@@ -64,8 +64,33 @@ export function databaseObjectTreeQuerySchema(dbType: DatabaseType | undefined, 
   return schema || database;
 }
 
+/**
+ * Cloud Spanner is the one schema-aware type whose default schema is the empty string: that is the
+ * literal name of GoogleSQL's user schema, and the agent forwards it to the driver verbatim. Every
+ * `schema || database` fallback therefore has to be bypassed, because `database` holds a resource
+ * path (`projects/…/databases/db`) that is never a schema name and matches no metadata.
+ *
+ * Named schemas (Spanner 2024+) pass through unchanged. Callers that already collapsed
+ * `schema || node.database` are normalized back to the blank schema, which is safe because a Spanner
+ * schema identifier is letters, digits and underscores and can never contain the path separator.
+ */
+export function spannerObjectTreeSchema(schema?: string): string {
+  return schema && !schema.includes("/") ? schema : "";
+}
+
+/**
+ * Whether a schema tree node carries a name its children can be loaded for. Cloud Spanner is the one
+ * type where the empty string is a real schema name (GoogleSQL's user schema), so a plain truthiness
+ * check would leave that node expandable but permanently empty. Every other type keeps the
+ * truthiness test, which also filters the undefined schema on nodes that have no schema level.
+ */
+export function schemaNodeHasLoadableName(dbType: DatabaseType | undefined, schema?: string): boolean {
+  return dbType === "spanner" ? schema != null : !!schema;
+}
+
 export function databaseObjectTreeNodeSchema(dbType: DatabaseType | undefined, database: string, schema?: string): string | undefined {
   if (usesDatabaseObjectTreeMode(dbType)) return undefined;
+  if (dbType === "spanner") return spannerObjectTreeSchema(schema);
   if (schema) return schema;
   return isSchemaAware(dbType) ? database : undefined;
 }

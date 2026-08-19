@@ -71,6 +71,10 @@ class SpannerAgentTest extends JdbcFakeExecutionBehaviorTest {
     void reportsTheEmptyGoogleSqlSchemaInsteadOfDroppingIt() {
         SpannerAgent agent = connectedAgent(GOOGLE_SQL_PRODUCT, null, new LinkedHashMap<>());
 
+        // The fake connection cannot create statements, so this exercises the fallback taken when
+        // INFORMATION_SCHEMA.SCHEMATA is unreadable: the default schema is still reported, and it is
+        // the empty string that GoogleSQL uses for its user schema. Named-schema discovery runs
+        // against the emulator instead — a proxy cannot answer a real catalog query.
         assertEquals(Collections.singletonList(""), agent.listSchemas());
     }
 
@@ -78,6 +82,7 @@ class SpannerAgentTest extends JdbcFakeExecutionBehaviorTest {
     void reportsThePostgresDialectSchema() {
         SpannerAgent agent = connectedAgent(POSTGRES_PRODUCT, "public", new LinkedHashMap<>());
 
+        // Same fallback path as above; the PostgreSQL dialect's default schema is `public`.
         assertEquals(Collections.singletonList("public"), agent.listSchemas());
     }
 

@@ -1,5 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { encodeSpannerResourcePath, formatSpannerResourcePath, hasSpannerResourcePath, isSpannerConnection, normalizeSpannerConnection, parseSpannerResourcePath, spannerDisplayDatabase, spannerResourceParts, withSpannerResourcePart } from "@/lib/connection/spannerResourcePath";
+import {
+  encodeSpannerResourcePath,
+  spannerSchemaDisplayName,
+  formatSpannerResourcePath,
+  hasSpannerResourcePath,
+  isSpannerConnection,
+  normalizeSpannerConnection,
+  parseSpannerResourcePath,
+  spannerDisplayDatabase,
+  spannerResourceParts,
+  withSpannerResourcePart,
+} from "@/lib/connection/spannerResourcePath";
 
 const RESOURCE_PATH = "projects/p1/instances/i1/databases/db1";
 
@@ -77,6 +88,14 @@ describe("spannerResourcePath", () => {
     expect(spannerDisplayDatabase(RESOURCE_PATH)).toBe("db1");
     expect(spannerDisplayDatabase("some-other-path")).toBe("some-other-path");
     expect(spannerDisplayDatabase(undefined)).toBe("");
+  });
+
+  it("gives GoogleSQL's nameless default schema something to render", () => {
+    // The empty string is the literal name of the GoogleSQL user schema, so the sidebar would
+    // otherwise show a blank node beside any named schema. Display only: routing still uses "".
+    expect(spannerSchemaDisplayName("")).toBe("(default)");
+    expect(spannerSchemaDisplayName("public")).toBe("public");
+    expect(spannerSchemaDisplayName("sales")).toBe("sales");
   });
 
   it("keeps the resource path separators when encoding it for display", () => {

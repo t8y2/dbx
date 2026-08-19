@@ -64,6 +64,11 @@ public final class SpannerAgent extends ConfiguredJdbcAgent {
         new HashSet<>(Arrays.asList("localhost", "127.0.0.1", "::1", "[::1]"));
     private static final String PLAIN_TEXT_PARAM = "usePlainText=true";
     /**
+     * Works verbatim in both dialects: the PostgreSQL dialect folds the unquoted upper-case
+     * identifiers to lower case, so one statement serves GoogleSQL and PostgreSQL alike.
+     */
+    private static final String SCHEMATA_SQL = "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA";
+    /**
      * The driver reports GoogleSQL spellings from {@code getTypeInfo()} for both dialects (only
      * JSON/JSONB differs), so the PostgreSQL-dialect names are substituted here. Every entry was
      * read back from {@code information_schema.columns} on a PostgreSQL-dialect database rather than
@@ -222,10 +227,34 @@ public final class SpannerAgent extends ConfiguredJdbcAgent {
 
     @Override
     public List<String> listSchemas() {
-        // getSchemas() also returns INFORMATION_SCHEMA/SPANNER_SYS/pg_catalog, and the shared adapter
-        // drops GoogleSQL's empty user schema entirely, which leaves the object tree unreachable.
-        requireConnection();
-        return Collections.singletonList(defaultSchema);
+        // Not getSchemas(): the shared adapter drops blank names, and GoogleSQL's user schema *is*
+        // the empty string, so the default schema would disappear and take the object tree with it.
+        // Query the catalog directly instead, the way H2, DB2, Trino and Snowflake already do.
+        Connection connection = requireConnection();
+        Set<String> names = new LinkedHashSet<>();
+        names.add(defaultSchema);
+        List<String> named = new ArrayList<>();
+        try (java.sql.Statement statement = connection.createStatement();
+             ResultSet rs = statement.executeQuery(SCHEMATA_SQL)) {
+            while (rs.next()) {
+                String name = rs.getString(1);
+                if (name == null || name.equals(defaultSchema)) {
+                    continue;
+                }
+                // Upper-cased before the comparison because the PostgreSQL dialect reports its
+                // system schemas in lower case.
+                if (SPANNER_PROFILE.getExcludedSchemas().contains(name.toUpperCase(Locale.ROOT))) {
+                    continue;
+                }
+                named.add(name);
+            }
+        } catch (Exception ignored) {
+            // A database that cannot be queried still browses under its default schema.
+            return new ArrayList<>(names);
+        }
+        Collections.sort(named);
+        names.addAll(named);
+        return new ArrayList<>(names);
     }
 
     @Override

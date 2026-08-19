@@ -68,7 +68,7 @@ import { mergeSqlObjectNavigationType, sqlObjectNavigationTypeFromTableType } fr
 import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
-import { connectionIsDorisFamilyCatalogCapable, isInternalDorisCatalog, isSchemaAware, normalizeSidebarObjectKind, sidebarObjectKindsForDatabase, supportsPackageMemberExpansion, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
+import { connectionIsDorisFamilyCatalogCapable, isInternalDorisCatalog, isSchemaAware, normalizeSidebarObjectKind, schemaNodeHasLoadableName, sidebarObjectKindsForDatabase, supportsPackageMemberExpansion, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
 import {
   connectionDatabaseMetadataSchema,
   connectionObjectTreeNodeSchema,
@@ -80,7 +80,7 @@ import {
   gaussdbIdentifierQuoteOverride,
 } from "@/lib/database/jdbcDialect";
 import { buildDatabaseTreeNodes, buildDuckDbConnectionTreeNodes, compareSidebarNames, sortSidebarDatabases, sortSidebarNames, shouldIncludeDefaultDatabaseNode } from "@/lib/database/databaseTree";
-import { spannerDisplayDatabase } from "@/lib/connection/spannerResourcePath";
+import { spannerDisplayDatabase, spannerSchemaDisplayName } from "@/lib/connection/spannerResourcePath";
 import { buildSqlServerDatabaseTreeNodes } from "@/lib/database/sqlServerTree";
 import { collapseExpandedTreeNodes } from "@/lib/sidebar/sidebarTreeCollapse";
 import { findNodePathByIdentity, nodeMatchesRegexScopeIdentity, type SidebarRegexScopeIdentity } from "@/lib/sidebar/sidebarSearchTree";
@@ -1613,11 +1613,17 @@ export const useConnectionStore = defineStore("connection", () => {
     return ownerAwareMetadataCacheVersion(config, scopedVersion);
   }
 
-  function sortSidebarSchemaInfos(schemas: readonly SchemaInfo[]): SchemaInfo[] {
+  /**
+   * The blank guard drops junk entries reported by drivers that pad their schema list. Cloud Spanner
+   * is the exception: in GoogleSQL the empty string *is* the name of the user schema, so dropping it
+   * hides every table that is not in a named schema. `keepBlankSchema` is therefore opt-in per
+   * database type rather than a global relaxation.
+   */
+  function sortSidebarSchemaInfos(schemas: readonly SchemaInfo[], keepBlankSchema = false): SchemaInfo[] {
     const byName = new Map<string, SchemaInfo>();
     for (const schema of schemas) {
       const name = schema.name.trim();
-      if (!name) continue;
+      if (!name && !keepBlankSchema) continue;
       byName.set(name, { name, comment: schema.comment ?? null });
     }
     return sortXuguSchemaInfos([...byName.values()], compareSidebarNames);
@@ -4602,7 +4608,7 @@ export const useConnectionStore = defineStore("connection", () => {
             }
           }
 
-          const schemas = sortSidebarSchemaInfos(await withMetadataLoadTimeout(connectionId, api.listSchemaInfos(connectionId, database), "schemas"));
+          const schemas = sortSidebarSchemaInfos(await withMetadataLoadTimeout(connectionId, api.listSchemaInfos(connectionId, database), "schemas"), effectiveDatabaseTypeForConnection(config) === "spanner");
           const visibleSchemaNames = new Set(
             filterSchemaNamesForConnection(
               schemas.map((schema) => schema.name),
@@ -4623,7 +4629,7 @@ export const useConnectionStore = defineStore("connection", () => {
               const s = schema.name;
               return {
                 id: `${connectionId}:${database}:${s}`,
-                label: config?.db_type === "xugu" ? xuguSchemaDisplayName(s) : s,
+                label: config?.db_type === "xugu" ? xuguSchemaDisplayName(s) : config?.db_type === "spanner" ? spannerSchemaDisplayName(s) : s,
                 type: "schema" as const,
                 connectionId,
                 database,
@@ -4975,7 +4981,11 @@ export const useConnectionStore = defineStore("connection", () => {
       nodeKind: simpleObjectDisplayForScope ? "simple-tables" : "group-tables",
     });
     if (!options?.force && simpleObjectDisplayForScope && !searchFilter && !options?.sidebarTableSearchParentId && !tableNameFilterForScope) {
-      const nodeId = schema ? `${connectionId}:${database}:${schema}` : `${connectionId}:${database}`;
+      // `schema != null`, not truthiness: Cloud Spanner's GoogleSQL default schema is the empty
+      // string, and its node id carries the trailing separator (`conn:db:`). A truthiness test
+      // collapses that to the database node id, so the loaded tables were attached to the
+      // database node instead of the schema node, leaving `(default)` permanently empty.
+      const nodeId = schema != null ? `${connectionId}:${database}:${schema}` : `${connectionId}:${database}`;
       const cacheKey = schemaCacheKey(connectionId, database, schema || "", objectTreeCacheVersion(configForScope, schema, "objects-simple-v8"));
       if (await hydrateTreeNodeFromCache(findNode(treeNodes.value, nodeId), cacheKey)) {
         void loadTables(connectionId, database, schema, { ...options, force: true }).catch(() => undefined);
@@ -4988,7 +4998,7 @@ export const useConnectionStore = defineStore("connection", () => {
         connectionId,
         database,
         schema,
-        nodeKind: schema ? "schema" : "database",
+        nodeKind: schema != null ? "schema" : "database",
         objectTypes: objectTypesForScope,
         searchFilter: activeTreeLoadSearchFilter(options),
         limit: simpleObjectDisplayForScope ? sidebarObjectGroupPageSize() + 1 : undefined,
@@ -4998,7 +5008,11 @@ export const useConnectionStore = defineStore("connection", () => {
         extra: options?.sidebarTableSearchParentId ? { sidebarTableSearchParentId: options.sidebarTableSearchParentId } : undefined,
       },
       async () => {
-        const nodeId = schema ? `${connectionId}:${database}:${schema}` : `${connectionId}:${database}`;
+        // `schema != null`, not truthiness: Cloud Spanner's GoogleSQL default schema is the empty
+        // string, and its node id carries the trailing separator (`conn:db:`). A truthiness test
+        // collapses that to the database node id, so the loaded tables were attached to the
+        // database node instead of the schema node, leaving `(default)` permanently empty.
+        const nodeId = schema != null ? `${connectionId}:${database}:${schema}` : `${connectionId}:${database}`;
         const node = findNode(treeNodes.value, nodeId);
         if (!node) return;
         let load = beginTreeNodeLoad(node);
@@ -6113,7 +6127,7 @@ export const useConnectionStore = defineStore("connection", () => {
           await loadTables(node.connectionId, node.database, undefined, options);
         }
       }
-    } else if (node.type === "schema" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.schema) {
+    } else if (node.type === "schema" && node.connectionId && hasTreeNodeDatabaseContext(node) && schemaNodeHasLoadableName(effectiveDatabaseTypeForConnection(getConfig(node.connectionId)), node.schema)) {
       await loadTables(node.connectionId, node.database, node.schema, options);
     } else if (node.type === "linked-server-root" && node.connectionId) {
       await loadSqlServerLinkedServers(node.connectionId, options);

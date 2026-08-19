@@ -101,6 +101,7 @@ import {
   supportsPackageMemberExpansion,
   usesTreeSchemaMode,
   isSingleDatabase,
+  schemaNodeHasLoadableName,
 } from "@/lib/database/databaseCapabilities";
 import { copyDisplayPathForTreeNode, copyNameForTreeNode, isDirectNavigationTreeNode, isDocumentBrowserTreeNode, isRepeatableNavigationTreeNode, objectSourceTargetForTreeNode, shouldRunTreeNodeRowAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "@/lib/sidebar/treeNodeClick";
 import { customTypeCapabilities, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
@@ -867,7 +868,7 @@ async function toggle(requestId = beginNavigationRequest()) {
       }
     } else if (node.type === "doris-catalog" && node.connectionId) {
       await connectionStore.loadDorisCatalogDatabases(node, treeLoadSearchOptions);
-    } else if (node.type === "schema" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.schema) {
+    } else if (node.type === "schema" && node.connectionId && hasTreeNodeDatabaseContext(node) && schemaNodeHasLoadableName(effectiveDatabaseTypeForConnection(connectionStore.getConfig(node.connectionId)), node.schema)) {
       await connectionStore.loadTables(node.connectionId, node.database, node.schema, treeLoadSearchOptions);
     } else if (node.type === "linked-server-root" && node.connectionId) {
       await connectionStore.loadSqlServerLinkedServers(node.connectionId, treeLoadSearchOptions);

@@ -14,11 +14,33 @@ import {
   supportsTableImport,
   supportsTransaction,
   usesConnectionOnlyQueryTarget,
+  usesTreeSchemaMode,
+  schemaNodeHasLoadableName,
 } from "@/lib/database/databaseFeatureSupport";
 
 describe("schema awareness", () => {
   it("keeps SQLite database aliases separate from schema-capable databases", () => {
     expect(isSchemaAware("sqlite")).toBe(false);
+  });
+
+  it("puts Cloud Spanner in both schema sets because they gate different surfaces", () => {
+    // Spanner 2024+ has named schemas and they are queryable, so both have to be true. The two sets
+    // are not interchangeable: SCHEMA_AWARE_TYPES reaches the schema pickers in dialogs, while
+    // TREE_SCHEMA_TYPES is what makes a database node load schemas instead of tables. With only the
+    // former, `sales` showed up in the schema-diff dropdown but was unreachable in the object tree.
+    expect(isSchemaAware("spanner")).toBe(true);
+    expect(usesTreeSchemaMode("spanner")).toBe(true);
+  });
+
+  it("treats Cloud Spanner's blank schema as a loadable node name", () => {
+    // The GoogleSQL default schema node carries "", so a truthiness check would render an
+    // expandable node that never loads its tables. Other types keep the truthiness test, which is
+    // what filters the undefined schema on nodes that have no schema level at all.
+    expect(schemaNodeHasLoadableName("spanner", "")).toBe(true);
+    expect(schemaNodeHasLoadableName("spanner", "sales")).toBe(true);
+    expect(schemaNodeHasLoadableName("spanner", undefined)).toBe(false);
+    expect(schemaNodeHasLoadableName("postgres", "")).toBe(false);
+    expect(schemaNodeHasLoadableName("postgres", "public")).toBe(true);
   });
 });
 

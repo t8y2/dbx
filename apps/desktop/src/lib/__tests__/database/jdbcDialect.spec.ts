@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ConnectionConfig } from "@/types/database";
+import { databaseObjectTreeNodeSchema } from "@/lib/database/databaseFeatureSupport";
 import {
   GAUSSDB_M_JDBC_DRIVER_CLASS,
   connectionDatabaseMetadataSchema,
@@ -331,10 +332,19 @@ describe("object tree node schema", () => {
     expect(connectionObjectTreeQuerySchema(connection, resourcePath, "public")).toBe("public");
     expect(connectionObjectTreeQuerySchema(connection, resourcePath, "analytics")).toBe("analytics");
     expect(metadataSchemaForConnection(connection, resourcePath, "analytics")).toBe("analytics");
-    // The tree node itself carries no schema, so the resource path can never reach
-    // qualifiedTableName as a qualifier.
-    expect(connectionObjectTreeNodeSchema(connection, resourcePath)).toBeUndefined();
-    expect(connectionObjectTreeNodeSchema(connection, resourcePath, "")).toBeUndefined();
+    // The tree node resolves to GoogleSQL's blank default schema rather than to the resource
+    // path, so the path can never reach qualifiedTableName as a qualifier. It is the empty
+    // string and not undefined because Spanner does have a schema level: "" is the literal
+    // name of the GoogleSQL user schema.
+    expect(connectionObjectTreeNodeSchema(connection, resourcePath)).toBe("");
+    expect(connectionObjectTreeNodeSchema(connection, resourcePath, "")).toBe("");
+    expect(connectionObjectTreeNodeSchema(connection, resourcePath, "sales")).toBe("sales");
+    expect(connectionObjectTreeNodeSchema(connection, resourcePath, resourcePath)).toBe("");
+    // Named schemas (Spanner 2024+) reach the tree unchanged now that Spanner is schema-aware.
+    expect(connectionObjectTreeQuerySchema(connection, resourcePath, "sales")).toBe("sales");
+    expect(databaseObjectTreeNodeSchema("spanner", resourcePath, "sales")).toBe("sales");
+    expect(databaseObjectTreeNodeSchema("spanner", resourcePath, "")).toBe("");
+    expect(databaseObjectTreeNodeSchema("spanner", resourcePath)).toBe("");
     // Callers that collapsed `node.schema || node.database` before calling in (the sidebar
     // SQL template and DDL paths) hand over the resource path as the schema.
     expect(connectionObjectTreeQuerySchema(connection, resourcePath, resourcePath)).toBe("");

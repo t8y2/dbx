@@ -1,5 +1,5 @@
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
-import { isSchemaAware, usesDatabaseObjectTreeMode, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
+import { isSchemaAware, spannerObjectTreeSchema, usesDatabaseObjectTreeMode, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
 import type { CodeMirrorSqlDialectName } from "@/lib/editor/codemirrorSqlDialect";
 
 type JdbcDialectConnection = Partial<Pick<ConnectionConfig, "db_type" | "driver_profile" | "driver_label" | "connection_string" | "url_params" | "jdbc_driver_class" | "jdbc_driver_paths" | "database_info" | "external_config">>;
@@ -215,15 +215,7 @@ export function connectionObjectTreeQuerySchema(connection: JdbcDialectConnectio
   if (connectionUsesDatabaseObjectTreeMode(connection)) return "";
   const type = effectiveDatabaseTypeForConnection(connection);
   if (type === "informix") return schema || "";
-  // Cloud Spanner keeps a resource path (`projects/…/databases/db`) in `database`,
-  // which is never a schema name, and GoogleSQL's default schema is the empty string
-  // that the agent forwards to the driver verbatim. Falling through to the
-  // `schema || database` default would send the resource path as the schema and every
-  // metadata lookup would match nothing, so the blank schema must survive `||`.
-  // Callers that already collapsed `schema || node.database` (the sidebar SQL template
-  // and DDL paths) are normalized back to the blank schema here: a Spanner schema name
-  // is letters, digits and underscores, so it can never contain the path separator.
-  if (type === "spanner") return schema && !schema.includes("/") ? schema : "";
+  if (type === "spanner") return spannerObjectTreeSchema(schema);
   return schema || database;
 }
 
@@ -251,6 +243,7 @@ export function connectionObjectTreeNodeSchema(connection: JdbcDialectConnection
   const type = effectiveDatabaseTypeForConnection(connection);
   if (type === "informix") return schema || undefined;
   if (type === "sqlite") return schema || database;
+  if (type === "spanner") return spannerObjectTreeSchema(schema);
   if (!type) return schema;
   return isSchemaAware(type) ? schema || database : undefined;
 }

@@ -110,6 +110,17 @@ export function spannerDisplayDatabase(database: string | undefined): string {
 }
 
 /**
+ * GoogleSQL's user schema is literally the empty string, so the sidebar would otherwise render a
+ * nameless node next to any named schema. Mirrors `xuguSchemaDisplayName`: a display-only label
+ * that never replaces the real schema key used for routing.
+ */
+export const SPANNER_DEFAULT_SCHEMA_LABEL = "(default)";
+
+export function spannerSchemaDisplayName(schema: string): string {
+  return schema === "" ? SPANNER_DEFAULT_SCHEMA_LABEL : schema;
+}
+
+/**
  * Percent-encode a Spanner resource path for display, keeping the `/` separators
  * intact — they are structure, not data. Mirrors `encode_spanner_resource_path`
  * in crates/dbx-core/src/models/connection.rs.

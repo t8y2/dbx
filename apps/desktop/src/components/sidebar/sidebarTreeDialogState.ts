@@ -35,6 +35,7 @@ export const structureDocCopyTitle = ref("");
 export const isLoadingStructurePreview = ref(false);
 export const showEmptyTableConfirm = ref(false);
 export const showTruncateTableConfirm = ref(false);
+export const showVacuumTableConfirm = ref(false);
 export const showMysqlAutoIncrementConfirm = ref(false);
 export const showRenameObjectDialog = ref(false);
 export const renameObjectName = ref("");
@@ -46,6 +47,11 @@ export const batchDropCascade = ref(false);
 export const emptyTablePreviewSql = ref("");
 export const truncateTablePreviewSql = ref("");
 export const truncateTableCascade = ref(false);
+export const vacuumTableFull = ref(false);
+export const vacuumTableAnalyze = ref(false);
+export const vacuumTablePreviewSql = ref("");
+export const vacuumTablePreviewKey = ref("");
+export const vacuumTableExecuting = ref(false);
 export const mysqlAutoIncrementValue = ref("1");
 export const mysqlAutoIncrementPreviewSql = ref("");
 export const mysqlAutoIncrementPreviewKey = ref("");
@@ -185,6 +191,7 @@ const openFlags = [
   showStructureDocCopyDialog,
   showEmptyTableConfirm,
   showTruncateTableConfirm,
+  showVacuumTableConfirm,
   showMysqlAutoIncrementConfirm,
   showDropObjectConfirm,
   showRenameObjectDialog,
@@ -228,6 +235,7 @@ export function resetSidebarTreeDialogState() {
   cloneMongoCollectionLoading.value = false;
   resetMongoCreateIndexForm();
   resetMongoIndexManager();
+  vacuumTableExecuting.value = false;
   sidebarTreeDialogOwner.value = null;
   sidebarDangerTarget.value = null;
   sidebarFormTarget.value = null;

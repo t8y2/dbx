@@ -18,6 +18,14 @@ export interface TableAdminSqlOptions {
   cascade?: boolean;
 }
 
+export interface VacuumTableSqlOptions {
+  databaseType?: DatabaseType;
+  schema?: string | null;
+  tableName: string;
+  full?: boolean;
+  analyze?: boolean;
+}
+
 export interface MysqlAutoIncrementSqlOptions {
   databaseType: DatabaseType;
   driverProfile?: string | null;
@@ -284,6 +292,10 @@ export function buildEmptyTableSql(options: TableAdminSqlOptions): Promise<strin
 
 export function buildTruncateTableSql(options: TableAdminSqlOptions): Promise<string> {
   return api.buildTruncateTableSql(options);
+}
+
+export function buildVacuumTableSql(options: VacuumTableSqlOptions): Promise<string> {
+  return api.buildVacuumTableSql(options);
 }
 
 export function buildMysqlAutoIncrementSql(options: MysqlAutoIncrementSqlOptions): Promise<string> {

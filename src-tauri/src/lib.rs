@@ -1718,6 +1718,7 @@ pub fn run() {
             commands::query::build_drop_table_child_object_sql,
             commands::query::build_empty_table_sql,
             commands::query::build_truncate_table_sql,
+            commands::query::build_vacuum_table_sql,
             commands::query::build_mysql_auto_increment_sql,
             commands::query::build_drop_database_sql,
             commands::query::build_create_schema_sql,

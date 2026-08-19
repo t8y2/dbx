@@ -88,7 +88,18 @@ import type { BuildEditableObjectSourceSqlInput, BuildRoutineRenameObjectSourceI
 import type { BuildViewDdlInput } from "@/lib/table/viewDdl";
 import type { BuildRenameObjectSqlOptions } from "@/lib/table/objectRenameSql";
 import type { CreateDatabaseSqlOptions } from "@/lib/database/createDatabaseSql";
-import type { DatabaseNameSqlOptions, DatabasePropertyEditSqlOptions, DropTableChildObjectSqlOptions, DropObjectSqlOptions, DuplicateTableStructureSqlOptions, CopyTableDataSqlOptions, MysqlAutoIncrementSqlOptions, SchemaNameSqlOptions, TableAdminSqlOptions } from "@/lib/database/dbAdminSql";
+import type {
+  DatabaseNameSqlOptions,
+  DatabasePropertyEditSqlOptions,
+  DropTableChildObjectSqlOptions,
+  DropObjectSqlOptions,
+  DuplicateTableStructureSqlOptions,
+  CopyTableDataSqlOptions,
+  MysqlAutoIncrementSqlOptions,
+  SchemaNameSqlOptions,
+  TableAdminSqlOptions,
+  VacuumTableSqlOptions,
+} from "@/lib/database/dbAdminSql";
 import type { BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions } from "@/lib/export/databaseExport";
 
 export interface SshPromptResolution {
@@ -1435,6 +1446,10 @@ export async function buildEmptyTableSql(options: TableAdminSqlOptions): Promise
 
 export async function buildTruncateTableSql(options: TableAdminSqlOptions): Promise<string> {
   return invoke("build_truncate_table_sql", { options });
+}
+
+export async function buildVacuumTableSql(options: VacuumTableSqlOptions): Promise<string> {
+  return invoke("build_vacuum_table_sql", { options });
 }
 
 export async function buildMysqlAutoIncrementSql(options: MysqlAutoIncrementSqlOptions): Promise<string> {

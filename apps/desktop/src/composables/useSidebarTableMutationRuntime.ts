@@ -3,8 +3,20 @@ import { useI18n } from "vue-i18n";
 import { useToast } from "@/composables/useToast";
 import { useConnectionStore } from "@/stores/connectionStore";
 import type { DatabaseType, TreeNode } from "@/types/database";
-import { supportsTableTruncate } from "@/lib/database/databaseCapabilities";
-import { buildDropTableSql, buildEmptyTableSql, buildMysqlAutoIncrementSql, buildTruncateTableSql, supportsDropTableCascade, supportsNativeMysqlAutoIncrement, supportsTruncateTableCascade, type MysqlAutoIncrementSqlOptions, type TableAdminSqlOptions } from "@/lib/database/dbAdminSql";
+import { supportsTableTruncate, supportsTableVacuum } from "@/lib/database/databaseCapabilities";
+import {
+  buildDropTableSql,
+  buildEmptyTableSql,
+  buildMysqlAutoIncrementSql,
+  buildTruncateTableSql,
+  buildVacuumTableSql,
+  supportsDropTableCascade,
+  supportsNativeMysqlAutoIncrement,
+  supportsTruncateTableCascade,
+  type MysqlAutoIncrementSqlOptions,
+  type TableAdminSqlOptions,
+  type VacuumTableSqlOptions,
+} from "@/lib/database/dbAdminSql";
 import { isSqlServerLinkedNode } from "@/lib/database/sqlServerLinkedServers";
 import {
   sidebarDangerTarget,
@@ -12,6 +24,7 @@ import {
   showEmptyTableConfirm,
   showMysqlAutoIncrementConfirm,
   showTruncateTableConfirm,
+  showVacuumTableConfirm,
   dropTablePreviewSql,
   dropTableCascade,
   emptyTablePreviewSql,
@@ -20,6 +33,11 @@ import {
   mysqlAutoIncrementValue,
   truncateTablePreviewSql,
   truncateTableCascade,
+  vacuumTableFull,
+  vacuumTableAnalyze,
+  vacuumTablePreviewSql,
+  vacuumTablePreviewKey,
+  vacuumTableExecuting,
 } from "@/components/sidebar/sidebarTreeDialogState";
 
 interface SidebarTableMutationRuntimeOptions {
@@ -40,6 +58,10 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
 
   const isTableNotView = computed(() => activeNode.value.type === "table" && !isSqlServerLinkedNode(activeNode.value));
   const supportsTruncate = computed(() => supportsTableTruncate(currentDatabaseType()));
+  const supportsVacuum = computed(() => {
+    const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
+    return activeNode.value.type === "table" && !config?.read_only && supportsTableVacuum(currentDatabaseType());
+  });
   const canDropTableCascade = computed(() => activeNode.value.type === "table" && supportsDropTableCascade(currentDatabaseType()));
   const canTruncateTableCascade = computed(() => activeNode.value.type === "table" && supportsTruncateTableCascade(currentDatabaseType()));
   const supportsMysqlAutoIncrement = computed(() => activeNode.value.type === "table" && supportsNativeMysqlAutoIncrement(activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined));
@@ -140,6 +162,69 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
     }
   }
 
+  function vacuumTableSqlOptions(node: TreeNode, full = vacuumTableFull.value, analyze = vacuumTableAnalyze.value): VacuumTableSqlOptions {
+    return {
+      databaseType: databaseTypeForNode(node),
+      schema: node.schema,
+      tableName: node.label,
+      full,
+      analyze,
+    };
+  }
+
+  function vacuumTablePreviewKeyForNode(node: TreeNode, full = vacuumTableFull.value, analyze = vacuumTableAnalyze.value): string {
+    return JSON.stringify([node.id, databaseTypeForNode(node), node.schema || "", node.label, full, analyze]);
+  }
+
+  async function refreshVacuumTablePreviewSql() {
+    const node = sidebarDangerTarget.value ?? activeNode.value;
+    const full = vacuumTableFull.value;
+    const analyze = vacuumTableAnalyze.value;
+    const previewKey = vacuumTablePreviewKeyForNode(node, full, analyze);
+    vacuumTablePreviewSql.value = "";
+    vacuumTablePreviewKey.value = "";
+    const sql = await buildVacuumTableSql(vacuumTableSqlOptions(node, full, analyze)).catch(() => "");
+    const currentNode = sidebarDangerTarget.value ?? activeNode.value;
+    if (previewKey !== vacuumTablePreviewKeyForNode(currentNode)) return;
+    vacuumTablePreviewSql.value = sql;
+    vacuumTablePreviewKey.value = sql ? previewKey : "";
+  }
+
+  function vacuumTable() {
+    if (!supportsVacuum.value) return;
+    vacuumTableFull.value = false;
+    vacuumTableAnalyze.value = false;
+    vacuumTablePreviewSql.value = "";
+    vacuumTablePreviewKey.value = "";
+    void refreshVacuumTablePreviewSql();
+    showVacuumTableConfirm.value = true;
+  }
+
+  async function confirmVacuumTable(): Promise<boolean> {
+    const node = sidebarDangerTarget.value ?? activeNode.value;
+    if (!node.connectionId || node.database == null) return false;
+    vacuumTableExecuting.value = true;
+    try {
+      await connectionStore.ensureConnected(node.connectionId);
+      const optionsForNode = vacuumTableSqlOptions(node, vacuumTableFull.value, vacuumTableAnalyze.value);
+      const previewKey = vacuumTablePreviewKeyForNode(node);
+      const sql = vacuumTablePreviewKey.value === previewKey && vacuumTablePreviewSql.value ? vacuumTablePreviewSql.value : await buildVacuumTableSql(optionsForNode);
+      const executed = await options.executeWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
+      if (executed === undefined) return false;
+      toast(t("contextMenu.vacuumTableSuccess", { name: node.label }), 3000);
+      return true;
+    } catch (error: any) {
+      toast(t("contextMenu.tableOperationFailed", { message: error?.message || String(error) }), 5000);
+      return false;
+    } finally {
+      vacuumTableExecuting.value = false;
+    }
+  }
+
+  async function refreshVacuumPreviewForOptions() {
+    await refreshVacuumTablePreviewSql();
+  }
+
   function dropTable() {
     dropTableCascade.value = false;
     void refreshDropTablePreviewSql();
@@ -210,6 +295,7 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
   return {
     isTableNotView,
     supportsTruncate,
+    supportsVacuum,
     canDropTableCascade,
     canTruncateTableCascade,
     supportsMysqlAutoIncrement,
@@ -222,6 +308,9 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
     confirmEmptyTable,
     truncateTable,
     confirmTruncateTable,
+    vacuumTable,
+    refreshVacuumPreviewForOptions,
+    confirmVacuumTable,
     mysqlAutoIncrement,
     refreshMysqlAutoIncrementPreviewSql,
     confirmMysqlAutoIncrement,

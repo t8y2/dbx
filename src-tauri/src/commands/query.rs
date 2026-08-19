@@ -502,6 +502,11 @@ pub fn build_truncate_table_sql(options: dbx_core::db_admin_sql::TableAdminSqlOp
 }
 
 #[tauri::command]
+pub fn build_vacuum_table_sql(options: dbx_core::db_admin_sql::VacuumTableSqlOptions) -> Result<String, String> {
+    dbx_core::db_admin_sql::build_vacuum_table_sql(options)
+}
+
+#[tauri::command]
 pub fn build_mysql_auto_increment_sql(
     options: dbx_core::db_admin_sql::MysqlAutoIncrementSqlOptions,
 ) -> Result<String, String> {

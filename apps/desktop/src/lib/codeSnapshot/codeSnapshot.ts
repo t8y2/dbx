@@ -129,6 +129,11 @@ let highlighterPromise: Promise<AiCodeHighlighter> | undefined;
 export function getCodeSnapshotHighlighter(): Promise<AiCodeHighlighter> {
   highlighterPromise ??= createAiShikiCodeHighlighter({
     appearance: () => "dark",
+  }).catch((err: unknown) => {
+    // Reset so a transient highlighter failure can be retried on the next
+    // render instead of permanently poisoning the singleton.
+    highlighterPromise = undefined;
+    throw err;
   });
   return highlighterPromise;
 }
@@ -137,8 +142,8 @@ function escapeHtml(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
 
-function renderSnapshotBar(title: string | undefined, appearance: AppThemeAppearance): string {
-  const dots = TRAFFIC_LIGHT_COLORS.map((color) => `<span class="dbx-code-snapshot__dot" style="background:${color}"></span>`).join("");
+function renderSnapshotBar(title: string | undefined, appearance: AppThemeAppearance, showTrafficLights: boolean): string {
+  const dots = showTrafficLights ? TRAFFIC_LIGHT_COLORS.map((color) => `<span class="dbx-code-snapshot__dot" style="background:${color}"></span>`).join("") : "";
   const titleHtml = title ? `<span class="dbx-code-snapshot__title" style="color:${SNAPSHOT_BAR_TEXT[appearance]}">${escapeHtml(title)}</span>` : "";
   return `<div class="dbx-code-snapshot__bar" style="background:${SNAPSHOT_BAR_BACKGROUND[appearance]};color:${SNAPSHOT_BAR_TEXT[appearance]}">${dots}${titleHtml}</div>`;
 }
@@ -158,7 +163,7 @@ export async function renderCodeSnapshotHtml(source: CodeSnapshotSource, options
   const padding = options.padding ?? 16;
   const fontSize = options.fontSize ?? 13;
 
-  const bar = showBar ? renderSnapshotBar(source.title, appearance) : "";
+  const bar = showBar ? renderSnapshotBar(source.title, appearance, options.showTrafficLights !== false) : "";
   const preClass = `dbx-code-snapshot__pre${showLineNumbers ? " dbx-code-snapshot__pre--numbered" : ""}`;
   const lineNumberColor = SNAPSHOT_LINE_NUMBER[appearance];
 

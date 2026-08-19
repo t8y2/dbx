@@ -32,6 +32,14 @@ describe("renderCodeSnapshotHtml", () => {
     expect(html).not.toContain('class="dbx-code-snapshot__bar"');
   });
 
+  it("keeps the title bar but hides traffic lights when window controls are disabled", async () => {
+    const html = await renderCodeSnapshotHtml({ code: "SELECT 1", lang: "sql", title: "Query example" }, { appearance: "dark", showTrafficLights: false });
+
+    expect(html).toContain('class="dbx-code-snapshot__bar"');
+    expect(html).toContain("Query example");
+    expect(html).not.toContain('class="dbx-code-snapshot__dot"');
+  });
+
   it("hides line numbers when disabled", async () => {
     const html = await renderCodeSnapshotHtml({ code: "SELECT 1", lang: "sql" }, { appearance: "light", showLineNumbers: false });
 

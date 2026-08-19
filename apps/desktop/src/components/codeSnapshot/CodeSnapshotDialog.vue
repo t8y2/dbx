@@ -1,7 +1,6 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { useDebounceFn } from "@vueuse/core";
 import { Camera, Check, ClipboardCopy, Download, Moon, Sun } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -45,9 +44,10 @@ function loadUiSettings(): CodeSnapshotUiSettings {
   return fallback;
 }
 
-const appearance = ref<"light" | "dark">(loadUiSettings().appearance);
-const showTrafficLights = ref(loadUiSettings().showTrafficLights);
-const showLineNumbers = ref(loadUiSettings().showLineNumbers);
+const initialUiSettings = loadUiSettings();
+const appearance = ref<"light" | "dark">(initialUiSettings.appearance);
+const showTrafficLights = ref(initialUiSettings.showTrafficLights);
+const showLineNumbers = ref(initialUiSettings.showLineNumbers);
 const title = ref("");
 
 function persistUiSettings() {
@@ -69,6 +69,7 @@ const previewWrapRef = ref<HTMLDivElement>();
 const exporting = ref(false);
 const copied = ref(false);
 let copyResetTimer: ReturnType<typeof setTimeout> | null = null;
+let titleDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 function snapshotRoot(): HTMLElement | null {
   return previewWrapRef.value?.querySelector<HTMLElement>(".dbx-code-snapshot") ?? null;
@@ -76,27 +77,49 @@ function snapshotRoot(): HTMLElement | null {
 
 async function renderSnapshot() {
   if (!open.value || !props.source) return;
-  snapshotHtml.value = await renderCodeSnapshotHtml(
-    {
-      code: props.source.code,
-      lang: props.source.lang,
-      title: title.value.trim() || props.source.title,
-    },
-    {
-      appearance: appearance.value,
-      showTrafficLights: showTrafficLights.value,
-      showLineNumbers: showLineNumbers.value,
-    },
-  );
+  try {
+    snapshotHtml.value = await renderCodeSnapshotHtml(
+      {
+        code: props.source.code,
+        lang: props.source.lang,
+        title: title.value.trim() || props.source.title,
+      },
+      {
+        appearance: appearance.value,
+        showTrafficLights: showTrafficLights.value,
+        showLineNumbers: showLineNumbers.value,
+      },
+    );
+  } catch (e: any) {
+    snapshotHtml.value = "";
+    toast(t("codeSnapshot.failed", { message: e?.message || String(e) }), 5000);
+  }
 }
+
+// Reset the title for each new snapshot source instead of leaking the
+// previous snapshot's title across opens.
+watch(
+  [open, () => props.source],
+  ([isOpen, source]) => {
+    if (isOpen && source) title.value = source.title ?? "";
+  },
+  { immediate: true },
+);
 
 // Appearance / toggle options re-render immediately; the title input is
 // debounced so typing large code blocks stays responsive.
-const debouncedRender = useDebounceFn(renderSnapshot, 300);
 watch([open, () => props.source, appearance, showTrafficLights, showLineNumbers], renderSnapshot, {
   immediate: true,
 });
-watch(title, () => void debouncedRender());
+watch(title, () => {
+  if (titleDebounceTimer) clearTimeout(titleDebounceTimer);
+  titleDebounceTimer = setTimeout(renderSnapshot, 300);
+});
+
+onBeforeUnmount(() => {
+  if (copyResetTimer) clearTimeout(copyResetTimer);
+  if (titleDebounceTimer) clearTimeout(titleDebounceTimer);
+});
 
 function sanitizeFileName(value: string): string {
   return value.replace(/[\\/:*?"<>|]/g, "-").trim() || "code-snapshot";
@@ -117,7 +140,7 @@ async function exportSnapshot(kind: "clipboard" | "file") {
         copied.value = false;
       }, 2000);
     } else {
-      const base = sanitizeFileName(props.source?.title ?? title.value.trim());
+      const base = sanitizeFileName(title.value.trim() || (props.source?.title ?? "code-snapshot"));
       const saved = await savePngDataUrlToFile(dataUrl, `${base}-${Date.now()}.png`);
       if (saved) toast(t("codeSnapshot.saved"));
     }

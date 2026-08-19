@@ -43,11 +43,12 @@ describe("MQ list panels", () => {
     expect(consoleSource).toContain(':topic="selectedTopic"');
   });
 
-  it("routes Kafka subscriptions to the cluster-wide consumer groups panel", () => {
+  it("keeps Kafka topic subscriptions and cluster-wide consumer groups on separate panels", () => {
     const consoleSource = componentSource("MqAdminConsole.vue");
 
-    expect(consoleSource).toContain('tab === "subscriptions") return "mqAdmin.tabConsumerGroups"');
     expect(consoleSource).toContain("KafkaConsumerGroupsPanel");
-    expect(consoleSource).toContain("activeTab === 'subscriptions' && canManageSubscriptions && isKafkaCluster");
+    expect(consoleSource).toContain("activeTab === 'subscriptions' && canManageSubscriptions");
+    expect(consoleSource).toContain("activeTab === 'consumerGroups' && isKafkaCluster");
+    expect(consoleSource).not.toContain("activeTab === 'subscriptions' && canManageSubscriptions && isKafkaCluster");
   });
 });

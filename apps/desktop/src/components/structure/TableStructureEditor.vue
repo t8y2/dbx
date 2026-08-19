@@ -2465,15 +2465,24 @@ function existingIndexNamesForDraft(index: EditableStructureIndex): string[] {
 }
 
 function generatedIndexNameForDraft(index: EditableStructureIndex, columnsForName = index.columns): string {
-  return generateUniqueIndexName(structureIndexTableName(), columnsForName, existingIndexNamesForDraft(index));
+  const name = generateUniqueIndexName(structureIndexTableName(), columnsForName, existingIndexNamesForDraft(index));
+  // GaussDB M-mode expects lowercase index names (MySQL-compatible).
+  return connection.value?.driver_profile?.toLowerCase() === "gaussdb-m" ? name.toLowerCase() : name;
 }
 
 function refreshAutoIndexName(index: EditableStructureIndex, previousColumns = index.columns) {
   if (index.original || index.nameEdited) return;
+  const isGaussdbM = connection.value?.driver_profile?.toLowerCase() === "gaussdb-m";
   const previousName = generateIndexName(structureIndexTableName(), previousColumns);
   const previousUniqueName = generateUniqueIndexName(structureIndexTableName(), previousColumns, existingIndexNamesForDraft(index));
   const currentName = index.name.trim();
-  if (currentName && currentName !== previousName && currentName !== previousUniqueName) return;
+  if (currentName) {
+    if (isGaussdbM) {
+      if (currentName.toLowerCase() !== previousName.toLowerCase() && currentName.toLowerCase() !== previousUniqueName.toLowerCase()) return;
+    } else if (currentName !== previousName && currentName !== previousUniqueName) {
+      return;
+    }
+  }
   index.name = generatedIndexNameForDraft(index);
 }
 

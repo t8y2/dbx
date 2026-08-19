@@ -56,6 +56,7 @@ const SNAPSHOT_LINE_NUMBER: Record<AppThemeAppearance, string> = {
 };
 
 const TRAFFIC_LIGHT_COLORS = ["#ff5f57", "#febc2e", "#28c840"] as const;
+const MAX_EXPORT_PIXEL_RATIO = 2;
 
 /**
  * Self-contained stylesheet embedded in every snapshot DOM. Keep it prefix
@@ -183,6 +184,9 @@ export async function snapshotElementToPng(element: HTMLElement): Promise<string
     quality: 1,
     width: element.offsetWidth,
     height: element.offsetHeight,
+    // Preserve text sharpness on high-DPI displays without letting a large
+    // selected block allocate an unbounded export canvas.
+    pixelRatio: Math.min(MAX_EXPORT_PIXEL_RATIO, Math.max(1, typeof window === "undefined" ? 1 : window.devicePixelRatio || 1)),
   });
 }
 
@@ -211,25 +215,23 @@ export async function copyPngDataUrlToClipboard(dataUrl: string): Promise<void> 
 
 /**
  * Save a PNG data URL to a file. On desktop this opens the native save
- * dialog (mirroring the LayerPreview export path); on web it downloads the
- * image. Returns false when the user cancels the save dialog.
+ * dialog; on web it downloads the image. Returns false when the user
+ * cancels the native save dialog.
  */
 export async function savePngDataUrlToFile(dataUrl: string, defaultName: string): Promise<boolean> {
   const blob = await dataUrlToBlob(dataUrl);
   if (isTauriRuntime()) {
-    try {
-      const { save } = await import("@tauri-apps/plugin-dialog");
-      const { writeFile } = await import("@tauri-apps/plugin-fs");
-      const path = await save({
-        defaultPath: defaultName,
-        filters: [{ name: "PNG", extensions: ["png"] }],
-      });
-      if (!path) return false;
-      await writeFile(path, new Uint8Array(await blob.arrayBuffer()));
-      return true;
-    } catch {
-      // Fall through to the browser download path when native save fails.
-    }
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const { writeFile } = await import("@tauri-apps/plugin-fs");
+    const path = await save({
+      defaultPath: defaultName,
+      filters: [{ name: "PNG", extensions: ["png"] }],
+    });
+    if (!path) return false;
+    // Native write errors must reach the caller so the UI never claims the
+    // user-selected path was saved when the filesystem rejected it.
+    await writeFile(path, new Uint8Array(await blob.arrayBuffer()));
+    return true;
   }
   const url = URL.createObjectURL(blob);
   try {

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, onActivated, onDeactivated, watch, shallowRef, computed, nextTick } from "vue";
-import { AlignLeft, CaseLower, CaseUpper, ClipboardPaste, Code2, Download, FileCode, MessageSquareText, Minimize2, Pencil, PencilRuler, Play, Copy, List, Scissors, Search, Sparkles, Table2, TextSelect, Trash2 } from "@lucide/vue";
+import { AlignLeft, Camera, CaseLower, CaseUpper, ClipboardPaste, Code2, Download, FileCode, MessageSquareText, Minimize2, Pencil, PencilRuler, Play, Copy, List, Scissors, Search, Sparkles, Table2, TextSelect, Trash2 } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import type { CompletionContext } from "@codemirror/autocomplete";
 import { Transaction, StateEffect } from "@codemirror/state";
@@ -9,7 +9,9 @@ import { search as cmSearch } from "@codemirror/search";
 import EditorSearchPanel from "./EditorSearchPanel.vue";
 import SqlExecutionTargetPicker from "./SqlExecutionTargetPicker.vue";
 import DelimitedListDialog from "./DelimitedListDialog.vue";
+import CodeSnapshotDialog from "@/components/codeSnapshot/CodeSnapshotDialog.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
+import type { CodeSnapshotSource } from "@/lib/codeSnapshot/codeSnapshot";
 import { copyToClipboard, readTextFromClipboard } from "@/lib/common/clipboard";
 import { completionMatchRanges } from "@/lib/common/completionMatch";
 import { executionCandidateForMode, resolveExecutableSql, type SqlExecutionSnapshot, type SqlExecutionOverride, type SqlExecutionCandidate } from "@/lib/sql/sqlExecutionTarget";
@@ -367,6 +369,8 @@ const pickerAnchor = ref<{ left: number; top: number }>();
 // Delimited list dialog state
 const delimitedListOpen = ref(false);
 const delimitedListSelectedText = ref("");
+const codeSnapshotOpen = ref(false);
+const codeSnapshotSource = ref<CodeSnapshotSource | null>(null);
 
 function openDelimitedListDialog() {
   if (props.readOnly) return;
@@ -1769,6 +1773,17 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
       disabled: !canCopySelectedSql.value,
       icon: Copy,
       shortcut: "Mod+C",
+    },
+    {
+      label: t("editor.contextMenu.screenshotSelection"),
+      action: () => {
+        if (selectedSql.value.trim()) {
+          codeSnapshotSource.value = { code: selectedSql.value, lang: "sql" };
+          codeSnapshotOpen.value = true;
+        }
+      },
+      disabled: !canCopySelectedSql.value,
+      icon: Camera,
     },
     {
       label: t("editor.contextMenu.cutSelection"),
@@ -5835,6 +5850,7 @@ defineExpose({
     <EditorSearchPanel ref="searchPanelRef" :view="view" />
     <SqlExecutionTargetPicker v-if="pickerVisible" :candidates="pickerCandidates" :active-index="pickerActiveIndex" :anchor="pickerAnchor" @update:active-index="onPickerActiveIndexChange" @confirm="onPickerConfirm" @cancel="closePicker" />
     <DelimitedListDialog v-model:open="delimitedListOpen" :selected-text="delimitedListSelectedText" @confirm="applyDelimitedListResult" />
+    <CodeSnapshotDialog v-model:open="codeSnapshotOpen" :source="codeSnapshotSource" />
     <!-- SQL 意图操作弹出菜单（参考 DataGrip Alt+Enter） -->
     <Teleport to="body">
       <div v-if="intentionPopup?.visible" class="intention-popup-overlay" @click.self="closeIntentionPopup">

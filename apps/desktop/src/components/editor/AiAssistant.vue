@@ -9,6 +9,7 @@ import {
   ArrowRightLeft,
   AlertTriangle,
   Bot,
+  Camera,
   Check,
   ChevronLeft,
   ChevronRight,
@@ -44,6 +45,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useTheme } from "@/composables/useTheme";
+import CodeSnapshotDialog from "@/components/codeSnapshot/CodeSnapshotDialog.vue";
+import type { CodeSnapshotSource } from "@/lib/codeSnapshot/codeSnapshot";
 import { useSettingsStore, AI_PROVIDER_PRESETS, normalizeAiConfig } from "@/stores/settingsStore";
 import AiProviderLogo from "@/components/icons/AiProviderLogo.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -842,6 +845,14 @@ function sendProposalReply(positive: boolean) {
 
 const activePlaceholder = computed(() => `${t(`ai.placeholders.${activeAction.value}`)} ${t("ai.tableMentionPlaceholderHint")}`);
 const aiCodeAppearance = computed(() => (isDark.value ? "dark" : "light"));
+
+const codeSnapshotOpen = ref(false);
+const codeSnapshotSource = ref<CodeSnapshotSource | null>(null);
+
+function openCodeSnapshot(seg: { content: string; lang: string }) {
+  codeSnapshotSource.value = { code: seg.content, lang: seg.lang };
+  codeSnapshotOpen.value = true;
+}
 
 const showActionButtons = computed(() => {
   if (!props.connection) return true;
@@ -2640,6 +2651,9 @@ async function openExternalUrl(url: string) {
                           <Check v-if="copiedContentKey === `code:${i}:${j}`" class="h-3.5 w-3.5 text-green-400" />
                           <Copy v-else class="h-3.5 w-3.5" />
                         </button>
+                        <button class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('codeSnapshot.take')" @click="openCodeSnapshot(seg)">
+                          <Camera class="h-3.5 w-3.5" />
+                        </button>
                       </div>
                     </div>
                     <pre class="ai-code-block whitespace-pre-wrap break-words p-3 text-xs leading-relaxed text-zinc-900 dark:text-zinc-100"><code v-html="seg.html"></code></pre>
@@ -3116,6 +3130,7 @@ async function openExternalUrl(url: string) {
           </div>
         </div>
       </div>
+      <CodeSnapshotDialog v-model:open="codeSnapshotOpen" :source="codeSnapshotSource" />
     </div>
   </div>
 </template>

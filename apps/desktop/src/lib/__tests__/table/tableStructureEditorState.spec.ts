@@ -410,6 +410,33 @@ describe("tableStructureEditorState", () => {
     expect(defaultNewColumnDataType("clickhouse")).toBe("String");
   });
 
+  it("offers the Xugu types that can be used by the table editor", () => {
+    for (const dataType of ["TINYINT", "DOUBLE", "DATETIME", "DATETIME WITH TIME ZONE", "TIME WITH TIME ZONE", "INTERVAL YEAR", "INTERVAL DAY TO SECOND", "GUID", "ROWID", "JSON", "BIT", "VARBIT", "INTEGER[]", "DOUBLE[]", "CHAR[]", "CLOB[]"]) {
+      expect(DATA_TYPE_OPTIONS.xugu).toContain(dataType);
+    }
+    for (const pseudoType of ["NULL", '"NULL"', "ARRAY", "ROWVERSION", "POINT", "LSEG", "LINE", "BOX", "PATH", "POLYGON", "CIRCLE"]) {
+      expect(DATA_TYPE_OPTIONS.xugu).not.toContain(pseudoType);
+    }
+  });
+
+  it("keeps Xugu type parameters within syntax the generic editor can emit", () => {
+    for (const fixedType of ["GUID", "ROWID", "JSON", "XML", "BLOB", "CLOB", "INTEGER[]", "INTERVAL DAY TO SECOND", "DATETIME WITH TIME ZONE"]) {
+      expect(isDataTypeLengthDisabled("xugu", fixedType)).toBe(true);
+      expect(combineDataTypeForDatabase("xugu", fixedType, "12")).toBe(fixedType);
+    }
+    for (const parameterizedType of ["VARCHAR", "BINARY", "BIT", "VARBIT", "NUMERIC", "TIME", "TIMESTAMP"]) {
+      expect(isDataTypeLengthDisabled("xugu", parameterizedType)).toBe(false);
+    }
+    expect(combineDataTypeForDatabase("xugu", "TIME", "3")).toBe("TIME(3)");
+    expect(combineDataTypeForDatabase("xugu", "TIME", "4")).toBe("TIME");
+    expect(combineDataTypeForDatabase("xugu", "TIMESTAMP", "6")).toBe("TIMESTAMP(6)");
+    expect(combineDataTypeForDatabase("xugu", "TIMESTAMP", "7")).toBe("TIMESTAMP");
+
+    // Xugu-only constraints must not change other database profiles.
+    expect(isDataTypeLengthDisabled("mysql", "json")).toBe(false);
+    expect(isDataTypeLengthDisabled("oracle", "clob")).toBe(false);
+  });
+
   it("requires a SQLite rebuild only for a retained existing column type change", () => {
     const [column] = createColumnDrafts(
       [

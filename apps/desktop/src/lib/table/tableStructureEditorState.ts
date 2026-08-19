@@ -371,7 +371,62 @@ export const DATA_TYPE_OPTIONS: Record<string, string[]> = {
     "interval day to second",
   ],
   questdb: ["boolean", "ipv4", "byte", "short", "char", "int", "float", "symbol", "varchar", "string", "long", "date", "timestamp", "timestamp_ns", "double", "uuid", "binary", "long256", "geohash", "array", "interval", "decimal"],
-  xugu: ["BOOLEAN", "INTEGER", "SMALLINT", "BIGINT", "FLOAT", "NUMERIC", "CHAR", "VARCHAR", "CLOB", "DATE", "TIME", "TIMESTAMP", "BINARY", "VARBINARY", "BLOB", "XML", "BOOL", "INT", "SHORT", "LONGINT", "LONG", "REAL", "DECIMAL", "TEXT", "NCHAR", "NVARCHAR", "NVARCHAR2"],
+  xugu: [
+    "BIGINT",
+    "BINARY",
+    "BIT",
+    "BLOB",
+    "BOOL",
+    "BOOLEAN",
+    "CHAR",
+    "CHAR[]",
+    "CLOB",
+    "CLOB[]",
+    "DATE",
+    "DATETIME",
+    "DATETIME WITH TIME ZONE",
+    "DECIMAL",
+    "DOUBLE",
+    "DOUBLE[]",
+    "FLOAT",
+    "GUID",
+    "INT",
+    "INTEGER",
+    "INTEGER[]",
+    "INTERVAL DAY",
+    "INTERVAL DAY TO HOUR",
+    "INTERVAL DAY TO MINUTE",
+    "INTERVAL DAY TO SECOND",
+    "INTERVAL HOUR",
+    "INTERVAL HOUR TO MINUTE",
+    "INTERVAL HOUR TO SECOND",
+    "INTERVAL MINUTE",
+    "INTERVAL MINUTE TO SECOND",
+    "INTERVAL MONTH",
+    "INTERVAL SECOND",
+    "INTERVAL YEAR",
+    "INTERVAL YEAR TO MONTH",
+    "JSON",
+    "LONG",
+    "LONGINT",
+    "NCHAR",
+    "NUMERIC",
+    "NVARCHAR",
+    "NVARCHAR2",
+    "REAL",
+    "ROWID",
+    "SHORT",
+    "SMALLINT",
+    "TEXT",
+    "TIME",
+    "TIME WITH TIME ZONE",
+    "TIMESTAMP",
+    "TINYINT",
+    "VARBINARY",
+    "VARBIT",
+    "VARCHAR",
+    "XML",
+  ],
   duckdb: ["BOOLEAN", "TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "UTINYINT", "USMALLINT", "UINTEGER", "UBIGINT", "FLOAT", "DOUBLE", "DECIMAL", "VARCHAR", "TEXT", "BLOB", "DATE", "TIME", "TIMESTAMP", "TIMESTAMPTZ", "INTERVAL", "UUID", "JSON"],
   h2: ["BOOLEAN", "TINYINT", "SMALLINT", "INTEGER", "BIGINT", "IDENTITY", "DECIMAL", "NUMERIC", "REAL", "DOUBLE", "FLOAT", "CHAR", "CHARACTER", "VARCHAR", "VARCHAR_IGNORECASE", "CLOB", "BINARY", "VARBINARY", "BLOB", "DATE", "TIME", "TIMESTAMP", "TIMESTAMP WITH TIME ZONE", "UUID", "ARRAY", "JSON"],
 };
@@ -558,6 +613,8 @@ export const POSTGRES_TYPE_LENGTH_DISABLES: string[] = [
 ];
 
 export const ORACLE_LIKE_TYPE_LENGTH_DISABLES: string[] = ["binary_double", "binary_float", "bigint", "boolean", "bool", "byte", "date", "double", "double precision", "float", "integer", "int", "long", "long raw", "nclob", "real", "smallint", "text", "tinyint"];
+
+const XUGU_TYPE_LENGTH_DISABLES = new Set([...ORACLE_LIKE_TYPE_LENGTH_DISABLES, "blob", "clob", "datetime", "datetime with time zone", "guid", "json", "longint", "rowid", "short", "xml"]);
 
 export const SQLSERVER_TYPE_LENGTH_DISABLES: string[] = ["bigint", "bit", "date", "datetime", "image", "int", "integer", "money", "ntext", "real", "smalldatetime", "smallint", "smallmoney", "sql_variant", "text", "timestamp", "tinyint", "uniqueidentifier", "xml"];
 
@@ -1170,7 +1227,7 @@ export function normalizeDataTypeParams(dbType: DatabaseType | undefined, baseTy
   const p = params.trim();
   if (!p) return "";
   if (!isTemporalPrecisionType(dbType, baseType)) return p;
-  return isValidTemporalPrecision(dbType, p) ? p : "";
+  return isValidTemporalPrecision(dbType, baseType, p) ? p : "";
 }
 
 function isTemporalPrecisionType(dbType: DatabaseType | undefined, baseType: string): boolean {
@@ -1200,6 +1257,8 @@ function isTemporalPrecisionType(dbType: DatabaseType | undefined, baseType: str
       return ["timestamp", "timestamp with time zone", "timestamp with local time zone"].includes(normalized);
     case "questdb":
       return ["timestamp"].includes(normalized);
+    case "xugu":
+      return ["time", "timestamp"].includes(normalized);
     default:
       return false;
   }
@@ -1224,10 +1283,11 @@ function isOracleLikeStructureType(dbType: DatabaseType | undefined): boolean {
   return dbType === "oracle" || dbType === "dameng" || dbType === "oceanbase-oracle" || dbType === "iris" || dbType === "yashandb" || dbType === "xugu";
 }
 
-function isValidTemporalPrecision(dbType: DatabaseType | undefined, params: string): boolean {
+function isValidTemporalPrecision(dbType: DatabaseType | undefined, baseType: string, params: string): boolean {
   if (!/^\d+$/.test(params)) return false;
   const value = Number(params);
-  const max = dbType === "oracle" || dbType === "dameng" || dbType === "oceanbase-oracle" ? 9 : 6;
+  const normalizedBaseType = baseType.trim().replace(/\s+/g, " ").toLowerCase();
+  const max = dbType === "xugu" && normalizedBaseType === "time" ? 3 : dbType === "oracle" || dbType === "dameng" || dbType === "oceanbase-oracle" ? 9 : 6;
   return Number.isInteger(value) && value >= 0 && value <= max && String(value) === params;
 }
 
@@ -1303,6 +1363,10 @@ export function isDataTypeLengthDisabled(_dbType: DatabaseType | undefined, base
     return key !== "bit" && key !== "float_vector";
   } else if (_dbType === "postgres" || _dbType === "gaussdb" || _dbType === "kwdb" || _dbType === "opengauss" || _dbType === "highgo" || _dbType === "uxdb" || _dbType === "vastbase" || _dbType === "kingbase") {
     return key.endsWith("[]") || POSTGRES_TYPE_LENGTH_DISABLES.includes(key);
+  } else if (_dbType === "xugu") {
+    // Xugu array suffixes and interval qualifiers require grammar-aware
+    // placement; a generic TYPE(length) editor would emit invalid DDL for them.
+    return key.endsWith("[]") || key.startsWith("interval ") || XUGU_TYPE_LENGTH_DISABLES.has(key);
   } else if (isOracleLikeStructureType(_dbType)) {
     // Dameng/Oracle integer aliases have fixed precision; MySQL-style display widths generate invalid DDL.
     return ORACLE_LIKE_TYPE_LENGTH_DISABLES.includes(key);

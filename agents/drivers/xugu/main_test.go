@@ -361,9 +361,19 @@ func TestListDataTypesReturnsXuguTypes(t *testing.T) {
 	if err := json.Unmarshal(data, &result); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"INTEGER", "VARCHAR", "NUMERIC", "INT"} {
+	for _, want := range []string{
+		"INTEGER", "VARCHAR", "NUMERIC", "INT",
+		"TINYINT", "DOUBLE", "DATETIME", "DATETIME WITH TIME ZONE", "TIME WITH TIME ZONE",
+		"INTERVAL YEAR", "INTERVAL DAY TO SECOND", "GUID", "ROWID", "JSON", "BIT", "VARBIT",
+		"INTEGER[]", "DOUBLE[]", "CHAR[]", "CLOB[]",
+	} {
 		if !contains(result, want) {
 			t.Fatalf("expected data type %q in %v", want, result)
+		}
+	}
+	for _, pseudoType := range []string{"NULL", `"NULL"`, "ARRAY", "ROWVERSION", "POINT", "LSEG", "LINE", "BOX", "PATH", "POLYGON", "CIRCLE"} {
+		if contains(result, pseudoType) {
+			t.Fatalf("pseudo/internal type %q must not be offered as a regular column type: %v", pseudoType, result)
 		}
 	}
 }

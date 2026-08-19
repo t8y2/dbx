@@ -3795,7 +3795,7 @@ export async function meilisearchSearchDocuments(
   connectionId: string,
   index: string,
   params: { q?: string | null; filter?: string | null; sort?: string | null; limit: number; offset: number; hybridEmbedder?: string | null; hybridSemanticRatio?: number | null; showRankingScore?: boolean; rankingScoreThreshold?: number | null },
-): Promise<{ hits: Array<{ id?: unknown; document: Record<string, any> }>; totalHits: number; processingTimeMs: number }> {
+): Promise<{ hits: Array<{ id?: unknown; document: Record<string, any>; formatted?: Record<string, any>; rankingScore?: unknown }>; totalHits: number; processingTimeMs: number }> {
   return invoke("meilisearch_search_documents", {
     connectionId,
     index,
@@ -3808,6 +3808,14 @@ export async function meilisearchSearchDocuments(
     hybridSemanticRatio: params.hybridSemanticRatio ?? null,
     showRankingScore: params.showRankingScore ?? false,
     rankingScoreThreshold: params.rankingScoreThreshold ?? null,
+  });
+}
+
+export async function meilisearchGetDocument(connectionId: string, index: string, id: string): Promise<Record<string, any>> {
+  return invoke("meilisearch_get_document", {
+    connectionId,
+    index,
+    id,
   });
 }
 

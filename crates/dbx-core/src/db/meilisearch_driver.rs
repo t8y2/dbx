@@ -250,7 +250,7 @@ async fn fetch_documents_value(
     body.insert("offset".to_string(), Value::Number(offset.into()));
     body.insert("limit".to_string(), Value::Number(limit.into()));
     if let Some(filter) = meilisearch_filter_from_request(filter, index_info.primary_key.as_deref())? {
-        body.insert("filter".to_string(), Value::String(filter));
+        body.insert("filter".to_string(), filter);
     }
     if let Some(sort) = meilisearch_sort_from_request(sort, index_info.primary_key.as_deref())? {
         body.insert("sort".to_string(), Value::Array(sort.into_iter().map(Value::String).collect()));
@@ -395,9 +395,22 @@ fn inject_document_identity(document: Value, primary_key: Option<&str>) -> Resul
     Ok(Value::Object(document))
 }
 
-fn search_hit(hit: Value, primary_key: Option<&str>) -> MeilisearchSearchHit {
+fn search_hit(hit: Value, primary_key: Option<&str>, highlight: bool, ranking_score: bool) -> MeilisearchSearchHit {
     let id = primary_key.and_then(|primary_key| hit.get(primary_key).cloned());
-    MeilisearchSearchHit { id, document: hit }
+    let mut document = hit;
+    let mut formatted = None;
+    let mut ranking = None;
+    if let Some(object) = document.as_object_mut() {
+        // Hoist response metadata only when the request asked for it; without
+        // the flag a same-named key is a legitimate user field and stays put.
+        if highlight {
+            formatted = object.remove("_formatted");
+        }
+        if ranking_score {
+            ranking = object.remove("_rankingScore");
+        }
+    }
+    MeilisearchSearchHit { id, document, formatted, ranking_score: ranking }
 }
 
 fn parse_document_object(doc_json: &str) -> Result<Map<String, Value>, String> {
@@ -472,6 +485,18 @@ pub async fn update_document(client: &MeilisearchClient, index: &str, id: &str, 
     // DBX sends the complete edited document so removed fields must disappear.
     submit_documents(client, index, Method::POST, vec![Value::Object(document)]).await?;
     Ok(1)
+}
+
+/// Fetch the canonical stored document by identity. Search hits may be shaped
+/// by `displayedAttributes` and search options, so edits must round-trip
+/// through this record instead of a hit payload.
+pub async fn get_document(client: &MeilisearchClient, index: &str, id: &str) -> Result<Value, String> {
+    let response = client
+        .get(&format!("/indexes/{}/documents/{}", encode_path_segment(index), encode_path_segment(&identity_path(id))))
+        .send()
+        .await
+        .map_err(|error| format!("Meilisearch request failed: {error}"))?;
+    response_json(response, "document lookup").await
 }
 
 pub async fn delete_document(client: &MeilisearchClient, index: &str, id: &str) -> Result<u64, String> {
@@ -604,21 +629,26 @@ async fn wait_for_task(client: &MeilisearchClient, task_uid: u64) -> Result<(), 
     }
 }
 
-fn meilisearch_filter_from_request(filter: Option<&str>, primary_key: Option<&str>) -> Result<Option<String>, String> {
+fn meilisearch_filter_from_request(filter: Option<&str>, primary_key: Option<&str>) -> Result<Option<Value>, String> {
     let Some(filter) = filter.map(str::trim).filter(|value| !value.is_empty() && *value != "{}") else {
         return Ok(None);
     };
     // Native Meilisearch filter syntax (e.g. `status = "published" AND rating >= 8`)
     // is passed through; the server validates it. Same trust level as `$meiliFilter`.
     if !filter.starts_with('{') && !filter.starts_with('[') {
-        return Ok(Some(filter.to_string()));
+        return Ok(Some(Value::String(filter.to_string())));
     }
     let value: Value =
         serde_json::from_str(filter).map_err(|error| format!("Invalid Meilisearch filter JSON: {error}"))?;
-    if let Some(raw) = value.get("$meiliFilter").and_then(Value::as_str) {
-        return Ok(Some(raw.to_string()));
+    // Native filter arrays (e.g. [["rating > 3"], "status = \"published\""]) are
+    // passed through unchanged; the official search API accepts string or array.
+    if value.is_array() {
+        return Ok(Some(value));
     }
-    filter_expression(&value, primary_key).map(Some)
+    if let Some(raw) = value.get("$meiliFilter").and_then(Value::as_str) {
+        return Ok(Some(Value::String(raw.to_string())));
+    }
+    filter_expression(&value, primary_key).map(|expression| Some(Value::String(expression)))
 }
 
 fn filter_expression(value: &Value, primary_key: Option<&str>) -> Result<String, String> {
@@ -761,14 +791,20 @@ fn meilisearch_sort_from_request(sort: Option<&str>, primary_key: Option<&str>) 
     Ok((!result.is_empty()).then_some(result))
 }
 
-/// Search hit with the document identity kept outside the document payload, so
-/// a real `_id` (or any other) field in the stored document is never shadowed
-/// by dbx metadata.
+/// Search hit with dbx identity and Meilisearch response metadata kept outside
+/// the document payload: `document` is always the pure user payload, so a real
+/// `_id` / `_formatted` / `_rankingScore` field in the stored document is never
+/// shadowed or stripped. `formatted` / `rankingScore` are hoisted only when the
+/// request actually asked for them.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MeilisearchSearchHit {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<Value>,
     pub document: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub formatted: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "rankingScore")]
+    pub ranking_score: Option<Value>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -804,7 +840,7 @@ fn meilisearch_search_body(
     body.insert("offset".to_string(), Value::Number(offset.into()));
     body.insert("limit".to_string(), Value::Number(limit.into()));
     if let Some(filter) = meilisearch_filter_from_request(filter, primary_key)? {
-        body.insert("filter".to_string(), Value::String(filter));
+        body.insert("filter".to_string(), filter);
     }
     if let Some(sort) = meilisearch_sort_from_request(sort, primary_key)? {
         body.insert("sort".to_string(), Value::Array(sort.into_iter().map(Value::String).collect()));
@@ -844,6 +880,8 @@ fn meilisearch_search_body(
 fn parse_meilisearch_search_response(
     value: Value,
     primary_key: Option<&str>,
+    highlight: bool,
+    ranking_score: bool,
 ) -> Result<MeilisearchSearchResult, String> {
     let hits = value
         .get("hits")
@@ -858,7 +896,7 @@ fn parse_meilisearch_search_response(
         .and_then(Value::as_u64)
         .ok_or_else(|| "Meilisearch search response is missing a hit total".to_string())?;
     let processing_time_ms = value.get("processingTimeMs").and_then(Value::as_u64).unwrap_or(0);
-    let hits = hits.into_iter().map(|hit| search_hit(hit, primary_key)).collect();
+    let hits = hits.into_iter().map(|hit| search_hit(hit, primary_key, highlight, ranking_score)).collect();
     Ok(MeilisearchSearchResult { hits, total_hits, processing_time_ms })
 }
 
@@ -914,7 +952,8 @@ pub async fn search_documents(
         .await
         .map_err(|error| format!("Meilisearch request failed: {error}"))?;
     let value = response_json(response, "document search").await?;
-    parse_meilisearch_search_response(value, index_info.primary_key.as_deref())
+    let highlight = q.map(str::trim).is_some_and(|value| !value.is_empty());
+    parse_meilisearch_search_response(value, index_info.primary_key.as_deref(), highlight, show_ranking_score)
 }
 
 pub async fn get_index_settings(client: &MeilisearchClient, index: &str) -> Result<Value, String> {
@@ -1106,9 +1145,9 @@ fn raw_response_result(status: u16, body: String, start: Instant, truncated: boo
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_bounded_rest_body, filter_expression, meilisearch_base_url, meilisearch_filter_from_request,
-        meilisearch_search_body, meilisearch_sort_from_request, parse_meilisearch_search_response,
-        parse_rest_request_line, MeilisearchClient,
+        decode_bounded_rest_body, decoded_identity, filter_expression, identity_path, meilisearch_base_url,
+        meilisearch_filter_from_request, meilisearch_search_body, meilisearch_sort_from_request,
+        parse_meilisearch_search_response, parse_rest_request_line, MeilisearchClient,
     };
     use reqwest::Method;
     use serde_json::{json, Value};
@@ -1204,13 +1243,24 @@ mod tests {
     fn passes_through_native_meilisearch_filter_syntax() {
         assert_eq!(
             meilisearch_filter_from_request(Some("status = \"published\" AND rating >= 8"), Some("id")).unwrap(),
-            Some("status = \"published\" AND rating >= 8".to_string())
+            Some(json!("status = \"published\" AND rating >= 8"))
         );
         // JSON filters keep going through the document-store translation.
         assert!(meilisearch_filter_from_request(Some(r#"{"status":"published"}"#), Some("id"))
             .unwrap()
+            .and_then(|value| value.as_str().map(str::to_string))
             .unwrap()
             .contains("status = \"published\""));
+    }
+
+    #[test]
+    fn passes_through_native_meilisearch_filter_arrays() {
+        // The official search API accepts filter as a string or an array; array
+        // input must reach the request body unchanged instead of entering the
+        // legacy JSON-object translation.
+        let filter =
+            meilisearch_filter_from_request(Some(r#"[["rating > 3"], "status = \"published\""]"#), Some("id")).unwrap();
+        assert_eq!(filter, Some(json!([["rating > 3"], "status = \"published\""])));
     }
 
     #[test]
@@ -1343,7 +1393,7 @@ mod tests {
             "estimatedTotalHits": 42,
             "processingTimeMs": 7
         });
-        let result = parse_meilisearch_search_response(value, Some("movie_id")).unwrap();
+        let result = parse_meilisearch_search_response(value, Some("movie_id"), true, false).unwrap();
 
         assert_eq!(result.total_hits, 42);
         assert_eq!(result.processing_time_ms, 7);
@@ -1352,7 +1402,35 @@ mod tests {
         // The document payload is kept exactly as returned, including the
         // original primary key field, so consumers can rebuild the stored document.
         assert_eq!(result.hits[0].document["movie_id"], json!(123));
-        assert_eq!(result.hits[0].document["_formatted"]["title"], json!("<mark>Alien</mark>"));
+        // Response metadata is hoisted out of the document when it was requested.
+        assert_eq!(result.hits[0].formatted, Some(json!({ "title": "<mark>Alien</mark>" })));
+        assert!(result.hits[0].document.get("_formatted").is_none());
+    }
+
+    #[test]
+    fn search_hit_preserves_real_formatted_and_ranking_score_fields_when_not_requested() {
+        // Without highlight/ranking-score requests, same-named keys are user
+        // fields and must stay inside the document payload.
+        let value = json!({
+            "hits": [
+                { "movie_id": 7, "_formatted": { "note": "user data" }, "_rankingScore": 0.99 }
+            ],
+            "estimatedTotalHits": 1,
+            "processingTimeMs": 1
+        });
+        let result = parse_meilisearch_search_response(value.clone(), Some("movie_id"), false, false).unwrap();
+
+        assert_eq!(result.hits[0].formatted, None);
+        assert_eq!(result.hits[0].ranking_score, None);
+        assert_eq!(result.hits[0].document["_formatted"], json!({ "note": "user data" }));
+        assert_eq!(result.hits[0].document["_rankingScore"], json!(0.99));
+
+        // With the flags on, Meilisearch-owned metadata is hoisted instead.
+        let hoisted = parse_meilisearch_search_response(value, Some("movie_id"), true, true).unwrap();
+        assert_eq!(hoisted.hits[0].formatted, Some(json!({ "note": "user data" })));
+        assert_eq!(hoisted.hits[0].ranking_score, Some(json!(0.99)));
+        assert!(hoisted.hits[0].document.get("_formatted").is_none());
+        assert!(hoisted.hits[0].document.get("_rankingScore").is_none());
     }
 
     #[test]
@@ -1366,7 +1444,7 @@ mod tests {
             "estimatedTotalHits": 1,
             "processingTimeMs": 1
         });
-        let result = parse_meilisearch_search_response(value, Some("movie_id")).unwrap();
+        let result = parse_meilisearch_search_response(value, Some("movie_id"), false, false).unwrap();
 
         assert_eq!(result.hits[0].id, Some(json!(7)));
         assert_eq!(result.hits[0].document["_id"], json!("user-owned"));
@@ -1377,9 +1455,13 @@ mod tests {
     fn parses_large_search_responses() {
         let hits: Vec<Value> =
             (0..5000).map(|index| json!({ "movie_id": index, "title": format!("title-{index}") })).collect();
-        let result =
-            parse_meilisearch_search_response(json!({ "hits": hits, "estimatedTotalHits": 5000 }), Some("movie_id"))
-                .unwrap();
+        let result = parse_meilisearch_search_response(
+            json!({ "hits": hits, "estimatedTotalHits": 5000 }),
+            Some("movie_id"),
+            false,
+            false,
+        )
+        .unwrap();
 
         assert_eq!(result.hits.len(), 5000);
         assert_eq!(result.hits[4999].id, Some(json!(4999)));
@@ -1391,19 +1473,26 @@ mod tests {
         let estimated = parse_meilisearch_search_response(
             json!({ "hits": [], "estimatedTotalHits": 5, "processingTimeMs": 1 }),
             None,
+            false,
+            false,
         )
         .unwrap();
         assert_eq!(estimated.total_hits, 5);
 
-        let fallback =
-            parse_meilisearch_search_response(json!({ "hits": [], "totalHits": 9, "processingTimeMs": 2 }), None)
-                .unwrap();
+        let fallback = parse_meilisearch_search_response(
+            json!({ "hits": [], "totalHits": 9, "processingTimeMs": 2 }),
+            None,
+            false,
+            false,
+        )
+        .unwrap();
         assert_eq!(fallback.total_hits, 9);
     }
 
     #[test]
     fn search_response_requires_a_hit_total() {
-        let error = parse_meilisearch_search_response(json!({ "hits": [], "processingTimeMs": 1 }), None).unwrap_err();
+        let error = parse_meilisearch_search_response(json!({ "hits": [], "processingTimeMs": 1 }), None, false, false)
+            .unwrap_err();
 
         assert!(error.contains("hit total"));
     }
@@ -1428,7 +1517,9 @@ mod tests {
                     let head = String::from_utf8_lossy(&buf[..read]).to_string();
                     let request_line = head.lines().next().unwrap_or("").to_string();
                     requests.lock().unwrap().push(request_line.clone());
-                    let body = if request_line.starts_with("GET ") {
+                    let body = if request_line.starts_with("GET ") && request_line.contains("/documents/") {
+                        r#"{"movie_id":"SN-0001","title":"Canonical"}"#
+                    } else if request_line.starts_with("GET ") {
                         r#"{"uid":"movies","primaryKey":"movie_id"}"#
                     } else {
                         r#"{"hits":[{"movie_id":1}],"estimatedTotalHits":1,"processingTimeMs":1}"#
@@ -1460,5 +1551,35 @@ mod tests {
         // is a single `/search` request instead of two round-trips.
         assert_eq!(index_lookups, 1, "requests: {requests:?}");
         assert_eq!(searches, 2, "requests: {requests:?}");
+    }
+
+    #[test]
+    fn string_primary_keys_keep_their_string_identity() {
+        // serializeDocumentStoreId on the frontend prefixes string ids so the
+        // backend does not reinterpret a numeric-looking string as a number.
+        let serialized = r#"__dbx_meilisearch_string_id__"123""#;
+        assert_eq!(decoded_identity(serialized), json!("123"));
+        assert_eq!(identity_path(serialized), "123");
+        // A bare numeric id still decodes as a number.
+        assert_eq!(decoded_identity("123"), json!(123));
+        assert_eq!(identity_path("123"), "123");
+    }
+
+    #[tokio::test]
+    async fn get_document_fetches_the_canonical_record_by_identity() {
+        let (base_url, requests) = spawn_recording_server().await;
+        let client = super::MeilisearchClient::new(&base_url, None, false, None, Duration::from_secs(5)).unwrap();
+
+        // A string id arrives in the serialized form and must keep its string
+        // identity in the request path.
+        let document =
+            super::get_document(&client, "movies", r#"__dbx_meilisearch_string_id__"SN-0001""#).await.unwrap();
+
+        assert_eq!(document["title"], json!("Canonical"));
+        let requests = requests.lock().unwrap();
+        assert!(
+            requests.iter().any(|line| line.starts_with("GET /indexes/movies/documents/SN-0001")),
+            "requests: {requests:?}"
+        );
     }
 }

@@ -17,6 +17,7 @@ import JsonTree from "@/components/common/JsonTree.vue";
 import RedisJsonEditor from "@/components/redis/RedisJsonEditor.vue";
 import * as api from "@/lib/backend/api";
 import { compactLocalTimestamp, sanitizeExportBaseName, saveTextFile } from "@/lib/export/saveTextFile";
+import { serializeDocumentStoreId } from "@/lib/app/documentJsonValues";
 import { useToast } from "@/composables/useToast";
 
 const props = defineProps<{
@@ -29,8 +30,12 @@ const emit = defineEmits<{
 }>();
 
 type ViewMode = "json" | "table" | "grid";
-/** Search hit from the backend: `id` is the primary-key value captured outside the document, `document` is the hit payload exactly as Meilisearch returned it. */
-type Hit = { id?: unknown; document: Record<string, any> };
+/**
+ * Search hit from the backend: `id` is the primary-key value and `formatted` /
+ * `rankingScore` are requested response metadata — all kept outside `document`,
+ * which is always the pure user payload.
+ */
+type Hit = { id?: unknown; document: Record<string, any>; formatted?: Record<string, any>; rankingScore?: unknown };
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -66,6 +71,8 @@ const editingHit = ref<Hit | null>(null);
 const editJson = ref("");
 const editError = ref("");
 const isSaving = ref(false);
+/** True while the canonical document is being fetched for the editor. */
+const editLoading = ref(false);
 
 const deleteOpen = ref(false);
 const deletingHit = ref<Hit | null>(null);
@@ -136,17 +143,14 @@ function renderMarkHtml(value: string): string {
 }
 
 /**
- * Display value for the JSON/grid cards: prefer `_formatted` so search
- * `<mark>` highlights stay visible, and drop search-only metadata. The
- * document payload is shown as stored — the dbx identity lives on `hit.id`
- * and never enters the document.
+ * Display value for the JSON/grid cards: prefer the hoisted `formatted` payload
+ * so search `<mark>` highlights stay visible. `document` is already the pure
+ * user payload — no name-based stripping, so user fields named `_formatted` or
+ * `_rankingScore` survive untouched.
  */
 function displayValue(hit: Hit): Record<string, any> {
-  const formatted = hit?.document?._formatted;
-  const display: Record<string, any> = formatted && typeof formatted === "object" ? { ...formatted } : { ...hit.document };
-  delete display._formatted;
-  delete display._rankingScore;
-  return display;
+  const formatted = hit?.formatted;
+  return formatted && typeof formatted === "object" ? { ...formatted } : { ...hit.document };
 }
 
 /** Deep-remove `<mark>` search highlight tags to reconstruct the stored document. */
@@ -159,16 +163,13 @@ function stripSearchMarks(value: unknown): unknown {
   return value;
 }
 
-/** The document exactly as stored in the index: the raw hit payload without search metadata. */
+/** The user payload exactly as returned by the search — already free of dbx/Meilisearch metadata. */
 function rawDocument(hit: Hit): Record<string, unknown> {
-  const raw: Record<string, unknown> = { ...hit.document };
-  delete raw._formatted;
-  delete raw._rankingScore;
-  return raw;
+  return { ...hit.document };
 }
 
 function rankingScore(hit: Hit): number | null {
-  const value = hit?.document?._rankingScore;
+  const value = hit?.rankingScore;
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
@@ -193,7 +194,7 @@ function gridFields(hit: Hit): Array<[string, unknown]> {
 }
 
 function cellValue(hit: Hit, column: string): unknown {
-  const formatted = hit?.document?._formatted;
+  const formatted = hit?.formatted;
   if (formatted && typeof formatted === "object" && column in formatted) return formatted[column];
   return hit?.document?.[column];
 }
@@ -213,7 +214,10 @@ function cellText(hit: Hit, column: string): string {
 
 function documentId(hit: Hit | null | undefined): string {
   const id = hit?.id;
-  return id == null ? "" : String(id);
+  if (id == null) return "";
+  // The store-id serializer prefixes string ids so the backend keeps their
+  // type — a string primary key like "123" must not round-trip as numeric 123.
+  return serializeDocumentStoreId(id, "meilisearch");
 }
 
 /** Search params shared by the results view and the export. */
@@ -258,15 +262,26 @@ function nextPage() {
   void runSearch();
 }
 
-function startEdit(hit: Hit) {
+/**
+ * Open the editor with the canonical stored document. Search hits may be
+ * partial (`displayedAttributes`) and are never used as the write payload.
+ */
+async function startEdit(hit: Hit) {
+  const id = documentId(hit);
+  if (!id) return;
   editingHit.value = hit;
   editError.value = "";
-  try {
-    editJson.value = JSON.stringify(rawDocument(hit), null, 2);
-  } catch {
-    editJson.value = "{}";
-  }
+  editJson.value = "";
   editOpen.value = true;
+  editLoading.value = true;
+  try {
+    const canonical = await api.meilisearchGetDocument(props.connectionId, props.index, id);
+    editJson.value = JSON.stringify(canonical, null, 2);
+  } catch (e: any) {
+    editError.value = e?.message || String(e);
+  } finally {
+    editLoading.value = false;
+  }
 }
 
 /** Download every hit matching the current search as a JSON file of the stored documents. */
@@ -636,10 +651,10 @@ onBeforeUnmount(() => {
             <Button variant="ghost" size="icon" class="h-6 w-7" :title="t('meilisearch.copyDocument')" @click="copyDocument(hit)">
               <Copy class="h-3.5 w-3.5" />
             </Button>
-            <Button variant="ghost" size="icon" class="h-6 w-7" :title="t('meilisearch.editDocument')" @click="startEdit(hit)">
+            <Button variant="ghost" size="icon" class="h-6 w-7" :title="t('meilisearch.editDocument')" :disabled="!documentId(hit)" @click="startEdit(hit)">
               <Pencil class="h-3.5 w-3.5" />
             </Button>
-            <Button variant="ghost" size="icon" class="h-6 w-7 text-destructive" :title="t('meilisearch.deleteDocument')" @click="startDelete(hit)">
+            <Button variant="ghost" size="icon" class="h-6 w-7 text-destructive" :title="t('meilisearch.deleteDocument')" :disabled="!documentId(hit)" @click="startDelete(hit)">
               <Trash2 class="h-3.5 w-3.5" />
             </Button>
           </div>
@@ -672,10 +687,10 @@ onBeforeUnmount(() => {
                     <Button variant="ghost" size="icon" class="h-6 w-6" :title="t('meilisearch.copyDocument')" @click="copyDocument(hit)">
                       <Copy class="h-3.5 w-3.5" />
                     </Button>
-                    <Button variant="ghost" size="icon" class="h-6 w-6" :title="t('meilisearch.editDocument')" @click="startEdit(hit)">
+                    <Button variant="ghost" size="icon" class="h-6 w-6" :title="t('meilisearch.editDocument')" :disabled="!documentId(hit)" @click="startEdit(hit)">
                       <Pencil class="h-3.5 w-3.5" />
                     </Button>
-                    <Button variant="ghost" size="icon" class="h-6 w-6 text-destructive" :title="t('meilisearch.deleteDocument')" @click="startDelete(hit)">
+                    <Button variant="ghost" size="icon" class="h-6 w-6 text-destructive" :title="t('meilisearch.deleteDocument')" :disabled="!documentId(hit)" @click="startDelete(hit)">
                       <Trash2 class="h-3.5 w-3.5" />
                     </Button>
                   </div>
@@ -696,10 +711,10 @@ onBeforeUnmount(() => {
             <Button variant="ghost" size="icon" class="h-6 w-7" :title="t('meilisearch.copyDocument')" @click="copyDocument(hit)">
               <Copy class="h-3.5 w-3.5" />
             </Button>
-            <Button variant="ghost" size="icon" class="h-6 w-7" :title="t('meilisearch.editDocument')" @click="startEdit(hit)">
+            <Button variant="ghost" size="icon" class="h-6 w-7" :title="t('meilisearch.editDocument')" :disabled="!documentId(hit)" @click="startEdit(hit)">
               <Pencil class="h-3.5 w-3.5" />
             </Button>
-            <Button variant="ghost" size="icon" class="h-6 w-7 text-destructive" :title="t('meilisearch.deleteDocument')" @click="startDelete(hit)">
+            <Button variant="ghost" size="icon" class="h-6 w-7 text-destructive" :title="t('meilisearch.deleteDocument')" :disabled="!documentId(hit)" @click="startDelete(hit)">
               <Trash2 class="h-3.5 w-3.5" />
             </Button>
           </div>
@@ -734,12 +749,13 @@ onBeforeUnmount(() => {
           <DialogTitle>{{ t("meilisearch.editDocument") }}</DialogTitle>
         </DialogHeader>
         <div class="flex-1 min-h-0 overflow-hidden rounded-md border bg-muted/20">
-          <RedisJsonEditor v-model="editJson" class="h-full" :read-only="isSaving" />
+          <QueryLoadingState v-if="editLoading" class="h-full" />
+          <RedisJsonEditor v-else v-model="editJson" class="h-full" :read-only="isSaving" />
         </div>
         <div v-if="editError" class="shrink-0 text-xs text-destructive">{{ editError }}</div>
         <DialogFooter class="shrink-0">
           <Button variant="outline" :disabled="isSaving" @click="editOpen = false">{{ t("common.cancel") }}</Button>
-          <Button class="gap-1" :disabled="isSaving" @click="saveEdit">
+          <Button class="gap-1" :disabled="isSaving || editLoading || !editJson" @click="saveEdit">
             <Save class="h-3.5 w-3.5" />
             {{ t("common.save") }}
           </Button>

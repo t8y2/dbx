@@ -164,6 +164,14 @@ pub struct MeilisearchIndexRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MeilisearchDocumentGetRequest {
+    pub connection_id: String,
+    pub index: String,
+    pub id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MeilisearchSettingsUpdateRequest {
     pub connection_id: String,
     pub index: String,
@@ -411,6 +419,17 @@ pub async fn meilisearch_search(
     )
     .await
     .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn meilisearch_get_document(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MeilisearchDocumentGetRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let result =
+        dbx_core::document_ops::meilisearch_get_document_core(&state.app, &req.connection_id, &req.index, &req.id)
+            .await
+            .map_err(AppError::from)?;
     Ok(Json(result))
 }
 

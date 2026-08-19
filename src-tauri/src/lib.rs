@@ -2038,6 +2038,7 @@ pub fn run() {
             commands::document_cmd::document_delete_document,
             commands::document_cmd::document_save_meilisearch_batch,
             commands::document_cmd::meilisearch_search_documents,
+            commands::document_cmd::meilisearch_get_document,
             commands::document_cmd::meilisearch_get_index_settings,
             commands::document_cmd::meilisearch_update_index_settings,
             commands::document_cmd::meilisearch_get_index_stats,

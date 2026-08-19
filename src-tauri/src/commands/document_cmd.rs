@@ -265,6 +265,16 @@ pub async fn meilisearch_search_documents(
 }
 
 #[tauri::command]
+pub async fn meilisearch_get_document(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    index: String,
+    id: String,
+) -> Result<serde_json::Value, String> {
+    dbx_core::document_ops::meilisearch_get_document_core(&state, &connection_id, &index, &id).await
+}
+
+#[tauri::command]
 pub async fn meilisearch_get_index_settings(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

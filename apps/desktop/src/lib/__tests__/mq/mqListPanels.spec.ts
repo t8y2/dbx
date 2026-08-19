@@ -42,4 +42,12 @@ describe("MQ list panels", () => {
     expect(consoleSource).toContain(':namespace="selectedNamespace"');
     expect(consoleSource).toContain(':topic="selectedTopic"');
   });
+
+  it("routes Kafka subscriptions to the cluster-wide consumer groups panel", () => {
+    const consoleSource = componentSource("MqAdminConsole.vue");
+
+    expect(consoleSource).toContain('tab === "subscriptions") return "mqAdmin.tabConsumerGroups"');
+    expect(consoleSource).toContain("KafkaConsumerGroupsPanel");
+    expect(consoleSource).toContain("activeTab === 'subscriptions' && canManageSubscriptions && isKafkaCluster");
+  });
 });

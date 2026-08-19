@@ -299,6 +299,10 @@ impl MessageQueueAdmin for KafkaAdmin {
         Ok(subs)
     }
 
+    async fn get_kafka_consumer_group_snapshot(&self) -> Result<KafkaConsumerGroupSnapshot, String> {
+        self.call("mq_get_consumer_group_snapshot", serde_json::json!({})).await
+    }
+
     async fn create_subscription(&self, _topic: &TopicRef, _sub: &str, _pos: ResetPosition) -> Result<(), String> {
         Err("Kafka consumer groups are created automatically when consumers join".to_string())
     }

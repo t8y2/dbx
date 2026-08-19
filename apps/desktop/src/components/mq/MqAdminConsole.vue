@@ -27,6 +27,7 @@ import TenantsPanel from "./TenantsPanel.vue";
 import NamespacesPanel from "./NamespacesPanel.vue";
 import TopicsPanel from "./TopicsPanel.vue";
 import SubscriptionsPanel from "./SubscriptionsPanel.vue";
+import KafkaConsumerGroupsPanel from "./KafkaConsumerGroupsPanel.vue";
 import MonitoringPanel from "./MonitoringPanel.vue";
 import ProducerConsumerPanel from "./ProducerConsumerPanel.vue";
 import PoliciesPanel from "./PoliciesPanel.vue";
@@ -164,6 +165,7 @@ const availableTabs = computed<MqTab[]>(() =>
 );
 
 function tabLabelKey(tab: MqTab): string {
+  if (isKafkaCluster.value && tab === "subscriptions") return "mqAdmin.tabConsumerGroups";
   if (isRocketMqCluster.value) {
     if (tab === "broker") return "mqAdmin.tabCluster";
     if (tab === "subscriptions") return "mqAdmin.tabConsumers";
@@ -455,6 +457,7 @@ onMounted(async () => {
         @topic-selected="handleTopicSelected"
         @navigate-tab="handleNavigateTab"
       />
+      <KafkaConsumerGroupsPanel v-else-if="activeTab === 'subscriptions' && canManageSubscriptions && isKafkaCluster" :connection-id="connectionId" />
       <SubscriptionsPanel
         v-else-if="activeTab === 'subscriptions' && canManageSubscriptions"
         :connection-id="connectionId"

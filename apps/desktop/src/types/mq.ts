@@ -202,6 +202,30 @@ export interface SubscriptionInfo {
   backlogUnavailable?: boolean;
 }
 
+export interface KafkaConsumerGroupPartitionLag {
+  topic: string;
+  partition: number;
+  currentOffset?: number;
+  endOffset?: number;
+  lag?: number;
+}
+
+export interface KafkaConsumerGroupSummary {
+  groupId: string;
+  state: string;
+  simpleGroup: boolean;
+  memberCount?: number;
+  topics: string[];
+  totalLag?: number;
+  lagAvailable: boolean;
+  partitions: KafkaConsumerGroupPartitionLag[];
+  error?: string;
+}
+
+export interface KafkaConsumerGroupSnapshot {
+  groups: KafkaConsumerGroupSummary[];
+}
+
 export interface RocketMqConsumerGroupConfig {
   groupName: string;
   consumeEnable: boolean;

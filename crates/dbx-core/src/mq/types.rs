@@ -429,6 +429,50 @@ pub struct SubscriptionInfo {
     pub backlog_unavailable: Option<bool>,
 }
 
+/// One Kafka topic-partition's committed and log-end offsets for a consumer group.
+/// Optional offsets distinguish unavailable data from a healthy zero lag.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KafkaConsumerGroupPartitionLag {
+    pub topic: String,
+    pub partition: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_offset: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_offset: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lag: Option<i64>,
+}
+
+/// Cluster-wide Kafka consumer group summary with its partition lag details.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KafkaConsumerGroupSummary {
+    pub group_id: String,
+    pub state: String,
+    #[serde(default)]
+    pub simple_group: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_count: Option<u32>,
+    #[serde(default)]
+    pub topics: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_lag: Option<i64>,
+    #[serde(default)]
+    pub lag_available: bool,
+    #[serde(default)]
+    pub partitions: Vec<KafkaConsumerGroupPartitionLag>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KafkaConsumerGroupSnapshot {
+    #[serde(default)]
+    pub groups: Vec<KafkaConsumerGroupSummary>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConsumerInfo {
@@ -482,6 +526,41 @@ mod reset_position_tests {
         assert_eq!(value, serde_json::json!({ "kind": "partitionOffset", "partition": 3, "offset": 27 }));
         let decoded: ResetPosition = serde_json::from_value(value).expect("deserialize reset position");
         assert!(matches!(decoded, ResetPosition::PartitionOffset { partition: 3, offset: 27 }));
+    }
+}
+
+#[cfg(test)]
+mod kafka_consumer_group_snapshot_tests {
+    use super::KafkaConsumerGroupSnapshot;
+
+    #[test]
+    fn preserves_unavailable_offsets_as_none() {
+        let snapshot: KafkaConsumerGroupSnapshot = serde_json::from_value(serde_json::json!({
+            "groups": [{
+                "groupId": "orders-service",
+                "state": "STABLE",
+                "simpleGroup": false,
+                "memberCount": 1,
+                "topics": ["orders"],
+                "totalLag": null,
+                "lagAvailable": false,
+                "partitions": [{
+                    "topic": "orders",
+                    "partition": 0,
+                    "currentOffset": 8,
+                    "endOffset": null,
+                    "lag": null
+                }],
+                "error": "End offsets unavailable for 1 partition(s)"
+            }]
+        }))
+        .expect("deserialize Kafka consumer group snapshot");
+
+        assert_eq!(snapshot.groups[0].total_lag, None);
+        assert!(!snapshot.groups[0].lag_available);
+        assert_eq!(snapshot.groups[0].partitions[0].current_offset, Some(8));
+        assert_eq!(snapshot.groups[0].partitions[0].end_offset, None);
+        assert_eq!(snapshot.groups[0].partitions[0].lag, None);
     }
 }
 

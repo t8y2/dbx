@@ -2098,6 +2098,8 @@ pub fn run() {
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_enrich_subscriptions,
             #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_get_kafka_consumer_group_snapshot,
+            #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_create_subscription,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_delete_subscription,

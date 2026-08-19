@@ -25,8 +25,8 @@ interface Props {
 
 interface MetricPoint {
   time: string;
-  msgRateIn: number;
-  msgRateOut: number;
+  msgRateIn: number | null;
+  msgRateOut: number | null;
   backlogSize: number;
   msgBacklog: number;
   consumerLagMs: number;
@@ -72,6 +72,16 @@ const selectedPartitionName = ref<string>();
 let refreshTimer: number | undefined;
 const history = ref<MetricPoint[]>([]);
 const MAX_HISTORY_POINTS = 60;
+const messageFlowStatus = computed(() => {
+  if (!stats.value || stats.value.ratesUnavailable) {
+    return { kind: "unavailable", label: "-" };
+  }
+  const active = stats.value.msgRateIn > 0 || stats.value.msgRateOut > 0;
+  return {
+    kind: active ? "healthy" : "idle",
+    label: active ? t("mqMonitoring.flowActive") : t("mqMonitoring.flowIdle"),
+  };
+});
 
 const partitionRows = computed(() => extractPartitionRows(stats.value?.raw));
 const kafkaPartitionRows = computed(() => extractKafkaPartitionRows(stats.value?.raw));
@@ -213,10 +223,11 @@ function refreshNow() {
 }
 
 function appendHistoryPoint(statsData: TopicStats, backlogData?: BacklogStats) {
+  const ratesUnavailable = statsData.ratesUnavailable === true;
   const point: MetricPoint = {
     time: new Date().toLocaleTimeString(),
-    msgRateIn: statsData.msgRateIn,
-    msgRateOut: statsData.msgRateOut,
+    msgRateIn: ratesUnavailable ? null : statsData.msgRateIn,
+    msgRateOut: ratesUnavailable ? null : statsData.msgRateOut,
     backlogSize: statsData.backlogSize,
     msgBacklog: backlogData?.msgBacklog ?? 0,
     consumerLagMs: extractConsumerLagMs(statsData.raw),
@@ -349,6 +360,10 @@ function formatBytes(bytes: number): string {
 
 function formatNumber(num: number): string {
   return num.toLocaleString();
+}
+
+function formatMessageRate(rate: number, unavailable?: boolean): string {
+  return unavailable ? "-" : `${rate.toFixed(2)} msg/s`;
 }
 
 watch(
@@ -615,14 +630,14 @@ onUnmounted(() => {
             <div class="stat-icon"><Download :size="21" /></div>
             <div class="stat-content">
               <div class="stat-label">{{ t("mqMonitoring.inboundRate") }}</div>
-              <div class="stat-value">{{ stats.msgRateIn.toFixed(2) }} msg/s</div>
+              <div class="stat-value" data-testid="monitoring-rate-in">{{ formatMessageRate(stats.msgRateIn, stats.ratesUnavailable) }}</div>
             </div>
           </div>
           <div class="stat-card">
             <div class="stat-icon"><Upload :size="21" /></div>
             <div class="stat-content">
               <div class="stat-label">{{ t("mqMonitoring.outboundRate") }}</div>
-              <div class="stat-value">{{ stats.msgRateOut.toFixed(2) }} msg/s</div>
+              <div class="stat-value" data-testid="monitoring-rate-out">{{ formatMessageRate(stats.msgRateOut, stats.ratesUnavailable) }}</div>
             </div>
           </div>
           <div class="stat-card">
@@ -645,7 +660,7 @@ onUnmounted(() => {
       <div class="charts-grid">
         <div class="chart-panel">
           <h4>{{ t("mqMonitoring.rateTrend") }}</h4>
-          <VChart :option="rateChartOption" autoresize class="trend-chart" />
+          <VChart :option="rateChartOption" autoresize class="trend-chart" data-testid="monitoring-rate-chart" />
         </div>
         <div class="chart-panel">
           <h4>{{ t("mqMonitoring.backlogTrend") }}</h4>
@@ -820,8 +835,8 @@ onUnmounted(() => {
         <div class="health-indicators">
           <div class="health-item">
             <span class="health-label">{{ t("mqMonitoring.messageFlow") }}:</span>
-            <span :class="['health-badge', stats.msgRateIn > 0 || stats.msgRateOut > 0 ? 'healthy' : 'idle']">
-              {{ stats.msgRateIn > 0 || stats.msgRateOut > 0 ? t("mqMonitoring.flowActive") : t("mqMonitoring.flowIdle") }}
+            <span :class="['health-badge', messageFlowStatus.kind]" data-testid="monitoring-flow-status">
+              {{ messageFlowStatus.label }}
             </span>
           </div>
           <div class="health-item">
@@ -1464,6 +1479,11 @@ onUnmounted(() => {
 
 .health-badge.idle {
   background: color-mix(in srgb, var(--monitor-muted) 12%, transparent);
+  color: var(--monitor-muted);
+}
+
+.health-badge.unavailable {
+  background: color-mix(in srgb, var(--monitor-muted) 8%, transparent);
   color: var(--monitor-muted);
 }
 

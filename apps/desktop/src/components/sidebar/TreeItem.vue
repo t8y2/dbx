@@ -34,6 +34,7 @@ import {
   Lock,
   Archive,
   Square,
+  Minus,
   X,
   CircleX,
   RefreshCw,
@@ -61,6 +62,7 @@ import { sidebarDisplayTableName } from "@/lib/sidebar/sidebarTableNameDisplay";
 import { shouldMeasureSidebarLabelOverflow } from "@/lib/sidebar/sidebarLabelTooltip";
 import { filterSidebarModifierSelectionIds, supportsSidebarModifierSelection, treeSelectionRangeIdsByIndex, treeSelectionRangeIds } from "@/lib/sidebar/sidebarTreeSelection";
 import { applyConnectionMultiSelection, applyTreeNodeSelection, connectionMultiSelectionAfterToggle } from "@/lib/sidebar/sidebarConnectionMultiSelect";
+import { connectionBearingGroupIdsUnder, connectionIdsUnderGroup } from "@/lib/sidebar/sidebarLayout";
 import { isSidebarDatabaseOpenForVisual } from "@/lib/sidebar/sidebarDatabaseOpenState";
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
 import { connectionCanConfigureSidebarVisibleDatabases } from "@/lib/sidebar/sidebarVisibleFilterMenu";
@@ -645,37 +647,53 @@ function toggleConnectionMultiSelection(event: MouseEvent) {
   rowRef.value?.focus({ preventScroll: true });
 }
 
-function selectedConnectionGroupIdsForAction(): string[] {
-  const groupIds = connectionGroupIdsForSelection();
-  return connectionStore.selectedTreeNodeIds.filter((id) => groupIds.has(id));
+function connectionIdsForActiveGroupSelection(): string[] {
+  if (activeNode.value.type !== "connection-group") return [];
+  const groupConnectionIds = connectionIdsUnderGroup(connectionStore.sidebarLayout, activeNode.value.id);
+  const projectedConnectionIds = sidebarTreeContext?.getProjectedConnectionIds?.();
+  return projectedConnectionIds ? groupConnectionIds.filter((id) => projectedConnectionIds.has(id)) : groupConnectionIds;
 }
 
-function isConnectionGroupSelectionChecked(): boolean {
-  if (!isConnectionGroupMultiSelectActive() || activeNode.value.type !== "connection-group") return false;
-  return connectionStore.selectedTreeNodeIds.includes(activeNode.value.id);
-}
+const connectionGroupSelectionState = computed<"none" | "partial" | "all">(() => {
+  const groupConnectionIds = connectionIdsForActiveGroupSelection();
+  if (groupConnectionIds.length === 0) return "none";
+  const selectedIds = connectionStore.selectedTreeNodeIdsSet;
+  const selectedCount = groupConnectionIds.filter((id) => selectedIds.has(id)).length;
+  if (selectedCount === 0) return "none";
+  if (selectedCount === groupConnectionIds.length) return "all";
+  return "partial";
+});
 
 function toggleConnectionGroupMultiSelection(event: MouseEvent) {
   event.preventDefault();
   event.stopPropagation();
   if (activeNode.value.type !== "connection-group") return;
 
-  const selectedGroupIds = connectionStore.connectionMultiSelectActive ? selectedConnectionGroupIdsForAction() : [];
-  const nextGroupIds = new Set(selectedGroupIds);
-  if (nextGroupIds.has(activeNode.value.id)) nextGroupIds.delete(activeNode.value.id);
-  else nextGroupIds.add(activeNode.value.id);
-  const nodeIds = [...nextGroupIds];
-  const activeNodeId = nextGroupIds.has(activeNode.value.id) ? activeNode.value.id : (nodeIds[0] ?? null);
-  applyTreeNodeSelection(
-    connectionStore,
-    {
-      nodeIds,
-      activeNodeId,
-      anchorNodeId: activeNodeId,
-    },
-    connectionIdsForSelection(),
-    connectionGroupIdsForSelection(),
-  );
+  const groupConnectionIds = connectionIdsForActiveGroupSelection();
+  if (groupConnectionIds.length === 0) return;
+
+  // 当前是分组多选（Ctrl/Shift 框选分组行）时，改为级联选中连接并重新开始
+  const baseConnectionIds = isConnectionMultiSelectActive() ? selectedConnectionIdsForAction() : [];
+  const next = new Set(baseConnectionIds);
+  const allSelected = groupConnectionIds.every((id) => next.has(id));
+  if (allSelected) {
+    // 分组下连接已全部勾选：取消勾选这些连接，保留其他已勾选的连接
+    for (const id of groupConnectionIds) next.delete(id);
+  } else {
+    // 分组下连接未全部勾选：级联勾选全部连接，并保留其他已勾选的连接
+    for (const id of groupConnectionIds) next.add(id);
+    // 自动展开该分组及含连接的子分组：折叠状态下选中的连接不可见，
+    // 会被树的选择修剪逻辑清空，展开后选择才能保留并可被右键操作
+    connectionStore.expandConnectionGroups(connectionBearingGroupIdsUnder(connectionStore.sidebarLayout, activeNode.value.id));
+  }
+
+  const connectionIds = [...next];
+  applyConnectionMultiSelection(connectionStore, {
+    connectionIds,
+    activeConnectionId: connectionIds[0] ?? null,
+    anchorConnectionId: connectionIds[0] ?? null,
+    active: connectionIds.length > 0,
+  });
   rowRef.value?.focus({ preventScroll: true });
 }
 
@@ -1424,7 +1442,7 @@ function onKeydown(event: KeyboardEvent) {
         </div>
         <span v-if="node.type === 'connection' && node.connectionId && connectionStore.connectedIds.has(node.connectionId)" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
         <span v-if="databaseOpenVisual.showsIndicator" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
-        <Badge v-if="isConnectionReadonly" variant="secondary" class="h-4 px-1.5 text-[10px] gap-0.5"><Lock class="w-2.5 h-2.5" />{{ t("connection.readOnlyBadge") }}</Badge>
+        <Badge v-if="isConnectionReadonly" variant="secondary" class="h-4 px-1.5 text-[10px] gap-0.5"> <Lock class="w-2.5 h-2.5" />{{ t("connection.readOnlyBadge") }} </Badge>
         <ConnectionErrorIndicator v-if="node.type === 'connection'" :connection-id="node.connectionId" trigger-class="h-4 w-4" />
         <span v-if="formattedObjectStorage()" class="ml-auto shrink-0 text-right text-xs tabular-nums text-muted-foreground">{{ formattedObjectStorage() }}</span>
         <button
@@ -1453,14 +1471,17 @@ function onKeydown(event: KeyboardEvent) {
         <button
           v-if="node.type === 'connection-group'"
           type="button"
+          role="checkbox"
           data-sidebar-group-selection-toggle="true"
           class="ml-auto flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground/55 opacity-0 transition-colors transition-opacity hover:bg-secondary/45 hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover/sidebar-row:opacity-100"
-          :class="{ 'opacity-100': isConnectionGroupSelectionChecked() || isConnectionGroupMultiSelectActive() }"
-          :aria-label="isConnectionGroupSelectionChecked() ? t('connectionGroup.deselectGroup') : t('connectionGroup.selectGroup')"
+          :class="{ 'opacity-100': isConnectionMultiSelectActive() || isConnectionGroupMultiSelectActive() || connectionGroupSelectionState !== 'none' }"
+          :aria-label="connectionGroupSelectionState === 'all' ? t('connectionGroup.deselectGroup') : t('connectionGroup.selectGroup')"
+          :aria-checked="connectionGroupSelectionState === 'partial' ? 'mixed' : connectionGroupSelectionState === 'all'"
           @mousedown.stop
           @click="toggleConnectionGroupMultiSelection"
         >
-          <Check v-if="isConnectionGroupSelectionChecked()" class="h-3 w-3 text-primary" />
+          <Check v-if="connectionGroupSelectionState === 'all'" class="h-3 w-3 text-primary" />
+          <Minus v-else-if="connectionGroupSelectionState === 'partial'" class="h-3 w-3 text-primary" />
           <Square v-else class="h-3 w-3 stroke-[1.7]" />
         </button>
       </div>
@@ -1586,6 +1607,7 @@ function onKeydown(event: KeyboardEvent) {
 .tree-item-active {
   background-color: var(--tree-connection-active-bg, rgb(235 235 235)) !important;
 }
+
 :root.dark .tree-item-active {
   background-color: var(--tree-connection-active-bg, rgb(36 36 36)) !important;
 }
@@ -1594,6 +1616,7 @@ function onKeydown(event: KeyboardEvent) {
 .tree-item-active:focus {
   background-color: var(--tree-connection-active-focus-bg, rgb(211 227 245)) !important;
 }
+
 :root.dark .tree-item-active:focus {
   background-color: var(--tree-connection-active-focus-bg, rgb(33 60 89)) !important;
 }
@@ -1603,6 +1626,7 @@ function onKeydown(event: KeyboardEvent) {
   background-color: var(--tree-connection-active-bg, rgb(235 235 235)) !important;
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--foreground) 14%, transparent);
 }
+
 :root.dark .tree-item-active--selection-set:focus {
   background-color: var(--tree-connection-active-bg, rgb(36 36 36)) !important;
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--foreground) 18%, transparent);

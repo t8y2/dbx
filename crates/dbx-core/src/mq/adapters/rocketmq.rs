@@ -285,6 +285,7 @@ impl MessageQueueAdmin for RocketMqAdmin {
             msg_out_counter: 0,
             subscription_count: 0,
             producer_count: 0,
+            rates_unavailable: false,
             raw: result,
         })
     }
@@ -766,6 +767,7 @@ fn topic_info_from_agent_value(t: &serde_json::Value) -> TopicInfo {
         message_count: None,
         messages_ready: None,
         messages_unacked: None,
+        ..Default::default()
     }
 }
 

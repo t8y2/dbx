@@ -340,6 +340,36 @@ pub struct TopicInfo {
     /// RabbitMQ messages delivered but not yet acknowledged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub messages_unacked: Option<i64>,
+    /// RabbitMQ queue: auto-delete flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_delete: Option<bool>,
+    /// RabbitMQ queue: exclusive flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclusive: Option<bool>,
+    /// RabbitMQ queue: state (running / idle / flow / blocked ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    /// RabbitMQ queue: type (classic / quorum / stream), from the management
+    /// API `type` field or the x-queue-type argument on older versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_type: Option<String>,
+    /// RabbitMQ queue: x-arguments, preserving the original JSON value types
+    /// (numbers, booleans, nested objects/arrays) returned by the management API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<serde_json::Value>,
+    /// RabbitMQ queue: consumer count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumer_count: Option<i64>,
+    /// RabbitMQ queue: publish rate (msg/s). Absent when the management API
+    /// sampled no message_stats data for this queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publish_rate: Option<f64>,
+    /// RabbitMQ queue: deliver/get rate (msg/s).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deliver_rate: Option<f64>,
+    /// RabbitMQ queue: ack rate (msg/s).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ack_rate: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
@@ -365,6 +395,12 @@ pub struct TopicStats {
     pub msg_out_counter: i64,
     pub subscription_count: u32,
     pub producer_count: u32,
+    /// RabbitMQ: true when the management API exposed no `message_stats`
+    /// sample for the queue, so the msg_rate_* / counter fields are NOT
+    /// meaningful — consumers must render them as "no data" instead of
+    /// presenting the zero placeholder as a real rate of 0.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rates_unavailable: bool,
     /// Original raw stats JSON, for the detail view / advanced inspection.
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub raw: serde_json::Value,

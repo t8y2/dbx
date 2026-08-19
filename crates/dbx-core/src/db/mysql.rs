@@ -2816,7 +2816,7 @@ async fn list_table_names_show(pool: &MySqlPool, database: &str) -> Result<Vec<T
     list_table_names_show_filtered(pool, database, None, &[]).await
 }
 
-fn shardingsphere_show_full_tables_sql(database: &str) -> String {
+fn logical_show_full_tables_sql(database: &str) -> String {
     if database.trim().is_empty() {
         "SHOW FULL TABLES".to_string()
     } else {
@@ -2840,14 +2840,30 @@ fn table_infos_from_show_rows(rows: &[mysql_async::Row]) -> Vec<TableInfo> {
     tables
 }
 
-pub async fn list_shardingsphere_tables(pool: &MySqlPool, database: &str) -> Result<Vec<TableInfo>, String> {
-    // ShardingSphere's logical names are authoritative here. Do not add SHOW TABLE STATUS:
-    // this hot path must replace the information_schema lookup with one metadata request.
-    let sql = shardingsphere_show_full_tables_sql(database);
+pub async fn list_logical_tables_show(pool: &MySqlPool, database: &str) -> Result<Vec<TableInfo>, String> {
+    // Proxy logical names are authoritative here. Do not add SHOW TABLE STATUS: this hot
+    // path must replace the information_schema lookup with one metadata request.
+    let sql = logical_show_full_tables_sql(database);
     let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
     let result = conn.query_iter(&sql).await.map_err(|error| error.to_string())?;
     let rows = result.collect_and_drop::<mysql_async::Row>().await.map_err(|error| error.to_string())?;
     Ok(table_infos_from_show_rows(&rows))
+}
+
+async fn list_logical_table_objects_show_filtered(
+    pool: &MySqlPool,
+    database: &str,
+    object_types: Option<&[String]>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Result<Vec<ObjectInfo>, String> {
+    let tables = list_logical_tables_show(pool, database).await?;
+    Ok(filter_table_objects_fallback(
+        table_infos_to_objects(tables, &HashMap::new(), database),
+        object_types,
+        limit,
+        offset,
+    ))
 }
 
 async fn list_table_names_show_filtered(
@@ -3264,6 +3280,14 @@ fn object_query_supports_paging(object_types: Option<&[String]>) -> bool {
     all_types_supported && uses_table_source != uses_routine_source
 }
 
+fn logical_table_supplemental_types(object_types: Option<&[String]>) -> Vec<String> {
+    ["PROCEDURE", "FUNCTION", "TRIGGER", "EVENT"]
+        .into_iter()
+        .filter(|object_type| requested_object_type(object_types, object_type))
+        .map(str::to_string)
+        .collect()
+}
+
 pub async fn list_objects(
     pool: &MySqlPool,
     database: &str,
@@ -3363,6 +3387,29 @@ pub async fn list_objects(
                 log::warn!("Skipping events for database `{}` in object browser: {}", database, e);
             }
         }
+    }
+
+    Ok(PagedObjectList { objects, paging_applied })
+}
+
+pub async fn list_objects_with_logical_tables(
+    pool: &MySqlPool,
+    database: &str,
+    object_types: Option<&[String]>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Result<PagedObjectList, String> {
+    if !wants_table_objects(object_types) {
+        return list_objects(pool, database, object_types, limit, offset).await;
+    }
+
+    let paging_applied = limit.is_some() && object_query_supports_paging(object_types);
+    let (query_limit, query_offset) = if paging_applied { (limit, offset) } else { (None, None) };
+    let mut objects =
+        list_logical_table_objects_show_filtered(pool, database, object_types, query_limit, query_offset).await?;
+    let supplemental_types = logical_table_supplemental_types(object_types);
+    if !supplemental_types.is_empty() {
+        objects.extend(list_objects(pool, database, Some(&supplemental_types), None, None).await?.objects);
     }
 
     Ok(PagedObjectList { objects, paging_applied })
@@ -3513,6 +3560,94 @@ fn columns_sql(database: &str, table: &str) -> String {
         quote_value(database),
         quote_value(table),
     )
+}
+
+fn generation_expressions_sql(database: &str, table: &str) -> String {
+    format!(
+        "SELECT COLUMN_NAME, GENERATION_EXPRESSION \
+         FROM information_schema.COLUMNS \
+         WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} \
+         AND GENERATION_EXPRESSION IS NOT NULL AND GENERATION_EXPRESSION <> '' \
+         ORDER BY ORDINAL_POSITION",
+        quote_value(database),
+        quote_value(table),
+    )
+}
+
+fn mysql_generated_column_storage(extra: &str) -> Option<&'static str> {
+    let normalized = extra.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
+    if normalized.contains("virtual generated") {
+        Some("VIRTUAL")
+    } else if normalized.contains("stored generated") {
+        Some("STORED")
+    } else if normalized.contains("persistent generated") {
+        Some("PERSISTENT")
+    } else {
+        None
+    }
+}
+
+fn mysql_generated_column_extra(extra: &str, expression: &str) -> Option<String> {
+    let storage = mysql_generated_column_storage(extra)?;
+    let expression = expression.trim();
+    if expression.is_empty() {
+        return None;
+    }
+    Some(format!("GENERATED ALWAYS AS ({expression}) {storage}"))
+}
+
+async fn enrich_mysql_generated_column_expressions(
+    conn: &mut mysql_async::Conn,
+    database: &str,
+    table: &str,
+    columns: &mut [ColumnInfo],
+) {
+    if database.trim().is_empty()
+        || !columns
+            .iter()
+            .any(|column| column.extra.as_deref().is_some_and(|extra| mysql_generated_column_storage(extra).is_some()))
+    {
+        return;
+    }
+
+    let sql = generation_expressions_sql(database, table);
+    let rows = match conn.query_iter(&sql).await {
+        Ok(result) => match result.collect_and_drop::<mysql_async::Row>().await {
+            Ok(rows) => rows,
+            Err(error) => {
+                log::debug!("Failed to collect MySQL generated-column expressions with `{sql}`: {error}");
+                return;
+            }
+        },
+        Err(error) => {
+            log::debug!("Failed to read MySQL generated-column expressions with `{sql}`: {error}");
+            return;
+        }
+    };
+    let expressions = rows
+        .iter()
+        .filter_map(|row| {
+            let name = get_str_by_name(row, "COLUMN_NAME");
+            let expression = get_str_by_name(row, "GENERATION_EXPRESSION");
+            (!name.is_empty() && !expression.trim().is_empty()).then_some((name, expression))
+        })
+        .collect::<HashMap<_, _>>();
+
+    apply_mysql_generated_column_expressions(columns, &expressions);
+}
+
+fn apply_mysql_generated_column_expressions(columns: &mut [ColumnInfo], expressions: &HashMap<String, String>) {
+    for column in columns {
+        let Some(expression) = expressions.get(&column.name) else {
+            continue;
+        };
+        let Some(extra) = column.extra.as_deref() else {
+            continue;
+        };
+        if let Some(generated_extra) = mysql_generated_column_extra(extra, expression) {
+            column.extra = Some(generated_extra);
+        }
+    }
 }
 
 fn table_collation_sql(database: &str, table: &str) -> String {
@@ -3731,6 +3866,7 @@ where
         return get_columns_show(pool, database, table).await;
     }
 
+    enrich_mysql_generated_column_expressions(&mut conn, database, table, &mut columns).await;
     normalize_mysql_column_charset_metadata(&mut columns, table_collation.as_deref());
     Ok(columns)
 }
@@ -3787,6 +3923,7 @@ where
             })
         })
         .collect();
+    enrich_mysql_generated_column_expressions(&mut conn, database, table, &mut columns).await;
     normalize_mysql_column_charset_metadata(&mut columns, table_collation.as_deref());
     Ok(columns)
 }
@@ -6159,13 +6296,13 @@ mod tests {
     }
 
     #[test]
-    fn shardingsphere_show_full_tables_is_one_exact_statement() {
-        assert_eq!(shardingsphere_show_full_tables_sql("app"), "SHOW FULL TABLES FROM `app`");
-        assert_eq!(shardingsphere_show_full_tables_sql(""), "SHOW FULL TABLES");
+    fn logical_show_full_tables_is_one_exact_statement() {
+        assert_eq!(logical_show_full_tables_sql("app"), "SHOW FULL TABLES FROM `app`");
+        assert_eq!(logical_show_full_tables_sql(""), "SHOW FULL TABLES");
     }
 
     #[test]
-    fn shardingsphere_show_rows_keep_logical_names_and_types_without_comments() {
+    fn proxy_show_rows_keep_logical_names_and_types_without_comments() {
         let rows = vec![
             mysql_test_row(vec![Value::Bytes(b"normal_table".to_vec()), Value::Bytes(b"BASE TABLE".to_vec())]),
             mysql_test_row(vec![Value::Bytes(b"t_order".to_vec()), Value::Bytes(b"BASE TABLE".to_vec())]),
@@ -6475,6 +6612,16 @@ mod tests {
     }
 
     #[test]
+    fn logical_table_objects_keep_only_requested_non_table_sources() {
+        assert_eq!(logical_table_supplemental_types(None), ["PROCEDURE", "FUNCTION", "TRIGGER", "EVENT"]);
+        assert!(logical_table_supplemental_types(Some(&["TABLE".to_string(), "VIEW".to_string()])).is_empty());
+        assert_eq!(
+            logical_table_supplemental_types(Some(&["TABLE".to_string(), "PROCEDURE".to_string()])),
+            ["PROCEDURE"]
+        );
+    }
+
+    #[test]
     fn mysql_completion_triggers_sql_lists_database_triggers() {
         let sql = list_completion_triggers_sql("app");
 
@@ -6544,6 +6691,57 @@ mod tests {
         assert!(sql.contains("COLUMN_TYPE"));
         assert!(!sql.contains("COLLATE"));
         assert!(!sql.contains("AS ENUM_VALUES"));
+    }
+
+    #[test]
+    fn mysql_generation_expression_sql_is_separate_and_scoped() {
+        let sql = generation_expressions_sql("app", "products");
+
+        assert!(sql.contains("COLUMN_NAME, GENERATION_EXPRESSION"));
+        assert!(sql.contains("TABLE_SCHEMA = 'app'"));
+        assert!(sql.contains("TABLE_NAME = 'products'"));
+        assert!(sql.contains("GENERATION_EXPRESSION <> ''"));
+    }
+
+    #[test]
+    fn mysql_generated_column_extra_rebuilds_virtual_and_stored_clauses() {
+        assert_eq!(
+            mysql_generated_column_extra("STORED GENERATED", "`price` * `quantity`"),
+            Some("GENERATED ALWAYS AS (`price` * `quantity`) STORED".to_string())
+        );
+        assert_eq!(
+            mysql_generated_column_extra("VIRTUAL GENERATED", "lower(`name`)"),
+            Some("GENERATED ALWAYS AS (lower(`name`)) VIRTUAL".to_string())
+        );
+        assert_eq!(mysql_generated_column_extra("DEFAULT_GENERATED", "current_timestamp()"), None);
+    }
+
+    #[test]
+    fn mysql_generated_column_expressions_enrich_only_generated_columns() {
+        let mut columns = vec![
+            ColumnInfo { name: "total".to_string(), extra: Some("STORED GENERATED".to_string()), ..Default::default() },
+            ColumnInfo {
+                name: "search_name".to_string(),
+                extra: Some("VIRTUAL GENERATED".to_string()),
+                ..Default::default()
+            },
+            ColumnInfo {
+                name: "created_at".to_string(),
+                extra: Some("DEFAULT_GENERATED".to_string()),
+                ..Default::default()
+            },
+        ];
+        let expressions = HashMap::from([
+            ("total".to_string(), "`price` * `quantity`".to_string()),
+            ("search_name".to_string(), "lower(`name`)".to_string()),
+            ("created_at".to_string(), "current_timestamp()".to_string()),
+        ]);
+
+        apply_mysql_generated_column_expressions(&mut columns, &expressions);
+
+        assert_eq!(columns[0].extra.as_deref(), Some("GENERATED ALWAYS AS (`price` * `quantity`) STORED"));
+        assert_eq!(columns[1].extra.as_deref(), Some("GENERATED ALWAYS AS (lower(`name`)) VIRTUAL"));
+        assert_eq!(columns[2].extra.as_deref(), Some("DEFAULT_GENERATED"));
     }
 
     #[test]

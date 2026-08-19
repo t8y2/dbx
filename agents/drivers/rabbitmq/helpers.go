@@ -214,23 +214,31 @@ func floatOrNull(object jsonObject, key string) *float64 {
 }
 
 func boolOrDefault(object jsonObject, key string, fallback bool) bool {
-	if object == nil {
+	value := boolOrNull(object, key)
+	if value == nil {
 		return fallback
+	}
+	return *value
+}
+
+func boolOrNull(object jsonObject, key string) *bool {
+	if object == nil {
+		return nil
 	}
 	value, exists := object[key]
 	if !exists || value == nil {
-		return fallback
+		return nil
 	}
 	switch typed := value.(type) {
 	case bool:
-		return typed
+		return &typed
 	case string:
 		parsed, err := strconv.ParseBool(typed)
 		if err == nil {
-			return parsed
+			return &parsed
 		}
 	}
-	return fallback
+	return nil
 }
 
 func integerProperty(properties jsonObject, key string) (int, bool) {

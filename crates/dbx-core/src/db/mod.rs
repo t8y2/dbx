@@ -3,6 +3,7 @@ pub mod clickhouse_driver;
 pub mod cloudberry;
 pub mod cloudflare_d1;
 pub use cloudflare_d1 as cloudflare_d1_driver;
+pub(crate) mod ddl_scan;
 pub mod document_result;
 pub mod dolt;
 pub mod doris;

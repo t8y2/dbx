@@ -209,6 +209,7 @@ impl MessageQueueAdmin for KafkaAdmin {
                     message_count: None,
                     messages_ready: None,
                     messages_unacked: None,
+                    ..Default::default()
                 }
             })
             .collect())
@@ -256,6 +257,7 @@ impl MessageQueueAdmin for KafkaAdmin {
             msg_out_counter: 0,
             subscription_count: 0,
             producer_count: 0,
+            rates_unavailable: false,
             raw: result,
         })
     }

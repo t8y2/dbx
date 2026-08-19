@@ -3839,6 +3839,34 @@ fn mysql_single_column_alter_quotes_datetime_literal() {
 }
 
 #[test]
+fn mysql_single_generated_column_change_is_blocked_without_expression_metadata() {
+    let mut generated = column("total");
+    generated.data_type = "decimal(14,2)".to_string();
+    generated.extra = Some(ColumnExtra::default());
+    generated.original = Some(ColumnInfo {
+        name: "total".to_string(),
+        data_type: "decimal(12,2)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: Some("STORED GENERATED".to_string()),
+        comment: None,
+        ..Default::default()
+    });
+
+    let result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "products".to_string(),
+        column: generated,
+    });
+
+    assert!(result.statements.is_empty());
+    assert_eq!(result.warnings.len(), 1);
+    assert!(result.warnings[0].contains("generation expression could not be loaded"));
+}
+
+#[test]
 fn builds_mysql_foreign_key_changes() {
     let mut existing = foreign_key("fk_orders_users", "user_id", "users", "id");
     existing.on_delete = "CASCADE".to_string();
@@ -4580,6 +4608,116 @@ fn mysql_character_column_preserves_charset_collation_on_other_change() {
         result.statements,
         vec!["ALTER TABLE `users` MODIFY COLUMN `name` varchar(255) CHARACTER SET `utf8mb4` COLLATE `utf8mb4_unicode_ci` DEFAULT 'guest';"]
     );
+}
+
+#[test]
+fn mysql_generated_column_preserves_expression_when_modified() {
+    let mut generated = column("total");
+    generated.data_type = "decimal(14,2)".to_string();
+    generated.is_nullable = false;
+    generated.comment = "Computed total".to_string();
+    generated.extra = Some(ColumnExtra::default());
+    generated.original = Some(ColumnInfo {
+        name: "total".to_string(),
+        data_type: "decimal(12,2)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: Some("GENERATED ALWAYS AS (`price` * `quantity`) STORED".to_string()),
+        comment: None,
+        ..Default::default()
+    });
+    generated.original_position = Some(0);
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Mysql,
+        None,
+        "products",
+        vec![generated],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE `products` MODIFY COLUMN `total` decimal(14,2) GENERATED ALWAYS AS (`price` * `quantity`) STORED NOT NULL COMMENT 'Computed total';"
+        ]
+    );
+}
+
+#[test]
+fn mysql_unchanged_generated_column_is_not_modified_with_other_columns() {
+    let mut generated = column("total");
+    generated.data_type = "decimal(12,2)".to_string();
+    generated.extra = Some(ColumnExtra::default());
+    generated.original = Some(ColumnInfo {
+        name: "total".to_string(),
+        data_type: "decimal(12,2)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: Some("STORED GENERATED".to_string()),
+        comment: None,
+        ..Default::default()
+    });
+    generated.original_position = Some(0);
+
+    let mut status = column("status");
+    status.data_type = "varchar(50)".to_string();
+    status.comment = "状态1".to_string();
+    status.original = Some(ColumnInfo {
+        name: "status".to_string(),
+        data_type: "varchar(50)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+        ..Default::default()
+    });
+    status.original_position = Some(1);
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Mysql,
+        None,
+        "product_info",
+        vec![generated, status],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["ALTER TABLE `product_info` MODIFY COLUMN `status` varchar(50) COMMENT '状态1';"]
+    );
+}
+
+#[test]
+fn mysql_generated_column_change_is_blocked_without_expression_metadata() {
+    let mut generated = column("total");
+    generated.data_type = "decimal(14,2)".to_string();
+    generated.extra = Some(ColumnExtra::default());
+    generated.original = Some(ColumnInfo {
+        name: "total".to_string(),
+        data_type: "decimal(12,2)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: Some("STORED GENERATED".to_string()),
+        comment: None,
+        ..Default::default()
+    });
+    generated.original_position = Some(0);
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Mysql,
+        None,
+        "products",
+        vec![generated],
+    ));
+
+    assert!(result.statements.is_empty());
+    assert_eq!(result.warnings.len(), 1);
+    assert!(result.warnings[0].contains("generation expression could not be loaded"));
 }
 
 // ---- Oscar (神通) ----

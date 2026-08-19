@@ -1,4 +1,7 @@
-use super::column_format::{clickhouse_column_type, column_data_type, column_definition, is_mysql_character_data_type};
+use super::column_format::{
+    clickhouse_column_type, column_data_type, column_definition, is_mysql_character_data_type,
+    original_is_mysql_generated_column, original_mysql_generated_clause,
+};
 use super::columns::build_drop_column_sql;
 use super::comments::build_sqlserver_column_comment_sql;
 use super::dialect::{capabilities_for, database_label, StructureDialect};
@@ -79,6 +82,16 @@ pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> Ta
     {
         return TableStructureSqlResult { statements, warnings };
     }
+    if dialect == StructureDialect::Mysql
+        && original_is_mysql_generated_column(&options.column)
+        && original_mysql_generated_clause(&options.column).is_none()
+    {
+        warnings.push(format!(
+            "Column \"{}\" is generated, but its generation expression could not be loaded; no ALTER statement was generated to avoid removing the generated-column definition.",
+            original.name
+        ));
+        return TableStructureSqlResult { statements, warnings };
+    }
     if !has_rename && !has_attribute_change && !has_column_extra_change(&options.column) {
         return TableStructureSqlResult { statements, warnings };
     }
@@ -130,6 +143,14 @@ fn is_column_extra_empty(extra: &ColumnExtra) -> bool {
 
 fn original_manticore_extra_flags(extra: &str) -> (bool, bool, bool, bool) {
     let lower = extra.to_lowercase();
+    let mut tokens = lower.split_whitespace();
+    let first = tokens.next();
+    let is_generated_column = first.is_some_and(|token| token == "generated")
+        || matches!(first, Some("virtual" | "stored" | "persistent"))
+            && tokens.next().is_some_and(|token| token == "generated");
+    if is_generated_column {
+        return (false, false, false, false);
+    }
     (
         lower.split_whitespace().any(|token| token == "indexed"),
         lower.split_whitespace().any(|token| token == "stored"),

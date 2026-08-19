@@ -119,6 +119,27 @@ test("creates editable column drafts from column metadata", () => {
   );
 });
 
+test("preserves MySQL generated expressions in original column metadata", () => {
+  const expression = "GENERATED ALWAYS AS (`price` * `quantity`) STORED";
+  const [draft] = createColumnDrafts(
+    [
+      {
+        name: "total",
+        data_type: "decimal(12,2)",
+        is_nullable: true,
+        column_default: null,
+        is_primary_key: false,
+        extra: expression,
+        comment: null,
+      },
+    ],
+    "mysql",
+  );
+
+  assert.deepEqual(draft.extra, {});
+  assert.equal(draft.original?.extra, expression);
+});
+
 test("rehydrates restored existing column drafts from live metadata", () => {
   const drafts = rehydrateColumnDraftsFromMetadata(
     [

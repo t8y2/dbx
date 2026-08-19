@@ -1337,6 +1337,7 @@ fn provider_requires_api_key(provider: &AiProvider) -> bool {
             | AiProvider::Deepseek
             | AiProvider::Qwen
             | AiProvider::MiniMax
+            | AiProvider::OrcaRouter
     )
 }
 
@@ -1449,12 +1450,18 @@ pub fn build_ai_http_client(config: &AiConfig, timeout_secs: u64) -> Result<reqw
 // Model listing
 // ---------------------------------------------------------------------------
 
-fn parse_model_list_response(data: &serde_json::Value) -> Result<Vec<AiModelInfo>, String> {
+fn parse_model_list_response_with_filter(
+    data: &serde_json::Value,
+    mut include_item: impl FnMut(&serde_json::Value) -> bool,
+) -> Result<Vec<AiModelInfo>, String> {
     let items = data["data"].as_array().ok_or_else(|| "Invalid model list response".to_string())?;
     let mut seen = HashSet::new();
     let mut models = Vec::new();
 
     for item in items {
+        if !include_item(item) {
+            continue;
+        }
         let Some(id) = item["id"].as_str().filter(|id| !id.trim().is_empty()) else {
             continue;
         };
@@ -1474,6 +1481,10 @@ fn parse_model_list_response(data: &serde_json::Value) -> Result<Vec<AiModelInfo
     }
 
     Ok(models)
+}
+
+fn parse_model_list_response(data: &serde_json::Value) -> Result<Vec<AiModelInfo>, String> {
+    parse_model_list_response_with_filter(data, |_| true)
 }
 
 fn parse_dynamic_effort_capability(
@@ -1647,7 +1658,13 @@ async fn list_openai_compatible_models(
         return Err(extract_error(&data).unwrap_or_else(|| format!("Model list API error: {status}")));
     }
 
-    parse_model_list_response(&data)
+    if matches!(config.provider, AiProvider::OrcaRouter) {
+        parse_model_list_response_with_filter(&data, |item| {
+            crate::ai_model_filter::orcarouter_item_supports_api_style(item, &config.api_style)
+        })
+    } else {
+        parse_model_list_response(&data)
+    }
 }
 
 fn resolve_ollama_show_endpoint(config: &AiConfig) -> Result<String, String> {
@@ -4591,6 +4608,16 @@ mod tests {
         config
     }
 
+    fn orcarouter_test_config(endpoint: impl Into<String>, api_style: AiApiStyle) -> AiConfig {
+        let mut config = test_config(AiProvider::OrcaRouter);
+        config.api_key = "secret".to_string();
+        config.auth_method = AiAuthMethod::Bearer;
+        config.endpoint = endpoint.into();
+        config.model = "orcarouter/fusion-flash".to_string();
+        config.api_style = api_style;
+        config
+    }
+
     fn minimax_test_request(endpoint: impl Into<String>) -> AiCompletionRequest {
         AiCompletionRequest {
             config: minimax_test_config(endpoint),
@@ -5428,11 +5455,28 @@ mod tests {
             AiProvider::Deepseek,
             AiProvider::Qwen,
             AiProvider::MiniMax,
+            AiProvider::OrcaRouter,
         ] {
             let config = AiConfig { provider, ..base.clone() };
             assert_eq!(validate_config(&config).unwrap_err(), "API key is required");
             assert_eq!(validate_model_list_config(&config).unwrap_err(), "API key is required");
         }
+    }
+
+    #[test]
+    fn orcarouter_requires_api_key_for_completion_and_model_discovery() {
+        let mut config = orcarouter_test_config("https://api.orcarouter.ai/v1", AiApiStyle::Completions);
+        config.api_key.clear();
+
+        assert!(provider_requires_api_key(&config.provider));
+        assert_eq!(validate_config(&config).unwrap_err(), "API key is required");
+        assert_eq!(validate_model_list_config(&config).unwrap_err(), "API key is required");
+
+        config.api_key = "secret".to_string();
+        let headers = maybe_bearer_headers(&config).unwrap();
+        assert_eq!(headers.get(AUTHORIZATION).unwrap(), "Bearer secret");
+        assert_eq!(resolve_endpoint(&config), "https://api.orcarouter.ai/v1/chat/completions");
+        assert_eq!(resolve_model_list_endpoint(&config).unwrap(), "https://api.orcarouter.ai/v1/models");
     }
 
     #[test]
@@ -6462,6 +6506,34 @@ mod tests {
         let request = server.await.unwrap().to_ascii_lowercase();
         assert!(request.starts_with("get /v1/models "));
         assert!(request.contains("authorization: bearer secret"));
+    }
+
+    #[tokio::test]
+    async fn orcarouter_model_list_matches_configured_openai_api_style() {
+        let response_body = r#"{"data":[
+            {"id":"deepseek/deepseek-chat","supported_endpoint_types":["openai"]},
+            {"id":"openai/gpt-response-only","supported_endpoint_types":["openai-response"]},
+            {"id":"orcarouter/fusion-flash","supported_endpoint_types":["openai","openai-response"]},
+            {"id":"google/gemini-embedding-001","supported_endpoint_types":["embeddings"]},
+            {"id":"openai/gpt-image-1","supported_endpoint_types":["image-generation"]},
+            {"id":"kling/kling-v3","supported_endpoint_types":["openai-video"]},
+            {"id":"vendor/missing-metadata"}
+        ]}"#;
+
+        for (api_style, expected_ids) in [
+            (AiApiStyle::Completions, vec!["deepseek/deepseek-chat", "orcarouter/fusion-flash"]),
+            (AiApiStyle::Responses, vec!["openai/gpt-response-only", "orcarouter/fusion-flash"]),
+        ] {
+            let (origin, server) = spawn_get_response_server("200 OK", response_body).await;
+            let config = orcarouter_test_config(format!("{origin}/v1"), api_style);
+
+            let models = list_models_core(&config).await.unwrap();
+
+            assert_eq!(models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(), expected_ids);
+            let request = server.await.unwrap().to_ascii_lowercase();
+            assert!(request.starts_with("get /v1/models "));
+            assert!(request.contains("authorization: bearer secret"));
+        }
     }
 
     #[tokio::test]

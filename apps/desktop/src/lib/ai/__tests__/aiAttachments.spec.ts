@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   AI_IMAGE_ATTACHMENT_MAX_TOTAL_BYTES,
   AI_TEXT_ATTACHMENT_MAX_BYTES,
+  AI_TEXT_ATTACHMENT_MAX_CHARS,
   AI_TEXT_ATTACHMENT_MAX_COUNT,
+  AI_TEXT_ATTACHMENT_MAX_TOTAL_CHARS,
   buildAiModelInstruction,
   cloneTextAttachmentForEdit,
   decodeTextAttachmentBytes,
@@ -16,6 +18,7 @@ import {
   remainingTextAttachmentChars,
   resolveTextAttachmentEncoding,
   textAttachmentBudgetError,
+  truncateTextAttachmentContent,
 } from "@/lib/ai/aiAttachments";
 
 describe("AI attachment policy", () => {
@@ -107,6 +110,23 @@ describe("AI attachment policy", () => {
     expect(textAttachmentBudgetError(texts)).toBe("count");
     expect(remainingTextAttachmentChars([{ name: "large.txt", content: "x".repeat(31_999) }])).toBe(1);
     expect(imageAttachmentBudgetError([{ sizeBytes: AI_IMAGE_ATTACHMENT_MAX_TOTAL_BYTES - 1 }], 2)).toBe("total");
+  });
+
+  it("truncates text attachment budgets without splitting emoji surrogate pairs", () => {
+    const perFileSource = "x".repeat(AI_TEXT_ATTACHMENT_MAX_CHARS - 1) + "😀tail";
+    const perFileContent = truncateTextAttachmentContent(perFileSource, AI_TEXT_ATTACHMENT_MAX_CHARS);
+    expect(perFileContent).toBe("x".repeat(AI_TEXT_ATTACHMENT_MAX_CHARS - 1));
+    expect(perFileContent.length).toBeLessThanOrEqual(AI_TEXT_ATTACHMENT_MAX_CHARS);
+
+    const existingContent = "x".repeat(AI_TEXT_ATTACHMENT_MAX_TOTAL_CHARS - AI_TEXT_ATTACHMENT_MAX_CHARS + 1);
+    const remainingChars = remainingTextAttachmentChars([{ name: "existing.txt", content: existingContent }]);
+    const totalSource = "y".repeat(remainingChars - 1) + "😀tail";
+    const totalContent = truncateTextAttachmentContent(totalSource, remainingChars);
+    expect(totalContent).toBe("y".repeat(remainingChars - 1));
+    expect(existingContent.length + totalContent.length).toBeLessThanOrEqual(AI_TEXT_ATTACHMENT_MAX_TOTAL_CHARS);
+
+    const completeEmoji = "z".repeat(AI_TEXT_ATTACHMENT_MAX_CHARS - 2) + "😀tail";
+    expect(truncateTextAttachmentContent(completeEmoji, AI_TEXT_ATTACHMENT_MAX_CHARS)).toBe(completeEmoji.slice(0, AI_TEXT_ATTACHMENT_MAX_CHARS));
   });
 
   it("converts physical Tauri drop coordinates before hit testing", () => {

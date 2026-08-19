@@ -94,6 +94,7 @@ import {
   remainingTextAttachmentChars,
   resolveTextAttachmentEncoding,
   textAttachmentBudgetError,
+  truncateTextAttachmentContent,
 } from "@/lib/ai/aiAttachments";
 import { isAiConfigModelCandidate } from "@/lib/ai/aiConfigCandidates";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
@@ -1589,7 +1590,7 @@ function updateTextAttachmentEncoding(attachments: AiCsvFileContext[], index: nu
     const decoded = decodeTextAttachmentBytes(source.bytes, source.fileTruncated, requested);
     const otherAttachments = attachments.filter((_, attachmentIndex) => attachmentIndex !== index);
     const remainingChars = remainingTextAttachmentChars(otherAttachments);
-    const content = decoded.slice(0, remainingChars);
+    const content = truncateTextAttachmentContent(decoded, remainingChars);
     if (!content.trim()) {
       toast(t("ai.csvAttachmentEmpty"), 4000);
       return;
@@ -2013,7 +2014,7 @@ async function addTextAttachmentBytes(name: string, bytes: Uint8Array, sourceSiz
       return;
     }
     const remainingChars = remainingTextAttachmentChars(selectedCsvAttachments.value);
-    const content = source.slice(0, remainingChars);
+    const content = truncateTextAttachmentContent(source, remainingChars);
     if (!content.trim()) {
       toast(t("ai.csvAttachmentEmpty"), 4000);
       return;

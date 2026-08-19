@@ -146,6 +146,14 @@ export async function readTextAttachmentPrefix(reader: AttachmentByteReader, sou
   return offset === bytes.length ? bytes : bytes.slice(0, offset);
 }
 
+/** Truncate within the existing UTF-16 budget without splitting a surrogate pair. */
+export function truncateTextAttachmentContent(content: string, maxChars: number): string {
+  const truncated = content.slice(0, Math.max(0, maxChars));
+  if (truncated.length === content.length) return truncated;
+  const lastCodeUnit = truncated.charCodeAt(truncated.length - 1);
+  return lastCodeUnit >= 0xd800 && lastCodeUnit <= 0xdbff ? truncated.slice(0, -1) : truncated;
+}
+
 export function textAttachmentBudgetError(existing: readonly AiCsvFileContext[]): AttachmentBudgetError | undefined {
   if (existing.length >= AI_TEXT_ATTACHMENT_MAX_COUNT) return "count";
   if (existing.reduce((total, attachment) => total + attachment.content.length, 0) >= AI_TEXT_ATTACHMENT_MAX_TOTAL_CHARS) return "total";

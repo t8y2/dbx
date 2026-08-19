@@ -25,8 +25,13 @@ describe("ConnectionDialog timeout controls", () => {
     expect(dialogSource).not.toContain("Number(config.connect_timeout_secs)");
   });
 
-  it("shows range help beside both global timeout labels", () => {
-    expect(dialogSource).toContain('t("connection.globalConnectTimeoutHint")');
-    expect(dialogSource).toContain('t("connection.globalQueryTimeoutHint")');
+  it("uses button-backed help tooltips beside both global timeout labels", () => {
+    const connectGlobalControl = dialogSource.slice(dialogSource.indexOf('id="connect-timeout-global"'), dialogSource.indexOf('id="connect-timeout-connection"'));
+    const queryGlobalControl = dialogSource.slice(dialogSource.indexOf('id="query-timeout-global"'), dialogSource.indexOf('id="query-timeout-connection"'));
+
+    expect(connectGlobalControl).toContain(`<HelpTooltip :label="t('connection.globalConnectTimeoutHint')"`);
+    expect(queryGlobalControl).toContain(`<HelpTooltip :label="t('connection.globalQueryTimeoutHint')"`);
+    expect(connectGlobalControl).not.toContain("<TooltipTrigger");
+    expect(queryGlobalControl).not.toContain("<TooltipTrigger");
   });
 });

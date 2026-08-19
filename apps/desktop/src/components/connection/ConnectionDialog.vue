@@ -8154,14 +8154,9 @@ function openExternalUrl(url: string) {
                       <input id="connect-timeout-global" v-model="form.connect_timeout_inherit" type="radio" name="connect-timeout-scope" :value="true" class="h-3.5 w-3.5 shrink-0 accent-primary" />
                       <div class="flex min-w-0 flex-1 items-center gap-1">
                         <label for="connect-timeout-global" class="min-w-0 cursor-pointer truncate text-xs" :title="t('connection.useGlobalQueryTimeout')">{{ t("connection.useGlobalQueryTimeout") }}</label>
-                        <Tooltip>
-                          <TooltipTrigger as-child>
-                            <CircleHelp class="h-3.5 w-3.5 shrink-0 cursor-help text-muted-foreground hover:text-foreground" />
-                          </TooltipTrigger>
-                          <TooltipContent side="top" align="center" class="max-w-[280px] text-xs leading-relaxed">
-                            {{ t("connection.globalConnectTimeoutHint") }}
-                          </TooltipContent>
-                        </Tooltip>
+                        <HelpTooltip :label="t('connection.globalConnectTimeoutHint')" content-class="max-w-[280px]">
+                          {{ t("connection.globalConnectTimeoutHint") }}
+                        </HelpTooltip>
                       </div>
                       <Input
                         v-model.number="editGlobalConnectTimeoutSecs"
@@ -8204,14 +8199,9 @@ function openExternalUrl(url: string) {
                       <input id="query-timeout-global" v-model="form.query_timeout_inherit" type="radio" name="query-timeout-scope" :value="true" class="h-3.5 w-3.5 shrink-0 accent-primary" />
                       <div class="flex min-w-0 flex-1 items-center gap-1">
                         <label for="query-timeout-global" class="min-w-0 cursor-pointer truncate text-xs" :title="t('connection.useGlobalQueryTimeout')">{{ t("connection.useGlobalQueryTimeout") }}</label>
-                        <Tooltip>
-                          <TooltipTrigger as-child>
-                            <CircleHelp class="h-3.5 w-3.5 shrink-0 cursor-help text-muted-foreground hover:text-foreground" />
-                          </TooltipTrigger>
-                          <TooltipContent side="top" align="center" class="max-w-[280px] text-xs leading-relaxed">
-                            {{ t("connection.globalQueryTimeoutHint") }}
-                          </TooltipContent>
-                        </Tooltip>
+                        <HelpTooltip :label="t('connection.globalQueryTimeoutHint')" content-class="max-w-[280px]">
+                          {{ t("connection.globalQueryTimeoutHint") }}
+                        </HelpTooltip>
                       </div>
                       <Input v-model.number="editGlobalQueryTimeoutSecs" type="number" min="0" :max="MAX_QUERY_TIMEOUT_SECS" step="1" class="col-span-2 h-7 w-full shrink-0 sm:col-span-1 sm:w-20" :disabled="form.query_timeout_inherit !== true" @input="clampQueryTimeoutInput($event, 'global')" />
                     </div>

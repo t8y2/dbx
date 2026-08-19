@@ -142,12 +142,16 @@ pub fn build_query_pagination_execution_plan(
         single_execution: false,
     };
 
-    let counted = build_count_query_sql(CountQuerySqlOptions {
-        original_sql: options.query_base_sql.clone(),
-        database_type: options.database_type,
-    });
-    if counted.ok {
-        plan.count_sql = counted.sql;
+    let sql_server_cte =
+        options.database_type == Some(DatabaseType::SqlServer) && starts_with_cte(&options.query_base_sql);
+    if !sql_server_cte {
+        let counted = build_count_query_sql(CountQuerySqlOptions {
+            original_sql: options.query_base_sql.clone(),
+            database_type: options.database_type,
+        });
+        if counted.ok {
+            plan.count_sql = counted.sql;
+        }
     }
 
     if options.pagination.session_id.is_some() {
@@ -157,7 +161,7 @@ pub fn build_query_pagination_execution_plan(
         return plan;
     }
 
-    if options.database_type == Some(DatabaseType::SqlServer) && starts_with_cte(&options.query_base_sql) {
+    if sql_server_cte {
         return plan;
     }
 
@@ -451,7 +455,16 @@ fn single_statement_matches_base_sql(statement: &str, base_sql: &str) -> bool {
 }
 
 fn starts_with_cte(sql: &str) -> bool {
-    sql.trim_start().trim_start_matches(';').trim_start().to_ascii_uppercase().starts_with("WITH")
+    let mut statement = sql;
+    loop {
+        let previous_len = statement.len();
+        statement = strip_leading_statement_comments(statement);
+        statement = statement.trim_start_matches(';').trim_start();
+        if statement.len() == previous_len {
+            break;
+        }
+    }
+    sql_keyword_at(statement, 0, "WITH")
 }
 
 fn cte_main_statement_is_select(sql: &str) -> bool {
@@ -2631,6 +2644,31 @@ mod tests {
         assert!(plan.count_sql.is_none());
         assert_eq!(plan.page_limit, None);
         assert_eq!(plan.page_offset, None);
+    }
+
+    #[test]
+    fn sqlserver_cte_after_leading_comments_executes_original_sql() {
+        for sql in [
+            "-- heading comment\nWITH staff AS (SELECT 1 AS id) SELECT id FROM staff;",
+            "/* heading comment */\nWITH staff AS (SELECT 1 AS id) SELECT id FROM staff;",
+            ";-- heading comment\nWITH staff AS (SELECT 1 AS id) SELECT id FROM staff;",
+            "-- heading comment\n;WITH staff AS (SELECT 1 AS id) SELECT id FROM staff;",
+        ] {
+            let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+                sql: sql.to_string(),
+                query_base_sql: sql.to_string(),
+                database_type: Some(DatabaseType::SqlServer),
+                pagination: QueryPagination { limit: 100, offset: 0, session_id: None },
+                use_agent_cursor: false,
+                first_page_uses_actual_sql: false,
+            });
+
+            assert_eq!(plan.sql_to_execute, sql);
+            assert!(plan.page_sql.is_none());
+            assert!(plan.count_sql.is_none());
+            assert_eq!(plan.page_limit, None);
+            assert_eq!(plan.page_offset, None);
+        }
     }
 
     #[test]

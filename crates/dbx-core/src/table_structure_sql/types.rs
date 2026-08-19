@@ -217,6 +217,11 @@ pub struct TableStructureSqlOptions {
     /// will reject or downgrading to a blocking `CREATE INDEX`.
     #[serde(default)]
     pub partitioned: bool,
+    /// When true, the connection is GaussDB M-mode which uses MySQL-compatible
+    /// SQL dialect with backtick quoting. The structure editor maps this to
+    /// `StructureDialect::Mysql` so that DDL is generated with MySQL syntax.
+    #[serde(default)]
+    pub is_gaussdb_m_mode: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

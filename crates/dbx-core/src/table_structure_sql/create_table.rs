@@ -13,6 +13,10 @@ use super::validation::{validate_columns, validate_concurrent_index_scope, valid
 use crate::models::connection::DatabaseType;
 
 pub fn build_create_table_sql(mut options: TableStructureSqlOptions) -> TableStructureSqlResult {
+    // GaussDB M-mode uses MySQL-compatible SQL dialect with backtick quoting.
+    if options.is_gaussdb_m_mode {
+        options.database_type = Some(DatabaseType::Mysql);
+    }
     options.table_name = clean(&options.table_name);
     let mut warnings = Vec::new();
     // Fail closed: a concurrent-index request on a partitioned parent (or on an

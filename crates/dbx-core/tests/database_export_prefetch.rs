@@ -143,8 +143,25 @@ fn postgres_test_config(id: &str, port: u16) -> ConnectionConfig {
     }
 }
 
-#[tokio::test]
-async fn database_export_writes_structure_and_data_for_all_tables() {
+#[test]
+fn database_export_writes_structure_and_data_for_all_tables() {
+    let handle = std::thread::Builder::new()
+        .name("database-export-prefetch".to_string())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build database export prefetch test runtime")
+                .block_on(run_database_export_writes_structure_and_data_for_all_tables());
+        })
+        .expect("spawn database export prefetch test thread");
+    if let Err(panic) = handle.join() {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+async fn run_database_export_writes_structure_and_data_for_all_tables() {
     let Some(container) = start_docker_postgres() else {
         return;
     };

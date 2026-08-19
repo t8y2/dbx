@@ -7365,6 +7365,7 @@ export default withEnglishFallback({
     partitionDetail: "Detalhes do atraso por partição",
     noCommittedOffsets: "Nenhum offset confirmado ou partição atribuída",
     topic: "Tópico",
+    openTopicSubscriptions: "Abrir assinaturas de {topic}",
     partition: "Partição",
     committedOffset: "Offset confirmado",
     logEndOffset: "Offset final do log",

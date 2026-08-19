@@ -7412,6 +7412,7 @@ export default withEnglishFallback({
     partitionDetail: "分区积压详情",
     noCommittedOffsets: "暂无已提交 Offset 或已分配分区",
     topic: "Topic",
+    openTopicSubscriptions: "打开 {topic} 的订阅",
     partition: "分区",
     committedOffset: "已提交 Offset",
     logEndOffset: "Log End Offset",

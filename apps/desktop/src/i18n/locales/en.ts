@@ -7427,6 +7427,7 @@ export default {
     partitionDetail: "Partition lag details",
     noCommittedOffsets: "No committed offsets or assigned partitions",
     topic: "Topic",
+    openTopicSubscriptions: "Open subscriptions for {topic}",
     partition: "Partition",
     committedOffset: "Committed offset",
     logEndOffset: "Log end offset",

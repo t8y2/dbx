@@ -6834,6 +6834,7 @@ export default withEnglishFallback({
     partitionDetail: "파티션 지연 상세",
     noCommittedOffsets: "커밋된 오프셋 또는 할당된 파티션이 없습니다",
     topic: "토픽",
+    openTopicSubscriptions: "{topic} 구독 열기",
     partition: "파티션",
     committedOffset: "커밋된 오프셋",
     logEndOffset: "로그 끝 오프셋",

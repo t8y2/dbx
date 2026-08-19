@@ -7363,6 +7363,7 @@ export default withEnglishFallback({
     partitionDetail: "Dettagli ritardo partizioni",
     noCommittedOffsets: "Nessun offset confermato o partizione assegnata",
     topic: "Argomento",
+    openTopicSubscriptions: "Apri le sottoscrizioni di {topic}",
     partition: "Partizione",
     committedOffset: "Offset confermato",
     logEndOffset: "Offset finale del log",

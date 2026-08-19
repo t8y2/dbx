@@ -7356,6 +7356,7 @@ export default withEnglishFallback({
     partitionDetail: "分區積壓詳情",
     noCommittedOffsets: "暫無已提交 Offset 或已分配分區",
     topic: "Topic",
+    openTopicSubscriptions: "開啟 {topic} 的訂閱",
     partition: "分區",
     committedOffset: "已提交 Offset",
     logEndOffset: "Log End Offset",

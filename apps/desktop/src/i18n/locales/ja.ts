@@ -7416,6 +7416,7 @@ export default withEnglishFallback({
     partitionDetail: "パーティション別ラグ",
     noCommittedOffsets: "コミット済みオフセットまたは割り当て済みパーティションがありません",
     topic: "トピック",
+    openTopicSubscriptions: "{topic} のサブスクリプションを開く",
     partition: "パーティション",
     committedOffset: "コミット済みオフセット",
     logEndOffset: "ログ末尾オフセット",

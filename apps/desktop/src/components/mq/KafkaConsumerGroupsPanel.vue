@@ -12,6 +12,9 @@ interface Props {
 }
 
 const props = defineProps<Props>();
+const emit = defineEmits<{
+  navigateSubscriptions: [topic: string];
+}>();
 const { t } = useI18n();
 
 const groups = ref<KafkaConsumerGroupSummary[]>([]);
@@ -73,6 +76,10 @@ async function loadGroups() {
 
 function formatNumber(value: number | undefined): string {
   return value === undefined ? "-" : value.toLocaleString();
+}
+
+function openTopicSubscriptions(topic: string) {
+  emit("navigateSubscriptions", topic);
 }
 
 watch(
@@ -160,7 +167,18 @@ watch(
             </thead>
             <tbody>
               <tr v-for="partition in selectedGroup.partitions" :key="`${partition.topic}:${partition.partition}`">
-                <td>{{ partition.topic }}</td>
+                <td>
+                  <button
+                    type="button"
+                    class="topic-link"
+                    :data-topic="partition.topic"
+                    :title="t('mqKafkaConsumerGroups.openTopicSubscriptions', { topic: partition.topic })"
+                    :aria-label="t('mqKafkaConsumerGroups.openTopicSubscriptions', { topic: partition.topic })"
+                    @click="openTopicSubscriptions(partition.topic)"
+                  >
+                    {{ partition.topic }}
+                  </button>
+                </td>
                 <td class="number-cell">{{ partition.partition }}</td>
                 <td class="number-cell">{{ formatNumber(partition.currentOffset) }}</td>
                 <td class="number-cell">{{ formatNumber(partition.endOffset) }}</td>
@@ -337,6 +355,28 @@ th {
   padding: 24px;
   text-align: center;
   color: var(--color-text-secondary);
+}
+
+.topic-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-primary);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  text-underline-offset: 2px;
+}
+
+.topic-link:hover {
+  text-decoration-color: currentColor;
+}
+
+.topic-link:focus-visible {
+  border-radius: var(--dbx-radius-fixed-4);
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
 }
 
 @media (max-height: 620px) {

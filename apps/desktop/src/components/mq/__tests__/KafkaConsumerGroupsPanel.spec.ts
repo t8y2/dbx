@@ -33,12 +33,13 @@ const SNAPSHOT: KafkaConsumerGroupSnapshot = {
       state: "STABLE",
       simpleGroup: false,
       memberCount: 2,
-      topics: ["orders"],
+      topics: ["orders", "orders-archive"],
       totalLag: 10,
       lagAvailable: true,
       partitions: [
         { topic: "orders", partition: 0, currentOffset: 5, endOffset: 12, lag: 7 },
         { topic: "orders", partition: 1, currentOffset: 6, endOffset: 9, lag: 3 },
+        { topic: "orders-archive", partition: 0, currentOffset: 4, endOffset: 4, lag: 0 },
       ],
     },
     {
@@ -62,10 +63,10 @@ async function flushUi() {
   await nextTick();
 }
 
-async function mountPanel() {
+async function mountPanel(onNavigateSubscriptions?: (topic: string) => void) {
   root = document.createElement("div");
   document.body.appendChild(root);
-  app = createApp(KafkaConsumerGroupsPanel, { connectionId: "kafka-1" });
+  app = createApp(KafkaConsumerGroupsPanel, { connectionId: "kafka-1", onNavigateSubscriptions });
   app.mount(root);
   await flushUi();
   return root;
@@ -100,6 +101,22 @@ describe("KafkaConsumerGroupsPanel", () => {
     expect(panel.querySelector('[data-testid="kafka-consumer-group-count"]')?.textContent?.trim()).toBe("3 / 3");
     expect(panel.querySelector('[data-testid="kafka-consumer-group-detail"]')?.textContent).toContain("orders");
     expect(panel.querySelector('[data-testid="kafka-consumer-group-detail"]')?.textContent).toContain("7");
+  });
+
+  it("emits the exact topic selected from partition details using keyboard-accessible buttons", async () => {
+    const navigateSubscriptions = vi.fn();
+    const panel = await mountPanel(navigateSubscriptions);
+    await vi.waitFor(() => expect(panel.querySelectorAll("[data-topic]")).toHaveLength(3));
+
+    const ordersLink = panel.querySelector<HTMLButtonElement>('[data-topic="orders"]');
+    const archiveLink = panel.querySelector<HTMLButtonElement>('[data-topic="orders-archive"]');
+    expect(ordersLink?.tagName).toBe("BUTTON");
+    expect(ordersLink?.getAttribute("aria-label")).toBe("mqKafkaConsumerGroups.openTopicSubscriptions");
+
+    ordersLink?.click();
+    archiveLink?.click();
+    expect(navigateSubscriptions).toHaveBeenNthCalledWith(1, "orders");
+    expect(navigateSubscriptions).toHaveBeenNthCalledWith(2, "orders-archive");
   });
 
   it("searches by topic and keeps unavailable lag visibly distinct from zero", async () => {

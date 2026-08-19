@@ -51,4 +51,13 @@ describe("MQ list panels", () => {
     expect(consoleSource).toContain("activeTab === 'consumerGroups' && isKafkaCluster");
     expect(consoleSource).not.toContain("activeTab === 'subscriptions' && canManageSubscriptions && isKafkaCluster");
   });
+
+  it("routes a Kafka consumer-group partition topic to its topic-scoped subscriptions", () => {
+    const consoleSource = componentSource("MqAdminConsole.vue");
+
+    expect(consoleSource).toContain("function handleKafkaConsumerGroupTopicSelected(topic: string)");
+    expect(consoleSource).toContain("shortName: topic");
+    expect(consoleSource).toContain('setActiveTab("subscriptions")');
+    expect(consoleSource).toContain('@navigate-subscriptions="handleKafkaConsumerGroupTopicSelected"');
+  });
 });

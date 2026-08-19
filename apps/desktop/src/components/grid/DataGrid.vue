@@ -739,6 +739,20 @@ const contextCell = ref<{
   rowIndex: number;
   col: number;
 } | null>(null);
+type ContextFilterTarget = {
+  rowId: number;
+  rowIndex: number;
+  col: number;
+  columnName: string;
+  columnInfo?: ColumnInfo;
+  sourceResult: QueryResult;
+  sourceIndex?: number;
+  sourceValue: CellValue;
+  requiresHydration: boolean;
+};
+// The context menu closes before invoking its action. Keep an immutable target
+// for asynchronous filter actions instead of reading the cleared selection.
+const contextFilterTarget = ref<ContextFilterTarget | null>(null);
 // True when onCellContext created a synthetic single-cell selection (the cell
 // was not previously selected). Lets buildRequest distinguish a genuine 1×1
 // selection (user Ctrl+click) from a synthetic one (right-click on unselected).
@@ -755,7 +769,31 @@ function invalidateSyntheticContextSelection() {
 
 function onGridContextMenuOpen() {
   contextMenuLifecycle += 1;
+  const cell = contextCell.value;
+  const columnName = cell ? props.result.columns[cell.col] : undefined;
+  const sourceItem = cell ? getRowItem(cell.rowId) : undefined;
+  contextFilterTarget.value =
+    cell && columnName && sourceItem
+      ? {
+          rowId: cell.rowId,
+          rowIndex: cell.rowIndex,
+          col: cell.col,
+          columnName,
+          columnInfo: props.tableMeta?.columns.find((column) => column.name === columnName),
+          sourceResult: props.result,
+          sourceIndex: sourceItem.sourceIndex,
+          sourceValue: sourceItem.data[cell.col] ?? null,
+          requiresHydration: sourceItem.sourceIndex !== undefined && isLargeValuePreview(sourceItem, cell.col),
+        }
+      : null;
 }
+
+watch(
+  () => props.result,
+  (result) => {
+    if (contextFilterTarget.value?.sourceResult !== result) contextFilterTarget.value = null;
+  },
+);
 
 function onGridContextMenuClose() {
   const lifecycle = ++contextMenuLifecycle;
@@ -5639,16 +5677,9 @@ function applyContextSort(direction: "asc" | "desc" | null, mode: DataGridSortMo
 }
 
 async function contextFilterCondition(mode: FilterMode): Promise<string | null> {
-  const target = contextCell.value;
+  const target = contextFilterTarget.value;
   if (!target) return null;
-  const columnName = props.result.columns[target.col];
-  if (!columnName) return null;
-  const sourceResult = props.result;
-  const sourceItem = getRowItem(target.rowId);
-  if (!sourceItem) return null;
-  const sourceIndex = sourceItem.sourceIndex;
-  const requiresHydration = sourceIndex !== undefined && isLargeValuePreview(sourceItem, target.col);
-  const sourceValue = sourceItem.data[target.col] ?? null;
+  const { columnName, sourceResult, sourceIndex, sourceValue, requiresHydration } = target;
   // CustomContextMenu closes before invoking its action. Keep the target
   // stable across hydration after the close lifecycle clears contextCell.
   if (mode !== "is-null" && mode !== "is-not-null") {
@@ -5661,7 +5692,7 @@ async function contextFilterCondition(mode: FilterMode): Promise<string | null> 
       databaseType: resolvedDatabaseType.value,
       identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
       columnName,
-      columnInfo: props.tableMeta?.columns.find((column) => column.name === columnName),
+      columnInfo: target.columnInfo,
       mode,
       value,
     })) ?? null

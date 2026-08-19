@@ -20,14 +20,25 @@ describe("DataGrid context extractor lifecycle", () => {
     const start = source.indexOf("async function contextFilterCondition");
     const end = source.indexOf("async function applyContextFilter", start);
     const filterSource = source.slice(start, end);
+    const openStart = source.indexOf("function onGridContextMenuOpen");
+    const openEnd = source.indexOf("function onGridContextMenuClose", openStart);
+    const openSource = source.slice(openStart, openEnd);
 
     expect(start).toBeGreaterThanOrEqual(0);
     expect(end).toBeGreaterThan(start);
-    expect(filterSource).toContain("const target = contextCell.value;");
-    expect(filterSource).toContain("const sourceResult = props.result;");
-    expect(filterSource).toContain("const sourceIndex = sourceItem.sourceIndex;");
+    expect(openStart).toBeGreaterThanOrEqual(0);
+    expect(openEnd).toBeGreaterThan(openStart);
+    expect(openSource).toContain("contextFilterTarget.value =");
+    expect(openSource).toContain("cell && columnName && sourceItem");
+    expect(openSource).toContain("sourceResult: props.result,");
+    expect(openSource).toContain("sourceValue: sourceItem.data[cell.col] ?? null,");
+    expect(openSource).toContain("() => props.result,");
+    expect(openSource).toContain("contextFilterTarget.value?.sourceResult !== result");
+    expect(filterSource).toContain("const target = contextFilterTarget.value;");
+    expect(filterSource).toContain("const { columnName, sourceResult, sourceIndex, sourceValue, requiresHydration } = target;");
     expect(filterSource).toContain("await hydrateLargeValueCell(target.rowId, target.col)");
     expect(filterSource).toContain("sourceResult.rows[sourceIndex]?.[target.col]");
+    expect(filterSource).not.toContain("contextCell.value");
     expect(filterSource).not.toContain("getRowItem(target.rowId);\n  if (!item)");
     expect(filterSource).not.toContain("contextColumn.value");
     expect(filterSource).not.toContain("contextCellValue.value");

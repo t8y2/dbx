@@ -150,6 +150,26 @@ class SpannerAgentTest extends JdbcFakeExecutionBehaviorTest {
     }
 
     @Test
+    void quotesGeneratedDdlWithTheDialectQuote() {
+        Map<String, List<Map<String, Object>>> rows = new LinkedHashMap<>();
+        rows.put("getColumns", Collections.singletonList(row(
+            "COLUMN_NAME", "singer_id",
+            "TYPE_NAME", "INT64",
+            "NULLABLE", DatabaseMetaData.columnNoNulls
+        )));
+
+        // The shared builder hardcodes ANSI double quotes, which GoogleSQL reads as a string
+        // literal rather than an identifier.
+        String googleSql = connectedAgent(GOOGLE_SQL_PRODUCT, null, rows).getTableDdl("", "singers");
+        assertTrue(googleSql.contains("`singers`"), googleSql);
+        assertFalse(googleSql.contains("\"singers\""), googleSql);
+
+        String postgres = connectedAgent(POSTGRES_PRODUCT, "public", rows).getTableDdl("public", "singers");
+        assertTrue(postgres.contains("\"singers\""), postgres);
+        assertFalse(postgres.contains("`singers`"), postgres);
+    }
+
+    @Test
     void skipsStoringIndexColumnsThatHaveNoOrdinalPosition() {
         Map<String, List<Map<String, Object>>> rows = new LinkedHashMap<>();
         rows.put("getIndexInfo", Arrays.asList(
@@ -245,7 +265,46 @@ class SpannerAgentTest extends JdbcFakeExecutionBehaviorTest {
         setConfiguredDatabase(agent, resourcePath);
 
         // The shared adapter reports [pgdb, projects/.../databases/pgdb] for the PostgreSQL dialect.
+        // The fake connection cannot unwrap to CloudSpannerJdbcConnection, so this also pins the
+        // fallback taken whenever the Admin API is unavailable — a caller without
+        // spanner.databases.list still sees the database it connected to.
+        //
+        // The invariant both paths share: a reported name is the *full resource path*, because it
+        // round-trips as ConnectParams.database and only the path builds a resolvable JDBC URL. A
+        // bare database id would make every click on a sibling database hang until the connect
+        // timeout. The Admin API branch cannot be reached through this proxy, so that half is
+        // verified against the emulator by reconnecting with each name it reports.
         assertEquals(Collections.singletonList(resourcePath), databaseNames(agent.listDatabases()));
+    }
+
+    @Test
+    void translatesDataTypeNamesForThePostgresDialect() {
+        Map<String, List<Map<String, Object>>> rows = new LinkedHashMap<>();
+        rows.put("getTypeInfo", Arrays.asList(
+            row("TYPE_NAME", "INT64"),
+            row("TYPE_NAME", "STRING"),
+            row("TYPE_NAME", "FLOAT64"),
+            row("TYPE_NAME", "JSON")
+        ));
+        Map<String, List<Map<String, Object>>> postgresRows = new LinkedHashMap<>();
+        postgresRows.put("getTypeInfo", Arrays.asList(
+            row("TYPE_NAME", "INT64"),
+            row("TYPE_NAME", "STRING"),
+            row("TYPE_NAME", "FLOAT64"),
+            // The driver answers JSONB here rather than JSON, but still in upper case.
+            row("TYPE_NAME", "JSONB")
+        ));
+
+        // The driver answers getTypeInfo() with GoogleSQL spellings for both dialects, so a
+        // PostgreSQL-dialect database would otherwise be offered INT64/STRING in field mapping.
+        assertEquals(
+            Arrays.asList("INT64", "STRING", "FLOAT64", "JSON"),
+            connectedAgent(GOOGLE_SQL_PRODUCT, null, rows).listDataTypes()
+        );
+        assertEquals(
+            Arrays.asList("bigint", "character varying", "double precision", "jsonb"),
+            connectedAgent(POSTGRES_PRODUCT, "public", postgresRows).listDataTypes()
+        );
     }
 
     @Test
@@ -458,6 +517,10 @@ class SpannerAgentTest extends JdbcFakeExecutionBehaviorTest {
                 || "getIndexInfo".equals(name) || "getImportedKeys".equals(name)) {
                 calls.add(name + "(catalog=" + args[0] + ", schema=[" + args[1] + "], table=" + args[2] + ")");
                 return fakeResultSet(rowsByCall.get(name));
+            }
+            if ("getTypeInfo".equals(name)) {
+                // Takes no arguments, so it is not recorded alongside the schema-scoped calls.
+                return fakeResultSet(rowsByCall.get("getTypeInfo"));
             }
             if ("getSearchStringEscape".equals(name)) {
                 return "\\";

@@ -10,6 +10,7 @@ import com.dbx.agent.CompletionAssistantResponse;
 import com.dbx.agent.ConfiguredJdbcAgent;
 import com.dbx.agent.ConnectParams;
 import com.dbx.agent.DatabaseInfo;
+import com.dbx.agent.DdlBuilder;
 import com.dbx.agent.ForeignKeyInfo;
 import com.dbx.agent.IndexInfo;
 import com.dbx.agent.JdbcAgentProfile;
@@ -18,6 +19,8 @@ import com.dbx.agent.MultiSessionJsonRpcServer;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.StandardJdbcMetadata;
 import com.dbx.agent.TableInfo;
+import com.google.cloud.spanner.Database;
+import com.google.cloud.spanner.DatabaseId;
 import com.google.cloud.spanner.Dialect;
 import com.google.cloud.spanner.jdbc.CloudSpannerJdbcConnection;
 
@@ -60,6 +63,31 @@ public final class SpannerAgent extends ConfiguredJdbcAgent {
     private static final Set<String> LOOPBACK_HOSTS =
         new HashSet<>(Arrays.asList("localhost", "127.0.0.1", "::1", "[::1]"));
     private static final String PLAIN_TEXT_PARAM = "usePlainText=true";
+    /**
+     * The driver reports GoogleSQL spellings from {@code getTypeInfo()} for both dialects (only
+     * JSON/JSONB differs), so the PostgreSQL-dialect names are substituted here. Every entry was
+     * read back from {@code information_schema.columns} on a PostgreSQL-dialect database rather than
+     * transcribed from documentation.
+     */
+    private static final Map<String, String> POSTGRES_DIALECT_TYPE_NAMES = postgresDialectTypeNames();
+
+    private static Map<String, String> postgresDialectTypeNames() {
+        Map<String, String> names = new LinkedHashMap<>();
+        names.put("STRING", "character varying");
+        names.put("INT64", "bigint");
+        names.put("BYTES", "bytea");
+        names.put("FLOAT32", "real");
+        names.put("FLOAT64", "double precision");
+        names.put("BOOL", "boolean");
+        names.put("DATE", "date");
+        names.put("TIMESTAMP", "timestamp with time zone");
+        names.put("NUMERIC", "numeric");
+        names.put("UUID", "uuid");
+        // The driver already answers JSONB for the PostgreSQL dialect, but in upper case.
+        names.put("JSON", "jsonb");
+        names.put("JSONB", "jsonb");
+        return Collections.unmodifiableMap(names);
+    }
     private static final int DEFAULT_COMPLETION_LIMIT = 100;
     private static final int MAX_COMPLETION_LIMIT = 1000;
 
@@ -107,9 +135,89 @@ public final class SpannerAgent extends ConfiguredJdbcAgent {
 
     @Override
     public List<DatabaseInfo> listDatabases() {
-        // JDBC cannot enumerate the other databases of an instance, and in the PostgreSQL dialect
-        // getCatalogs() plus the configured resource path would produce a duplicated entry.
-        return Collections.singletonList(new DatabaseInfo(configuredDatabaseName()));
+        // JDBC alone cannot enumerate an instance (and in the PostgreSQL dialect getCatalogs() plus
+        // the configured resource path would duplicate the current entry), but the bundled driver
+        // ships the Admin API and the connection already carries the credentials, so ask it.
+        List<DatabaseInfo> databases = adminListDatabases();
+        return databases.isEmpty() ? Collections.singletonList(new DatabaseInfo(configuredDatabaseName())) : databases;
+    }
+
+    /**
+     * Lists the sibling databases through {@code DatabaseAdminClient}, which the JDBC connection
+     * exposes via {@code getSpanner()}. Returns an empty list — never throws — when the caller lacks
+     * {@code spanner.databases.list}, when the driver is loaded from a classloader that cannot see
+     * the admin classes, or when anything else about the unwrap fails; {@link #listDatabases()} then
+     * falls back to the connected database alone, which is what shipped before.
+     */
+    private List<DatabaseInfo> adminListDatabases() {
+        try {
+            CloudSpannerJdbcConnection connection = requireConnection().unwrap(CloudSpannerJdbcConnection.class);
+            DatabaseId databaseId = connection.getDatabaseId();
+            String instance = databaseId.getInstanceId().getInstance();
+            List<DatabaseInfo> result = new ArrayList<>();
+            for (Database database : connection.getSpanner().getDatabaseAdminClient().listDatabases(instance).iterateAll()) {
+                // getName(), not getDatabase(): the reported name round-trips as
+                // ConnectParams.database, and only the full resource path builds a valid JDBC URL.
+                // The sidebar shortens it for display through `spannerDisplayDatabase`.
+                result.add(new DatabaseInfo(database.getId().getName()));
+            }
+            result.sort(Comparator.comparing(DatabaseInfo::getName));
+            return result;
+        } catch (Throwable ignored) {
+            return Collections.emptyList();
+        }
+    }
+
+    @Override
+    public List<String> listDataTypes() {
+        // The driver reports GoogleSQL spellings for both dialects except JSON/JSONB, so a
+        // PostgreSQL-dialect database would otherwise offer INT64/STRING/BOOL in the schema-diff
+        // field mapping. Substitute the PostgreSQL names for the types the driver enumerates.
+        List<String> types = super.listDataTypes();
+        if (!postgresDialect) {
+            return types;
+        }
+        List<String> result = new ArrayList<>(types.size());
+        for (String type : types) {
+            result.add(POSTGRES_DIALECT_TYPE_NAMES.getOrDefault(type.toUpperCase(Locale.ROOT), type));
+        }
+        return result;
+    }
+
+    @Override
+    public String getTableDdl(String schema, String table) {
+        String resolved = resolveSchema(schema);
+        List<IndexInfo> indexes;
+        try {
+            indexes = listIndexes(resolved, table);
+        } catch (RuntimeException e) {
+            indexes = Collections.emptyList();
+        }
+        List<ForeignKeyInfo> foreignKeys;
+        try {
+            foreignKeys = listForeignKeys(resolved, table);
+        } catch (RuntimeException e) {
+            foreignKeys = Collections.emptyList();
+        }
+        String tableComment = null;
+        try {
+            tableComment = getTableComment(resolved, table);
+        } catch (RuntimeException e) {
+            // Optional; DDL generation should still succeed without it.
+        }
+        // Same as the inherited implementation except for the quote: it hardcodes ANSI double quotes,
+        // which GoogleSQL reads as a string literal rather than an identifier.
+        return DdlBuilder.buildTableDdl(
+            resolved,
+            table,
+            getColumns(resolved, table),
+            indexes,
+            foreignKeys,
+            Collections.emptyList(),
+            !postgresDialect,
+            false,
+            tableComment
+        );
     }
 
     @Override
@@ -168,14 +276,6 @@ public final class SpannerAgent extends ConfiguredJdbcAgent {
         return spannerForeignKeys(requireConnection(), resolveSchema(schema), table);
     }
 
-    @Override
-    public String getTableDdl(String schema, String table) {
-        // The inherited implementation forwards the schema to DdlBuilder as the qualifier, so it has
-        // to be resolved here too: an unresolved resource path would be rendered as
-        // CREATE TABLE "projects/../databases/db"."singers", while GoogleSQL's empty schema makes
-        // DdlBuilder drop the qualifier entirely.
-        return super.getTableDdl(resolveSchema(schema), table);
-    }
 
     @Override
     public CompletionAssistantResponse completionAssistantSearch(CompletionAssistantRequest request) {

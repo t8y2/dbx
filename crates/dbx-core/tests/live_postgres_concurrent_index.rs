@@ -60,6 +60,7 @@ async fn live_postgres_concurrent_index_builds_valid_index() {
         table_comment: None,
         original_table_comment: None,
         partitioned: false,
+        is_gaussdb_m_mode: false,
     });
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     assert_eq!(
@@ -189,6 +190,7 @@ async fn live_postgres_partitioned_parent_concurrent_request_rejected() {
         table_comment: None,
         original_table_comment: None,
         partitioned: true,
+        is_gaussdb_m_mode: false,
     });
     assert_eq!(
         result.warnings,

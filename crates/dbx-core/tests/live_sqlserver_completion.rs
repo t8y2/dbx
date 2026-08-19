@@ -1006,6 +1006,7 @@ async fn live_sqlserver_table_structure_default_changes_drop_existing_constraint
         table_comment: None,
         original_table_comment: None,
         partitioned: false,
+        is_gaussdb_m_mode: false,
     });
     assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(result.statements.len(), 4);

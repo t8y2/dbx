@@ -7908,7 +7908,14 @@ async fn get_object_source_once(
             } else {
                 let mut client = client.lock().await;
                 let result: db::ObjectSource = client
-                    .get_object_source(database, schema, name, &object_type, agent_metadata_timeout(db_config.as_ref()))
+                    .get_object_source_for_relation(
+                        database,
+                        schema,
+                        name,
+                        &object_type,
+                        relation_name,
+                        agent_metadata_timeout(db_config.as_ref()),
+                    )
                     .await?;
                 return Ok(result);
             }

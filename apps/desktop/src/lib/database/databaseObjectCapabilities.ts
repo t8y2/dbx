@@ -24,10 +24,11 @@ const POSTGRES_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VI
 const POSTGRES_NO_TYPE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE"];
 
 // Kingbase and Vastbase agents support the same user-defined type listing via
-// their own metadata query, but do not expose sequences. Kept separate from
-// POSTGRES_OBJECTS and POSTGRES_LIKE_OBJECTS so unverified PG-like databases
-// (highgo/uxdb/redshift) never advertise TYPE.
-const KINGBASE_VASTBASE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TYPE"];
+// their own metadata query, but do not expose sequences. Kingbase additionally
+// has a verified schema-trigger path; keep Vastbase separate until its Agent
+// exposes the same parent-table-aware metadata contract.
+const KINGBASE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "TYPE"];
+const VASTBASE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TYPE"];
 
 const POSTGRES_LIKE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION"];
 const ORACLE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SYNONYM", "PACKAGE", "PACKAGE_BODY"];
@@ -43,10 +44,10 @@ const DATABASE_TYPE_OBJECTS = new Map<DatabaseType, SidebarObjectKind[]>([
   ["kwdb", POSTGRES_NO_TYPE_OBJECTS],
   ["opengauss", POSTGRES_OBJECTS],
   // postgres like
-  ["kingbase", KINGBASE_VASTBASE_OBJECTS],
+  ["kingbase", KINGBASE_OBJECTS],
   ["highgo", POSTGRES_LIKE_OBJECTS],
   ["uxdb", POSTGRES_LIKE_OBJECTS],
-  ["vastbase", KINGBASE_VASTBASE_OBJECTS],
+  ["vastbase", VASTBASE_OBJECTS],
   ["redshift", POSTGRES_LIKE_OBJECTS],
   // oracle
   ["oracle", ORACLE_OBJECTS],

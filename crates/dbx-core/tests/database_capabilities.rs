@@ -408,3 +408,16 @@ fn kingbase_declares_data_transfer_support() {
     assert!(kingbase.capabilities.table_import);
     assert!(kingbase.capabilities.data_transfer);
 }
+
+#[test]
+fn goldendb_declares_data_transfer_support() {
+    let manifest = driver_manifest();
+    let goldendb = manifest
+        .drivers
+        .iter()
+        .find(|driver| driver.db_type == DatabaseType::Goldendb)
+        .expect("GoldenDB manifest entry");
+
+    assert!(goldendb.capabilities.table_import);
+    assert!(goldendb.capabilities.data_transfer);
+}

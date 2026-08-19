@@ -62,6 +62,12 @@ describe("databaseObjectCapabilities", () => {
     }
   });
 
+  it("exposes schema triggers for Kingbase without widening Vastbase", () => {
+    expect(sidebarObjectKindsForDatabase("kingbase")).toContain("TRIGGER");
+    expect(databaseObjectCapabilities("kingbase").sourceReadable).toContain("TRIGGER");
+    expect(sidebarObjectKindsForDatabase("vastbase")).not.toContain("TRIGGER");
+  });
+
   it("only Xugu TYPE nodes can open object source", () => {
     expect(supportsTypeObjectSource("xugu")).toBe(true);
     for (const dbType of ["postgres", "opengauss", "gaussdb", "kingbase", "vastbase", undefined] as const) {

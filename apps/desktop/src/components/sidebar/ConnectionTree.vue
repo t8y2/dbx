@@ -942,7 +942,7 @@ const stickyHeaderStyle = computed<CSSProperties>(() => {
 
 // Reset tracking when the tree rebuilds (connect/disconnect/collapse) so a
 // stale scrollTop doesn't keep the overlay mounted after a structural change.
-watch(flatNodes, (nodes) => {
+watch(flatNodes, (nodes, previousNodes) => {
   const contextMenuTarget = sidebarContextMenuTarget.value;
   if (contextMenuTarget) {
     const visibleContextMenuTarget = nodes.find(({ node }) => matchesSidebarActionTarget(node, contextMenuTarget))?.node;
@@ -954,6 +954,25 @@ watch(flatNodes, (nodes) => {
   }
   stickyScrollTop.value = 0;
   void nextTick(scheduleSidebarScrollMetricsUpdate);
+  // After a structural change (list grew/shrunk, e.g. a Dameng connection
+  // expands or collapses) reconcile the virtual scroller with the browser's
+  // scroll position. The recycle pool is rebuilt from the live scrollTop, but
+  // scrollTop is only clamped on the next layout, so right after a shrink the
+  // pool can still target a window beyond the new content — the viewport then
+  // lands inside the end spacer and shows a blank region until the next scroll
+  // event. Reading scrollHeight forces that layout (applying the clamp), then
+  // one explicit pool refresh keeps the rendered window aligned. Only needed
+  // when the item count changed; reorders are already rebuilt by the library.
+  if (nodes.length === (previousNodes?.length ?? -1)) return;
+  void nextTick(() => {
+    const scroller = treeScrollerRef.value;
+    if (!scroller || !useVirtualTree.value) return;
+    const el = scroller.$el as HTMLElement | undefined;
+    if (!el) return;
+    const maxScrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
+    if (el.scrollTop > maxScrollTop) el.scrollTop = maxScrollTop;
+    scroller.updateVisibleItems(true);
+  });
 });
 
 const sidebarTreeOverflowClass = computed(() => (settingsStore.editorSettings.sidebarAllowHorizontalScroll ? "overflow-x-auto sidebar-tree-horizontal-scroll" : "overflow-x-hidden"));

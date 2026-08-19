@@ -1310,7 +1310,7 @@ function onKeydown(event: KeyboardEvent) {
     <LightTooltip :text="visibleLabel(node)" :disabled="isTooltipDisabled()" side="right" :side-offset="8" :delay="0" :close-delay="30" :surface="detailTooltip ? 'popover' : 'foreground'">
       <div
         ref="rowRef"
-        class="group flex cursor-default items-center gap-2 py-1 px-2 relative outline-none"
+        class="group flex cursor-default items-center gap-2 min-h-7 py-1 px-2 relative outline-none"
         style="contain: layout style"
         :class="[
           rowWidthClass,

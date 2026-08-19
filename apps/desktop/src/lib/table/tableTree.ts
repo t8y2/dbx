@@ -410,6 +410,10 @@ export function mergeTableTreePageChildren(currentChildren: TreeNode[], pageChil
   const roots = [...currentChildren];
   const nodesByKey = new Map<string, TreeNode>();
   const rootKeys = new Set<string>();
+  // Non-table children (e.g. views in simple-display pagination) have no key
+  // bucket of their own; dedupe them by id so paging drift can never insert
+  // the same node twice. Duplicate ids break the sidebar scroller's key-field.
+  const rootNodeIds = new Set<string>(roots.map((node) => node.id));
 
   const nodeKey = (node: TreeNode) => exactObjectIdentityKey("TABLE", node.schema, node.label);
   const collect = (nodes: readonly TreeNode[]) => {
@@ -484,7 +488,10 @@ export function mergeTableTreePageChildren(currentChildren: TreeNode[], pageChil
 
   const addNode = (node: TreeNode) => {
     if (node.type !== "table") {
-      roots.push(node);
+      if (!rootNodeIds.has(node.id)) {
+        roots.push(node);
+        rootNodeIds.add(node.id);
+      }
       return;
     }
 

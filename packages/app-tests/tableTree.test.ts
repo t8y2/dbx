@@ -13,6 +13,16 @@ function table(name: string, parent?: string): TableInfo {
   };
 }
 
+function view(name: string): TableInfo {
+  return {
+    name,
+    table_type: "VIEW",
+    comment: null,
+    parent_schema: null,
+    parent_name: null,
+  };
+}
+
 function object(name: string, parent?: string): ObjectInfo {
   return {
     name,
@@ -102,6 +112,36 @@ test("mergeTableTreePageChildren attaches later page partitions to loaded parent
   assert.deepEqual(
     partitionGroup(regionPartition!)?.children?.map((node) => node.label),
     ["events_region_0_2026_01"],
+  );
+});
+
+test("mergeTableTreePageChildren dedupes non-table nodes repeated across pages", () => {
+  // Simple-display pagination: a later page can re-return an object the
+  // current children already hold (Dameng agent falls back between metadata
+  // queries, so page boundaries drift). Non-table nodes (views) must not be
+  // inserted twice — duplicate ids break the sidebar scroller's key-field.
+  const firstPage = buildTableTreeNodes({
+    nodeId: "conn:app:public",
+    connectionId: "conn",
+    database: "app",
+    schema: "public",
+    tables: [table("orders"), view("orders_v")],
+  });
+  const driftedPage = buildTableTreeNodes({
+    nodeId: "conn:app:public",
+    connectionId: "conn",
+    database: "app",
+    schema: "public",
+    tables: [view("orders_v"), table("payments")],
+  });
+
+  const merged = mergeTableTreePageChildren(firstPage, driftedPage, "conn", "app");
+  const ids = merged.map((node) => node.id);
+  assert.equal(new Set(ids).size, ids.length, "merged children must not contain duplicate ids");
+  assert.equal(merged.filter((node) => node.type === "view").length, 1, "the repeated view must appear once");
+  assert.deepEqual(
+    merged.map((node) => node.label).sort(),
+    ["orders", "orders_v", "payments"].sort(),
   );
 });
 

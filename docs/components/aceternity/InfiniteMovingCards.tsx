@@ -1,5 +1,3 @@
-"use client";
-
 type Testimonial = {
   name: string;
   role: string;
@@ -17,7 +15,7 @@ export function InfiniteMovingCards({ items, direction = "left", speed = "normal
   const repeatedItems = [...items, ...items];
 
   return (
-    <div className="landing-testimonial-marquee flex overflow-hidden select-none" data-direction={direction} data-speed={speed} aria-label="Testimonials" tabIndex={0}>
+    <div className="landing-testimonial-marquee flex overflow-hidden" data-direction={direction} data-speed={speed} aria-label="Testimonials" tabIndex={0}>
       <div className="landing-testimonial-track flex w-max min-w-full gap-3.5 px-[7px]">
         {repeatedItems.map((item, index) => (
           <figure aria-hidden={index >= items.length} className="landing-testimonial-card flex-[0_0_340px] min-h-[188px] rounded-[9px] m-0 p-[22px] max-[760px]:flex-[0_0_286px] max-[760px]:min-h-[210px] max-[760px]:p-[18px]" key={`${item.name}-${index}`}>

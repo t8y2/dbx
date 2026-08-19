@@ -65,7 +65,7 @@ const AGENT_CATALOG: &[AgentCatalogEntry] = &[
     AgentCatalogEntry {
         db_type: DatabaseType::Kingbase,
         key: "kingbase",
-        label: "人大金仓 KingbaseES",
+        label: "金仓KingbaseES",
         store_visible: true,
         profiles: &[],
     },
@@ -257,6 +257,13 @@ const AGENT_CATALOG: &[AgentCatalogEntry] = &[
         db_type: DatabaseType::Kylin,
         key: "kylin",
         label: "Apache Kylin",
+        store_visible: true,
+        profiles: &[],
+    },
+    AgentCatalogEntry {
+        db_type: DatabaseType::Ignite,
+        key: "ignite",
+        label: "Apache Ignite",
         store_visible: true,
         profiles: &[],
     },

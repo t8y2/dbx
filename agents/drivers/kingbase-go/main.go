@@ -136,10 +136,14 @@ type server struct {
 	usePgDefaultExpression     bool
 	usePgViewDefinition        bool
 	usePgFunctionDefinition    bool
+	useLegacyRoutineDefinition bool
 	catalogIdentityUnsupported bool
 	catalogOIDUnsupported      bool
 	infoColumnTypeUnsupported  bool
 	infoUdtNameUnsupported     bool
+	indexOrdinalityUnsupported bool
+	triggerPrettyUnsupported   bool
+	triggerInternalUnsupported bool
 	currentSchema              string
 	schemaSet                  bool
 	sessions                   map[string]*querySession
@@ -461,13 +465,18 @@ func (s *server) connect(cp connectParams) error {
 	s.db = db
 	s.params = cp
 	s.mode = detectKingbaseMode(db, cp.MySQLCompatMode)
+	s.mode.legacyV7 = detectKingbaseV7(db)
 	s.usePgDefaultExpression = false
 	s.usePgViewDefinition = false
 	s.usePgFunctionDefinition = false
+	s.useLegacyRoutineDefinition = false
 	s.catalogIdentityUnsupported = false
 	s.catalogOIDUnsupported = false
 	s.infoColumnTypeUnsupported = false
 	s.infoUdtNameUnsupported = false
+	s.indexOrdinalityUnsupported = false
+	s.triggerPrettyUnsupported = false
+	s.triggerInternalUnsupported = false
 	return nil
 }
 
@@ -531,10 +540,14 @@ func (s *server) disconnect() error {
 	s.usePgDefaultExpression = false
 	s.usePgViewDefinition = false
 	s.usePgFunctionDefinition = false
+	s.useLegacyRoutineDefinition = false
 	s.catalogIdentityUnsupported = false
 	s.catalogOIDUnsupported = false
 	s.infoColumnTypeUnsupported = false
 	s.infoUdtNameUnsupported = false
+	s.indexOrdinalityUnsupported = false
+	s.triggerPrettyUnsupported = false
+	s.triggerInternalUnsupported = false
 	s.currentSchema = ""
 	s.schemaSet = false
 	if s.db == nil {

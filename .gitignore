@@ -29,6 +29,10 @@ docs/superpowers/
 /docs/aegis/
 src-tauri/*.dylib
 
+# Python
+__pycache__/
+*.py[cod]
+
 # OS files
 .DS_Store
 Thumbs.db

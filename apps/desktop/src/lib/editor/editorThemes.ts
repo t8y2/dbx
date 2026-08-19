@@ -30,6 +30,21 @@ export function sqlSemanticHighlightTheme(EditorView: typeof import("@codemirror
   });
 }
 
+// MongoDB and other shell-style editors keep the SQL grammar, so their `//` comments are decorated
+// manually. The decoration carries the active theme's comment highlight class, so it only has to
+// keep the SQL grammar's colours from leaking through on the tokens it wraps.
+export function shellLineCommentTheme(EditorView: typeof import("@codemirror/view").EditorView): Extension {
+  return EditorView.theme({
+    ".cm-shell-line-comment": {
+      fontStyle: "italic",
+    },
+    ".cm-shell-line-comment *": {
+      color: "inherit !important",
+      fontStyle: "italic",
+    },
+  });
+}
+
 const SUPPORTS_COLOR_MIX = typeof CSS !== "undefined" && typeof CSS.supports === "function" && CSS.supports("color", "color-mix(in oklch, black 50%, white)");
 const SUPPORTS_OKLCH = typeof CSS !== "undefined" && typeof CSS.supports === "function" && CSS.supports("color", "oklch(0.62 0.19 255)");
 

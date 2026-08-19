@@ -66,6 +66,11 @@ export default async function DatabasesPage({ params }: { params: Promise<{ lang
         <ExpandableDatabaseGrid lang={l}>
           {databaseSupport.map((db) => {
             const isCta = "href" in db && db.href;
+            const nameSizeClass = db.name.length >= 14
+              ? "text-[11px] tracking-[-0.035em] max-[760px]:text-[9px]"
+              : db.name.length >= 11
+                ? "text-xs tracking-[-0.015em] max-[760px]:text-[10px]"
+                : "text-sm max-[760px]:text-[11px]";
             const CardTag = isCta ? "a" : "div";
             return (
               <CardTag
@@ -82,7 +87,7 @@ export default async function DatabasesPage({ params }: { params: Promise<{ lang
                     <img src={db.icon} alt="" width={38} height={38} loading="lazy" decoding="async" className="block w-[38px] h-[38px] object-contain max-[760px]:size-7" />
                   )}
                 </div>
-                <strong className={`text-sm font-[650] leading-[1.2] text-center max-[760px]:text-[11px] ${isCta ? "text-landing-blue" : "text-[color-mix(in_srgb,var(--color-landing-ink)_92%,var(--color-landing-muted))]"}`}>{db.name}</strong>
+                <strong className={`block w-full min-w-0 px-1 font-[650] leading-[1.2] text-center [overflow-wrap:anywhere] min-[761px]:whitespace-nowrap ${nameSizeClass} ${isCta ? "text-landing-blue" : "text-[color-mix(in_srgb,var(--color-landing-ink)_92%,var(--color-landing-muted))]"}`}>{db.name}</strong>
               </CardTag>
             );
           })}

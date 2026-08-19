@@ -64,7 +64,8 @@ test("AI model menu separates provider groups from model selections", () => {
   const selectorEnd = source.indexOf("</template>", source.indexOf("</Popover>", selectorStart));
   const selector = source.slice(selectorStart, selectorEnd);
 
-  assert.match(selector, /v-for="\(config, configIndex\) in configuredProviders"/);
+  assert.match(selector, /<div v-for="\(config, configIndex\) in configuredProviders" :key="config\.id" class="relative">/);
+  assert.match(selector, /class="sticky top-0 z-10 flex w-full items-center gap-2 rounded-sm bg-popover/);
   assert.match(selector, /class="ml-5 border-l border-border\/60 pl-1"/);
   assert.match(selector, /v-if="configIndex < configuredProviders\.length - 1" class="my-1 border-t"/);
   assert.doesNotMatch(selector, /bg-accent text-accent-foreground.*config\.id === settings\.activeModel/);

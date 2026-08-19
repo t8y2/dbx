@@ -574,3 +574,40 @@ describe("RedisKeyBrowser loadMore failure handling (PR #6313 review)", () => {
     expect(mocks.redisScanKeysBatch.mock.calls.length).toBeLessThanOrEqual(1 + AUTO_LOAD_MAX_CALLS);
   });
 });
+
+// A group's `loadedLeafCount` only reflects keys the SCAN happened to return
+// before auto-load stopped (see `redisKeyTree.ts`); when the cursor hasn't
+// reached 0 yet, that count is not the folder's real total. Issue #6392: a
+// user compared DBX's tree against `redis-cli --scan` and saw folder counts
+// far below the real per-prefix cardinality, with nothing in the UI hinting
+// the numbers were partial.
+describe("RedisKeyBrowser group key counts reflect incomplete loading (issue #6392)", () => {
+  it("marks a group's count as partial while more keys remain unscanned", async () => {
+    stubNonOverflowingViewport();
+    // cursor never returns to 0, so hasMore stays true even after the
+    // shared auto-load budget is exhausted.
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, cursor: number) => {
+      if (cursor === 0) return Promise.resolve({ cursor: 1, keys: [keyInfo("grp:a"), keyInfo("grp:b")], total_keys: 500 });
+      return Promise.resolve({ cursor: cursor + 1, keys: [], total_keys: 0 });
+    });
+
+    const host = mountBrowser();
+    await settleThoroughly();
+
+    const countBadge = host.querySelector(".text-muted-foreground.ml-1");
+    expect(countBadge?.textContent).toBe("(2+)");
+    expect(countBadge?.getAttribute("title")).toBeTruthy();
+  });
+
+  it("shows an exact count once every key has actually been scanned", async () => {
+    stubNonOverflowingViewport();
+    mocks.redisScanKeysBatch.mockResolvedValue({ cursor: 0, keys: [keyInfo("grp:a"), keyInfo("grp:b")], total_keys: 2 });
+
+    const host = mountBrowser();
+    await settleThoroughly();
+
+    const countBadge = host.querySelector(".text-muted-foreground.ml-1");
+    expect(countBadge?.textContent).toBe("(2)");
+    expect(countBadge?.getAttribute("title")).toBeFalsy();
+  });
+});

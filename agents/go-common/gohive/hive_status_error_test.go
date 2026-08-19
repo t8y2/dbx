@@ -41,3 +41,28 @@ func TestHiveStatusErrorPreservesUsefulServerDiagnostics(t *testing.T) {
 		t.Fatalf("unexpected Hive error payload: %#v", err)
 	}
 }
+
+func TestFetchResultsReadyPollsWhileOperationIsStillExecuting(t *testing.T) {
+	ready, err := fetchResultsReady(&hiveserver.TStatus{
+		StatusCode: hiveserver.TStatusCode_STILL_EXECUTING_STATUS,
+	})
+	if err != nil || ready {
+		t.Fatalf("still-executing fetch must be retried: ready=%v err=%v", ready, err)
+	}
+}
+
+func TestFetchResultsReadyAcceptsSuccessAndRejectsErrors(t *testing.T) {
+	ready, err := fetchResultsReady(&hiveserver.TStatus{
+		StatusCode: hiveserver.TStatusCode_SUCCESS_WITH_INFO_STATUS,
+	})
+	if err != nil || !ready {
+		t.Fatalf("successful fetch was rejected: ready=%v err=%v", ready, err)
+	}
+
+	ready, err = fetchResultsReady(&hiveserver.TStatus{
+		StatusCode: hiveserver.TStatusCode_ERROR_STATUS,
+	})
+	if err == nil || ready || !strings.Contains(err.Error(), "ERROR_STATUS") {
+		t.Fatalf("failed fetch did not preserve the server status: ready=%v err=%v", ready, err)
+	}
+}

@@ -26,7 +26,7 @@ vi.mock("@/stores/productionSafetyStore", () => ({
   useProductionSafetyStore: () => ({}),
 }));
 
-function createEditor(sourceColumns?: Array<string | undefined>, confirmDangerousRowDeletion = true, cacheKey?: string) {
+function createEditor(sourceColumns?: Array<string | undefined>, confirmDangerousRowDeletion = true, cacheKey?: string, readonlyColumnIndexes?: number[]) {
   let editor: ReturnType<typeof useDataGridEditor>;
   const result = ref<{ columns: string[]; rows: CellValue[][] }>({
     columns: ["first", "hidden", "last"],
@@ -49,6 +49,7 @@ function createEditor(sourceColumns?: Array<string | undefined>, confirmDangerou
       primaryKeys: [],
     })),
     sourceColumns: computed(() => sourceColumns),
+    readonlyColumnIndexes: computed(() => (readonlyColumnIndexes ? new Set(readonlyColumnIndexes) : undefined)),
     onExecuteSql: computed(() => undefined),
     sql: computed(() => undefined),
     searchText: ref(""),
@@ -178,6 +179,14 @@ describe("useDataGridEditor appendPastedRowsToNewRow", () => {
       ["Grace", null, "Hopper"],
     ]);
     expect(editor.hasPendingChanges.value).toBe(true);
+  });
+
+  it("keeps explicitly read-only mapped columns out of editing and paste", () => {
+    const editor = createEditor(["first", "hidden", "last"], true, undefined, [0]);
+
+    expect(editor.canEditColumn(0)).toBe(false);
+    expect(editor.canEditColumn(2)).toBe(true);
+    expect(editor.appendPastedRowsToNewRow(-1, [["Ada"]], [0])).toEqual({ ok: false, reason: "readonly-column" });
   });
 
   it("fills following blank new rows before adding more rows", () => {

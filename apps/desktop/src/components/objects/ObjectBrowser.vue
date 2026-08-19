@@ -129,6 +129,8 @@ import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPr
 import { gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
 import { cacheObjectBrowserRows, createObjectBrowserRowsCacheWriteToken, getCachedObjectBrowserRows, type ObjectBrowserRowsCacheScope, type ObjectBrowserRowsCacheWriteToken } from "@/lib/table/objectBrowserRowsCache";
 import { createObjectBrowserRowsLoadGuard, type ObjectBrowserRowsLoadHandle } from "@/lib/table/objectBrowserRowsLoadGuard";
+import { loadObjectDdl, type ObjectDdlRequest } from "@/lib/metadata/objectDdlCache";
+import { loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
 
 type ObjectFilter = ObjectBrowserFilter;
 type ObjectBrowserColumnKey = "select" | "name" | "type" | "estimatedRows" | "totalBytes" | "created_at" | "updated_at" | "comment";
@@ -183,14 +185,19 @@ const sidePanelMode = ref<"table-info" | "source" | "type-info">("source");
 const tableInfoTab = ref<TableInfoTab>("ddl");
 const tableColumns = ref<ColumnInfo[]>([]);
 const tableColumnsLoading = ref(false);
+const tableColumnsLoaded = ref(false);
 const tableDdlContent = ref("");
 const tableDdlLoading = ref(false);
+const tableDdlLoaded = ref(false);
 const tableIndexes = ref<IndexInfo[]>([]);
 const tableIndexesLoading = ref(false);
+const tableIndexesLoaded = ref(false);
 const tableForeignKeys = ref<ForeignKeyInfo[]>([]);
 const tableForeignKeysLoading = ref(false);
+const tableForeignKeysLoaded = ref(false);
 const tableTriggers = ref<TriggerInfo[]>([]);
 const tableTriggersLoading = ref(false);
+const tableTriggersLoaded = ref(false);
 const tableInfoSearchQuery = ref("");
 const tableInfoDdlPreRef = ref<HTMLPreElement | null>(null);
 const SIDE_PANEL_MIN_WIDTH = 280;
@@ -973,6 +980,11 @@ async function openTableInfo(row: ObjectBrowserRow, initialTab?: TableInfoTab) {
   tableIndexes.value = [];
   tableForeignKeys.value = [];
   tableTriggers.value = [];
+  tableColumnsLoaded.value = false;
+  tableDdlLoaded.value = false;
+  tableIndexesLoaded.value = false;
+  tableForeignKeysLoaded.value = false;
+  tableTriggersLoaded.value = false;
   tableInfoSearchQuery.value = "";
   // Determine initial tab: explicit request > previously activated
   const firstTab = initialTab ?? tableInfoTab.value;
@@ -991,93 +1003,132 @@ async function selectTableInfoTab(tab: TableInfoTab) {
   else if (nextTab === "triggers") await fetchTableTriggers();
 }
 
-async function fetchTableDdl() {
+function tableMetadataRequest(row: ObjectBrowserRow): ObjectDdlRequest {
+  return {
+    connectionId: props.connection.id,
+    database: props.database || "",
+    schema: row.schema || selectedSchema.value || props.database,
+    tableName: row.name,
+    objectType: tableDdlObjectType(row.type),
+    catalog: props.catalog,
+  };
+}
+
+async function fetchTableDdl(force = false) {
   const row = sidePanelRow.value;
-  if (!row) return;
+  if (!row || (tableDdlLoaded.value && !force)) return;
   const epoch = sidePanelGuard.capture();
   tableDdlLoading.value = true;
+  let loadedSuccessfully = false;
   try {
-    const schema = row.schema || selectedSchema.value || props.database;
-    const ddl = await api.getTableDisplayDdl(props.connection.id, props.database || "", schema, row.name, tableDdlObjectType(row.type), props.catalog);
+    const { ddl } = await loadObjectDdl(tableMetadataRequest(row), { force });
     if (sidePanelGuard.isStale(epoch)) return;
     tableDdlContent.value = ddl;
+    loadedSuccessfully = true;
   } catch (e: any) {
     if (sidePanelGuard.isStale(epoch)) return;
     tableDdlContent.value = `-- Error: ${e?.message || e}`;
   } finally {
-    if (sidePanelGuard.isFresh(epoch)) tableDdlLoading.value = false;
+    if (sidePanelGuard.isFresh(epoch)) {
+      tableDdlLoaded.value = loadedSuccessfully;
+      tableDdlLoading.value = false;
+    }
   }
 }
 
-async function fetchTableColumns() {
+async function fetchTableColumns(force = false) {
   const row = sidePanelRow.value;
-  if (!row || tableColumns.value.length > 0) return;
+  if (!row || (tableColumnsLoaded.value && !force)) return;
   const epoch = sidePanelGuard.capture();
   tableColumnsLoading.value = true;
+  let loadedSuccessfully = false;
   try {
-    const schema = row.schema || selectedSchema.value || props.database;
-    const columns = await api.getColumns(props.connection.id, props.database || "", schema, row.name, props.catalog);
+    const request = tableMetadataRequest(row);
+    const { value: columns } = await loadObjectMetadataFacet(request, "columns", () => api.getColumns(request.connectionId, request.database, request.schema || request.database, request.tableName, request.catalog), { force });
     if (sidePanelGuard.isStale(epoch)) return;
     tableColumns.value = columns;
-  } catch {
+    loadedSuccessfully = true;
+  } catch (error) {
     if (sidePanelGuard.isStale(epoch)) return;
     tableColumns.value = [];
+    toast(translateBackendError(t, error), 5000);
   } finally {
-    if (sidePanelGuard.isFresh(epoch)) tableColumnsLoading.value = false;
+    if (sidePanelGuard.isFresh(epoch)) {
+      tableColumnsLoaded.value = loadedSuccessfully;
+      tableColumnsLoading.value = false;
+    }
   }
 }
 
-async function fetchTableIndexes() {
+async function fetchTableIndexes(force = false) {
   const row = sidePanelRow.value;
-  if (!row || tableIndexes.value.length > 0) return;
+  if (!row || (tableIndexesLoaded.value && !force)) return;
   const epoch = sidePanelGuard.capture();
   tableIndexesLoading.value = true;
+  let loadedSuccessfully = false;
   try {
-    const schema = row.schema || selectedSchema.value || props.database;
-    const indexes = await api.listIndexes(props.connection.id, props.database || "", schema, row.name, props.catalog);
+    const request = tableMetadataRequest(row);
+    const { value: indexes } = await loadObjectMetadataFacet(request, "indexes", () => api.listIndexes(request.connectionId, request.database, request.schema || request.database, request.tableName, request.catalog), { force });
     if (sidePanelGuard.isStale(epoch)) return;
     tableIndexes.value = indexes;
-  } catch {
+    loadedSuccessfully = true;
+  } catch (error) {
     if (sidePanelGuard.isStale(epoch)) return;
     tableIndexes.value = [];
+    toast(translateBackendError(t, error), 5000);
   } finally {
-    if (sidePanelGuard.isFresh(epoch)) tableIndexesLoading.value = false;
+    if (sidePanelGuard.isFresh(epoch)) {
+      tableIndexesLoaded.value = loadedSuccessfully;
+      tableIndexesLoading.value = false;
+    }
   }
 }
 
-async function fetchTableForeignKeys() {
+async function fetchTableForeignKeys(force = false) {
   const row = sidePanelRow.value;
-  if (!row || tableForeignKeys.value.length > 0) return;
+  if (!row || (tableForeignKeysLoaded.value && !force)) return;
   const epoch = sidePanelGuard.capture();
   tableForeignKeysLoading.value = true;
+  let loadedSuccessfully = false;
   try {
-    const schema = row.schema || selectedSchema.value || props.database;
-    const fks = await api.listForeignKeys(props.connection.id, props.database || "", schema, row.name, props.catalog);
+    const request = tableMetadataRequest(row);
+    const { value: fks } = await loadObjectMetadataFacet(request, "foreign-keys", () => api.listForeignKeys(request.connectionId, request.database, request.schema || request.database, request.tableName, request.catalog), { force });
     if (sidePanelGuard.isStale(epoch)) return;
     tableForeignKeys.value = fks;
-  } catch {
+    loadedSuccessfully = true;
+  } catch (error) {
     if (sidePanelGuard.isStale(epoch)) return;
     tableForeignKeys.value = [];
+    toast(translateBackendError(t, error), 5000);
   } finally {
-    if (sidePanelGuard.isFresh(epoch)) tableForeignKeysLoading.value = false;
+    if (sidePanelGuard.isFresh(epoch)) {
+      tableForeignKeysLoaded.value = loadedSuccessfully;
+      tableForeignKeysLoading.value = false;
+    }
   }
 }
 
-async function fetchTableTriggers() {
+async function fetchTableTriggers(force = false) {
   const row = sidePanelRow.value;
-  if (!row || tableTriggers.value.length > 0) return;
+  if (!row || (tableTriggersLoaded.value && !force)) return;
   const epoch = sidePanelGuard.capture();
   tableTriggersLoading.value = true;
+  let loadedSuccessfully = false;
   try {
-    const schema = row.schema || selectedSchema.value || props.database;
-    const triggers = await api.listTriggers(props.connection.id, props.database || "", schema, row.name, props.catalog);
+    const request = tableMetadataRequest(row);
+    const { value: triggers } = await loadObjectMetadataFacet(request, "triggers", () => api.listTriggers(request.connectionId, request.database, request.schema || request.database, request.tableName, request.catalog), { force });
     if (sidePanelGuard.isStale(epoch)) return;
     tableTriggers.value = triggers;
-  } catch {
+    loadedSuccessfully = true;
+  } catch (error) {
     if (sidePanelGuard.isStale(epoch)) return;
     tableTriggers.value = [];
+    toast(translateBackendError(t, error), 5000);
   } finally {
-    if (sidePanelGuard.isFresh(epoch)) tableTriggersLoading.value = false;
+    if (sidePanelGuard.isFresh(epoch)) {
+      tableTriggersLoaded.value = loadedSuccessfully;
+      tableTriggersLoading.value = false;
+    }
   }
 }
 
@@ -1087,19 +1138,24 @@ async function refreshActiveTableInfo() {
 
   if (tableInfoTab.value === "ddl") {
     tableDdlContent.value = "";
-    await fetchTableDdl();
+    tableDdlLoaded.value = false;
+    await fetchTableDdl(true);
   } else if (tableInfoTab.value === "columns") {
     tableColumns.value = [];
-    await fetchTableColumns();
+    tableColumnsLoaded.value = false;
+    await fetchTableColumns(true);
   } else if (tableInfoTab.value === "indexes") {
     tableIndexes.value = [];
-    await fetchTableIndexes();
+    tableIndexesLoaded.value = false;
+    await fetchTableIndexes(true);
   } else if (tableInfoTab.value === "foreignKeys") {
     tableForeignKeys.value = [];
-    await fetchTableForeignKeys();
+    tableForeignKeysLoaded.value = false;
+    await fetchTableForeignKeys(true);
   } else if (tableInfoTab.value === "triggers") {
     tableTriggers.value = [];
-    await fetchTableTriggers();
+    tableTriggersLoaded.value = false;
+    await fetchTableTriggers(true);
   }
 }
 
@@ -2602,7 +2658,12 @@ function focusSearch(): boolean {
 function onSearchKeydown(event: KeyboardEvent) {
   if (!isCancelSearchShortcut(event)) return;
   event.preventDefault();
+  clearObjectSearch();
+}
+
+function clearObjectSearch() {
   search.value = "";
+  getSearchInput()?.focus();
 }
 
 defineExpose({ focusSearch, refresh });
@@ -2847,7 +2908,10 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       <div class="flex min-w-0 flex-1 items-center gap-2">
         <div class="relative min-w-0 flex-1">
           <Search class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-          <Input v-model="search" data-object-search-input class="h-7 pl-8 text-xs" :placeholder="t('objects.search')" @keydown="onSearchKeydown" />
+          <Input v-model="search" data-object-search-input class="h-7 pl-8 pr-6 text-xs" :placeholder="t('objects.search')" @keydown="onSearchKeydown" />
+          <button v-if="search" type="button" class="absolute right-1.5 top-1/2 flex h-4 w-4 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground" :aria-label="t('common.clear')" @click="clearObjectSearch">
+            <X class="h-3 w-3" />
+          </button>
         </div>
         <div v-if="showObjectFilter" class="flex h-7 shrink-0 items-center rounded border bg-muted/20 p-0.5">
           <button

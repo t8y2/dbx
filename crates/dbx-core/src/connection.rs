@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{watch, Mutex, RwLock};
+use tokio::sync::{watch, Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
 
 use mysql_async::prelude::Queryable;
 use mysql_async::Row as MysqlRow;
@@ -44,6 +44,9 @@ const DEFAULT_AGENT_CONNECT_TIMEOUT_SECS: u64 = 30;
 const ACCESS_AGENT_CONNECT_TIMEOUT_SECS: u64 = 30;
 const POOL_CLOSE_TIMEOUT_SECS: u64 = 3;
 const HEALTH_CHECK_POOL_ACQUIRE_TIMEOUT: Duration = Duration::from_millis(500);
+pub(crate) const METADATA_POOL_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const METADATA_POOL_DEFAULT_LIMIT: usize = 6;
+pub(crate) const METADATA_POOL_SQLSERVER_LIMIT: usize = 1;
 
 mod duckdb_types {
     #[cfg(feature = "duckdb-sidecar")]
@@ -115,6 +118,42 @@ pub enum PoolKind {
 }
 
 impl PoolKind {
+    /// Clone only the handles used by metadata operations so the global pool
+    /// map lock can be released before any database I/O begins.
+    pub(crate) fn clone_for_metadata(&self) -> Option<Self> {
+        match self {
+            Self::Mysql(pool, mode) => Some(Self::Mysql(pool.clone(), *mode)),
+            Self::Postgres(pool) => Some(Self::Postgres(pool.clone())),
+            Self::Sqlite(pool) => Some(Self::Sqlite(pool.clone())),
+            Self::Rqlite(client) => Some(Self::Rqlite(client.clone())),
+            Self::Turso(client) => Some(Self::Turso(client.clone())),
+            Self::CloudflareD1(client) => Some(Self::CloudflareD1(client.clone())),
+            Self::DuckDbWorker(client) => Some(Self::DuckDbWorker(client.clone())),
+            Self::MongoDb(client) => Some(Self::MongoDb(client.clone())),
+            Self::ClickHouse(client) => Some(Self::ClickHouse(client.clone())),
+            Self::SqlServer(client) => Some(Self::SqlServer(client.clone())),
+            Self::Elasticsearch(client) => Some(Self::Elasticsearch(client.clone())),
+            Self::Easysearch(client) => Some(Self::Easysearch(client.clone())),
+            Self::Meilisearch(client) => Some(Self::Meilisearch(client.clone())),
+            Self::HBase(client) => Some(Self::HBase(client.clone())),
+            Self::VectorDb(client) => Some(Self::VectorDb(client.clone())),
+            Self::InfluxDb(client) => Some(Self::InfluxDb(client.clone())),
+            Self::VictoriaMetrics(client) => Some(Self::VictoriaMetrics(client.clone())),
+            Self::Agent(client) => Some(Self::Agent(client.clone())),
+            Self::ExternalDriver { driver_id, config, session } => Some(Self::ExternalDriver {
+                driver_id: driver_id.clone(),
+                config: config.clone(),
+                session: session.clone(),
+            }),
+            Self::MessageQueue => Some(Self::MessageQueue),
+            Self::Nacos => Some(Self::Nacos),
+            Self::Consul(client) => Some(Self::Consul(client.clone())),
+            #[cfg(feature = "mq-admin")]
+            Self::Mqtt(client) => Some(Self::Mqtt(client.clone())),
+            _ => None,
+        }
+    }
+
     pub fn agent(client: db::agent_driver::AgentDriverClient) -> Self {
         Self::Agent(Arc::new(db::agent_driver::PooledAgentClient::new(client)))
     }
@@ -182,6 +221,7 @@ macro_rules! agent_connection_pool_database_type {
             | DatabaseType::Cassandra
             | DatabaseType::Bigquery
             | DatabaseType::Kylin
+            | DatabaseType::Ignite
             | DatabaseType::Sundb
             | DatabaseType::Oscar
             | DatabaseType::Tdengine
@@ -220,6 +260,7 @@ pub struct AppState {
     /// Web 端 owner 为已认证会话 token，不同登录会话互不可见。建池/池重建/
     /// AI/元数据从它读取，前端通过状态接口查询。
     pub session_credentials: SessionCredentialStore,
+    metadata_gates: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
     #[cfg(feature = "mq-admin")]
     pub mq_registry: crate::mq::MqAdminRegistry,
 }
@@ -247,6 +288,32 @@ struct PoolActivity {
 struct ConnectionAttemptState {
     server_attempt: u64,
     client_attempt: Option<u64>,
+}
+
+pub(crate) fn metadata_concurrency_limit(db_type: DatabaseType, max_connections: usize) -> usize {
+    if db_type == DatabaseType::SqlServer {
+        METADATA_POOL_SQLSERVER_LIMIT
+    } else {
+        max_connections.saturating_sub(2).clamp(1, METADATA_POOL_DEFAULT_LIMIT)
+    }
+}
+
+pub(crate) fn uses_metadata_gate(db_type: DatabaseType) -> bool {
+    matches!(db_type, DatabaseType::Mysql | DatabaseType::Postgres | DatabaseType::SqlServer)
+}
+
+fn metadata_gate_key(
+    connection_id: &str,
+    database: Option<&str>,
+    db_type: DatabaseType,
+    client_session_id: Option<&str>,
+) -> String {
+    let session = if db_type == DatabaseType::SqlServer {
+        ""
+    } else {
+        client_session_id.map(str::trim).filter(|session| !session.is_empty()).unwrap_or_default()
+    };
+    format!("{connection_id}\0{}\0{}", database.unwrap_or_default(), session)
 }
 
 struct PoolDrainGuard {
@@ -1090,9 +1157,63 @@ impl AppState {
             postgres_cancel_contexts: Arc::new(RwLock::new(HashMap::new())),
             transaction_sessions: Arc::new(RwLock::new(HashMap::new())),
             session_credentials: SessionCredentialStore::new(),
+            metadata_gates: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(feature = "mq-admin")]
             mq_registry: crate::mq::MqAdminRegistry::new(),
         }
+    }
+
+    pub(crate) async fn acquire_metadata_permit(
+        &self,
+        connection_id: &str,
+        database: Option<&str>,
+        db_type: DatabaseType,
+        client_session_id: Option<&str>,
+    ) -> Result<OwnedSemaphorePermit, String> {
+        let key = metadata_gate_key(connection_id, database, db_type, client_session_id);
+        let max_connections =
+            if client_session_id.map(str::trim).is_some_and(|session| !session.is_empty()) { 1 } else { 10 };
+        let limit = metadata_concurrency_limit(db_type, max_connections);
+        let gate = {
+            let mut gates = self.metadata_gates.lock().await;
+            gates.entry(key.clone()).or_insert_with(|| Arc::new(Semaphore::new(limit))).clone()
+        };
+        let started = Instant::now();
+        let queued = gate.available_permits() == 0;
+        let permit = match tokio::time::timeout(METADATA_POOL_ACQUIRE_TIMEOUT, gate.acquire_owned()).await {
+            Ok(Ok(permit)) => permit,
+            Ok(Err(_)) => return Err(crate::query::METADATA_POOL_BUSY_ERROR.to_string()),
+            Err(_) => {
+                log::warn!(
+                    "[metadata:pool:busy] connection_id={} database={} wait_ms={} limit={}",
+                    connection_id,
+                    database.unwrap_or_default(),
+                    started.elapsed().as_millis(),
+                    limit
+                );
+                return Err(crate::query::METADATA_POOL_BUSY_ERROR.to_string());
+            }
+        };
+        if queued {
+            log::debug!(
+                "[metadata:pool:acquired] connection_id={} database={} wait_ms={} limit={}",
+                connection_id,
+                database.unwrap_or_default(),
+                started.elapsed().as_millis(),
+                limit
+            );
+        }
+        Ok(permit)
+    }
+
+    async fn clear_metadata_gates_for_connection(&self, connection_id: &str) {
+        let prefix = format!("{connection_id}\0");
+        self.metadata_gates.lock().await.retain(|key, _| !key.starts_with(&prefix));
+    }
+
+    async fn clear_metadata_gate_for_database(&self, connection_id: &str, database: Option<&str>) {
+        let prefix = format!("{connection_id}\0{}\0", database.unwrap_or_default());
+        self.metadata_gates.lock().await.retain(|key, _| !key.starts_with(&prefix));
     }
 
     pub fn jdbc_unavailable_error(&self) -> String {
@@ -3020,18 +3141,18 @@ impl AppState {
                 PoolKind::Mysql(pool, _) => {
                     let pool = pool.clone();
                     drop(connections);
-                    match tokio::time::timeout(HEALTH_CHECK_POOL_ACQUIRE_TIMEOUT, pool.get_conn()).await {
+                    match db::mysql::checkout_mysql_conn(&pool, HEALTH_CHECK_POOL_ACQUIRE_TIMEOUT).await {
                         // Pool saturation means active work, not a dead connection. Removing this pool would
                         // start a competing reconnect while foreground queries and metadata are still running.
-                        Err(_) => {
-                            log::debug!("MySQL connection pool '{pool_key}' is busy; skipping health probe");
+                        Err(err) if err.is_pool_saturation() => {
+                            log::debug!("MySQL connection pool '{pool_key}' is busy; skipping health probe: {err}");
                             false
                         }
-                        Ok(Err(err)) => {
+                        Err(err) => {
                             log::warn!("MySQL connection pool '{pool_key}' is stale: {err}");
                             true
                         }
-                        Ok(Ok(mut conn)) => {
+                        Ok(mut conn) => {
                             let timeout = crate::db::connection_timeout();
                             match tokio::time::timeout(timeout, conn.ping()).await {
                                 Ok(Ok(())) => false,
@@ -3051,8 +3172,14 @@ impl AppState {
                     let pool = pool.clone();
                     drop(connections);
                     let timeout = crate::db::connection_timeout();
-                    match tokio::time::timeout(HEALTH_CHECK_POOL_ACQUIRE_TIMEOUT, pool.get()).await {
-                        Ok(Ok(client)) => match tokio::time::timeout(timeout, client.simple_query("SELECT 1")).await {
+                    match db::postgres::checkout_postgres_client_classified(
+                        &pool,
+                        None,
+                        HEALTH_CHECK_POOL_ACQUIRE_TIMEOUT,
+                    )
+                    .await
+                    {
+                        Ok(client) => match tokio::time::timeout(timeout, client.simple_query("SELECT 1")).await {
                             Ok(Ok(_)) => false,
                             Ok(Err(err)) => {
                                 log::warn!("PostgreSQL connection pool '{pool_key}' is stale: {err}");
@@ -3063,13 +3190,15 @@ impl AppState {
                                 true
                             }
                         },
-                        Ok(Err(err)) => {
+                        Err(err) if err.is_pool_saturation() => {
+                            log::debug!(
+                                "PostgreSQL connection pool '{pool_key}' is busy; skipping health probe: {err}"
+                            );
+                            false
+                        }
+                        Err(err) => {
                             log::warn!("PostgreSQL connection pool '{pool_key}' is stale: {err}");
                             true
-                        }
-                        Err(_) => {
-                            log::debug!("PostgreSQL connection pool '{pool_key}' is busy; skipping health probe");
-                            false
                         }
                     }
                 }
@@ -3741,6 +3870,7 @@ impl AppState {
         }
         drop(conns);
         let closed = !removed.is_empty();
+        self.clear_metadata_gate_for_database(connection_id, database).await;
         for (key, pool) in removed {
             self.pool_routing_control().close_pool_with_timeout(key, pool).await;
         }
@@ -4033,32 +4163,38 @@ impl AppState {
             let healthy = match pool {
                 PoolKind::Mysql(p, _) => match db::mysql::get_conn_with_health_check(p).await {
                     Ok(_) => true,
+                    Err(e) if crate::query::is_pool_saturation_error(&e) => {
+                        log::debug!("MySQL connection pool '{key}' is busy; skipping health probe: {e}");
+                        true
+                    }
                     Err(e) => {
                         log::warn!("MySQL connection pool '{key}' is unhealthy: {e}");
                         false
                     }
                 },
-                PoolKind::Postgres(p) => match tokio::time::timeout(timeout, p.get()).await {
-                    Ok(Ok(client)) => match tokio::time::timeout(timeout, client.simple_query("SELECT 1")).await {
-                        Ok(Ok(_)) => true,
-                        Ok(Err(e)) => {
-                            log::warn!("PostgreSQL connection pool '{key}' is unhealthy: {e}");
+                PoolKind::Postgres(p) => {
+                    match db::postgres::checkout_postgres_client_classified(p, None, timeout).await {
+                        Ok(client) => match tokio::time::timeout(timeout, client.simple_query("SELECT 1")).await {
+                            Ok(Ok(_)) => true,
+                            Ok(Err(e)) => {
+                                log::warn!("PostgreSQL connection pool '{key}' is unhealthy: {e}");
+                                false
+                            }
+                            Err(_) => {
+                                log::warn!("PostgreSQL connection pool '{key}' is unhealthy: health check timed out");
+                                false
+                            }
+                        },
+                        Err(error) if error.is_pool_saturation() => {
+                            log::debug!("PostgreSQL connection pool '{key}' is busy; skipping health probe: {error}");
+                            true
+                        }
+                        Err(error) => {
+                            log::warn!("PostgreSQL connection pool '{key}' is unhealthy: {error}");
                             false
                         }
-                        Err(_) => {
-                            log::warn!("PostgreSQL connection pool '{key}' is unhealthy: health check timed out");
-                            false
-                        }
-                    },
-                    Ok(Err(e)) => {
-                        log::warn!("PostgreSQL connection pool '{key}' is unhealthy: {e}");
-                        false
                     }
-                    Err(_) => {
-                        log::warn!("PostgreSQL connection pool '{key}' is unhealthy: get connection timed out");
-                        false
-                    }
-                },
+                }
                 PoolKind::SqlServer(client) => {
                     let mut client = client.lock().await;
                     match db::sqlserver::test_connection(&mut client).await {
@@ -4279,11 +4415,13 @@ impl AppState {
 
     pub async fn remove_connection_pools(&self, connection_id: &str) {
         let removed = self.drain_connection_pools(connection_id).await;
+        self.clear_metadata_gates_for_connection(connection_id).await;
         self.pool_routing_control().close_removed(removed).await;
     }
 
     pub async fn remove_connection_pools_detached(&self, connection_id: &str) {
         let removed = self.drain_connection_pools(connection_id).await;
+        self.clear_metadata_gates_for_connection(connection_id).await;
         self.pool_routing_control().close_removed_in_background(removed);
     }
 
@@ -4302,6 +4440,7 @@ impl AppState {
         self.session_credentials.clear_pool_owners();
         self.postgres_cancel_contexts.write().await.clear();
         self.draining_pools.lock().unwrap_or_else(|error| error.into_inner()).clear();
+        self.metadata_gates.lock().await.clear();
         self.connections.write().await.drain().collect()
     }
 
@@ -6856,6 +6995,37 @@ mod tests {
         assert_eq!(super::mysql_pool_max_connections_for_session(None), 10);
         assert_eq!(super::mysql_pool_max_connections_for_session(Some("")), 10);
         assert_eq!(super::mysql_pool_max_connections_for_session(Some("tab-1")), 1);
+    }
+
+    #[test]
+    fn metadata_concurrency_reserves_query_capacity() {
+        assert_eq!(super::metadata_concurrency_limit(DatabaseType::Mysql, 10), 6);
+        assert_eq!(super::metadata_concurrency_limit(DatabaseType::Postgres, 10), 6);
+        assert_eq!(super::metadata_concurrency_limit(DatabaseType::Mysql, 3), 1);
+        assert_eq!(super::metadata_concurrency_limit(DatabaseType::Postgres, 1), 1);
+        assert_eq!(super::metadata_concurrency_limit(DatabaseType::SqlServer, 10), 1);
+    }
+
+    #[test]
+    fn metadata_gate_is_limited_to_supported_pool_drivers() {
+        assert!(super::uses_metadata_gate(DatabaseType::Mysql));
+        assert!(super::uses_metadata_gate(DatabaseType::Postgres));
+        assert!(super::uses_metadata_gate(DatabaseType::SqlServer));
+        assert!(!super::uses_metadata_gate(DatabaseType::Oracle));
+        assert!(!super::uses_metadata_gate(DatabaseType::Sqlite));
+        assert!(!super::uses_metadata_gate(DatabaseType::MongoDb));
+    }
+
+    #[test]
+    fn sqlserver_metadata_gate_is_shared_across_client_sessions() {
+        assert_eq!(
+            super::metadata_gate_key("conn", Some("app"), DatabaseType::SqlServer, Some("metadata-1")),
+            super::metadata_gate_key("conn", Some("app"), DatabaseType::SqlServer, Some("metadata-2"))
+        );
+        assert_ne!(
+            super::metadata_gate_key("conn", Some("app"), DatabaseType::Mysql, Some("tab-1")),
+            super::metadata_gate_key("conn", Some("app"), DatabaseType::Mysql, Some("tab-2"))
+        );
     }
 
     #[test]

@@ -128,6 +128,33 @@ describe("useSqlExecution", () => {
     setActivePinia(createPinia());
   });
 
+  it("invalidates object metadata after successful connection-level DDL", async () => {
+    const sql = "CREATE DATABASE app_db";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab(), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("mysql"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const connectionStore = useConnectionStore();
+    vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (activeTab.value) activeTab.value.result = { columns: [], rows: [], affected_rows: 1, execution_time_ms: 1 };
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+    const invalidateMetadata = vi.spyOn(connectionStore, "invalidateMetadataCache");
+    const loadDatabases = vi.spyOn(connectionStore, "loadDatabases").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+
+    await execution.tryExecute();
+
+    expect(invalidateMetadata).toHaveBeenCalledWith("conn-1");
+    expect(loadDatabases).toHaveBeenCalledWith("conn-1", { force: true });
+  });
+
   it("sends every placeholder syntax and @set unchanged when substitution is disabled", async () => {
     const sql = ["@set tenant = 42;", "SELECT ?, :named, ${shell}, #{mybatis}, @sqlserver, @tenant;"].join("\n");
     const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });
@@ -668,6 +695,69 @@ SELECT @value AS Message;`;
     expect(execution.showSqlParameterDialog.value).toBe(false);
     expect(execution.sqlParameterNames.value).toEqual([]);
     expect(executeCurrentSql).toHaveBeenCalledWith(sql, {});
+  });
+
+  it.each([
+    {
+      label: "JDBC MySQL",
+      config: {
+        ...connection("jdbc"),
+        driver_label: "MySQL JDBC",
+        connection_string: "jdbc:mysql://127.0.0.1:3306/app",
+      },
+    },
+    {
+      label: "GBase MySQL compatibility",
+      config: {
+        ...connection("gbase"),
+        driver_profile: "gbase",
+        driver_label: "GBase 8a",
+      },
+    },
+  ])("executes $label cursor procedures from the gutter without opening the parameter dialog", async ({ config }) => {
+    const sql = `CREATE PROCEDURE process_orders()
+      BEGIN
+        DECLARE done INT DEFAULT FALSE;
+        DECLARE order_id INT;
+        DECLARE cur_orders CURSOR FOR SELECT id FROM orders;
+        DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = TRUE;
+        OPEN cur_orders;
+        read_loop:LOOP
+          FETCH cur_orders INTO order_id;
+          IF done THEN LEAVE read_loop; END IF;
+        END LOOP read_loop;
+        CLOSE cur_orders;
+      END`;
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(config);
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const executeCurrentSql = vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (activeTab.value) activeTab.value.result = { columns: [], rows: [], affected_rows: 0, execution_time_ms: 1 };
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+    vi.spyOn(useConnectionStore(), "refreshObjectListTreeNode").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      resolveExecutableSql: async () => sql,
+      activeOutputView,
+    });
+
+    await execution.tryExecute({
+      fullSql: sql,
+      selectedSql: sql,
+      cursorPos: 0,
+      selectionFrom: 0,
+      selectionTo: sql.length,
+      editorViewportRequestId: 1,
+    });
+
+    expect(execution.showSqlParameterDialog.value).toBe(false);
+    expect(execution.sqlParameterNames.value).toEqual([]);
+    expect(executeCurrentSql).toHaveBeenCalledWith(sql, { sourceOffset: 0, onExecutionStarted: expect.any(Function) });
   });
 
   it("sends Doris STRUCT DDL unchanged without opening the parameter dialog", async () => {

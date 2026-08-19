@@ -41,7 +41,7 @@ const extraAliases = {
   doris: ["selectdb"],
   manticoresearch: ["manticore"],
   dameng: ["dm8", "dameng", "达梦"],
-  kingbase: ["kingbasees", "kingbase", "人大金仓", "金仓"],
+  kingbase: ["kingbasees", "kingbase", "人大金仓", "金仓", "电科金仓"],
   highgo: ["瀚高"],
   yashandb: ["yashan", "崖山"],
   saphana: ["hana", "sap hana"],

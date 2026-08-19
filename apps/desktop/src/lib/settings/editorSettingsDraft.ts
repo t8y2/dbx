@@ -34,6 +34,8 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "showColumnTypesInHeader",
   "dataGridShowTransposeFieldMetadata",
   "colorizeDataGridCellTypes",
+  "dataGridTypeColorSchemes",
+  "activeDataGridTypeColorSchemeId",
   "showIndexIndicatorsInHeader",
   "compactColumnHeaderActions",
   "dataGridQuickEntry",

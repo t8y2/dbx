@@ -1,4 +1,5 @@
 import type { DataGridTypeVisualKind } from "@/lib/dataGrid/dataGridColumnType";
+import { DATA_GRID_TYPE_COLOR_KEYS, dataGridTypeColorCssVar, defaultDataGridTypeColors } from "@/lib/dataGrid/dataGridTypeColorScheme";
 
 export type DataGridTypeForegrounds = Record<DataGridTypeVisualKind, string>;
 
@@ -271,18 +272,11 @@ export function resolveDataGridPaintTheme(options: { getVar: (name: string) => s
   const rowNumberDeleted = isDark ? DATA_GRID_DARK_ROW_NUMBER_DELETED_BG : DATA_GRID_LIGHT_ROW_NUMBER_DELETED_BG;
   const rowNumberActive = activeSurface;
   const rowNumberSelected = isDark ? "rgb(30, 64, 96)" : "rgb(191, 219, 254)";
-  const typeForegrounds: DataGridTypeForegrounds = {
-    integer: paintToken(getVar, "--data-grid-type-integer-fg", isDark ? "#93c5fd" : "#1d4ed8"),
-    numeric: paintToken(getVar, "--data-grid-type-numeric-fg", isDark ? "#67e8f9" : "#0e7490"),
-    string: paintToken(getVar, "--data-grid-type-string-fg", isDark ? "#86efac" : "#166534"),
-    boolean: paintToken(getVar, "--data-grid-type-boolean-fg", isDark ? "#fdba74" : "#c2410c"),
-    temporal: paintToken(getVar, "--data-grid-type-temporal-fg", isDark ? "#d8b4fe" : "#7e22ce"),
-    structured: paintToken(getVar, "--data-grid-type-structured-fg", isDark ? "#f9a8d4" : "#be185d"),
-    identifier: paintToken(getVar, "--data-grid-type-identifier-fg", isDark ? "#fcd34d" : "#92400e"),
-    binary: paintToken(getVar, "--data-grid-type-binary-fg", isDark ? "#fca5a5" : "#b91c1c"),
-    spatial: paintToken(getVar, "--data-grid-type-spatial-fg", isDark ? "#6ee7b7" : "#047857"),
-    unknown: foreground,
-  };
+  const typeDefaults = defaultDataGridTypeColors(isDark);
+  const typeForegrounds = { unknown: foreground } as DataGridTypeForegrounds;
+  for (const key of DATA_GRID_TYPE_COLOR_KEYS) {
+    typeForegrounds[key] = paintToken(getVar, dataGridTypeColorCssVar(key), typeDefaults[key]);
+  }
 
   return {
     background,

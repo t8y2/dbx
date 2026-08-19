@@ -1849,6 +1849,17 @@ pub async fn export_database_sql_core(
     request: &DatabaseExportRequest,
     on_progress: impl Fn(ExportProgress) + Sync,
 ) -> Result<(), String> {
+    // Keep the large export state machine on the heap. Besides making the
+    // caller future small, this prevents the metadata-prefetch locals from
+    // exhausting the bounded stack used by test and runtime worker threads.
+    Box::pin(export_database_sql_core_inner(state, request, on_progress)).await
+}
+
+async fn export_database_sql_core_inner(
+    state: &crate::connection::AppState,
+    request: &DatabaseExportRequest,
+    on_progress: impl Fn(ExportProgress) + Sync,
+) -> Result<(), String> {
     let _snapshot_keep_alive = if let Some(snapshot_session_id) = request.snapshot_session_id.as_deref() {
         Some(crate::query::keep_manual_transaction_alive(state, snapshot_session_id).await?)
     } else {
@@ -1869,12 +1880,15 @@ pub async fn export_database_sql_core(
 
     // 2. Get pool
     let client_session_id = database_export_client_session_id(&request.export_id);
-    let pool_key = state
-        .get_or_create_pool_for_session(&request.connection_id, Some(&request.database), Some(&client_session_id))
-        .await?;
+    let pool_key = Box::pin(state.get_or_create_pool_for_session(
+        &request.connection_id,
+        Some(&request.database),
+        Some(&client_session_id),
+    ))
+    .await?;
 
     // 3. List tables
-    let all_tables = crate::schema::list_tables_core(
+    let all_tables = Box::pin(crate::schema::list_tables_core(
         state,
         &request.connection_id,
         &request.database,
@@ -1884,7 +1898,7 @@ pub async fn export_database_sql_core(
         None,
         None,
         None,
-    )
+    ))
     .await?;
     // 4. Create file
     let mut expected_destination_dev = None;

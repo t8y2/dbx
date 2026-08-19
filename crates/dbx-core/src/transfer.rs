@@ -1170,12 +1170,17 @@ pub fn sqlserver_object_ddl_from_result(
         _ => Err(format!("SQL Server object DDL not supported for {:?}", kind)),
     }
 }
-pub fn rewrite_oracle_schema_qualifier(ddl: &str, source_schema: &str, target_schema: &str) -> String {
+fn rewrite_double_quoted_schema_qualifier(ddl: &str, source_schema: &str, target_schema: &str) -> String {
     if source_schema == target_schema || source_schema.is_empty() {
         return ddl.to_string();
     }
-    let re = Regex::new(&format!(r#""{}"\."#, regex::escape(source_schema))).unwrap();
-    re.replace_all(ddl, &format!("\"{target_schema}\".")).to_string()
+    let source = format!("\"{}\".", source_schema.replace('"', "\"\""));
+    let target = format!("\"{}\".", target_schema.replace('"', "\"\""));
+    map_sql_code_spans(ddl, false, |code| code.replace(&source, &target))
+}
+
+pub fn rewrite_oracle_schema_qualifier(ddl: &str, source_schema: &str, target_schema: &str) -> String {
+    rewrite_double_quoted_schema_qualifier(ddl, source_schema, target_schema)
 }
 
 pub(crate) fn quote_postgres_string_literal(value: &str) -> String {
@@ -3563,6 +3568,8 @@ fn rewrite_transfer_source_table_ddl(
 ) -> String {
     if is_postgres_family_target(source_db_type) && is_postgres_family_target(target_db_type) {
         rewrite_postgres_schema_qualified_references(sql, source_schema, target_schema)
+    } else if matches!((source_db_type, target_db_type), (DatabaseType::Dameng, DatabaseType::Dameng)) {
+        rewrite_double_quoted_schema_qualifier(sql, source_schema, target_schema)
     } else {
         sql.to_string()
     }
@@ -8462,10 +8469,18 @@ mod tests {
 
         #[test]
         fn rewrites_oracle_schema_qualifiers() {
-            let ddl = "CREATE OR REPLACE TRIGGER \"HR\".\"TRG1\" ...";
+            let ddl = concat!(
+                "CREATE OR REPLACE TRIGGER \"HR\".\"TRG1\" ... '\"HR\".literal';\n",
+                "-- keep \"HR\".line_comment\n",
+                "/* keep \"HR\".block_comment */",
+            );
             assert_eq!(
                 rewrite_oracle_schema_qualifier(ddl, "HR", "APP"),
-                "CREATE OR REPLACE TRIGGER \"APP\".\"TRG1\" ..."
+                concat!(
+                    "CREATE OR REPLACE TRIGGER \"APP\".\"TRG1\" ... '\"HR\".literal';\n",
+                    "-- keep \"HR\".line_comment\n",
+                    "/* keep \"HR\".block_comment */",
+                )
             );
         }
     }
@@ -9593,6 +9608,36 @@ mod tests {
         assert!(rewritten.contains("CREATE TABLE \"dst\".\"items\""));
         assert!(rewritten.contains("COMMENT ON COLUMN \"dst\".\"items\".\"id\""));
         assert!(!rewritten.contains("\"src\".\"items\""));
+    }
+
+    #[test]
+    fn dameng_transfer_reused_table_ddl_rewrites_only_code_schema_qualifiers() {
+        let ddl = concat!(
+            "CREATE TABLE \"SRC\".\"items\" (\"note\" VARCHAR(100) DEFAULT '\"SRC\".literal');\n",
+            "COMMENT ON TABLE \"SRC\".\"items\" IS '\"SRC\".comment';\n",
+            "-- keep \"SRC\".line_comment\n",
+            "/* keep \"SRC\".block_comment */\n",
+            "ALTER TABLE \"SRC\".\"items\" ADD \"value\" INTEGER;",
+        );
+
+        let rewritten =
+            rewrite_transfer_source_table_ddl(ddl, "SRC", "DST", &DatabaseType::Dameng, &DatabaseType::Dameng);
+
+        assert!(rewritten.contains("CREATE TABLE \"DST\".\"items\""));
+        assert!(rewritten.contains("COMMENT ON TABLE \"DST\".\"items\""));
+        assert!(rewritten.contains("ALTER TABLE \"DST\".\"items\""));
+        assert!(rewritten.contains("'\"SRC\".literal'"));
+        assert!(rewritten.contains("'\"SRC\".comment'"));
+        assert!(rewritten.contains("-- keep \"SRC\".line_comment"));
+        assert!(rewritten.contains("/* keep \"SRC\".block_comment */"));
+        assert_eq!(
+            rewrite_transfer_source_table_ddl(ddl, "SRC", "SRC", &DatabaseType::Dameng, &DatabaseType::Dameng),
+            ddl
+        );
+        assert_eq!(
+            rewrite_transfer_source_table_ddl(ddl, "", "DST", &DatabaseType::Dameng, &DatabaseType::Dameng),
+            ddl
+        );
     }
 
     #[test]

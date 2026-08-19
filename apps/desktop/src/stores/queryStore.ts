@@ -3449,7 +3449,7 @@ export const useQueryStore = defineStore("query", () => {
   /**
    * Resolve multi-source result columns (by projection ordinal) back to exactly
    * one base column per source, then surface the resolved column comments and a
-   * display-only result->source mapping. Reuses the same database-aware binder
+   * result->source mapping. Reuses the same database-aware binder
    * as the editability analysis, so `name AS username` (uniquely resolvable
    * unqualified alias) maps back to its physical column and quoted mixed-case
    * identifiers keep exact casing. Ambiguous or unresolved columns yield
@@ -3478,14 +3478,31 @@ export const useQueryStore = defineStore("query", () => {
     return { comments, mapping };
   }
 
+  function mysqlColumnIsGenerated(column: { extra: string | null }): boolean {
+    const extra = column.extra?.trim().toLowerCase() ?? "";
+    return extra.includes("virtual generated") || extra.includes("stored generated");
+  }
+
+  function groupedByExactlyOneSourcePrimaryKey(loaded: LoadedEditableSource, groupByRefs: Array<QueryResultSourceColumnRef | undefined>): boolean {
+    const primaryKeys = loaded.tableMeta.primaryKeys;
+    if (!primaryKeys.length || groupByRefs.length !== primaryKeys.length) return false;
+    const groupedColumns = groupByRefs.flatMap((ref) => (ref?.sourceKey === loaded.source.key ? [ref.sourceColumn] : []));
+    return groupedColumns.length === primaryKeys.length && new Set(groupedColumns).size === primaryKeys.length && primaryKeys.every((primaryKey) => groupedColumns.includes(primaryKey));
+  }
+
   function canInsertIntoEditableQuerySource(tab: QueryTab, databaseType: DatabaseType | undefined, loaded: LoadedEditableSource, sourceColumns: readonly (string | undefined)[] | undefined): boolean {
     if (!canInsertTableRows(databaseType) || !sourceColumns?.length || !sourceColumns.every(Boolean)) return false;
-    const knownTableType =
+    const knownTableType = knownEditableQuerySourceTableType(tab, loaded);
+    return !knownTableType?.toUpperCase().includes("VIEW");
+  }
+
+  function knownEditableQuerySourceTableType(tab: QueryTab, loaded: LoadedEditableSource): string | undefined {
+    return (
       loaded.tableMeta.tableType ??
       useConnectionStore()
         .lookupLocalCompletionTables(tab.connectionId!, loaded.tableMeta.database ?? tab.database, loaded.tableMeta.tableName, 20, loaded.tableMeta.schema, loaded.tableMeta.catalog)
-        .find((table) => table.name.toLowerCase() === loaded.tableMeta.tableName.toLowerCase())?.type;
-    return !knownTableType?.toUpperCase().includes("VIEW");
+        .find((table) => table.name.toLowerCase() === loaded.tableMeta.tableName.toLowerCase())?.type
+    );
   }
 
   interface EditableQueryExecutionPreparation {
@@ -3587,10 +3604,10 @@ export const useQueryStore = defineStore("query", () => {
         tableName: target.request.tableName,
         tableType: loadedColumns.tableType,
         columns: loadedColumns.columns,
-        // Display-only enrichment never resolves row identity (indexes), so
-        // there are no primary keys to carry; resolveMultiSourceColumnInfo only
-        // consumes `source` + `columns`.
-        primaryKeys: [],
+        // MySQL getColumns already marks declared primary-key columns. Keep the
+        // columns-only path free of index discovery while allowing grouped
+        // results to prove that one physical row is uniquely identifiable.
+        primaryKeys: target.request.databaseType === "mysql" && target.request.driverProfile === "mysql" ? loadedColumns.columns.filter((column) => column.is_primary_key).map((column) => column.name) : [],
       },
     };
   }
@@ -3726,15 +3743,12 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   /**
-   * Display-only result-column enrichment for aggregated (GROUP BY / HAVING)
-   * results: parse the SELECT structure, load every source table's metadata,
-   * resolve each result column back to exactly one base-table column by
-   * projection ordinal, and return the resolved comments + display mapping.
-   * Best-effort by design: returns `undefined` when the statement cannot be
-   * structurally parsed or source metadata cannot be loaded — the query result
-   * itself and editability are never affected.
+   * Resolve grouped result columns by projection ordinal. All databases use the
+   * mapping for comments. MySQL may additionally edit direct columns from one
+   * uniquely identifiable base table; aggregate expressions and columns from
+   * every other source remain read-only.
    */
-  async function resolveAggregationDisplayColumnInfo(tab: QueryTab, sql: string, executionDatabase: string, traceId: string | undefined): Promise<{ comments: Array<string | undefined>; mapping: Array<QueryResultSourceColumnRef | undefined> } | undefined> {
+  async function resolveAggregationQueryMetadata(tab: QueryTab, sql: string, executionDatabase: string, traceId: string | undefined): Promise<QueryMetadataPatch | undefined> {
     if (tab.mode !== "query" || !tab.connectionId || !tab.result || !tab.result.columns.length) return undefined;
     const conn = useConnectionStore().getConfig(tab.connectionId);
     const dbType = conn?.db_type || "";
@@ -3763,7 +3777,63 @@ export const useQueryStore = defineStore("query", () => {
           }),
         ),
       );
-      return resolveMultiSourceColumnInfo(dbType, analysis, tab.result.columns, loadedSources);
+      const displayInfo = resolveMultiSourceColumnInfo(dbType, analysis, tab.result.columns, loadedSources);
+      const readOnlyPatch: QueryMetadataPatch = {
+        queryAnalysis: undefined,
+        querySourceColumns: undefined,
+        queryEditabilityReason: "aggregation",
+        tableMeta: undefined,
+        resultColumnComments: displayInfo.comments,
+        queryDisplaySourceColumns: displayInfo.mapping,
+      };
+      if (dbType !== "mysql" || (conn?.driver_profile || conn?.db_type) !== "mysql") return readOnlyPatch;
+      // Mutation safety boundary: the FROM root must remain on the preserved
+      // side of the join tree, and GROUP BY must resolve to exactly that table's
+      // declared primary key. This makes every editable result row identify one
+      // physical root row even when joined rows are collapsed by aggregation.
+      if (analysis.distinct || analysis.hasHavingClause || analysis.hasWindowClause || analysis.hasRightJoinClause || !analysis.groupByColumns?.length) return readOnlyPatch;
+
+      const groupByRefs = resolveSourceColumnsByOrdinal(
+        dbType,
+        { ...analysis, selectStar: false, columns: analysis.groupByColumns },
+        loadedSources.map((loaded) => ({ source: loaded.source, columns: loaded.tableMeta.columns })),
+        analysis.groupByColumns.length,
+      );
+
+      const candidates = loadedSources
+        .map((loaded) => {
+          const sourceColumns = displayInfo.mapping.map((ref) => {
+            if (ref?.sourceKey !== loaded.source.key) return undefined;
+            const column = loaded.tableMeta.columns.find((candidate) => candidate.name === ref.sourceColumn);
+            return column && !mysqlColumnIsGenerated(column) ? ref.sourceColumn : undefined;
+          });
+          const primaryKeySet = new Set(loaded.tableMeta.primaryKeys);
+          const hasCompletePrimaryKey = loaded.tableMeta.primaryKeys.length > 0 && loaded.tableMeta.primaryKeys.every((primaryKey) => sourceColumns.includes(primaryKey));
+          const editableSourceColumnCount = sourceColumns.filter((column) => column && !primaryKeySet.has(column)).length;
+          const hasExactPrimaryKeyGrouping = groupedByExactlyOneSourcePrimaryKey(loaded, groupByRefs);
+          return { ...loaded, sourceColumns, isRootSource: loaded.source.key === sources[0]!.key, hasCompletePrimaryKey, hasExactPrimaryKeyGrouping, editableSourceColumnCount };
+        })
+        .filter((loaded) => loaded.isRootSource && loaded.hasCompletePrimaryKey && loaded.hasExactPrimaryKeyGrouping && loaded.editableSourceColumnCount > 0 && !knownEditableQuerySourceTableType(tab, loaded)?.toUpperCase().includes("VIEW"));
+
+      // More than one writable source is ambiguous. Refuse the entire result
+      // instead of guessing which table an edit should mutate.
+      if (candidates.length !== 1) return readOnlyPatch;
+
+      const target = candidates[0]!;
+      return {
+        queryAnalysis: {
+          ...target.analysis,
+          editableSourceKey: target.source.key,
+          allowInsert: false,
+          allowInsertDelete: false,
+          multiSource: sources.length > 1,
+        },
+        querySourceColumns: target.sourceColumns,
+        queryEditabilityReason: undefined,
+        tableMeta: target.tableMeta,
+        resultColumnComments: displayInfo.comments,
+        queryDisplaySourceColumns: displayInfo.mapping,
+      };
     } catch (err) {
       console.error("[DBX] ERROR fetching columns for grouped query metadata:", err);
       return undefined;
@@ -3790,18 +3860,13 @@ export const useQueryStore = defineStore("query", () => {
       elapsed: elapsed?.(),
     });
     if (!editability.editable) {
-      // Grouped (aggregation) results stay read-only, but their directly
-      // projected base-table columns can still be resolved for display metadata
-      // (column comments). This enrichment is display-only — it never enables
-      // row mutation for aggregated results (fixes #6463). Every other
-      // non-editable reason keeps the previous behavior.
-      const displayInfo = editability.reason === "aggregation" ? await resolveAggregationDisplayColumnInfo(tab, sql, executionDatabase, traceId) : undefined;
+      const aggregationPatch = editability.reason === "aggregation" ? await resolveAggregationQueryMetadata(tab, sql, executionDatabase, traceId) : undefined;
+      if (aggregationPatch) return aggregationPatch;
       return {
         queryAnalysis: undefined,
         querySourceColumns: undefined,
         queryEditabilityReason: editability.reason,
         tableMeta: undefined,
-        ...(displayInfo ? { resultColumnComments: displayInfo.comments, queryDisplaySourceColumns: displayInfo.mapping } : {}),
       };
     }
     const analysis = editability.analysis;

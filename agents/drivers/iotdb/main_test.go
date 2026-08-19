@@ -120,14 +120,61 @@ func TestMetadataHelpers(t *testing.T) {
 
 func TestNormalizeIoTDBValues(t *testing.T) {
 	when := time.Date(2026, time.August, 10, 12, 34, 56, 123, time.FixedZone("CST", 8*60*60))
-	if got := normalizeIoTDBValue(when, "TIMESTAMP"); got != "2026-08-10T12:34:56.000000123+08:00" {
-		t.Fatalf("unexpected timestamp: %#v", got)
+	if got := normalizeIoTDBValue(when, "DATETIME"); got != "2026-08-10T12:34:56.000000123+08:00" {
+		t.Fatalf("unexpected datetime: %#v", got)
 	}
 	if got := normalizeIoTDBValue(when, "DATE"); got != "2026-08-10" {
 		t.Fatalf("unexpected date: %#v", got)
 	}
 	if got := normalizeIoTDBValue([]byte{0xde, 0xad}, "BLOB"); got != "dead" {
 		t.Fatalf("unexpected blob: %#v", got)
+	}
+}
+
+func TestTreeTimeColumnPresentation(t *testing.T) {
+	columns := []string{"Time", "root.db.d1.s1"}
+	for _, precision := range []string{"ms", "us", "ns"} {
+		types := normalizedColumnTypes([]string{"INT64", "DOUBLE"}, columns, client.TreeSqlDialect, precision)
+		want := []string{"TIMESTAMP(" + precision + ")", "DOUBLE"}
+		if !reflect.DeepEqual(types, want) {
+			t.Fatalf("unexpected tree column types for %s: %#v", precision, types)
+		}
+	}
+}
+
+func TestTableTimestampColumnPresentation(t *testing.T) {
+	columns := []string{"time", "device", "event_time"}
+	for _, precision := range []string{"ms", "us", "ns"} {
+		got := normalizedColumnTypes([]string{"TIMESTAMP", "STRING", "TIMESTAMP"}, columns, client.TableSqlDialect, precision)
+		want := []string{"TIMESTAMP(" + precision + ")", "STRING", "TIMESTAMP(" + precision + ")"}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("unexpected table column types for %s: %#v", precision, got)
+		}
+	}
+}
+
+func TestUnknownTimestampPrecisionDoesNotEnableFormattingMetadata(t *testing.T) {
+	columns := []string{"Time", "root.db.d1.s1"}
+	if got := normalizedColumnTypes([]string{"INT64", "DOUBLE"}, columns, client.TreeSqlDialect, ""); !reflect.DeepEqual(got, []string{"TIMESTAMP", "DOUBLE"}) {
+		t.Fatalf("unexpected unknown-precision types: %#v", got)
+	}
+	for _, value := range []string{"ms", "US", " ns "} {
+		if normalizeTimestampPrecision(value) == "" {
+			t.Fatalf("expected supported precision %q", value)
+		}
+	}
+	if normalizeTimestampPrecision("seconds") != "" {
+		t.Fatal("unsupported precision must not be accepted")
+	}
+}
+
+func TestTreeTimeColumnPresentationDoesNotRewriteOrdinaryInt64(t *testing.T) {
+	columns := []string{"Time", "value"}
+	if got := normalizedColumnTypes([]string{"INT64", "INT64"}, columns, client.TableSqlDialect, "ms"); !reflect.DeepEqual(got, []string{"INT64", "INT64"}) {
+		t.Fatalf("unexpected table column types: %#v", got)
+	}
+	if got := normalizedColumnTypes([]string{"INT64", "INT64"}, []string{"value", "Time"}, client.TreeSqlDialect, "ms"); !reflect.DeepEqual(got, []string{"INT64", "INT64"}) {
+		t.Fatalf("unexpected non-axis column types: %#v", got)
 	}
 }
 

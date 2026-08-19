@@ -39,6 +39,7 @@ const DRIVER_STARTUP_FLOOR_TYPES = new Set<DatabaseType>([
   "cassandra",
   "bigquery",
   "kylin",
+  "ignite",
   "sundb",
   "oscar",
   "tdengine",

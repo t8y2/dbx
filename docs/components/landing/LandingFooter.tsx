@@ -27,8 +27,8 @@ export function LandingFooter({ lang }: { lang: "en" | "cn" }) {
       <div className="max-w-[1180px] mx-auto px-7 py-7 max-[760px]:px-[18px]">
         <div className="flex items-center justify-between gap-4 max-[760px]:flex-col max-[760px]:gap-3 max-[760px]:text-center">
           {/* Logo */}
-          <Link href={`/${lang}`} className="flex min-h-11 items-center gap-2.5 text-[var(--color-landing-ink)] text-lg font-[820] shrink-0">
-            <img src="/logo.png" alt="" aria-hidden="true" width={22} height={22} />
+          <Link href={`/${lang}`} prefetch={false} className="flex min-h-11 items-center gap-2.5 text-[var(--color-landing-ink)] text-lg font-[820] shrink-0">
+            <img src="/logo-64.png" alt="" aria-hidden="true" width={22} height={22} />
             <span>DBX</span>
           </Link>
 

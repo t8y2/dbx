@@ -8,8 +8,8 @@ export const metadata: Metadata = {
   description: DEFAULT_DESCRIPTION,
   metadataBase: new URL(SITE_URL),
   icons: {
-    icon: "/favicon.png",
-    shortcut: "/favicon.png",
+    icon: "/favicon-64.png",
+    shortcut: "/favicon-64.png",
     apple: "/logo.png",
   },
   openGraph: {

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -933,6 +934,173 @@ func TestKingbaseListIndexesQuerySupportsSQLServerMode(t *testing.T) {
 	}
 }
 
+func TestParseCatalogAttributeNumbers(t *testing.T) {
+	tests := []struct {
+		name     string
+		raw      any
+		expected string
+		wantErr  bool
+	}{
+		{name: "int2vector string", raw: "1 2 4", expected: "1,2,4"},
+		{name: "array string", raw: "{3,5}", expected: "3,5"},
+		{name: "bytes", raw: []byte("6 7"), expected: "6,7"},
+		{name: "empty", raw: nil, expected: ""},
+		{name: "invalid", raw: "1 bad", wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			numbers, err := parseCatalogAttributeNumbers(test.raw)
+			if test.wantErr {
+				if err == nil {
+					t.Fatalf("expected parse error, got %v", numbers)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			parts := make([]string, len(numbers))
+			for index, number := range numbers {
+				parts[index] = strconv.Itoa(number)
+			}
+			if actual := strings.Join(parts, ","); actual != test.expected {
+				t.Fatalf("unexpected numbers: %q", actual)
+			}
+		})
+	}
+}
+
+func TestListIndexesFallsBackWhenWithOrdinalityIsUnsupported(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		switch {
+		case strings.Contains(query, "WITH ORDINALITY"):
+			return nil, &gokb.Error{Code: gokb.ErrorCode("42601"), Message: `syntax error at or near "WITH ORDINALITY"`}
+		case strings.Contains(query, "SELECT i.relname, am.amname") && strings.Contains(query, "ix.indkey"):
+			return &valueRows{
+				columns: []string{"relname", "amname", "indisunique", "indisprimary", "indkey"},
+				rows: [][]driver.Value{
+					{"orders_customer_idx", "btree", false, false, "2 3"},
+					{"orders_pkey", "btree", true, true, []byte("1")},
+				},
+			}, nil
+		case strings.Contains(query, "SELECT a.attnum, a.attname"):
+			return &valueRows{
+				columns: []string{"attnum", "attname"},
+				rows:    [][]driver.Value{{int64(1), "id"}, {int64(2), "customer_id"}, {int64(3), "created_at"}},
+			}, nil
+		default:
+			return nil, errors.New("unexpected query: " + query)
+		}
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	for range 2 {
+		indexes, err := server.listIndexes("PUBLIC", "orders")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(indexes) != 2 || strings.Join(indexes[0].Columns, ",") != "customer_id,created_at" || strings.Join(indexes[1].Columns, ",") != "id" {
+			t.Fatalf("unexpected indexes: %#v", indexes)
+		}
+	}
+
+	var ordinalityQueries int
+	for _, query := range state.snapshotQueries() {
+		if strings.Contains(query, "WITH ORDINALITY") {
+			ordinalityQueries++
+		}
+	}
+	if ordinalityQueries != 1 || !server.indexOrdinalityUnsupported {
+		t.Fatalf("unsupported capability was not cached: queries=%v", state.snapshotQueries())
+	}
+}
+
+func TestListIndexesDoesNotFallbackForUnrelatedErrors(t *testing.T) {
+	expectedErr := errors.New("metadata connection reset")
+	state := &metadataDriverState{query: func(string) (driver.Rows, error) { return nil, expectedErr }}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	if _, err := server.listIndexes("PUBLIC", "orders"); !errors.Is(err, expectedErr) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if queries := state.snapshotQueries(); len(queries) != 1 || server.indexOrdinalityUnsupported {
+		t.Fatalf("unrelated error triggered fallback: %v", queries)
+	}
+}
+
+func TestListForeignKeysUsesCatalogForV7(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		switch {
+		case strings.Contains(query, "FROM information_schema.table_constraints tc"):
+			return nil, errors.New("V7 must not query information_schema foreign keys")
+		case strings.Contains(query, "FROM sys_catalog.sys_constraint c"):
+			return &valueRows{
+				columns: []string{"conname", "conkey", "confkey", "nspname", "relname"},
+				rows:    [][]driver.Value{{"orders_customer_fkey", "2 3", "1 2", "PUBLIC", "customers"}},
+			}, nil
+		case strings.Contains(query, "SELECT a.attnum, a.attname") && strings.Contains(query, "c.relname = 'orders'"):
+			return &valueRows{columns: []string{"attnum", "attname"}, rows: [][]driver.Value{{int64(2), "customer_id"}, {int64(3), "customer_region"}}}, nil
+		case strings.Contains(query, "SELECT a.attnum, a.attname") && strings.Contains(query, "c.relname = 'customers'"):
+			return &valueRows{columns: []string{"attnum", "attname"}, rows: [][]driver.Value{{int64(1), "id"}, {int64(2), "region"}}}, nil
+		default:
+			return nil, errors.New("unexpected query: " + query)
+		}
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+	server.mode.legacyV7 = true
+
+	keys, err := server.listForeignKeys("PUBLIC", "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 2 || keys[0].Column != "customer_id" || keys[0].RefColumn != "id" || keys[1].Column != "customer_region" || keys[1].RefColumn != "region" {
+		t.Fatalf("unexpected foreign keys: %#v", keys)
+	}
+}
+
+func TestListForeignKeysKeepsEmptyInformationSchemaResultOnV8(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		if strings.Contains(query, "FROM information_schema.table_constraints tc") {
+			return &valueRows{columns: []string{"constraint_name", "column_name", "table_name", "column_name"}}, nil
+		}
+		return nil, errors.New("V8 empty result must not trigger a catalog query: " + query)
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	keys, err := server.listForeignKeys("PUBLIC", "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 0 || len(state.snapshotQueries()) != 1 {
+		t.Fatalf("unexpected foreign keys or query count: keys=%#v queries=%v", keys, state.snapshotQueries())
+	}
+}
+
+func TestKingbaseV7VersionPattern(t *testing.T) {
+	for _, test := range []struct {
+		version string
+		v7      bool
+	}{
+		{version: "Kingbase V007R001C002B0014", v7: true},
+		{version: "KingbaseES V008R006C008B0014"},
+		{version: "PostgreSQL 12.1"},
+	} {
+		match := kingbaseReleasePattern.FindStringSubmatch(test.version)
+		actual := false
+		if len(match) == 2 {
+			major, err := strconv.Atoi(match[1])
+			actual = err == nil && major == 7
+		}
+		if actual != test.v7 {
+			t.Fatalf("version=%q: expected v7=%v, got %v", test.version, test.v7, actual)
+		}
+	}
+}
+
 func TestKingbaseCatalogFunctionsFollowMetadataMode(t *testing.T) {
 	registerExpressionFallbackDriver.Do(func() { sql.Register("kingbase-expression-fallback-test", fallbackDriver{}) })
 	tests := []struct {
@@ -972,6 +1140,87 @@ func TestKingbaseCatalogFunctionsFollowMetadataMode(t *testing.T) {
 				t.Fatalf("catalog functions do not match metadata mode: %v", queries)
 			}
 		})
+	}
+}
+
+func TestListTriggerDefinitionsFallsBackToSingleArgument(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		if strings.Contains(query, "sys_get_triggerdef(tg.oid, true)") {
+			return nil, &gokb.Error{Code: gokb.ErrorCode("42883"), Message: "function SYS_CATALOG.SYS_GET_TRIGGERDEF(OID, BOOLEAN) does not exist"}
+		}
+		if strings.Contains(query, "tg.tgisinternal") {
+			return nil, &gokb.Error{Code: gokb.ErrorCode("42703"), Message: "column TG.TGISINTERNAL does not exist"}
+		}
+		if strings.Contains(query, "sys_get_triggerdef(tg.oid)") {
+			if !strings.Contains(query, "tg.tgkind <> 'c'") {
+				return nil, errors.New("V7 trigger query did not exclude constraint triggers: " + query)
+			}
+			return &valueRows{columns: []string{"definition"}, rows: [][]driver.Value{{"CREATE TRIGGER orders_audit ..."}}}, nil
+		}
+		return nil, errors.New("unexpected query: " + query)
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	for range 2 {
+		definitions, err := server.listTriggerDefinitions("PUBLIC", "orders")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(definitions) != 1 || definitions[0] != "CREATE TRIGGER orders_audit ..." {
+			t.Fatalf("unexpected definitions: %#v", definitions)
+		}
+	}
+
+	var prettyQueries int
+	for _, query := range state.snapshotQueries() {
+		if strings.Contains(query, "tg.oid, true") {
+			prettyQueries++
+		}
+	}
+	if prettyQueries != 1 || !server.triggerPrettyUnsupported || !server.triggerInternalUnsupported {
+		t.Fatalf("unsupported signature was not cached: %v", state.snapshotQueries())
+	}
+}
+
+func TestListTriggersFallsBackToV7InternalPredicate(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		if strings.Contains(query, "tg.tgisinternal") {
+			return nil, &gokb.Error{Code: gokb.ErrorCode("42703"), Message: "column TG.TGISINTERNAL does not exist"}
+		}
+		if strings.Contains(query, "tg.tgkind <> 'c'") {
+			return &valueRows{columns: []string{"tgname", "events", "tgtype"}, rows: [][]driver.Value{{"orders_audit", "INSERT", int64(7)}}}, nil
+		}
+		return nil, errors.New("unexpected query: " + query)
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	for range 2 {
+		triggers, err := server.listTriggers("PUBLIC", "orders")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(triggers) != 1 || triggers[0].Name != "orders_audit" {
+			t.Fatalf("unexpected triggers: %#v", triggers)
+		}
+	}
+	if queries := state.snapshotQueries(); len(queries) != 3 || !server.triggerInternalUnsupported {
+		t.Fatalf("unsupported column was not cached: %v", queries)
+	}
+}
+
+func TestListTriggerDefinitionsDoesNotFallbackForUnrelatedErrors(t *testing.T) {
+	expectedErr := errors.New("permission denied for sys_trigger")
+	state := &metadataDriverState{query: func(string) (driver.Rows, error) { return nil, expectedErr }}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	if _, err := server.listTriggerDefinitions("PUBLIC", "orders"); !errors.Is(err, expectedErr) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if queries := state.snapshotQueries(); len(queries) != 1 || server.triggerPrettyUnsupported || server.triggerInternalUnsupported {
+		t.Fatalf("unrelated error triggered fallback: %v", queries)
 	}
 }
 
@@ -2047,6 +2296,41 @@ func TestObjectSourceDoesNotFallbackOnUnrelatedErrors(t *testing.T) {
 	defer state.mu.Unlock()
 	if len(state.queries) != 1 || !strings.Contains(state.queries[0], "sys_get_functiondef(") {
 		t.Fatalf("unrelated error triggered a fallback: %v", state.queries)
+	}
+}
+
+func TestObjectSourceFallsBackToV7RoutineDDLAndCachesChoice(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		switch {
+		case strings.Contains(query, "sys_get_functiondef("):
+			return nil, &gokb.Error{Code: gokb.ErrorCode("42883"), Message: "function SYS_GET_FUNCTIONDEF(OID) does not exist"}
+		case strings.Contains(query, "pg_get_functiondef("):
+			return nil, &gokb.Error{Code: gokb.ErrorCode("42883"), Message: "function PG_GET_FUNCTIONDEF(OID) does not exist"}
+		case strings.Contains(query, "DBMS_METADATA.GET_FUNC_DDL"):
+			if !strings.Contains(query, "CAST('format_name' AS varchar(128))") || !strings.Contains(query, "CAST('PUBLIC' AS varchar(128))") {
+				return nil, errors.New("legacy DDL query lost routine identity: " + query)
+			}
+			return &valueRows{columns: []string{"ddl"}, rows: [][]driver.Value{{"CREATE OR REPLACE FUNCTION PUBLIC.format_name() RETURN TEXT AS ..."}}}, nil
+		default:
+			return nil, errors.New("unexpected query: " + query)
+		}
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	for range 2 {
+		source, err := server.getObjectSource("PUBLIC", "format_name", "FUNCTION")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(fmt.Sprint(source["source"]), "CREATE OR REPLACE FUNCTION") {
+			t.Fatalf("unexpected source: %#v", source)
+		}
+	}
+
+	queries := state.snapshotQueries()
+	if len(queries) != 4 || !strings.Contains(queries[2], "DBMS_METADATA.GET_FUNC_DDL") || !strings.Contains(queries[3], "DBMS_METADATA.GET_FUNC_DDL") || !server.useLegacyRoutineDefinition {
+		t.Fatalf("V7 routine DDL choice was not cached: %v", queries)
 	}
 }
 

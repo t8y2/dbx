@@ -18,9 +18,15 @@ function installApiMocks() {
     connectDb: vi.fn().mockResolvedValue("preview-1"),
     disconnectDb: vi.fn().mockResolvedValue(undefined),
     deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+    loadConnections: vi.fn().mockResolvedValue([]),
+    loadEditorSettings: vi.fn().mockResolvedValue(null),
+    loadPinnedTreeNodeIds: vi.fn().mockResolvedValue([]),
     loadSchemaCache: vi.fn().mockResolvedValue(null),
+    loadTunnelProfiles: vi.fn().mockResolvedValue([]),
     saveConnections: vi.fn().mockResolvedValue(undefined),
+    saveEditorSettings: vi.fn().mockResolvedValue(undefined),
     saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    loadSidebarLayout: vi.fn().mockResolvedValue(null),
     connectionDatabaseInfo: vi.fn().mockResolvedValue(undefined),
     listInstalledAgents: vi.fn().mockResolvedValue([]),
     sessionCredentialStatus: vi.fn().mockResolvedValue(false),
@@ -75,6 +81,34 @@ describe("connectionStore one_time runtime cleanup", () => {
     // No clientAttempt: removal is terminal, so a superseded attempt number must not
     // skip the cleanup.
     expect(disconnectDb).toHaveBeenCalledWith("preview-1");
+  });
+
+  it("initFromDisk preserves an open one_time connection during a persisted-list reload", async () => {
+    installApiMocks();
+    const { loadConnections } = await import("@/lib/backend/api");
+    vi.mocked(loadConnections).mockResolvedValue([previewConnection({ id: "saved-1", name: "Saved", one_time: false })]);
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [previewConnection({ id: "deeplink-1", name: "Deeplink", one_time: true })];
+
+    await store.initFromDisk();
+
+    expect(store.connections.map((connection) => connection.id)).toEqual(["saved-1", "deeplink-1"]);
+    expect(store.getConfig("deeplink-1")).toMatchObject({ name: "Deeplink", one_time: true });
+  });
+
+  it("does not retain a stale saved connection removed from persisted storage", async () => {
+    installApiMocks();
+    const { loadConnections } = await import("@/lib/backend/api");
+    vi.mocked(loadConnections).mockResolvedValue([]);
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [previewConnection({ id: "removed-1", name: "Removed", one_time: false })];
+
+    await store.initFromDisk();
+
+    expect(store.getConfig("removed-1")).toBeUndefined();
+    expect(store.connections).toEqual([]);
   });
 
   it("removeConnection leaves saved connections to the save_connections sync", async () => {

@@ -170,10 +170,14 @@ fn render_external_table_ddl(ddl: &str, external: &ExternalTableDefinition) -> R
         .ok_or_else(|| "Cloudberry fallback DDL has no CREATE TABLE terminator".to_string())?;
     // When the fallback DDL already read `CREATE FOREIGN TABLE`, the generic
     // renderer also already appended its own ` SERVER ... [OPTIONS (...)]`
-    // clause (from the same relkind='f' catalog data). Drop that so this
-    // doesn't emit the clause twice — Cloudberry's own `external` definition
-    // above is authoritative here.
-    let body_end = ddl[header_len..insertion].find(" SERVER \"").map(|pos| header_len + pos).unwrap_or(insertion);
+    // clause (from the same relkind='f' catalog data) right after the column
+    // list's closing paren. Drop that so this doesn't emit the clause twice —
+    // Cloudberry's own `external` definition above is authoritative here.
+    // Locate the column list's own closing paren structurally (tracking
+    // parenthesis depth and skipping quoted content) instead of searching for
+    // the literal text `" SERVER \""`, which a column's DEFAULT/CHECK
+    // expression could contain and match spuriously.
+    let body_end = super::ddl_scan::find_top_level_paren_close(ddl, header_len).unwrap_or(insertion);
     let mut output = String::with_capacity(ddl.len() + external.options.len() * 24 + 48);
     output.push_str("CREATE FOREIGN TABLE ");
     output.push_str(&ddl[header_len..body_end]);
@@ -360,6 +364,34 @@ mod tests {
 
         assert!(rendered.starts_with("CREATE FOREIGN TABLE \"public\".\"external_events\""));
         assert_eq!(rendered.matches("SERVER").count(), 1);
+        assert!(rendered.contains("SERVER \"gp_exttable_server\""));
+        assert!(!rendered.contains("stale_server"));
+    }
+
+    #[test]
+    fn renders_external_table_when_a_column_default_contains_literal_server_text() {
+        // A naive text search for `" SERVER \""` to find the stale SERVER
+        // clause's start would match this DEFAULT's embedded text instead of
+        // the real trailing SERVER clause, truncating the column list.
+        let ddl = "CREATE FOREIGN TABLE \"public\".\"external_events\" (\n  \"id\" integer,\n  \"note\" text DEFAULT 'contact SERVER \"admin\"'\n) SERVER \"stale_server\";\n";
+        let rendered = append_table_modifiers(
+            ddl,
+            &TableModifiers {
+                external: Some(ExternalTableDefinition {
+                    server: "gp_exttable_server".to_string(),
+                    options: vec!["format=csv".to_string()],
+                }),
+                ..modifiers(None)
+            },
+        )
+        .unwrap();
+
+        assert!(rendered.contains("\"note\" text DEFAULT 'contact SERVER \"admin\"'"));
+        assert_eq!(
+            rendered.matches("SERVER").count(),
+            2,
+            "expected exactly the embedded literal plus the real clause: {rendered}"
+        );
         assert!(rendered.contains("SERVER \"gp_exttable_server\""));
         assert!(!rendered.contains("stale_server"));
     }

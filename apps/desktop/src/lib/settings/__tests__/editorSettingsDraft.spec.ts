@@ -69,6 +69,25 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("colorizeDataGridCellTypes");
   });
 
+  it("includes the type color scheme in the apply-footer draft", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridTypeColorSchemes");
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("activeDataGridTypeColorSchemeId");
+
+    const base = editorSettingsDraftFromSettings(makeSettings({ dataGridTypeColorSchemes: [], activeDataGridTypeColorSchemeId: "auto" }));
+    const withScheme = editorSettingsDraftFromSettings(
+      makeSettings({
+        dataGridTypeColorSchemes: [{ id: "type-colors-1", name: "配色方案 1", colors: { integer: "#254fce", numeric: "#0e7490", string: "#fdc9c9", boolean: "#100cc2", temporal: "#7e22ce", structured: "#be185d", identifier: "#92400e", binary: "#b91c1c", spatial: "#047857" } }],
+        activeDataGridTypeColorSchemeId: "type-colors-1",
+      }),
+    );
+
+    expect(editorSettingsDraftChanged(withScheme, base)).toBe(true);
+    expect(editorSettingsPatchFromDraft(withScheme, base)).toEqual({
+      dataGridTypeColorSchemes: [{ id: "type-colors-1", name: "配色方案 1", colors: { integer: "#254fce", numeric: "#0e7490", string: "#fdc9c9", boolean: "#100cc2", temporal: "#7e22ce", structured: "#be185d", identifier: "#92400e", binary: "#b91c1c", spatial: "#047857" } }],
+      activeDataGridTypeColorSchemeId: "type-colors-1",
+    });
+  });
+
   it("includes the data grid filter view", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridFilterEditorView");
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridTextFilterPanelHeight");

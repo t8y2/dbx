@@ -42,6 +42,7 @@ export const AGENT_DRIVER_CATEGORY_MAP: Readonly<Record<string, DriverCategoryKe
   kafka: "mq",
   kingbase: "domestic",
   kylin: "analytics",
+  ignite: "analytics",
   mongodb: "document",
   neo4j: "graph_ai",
   "oceanbase-oracle": "domestic",

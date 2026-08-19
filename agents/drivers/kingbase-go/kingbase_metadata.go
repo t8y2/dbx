@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -37,6 +38,22 @@ type kingbaseMode struct {
 	postgresCatalog   bool
 	mysqlCompat       bool
 	sqlServerIdentity bool
+	legacyV7          bool
+}
+
+var kingbaseReleasePattern = regexp.MustCompile(`(?i)\bV0*([0-9]+)R`)
+
+func detectKingbaseV7(db *sql.DB) bool {
+	var version string
+	if err := db.QueryRow("SELECT version()").Scan(&version); err != nil {
+		return false
+	}
+	match := kingbaseReleasePattern.FindStringSubmatch(version)
+	if len(match) != 2 {
+		return false
+	}
+	major, err := strconv.Atoi(match[1])
+	return err == nil && major == 7
 }
 
 type databaseInfo struct {
@@ -1399,8 +1416,14 @@ func (s *server) listIndexes(schema, table string) ([]indexInfo, error) {
 	if s.mode.postgresCatalog {
 		catalog, prefix = "pg_catalog", "pg"
 	}
-	query := kingbaseListIndexesQuery(catalog, prefix, effective, table)
-	rows, err := s.metadataQuery(query)
+	if s.indexOrdinalityUnsupported {
+		return s.listIndexesWithoutOrdinality(catalog, prefix, effective, table)
+	}
+	rows, err := s.metadataQuery(kingbaseListIndexesQuery(catalog, prefix, effective, table))
+	if err != nil && isUnsupportedWithOrdinality(err) {
+		s.indexOrdinalityUnsupported = true
+		return s.listIndexesWithoutOrdinality(catalog, prefix, effective, table)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1429,6 +1452,118 @@ func (s *server) listIndexes(schema, table string) ([]indexInfo, error) {
 	return result, rows.Err()
 }
 
+func isUnsupportedWithOrdinality(err error) bool {
+	if err == nil {
+		return false
+	}
+	var driverError *gokb.Error
+	isSyntaxError := errors.As(err, &driverError) && string(driverError.Code) == "42601"
+	normalized := strings.ToLower(err.Error())
+	return (isSyntaxError || strings.Contains(normalized, "syntax error") || strings.Contains(normalized, "语法错误")) && strings.Contains(normalized, "with ordinality")
+}
+
+func (s *server) listIndexesWithoutOrdinality(catalog, prefix, schema, table string) ([]indexInfo, error) {
+	query := fmt.Sprintf(`SELECT i.relname, am.amname, ix.indisunique, ix.indisprimary, ix.indkey
+FROM %s.%s_index ix JOIN %s.%s_class t ON t.oid = ix.indrelid
+JOIN %s.%s_class i ON i.oid = ix.indexrelid JOIN %s.%s_namespace n ON n.oid = t.relnamespace
+JOIN %s.%s_am am ON am.oid = i.relam
+WHERE n.nspname = %s AND t.relname = %s ORDER BY i.relname`, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(table))
+	rows, err := s.metadataQuery(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type rawIndex struct {
+		name, kind      string
+		unique, primary bool
+		attributeNums   []int
+	}
+	rawIndexes := []rawIndex{}
+	for rows.Next() {
+		var item rawIndex
+		var raw any
+		if err := rows.Scan(&item.name, &item.kind, &item.unique, &item.primary, &raw); err != nil {
+			return nil, err
+		}
+		item.attributeNums, err = parseCatalogAttributeNumbers(raw)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse index %s columns: %w", item.name, err)
+		}
+		rawIndexes = append(rawIndexes, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(rawIndexes) == 0 {
+		return []indexInfo{}, nil
+	}
+	attributes, err := s.relationAttributesByNumber(catalog, prefix, schema, table)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]indexInfo, 0, len(rawIndexes))
+	for _, raw := range rawIndexes {
+		item := indexInfo{Name: raw.name, IsUnique: raw.unique, IsPrimary: raw.primary, IndexType: stringPtr(raw.kind), Columns: []string{}, IncludedColumns: []string{}}
+		for _, number := range raw.attributeNums {
+			if name := attributes[number]; name != "" {
+				item.Columns = append(item.Columns, name)
+			}
+		}
+		result = append(result, item)
+	}
+	return result, nil
+}
+
+func parseCatalogAttributeNumbers(raw any) ([]int, error) {
+	var value string
+	switch typed := raw.(type) {
+	case nil:
+		return []int{}, nil
+	case string:
+		value = typed
+	case []byte:
+		value = string(typed)
+	default:
+		value = fmt.Sprint(typed)
+	}
+	value = strings.TrimSpace(strings.Trim(value, "{}"))
+	if value == "" {
+		return []int{}, nil
+	}
+	parts := strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' })
+	result := make([]int, 0, len(parts))
+	for _, part := range parts {
+		number, err := strconv.Atoi(strings.TrimSpace(part))
+		if err != nil {
+			return nil, fmt.Errorf("invalid attribute number %q", part)
+		}
+		result = append(result, number)
+	}
+	return result, nil
+}
+
+func (s *server) relationAttributesByNumber(catalog, prefix, schema, table string) (map[int]string, error) {
+	query := fmt.Sprintf(`SELECT a.attnum, a.attname
+FROM %s.%s_attribute a JOIN %s.%s_class c ON c.oid = a.attrelid
+JOIN %s.%s_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = %s AND c.relname = %s AND a.attnum > 0 AND NOT a.attisdropped`, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(table))
+	rows, err := s.metadataQuery(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := map[int]string{}
+	for rows.Next() {
+		var number int
+		var name string
+		if err := rows.Scan(&number, &name); err != nil {
+			return nil, err
+		}
+		result[number] = name
+	}
+	return result, rows.Err()
+}
+
 func kingbaseListIndexesQuery(catalog, prefix, schema, table string) string {
 	return fmt.Sprintf(`SELECT i.relname, am.amname, ix.indisunique, ix.indisprimary, a.attname, pos.n
 FROM %s.%s_index ix JOIN %s.%s_class t ON t.oid = ix.indrelid
@@ -1452,6 +1587,9 @@ func (s *server) listForeignKeys(schema, table string) ([]foreignKeyInfo, error)
 	if err != nil {
 		return nil, err
 	}
+	if s.mode.legacyV7 && !s.mode.mysqlCompat {
+		return s.listForeignKeysFromCatalog(effective, table)
+	}
 	query := `SELECT fk.constraint_name, fk.column_name, pk.table_name, pk.column_name
 FROM information_schema.table_constraints tc
 JOIN information_schema.key_column_usage fk ON fk.constraint_schema = tc.constraint_schema AND fk.constraint_name = tc.constraint_name AND fk.table_schema = tc.table_schema AND fk.table_name = tc.table_name
@@ -1471,7 +1609,82 @@ WHERE tc.table_schema = ` + quoteLiteral(effective) + ` AND tc.table_name = ` + 
 		}
 		result = append(result, item)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (s *server) listForeignKeysFromCatalog(schema, table string) ([]foreignKeyInfo, error) {
+	catalog, prefix := "sys_catalog", "sys"
+	if s.mode.postgresCatalog {
+		catalog, prefix = "pg_catalog", "pg"
+	}
+	query := fmt.Sprintf(`SELECT c.conname, c.conkey, c.confkey, rn.nspname, rt.relname
+FROM %s.%s_constraint c JOIN %s.%s_class t ON t.oid = c.conrelid
+JOIN %s.%s_namespace n ON n.oid = t.relnamespace
+JOIN %s.%s_class rt ON rt.oid = c.confrelid
+JOIN %s.%s_namespace rn ON rn.oid = rt.relnamespace
+WHERE c.contype = 'f' AND n.nspname = %s AND t.relname = %s ORDER BY c.conname`, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(table))
+	rows, err := s.metadataQuery(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type rawForeignKey struct {
+		name, refSchema, refTable string
+		columns, refColumns       []int
+	}
+	rawKeys := []rawForeignKey{}
+	for rows.Next() {
+		var item rawForeignKey
+		var columnsRaw, refColumnsRaw any
+		if err := rows.Scan(&item.name, &columnsRaw, &refColumnsRaw, &item.refSchema, &item.refTable); err != nil {
+			return nil, err
+		}
+		item.columns, err = parseCatalogAttributeNumbers(columnsRaw)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse foreign key %s columns: %w", item.name, err)
+		}
+		item.refColumns, err = parseCatalogAttributeNumbers(refColumnsRaw)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse foreign key %s referenced columns: %w", item.name, err)
+		}
+		rawKeys = append(rawKeys, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(rawKeys) == 0 {
+		return []foreignKeyInfo{}, nil
+	}
+	localAttributes, err := s.relationAttributesByNumber(catalog, prefix, schema, table)
+	if err != nil {
+		return nil, err
+	}
+	refAttributes := map[string]map[int]string{}
+	result := []foreignKeyInfo{}
+	for _, raw := range rawKeys {
+		key := raw.refSchema + "\x00" + raw.refTable
+		attributes := refAttributes[key]
+		if attributes == nil {
+			attributes, err = s.relationAttributesByNumber(catalog, prefix, raw.refSchema, raw.refTable)
+			if err != nil {
+				return nil, err
+			}
+			refAttributes[key] = attributes
+		}
+		for i, number := range raw.columns {
+			if i >= len(raw.refColumns) {
+				break
+			}
+			column, refColumn := localAttributes[number], attributes[raw.refColumns[i]]
+			if column != "" && refColumn != "" {
+				result = append(result, foreignKeyInfo{Name: raw.name, Column: column, RefTable: raw.refTable, RefColumn: refColumn})
+			}
+		}
+	}
+	return result, nil
 }
 
 func (s *server) listTriggers(schema, table string) ([]triggerInfo, error) {
@@ -1483,11 +1696,21 @@ func (s *server) listTriggers(schema, table string) ([]triggerInfo, error) {
 	if s.mode.postgresCatalog {
 		catalog, prefix = "pg_catalog", "pg"
 	}
-	query := fmt.Sprintf(`SELECT tg.tgname,
+	queryForCatalog := func() string {
+		internalPredicate := "NOT tg.tgisinternal"
+		if s.triggerInternalUnsupported {
+			internalPredicate = "tg.tgkind <> 'c'"
+		}
+		return fmt.Sprintf(`SELECT tg.tgname,
 trim(trailing ',' FROM (CASE WHEN (tg.tgtype & 4) <> 0 THEN 'INSERT,' ELSE '' END || CASE WHEN (tg.tgtype & 8) <> 0 THEN 'DELETE,' ELSE '' END || CASE WHEN (tg.tgtype & 16) <> 0 THEN 'UPDATE,' ELSE '' END || CASE WHEN (tg.tgtype & 32) <> 0 THEN 'TRUNCATE,' ELSE '' END)), tg.tgtype
 FROM %s.%s_trigger tg JOIN %s.%s_class c ON c.oid = tg.tgrelid JOIN %s.%s_namespace n ON n.oid = c.relnamespace
-WHERE n.nspname = %s AND c.relname = %s AND NOT tg.tgisinternal ORDER BY tg.tgname`, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(effective), quoteLiteral(table))
-	rows, err := s.metadataQuery(query)
+WHERE n.nspname = %s AND c.relname = %s AND %s ORDER BY tg.tgname`, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(effective), quoteLiteral(table), internalPredicate)
+	}
+	rows, err := s.metadataQuery(queryForCatalog())
+	if err != nil && !s.triggerInternalUnsupported && isUndefinedColumn(err, "tgisinternal") {
+		s.triggerInternalUnsupported = true
+		rows, err = s.metadataQuery(queryForCatalog())
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1542,10 +1765,27 @@ func (s *server) getObjectSource(schema, name, objectType string) (map[string]an
 			query := fmt.Sprintf("SELECT %s(p.oid) FROM %s.%s_proc p JOIN %s.%s_namespace n ON n.oid=p.pronamespace WHERE n.nspname=%s AND p.proname=%s ORDER BY CASE WHEN p.prorettype=2278 THEN 0 ELSE 1 END LIMIT 1", definitionFunction, catalog, prefix, catalog, prefix, quoteLiteral(effective), quoteLiteral(name))
 			return s.requireDBQueryRow(query, &source)
 		}
-		err = querySource(function)
-		if err != nil && function == "sys_get_functiondef" && isUndefinedFunction(err, function) {
-			s.usePgFunctionDefinition = true
-			err = querySource("pg_get_functiondef")
+		queryLegacySource := func() error {
+			legacyFunction := "GET_FUNC_DDL"
+			if kind == "PROCEDURE" {
+				legacyFunction = "GET_PROCEDURE_DDL"
+			}
+			query := fmt.Sprintf("SELECT DBMS_METADATA.%s(CAST(%s AS varchar(128)), CAST(%s AS varchar(128)))", legacyFunction, quoteLiteral(name), quoteLiteral(effective))
+			return s.requireDBQueryRow(query, &source)
+		}
+		if s.useLegacyRoutineDefinition {
+			err = queryLegacySource()
+		} else {
+			err = querySource(function)
+			if err != nil && function == "sys_get_functiondef" && isUndefinedFunction(err, function) {
+				s.usePgFunctionDefinition = true
+				function = "pg_get_functiondef"
+				err = querySource(function)
+			}
+			if err != nil && !s.mode.postgresCatalog && function == "pg_get_functiondef" && isUndefinedFunction(err, function) {
+				s.useLegacyRoutineDefinition = true
+				err = queryLegacySource()
+			}
 		}
 	}
 	if err != nil && err != sql.ErrNoRows {
@@ -1665,10 +1905,36 @@ func (s *server) listTriggerDefinitions(schema, table string) ([]string, error) 
 		catalog, prefix = "pg_catalog", "pg"
 	}
 	triggerDefinitionFunction := kingbaseCatalogFunction(catalog, "sys_get_triggerdef", "pg_get_triggerdef")
-	query := fmt.Sprintf(`SELECT %s(tg.oid, true)
+	queryForSignature := func(includePretty bool) string {
+		arguments := "tg.oid"
+		if includePretty {
+			arguments += ", true"
+		}
+		internalPredicate := "NOT tg.tgisinternal"
+		if s.triggerInternalUnsupported {
+			internalPredicate = "tg.tgkind <> 'c'"
+		}
+		return fmt.Sprintf(`SELECT %s(%s)
 FROM %s.%s_trigger tg JOIN %s.%s_class c ON c.oid = tg.tgrelid JOIN %s.%s_namespace n ON n.oid = c.relnamespace
-WHERE n.nspname = %s AND c.relname = %s AND NOT tg.tgisinternal ORDER BY tg.tgname`, triggerDefinitionFunction, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(effective), quoteLiteral(table))
-	rows, err := s.metadataQuery(query)
+WHERE n.nspname = %s AND c.relname = %s AND %s ORDER BY tg.tgname`, triggerDefinitionFunction, arguments, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(effective), quoteLiteral(table), internalPredicate)
+	}
+	var rows *sql.Rows
+	for {
+		includePretty := !s.triggerPrettyUnsupported
+		rows, err = s.metadataQuery(queryForSignature(includePretty))
+		if err == nil {
+			break
+		}
+		if includePretty && isUndefinedFunction(err, triggerDefinitionFunction) {
+			s.triggerPrettyUnsupported = true
+			continue
+		}
+		if !s.triggerInternalUnsupported && isUndefinedColumn(err, "tgisinternal") {
+			s.triggerInternalUnsupported = true
+			continue
+		}
+		break
+	}
 	if err != nil {
 		return nil, err
 	}

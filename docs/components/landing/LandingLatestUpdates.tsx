@@ -1,5 +1,3 @@
-"use client";
-
 import Link from "next/link";
 import { ArrowRight, CheckCircle2 } from "lucide-react";
 import { RevealSection } from "@/components/landing/RevealSection";
@@ -32,7 +30,7 @@ export function LandingLatestUpdates({ lang, fallbackVersion, initialRelease, in
           </li>
         ))}
       </ul>
-      <Link href={`/${lang}/changelog`} className="landing-inline-link flex shrink-0 items-center gap-[7px] text-sm font-[650] max-[760px]:mt-4">
+      <Link href={`/${lang}/changelog`} prefetch={false} className="landing-inline-link flex shrink-0 items-center gap-[7px] text-sm font-[650] max-[760px]:mt-4">
         {latest.link}
         <ArrowRight size={15} />
       </Link>

@@ -63,6 +63,7 @@ export type DatabaseType =
   | "cassandra"
   | "bigquery"
   | "kylin"
+  | "ignite"
   | "sundb"
   | "oscar"
   | "tdengine"
@@ -1283,6 +1284,15 @@ export interface QueryTab {
       alias?: string;
     }[];
     columns: {
+      sourceName?: string;
+      sourceNameQuoted?: boolean;
+      sourceQualifier?: string;
+      sourceKey?: string;
+      star?: boolean;
+      resultName: string;
+      expression: string;
+    }[];
+    groupByColumns?: {
       sourceName?: string;
       sourceNameQuoted?: boolean;
       sourceQualifier?: string;

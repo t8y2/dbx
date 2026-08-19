@@ -197,7 +197,7 @@
             fetcherVersion = 4;
             # Update with the hash reported by a failed fixed-output build:
             #   nix build .#dbx-pnpm-deps 2>&1 | grep 'got:'
-            hash = "sha256-wkjQz/nNx4D7p5B/5NcdXnMGvOljM+nGKyKDxvMRCgw=";
+            hash = "sha256-VYG+rEeTTcf3B4avT6UIAdwIymrrioAUtUP2MBYi6s0=";
           };
 
           # ── Step 2: vendor Cargo dependencies ───────────────────────────── #

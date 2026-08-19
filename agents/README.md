@@ -12,7 +12,7 @@ Each agent runs as a standalone process and communicates with DBX via stdin/stdo
 |-------|----------|-------------|
 | access | Microsoft Access | UCanAccess |
 | dameng | 达梦 DM8 | DM JDBC |
-| kingbase | 人大金仓 KingbaseES | gokb Go native agent |
+| kingbase | 金仓KingbaseES | gokb Go native agent |
 | vastbase | Vastbase | openGauss Go native agent |
 | uxdb | UXDB | UXDB JDBC |
 | goldendb | GoldenDB | MySQL Connector/J |
@@ -37,6 +37,7 @@ Each agent runs as a standalone process and communicates with DBX via stdin/stdo
 | cassandra | Apache Cassandra 2.1+ | Apache cassandra-gocql-driver native agent |
 | bigquery | Google BigQuery | BigQuery JDBC |
 | kylin | Apache Kylin | Kylin JDBC |
+| ignite | Apache Ignite | Ignite JDBC thin (ignite-core) |
 | sundb | SunDB | SunDB JDBC |
 | tdengine | TDengine 2.4+ | taos-connector-rust native WebSocket agent |
 | yashandb | 崖山 YashanDB | YashanDB JDBC |

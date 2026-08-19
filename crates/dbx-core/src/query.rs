@@ -32,6 +32,16 @@ pub const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MAX_ROWS: usize = 10000;
 pub const AGENT_PROTOCOL_MAX_ROWS: usize = i32::MAX as usize;
 pub const QUERY_CANCELED: &str = "Query canceled";
+pub const METADATA_POOL_BUSY_ERROR: &str = "DBX metadata pool is busy; please retry";
+
+/// Returns true when a metadata request failed because all pool/client slots
+/// were temporarily occupied. This is deliberately separate from
+/// `is_connection_error`: a saturated pool is healthy and must not trigger a
+/// shared-pool reconnect.
+pub fn is_pool_saturation_error(err: &str) -> bool {
+    let lower = err.to_lowercase();
+    lower.contains("connection pool checkout timed out [stage=wait") || lower.contains("dbx metadata pool is busy")
+}
 /// Fallback when a Mongo connection hits the generic SQL executor instead of the shell path.
 /// Wording must match packages/mongo-shell `MONGO_SHELL_COMMAND_HINT`
 /// (desktop/CLI diagnose first; this is only the Rust SQL-executor backstop).
@@ -1070,7 +1080,7 @@ pub fn agent_close_query_session_params(session_id: &str) -> serde_json::Value {
 
 pub fn is_connection_error(err: &str) -> bool {
     let lower = err.to_lowercase();
-    if is_dbx_query_timeout_error(&lower) || is_agent_rpc_timeout_error(&lower) {
+    if is_dbx_query_timeout_error(&lower) || is_agent_rpc_timeout_error(&lower) || is_pool_saturation_error(err) {
         return false;
     }
     lower.contains("connection")
@@ -3849,7 +3859,7 @@ pub async fn execute_statements_in_transaction_on_pool_typed(
 /// Owned pool variants for safe dispatch across async boundaries.
 enum TxPath {
     Pg(deadpool_postgres::Pool),
-    Mysql(mysql_async::Pool, bool),
+    Mysql(db::mysql::MySqlPool, bool),
     Sqlite(db::sqlite::SqliteHandle),
     CloudflareD1(db::cloudflare_d1_driver::CloudflareD1Client),
     Agent(Arc<crate::db::agent_driver::PooledAgentClient>),
@@ -3962,7 +3972,7 @@ async fn exec_tx_pg_statements(
 async fn exec_tx_mysql_inner(
     state: &AppState,
     pool_key: &str,
-    pool: mysql_async::Pool,
+    pool: db::mysql::MySqlPool,
     statements: &[String],
     start: std::time::Instant,
     budget: DbOperationBudget,
@@ -4299,7 +4309,7 @@ async fn begin_transaction_session(
         TxnPoolHandle::Postgres(pg_pool) => {
             let conn = pg_pool.get().await.map_err(|e| format!("Failed to get Postgres connection: {e}"))?;
             let begin_sql = postgres_transaction_begin_sql(consistent_snapshot);
-            conn.execute(begin_sql, &[]).await.map_err(|e| format!("BEGIN failed: {e}"))?;
+            conn.execute_typed(begin_sql, &[]).await.map_err(|e| format!("BEGIN failed: {e}"))?;
             if let Some(schema) = schema {
                 db::postgres::set_postgres_search_path(
                     &conn,
@@ -4585,7 +4595,7 @@ where
         TxnConnection::Postgres(conn) => {
             let mut batch = Vec::with_capacity(batch_size);
             let mut total_rows = 0_u64;
-            let result = db::postgres::stream_select_query_inner(conn, sql, None, &mut |item| {
+            let result = db::postgres::stream_select_query_inner_unnamed(conn, sql, None, &mut |item| {
                 if let db::postgres::PostgresQueryStreamItem::Row(row) = item {
                     batch.push(row);
                     total_rows += 1;
@@ -4672,7 +4682,7 @@ where
 async fn rollback_manual_txn_connection(conn: &mut TxnConnection) -> Result<(), String> {
     match conn {
         TxnConnection::Postgres(conn) => {
-            conn.execute("ROLLBACK", &[]).await.map_err(|e| format!("ROLLBACK failed: {e}"))?;
+            conn.execute_typed("ROLLBACK", &[]).await.map_err(|e| format!("ROLLBACK failed: {e}"))?;
         }
         TxnConnection::Mysql(conn) => {
             conn.query_drop("ROLLBACK").await.map_err(|e| format!("ROLLBACK failed: {e}"))?;
@@ -4730,9 +4740,9 @@ async fn execute_manual_txn_postgres_statement(
     row_limit: usize,
 ) -> Result<db::QueryResult, String> {
     if db::postgres::postgres_statement_returns_rows(sql) {
-        db::postgres::execute_select_query(conn, sql, std::time::Instant::now(), row_limit).await
+        db::postgres::execute_select_query_unnamed(conn, sql, std::time::Instant::now(), row_limit).await
     } else {
-        let affected = conn.execute(sql, &[]).await.map_err(|e| format!("Query failed: {e}"))?;
+        let affected = conn.execute_typed(sql, &[]).await.map_err(|e| format!("Query failed: {e}"))?;
         Ok(db::QueryResult {
             columns: vec![],
             column_types: Vec::new(),
@@ -4823,7 +4833,7 @@ pub async fn commit_manual_transaction(state: &AppState, txn_session_id: &str) -
     let mut conn = session.connection.lock().await;
     match &mut *conn {
         TxnConnection::Postgres(conn) => {
-            conn.execute("COMMIT", &[]).await.map_err(|e| format!("COMMIT failed: {e}"))?;
+            conn.execute_typed("COMMIT", &[]).await.map_err(|e| format!("COMMIT failed: {e}"))?;
         }
         TxnConnection::Mysql(conn) => {
             conn.query_drop("COMMIT").await.map_err(|e| format!("COMMIT failed: {e}"))?;
@@ -6905,17 +6915,43 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn is_connection_error_detects_deadpool_pool_timeouts() {
+    fn is_connection_error_distinguishes_checkout_saturation_from_connection_timeouts() {
         // deadpool-postgres PoolError::Timeout messages (contain "pool" + "timeout" but not "timed out")
         assert!(is_connection_error("pool wait timeout"));
         assert!(is_connection_error("pool create timeout"));
         assert!(is_connection_error("pool recycle timeout"));
         // checkout helper timeout messages
-        assert!(is_connection_error("PostgreSQL connection pool checkout timed out (5s)"));
-        assert!(is_connection_error("MySQL get connection timed out"));
+        assert!(!is_connection_error("PostgreSQL connection pool checkout timed out [stage=wait, timeout_ms=5000]"));
+        assert!(is_connection_error("PostgreSQL connection pool checkout timed out [stage=create, timeout_ms=5000]"));
+        assert!(is_connection_error("PostgreSQL connection pool checkout timed out [stage=recycle, timeout_ms=5000]"));
+        assert!(!is_connection_error("MySQL connection pool checkout timed out [stage=wait, timeout_ms=5000]"));
+        assert!(!is_connection_error(METADATA_POOL_BUSY_ERROR));
         assert!(is_connection_error("MySQL ping timed out"));
         assert!(is_connection_error("MySQL kill connection checkout timed out"));
         assert!(is_connection_error("MySQL KILL QUERY timed out"));
+
+        assert!(is_pool_saturation_error(
+            "PostgreSQL connection pool checkout timed out [stage=wait, timeout_ms=5000]"
+        ));
+        assert!(is_pool_saturation_error("MySQL connection pool checkout timed out [stage=wait, timeout_ms=5000]"));
+        assert!(!is_pool_saturation_error(
+            "PostgreSQL connection pool checkout timed out [stage=create, timeout_ms=5000]"
+        ));
+        assert!(is_pool_saturation_error(METADATA_POOL_BUSY_ERROR));
+        assert_eq!(
+            pool_error_action(
+                Some(DatabaseType::Mysql),
+                "MySQL connection pool checkout timed out [stage=wait, timeout_ms=5000]"
+            ),
+            PoolErrorAction::Keep
+        );
+        assert_eq!(
+            pool_error_action(
+                Some(DatabaseType::Postgres),
+                "PostgreSQL connection pool checkout timed out [stage=wait, timeout_ms=5000]"
+            ),
+            PoolErrorAction::Keep
+        );
     }
 
     #[test]

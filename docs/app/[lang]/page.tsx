@@ -465,7 +465,7 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
           <h2 className="m-0 text-[25px] font-[720] text-landing-ink">{t.docsStart}</h2>
           <p className="mt-2 text-landing-muted text-sm leading-[1.65]">{t.docsStartDesc}</p>
         </div>
-        <Link href={`/${l}/docs/getting-started`} className="landing-inline-link flex shrink-0 items-center gap-[7px] text-sm font-[650] max-[760px]:mt-4" target="_blank">
+        <Link href={`/${l}/docs/getting-started`} prefetch={false} className="landing-inline-link flex shrink-0 items-center gap-[7px] text-sm font-[650] max-[760px]:mt-4" target="_blank">
           {t.readDocs}
           <ArrowRight size={15} />
         </Link>
@@ -479,7 +479,7 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
         </div>
         <div className="landing-workflow-grid grid grid-cols-4 rounded-[10px] overflow-hidden max-[1040px]:grid-cols-2 max-[760px]:grid-cols-2 max-[360px]:grid-cols-1">
           {workflowItems.map((item, i) => (
-            <Link key={item.title} href={item.href} className={`landing-workflow-card min-h-[250px] p-6 border-r border-r-landing-line max-[760px]:min-h-0 max-[760px]:p-[18px] ${i === workflowItems.length - 1 ? "border-r-0" : ""}`} target="_blank" data-stagger>
+            <Link key={item.title} href={item.href} prefetch={false} className={`landing-workflow-card min-h-[250px] p-6 border-r border-r-landing-line max-[760px]:min-h-0 max-[760px]:p-[18px] ${i === workflowItems.length - 1 ? "border-r-0" : ""}`} target="_blank" data-stagger>
               <item.icon size={20} className="text-landing-blue" />
               <h3 className="mt-[18px] text-base font-bold">{item.title}</h3>
               <p className="mt-2.5 text-landing-muted text-[13px] leading-[1.62]">{item.desc}</p>
@@ -498,7 +498,7 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
           <h2 className="m-0 text-[25px] font-[720] text-landing-ink">{t.supportTitle}</h2>
           <div className="flex items-center justify-end gap-5 justify-self-end max-w-[760px] text-right max-[760px]:block max-[760px]:max-w-none max-[760px]:text-left">
             <p className="m-0 text-landing-muted text-sm leading-[1.65]">{t.supportDesc}</p>
-            <Link href={`/${l}/databases`} className="landing-inline-link inline-flex shrink-0 items-center gap-[7px] text-sm font-[650] max-[760px]:mt-3">
+            <Link href={`/${l}/databases`} prefetch={false} className="landing-inline-link inline-flex shrink-0 items-center gap-[7px] text-sm font-[650] max-[760px]:mt-3">
               {t.supportLink}
               <ArrowRight size={15} />
             </Link>
@@ -507,6 +507,11 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
         <ExpandableDatabaseGrid lang={l}>
           {databaseSupport.map((db) => {
             const isCta = "href" in db && db.href;
+            const nameSizeClass = db.name.length >= 14
+              ? "text-[11px] tracking-[-0.035em] max-[760px]:text-[9px]"
+              : db.name.length >= 11
+                ? "text-xs tracking-[-0.015em] max-[760px]:text-[10px]"
+                : "text-sm max-[760px]:text-[11px]";
             const CardTag = isCta ? "a" : "div";
             return (
               <CardTag
@@ -523,7 +528,7 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
                     <img src={db.icon} alt="" width={38} height={38} loading="lazy" decoding="async" className="block w-[38px] h-[38px] object-contain max-[760px]:size-7" />
                   )}
                 </div>
-                <strong className={`text-sm font-[650] leading-[1.2] text-center max-[760px]:text-[11px] ${isCta ? "text-landing-blue" : "text-[color-mix(in_srgb,var(--color-landing-ink)_92%,var(--color-landing-muted))]"}`}>{db.name}</strong>
+                <strong className={`block w-full min-w-0 px-1 font-[650] leading-[1.2] text-center [overflow-wrap:anywhere] min-[761px]:whitespace-nowrap ${nameSizeClass} ${isCta ? "text-landing-blue" : "text-[color-mix(in_srgb,var(--color-landing-ink)_92%,var(--color-landing-muted))]"}`}>{db.name}</strong>
               </CardTag>
             );
           })}
@@ -597,7 +602,7 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
           <Link href="https://github.com/t8y2/dbx/releases/latest" target="_blank" className="landing-final-link inline-flex items-center justify-center min-h-[42px] rounded-[7px] px-[15px] text-sm font-[650]">
             {t.release}
           </Link>
-          <Link href={`/${l}/docs/getting-started#docker`} target="_blank" className="landing-final-link inline-flex items-center justify-center min-h-[42px] rounded-[7px] px-[15px] text-sm font-[650]">
+          <Link href={`/${l}/docs/getting-started#docker`} prefetch={false} target="_blank" className="landing-final-link inline-flex items-center justify-center min-h-[42px] rounded-[7px] px-[15px] text-sm font-[650]">
             {t.docker}
           </Link>
         </div>

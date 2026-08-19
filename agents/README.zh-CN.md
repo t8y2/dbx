@@ -12,7 +12,7 @@ DBX 的 Agent 驱动 —— 通过 JDBC 和原生数据库驱动支持各种数�
 |-------|----------|-------------|
 | access | Microsoft Access | UCanAccess |
 | dameng | 达梦 DM8 | DM JDBC |
-| kingbase | 人大金仓 KingbaseES | gokb Go 原生 agent |
+| kingbase | 金仓KingbaseES | gokb Go 原生 agent |
 | vastbase | Vastbase | openGauss Go 原生 agent |
 | uxdb | 优炫 UXDB | UXDB JDBC |
 | goldendb | GoldenDB | MySQL Connector/J |
@@ -37,6 +37,7 @@ DBX 的 Agent 驱动 —— 通过 JDBC 和原生数据库驱动支持各种数�
 | cassandra | Apache Cassandra 2.1+ | Apache cassandra-gocql-driver 原生 Agent |
 | bigquery | Google BigQuery | BigQuery JDBC |
 | kylin | Apache Kylin | Kylin JDBC |
+| ignite | Apache Ignite | Ignite JDBC thin（ignite-core） |
 | sundb | SunDB | SunDB JDBC |
 | tdengine | TDengine 2.4+ | taos-connector-rust 原生 WebSocket agent |
 | yashandb | 崖山 YashanDB | YashanDB JDBC |

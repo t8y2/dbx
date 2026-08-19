@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { DATA_GRID_DARK_ACTIVE_ROW_BG, DATA_GRID_LIGHT_ACTIVE_ROW_BG, dataGridActiveRowBackground, resolveDataGridPaintTheme } from "@/lib/dataGrid/dataGridPaintTheme";
+import { DEFAULT_DATA_GRID_TYPE_COLORS_DARK, DEFAULT_DATA_GRID_TYPE_COLORS_LIGHT, dataGridTypeColorCssVar } from "@/lib/dataGrid/dataGridTypeColorScheme";
 
 function parseRgb(value: string): { r: number; g: number; b: number } | null {
   const hex = value.match(/^#([\da-f]{2})([\da-f]{2})([\da-f]{2})$/i);
@@ -39,6 +40,30 @@ describe("data grid paint theme", () => {
     expect(resolveDataGridPaintTheme({ getVar: emptyCssVariable, isDark: false }).rowNumberActive).toBe(DATA_GRID_LIGHT_ACTIVE_ROW_BG);
     expect(resolveDataGridPaintTheme({ getVar: emptyCssVariable, isDark: true }).cellActive).toBe(DATA_GRID_DARK_ACTIVE_ROW_BG);
     expect(resolveDataGridPaintTheme({ getVar: emptyCssVariable, isDark: true }).rowNumberActive).toBe(DATA_GRID_DARK_ACTIVE_ROW_BG);
+  });
+
+  it("falls back to the built-in type palette for the active appearance", () => {
+    const emptyCssVariable = () => "";
+
+    expect(resolveDataGridPaintTheme({ getVar: emptyCssVariable, isDark: false }).typeForegrounds.integer).toBe(DEFAULT_DATA_GRID_TYPE_COLORS_LIGHT.integer);
+    expect(resolveDataGridPaintTheme({ getVar: emptyCssVariable, isDark: true }).typeForegrounds.integer).toBe(DEFAULT_DATA_GRID_TYPE_COLORS_DARK.integer);
+  });
+
+  it("lets an overridden type variable drive the canvas foreground", () => {
+    // A custom scheme is applied by writing these variables onto the document,
+    // so the canvas paint theme has to read them rather than its own defaults.
+    const overrides: Record<string, string> = { [dataGridTypeColorCssVar("integer")]: "#123456" };
+    const theme = resolveDataGridPaintTheme({ getVar: (name) => overrides[name] ?? "", isDark: false });
+
+    // A resolved variable is normalized to a canvas-safe rgb(); an absent one keeps the raw fallback.
+    expect(theme.typeForegrounds.integer).toBe("rgb(18, 52, 86)");
+    expect(theme.typeForegrounds.string).toBe(DEFAULT_DATA_GRID_TYPE_COLORS_LIGHT.string);
+  });
+
+  it("keeps unknown-typed values on the neutral foreground", () => {
+    const theme = resolveDataGridPaintTheme({ getVar: () => "", isDark: false });
+
+    expect(theme.typeForegrounds.unknown).toBe(theme.foreground);
   });
 
   it("keeps the classic blue selection palette instead of theme accent/ring mixing", () => {

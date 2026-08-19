@@ -1171,7 +1171,7 @@ const driverProfiles: Record<
   gaussdb: { type: "gaussdb", port: 5432, user: "gaussdb", label: "GaussDB", icon: "gaussdb" },
   kwdb: { type: "kwdb", port: 26257, user: "root", label: "KWDB", icon: "kwdb" },
   questdb: { type: "questdb", port: 8812, user: "questdb", label: "QuestDB", icon: "questdb" },
-  kingbase: { type: "kingbase", port: 54321, user: "system", label: "人大金仓 KingbaseES", icon: "kingbase" },
+  kingbase: { type: "kingbase", port: 54321, user: "system", label: "金仓KingbaseES", icon: "kingbase" },
   highgo: { type: "highgo", port: 5866, user: "highgo", label: "瀚高 HighGo", icon: "highgo" },
   uxdb: { type: "uxdb", port: 52025, user: "uxdb", label: "优炫 UXDB", icon: "uxdb" },
   yashandb: { type: "yashandb", port: 1688, user: "sys", label: "崖山 YashanDB", icon: "yashandb" },
@@ -1234,6 +1234,7 @@ const driverProfiles: Record<
     host: "https://www.googleapis.com/bigquery/v2",
   },
   kylin: { type: "kylin", port: 7070, user: "ADMIN", label: "Apache Kylin", icon: "kylin" },
+  ignite: { type: "ignite", port: 10800, user: "", label: "Apache Ignite", icon: "ignite" },
   sundb: { type: "sundb", port: 22000, user: "root", label: "科蓝 SUNDB", icon: "sundb" },
   oscar: { type: "oscar", port: 2003, user: "SYSDBA", label: "神通 OSCAR", icon: "oscar" },
   jdbc: { type: "jdbc", port: 0, user: "", label: "JDBC", icon: "jdbc" },
@@ -2973,6 +2974,7 @@ const iconTypeMap: Record<string, string> = {
   cassandra: "cassandra",
   bigquery: "bigquery",
   kylin: "kylin",
+  ignite: "ignite",
   sundb: "sundb",
   oscar: "oscar",
   influxdb: "influxdb",
@@ -3033,7 +3035,7 @@ const dbOptions: DbOption[] = [
   { value: "firebird", label: "Firebird" },
   { value: "exasol", label: "Exasol" },
   { value: "gbase", label: "南大通用 GBase" },
-  { value: "kingbase", label: "人大金仓 KingbaseES" },
+  { value: "kingbase", label: "金仓KingbaseES" },
   { value: "highgo", label: "瀚高 HighGo" },
   { value: "uxdb", label: "优炫 UXDB" },
   { value: "yashandb", label: "崖山 YashanDB" },
@@ -3054,6 +3056,7 @@ const dbOptions: DbOption[] = [
   { value: "cassandra", label: "Cassandra" },
   { value: "bigquery", label: "BigQuery" },
   { value: "kylin", label: "Kylin" },
+  { value: "ignite", label: "Apache Ignite" },
   { value: "sundb", label: "科蓝 SUNDB" },
   { value: "oscar", label: "神通 OSCAR" },
   { value: "xugu", label: "虚谷 XuguDB" },
@@ -3092,7 +3095,7 @@ const dbCategoryDefinitions: Array<{
   {
     key: "analytics",
     titleKey: "connection.databaseCategoryAnalytics",
-    optionValues: ["cloudberry", "clickhouse", "doris", "starrocks", "databend", "selectdb", "databricks", "saphana", "teradata", "vertica", "exasol", "redshift", "snowflake", "trino", "prestosql", "hive", "kyuubi", "impala", "spark", "bigquery", "kylin", "dremio"],
+    optionValues: ["cloudberry", "clickhouse", "doris", "starrocks", "databend", "selectdb", "databricks", "saphana", "teradata", "vertica", "exasol", "redshift", "snowflake", "trino", "prestosql", "hive", "kyuubi", "impala", "spark", "bigquery", "kylin", "ignite", "dremio"],
   },
   {
     key: "domestic",
@@ -4108,9 +4111,11 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
   } else if (supportsGaussdbIdentifierQuoteStyle(config)) {
     const style = gaussdbIdentifierQuoteStyle(config);
     const targetServerType = gaussdbTargetServerType(config);
+    const countQueryDop = gaussdbCountQueryDop(config);
     config.external_config = undefined;
     setGaussdbIdentifierQuoteStyle(config, style);
     setGaussdbTargetServerType(config, targetServerType);
+    setGaussdbCountQueryDop(config, countQueryDop);
   } else if (!isDoltDriverProfile(config.driver_profile)) {
     config.external_config = undefined;
   }
@@ -8149,14 +8154,9 @@ function openExternalUrl(url: string) {
                       <input id="connect-timeout-global" v-model="form.connect_timeout_inherit" type="radio" name="connect-timeout-scope" :value="true" class="h-3.5 w-3.5 shrink-0 accent-primary" />
                       <div class="flex min-w-0 flex-1 items-center gap-1">
                         <label for="connect-timeout-global" class="min-w-0 cursor-pointer truncate text-xs" :title="t('connection.useGlobalQueryTimeout')">{{ t("connection.useGlobalQueryTimeout") }}</label>
-                        <Tooltip>
-                          <TooltipTrigger as-child>
-                            <CircleHelp class="h-3.5 w-3.5 shrink-0 cursor-help text-muted-foreground hover:text-foreground" />
-                          </TooltipTrigger>
-                          <TooltipContent side="top" align="center" class="max-w-[280px] text-xs leading-relaxed">
-                            {{ t("connection.globalConnectTimeoutHint") }}
-                          </TooltipContent>
-                        </Tooltip>
+                        <HelpTooltip :label="t('connection.globalConnectTimeoutHint')" content-class="max-w-[280px]">
+                          {{ t("connection.globalConnectTimeoutHint") }}
+                        </HelpTooltip>
                       </div>
                       <Input
                         v-model.number="editGlobalConnectTimeoutSecs"
@@ -8199,14 +8199,9 @@ function openExternalUrl(url: string) {
                       <input id="query-timeout-global" v-model="form.query_timeout_inherit" type="radio" name="query-timeout-scope" :value="true" class="h-3.5 w-3.5 shrink-0 accent-primary" />
                       <div class="flex min-w-0 flex-1 items-center gap-1">
                         <label for="query-timeout-global" class="min-w-0 cursor-pointer truncate text-xs" :title="t('connection.useGlobalQueryTimeout')">{{ t("connection.useGlobalQueryTimeout") }}</label>
-                        <Tooltip>
-                          <TooltipTrigger as-child>
-                            <CircleHelp class="h-3.5 w-3.5 shrink-0 cursor-help text-muted-foreground hover:text-foreground" />
-                          </TooltipTrigger>
-                          <TooltipContent side="top" align="center" class="max-w-[280px] text-xs leading-relaxed">
-                            {{ t("connection.globalQueryTimeoutHint") }}
-                          </TooltipContent>
-                        </Tooltip>
+                        <HelpTooltip :label="t('connection.globalQueryTimeoutHint')" content-class="max-w-[280px]">
+                          {{ t("connection.globalQueryTimeoutHint") }}
+                        </HelpTooltip>
                       </div>
                       <Input v-model.number="editGlobalQueryTimeoutSecs" type="number" min="0" :max="MAX_QUERY_TIMEOUT_SECS" step="1" class="col-span-2 h-7 w-full shrink-0 sm:col-span-1 sm:w-20" :disabled="form.query_timeout_inherit !== true" @input="clampQueryTimeoutInput($event, 'global')" />
                     </div>

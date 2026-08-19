@@ -9,6 +9,7 @@ import {
   ArrowRightLeft,
   AlertTriangle,
   Bot,
+  Camera,
   Check,
   ChevronLeft,
   ChevronRight,
@@ -44,6 +45,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useTheme } from "@/composables/useTheme";
+import CodeSnapshotDialog from "@/components/codeSnapshot/CodeSnapshotDialog.vue";
+import type { CodeSnapshotSource } from "@/lib/codeSnapshot/codeSnapshot";
 import { useSettingsStore, AI_PROVIDER_PRESETS, normalizeAiConfig } from "@/stores/settingsStore";
 import AiProviderLogo from "@/components/icons/AiProviderLogo.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -842,6 +845,14 @@ function sendProposalReply(positive: boolean) {
 
 const activePlaceholder = computed(() => `${t(`ai.placeholders.${activeAction.value}`)} ${t("ai.tableMentionPlaceholderHint")}`);
 const aiCodeAppearance = computed(() => (isDark.value ? "dark" : "light"));
+
+const codeSnapshotOpen = ref(false);
+const codeSnapshotSource = ref<CodeSnapshotSource | null>(null);
+
+function openCodeSnapshot(seg: { content: string; lang: string }) {
+  codeSnapshotSource.value = { code: seg.content, lang: seg.lang };
+  codeSnapshotOpen.value = true;
+}
 
 const showActionButtons = computed(() => {
   if (!props.connection) return true;
@@ -2640,6 +2651,9 @@ async function openExternalUrl(url: string) {
                           <Check v-if="copiedContentKey === `code:${i}:${j}`" class="h-3.5 w-3.5 text-green-400" />
                           <Copy v-else class="h-3.5 w-3.5" />
                         </button>
+                        <button class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('codeSnapshot.take')" @click="openCodeSnapshot(seg)">
+                          <Camera class="h-3.5 w-3.5" />
+                        </button>
                       </div>
                     </div>
                     <pre class="ai-code-block whitespace-pre-wrap break-words p-3 text-xs leading-relaxed text-zinc-900 dark:text-zinc-100"><code v-html="seg.html"></code></pre>
@@ -2934,8 +2948,8 @@ async function openExternalUrl(url: string) {
                     <input v-model="modelSearchQuery" type="text" :placeholder="t('ai.searchModels')" class="w-full rounded-sm border bg-background py-1.5 pl-7 pr-2 text-xs outline-none focus:ring-1 focus:ring-primary" @click.stop />
                   </div>
                   <div class="max-h-80 overflow-auto">
-                    <template v-for="(config, configIndex) in configuredProviders" :key="config.id">
-                      <button type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs text-foreground hover:bg-muted" :aria-expanded="!isModelConfigCollapsed(config.id)" @click="toggleModelConfig(config.id)">
+                    <div v-for="(config, configIndex) in configuredProviders" :key="config.id" class="relative">
+                      <button type="button" class="sticky top-0 z-10 flex w-full items-center gap-2 rounded-sm bg-popover px-2 py-1.5 text-left text-xs text-foreground hover:bg-muted" :aria-expanded="!isModelConfigCollapsed(config.id)" @click="toggleModelConfig(config.id)">
                         <ChevronRight class="h-3.5 w-3.5 shrink-0 transition-transform" :class="{ 'rotate-90': !isModelConfigCollapsed(config.id) }" />
                         <AiProviderLogo :provider="config.provider" :label="AI_PROVIDER_PRESETS[config.provider]?.label ?? config.provider" :icon-slug="AI_PROVIDER_PRESETS[config.provider]?.iconSlug" class="h-3.5 w-3.5 shrink-0" />
                         <span class="min-w-0 flex-1 truncate font-medium">{{ config.name }}</span>
@@ -2984,7 +2998,7 @@ async function openExternalUrl(url: string) {
                         </button>
                       </div>
                       <div v-if="configIndex < configuredProviders.length - 1" class="my-1 border-t" />
-                    </template>
+                    </div>
                   </div>
                   <div v-if="settings.activeModel" class="border-t pt-1">
                     <Popover v-model:open="effortMenuOpen">
@@ -3116,6 +3130,7 @@ async function openExternalUrl(url: string) {
           </div>
         </div>
       </div>
+      <CodeSnapshotDialog v-model:open="codeSnapshotOpen" :source="codeSnapshotSource" />
     </div>
   </div>
 </template>
@@ -3149,6 +3164,11 @@ async function openExternalUrl(url: string) {
 }
 .ai-markdown :deep(ol) {
   list-style-type: decimal;
+  /* Multi-digit markers (100., 101., ...) don't fit the fixed padding-left
+     with the default outside marker position, so they hang past the bubble
+     edge. Keeping the marker inside the content box scales with any digit
+     count. */
+  list-style-position: inside;
 }
 .ai-markdown :deep(li) {
   margin: 0.15em 0;

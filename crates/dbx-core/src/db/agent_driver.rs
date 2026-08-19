@@ -2897,6 +2897,23 @@ fn agent_java_args_with_extra_opts(
         args.push("-Djava.net.preferIPv4Stack=true".to_string());
     }
 
+    // Ignite's GridUnsafe/BinaryContext reflect into JDK internals; without these
+    // opens every connect fails with ExceptionInInitializerError on JDK 9+.
+    if agent_jar_path_matches_key(jar_path, "ignite") {
+        args.extend(
+            [
+                "--add-opens=java.base/jdk.internal.misc=ALL-UNNAMED",
+                "--add-opens=java.base/java.nio=ALL-UNNAMED",
+                "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED",
+                "--add-opens=java.base/java.util=ALL-UNNAMED",
+                "--add-opens=java.base/java.lang=ALL-UNNAMED",
+                "--add-opens=java.base/java.lang.reflect=ALL-UNNAMED",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        );
+    }
+
     // Hive/Kerberos JDBC drivers read JAAS and krb5 settings during JVM startup,
     // so users need a process-level escape hatch before the agent jar is loaded.
     if let Some(extra) = extra_opts {
@@ -3623,6 +3640,22 @@ mod tests {
         let args = agent_java_args("/tmp/dbx/drivers/highgo/agent.jar");
 
         assert!(!args.iter().any(|arg| arg == "-Djava.net.preferIPv4Stack=true"));
+    }
+
+    #[test]
+    fn agent_java_args_open_jdk_internals_for_ignite() {
+        let args = agent_java_args("/tmp/dbx/drivers/ignite/agent.jar");
+
+        assert!(args.iter().any(|arg| arg == "--add-opens=java.base/java.nio=ALL-UNNAMED"));
+        assert!(args.iter().any(|arg| arg == "--add-opens=java.base/java.util=ALL-UNNAMED"));
+        assert!(args.iter().any(|arg| arg == "--add-opens=java.base/java.lang=ALL-UNNAMED"));
+    }
+
+    #[test]
+    fn agent_java_args_do_not_open_jdk_internals_for_other_agents() {
+        let args = agent_java_args("/tmp/dbx/drivers/kylin/agent.jar");
+
+        assert!(!args.iter().any(|arg| arg == "--add-opens=java.base/java.nio=ALL-UNNAMED"));
     }
 
     #[test]

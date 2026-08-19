@@ -18,6 +18,7 @@ import com.dbx.agent.QueryPageResult;
 import com.dbx.agent.QueryResult;
 import com.dbx.agent.TableInfo;
 import com.dbx.agent.TriggerInfo;
+import dm.jdbc.driver.DmdbConnection;
 import java.io.PrintStream;
 import java.io.Reader;
 import java.net.SocketTimeoutException;
@@ -49,6 +50,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.WeakHashMap;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -89,6 +91,8 @@ public final class DamengAgent extends AbstractJdbcAgent {
         """.stripIndent().trim();
     private String connectedUsername;
     private volatile boolean dbmsOutputInitializationSupported = true;
+    private final Map<Object, Boolean> dbmsOutputInitializedConnections =
+        Collections.synchronizedMap(new WeakHashMap<>());
 
     @Override
     protected String driverClass() {
@@ -118,9 +122,22 @@ public final class DamengAgent extends AbstractJdbcAgent {
     }
 
     @Override
-    protected void afterPhysicalConnect(ConnectParams params, Connection connection) throws SQLException {
-        if (!dbmsOutputInitializationSupported) {
+    protected void afterPhysicalConnect(ConnectParams params, Connection connection) {
+        // DBMS_OUTPUT is initialized lazily because some DM versions can block here indefinitely.
+    }
+
+    private void initializeDbmsOutputIfNeeded(String sql) throws SQLException {
+        if (!dbmsOutputInitializationSupported || !isDbmsOutputStatement(sql)) {
             return;
+        }
+
+        Connection connection = requireConnected();
+        Object physicalConnection = connection.unwrap(DmdbConnection.class);
+        synchronized (dbmsOutputInitializedConnections) {
+            if (dbmsOutputInitializedConnections.containsKey(physicalConnection)) {
+                return;
+            }
+            dbmsOutputInitializedConnections.put(physicalConnection, Boolean.TRUE);
         }
 
         Integer originalNetworkTimeout = applyDbmsOutputNetworkTimeout(connection);
@@ -159,6 +176,25 @@ public final class DamengAgent extends AbstractJdbcAgent {
             return;
         }
         throw setupError;
+    }
+
+    private static boolean isDbmsOutputStatement(String sql) {
+        if (sql == null) {
+            return false;
+        }
+        int start = skipSqlTrivia(sql, 0);
+        return startsWithKeyword(sql, start, "CALL")
+            || startsWithKeyword(sql, start, "BEGIN")
+            || startsWithKeyword(sql, start, "DECLARE")
+            || startsWithKeyword(sql, start, "EXEC")
+            || startsWithKeyword(sql, start, "EXECUTE");
+    }
+
+    private static boolean startsWithKeyword(String sql, int start, String keyword) {
+        int end = start + keyword.length();
+        return end <= sql.length()
+            && sql.regionMatches(true, start, keyword, 0, keyword.length())
+            && (end == sql.length() || !isIdentifierPart(sql.charAt(end)));
     }
 
     private static Integer applyDbmsOutputNetworkTimeout(Connection connection) throws SQLException {
@@ -1653,6 +1689,7 @@ public final class DamengAgent extends AbstractJdbcAgent {
             // DM JDBC reports raw EXPLAIN as an update count; its driver API is the only source of plan rows.
             return executeExplainQuery(explainSql, schema, options);
         }
+        uncheckedVoid(() -> initializeDbmsOutputIfNeeded(sql));
         return JdbcExecutor.current().execute(
             requireConnected(),
             sql,
@@ -1776,6 +1813,7 @@ public final class DamengAgent extends AbstractJdbcAgent {
                 false
             );
         }
+        uncheckedVoid(() -> initializeDbmsOutputIfNeeded(sql));
         return JdbcExecutor.current().executePage(
             requireConnected(),
             sql,

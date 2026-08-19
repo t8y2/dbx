@@ -617,9 +617,29 @@ fn select_row_falls_back_to_all_columns_without_usable_identity() {
 }
 
 #[test]
+fn select_cells_joins_multiple_columns_and_rows() {
+    // A genuine multi-cell selection (same-row columns AND'd, multi-row
+    // selections OR'd) is allowed for SELECT and reuses the WHERE predicate
+    // builder, matching "Copy as WHERE clause" for the same selection.
+    let mut request = request(DataGridExtractorId::SqlSelect);
+    request.table_meta = Some(DataGridTableMeta {
+        catalog: None,
+        database: None,
+        schema: None,
+        table_name: "users".to_string(),
+        primary_keys: vec!["id".to_string()],
+        columns: None,
+    });
+
+    let result = extract_data_grid_selection(request).expect("multi-cell SELECT extraction");
+
+    assert_eq!(result.text, "SELECT * FROM \"users\" WHERE (\"id\" = 1 AND \"name\" = 'Ada') OR (\"id\" = 2 AND \"name\" = 'Grace, Hopper');");
+}
+
+#[test]
 fn select_rejects_ambiguous_selection_and_missing_target() {
     let error = extract_data_grid_selection(request(DataGridExtractorId::SqlSelect))
-        .expect_err("multiple cells without a table must fail");
+        .expect_err("cells without a table must fail");
     assert_eq!(error.code, DataGridExtractErrorCode::MissingTableMetadata);
 
     let mut request = request(DataGridExtractorId::SqlSelect);
@@ -631,7 +651,12 @@ fn select_rejects_ambiguous_selection_and_missing_target() {
         primary_keys: Vec::new(),
         columns: None,
     });
-    let error = extract_data_grid_selection(request).expect_err("multiple cells must fail");
+    request.selection_kind = DataGridSelectionKind::Columns;
+    let error = extract_data_grid_selection(request.clone()).expect_err("column selection must fail");
+    assert_eq!(error.code, DataGridExtractErrorCode::InvalidSelectSelection);
+
+    request.selection_kind = DataGridSelectionKind::Rows;
+    let error = extract_data_grid_selection(request).expect_err("multiple selected rows must fail");
     assert_eq!(error.code, DataGridExtractErrorCode::InvalidSelectSelection);
 }
 
@@ -668,12 +693,55 @@ fn where_clause_applies_mysql_json_cast() {
             },
         ]),
     });
+    let mut select_request = request.clone();
+    select_request.extractor = DataGridExtractorId::SqlSelect;
     let result = extract_data_grid_selection(request).expect("WHERE extraction");
     assert!(
         result.text.contains("CAST(") && result.text.contains(" AS JSON)"),
         "expected MySQL JSON CAST predicate, got: {}",
         result.text
     );
+
+    let select_result = extract_data_grid_selection(select_request).expect("SELECT extraction");
+    assert!(
+        select_result.text.starts_with("SELECT * FROM `t` WHERE ")
+            && select_result.text.contains("CAST(")
+            && select_result.text.contains(" AS JSON)"),
+        "expected MySQL JSON CAST predicate in SELECT, got: {}",
+        select_result.text
+    );
+}
+
+#[test]
+fn select_cells_falls_back_to_display_name_like_where_clause() {
+    // SELECT built from a cell selection reuses write_where_clause, so a
+    // missing source_name must fall back to display_name exactly like WHERE
+    // does, instead of erroring — the two must stay in lockstep for the
+    // identical selection.
+    let mut request = request(DataGridExtractorId::SqlSelect);
+    request.table_meta = Some(DataGridTableMeta {
+        catalog: None,
+        database: None,
+        schema: None,
+        table_name: "users".to_string(),
+        primary_keys: vec!["id".to_string()],
+        columns: None,
+    });
+    request.columns = vec![
+        DataGridExtractColumn { display_name: "id".to_string(), source_name: None, source_index: 0 },
+        column("name", 1),
+    ];
+    let mut where_request = request.clone();
+    where_request.extractor = DataGridExtractorId::WhereClause;
+
+    let result = extract_data_grid_selection(request).expect("SELECT extraction with missing source_name");
+    assert_eq!(
+        result.text,
+        "SELECT * FROM \"users\" WHERE (\"id\" = 1 AND \"name\" = 'Ada') OR (\"id\" = 2 AND \"name\" = 'Grace, Hopper');"
+    );
+
+    let where_result = extract_data_grid_selection(where_request).expect("WHERE extraction with missing source_name");
+    assert_eq!(where_result.text, "(\"id\" = 1 AND \"name\" = 'Ada') OR (\"id\" = 2 AND \"name\" = 'Grace, Hopper')");
 }
 
 #[test]

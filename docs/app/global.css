@@ -82,6 +82,12 @@ body {
   text-rendering: optimizeLegibility;
 }
 
+.landing,
+.landing :where(h1, h2, h3, h4, p, li, span, strong, em, code) {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
 a,
 button {
   -webkit-tap-highlight-color: transparent;
@@ -591,6 +597,7 @@ a {
   mix-blend-mode: screen;
   pointer-events: none;
   transform: translateX(-50%);
+  animation: landing-spotlight-enter 1.1s cubic-bezier(0.16, 1, 0.3, 1) both;
   z-index: -1;
 }
 
@@ -742,6 +749,7 @@ a {
     0 38px 110px rgba(0, 0, 0, 0.5),
     0 0 80px rgba(82, 213, 255, 0.1),
     0 0 0 1px rgba(255, 255, 255, 0.03) inset;
+  animation: landing-product-enter 0.9s cubic-bezier(0.16, 1, 0.3, 1) 0.18s both;
   transform-style: preserve-3d;
   transition:
     box-shadow 0.24s ease,
@@ -782,12 +790,7 @@ a {
 }
 
 .landing-product-slide {
-  opacity: 0;
-  transition: opacity 0.45s ease;
-}
-
-.landing-product-slide[data-active="true"] {
-  opacity: 1;
+  animation: landing-product-slide-enter 0.45s ease both;
 }
 
 .landing-product-dots {
@@ -988,6 +991,24 @@ a {
   margin-top: 3px;
 }
 
+.landing-contributor-row {
+  display: contents;
+}
+
+@media (min-width: 1180px) {
+  .landing-contributor-grid {
+    flex-direction: column;
+    flex-wrap: nowrap;
+    align-items: center;
+  }
+
+  .landing-contributor-row {
+    display: flex;
+    gap: 10px;
+    justify-content: center;
+  }
+}
+
 .landing-contributor-avatar {
   display: block;
   position: relative;
@@ -1043,7 +1064,8 @@ a {
     transform 0.18s ease;
 }
 
-.landing-contributor-tooltip.is-visible {
+.landing-contributor-avatar:hover .landing-contributor-tooltip,
+.landing-contributor-avatar:focus-visible .landing-contributor-tooltip {
   opacity: 1;
   transform: translateX(-50%) translateY(0);
 }
@@ -1828,6 +1850,33 @@ a {
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+@keyframes landing-spotlight-enter {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes landing-product-enter {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes landing-product-slide-enter {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
   }
 }
 

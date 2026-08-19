@@ -233,6 +233,7 @@ const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   quit_on_close: false,
   close_action_prompted: false,
   debug_logging_enabled: false,
+  metadata_cache_max_memory_mb: 64,
   duckdb_worker_process_isolation: false,
   duckdb_worker_max_processes: 4,
   saved_sql_sync_dir: null,

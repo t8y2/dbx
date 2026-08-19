@@ -21,7 +21,13 @@ vi.mock("echarts/charts", () => ({ LineChart: {} }));
 vi.mock("echarts/components", () => ({ GridComponent: {}, LegendComponent: {}, TooltipComponent: {} }));
 vi.mock("vue-echarts", async () => {
   const { defineComponent, h } = await import("vue");
-  return { default: defineComponent({ name: "VChart", setup: () => () => h("div") }) };
+  return {
+    default: defineComponent({
+      name: "VChart",
+      props: { option: { type: Object, required: true } },
+      setup: (props) => () => h("div", { "data-chart-option": JSON.stringify(props.option) }),
+    }),
+  };
 });
 vi.mock("@lucide/vue", async () => {
   const { defineComponent, h } = await import("vue");
@@ -89,15 +95,15 @@ async function flushUi() {
   await nextTick();
 }
 
-async function mountPanel() {
+async function mountPanel(options: { mqSystemKind?: "kafka" | "rabbitmq"; tenant?: string; namespace?: string } = {}) {
   root = document.createElement("div");
   document.body.appendChild(root);
   app = createApp(MonitoringPanel, {
     connectionId: "mq-1",
-    tenant: "_kafka",
-    namespace: "default",
+    tenant: options.tenant ?? "_kafka",
+    namespace: options.namespace ?? "default",
     topic: TOPIC,
-    mqSystemKind: "kafka",
+    mqSystemKind: options.mqSystemKind ?? "kafka",
     onNavigateTab: navigateTab,
   });
   app.mount(root);
@@ -187,5 +193,54 @@ describe("MonitoringPanel Kafka message browser", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("MonitoringPanel unavailable RabbitMQ rates", () => {
+  it("renders no-data without plotting zeros or reporting an idle flow", async () => {
+    backend.mqGetTopicStats.mockResolvedValue({
+      ...KAFKA_STATS,
+      ratesUnavailable: true,
+      raw: {},
+    });
+    backend.mqGetBacklog.mockResolvedValue({ msgBacklog: 5, backlogSize: 128 });
+
+    const panel = await mountPanel({ mqSystemKind: "rabbitmq", tenant: "_rabbitmq", namespace: "/" });
+
+    expect(panel.querySelector<HTMLElement>('[data-testid="monitoring-rate-in"]')?.textContent?.trim()).toBe("-");
+    expect(panel.querySelector<HTMLElement>('[data-testid="monitoring-rate-out"]')?.textContent?.trim()).toBe("-");
+    const flowStatus = panel.querySelector<HTMLElement>('[data-testid="monitoring-flow-status"]');
+    expect(flowStatus?.textContent?.trim()).toBe("-");
+    expect(flowStatus?.classList.contains("idle")).toBe(false);
+    expect(flowStatus?.classList.contains("unavailable")).toBe(true);
+
+    const rateChart = panel.querySelector<HTMLElement>('[data-testid="monitoring-rate-chart"]');
+    const option = JSON.parse(rateChart?.dataset.chartOption ?? "{}");
+    expect(option.series[0].data).toEqual([null]);
+    expect(option.series[1].data).toEqual([null]);
+    expect(backend.mqGetTopicStats).toHaveBeenCalledTimes(1);
+    expect(backend.mqGetBacklog).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a sampled zero as a real idle rate", async () => {
+    backend.mqGetTopicStats.mockResolvedValue({
+      ...KAFKA_STATS,
+      ratesUnavailable: false,
+      raw: {},
+    });
+    backend.mqGetBacklog.mockResolvedValue({ msgBacklog: 0, backlogSize: 0 });
+
+    const panel = await mountPanel({ mqSystemKind: "rabbitmq", tenant: "_rabbitmq", namespace: "/" });
+
+    expect(panel.querySelector<HTMLElement>('[data-testid="monitoring-rate-in"]')?.textContent?.trim()).toBe("0.00 msg/s");
+    expect(panel.querySelector<HTMLElement>('[data-testid="monitoring-rate-out"]')?.textContent?.trim()).toBe("0.00 msg/s");
+    const flowStatus = panel.querySelector<HTMLElement>('[data-testid="monitoring-flow-status"]');
+    expect(flowStatus?.textContent?.trim()).toBe("mqMonitoring.flowIdle");
+    expect(flowStatus?.classList.contains("idle")).toBe(true);
+
+    const rateChart = panel.querySelector<HTMLElement>('[data-testid="monitoring-rate-chart"]');
+    const option = JSON.parse(rateChart?.dataset.chartOption ?? "{}");
+    expect(option.series[0].data).toEqual([0]);
+    expect(option.series[1].data).toEqual([0]);
   });
 });

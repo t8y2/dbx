@@ -670,7 +670,7 @@ pub fn profile_for(db_type: DatabaseType) -> DdlDialectProfile {
         ClickHouse => clickhouse_profile(),
 
         DuckDb | Questdb | SapHana | Teradata | Snowflake | Trino | PrestoSql | Hive | Kyuubi | Impala | Spark
-        | Db2 | Informix | Bigquery | Kylin | Oscar | Tdengine | Iotdb | Databricks | Jdbc => {
+        | Db2 | Informix | Bigquery | Kylin | Ignite | Oscar | Tdengine | Iotdb | Databricks | Jdbc => {
             conservative_ansi(db_type)
         }
 

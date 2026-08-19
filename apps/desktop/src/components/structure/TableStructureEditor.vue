@@ -680,8 +680,15 @@ const indexTypesByDb: Record<string, string[]> = {
   sqlserver: ["CLUSTERED", "NONCLUSTERED", "COLUMNSTORE", "NONCLUSTERED COLUMNSTORE", "XML", "SPATIAL"],
   oracle: ["NORMAL", "BITMAP", "FUNCTION-BASED NORMAL", "FUNCTION-BASED DOMAIN", "DOMAIN", "CLUSTER"],
   sqlite: ["BTREE"],
+  "gaussdb-m": ["UBTREE"],
 };
-const indexTypeOptions = computed(() => (structureCapabilities.value.indexType ? (indexTypesByDb[structureDialect.value] ?? []) : []));
+const indexTypeOptions = computed(() => {
+  if (!structureCapabilities.value.indexType) return [];
+  if (connection.value?.driver_profile?.toLowerCase() === "gaussdb-m") {
+    return indexTypesByDb["gaussdb-m"];
+  }
+  return indexTypesByDb[structureDialect.value] ?? [];
+});
 
 interface DefaultValuePreset {
   label: string;

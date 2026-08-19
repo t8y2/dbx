@@ -740,6 +740,7 @@ const contextCell = ref<{
   col: number;
 } | null>(null);
 type ContextFilterTarget = {
+  id: number;
   rowId: number;
   rowIndex: number;
   col: number;
@@ -753,6 +754,8 @@ type ContextFilterTarget = {
 // The context menu closes before invoking its action. Keep an immutable target
 // for asynchronous filter actions instead of reading the cleared selection.
 const contextFilterTarget = ref<ContextFilterTarget | null>(null);
+let nextContextFilterTargetId = 0;
+const activeContextFilterActions = new Set<number>();
 // True when onCellContext created a synthetic single-cell selection (the cell
 // was not previously selected). Lets buildRequest distinguish a genuine 1×1
 // selection (user Ctrl+click) from a synthetic one (right-click on unselected).
@@ -775,6 +778,7 @@ function onGridContextMenuOpen() {
   contextFilterTarget.value =
     cell && columnName && sourceItem
       ? {
+          id: ++nextContextFilterTargetId,
           rowId: cell.rowId,
           rowIndex: cell.rowIndex,
           col: cell.col,
@@ -797,9 +801,14 @@ watch(
 
 function onGridContextMenuClose() {
   const lifecycle = ++contextMenuLifecycle;
+  const target = contextFilterTarget.value;
+  const targetId = target?.id;
   queueMicrotask(() => {
     if (lifecycle !== contextMenuLifecycle) return;
     invalidateSyntheticContextSelection();
+    // CustomContextMenu closes before starting an item action. Its action runs
+    // in this turn, so only a menu dismissal leaves this target unclaimed.
+    if (targetId !== undefined && contextFilterTarget.value?.id === targetId && !activeContextFilterActions.has(targetId)) contextFilterTarget.value = null;
   });
 }
 
@@ -5676,9 +5685,7 @@ function applyContextSort(direction: "asc" | "desc" | null, mode: DataGridSortMo
   applyColumnSort(contextColumn.value, contextCell.value.col, direction, mode);
 }
 
-async function contextFilterCondition(mode: FilterMode): Promise<string | null> {
-  const target = contextFilterTarget.value;
-  if (!target) return null;
+async function contextFilterCondition(target: ContextFilterTarget, mode: FilterMode): Promise<string | null> {
   const { columnName, sourceResult, sourceIndex, sourceValue, requiresHydration } = target;
   // CustomContextMenu closes before invoking its action. Keep the target
   // stable across hydration after the close lifecycle clears contextCell.
@@ -5687,25 +5694,32 @@ async function contextFilterCondition(mode: FilterMode): Promise<string | null> 
   }
   if (props.result !== sourceResult) return null;
   const value = requiresHydration && sourceIndex !== undefined ? (sourceResult.rows[sourceIndex]?.[target.col] ?? null) : sourceValue;
-  return (
-    (await buildDataGridContextFilterCondition({
-      databaseType: resolvedDatabaseType.value,
-      identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
-      columnName,
-      columnInfo: target.columnInfo,
-      mode,
-      value,
-    })) ?? null
-  );
+  const condition = await buildDataGridContextFilterCondition({
+    databaseType: resolvedDatabaseType.value,
+    identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
+    columnName,
+    columnInfo: target.columnInfo,
+    mode,
+    value,
+  });
+  return props.result === sourceResult ? (condition ?? null) : null;
 }
 
 async function applyContextFilter(mode: FilterMode) {
   if (!canUseWhereSearch.value) return;
-  const condition = await contextFilterCondition(mode);
-  if (!condition) return;
-  const existing = whereFilterInput.value.trim();
-  whereFilterInput.value = existing ? `(${existing}) AND (${condition})` : condition;
-  await applyWhereFilter();
+  const target = contextFilterTarget.value;
+  if (!target) return;
+  activeContextFilterActions.add(target.id);
+  try {
+    const condition = await contextFilterCondition(target, mode);
+    if (!condition || props.result !== target.sourceResult) return;
+    const existing = whereFilterInput.value.trim();
+    whereFilterInput.value = existing ? `(${existing}) AND (${condition})` : condition;
+    await applyWhereFilter();
+  } finally {
+    activeContextFilterActions.delete(target.id);
+    if (contextFilterTarget.value?.id === target.id) contextFilterTarget.value = null;
+  }
 }
 
 async function clearContextFilter() {

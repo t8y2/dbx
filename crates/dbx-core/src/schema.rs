@@ -6321,6 +6321,14 @@ async fn list_indexes_core_for_session(
         {
             let connections = state.connections.read().await;
             try_sqlserver!(connections, &pool_key, list_indexes, schema, table);
+            if let Some(PoolKind::ExternalDriver { config, session, .. }) = connections.get(&pool_key) {
+                if external_driver_uses_mysql_ddl(config.as_ref()) {
+                    let config = config.clone();
+                    let session = session.clone();
+                    drop(connections);
+                    return external_driver_gaussdb_m_indexes(session, config.as_ref(), database, schema, table).await;
+                }
+            }
             if let Some(client) = extract_pool!(&connections, &pool_key, Agent) {
                 drop(connections);
                 let mut client = client.lock().await;
@@ -7219,6 +7227,93 @@ fn is_mysql_external_driver_config(config: &ConnectionConfig) -> bool {
 
 fn external_driver_uses_mysql_ddl(config: &ConnectionConfig) -> bool {
     is_mysql_external_driver_config(config) || gaussdb_uses_m_jdbc_driver(config)
+}
+
+async fn external_driver_gaussdb_m_indexes(
+    session: std::sync::Arc<crate::plugins::PluginDriverSession>,
+    config: &ConnectionConfig,
+    database: &str,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<db::IndexInfo>, String> {
+    // Use information_schema.STATISTICS (MySQL-compatible) which is available in GaussDB M-mode.
+    // GROUP_CONCAT aggregates all column names per index, ordered by SEQ_IN_INDEX.
+    let sql = format!(
+        "SELECT INDEX_NAME, GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX) AS INDEX_COLUMNS, \
+                MAX(NON_UNIQUE) AS NON_UNIQUE, \
+                MAX(INDEX_TYPE) AS INDEX_TYPE, \
+                MAX(INDEX_COMMENT) AS INDEX_COMMENT \
+         FROM information_schema.STATISTICS \
+         WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} \
+         GROUP BY INDEX_NAME \
+         ORDER BY INDEX_NAME",
+        sql_string(schema),
+        sql_string(table),
+    );
+    log::debug!("[gaussdb-m][list_indexes] sql={sql}");
+    let result: db::QueryResult = session
+        .invoke_with_timeout(
+            "executeQuery",
+            serde_json::json!({
+                "connection": config,
+                "database": database,
+                "schema": schema,
+                "sql": sql,
+                "maxRows": 0,
+            }),
+            agent_metadata_timeout(Some(config)),
+        )
+        .await?;
+    log::debug!("[gaussdb-m][list_indexes] row_count={}", result.rows.len());
+
+    let col_index: std::collections::HashMap<&str, usize> =
+        result.columns.iter().enumerate().map(|(i, name)| (name.as_str(), i)).collect();
+    let idx_name = col_index.get("INDEX_NAME").copied().unwrap_or(0);
+    let idx_columns = col_index.get("INDEX_COLUMNS").copied().unwrap_or(1);
+    let idx_non_unique = col_index.get("NON_UNIQUE").copied();
+    let idx_index_type = col_index.get("INDEX_TYPE").copied();
+    let idx_comment = col_index.get("INDEX_COMMENT").copied();
+
+    let mut indexes = Vec::new();
+    for row in &result.rows {
+        let name = row.get(idx_name).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if name.is_empty() {
+            continue;
+        }
+        // Split the comma-separated column names from GROUP_CONCAT
+        let columns_str = row.get(idx_columns).and_then(|v| v.as_str()).unwrap_or("");
+        let columns: Vec<String> = if columns_str.is_empty() {
+            Vec::new()
+        } else {
+            columns_str.split(',').map(|s| s.trim().to_string()).collect()
+        };
+
+        let is_unique =
+            idx_non_unique.and_then(|i| row.get(i)).and_then(|v| v.as_i64()).map(|v| v == 0).unwrap_or(false);
+
+        let is_primary = name.to_lowercase().ends_with("_pkey") || name.eq_ignore_ascii_case("primary");
+
+        let index_type = idx_index_type.and_then(|i| row.get(i)).and_then(|v| v.as_str()).map(|s| s.to_string());
+
+        let comment = idx_comment
+            .and_then(|i| row.get(i))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty());
+
+        indexes.push(db::IndexInfo {
+            name,
+            columns,
+            is_unique,
+            is_primary,
+            filter: None,
+            index_type,
+            included_columns: None,
+            comment,
+            key_is_expression: Vec::new(),
+        });
+    }
+    Ok(indexes)
 }
 
 fn gaussdb_m_view_object_source_sql(

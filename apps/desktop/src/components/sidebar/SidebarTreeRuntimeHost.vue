@@ -57,6 +57,7 @@ import {
   X,
   Settings2,
   GitBranch,
+  Sparkles,
 } from "@lucide/vue";
 import type { ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } from "@/stores/connectionStore";
@@ -4550,7 +4551,7 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
     if (supportsQueryActions) {
       items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
       if (supportsAiContext) {
-        items.push({ label: t("contextMenu.addToAi"), action: () => emit("add-to-ai", node), icon: TableProperties });
+        items.push({ label: t("contextMenu.addToAi"), action: () => emit("add-to-ai", node), icon: Sparkles });
       }
     }
     const connectionWorkspace = node.connectionId ? driverProfileDatabaseWorkspace(connectionStore.getConfig(node.connectionId)?.driver_profile) : undefined;
@@ -4747,7 +4748,7 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     if (supportsConnectionQueryActions(currentDatabaseType())) {
       items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
       if (node.type === "database" && supportsAiAssistantContext(currentDatabaseType())) {
-        items.push({ label: t("contextMenu.addToAi"), action: () => emit("add-to-ai", node), icon: TableProperties });
+        items.push({ label: t("contextMenu.addToAi"), action: () => emit("add-to-ai", node), icon: Sparkles });
       }
       const sqlHistoryMenu = savedSqlHistorySubmenu();
       if (sqlHistoryMenu) items.push(sqlHistoryMenu);
@@ -5045,7 +5046,7 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       items.push({ label: t("contextMenu.openInNewDataTab"), action: openDataInNewTabImmediately, icon: CopyPlus });
       items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
       if (supportsAiAssistantContext(currentDatabaseType())) {
-        items.push({ label: t("contextMenu.addToAi"), action: () => emit("add-to-ai", node), icon: TableProperties });
+        items.push({ label: t("contextMenu.addToAi"), action: () => emit("add-to-ai", node), icon: Sparkles });
       }
       items.push({ label: "", separator: true });
       items.push(exportDataSubmenu(false));
@@ -5056,7 +5057,7 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     items.push(copyNameMenuItem());
     items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
     if (node.type === "table" && supportsAiAssistantContext(currentDatabaseType())) {
-      items.push({ label: t("contextMenu.addToAi"), action: () => emit("add-to-ai", node), icon: TableProperties });
+      items.push({ label: t("contextMenu.addToAi"), action: () => emit("add-to-ai", node), icon: Sparkles });
     }
     items.push({ label: "", separator: true });
     items.push({ label: t("contextMenu.viewData"), action: openDataImmediately, icon: TableProperties });

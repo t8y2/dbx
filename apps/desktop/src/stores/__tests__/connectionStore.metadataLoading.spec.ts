@@ -175,7 +175,7 @@ describe("connectionStore metadata loading", () => {
       fallback_used: false,
     });
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
-    vi.doMock("@/lib/backend/api", () => ({ checkConnectionHealth: vi.fn().mockResolvedValue(undefined), completionAssistantSearch }));
+    vi.doMock("@/lib/backend/api", () => ({ checkConnectionHealth: vi.fn().mockResolvedValue(undefined), completionAssistantSearch, deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined), listInstalledAgents: vi.fn().mockResolvedValue([]) }));
 
     const { useConnectionStore } = await import("@/stores/connectionStore");
     const store = useConnectionStore();
@@ -219,6 +219,18 @@ describe("connectionStore metadata loading", () => {
     ]);
     expect(packageNode.children?.flatMap((group) => group.children ?? []).map((child) => child.label)).toEqual(["process_item(p_id IN INT)", "process_item(p_code IN VARCHAR)", "item_count"]);
     expect(packageNode.children?.flatMap((group) => group.children ?? []).every((child) => child.parentName === "business_api")).toBe(true);
+
+    completionAssistantSearch.mockResolvedValueOnce({
+      candidates: [{ name: "next_item", kind: "function", data_type: "INT" }],
+      incomplete: false,
+      fallback_used: false,
+    });
+    const functionGroup = packageNode.children?.find((child) => child.type === "group-functions");
+    await store.refreshTreeNode(functionGroup!);
+
+    expect(completionAssistantSearch).toHaveBeenCalledTimes(2);
+    expect(packageNode.children?.map((child) => [child.type, child.objectCount])).toEqual([["group-functions", 1]]);
+    expect(packageNode.children?.[0]?.children?.map((child) => child.label)).toEqual(["next_item"]);
   }, 15000);
 
   it("loads Xugu object type members through the scoped completion endpoint", async () => {

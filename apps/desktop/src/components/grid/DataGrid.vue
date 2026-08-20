@@ -867,6 +867,8 @@ const { searchText, deferredSearchText: deferredClientSearchText, overlayVisible
 
 const orderByInput = ref(props.initialOrderByInput ?? "");
 const whereFilterInput = ref(props.initialWhereInput ?? "");
+const conditionInputRevision = ref(0);
+const appliedConditionInputRevision = ref(0);
 const queryControlError = ref("");
 const conditionColumns = computed(() => dataGridConditionColumnOptions(props.tableMeta?.columns ?? props.result.columns, resolvedDatabaseType.value));
 const conditionIdentifierQuote = computed(() => dataGridConditionIdentifierQuote(resolvedDatabaseType.value, connectionStore.connectionIdentifierQuote?.(props.connectionId)));
@@ -1802,7 +1804,10 @@ function loadStructuredFilterStateForScope() {
     void buildStructuredWhereFromRules(structuredFilterRules.value).then((whereInput) => {
       if (structuredFilterCacheKey.value !== cacheKey || structuredFilterScopeKey.value !== scopeKey) return;
       appliedStructuredWhereInput.value = whereInput;
-      nextTick(() => emit("update:whereInput", currentWhereInput() ?? ""));
+      nextTick(() => {
+        emit("update:whereInput", currentWhereInput() ?? "");
+        markConditionInputsApplied();
+      });
     });
     return;
   }
@@ -1810,6 +1815,7 @@ function loadStructuredFilterStateForScope() {
   serverColumnFilters.value = {};
   structuredFilterRules.value = filterBuilderColumnOptions.value.length > 0 ? [defaultStructuredFilterRule()] : [];
   persistStructuredFilterState();
+  markConditionInputsApplied();
 }
 
 function ensureStructuredFilterRule() {
@@ -2033,6 +2039,22 @@ function onSearchKeydown(e: KeyboardEvent) {
     e.preventDefault();
     navigateMatch(e.shiftKey ? -1 : 1);
   }
+}
+
+watch(
+  [whereFilterInput, orderByInput],
+  () => {
+    conditionInputRevision.value += 1;
+  },
+  { flush: "sync" },
+);
+
+function markConditionInputsApplied() {
+  appliedConditionInputRevision.value = conditionInputRevision.value;
+}
+
+function hasPendingConditionInputs(): boolean {
+  return conditionInputRevision.value !== appliedConditionInputRevision.value;
 }
 
 watch(whereFilterInput, () => {
@@ -3946,8 +3968,14 @@ async function onToolbarRefresh() {
   if (transactionActive.value) {
     discardChanges();
   }
+  const resetToFirstPage = hasPendingConditionInputs();
+  if (resetToFirstPage) {
+    currentPage.value = 1;
+    resetGridVerticalScroll(true);
+  }
+  markConditionInputsApplied();
   prepareFullReload();
-  emit("reload", props.sql, searchText.value, currentWhereInput(), currentOrderBy(), pageSize.value, (currentPage.value - 1) * pageSize.value, "refresh");
+  emit("reload", props.sql, searchText.value, currentWhereInput(), currentOrderBy(), pageSize.value, resetToFirstPage ? 0 : (currentPage.value - 1) * pageSize.value, "refresh");
 }
 
 function setAutoRefreshInterval(seconds: number) {
@@ -5776,6 +5804,7 @@ async function applyOrderBySearch() {
       whereInput: currentWhereInput(),
       includeRowId: usesSyntheticRowIdKey(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType),
     });
+    markConditionInputsApplied();
     await props.onExecuteSql(sql);
   } catch (e: any) {
     queryControlError.value = String(e?.message || e);
@@ -5812,6 +5841,7 @@ async function applyWhereFilter() {
       whereInput,
       includeRowId: usesSyntheticRowIdKey(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType),
     });
+    markConditionInputsApplied();
     await props.onExecuteSql(sql);
   } catch (e: any) {
     queryControlError.value = String(e?.message || e);

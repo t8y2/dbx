@@ -39,6 +39,8 @@ uuid = { version = "1", features = ["v4", "serde"] }
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-uuid-1", "with-serde_json-1"] }
 deadpool-postgres = { version = "0.14", features = ["rt_tokio_1"] }
 tokio-postgres-rustls = "0.13"
+postgres-openssl = "0.5"
+openssl = { version = "0.10", features = ["vendored"] }
 webpki-roots = "0.26"
 rusqlite = { version = "0.32", features = ["bundled", "load_extension", "backup", "functions", "column_decltype"] }
 mysql_async = { version = "0.37", default-features = false, features = ["default-rustls", "client_ed25519", "chrono", "rust_decimal"] }
@@ -91,3 +93,4 @@ windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32
 [dev-dependencies]
 mysql_common = { git = "https://github.com/t8y2/rust_mysql_common.git", rev = "47740d85a8277167a5717afac785d37b46a36296", default-features = false }
 tokio = { version = "1", features = ["test-util"] }
+tokio-openssl = "0.6"

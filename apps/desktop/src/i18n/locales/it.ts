@@ -556,6 +556,8 @@ export default withEnglishFallback({
     postgresSslModeRequire: "Richiedi",
     postgresSslModeVerifyCa: "Verifica CA",
     postgresSslModeVerifyFull: "Verifica Completa",
+    postgresLegacyTls: "Compatibilità TLS legacy",
+    postgresLegacyTlsHint: "Supporta i server limitati allo scambio di chiavi RSA statico di TLS 1.2. È meno sicuro della modalità predefinita; abilitalo solo se non è possibile aggiornare la configurazione TLS del server.",
     postgresServerCert: "CA Server",
     postgresRootCertPlaceholder: "/percorso/per/ca.crt",
     postgresRootCertHint: "Usa questo per verifica-ca o verifica-completa quando il certificato del server è firmato da una CA privata.",

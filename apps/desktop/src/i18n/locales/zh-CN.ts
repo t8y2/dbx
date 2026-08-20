@@ -507,6 +507,8 @@ export default withEnglishFallback({
     postgresSslModeRequire: "必须使用",
     postgresSslModeVerifyCa: "验证 CA",
     postgresSslModeVerifyFull: "完整验证",
+    postgresLegacyTls: "旧版 TLS 兼容",
+    postgresLegacyTlsHint: "兼容仅支持 TLS 1.2 静态 RSA 密钥交换的服务器。安全性低于默认模式，请仅在无法升级服务端 TLS 配置时启用。",
     postgresServerCert: "服务端 CA",
     postgresRootCertPlaceholder: "/path/to/ca.crt",
     postgresRootCertHint: "服务端证书由私有 CA 签发时，在 verify-ca 或 verify-full 模式下填写。",

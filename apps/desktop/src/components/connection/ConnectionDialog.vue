@@ -60,7 +60,7 @@ import { connectionAttemptOriginalErrorMessage, connectionAttemptTimeoutMessage,
 import { consulAgentAddressesMatch } from "@/lib/consul/agentTarget";
 import { appendConnectionErrorHints, isJdbcMissingRuntimeDependencyError } from "@/lib/connection/connectionErrorHints";
 import { preventDialogDocumentSelectAll } from "@/lib/connection/dialogTextSelection";
-import { postgresTlsModeForForm } from "@/lib/connection/postgresTlsMode";
+import { postgresLegacyTlsEnabled, postgresTlsModeForForm, setPostgresLegacyTlsEnabled } from "@/lib/connection/postgresTlsMode";
 import { buildMqKafkaConnectionExtra, mqKafkaConnectionTarget, resolveMqKafkaConnectionSource, type MqKafkaConnectionSource } from "@/lib/connection/mqKafkaConnection";
 import { assertCompleteDatabaseCategories, databaseSelectionForCategory } from "@/lib/connection/databaseCategoryOptions";
 import { loadConnectionPickerView, saveConnectionPickerView, type DbPickerView } from "@/lib/connection/connectionPickerViewPreference";
@@ -3422,6 +3422,12 @@ const postgresTlsMode = computed({
   set: (value: string) => {
     form.value.ssl = value !== "disable";
     form.value.url_params = setUrlParam(form.value.url_params, "sslmode", value);
+  },
+});
+const postgresLegacyTls = computed({
+  get: () => postgresLegacyTlsEnabled(form.value.url_params),
+  set: (value: boolean) => {
+    form.value.url_params = setPostgresLegacyTlsEnabled(form.value.url_params, value);
   },
 });
 const postgresRootCertPath = computed({
@@ -8164,6 +8170,16 @@ function openExternalUrl(url: string) {
                         <SelectItem value="verify-full">{{ t("connection.postgresSslModeVerifyFull") }}</SelectItem>
                       </SelectContent>
                     </Select>
+                  </div>
+
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.postgresLegacyTls") }}</Label>
+                    <div class="col-span-3 flex items-center gap-2">
+                      <Switch v-model="postgresLegacyTls" :disabled="postgresTlsMode === 'disable'" />
+                      <HelpTooltip :label="t('connection.postgresLegacyTlsHint')">
+                        {{ t("connection.postgresLegacyTlsHint") }}
+                      </HelpTooltip>
+                    </div>
                   </div>
 
                   <div class="grid grid-cols-4 items-start gap-4">

@@ -556,6 +556,8 @@ export default withEnglishFallback({
     postgresSslModeRequire: "必須にする",
     postgresSslModeVerifyCa: "CA検証",
     postgresSslModeVerifyFull: "完全検証",
+    postgresLegacyTls: "旧式TLS互換",
+    postgresLegacyTlsHint: "TLS 1.2の静的RSA鍵交換に制限されたサーバーをサポートします。既定モードより安全性が低いため、サーバーのTLS設定を更新できない場合にのみ有効にしてください。",
     postgresServerCert: "サーバーCA",
     postgresRootCertPlaceholder: "/path/to/ca.crt",
     postgresRootCertHint: "サーバー証明書がプライベートCAで署名されている場合、verify-caまたはverify-fullに使用します。",

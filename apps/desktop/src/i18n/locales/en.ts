@@ -582,6 +582,8 @@ export default {
     postgresSslModeRequire: "Require",
     postgresSslModeVerifyCa: "Verify CA",
     postgresSslModeVerifyFull: "Verify Full",
+    postgresLegacyTls: "Legacy TLS compatibility",
+    postgresLegacyTlsHint: "Supports servers restricted to TLS 1.2 static RSA key exchange. This is less secure than the default mode; enable it only when the server TLS configuration cannot be upgraded.",
     postgresServerCert: "Server CA",
     postgresRootCertPlaceholder: "/path/to/ca.crt",
     postgresRootCertHint: "Use this for verify-ca or verify-full when the server certificate is signed by a private CA.",

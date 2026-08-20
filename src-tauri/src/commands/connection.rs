@@ -840,7 +840,7 @@ mod tests {
             serde_json::json!(["namespace-a", "namespace-b"]);
         let sync = sync_connection_configs(&state, std::slice::from_ref(&scope_updated)).await;
 
-        assert_eq!(sync.connection_pool_ids_to_drop.as_slice(), &[initial.id.clone()]);
+        assert_eq!(sync.connection_pool_ids_to_drop.as_slice(), std::slice::from_ref(&initial.id));
         assert_eq!(state.session_credentials.get("", &initial.id).as_deref(), Some("new-password"));
         assert_eq!(
             state.session_credentials.get_for_purpose("", &initial.id, "nacos-primary-password").as_deref(),

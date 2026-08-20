@@ -1674,7 +1674,7 @@ mod tests {
             serde_json::json!(["namespace-a", "namespace-b"]);
         let sync = sync_connection_configs(&state, std::slice::from_ref(&scope_updated)).await;
 
-        assert_eq!(sync.connection_pool_ids_to_drop.as_slice(), &[initial.id.clone()]);
+        assert_eq!(sync.connection_pool_ids_to_drop.as_slice(), std::slice::from_ref(&initial.id));
         for (owner, password) in [("token-a", "owner-a-secret"), ("token-b", "owner-b-secret")] {
             assert_eq!(state.app.session_credentials.get(owner, &initial.id).as_deref(), Some(password));
             assert_eq!(

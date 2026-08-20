@@ -1787,8 +1787,8 @@ impl NacosAdmin for NacosOpenApiAdmin {
         self.detected_rnacos.store(is_rnacos, Ordering::Relaxed);
         let _ = self.access_token().await?;
         self.list_namespaces().await?;
-        let mut capabilities = NacosCapabilities::default();
-        capabilities.service_management = self.service_capabilities();
+        let mut capabilities =
+            NacosCapabilities { service_management: self.service_capabilities(), ..Default::default() };
         if is_rnacos {
             if !self.cfg.rnacos_history_enabled() {
                 capabilities.supports_config_history = false;

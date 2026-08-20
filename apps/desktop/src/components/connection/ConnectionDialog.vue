@@ -6964,9 +6964,12 @@ function openExternalUrl(url: string) {
                         </SelectContent>
                       </Select>
                     </div>
-                    <p v-if="mongoAuthMechanism === 'MONGODB-OIDC'" class="col-start-2 col-span-3 text-xs text-muted-foreground">
-                      {{ t("connection.oidcBrowserAuthHint") }}
-                    </p>
+                    <div v-if="mongoAuthMechanism === 'MONGODB-OIDC'" class="grid grid-cols-4 items-start gap-4">
+                      <span />
+                      <p class="col-span-3 text-xs text-muted-foreground">
+                        {{ t("connection.oidcBrowserAuthHint") }}
+                      </p>
+                    </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">{{ t("connection.urlParams") }}</Label>
                       <Input v-model="form.url_params" class="col-span-3" placeholder="replicaSet=rs0&authSource=admin" />

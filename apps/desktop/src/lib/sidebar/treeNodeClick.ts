@@ -147,7 +147,9 @@ export function treeNodeRowDoubleClickAction(type: TreeNodeType, canOpenObjectBr
   // sequence. Only double-click activation needs a second-stage table action.
   if (type === "table") return activation === "double" ? "activate-data" : "none";
   if (openDatabaseOnSingleClick && canOpenObjectBrowser && shouldOpenObjectBrowserOnSingleClick(type, true)) return "none";
-  if (type === "connection" && canOpenDatabaseBrowser) return "open-database-browser";
+  // 双击激活模式下，双击连接节点应当展开树（与单击模式下单击展开一致），
+  // “打开数据库浏览”只保留给单击激活模式下的双击手势。
+  if (type === "connection" && canOpenDatabaseBrowser && activation !== "double") return "open-database-browser";
   if (activation === "double") {
     if (type === "extension") return "open-extension-details";
     if (dataNodeTypes.has(type)) return "open-data";

@@ -188,7 +188,7 @@ describe("connectionStore metadata loading", () => {
       database: "app_db",
       schema: "app_schema",
       children: [],
-      isExpanded: false,
+      isExpanded: true,
     };
     store.connections = [connection];
     store.connectedIds = new Set([connection.id]);
@@ -289,7 +289,7 @@ describe("connectionStore metadata loading", () => {
     expect(typeNode.children?.every((child) => child.parentName === "ADDRESS_T")).toBe(true);
   }, 15000);
 
-  it("routes generic tree restoration for Xugu types through the member loader", async () => {
+  it("keeps expanded Xugu type members loaded during forced tree refresh", async () => {
     const completionAssistantSearch = vi.fn(async (request: { object_kinds?: string[] }) => ({
       candidates: request.object_kinds?.includes("column") ? [{ name: "street", kind: "column", data_type: "VARCHAR(120)" }] : [],
       incomplete: false,
@@ -300,6 +300,7 @@ describe("connectionStore metadata loading", () => {
     vi.doMock("@/lib/backend/api", () => ({
       checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
       completionAssistantSearch,
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
       getCustomTypeDetails,
     }));
 
@@ -322,7 +323,7 @@ describe("connectionStore metadata loading", () => {
     store.connectedIds = new Set([connection.id]);
     store.treeNodes = [typeNode];
 
-    await store.loadTreeNodeChildren(typeNode);
+    await store.refreshTreeNode(typeNode);
 
     expect(getCustomTypeDetails).not.toHaveBeenCalled();
     expect(completionAssistantSearch).toHaveBeenCalledTimes(2);

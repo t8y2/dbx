@@ -6444,17 +6444,17 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
-  async function loadXuguTypeMembers(node: TreeNode, options?: Pick<LoadTreeOptions, "preserveCollapsedChildren">): Promise<void> {
+  async function loadXuguTypeMembers(node: TreeNode, options?: Pick<LoadTreeOptions, "force" | "preserveCollapsedChildren">): Promise<void> {
     if (!isXuguTypeMemberContainer(node, getConfig(node.connectionId || "")?.db_type)) return;
     const connectionId = node.connectionId;
     const database = node.database;
     if (!connectionId || !database) return;
-    if (node.isExpanded) {
+    if (node.isExpanded && !options?.force) {
       node.isExpanded = false;
       if (!sidebarSearchQuery.value && !options?.preserveCollapsedChildren) releaseCollapsedTreeNodeChildren(node.id);
       return;
     }
-    if (node.children && node.children.length > 0) {
+    if (!options?.force && node.children && node.children.length > 0) {
       node.isExpanded = true;
       return;
     }

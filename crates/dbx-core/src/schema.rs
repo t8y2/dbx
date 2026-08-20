@@ -7237,12 +7237,13 @@ async fn external_driver_gaussdb_m_indexes(
     table: &str,
 ) -> Result<Vec<db::IndexInfo>, String> {
     // Query information_schema.STATISTICS row by row (one row per index column,
-    // ordered by SEQ_IN_INDEX). Unlike MySQL, GaussDB M-mode may also surface
-    // SUB_PART and EXPRESSION in the same STATISTICS view.
-    // See: https://support.huaweicloud.com/intl/en-us/centralized-m-comp-devg-v8-gaussdb/gaussdb-81-0134.html
+    // ordered by SEQ_IN_INDEX).
+    // Docs: https://support.huaweicloud.com/intl/en-us/centralized-m-comp-devg-v8-gaussdb/gaussdb-81-0134.html
+    // The STATISTICS view has no EXPRESSION column in GaussDB M-mode. Expression
+    // indexes are not supported via this path.
     let sql = format!(
         "SELECT INDEX_NAME, COLUMN_NAME, SEQ_IN_INDEX, NON_UNIQUE, \
-                INDEX_TYPE, INDEX_COMMENT, SUB_PART, EXPRESSION \
+                INDEX_TYPE, INDEX_COMMENT, SUB_PART \
          FROM information_schema.STATISTICS \
          WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} \
          ORDER BY INDEX_NAME, SEQ_IN_INDEX",
@@ -7339,24 +7340,33 @@ async fn external_driver_gaussdb_m_indexes(
 
         // Build column name with prefix/sub_part suffix
         let column_name = get_str(row, "COLUMN_NAME");
-        let sub_part = get_str(row, "SUB_PART");
-        let expression = get_str(row, "EXPRESSION");
-
-        if !expression.is_empty() {
-            // Expression index: use expression text as column identifier
-            // Wrap in ((expression)) to match the convention used by MySQL path
-            // (mysql_index_column_sql in indexes.rs handles stripping (( ))).
-            current_columns.push(format!("(({}))", expression));
-            current_is_expression.push(true);
-        } else if !column_name.is_empty() {
-            if !sub_part.is_empty() && sub_part != "0" && sub_part != "NULL" {
-                // Prefix index: COLUMN_NAME(SUB_PART) like "name(10)"
-                current_columns.push(format!("{}({})", column_name, sub_part));
-            } else {
-                current_columns.push(column_name);
-            }
-            current_is_expression.push(false);
+        if column_name.is_empty() {
+            continue;
         }
+
+        // SUB_PART is bigint in STATISTICS; JDBC plugin sends it as JSON number,
+        // but may also be null or string.
+        let sub_part: String = col_index
+            .get("SUB_PART")
+            .and_then(|&i| row.get(i))
+            .and_then(|v| {
+                if v.is_null() {
+                    None
+                } else if let Some(n) = v.as_i64() {
+                    Some(n.to_string())
+                } else {
+                    v.as_str().map(|s| s.to_string())
+                }
+            })
+            .unwrap_or_default();
+
+        if !sub_part.is_empty() && sub_part != "0" && sub_part != "NULL" {
+            // Prefix index: COLUMN_NAME(SUB_PART) like "name(10)"
+            current_columns.push(format!("{}({})", column_name, sub_part));
+        } else {
+            current_columns.push(column_name);
+        }
+        current_is_expression.push(false);
     }
 
     // Finalize last index

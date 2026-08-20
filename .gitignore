@@ -3,6 +3,7 @@ node_modules
 .claude/
 .codex/
 .cortexkit/
+.codebuddy/
 .workbuddy/
 .superpowers/
 .trellis/

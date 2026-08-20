@@ -142,11 +142,8 @@ fn gaussdbm_index_parts(index_type: &str) -> (String, String) {
 }
 
 fn gaussdbm_index_column_sql(column: &str, is_expression: bool) -> String {
-    let trimmed = column.trim();
     if is_expression {
-        trimmed.to_string()
-    } else if trimmed.starts_with("((") && trimmed.ends_with("))") {
-        trimmed.to_string()
+        column.trim().to_string()
     } else {
         quote_ident(StructureDialect::GaussdbM, column)
     }

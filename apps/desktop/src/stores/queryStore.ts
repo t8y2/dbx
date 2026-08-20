@@ -1737,12 +1737,13 @@ export const useQueryStore = defineStore("query", () => {
     });
   }
 
-  function openExternalSqlFile(connectionId: string, database: string, path: string, sql: string, version?: QueryTab["externalSqlFileVersion"], meta?: { projectId?: string; fileEncoding?: QueryTab["fileEncoding"]; fileLineEnding?: QueryTab["fileLineEnding"]; catalog?: string }) {
+  function openExternalSqlFile(connectionId: string, database: string, path: string, sql: string, version?: QueryTab["externalSqlFileVersion"], meta?: { projectId?: string; schema?: string; fileEncoding?: QueryTab["fileEncoding"]; fileLineEnding?: QueryTab["fileLineEnding"]; catalog?: string }) {
     const normalizedPath = normalizeExternalSqlPath(path);
     const existing = tabs.value.find((tab) => tab.mode === "query" && tab.externalSqlPath && normalizeExternalSqlPath(tab.externalSqlPath) === normalizedPath);
     if (existing) {
       // Backfill project/encoding metadata for tabs created before the project existed.
       if (meta?.projectId && !existing.projectId) existing.projectId = meta.projectId;
+      if (meta?.schema && !existing.schema) existing.schema = meta.schema;
       if (meta?.fileEncoding && !existing.fileEncoding) existing.fileEncoding = meta.fileEncoding;
       if (meta?.fileLineEnding && !existing.fileLineEnding) existing.fileLineEnding = meta.fileLineEnding;
       switchTab(existing.id);
@@ -1758,6 +1759,7 @@ export const useQueryStore = defineStore("query", () => {
       customTitle: true,
       connectionId,
       database,
+      schema: meta?.schema,
       catalog: meta?.catalog,
       sql,
       originalSql: sql,

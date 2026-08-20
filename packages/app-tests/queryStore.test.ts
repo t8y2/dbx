@@ -8210,6 +8210,37 @@ test("reorderTab preserves relative order within unpinned group", () => {
   assert.equal(ids[3], tabC, "C should be last unpinned");
 });
 
+test("openExternalSqlFile injects project schema into new tabs", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+
+  const id = store.openExternalSqlFile("conn-1", "sales", "/work/sp/proc.sql", "select 1;", undefined, { projectId: "p1", schema: "DBO" });
+  const tab = store.tabs.find((item) => item.id === id);
+  assert.equal(tab?.schema, "DBO");
+  assert.equal(tab?.projectId, "p1");
+});
+
+test("openExternalSqlFile backfills schema on existing tabs only when missing", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+
+  // 新建时带 schema → 重开不覆盖（保留用户已改 schema）
+  const firstId = store.openExternalSqlFile("conn-1", "sales", "/work/sp/proc.sql", "select 1;", undefined, { projectId: "p1", schema: "DBO" });
+  const reopenedId = store.openExternalSqlFile("conn-2", "other", "/work/sp/proc.sql", "select 2;", undefined, { schema: "STALE" });
+  assert.equal(reopenedId, firstId);
+  assert.equal(store.tabs.find((tab) => tab.id === firstId)?.schema, "DBO");
+  assert.equal(store.tabs.find((tab) => tab.id === firstId)?.connectionId, "conn-1");
+
+  // 旧 tab 无 schema → 回填 meta.schema（项目绑定后补挂）
+  const bareId = store.openExternalSqlFile("conn-3", "db", "/work/sp/bare.sql", "select 1;");
+  assert.equal(store.tabs.find((tab) => tab.id === bareId)?.schema, undefined);
+  const backfilledId = store.openExternalSqlFile("conn-4", "other", "/work/sp/bare.sql", "select 2;", undefined, { projectId: "p1", schema: "DBO" });
+  assert.equal(backfilledId, bareId);
+  const bareTab = store.tabs.find((tab) => tab.id === bareId);
+  assert.equal(bareTab?.schema, "DBO");
+  assert.equal(bareTab?.projectId, "p1");
+});
+
 test("reorderTab with after position places tab correctly", () => {
   setActivePinia(createPinia());
   const store = useQueryStore();

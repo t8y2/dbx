@@ -367,12 +367,16 @@ export const updateSqlProject = forward("updateSqlProject");
 export const trustSqlProject = forward("trustSqlProject");
 export const deleteSqlProject = forward("deleteSqlProject");
 export const snapshotSqlFileBeforeSave = forward("snapshotSqlFileBeforeSave");
-export const listSqlFileSnapshots = forward("listSqlFileSnapshots");
+export const listSqlFileSnapshotsMeta = forward("listSqlFileSnapshotsMeta");
+export const getSqlFileSnapshotContent = forward("getSqlFileSnapshotContent");
 export const createProjectFile = forward("createProjectFile");
 export const createProjectFolder = forward("createProjectFolder");
 export const renameProjectEntry = forward("renameProjectEntry");
 export const countProjectEntryFiles = forward("countProjectEntryFiles");
 export const deleteProjectEntryToTrash = forward("deleteProjectEntryToTrash");
+export const restoreProjectEntryFromTrash = forward("restoreProjectEntryFromTrash");
+export const listProjectTrashEntries = forward("listProjectTrashEntries");
+export const emptyProjectTrash = forward("emptyProjectTrash");
 
 // Nacos
 export const nacosTestConnection = forward("nacosTestConnection");

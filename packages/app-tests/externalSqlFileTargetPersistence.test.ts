@@ -27,18 +27,20 @@ test("external SQL saves persist their selected data source before closing", () 
 
 test("external SQL open entry points restore a saved data source", () => {
   const startupOpen = functionSource(appSource, "async function openSqlFilePath", "async function openPendingSqlFiles");
-  const startupResolve = startupOpen.indexOf("resolveExternalSqlFileTarget");
+  const startupResolve = startupOpen.indexOf("resolveProjectFileTarget");
   const startupTabOpen = startupOpen.indexOf("queryStore.openExternalSqlFile");
   assert.ok(startupResolve >= 0);
   assert.ok(startupResolve < startupTabOpen);
   assert.ok(startupOpen.includes("catalog: target.catalog"));
+  assert.ok(startupOpen.includes("schema: target.schema"));
 
   const panelOpen = functionSource(sqlFilePanelSource, "async function openFile", "function executeFile");
-  const panelResolve = panelOpen.indexOf("resolveExternalSqlFileTarget");
+  const panelResolve = panelOpen.indexOf("resolveProjectFileTarget");
   const panelTabOpen = panelOpen.indexOf("queryStore.openExternalSqlFile");
   assert.ok(panelResolve >= 0);
   assert.ok(panelResolve < panelTabOpen);
   assert.ok(panelOpen.includes("catalog: target.catalog"));
+  assert.ok(panelOpen.includes("schema: target.schema"));
 
   const pickerOpen = functionSource(appSource, "async function openSqlFile()", "async function importResultArchive");
   assert.ok(pickerOpen.includes("applyExternalSqlFileTarget(tab, sqlPath)"));

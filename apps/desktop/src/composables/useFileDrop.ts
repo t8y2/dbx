@@ -10,7 +10,7 @@ import type { ConnectionConfig, ExternalSqlFileVersion } from "@/types/database"
 import type { SqlFileEncoding, SqlFileLineEnding } from "@/lib/backend/tauri";
 import { detectDatabaseFileType } from "@/lib/database/databaseFileDetection";
 import { externalSqlFileOpenErrorMessage, readBrowserSqlFile } from "@/lib/sql/sqlFileOpen";
-import { resolveExternalSqlFileTarget, unassociatedExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
+import { resolveProjectFileTarget } from "@/lib/sql/projectFileTarget";
 
 function isSqlFilePath(path: string): boolean {
   return /\.sql$/i.test(path);
@@ -29,8 +29,19 @@ export function useFileDrop() {
 
   async function openDroppedSqlFile(name: string, content: string, path?: string, version?: ExternalSqlFileVersion, meta?: { projectId?: string; fileEncoding?: SqlFileEncoding; fileLineEnding?: SqlFileLineEnding }) {
     if (path) {
-      const target = resolveExternalSqlFileTarget(path, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), unassociatedExternalSqlFileTarget());
-      queryStore.openExternalSqlFile(target.connectionId, target.database, path, content, version, { catalog: target.catalog, ...meta });
+      const target = resolveProjectFileTarget(path, {
+        connectionExists: (connectionId) => !!connectionStore.getConfig(connectionId),
+        getConnection: (connectionId) => connectionStore.getConfig(connectionId),
+        projects: projectStore.projects,
+        activeConnectionId: connectionStore.activeConnectionId,
+        firstConnectionId: connectionStore.connections[0]?.id,
+      });
+      queryStore.openExternalSqlFile(target.connectionId, target.database, path, content, version, {
+        catalog: target.catalog,
+        schema: target.schema,
+        projectId: target.projectId,
+        ...meta,
+      });
     } else {
       const connectionId = connectionStore.activeConnectionId || connectionStore.connections[0]?.id || "";
       const connection = connectionId ? connectionStore.getConfig(connectionId) : undefined;

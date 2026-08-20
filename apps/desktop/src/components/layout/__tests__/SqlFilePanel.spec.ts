@@ -30,3 +30,30 @@ describe("SqlFilePanel folder headers", () => {
     expect(panelSource).not.toContain("bg-muted/10 sticky top-0");
   });
 });
+
+describe("SqlFilePanel DBX-managed trash", () => {
+  it("uses move-to-trash wording for delete actions and confirmation", () => {
+    expect(panelSource).toMatch(/t\("sqlFileTree\.moveToTrash"\), action: \(\) => folder && requestDelete/);
+    expect(panelSource).toContain('{{ t("sqlFileTree.moveToTrash") }}</DialogTitle>');
+  });
+
+  it("opens the trash dialog and loads entries on demand", () => {
+    expect(panelSource).toContain('@click="openTrashDialog"');
+    expect(panelSource).toContain("api.listProjectTrashEntries(project.id)");
+    expect(panelSource).toContain('t("sqlFileTree.trashLoadFailed"');
+  });
+
+  it("restores an entry through the trash API and refreshes the tree", () => {
+    expect(panelSource).toContain("api.restoreProjectEntryFromTrash(project.id, entry.id)");
+    expect(panelSource).toContain('@click="restoreTrashEntry(entry)"');
+    expect(panelSource).toContain('t("sqlFileTree.trashRestored")');
+    expect(panelSource).toContain('t("sqlFileTree.restoreFailed"');
+  });
+
+  it("empties the trash only after explicit confirmation", () => {
+    expect(panelSource).toContain('@click="showEmptyTrashConfirm = true"');
+    expect(panelSource).toContain("api.emptyProjectTrash(project.id)");
+    expect(panelSource).toContain('t("sqlFileTree.emptyTrashConfirm")');
+    expect(panelSource).toContain('t("sqlFileTree.trashEmptyFailed"');
+  });
+});

@@ -61,7 +61,8 @@ import { uuid } from "@/lib/common/utils";
 import { isMacOS, isWindows } from "@/lib/backend/platform";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { openQueryResultArchiveFile } from "@/lib/query/queryResultArchiveFile";
-import { rememberExternalSqlFileTarget, resolveExternalSqlFileTarget, unassociatedExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
+import { rememberExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
+import { resolveProjectFileTarget, type ProjectLike } from "@/lib/sql/projectFileTarget";
 import { externalSqlFileOpenErrorMessage, readBrowserSqlFile, sqlFileTitleFromPath } from "@/lib/sql/sqlFileOpen";
 import type { ConnectionConfig, DatabaseType, ObjectSourceKind, QueryTab, TreeNode } from "@/types/database";
 import { parseConnectionDeepLink, type ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
@@ -1452,14 +1453,28 @@ async function saveActiveSqlAsLocalFile() {
   if (tab) await saveExternalSqlTabAs(tab);
 }
 
+/** 统一的项目上下文解析选项（连接存在性 + 项目列表）。 */
+function projectFileTargetOptions(projects: ProjectLike[]) {
+  return {
+    connectionExists: (connectionId: string) => !!connectionStore.getConfig(connectionId),
+    getConnection: (connectionId: string) => connectionStore.getConfig(connectionId),
+    projects,
+    activeConnectionId: connectionStore.activeConnectionId,
+    firstConnectionId: connectionStore.connections[0]?.id,
+  };
+}
+
 function applyExternalSqlFileTarget(tab: QueryTab, path: string) {
-  const target = resolveExternalSqlFileTarget(path, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), unassociatedExternalSqlFileTarget());
+  const target = resolveProjectFileTarget(path, projectFileTargetOptions(projectStore.projects));
   if (target.connectionId !== tab.connectionId) {
     queryStore.updateConnection(tab.id, target.connectionId, target.database);
   }
   if (target.catalog !== tab.catalog || target.database !== tab.database) {
     if (target.catalog !== undefined || tab.catalog !== undefined) queryStore.updateCatalog(tab.id, target.catalog, target.database);
     else queryStore.updateDatabase(tab.id, target.database);
+  }
+  if (target.schema !== undefined && tab.schema !== target.schema) {
+    queryStore.updateSchema(tab.id, target.schema);
   }
 }
 
@@ -1530,17 +1545,18 @@ async function openSqlFilePath(path: string) {
   try {
     await desktopOpenTabsRestorationBarrier?.settled;
     const snapshot = await api.readExternalSqlFileSnapshot(path);
-    const target = resolveExternalSqlFileTarget(path, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), unassociatedExternalSqlFileTarget());
-    let projectId: string | undefined;
+    let projects: ProjectLike[] = [];
     try {
       await projectStore.ensureLoaded();
-      projectId = projectStore.projectForFilePath(path)?.id ?? undefined;
+      projects = projectStore.projects;
     } catch {
-      projectId = undefined;
+      projects = [];
     }
+    const target = resolveProjectFileTarget(path, projectFileTargetOptions(projects));
     queryStore.openExternalSqlFile(target.connectionId, target.database, path, snapshot.content, snapshot.version, {
       catalog: target.catalog,
-      projectId,
+      schema: target.schema,
+      projectId: target.projectId,
       fileEncoding: snapshot.encoding,
       fileLineEnding: snapshot.lineEnding,
     });
@@ -2163,24 +2179,24 @@ function onAiOpenExplainPlan(sql: string) {
 }
 
 async function handleQuickOpenSelect(item: any) {
-  const connectionStore = useConnectionStore();
   const queryStore = useQueryStore();
 
   // Handle SQL file types first — they don't require a database connection
   if (item.type === "sql_file" && item.filePath) {
     try {
       const snapshot = await api.readExternalSqlFileSnapshot(item.filePath);
-      const target = resolveExternalSqlFileTarget(item.filePath, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), unassociatedExternalSqlFileTarget());
-      let projectId: string | undefined;
+      let projects: ProjectLike[] = [];
       try {
         await projectStore.ensureLoaded();
-        projectId = projectStore.projectForFilePath(item.filePath)?.id ?? undefined;
+        projects = projectStore.projects;
       } catch {
-        projectId = undefined;
+        projects = [];
       }
+      const target = resolveProjectFileTarget(item.filePath, projectFileTargetOptions(projects));
       queryStore.openExternalSqlFile(target.connectionId, target.database, item.filePath, snapshot.content, snapshot.version, {
         catalog: target.catalog,
-        projectId,
+        schema: target.schema,
+        projectId: target.projectId,
         fileEncoding: snapshot.encoding,
         fileLineEnding: snapshot.lineEnding,
       });

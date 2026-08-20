@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 #[cfg(test)]
 use cap_fs_ext::DirExt;
@@ -8,7 +9,7 @@ use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
 use dbx_core::connection::AppState;
 use dbx_core::sql::{decode_sql_file_bytes_with_meta, SqlFileEncoding, SqlFileLineEnding};
-use dbx_core::sql_project::{SqlFileSnapshot, SqlProject};
+use dbx_core::sql_project::{RootIdentity, SqlFileSnapshot, SqlFileSnapshotMeta, SqlProject, TrashEntry};
 use serde::Serialize;
 use tauri::State;
 
@@ -100,12 +101,17 @@ pub async fn open_sql_project_by_path(
     }
     let canonical_str = canonical.to_string_lossy().to_string();
 
-    if let Some(existing) = state.storage.find_sql_project_by_root_path(&canonical_str).await? {
+    if let Some(mut existing) = state.storage.find_sql_project_by_root_path(&canonical_str).await? {
         let now = now_iso();
         state.storage.touch_sql_project(&existing.id, &now).await?;
-        let mut updated = existing;
-        updated.last_opened_at = now;
-        return Ok(updated);
+        existing.last_opened_at = now;
+        // 历史数据缺少 identity 基线：补写一次，避免后续替换检测失效。
+        if existing.root_identity.is_none() {
+            let identity = read_project_root_identity(&canonical).await?;
+            state.storage.set_sql_project_root_identity(&existing.id, Some(&identity)).await?;
+            existing.root_identity = Some(identity);
+        }
+        return Ok(existing);
     }
 
     let name = canonical.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| canonical_str.clone());
@@ -116,11 +122,28 @@ pub async fn open_sql_project_by_path(
         connection_id: None,
         default_schema: None,
         trusted: false,
+        root_identity: None,
         created_at: now_iso(),
         last_opened_at: now_iso(),
     };
     state.storage.insert_sql_project(&project).await?;
-    Ok(project)
+    // 首次打开即记录根目录身份，作为后续替换检测基线（信任时也会刷新）。
+    let identity = read_project_root_identity(&canonical).await?;
+    state.storage.set_sql_project_root_identity(&project.id, Some(&identity)).await?;
+    let mut created = project;
+    created.root_identity = Some(identity);
+    Ok(created)
+}
+
+/// 打开根目录句柄并读取其稳定身份（blocking 文件 IO）。
+async fn read_project_root_identity(canonical: &Path) -> Result<RootIdentity, String> {
+    let canonical = canonical.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let root = ProjectRoot::open(&canonical)?;
+        read_root_identity(&root.dir)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// 更新项目可变元数据（名称/绑定连接/默认 schema）。
@@ -142,12 +165,27 @@ pub async fn update_sql_project(
 #[tauri::command]
 pub async fn trust_sql_project(state: State<'_, std::sync::Arc<AppState>>, id: String) -> Result<SqlProject, String> {
     state.storage.trust_sql_project(&id).await?;
+    // 确认信任时记录（刷新）根目录身份，作为替换检测基线。
+    if let Some(project) = state.storage.find_sql_project_by_id(&id).await? {
+        let canonical = canonical_root(&project.root_path)?;
+        let identity = read_project_root_identity(&canonical).await?;
+        state.storage.set_sql_project_root_identity(&id, Some(&identity)).await?;
+    }
     state.storage.find_sql_project_by_id(&id).await?.ok_or_else(|| "Project not found".to_string())
 }
 
 #[tauri::command]
 pub async fn delete_sql_project(state: State<'_, std::sync::Arc<AppState>>, id: String) -> Result<(), String> {
-    state.storage.delete_sql_project(&id).await
+    // 先尽力清理该项目回收站的磁盘文件（记录随项目 ON DELETE CASCADE 级联清掉）。
+    if let Ok(Some(project)) = state.storage.find_sql_project_by_id(&id).await {
+        cleanup_project_trash_files(&state, &id, &project.root_path).await;
+    }
+    let result = state.storage.delete_sql_project(&id).await;
+    if result.is_ok() {
+        // 项目已删除，释放缓存的根句柄，避免残留句柄占用。
+        evict_project_root(&id);
+    }
+    result
 }
 
 // ---------- 保存前快照（Local History 保底） ----------
@@ -219,15 +257,25 @@ fn line_ending_label(line_ending: SqlFileLineEnding) -> &'static str {
     }
 }
 
-/// 查询某文件的本地历史快照列表（按保存时间倒序，供 Local History UI 使用）。
+/// 查询某文件的本地历史快照元数据列表（不含 content，按保存时间倒序）。
 #[tauri::command]
-pub async fn list_sql_file_snapshots(
+pub async fn list_sql_file_snapshots_meta(
     state: State<'_, std::sync::Arc<AppState>>,
     project_id: String,
     path: String,
     limit: usize,
-) -> Result<Vec<SqlFileSnapshot>, String> {
-    state.storage.list_sql_file_snapshots(&project_id, &path, limit).await
+) -> Result<Vec<SqlFileSnapshotMeta>, String> {
+    state.storage.list_sql_file_snapshot_meta(&project_id, &path, limit).await
+}
+
+/// 按 snapshot_id 获取单条快照完整内容（Local History 选中后才请求，避免一次加载 160 MiB）。
+#[tauri::command]
+pub async fn get_sql_file_snapshot_content(
+    state: State<'_, std::sync::Arc<AppState>>,
+    project_id: String,
+    snapshot_id: String,
+) -> Result<Option<SqlFileSnapshot>, String> {
+    state.storage.get_sql_file_snapshot_content(&project_id, &snapshot_id).await
 }
 
 // ---------- 项目内文件操作 ----------
@@ -314,6 +362,7 @@ fn canonical_root(root_path: &str) -> Result<PathBuf, String> {
 /// 方式执行。cap-std 会在解析路径时保证 symlink 不逃逸出根目录（Linux 上为
 /// openat2 RESOLVE_BENEATH，其余平台逐组件校验），从而关闭 "先 canonicalize
 /// 校验、再按字符串路径操作" 的 TOCTOU 窗口。
+#[derive(Debug)]
 struct ProjectRoot {
     canonical: PathBuf,
     dir: Dir,
@@ -324,6 +373,62 @@ impl ProjectRoot {
         let dir = Dir::open_ambient_dir(canonical, ambient_authority())
             .map_err(|e| format!("Failed to open project root: {e}"))?;
         Ok(Self { canonical: canonical.to_path_buf(), dir })
+    }
+
+    fn clone_handle(&self) -> Result<Self, String> {
+        let dir = self.dir.try_clone().map_err(|e| format!("Failed to clone project root handle: {e}"))?;
+        Ok(Self { canonical: self.canonical.clone(), dir })
+    }
+}
+
+/// 读取根目录句柄的稳定身份（信任时记录、使用时校验）。
+/// cap_fs_ext::MetadataExt 统一了跨平台 dev()/ino()：Unix 为 (dev, ino)，
+/// Windows 为 (volume_serial_number, file_index)。
+fn read_root_identity(dir: &Dir) -> Result<RootIdentity, String> {
+    let meta = dir.dir_metadata().map_err(|e| format!("Failed to stat project root: {e}"))?;
+    use cap_fs_ext::MetadataExt;
+    let volume = meta.dev();
+    let file_id = meta.ino();
+    #[cfg(windows)]
+    let fallback = {
+        // 部分 FAT/网络盘 file_index 恒为 0（或取不到），无法作 identity，退化为
+        // (last_write_time, file_size) 兜底（目录未被替换时保持稳定）。
+        if file_id == 0 {
+            use cap_std::fs::MetadataExt;
+            Some((meta.last_write_time(), meta.file_size()))
+        } else {
+            None
+        }
+    };
+    #[cfg(not(windows))]
+    let fallback = None;
+    Ok(RootIdentity { volume, file_id, fallback })
+}
+
+/// 项目根目录句柄缓存（按 project_id）。信任时打开一次并绑定，之后复用，
+/// 避免每次按字符串路径重新 canonicalize + open_ambient_dir：若原根目录被替换成
+/// 指向项目外的 symlink/junction，缓存的句柄仍绑定原目录（Unix 上为 inode），
+/// 且每次使用前用持久化 identity 校验，替换即被拒绝。
+static PROJECT_ROOT_CACHE: OnceLock<Mutex<HashMap<String, ProjectRoot>>> = OnceLock::new();
+
+fn project_root_cache() -> &'static Mutex<HashMap<String, ProjectRoot>> {
+    PROJECT_ROOT_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 仅测试用：清空句柄缓存，保证测试间互不影响。
+#[cfg(test)]
+fn clear_project_root_cache() {
+    if let Some(cache) = PROJECT_ROOT_CACHE.get() {
+        if let Ok(mut guard) = cache.lock() {
+            guard.clear();
+        }
+    }
+}
+
+/// 释放指定项目的缓存根句柄（项目删除/身份校验失败时调用）。
+fn evict_project_root(project_id: &str) {
+    if let Ok(mut cache) = project_root_cache().lock() {
+        cache.remove(project_id);
     }
 }
 
@@ -338,8 +443,31 @@ async fn resolve_trusted_root(
     if !project.trusted {
         return Err("Project is not trusted".to_string());
     }
+
+    let mut cache = project_root_cache().lock().map_err(|_| "Project root cache poisoned".to_string())?;
+    if let Some(root) = cache.get(project_id) {
+        // 缓存命中：验证句柄身份与信任时记录一致，检测根目录被替换。
+        if let Some(expected) = project.root_identity {
+            let identity = read_root_identity(&root.dir)?;
+            if expected != identity {
+                cache.remove(project_id);
+                return Err("Project root identity mismatch (directory was replaced)".to_string());
+            }
+        }
+        return Ok((root.clone_handle()?, project));
+    }
+
+    // 首次使用：打开句柄并校验/建立 identity 基线。
     let canonical = canonical_root(&project.root_path)?;
     let root = ProjectRoot::open(&canonical)?;
+    let identity = read_root_identity(&root.dir)?;
+    if let Some(expected) = project.root_identity {
+        if expected != identity {
+            return Err("Project root identity mismatch (directory was replaced)".to_string());
+        }
+    }
+    cache.insert(project_id.to_string(), root);
+    let root = cache.get(project_id).unwrap().clone_handle()?;
     Ok((root, project))
 }
 
@@ -442,32 +570,57 @@ pub async fn rename_project_entry(
     new_name: String,
 ) -> Result<ProjectEntryOpResult, String> {
     let (root, _project) = resolve_trusted_root(&state, &project_id).await?;
-    tokio::task::spawn_blocking(move || {
+    let storage = state.storage.clone();
+    // Dir 非 Copy：预克隆一个句柄供快照迁移失败时的磁盘回滚使用，
+    // 避免 spawn_blocking(move) 把 root 整体移走后无法再访问。
+    let rollback_dir = root.dir.try_clone().map_err(|e| format!("Failed to clone project root handle: {e}"))?;
+    let canonical = root.canonical.clone();
+    let renamed = tokio::task::spawn_blocking(move || {
         let source_rel = validate_relative_path(&relative_path)?;
         validate_entry_name(&new_name)?;
         // 源路径必须存在（no-follow 元数据，不跟随最终组件 symlink）。
-        root.dir.symlink_metadata(&source_rel).map_err(|e| {
+        let meta = root.dir.symlink_metadata(&source_rel).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 "The file or folder no longer exists".to_string()
             } else {
                 format!("Failed to access entry: {e}")
             }
         })?;
+        let is_dir = meta.is_dir();
         let target_rel = match source_rel.parent() {
             Some(parent) if !parent.as_os_str().is_empty() => parent.join(&new_name),
             _ => PathBuf::from(&new_name),
         };
         if source_rel == target_rel {
-            return Ok(ProjectEntryOpResult { path: root.canonical.join(&source_rel).to_string_lossy().to_string() });
+            return Ok((is_dir, source_rel, target_rel));
         }
         if root.dir.try_exists(&target_rel).map_err(|e| format!("Failed to check target: {e}"))? {
             return Err(format!("A file or folder already exists: {new_name}"));
         }
         root.dir.rename(&source_rel, &root.dir, &target_rel).map_err(|e| format!("Failed to rename: {e}"))?;
-        Ok(ProjectEntryOpResult { path: root.canonical.join(&target_rel).to_string_lossy().to_string() })
+        Ok((is_dir, source_rel, target_rel))
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())??;
+
+    let (is_dir, source_rel, target_rel) = renamed;
+    // 快照 path 迁移：失败则回滚磁盘 rename，禁止磁盘与 Local History 不一致的中间态。
+    let old_rel = source_rel.to_string_lossy().into_owned();
+    let new_rel = target_rel.to_string_lossy().into_owned();
+    if let Err(err) = storage.rename_sql_file_snapshot_paths(&project_id, &old_rel, &new_rel, is_dir).await {
+        let rollback = tokio::task::spawn_blocking(move || {
+            rollback_dir
+                .rename(&target_rel, &rollback_dir, &source_rel)
+                .map_err(|e| format!("Failed to roll back rename: {e}"))
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        return match rollback {
+            Ok(()) => Err(format!("Failed to migrate snapshot paths ({err}); rename rolled back.")),
+            Err(rollback_err) => Err(format!("Failed to migrate snapshot paths ({err}); rollback also failed: {rollback_err}. Please check Local History.")),
+        };
+    }
+    Ok(ProjectEntryOpResult { path: canonical.join(&target_rel).to_string_lossy().to_string() })
 }
 
 fn count_files_recursive(dir: &Dir, depth: usize) -> u64 {
@@ -516,7 +669,12 @@ pub async fn count_project_entry_files(
     .map_err(|e| e.to_string())?
 }
 
-/// 删除文件/文件夹到回收站（可恢复）。
+/// 项目内 DBX 自管回收站目录名（descriptor-relative，所有操作基于根句柄）。
+const DBX_TRASH_DIR: &str = ".dbx-trash";
+
+/// 删除文件/文件夹到 DBX 自管回收站（可还原）。
+/// 流程：根句柄 move 到项目内 `.dbx-trash/{uuid}-{name}` + DB 记录还原信息；
+/// move 成功但 DB 写入失败 → 回滚移回原位置，禁止「磁盘已删、DB 无记录」中间态。
 #[tauri::command]
 pub async fn delete_project_entry_to_trash(
     state: State<'_, std::sync::Arc<AppState>>,
@@ -524,43 +682,184 @@ pub async fn delete_project_entry_to_trash(
     relative_path: String,
 ) -> Result<(), String> {
     let (root, _project) = resolve_trusted_root(&state, &project_id).await?;
-    tokio::task::spawn_blocking(move || {
+    let staged = tokio::task::spawn_blocking(move || -> Result<StagedTrash, String> {
         let rel = validate_relative_path(&relative_path)?;
 
-        // 确认条目存在（no-follow 最终组件，避免跟随项目内 symlink）。
-        root.dir.symlink_metadata(&rel).map_err(|e| {
+        // 确认条目存在（no-follow 最终组件，symlink 只记录 is_dir=false，仅 move 本体）。
+        let meta = root.dir.symlink_metadata(&rel).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 "The file or folder no longer exists".to_string()
             } else {
                 format!("Failed to access entry: {e}")
             }
         })?;
+        let is_dir = meta.is_dir();
 
-        // `trash::delete` 是路径式 API，内部会先 `canonicalize` 父目录，从而跟随被替换成
-        // 外部 symlink 的中间目录组件，形成 check-then-use 的 TOCTOU 窗口。为真正关闭该
-        // 窗口，这里先通过根目录句柄以 descriptor-relative 方式把条目改名到项目根目录顶层
-        // （无中间路径组件、不会逃逸），再对顶层路径执行 trash。staged 名保留原条目名以便
-        // 回收站中可辨识。注意：OS 回收站"还原"会指向该 staged 路径而非原始相对路径，这是
-        // 基于句柄操作的安全折衷。
-        let original_name = rel.file_name().and_then(|n| n.to_str()).unwrap_or("entry");
-        // staged 名的固定前缀 ".dbx-trash-" + uuid(36) + "-" 共 48 字节；将原名称按
-        // 字节截断到 200 字节内，确保最终名不超过常见文件系统的 NAME_MAX（255 字节）。
-        let suffix = truncate_to_bytes(original_name, 200);
-        let staged = format!(".dbx-trash-{}-{}", uuid::Uuid::new_v4(), suffix);
-        root.dir
-            .rename(&rel, &root.dir, Path::new(&staged))
-            .map_err(|e| format!("Failed to stage entry for trash: {e}"))?;
-
-        let abs = root.canonical.join(&staged);
-        if let Err(e) = trash::delete(&abs) {
-            // 回滚：把条目移回原位置，避免用户文件停留在顶层临时目录。
-            let _ = root.dir.rename(Path::new(&staged), &root.dir, &rel);
-            return Err(format!("Failed to move to trash: {e}"));
+        // `.dbx-trash` 不存在时用根句柄创建；即使该目录已被外部替换为 symlink，
+        // descriptor-relative 语义下仍落在项目内（回归问题 2 identity 校验）。
+        if let Err(e) = root.dir.create_dir(Path::new(DBX_TRASH_DIR)) {
+            if e.kind() != std::io::ErrorKind::AlreadyExists {
+                return Err(format!("Failed to create trash directory: {e}"));
+            }
         }
-        Ok(())
+
+        // 存储名 = uuid 前缀 + 原名（字节截断防超 NAME_MAX），同名条目各自独立还原。
+        let original_name = rel.file_name().and_then(|n| n.to_str()).unwrap_or("entry").to_string();
+        let suffix = truncate_to_bytes(&original_name, 200);
+        let trash_name = format!("{}-{}", uuid::Uuid::new_v4(), suffix);
+        let trash_rel = Path::new(DBX_TRASH_DIR).join(&trash_name);
+
+        root.dir.rename(&rel, &root.dir, &trash_rel).map_err(|e| format!("Failed to move to trash: {e}"))?;
+        Ok(StagedTrash { rel, trash_name, original_name, is_dir })
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())??;
+
+    let StagedTrash { rel, trash_name, original_name, is_dir } = staged;
+    // 用已校验的 rel（validate_relative_path 归一化后）作为 DB 中的原路径，
+    // 避免闭包已 move 的原始 relative_path 二次使用。
+    let original_relative_path = rel.to_string_lossy().into_owned();
+    let entry = TrashEntry {
+        id: uuid::Uuid::new_v4().to_string(),
+        project_id: project_id.clone(),
+        original_relative_path,
+        original_name,
+        trash_name: trash_name.clone(),
+        is_dir,
+        trashed_at: now_iso(),
+    };
+    if let Err(err) = state.storage.insert_trash_entry(&entry).await {
+        // 磁盘已 move、DB 写入失败 → 回滚移回原位置。
+        let (root2, _project2) = resolve_trusted_root(&state, &project_id).await?;
+        let rollback = tokio::task::spawn_blocking(move || {
+            let trash_rel = Path::new(DBX_TRASH_DIR).join(&trash_name);
+            root2.dir.rename(&trash_rel, &root2.dir, &rel).map_err(|e| format!("Failed to roll back trash move: {e}"))
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        return match rollback {
+            Ok(()) => Err(format!("Failed to record trash entry ({err}); move rolled back.")),
+            Err(rollback_err) => {
+                Err(format!("Failed to record trash entry ({err}); rollback also failed: {rollback_err}. Please check the project .dbx-trash folder."))
+            }
+        };
+    }
+    Ok(())
+}
+
+/// 已被 move 到 `.dbx-trash/` 的条目的磁盘信息（供写 DB 与失败回滚）。
+struct StagedTrash {
+    rel: PathBuf,
+    trash_name: String,
+    original_name: String,
+    is_dir: bool,
+}
+
+/// 从 DBX 回收站还原条目到原父目录 + 原名。
+/// 跨会话有效（还原信息持久化在 DB）；原位置同名冲突时拒绝，不静默覆盖。
+#[tauri::command]
+pub async fn restore_project_entry_from_trash(
+    state: State<'_, std::sync::Arc<AppState>>,
+    project_id: String,
+    entry_id: String,
+) -> Result<(), String> {
+    let (root, _project) = resolve_trusted_root(&state, &project_id).await?;
+    let record = state.storage.get_trash_entry(&entry_id).await?.ok_or_else(|| "Trash entry not found".to_string())?;
+    if record.project_id != project_id {
+        return Err("Trash entry does not belong to this project".to_string());
+    }
+    tokio::task::spawn_blocking(move || {
+        let original_rel = validate_relative_path(&record.original_relative_path)?;
+        let trash_rel = Path::new(DBX_TRASH_DIR).join(validate_relative_path(&record.trash_name)?);
+        // 原位置已存在同名条目 → 冲突错误，不覆盖。
+        if root.dir.symlink_metadata(&original_rel).is_ok() {
+            return Err("An entry already exists at the original location".to_string());
+        }
+        root.dir.rename(&trash_rel, &root.dir, &original_rel).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                "The trashed entry is missing (the trash directory may have been deleted)".to_string()
+            } else {
+                format!("Failed to restore entry: {e}")
+            }
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    // move 回原位置成功 → 删除记录；重复还原同一 id 在此报错。
+    state.storage.delete_trash_entry(&entry_id).await
+}
+
+/// 列出项目回收站条目（供回收站对话框展示还原/清空）。
+#[tauri::command]
+pub async fn list_project_trash_entries(
+    state: State<'_, std::sync::Arc<AppState>>,
+    project_id: String,
+) -> Result<Vec<TrashEntry>, String> {
+    let _ = resolve_trusted_root(&state, &project_id).await?;
+    state.storage.list_trash_entries(&project_id).await
+}
+
+/// 清空项目回收站：删除 `.dbx-trash` 内对应条目并清 DB 记录。
+/// 磁盘删除失败时保留其记录（可重试/还原），不静默丢数据。
+#[tauri::command]
+pub async fn empty_project_trash(state: State<'_, std::sync::Arc<AppState>>, project_id: String) -> Result<(), String> {
+    let (root, _project) = resolve_trusted_root(&state, &project_id).await?;
+    let entries = state.storage.list_trash_entries(&project_id).await?;
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let removed = tokio::task::spawn_blocking(move || -> Result<Vec<String>, String> {
+        let mut removed = Vec::new();
+        for entry in &entries {
+            let trash_rel = Path::new(DBX_TRASH_DIR).join(&entry.trash_name);
+            let result =
+                if entry.is_dir { root.dir.remove_dir_all(&trash_rel) } else { root.dir.remove_file(&trash_rel) };
+            match result {
+                Ok(()) => removed.push(entry.id.clone()),
+                // 条目已丢失（回收站目录被误删等）：记录视为已清理。
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => removed.push(entry.id.clone()),
+                Err(e) => {
+                    return Err(format!("Failed to clear trash entry {}: {e}", entry.original_name));
+                }
+            }
+        }
+        Ok(removed)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    for id in removed {
+        state.storage.delete_trash_entry(&id).await?;
+    }
+    Ok(())
+}
+
+/// 项目删除时尽力清理该项目回收站磁盘文件（记录随项目 ON DELETE CASCADE 清掉）。
+/// 全程 best-effort：根目录不可访问/无权限时不阻断项目删除。
+async fn cleanup_project_trash_files(state: &std::sync::Arc<AppState>, project_id: &str, root_path: &str) {
+    let entries = match state.storage.list_trash_entries(project_id).await {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    if entries.is_empty() {
+        return;
+    }
+    let canonical = match std::fs::canonicalize(root_path) {
+        Ok(canonical) => canonical,
+        Err(_) => return,
+    };
+    let dir = match Dir::open_ambient_dir(&canonical, ambient_authority()) {
+        Ok(dir) => dir,
+        Err(_) => return,
+    };
+    let _ = tokio::task::spawn_blocking(move || {
+        for entry in &entries {
+            let trash_rel = Path::new(DBX_TRASH_DIR).join(&entry.trash_name);
+            let _ = if entry.is_dir { dir.remove_dir_all(&trash_rel) } else { dir.remove_file(&trash_rel) };
+        }
+        let _ = dir.remove_dir_all(Path::new(DBX_TRASH_DIR));
+    })
+    .await;
 }
 
 #[cfg(test)]
@@ -804,5 +1103,153 @@ mod tests {
         assert!(dir.try_exists("sub/renamed.sql").unwrap());
         assert!(!dir.try_exists("sub/normal.sql").unwrap());
         cleanup_dirs(&[&root]);
+    }
+
+    // ---- 根目录 identity 绑定测试（T1） ----
+
+    /// 辅助：创建临时项目根目录 + 临时 storage 数据目录，返回 (AppState, root, data)。
+    async fn setup_project_state() -> (std::sync::Arc<AppState>, PathBuf, PathBuf) {
+        use dbx_core::storage::Storage;
+        let temp = std::env::temp_dir();
+        let root = temp.join(format!("dbx-proj-root-{}", uuid::Uuid::new_v4()));
+        let data = temp.join(format!("dbx-proj-data-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let storage = Storage::open(&data.join("storage.db")).await.unwrap();
+        let state = std::sync::Arc::new(AppState::new_with_plugin_dir(storage, data.join("plugins")));
+        (state, root, data)
+    }
+
+    /// 辅助：插入一条已带 identity 的项目记录。
+    async fn insert_project_with_identity(state: &std::sync::Arc<AppState>, root: &Path, trusted: bool) -> SqlProject {
+        let identity = read_project_root_identity(root).await.unwrap();
+        let project = SqlProject {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: "proj".to_string(),
+            root_path: root.to_string_lossy().to_string(),
+            connection_id: None,
+            default_schema: None,
+            trusted,
+            root_identity: Some(identity),
+            created_at: now_iso(),
+            last_opened_at: now_iso(),
+        };
+        state.storage.insert_sql_project(&project).await.unwrap();
+        project
+    }
+
+    /// 同一目录 identity 稳定，不同目录 identity 不同。
+    #[test]
+    fn root_identity_is_stable_per_directory() {
+        let temp = std::env::temp_dir();
+        let a = temp.join(format!("dbx-id-a-{}", uuid::Uuid::new_v4()));
+        let b = temp.join(format!("dbx-id-b-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let dir_a = open_test_dir(&a);
+        let dir_b = open_test_dir(&b);
+        let id_a1 = read_root_identity(&dir_a).unwrap();
+        let id_a2 = read_root_identity(&dir_a).unwrap();
+        let id_b = read_root_identity(&dir_b).unwrap();
+        assert_eq!(id_a1, id_a2);
+        assert_ne!(id_a1, id_b);
+        cleanup_dirs(&[&a, &b]);
+    }
+
+    /// RootIdentity 序列化为 camelCase 且可无损反序列化。
+    #[test]
+    fn root_identity_serde_round_trips_as_camel_case() {
+        let identity = RootIdentity { volume: 123, file_id: 456, fallback: Some((789, 1011)) };
+        let json = serde_json::to_string(&identity).unwrap();
+        assert!(json.contains("fileId"));
+        let back: RootIdentity = serde_json::from_str(&json).unwrap();
+        assert_eq!(identity, back);
+    }
+
+    /// 根目录被替换成指向项目外的 symlink/junction：即使 canonicalize 跟随了
+    /// symlink 重新打开，identity 校验也会拒绝，且不会在项目外产生任何文件。
+    #[tokio::test]
+    async fn resolve_trusted_root_rejects_replaced_root() {
+        clear_project_root_cache();
+        let (state, root, data) = setup_project_state().await;
+        let project = insert_project_with_identity(&state, &root, true).await;
+
+        let replaced = root.with_extension("replaced");
+        std::fs::rename(&root, &replaced).unwrap();
+        let outside = data.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        if !symlink_dir_available(&outside, &root) {
+            std::fs::rename(&replaced, &root).unwrap();
+            cleanup_dirs(&[&root, &data]);
+            return;
+        }
+
+        let err = resolve_trusted_root(&state, &project.id).await.unwrap_err();
+        assert!(err.contains("identity mismatch"), "unexpected error: {err}");
+
+        // 替换检测拒绝后，任何操作都不应落到项目外。
+        assert!(std::fs::read_dir(&outside).unwrap().next().is_none(), "must not write outside the project root");
+        cleanup_dirs(&[&replaced, &data]);
+    }
+
+    /// 根目录被删除后重建同名目录：identity 变化被拒绝，不误用新目录。
+    #[tokio::test]
+    async fn resolve_trusted_root_rejects_deleted_and_recreated_root() {
+        clear_project_root_cache();
+        let (state, root, data) = setup_project_state().await;
+        let project = insert_project_with_identity(&state, &root, true).await;
+
+        std::fs::remove_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+
+        let err = resolve_trusted_root(&state, &project.id).await.unwrap_err();
+        assert!(err.contains("identity mismatch"), "unexpected error: {err}");
+        cleanup_dirs(&[&root, &data]);
+    }
+
+    /// 正常场景：多次 resolve 复用缓存句柄，项目内操作可用。
+    #[tokio::test]
+    async fn resolve_trusted_root_reuses_cached_handle() {
+        clear_project_root_cache();
+        let (state, root, data) = setup_project_state().await;
+        let project = insert_project_with_identity(&state, &root, true).await;
+
+        let (first, _) = resolve_trusted_root(&state, &project.id).await.unwrap();
+        let (second, _) = resolve_trusted_root(&state, &project.id).await.unwrap();
+        assert!(first.dir.try_exists("missing").is_err());
+        assert!(second.dir.try_exists("missing").is_err());
+
+        cleanup_dirs(&[&root, &data]);
+    }
+
+    /// 项目未信任或不存在时拒绝。
+    #[tokio::test]
+    async fn resolve_trusted_root_rejects_untrusted_and_missing() {
+        clear_project_root_cache();
+        let (state, root, data) = setup_project_state().await;
+        let untrusted = insert_project_with_identity(&state, &root, false).await;
+
+        let err = resolve_trusted_root(&state, &untrusted.id).await.unwrap_err();
+        assert!(err.contains("not trusted"), "unexpected error: {err}");
+
+        let err = resolve_trusted_root(&state, "no-such-project").await.unwrap_err();
+        assert!(err.contains("not found"), "unexpected error: {err}");
+        cleanup_dirs(&[&root, &data]);
+    }
+
+    /// 删除项目后，缓存的根句柄被释放；项目记录消失。
+    #[tokio::test]
+    async fn delete_sql_project_clears_cached_root() {
+        clear_project_root_cache();
+        let (state, root, data) = setup_project_state().await;
+        let project = insert_project_with_identity(&state, &root, true).await;
+
+        resolve_trusted_root(&state, &project.id).await.unwrap();
+        assert!(project_root_cache().lock().unwrap().contains_key(&project.id));
+
+        state.storage.delete_sql_project(&project.id).await.unwrap();
+        evict_project_root(&project.id);
+        assert!(!project_root_cache().lock().unwrap().contains_key(&project.id));
+
+        cleanup_dirs(&[&root, &data]);
     }
 }

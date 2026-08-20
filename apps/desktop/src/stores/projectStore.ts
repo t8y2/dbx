@@ -87,8 +87,9 @@ export const useProjectStore = defineStore("sqlProject", () => {
   /**
    * 老用户平滑升级：把 localStorage `dbx-sql-file-folders` 中已添加的文件夹
    * 一次性迁移为 dbx.db 中的项目记录（connection 留空，trusted=true——
-   * 老用户已手动添加过，视为已信任），迁移后清空旧列表。
-   * 返回是否发生了迁移。
+   * 老用户已手动添加过，视为已信任）。
+   * 迁移失败的项（目录缺失/权限/open 成功但 trust 失败等）保留在旧列表中，
+   * 供下次 loadProjects 重试；只清空成功迁移（含重复已存在）的项。
    */
   async function migrateLegacyFolders(): Promise<boolean> {
     const legacyPaths = getSqlFileFolderPaths();
@@ -96,6 +97,7 @@ export const useProjectStore = defineStore("sqlProject", () => {
 
     const knownIds = new Set(projects.value.map((project) => project.id));
     const knownRoots = new Set(projects.value.map((project) => normalizeRootForCompare(project.rootPath)));
+    const failed: string[] = [];
     let changed = false;
 
     for (const path of legacyPaths) {
@@ -109,12 +111,13 @@ export const useProjectStore = defineStore("sqlProject", () => {
         projects.value.push(trustedProject);
         changed = true;
       } catch {
-        // 目录已不存在等场景：跳过该遗留文件夹
+        // 单项失败（目录已不存在、trust 失败等）：保留该项，禁止清空整个旧列表。
+        failed.push(path);
       }
     }
 
-    // 废弃旧列表；bump 版本号通知订阅者（QuickOpen 等）。
-    saveSqlFileFolderPaths([]);
+    // 只移除成功迁移与重复项；失败项保留供下次重试；bump 版本号通知订阅者（QuickOpen 等）。
+    saveSqlFileFolderPaths(failed);
     if (changed) projects.value.sort(compareRecentFirst);
     return changed;
   }

@@ -21,7 +21,9 @@ use crate::history::{
 use crate::models::connection::{ConnectionConfig, DatabaseConnectionInfo, DatabaseType, TransportLayerConfig};
 use crate::prompt_template::PromptTemplate;
 use crate::saved_sql::{SavedSqlFile, SavedSqlFolder, SavedSqlLibrary};
-use crate::sql_project::{SqlFileSnapshot, SqlProject, MAX_SQL_FILE_SNAPSHOTS_PER_FILE};
+use crate::sql_project::{
+    RootIdentity, SqlFileSnapshot, SqlFileSnapshotMeta, SqlProject, TrashEntry, MAX_SQL_FILE_SNAPSHOTS_PER_FILE,
+};
 
 const SSH_TUNNEL_SECRET_PREFIX: &str = "ssh_tunnels.";
 const TRANSPORT_LAYER_SECRET_PREFIX: &str = "transport_layers.";
@@ -480,6 +482,17 @@ const SCHEMA_STATEMENTS: &[&str] = &[
         saved_at TEXT NOT NULL DEFAULT ''
     )",
     "CREATE INDEX IF NOT EXISTS idx_sql_file_snapshots_project_path ON sql_file_snapshots (project_id, path, saved_at)",
+    // DBX 自管回收站：删除条目 move 到项目内 .dbx-trash/ 并在此记录还原信息。
+    "CREATE TABLE IF NOT EXISTS trash_entries (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES sql_projects(id) ON DELETE CASCADE,
+        original_relative_path TEXT NOT NULL,
+        original_name TEXT NOT NULL,
+        trash_name TEXT NOT NULL,
+        is_dir INTEGER NOT NULL DEFAULT 0,
+        trashed_at TEXT NOT NULL DEFAULT ''
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_trash_entries_project ON trash_entries (project_id, trashed_at)",
 ];
 
 impl Storage {
@@ -509,6 +522,7 @@ impl Storage {
             ensure_schema_cache_columns_sync(conn)?;
             ensure_ai_configs_columns_sync(conn)?;
             ensure_state_store_columns_sync(conn)?;
+            ensure_sql_projects_columns_sync(conn)?;
             Ok(())
         })
     }
@@ -737,6 +751,11 @@ fn ensure_state_store_columns_sync(conn: &Connection) -> Result<(), String> {
         ("payload", "BLOB DEFAULT x''"),
     ];
     ensure_table_columns(conn, "state_store", COLUMNS)
+}
+
+/// sql_projects 表结构演进：新增 root_identity 列（TEXT，RootIdentity 的 JSON）。
+fn ensure_sql_projects_columns_sync(conn: &Connection) -> Result<(), String> {
+    ensure_table_columns(conn, "sql_projects", &[("root_identity", "TEXT")])
 }
 
 fn ssh_tunnel_secret_segment(index: usize, hop: &crate::models::connection::SshTunnelConfig) -> String {
@@ -3313,7 +3332,12 @@ impl Storage {
 // SQL projects (SQL 文件项目管理)
 
 impl Storage {
+    const SQL_PROJECT_COLUMNS: &'static str =
+        "id, name, root_path, connection_id, default_schema, trusted, root_identity, created_at, last_opened_at";
+
     fn row_to_sql_project(row: &rusqlite::Row) -> rusqlite::Result<SqlProject> {
+        let root_identity: Option<String> = row.get("root_identity")?;
+        let root_identity = root_identity.as_deref().and_then(|json| serde_json::from_str::<RootIdentity>(json).ok());
         Ok(SqlProject {
             id: row.get("id")?,
             name: row.get("name")?,
@@ -3321,6 +3345,7 @@ impl Storage {
             connection_id: row.get("connection_id")?,
             default_schema: row.get("default_schema")?,
             trusted: row.get::<_, i64>("trusted")? != 0,
+            root_identity,
             created_at: row.get("created_at")?,
             last_opened_at: row.get("last_opened_at")?,
         })
@@ -3329,7 +3354,10 @@ impl Storage {
     pub async fn list_sql_projects(&self) -> Result<Vec<SqlProject>, String> {
         self.with_conn(|conn| {
             let mut stmt = conn
-                .prepare("SELECT id, name, root_path, connection_id, default_schema, trusted, created_at, last_opened_at FROM sql_projects ORDER BY last_opened_at DESC, created_at DESC")
+                .prepare(&format!(
+                    "SELECT {} FROM sql_projects ORDER BY last_opened_at DESC, created_at DESC",
+                    Self::SQL_PROJECT_COLUMNS
+                ))
                 .map_err(|e| e.to_string())?;
             let rows = stmt
                 .query_map([], Self::row_to_sql_project)
@@ -3346,8 +3374,7 @@ impl Storage {
         let project = project.clone();
         self.with_conn(move |conn| {
             conn.execute(
-                "INSERT INTO sql_projects (id, name, root_path, connection_id, default_schema, trusted, created_at, last_opened_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                &format!("INSERT INTO sql_projects ({}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", Self::SQL_PROJECT_COLUMNS),
                 params![
                     project.id,
                     project.name,
@@ -3355,12 +3382,25 @@ impl Storage {
                     project.connection_id,
                     project.default_schema,
                     if project.trusted { 1 } else { 0 },
+                    project.root_identity.map(|i| serde_json::to_string(&i).unwrap_or_default()),
                     project.created_at,
                     project.last_opened_at
                 ],
             )
             .map(|_| ())
             .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    /// 记录项目根目录的稳定身份（open/trust 时调用）。
+    pub async fn set_sql_project_root_identity(&self, id: &str, identity: Option<&RootIdentity>) -> Result<(), String> {
+        let id = id.to_string();
+        let json = identity.map(|i| serde_json::to_string(i).unwrap_or_default());
+        self.with_conn(move |conn| {
+            conn.execute("UPDATE sql_projects SET root_identity = ?2 WHERE id = ?1", params![id, json])
+                .map(|_| ())
+                .map_err(|e| e.to_string())
         })
         .await
     }
@@ -3404,7 +3444,7 @@ impl Storage {
         let root_path = root_path.to_string();
         self.with_conn(move |conn| {
             conn.query_row(
-                "SELECT id, name, root_path, connection_id, default_schema, trusted, created_at, last_opened_at FROM sql_projects WHERE root_path = ?1",
+                &format!("SELECT {} FROM sql_projects WHERE root_path = ?1", Self::SQL_PROJECT_COLUMNS),
                 params![root_path],
                 Self::row_to_sql_project,
             )
@@ -3418,7 +3458,7 @@ impl Storage {
         let id = id.to_string();
         self.with_conn(move |conn| {
             conn.query_row(
-                "SELECT id, name, root_path, connection_id, default_schema, trusted, created_at, last_opened_at FROM sql_projects WHERE id = ?1",
+                &format!("SELECT {} FROM sql_projects WHERE id = ?1", Self::SQL_PROJECT_COLUMNS),
                 params![id],
                 Self::row_to_sql_project,
             )
@@ -3477,20 +3517,51 @@ impl Storage {
         .await
     }
 
-    pub async fn list_sql_file_snapshots(
+    /// 快照列表的轻量元数据（不含 content，首屏按需加载用）。
+    pub async fn list_sql_file_snapshot_meta(
         &self,
         project_id: &str,
         path: &str,
         limit: usize,
-    ) -> Result<Vec<SqlFileSnapshot>, String> {
+    ) -> Result<Vec<SqlFileSnapshotMeta>, String> {
         let project_id = project_id.to_string();
         let path = path.to_string();
         self.with_conn(move |conn| {
             let mut stmt = conn
-                .prepare("SELECT id, project_id, path, content, encoding, saved_at FROM sql_file_snapshots WHERE project_id = ?1 AND path = ?2 ORDER BY saved_at DESC, id DESC LIMIT ?3")
+                .prepare("SELECT id, project_id, path, encoding, saved_at, length(CAST(content AS BLOB)) AS byte_len FROM sql_file_snapshots WHERE project_id = ?1 AND path = ?2 ORDER BY saved_at DESC, id DESC LIMIT ?3")
                 .map_err(|e| e.to_string())?;
             let rows = stmt
                 .query_map(params![project_id, path, limit as i64], |row| {
+                    Ok(SqlFileSnapshotMeta {
+                        id: row.get("id")?,
+                        project_id: row.get("project_id")?,
+                        path: row.get("path")?,
+                        encoding: row.get("encoding")?,
+                        saved_at: row.get("saved_at")?,
+                        byte_len: row.get("byte_len")?,
+                    })
+                })
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            Ok(rows)
+        })
+        .await
+    }
+
+    /// 按 snapshot_id 获取单条快照完整内容（选中后才请求）。
+    pub async fn get_sql_file_snapshot_content(
+        &self,
+        project_id: &str,
+        snapshot_id: &str,
+    ) -> Result<Option<SqlFileSnapshot>, String> {
+        let (project_id, snapshot_id) = (project_id.to_string(), snapshot_id.to_string());
+        self.with_conn(move |conn| {
+            let mut stmt = conn
+                .prepare("SELECT id, project_id, path, content, encoding, saved_at FROM sql_file_snapshots WHERE project_id = ?1 AND id = ?2")
+                .map_err(|e| e.to_string())?;
+            let mut rows = stmt
+                .query_map(params![project_id, snapshot_id], |row| {
                     Ok(SqlFileSnapshot {
                         id: row.get("id")?,
                         project_id: row.get("project_id")?,
@@ -3500,10 +3571,135 @@ impl Storage {
                         saved_at: row.get("saved_at")?,
                     })
                 })
+                .map_err(|e| e.to_string())?;
+            let row = rows.next().transpose().map_err(|e| e.to_string())?;
+            Ok(row)
+        })
+        .await
+    }
+
+    // ---------- DBX 自管回收站（trash_entries） ----------
+
+    pub async fn insert_trash_entry(&self, entry: &TrashEntry) -> Result<(), String> {
+        let entry = entry.clone();
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO trash_entries (id, project_id, original_relative_path, original_name, trash_name, is_dir, trashed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![entry.id, entry.project_id, entry.original_relative_path, entry.original_name, entry.trash_name, entry.is_dir as i64, entry.trashed_at],
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// 按 id 查询回收站条目（不校验 project_id，调用方自行核对）。
+    pub async fn get_trash_entry(&self, id: &str) -> Result<Option<TrashEntry>, String> {
+        let id = id.to_string();
+        self.with_conn(move |conn| {
+            let mut stmt = conn
+                .prepare("SELECT id, project_id, original_relative_path, original_name, trash_name, is_dir, trashed_at FROM trash_entries WHERE id = ?1")
+                .map_err(|e| e.to_string())?;
+            let mut rows = stmt
+                .query_map([id], |row| {
+                    Ok(TrashEntry {
+                        id: row.get("id")?,
+                        project_id: row.get("project_id")?,
+                        original_relative_path: row.get("original_relative_path")?,
+                        original_name: row.get("original_name")?,
+                        trash_name: row.get("trash_name")?,
+                        is_dir: row.get::<_, i64>("is_dir")? != 0,
+                        trashed_at: row.get("trashed_at")?,
+                    })
+                })
+                .map_err(|e| e.to_string())?;
+            let row = rows.next().transpose().map_err(|e| e.to_string())?;
+            Ok(row)
+        })
+        .await
+    }
+
+    /// 某项目的回收站条目列表（按删除时间倒序）。
+    pub async fn list_trash_entries(&self, project_id: &str) -> Result<Vec<TrashEntry>, String> {
+        let project_id = project_id.to_string();
+        self.with_conn(move |conn| {
+            let mut stmt = conn
+                .prepare("SELECT id, project_id, original_relative_path, original_name, trash_name, is_dir, trashed_at FROM trash_entries WHERE project_id = ?1 ORDER BY trashed_at DESC, id DESC")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([project_id], |row| {
+                    Ok(TrashEntry {
+                        id: row.get("id")?,
+                        project_id: row.get("project_id")?,
+                        original_relative_path: row.get("original_relative_path")?,
+                        original_name: row.get("original_name")?,
+                        trash_name: row.get("trash_name")?,
+                        is_dir: row.get::<_, i64>("is_dir")? != 0,
+                        trashed_at: row.get("trashed_at")?,
+                    })
+                })
                 .map_err(|e| e.to_string())?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|e| e.to_string())?;
             Ok(rows)
+        })
+        .await
+    }
+
+    /// 删除单条回收站记录（还原成功或清空时调用）。
+    pub async fn delete_trash_entry(&self, id: &str) -> Result<(), String> {
+        let id = id.to_string();
+        self.with_conn(move |conn| {
+            conn.execute("DELETE FROM trash_entries WHERE id = ?1", params![id]).map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// 删除某项目的全部回收站记录（项目删除时级联清理）。
+    pub async fn delete_trash_entries_by_project(&self, project_id: &str) -> Result<(), String> {
+        let project_id = project_id.to_string();
+        self.with_conn(move |conn| {
+            conn.execute("DELETE FROM trash_entries WHERE project_id = ?1", params![project_id])
+                .map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// 文件/目录重命名后迁移其下全部快照 path，保证 Local History 不丢。
+    /// - 文件：精确替换该文件 path；
+    /// - 目录：带分隔符边界的前缀替换（避免 `/a` 误改 `/ab`），保留剩余子路径，
+    ///   兼容 `/` 与 `\` 两种路径分隔符。
+    pub async fn rename_sql_file_snapshot_paths(
+        &self,
+        project_id: &str,
+        old_path: &str,
+        new_path: &str,
+        is_dir: bool,
+    ) -> Result<(), String> {
+        let (project_id, old_path, new_path) = (project_id.to_string(), old_path.to_string(), new_path.to_string());
+        self.with_conn(move |conn| {
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            if is_dir {
+                tx.execute(
+                    "UPDATE sql_file_snapshots
+                     SET path = ?1 || substr(path, length(?2) + 1)
+                     WHERE project_id = ?3
+                       AND (path LIKE ?2 || '/' || '%' OR path LIKE ?2 || char(92) || '%')",
+                    params![new_path, old_path, project_id],
+                )
+                .map_err(|e| e.to_string())?;
+            } else {
+                tx.execute(
+                    "UPDATE sql_file_snapshots SET path = ?1 WHERE project_id = ?2 AND path = ?3",
+                    params![new_path, project_id, old_path],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok(())
         })
         .await
     }
@@ -4544,7 +4740,7 @@ mod tests {
         ConnectionConfig, DatabaseConnectionInfo, DatabaseType, SshTunnelConfig, TransportLayerConfig,
     };
     use crate::saved_sql::SavedSqlFile;
-    use crate::sql_project::SqlProject;
+    use crate::sql_project::{SqlFileSnapshot, SqlProject, TrashEntry};
     use rusqlite::Connection;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -7135,6 +7331,7 @@ mod tests {
             connection_id: None,
             default_schema: None,
             trusted: false,
+            root_identity: None,
             created_at: "2026-01-01T00:00:00.000Z".to_string(),
             last_opened_at: "2026-01-01T00:00:00.000Z".to_string(),
         }
@@ -7183,5 +7380,349 @@ mod tests {
         assert_eq!(reloaded.created_at, "2026-01-01T00:00:00.000Z");
 
         std::fs::remove_file(&db).ok();
+    }
+
+    // ---- 快照 path 迁移（文件/目录重命名后 Local History 一致性）----
+
+    fn sample_snapshot(id: &str, project_id: &str, path: &str) -> SqlFileSnapshot {
+        SqlFileSnapshot {
+            id: id.to_string(),
+            project_id: project_id.to_string(),
+            path: path.to_string(),
+            content: "select 1;".to_string(),
+            encoding: "utf8".to_string(),
+            saved_at: "2026-01-01T00:00:00.000Z".to_string(),
+        }
+    }
+
+    async fn snapshot_paths(storage: &Storage, project_id: &str) -> Vec<String> {
+        // list_sql_file_snapshots 按单文件 path 查询，这里直接全表扫描测试辅助。
+        let project_id = project_id.to_string();
+        storage
+            .with_conn(move |conn| {
+                let mut stmt = conn
+                    .prepare("SELECT path FROM sql_file_snapshots WHERE project_id = ?1 ORDER BY path")
+                    .map_err(|e| e.to_string())?;
+                let rows = stmt
+                    .query_map([&project_id], |row| row.get::<_, String>("path"))
+                    .map_err(|e| e.to_string())?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| e.to_string())?;
+                Ok(rows)
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn rename_snapshot_paths_file_exact_replacement() {
+        let db = temp_db_path("snapshot-rename-file");
+        let storage = Storage::open(&db).await.unwrap();
+        let project = sample_project("proj-snap-1", "/work/sp");
+        storage.insert_sql_project(&project).await.unwrap();
+        storage.insert_sql_file_snapshot(&sample_snapshot("s1", "proj-snap-1", "proc.sql")).await.unwrap();
+        storage.insert_sql_file_snapshot(&sample_snapshot("s2", "proj-snap-1", "other.sql")).await.unwrap();
+
+        storage.rename_sql_file_snapshot_paths("proj-snap-1", "proc.sql", "renamed.sql", false).await.unwrap();
+
+        let paths = snapshot_paths(&storage, "proj-snap-1").await;
+        assert_eq!(paths, vec!["other.sql", "renamed.sql"]);
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn rename_snapshot_paths_dir_prefix_replacement() {
+        let db = temp_db_path("snapshot-rename-dir");
+        let storage = Storage::open(&db).await.unwrap();
+        let project = sample_project("proj-snap-2", "/work/sp");
+        storage.insert_sql_project(&project).await.unwrap();
+        storage.insert_sql_file_snapshot(&sample_snapshot("s1", "proj-snap-2", "libs/util.sql")).await.unwrap();
+        storage.insert_sql_file_snapshot(&sample_snapshot("s2", "proj-snap-2", "libs/nested/deep.sql")).await.unwrap();
+        storage.insert_sql_file_snapshot(&sample_snapshot("s3", "proj-snap-2", "outside.sql")).await.unwrap();
+
+        storage.rename_sql_file_snapshot_paths("proj-snap-2", "libs", "packages", true).await.unwrap();
+
+        let paths = snapshot_paths(&storage, "proj-snap-2").await;
+        assert_eq!(paths, vec!["outside.sql", "packages/nested/deep.sql", "packages/util.sql"]);
+        std::fs::remove_file(&db).ok();
+    }
+
+    /// 前缀边界：`/a` 不能误改 `/ab` 下的文件。
+    #[tokio::test]
+    async fn rename_snapshot_paths_dir_respects_separator_boundary() {
+        let db = temp_db_path("snapshot-rename-boundary");
+        let storage = Storage::open(&db).await.unwrap();
+        let project = sample_project("proj-snap-3", "/work/sp");
+        storage.insert_sql_project(&project).await.unwrap();
+        storage.insert_sql_file_snapshot(&sample_snapshot("s1", "proj-snap-3", "a/x.sql")).await.unwrap();
+        storage.insert_sql_file_snapshot(&sample_snapshot("s2", "proj-snap-3", "ab/y.sql")).await.unwrap();
+
+        storage.rename_sql_file_snapshot_paths("proj-snap-3", "a", "renamed-a", true).await.unwrap();
+
+        let paths = snapshot_paths(&storage, "proj-snap-3").await;
+        assert_eq!(paths, vec!["ab/y.sql", "renamed-a/x.sql"]);
+        std::fs::remove_file(&db).ok();
+    }
+
+    /// Windows 反斜杠分隔符与斜杠混合路径。
+    #[tokio::test]
+    async fn rename_snapshot_paths_dir_backslash_separator() {
+        let db = temp_db_path("snapshot-rename-backslash");
+        let storage = Storage::open(&db).await.unwrap();
+        let project = sample_project("proj-snap-4", r"C:\work\sp");
+        storage.insert_sql_project(&project).await.unwrap();
+        storage.insert_sql_file_snapshot(&sample_snapshot("s1", "proj-snap-4", r"libs\util.sql")).await.unwrap();
+        storage.insert_sql_file_snapshot(&sample_snapshot("s2", "proj-snap-4", "libs/util.sql")).await.unwrap();
+        storage.insert_sql_file_snapshot(&sample_snapshot("s3", "proj-snap-4", "libs-backup/x.sql")).await.unwrap();
+
+        storage.rename_sql_file_snapshot_paths("proj-snap-4", "libs", "pkgs", true).await.unwrap();
+
+        let paths = snapshot_paths(&storage, "proj-snap-4").await;
+        // SQLite BINARY 排序：'/' (0x2F) < '\' (0x5C)，故 pkgs/util.sql 排在 pkgs\util.sql 前。
+        assert_eq!(paths, vec!["libs-backup/x.sql", "pkgs/util.sql", r"pkgs\util.sql"]);
+        std::fs::remove_file(&db).ok();
+    }
+
+    /// 中文/特殊字符路径不影响前缀替换。
+    #[tokio::test]
+    async fn rename_snapshot_paths_dir_unicode_paths() {
+        let db = temp_db_path("snapshot-rename-unicode");
+        let storage = Storage::open(&db).await.unwrap();
+        let project = sample_project("proj-snap-5", "/work/sp");
+        storage.insert_sql_project(&project).await.unwrap();
+        storage.insert_sql_file_snapshot(&sample_snapshot("s1", "proj-snap-5", "报表/月度.sql")).await.unwrap();
+        storage.insert_sql_file_snapshot(&sample_snapshot("s2", "proj-snap-5", "报表2/其他.sql")).await.unwrap();
+
+        storage.rename_sql_file_snapshot_paths("proj-snap-5", "报表", "汇总", true).await.unwrap();
+
+        let paths = snapshot_paths(&storage, "proj-snap-5").await;
+        assert_eq!(paths, vec!["报表2/其他.sql", "汇总/月度.sql"]);
+        std::fs::remove_file(&db).ok();
+    }
+
+    /// 无快照时迁移是 no-op。
+    #[tokio::test]
+    async fn rename_snapshot_paths_no_snapshots_noop() {
+        let db = temp_db_path("snapshot-rename-noop");
+        let storage = Storage::open(&db).await.unwrap();
+        let project = sample_project("proj-snap-6", "/work/sp");
+        storage.insert_sql_project(&project).await.unwrap();
+
+        storage.rename_sql_file_snapshot_paths("proj-snap-6", "libs", "pkgs", true).await.unwrap();
+
+        let paths = snapshot_paths(&storage, "proj-snap-6").await;
+        assert!(paths.is_empty());
+        std::fs::remove_file(&db).ok();
+    }
+
+    /// meta 列表不含 content，且按保存时间倒序；byte_len 为字节数（非字符数）。
+    #[tokio::test]
+    async fn snapshot_meta_omits_content_and_sorted_desc() {
+        let db = temp_db_path("snapshot-meta");
+        let storage = Storage::open(&db).await.unwrap();
+        let project = sample_project("proj-snap-7", "/work/sp");
+        storage.insert_sql_project(&project).await.unwrap();
+        let mut old = sample_snapshot("s-old", "proj-snap-7", "proc.sql");
+        old.saved_at = "2026-01-01T00:00:00.000Z".to_string();
+        let mut new = sample_snapshot("s-new", "proj-snap-7", "proc.sql");
+        new.saved_at = "2026-01-02T00:00:00.000Z".to_string();
+        storage.insert_sql_file_snapshot(&old).await.unwrap();
+        storage.insert_sql_file_snapshot(&new).await.unwrap();
+
+        let meta = storage.list_sql_file_snapshot_meta("proj-snap-7", "proc.sql", 10).await.unwrap();
+        assert_eq!(meta.len(), 2);
+        // 按 saved_at 倒序：新的在前。
+        assert_eq!(meta[0].id, "s-new");
+        assert_eq!(meta[1].id, "s-old");
+        assert_eq!(meta[0].path, "proc.sql");
+        assert_eq!(meta[0].encoding, "utf8");
+        assert_eq!(meta[0].byte_len, "select 1;".len() as i64);
+        std::fs::remove_file(&db).ok();
+    }
+
+    /// 多字节内容（UTF-8 中文）：byte_len 取字节数而非字符数。
+    #[tokio::test]
+    async fn snapshot_meta_byte_len_is_bytes_not_chars() {
+        let db = temp_db_path("snapshot-meta-multibyte");
+        let storage = Storage::open(&db).await.unwrap();
+        let project = sample_project("proj-snap-10", "/work/sp");
+        storage.insert_sql_project(&project).await.unwrap();
+        // "选择月度" 4 个中文字符，UTF-8 各占 3 字节 = 12 字节。
+        let mut snapshot = sample_snapshot("s-cn", "proj-snap-10", "报表.sql");
+        snapshot.content = "选择月度".to_string();
+        storage.insert_sql_file_snapshot(&snapshot).await.unwrap();
+
+        let meta = storage.list_sql_file_snapshot_meta("proj-snap-10", "报表.sql", 10).await.unwrap();
+        assert_eq!(meta.len(), 1);
+        assert_eq!(meta[0].byte_len, 12);
+        assert_ne!(meta[0].byte_len, 4, "byte_len 必须是字节数而非字符数");
+        std::fs::remove_file(&db).ok();
+    }
+
+    /// 选中后按 snapshot_id 取回完整 content；不存在时返回 None。
+    #[tokio::test]
+    async fn snapshot_content_by_id_round_trips() {
+        let db = temp_db_path("snapshot-content");
+        let storage = Storage::open(&db).await.unwrap();
+        let project = sample_project("proj-snap-8", "/work/sp");
+        storage.insert_sql_project(&project).await.unwrap();
+        let snapshot = sample_snapshot("s-abc", "proj-snap-8", "proc.sql");
+        storage.insert_sql_file_snapshot(&snapshot).await.unwrap();
+
+        let loaded = storage.get_sql_file_snapshot_content("proj-snap-8", "s-abc").await.unwrap();
+        assert_eq!(loaded, Some(snapshot));
+
+        // 跨项目隔离：其他项目查不到。
+        let cross = storage.get_sql_file_snapshot_content("proj-other", "s-abc").await.unwrap();
+        assert!(cross.is_none());
+        std::fs::remove_file(&db).ok();
+    }
+
+    /// 大数据量验证：meta 仅返回 byte_len 不携带 content，content 按 id 单独取回。
+    #[tokio::test]
+    async fn snapshot_meta_large_content_only_byte_len() {
+        let db = temp_db_path("snapshot-meta-large");
+        let storage = Storage::open(&db).await.unwrap();
+        let project = sample_project("proj-snap-9", "/work/sp");
+        storage.insert_sql_project(&project).await.unwrap();
+        // 约 2 MiB 内容，模拟超大数据量快照。
+        let big = "select 1; -- ".repeat(2 * 1024 * 1024 / 12);
+        let mut snapshot = sample_snapshot("s-big", "proj-snap-9", "huge.sql");
+        snapshot.content = big.clone();
+        storage.insert_sql_file_snapshot(&snapshot).await.unwrap();
+
+        // meta 列表只暴露字节数，不返回 content。
+        let meta = storage.list_sql_file_snapshot_meta("proj-snap-9", "huge.sql", 10).await.unwrap();
+        assert_eq!(meta.len(), 1);
+        assert_eq!(meta[0].id, "s-big");
+        assert_eq!(meta[0].byte_len, big.len() as i64);
+
+        // 选中后才按 id 取回完整内容。
+        let loaded = storage.get_sql_file_snapshot_content("proj-snap-9", "s-big").await.unwrap().unwrap();
+        assert_eq!(loaded.content, big);
+        std::fs::remove_file(&db).ok();
+    }
+
+    // ---- DBX 自管回收站（trash_entries）----
+
+    fn sample_trash_entry(id: &str, project_id: &str, original: &str, trash_name: &str) -> TrashEntry {
+        TrashEntry {
+            id: id.to_string(),
+            project_id: project_id.to_string(),
+            original_relative_path: original.to_string(),
+            original_name: original.rsplit(['/', '\\']).next().unwrap_or(original).to_string(),
+            trash_name: trash_name.to_string(),
+            is_dir: false,
+            trashed_at: "2026-01-01T00:00:00.000Z".to_string(),
+        }
+    }
+
+    /// trash_entries CRUD：插入/查询/列表/删除，project_id 隔离。
+    #[tokio::test]
+    async fn trash_entries_crud_and_project_isolation() {
+        let db = temp_db_path("trash-crud");
+        let storage = Storage::open(&db).await.unwrap();
+        storage.insert_sql_project(&sample_project("proj-t1", "/work/a")).await.unwrap();
+        storage.insert_sql_project(&sample_project("proj-t2", "/work/b")).await.unwrap();
+
+        storage
+            .insert_trash_entry(&sample_trash_entry("t-1", "proj-t1", "libs/util.sql", "abc-util.sql"))
+            .await
+            .unwrap();
+        storage.insert_trash_entry(&sample_trash_entry("t-2", "proj-t1", "proc.sql", "def-proc.sql")).await.unwrap();
+        storage.insert_trash_entry(&sample_trash_entry("t-3", "proj-t2", "other.sql", "xyz-other.sql")).await.unwrap();
+
+        let one = storage.get_trash_entry("t-1").await.unwrap().unwrap();
+        assert_eq!(one.project_id, "proj-t1");
+        assert_eq!(one.original_relative_path, "libs/util.sql");
+        assert_eq!(one.original_name, "util.sql");
+        assert_eq!(one.trash_name, "abc-util.sql");
+        assert!(!one.is_dir);
+
+        // project 过滤：proj-t1 只看到自己的两条。
+        let list = storage.list_trash_entries("proj-t1").await.unwrap();
+        assert_eq!(list.len(), 2);
+        assert!(list.iter().all(|e| e.project_id == "proj-t1"));
+
+        // 不存在返回 None。
+        assert!(storage.get_trash_entry("t-nope").await.unwrap().is_none());
+
+        // 单条删除。
+        storage.delete_trash_entry("t-2").await.unwrap();
+        assert_eq!(storage.list_trash_entries("proj-t1").await.unwrap().len(), 1);
+
+        // 按项目清理。
+        storage.delete_trash_entries_by_project("proj-t1").await.unwrap();
+        assert!(storage.list_trash_entries("proj-t1").await.unwrap().is_empty());
+        // 其他项目不受影响。
+        assert_eq!(storage.list_trash_entries("proj-t2").await.unwrap().len(), 1);
+        std::fs::remove_file(&db).ok();
+    }
+
+    /// 删除项目 → ON DELETE CASCADE 清理该项目 trash 记录。
+    #[tokio::test]
+    async fn trash_entries_cascade_on_project_delete() {
+        let db = temp_db_path("trash-cascade");
+        let storage = Storage::open(&db).await.unwrap();
+        storage.insert_sql_project(&sample_project("proj-t3", "/work/c")).await.unwrap();
+        storage.insert_trash_entry(&sample_trash_entry("t-4", "proj-t3", "a.sql", "aa-a.sql")).await.unwrap();
+
+        storage.delete_sql_project("proj-t3").await.unwrap();
+        assert!(storage.list_trash_entries("proj-t3").await.unwrap().is_empty());
+        std::fs::remove_file(&db).ok();
+    }
+
+    /// is_dir 读写映射正确。
+    #[tokio::test]
+    async fn trash_entries_is_dir_round_trips() {
+        let db = temp_db_path("trash-isdir");
+        let storage = Storage::open(&db).await.unwrap();
+        storage.insert_sql_project(&sample_project("proj-t4", "/work/d")).await.unwrap();
+        let mut entry = sample_trash_entry("t-5", "proj-t4", "folder/sub", "uuid-folder");
+        entry.is_dir = true;
+        storage.insert_trash_entry(&entry).await.unwrap();
+
+        let loaded = storage.get_trash_entry("t-5").await.unwrap().unwrap();
+        assert!(loaded.is_dir);
+        std::fs::remove_file(&db).ok();
+    }
+
+    // ---- 根目录 identity 持久化（T1：绑定稳定身份，使用时校验）----
+
+    /// root_identity 默认缺省为 None，set/clear 可读写回。
+    #[tokio::test]
+    async fn sql_project_root_identity_persists_and_reads_back() {
+        use crate::sql_project::RootIdentity;
+
+        let db = temp_db_path("sql-project-root-identity");
+        let storage = Storage::open(&db).await.unwrap();
+        let project = sample_project("proj-rid-1", "/work/sp");
+        storage.insert_sql_project(&project).await.unwrap();
+        assert_eq!(storage.find_sql_project_by_id("proj-rid-1").await.unwrap().unwrap().root_identity, None);
+
+        let identity = RootIdentity { volume: 0x1122, file_id: 0x3344, fallback: Some((5, 6)) };
+        storage.set_sql_project_root_identity("proj-rid-1", Some(&identity)).await.unwrap();
+        assert_eq!(storage.find_sql_project_by_id("proj-rid-1").await.unwrap().unwrap().root_identity, Some(identity));
+
+        storage.set_sql_project_root_identity("proj-rid-1", None).await.unwrap();
+        assert_eq!(storage.find_sql_project_by_id("proj-rid-1").await.unwrap().unwrap().root_identity, None);
+        std::fs::remove_file(&db).ok();
+    }
+
+    /// serde 使用 camelCase；fallback 缺省兼容旧记录。
+    #[test]
+    fn root_identity_serde_round_trips_as_camel_case() {
+        use crate::sql_project::RootIdentity;
+
+        let identity = RootIdentity { volume: 0x1122, file_id: 0x3344, fallback: Some((5, 6)) };
+        let json = serde_json::to_string(&identity).unwrap();
+        assert_eq!(json, r#"{"volume":4386,"fileId":13124,"fallback":[5,6]}"#);
+        let back: RootIdentity = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, identity);
+
+        // 旧记录没有 fallback 字段（serde default）→ 反序列化不失败。
+        let minimal: RootIdentity = serde_json::from_str(r#"{"volume":1,"fileId":2}"#).unwrap();
+        assert_eq!(minimal.fallback, None);
+        assert_eq!(minimal.volume, 1);
     }
 }

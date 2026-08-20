@@ -15,13 +15,12 @@ import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { copyToClipboard } from "@/lib/common/clipboard";
-import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
-import { resolveExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
+import { resolveProjectFileTarget } from "@/lib/sql/projectFileTarget";
 import { externalSqlFileOpenErrorMessage, formatSqlFileSize, isExternalSqlFileTooLargeError } from "@/lib/sql/sqlFileOpen";
 import { focusSidebarRenameInput } from "@/lib/sidebar/sidebarRenameFocus";
 import * as api from "@/lib/backend/api";
 import type { SqlFileEntry } from "@/lib/backend/api";
-import type { SqlProject } from "@/lib/backend/tauri";
+import type { SqlProject, TrashEntry } from "@/lib/backend/tauri";
 import { notifySqlFileFoldersChanged } from "@/lib/sqlFile/sqlFileFolders";
 import { orderedListRangeAnchorIndex, orderedListSelectionIntent, type OrderedListSelectionItem } from "@/lib/selection/orderedListSelection";
 import { useFolderWatcherLifecycle } from "@/composables/useFolderWatcherLifecycle";
@@ -120,14 +119,31 @@ function syncFromProjects() {
   }
   for (const project of wanted) {
     if (!folders.value.some((folder) => folder.project.id === project.id)) {
+      // 按需扫描：仅激活项目 eager 加载，其余项目先占位，切换激活时再扫（见下方
+      // activeProjectId watch），避免启动时并发递归扫描全部项目目录。
       folders.value.push(createFolderState(project));
-      void loadFolderEntries(project.rootPath);
       // watcher 由 useFolderWatcherLifecycle 管理仅激活项目
     }
   }
   folders.value.sort((a, b) => wanted.findIndex((p) => p.id === a.project.id) - wanted.findIndex((p) => p.id === b.project.id));
   queueTrustPrompts();
 }
+
+// 激活项目切换时才扫描对应目录；非激活项目保持占位状态，收敛后台递归扫描。
+watch(
+  () => projectStore.activeProjectId,
+  (id) => {
+    const project = projectStore.projects.find((p) => p.id === id);
+    if (!project) return;
+    let folder = folders.value.find((f) => f.project.id === id);
+    if (!folder) {
+      folders.value.push(createFolderState(project));
+      folder = folders.value[folders.value.length - 1];
+    }
+    void loadFolderEntries(folder.path);
+  },
+  { immediate: true },
+);
 
 async function pickFolder() {
   if (!isTauriRuntime()) {
@@ -192,7 +208,9 @@ async function refreshFolder(folderPath: string) {
 
 async function refreshAll() {
   await projectStore.loadProjects({ force: true });
-  await Promise.all(folders.value.map((f) => loadFolderEntries(f.path)));
+  // 按需扫描：刷新仅作用于激活项目，非激活项目占位不重扫。
+  const active = activeFolder.value;
+  if (active) await loadFolderEntries(active.path);
   notifySqlFileFoldersChanged();
   toast(t("sqlFileTree.refreshed"), 1500);
 }
@@ -368,13 +386,17 @@ async function openFile(folder: FolderState, path: string) {
   if (!ensureTrusted(folder)) return;
   try {
     const snapshot = await api.readExternalSqlFileSnapshot(path);
-    const connectionId = executionConnectionId(folder);
-    const connection = connectionId ? connectionStore.getConfig(connectionId) : undefined;
-    const database = connection ? resolveDefaultDatabase(connection, []) : "";
-    const target = resolveExternalSqlFileTarget(path, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), { connectionId, database });
+    const target = resolveProjectFileTarget(path, {
+      connectionExists: (id) => !!connectionStore.getConfig(id),
+      getConnection: (id) => connectionStore.getConfig(id),
+      projects: [folder.project],
+      activeConnectionId: connectionStore.activeConnectionId,
+      firstConnectionId: connectionStore.connections[0]?.id,
+    });
     queryStore.openExternalSqlFile(target.connectionId, target.database, path, snapshot.content, snapshot.version, {
       catalog: target.catalog,
-      projectId: folder.project.id,
+      schema: target.schema,
+      projectId: target.projectId ?? folder.project.id,
       fileEncoding: snapshot.encoding,
       fileLineEnding: snapshot.lineEnding,
     });
@@ -595,6 +617,64 @@ async function executeDelete() {
     showDeleteConfirm.value = false;
     deleteTarget.value = null;
   }
+}
+
+// ---- DBX 自管回收站（回收站对话框：还原 / 清空） ----
+
+const showTrashDialog = ref(false);
+const trashLoading = ref(false);
+const trashEntries = ref<TrashEntry[]>([]);
+const emptyingTrash = ref(false);
+const showEmptyTrashConfirm = ref(false);
+
+async function openTrashDialog() {
+  const project = activeFolder.value?.project;
+  if (!project) return;
+  showTrashDialog.value = true;
+  trashLoading.value = true;
+  trashEntries.value = [];
+  try {
+    trashEntries.value = await api.listProjectTrashEntries(project.id);
+  } catch (e: any) {
+    toast(t("sqlFileTree.trashLoadFailed", { message: translateBackendError(t, e) }), 5000);
+  } finally {
+    trashLoading.value = false;
+  }
+}
+
+async function restoreTrashEntry(entry: TrashEntry) {
+  const project = activeFolder.value?.project;
+  if (!project) return;
+  try {
+    await api.restoreProjectEntryFromTrash(project.id, entry.id);
+    trashEntries.value = trashEntries.value.filter((item) => item.id !== entry.id);
+    await loadFolderEntries(project.rootPath);
+    notifySqlFileFoldersChanged();
+    toast(t("sqlFileTree.trashRestored"), 2000);
+  } catch (e: any) {
+    toast(t("sqlFileTree.restoreFailed", { message: translateBackendError(t, e) }), 5000);
+  }
+}
+
+async function executeEmptyTrash() {
+  const project = activeFolder.value?.project;
+  if (!project || emptyingTrash.value) return;
+  emptyingTrash.value = true;
+  try {
+    await api.emptyProjectTrash(project.id);
+    trashEntries.value = [];
+    toast(t("sqlFileTree.trashEmptied"), 2000);
+  } catch (e: any) {
+    toast(t("sqlFileTree.trashEmptyFailed", { message: translateBackendError(t, e) }), 5000);
+  } finally {
+    emptyingTrash.value = false;
+    showEmptyTrashConfirm.value = false;
+  }
+}
+
+function formatTrashedTime(iso: string): string {
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? iso : date.toLocaleString();
 }
 
 // ---- project settings / removal ----
@@ -923,7 +1003,7 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
       { label: t("sqlFileTree.expandAll"), action: () => expandSubtree(target), icon: ChevronsUpDown },
       { label: t("sqlFileTree.collapseAll"), action: () => collapseSubtree(target), icon: ChevronsDownUp },
       { label: "", separator: true },
-      { label: t("sqlFileTree.delete"), action: () => folder && requestDelete(folder, target.entry), icon: Trash2, variant: "destructive", disabled: !folder },
+      { label: t("sqlFileTree.moveToTrash"), action: () => folder && requestDelete(folder, target.entry), icon: Trash2, variant: "destructive", disabled: !folder },
     ];
   }
 
@@ -938,7 +1018,7 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
     { label: t("sqlFileTree.revealInFileManager"), action: () => revealInFileManager(target.entry.path), icon: FolderSearch },
     { label: t("sqlFileTree.copyPath"), action: () => copyPath(target.entry.path), icon: Copy },
     { label: "", separator: true },
-    { label: t("sqlFileTree.delete"), action: () => folder && requestDelete(folder, target.entry), icon: Trash2, variant: "destructive", disabled: !folder },
+    { label: t("sqlFileTree.moveToTrash"), action: () => folder && requestDelete(folder, target.entry), icon: Trash2, variant: "destructive", disabled: !folder },
   ];
 });
 
@@ -1003,6 +1083,11 @@ function clearContextTarget() {
       <LightTooltip v-if="folders.length > 0" :text="t('sqlFileTree.refreshAll')" side="bottom" :delay="0" :close-delay="0" nowrap>
         <Button variant="ghost" size="icon" class="h-5 w-5" @click="refreshAll">
           <RefreshCw class="h-3 w-3" />
+        </Button>
+      </LightTooltip>
+      <LightTooltip v-if="folders.length > 0" :text="t('sqlFileTree.trash')" side="bottom" :delay="0" :close-delay="0" nowrap>
+        <Button variant="ghost" size="icon" class="h-5 w-5" @click="openTrashDialog">
+          <Trash2 class="h-3 w-3" />
         </Button>
       </LightTooltip>
       <LightTooltip :text="t('sqlFileTree.openProject')" side="bottom" :delay="0" :close-delay="0" nowrap>
@@ -1206,7 +1291,7 @@ function clearContextTarget() {
     <Dialog v-model:open="showDeleteConfirm">
       <DialogContent class="sm:max-w-[420px]">
         <DialogHeader>
-          <DialogTitle>{{ t("sqlFileTree.delete") }}</DialogTitle>
+          <DialogTitle>{{ t("sqlFileTree.moveToTrash") }}</DialogTitle>
           <DialogDescription v-if="deleteTarget?.isDir">
             {{ t("sqlFileTree.deleteConfirmFolder", { name: deleteTarget?.name || "", count: deleteTarget?.fileCount || 0 }) }}
           </DialogDescription>
@@ -1217,6 +1302,51 @@ function clearContextTarget() {
         <DialogFooter>
           <Button variant="outline" size="sm" :disabled="deletingEntry" @click="showDeleteConfirm = false">{{ t("dangerDialog.cancel") }}</Button>
           <Button variant="destructive" size="sm" :disabled="deletingEntry" @click="executeDelete">{{ t("dangerDialog.confirm") }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <!-- DBX trash dialog（还原 / 清空回收站） -->
+    <Dialog v-model:open="showTrashDialog">
+      <DialogContent class="sm:max-w-[560px]">
+        <DialogHeader>
+          <DialogTitle>{{ t("sqlFileTree.trash") }}</DialogTitle>
+          <DialogDescription>{{ activeFolder?.project.name }}</DialogDescription>
+        </DialogHeader>
+        <div class="min-h-[200px]">
+          <div v-if="trashLoading" class="p-3 text-xs text-muted-foreground">{{ t("sqlFileTree.loading") }}</div>
+          <div v-else-if="trashEntries.length === 0" class="p-3 text-xs text-muted-foreground">{{ t("sqlFileTree.trashEmpty") }}</div>
+          <div v-else class="max-h-[320px] overflow-y-auto">
+            <div v-for="entry in trashEntries" :key="entry.id" class="flex items-center gap-2 border-b px-2 py-1.5 last:border-b-0">
+              <div class="min-w-0 flex-1">
+                <div class="flex items-center gap-1.5 text-[12px]">
+                  <span class="truncate font-medium">{{ entry.originalName }}</span>
+                  <span v-if="entry.isDir" class="shrink-0 text-[10px] text-muted-foreground">dir</span>
+                </div>
+                <div class="truncate text-[10px] text-muted-foreground" :title="entry.originalRelativePath">{{ entry.originalRelativePath }}</div>
+                <div class="text-[10px] text-muted-foreground">{{ formatTrashedTime(entry.trashedAt) }}</div>
+              </div>
+              <Button variant="outline" size="sm" class="shrink-0" @click="restoreTrashEntry(entry)">{{ t("sqlFileTree.restore") }}</Button>
+            </div>
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" size="sm" :disabled="trashEntries.length === 0 || emptyingTrash" @click="showEmptyTrashConfirm = true">{{ t("sqlFileTree.emptyTrash") }}</Button>
+          <Button variant="outline" size="sm" @click="showTrashDialog = false">{{ t("dangerDialog.close") }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <!-- Empty trash confirmation dialog -->
+    <Dialog v-model:open="showEmptyTrashConfirm">
+      <DialogContent class="sm:max-w-[420px]">
+        <DialogHeader>
+          <DialogTitle>{{ t("sqlFileTree.emptyTrash") }}</DialogTitle>
+          <DialogDescription>{{ t("sqlFileTree.emptyTrashConfirm") }}</DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" size="sm" :disabled="emptyingTrash" @click="showEmptyTrashConfirm = false">{{ t("dangerDialog.cancel") }}</Button>
+          <Button variant="destructive" size="sm" :disabled="emptyingTrash" @click="executeEmptyTrash">{{ t("dangerDialog.confirm") }}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

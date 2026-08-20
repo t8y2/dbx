@@ -884,6 +884,7 @@ export interface SqlProject {
   connectionId: string | null;
   defaultSchema: string | null;
   trusted: boolean;
+  rootIdentity: { volume: number; fileId: number; fallback?: [number, number] } | null;
   createdAt: string;
   lastOpenedAt: string;
 }
@@ -896,6 +897,17 @@ export interface SqlFileSnapshot {
   content: string;
   encoding: string;
   savedAt: string;
+}
+
+/** 快照列表的轻量元数据（不含 content，Local History 首屏按需加载用）。 */
+export interface SqlFileSnapshotMeta {
+  id: string;
+  projectId: string;
+  path: string;
+  encoding: string;
+  savedAt: string;
+  /** 快照 content 的字节数（SQLite length(content)，非字符数）。 */
+  byteLen: number;
 }
 
 export async function pendingOpenSqlProjects(): Promise<string[]> {
@@ -950,9 +962,40 @@ export async function deleteProjectEntryToTrash(projectId: string, relativePath:
   return invoke("delete_project_entry_to_trash", { projectId, relativePath });
 }
 
-/** 查询某文件的本地历史快照列表（按保存时间倒序）。 */
-export async function listSqlFileSnapshots(projectId: string, path: string, limit: number): Promise<SqlFileSnapshot[]> {
-  return invoke("list_sql_file_snapshots", { projectId, path, limit });
+/** 查询某文件的本地历史快照元数据列表（不含 content，按保存时间倒序）。 */
+export async function listSqlFileSnapshotsMeta(projectId: string, path: string, limit: number): Promise<SqlFileSnapshotMeta[]> {
+  return invoke("list_sql_file_snapshots_meta", { projectId, path, limit });
+}
+
+/** 按 snapshot_id 获取单条快照完整内容（Local History 选中后才请求）。 */
+export async function getSqlFileSnapshotContent(projectId: string, snapshotId: string): Promise<SqlFileSnapshot | null> {
+  return invoke("get_sql_file_snapshot_content", { projectId, snapshotId });
+}
+
+/** DBX 自管回收站条目：记录被删除条目的原始位置与 .dbx-trash 存储名。 */
+export interface TrashEntry {
+  id: string;
+  projectId: string;
+  originalRelativePath: string;
+  originalName: string;
+  trashName: string;
+  isDir: boolean;
+  trashedAt: string;
+}
+
+/** 从 DBX 回收站还原条目到原父目录 + 原名。 */
+export async function restoreProjectEntryFromTrash(projectId: string, entryId: string): Promise<void> {
+  return invoke("restore_project_entry_from_trash", { projectId, entryId });
+}
+
+/** 列出项目回收站条目（按删除时间倒序）。 */
+export async function listProjectTrashEntries(projectId: string): Promise<TrashEntry[]> {
+  return invoke("list_project_trash_entries", { projectId });
+}
+
+/** 清空项目回收站（删除 .dbx-trash 内条目 + 清 DB 记录）。 */
+export async function emptyProjectTrash(projectId: string): Promise<void> {
+  return invoke("empty_project_trash", { projectId });
 }
 
 // --- AI Conversations ---

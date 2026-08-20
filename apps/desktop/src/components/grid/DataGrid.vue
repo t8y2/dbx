@@ -436,6 +436,14 @@ const props = withDefaults(defineProps<DataGridProps>(), {
   allowDeleteRows: undefined,
 });
 
+const tableColumnsByResultIndex = computed(() =>
+  resolveDataGridColumnsByResultIndex({
+    resultColumns: props.result.columns,
+    sourceColumns: props.sourceColumns,
+    tableColumns: props.tableMeta?.columns ?? [],
+  }),
+);
+
 const dataGridTraceId = uuid().slice(0, 8);
 const dataGridCreatedAt = performance.now();
 const dataGridElapsed = () => `${Math.round(performance.now() - dataGridCreatedAt)}ms`;
@@ -3776,14 +3784,6 @@ function measureCellTextWidthCached(text: string, font: string): number {
   }
   return width;
 }
-
-const tableColumnsByResultIndex = computed(() =>
-  resolveDataGridColumnsByResultIndex({
-    resultColumns: props.result.columns,
-    sourceColumns: props.sourceColumns,
-    tableColumns: props.tableMeta?.columns ?? [],
-  }),
-);
 
 function tableColumnForGridColumn(columnIndex: number): ColumnInfo | undefined {
   return tableColumnsByResultIndex.value[columnIndex];

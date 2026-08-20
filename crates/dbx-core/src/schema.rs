@@ -7236,17 +7236,16 @@ async fn external_driver_gaussdb_m_indexes(
     schema: &str,
     table: &str,
 ) -> Result<Vec<db::IndexInfo>, String> {
-    // Use information_schema.STATISTICS (MySQL-compatible) which is available in GaussDB M-mode.
-    // GROUP_CONCAT aggregates all column names per index, ordered by SEQ_IN_INDEX.
+    // Query information_schema.STATISTICS row by row (one row per index column,
+    // ordered by SEQ_IN_INDEX). Unlike MySQL, GaussDB M-mode may also surface
+    // SUB_PART and EXPRESSION in the same STATISTICS view.
+    // See: https://support.huaweicloud.com/intl/en-us/centralized-m-comp-devg-v8-gaussdb/gaussdb-81-0134.html
     let sql = format!(
-        "SELECT INDEX_NAME, GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX) AS INDEX_COLUMNS, \
-                MAX(NON_UNIQUE) AS NON_UNIQUE, \
-                MAX(INDEX_TYPE) AS INDEX_TYPE, \
-                MAX(INDEX_COMMENT) AS INDEX_COMMENT \
+        "SELECT INDEX_NAME, COLUMN_NAME, SEQ_IN_INDEX, NON_UNIQUE, \
+                INDEX_TYPE, INDEX_COMMENT, SUB_PART, EXPRESSION \
          FROM information_schema.STATISTICS \
          WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} \
-         GROUP BY INDEX_NAME \
-         ORDER BY INDEX_NAME",
+         ORDER BY INDEX_NAME, SEQ_IN_INDEX",
         sql_string(schema),
         sql_string(table),
     );
@@ -7268,51 +7267,105 @@ async fn external_driver_gaussdb_m_indexes(
 
     let col_index: std::collections::HashMap<&str, usize> =
         result.columns.iter().enumerate().map(|(i, name)| (name.as_str(), i)).collect();
-    let idx_name = col_index.get("INDEX_NAME").copied().unwrap_or(0);
-    let idx_columns = col_index.get("INDEX_COLUMNS").copied().unwrap_or(1);
-    let idx_non_unique = col_index.get("NON_UNIQUE").copied();
-    let idx_index_type = col_index.get("INDEX_TYPE").copied();
-    let idx_comment = col_index.get("INDEX_COMMENT").copied();
+    let get_str = |row: &[serde_json::Value], key: &str| -> String {
+        col_index.get(key).and_then(|&i| row.get(i)).and_then(|v| v.as_str()).unwrap_or("").to_string()
+    };
+    let get_i64 = |row: &[serde_json::Value], key: &str| -> Option<i64> {
+        col_index.get(key).and_then(|&i| row.get(i)).and_then(|v| v.as_i64())
+    };
 
-    let mut indexes = Vec::new();
+    let mut indexes: Vec<db::IndexInfo> = Vec::new();
+    let mut current_name = String::new();
+    let mut current_columns: Vec<String> = Vec::new();
+    let mut current_is_expression: Vec<bool> = Vec::new();
+    let mut current_non_unique: i64 = 1;
+    let mut current_index_type: Option<String> = None;
+    let mut current_comment: Option<String> = None;
+
     for row in &result.rows {
-        let name = row.get(idx_name).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let name = get_str(row, "INDEX_NAME");
         if name.is_empty() {
             continue;
         }
-        // Split the comma-separated column names from GROUP_CONCAT
-        let columns_str = row.get(idx_columns).and_then(|v| v.as_str()).unwrap_or("");
-        let columns: Vec<String> = if columns_str.is_empty() {
-            Vec::new()
-        } else {
-            columns_str.split(',').map(|s| s.trim().to_string()).collect()
-        };
 
-        let is_unique =
-            idx_non_unique.and_then(|i| row.get(i)).and_then(|v| v.as_i64()).map(|v| v == 0).unwrap_or(false);
+        if name != current_name {
+            // Finalize previous index
+            if !current_name.is_empty() {
+                let is_primary =
+                    current_name.to_lowercase().ends_with("_pkey") || current_name.eq_ignore_ascii_case("primary");
+                indexes.push(db::IndexInfo {
+                    name: current_name.clone(),
+                    columns: current_columns.clone(),
+                    is_unique: current_non_unique == 0,
+                    is_primary,
+                    filter: None,
+                    index_type: current_index_type.clone(),
+                    included_columns: None,
+                    comment: current_comment.clone(),
+                    key_is_expression: current_is_expression.clone(),
+                });
+            }
+            // Start new index
+            current_name = name;
+            current_columns = Vec::new();
+            current_is_expression = Vec::new();
+            current_non_unique = get_i64(row, "NON_UNIQUE").unwrap_or(1);
+            current_index_type = {
+                let t = get_str(row, "INDEX_TYPE");
+                if t.is_empty() {
+                    None
+                } else {
+                    Some(t)
+                }
+            };
+            current_comment = {
+                let c = get_str(row, "INDEX_COMMENT");
+                if c.is_empty() {
+                    None
+                } else {
+                    Some(c)
+                }
+            };
+        }
 
-        let is_primary = name.to_lowercase().ends_with("_pkey") || name.eq_ignore_ascii_case("primary");
+        // Build column name with prefix/sub_part suffix
+        let column_name = get_str(row, "COLUMN_NAME");
+        let sub_part = get_str(row, "SUB_PART");
+        let expression = get_str(row, "EXPRESSION");
 
-        let index_type = idx_index_type.and_then(|i| row.get(i)).and_then(|v| v.as_str()).map(|s| s.to_string());
+        if !expression.is_empty() {
+            // Expression index: use expression text as column identifier
+            // Wrap in ((expression)) to match the convention used by MySQL path
+            // (mysql_index_column_sql in indexes.rs handles stripping (( ))).
+            current_columns.push(format!("(({}))", expression));
+            current_is_expression.push(true);
+        } else if !column_name.is_empty() {
+            if !sub_part.is_empty() && sub_part != "0" && sub_part != "NULL" {
+                // Prefix index: COLUMN_NAME(SUB_PART) like "name(10)"
+                current_columns.push(format!("{}({})", column_name, sub_part));
+            } else {
+                current_columns.push(column_name);
+            }
+            current_is_expression.push(false);
+        }
+    }
 
-        let comment = idx_comment
-            .and_then(|i| row.get(i))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .filter(|s| !s.is_empty());
-
+    // Finalize last index
+    if !current_name.is_empty() {
+        let is_primary = current_name.to_lowercase().ends_with("_pkey") || current_name.eq_ignore_ascii_case("primary");
         indexes.push(db::IndexInfo {
-            name,
-            columns,
-            is_unique,
+            name: current_name,
+            columns: current_columns,
+            is_unique: current_non_unique == 0,
             is_primary,
             filter: None,
-            index_type,
+            index_type: current_index_type,
             included_columns: None,
-            comment,
-            key_is_expression: Vec::new(),
+            comment: current_comment,
+            key_is_expression: current_is_expression,
         });
     }
+
     Ok(indexes)
 }
 

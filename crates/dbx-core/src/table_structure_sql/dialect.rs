@@ -19,6 +19,10 @@ pub(super) enum StructureDialect {
     ManticoreSearch,
     Informix,
     Questdb,
+    // GaussDB M 模式：MySQL 兼容方言，使用反引号引用标识符。DDL 行为接近 MySQL，
+    // 但使用 UBTREE 索引类型（而非 BTREE），不支持 INCLUDE/FILTER 等。
+    // DROP INDEX 使用 PostgreSQL 风格（DROP INDEX name），而非 MySQL 的 DROP INDEX name ON table。
+    GaussdbM,
     Unsupported,
 }
 
@@ -64,6 +68,25 @@ impl Default for TableStructureCapabilities {
             alter_primary_key: false,
             foreign_key: false,
         }
+    }
+}
+
+pub(super) fn gaussdb_m_capabilities() -> TableStructureCapabilities {
+    TableStructureCapabilities {
+        dialect: StructureDialect::GaussdbM,
+        add_column: true,
+        drop_column: true,
+        rename_column: true,
+        alter_existing_column: true,
+        reorder_column: true,
+        comment: true,
+        create_index: true,
+        drop_index: true,
+        rebuild_index: true,
+        index_type: true,
+        index_comment: true,
+        alter_primary_key: true,
+        ..TableStructureCapabilities::default()
     }
 }
 
@@ -362,6 +385,7 @@ pub(super) fn dialect_label(dialect: StructureDialect) -> String {
         StructureDialect::ClickHouse => "clickhouse",
         StructureDialect::ManticoreSearch => "manticoresearch",
         StructureDialect::Informix => "informix",
+        StructureDialect::GaussdbM => "gaussdb-m",
         StructureDialect::Questdb => "questdb",
         StructureDialect::Unsupported => "this database",
     }
@@ -385,6 +409,7 @@ pub(super) fn database_type_for_dialect(dialect: StructureDialect) -> Option<Dat
         StructureDialect::ManticoreSearch => Some(DatabaseType::ManticoreSearch),
         StructureDialect::Informix => Some(DatabaseType::Informix),
         StructureDialect::Questdb => Some(DatabaseType::Questdb),
+        StructureDialect::GaussdbM => Some(DatabaseType::Mysql),
         StructureDialect::Unsupported => None,
     }
 }

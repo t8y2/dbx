@@ -5474,3 +5474,258 @@ fn non_postgres_concurrent_flag_is_ignored() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// GaussDB M-mode index tests
+// ---------------------------------------------------------------------------
+
+fn gaussdb_m_options(columns: Vec<EditableStructureColumn>) -> TableStructureSqlOptions {
+    TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Gaussdb),
+        schema: None,
+        table_name: "USERS".to_string(),
+        columns,
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: true,
+    }
+}
+
+fn gaussdb_m_index(name: &str, columns: &[&str]) -> EditableStructureIndex {
+    EditableStructureIndex {
+        id: name.to_string(),
+        name: name.to_string(),
+        columns: columns.iter().map(|c| c.to_string()).collect(),
+        is_unique: false,
+        is_primary: false,
+        filter: String::new(),
+        index_type: String::new(),
+        included_columns: Vec::new(),
+        comment: String::new(),
+        concurrently: false,
+        original: None,
+        marked_for_drop: false,
+    }
+}
+
+fn gaussdb_m_existing_index(
+    name: &str,
+    columns: &[&str],
+    is_unique: bool,
+    index_type: Option<&str>,
+) -> EditableStructureIndex {
+    let mut idx = gaussdb_m_index(name, columns);
+    idx.is_unique = is_unique;
+    idx.index_type = index_type.unwrap_or("").to_string();
+    idx.original = Some(IndexInfo {
+        name: name.to_string(),
+        columns: columns.iter().map(|c| c.to_string()).collect(),
+        is_unique,
+        is_primary: false,
+        filter: None,
+        index_type: index_type.map(|s| s.to_string()),
+        included_columns: None,
+        comment: None,
+        key_is_expression: Vec::new(),
+    });
+    idx
+}
+
+#[test]
+fn gaussdb_m_create_index_uses_backtick_quoting() {
+    let mut options = gaussdb_m_options(vec![column("id")]);
+    options.indexes = vec![gaussdb_m_index("idx_email", &["email"])];
+    let result = build_table_structure_change_sql(options);
+    assert_eq!(result.warnings, Vec::<String>::new());
+    let sql = result.statements.join("\n");
+    assert!(sql.contains("CREATE INDEX `idx_email` ON `USERS`"));
+    assert!(sql.contains("(`email`)"));
+}
+
+#[test]
+fn gaussdb_m_create_unique_index() {
+    let mut options = gaussdb_m_options(vec![column("id")]);
+    let mut idx = gaussdb_m_index("idx_email", &["email"]);
+    idx.is_unique = true;
+    options.indexes = vec![idx];
+    let result = build_table_structure_change_sql(options);
+    assert_eq!(result.warnings, Vec::<String>::new());
+    let sql = result.statements.join("\n");
+    assert!(sql.contains("CREATE UNIQUE INDEX `idx_email` ON `USERS`"));
+}
+
+#[test]
+fn gaussdb_m_create_index_with_ubtree_using_clause() {
+    let mut options = gaussdb_m_options(vec![column("id")]);
+    let mut idx = gaussdb_m_index("idx_email", &["email"]);
+    idx.index_type = "UBTREE".to_string();
+    options.indexes = vec![idx];
+    let result = build_table_structure_change_sql(options);
+    assert_eq!(result.warnings, Vec::<String>::new());
+    let sql = result.statements.join("\n");
+    // GaussDB M-mode maps UBTREE/BTREE to USING UBTREE
+    assert!(sql.contains("USING UBTREE"), "Expected USING UBTREE, got: {sql}");
+}
+
+#[test]
+fn gaussdb_m_create_index_with_btree_also_emits_ubtree() {
+    let mut options = gaussdb_m_options(vec![column("id")]);
+    let mut idx = gaussdb_m_index("idx_email", &["email"]);
+    idx.index_type = "BTREE".to_string();
+    options.indexes = vec![idx];
+    let result = build_table_structure_change_sql(options);
+    assert_eq!(result.warnings, Vec::<String>::new());
+    let sql = result.statements.join("\n");
+    // BTREE in the DB is also rendered as USING UBTREE for GaussDB M
+    assert!(sql.contains("USING UBTREE"), "Expected USING UBTREE, got: {sql}");
+}
+
+#[test]
+fn gaussdb_m_create_index_with_comment() {
+    let mut options = gaussdb_m_options(vec![column("id")]);
+    let mut idx = gaussdb_m_index("idx_email", &["email"]);
+    idx.comment = "index comment".to_string();
+    options.indexes = vec![idx];
+    let result = build_table_structure_change_sql(options);
+    assert_eq!(result.warnings, Vec::<String>::new());
+    let sql = result.statements.join("\n");
+    assert!(sql.contains("COMMENT 'index comment'"));
+}
+
+#[test]
+fn gaussdb_m_drop_index_does_not_use_on_table() {
+    let mut idx = gaussdb_m_existing_index("idx_email", &["email"], false, None);
+    idx.marked_for_drop = true;
+    let options = gaussdb_m_options(vec![column("id")]);
+    let options = TableStructureSqlOptions { indexes: vec![idx], ..options };
+    let result = build_table_structure_change_sql(options);
+    assert_eq!(result.warnings, Vec::<String>::new());
+    let sql = result.statements.join("\n");
+    // GaussDB M-mode must NOT use MySQL-style "DROP INDEX ... ON table"
+    assert!(!sql.contains("ON `USERS`"), "Must not use MySQL ON clause: {sql}");
+    // Must use PostgreSQL-style "DROP INDEX name"
+    assert!(sql.contains("DROP INDEX `idx_email`"), "Expected DROP INDEX without ON: {sql}");
+}
+
+#[test]
+fn gaussdb_m_rebuild_index_drops_and_creates() {
+    let mut idx = gaussdb_m_existing_index("idx_email", &["email"], false, None);
+    idx.columns = vec!["email".to_string(), "name".to_string()]; // change: add column
+    let options = gaussdb_m_options(vec![column("id")]);
+    let options = TableStructureSqlOptions { indexes: vec![idx], ..options };
+    let result = build_table_structure_change_sql(options);
+    assert_eq!(result.warnings, Vec::<String>::new());
+    let sql = result.statements.join("\n");
+    assert!(sql.contains("DROP INDEX `idx_email`"), "Must drop old index: {sql}");
+    assert!(sql.contains("CREATE INDEX `idx_email` ON `USERS`"), "Must recreate index: {sql}");
+    assert!(sql.contains("(`email`, `name`)"), "Must include new column: {sql}");
+}
+
+#[test]
+fn gaussdb_m_create_index_with_composite_columns() {
+    let mut options = gaussdb_m_options(vec![column("id")]);
+    options.indexes = vec![gaussdb_m_index("idx_name_email", &["last_name", "first_name", "email"])];
+    let result = build_table_structure_change_sql(options);
+    assert_eq!(result.warnings, Vec::<String>::new());
+    let sql = result.statements.join("\n");
+    assert!(sql.contains("(`last_name`, `first_name`, `email`)"));
+}
+
+#[test]
+fn gaussdb_m_create_table_uses_backtick_quoting() {
+    let cols = vec![column("id"), column("name")];
+    let mut options = gaussdb_m_options(cols);
+    options.indexes = vec![gaussdb_m_index("idx_name", &["name"])];
+    let result = build_create_table_sql(options);
+    assert!(result.warnings.is_empty());
+    let sql = result.statements.join("\n");
+    assert!(sql.contains("CREATE TABLE `USERS`"));
+    assert!(sql.contains("`id` varchar(255)"));
+    assert!(sql.contains("`name` varchar(255)"));
+    assert!(sql.contains("CREATE INDEX `idx_name` ON `USERS`"));
+}
+
+#[test]
+fn gaussdb_m_create_table_does_not_add_charset_or_collation() {
+    let mut col = column("name");
+    col.character_set = "utf8mb4".to_string();
+    col.collation = "utf8mb4_unicode_ci".to_string();
+    let options = gaussdb_m_options(vec![col]);
+    let result = build_create_table_sql(options);
+    assert!(result.warnings.is_empty());
+    let sql = result.statements.join("\n");
+    // GaussDB M must NOT emit MySQL CHARACTER SET/COLLATE clauses
+    assert!(!sql.contains("CHARACTER SET"), "Must not emit CHARACTER SET: {sql}");
+    assert!(!sql.contains("COLLATE"), "Must not emit COLLATE: {sql}");
+}
+
+#[test]
+fn gaussdb_m_create_table_comment_uses_mysql_syntax() {
+    let options = TableStructureSqlOptions {
+        table_comment: Some("User accounts table".to_string()),
+        original_table_comment: None,
+        ..gaussdb_m_options(vec![column("id")])
+    };
+    let result = build_create_table_sql(options);
+    assert!(result.warnings.is_empty());
+    let sql = result.statements.join("\n");
+    // GaussDB M uses MySQL-style inline COMMENT = '...'
+    assert!(sql.contains("COMMENT = 'User accounts table'"), "Expected MySQL-style comment, got: {sql}");
+}
+
+#[test]
+fn gaussdb_m_rebuild_index_changing_type_from_btree_to_ubtree() {
+    let mut idx = gaussdb_m_existing_index("idx_email", &["email"], false, Some("BTREE"));
+    idx.index_type = "UBTREE".to_string();
+    let options = gaussdb_m_options(vec![column("id")]);
+    let options = TableStructureSqlOptions { indexes: vec![idx], ..options };
+    let result = build_table_structure_change_sql(options);
+    assert_eq!(result.warnings, Vec::<String>::new());
+    let sql = result.statements.join("\n");
+    assert!(sql.contains("DROP INDEX `idx_email`"));
+    assert!(sql.contains("USING UBTREE"));
+}
+
+#[test]
+fn gaussdb_m_rebuild_index_unchanged_type_does_not_rebuild() {
+    // When the index type from SHOW INDEX is "BTREE" and the user doesn't
+    // change it, the editor should send "BTREE" back (which maps to
+    // USING UBTREE in SQL). But since normalized_index_type("BTREE") ==
+    // "BTREE" and original.index_type == Some("BTREE"), they match — no rebuild.
+    let mut idx = gaussdb_m_existing_index("idx_email", &["email"], false, Some("BTREE"));
+    idx.index_type = "BTREE".to_string(); // same type
+                                          // No columns — just test the index itself has no change
+    let options = TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Gaussdb),
+        schema: None,
+        table_name: "USERS".to_string(),
+        columns: Vec::new(),
+        indexes: vec![idx],
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: true,
+    };
+    let result = build_table_structure_change_sql(options);
+    assert!(result.warnings.is_empty());
+    assert!(result.statements.is_empty(), "Expected no DDL for unchanged index, got: {:?}", result.statements);
+}
+
+#[test]
+fn gaussdb_m_create_table_with_primary_key() {
+    let mut pk_col = column("id");
+    pk_col.is_primary_key = true;
+    pk_col.is_nullable = false;
+    pk_col.data_type = "bigint".to_string();
+    let options = gaussdb_m_options(vec![pk_col]);
+    let result = build_create_table_sql(options);
+    assert!(result.warnings.is_empty());
+    let sql = result.statements.join("\n");
+    assert!(sql.contains("PRIMARY KEY (`id`)"));
+}

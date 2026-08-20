@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::db::ObjectInfo;
 use crate::models::connection::DatabaseType;
 use crate::sql_dialect::{is_schema_aware, profile_for, qualified_table_name, quote_table_identifier};
 
@@ -567,6 +568,204 @@ fn supports_truncate_table_cascade(database_type: Option<DatabaseType>) -> bool 
 
 pub fn build_drop_database_sql(options: DatabaseNameSqlOptions) -> String {
     format!("DROP DATABASE {};", quote_table_identifier(options.database_type, &options.name))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseScopeSqlOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_type: Option<DatabaseType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    #[serde(default)]
+    pub objects: Vec<ObjectInfo>,
+}
+
+/// Builds SQL that removes all row data from every table in the target
+/// database/schema while preserving table structures (columns, indexes,
+/// constraints, triggers). Per-table deletes naturally satisfy foreign-key
+/// ordering, so the generated script is safe to run inside a single
+/// transaction on transactional dialects.
+pub fn build_truncate_database_sql(options: DatabaseScopeSqlOptions) -> Result<Vec<String>, String> {
+    let database_type = options.database_type;
+    let fallback_schema = options.schema.as_deref();
+    let mut statements = Vec::new();
+    for object in &options.objects {
+        if normalize_database_scope_object_type(&object.object_type) != "TABLE" {
+            continue;
+        }
+        statements.push(build_empty_table_sql(TableAdminSqlOptions {
+            database_type,
+            schema: object.schema.as_deref().or(fallback_schema).map(str::to_string),
+            table_name: object.name.clone(),
+            cascade: None,
+        }));
+    }
+    Ok(statements)
+}
+
+/// Builds SQL that drops every user object in the target database/schema
+/// (views, materialized views, procedures, functions, tables, sequences and
+/// custom types), leaving an empty shell while keeping the database itself.
+///
+/// Objects are emitted in dependency-reverse order: dependent views/routines
+/// first, then tables (with CASCADE on PostgreSQL-family dialects so their
+/// triggers, indexes and foreign keys are removed too), and finally sequences
+/// and custom types. Dialects that do not support a given object kind simply
+/// skip it.
+pub fn build_empty_database_sql(options: DatabaseScopeSqlOptions) -> Result<Vec<String>, String> {
+    let database_type = options.database_type;
+    let fallback_schema = options.schema.as_deref();
+    let cascade = supports_drop_table_cascade(database_type);
+    let mut statements = Vec::new();
+    let mut views = Vec::new();
+    let mut routines = Vec::new();
+    let mut tables = Vec::new();
+    let mut sequences = Vec::new();
+    let mut types = Vec::new();
+
+    for object in &options.objects {
+        let object_schema = object.schema.as_deref().or(fallback_schema).map(str::to_string);
+        match normalize_database_scope_object_type(&object.object_type).as_str() {
+            "MATERIALIZED_VIEW" => views.push(DropObjectSqlOptions {
+                database_type,
+                object_type: DatabaseObjectType::MaterializedView,
+                schema: object_schema,
+                name: object.name.clone(),
+                signature: object.signature.clone(),
+            }),
+            "VIEW" => views.push(DropObjectSqlOptions {
+                database_type,
+                object_type: DatabaseObjectType::View,
+                schema: object_schema,
+                name: object.name.clone(),
+                signature: object.signature.clone(),
+            }),
+            "PROCEDURE" => routines.push(DropObjectSqlOptions {
+                database_type,
+                object_type: DatabaseObjectType::Procedure,
+                schema: object_schema,
+                name: object.name.clone(),
+                signature: object.signature.clone(),
+            }),
+            "FUNCTION" => routines.push(DropObjectSqlOptions {
+                database_type,
+                object_type: DatabaseObjectType::Function,
+                schema: object_schema,
+                name: object.name.clone(),
+                signature: object.signature.clone(),
+            }),
+            "TABLE" => tables.push(TableAdminSqlOptions {
+                database_type,
+                schema: object_schema,
+                table_name: object.name.clone(),
+                cascade: Some(cascade),
+            }),
+            "SEQUENCE" => {
+                if supports_drop_sequence(database_type) {
+                    sequences.push(object);
+                }
+            }
+            "TYPE" => {
+                if supports_drop_type(database_type) {
+                    types.push(object);
+                }
+            }
+            // Triggers, indexes, foreign keys and similar child objects are
+            // removed together with their parent table (CASCADE or table drop).
+            _ => {}
+        }
+    }
+
+    // Emit in a deterministic dependency-reverse order: materialized views
+    // before views, procedures before functions, then tables, sequences and
+    // custom types last.
+    views.sort_by_key(|options| match options.object_type {
+        DatabaseObjectType::MaterializedView => 0,
+        _ => 1,
+    });
+    routines.sort_by_key(|options| match options.object_type {
+        DatabaseObjectType::Procedure => 0,
+        _ => 1,
+    });
+    for view in views {
+        statements.push(build_drop_object_sql(view));
+    }
+    for routine in routines {
+        statements.push(build_drop_object_sql(routine));
+    }
+    for table in tables {
+        statements.push(build_drop_table_sql(table));
+    }
+    for object in sequences {
+        statements.push(format!(
+            "DROP SEQUENCE {};",
+            qualified_name(database_type, object.schema.as_deref().or(fallback_schema), &object.name)
+        ));
+    }
+    for object in types {
+        statements.push(format!(
+            "DROP TYPE {};",
+            qualified_name(database_type, object.schema.as_deref().or(fallback_schema), &object.name)
+        ));
+    }
+    Ok(statements)
+}
+
+fn normalize_database_scope_object_type(value: &str) -> String {
+    let upper = value.to_ascii_uppercase().replace(' ', "_");
+    if upper.contains("MATERIALIZED") && upper.contains("VIEW") {
+        return "MATERIALIZED_VIEW".to_string();
+    }
+    if upper == "BASE_TABLE" || upper.contains("TABLE") {
+        return "TABLE".to_string();
+    }
+    if upper.contains("VIEW") {
+        return "VIEW".to_string();
+    }
+    upper
+}
+
+fn supports_drop_sequence(database_type: Option<DatabaseType>) -> bool {
+    matches!(
+        database_type,
+        Some(
+            DatabaseType::Postgres
+                | DatabaseType::Redshift
+                | DatabaseType::Gaussdb
+                | DatabaseType::Kwdb
+                | DatabaseType::Kingbase
+                | DatabaseType::Highgo
+                | DatabaseType::Uxdb
+                | DatabaseType::Vastbase
+                | DatabaseType::OpenGauss
+                | DatabaseType::Oracle
+                | DatabaseType::Dameng
+                | DatabaseType::OceanbaseOracle
+                | DatabaseType::Yashandb
+        )
+    )
+}
+
+fn supports_drop_type(database_type: Option<DatabaseType>) -> bool {
+    matches!(
+        database_type,
+        Some(
+            DatabaseType::Postgres
+                | DatabaseType::Redshift
+                | DatabaseType::Gaussdb
+                | DatabaseType::Kwdb
+                | DatabaseType::Kingbase
+                | DatabaseType::Highgo
+                | DatabaseType::Uxdb
+                | DatabaseType::Vastbase
+                | DatabaseType::OpenGauss
+                | DatabaseType::Oracle
+                | DatabaseType::Dameng
+                | DatabaseType::OceanbaseOracle
+                | DatabaseType::SqlServer
+        )
+    )
 }
 
 pub fn build_update_database_properties_sql(options: DatabasePropertyEditSqlOptions) -> Result<String, String> {
@@ -2152,5 +2351,144 @@ mod tests {
         })
         .unwrap_err()
         .contains("Renaming PROCEDURE is not supported"));
+    }
+
+    fn scope_object(name: &str, object_type: &str, schema: Option<&str>) -> ObjectInfo {
+        ObjectInfo {
+            name: name.to_string(),
+            object_type: object_type.to_string(),
+            schema: schema.map(str::to_string),
+            valid: None,
+            signature: None,
+            custom_type_kind: None,
+            has_members: None,
+            comment: None,
+            created_at: None,
+            updated_at: None,
+            parent_schema: None,
+            parent_name: None,
+            trigger: None,
+            xugu_type_members_expandable: None,
+        }
+    }
+
+    fn scope_statements(database_type: DatabaseType, objects: Vec<ObjectInfo>, schema: Option<&str>) -> Vec<String> {
+        build_truncate_database_sql(DatabaseScopeSqlOptions {
+            database_type: Some(database_type),
+            schema: schema.map(str::to_string),
+            objects,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn truncate_database_filters_non_table_objects_and_generates_per_table_deletes() {
+        let statements = scope_statements(
+            DatabaseType::Postgres,
+            vec![
+                scope_object("orders", "TABLE", Some("shop")),
+                scope_object("orders_view", "VIEW", Some("shop")),
+                scope_object("find_user", "FUNCTION", Some("shop")),
+                scope_object("audit_log", "BASE TABLE", Some("shop")),
+            ],
+            Some("shop"),
+        );
+
+        assert_eq!(statements, vec!["DELETE FROM \"shop\".\"orders\";", "DELETE FROM \"shop\".\"audit_log\";"]);
+    }
+
+    #[test]
+    fn truncate_database_uses_dialect_specific_empty_sql() {
+        let objects = vec![scope_object("t1", "TABLE", None), scope_object("t2", "TABLE", None)];
+
+        assert_eq!(
+            scope_statements(DatabaseType::Mysql, objects.clone(), None),
+            vec!["DELETE FROM `t1`;", "DELETE FROM `t2`;"]
+        );
+        assert_eq!(
+            scope_statements(DatabaseType::ClickHouse, objects.clone(), None),
+            vec!["ALTER TABLE `t1` DELETE WHERE 1 = 1;", "ALTER TABLE `t2` DELETE WHERE 1 = 1;"]
+        );
+        assert_eq!(
+            scope_statements(DatabaseType::Sqlite, objects, None),
+            vec!["DELETE FROM \"t1\";", "DELETE FROM \"t2\";"]
+        );
+    }
+
+    #[test]
+    fn empty_database_orders_drops_by_dependency_for_postgres() {
+        let objects = vec![
+            scope_object("orders_seq", "SEQUENCE", Some("shop")),
+            scope_object("orders", "TABLE", Some("shop")),
+            scope_object("money", "TYPE", Some("shop")),
+            scope_object("orders_view", "VIEW", Some("shop")),
+            scope_object("daily_mv", "MATERIALIZED VIEW", Some("shop")),
+            scope_object("refresh_orders", "PROCEDURE", Some("shop")),
+            scope_object("calc_total", "FUNCTION", Some("shop")),
+            scope_object("orders_idx", "INDEX", Some("shop")),
+        ];
+
+        let statements = build_empty_database_sql(DatabaseScopeSqlOptions {
+            database_type: Some(DatabaseType::Postgres),
+            schema: Some("shop".to_string()),
+            objects,
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec![
+                "DROP MATERIALIZED VIEW \"shop\".\"daily_mv\";",
+                "DROP VIEW \"shop\".\"orders_view\";",
+                "DROP PROCEDURE \"shop\".\"refresh_orders\";",
+                "DROP FUNCTION \"shop\".\"calc_total\";",
+                "DROP TABLE \"shop\".\"orders\" CASCADE;",
+                "DROP SEQUENCE \"shop\".\"orders_seq\";",
+                "DROP TYPE \"shop\".\"money\";",
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_database_skips_cascade_for_non_postgres_family() {
+        let objects = vec![scope_object("orders", "TABLE", None), scope_object("orders_seq", "SEQUENCE", None)];
+
+        let mysql = build_empty_database_sql(DatabaseScopeSqlOptions {
+            database_type: Some(DatabaseType::Mysql),
+            schema: None,
+            objects: objects.clone(),
+        })
+        .unwrap();
+        assert_eq!(mysql, vec!["DROP TABLE `orders`;"]);
+
+        let sqlserver = build_empty_database_sql(DatabaseScopeSqlOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            schema: Some("dbo".to_string()),
+            objects: objects.clone(),
+        })
+        .unwrap();
+        assert_eq!(sqlserver, vec!["DROP TABLE [dbo].[orders];"]);
+
+        let oracle = build_empty_database_sql(DatabaseScopeSqlOptions {
+            database_type: Some(DatabaseType::Oracle),
+            schema: Some("APP".to_string()),
+            objects,
+        })
+        .unwrap();
+        assert_eq!(oracle, vec!["DROP TABLE \"APP\".\"orders\";", "DROP SEQUENCE \"APP\".\"orders_seq\";"]);
+    }
+
+    #[test]
+    fn empty_database_sqlite_drops_tables_and_views() {
+        let objects = vec![scope_object("users", "TABLE", None), scope_object("users_view", "VIEW", None)];
+
+        let statements = build_empty_database_sql(DatabaseScopeSqlOptions {
+            database_type: Some(DatabaseType::Sqlite),
+            schema: None,
+            objects,
+        })
+        .unwrap();
+
+        assert_eq!(statements, vec!["DROP VIEW \"users_view\";", "DROP TABLE \"users\";"]);
     }
 }

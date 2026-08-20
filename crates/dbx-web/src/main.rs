@@ -483,6 +483,8 @@ async fn main() {
         .route("/query/build-truncate-table-sql", post(routes::query::build_truncate_table_sql))
         .route("/query/build-mysql-auto-increment-sql", post(routes::query::build_mysql_auto_increment_sql))
         .route("/query/build-drop-database-sql", post(routes::query::build_drop_database_sql))
+        .route("/query/build-truncate-database-sql", post(routes::query::build_truncate_database_sql))
+        .route("/query/build-empty-database-sql", post(routes::query::build_empty_database_sql))
         .route("/query/build-create-schema-sql", post(routes::query::build_create_schema_sql))
         .route("/query/build-update-database-properties-sql", post(routes::query::build_update_database_properties_sql))
         .route("/query/build-drop-schema-sql", post(routes::query::build_drop_schema_sql))

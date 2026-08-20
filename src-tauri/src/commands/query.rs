@@ -513,6 +513,67 @@ pub fn build_drop_database_sql(options: dbx_core::db_admin_sql::DatabaseNameSqlO
     Ok(dbx_core::db_admin_sql::build_drop_database_sql(options))
 }
 
+#[derive(Clone, Copy)]
+enum DatabaseScopeSqlMode {
+    Truncate,
+    Empty,
+}
+
+async fn build_database_scope_sql(
+    state: &AppState,
+    connection_id: String,
+    database: String,
+    schema: Option<String>,
+    database_type: Option<DatabaseType>,
+    mode: DatabaseScopeSqlMode,
+) -> Result<String, String> {
+    let schema = schema.unwrap_or_default();
+    let object_types = match mode {
+        DatabaseScopeSqlMode::Truncate => Some(vec!["TABLE".to_string()]),
+        DatabaseScopeSqlMode::Empty => None,
+    };
+    let objects = dbx_core::schema::list_objects_core(
+        state,
+        &connection_id,
+        &database,
+        &schema,
+        None,
+        None,
+        None,
+        object_types.as_deref(),
+    )
+    .await?;
+    let options = dbx_core::db_admin_sql::DatabaseScopeSqlOptions { database_type, schema: Some(schema), objects };
+    let statements = match mode {
+        DatabaseScopeSqlMode::Truncate => dbx_core::db_admin_sql::build_truncate_database_sql(options)?,
+        DatabaseScopeSqlMode::Empty => dbx_core::db_admin_sql::build_empty_database_sql(options)?,
+    };
+    Ok(statements.join("\n"))
+}
+
+#[tauri::command]
+pub async fn build_truncate_database_sql(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    schema: Option<String>,
+    database_type: Option<DatabaseType>,
+) -> Result<String, String> {
+    build_database_scope_sql(&state, connection_id, database, schema, database_type, DatabaseScopeSqlMode::Truncate)
+        .await
+}
+
+#[tauri::command]
+pub async fn build_empty_database_sql(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    schema: Option<String>,
+    database_type: Option<DatabaseType>,
+) -> Result<String, String> {
+    build_database_scope_sql(&state, connection_id, database, schema, database_type, DatabaseScopeSqlMode::Empty).await
+}
+
 #[tauri::command]
 pub fn build_create_schema_sql(options: dbx_core::db_admin_sql::SchemaNameSqlOptions) -> Result<String, String> {
     dbx_core::db_admin_sql::build_create_schema_sql(options)

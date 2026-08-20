@@ -311,6 +311,21 @@ export function buildDropDatabaseSql(options: DatabaseNameSqlOptions): Promise<s
   return api.buildDropDatabaseSql(options);
 }
 
+export interface DatabaseScopeSqlOptions {
+  connectionId: string;
+  database: string;
+  schema?: string | null;
+  databaseType?: DatabaseType;
+}
+
+export function buildTruncateDatabaseSql(options: DatabaseScopeSqlOptions): Promise<string> {
+  return api.buildTruncateDatabaseSql(options.connectionId, options.database, options.schema, options.databaseType);
+}
+
+export function buildEmptyDatabaseSql(options: DatabaseScopeSqlOptions): Promise<string> {
+  return api.buildEmptyDatabaseSql(options.connectionId, options.database, options.schema, options.databaseType);
+}
+
 export function buildCreateSchemaSql(options: SchemaNameSqlOptions): Promise<string> {
   return api.buildCreateSchemaSql(options);
 }

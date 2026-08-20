@@ -93,6 +93,12 @@ export const createDatabaseCollationsByCharset = ref<Record<string, string[]>>(f
 export const createDatabaseCharsetLoading = ref(false);
 export const showDropDatabaseConfirm = ref(false);
 export const dropDatabaseLoading = ref(false);
+export const showTruncateDatabaseConfirm = ref(false);
+export const truncateDatabaseLoading = ref(false);
+export const truncateDatabasePreviewSql = ref("");
+export const showEmptyDatabaseConfirm = ref(false);
+export const emptyDatabaseLoading = ref(false);
+export const emptyDatabasePreviewSql = ref("");
 export const showDropMongoCollectionConfirm = ref(false);
 export const dropMongoCollectionLoading = ref(false);
 export const showRenameMongoCollectionDialog = ref(false);
@@ -195,6 +201,8 @@ const openFlags = [
   showCreateNacosNamespaceDialog,
   showEditNacosNamespaceDialog,
   showDropDatabaseConfirm,
+  showTruncateDatabaseConfirm,
+  showEmptyDatabaseConfirm,
   showDropMongoCollectionConfirm,
   showRenameMongoCollectionDialog,
   showCloneMongoCollectionDialog,

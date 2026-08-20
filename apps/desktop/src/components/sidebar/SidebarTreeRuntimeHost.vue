@@ -115,6 +115,8 @@ import { SQLITE_DATABASE_FILE_EXTENSIONS } from "@/lib/database/databaseFileDete
 import {
   buildCreateSchemaSql,
   buildDropDatabaseSql,
+  buildTruncateDatabaseSql,
+  buildEmptyDatabaseSql,
   buildDropObjectSql,
   buildDropSchemaSql,
   damengDropSchemaExecutionSchema,
@@ -249,6 +251,12 @@ import {
   createDatabaseCharsetLoading,
   showDropDatabaseConfirm,
   dropDatabaseLoading,
+  showTruncateDatabaseConfirm,
+  truncateDatabaseLoading,
+  truncateDatabasePreviewSql,
+  showEmptyDatabaseConfirm,
+  emptyDatabaseLoading,
+  emptyDatabasePreviewSql,
   showDropMongoCollectionConfirm,
   dropMongoCollectionLoading,
   showDropMongoIndexConfirm,
@@ -2853,6 +2861,16 @@ const canDropDatabase = computed(() => {
   return activeNode.value.type === "database" && !isSqlServerLinkedNode(activeNode.value) && supportsDatabaseCreation(config?.db_type);
 });
 
+const canTruncateDatabase = computed(() => {
+  const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
+  return canDropDatabase.value && !config?.read_only;
+});
+
+const canEmptyDatabase = computed(() => {
+  const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
+  return canDropDatabase.value && !config?.read_only;
+});
+
 const databasePropertyGroups = computed(() => {
   const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
   return editableDatabasePropertyGroups(config, activeNode.value);
@@ -2904,6 +2922,30 @@ async function refreshDropDatabasePreviewSql() {
     databaseType: currentDatabaseType(),
     name: node.label,
   }).catch(() => "");
+}
+
+function databaseScopeOptionsForNode(node: TreeNode) {
+  const config = node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined;
+  return {
+    connectionId: node.connectionId!,
+    database: node.database || node.label,
+    schema: connectionObjectTreeQuerySchema(config, node.database || node.label, node.schema),
+    databaseType: databaseTypeForNode(node),
+  };
+}
+
+async function refreshTruncateDatabasePreviewSql() {
+  const node = activeNode.value;
+  truncateDatabasePreviewSql.value = "";
+  if (!node.connectionId || node.type === "mongo-db") return;
+  truncateDatabasePreviewSql.value = await buildTruncateDatabaseSql(databaseScopeOptionsForNode(node)).catch(() => "");
+}
+
+async function refreshEmptyDatabasePreviewSql() {
+  const node = activeNode.value;
+  emptyDatabasePreviewSql.value = "";
+  if (!node.connectionId || node.type === "mongo-db") return;
+  emptyDatabasePreviewSql.value = await buildEmptyDatabaseSql(databaseScopeOptionsForNode(node)).catch(() => "");
 }
 
 async function refreshDropSchemaPreviewSql() {
@@ -3488,6 +3530,74 @@ async function confirmDropDatabase() {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
   } finally {
     dropDatabaseLoading.value = false;
+  }
+}
+
+function truncateDatabase() {
+  void refreshTruncateDatabasePreviewSql();
+  truncateDatabaseLoading.value = false;
+  showTruncateDatabaseConfirm.value = true;
+}
+
+async function confirmTruncateDatabase() {
+  const node = sidebarDangerTarget.value ?? activeNode.value;
+  const connectionId = node.connectionId;
+  if (!connectionId || truncateDatabaseLoading.value || node.type === "mongo-db") return;
+  truncateDatabaseLoading.value = true;
+  try {
+    await connectionStore.ensureConnected(connectionId);
+    const sql = truncateDatabasePreviewSql.value || (await buildTruncateDatabaseSql(databaseScopeOptionsForNode(node)));
+    if (!sql.trim()) {
+      toast(t("contextMenu.databaseScopeEmpty"), 3000);
+      return;
+    }
+    const executed = await executeTreeNodeSqlWithProductionGuard(node, sql, {
+      database: node.database || node.label,
+      schema: node.schema,
+      executeAsScript: true,
+    });
+    if (!executed) return;
+    toast(t("contextMenu.truncateDatabaseSuccess", { name: node.label }), 3000);
+    await connectionStore.refreshObjectListTreeNode(connectionId, node.database || node.label, databaseScopeOptionsForNode(node).schema);
+    showTruncateDatabaseConfirm.value = false;
+  } catch (e: any) {
+    toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
+  } finally {
+    truncateDatabaseLoading.value = false;
+  }
+}
+
+function emptyDatabase() {
+  void refreshEmptyDatabasePreviewSql();
+  emptyDatabaseLoading.value = false;
+  showEmptyDatabaseConfirm.value = true;
+}
+
+async function confirmEmptyDatabase() {
+  const node = sidebarDangerTarget.value ?? activeNode.value;
+  const connectionId = node.connectionId;
+  if (!connectionId || emptyDatabaseLoading.value || node.type === "mongo-db") return;
+  emptyDatabaseLoading.value = true;
+  try {
+    await connectionStore.ensureConnected(connectionId);
+    const sql = emptyDatabasePreviewSql.value || (await buildEmptyDatabaseSql(databaseScopeOptionsForNode(node)));
+    if (!sql.trim()) {
+      toast(t("contextMenu.databaseScopeEmpty"), 3000);
+      return;
+    }
+    const executed = await executeTreeNodeSqlWithProductionGuard(node, sql, {
+      database: node.database || node.label,
+      schema: node.schema,
+      executeAsScript: true,
+    });
+    if (!executed) return;
+    toast(t("contextMenu.emptyDatabaseSuccess", { name: node.label }), 3000);
+    await connectionStore.refreshObjectListTreeNode(connectionId, node.database || node.label, databaseScopeOptionsForNode(node).schema);
+    showEmptyDatabaseConfirm.value = false;
+  } catch (e: any) {
+    toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
+  } finally {
+    emptyDatabaseLoading.value = false;
   }
 }
 
@@ -4132,6 +4242,38 @@ routeDangerDialog(showDropDatabaseConfirm, () =>
     },
     closeOnConfirm: false,
     confirm: confirmDropDatabase,
+  }),
+);
+
+routeDangerDialog(showTruncateDatabaseConfirm, () =>
+  dangerRequest({
+    title: t("contextMenu.confirmTruncateDatabaseTitle"),
+    message: t("contextMenu.confirmTruncateDatabaseMessage", { name: activeNode.value.label }),
+    get sql() {
+      return truncateDatabasePreviewSql.value;
+    },
+    confirmLabel: t("contextMenu.truncateDatabase"),
+    get loading() {
+      return truncateDatabaseLoading.value;
+    },
+    closeOnConfirm: false,
+    confirm: confirmTruncateDatabase,
+  }),
+);
+
+routeDangerDialog(showEmptyDatabaseConfirm, () =>
+  dangerRequest({
+    title: t("contextMenu.confirmEmptyDatabaseTitle"),
+    message: t("contextMenu.confirmEmptyDatabaseMessage", { name: activeNode.value.label }),
+    get sql() {
+      return emptyDatabasePreviewSql.value;
+    },
+    confirmLabel: t("contextMenu.emptyDatabase"),
+    get loading() {
+      return emptyDatabaseLoading.value;
+    },
+    closeOnConfirm: false,
+    confirm: confirmEmptyDatabase,
   }),
 );
 
@@ -4811,6 +4953,22 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
         action: dropDatabase,
         icon: Trash2,
         shortcut: shortcutDelete,
+        variant: "destructive" as const,
+      });
+    }
+    if (canTruncateDatabase.value) {
+      destructiveActions.push({
+        label: t("contextMenu.truncateDatabase"),
+        action: truncateDatabase,
+        icon: Eraser,
+        variant: "destructive" as const,
+      });
+    }
+    if (canEmptyDatabase.value) {
+      destructiveActions.push({
+        label: t("contextMenu.emptyDatabase"),
+        action: emptyDatabase,
+        icon: Trash2,
         variant: "destructive" as const,
       });
     }

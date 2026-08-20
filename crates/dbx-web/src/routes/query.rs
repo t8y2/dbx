@@ -191,6 +191,21 @@ pub struct BuildDatabaseNameSqlRequest {
     pub options: dbx_core::db_admin_sql::DatabaseNameSqlOptions,
 }
 
+#[derive(Clone, Copy)]
+enum DatabaseScopeSqlMode {
+    Truncate,
+    Empty,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildDatabaseScopeSqlRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub schema: Option<String>,
+    pub database_type: Option<dbx_core::models::connection::DatabaseType>,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BuildSchemaNameSqlRequest {
@@ -737,6 +752,59 @@ pub async fn build_mysql_auto_increment_sql(
 
 pub async fn build_drop_database_sql(Json(req): Json<BuildDatabaseNameSqlRequest>) -> Json<String> {
     Json(dbx_core::db_admin_sql::build_drop_database_sql(req.options))
+}
+
+async fn build_database_scope_sql(
+    state: &WebState,
+    req: BuildDatabaseScopeSqlRequest,
+    mode: DatabaseScopeSqlMode,
+) -> Result<String, AppError> {
+    let database = req.database;
+    let schema = req.schema.unwrap_or_default();
+    let object_types = match mode {
+        DatabaseScopeSqlMode::Truncate => Some(vec!["TABLE".to_string()]),
+        DatabaseScopeSqlMode::Empty => None,
+    };
+    let objects = dbx_core::schema::list_objects_core(
+        &state.app,
+        &req.connection_id,
+        &database,
+        &schema,
+        None,
+        None,
+        None,
+        object_types.as_deref(),
+    )
+    .await
+    .map_err(AppError::from)?;
+    let options = dbx_core::db_admin_sql::DatabaseScopeSqlOptions {
+        database_type: req.database_type,
+        schema: Some(schema),
+        objects,
+    };
+    let statements = match mode {
+        DatabaseScopeSqlMode::Truncate => {
+            dbx_core::db_admin_sql::build_truncate_database_sql(options).map_err(AppError::from)?
+        }
+        DatabaseScopeSqlMode::Empty => {
+            dbx_core::db_admin_sql::build_empty_database_sql(options).map_err(AppError::from)?
+        }
+    };
+    Ok(statements.join("\n"))
+}
+
+pub async fn build_truncate_database_sql(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<BuildDatabaseScopeSqlRequest>,
+) -> Result<Json<String>, AppError> {
+    build_database_scope_sql(&state, req, DatabaseScopeSqlMode::Truncate).await.map(Json)
+}
+
+pub async fn build_empty_database_sql(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<BuildDatabaseScopeSqlRequest>,
+) -> Result<Json<String>, AppError> {
+    build_database_scope_sql(&state, req, DatabaseScopeSqlMode::Empty).await.map(Json)
 }
 
 pub async fn build_create_schema_sql(Json(req): Json<BuildSchemaNameSqlRequest>) -> Result<Json<String>, AppError> {

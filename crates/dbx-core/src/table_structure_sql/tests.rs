@@ -5636,6 +5636,17 @@ fn gaussdb_m_create_index_with_composite_columns() {
 }
 
 #[test]
+fn gaussdb_m_create_prefix_index_quotes_column_before_length() {
+    let mut options = gaussdb_m_options(vec![column("email")]);
+    options.indexes = vec![gaussdb_m_index("idx_email", &["email(10)"])];
+    let result = build_table_structure_change_sql(options);
+    assert_eq!(result.warnings, Vec::<String>::new());
+    let sql = result.statements.join("\n");
+    assert!(sql.contains("(`email`(10))"), "Expected prefix length outside the quoted identifier: {sql}");
+    assert!(!sql.contains("`email(10)`"), "Prefix length must not be quoted as part of the identifier: {sql}");
+}
+
+#[test]
 fn gaussdb_m_create_table_uses_backtick_quoting() {
     let cols = vec![column("id"), column("name")];
     let mut options = gaussdb_m_options(cols);

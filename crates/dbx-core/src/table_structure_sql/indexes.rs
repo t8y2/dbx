@@ -142,11 +142,18 @@ fn gaussdbm_index_parts(index_type: &str) -> (String, String) {
 }
 
 fn gaussdbm_index_column_sql(column: &str, is_expression: bool) -> String {
+    let trimmed = column.trim();
     if is_expression {
-        column.trim().to_string()
-    } else {
-        quote_ident(StructureDialect::GaussdbM, column)
+        return trimmed.to_string();
     }
+    if let Some((name, suffix)) = trimmed.rsplit_once('(') {
+        if let Some(length) = suffix.strip_suffix(')') {
+            if !name.trim().is_empty() && !length.is_empty() && length.chars().all(|ch| ch.is_ascii_digit()) {
+                return format!("{}({length})", quote_ident(StructureDialect::GaussdbM, name.trim()));
+            }
+        }
+    }
+    quote_ident(StructureDialect::GaussdbM, trimmed)
 }
 
 fn mysql_index_column_sql(column: &str) -> String {

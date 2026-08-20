@@ -31,7 +31,7 @@ use super::Theme;
 use crate::{
   custom_protocol_workaround, proxy::ProxyConfig, Error, MemoryUsageLevel, NewWindowFeatures,
   NewWindowOpener, NewWindowResponse, PageLoadEvent, Rect, RequestAsyncResponder, Result,
-  WebViewAttributes, RGBA,
+  WebView2ProcessFailedInfo, WebView2ProcessFailedKind, WebViewAttributes, RGBA,
 };
 
 type EventRegistrationToken = i64;
@@ -495,6 +495,32 @@ impl InnerWebView {
         },
       ));
       controller.add_AcceleratorKeyPressed(&accelerator_key_handler, &mut token)?;
+    }
+
+    // Detect WebView2 child-process failures while the host process stays
+    // alive: losing the renderer/GPU process group turns the window black
+    // with nothing to repaint it (reproduced after an overnight idle session,
+    // see t8y2/dbx#6362). wry only detects and constructs a structured
+    // [`WebView2ProcessFailedInfo`] signal here — the application layer
+    // (registered via [`crate::set_webview2_process_failed_callback`])
+    // decides recovery (reload / restart / log-only), so wry never learns
+    // about application state. Every event is also logged locally with full
+    // forensics so the real kind/reason on affected Windows devices can be
+    // collected — the issue only proves the process group disappeared, not
+    // which event actually fired.
+    unsafe {
+      let process_failed_handler = ProcessFailedEventHandler::create(Box::new(
+        move |_, args| {
+          let Some(args) = args else { return Ok(()) };
+          let info = process_failed_info(&args);
+          record_process_failure(&info);
+          if let Some(callback) = webview2_process_failed_callback() {
+            callback(&info);
+          }
+          Ok(())
+        },
+      ));
+      webview.add_ProcessFailed(&process_failed_handler, &mut token)?;
     }
 
     // IPC handler
@@ -1890,6 +1916,131 @@ fn configured_browser_executable_folder() -> Option<HSTRING> {
   browser_executable_folder_from(folder.as_deref(), cfg!(target_vendor = "win7"))
 }
 
+/// Builds a structured [`WebView2ProcessFailedInfo`] from the WebView2 event
+/// args.
+///
+/// Kind is always present; reason / exit code / process description /
+/// affected frames only exist on the v2 event args (`ICoreWebView2ProcessFailedEventArgs2`).
+fn process_failed_info(args: &ICoreWebView2ProcessFailedEventArgs) -> WebView2ProcessFailedInfo {
+  let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
+  let _ = unsafe { args.ProcessFailedKind(&mut kind) };
+  let mut info = WebView2ProcessFailedInfo {
+    kind: process_failed_kind(kind),
+    reason: None,
+    exit_code: None,
+    process_description: None,
+    affected_frames: 0,
+  };
+  if let Ok(args2) = args.cast::<ICoreWebView2ProcessFailedEventArgs2>() {
+    let mut reason = COREWEBVIEW2_PROCESS_FAILED_REASON::default();
+    let mut exit_code = 0i32;
+    let mut process = PWSTR::null();
+    let _ = unsafe { args2.Reason(&mut reason) };
+    let _ = unsafe { args2.ExitCode(&mut exit_code) };
+    let _ = unsafe { args2.ProcessDescription(&mut process) };
+    info.reason = Some(process_failed_reason_name(reason).to_string());
+    info.exit_code = Some(exit_code);
+    info.process_description = Some(take_pwstr(process));
+    if let Ok(collection) = unsafe { args2.FrameInfosForFailedProcess() } {
+      if let Ok(iterator) = unsafe { collection.GetIterator() } {
+        let mut has_current = BOOL::default();
+        while unsafe { iterator.HasCurrent(&mut has_current) }.is_ok() && has_current.as_bool() {
+          info.affected_frames += 1;
+          let _ = unsafe { iterator.MoveNext(&mut BOOL::default()) };
+        }
+      }
+    }
+  }
+  info
+}
+
+/// Maps a raw [`COREWEBVIEW2_PROCESS_FAILED_KIND`] to the public kind.
+fn process_failed_kind(kind: COREWEBVIEW2_PROCESS_FAILED_KIND) -> WebView2ProcessFailedKind {
+  match kind {
+    COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED => WebView2ProcessFailedKind::Browser,
+    COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED => WebView2ProcessFailedKind::Renderer,
+    COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE => {
+      WebView2ProcessFailedKind::RendererUnresponsive
+    }
+    COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_EXITED => {
+      WebView2ProcessFailedKind::FrameRenderer
+    }
+    COREWEBVIEW2_PROCESS_FAILED_KIND_GPU_PROCESS_EXITED => WebView2ProcessFailedKind::Gpu,
+    COREWEBVIEW2_PROCESS_FAILED_KIND_UTILITY_PROCESS_EXITED => WebView2ProcessFailedKind::Utility,
+    COREWEBVIEW2_PROCESS_FAILED_KIND_SANDBOX_HELPER_PROCESS_EXITED => {
+      WebView2ProcessFailedKind::SandboxHelper
+    }
+    COREWEBVIEW2_PROCESS_FAILED_KIND_PPAPI_PLUGIN_PROCESS_EXITED => {
+      WebView2ProcessFailedKind::PpapiPlugin
+    }
+    COREWEBVIEW2_PROCESS_FAILED_KIND_PPAPI_BROKER_PROCESS_EXITED => {
+      WebView2ProcessFailedKind::PpapiBroker
+    }
+    _ => WebView2ProcessFailedKind::Unknown,
+  }
+}
+
+/// Human-readable name for a [`WebView2ProcessFailedKind`].
+fn process_failed_kind_name(kind: WebView2ProcessFailedKind) -> &'static str {
+  match kind {
+    WebView2ProcessFailedKind::Browser => "browser",
+    WebView2ProcessFailedKind::Renderer => "renderer",
+    WebView2ProcessFailedKind::RendererUnresponsive => "renderer_unresponsive",
+    WebView2ProcessFailedKind::FrameRenderer => "frame_renderer",
+    WebView2ProcessFailedKind::Gpu => "gpu",
+    WebView2ProcessFailedKind::Utility => "utility",
+    WebView2ProcessFailedKind::SandboxHelper => "sandbox_helper",
+    WebView2ProcessFailedKind::PpapiPlugin => "ppapi_plugin",
+    WebView2ProcessFailedKind::PpapiBroker => "ppapi_broker",
+    WebView2ProcessFailedKind::Unknown => "unknown",
+  }
+}
+
+/// Human-readable name for a [`COREWEBVIEW2_PROCESS_FAILED_REASON`].
+fn process_failed_reason_name(reason: COREWEBVIEW2_PROCESS_FAILED_REASON) -> &'static str {
+  match reason {
+    COREWEBVIEW2_PROCESS_FAILED_REASON_UNEXPECTED => "unexpected",
+    COREWEBVIEW2_PROCESS_FAILED_REASON_UNRESPONSIVE => "unresponsive",
+    COREWEBVIEW2_PROCESS_FAILED_REASON_TERMINATED => "terminated",
+    COREWEBVIEW2_PROCESS_FAILED_REASON_CRASHED => "crashed",
+    COREWEBVIEW2_PROCESS_FAILED_REASON_LAUNCH_FAILED => "launch_failed",
+    COREWEBVIEW2_PROCESS_FAILED_REASON_OUT_OF_MEMORY => "out_of_memory",
+    COREWEBVIEW2_PROCESS_FAILED_REASON_PROFILE_DELETED => "profile_deleted",
+    _ => "unknown",
+  }
+}
+
+/// Returns the application-level ProcessFailed callback, if one was
+/// registered via [`crate::set_webview2_process_failed_callback`].
+fn webview2_process_failed_callback() -> Option<crate::WebView2ProcessFailedCallback> {
+  crate::WEBVIEW2_PROCESS_FAILED_CALLBACK
+    .read()
+    .ok()
+    .and_then(|callback| callback.clone())
+}
+
+/// Emits a diagnostic line for every ProcessFailed event.
+///
+/// issue t8y2/dbx#6362 only proves the WebView2 process group disappeared,
+/// not which event actually fired on the affected devices, so every event is
+/// recorded with its kind / reason / exit code / process description /
+/// affected-frame info. This is the forensics channel for confirming the real
+/// failure on Windows hardware.
+fn record_process_failure(info: &WebView2ProcessFailedInfo) {
+  let description = format!(
+    "webview2 process failed kind={} reason={} exit_code={} process={} frames={}",
+    process_failed_kind_name(info.kind),
+    info.reason.as_deref().unwrap_or("-"),
+    info.exit_code.map(|code| code.to_string()).unwrap_or_else(|| "-".into()),
+    info.process_description.as_deref().unwrap_or("-"),
+    info.affected_frames,
+  );
+  #[cfg(feature = "tracing")]
+  tracing::error!("{description}");
+  #[cfg(debug_assertions)]
+  eprintln!("{description}");
+}
+
 fn browser_executable_folder_from(
   folder: Option<&OsStr>,
   fixed_runtime_enabled: bool,
@@ -1924,6 +2075,79 @@ mod tests {
     let value = browser_executable_folder_from(Some(folder), true).unwrap();
 
     assert_eq!(value.to_string_lossy(), folder.to_string_lossy());
+  }
+
+  #[test]
+  fn process_failed_kind_maps_all_raw_kinds() {
+    assert_eq!(
+      process_failed_kind(COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED),
+      WebView2ProcessFailedKind::Browser
+    );
+    assert_eq!(
+      process_failed_kind(COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED),
+      WebView2ProcessFailedKind::Renderer
+    );
+    assert_eq!(
+      process_failed_kind(COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE),
+      WebView2ProcessFailedKind::RendererUnresponsive
+    );
+    assert_eq!(
+      process_failed_kind(COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_EXITED),
+      WebView2ProcessFailedKind::FrameRenderer
+    );
+    assert_eq!(
+      process_failed_kind(COREWEBVIEW2_PROCESS_FAILED_KIND_GPU_PROCESS_EXITED),
+      WebView2ProcessFailedKind::Gpu
+    );
+    assert_eq!(
+      process_failed_kind(COREWEBVIEW2_PROCESS_FAILED_KIND_UTILITY_PROCESS_EXITED),
+      WebView2ProcessFailedKind::Utility
+    );
+    assert_eq!(
+      process_failed_kind(COREWEBVIEW2_PROCESS_FAILED_KIND_SANDBOX_HELPER_PROCESS_EXITED),
+      WebView2ProcessFailedKind::SandboxHelper
+    );
+    assert_eq!(
+      process_failed_kind(COREWEBVIEW2_PROCESS_FAILED_KIND_PPAPI_PLUGIN_PROCESS_EXITED),
+      WebView2ProcessFailedKind::PpapiPlugin
+    );
+    assert_eq!(
+      process_failed_kind(COREWEBVIEW2_PROCESS_FAILED_KIND_PPAPI_BROKER_PROCESS_EXITED),
+      WebView2ProcessFailedKind::PpapiBroker
+    );
+    assert_eq!(
+      process_failed_kind(COREWEBVIEW2_PROCESS_FAILED_KIND_UNKNOWN_PROCESS_EXITED),
+      WebView2ProcessFailedKind::Unknown
+    );
+  }
+
+  #[test]
+  fn process_failed_kind_and_reason_names_are_stable() {
+    assert_eq!(
+      process_failed_kind_name(WebView2ProcessFailedKind::Browser),
+      "browser"
+    );
+    assert_eq!(
+      process_failed_kind_name(WebView2ProcessFailedKind::Renderer),
+      "renderer"
+    );
+    assert_eq!(
+      process_failed_kind_name(WebView2ProcessFailedKind::RendererUnresponsive),
+      "renderer_unresponsive"
+    );
+    assert_eq!(
+      process_failed_kind_name(WebView2ProcessFailedKind::FrameRenderer),
+      "frame_renderer"
+    );
+    assert_eq!(process_failed_kind_name(WebView2ProcessFailedKind::Gpu), "gpu");
+    assert_eq!(
+      process_failed_reason_name(COREWEBVIEW2_PROCESS_FAILED_REASON_CRASHED),
+      "crashed"
+    );
+    assert_eq!(
+      process_failed_reason_name(COREWEBVIEW2_PROCESS_FAILED_REASON_OUT_OF_MEMORY),
+      "out_of_memory"
+    );
   }
 }
 

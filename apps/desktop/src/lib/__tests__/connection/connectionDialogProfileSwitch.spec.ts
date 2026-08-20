@@ -75,6 +75,63 @@ function profileSwitchHarness(selectedProfile: string, editing = false) {
   return { customDriverName, events, form, selectProfile, selectedType };
 }
 
+function igniteProfileSwitchHarness(selectedProfile: "ignite" | "ignite3") {
+  const form = {
+    value: {
+      db_type: selectedProfile,
+      driver_profile: selectedProfile,
+      driver_label: selectedProfile === "ignite" ? "Apache Ignite 2.x" : "Apache Ignite 3.x",
+      host: "ignite.example.com",
+      port: 10800,
+      username: "draft-user",
+      password: "draft-password",
+      database: "draft-database",
+      ssl: true,
+      url_params: "sslMode=require",
+      connection_string: "jdbc:ignite:thin://ignite.example.com:10800/draft-database",
+      agent_java_options: ["-Xms256m", "-Xmx1g"],
+    },
+  };
+  const selectedType = { value: selectedProfile };
+  const selectedDbCategory = { value: "sql" };
+  const customDriverName = { value: "" };
+  const events: string[] = [];
+
+  function applyProfile(profile: "ignite" | "ignite3", preserveConnectionFields: boolean) {
+    events.push(`apply:${profile}:${preserveConnectionFields}`);
+    selectedType.value = profile;
+    form.value.db_type = profile;
+    form.value.driver_profile = profile;
+    form.value.driver_label = profile === "ignite" ? "Apache Ignite 2.x" : "Apache Ignite 3.x";
+    if (!preserveConnectionFields) {
+      form.value.host = "127.0.0.1";
+      form.value.username = "";
+      form.value.password = "";
+      form.value.database = "";
+      form.value.ssl = false;
+      form.value.url_params = "";
+      form.value.connection_string = "";
+      form.value.agent_java_options = [];
+    }
+  }
+
+  const javascript = ts.transpileModule(functionSource("selectIgniteConnectionProfile"), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const selectProfile = new Function("form", "selectedType", "dbCategoryForOption", "selectedDbCategory", "customDriverName", "applyProfile", "resetTestState", "resetVisibleSchemasState", `${javascript}\nreturn selectIgniteConnectionProfile;`)(
+    form,
+    selectedType,
+    () => "sql",
+    selectedDbCategory,
+    customDriverName,
+    applyProfile,
+    () => events.push("reset-test"),
+    () => events.push("reset-schemas"),
+  ) as (profile: "ignite" | "ignite3") => void;
+
+  return { events, form, selectProfile, selectedType };
+}
+
 describe("ConnectionDialog database profile switching", () => {
   it.each([
     ["mysql", ""],
@@ -115,5 +172,31 @@ describe("ConnectionDialog database profile switching", () => {
     expect(harness.form).toEqual(formBeforeReselect);
     expect(harness.customDriverName.value).toBe("");
     expect(harness.events).toEqual(["apply:custom_mysql:true", "reset-test", "reset-schemas"]);
+  });
+
+  it.each([
+    ["ignite", "ignite3"],
+    ["ignite3", "ignite"],
+  ] as const)("preserves an Ignite %s draft when switching to %s", (from, to) => {
+    const harness = igniteProfileSwitchHarness(from);
+    const connectionFields = {
+      host: harness.form.value.host,
+      port: harness.form.value.port,
+      username: harness.form.value.username,
+      password: harness.form.value.password,
+      database: harness.form.value.database,
+      ssl: harness.form.value.ssl,
+      url_params: harness.form.value.url_params,
+      connection_string: harness.form.value.connection_string,
+      agent_java_options: [...harness.form.value.agent_java_options],
+    };
+
+    harness.selectProfile(to);
+
+    expect(harness.form.value).toMatchObject(connectionFields);
+    expect(harness.form.value.db_type).toBe(to);
+    expect(harness.form.value.driver_profile).toBe(to);
+    expect(harness.selectedType.value).toBe(to);
+    expect(harness.events).toEqual([`apply:${to}:true`, "reset-test", "reset-schemas"]);
   });
 });

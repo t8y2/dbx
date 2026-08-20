@@ -57,12 +57,19 @@ const SNAPSHOT_LINE_NUMBER: Record<AppThemeAppearance, string> = {
 
 const TRAFFIC_LIGHT_COLORS = ["#ff5f57", "#febc2e", "#28c840"] as const;
 const MAX_EXPORT_PIXEL_RATIO = 2;
+const MAX_EXPORT_CANVAS_EDGE = 16_384;
+const MAX_EXPORT_CANVAS_PIXELS = 64 * 1024 * 1024;
 
 /**
  * Self-contained stylesheet embedded in every snapshot DOM. Keep it prefix
  * namespaced (`dbx-code-snapshot`) so it never leaks into the app chrome.
  */
 export const CODE_SNAPSHOT_CSS = `
+.dbx-code-snapshot,
+.dbx-code-snapshot * {
+  border: 0;
+  outline: 0;
+}
 .dbx-code-snapshot {
   border-radius: 8px;
   overflow: hidden;
@@ -180,13 +187,26 @@ export async function renderCodeSnapshotHtml(source: CodeSnapshotSource, options
 /** Convert a snapshot DOM element into a PNG data URL. */
 export async function snapshotElementToPng(element: HTMLElement): Promise<string> {
   const domtoimage = (await import("dom-to-image-more")).default;
+  // 预览区允许滚动，因此导出尺寸必须覆盖完整内容，而不是只取当前可见宽度。
+  const width = Math.max(element.offsetWidth, element.scrollWidth);
+  const height = Math.max(element.offsetHeight, element.scrollHeight);
+  const basePixels = width * height;
+  if (width > MAX_EXPORT_CANVAS_EDGE || height > MAX_EXPORT_CANVAS_EDGE || basePixels > MAX_EXPORT_CANVAS_PIXELS) {
+    throw new Error(`Snapshot is too large to export safely (${width} × ${height}px). Reduce the code size and try again.`);
+  }
+
+  const targetScale = Math.min(MAX_EXPORT_PIXEL_RATIO, Math.max(1, typeof window === "undefined" ? 1 : window.devicePixelRatio || 1));
+  const scale = Math.min(targetScale, MAX_EXPORT_CANVAS_EDGE / width, MAX_EXPORT_CANVAS_EDGE / height, Math.sqrt(MAX_EXPORT_CANVAS_PIXELS / basePixels));
   return domtoimage.toPng(element, {
     quality: 1,
-    width: element.offsetWidth,
-    height: element.offsetHeight,
-    // Preserve text sharpness on high-DPI displays without letting a large
-    // selected block allocate an unbounded export canvas.
-    pixelRatio: Math.min(MAX_EXPORT_PIXEL_RATIO, Math.max(1, typeof window === "undefined" ? 1 : window.devicePixelRatio || 1)),
+    width,
+    height,
+    // dom-to-image-more 使用 scale 放大实际画布；pixelRatio 不是该库支持的参数。
+    scale,
+    style: {
+      width: `${width}px`,
+      height: `${height}px`,
+    },
   });
 }
 

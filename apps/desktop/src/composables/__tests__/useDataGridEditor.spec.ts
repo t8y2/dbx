@@ -154,6 +154,56 @@ describe("useDataGridEditor row deletion confirmation", () => {
     expect(editor.showDeleteRowConfirm.value).toBe(false);
     expect(editor.newRows.value).toHaveLength(0);
   });
+
+  it("populates pendingDeleteRowIds for a single-row delete request", () => {
+    const editor = createEditor(undefined, true);
+
+    editor.requestDeleteRow(-1);
+
+    expect(editor.pendingDeleteRowIds.value).toEqual([-1]);
+  });
+
+  it("populates pendingDeleteRowIds for a multi-row delete request and clears it on confirm", () => {
+    const editor = createEditor(undefined, true);
+    editor.newRows.value = [
+      [null, null, null],
+      [null, null, null],
+    ];
+
+    editor.requestDeleteRows([-1, -2]);
+
+    expect(editor.pendingDeleteRowIds.value).toEqual([-1, -2]);
+
+    editor.confirmDeleteRow();
+
+    expect(editor.pendingDeleteRowIds.value).toEqual([]);
+    expect(editor.newRows.value).toHaveLength(0);
+  });
+
+  it("clears pendingDeleteRowIds when the confirmation dialog is closed without confirming", () => {
+    const editor = createEditor(undefined, true);
+
+    editor.requestDeleteRow(-1);
+    expect(editor.pendingDeleteRowIds.value).toEqual([-1]);
+
+    editor.showDeleteRowConfirm.value = false;
+
+    expect(editor.pendingDeleteRowIds.value).toEqual([]);
+    expect(editor.newRows.value).toHaveLength(1); // row itself was never actually deleted
+  });
+
+  it("confirmDeleteRow deletes the row and closes the dialog itself, without racing the cancel watcher", () => {
+    const editor = createEditor(undefined, true);
+
+    editor.requestDeleteRow(-1);
+    expect(editor.newRows.value).toHaveLength(1);
+
+    editor.confirmDeleteRow();
+
+    expect(editor.newRows.value).toHaveLength(0); // the row must actually be deleted
+    expect(editor.showDeleteRowConfirm.value).toBe(false); // and the dialog closes on its own
+    expect(editor.pendingDeleteRowIds.value).toEqual([]);
+  });
 });
 
 describe("useDataGridEditor appendPastedRowsToNewRow", () => {

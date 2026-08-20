@@ -66,6 +66,40 @@ describe("coerceDataGridCellValue", () => {
     expect(coerceDataGridCellValue({ ...options, preserveEmptyString: true })).toBe("");
   });
 
+  it.each([
+    ["numeric non-nullable", 42, "integer", false],
+    ["boolean nullable", true, "boolean", true],
+    ["text nullable", "before", "text", true],
+    ["text non-nullable", "before", "varchar(255)", false],
+    ["previously NULL text", null, "varchar(255)", true],
+  ])("uses SQL NULL for an empty inline bulk edit in a %s cell", (_name, oldValue, dataType, _isNullable) => {
+    expect(
+      coerceDataGridCellValue({
+        value: "",
+        oldValue,
+        databaseType: "postgres",
+        columnInfo: { data_type: dataType },
+        emptyStringAsNull: true,
+      }),
+    ).toBeNull();
+  });
+
+  it.each([
+    ["numeric", 42, "integer", "7", 7],
+    ["boolean", false, "boolean", "true", true],
+    ["text", "before", "text", "after", "after"],
+  ])("keeps per-column coercion for non-empty inline bulk edits: %s", (_name, oldValue, dataType, value, expected) => {
+    expect(
+      coerceDataGridCellValue({
+        value,
+        oldValue,
+        databaseType: "postgres",
+        columnInfo: { data_type: dataType },
+        emptyStringAsNull: true,
+      }),
+    ).toBe(expected);
+  });
+
   it("strips unambiguous thousands separators before numeric coercion", () => {
     expect(
       coerceDataGridCellValue({

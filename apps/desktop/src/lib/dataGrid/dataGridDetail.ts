@@ -228,6 +228,22 @@ export function dataGridColumnDetailTsv(detail: DataGridColumnDetail): string {
   return detail.fields.map((field) => displayCellValue(field.value)).join("\n");
 }
 
+export interface BuildDeleteRowConfirmDetailsOptions<TRow> {
+  header: string;
+  rowIds: readonly number[];
+  columns: readonly string[];
+  getRow: (rowId: number) => TRow | undefined;
+  formatCell: (row: TRow, columnIndex: number) => string;
+}
+
+export function buildDeleteRowConfirmDetails<TRow>(options: BuildDeleteRowConfirmDetailsOptions<TRow>): string {
+  const rowLines = options.rowIds
+    .map((rowId) => options.getRow(rowId))
+    .filter((row): row is TRow => row !== undefined)
+    .map((row) => JSON.stringify(Object.fromEntries(options.columns.map((name, columnIndex) => [name, options.formatCell(row, columnIndex)]))));
+  return rowLines.length > 0 ? [options.header, ...rowLines].join("\n") : options.header;
+}
+
 export function filterDataGridDetailFields<T extends DataGridCellDetail>(fields: readonly T[], keyword: string): T[] {
   if (keyword.trim() === "") return [...fields];
   const kw = keyword.trim().toLowerCase();

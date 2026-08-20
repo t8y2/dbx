@@ -194,6 +194,18 @@ const NACOS_CONNECTION_PROFILES: ReadonlyArray<{ value: NacosConnectionProfile; 
   { value: "rnacos", title: "r-nacos" },
 ];
 
+type IgniteConnectionProfile = "ignite" | "ignite3";
+
+const IGNITE_CONNECTION_PROFILES: ReadonlyArray<{ value: IgniteConnectionProfile; title: string }> = [
+  { value: "ignite", title: "Ignite 2.x" },
+  { value: "ignite3", title: "Ignite 3.x" },
+];
+
+// The picker merges the Ignite 2.x/3.x cards into a single "Apache Ignite"
+// entry; the version is picked inside the connection form instead.
+const MERGED_PICKER_OPTION_FOR_TYPE: Record<string, string> = { ignite3: "ignite" };
+const PICKER_SEARCH_ALIASES: Record<string, string[]> = { ignite: ["ignite3", "ignite 3"] };
+
 type LegacyTransportFields = {
   ssh_enabled?: boolean;
   ssh_host?: string;
@@ -2883,6 +2895,16 @@ function onDbTypeChange(val: string) {
   resetVisibleSchemasState();
 }
 
+function selectIgniteConnectionProfile(profile: IgniteConnectionProfile) {
+  if (form.value.db_type === profile) return;
+  const category = dbCategoryForOption(profile);
+  if (category) selectedDbCategory.value = category;
+  customDriverName.value = "";
+  applyProfile(profile, true);
+  resetTestState();
+  resetVisibleSchemasState();
+}
+
 function switchH2ConnectionMode(mode: H2ConnectionMode) {
   h2ConnectionMode.value = mode;
   if (mode === "file") {
@@ -3177,17 +3199,19 @@ assertCompleteDatabaseCategories(
   dbCategoryDefinitions.map((category) => category.optionValues),
 );
 
+const hiddenPickerOptionTypes = new Set(Object.keys(MERGED_PICKER_OPTION_FOR_TYPE));
+
 const dbCategories = computed<DbCategory[]>(() => {
   return dbCategoryDefinitions.map((category) => ({
     key: category.key,
     title: t(category.titleKey),
-    options: dbOptions.filter((option) => category.optionValues.includes(option.value)),
+    options: dbOptions.filter((option) => category.optionValues.includes(option.value) && !hiddenPickerOptionTypes.has(option.value)),
   }));
 });
 
 function matchesDbOption(option: DbOption, keyword: string, categoryTitle = "") {
   const profile = driverProfiles[option.value];
-  return [option.label, option.value, profile?.label, profile?.type, categoryTitle].some((value) =>
+  return [option.label, option.value, profile?.label, profile?.type, categoryTitle, ...(PICKER_SEARCH_ALIASES[option.value] ?? [])].some((value) =>
     String(value || "")
       .toLowerCase()
       .includes(keyword),
@@ -3213,7 +3237,11 @@ const visibleDbCategories = computed<DbCategory[]>(() => {
   return filteredDbCategories.value.filter((category) => category.key === selectedDbCategory.value);
 });
 const hasDbPickerResults = computed(() => visibleDbCategories.value.some((category) => category.options.length > 0));
-const selectedDbOptionIsVisible = computed(() => visibleDbCategories.value.some((category) => category.options.some((option) => option.value === selectedType.value)));
+function isPickerOptionSelected(optionValue: string): boolean {
+  return selectedType.value === optionValue || MERGED_PICKER_OPTION_FOR_TYPE[selectedType.value] === optionValue;
+}
+
+const selectedDbOptionIsVisible = computed(() => visibleDbCategories.value.some((category) => category.options.some((option) => isPickerOptionSelected(option.value))));
 
 function selectDbCategory(category: DbCategoryKey) {
   selectedDbCategory.value = category;
@@ -3229,7 +3257,8 @@ function selectDbPickerView(view: DbPickerView) {
 }
 
 function dbCategoryForOption(value: string): DbCategoryKey | undefined {
-  return dbCategories.value.find((category) => category.options.some((option) => option.value === value))?.key;
+  const pickerValue = MERGED_PICKER_OPTION_FOR_TYPE[value] ?? value;
+  return dbCategories.value.find((category) => category.options.some((option) => option.value === pickerValue))?.key;
 }
 
 const selectedDbIcon = computed(() => iconTypeMap[selectedType.value] || selectedProfile().icon || selectedType.value);
@@ -5881,8 +5910,8 @@ function openExternalUrl(url: string) {
                     type="button"
                     :title="opt.label"
                     class="connection-db-picker-option group flex min-h-24 flex-col items-center justify-center gap-2 rounded-[4px] border bg-background/70 p-3 text-center transition hover:border-primary/40 hover:bg-muted/40 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    :class="selectedType === opt.value ? 'dbx-tile-selected shadow-sm' : 'border-border'"
-                    :aria-pressed="selectedType === opt.value"
+                    :class="isPickerOptionSelected(opt.value) ? 'dbx-tile-selected shadow-sm' : 'border-border'"
+                    :aria-pressed="isPickerOptionSelected(opt.value)"
                     @click="onDbTypeChange(opt.value)"
                     @dblclick="goToConnectionStep(opt.value)"
                   >
@@ -5901,8 +5930,8 @@ function openExternalUrl(url: string) {
                     :key="opt.value"
                     type="button"
                     class="connection-db-picker-option flex items-center gap-3 rounded-[4px] border bg-background px-3 py-2 text-left transition hover:border-primary/40 hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    :class="selectedType === opt.value ? 'dbx-tile-selected' : 'border-border'"
-                    :aria-pressed="selectedType === opt.value"
+                    :class="isPickerOptionSelected(opt.value) ? 'dbx-tile-selected' : 'border-border'"
+                    :aria-pressed="isPickerOptionSelected(opt.value)"
                     @click="onDbTypeChange(opt.value)"
                     @dblclick="goToConnectionStep(opt.value)"
                   >
@@ -7270,6 +7299,23 @@ function openExternalUrl(url: string) {
 
                 <!-- MySQL / PostgreSQL: host, port, user, password, database -->
                 <template v-else>
+                  <div v-if="form.db_type === 'ignite' || form.db_type === 'ignite3'" class="grid grid-cols-4 items-start gap-4">
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.igniteVersion") }}</Label>
+                    <div class="col-span-3 grid grid-cols-2 gap-2">
+                      <button
+                        v-for="profile in IGNITE_CONNECTION_PROFILES"
+                        :key="profile.value"
+                        type="button"
+                        class="min-w-0 rounded-md border px-3 py-2.5 text-left transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        :class="form.db_type === profile.value ? 'border-primary bg-primary/5 shadow-sm' : 'border-border bg-background'"
+                        :aria-pressed="form.db_type === profile.value"
+                        @click="selectIgniteConnectionProfile(profile.value)"
+                      >
+                        <span class="block truncate text-sm font-medium">{{ profile.title }}</span>
+                      </button>
+                    </div>
+                  </div>
+
                   <div v-if="form.db_type === 'elasticsearch'" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelSmallClass">{{ t("connection.mode") }}</Label>
                     <div class="col-span-3 grid h-8 grid-cols-2 overflow-hidden rounded-md border border-input bg-muted/30 p-0.5">

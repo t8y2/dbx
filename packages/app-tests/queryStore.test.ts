@@ -2379,8 +2379,8 @@ test("binds DISTINCT qualified-star edits to the single safe joined source", asy
     const tab = store.tabs.find((item) => item.id === tabId);
     await waitFor(() => columnRequests.length === 2 && tab?.tableMeta?.tableName === "users");
     assert.deepEqual(columnRequests, [
-      { schema: "public", table: "users" },
-      { schema: "public", table: "orders" },
+      { schema: "", table: "users" },
+      { schema: "", table: "orders" },
     ]);
     assert.equal(tab?.queryEditabilityReason, undefined);
     assert.equal(tab?.queryAnalysis?.multiSource, true);
@@ -2560,7 +2560,7 @@ test("expands single-table alias star projections for editable query metadata", 
 
     const tab = store.tabs.find((item) => item.id === tabId);
     await waitFor(() => columnRequests.length === 1 && tab?.tableMeta?.tableName === "tt_kd_material_container_sap");
-    assert.deepEqual(columnRequests, [{ schema: "public", table: "tt_kd_material_container_sap" }]);
+    assert.deepEqual(columnRequests, [{ schema: "", table: "tt_kd_material_container_sap" }]);
     assert.equal(tab?.queryEditabilityReason, undefined);
     assert.equal(tab?.queryAnalysis?.selectStar, false);
     assert.equal(tab?.tableMeta?.tableName, "tt_kd_material_container_sap");

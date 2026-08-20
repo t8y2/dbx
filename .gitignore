@@ -17,6 +17,8 @@ CLAUDE.md
 dist/
 coverage/
 /target/
+vendor/wry/target/
+vendor/wry/Cargo.lock
 src-tauri/webview2-fixed-runtime/
 plugins/jdbc/target/
 plugins/jdbc/dependency-reduced-pom.xml

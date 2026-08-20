@@ -348,6 +348,8 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
           input.select();
           input.setSelectionRange?.(0, input.value.length);
         }
+      } else if (input) {
+        input.setSelectionRange?.(input.value.length, input.value.length);
       }
     };
     nextTick(() => {
@@ -554,6 +556,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   // --- Cell value coercion ---
   interface ApplyCellValueOptions {
     preserveEmptyString?: boolean;
+    emptyStringAsNull?: boolean;
   }
 
   function coerceCellValue(value: string, oldValue: CellValue | undefined, columnIndex: number, options: ApplyCellValueOptions = {}): CellValue {
@@ -563,6 +566,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       databaseType: resolvedDatabaseType.value,
       columnInfo: tableColumnForGridColumn(columnIndex),
       preserveEmptyString: options.preserveEmptyString,
+      emptyStringAsNull: options.emptyStringAsNull,
     }) as CellValue;
   }
 
@@ -710,7 +714,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   // --- Inline editing ---
-  function startEdit(rowId: number, colIdx: number) {
+  function startEdit(rowId: number, colIdx: number, selectOnFocus = true) {
     if (!editable.value) return;
     if (!canEditColumn(colIdx)) return;
     const item = getRowItem(rowId);
@@ -726,7 +730,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       databaseType: resolvedDatabaseType.value,
       columnInfo: tableColumnForGridColumn(colIdx),
     });
-    focusEditInput();
+    focusEditInput(selectOnFocus);
   }
 
   function commitEdit(options: CommitEditOptions = {}): CommitEditResult {
@@ -1239,16 +1243,10 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   const showDeleteRowConfirm = ref(false);
-  const pendingDeleteRowId = ref<number | null>(null);
   const pendingDeleteRowIds = ref<number[]>([]);
 
   function requestDeleteRow(rowId: number) {
-    if (!confirmDangerousRowDeletion.value) {
-      applyDeleteRow(rowId);
-      return;
-    }
-    pendingDeleteRowId.value = rowId;
-    showDeleteRowConfirm.value = true;
+    requestDeleteRows([rowId]);
   }
 
   function requestDeleteRows(rowIds: number[]) {
@@ -1261,15 +1259,20 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   function confirmDeleteRow() {
-    if (pendingDeleteRowIds.value.length > 0) {
-      applyDeleteRows(pendingDeleteRowIds.value);
-      pendingDeleteRowIds.value = [];
-      return;
-    }
-    if (pendingDeleteRowId.value === null) return;
-    applyDeleteRow(pendingDeleteRowId.value);
-    pendingDeleteRowId.value = null;
+    const rowIds = pendingDeleteRowIds.value;
+    pendingDeleteRowIds.value = [];
+    showDeleteRowConfirm.value = false;
+    if (rowIds.length === 0) return;
+    applyDeleteRows(rowIds);
   }
+
+  watch(
+    showDeleteRowConfirm,
+    (isOpen) => {
+      if (!isOpen) pendingDeleteRowIds.value = [];
+    },
+    { flush: "sync" },
+  );
 
   function restoreRow(rowId: number) {
     const item = getRowItem(rowId);
@@ -1794,7 +1797,6 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     applyDeleteRows,
     applyDeleteRow,
     showDeleteRowConfirm,
-    pendingDeleteRowId,
     pendingDeleteRowIds,
     requestDeleteRow,
     requestDeleteRows,

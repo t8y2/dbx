@@ -5216,6 +5216,8 @@ const POSTGRES_COLUMNS_SQL: &str = "SELECT a.attname AS column_name, \
                               FROM pg_enum e WHERE e.enumtypid = enum_t.oid), '[]') END AS enum_values \
              FROM pg_attribute a \
              JOIN pg_type t ON t.oid = a.atttypid \
+             JOIN pg_class relation_class ON relation_class.oid = a.attrelid \
+             JOIN pg_namespace relation_namespace ON relation_namespace.oid = relation_class.relnamespace \
              LEFT JOIN pg_type enum_t ON enum_t.oid = CASE WHEN t.typtype = 'd' THEN t.typbasetype WHEN t.typtype = 'e' THEN t.oid ELSE NULL END AND enum_t.typtype = 'e' \
              LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum \
              LEFT JOIN LATERAL ( \
@@ -5241,8 +5243,8 @@ const POSTGRES_COLUMNS_SQL: &str = "SELECT a.attname AS column_name, \
              ) dep ON TRUE \
              LEFT JOIN pg_sequence pseq ON pseq.seqrelid = dep.objid \
              LEFT JOIN information_schema.columns c \
-               ON c.table_schema = $1 AND c.table_name = $2 AND c.column_name = a.attname \
-             WHERE a.attrelid = (quote_ident($1) || '.' || quote_ident($2))::regclass \
+               ON c.table_schema = relation_namespace.nspname AND c.table_name = relation_class.relname AND c.column_name = a.attname \
+             WHERE a.attrelid = (CASE WHEN $1 = '' THEN quote_ident($2) ELSE quote_ident($1) || '.' || quote_ident($2) END)::regclass \
              AND a.attnum > 0 AND NOT a.attisdropped \
              ORDER BY a.attnum";
 
@@ -5275,6 +5277,8 @@ const POSTGRES_COLUMNS_COMPAT_SQL: &str = "SELECT a.attname AS column_name, \
              NULL::text AS enum_values \
              FROM pg_attribute a \
              JOIN pg_type t ON t.oid = a.atttypid \
+             JOIN pg_class relation_class ON relation_class.oid = a.attrelid \
+             JOIN pg_namespace relation_namespace ON relation_namespace.oid = relation_class.relnamespace \
              LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum \
              LEFT JOIN pg_catalog.pg_class serial_seq ON serial_seq.oid = ( \
                SELECT sequence_dep.objid \
@@ -5297,8 +5301,8 @@ const POSTGRES_COLUMNS_COMPAT_SQL: &str = "SELECT a.attname AS column_name, \
                LIMIT 1 \
              ) AND serial_seq.relkind = 'S' \
              LEFT JOIN information_schema.columns c \
-               ON c.table_schema = $1 AND c.table_name = $2 AND c.column_name = a.attname \
-             WHERE a.attrelid = (quote_ident($1) || '.' || quote_ident($2))::regclass \
+               ON c.table_schema = relation_namespace.nspname AND c.table_name = relation_class.relname AND c.column_name = a.attname \
+             WHERE a.attrelid = (CASE WHEN $1 = '' THEN quote_ident($2) ELSE quote_ident($1) || '.' || quote_ident($2) END)::regclass \
              AND a.attnum > 0 AND NOT a.attisdropped \
              ORDER BY a.attnum";
 
@@ -5425,7 +5429,6 @@ async fn get_columns_with_sql(
 }
 
 pub async fn get_columns(pool: &Pool, schema: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
-    let schema = if schema.is_empty() { "public" } else { schema };
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
     let tiers = [POSTGRES_COLUMNS_SQL, POSTGRES_COLUMNS_COMPAT_SQL, POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL];
     query_with_compat_fallback("get_columns", &tiers, |sql| get_columns_with_sql(&client, sql, schema, table)).await
@@ -6449,7 +6452,7 @@ const POSTGRES_INDEXES_SQL: &str = "SELECT i.relname AS index_name, \
              JOIN pg_am am ON am.oid = i.relam \
              JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS k(attnum, n) ON true \
              LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum AND k.attnum > 0 \
-             WHERE n.nspname = $1 AND t.relname = $2 \
+             WHERE t.oid = (CASE WHEN $1 = '' THEN quote_ident($2) ELSE quote_ident($1) || '.' || quote_ident($2) END)::regclass \
              GROUP BY i.relname, i.oid, ix.indisunique, ix.indisprimary, ix.indpred, ix.indrelid, am.amname, ix.indnkeyatts, ix.indkey \
              ORDER BY i.relname";
 
@@ -6486,7 +6489,7 @@ const POSTGRES_INDEXES_COMPAT_SQL: &str = "SELECT i.relname AS index_name, \
              JOIN pg_class i ON i.oid = ix.indexrelid \
              JOIN pg_namespace n ON n.oid = t.relnamespace \
              JOIN pg_am am ON am.oid = i.relam \
-             WHERE n.nspname = $1 AND t.relname = $2 \
+             WHERE t.oid = (CASE WHEN $1 = '' THEN quote_ident($2) ELSE quote_ident($1) || '.' || quote_ident($2) END)::regclass \
              ORDER BY i.relname";
 
 const POSTGRES_OWNERS_SQL: &str =
@@ -9434,6 +9437,17 @@ mod tests {
     }
 
     #[test]
+    fn postgres_single_relation_metadata_can_resolve_through_search_path() {
+        for sql in [POSTGRES_COLUMNS_SQL, POSTGRES_COLUMNS_COMPAT_SQL] {
+            assert!(sql.contains("CASE WHEN $1 = '' THEN quote_ident($2)"));
+            assert!(sql.contains("c.table_schema = relation_namespace.nspname"));
+        }
+        for sql in [POSTGRES_INDEXES_SQL, POSTGRES_INDEXES_COMPAT_SQL] {
+            assert!(sql.contains("t.oid = (CASE WHEN $1 = '' THEN quote_ident($2)"));
+        }
+    }
+
+    #[test]
     fn postgres_column_metadata_marks_only_owned_integer_sequence_defaults_as_serial() {
         let modern_sql = [POSTGRES_COLUMNS_SQL, postgres_columns_for_relations_sql()];
         let compat_sql = [POSTGRES_COLUMNS_COMPAT_SQL, postgres_columns_for_relations_compat_sql()];
@@ -9599,6 +9613,48 @@ mod tests {
             state_enum_values(&columns),
             Some(vec!["pending".to_string(), "active".to_string(), "archived".to_string()])
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a writable PostgreSQL database"]
+    async fn postgres_unqualified_metadata_follows_search_path() {
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let pool = connect(&url, Duration::from_secs(5)).await.expect("connect postgres");
+        let client =
+            checkout_postgres_client(&pool, None, crate::db::connection_timeout()).await.expect("checkout client");
+        let suffix = std::process::id();
+        let schema = format!("dbx_search_path_meta_{suffix}");
+        let table = format!("comments_{suffix}");
+        let schema_ident = format!("\"{}\"", schema.replace('\"', "\"\""));
+        let table_ident = format!("\"{}\"", table.replace('\"', "\"\""));
+
+        client
+            .batch_execute(&format!(
+                "CREATE SCHEMA {schema_ident}; \
+                 CREATE TABLE {schema_ident}.{table_ident} (id integer PRIMARY KEY, display_name text); \
+                 COMMENT ON COLUMN {schema_ident}.{table_ident}.display_name IS '客户姓名'; \
+                 SET search_path TO {schema_ident}, public;"
+            ))
+            .await
+            .expect("create search_path metadata fixtures");
+
+        let columns = get_columns_with_sql(&client, POSTGRES_COLUMNS_SQL, "", &table)
+            .await
+            .expect("load columns through search_path");
+        assert_eq!(
+            columns.iter().find(|column| column.name == "display_name").and_then(|column| column.comment.as_deref()),
+            Some("客户姓名")
+        );
+
+        let indexes = list_indexes_with_sql(&client, POSTGRES_INDEXES_SQL, "", &table)
+            .await
+            .expect("load indexes through search_path");
+        assert!(indexes.iter().any(|index| index.is_primary && index.columns == ["id"]));
+
+        client
+            .batch_execute(&format!("RESET search_path; DROP SCHEMA {schema_ident} CASCADE"))
+            .await
+            .expect("clean search_path metadata fixtures");
     }
 
     #[tokio::test]

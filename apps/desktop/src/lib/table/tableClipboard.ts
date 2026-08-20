@@ -85,7 +85,8 @@ function isWritableTableDataCopyColumn(databaseType: DatabaseType | undefined, c
     return !extra.includes("generated always as (");
   }
   if (databaseType === "sqlserver") {
-    return !extra.includes("computed");
+    const baseDataType = column.data_type.trim().toLowerCase().split(/[\s(]/, 1)[0] ?? "";
+    return !extra.includes("computed") && baseDataType !== "timestamp" && baseDataType !== "rowversion";
   }
   return !extra.includes("computed") && !(extra.includes("generated") && !extra.includes("identity"));
 }

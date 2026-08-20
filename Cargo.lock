@@ -2084,6 +2084,7 @@ dependencies = [
  "trash",
  "uuid",
  "windows-sys 0.61.2",
+ "wry",
  "zip",
 ]
 
@@ -9056,8 +9057,6 @@ dependencies = [
 [[package]]
 name = "tiberius"
 version = "0.12.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a1446cb4198848d1562301a3340424b4f425ef79f35ef9ee034769a9dd92c10d"
 dependencies = [
  "async-trait",
  "asynchronous-codec",

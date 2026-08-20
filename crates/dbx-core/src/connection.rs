@@ -1819,6 +1819,35 @@ impl AppState {
         }
     }
 
+    /// Cancels the tasks whose frontend consumer lives in the webview renderer
+    /// session that is about to be reloaded after a WebView2 renderer process
+    /// failure.
+    ///
+    /// A renderer reload keeps the application process alive, so only the tasks
+    /// bound to the (now-dying) renderer session must be torn down. All of those
+    /// (SQL execution, counts/explains and exports) are registered in
+    /// [`Self::running_queries`], so this narrow boundary is exactly
+    /// [`RunningQueries::cancel_all`]: it signals their cancellation tokens and
+    /// fires any registered interrupts, which is what the underlying drivers
+    /// (and `query_result_export`) poll to stop work on the database.
+    ///
+    /// Connection pools, tunnels, transaction sessions and daemons are
+    /// *application-scoped* and are reused by the reloaded frontend, so they are
+    /// deliberately NOT closed here — closing them is the job of
+    /// [`Self::shutdown`] on a full application restart. This keeps a renderer
+    /// reload from evicting a pool and tearing down tunnels that the reloaded
+    /// page still needs.
+    ///
+    /// Returns the number of tasks signalled for cancellation (0 when there was
+    /// nothing running).
+    pub fn cancel_webview_reload_session_tasks(&self) -> usize {
+        let cancelled = self.running_queries.cancel_all();
+        if cancelled > 0 {
+            log::info!("cancelled {cancelled} webview-session query/export tasks before renderer reload");
+        }
+        cancelled
+    }
+
     #[cfg(test)]
     pub fn supervised_task_count(&self) -> usize {
         self.task_supervisor.active_count()
@@ -6325,6 +6354,23 @@ mod tests {
 
         assert!(state.connections.read().await.is_empty());
         assert!(state.agent_manager.active_daemon_keys().await.is_empty());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn webview_reload_session_cancellation_marks_running_tasks_cancelled() {
+        let (state, dir) = test_app_state().await;
+        let registered = state.running_queries.register_task(
+            "exec-1".to_string(),
+            crate::query_cancel::RunningTaskMetadata::query("conn-1", "main", Some("tab-1".to_string())),
+        );
+        assert!(!registered.token().is_cancelled());
+
+        // The narrow renderer-reload boundary signals all running-query tasks
+        // (SQL execution and exports register here) without touching pools.
+        assert_eq!(state.cancel_webview_reload_session_tasks(), 1);
+        assert!(registered.token().is_cancelled());
 
         let _ = std::fs::remove_dir_all(dir);
     }

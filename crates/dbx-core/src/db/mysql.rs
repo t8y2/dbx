@@ -5200,6 +5200,7 @@ pub(crate) async fn execute_non_result_batch_on_conn(
     conn: &mut mysql_async::Conn,
     sql: &str,
     expected_results: usize,
+    on_result: &mut (dyn FnMut(usize, &QueryResult) + Send),
 ) -> Result<MySqlNonResultBatchOutcome, String> {
     if expected_results == 0 {
         return Ok(MySqlNonResultBatchOutcome { results: Vec::new(), error: None });
@@ -5218,9 +5219,19 @@ pub(crate) async fn execute_non_result_batch_on_conn(
     let mut results = Vec::with_capacity(expected_results);
     let mut warning_counts = Vec::with_capacity(expected_results);
     let mut error = None;
+    let mut previous_elapsed_ms = 0;
 
     for statement_index in 0..expected_results {
-        if !result.columns_ref().is_empty() {
+        let Some(columns) = result.columns() else {
+            error = Some(match result.collect::<mysql_async::Row>().await {
+                Err(next_error) => next_error.to_string(),
+                Ok(_) => format!(
+                    "MySQL batch returned fewer results than expected (expected {expected_results}, received {statement_index})."
+                ),
+            });
+            break;
+        };
+        if !columns.is_empty() {
             error = Some(format!(
                 "MySQL batch statement {} unexpectedly returned rows; retry the statement separately.",
                 statement_index + 1
@@ -5232,6 +5243,7 @@ pub(crate) async fn execute_non_result_batch_on_conn(
         let info = result.info().into_owned();
         let messages =
             if capture_per_set_messages { mysql_info_message(&info).into_iter().collect() } else { Vec::new() };
+        let elapsed_ms = start.elapsed().as_millis();
         let current_result = QueryResult {
             columns: vec![],
             column_types: Vec::new(),
@@ -5240,7 +5252,7 @@ pub(crate) async fn execute_non_result_batch_on_conn(
             spatial_values: vec![],
             rows: vec![],
             affected_rows: result.affected_rows(),
-            execution_time_ms: start.elapsed().as_millis(),
+            execution_time_ms: elapsed_ms.saturating_sub(previous_elapsed_ms),
             truncated: false,
             session_id: None,
             has_more: false,
@@ -5248,15 +5260,18 @@ pub(crate) async fn execute_non_result_batch_on_conn(
             messages,
         };
 
-        // mysql_async can expose a failed next statement only when the current
-        // result set is consumed. Do not mark the current metadata slot as a
-        // successful statement until that consumption succeeds.
+        // query_iter/next_set only expose this metadata after the server has
+        // returned the current statement's OK packet. Report it before collect,
+        // because collect also waits for the next statement's result.
+        on_result(statement_index, &current_result);
+        previous_elapsed_ms = elapsed_ms;
+        results.push(current_result);
+        warning_counts.push(warnings);
+
         if let Err(next_error) = result.collect::<mysql_async::Row>().await {
             error = Some(next_error.to_string());
             break;
         }
-        results.push(current_result);
-        warning_counts.push(warnings);
     }
 
     if let Err(drop_error) = result.drop_result().await {

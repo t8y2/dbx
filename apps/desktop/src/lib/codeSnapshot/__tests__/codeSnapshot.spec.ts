@@ -32,6 +32,9 @@ describe("renderCodeSnapshotHtml", () => {
     expect(html).toContain('class="dbx-code-snapshot"');
     expect(html).toContain('data-snapshot-appearance="dark"');
     expect(html).toContain('class="dbx-code-snapshot__pre dbx-code-snapshot__pre--numbered"');
+    expect(html).toContain(".dbx-code-snapshot *");
+    expect(html).toContain("border: 0");
+    expect(html).toContain("outline: 0");
   });
 
   it("renders macOS traffic lights and an optional title by default", async () => {
@@ -93,23 +96,70 @@ describe("renderCodeSnapshotHtml", () => {
     toPng.mockResolvedValue("data:image/png;base64,test");
     vi.stubGlobal("window", { devicePixelRatio: 3 });
     try {
-      await snapshotElementToPng({ offsetWidth: 320, offsetHeight: 160 } as HTMLElement);
+      await snapshotElementToPng({ offsetWidth: 320, offsetHeight: 160, scrollWidth: 640, scrollHeight: 240 } as HTMLElement);
 
       expect(toPng).toHaveBeenLastCalledWith(
         expect.anything(),
         expect.objectContaining({
-          width: 320,
-          height: 160,
-          pixelRatio: 2,
+          width: 640,
+          height: 240,
+          scale: 2,
+          style: {
+            width: "640px",
+            height: "240px",
+          },
         }),
       );
 
       vi.stubGlobal("window", { devicePixelRatio: 0 });
-      await snapshotElementToPng({ offsetWidth: 320, offsetHeight: 160 } as HTMLElement);
-      expect(toPng).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ pixelRatio: 1 }));
+      await snapshotElementToPng({ offsetWidth: 320, offsetHeight: 160, scrollWidth: 320, scrollHeight: 160 } as HTMLElement);
+      expect(toPng).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ scale: 1 }));
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+
+  it("reduces the export scale when a wide snapshot reaches the canvas edge limit", async () => {
+    toPng.mockResolvedValue("data:image/png;base64,test");
+    vi.stubGlobal("window", { devicePixelRatio: 2 });
+    try {
+      await snapshotElementToPng({ offsetWidth: 10_000, offsetHeight: 100, scrollWidth: 10_000, scrollHeight: 100 } as HTMLElement);
+
+      expect(toPng).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ scale: 16_384 / 10_000 }));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("reduces the export scale when a tall snapshot reaches the canvas edge limit", async () => {
+    toPng.mockResolvedValue("data:image/png;base64,test");
+    vi.stubGlobal("window", { devicePixelRatio: 2 });
+    try {
+      await snapshotElementToPng({ offsetWidth: 100, offsetHeight: 10_000, scrollWidth: 100, scrollHeight: 10_000 } as HTMLElement);
+
+      expect(toPng).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ scale: 16_384 / 10_000 }));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("reduces the export scale when a dense snapshot reaches the total pixel limit", async () => {
+    toPng.mockResolvedValue("data:image/png;base64,test");
+    vi.stubGlobal("window", { devicePixelRatio: 2 });
+    try {
+      await snapshotElementToPng({ offsetWidth: 6_000, offsetHeight: 6_000, scrollWidth: 6_000, scrollHeight: 6_000 } as HTMLElement);
+
+      expect(toPng).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ scale: Math.sqrt((64 * 1024 * 1024) / (6_000 * 6_000)) }));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("rejects snapshots that exceed the safe rendering budget at 1x", async () => {
+    toPng.mockClear();
+
+    await expect(snapshotElementToPng({ offsetWidth: 20_000, offsetHeight: 100, scrollWidth: 20_000, scrollHeight: 100 } as HTMLElement)).rejects.toThrow("Snapshot is too large to export safely (20000 × 100px)");
+    expect(toPng).not.toHaveBeenCalled();
   });
 
   it("propagates a failed native save instead of reporting a browser download", async () => {

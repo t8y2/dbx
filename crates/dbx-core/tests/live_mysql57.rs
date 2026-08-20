@@ -1,11 +1,14 @@
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use dbx_core::connection::AppState;
 use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
 use dbx_core::query::{
-    execute_multi_core, execute_multi_core_with_options_for_client_typed, execute_sql_statement, QueryExecutionOptions,
+    execute_multi_core, execute_multi_core_with_options_for_client_and_progress,
+    execute_multi_core_with_options_for_client_typed, execute_sql_statement, ExecuteMultiProgressCallback,
+    QueryExecutionOptions,
 };
 use dbx_core::query_result_export::{export_query_result_core, ExportStatus, QueryResultExportRequest};
 use dbx_core::sql::{split_sql_statements_for_database, SqlFileRequest};
@@ -862,6 +865,162 @@ async fn live_mysql_multi_statement_stops_after_first_error() {
     assert_eq!(results[1].columns, vec!["Error"]);
     assert_eq!(rows.columns, vec!["id", "label"]);
     assert_eq!(rows.rows, vec![vec![serde_json::json!("1"), serde_json::json!("first")]]);
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_SQL_FILE_MYSQL_* env vars pointing at a writable MySQL connection"]
+async fn live_mysql_pipelined_dml_reports_each_statement_before_the_next_finishes() {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let connection_id = format!("live-mysql-progress-{suffix}");
+    let config = live_mysql_sql_file_config(&connection_id);
+    let database = std::env::var("DBX_LIVE_SQL_FILE_MYSQL_DATABASE").expect("DBX_LIVE_SQL_FILE_MYSQL_DATABASE");
+    let (state, db_path) = app_state_with_config(config).await;
+    let table_name = format!("dbx_batch_progress_{}", &suffix[..8]);
+
+    execute_sql_statement(
+        &state,
+        &connection_id,
+        &database,
+        &format!("CREATE TABLE `{table_name}` (id INT PRIMARY KEY)"),
+        None,
+        None,
+    )
+    .await
+    .expect("create live progress table");
+    execute_sql_statement(
+        &state,
+        &connection_id,
+        &database,
+        &format!("INSERT INTO `{table_name}` VALUES (1)"),
+        None,
+        None,
+    )
+    .await
+    .expect("seed live progress table");
+
+    let started = Instant::now();
+    let progress_events = Arc::new(Mutex::new(Vec::new()));
+    let progress: ExecuteMultiProgressCallback = {
+        let progress_events = Arc::clone(&progress_events);
+        Arc::new(move |event| progress_events.lock().unwrap().push((started.elapsed(), event)))
+    };
+    let sql = format!("DELETE FROM `{table_name}`;\nINSERT INTO `{table_name}` SELECT 2 WHERE SLEEP(3) = 0;");
+    let result = execute_multi_core_with_options_for_client_and_progress(
+        &state,
+        &connection_id,
+        &database,
+        &sql,
+        None,
+        None,
+        QueryExecutionOptions::default(),
+        Some(progress),
+    )
+    .await;
+
+    let _ = execute_sql_statement(
+        &state,
+        &connection_id,
+        &database,
+        &format!("DROP TABLE IF EXISTS `{table_name}`"),
+        None,
+        None,
+    )
+    .await;
+    let _ = std::fs::remove_file(db_path);
+
+    let results = result.expect("pipelined DML should succeed");
+    let events = progress_events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].1.statement_index, 0);
+    assert!(events[0].0 < Duration::from_secs(2), "DELETE progress arrived after the slow INSERT");
+    assert_eq!(events[1].1.statement_index, 1);
+    assert!(events[1].0 >= Duration::from_millis(2_500));
+    assert!(results[0].result.execution_time_ms < 2_000);
+    assert!(results[1].result.execution_time_ms >= 2_500);
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_SQL_FILE_MYSQL_* env vars pointing at a writable MySQL connection"]
+async fn live_mysql_pipelined_dml_keeps_completed_results_before_error() {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let connection_id = format!("live-mysql-progress-error-{suffix}");
+    let config = live_mysql_sql_file_config(&connection_id);
+    let database = std::env::var("DBX_LIVE_SQL_FILE_MYSQL_DATABASE").expect("DBX_LIVE_SQL_FILE_MYSQL_DATABASE");
+    let (state, db_path) = app_state_with_config(config).await;
+    let table_name = format!("dbx_batch_error_{}", &suffix[..8]);
+
+    execute_sql_statement(
+        &state,
+        &connection_id,
+        &database,
+        &format!("CREATE TABLE `{table_name}` (id INT PRIMARY KEY)"),
+        None,
+        None,
+    )
+    .await
+    .expect("create live batch error table");
+
+    let progress_events = Arc::new(Mutex::new(Vec::new()));
+    let progress: ExecuteMultiProgressCallback = {
+        let progress_events = Arc::clone(&progress_events);
+        Arc::new(move |event| progress_events.lock().unwrap().push(event))
+    };
+    let sql = format!(
+        "INSERT INTO `{table_name}` VALUES (1);\n\
+         INSERT INTO `{table_name}` VALUES (1);\n\
+         INSERT INTO `{table_name}` VALUES (2);"
+    );
+    let result = execute_multi_core_with_options_for_client_and_progress(
+        &state,
+        &connection_id,
+        &database,
+        &sql,
+        None,
+        None,
+        QueryExecutionOptions::default(),
+        Some(progress),
+    )
+    .await;
+    let rows = execute_sql_statement(
+        &state,
+        &connection_id,
+        &database,
+        &format!("SELECT id FROM `{table_name}` ORDER BY id"),
+        None,
+        None,
+    )
+    .await;
+
+    let _ = execute_sql_statement(
+        &state,
+        &connection_id,
+        &database,
+        &format!("DROP TABLE IF EXISTS `{table_name}`"),
+        None,
+        None,
+    )
+    .await;
+    let _ = std::fs::remove_file(db_path);
+
+    let results = result.expect("pipelined DML should return statement errors as results");
+    assert_eq!(
+        results.len(),
+        2,
+        "results: {:?}",
+        results
+            .iter()
+            .map(|result| (result.statement_index, result.execution_error, result.result.affected_rows))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(results[0].statement_index, Some(0));
+    assert!(!results[0].execution_error);
+    assert_eq!(results[1].statement_index, Some(1));
+    assert!(results[1].execution_error);
+    assert_eq!(
+        progress_events.lock().unwrap().iter().map(|event| (event.statement_index, event.success)).collect::<Vec<_>>(),
+        vec![(0, true), (1, false)]
+    );
+    assert_eq!(rows.expect("read rows after batch error").rows, vec![vec![serde_json::json!("1")]]);
 }
 
 #[tokio::test]

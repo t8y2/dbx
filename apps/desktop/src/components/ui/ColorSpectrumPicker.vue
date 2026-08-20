@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { hexToHsv, hsvToHex } from "@/lib/common/color";
+import { floatingPanelPlacement } from "@/lib/common/floatingPanelPlacement";
 
 interface Props {
   modelValue: string;
@@ -17,6 +18,8 @@ const emit = defineEmits<{ (e: "update:modelValue", value: string): void }>();
 const { t } = useI18n();
 
 const open = ref(false);
+// 面板弹出方向：下方空间不足（会被弹窗 overflow-hidden 裁剪）时改为向上弹出
+const placement = ref<"top" | "bottom">("bottom");
 const rootRef = ref<HTMLElement | null>(null);
 const spectrumRef = ref<HTMLElement | null>(null);
 const hueRef = ref<HTMLElement | null>(null);
@@ -120,10 +123,40 @@ function onDocumentPointerDown(event: PointerEvent) {
   if (!rootRef.value.contains(event.target as Node)) open.value = false;
 }
 
+// 面板整体高度的估算值（内边距 16 + 渐变区 132 + 色相条 20 + 读数行 32 + 按钮行 36 + 边框 2 = 238，向上取整留余量）
+const PANEL_HEIGHT_ESTIMATE = 240;
+
+// 向上查找会裁剪面板的祖先容器（例如弹窗的 overflow-hidden 内容区）
+function findClippingAncestor(element: HTMLElement | null): HTMLElement | null {
+  let node = element?.parentElement ?? null;
+  while (node) {
+    const { overflow, overflowY } = getComputedStyle(node);
+    if (/(auto|hidden|scroll)/.test(`${overflow} ${overflowY}`)) return node;
+    node = node.parentElement;
+  }
+  return null;
+}
+
+// 打开前双向比较上下方剩余空间，选出不会被裁剪的弹出方向（具体规则见 floatingPanelPlacement 的单元测试）
+function updatePlacement() {
+  const trigger = rootRef.value;
+  if (!trigger) return;
+  const rect = trigger.getBoundingClientRect();
+  const clippingRect = findClippingAncestor(trigger)?.getBoundingClientRect();
+  placement.value = floatingPanelPlacement({
+    triggerTop: rect.top,
+    triggerBottom: rect.bottom,
+    panelHeight: PANEL_HEIGHT_ESTIMATE,
+    boundaryTop: clippingRect?.top ?? 0,
+    boundaryBottom: clippingRect?.bottom ?? window.innerHeight,
+  });
+}
+
 watch(open, (isOpen) => {
   if (typeof document === "undefined") return;
   if (isOpen) {
     syncFromModel();
+    updatePlacement();
     document.addEventListener("pointerdown", onDocumentPointerDown, true);
   } else {
     clearPreview();
@@ -140,9 +173,9 @@ onBeforeUnmount(() => {
   <div ref="rootRef" class="relative">
     <button type="button" class="h-6 w-6 shrink-0 rounded border border-border/60 disabled:cursor-not-allowed disabled:opacity-60" :style="{ backgroundColor: props.modelValue }" :disabled="props.disabled" :aria-label="props.label" @click="open = !open" />
 
-    <div v-if="open" class="absolute right-0 top-full z-50 mt-1 w-[224px] rounded-lg border bg-popover p-2 shadow-lg" @pointerleave="clearPreview">
+    <div v-if="open" class="absolute right-0 z-50 w-56 rounded-lg border bg-popover p-2 shadow-lg" :class="placement === 'top' ? 'bottom-full mb-1' : 'top-full mt-1'" @pointerleave="clearPreview">
       <!-- Saturation / value gradient for the active hue -->
-      <div ref="spectrumRef" class="relative h-[132px] w-full cursor-crosshair rounded" :style="{ backgroundColor: `hsl(${hue}, 100%, 50%)` }" @pointermove="onSpectrumMove" @pointerdown.prevent="onSpectrumPick" @pointerleave="clearPreview">
+      <div ref="spectrumRef" class="relative h-33 w-full cursor-crosshair rounded" :style="{ backgroundColor: `hsl(${hue}, 100%, 50%)` }" @pointermove="onSpectrumMove" @pointerdown.prevent="onSpectrumPick" @pointerleave="clearPreview">
         <div class="pointer-events-none absolute inset-0 rounded" style="background: linear-gradient(to right, #fff, rgba(255, 255, 255, 0))" />
         <div class="pointer-events-none absolute inset-0 rounded" style="background: linear-gradient(to top, #000, rgba(0, 0, 0, 0))" />
         <div class="pointer-events-none absolute h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white shadow" :style="{ left: `${saturation * 100}%`, top: `${(1 - value) * 100}%` }" />

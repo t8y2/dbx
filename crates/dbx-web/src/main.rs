@@ -457,6 +457,7 @@ async fn main() {
         .route("/tab-runtime-cache/owner", delete(routes::tab_runtime_cache::delete_tab_runtime_cache_owner))
         // Query
         .route("/query/execute", post(routes::query::execute_query))
+        .route("/query/execute-conditional-update", post(routes::query::execute_conditional_update))
         .route("/query/execute-multi", post(routes::query::execute_multi))
         .route("/query/execute-batch", post(routes::query::execute_batch))
         .route("/query/execute-script", post(routes::query::execute_script))
@@ -541,6 +542,10 @@ async fn main() {
             post(routes::query::build_data_grid_column_distinct_values_sql),
         )
         .route("/query/build-data-grid-count-sql", post(routes::query::build_data_grid_count_sql))
+        .route(
+            "/query/build-data-grid-conditional-update-sql",
+            post(routes::query::build_data_grid_conditional_update_sql),
+        )
         .route("/query/build-hive-table-properties-sql", post(routes::query::build_hive_table_properties_sql))
         .route("/query/build-export-insert-statements", post(routes::query::build_export_insert_statements))
         .route("/query/build-export-sql-insert", post(routes::query::build_export_sql_insert))
@@ -550,6 +555,7 @@ async fn main() {
         .route("/data-compare/prepare-missing-target", post(routes::data_compare::prepare_data_compare_missing_target))
         .route("/data-compare/build-sync-plan", post(routes::data_compare::build_data_compare_sync_plan))
         .route("/query/cancel", post(routes::query::cancel_query))
+        .route("/query/cancel-conditional-update", post(routes::query::cancel_conditional_update))
         .route("/query/close-session", post(routes::query::close_query_session))
         .route("/query/close-client-session", post(routes::query::close_client_connection_session))
         .route("/export/query-result-json", post(routes::text_export::export_query_result_json))

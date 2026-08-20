@@ -277,6 +277,19 @@ pub struct DataGridCountSqlOptions {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DataGridConditionalUpdateSqlOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_type: Option<DatabaseType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identifier_quote: Option<String>,
+    pub table_meta: DataGridTableMeta,
+    pub column_name: String,
+    pub value: Value,
+    pub where_input: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HiveTablePropertiesSqlOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
@@ -889,6 +902,50 @@ pub fn build_data_grid_count_sql(options: DataGridCountSqlOptions) -> String {
     let hint = options.count_hint.as_deref().unwrap_or("");
     let hint_part = if hint.is_empty() { String::new() } else { format!(" {hint}") };
     format!("SELECT{hint_part} COUNT(*) AS cnt FROM {table}{where_clause}")
+}
+
+pub fn build_data_grid_conditional_update_sql(options: DataGridConditionalUpdateSqlOptions) -> Option<String> {
+    if options.database_type != Some(DatabaseType::Mysql) {
+        return None;
+    }
+    let predicate = crate::sql_dialect::normalize_where_input(Some(&options.where_input));
+    if predicate.is_empty() {
+        return None;
+    }
+
+    let columns = options.table_meta.columns.as_deref()?;
+    let column_info = column_info_for(columns, &options.column_name)?;
+    let primary_key_set: Vec<String> =
+        options.table_meta.primary_keys.iter().map(|primary_key| normalize_column_name(primary_key)).collect();
+    if primary_key_set.contains(&normalize_column_name(&column_info.name))
+        || column_info.is_primary_key
+        || is_grid_update_omitted_column(
+            options.database_type,
+            Some(column_info),
+            Some(&column_info.name),
+            &primary_key_set,
+        )
+    {
+        return None;
+    }
+
+    let table = data_grid_qualified_table_name(
+        options.database_type,
+        options.table_meta.catalog.as_deref(),
+        options.table_meta.schema.as_deref(),
+        options.table_meta.database.as_deref(),
+        &options.table_meta.table_name,
+        options.identifier_quote.as_deref(),
+    );
+    let sets = format!(
+        "{} = {}",
+        data_grid_identifier(options.database_type, &column_info.name, options.identifier_quote.as_deref()),
+        format_grid_save_sql_literal(&options.value, options.database_type, Some(column_info))
+    );
+    Some(data_grid_statement(
+        options.database_type,
+        data_grid_update_sql(options.database_type, &table, &sets, &format!("({predicate})")),
+    ))
 }
 
 pub fn build_hive_table_properties_sql(options: HiveTablePropertiesSqlOptions) -> String {
@@ -3227,6 +3284,45 @@ mod tests {
             }),
             "SELECT COUNT(*) AS cnt FROM \"SS\".\"SS_User\" WHERE (SSUSR_IsActive = 'Y')"
         );
+    }
+
+    #[test]
+    fn mysql_conditional_update_uses_typed_value_and_requires_a_writable_column_and_where() {
+        let options = DataGridConditionalUpdateSqlOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("app".to_string()),
+                table_name: "people".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "bigint", false, None), column("status", "varchar(32)", true, None)]),
+            },
+            column_name: "status".to_string(),
+            value: json!("O'Reilly"),
+            where_input: "WHERE tenant_id = 7;".to_string(),
+        };
+
+        assert_eq!(
+            build_data_grid_conditional_update_sql(options.clone()),
+            Some("UPDATE `app`.`people` SET `status` = 'O''Reilly' WHERE (tenant_id = 7);".to_string())
+        );
+
+        let mut condition_only = options.clone();
+        condition_only.where_input = "tenant_id = 7".to_string();
+        assert_eq!(
+            build_data_grid_conditional_update_sql(condition_only),
+            Some("UPDATE `app`.`people` SET `status` = 'O''Reilly' WHERE (tenant_id = 7);".to_string())
+        );
+
+        let mut empty_where = options.clone();
+        empty_where.where_input = " ".to_string();
+        assert_eq!(build_data_grid_conditional_update_sql(empty_where), None);
+
+        let mut primary_key = options;
+        primary_key.column_name = "id".to_string();
+        assert_eq!(build_data_grid_conditional_update_sql(primary_key), None);
     }
 
     #[test]

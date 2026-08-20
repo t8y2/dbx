@@ -1,6 +1,7 @@
 import type { GridCellValue } from "@/lib/dataGrid/dataGridSql";
 import type { DatabaseType, ColumnInfo } from "@/types/database";
 import { isNumericColumnType } from "@/lib/dataGrid/dataGridColumnType";
+import { isBooleanColumnType } from "@/lib/dataGrid/dataGridBooleanColumn";
 
 export interface CoerceDataGridCellValueOptions {
   value: string;
@@ -22,23 +23,38 @@ export function coerceDataGridCellValue(options: CoerceDataGridCellValueOptions)
   // Number() return NaN and the literal fail to convert on the server. Strip
   // only unambiguous groupings and keep the normalized text for the precision
   // checks below, so exact values survive as text.
-  const numericText = normalizeGroupedNumberText(value, options.columnInfo);
-  if (typeof oldValue === "number") {
+  const useSampledValueType = normalizeDataType(options.columnInfo?.data_type) === "";
+  const numericInput = isNumericColumnType(options.columnInfo?.data_type) || (useSampledValueType && typeof oldValue === "number");
+  const numericText = normalizeGroupedNumberText(value, options.columnInfo, oldValue);
+  if (isBooleanInputColumn(options) || (useSampledValueType && typeof oldValue === "boolean")) {
+    const booleanValue = parseBooleanInput(numericText);
+    if (booleanValue !== undefined) return booleanValue;
+  }
+  if (numericInput) {
     const num = Number(numericText);
     if (!Number.isNaN(num)) {
       if (shouldPreserveNumericText(options, num, numericText)) {
         // Keep precision-sensitive numeric edits as text; JS Number rounds 64-bit integers.
         const text = numericText.trim();
-        if (text === String(oldValue)) return oldValue;
+        if (oldValue !== undefined && text === String(oldValue)) return oldValue;
         return text;
       }
       return num;
     }
   }
-  if (typeof oldValue === "boolean") {
-    return numericText === "true" || numericText === "1";
-  }
   return normalizeSmartQuotedJsonInput(numericText);
+}
+
+function isBooleanInputColumn(options: CoerceDataGridCellValueOptions): boolean {
+  if (isBooleanColumnType(options.columnInfo?.data_type, options.databaseType)) return true;
+  return options.databaseType === "mysql" && options.columnInfo?.data_type.trim().toLowerCase() === "tinyint(1)";
+}
+
+function parseBooleanInput(value: string): boolean | undefined {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "true" || normalized === "1") return true;
+  if (normalized === "false" || normalized === "0") return false;
+  return undefined;
 }
 
 export function dataGridCellEditorText(options: { value: GridCellValue | undefined; databaseType: DatabaseType | undefined; columnInfo: Pick<ColumnInfo, "data_type"> | undefined }): string {
@@ -106,8 +122,9 @@ function shouldPreserveNumericText(options: CoerceDataGridCellValueOptions, pars
   return shouldPreserveNumericTextForType(options.columnInfo?.data_type, text, parsedNumber);
 }
 
-function normalizeGroupedNumberText(value: string, columnInfo: Pick<ColumnInfo, "data_type"> | undefined): string {
-  if (!isNumericColumnType(columnInfo?.data_type)) return value;
+function normalizeGroupedNumberText(value: string, columnInfo: Pick<ColumnInfo, "data_type"> | undefined, oldValue: GridCellValue | undefined): string {
+  const useSampledNumberType = normalizeDataType(columnInfo?.data_type) === "" && typeof oldValue === "number";
+  if (!isNumericColumnType(columnInfo?.data_type) && !useSampledNumberType) return value;
   return stripUnambiguousThousandSeparators(value);
 }
 

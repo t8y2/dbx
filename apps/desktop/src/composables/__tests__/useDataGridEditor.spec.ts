@@ -7,6 +7,8 @@ const mocks = vi.hoisted(() => ({
   getConfig: vi.fn(),
   prepareDataGridSave: vi.fn(),
   executeBatch: vi.fn(),
+  executeConditionalUpdate: vi.fn(),
+  cancelConditionalUpdate: vi.fn(),
   executeInTransaction: vi.fn(),
   addHistory: vi.fn(),
 }));
@@ -14,6 +16,8 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/lib/backend/api", () => ({
   prepareDataGridSave: mocks.prepareDataGridSave,
   executeBatch: mocks.executeBatch,
+  executeConditionalUpdate: mocks.executeConditionalUpdate,
+  cancelConditionalUpdate: mocks.cancelConditionalUpdate,
   executeInTransaction: mocks.executeInTransaction,
 }));
 vi.mock("@/stores/connectionStore", () => ({
@@ -366,6 +370,8 @@ describe("useDataGridEditor saveChanges reload", () => {
   beforeEach(() => {
     mocks.prepareDataGridSave.mockReset();
     mocks.executeBatch.mockReset();
+    mocks.executeConditionalUpdate.mockReset();
+    mocks.cancelConditionalUpdate.mockReset();
     mocks.executeInTransaction.mockReset();
     mocks.addHistory.mockReset();
     mocks.getConfig.mockReset();
@@ -426,6 +432,132 @@ describe("useDataGridEditor saveChanges reload", () => {
 
     expect(mocks.executeBatch).toHaveBeenCalledTimes(1);
     expect(emit).toHaveBeenCalledWith("reload", undefined, "", undefined, undefined, 100, 0);
+  });
+
+  it("executes a conditional update immediately, records affected rows, and reloads", async () => {
+    mocks.getConfig.mockReturnValue({ id: "connection-1", name: "Local MySQL", db_type: "mysql" });
+    mocks.executeConditionalUpdate.mockResolvedValue({ affected_rows: 7 });
+    const prepareFullReload = vi.fn();
+    const { editor, emit } = createSaveTestEditor({ prepareFullReload });
+    const statement = "UPDATE `app`.`orders_test` SET `status` = 'shipped' WHERE (`status` = 'pending');";
+
+    await expect(editor.executeConditionalUpdate(statement)).resolves.toEqual({ affectedRows: 7 });
+
+    expect(mocks.executeConditionalUpdate).toHaveBeenCalledWith("connection-1", "app", statement, undefined, expect.any(String));
+    expect(mocks.addHistory).toHaveBeenCalledWith(
+      expect.objectContaining({
+        connection_id: "connection-1",
+        connection_name: "Local MySQL",
+        sql: statement,
+        success: true,
+        operation: "UPDATE",
+        affected_rows: 7,
+      }),
+    );
+    expect(JSON.parse(mocks.addHistory.mock.calls[0][0].details_json)).toMatchObject({ conditional_update: true, statement_count: 1 });
+    expect(prepareFullReload).toHaveBeenCalledTimes(1);
+    expect(emit).toHaveBeenCalledWith("reload", undefined, "", undefined, undefined, 100, 0);
+  });
+
+  it("unlocks, records, and reloads after a terminal conditional update failure", async () => {
+    const sqlError = Object.assign(new Error("Duplicate entry '1' for key 'PRIMARY'"), {
+      backendError: {
+        version: 1,
+        code: "DBX-JDBC-4001",
+        messageKey: "backendErrors.jdbc.sqlFailed",
+        messageParams: { stage: "execute" },
+        source: "jdbc_agent",
+        operationOutcome: "unknown",
+        diagnostics: { category: "sql", stage: "execute" },
+      },
+    });
+    mocks.executeConditionalUpdate.mockRejectedValue(sqlError);
+    const prepareFullReload = vi.fn();
+    const { editor, emit } = createSaveTestEditor({ prepareFullReload });
+    const statement = "UPDATE `app`.`orders_test` SET `id` = 1 WHERE (`status` = 'pending');";
+
+    await expect(editor.executeConditionalUpdate(statement)).resolves.toBeNull();
+
+    expect(editor.isConditionalUpdateActive.value).toBe(false);
+    expect(editor.saveError.value).toBe("Duplicate entry '1' for key 'PRIMARY'");
+    expect(mocks.cancelConditionalUpdate).not.toHaveBeenCalled();
+    expect(mocks.addHistory).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sql: statement,
+        success: false,
+        error: "Duplicate entry '1' for key 'PRIMARY'",
+        affected_rows: undefined,
+      }),
+    );
+    expect(JSON.parse(mocks.addHistory.mock.calls[0][0].details_json)).toMatchObject({ conditional_update: true, execution_outcome: "failed" });
+    expect(prepareFullReload).toHaveBeenCalledTimes(1);
+    expect(emit).toHaveBeenCalledWith("reload", undefined, "", undefined, undefined, 100, 0);
+  });
+
+  it("refuses a conditional update while row edits are pending", async () => {
+    const { editor, emit } = createSaveTestEditor();
+    editor.dirtyRows.value = new Map([[0, new Map([[1, "shipped"]])]]);
+
+    await expect(editor.executeConditionalUpdate("UPDATE orders_test SET status = 'shipped' WHERE id > 0;")).resolves.toBeNull();
+
+    expect(mocks.executeConditionalUpdate).not.toHaveBeenCalled();
+    expect(mocks.addHistory).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalled();
+    expect(editor.saveError.value).not.toBe("");
+  });
+
+  it("keeps a timed-out conditional update cancellable without recording a failed update", async () => {
+    mocks.executeConditionalUpdate.mockRejectedValue(new Error("Query timed out after 30 seconds"));
+    mocks.cancelConditionalUpdate.mockResolvedValue({ requested: true, terminal: true });
+    const { editor, emit } = createSaveTestEditor();
+
+    await expect(editor.executeConditionalUpdate("UPDATE orders_test SET status = 'shipped' WHERE id > 0;")).resolves.toBeNull();
+
+    expect(editor.isConditionalUpdateActive.value).toBe(true);
+    expect(mocks.addHistory).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalled();
+    await expect(editor.cancelConditionalUpdate()).resolves.toBe(true);
+    expect(editor.isConditionalUpdateActive.value).toBe(false);
+    expect(mocks.cancelConditionalUpdate).toHaveBeenCalledWith(expect.any(String));
+    expect(emit).toHaveBeenCalledWith("reload", undefined, "", undefined, undefined, 100, 0);
+  });
+
+  it("keeps a timed-out conditional update locked until cancellation reports a terminal state", async () => {
+    vi.useFakeTimers();
+    mocks.executeConditionalUpdate.mockRejectedValue(new Error("Query timed out after 30 seconds"));
+    mocks.cancelConditionalUpdate.mockResolvedValue({ requested: true, terminal: false });
+    const { editor, emit } = createSaveTestEditor();
+
+    try {
+      await expect(editor.executeConditionalUpdate("UPDATE orders_test SET status = 'shipped' WHERE id > 0;")).resolves.toBeNull();
+      await expect(editor.cancelConditionalUpdate()).resolves.toBe(false);
+
+      expect(editor.isConditionalUpdateActive.value).toBe(true);
+      expect(emit).not.toHaveBeenCalled();
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("reloads a timed-out conditional update after a later terminal confirmation", async () => {
+    vi.useFakeTimers();
+    mocks.executeConditionalUpdate.mockRejectedValue(new Error("Query timed out after 30 seconds"));
+    mocks.cancelConditionalUpdate.mockResolvedValueOnce({ requested: true, terminal: false }).mockResolvedValueOnce({ requested: false, terminal: true });
+    const { editor, emit } = createSaveTestEditor();
+
+    try {
+      await expect(editor.executeConditionalUpdate("UPDATE orders_test SET status = 'shipped' WHERE id > 0;")).resolves.toBeNull();
+      await expect(editor.cancelConditionalUpdate()).resolves.toBe(false);
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(editor.isConditionalUpdateActive.value).toBe(false);
+      expect(mocks.cancelConditionalUpdate).toHaveBeenCalledTimes(2);
+      expect(emit).toHaveBeenCalledWith("reload", undefined, "", undefined, undefined, 100, 0);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
   });
 
   it("does not reload when there are no pending changes to save", async () => {

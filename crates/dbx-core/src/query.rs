@@ -943,6 +943,9 @@ pub struct QueryExecutionOptions {
     /// Query timeout in seconds. `None` uses the default (30s).
     /// `Some(0)` disables the timeout entirely.
     pub timeout_secs: Option<u64>,
+    /// Keep awaiting the database response after cancellation so callers can
+    /// distinguish an interrupt request from a confirmed terminal state.
+    pub await_cancel_completion: bool,
     pub execution_id: Option<String>,
     /// When `Some(true)`, multiple statements are executed within a single transaction
     /// (BEGIN … COMMIT) instead of auto-commit mode. `None` and `Some(false)` behave
@@ -1558,12 +1561,16 @@ async fn sqlserver_pool_is_current(
     matches!(connections.get(pool_key), Some(PoolKind::SqlServer(current)) if Arc::ptr_eq(current, client))
 }
 
-fn resolve_query_timeout(timeout_secs: Option<u64>) -> Option<Duration> {
+pub fn query_timeout_duration(timeout_secs: Option<u64>) -> Option<Duration> {
     match timeout_secs {
         Some(0) => None,
         Some(n) => Some(Duration::from_secs(n)),
         None => Some(QUERY_TIMEOUT),
     }
+}
+
+fn resolve_query_timeout(timeout_secs: Option<u64>) -> Option<Duration> {
+    query_timeout_duration(timeout_secs)
 }
 
 fn query_pool_database<'a>(database: &'a str, catalog: Option<&str>) -> Option<&'a str> {
@@ -1735,8 +1742,9 @@ async fn do_execute_typed(
                 ),
             )
             .await?;
+            let execution_cancel_token = if options.await_cancel_completion { None } else { cancel_token };
             wait_for_result_opt(
-                cancel_token,
+                execution_cancel_token,
                 query_timeout,
                 db::mysql::execute_query_on_conn_with_limits(
                     &mut conn,

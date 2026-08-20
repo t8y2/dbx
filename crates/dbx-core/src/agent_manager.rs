@@ -636,6 +636,30 @@ impl AgentManager {
         self.install_cancellations.lock().await.get(key).is_some_and(|token| token.is_cancelled())
     }
 
+    /// Remove idle per-driver locks that only the lock table itself references.
+    ///
+    /// `Arc::strong_count == 1` means no `driver_operation_lock` caller holds
+    /// or waits on the lock, so removing it cannot introduce a second lock for
+    /// the same key and break mutual exclusion. This is safe because every
+    /// `Arc` clone handed to a caller is produced while holding this map's lock,
+    /// and `retain` runs under the same lock, keeping the count stable with
+    /// respect to new callers.
+    pub async fn prune_driver_operation_locks(&self) {
+        self.driver_operation_locks
+            .lock()
+            .await
+            .retain(|_, lock| Arc::strong_count(lock) > 1);
+    }
+
+    /// Remove idle per-JRE-key locks that only the lock table itself references.
+    /// Same safety rationale as `prune_driver_operation_locks`.
+    pub async fn prune_jre_install_locks(&self) {
+        self.jre_install_locks
+            .lock()
+            .await
+            .retain(|_, lock| Arc::strong_count(lock) > 1);
+    }
+
     fn migrate_legacy_jre(&self) {
         let legacy = self.base_dir.join("jre");
         let versioned = self.jre_dir(DEFAULT_JRE_KEY);

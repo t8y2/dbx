@@ -818,20 +818,25 @@ async fn lock_or_cancel<'a>(
 
 pub async fn uninstall_agent_driver(am: &AgentManager, db_type: &str) -> Result<(), String> {
     let _installation_guard = am.installation_operation_lock.read().await;
-    let driver_lock = driver_operation_lock(am, db_type).await;
-    let _driver_guard = driver_lock.lock().await;
-    prune_driver_download_cache(am, db_type)?;
-    let jar_path = am.driver_jar_path(db_type);
-    if jar_path.exists() {
-        std::fs::remove_file(&jar_path).map_err(|err| err.to_string())?;
-    }
-    if let Some(driver_dir) = jar_path.parent() {
-        if driver_dir.exists() {
-            std::fs::remove_dir_all(driver_dir).map_err(|err| err.to_string())?;
+    {
+        let driver_lock = driver_operation_lock(am, db_type).await;
+        let _driver_guard = driver_lock.lock().await;
+        prune_driver_download_cache(am, db_type)?;
+        let jar_path = am.driver_jar_path(db_type);
+        if jar_path.exists() {
+            std::fs::remove_file(&jar_path).map_err(|err| err.to_string())?;
         }
+        if let Some(driver_dir) = jar_path.parent() {
+            if driver_dir.exists() {
+                std::fs::remove_dir_all(driver_dir).map_err(|err| err.to_string())?;
+            }
+        }
+        am.mutate_state(|state| state.installed_drivers.remove(db_type))?;
+        am.stop_daemon_by_key(db_type).await;
     }
-    am.mutate_state(|state| state.installed_drivers.remove(db_type))?;
-    am.stop_daemon_by_key(db_type).await;
+    // The lock and its Arc are dropped when the block ends; prunes are therefore
+    // guaranteed not to remove a lock that is still held or awaited.
+    am.prune_driver_operation_locks().await;
     Ok(())
 }
 
@@ -843,26 +848,31 @@ pub async fn uninstall_agent_jre(am: &AgentManager, jre_key: &str) -> Result<(),
     // Keep the dependency check and removal atomic with respect to driver
     // installs/uninstalls that may add or remove a dependency on this JRE.
     let _installation_guard = am.installation_operation_lock.write().await;
-    let jre_lock = jre_operation_lock(am, jre_key).await;
-    let _jre_guard = jre_lock.lock().await;
-    let local_state = am.load_state();
-    let dependents: Vec<&str> = local_state
-        .installed_drivers
-        .keys()
-        .filter(|db_type| am.installed_driver_jre_dependency(&local_state, db_type) == Some(jre_key))
-        .map(|k| k.as_str())
-        .collect();
-    if !dependents.is_empty() {
-        return Err(format!("JRE {jre_key} is in use by drivers: {}. Uninstall them first.", dependents.join(", ")));
+    {
+        let jre_lock = jre_operation_lock(am, jre_key).await;
+        let _jre_guard = jre_lock.lock().await;
+        let local_state = am.load_state();
+        let dependents: Vec<&str> = local_state
+            .installed_drivers
+            .keys()
+            .filter(|db_type| am.installed_driver_jre_dependency(&local_state, db_type) == Some(jre_key))
+            .map(|k| k.as_str())
+            .collect();
+        if !dependents.is_empty() {
+            return Err(format!("JRE {jre_key} is in use by drivers: {}. Uninstall them first.", dependents.join(", ")));
+        }
+        // Stop daemons first so any java.exe holding the JRE files exits before
+        // we try to remove the directory (Windows ERROR_ACCESS_DENIED otherwise).
+        am.stop_daemons().await;
+        let jre_dir = am.jre_dir(jre_key);
+        if let Err(err) = remove_jre_dir_with_retry(&jre_dir) {
+            return Err(format_jre_dir_remove_error(&jre_dir, &err));
+        }
+        am.mutate_state(|state| state.jre_versions.remove(jre_key))?;
     }
-    // Stop daemons first so any java.exe holding the JRE files exits before
-    // we try to remove the directory (Windows ERROR_ACCESS_DENIED otherwise).
-    am.stop_daemons().await;
-    let jre_dir = am.jre_dir(jre_key);
-    if let Err(err) = remove_jre_dir_with_retry(&jre_dir) {
-        return Err(format_jre_dir_remove_error(&jre_dir, &err));
-    }
-    am.mutate_state(|state| state.jre_versions.remove(jre_key))?;
+    // The lock and its Arc are dropped when the block ends; prunes are therefore
+    // guaranteed not to remove a lock that is still held or awaited.
+    am.prune_jre_install_locks().await;
     Ok(())
 }
 

@@ -2820,7 +2820,7 @@ function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   const useBatchActions = isSelectedBatchTableContext(item);
   const moreActions: ContextMenuItem[] = [];
   if (supportsVacuumTable.value) {
-    moreActions.push({ label: t("contextMenu.vacuumTable"), action: () => requestVacuumTable(item), icon: Activity });
+    moreActions.push({ label: t("contextMenu.vacuumTable"), action: () => requestVacuumTable(item), icon: Activity, variant: "destructive" as const });
   }
   if (supportsTruncateTable.value) {
     moreActions.push({

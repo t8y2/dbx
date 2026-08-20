@@ -86,9 +86,7 @@ describe("connectionStore one_time runtime cleanup", () => {
   it("initFromDisk preserves an open one_time connection during a persisted-list reload", async () => {
     installApiMocks();
     const { loadConnections } = await import("@/lib/backend/api");
-    vi.mocked(loadConnections).mockResolvedValue([
-      previewConnection({ id: "saved-1", name: "Saved", one_time: false }),
-    ]);
+    vi.mocked(loadConnections).mockResolvedValue([previewConnection({ id: "saved-1", name: "Saved", one_time: false })]);
     const { useConnectionStore } = await import("@/stores/connectionStore");
     const store = useConnectionStore();
     store.connections = [previewConnection({ id: "deeplink-1", name: "Deeplink", one_time: true })];

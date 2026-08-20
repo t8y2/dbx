@@ -5180,7 +5180,7 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       // Keep menu copy aligned with keyboard copy so frozen multi-selection and single-row fallback stay compatible.
       items.push(...treeTableClipboardMenuItems(node));
       if (supportsVacuum.value) {
-        destructiveActions.push({ label: t("contextMenu.vacuumTable"), action: vacuumTable, icon: Activity });
+        destructiveActions.push({ label: t("contextMenu.vacuumTable"), action: vacuumTable, icon: Activity, variant: "destructive" as const });
       }
       if (supportsMysqlAutoIncrement.value) {
         items.push({ label: t("contextMenu.mysqlAutoIncrement"), action: mysqlAutoIncrement, icon: Gauge });

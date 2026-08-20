@@ -523,6 +523,102 @@ pub struct NewWindowOpener {
 unsafe impl Send for NewWindowOpener {}
 unsafe impl Sync for NewWindowOpener {}
 
+/// Kind of a WebView2 child-process failure, surfaced by the Windows platform
+/// layer for the application to decide recovery.
+///
+/// Mirrors [`COREWEBVIEW2_PROCESS_FAILED_KIND`](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2processfailedeventargs?view=webview2-1.0.2849.39#get_processfailedkind).
+/// The type is defined on every platform (with `Unknown` as the only value on
+/// non-Windows) so recovery policy can be unit-tested anywhere; the runtime
+/// signal only fires on Windows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WebView2ProcessFailedKind {
+  /// The main browser process exited. Microsoft: "All associated WebView2
+  /// controls will be closed" and "the WebView2 controls need to be
+  /// recreated" — recovery requires recreating the webview or restarting the
+  /// application, a plain reload is ineffective.
+  Browser,
+  /// The main frame's renderer process exited. Microsoft documents a reload
+  /// as the recovery path for this kind.
+  Renderer,
+  /// The renderer process stopped responding. The event can be raised
+  /// repeatedly, and the application decides the threshold at which it acts.
+  RendererUnresponsive,
+  /// A subframe renderer process exited. Recovery is per-frame; reloading the
+  /// whole SPA is unnecessary and discards transient state.
+  FrameRenderer,
+  /// The GPU process exited. WebView2 restarts it on its own.
+  Gpu,
+  /// A utility process exited.
+  Utility,
+  /// The sandbox helper process exited.
+  SandboxHelper,
+  /// A PPAPI plugin process exited.
+  PpapiPlugin,
+  /// The PPAPI broker process exited.
+  PpapiBroker,
+  /// Some other/unknown process exited.
+  Unknown,
+}
+
+/// Structured WebView2 process-failure signal forwarded to the
+/// application-level handler registered with
+/// [`set_webview2_process_failed_callback`].
+///
+/// wry only performs detection and signal construction here; deciding and
+/// executing recovery (reload / restart / log-only) is the application's job,
+/// so vendored wry never learns about application state.
+#[derive(Clone, Debug)]
+pub struct WebView2ProcessFailedInfo {
+  /// Which child process failed.
+  pub kind: WebView2ProcessFailedKind,
+  /// Failure reason (v2 event args; e.g. `crashed`, `out_of_memory`),
+  /// when the runtime provided one.
+  pub reason: Option<String>,
+  /// Process exit code, when provided.
+  pub exit_code: Option<i32>,
+  /// Human-readable process description, when provided.
+  pub process_description: Option<String>,
+  /// Number of frames affected by the failed process.
+  pub affected_frames: usize,
+}
+
+/// Application-level handler for WebView2 child-process failures.
+///
+/// Invoked on the thread WebView2 dispatches the `ProcessFailed` event to
+/// (the COM thread the controller was created on, i.e. the UI thread in
+/// practice). The handler must not block; heavy work should be dispatched
+/// through the application's own event loop.
+pub type WebView2ProcessFailedCallback = std::sync::Arc<dyn Fn(&WebView2ProcessFailedInfo) + Send + Sync>;
+
+#[cfg(target_os = "windows")]
+pub(crate) static WEBVIEW2_PROCESS_FAILED_CALLBACK: once_cell::sync::Lazy<
+  std::sync::RwLock<Option<WebView2ProcessFailedCallback>>,
+> = once_cell::sync::Lazy::new(|| std::sync::RwLock::new(None));
+
+/// Registers the application-level WebView2 process-failure callback.
+///
+/// The callback receives every `ProcessFailed` event (browser, renderer, GPU,
+/// subframe, utility, ...) as a structured [`WebView2ProcessFailedInfo`]; the
+/// application decides whether and how to recover. On non-Windows platforms
+/// this is a no-op.
+///
+/// # Windows
+///
+/// This is a process-global registration: every WebView2 control created by
+/// this process reports into the same callback. Applications with more than
+/// one webview should disambiguate inside the callback (e.g. by what is
+/// currently visible); DBX has a single main webview.
+pub fn set_webview2_process_failed_callback(callback: Option<WebView2ProcessFailedCallback>) {
+  #[cfg(target_os = "windows")]
+  {
+    *WEBVIEW2_PROCESS_FAILED_CALLBACK.write().unwrap() = callback;
+  }
+  #[cfg(not(target_os = "windows"))]
+  {
+    let _ = callback;
+  }
+}
+
 /// Window features of a window requested to open.
 #[non_exhaustive]
 #[derive(Debug)]

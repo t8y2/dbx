@@ -43,6 +43,9 @@ func TestLiveIoTDBAgentTreeAndTable(t *testing.T) {
 	if err != nil || len(page.Rows) != 2 || !page.HasMore || page.SessionID == nil {
 		t.Fatalf("tree first page = %#v, %v", page, err)
 	}
+	if page.ColumnTypes[0] != "TIMESTAMP(ms)" || page.Rows[0][0] != "1" {
+		t.Fatalf("tree time column = types %#v row %#v", page.ColumnTypes, page.Rows[0])
+	}
 	lastPage, err := treeServer.fetchQueryPage(*page.SessionID, 2)
 	if err != nil || len(lastPage.Rows) != 1 || lastPage.HasMore || !lastPage.Truncated {
 		t.Fatalf("tree final page = %#v, %v", lastPage, err)
@@ -62,15 +65,15 @@ func TestLiveIoTDBAgentTreeAndTable(t *testing.T) {
 	mustExecuteNonQuery(t, tableServer, "CREATE DATABASE "+quoteTableIdentifier(tableDatabase), "")
 	mustExecuteNonQuery(t, tableServer,
 		"CREATE TABLE "+quoteTableIdentifier(tableDatabase)+"."+quoteTableIdentifier("d1")+
-			" (time TIMESTAMP TIME, device STRING TAG, s1 INT64 FIELD COMMENT 'value') COMMENT 'DBX live test' WITH (TTL='INF')",
+			" (time TIMESTAMP TIME, device STRING TAG, event_time TIMESTAMP FIELD, s1 INT64 FIELD COMMENT 'value') COMMENT 'DBX live test' WITH (TTL='INF')",
 		tableDatabase,
 	)
 	mustExecuteNonQuery(t, tableServer,
-		"INSERT INTO "+quoteTableIdentifier("d1")+"(time,device,s1) VALUES(1,'a',10),(2,'a',20)",
+		"INSERT INTO "+quoteTableIdentifier("d1")+"(time,device,event_time,s1) VALUES(1,'a',1001,10),(2,'a',1002,20)",
 		tableDatabase,
 	)
 	tableColumns, err := tableServer.getColumns(tableDatabase, "d1")
-	if err != nil || len(tableColumns) != 3 || !tableColumns[0].IsPrimaryKey || !tableColumns[1].IsPrimaryKey {
+	if err != nil || len(tableColumns) != 4 || !tableColumns[0].IsPrimaryKey || !tableColumns[1].IsPrimaryKey || tableColumns[2].IsPrimaryKey {
 		t.Fatalf("table getColumns() = %#v, %v", tableColumns, err)
 	}
 	comment, err := tableServer.getTableComment(tableDatabase, "d1")
@@ -78,7 +81,7 @@ func TestLiveIoTDBAgentTreeAndTable(t *testing.T) {
 		t.Fatalf("table comment = %#v, %v", comment, err)
 	}
 	result, err := tableServer.executeQuery(queryOptions{SQL: "SELECT * FROM d1 ORDER BY time", Database: tableDatabase, MaxRows: 10})
-	if err != nil || len(result.Rows) != 2 || result.Rows[0][0] != "1970-01-01T08:00:00.001+08:00" {
+	if err != nil || len(result.Rows) != 2 || result.ColumnTypes[0] != "TIMESTAMP(ms)" || result.ColumnTypes[2] != "TIMESTAMP(ms)" || result.Rows[0][0] != "1" || result.Rows[0][2] != "1001" {
 		t.Fatalf("table query = %#v, %v", result, err)
 	}
 	tableDDL, err := tableServer.getTableDDL(tableDatabase, "d1")

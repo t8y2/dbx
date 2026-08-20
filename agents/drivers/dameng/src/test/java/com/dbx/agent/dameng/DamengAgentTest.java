@@ -40,7 +40,7 @@ class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
 
     @Override
     protected String resultSetSql() {
-        return "CALL SP_SAMPLE()";
+        return "VALUES (1)";
     }
 
     @Test
@@ -60,7 +60,7 @@ class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
     }
 
     @Test
-    void physicalConnectionsEnableDbmsOutputWithoutChangingUserSql() throws Exception {
+    void physicalConnectionsDoNotEnableDbmsOutput() throws Exception {
         List<String> executedSql = new ArrayList<>();
         List<Integer> queryTimeouts = new ArrayList<>();
         List<Integer> networkTimeouts = new ArrayList<>();
@@ -68,77 +68,132 @@ class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
 
         agent.afterPhysicalConnect(null, printMessageConnection(null, executedSql, queryTimeouts, networkTimeouts));
 
-        assertEquals(List.of(5), queryTimeouts);
-        assertEquals(List.of(5_000, 0), networkTimeouts);
-        assertEquals(List.of("BEGIN DBMS_OUTPUT.ENABLE(1000000); END;"), executedSql);
+        assertTrue(queryTimeouts.isEmpty());
+        assertTrue(networkTimeouts.isEmpty());
+        assertTrue(executedSql.isEmpty());
     }
 
     @Test
-    void physicalConnectionsIgnoreUnsupportedOrRestrictedDbmsOutput() {
-        assertDoesNotThrow(() -> new DamengAgent().afterPhysicalConnect(
-            null,
-            failingDbmsOutputConnection(new SQLFeatureNotSupportedException("unsupported", "0A000"))
-        ));
-        assertDoesNotThrow(() -> new DamengAgent().afterPhysicalConnect(
-            null,
-            failingDbmsOutputConnection(new SQLException("permission denied", "42000"))
-        ));
+    void ordinaryQueriesDoNotEnableDbmsOutput() {
+        List<String> executedSql = new ArrayList<>();
+        DamengAgent agent = new DamengAgent();
+        TestSupport.setPrivateConnection(agent, printMessageConnection(null, executedSql));
+
+        agent.executeQuery("SELECT 1 FROM DUAL", null, new ExecuteQueryOptions());
+
+        assertEquals(List.of("SELECT 1 FROM DUAL"), executedSql);
     }
 
     @Test
-    void physicalConnectionsDisableDbmsOutputAfterInitializationTimeout() {
+    void outputStatementsEnableDbmsOutputAfterCommentsWithKeywordBoundaries() {
+        assertLazilyEnablesDbmsOutput("CALL LOG_ONLY_PROCEDURE()");
+        assertLazilyEnablesDbmsOutput(" -- leading comment\nBEGIN NULL; END;");
+        assertLazilyEnablesDbmsOutput("/* leading block */ DECLARE value INT; BEGIN NULL; END;");
+        assertLazilyEnablesDbmsOutput("EXEC LOG_ONLY_PROCEDURE");
+        assertLazilyEnablesDbmsOutput("EXECUTE LOG_ONLY_PROCEDURE");
+
+        assertDoesNotEnableDbmsOutput("CALLBACK()");
+        assertDoesNotEnableDbmsOutput("BEGINNING SELECT 1");
+        assertDoesNotEnableDbmsOutput("DECLARE_VALUE INT");
+        assertDoesNotEnableDbmsOutput("EXECUTOR RUN");
+        assertDoesNotEnableDbmsOutput("EXECUTE_IMMEDIATE 'SELECT 1'");
+        assertDoesNotEnableDbmsOutput("/* CALL hidden in a comment */ SELECT 1");
+    }
+
+    @Test
+    void outputStatementsEnableDbmsOutputOncePerPhysicalConnection() {
+        List<String> firstConnectionSql = new ArrayList<>();
+        List<String> secondConnectionSql = new ArrayList<>();
+        Object firstPhysicalConnection = new Object();
+        Object secondPhysicalConnection = new Object();
+        DamengAgent agent = new DamengAgent();
+
+        TestSupport.setPrivateConnection(
+            agent,
+            printMessageConnection(null, firstConnectionSql, firstPhysicalConnection, null)
+        );
+        agent.executeQuery("CALL FIRST_PROCEDURE()", null, new ExecuteQueryOptions());
+        TestSupport.setPrivateConnection(
+            agent,
+            printMessageConnection(null, firstConnectionSql, firstPhysicalConnection, null)
+        );
+        agent.executeQuery("BEGIN NULL; END;", null, new ExecuteQueryOptions());
+
+        TestSupport.setPrivateConnection(
+            agent,
+            printMessageConnection(null, secondConnectionSql, secondPhysicalConnection, null)
+        );
+        agent.executeQuery("EXEC SECOND_PROCEDURE", null, new ExecuteQueryOptions());
+
+        assertEquals(List.of(
+            "BEGIN DBMS_OUTPUT.ENABLE(1000000); END;",
+            "CALL FIRST_PROCEDURE()",
+            "BEGIN NULL; END;"
+        ), firstConnectionSql);
+        assertEquals(List.of(
+            "BEGIN DBMS_OUTPUT.ENABLE(1000000); END;",
+            "EXEC SECOND_PROCEDURE"
+        ), secondConnectionSql);
+    }
+
+    @Test
+    void unsupportedOrRestrictedDbmsOutputDoesNotBlockUserSql() {
+        assertDbmsOutputFailureFallsBack(new SQLFeatureNotSupportedException("unsupported", "0A000"));
+        assertDbmsOutputFailureFallsBack(new SQLException("permission denied", "42000"));
+    }
+
+    @Test
+    void dbmsOutputTimeoutDisablesFutureAttempts() {
         DamengAgent agent = new DamengAgent();
         SQLException timeout = new SQLException("network communication failed");
         timeout.initCause(new SocketTimeoutException("Read timed out"));
-        List<String> retrySql = new ArrayList<>();
-        List<Integer> networkTimeouts = new ArrayList<>();
+        List<String> firstConnectionSql = new ArrayList<>();
+        List<String> retryConnectionSql = new ArrayList<>();
+        List<Integer> firstNetworkTimeouts = new ArrayList<>();
 
-        assertSame(timeout, assertThrows(
-            SQLException.class,
-            () -> agent.afterPhysicalConnect(
-                null,
-                statementConnection(null, new ArrayList<>(), new ArrayList<>(), networkTimeouts, timeout)
-            )
-        ));
-        assertEquals(List.of(5_000), networkTimeouts);
-        assertDoesNotThrow(() -> agent.afterPhysicalConnect(
+        TestSupport.setPrivateConnection(agent, statementConnection(
             null,
-            printMessageConnection(null, retrySql)
+            firstConnectionSql,
+            new ArrayList<>(),
+            firstNetworkTimeouts,
+            new Object(),
+            timeout
         ));
-        assertTrue(retrySql.isEmpty());
+        RuntimeException error = assertThrows(
+            RuntimeException.class,
+            () -> agent.executeQuery("CALL FIRST_PROCEDURE()", null, new ExecuteQueryOptions())
+        );
+        assertSame(timeout, error.getCause());
+        assertEquals(List.of("BEGIN DBMS_OUTPUT.ENABLE(1000000); END;"), firstConnectionSql);
+        assertEquals(List.of(5_000), firstNetworkTimeouts);
+
+        TestSupport.setPrivateConnection(agent, printMessageConnection(
+            null,
+            retryConnectionSql,
+            new Object(),
+            null
+        ));
+        agent.executeQuery("CALL RETRY_PROCEDURE()", null, new ExecuteQueryOptions());
+        assertEquals(List.of("CALL RETRY_PROCEDURE()"), retryConnectionSql);
     }
 
     @Test
-    void physicalConnectionsPropagateConnectionFailures() {
-        DamengAgent agent = new DamengAgent();
+    void dbmsOutputInitializationPropagatesConnectionFailures() {
         SQLException transientFailure = new SQLTransientConnectionException("connection closed");
         SQLException sqlStateFailure = new SQLException("connection failure", "08006");
         SQLException wrappedFailure = new SQLException("permission denied", "42000");
         wrappedFailure.initCause(new SQLTransientConnectionException("connection closed"));
 
-        assertSame(transientFailure, assertThrows(
-            SQLException.class,
-            () -> agent.afterPhysicalConnect(null, failingDbmsOutputConnection(transientFailure))
-        ));
-        assertSame(sqlStateFailure, assertThrows(
-            SQLException.class,
-            () -> agent.afterPhysicalConnect(null, failingDbmsOutputConnection(sqlStateFailure))
-        ));
-        assertSame(wrappedFailure, assertThrows(
-            SQLException.class,
-            () -> agent.afterPhysicalConnect(null, failingDbmsOutputConnection(wrappedFailure))
-        ));
+        assertDbmsOutputFailurePropagates(transientFailure);
+        assertDbmsOutputFailurePropagates(sqlStateFailure);
+        assertDbmsOutputFailurePropagates(wrappedFailure);
     }
 
     @Test
-    void physicalConnectionsPropagateUnrelatedSetupFailures() {
-        DamengAgent agent = new DamengAgent();
+    void dbmsOutputInitializationPropagatesUnrelatedSetupFailures() {
         SQLException failure = new SQLException("resource busy", "HY000");
 
-        assertSame(failure, assertThrows(
-            SQLException.class,
-            () -> agent.afterPhysicalConnect(null, failingDbmsOutputConnection(failure))
-        ));
+        assertDbmsOutputFailurePropagates(failure);
     }
 
     @Test
@@ -155,7 +210,29 @@ class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
 
         assertEquals(List.of("Message"), result.getColumns());
         assertEquals(List.of(List.of("first"), List.of("中文日志")), result.getRows());
-        assertEquals(List.of("CALL LOG_ONLY_PROCEDURE('input')"), executedSql);
+        assertEquals(List.of(
+            "BEGIN DBMS_OUTPUT.ENABLE(1000000); END;",
+            "CALL LOG_ONLY_PROCEDURE('input')"
+        ), executedSql);
+    }
+
+    @Test
+    void pagedOutputStatementsEnableDbmsOutputLazily() {
+        List<String> executedSql = new ArrayList<>();
+        DamengAgent agent = new DamengAgent();
+        TestSupport.setPrivateConnection(agent, printMessageConnection("paged message", executedSql));
+
+        QueryPageResult result = agent.executeQueryPage(
+            "/* output */ CALL PAGED_LOG_PROCEDURE()",
+            null,
+            new QueryPageOptions(100, 100, 1000)
+        );
+
+        assertEquals(List.of(
+            "BEGIN DBMS_OUTPUT.ENABLE(1000000); END;",
+            "/* output */ CALL PAGED_LOG_PROCEDURE()"
+        ), executedSql);
+        assertEquals(List.of(List.of("paged message")), result.getRows());
     }
 
     @Test
@@ -404,11 +481,30 @@ class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
         List<Integer> queryTimeouts,
         List<Integer> networkTimeouts
     ) {
-        return statementConnection(printMessage, executedSql, queryTimeouts, networkTimeouts, null);
+        return statementConnection(
+            printMessage,
+            executedSql,
+            queryTimeouts,
+            networkTimeouts,
+            new Object(),
+            null
+        );
     }
 
-    private static Connection failingDbmsOutputConnection(SQLException failure) {
-        return statementConnection(null, new ArrayList<>(), new ArrayList<>(), new ArrayList<>(), failure);
+    private static Connection printMessageConnection(
+        String printMessage,
+        List<String> executedSql,
+        Object physicalConnection,
+        SQLException dbmsOutputFailure
+    ) {
+        return statementConnection(
+            printMessage,
+            executedSql,
+            new ArrayList<>(),
+            new ArrayList<>(),
+            physicalConnection,
+            dbmsOutputFailure
+        );
     }
 
     private static Connection statementConnection(
@@ -416,15 +512,17 @@ class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
         List<String> executedSql,
         List<Integer> queryTimeouts,
         List<Integer> networkTimeouts,
-        SQLException executeFailure
+        Object physicalConnection,
+        SQLException dbmsOutputFailure
     ) {
         InvocationHandler statementHandler = (Object unused, Method method, Object[] args) -> {
             switch (method.getName()) {
                 case "execute":
-                    if (executeFailure != null) {
-                        throw executeFailure;
+                    String sql = (String) args[0];
+                    executedSql.add(sql);
+                    if (dbmsOutputFailure != null && sql.contains("DBMS_OUTPUT.ENABLE")) {
+                        throw dbmsOutputFailure;
                     }
-                    executedSql.add((String) args[0]);
                     return false;
                 case "setQueryTimeout":
                     queryTimeouts.add((Integer) args[0]);
@@ -451,6 +549,16 @@ class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
                 case "setNetworkTimeout":
                     networkTimeouts.add((Integer) args[1]);
                     return null;
+                case "isWrapperFor":
+                    return ((Class<?>) args[0]).getName().equals("dm.jdbc.driver.DmdbConnection");
+                case "unwrap":
+                    return ((Class<?>) args[0]).getName().equals("dm.jdbc.driver.DmdbConnection")
+                        ? physicalConnection
+                        : null;
+                case "equals":
+                    return unused == args[0];
+                case "hashCode":
+                    return System.identityHashCode(unused);
                 default:
                     return defaultValue(method.getReturnType());
             }
@@ -460,6 +568,56 @@ class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
             new Class<?>[]{Connection.class},
             connectionHandler
         );
+    }
+
+    private static void assertLazilyEnablesDbmsOutput(String sql) {
+        List<String> executedSql = new ArrayList<>();
+        DamengAgent agent = new DamengAgent();
+        TestSupport.setPrivateConnection(agent, printMessageConnection(null, executedSql));
+
+        agent.executeQuery(sql, null, new ExecuteQueryOptions());
+
+        assertEquals(2, executedSql.size());
+        assertEquals("BEGIN DBMS_OUTPUT.ENABLE(1000000); END;", executedSql.get(0));
+    }
+
+    private static void assertDoesNotEnableDbmsOutput(String sql) {
+        List<String> executedSql = new ArrayList<>();
+        DamengAgent agent = new DamengAgent();
+        TestSupport.setPrivateConnection(agent, printMessageConnection(null, executedSql));
+
+        agent.executeQuery(sql, null, new ExecuteQueryOptions());
+
+        assertEquals(List.of(sql), executedSql);
+    }
+
+    private static void assertDbmsOutputFailureFallsBack(SQLException failure) {
+        List<String> executedSql = new ArrayList<>();
+        DamengAgent agent = new DamengAgent();
+        TestSupport.setPrivateConnection(agent, printMessageConnection(null, executedSql, new Object(), failure));
+
+        assertDoesNotThrow(() -> agent.executeQuery("CALL LOG_ONLY_PROCEDURE()", null, new ExecuteQueryOptions()));
+        assertDoesNotThrow(() -> agent.executeQuery("BEGIN NULL; END;", null, new ExecuteQueryOptions()));
+
+        assertEquals(List.of(
+            "BEGIN DBMS_OUTPUT.ENABLE(1000000); END;",
+            "CALL LOG_ONLY_PROCEDURE()",
+            "BEGIN NULL; END;"
+        ), executedSql);
+    }
+
+    private static void assertDbmsOutputFailurePropagates(SQLException failure) {
+        List<String> executedSql = new ArrayList<>();
+        DamengAgent agent = new DamengAgent();
+        TestSupport.setPrivateConnection(agent, printMessageConnection(null, executedSql, new Object(), failure));
+
+        RuntimeException error = assertThrows(
+            RuntimeException.class,
+            () -> agent.executeQuery("CALL LOG_ONLY_PROCEDURE()", null, new ExecuteQueryOptions())
+        );
+
+        assertSame(failure, error.getCause());
+        assertEquals(List.of("BEGIN DBMS_OUTPUT.ENABLE(1000000); END;"), executedSql);
     }
 
     private static Object defaultValue(Class<?> type) {

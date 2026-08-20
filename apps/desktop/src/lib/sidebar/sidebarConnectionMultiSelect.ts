@@ -62,15 +62,17 @@ export function applyConnectionMultiSelection(target: ConnectionMultiSelectionTa
 }
 
 /**
- * Keep modifier-key connection selection aligned with the checkbox mode. Mixed
- * tree selections remain regular tree selections because connection-only bulk
- * actions must never consume database or object nodes.
+ * Keep modifier-key connection and connection-group selection aligned with the
+ * checkbox mode. Mixed tree selections remain regular tree selections because
+ * type-specific bulk actions must never consume nodes of another kind.
  */
-export function applyTreeNodeSelection(target: ConnectionMultiSelectionTarget, selection: TreeNodeSelection, connectionIds: ReadonlySet<string>): void {
+export function applyTreeNodeSelection(target: ConnectionMultiSelectionTarget, selection: TreeNodeSelection, connectionIds: ReadonlySet<string>, connectionGroupIds: ReadonlySet<string> = new Set()): void {
   target.selectedTreeNodeIds = selection.nodeIds;
   target.selectedTreeNodeId = selection.activeNodeId;
   target.treeSelectionAnchorId = selection.anchorNodeId;
-  target.connectionMultiSelectActive = selection.nodeIds.length > 0 && selection.nodeIds.every((id) => connectionIds.has(id));
+  const containsOnlyConnections = selection.nodeIds.every((id) => connectionIds.has(id));
+  const containsOnlyConnectionGroups = selection.nodeIds.every((id) => connectionGroupIds.has(id));
+  target.connectionMultiSelectActive = selection.nodeIds.length > 0 && (containsOnlyConnections || containsOnlyConnectionGroups);
 }
 
 export function releaseConnectionFromMultiSelection(target: ConnectionMultiSelectionTarget, connectionId: string): void {

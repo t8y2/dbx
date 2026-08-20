@@ -41,6 +41,15 @@ test("database label synchronization includes every catalog entry once", () => {
   );
 });
 
+test("Kingbase aliases retain historical and current company names", () => {
+  const kingbase = databaseIssueDrivers.find((driver) => driver.dbType === "kingbase");
+  assert.ok(kingbase);
+  assert.equal(kingbase.aliases.includes("人大金仓"), true);
+  assert.equal(kingbase.aliases.includes("金仓"), true);
+  assert.equal(kingbase.aliases.includes("电科金仓"), true);
+  assert.equal(kingbase.aliases.includes("中电科金仓"), false);
+});
+
 test("labels native and compatibility database products with their families", () => {
   const cases = [
     ["Turso", ["db/turso"]],
@@ -60,6 +69,8 @@ test("labels native and compatibility database products with their families", ()
     ["RabbitMQ", ["db/mq", "db/rabbitmq"]],
     ["MQTT 5.0", ["db/mqtt"]],
     ["EMQX 5.8", ["db/mqtt"]],
+    ["电科金仓 KingbaseES V9", ["db/kingbase"]],
+    ["中电科金仓 KingbaseES V9", ["db/kingbase"]],
   ];
 
   for (const [database, expected] of cases) {

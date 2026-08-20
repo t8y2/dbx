@@ -1070,7 +1070,7 @@ jobs:
           native_only_label() {
             local name="$1"
             case "$name" in
-              kingbase) echo "人大金仓 KingbaseES" ;;
+              kingbase) echo "金仓KingbaseES" ;;
               vastbase) echo "Vastbase" ;;
               duckdb) echo "DuckDB" ;;
               xugu) echo "虚谷 XuguDB" ;;
@@ -1222,7 +1222,7 @@ jobs:
           native_only_label() {
             local name="$1"
             case "$name" in
-              kingbase) echo "人大金仓 KingbaseES" ;;
+              kingbase) echo "金仓KingbaseES" ;;
               vastbase) echo "Vastbase" ;;
               duckdb) echo "DuckDB" ;;
               oracle) echo "Oracle" ;;

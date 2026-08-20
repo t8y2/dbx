@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { ConnectionConfig } from "@/types/database";
+import { databaseObjectTreeNodeSchema } from "@/lib/database/databaseFeatureSupport";
 import {
   GAUSSDB_M_JDBC_DRIVER_CLASS,
+  connectionDatabaseMetadataSchema,
   connectionObjectTreeNodeSchema,
   connectionObjectTreeQuerySchema,
   connectionQueryExecutionSchema,
@@ -17,6 +19,7 @@ import {
   gaussdbIdentifierQuoteStyle,
   gaussdbTargetServerType,
   inferJdbcDialect,
+  metadataSchemaForConnection,
   setGaussdbConnectionMode,
   setGaussdbCountQueryDop,
   setGaussdbIdentifierQuoteStyle,
@@ -112,6 +115,10 @@ describe("jdbc dialect inference", () => {
     expect(connectionShouldLoadIdentifierQuote({ db_type: "gaussdb" })).toBe(true);
     expect(connectionShouldLoadIdentifierQuote({ db_type: "gbase", driver_profile: "gbase8s" })).toBe(true);
     expect(connectionShouldLoadIdentifierQuote({ db_type: "gbase", driver_profile: "gbase8a" })).toBe(false);
+    // Cloud Spanner reports a backtick for GoogleSQL and a double quote for the
+    // PostgreSQL dialect; both are only known from the connection.
+    expect(connectionShouldLoadIdentifierQuote({ db_type: "spanner" })).toBe(true);
+    expect(connectionShouldLoadIdentifierQuote({ db_type: "bigquery" })).toBe(false);
     expect(
       connectionShouldLoadIdentifierQuote({
         db_type: "jdbc",
@@ -310,5 +317,48 @@ describe("object tree node schema", () => {
   it("preserves explicit Informix owners", () => {
     expect(connectionObjectTreeQuerySchema({ db_type: "informix" }, "prulife", "xtdpcky")).toBe("xtdpcky");
     expect(connectionObjectTreeNodeSchema({ db_type: "informix" }, "prulife", "xtdpcky")).toBe("xtdpcky");
+  });
+
+  it("never sends the Cloud Spanner resource path as a metadata schema", () => {
+    const connection = { db_type: "spanner" as const };
+    const resourcePath = "projects/p/instances/i/databases/db";
+
+    // GoogleSQL's default schema is the empty string, which must survive the
+    // `schema || database` default: sending the resource path matches no objects.
+    expect(connectionObjectTreeQuerySchema(connection, resourcePath, "")).toBe("");
+    expect(connectionObjectTreeQuerySchema(connection, resourcePath)).toBe("");
+    expect(metadataSchemaForConnection(connection, resourcePath, "")).toBe("");
+    // PostgreSQL-dialect databases and named schemas pass through unchanged.
+    expect(connectionObjectTreeQuerySchema(connection, resourcePath, "public")).toBe("public");
+    expect(connectionObjectTreeQuerySchema(connection, resourcePath, "analytics")).toBe("analytics");
+    expect(metadataSchemaForConnection(connection, resourcePath, "analytics")).toBe("analytics");
+    // The tree node resolves to GoogleSQL's blank default schema rather than to the resource
+    // path, so the path can never reach qualifiedTableName as a qualifier. It is the empty
+    // string and not undefined because Spanner does have a schema level: "" is the literal
+    // name of the GoogleSQL user schema.
+    expect(connectionObjectTreeNodeSchema(connection, resourcePath)).toBe("");
+    expect(connectionObjectTreeNodeSchema(connection, resourcePath, "")).toBe("");
+    expect(connectionObjectTreeNodeSchema(connection, resourcePath, "sales")).toBe("sales");
+    expect(connectionObjectTreeNodeSchema(connection, resourcePath, resourcePath)).toBe("");
+    // Named schemas (Spanner 2024+) reach the tree unchanged now that Spanner is schema-aware.
+    expect(connectionObjectTreeQuerySchema(connection, resourcePath, "sales")).toBe("sales");
+    expect(databaseObjectTreeNodeSchema("spanner", resourcePath, "sales")).toBe("sales");
+    expect(databaseObjectTreeNodeSchema("spanner", resourcePath, "")).toBe("");
+    expect(databaseObjectTreeNodeSchema("spanner", resourcePath)).toBe("");
+    // Callers that collapsed `node.schema || node.database` before calling in (the sidebar
+    // SQL template and DDL paths) hand over the resource path as the schema.
+    expect(connectionObjectTreeQuerySchema(connection, resourcePath, resourcePath)).toBe("");
+    expect(metadataSchemaForConnection(connection, resourcePath, resourcePath)).toBe("");
+  });
+
+  it("keeps the database-as-schema fallback for flat engines and blanks it for Cloud Spanner", () => {
+    // Editor completion paths send the database name as the metadata schema when a
+    // connection has no schema level; only Spanner must send a blank schema instead.
+    expect(connectionDatabaseMetadataSchema({ db_type: "mysql" }, "shop")).toBe("shop");
+    expect(connectionDatabaseMetadataSchema({ db_type: "hbase" }, "shop")).toBe("shop");
+    expect(connectionDatabaseMetadataSchema({ db_type: "mysql" }, "shop", "other")).toBe("other");
+    expect(connectionDatabaseMetadataSchema({ db_type: "spanner" }, "projects/p/instances/i/databases/db")).toBe("");
+    expect(connectionDatabaseMetadataSchema({ db_type: "spanner" }, "projects/p/instances/i/databases/db", "")).toBe("");
+    expect(connectionDatabaseMetadataSchema({ db_type: "spanner" }, "projects/p/instances/i/databases/db", "public")).toBe("public");
   });
 });

@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestConsumersFromQueueInfo(t *testing.T) {
 	info := mustObject(t, `{
@@ -126,6 +129,9 @@ func TestTopicInfoMappingIncludesQueueMessageCounts(t *testing.T) {
 	if topic["messages"] != int64(12) || topic["messagesReady"] != int64(10) || topic["messagesUnacked"] != int64(2) {
 		t.Fatalf("unexpected topic counts %#v", topic)
 	}
+	if topic["consumers"] != int64(3) {
+		t.Fatalf("expected consumers wire field, got %#v", topic)
+	}
 
 	minimal := topicInfoFromJSON(mustObject(t, `{"name":"empty"}`))
 	if _, ok := minimal["messagesReady"]; ok {
@@ -141,5 +147,198 @@ func TestAttachVhost(t *testing.T) {
 	attachVhost(info, mustObject(t, `{"vhost":"orders"}`))
 	if info["vhost"] != "orders" {
 		t.Fatalf("unexpected info %#v", info)
+	}
+}
+
+func TestTopicInfoMappingIncludesQueueFeaturesAndArguments(t *testing.T) {
+	topic := topicInfoFromJSON(mustObject(t, `{
+      "name": "orders",
+      "durable": true,
+      "auto_delete": false,
+      "exclusive": true,
+      "state": "running",
+      "type": "quorum",
+      "messages": 123,
+      "messages_ready": 100,
+      "messages_unacknowledged": 23,
+      "consumers": 4,
+      "arguments": {
+        "x-queue-type": "quorum",
+        "x-message-ttl": 60000,
+        "x-max-length": 1000,
+        "x-queue-master-locator": "random"
+      }
+    }`))
+
+	if topic["durable"] != true || topic["autoDelete"] != false || topic["exclusive"] != true {
+		t.Fatalf("unexpected features %#v", topic)
+	}
+	if topic["state"] != "running" || topic["queueType"] != "quorum" {
+		t.Fatalf("unexpected state/type %#v", topic)
+	}
+	if topic["messages"] != int64(123) || topic["messagesReady"] != int64(100) ||
+		topic["messagesUnacked"] != int64(23) || topic["consumers"] != int64(4) {
+		t.Fatalf("unexpected counts %#v", topic)
+	}
+	arguments := topic["arguments"].(jsonObject)
+	// Argument values must keep their real JSON types, not be stringified:
+	// numbers survive as json.Number and booleans/strings pass through.
+	if ttl, ok := arguments["x-message-ttl"].(json.Number); !ok || ttl.String() != "60000" {
+		t.Fatalf("unexpected x-message-ttl %#v", arguments["x-message-ttl"])
+	}
+	if arguments["x-queue-type"] != "quorum" || arguments["x-queue-master-locator"] != "random" {
+		t.Fatalf("unexpected arguments %#v", arguments)
+	}
+}
+
+func TestTopicInfoMappingFallsBackToXQueueTypeArgument(t *testing.T) {
+	// Older RabbitMQ versions do not report the explicit `type` field; the
+	// queue type then lives only in the x-queue-type argument.
+	topic := topicInfoFromJSON(mustObject(t, `{
+      "name": "stream-q",
+      "arguments": {"x-queue-type": "stream"}
+    }`))
+	if topic["queueType"] != "stream" {
+		t.Fatalf("expected x-queue-type fallback, got %#v", topic["queueType"])
+	}
+
+	minimal := topicInfoFromJSON(mustObject(t, `{"name": "plain"}`))
+	if _, exists := minimal["queueType"]; exists {
+		t.Fatalf("unexpected queueType %#v", minimal)
+	}
+	if _, exists := minimal["arguments"]; exists {
+		t.Fatalf("unexpected arguments %#v", minimal)
+	}
+	if _, exists := minimal["exclusive"]; exists {
+		t.Fatalf("unexpected exclusive %#v", minimal)
+	}
+}
+
+func TestTopicInfoMappingIncludesMessageStatsRates(t *testing.T) {
+	topic := topicInfoFromJSON(mustObject(t, `{
+      "name": "orders",
+      "message_stats": {
+        "publish": 1000,
+        "publish_details": {"rate": 12.5},
+        "deliver_get": 900,
+        "deliver_get_details": {"rate": 11.8},
+        "ack": 880,
+        "ack_details": {"rate": 11.2}
+      }
+    }`))
+	if topic["publishRate"] != 12.5 || topic["deliverRate"] != 11.8 || topic["ackRate"] != 11.2 {
+		t.Fatalf("unexpected rates %#v", topic)
+	}
+
+	// No message_stats: rates must be absent, not fabricated as zero.
+	withoutStats := topicInfoFromJSON(mustObject(t, `{"name": "idle", "messages": 0}`))
+	for _, key := range []string{"publishRate", "deliverRate", "ackRate"} {
+		if _, exists := withoutStats[key]; exists {
+			t.Fatalf("unexpected %s in %#v", key, withoutStats)
+		}
+	}
+
+	// A real sampled rate of zero is preserved as zero (distinct from absent).
+	zeroRate := topicInfoFromJSON(mustObject(t, `{
+      "name": "quiet",
+      "message_stats": {"publish_details": {"rate": 0}, "deliver_get_details": {"rate": 0}, "ack_details": {"rate": 0}}
+    }`))
+	if zeroRate["publishRate"] != 0.0 || zeroRate["deliverRate"] != 0.0 || zeroRate["ackRate"] != 0.0 {
+		t.Fatalf("expected preserved zero rates, got %#v", zeroRate)
+	}
+}
+
+func TestGetTopicStatsPreservesMessageStatsFromManagementPayload(t *testing.T) {
+	queue := mustObject(t, `{
+      "name": "orders",
+      "messages": 123,
+      "messages_ready": 100,
+      "messages_unacknowledged": 23,
+      "consumers": 4,
+      "message_stats": {
+        "publish": 1000,
+        "publish_details": {"rate": 12.5},
+        "deliver_get": 900,
+        "deliver_get_details": {"rate": 11.8},
+        "ack": 880,
+        "ack_details": {"rate": 11.2}
+      }
+    }`)
+	// Mirror the Management API branch of getTopicStats: counts + rates all
+	// flow through, and a queue without message_stats omits every rate key.
+	messages := longOrDefault(queue, "messages", 0)
+	result := jsonObject{
+		"name":          "orders",
+		"messageCount":  messages,
+		"consumerCount": longOrDefault(queue, "consumers", 0),
+		"totalMessages": messages,
+	}
+	putIfPresent(result, "messagesReady", longOrNull(queue, "messages_ready"))
+	putIfPresent(result, "messagesUnacked", longOrNull(queue, "messages_unacknowledged"))
+	if stats := objectOrNil(queue, "message_stats"); stats != nil {
+		putIfPresent(result, "publishRate", rateFromDetails(stats, "publish_details"))
+		putIfPresent(result, "deliverRate", rateFromDetails(stats, "deliver_get_details"))
+		putIfPresent(result, "ackRate", rateFromDetails(stats, "ack_details"))
+		putIfPresent(result, "publishTotal", longOrNull(stats, "publish"))
+		putIfPresent(result, "deliverGetTotal", longOrNull(stats, "deliver_get"))
+		putIfPresent(result, "ackTotal", longOrNull(stats, "ack"))
+	}
+
+	if result["messageCount"] != int64(123) || result["messagesReady"] != int64(100) ||
+		result["messagesUnacked"] != int64(23) || result["consumerCount"] != int64(4) {
+		t.Fatalf("unexpected counts %#v", result)
+	}
+	if result["publishRate"] != 12.5 || result["deliverRate"] != 11.8 || result["ackRate"] != 11.2 {
+		t.Fatalf("unexpected rates %#v", result)
+	}
+	if result["publishTotal"] != int64(1000) || result["deliverGetTotal"] != int64(900) || result["ackTotal"] != int64(880) {
+		t.Fatalf("unexpected totals %#v", result)
+	}
+
+	withoutStats := jsonObject{"name": "idle", "messageCount": 0, "consumerCount": 0, "totalMessages": 0}
+	for _, key := range []string{"publishRate", "deliverRate", "ackRate", "publishTotal", "deliverGetTotal", "ackTotal"} {
+		if _, exists := withoutStats[key]; exists {
+			t.Fatalf("unexpected %s in %#v", key, withoutStats)
+		}
+	}
+}
+
+func TestGetTopicConfigPreservesArgumentTypes(t *testing.T) {
+	configs := jsonObject{}
+	object := mustObject(t, `{
+      "durable": true,
+      "auto_delete": false,
+      "exclusive": false,
+      "type": "quorum",
+      "arguments": {
+        "x-message-ttl": 60000,
+        "x-max-priority": 5,
+        "x-queue-type": "quorum",
+        "x-dead-letter-exchange": "dlx",
+        "x-single-active-consumer": true
+      }
+    }`)
+	configs["durable"] = boolOrDefault(object, "durable", false)
+	configs["auto_delete"] = boolOrDefault(object, "auto_delete", false)
+	configs["exclusive"] = boolOrDefault(object, "exclusive", false)
+	if queueType := queueTypeFromQueue(object); queueType != "" {
+		configs["queue_type"] = queueType
+	}
+	if arguments := objectOrNil(object, "arguments"); arguments != nil {
+		for key, value := range arguments {
+			configs[key] = value
+		}
+	}
+
+	if configs["queue_type"] != "quorum" || configs["durable"] != true {
+		t.Fatalf("unexpected config %#v", configs)
+	}
+	// Numbers and booleans keep their types instead of fmt.Sprint strings:
+	// the decoder produced json.Number, and pass-through preserves it verbatim.
+	if ttl, ok := configs["x-message-ttl"].(json.Number); !ok || ttl.String() != "60000" {
+		t.Fatalf("unexpected x-message-ttl type %#v", configs["x-message-ttl"])
+	}
+	if configs["x-single-active-consumer"] != true || configs["x-dead-letter-exchange"] != "dlx" {
+		t.Fatalf("unexpected argument values %#v", configs)
 	}
 }

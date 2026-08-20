@@ -42,9 +42,10 @@ export function dataGridTotalRowCountLabelKey(totalRowCountIsExact: boolean, ine
   return inexactMode === "estimated" ? "grid.totalRowCountEstimated" : "grid.totalRowCountAtLeast";
 }
 
-export function resolveDataGridPaginationTotal(options: { paginationTotalRowCount?: number; serverKnownTotalRowCount?: number; totalRowCountIsExact: boolean }): number | undefined {
-  if (options.paginationTotalRowCount !== undefined) return options.paginationTotalRowCount;
-  return options.totalRowCountIsExact ? options.serverKnownTotalRowCount : undefined;
+export function resolveDataGridPaginationTotal(options: { paginationTotalRowCount?: number; serverKnownTotalRowCount?: number; totalRowCountIsExact: boolean; maxRows?: number }): number | undefined {
+  const total = options.paginationTotalRowCount ?? (options.totalRowCountIsExact ? options.serverKnownTotalRowCount : undefined);
+  if (total === undefined || options.maxRows === undefined) return total;
+  return Math.min(total, options.maxRows);
 }
 
 export function hasCompleteLocalDataGridResult(options: CompleteLocalDataGridResultOptions): boolean {

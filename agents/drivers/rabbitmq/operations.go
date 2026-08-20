@@ -63,7 +63,34 @@ func topicInfoFromJSON(queue jsonObject) jsonObject {
 	}
 	putIfPresent(info, "messagesReady", longOrNull(queue, "messages_ready"))
 	putIfPresent(info, "messagesUnacked", longOrNull(queue, "messages_unacknowledged"))
+	putIfPresent(info, "exclusive", boolOrNull(queue, "exclusive"))
+	if queueType := queueTypeFromQueue(queue); queueType != "" {
+		info["queueType"] = queueType
+	}
+	if arguments := objectOrNil(queue, "arguments"); arguments != nil && len(arguments) > 0 {
+		// Preserve original JSON types (numbers, booleans, nested values); the
+		// management API already decoded them, so pass them through verbatim.
+		info["arguments"] = arguments
+	}
+	if stats := objectOrNil(queue, "message_stats"); stats != nil {
+		putIfPresent(info, "publishRate", rateFromDetails(stats, "publish_details"))
+		putIfPresent(info, "deliverRate", rateFromDetails(stats, "deliver_get_details"))
+		putIfPresent(info, "ackRate", rateFromDetails(stats, "ack_details"))
+	}
 	return info
+}
+
+// queueTypeFromQueue prefers the management API's explicit `type` field
+// (classic/quorum/stream, present on newer RabbitMQ versions) and falls back
+// to the x-queue-type argument for older versions that only report it there.
+func queueTypeFromQueue(queue jsonObject) string {
+	if explicit := stringOrEmpty(queue, "type"); explicit != "" {
+		return explicit
+	}
+	if arguments := objectOrNil(queue, "arguments"); arguments != nil {
+		return stringOrEmpty(arguments, "x-queue-type")
+	}
+	return ""
 }
 
 func (s *server) createTopic(params jsonObject) (any, error) {
@@ -116,13 +143,29 @@ func (s *server) getTopicStats(params jsonObject) (any, error) {
 			"/api/queues/"+urlEncodeVhost(vhost)+"/"+urlEncodePathSegment(name))
 		if managementError == nil {
 			if info, ok := queue.(map[string]any); ok {
-				messages := longOrDefault(jsonObject(info), "messages", 0)
-				return jsonObject{
+				object := jsonObject(info)
+				messages := longOrDefault(object, "messages", 0)
+				result := jsonObject{
 					"name":          name,
 					"messageCount":  messages,
-					"consumerCount": longOrDefault(jsonObject(info), "consumers", 0),
+					"consumerCount": longOrDefault(object, "consumers", 0),
 					"totalMessages": messages,
-				}, nil
+				}
+				putIfPresent(result, "messagesReady", longOrNull(object, "messages_ready"))
+				putIfPresent(result, "messagesUnacked", longOrNull(object, "messages_unacknowledged"))
+				if stats := objectOrNil(object, "message_stats"); stats != nil {
+					// Rates are only emitted when the management API actually
+					// sampled them; a missing entry stays absent so callers can
+					// distinguish "no data" from a real rate of zero.
+					putIfPresent(result, "publishRate", rateFromDetails(stats, "publish_details"))
+					putIfPresent(result, "deliverRate", rateFromDetails(stats, "deliver_get_details"))
+					putIfPresent(result, "ackRate", rateFromDetails(stats, "ack_details"))
+					// Cumulative counters, matching the management UI's totals.
+					putIfPresent(result, "publishTotal", longOrNull(stats, "publish"))
+					putIfPresent(result, "deliverGetTotal", longOrNull(stats, "deliver_get"))
+					putIfPresent(result, "ackTotal", longOrNull(stats, "ack"))
+				}
+				return result, nil
 			}
 		} else {
 			fmt.Fprintln(os.Stderr, "Management API unavailable for queue stats, falling back to passive declare: "+managementError.Error())
@@ -164,13 +207,15 @@ func (s *server) getTopicConfig(params jsonObject) (any, error) {
 				configs["durable"] = boolOrDefault(object, "durable", false)
 				configs["auto_delete"] = boolOrDefault(object, "auto_delete", false)
 				configs["exclusive"] = boolOrDefault(object, "exclusive", false)
+				if queueType := queueTypeFromQueue(object); queueType != "" {
+					configs["queue_type"] = queueType
+				}
 				if arguments := objectOrNil(object, "arguments"); arguments != nil {
+					// Preserve the real JSON types the management API returned
+					// (numbers, booleans, nested values) instead of stringifying
+					// every argument, so config round-trips and display stay true.
 					for key, value := range arguments {
-						if value == nil {
-							configs[key] = nil
-						} else {
-							configs[key] = fmt.Sprint(value)
-						}
+						configs[key] = value
 					}
 				}
 			}
@@ -1342,6 +1387,10 @@ func putIfPresent(info jsonObject, key string, value any) {
 			info[key] = *typed
 		}
 	case *float64:
+		if typed != nil {
+			info[key] = *typed
+		}
+	case *bool:
 		if typed != nil {
 			info[key] = *typed
 		}

@@ -31,7 +31,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     private static final long MICROS_PER_SECOND = 1_000_000L;
@@ -721,23 +720,16 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     }
 
     private List<String> querySchemaNames() throws SQLException {
-        String placeholders = SYSTEM_SCHEMAS.stream()
-            .map(schema -> "'" + schema + "'")
-            .collect(Collectors.joining(","));
         String sql = """
             SELECT username
             FROM ALL_USERS
             WHERE username IS NOT NULL
-              AND username NOT IN (%s)
-              AND username NOT LIKE 'APEX_%%'
-              AND username NOT LIKE 'FLOWS_%%'
-              AND username NOT LIKE '%%$%%'
             ORDER BY CASE
                 WHEN username = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') THEN 0
                 WHEN username = SYS_CONTEXT('USERENV', 'SESSION_USER') THEN 1
                 ELSE 2
             END, username
-            """.formatted(placeholders).stripIndent().trim();
+            """.stripIndent().trim();
 
         List<String> result = new ArrayList<>();
         try (var stmt = requireConnection().createStatement();

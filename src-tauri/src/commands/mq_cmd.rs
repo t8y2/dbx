@@ -277,6 +277,14 @@ pub async fn mq_enrich_subscriptions(
 }
 
 #[tauri::command]
+pub async fn mq_get_kafka_consumer_group_snapshot(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+) -> Result<dbx_core::mq::KafkaConsumerGroupSnapshot, String> {
+    dbx_core::mq::service::mq_get_kafka_consumer_group_snapshot_core(&state, &connection_id).await
+}
+
+#[tauri::command]
 pub async fn mq_create_subscription(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

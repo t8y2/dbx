@@ -33,6 +33,8 @@ const props = withDefaults(
     suppressToggleLabel?: string;
     loading?: boolean;
     closeOnConfirm?: boolean;
+    cancelable?: boolean;
+    cancelRunningLoading?: boolean;
   }>(),
   {
     sql: "",
@@ -45,11 +47,14 @@ const props = withDefaults(
     suppressToggleLabel: "",
     loading: false,
     closeOnConfirm: true,
+    cancelable: false,
+    cancelRunningLoading: false,
   },
 );
 
 const emit = defineEmits<{
   confirm: [];
+  "cancel-running": [];
 }>();
 
 const code = computed(() => props.details || props.sql);
@@ -119,7 +124,11 @@ async function copyFullCode() {
       </div>
 
       <DialogFooter>
-        <Button variant="outline" :disabled="loading" @click="open = false">{{ t("dangerDialog.cancel") }}</Button>
+        <Button v-if="loading && cancelable" variant="outline" :disabled="cancelRunningLoading" @click="$emit('cancel-running')">
+          <Loader2 v-if="cancelRunningLoading" class="h-3.5 w-3.5 animate-spin" />
+          {{ t("dangerDialog.cancelRunning") }}
+        </Button>
+        <Button v-else variant="outline" :disabled="loading" @click="open = false">{{ t("dangerDialog.cancel") }}</Button>
         <Button variant="destructive" class="gap-1.5" :disabled="loading" @click="onConfirm">
           <Loader2 v-if="loading" class="h-3.5 w-3.5 animate-spin" />
           {{ confirmLabel || t("dangerDialog.confirm") }}

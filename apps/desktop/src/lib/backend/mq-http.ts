@@ -13,6 +13,7 @@ import type {
   ListTopicsOpts,
   TopicStats,
   SubscriptionInfo,
+  KafkaConsumerGroupSnapshot,
   ResetPosition,
   SkipCount,
   ConsumerInfo,
@@ -219,6 +220,10 @@ export async function mqListSubscriptions(connectionId: string, topic: TopicRef)
 
 export async function mqEnrichSubscriptions(connectionId: string, topic: TopicRef): Promise<SubscriptionInfo[]> {
   return post("/api/mq/subscriptions/enrich", { connectionId, topic });
+}
+
+export async function mqGetKafkaConsumerGroupSnapshot(connectionId: string): Promise<KafkaConsumerGroupSnapshot> {
+  return post("/api/mq/kafka/consumer-groups", { connectionId });
 }
 
 export async function mqCreateSubscription(connectionId: string, topic: TopicRef, sub: string, pos: ResetPosition): Promise<void> {

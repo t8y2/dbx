@@ -1,7 +1,15 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { canFormatSqlForDatabaseType, formatSqlForDisplay, formatSqlForEditing, formatSqlText, MAX_SQL_FORMAT_CHARS, sqlFormatDialectForDbType, UnsupportedStructuredInputError } from "@/lib/sql/sqlFormatter";
 
+const sqlFormatterSource = readFileSync(new URL("../../sql/sqlFormatter.ts", import.meta.url), "utf8");
+
 describe("sqlFormatter", () => {
+  it("does not use lookbehind regular expressions in the startup path", () => {
+    expect(sqlFormatterSource).not.toContain("(?<!");
+    expect(sqlFormatterSource).not.toContain("(?<=");
+  });
+
   it("disables SQL formatting for VictoriaMetrics queries", () => {
     expect(canFormatSqlForDatabaseType("victoriametrics")).toBe(false);
     expect(canFormatSqlForDatabaseType("mysql")).toBe(true);
@@ -104,6 +112,31 @@ describe("sqlFormatter", () => {
 
     expect(formatted).toContain("1::int");
     expect(formatted).toContain("AS id");
+  });
+
+  it("formats complete backtick-quoted spans with the PostgreSQL dialect", async () => {
+    const formatted = await formatSqlText("select `schema`.`odd``name` from user;", "postgres");
+
+    expect(formatted).toBe("SELECT\n  `schema`.`odd``name`\nFROM\n  user;");
+  });
+
+  it("keeps PostgreSQL double-quoted identifiers and casts unchanged", async () => {
+    const formatted = await formatSqlText('select "display""name" from records where payload::jsonb is not null;', "postgres");
+
+    expect(formatted).toBe('SELECT\n  "display""name"\nFROM\n  records\nWHERE\n  payload::jsonb IS NOT NULL;');
+  });
+
+  it("keeps MySQL backtick formatting unchanged", async () => {
+    const formatted = await formatSqlText("select `schema`.`odd``name` from `user`;", "mysql");
+
+    expect(formatted).toBe("SELECT\n  `schema`.`odd``name`\nFROM\n  `user`;");
+  });
+
+  it("keeps malformed PostgreSQL backtick input unchanged while editing", async () => {
+    const sql = "select `id from user;";
+
+    await expect(formatSqlText(sql, "postgres")).rejects.toThrow("Parse error: Unexpected");
+    await expect(formatSqlForEditing(sql, "postgres")).resolves.toBe(sql);
   });
 
   it("formats Dameng SQL with a standalone trailing dot without changing the invalid token", async () => {

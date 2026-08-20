@@ -1,6 +1,6 @@
 import { DOLT_DRIVER_PROFILE_EXTENSION } from "@/lib/database/doltProfile";
 import type { SqlCompletionObject, SqlCompletionTable, SqlStatementKind } from "@/lib/sql/sqlCompletion";
-import type { ConnectionConfig, TableNameFilter, TreeNodeType } from "@/types/database";
+import type { ConnectionConfig, QueryTab, TableNameFilter, TreeNodeType } from "@/types/database";
 
 export type DriverProfileObjectTreeProfile = {
   cacheKey: string;
@@ -22,6 +22,25 @@ export type DriverProfileSqlCompletionContext = {
 
 export type DriverProfileCompletionTableMetadata = Pick<SqlCompletionTable, "detail" | "boost">;
 
+export type DriverProfileWorkspaceTarget = {
+  database: string;
+  branch?: string;
+};
+
+export type DriverProfileWorkspaceScope = "database" | "connection";
+
+export type DriverProfileDatabaseWorkspace = {
+  mode: QueryTab["mode"];
+  menuLabelKey: string;
+  tabTitleKey: string;
+  /** Determines whether tabs are reused per connection or per database. */
+  tabScope: DriverProfileWorkspaceScope;
+  /** Tree levels whose context menu exposes the workspace entry. */
+  entryScopes: readonly DriverProfileWorkspaceScope[];
+  /** Maps a tree database name to the context opened by the workspace. */
+  resolveTarget?: (database: string, source: DriverProfileWorkspaceScope) => DriverProfileWorkspaceTarget;
+};
+
 export type DriverProfileExtensionDefinition = {
   id: string;
   objectTreeProfile?: (config: ConnectionConfig) => DriverProfileObjectTreeProfile | undefined;
@@ -30,6 +49,7 @@ export type DriverProfileExtensionDefinition = {
   completionTables?: (context: DriverProfileSqlCompletionContext) => SqlCompletionTable[];
   sqlBuiltinTerms?: () => string;
   routineSignatures?: () => Map<string, string[]>;
+  databaseWorkspace?: DriverProfileDatabaseWorkspace;
 };
 
 export const DRIVER_PROFILE_EXTENSIONS = [DOLT_DRIVER_PROFILE_EXTENSION] as const satisfies readonly DriverProfileExtensionDefinition[];
@@ -68,4 +88,8 @@ export function driverProfileSqlBuiltinTerms(driverProfile?: string): string {
 
 export function driverProfileRoutineSignatures(driverProfile?: string): Map<string, string[]> {
   return driverProfileExtension(driverProfile)?.routineSignatures?.() ?? new Map();
+}
+
+export function driverProfileDatabaseWorkspace(driverProfile?: string): DriverProfileDatabaseWorkspace | undefined {
+  return driverProfileExtension(driverProfile)?.databaseWorkspace;
 }

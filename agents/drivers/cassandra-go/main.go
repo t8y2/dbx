@@ -358,7 +358,8 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 	case "list_foreign_keys":
 		return []foreignKeyInfo{}, false, nil
 	case "list_triggers":
-		return []triggerInfo{}, false, nil
+		result, err := s.listTriggers(stringParam(params, "schema"), stringParam(params, "table"))
+		return result, false, err
 	case "get_object_source":
 		return nil, false, errors.New("object source is not supported by Cassandra")
 	case "get_table_ddl":

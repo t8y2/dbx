@@ -1,6 +1,6 @@
 [package]
 name = "dbx"
-version = "0.5.86"
+version = "0.5.90"
 description = "Open-source database management tool"
 authors = ["skyler"]
 license = "Apache-2.0"
@@ -29,8 +29,9 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 base64 = "0.22"
 log = "0.4"
-tauri = { version = "2.10.3", features = ["tray-icon"] }
+tauri = { version = "2.10.3", features = ["tray-icon", "image-png"] }
 tauri-plugin-log = "2"
+tauri-plugin-opener = "2"
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-uuid-1", "with-serde_json-1"] }
 deadpool-postgres = { version = "0.14", features = ["rt_tokio_1"] }
 rust_decimal = { version = "1", features = ["serde", "db-postgres"] }
@@ -63,6 +64,7 @@ csv = "1.4.0"
 calamine = "0.30.1"
 zip = "4.6.1"
 dbx-core = { path = "../crates/dbx-core", default-features = false }
+wry = { path = "../vendor/wry" }
 axum = { version = "0.8", features = ["ws"] }
 font-kit = "0.14.3"
 tauri-plugin-clipboard-manager = "2.3.2"

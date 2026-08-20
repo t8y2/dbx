@@ -300,6 +300,7 @@ impl MessageQueueAdmin for PulsarAdmin {
                         message_count: None,
                         messages_ready: None,
                         messages_unacked: None,
+                        ..Default::default()
                     })
                 })
                 .buffered(PARTITION_METADATA_CONCURRENCY)
@@ -329,6 +330,7 @@ impl MessageQueueAdmin for PulsarAdmin {
                     message_count: None,
                     messages_ready: None,
                     messages_unacked: None,
+                    ..Default::default()
                 });
             }
         }
@@ -1606,6 +1608,7 @@ mod tests {
             msg_out_counter: 0,
             subscription_count: 2,
             producer_count: 0,
+            rates_unavailable: false,
             raw: serde_json::json!({
                 "subscriptions": {
                     "sub-a": { "msgBacklog": 7 },

@@ -32,8 +32,14 @@ test("mutation families retain accepted targets, failures, and refresh work", ()
     const body = functionBody(name);
     assert.match(body, /sidebarDangerTarget\.value \?\? activeNode\.value/);
     assert.match(body, /refreshMutatedTableDataTabsForNode\(node\)/);
-    assert.match(body, /tableOperationFailed/);
+    // Failure reporting (including the tableOperationFailed toast) lives in
+    // the shared runDangerOperation helper, not inlined in each confirm*
+    // function.
+    assert.match(body, /runDangerOperation\(/);
   }
+
+  const runDangerOperation = functionBody("runDangerOperation");
+  assert.match(runDangerOperation, /toastDangerOperationError\(/);
 
   for (const name of ["confirmCreateNacosNamespace", "confirmEditNacosNamespace", "confirmDropDatabase"]) {
     const body = functionBody(name);

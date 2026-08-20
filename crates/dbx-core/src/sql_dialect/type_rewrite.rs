@@ -30,6 +30,53 @@ fn first_length_param(params: Option<&str>) -> Option<u32> {
     params.and_then(|p| p.split(',').next()).and_then(|p| p.trim().parse::<u32>().ok())
 }
 
+/// Strip Oracle-specific length-unit qualifiers (`CHAR` / `BYTE`) from a
+/// parenthesized length slice such as `(50 CHAR)` → `(50)`.
+///
+/// Oracle allows character columns to declare their length unit explicitly:
+/// `VARCHAR2(50 CHAR)` (characters) or `VARCHAR2(50 BYTE)` (bytes). The unit
+/// qualifier is Oracle-only syntax — MySQL's `VARCHAR(n)` always means
+/// characters and rejects `VARCHAR(50 CHAR)` with ERROR 1064. Stripping the
+/// qualifier here keeps the generated target DDL valid while preserving the
+/// numeric length.
+///
+/// Only single numeric parameters followed by `CHAR`/`BYTE` are touched;
+/// precision/scale lists (`(10,2)`) and enum/set lists (`('a','b')`) are
+/// returned unchanged.
+pub fn normalize_len_params(parenthesized: &str) -> String {
+    let Some(open) = parenthesized.find('(') else {
+        return parenthesized.to_string();
+    };
+    let Some(close) = parenthesized.rfind(')') else {
+        return parenthesized.to_string();
+    };
+    if open >= close {
+        return parenthesized.to_string();
+    }
+    // Keep any prefix (base type or whitespace) so a full type string such as
+    // `varchar(50)` round-trips as-is instead of losing its base name.
+    format!("{}({})", &parenthesized[..open], strip_length_unit(&parenthesized[open + 1..close]))
+}
+
+/// Strip a trailing `CHAR`/`BYTE` unit from a single length parameter,
+/// e.g. `50 CHAR` → `50`. Multi-part or non-numeric parameters are unchanged.
+fn strip_length_unit(params: &str) -> String {
+    let trimmed = params.trim();
+    if trimmed.is_empty() || trimmed.contains(',') {
+        return trimmed.to_string();
+    }
+    let upper = trimmed.to_ascii_uppercase();
+    for unit in ["CHAR", "BYTE"] {
+        if let Some(head) = upper.strip_suffix(unit) {
+            let head = head.trim_end();
+            if !head.is_empty() && head.bytes().all(|b| b.is_ascii_digit()) {
+                return head.to_string();
+            }
+        }
+    }
+    trimmed.to_string()
+}
+
 fn apply_template(template: &str, params: Option<&str>, max_varchar_len: Option<u32>) -> String {
     if !template.contains("{}") {
         return template.to_string();
@@ -239,5 +286,34 @@ mod tests {
     fn mysql_keeps_display_width() {
         let t = rewrite_column_type("int(11)", DatabaseType::Mysql, None);
         assert_eq!(t, "int(11)");
+    }
+
+    #[test]
+    fn normalize_len_params_strips_oracle_char_unit() {
+        assert_eq!(normalize_len_params("(6 CHAR)"), "(6)");
+        assert_eq!(normalize_len_params("(50 char)"), "(50)");
+        assert_eq!(normalize_len_params("(50    CHAR)"), "(50)");
+        assert_eq!(normalize_len_params("(20 BYTE)"), "(20)");
+        assert_eq!(normalize_len_params("(20 byte)"), "(20)");
+    }
+
+    #[test]
+    fn normalize_len_params_leaves_non_unit_params_untouched() {
+        // Plain length without a unit qualifier.
+        assert_eq!(normalize_len_params("(50)"), "(50)");
+        // Precision/scale must never be disturbed.
+        assert_eq!(normalize_len_params("(10,2)"), "(10,2)");
+        // Enum/set lists must never be disturbed.
+        assert_eq!(normalize_len_params("('a','b')"), "('a','b')");
+        // Non-numeric head (defensive) is left alone.
+        assert_eq!(normalize_len_params("(MAX CHAR)"), "(MAX CHAR)");
+    }
+
+    #[test]
+    fn normalize_len_params_handles_malformed_input() {
+        assert_eq!(normalize_len_params("varchar(50)"), "varchar(50)");
+        assert_eq!(normalize_len_params("no-parens"), "no-parens");
+        assert_eq!(normalize_len_params("(unclosed"), "(unclosed");
+        assert_eq!(normalize_len_params(")"), ")");
     }
 }

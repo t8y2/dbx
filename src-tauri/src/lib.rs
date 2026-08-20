@@ -9,6 +9,8 @@ mod startup_recovery;
 #[cfg(all(not(target_os = "windows"), not(test)))]
 #[path = "startup_recovery_noop.rs"]
 mod startup_recovery;
+#[cfg(any(target_os = "windows", test))]
+mod webview2_recovery;
 mod window_state_guard;
 
 use commands::connection::AppState;
@@ -33,6 +35,7 @@ use tauri::{Emitter, Manager};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 #[cfg(any(windows, target_os = "linux"))]
 use tauri_plugin_deep_link::DeepLinkExt;
+use tauri_plugin_opener::OpenerExt;
 
 const DESKTOP_TRAY_ID: &str = "main-tray";
 const APP_CLOSE_REQUESTED_EVENT: &str = "dbx-app-close-requested";
@@ -1321,6 +1324,7 @@ pub fn run() {
     };
 
     let builder = builder
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
@@ -1463,6 +1467,13 @@ pub fn run() {
             };
             state.set_duckdb_worker_process_isolation_enabled(desktop_settings.duckdb_worker_process_isolation);
             state.set_duckdb_worker_max_processes(desktop_settings.duckdb_worker_max_processes);
+            let oidc_app_handle = app.handle().clone();
+            state.set_mongo_oidc_browser_opener(Arc::new(move |url| {
+                oidc_app_handle
+                    .opener()
+                    .open_url(url, None::<&str>)
+                    .map_err(|err| format!("Failed to open the system browser: {err}"))
+            }));
             let state = Arc::new(state);
             app.manage(state.clone());
             app.manage(commands::redis_pubsub_server::start_pubsub_server(state.clone()));
@@ -1476,6 +1487,8 @@ pub fn run() {
             commands::ssh_prompt::install_ssh_notice_bridge(app.handle());
             #[cfg(target_os = "macos")]
             macos_app_delegate::install_dock_quit_handler(app.handle());
+            #[cfg(target_os = "windows")]
+            webview2_recovery::install(app.handle());
             let startup_links = commands::deep_link::connection_deep_links_from_args(std::env::args().skip(1));
             open_connection_deep_links(app.handle(), startup_links);
 
@@ -1663,6 +1676,8 @@ pub fn run() {
             commands::schema::list_triggers,
             commands::schema::list_constraints,
             commands::schema::list_partitions,
+            commands::schema::get_table_partition_status,
+            commands::schema::list_invalid_indexes,
             commands::schema::list_subpartitions,
             commands::schema::get_table_ddl,
             commands::schema::list_functions,
@@ -1717,6 +1732,7 @@ pub fn run() {
             commands::query::build_drop_table_child_object_sql,
             commands::query::build_empty_table_sql,
             commands::query::build_truncate_table_sql,
+            commands::query::build_vacuum_table_sql,
             commands::query::build_mysql_auto_increment_sql,
             commands::query::build_drop_database_sql,
             commands::query::build_create_schema_sql,
@@ -1781,6 +1797,7 @@ pub fn run() {
             commands::redis_cmd::redis_get_stream_pending,
             commands::redis_cmd::redis_set_string,
             commands::redis_cmd::redis_delete_key,
+            commands::redis_cmd::redis_rename_key,
             commands::redis_cmd::redis_hash_set,
             commands::redis_cmd::redis_hash_del,
             commands::redis_cmd::redis_hash_field_set_ttl,
@@ -1995,6 +2012,8 @@ pub fn run() {
             commands::mongo_cmd::mongo_create_database,
             commands::mongo_cmd::mongo_drop_database,
             commands::mongo_cmd::mongo_drop_collection,
+            commands::mongo_cmd::vector_drop_database,
+            commands::mongo_cmd::vector_drop_collection,
             commands::mongo_cmd::mongo_rename_collection,
             commands::mongo_cmd::mongo_clone_collection,
             commands::docs::docs_collect_snapshot,
@@ -2036,6 +2055,15 @@ pub fn run() {
             commands::mongo_cmd::mongo_update_documents,
             commands::document_cmd::document_delete_document,
             commands::document_cmd::document_save_meilisearch_batch,
+            commands::document_cmd::meilisearch_search_documents,
+            commands::document_cmd::meilisearch_fetch_documents,
+            commands::document_cmd::meilisearch_get_document,
+            commands::document_cmd::meilisearch_get_index_settings,
+            commands::document_cmd::meilisearch_update_index_settings,
+            commands::document_cmd::meilisearch_get_index_stats,
+            commands::document_cmd::meilisearch_get_index_overview,
+            commands::document_cmd::meilisearch_delete_index,
+            commands::document_cmd::meilisearch_delete_all_documents,
             commands::hbase_cmd::hbase_get_table_schema,
             commands::hbase_cmd::hbase_scan_rows,
             commands::hbase_cmd::hbase_get_row,
@@ -2096,6 +2124,8 @@ pub fn run() {
             commands::mq_cmd::mq_list_subscriptions,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_enrich_subscriptions,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_get_kafka_consumer_group_snapshot,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_create_subscription,
             #[cfg(feature = "mq-admin")]
@@ -2255,7 +2285,9 @@ pub fn run() {
             commands::agents::stop_driver_runtime,
             commands::agents::restart_driver_runtime,
             commands::agents::install_agent,
+            commands::agents::cancel_agent_install,
             commands::agents::upgrade_all_agents,
+            commands::agents::cancel_agent_upgrade_all,
             commands::agents::check_agent_update_blockers,
             commands::agents::uninstall_agent,
             commands::agents::check_jre_installed,

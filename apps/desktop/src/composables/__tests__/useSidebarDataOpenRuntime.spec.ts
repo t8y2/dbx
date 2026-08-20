@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   cachedMetadata: undefined as unknown,
   dataTabReuseMode: "same-table" as DataTabReuseMode,
   openDataTabsNextToActive: false,
+  metadataGeneration: 0,
   ensureConnected: vi.fn(),
   executeTabSql: vi.fn(),
   loadTableMetadata: vi.fn(),
@@ -24,6 +25,7 @@ vi.mock("@/stores/connectionStore", () => ({
     getConfig: () => ({ id: "connection-1", db_type: mocks.databaseType }),
     ensureConnected: mocks.ensureConnected,
     connectionIdentifierQuote: () => undefined,
+    metadataGenerationFor: () => mocks.metadataGeneration,
   }),
 }));
 
@@ -76,6 +78,9 @@ vi.mock("@/stores/queryStore", () => ({
       const tab = mocks.tabs.find((item) => item.id === id);
       if (tab) {
         tab.tableMeta = tableMeta;
+        // 与真实 store 一致：记录写入时的连接元数据代次
+        tab.tableMetaGeneration = mocks.metadataGeneration;
+        tab.tableMetaUpdatedAt = Date.now();
         // 与真实 store 一致：仅真实元数据（columns 非空）落地才结束行标识等待
         if (tableMeta.columns.length > 0) tab.tableMetaPending = false;
       }
@@ -145,6 +150,7 @@ describe("useSidebarDataOpenRuntime", () => {
     mocks.cachedMetadata = undefined;
     mocks.dataTabReuseMode = "same-table";
     mocks.openDataTabsNextToActive = false;
+    mocks.metadataGeneration = 0;
     mocks.ensureConnected.mockResolvedValue(undefined);
     mocks.buildTableSelectSql.mockResolvedValue("SELECT * FROM users");
     mocks.executeTabSql.mockImplementation(async () => {
@@ -508,6 +514,8 @@ describe("useSidebarDataOpenRuntime", () => {
         primaryKeys: ["id"],
       },
       tableMetaUpdatedAt: Date.now(),
+      // 真实 tab 的 tableMeta 必经 setTableMeta 写入并记录当前代次（0）
+      tableMetaGeneration: 0,
     } as QueryTab);
     mocks.activeTabId = null;
 
@@ -541,5 +549,123 @@ describe("useSidebarDataOpenRuntime", () => {
     expect(mocks.tabs[0]?.tableMeta?.primaryKeys).toEqual(["id"]);
     expect(mocks.tabs[0]?.tableMetaPending).toBeFalsy();
     expect(mocks.loadTableMetadata).not.toHaveBeenCalled();
+  });
+
+  it("keeps tab-local metadata warm within the TTL window (no reload on reopen)", async () => {
+    const reload = vi.fn();
+    mocks.loadTableMetadata.mockImplementation(async () => {
+      reload();
+      return {
+        metadata: {
+          schema: "public",
+          tableName: "users",
+          tableType: "TABLE",
+          database: "app",
+          columns: [{ name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+          indexes: [],
+          primaryKeys: ["id"],
+          cachedAt: Date.now(),
+        },
+        cacheStatus: "miss",
+        ageMs: 0,
+      };
+    });
+
+    await useSidebarDataOpenRuntime().openData(tableNode);
+    // 第一次打开已把 tab-local tableMetaUpdatedAt 置为新鲜
+    expect(mocks.tabs[0]?.tableMetaUpdatedAt).toBeDefined();
+    // 复位执行态，让第二次打开走重开（reuse）路径而非 activate 早退
+    mocks.tabs[0]!.isExecuting = false;
+    mocks.tabs[0]!.executionId = undefined;
+
+    // 未发生连接生命周期变化：TTL 窗口内重开同表直接复用 tab-local 元数据
+    await useSidebarDataOpenRuntime().openData(tableNode);
+
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(mocks.tabs[0]?.tableMeta?.tableName).toBe("users");
+  });
+
+  it("reloads tab metadata after a reconnect boundary (issue #6623 reconnect regression)", async () => {
+    // 第一次打开的元数据：[id]
+    await useSidebarDataOpenRuntime().openData(tableNode);
+    expect(mocks.loadTableMetadata).toHaveBeenCalledTimes(1);
+    expect(mocks.tabs[0]?.tableMeta?.columns.map((column) => column.name)).toEqual(["id"]);
+    expect(mocks.tabs[0]?.tableMetaUpdatedAt).toBeDefined();
+
+    // 外部 ALTER TABLE ... ADD age：DBX 断开→重连。断开时 connectionStore 会
+    // 清掉该连接下数据标签页的 freshness 戳（staleConnectionDataTabMetadata），
+    // 此处等价模拟该生命周期边界。
+    mocks.tabs[0]!.tableMetaUpdatedAt = undefined;
+    mocks.tabs[0]!.isExecuting = false;
+    mocks.tabs[0]!.executionId = undefined;
+
+    // 第二次打开（重连后）：即使处于原 30s TTL 窗口内，也必须重新拉取结构
+    mocks.loadTableMetadata.mockImplementationOnce(async () => ({
+      metadata: {
+        schema: "public",
+        tableName: "users",
+        tableType: "TABLE",
+        database: "app",
+        columns: [
+          { name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+          { name: "age", data_type: "integer", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+        ],
+        indexes: [],
+        primaryKeys: ["id"],
+        cachedAt: Date.now(),
+      },
+      cacheStatus: "miss",
+      ageMs: 0,
+    }));
+    await useSidebarDataOpenRuntime().openData(tableNode);
+
+    expect(mocks.loadTableMetadata).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => {
+      expect(mocks.tabs[0]?.tableMeta?.columns.map((column) => column.name)).toContain("age");
+    });
+  });
+
+  it("does not write stale in-flight metadata back to the tab after a disconnect boundary", async () => {
+    // 手动挂起的元数据加载：openData 启动后台加载后停留在 in-flight
+    let resolveMetadata!: (value: Awaited<ReturnType<typeof mocks.loadTableMetadata>>) => void;
+    const pendingMetadata = new Promise<Awaited<ReturnType<typeof mocks.loadTableMetadata>>>((resolve) => {
+      resolveMetadata = resolve;
+    });
+    mocks.loadTableMetadata.mockReturnValueOnce(pendingMetadata);
+
+    const openPromise = useSidebarDataOpenRuntime().openData(tableNode);
+    await vi.waitFor(() => {
+      expect(mocks.loadTableMetadata).toHaveBeenCalledTimes(1);
+    });
+
+    // 模拟 disconnect 生命周期边界：连接代次递增 + freshness 戳被清
+    // （staleConnectionDataTabMetadata）
+    mocks.metadataGeneration = 1;
+    mocks.tabs[0]!.tableMetaUpdatedAt = undefined;
+
+    // 旧连接在途的结果此时才返回：shared 缓存写回已被 per-scope 失效代数
+    // 挡住，tab-local 写回必须被连接代次校验拦下（PR #6640 review blocker 1）
+    resolveMetadata({
+      metadata: {
+        schema: "public",
+        tableName: "users",
+        tableType: "TABLE",
+        database: "app",
+        columns: [{ name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+        indexes: [],
+        primaryKeys: ["id"],
+        cachedAt: Date.now(),
+      },
+      cacheStatus: "miss",
+      ageMs: 0,
+    });
+    await openPromise;
+    await vi.waitFor(() => {
+      expect(mocks.tabs[0]?.tableMetaUpdatedAt).toBeUndefined();
+    });
+
+    // 占位元数据未被旧列覆盖：freshness 保持在失效后的"冷"状态
+    expect(mocks.tabs[0]?.tableMeta?.columns).toEqual([]);
+    expect(mocks.tabs[0]?.tableMetaGeneration).toBe(0);
   });
 });

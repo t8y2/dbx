@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { buildPostgresSequenceLiteralCompletionItems, buildSelectStarExpansion, buildSqlCompletionItems, getPostgresSequenceLiteralCompletionContext, getSqlCompletionContext, selectStarResultColumnsMatch, shouldAutoOpenSqlCompletion } from "@/lib/sql/sqlCompletion";
+import {
+  buildPostgresSequenceLiteralCompletionItems,
+  buildSelectStarExpansion,
+  buildSqlCompletionItems,
+  buildSqlCompletionItemsFromContext,
+  getPostgresSequenceLiteralCompletionContext,
+  getSqlCompletionContext,
+  selectStarResultColumnsMatch,
+  shouldAutoOpenSqlCompletion,
+} from "@/lib/sql/sqlCompletion";
 import { sqlCompletionContextFromSemantic } from "@/lib/sql/semantic/completion";
 import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
 import { originForSqlCompletionProvider, originForTypedSqlCompletionStart, shouldAllowSqlCompletionTrigger, type SqlCompletionTriggerFacts } from "@/lib/sql/sqlCompletionTriggerPolicy";
@@ -14,6 +23,38 @@ describe("sqlCompletion keyword snippets", () => {
 
     expect(shouldAutoOpenSqlCompletion(sql, sql.length)).toBe(true);
     expect(items).toEqual(expect.arrayContaining([expect.objectContaining({ label: "select *", type: "snippet" }), expect.objectContaining({ label: "SELECT", type: "keyword" })]));
+  });
+});
+
+describe("MySQL DESCRIBE table completion", () => {
+  it.each(["DESC", "DESCRIBE"])("treats %s as a table-name context", (keyword) => {
+    const sql = `${keyword} ord`;
+    const options = { databaseType: "mysql", dialect: "mysql" } as const;
+    const context = sqlCompletionContextFromSemantic(buildSqlSemanticModel(sql, sql.length, options), getSqlCompletionContext(sql, sql.length, options));
+    expect(context.suggestTables).toBe(true);
+    expect(shouldAutoOpenSqlCompletion(sql, sql.length, options)).toBe(true);
+    expect(
+      buildSqlCompletionItemsFromContext(context, {
+        tables: [{ name: "orders" }],
+        columnsByTable: new Map(),
+        ...options,
+      }),
+    ).toEqual(expect.arrayContaining([expect.objectContaining({ label: "orders", type: "table" })]));
+  });
+
+  it("does not treat PostgreSQL ORDER BY DESC as a table-name context", () => {
+    const sql = "SELECT * FROM users ORDER BY name DESC ord";
+    const options = { databaseType: "postgres", dialect: "postgres" } as const;
+    const context = sqlCompletionContextFromSemantic(buildSqlSemanticModel(sql, sql.length, options), getSqlCompletionContext(sql, sql.length, options));
+
+    expect(context.suggestTables).toBe(false);
+    expect(
+      buildSqlCompletionItemsFromContext(context, {
+        tables: [{ name: "orders" }],
+        columnsByTable: new Map(),
+        ...options,
+      }).some((item) => item.type === "table"),
+    ).toBe(false);
   });
 });
 

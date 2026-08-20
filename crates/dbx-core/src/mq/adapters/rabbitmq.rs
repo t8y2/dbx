@@ -212,23 +212,7 @@ impl MessageQueueAdmin for RabbitMqAdmin {
         require_specific_vhost(&topic.namespace)?;
         let params = with_virtual_host(serde_json::json!({ "name": queue_name(topic) }), &topic.namespace);
         let result: serde_json::Value = self.call("mq_get_topic_stats", params).await?;
-
-        let total_messages = result.get("totalMessages").and_then(|v| v.as_i64()).unwrap_or(0);
-        let consumer_count = result.get("consumerCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-
-        Ok(TopicStats {
-            msg_rate_in: 0.0,
-            msg_rate_out: 0.0,
-            msg_throughput_in: 0.0,
-            msg_throughput_out: 0.0,
-            storage_size: 0,
-            backlog_size: total_messages,
-            msg_in_counter: 0,
-            msg_out_counter: 0,
-            subscription_count: consumer_count,
-            producer_count: 0,
-            raw: result,
-        })
+        Ok(topic_stats_from_agent_value(result))
     }
 
     async fn get_topic_internal_stats(&self, topic: &TopicRef) -> Result<serde_json::Value, String> {
@@ -997,8 +981,45 @@ fn peeked_message_from_json(idx: usize, m: &serde_json::Value) -> PeekedMessage 
     }
 }
 
+/// Map an `mq_get_topic_stats` agent payload onto the UI-friendly TopicStats.
+///
+/// RabbitMQ rates come from the management API's `message_stats` sample. A
+/// missing sample (new/idle queue, rates_mode=basic/none, or the AMQP
+/// passive-declare fallback path) must NOT be presented as a real rate of
+/// zero: `rates_unavailable` is set so the UI renders "no data" instead.
+fn topic_stats_from_agent_value(result: serde_json::Value) -> TopicStats {
+    let total_messages = result.get("totalMessages").and_then(|v| v.as_i64()).unwrap_or(0);
+    let consumer_count = result.get("consumerCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let publish_rate = result.get("publishRate").and_then(|v| v.as_f64());
+    let deliver_rate = result.get("deliverRate").and_then(|v| v.as_f64());
+    let has_stats =
+        result.get("publishRate").is_some() || result.get("deliverRate").is_some() || result.get("ackRate").is_some();
+
+    TopicStats {
+        msg_rate_in: publish_rate.unwrap_or(0.0),
+        msg_rate_out: deliver_rate.unwrap_or(0.0),
+        msg_throughput_in: 0.0,
+        msg_throughput_out: 0.0,
+        storage_size: 0,
+        backlog_size: total_messages,
+        msg_in_counter: result.get("publishTotal").and_then(|v| v.as_i64()).unwrap_or(0),
+        msg_out_counter: result.get("deliverGetTotal").and_then(|v| v.as_i64()).unwrap_or(0),
+        subscription_count: consumer_count,
+        producer_count: 0,
+        rates_unavailable: !has_stats,
+        raw: result,
+    }
+}
+
 fn topic_info_from_agent_value(topic: &serde_json::Value) -> TopicInfo {
     let name = topic.get("name").and_then(|value| value.as_str()).unwrap_or_default().to_string();
+    // Older RabbitMQ versions only report the queue type in the x-queue-type
+    // argument; the agent already prefers the explicit `type` field.
+    let queue_type = topic
+        .get("queueType")
+        .and_then(|value| value.as_str())
+        .or_else(|| topic.get("arguments").and_then(|args| args.get("x-queue-type")).and_then(|value| value.as_str()))
+        .map(String::from);
     TopicInfo {
         name: name.clone(),
         short_name: name,
@@ -1012,6 +1033,15 @@ fn topic_info_from_agent_value(topic: &serde_json::Value) -> TopicInfo {
         message_count: topic.get("messages").and_then(|value| value.as_i64()),
         messages_ready: topic.get("messagesReady").and_then(|value| value.as_i64()),
         messages_unacked: topic.get("messagesUnacked").and_then(|value| value.as_i64()),
+        auto_delete: topic.get("autoDelete").and_then(|value| value.as_bool()),
+        exclusive: topic.get("exclusive").and_then(|value| value.as_bool()),
+        state: topic.get("state").and_then(|value| value.as_str()).map(String::from),
+        queue_type,
+        arguments: topic.get("arguments").cloned().filter(|value| !value.is_null()),
+        consumer_count: topic.get("consumerCount").or_else(|| topic.get("consumers")).and_then(|value| value.as_i64()),
+        publish_rate: topic.get("publishRate").and_then(|value| value.as_f64()),
+        deliver_rate: topic.get("deliverRate").and_then(|value| value.as_f64()),
+        ack_rate: topic.get("ackRate").and_then(|value| value.as_f64()),
     }
 }
 
@@ -1205,6 +1235,129 @@ mod tests {
         assert_eq!(topic.messages_ready, Some(10));
         assert_eq!(topic.messages_unacked, Some(2));
         assert_eq!(topic.namespace.as_deref(), Some("/"));
+    }
+
+    #[test]
+    fn topic_info_maps_queue_features_arguments_and_rates() {
+        let topic = topic_info_from_agent_value(&serde_json::json!({
+            "name": "orders",
+            "durable": true,
+            "autoDelete": false,
+            "exclusive": true,
+            "state": "running",
+            "queueType": "quorum",
+            "consumerCount": 4,
+            "arguments": {
+                "x-queue-type": "quorum",
+                "x-message-ttl": 60000,
+                "x-max-length": 1000
+            },
+            "publishRate": 12.5,
+            "deliverRate": 11.8,
+            "ackRate": 11.2
+        }));
+
+        assert_eq!(topic.auto_delete, Some(false));
+        assert_eq!(topic.exclusive, Some(true));
+        assert_eq!(topic.state.as_deref(), Some("running"));
+        assert_eq!(topic.queue_type.as_deref(), Some("quorum"));
+        assert_eq!(topic.consumer_count, Some(4));
+        assert_eq!(topic.publish_rate, Some(12.5));
+        assert_eq!(topic.deliver_rate, Some(11.8));
+        assert_eq!(topic.ack_rate, Some(11.2));
+        let arguments = topic.arguments.as_ref().expect("arguments");
+        assert_eq!(arguments["x-message-ttl"], serde_json::json!(60000));
+        assert_eq!(arguments["x-queue-type"], serde_json::json!("quorum"));
+    }
+
+    #[test]
+    fn topic_info_accepts_consumers_wire_field() {
+        let topic = topic_info_from_agent_value(&serde_json::json!({
+            "name": "orders",
+            "consumers": 3
+        }));
+
+        assert_eq!(topic.consumer_count, Some(3));
+    }
+
+    #[test]
+    fn topic_info_falls_back_to_x_queue_type_argument() {
+        // Older RabbitMQ versions only expose the queue type in arguments.
+        let topic = topic_info_from_agent_value(&serde_json::json!({
+            "name": "stream-q",
+            "arguments": { "x-queue-type": "stream" }
+        }));
+        assert_eq!(topic.queue_type.as_deref(), Some("stream"));
+
+        // No type anywhere: absent, never guessed.
+        let plain = topic_info_from_agent_value(&serde_json::json!({"name": "plain"}));
+        assert_eq!(plain.queue_type, None);
+        assert_eq!(plain.arguments, None);
+        assert_eq!(plain.publish_rate, None);
+    }
+
+    #[test]
+    fn topic_stats_parses_rates_and_counters_from_agent_payload() {
+        let stats = topic_stats_from_agent_value(serde_json::json!({
+            "name": "orders",
+            "totalMessages": 123,
+            "consumerCount": 4,
+            "publishRate": 12.5,
+            "deliverRate": 11.8,
+            "ackRate": 11.2,
+            "publishTotal": 1000,
+            "deliverGetTotal": 900,
+            "ackTotal": 880
+        }));
+
+        assert_eq!(stats.msg_rate_in, 12.5);
+        assert_eq!(stats.msg_rate_out, 11.8);
+        assert_eq!(stats.backlog_size, 123);
+        assert_eq!(stats.subscription_count, 4);
+        assert_eq!(stats.msg_in_counter, 1000);
+        assert_eq!(stats.msg_out_counter, 900);
+        assert!(!stats.rates_unavailable, "rates sampled by the management API");
+    }
+
+    #[test]
+    fn topic_stats_marks_rates_unavailable_when_message_stats_is_missing() {
+        // No message_stats sample (fallback path, idle queue, rates_mode=none):
+        // the zero placeholders must not be presented as real rates.
+        let stats = topic_stats_from_agent_value(serde_json::json!({
+            "name": "idle",
+            "totalMessages": 5,
+            "consumerCount": 0
+        }));
+
+        assert_eq!(stats.msg_rate_in, 0.0);
+        assert!(stats.rates_unavailable, "rates must be flagged unavailable");
+
+        // And a real sampled zero is NOT flagged: it is a genuine rate of 0.
+        let zero = topic_stats_from_agent_value(serde_json::json!({
+            "name": "quiet",
+            "totalMessages": 0,
+            "consumerCount": 0,
+            "publishRate": 0.0,
+            "deliverRate": 0.0,
+            "ackRate": 0.0
+        }));
+        assert_eq!(zero.msg_rate_in, 0.0);
+        assert!(!zero.rates_unavailable, "a real zero rate is not unavailable");
+    }
+
+    #[test]
+    fn topic_stats_serialization_omits_rates_unavailable_when_false() {
+        let stats = topic_stats_from_agent_value(serde_json::json!({
+            "name": "q", "totalMessages": 1, "consumerCount": 0, "publishRate": 3.5
+        }));
+        let json = serde_json::to_value(&stats).expect("serialize stats");
+        assert!(json.get("ratesUnavailable").is_none());
+
+        let unavailable = topic_stats_from_agent_value(serde_json::json!({
+            "name": "q", "totalMessages": 1, "consumerCount": 0
+        }));
+        let json = serde_json::to_value(&unavailable).expect("serialize stats");
+        assert_eq!(json.get("ratesUnavailable"), Some(&serde_json::json!(true)));
     }
 
     #[test]

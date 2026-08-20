@@ -664,6 +664,132 @@ describe("RedisKeyBrowser scope changes", () => {
   });
 });
 
+describe("RedisKeyBrowser TTL list badges and no-expiry filter", () => {
+  it("renders TTL badges per row and filters rows to keys without expiry", async () => {
+    mocks.redisScanKeysBatch.mockResolvedValue({
+      cursor: 0,
+      keys: [
+        {
+          key_display: "session:a",
+          key_raw: "c2Vzc2lvbjph",
+          key_type: "string",
+          ttl: -1,
+        },
+        {
+          key_display: "cache:b",
+          key_raw: "Y2FjaGU6Yg==",
+          key_type: "string",
+          ttl: 3600,
+        },
+      ],
+      total_keys: 2,
+    });
+    mountBrowser();
+    await settle();
+    // 初始 "*" 浏览是树模式且分组默认折叠；切到 key 搜索后走平铺行，leaf 直接可见
+    await submitKeySearch("session");
+
+    expect(document.body.textContent).toContain("session:a");
+    // 永不过期（TTL = -1）显示为本地化的 redis.noExpiry 文案，
+    // 剩余 3600 秒显示为加载时刻快照 redis.ttlHour（测试未配置 i18n 文案时回退为 key）
+    expect(document.body.textContent).toContain("redis.noExpiry");
+    expect(document.body.textContent).toContain("redis.ttlHour");
+
+    requiredElement<HTMLButtonElement>("[data-redis-no-expiry-filter]").click();
+    await settle();
+
+    expect(document.body.textContent).toContain("session:a");
+    expect(document.body.textContent).not.toContain("cache:b");
+  });
+
+  it("shows an empty hint when no loaded key is without expiry", async () => {
+    mocks.redisScanKeysBatch.mockResolvedValue({
+      cursor: 0,
+      keys: [
+        {
+          key_display: "cache:b",
+          key_raw: "Y2FjaGU6Yg==",
+          key_type: "string",
+          ttl: 60,
+        },
+      ],
+      total_keys: 1,
+    });
+    mountBrowser();
+    await settle();
+    await submitKeySearch("cache");
+
+    requiredElement<HTMLButtonElement>("[data-redis-no-expiry-filter]").click();
+    await settle();
+
+    expect(document.body.textContent).toContain("redis.noExpiryKeysEmpty");
+  });
+
+  it("counts down the list TTL locally without extra network requests", async () => {
+    vi.useFakeTimers();
+    try {
+      mocks.redisScanKeysBatch.mockResolvedValue({
+        cursor: 0,
+        keys: [
+          {
+            key_display: "cache:b",
+            key_raw: "Y2FjaGU6Yg==",
+            key_type: "string",
+            ttl: 60,
+          },
+        ],
+        total_keys: 1,
+      });
+      mountBrowser();
+      await settle();
+      await submitKeySearch("cache");
+
+      // 刚加载时流逝为 0，60 秒只展示分钟单位（未配置文案时回退为 key）
+      expect(document.body.textContent).toContain("redis.ttlMinute");
+
+      const scanCalls = mocks.redisScanKeysBatch.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(5000);
+      await settle();
+
+      // 倒计时是纯本地计算，不发额外请求；55 秒只展示秒单位
+      expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(scanCalls);
+      expect(document.body.textContent).toContain("redis.ttlSecond");
+      expect(document.body.textContent).not.toContain("redis.ttlMinute");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("shows an expired badge when the local countdown reaches zero", async () => {
+    vi.useFakeTimers();
+    try {
+      mocks.redisScanKeysBatch.mockResolvedValue({
+        cursor: 0,
+        keys: [
+          {
+            key_display: "cache:b",
+            key_raw: "Y2FjaGU6Yg==",
+            key_type: "string",
+            ttl: 1,
+          },
+        ],
+        total_keys: 1,
+      });
+      mountBrowser();
+      await settle();
+      await submitKeySearch("cache");
+
+      await vi.advanceTimersByTimeAsync(2000);
+      await settle();
+
+      // 倒计时归零后展示已过期文案，而不是停留在旧快照
+      expect(document.body.textContent).toContain("redis.expired");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("RedisKeyBrowser command completion", () => {
   it("uses the connected server's module command docs and accepts the selection with Tab", async () => {
     mountBrowser();

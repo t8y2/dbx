@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, ref, watch, watchEffect } from "vue";
 import { useI18n } from "vue-i18n";
-import { Play, CirclePlay, Loader2, Square, Database, Check, Table2, AlignLeft, GitBranch, Save, FolderOpen, X, Shield, Download, RotateCcw, AlertTriangle, ClipboardPaste, Minimize2 } from "@lucide/vue";
+import { Play, CirclePlay, Loader2, Square, Database, Check, Table2, AlignLeft, GitBranch, Save, FolderOpen, X, Shield, Download, RotateCcw, AlertTriangle, ClipboardPaste, Minimize2, SpellCheck2 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import TruncatedTextTooltip from "@/components/ui/TruncatedTextTooltip.vue";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
+import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -14,8 +15,6 @@ import { catalogDatabaseOptionsKey, databaseAfterCatalogChange, normalizedQueryT
 import { useSchemaOptions } from "@/composables/useSchemaOptions";
 import { connectionIconType } from "@/lib/connection/connectionPresentation";
 import { formatDatabaseLabel, isDefaultDatabase } from "@/lib/database/defaultDatabase";
-import { connectionDisplayName } from "@/lib/tabs/tabPresentation";
-import { useConnectionGroupLabel } from "@/composables/useConnectionGroupLabel";
 import { isSingleDatabase, supportsClearableQuerySchema, supportsSqlInListPaste, supportsTransaction as supportsTransactionFeature } from "@/lib/database/databaseCapabilities";
 import { supportsQueryExecution } from "@/lib/database/databaseFeatureSupport";
 import { connectionIsDorisFamilyCatalogCapable } from "@/lib/database/databaseFeatureSupport";
@@ -91,8 +90,6 @@ const loadingActiveDatabaseOptions = computed(() => {
 });
 const switchingCatalog = ref(false);
 
-const connectionOptionIds = computed(() => connectionStore.connections.map((connection) => connection.id));
-const { connectionGroupLabel } = useConnectionGroupLabel();
 const activeDatabaseValue = computed(() => props.activeTab.database || "");
 const activeProductionContext = computed(() => productionContextForDatabase(props.activeConnection, props.activeTab.database));
 const showConnectionProductionBadge = computed(() => activeProductionContext.value.reason === "connection");
@@ -142,6 +139,17 @@ const explainAnalyzeTooltip = computed(() => {
 const canSaveSql = computed(() => !!props.activeTab.externalSqlPath || !!props.activeTab.sql.trim());
 const keywordCaseIsLower = computed(() => props.sqlKeywordCase === "lower");
 const keywordCaseToggleTooltip = computed(() => (keywordCaseIsLower.value ? t("toolbar.keywordCaseUpper") : t("toolbar.keywordCaseLower")));
+const sqlSemanticDiagnosticsEnabled = computed(() => settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled);
+const sqlSemanticDiagnosticsToggleTooltip = computed(() => (sqlSemanticDiagnosticsEnabled.value ? t("toolbar.sqlSemanticDiagnosticsToggleOn") : t("toolbar.sqlSemanticDiagnosticsToggleOff")));
+const supportsSqlSemanticDiagnosticsToggle = computed(() => {
+  const dbType = props.activeConnection?.db_type;
+  return dbType !== "redis" && dbType !== "victoriametrics";
+});
+function toggleSqlSemanticDiagnostics() {
+  settingsStore.updateEditorSettings({
+    sqlSemanticDiagnosticsMode: sqlSemanticDiagnosticsEnabled.value ? "disabled" : "enabled",
+  });
+}
 const transactionTooltip = computed(() => {
   const isAgent = (props.activeConnection?.db_type as string) === "agent";
   const isManual = props.autoCommit === false;
@@ -223,10 +231,6 @@ function databaseDisplayName(database: string): string {
     defaultDatabase: t("editor.defaultDatabase"),
     noDatabase: t("editor.noDatabase"),
   });
-}
-
-function connectionById(connectionId: string): ConnectionConfig | undefined {
-  return connectionStore.getConfig(connectionId);
 }
 
 function databaseOptionIsProduction(database: string): boolean {
@@ -368,6 +372,21 @@ async function changeCatalog(selectedCatalog: string) {
         </TooltipTrigger>
         <TooltipContent>{{ keywordCaseToggleTooltip }}</TooltipContent>
       </Tooltip>
+      <Tooltip v-if="supportsSqlSemanticDiagnosticsToggle">
+        <TooltipTrigger as-child>
+          <Button
+            variant="ghost"
+            size="icon"
+            class="h-6 w-6"
+            :class="sqlSemanticDiagnosticsEnabled ? 'text-emerald-600 bg-emerald-500/10 hover:bg-emerald-500/20 hover:text-emerald-700 dark:text-emerald-300 dark:hover:text-emerald-200' : 'text-muted-foreground/50 hover:bg-muted hover:text-muted-foreground'"
+            :aria-label="sqlSemanticDiagnosticsToggleTooltip"
+            @click="toggleSqlSemanticDiagnostics"
+          >
+            <SpellCheck2 class="h-3.5 w-3.5" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ sqlSemanticDiagnosticsToggleTooltip }}</TooltipContent>
+      </Tooltip>
       <Tooltip v-if="activeConnection?.db_type === 'redis'">
         <TooltipTrigger as-child>
           <Button
@@ -427,19 +446,16 @@ async function changeCatalog(selectedCatalog: string) {
     <div class="flex items-center gap-2 shrink-0">
       <div class="flex items-center gap-1">
         <span v-if="activeConnection?.color" class="h-4 w-1 rounded-full shrink-0" :style="{ backgroundColor: activeConnection.color }" />
-        <SearchableSelect
+        <ConnectionTreeSelect
           :model-value="activeConnectionValue"
-          :options="connectionOptionIds"
+          :connections="connectionStore.connections"
+          :layout="connectionStore.sidebarLayout"
           :placeholder="t('editor.selectConnection')"
           :search-placeholder="t('editor.searchConnection')"
           :empty-text="t('grid.noSearchResults')"
-          :loading-text="t('common.loading')"
-          trigger-variant="ghost"
           trigger-class="font-medium text-foreground"
           trigger-icon-class="h-3 w-3"
-          :display-name="connectionDisplayName"
           list-class="w-96 max-w-[calc(100vw-2rem)]"
-          item-class="min-h-9 h-auto py-1"
           @update:model-value="(connectionId) => emit('changeConnection', connectionId)"
         >
           <template #trigger-label="{ label }">
@@ -450,18 +466,7 @@ async function changeCatalog(selectedCatalog: string) {
             </div>
             <span v-else class="truncate text-muted-foreground">{{ t("editor.selectConnection") }}</span>
           </template>
-          <template #option-label="{ option, label }">
-            <div class="flex min-w-0 items-center gap-2">
-              <DatabaseIcon :db-type="connectionIconType(connectionById(option))" class="h-3.5 w-3.5 shrink-0" />
-              <div class="flex min-w-0 flex-1 items-center gap-2">
-                <span class="block min-w-0 max-w-48 shrink-0 whitespace-normal break-words rounded-sm bg-muted/70 px-1.5 py-0.5 text-[11px] leading-tight text-muted-foreground">
-                  {{ connectionGroupLabel(option) }}
-                </span>
-                <TruncatedTextTooltip :text="label" class="block min-w-[7rem] flex-1 text-sm font-medium" side="left" :side-offset="8" />
-              </div>
-            </div>
-          </template>
-        </SearchableSelect>
+        </ConnectionTreeSelect>
       </div>
       <div v-if="showCatalogSelector" class="flex items-center gap-1">
         <SearchableSelect

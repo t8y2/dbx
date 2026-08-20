@@ -121,6 +121,15 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
   }
 
   const canDropMongoDatabase = computed(() => activeNode.value.type === "mongo-db" && !!activeNode.value.database && usesAnyMongoDriver(activeNode.value));
+  function canDropMilvusDatabaseNode(node: TreeNode): boolean {
+    const connectionId = node.connectionId;
+    const database = node.database;
+    if (node.type !== "vector-database" || !connectionId || !database || database === "default") return false;
+    const config = connectionStore.getConfig(connectionId);
+    return config?.db_type === "milvus" && config.database !== database;
+  }
+
+  const canDropMilvusDatabase = computed(() => canDropMilvusDatabaseNode(activeNode.value));
 
   function canMutateMongoCollectionNode(node: TreeNode): boolean {
     if (node.type !== "mongo-collection" || !node.connectionId || !node.database) return false;
@@ -136,6 +145,7 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
   }
 
   const canDropMongoCollection = computed(() => canMutateMongoCollectionNode(activeNode.value));
+  const canDropMilvusCollection = computed(() => activeNode.value.type === "vector-collection" && !!activeNode.value.connectionId && !!activeNode.value.database && connectionStore.getConfig(activeNode.value.connectionId)?.db_type === "milvus");
   const canRenameMongoCollection = computed(() => canRenameMongoCollectionNode(activeNode.value));
   const canCloneMongoCollection = computed(() => canCloneMongoCollectionNode(activeNode.value));
 
@@ -846,6 +856,10 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     showDropMongoCollectionConfirm.value = true;
   }
 
+  function dropMilvusCollection() {
+    dropMongoCollection();
+  }
+
   function dropMongoIndex() {
     dropMongoIndexLoading.value = false;
     showDropMongoIndexConfirm.value = true;
@@ -950,10 +964,56 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
         toast(t("contextMenu.dropCollectionSuccess", { name: collectionName }), 3000);
         showDropMongoCollectionConfirm.value = false;
         await refreshMongoTreeAfterDrop(node, async () => {
-          // The final collection can remove its database; if the database
-          // remains, refresh its preserved expanded children as well.
           await connectionStore.loadMongoDatabases(connectionId);
           await connectionStore.loadMongoCollections(connectionId, database);
+        });
+      },
+      onError: toastMutationError,
+    });
+  }
+
+  async function confirmDropMilvusDatabase() {
+    const node = sidebarDangerTarget.value ?? activeNode.value;
+    const connectionId = node.connectionId;
+    const database = node.database;
+    if (!connectionId || !database || !canDropMilvusDatabaseNode(node)) return;
+    await runMongoSidebarMutation({
+      connection: connectionStore.getConfig(connectionId),
+      database,
+      reviewText: `POST /v2/vectordb/databases/drop\n{"dbName":${JSON.stringify(database)}}`,
+      source: t("production.sourceSidebar"),
+      loading: dropDatabaseLoading,
+      beforeExecute: () => connectionStore.ensureConnected(connectionId),
+      execute: () => api.vectorDropDatabase(connectionId, database),
+      onSuccess: async () => {
+        toast(t("contextMenu.dropDatabaseSuccess", { name: node.label }), 3000);
+        showDropDatabaseConfirm.value = false;
+        await refreshMongoTreeAfterDrop(node, () => connectionStore.loadMilvusDatabases(connectionId));
+      },
+      onError: toastMutationError,
+    });
+  }
+
+  async function confirmDropMilvusCollection() {
+    const node = sidebarDangerTarget.value ?? activeNode.value;
+    const connectionId = node.connectionId;
+    const database = node.database;
+    if (node.type !== "vector-collection" || !connectionId || !database || connectionStore.getConfig(connectionId)?.db_type !== "milvus") return;
+    const collectionName = node.label;
+    await runMongoSidebarMutation({
+      connection: connectionStore.getConfig(connectionId),
+      database,
+      reviewText: `POST /v2/vectordb/collections/drop\n{"dbName":${JSON.stringify(database)},"collectionName":${JSON.stringify(collectionName)}}`,
+      source: t("production.sourceSidebar"),
+      loading: dropMongoCollectionLoading,
+      beforeExecute: () => connectionStore.ensureConnected(connectionId),
+      execute: () => api.vectorDropCollection(connectionId, database, collectionName),
+      onSuccess: async () => {
+        toast(t("contextMenu.dropCollectionSuccess", { name: collectionName }), 3000);
+        showDropMongoCollectionConfirm.value = false;
+        await refreshMongoTreeAfterDrop(node, async () => {
+          await connectionStore.loadMilvusDatabases(connectionId);
+          await connectionStore.loadVectorCollections(connectionId, database);
         });
       },
       onError: toastMutationError,
@@ -1051,7 +1111,9 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
 
   return {
     canDropMongoDatabase,
+    canDropMilvusDatabase,
     canDropMongoCollection,
+    canDropMilvusCollection,
     canRenameMongoCollection,
     canCloneMongoCollection,
     prepareRenameMongoCollectionDialog,
@@ -1114,6 +1176,9 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     confirmFlushRedisDb,
     confirmDropMongoDatabase,
     confirmDropMongoCollection,
+    confirmDropMilvusDatabase,
+    confirmDropMilvusCollection,
+    dropMilvusCollection,
     confirmDropMongoIndex,
     confirmDropAllMongoIndexes,
   };

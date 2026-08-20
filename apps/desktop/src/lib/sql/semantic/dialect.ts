@@ -194,3 +194,15 @@ export function sqlSemanticDialectFor(options: { databaseType?: DatabaseType; di
       return SQL_SEMANTIC_DIALECTS.generic;
   }
 }
+
+/**
+ * Resolves the dialect id ("mysql", "postgres", ...) used to keep lexical/statement-boundary
+ * scanning in sync with tokenizeSqlSemantic's own dialect-aware tokenization -- most importantly,
+ * whether '#' starts a line comment (MySQL) or is an operator (PostgreSQL: #, #>, #>>, #-).
+ * Defaults to "mysql" when no dialect info is available (rather than sqlSemanticDialectFor's own
+ * "generic" default), matching tokenizeSqlSemantic's default and preserving the behavior callers
+ * had before dialect-aware scanning existed.
+ */
+export function resolveSqlDialectId(options: { databaseType?: DatabaseType; dialect?: "mysql" | "postgres" | "sqlserver" | "clickhouse" }): string {
+  return options.databaseType || options.dialect ? sqlSemanticDialectFor(options).id : "mysql";
+}

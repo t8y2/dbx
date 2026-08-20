@@ -130,6 +130,17 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+const testI18nMessages = {
+  en: {
+    redis: {
+      ttlDay: "{count}d",
+      ttlHour: "{count}h",
+      ttlMinute: "{count}m",
+      ttlSecond: "{count}s",
+    },
+  },
+};
+
 function mountViewer(onDeleted: (keyRaw: string) => void, onLoaded = vi.fn()) {
   const host = document.createElement("div");
   document.body.append(host);
@@ -148,7 +159,7 @@ function mountViewer(onDeleted: (keyRaw: string) => void, onLoaded = vi.fn()) {
       },
     }),
   );
-  app.use(createI18n({ legacy: false, locale: "en", messages: { en: {} }, missingWarn: false, fallbackWarn: false }));
+  app.use(createI18n({ legacy: false, locale: "en", messages: testI18nMessages, missingWarn: false, fallbackWarn: false }));
   app.mount(host);
   mountedApps.push({ unmount: () => app.unmount(), host });
 }
@@ -178,7 +189,7 @@ function mountKeepAliveViewer(onDeleted = vi.fn()) {
       },
     }),
   );
-  app.use(createI18n({ legacy: false, locale: "en", messages: { en: {} }, missingWarn: false, fallbackWarn: false }));
+  app.use(createI18n({ legacy: false, locale: "en", messages: testI18nMessages, missingWarn: false, fallbackWarn: false }));
   app.mount(host);
   mountedApps.push({ unmount: () => app.unmount(), host });
   return {
@@ -272,7 +283,7 @@ describe("RedisValueViewer expiry saving", () => {
 
     expect(mocks.redisGetValue).toHaveBeenCalledOnce();
     expect(mocks.redisGetTtl).not.toHaveBeenCalled();
-    expect(document.querySelector<HTMLElement>("[data-slot='badge'][aria-label='redis.expiry']")?.textContent).toContain("00:00:50");
+    expect(document.querySelector<HTMLElement>("[data-slot='badge'][aria-label='redis.expiry']")?.textContent).toContain("50s");
   });
 
   it("polls the full value at the configured interval without refreshing the parent key tree", async () => {
@@ -291,7 +302,7 @@ describe("RedisValueViewer expiry saving", () => {
     expect(mocks.redisGetTtl).not.toHaveBeenCalled();
     expect(loaded).toHaveBeenCalledOnce();
     expect(document.querySelector<HTMLTextAreaElement>("textarea")?.value).toBe("refreshed");
-    expect(document.querySelector<HTMLElement>("[data-slot='badge'][aria-label='redis.expiry']")?.textContent).toContain("00:00:45");
+    expect(document.querySelector<HTMLElement>("[data-slot='badge'][aria-label='redis.expiry']")?.textContent).toContain("45s");
   });
 
   it("pauses automatic value polling while a collection member is open", async () => {
@@ -332,7 +343,7 @@ describe("RedisValueViewer expiry saving", () => {
     await settle();
 
     expect(mocks.redisGetValue).toHaveBeenCalledTimes(2);
-    expect(document.querySelector<HTMLElement>("[data-slot='badge'][aria-label='redis.expiry']")?.textContent).toContain("00:00:30");
+    expect(document.querySelector<HTMLElement>("[data-slot='badge'][aria-label='redis.expiry']")?.textContent).toContain("30s");
   });
 
   it("stops auto-refresh after a full-value polling error", async () => {
@@ -368,7 +379,7 @@ describe("RedisValueViewer expiry saving", () => {
     await settle();
 
     expect(mocks.redisGetValue).toHaveBeenCalledTimes(3);
-    expect(document.querySelector<HTMLElement>("[data-slot='badge'][aria-label='redis.expiry']")?.textContent).toContain("00:00:30");
+    expect(document.querySelector<HTMLElement>("[data-slot='badge'][aria-label='redis.expiry']")?.textContent).toContain("30s");
   });
 
   it("pauses polling while the document is hidden and resumes when visible", async () => {
@@ -412,7 +423,7 @@ describe("RedisValueViewer expiry saving", () => {
     document.dispatchEvent(new Event("visibilitychange"));
     await settle();
 
-    expect(document.querySelector<HTMLElement>("[data-slot='badge'][aria-label='redis.expiry']")?.textContent).toContain("00:00:30");
+    expect(document.querySelector<HTMLElement>("[data-slot='badge'][aria-label='redis.expiry']")?.textContent).toContain("30s");
   });
 
   it("pauses polling while deactivated and resumes from the saved setting", async () => {
@@ -536,7 +547,7 @@ describe("RedisValueViewer expiry saving", () => {
     await saveTtlFromEditor();
 
     expect(document.querySelector<HTMLTextAreaElement>("textarea")?.value).toBe("draft");
-    expect(document.querySelector<HTMLElement>("[data-slot='badge'][aria-label='redis.expiry']")?.textContent).toContain("00:00:42");
+    expect(document.querySelector<HTMLElement>("[data-slot='badge'][aria-label='redis.expiry']")?.textContent).toContain("42s");
   });
 
   it("removes a key that disappears while refreshing after a successful TTL save", async () => {

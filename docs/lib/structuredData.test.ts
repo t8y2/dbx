@@ -18,8 +18,8 @@ test("software structured data stays localized and versioned", () => {
   assert.equal(english.applicationCategory, "DeveloperApplication");
   assert.equal(english.softwareVersion, "0.5.71");
   assert.equal(english.inLanguage, "en");
-  assert.match(english.description, /80\+ databases/);
+  assert.match(english.description, /90\+ databases/);
   assert.equal(chinese.inLanguage, "zh-CN");
-  assert.match(chinese.description, /80\+ 种数据库/);
+  assert.match(chinese.description, /90\+ 种数据库/);
   assert.equal(chinese.license, "https://github.com/t8y2/dbx/blob/main/LICENSE");
 });

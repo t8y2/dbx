@@ -10,6 +10,9 @@ const mocks = vi.hoisted(() => ({
   executeMulti: vi.fn(),
   productionGuard: vi.fn(),
   toast: vi.fn(),
+  listDatabases: vi.fn(),
+  listTables: vi.fn(),
+  listSchemas: vi.fn(),
 }));
 
 function passthrough(tag: string): Component {
@@ -44,6 +47,21 @@ function modelDialog(): Component {
   });
 }
 
+function passwordInput(): Component {
+  return defineComponent({
+    inheritAttrs: false,
+    setup(_, { attrs }) {
+      return () =>
+        h("input", {
+          ...attrs,
+          "data-password-input": "true",
+          value: attrs.modelValue as string,
+          onInput: (event: Event) => (attrs["onUpdate:modelValue"] as ((value: string) => void) | undefined)?.((event.target as HTMLInputElement).value),
+        });
+    },
+  });
+}
+
 vi.mock("vue-i18n", () => ({
   useI18n: () => ({
     t: (key: string, values?: Record<string, unknown>) => (values?.message ? `${key}: ${values.message}` : key),
@@ -54,6 +72,7 @@ vi.mock("@lucide/vue", () => {
   return {
     AlertTriangle: Icon,
     Check: Icon,
+    ChevronDown: Icon,
     Globe2: Icon,
     KeyRound: Icon,
     Lock: Icon,
@@ -62,6 +81,7 @@ vi.mock("@lucide/vue", () => {
     RefreshCcw: Icon,
     Search: Icon,
     ShieldCheck: Icon,
+    Table2: Icon,
     Trash2: Icon,
     Unlock: Icon,
     UserRound: Icon,
@@ -77,7 +97,12 @@ vi.mock("@/components/ui/dialog", () => ({
   DialogTitle: passthrough("div"),
 }));
 vi.mock("@/components/ui/input", () => ({ Input: modelInput() }));
-vi.mock("@/components/ui/PasswordInput.vue", () => ({ default: passthrough("input") }));
+vi.mock("@/components/ui/PasswordInput.vue", () => ({ default: passwordInput() }));
+vi.mock("@/components/ui/popover", () => ({
+  Popover: passthrough("div"),
+  PopoverContent: passthrough("div"),
+  PopoverTrigger: passthrough("div"),
+}));
 vi.mock("@/components/ui/select", () => ({
   Select: passthrough("div"),
   SelectContent: passthrough("div"),
@@ -93,8 +118,9 @@ vi.mock("@/composables/useSqlHighlighter", () => ({ useSqlHighlighter: () => ({ 
 vi.mock("@/lib/backend/api", () => ({
   executeQuery: mocks.executeQuery,
   executeMulti: mocks.executeMulti,
-  listDatabases: vi.fn(),
-  listSchemas: vi.fn(),
+  listDatabases: mocks.listDatabases,
+  listTables: mocks.listTables,
+  listSchemas: mocks.listSchemas,
 }));
 vi.mock("@/lib/database/productionExecutionGuard", () => ({
   executeWithProductionSqlGuard: (options: { execute: () => Promise<unknown> }) => {
@@ -192,6 +218,47 @@ describe("DatabaseUserAdmin MySQL grant loading", () => {
 function findButton(text: string): HTMLButtonElement | undefined {
   return Array.from(root?.querySelectorAll("button") ?? []).find((button) => button.textContent?.trim() === text);
 }
+
+describe("DatabaseUserAdmin MySQL create-user table grants", () => {
+  it("loads tables, requires a selection, and previews only the selected table grant", async () => {
+    mocks.ensureConnected.mockResolvedValue(undefined);
+    mocks.executeQuery.mockResolvedValueOnce({ columns: ["user", "host", "plugin"], rows: [["root", "%", "caching_sha2_password"]] }).mockResolvedValueOnce({ columns: ["Grants"], rows: [["GRANT ALL PRIVILEGES ON *.* TO 'root'@'%'"]] });
+    mocks.listDatabases.mockResolvedValue([{ name: "scope_test" }]);
+    mocks.listTables.mockResolvedValue([
+      { name: "allowed_table", table_type: "BASE TABLE" },
+      { name: "blocked_table", table_type: "BASE TABLE" },
+    ]);
+
+    root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(DatabaseUserAdmin, { connection: nativeMysqlConnection });
+    app.mount(root);
+    await vi.waitFor(() => expect(mocks.executeQuery).toHaveBeenCalledTimes(2));
+
+    findButton("userAdmin.newUser")?.click();
+    await vi.waitFor(() => expect(mocks.listDatabases).toHaveBeenCalledWith("native-mysql"));
+    await nextTick();
+    findButton("scope_test")?.click();
+    const password = root.querySelector<HTMLInputElement>('[data-password-input="true"]');
+    password!.value = "test-password";
+    password!.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+
+    findButton("userAdmin.specificTables")?.click();
+    await vi.waitFor(() => expect(mocks.listTables).toHaveBeenCalledWith("native-mysql", "scope_test", ""));
+    await nextTick();
+    expect(findButton("userAdmin.previewSql")?.disabled).toBe(true);
+
+    findButton("allowed_table")?.click();
+    await nextTick();
+    expect(findButton("userAdmin.previewSql")?.disabled).toBe(false);
+    findButton("userAdmin.previewSql")?.click();
+
+    await vi.waitFor(() => expect(root?.textContent).toContain("GRANT SELECT, SHOW VIEW ON `scope_test`.`allowed_table` TO 'app_user'@'%';"));
+    expect(root.textContent).not.toContain("ON `scope_test`.*");
+    expect(root.textContent).not.toContain("`blocked_table`");
+  });
+});
 
 async function mountNativeMysqlUserAdmin() {
   mocks.ensureConnected.mockResolvedValue(undefined);

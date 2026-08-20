@@ -8,10 +8,13 @@ export interface CoerceDataGridCellValueOptions {
   databaseType: DatabaseType | undefined;
   columnInfo: Pick<ColumnInfo, "data_type"> | undefined;
   preserveEmptyString?: boolean;
+  /** Treat an empty inline bulk edit as SQL NULL before type coercion. */
+  emptyStringAsNull?: boolean;
 }
 
 export function coerceDataGridCellValue(options: CoerceDataGridCellValueOptions): GridCellValue {
   const { value, oldValue } = options;
+  if (value === "" && options.emptyStringAsNull) return null;
   if (value === "" && oldValue === null && !options.preserveEmptyString) return null;
   const postgresArrayValue = coercePostgresArrayValue(options);
   if (postgresArrayValue !== undefined) return postgresArrayValue;

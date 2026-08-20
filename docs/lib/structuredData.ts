@@ -2,12 +2,12 @@ import { DEFAULT_DESCRIPTION, SITE_NAME, SITE_URL } from "./metadata";
 
 const localizedDescription = {
   en: DEFAULT_DESCRIPTION,
-  cn: "80+ 种数据库，仅 20 MB。支持桌面端、Docker 自托管、AI 助手与 MCP Server。",
+  cn: "90+ 种数据库，仅 20 MB。支持桌面端、Docker 自托管、AI 助手与 MCP Server。",
 } as const;
 
 const localizedFeatureList = {
   en: [
-    "Manage 80+ SQL, NoSQL, vector, time-series, embedded databases, and message queues",
+    "Manage 90+ SQL, NoSQL, vector, time-series, embedded databases, and message queues",
     "Desktop apps for Windows, macOS, and Linux",
     "Docker self-hosting for browser access",
     "AI-assisted SQL generation, explanation, optimization, and repair",
@@ -15,7 +15,7 @@ const localizedFeatureList = {
     "Schema browsing, schema diff, data editing, import, and export",
   ],
   cn: [
-    "统一管理 80+ 种 SQL、NoSQL、向量、时序、嵌入式数据库与消息队列",
+    "统一管理 90+ 种 SQL、NoSQL、向量、时序、嵌入式数据库与消息队列",
     "提供 Windows、macOS 与 Linux 桌面端",
     "支持 Docker 自托管与浏览器访问",
     "支持 AI 生成、解释、优化与修复 SQL",

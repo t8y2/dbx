@@ -1,16 +1,15 @@
 // Client-side SQL variable expansion.
 //
 // Lets users declare reusable values inside a SQL script with `@set name = value;`
-// and reference them elsewhere as `@name`. Expansion happens entirely on the client:
+// and reference them elsewhere as `${name}` or the legacy `@name` form. Expansion happens entirely on the client:
 // declarations are stripped and every reference is replaced with the declared value
 // verbatim (raw). Because the SQL sent to the server contains only plain literals,
 // this works uniformly across PostgreSQL, MySQL, SQL Server and every other backend
 // regardless of whether they have native variable support.
 //
-// This is intentionally separate from the placeholder parameter system
-// (`sqlParameters.ts`). A `@name` reference is only expanded when a matching
-// `@set` declaration exists in the same script; any other `@name` (SQL Server
-// native variables, `@@version`, dialog parameters) is left untouched.
+// This runs before the placeholder parameter system (`sqlParameters.ts`). A
+// reference is only expanded when a matching `@set` declaration exists; any
+// unresolved `${name}` or `@name` remains available to the parameter dialog.
 
 const VARIABLE_NAME_START_RE = /[\p{L}_]/u;
 const VARIABLE_NAME_CHAR_RE = /[\p{L}\p{N}_]/u;
@@ -18,6 +17,10 @@ const VARIABLE_NAME_CHAR_RE = /[\p{L}\p{N}_]/u;
 export interface SqlVariableExpansion {
   sql: string;
   expanded: boolean;
+}
+
+export interface SqlVariableExpansionOptions {
+  declarationSql?: string;
 }
 
 interface DeclarationSpan {
@@ -30,12 +33,13 @@ interface DeclarationSpan {
 /**
  * Expand `@set name = value;` declarations within a SQL script.
  *
- * Returns the SQL with declarations removed and `@name` references replaced by
- * their declared values. When no declaration is found the input is returned
- * unchanged with `expanded: false`.
+ * Returns the SQL with declarations removed and matching `${name}`/`@name`
+ * references replaced by their declared values. `declarationSql` can provide
+ * the document prefix for a separately executed statement.
  */
-export function expandSqlVariables(sql: string): SqlVariableExpansion {
-  const declarations = collectDeclarations(sql);
+export function expandSqlVariables(sql: string, options: SqlVariableExpansionOptions = {}): SqlVariableExpansion {
+  const declarationSql = options.declarationSql ?? sql;
+  const declarations = collectDeclarations(declarationSql);
   if (!declarations.length) return { sql, expanded: false };
 
   const values = new Map<string, string>();
@@ -43,16 +47,17 @@ export function expandSqlVariables(sql: string): SqlVariableExpansion {
     values.set(declaration.name.toLowerCase(), declaration.value);
   }
 
-  // Remove declaration spans first (right-to-left keeps earlier offsets valid),
-  // then replace references in the remaining text.
+  // Only spans inside the execution target are removed. Declarations supplied
+  // by the surrounding document are context and must not affect target offsets.
+  const targetDeclarations = declarationSql === sql ? declarations : collectDeclarations(sql);
   let result = sql;
-  for (let i = declarations.length - 1; i >= 0; i -= 1) {
-    const declaration = declarations[i];
+  for (let i = targetDeclarations.length - 1; i >= 0; i -= 1) {
+    const declaration = targetDeclarations[i];
     result = stripDeclaration(result, declaration.start, declaration.end);
   }
 
   result = replaceReferences(result, values);
-  return { sql: result, expanded: true };
+  return { sql: result, expanded: result !== sql };
 }
 
 function collectDeclarations(sql: string): DeclarationSpan[] {
@@ -219,6 +224,18 @@ function replaceReferences(sql: string, values: Map<string, string>): string {
         i += marker.length;
         dollarQuoteEnd = marker;
         continue;
+      }
+      if (next === "{") {
+        const name = readVariableName(sql, i + 2);
+        const end = i + 2 + name.length;
+        if (name && sql[end] === "}") {
+          const value = values.get(name.toLowerCase());
+          if (value !== undefined) {
+            result += value;
+            i = end + 1;
+            continue;
+          }
+        }
       }
     }
     if (ch === "@" && next !== "@" && sql[i - 1] !== "@") {

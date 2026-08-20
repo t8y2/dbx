@@ -166,10 +166,12 @@ pub async fn start_transfer(
         };
 
         let tables = req.tables.clone();
-        // Sort by FK dependency so referenced tables are transferred first.
+        // Sort by FK dependency so referenced tables are transferred first, and
+        // keep the foreign key metadata fetched along the way — MySQL-family
+        // targets reuse it per table below instead of re-querying it.
         // Skip for external Doris/StarRocks catalogs — the database name does
         // not exist in the default catalog and sorting is unnecessary.
-        let tables = {
+        let (tables, known_foreign_keys) = {
             let skip_fk_sort = {
                 let configs = app.configs.read().await;
                 configs
@@ -180,9 +182,9 @@ pub async fn start_transfer(
                     .is_some()
             };
             if skip_fk_sort {
-                tables
+                (tables, std::collections::HashMap::new())
             } else {
-                transfer::sort_tables_by_fk_dependency(
+                transfer::sort_tables_by_fk_dependency_with_foreign_keys(
                     &app,
                     &req.source_connection_id,
                     &req.source_database,
@@ -193,11 +195,12 @@ pub async fn start_transfer(
                 .await
                 .unwrap_or_else(|e| {
                     log::warn!("[transfer] failed to sort tables by FK dependency, using original order: {e}");
-                    tables
+                    (tables, std::collections::HashMap::new())
                 })
             }
         };
         let mut failed_tables: Vec<String> = Vec::new();
+        let mut pending_fk_alters: Vec<(String, String)> = Vec::new();
 
         if matches!(source_db_type, dbx_core::models::connection::DatabaseType::Postgres)
             && matches!(target_db_type, dbx_core::models::connection::DatabaseType::Postgres)
@@ -280,6 +283,8 @@ pub async fn start_transfer(
                 &target_db_type,
                 &source_pool_key,
                 &target_pool_key,
+                &known_foreign_keys,
+                &mut pending_fk_alters,
                 |progress| {
                     last_rows_transferred = progress.rows_transferred;
                     last_total_rows = progress.total_rows;
@@ -335,6 +340,25 @@ pub async fn start_transfer(
                     send_transfer_progress(&progress_channel, &progress);
                 }
             }
+        }
+
+        // Add any foreign keys deferred during MySQL-family table creation now that
+        // every selected table exists — see transfer_table's use of
+        // strip_inline_foreign_key_constraint_lines for why these can't be created
+        // inline (a foreign key cycle has no valid CREATE TABLE order at all).
+        let mut failed_fk_tables: Vec<String> = Vec::new();
+        let mut failed_fk_count = 0usize;
+        for (table, alter_sql) in &pending_fk_alters {
+            if let Err(e) = transfer::execute_on_pool(&app, &target_pool_key, alter_sql).await {
+                log::warn!("[transfer] failed to add deferred foreign key constraint for {table}: {e}");
+                failed_fk_count += 1;
+                failed_fk_tables.push(table.clone());
+            }
+        }
+        if failed_fk_count > 0 {
+            failed_fk_tables.sort();
+            failed_fk_tables.dedup();
+            failed_tables.push(format!("{} foreign key(s) on: {}", failed_fk_count, failed_fk_tables.join(", ")));
         }
 
         // Transfer selected non-table objects (views, procedures, functions,

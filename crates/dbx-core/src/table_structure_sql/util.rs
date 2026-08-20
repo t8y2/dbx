@@ -23,6 +23,7 @@ pub(super) fn quote_ident(dialect: StructureDialect, name: &str) -> String {
     match dialect {
         StructureDialect::Mysql
         | StructureDialect::Doris
+        | StructureDialect::GaussdbM
         | StructureDialect::ManticoreSearch
         | StructureDialect::Questdb => {
             format!("`{}`", name.replace('`', "``"))

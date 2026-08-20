@@ -239,6 +239,31 @@ pub async fn list_databases(client: &VectorClient) -> Result<Vec<String>, String
     }
 }
 
+/// Drop a Milvus database through the v2 REST API.
+pub async fn drop_database(client: &VectorClient, database: &str) -> Result<(), String> {
+    if client.kind != VectorDbKind::Milvus {
+        return Err("Database deletion is only supported for Milvus connections".to_string());
+    }
+    send_json(client.post("/v2/vectordb/databases/drop").json(&serde_json::json!({ "dbName": database })), client.kind)
+        .await
+        .map(|_| ())
+}
+
+/// Drop a Milvus collection through the v2 REST API.
+pub async fn drop_collection(client: &VectorClient, database: &str, collection: &str) -> Result<(), String> {
+    if client.kind != VectorDbKind::Milvus {
+        return Err("Collection deletion is only supported for Milvus connections".to_string());
+    }
+    send_json(
+        client
+            .post("/v2/vectordb/collections/drop")
+            .json(&serde_json::json!({ "dbName": database, "collectionName": collection })),
+        client.kind,
+    )
+    .await
+    .map(|_| ())
+}
+
 async fn list_milvus_databases(client: &VectorClient) -> Result<Vec<String>, String> {
     // Older Milvus versions (pre-2.2) do not expose the databases endpoint; fall back to the
     // configured database (or "default") so the connection stays browsable instead of failing the whole tree load.
@@ -254,11 +279,15 @@ async fn list_milvus_databases(client: &VectorClient) -> Result<Vec<String>, Str
 }
 
 fn milvus_database_names(body: &Value, configured_database: &str) -> Vec<String> {
+    let has_database_list = body.get("data").is_some_and(Value::is_array);
     let mut names: Vec<String> = match body.get("data") {
         Some(Value::Array(items)) => items.iter().filter_map(milvus_database_name_from_item).collect(),
         _ => Vec::new(),
     };
-    if !names.iter().any(|name| name == configured_database) {
+    // Only use the configured database as a compatibility fallback when the
+    // server does not return a database list. This lets a successfully dropped
+    // database disappear from the sidebar instead of being re-added locally.
+    if !has_database_list && !names.iter().any(|name| name == configured_database) {
         names.push(configured_database.to_string());
     }
     names.sort();
@@ -1061,11 +1090,8 @@ mod tests {
     }
 
     #[test]
-    fn milvus_database_list_keeps_the_configured_database() {
-        assert_eq!(
-            milvus_database_names(&json!({ "data": ["default"] }), "resume_test"),
-            vec!["default".to_string(), "resume_test".to_string()]
-        );
+    fn milvus_database_list_does_not_readd_deleted_configured_database() {
+        assert_eq!(milvus_database_names(&json!({ "data": ["default"] }), "resume_test"), vec!["default".to_string()]);
         assert_eq!(
             milvus_database_names(&json!({ "data": ["resume_test"] }), "resume_test"),
             vec!["resume_test".to_string()]

@@ -20,14 +20,28 @@ pub use create_table::build_create_table_sql;
 pub use sqlite_rebuild::{apply_sqlite_table_structure_change, preview_sqlite_table_structure_change};
 pub use types::*;
 
+use crate::models::connection::DatabaseType;
+
 use columns::build_column_sql;
 use comments::build_table_comment_sql;
 use foreign_keys::build_foreign_key_sql;
 use indexes::build_index_sql;
 use triggers::build_trigger_sql;
-use validation::validate_draft;
+use validation::{validate_concurrent_index_scope, validate_draft};
 
-pub fn build_table_structure_change_sql(options: TableStructureSqlOptions) -> TableStructureSqlResult {
+pub fn build_table_structure_change_sql(mut options: TableStructureSqlOptions) -> TableStructureSqlResult {
+    // GaussDB M-mode uses MySQL-compatible SQL dialect with backtick quoting.
+    // Map to StructureDialect::Mysql so DDL is generated correctly.
+    if options.is_gaussdb_m_mode {
+        options.database_type = Some(DatabaseType::Mysql);
+    }
+    // Fail closed: an unsupported concurrent-index request (existing index, or
+    // partitioned parent table) must never degrade into blocking index DDL
+    // behind the caller's back, so the whole plan is refused up front.
+    let concurrent_errors = validate_concurrent_index_scope(&options);
+    if !concurrent_errors.is_empty() {
+        return TableStructureSqlResult { statements: Vec::new(), warnings: concurrent_errors };
+    }
     let mut warnings = validate_draft(&options);
     let mut statements = build_column_sql(&options, &mut warnings);
     statements.extend(build_index_sql(&options, &mut warnings));

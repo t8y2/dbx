@@ -43,7 +43,13 @@ export function useFileDrop() {
       const { getCurrentWebview } = await import("@tauri-apps/api/webview");
       const webview = getCurrentWebview();
       await webview.onDragDropEvent(async (event) => {
+        const routedEvent = new CustomEvent("dbx:tauri-file-drop", {
+          detail: event.payload,
+          cancelable: true,
+        });
+        const handledByPanel = !document.dispatchEvent(routedEvent);
         if (event.payload.type !== "drop") return;
+        if (handledByPanel) return;
         for (const path of event.payload.paths) {
           const name = path.split("/").pop()?.split("\\").pop() || path;
 
@@ -111,7 +117,7 @@ export function useFileDrop() {
         }
       });
     } else {
-      document.addEventListener("drop", (event: DragEvent) => {
+      document.addEventListener("drop", (event) => {
         const files = event.dataTransfer?.files;
         if (!files || files.length === 0) return;
         event.preventDefault();
@@ -125,7 +131,7 @@ export function useFileDrop() {
             });
         }
       });
-      document.addEventListener("dragover", (event: DragEvent) => {
+      document.addEventListener("dragover", (event) => {
         const files = event.dataTransfer?.files;
         if (!files || files.length === 0) return;
         for (let i = 0; i < files.length; i++) {

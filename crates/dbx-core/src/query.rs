@@ -32,6 +32,16 @@ pub const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MAX_ROWS: usize = 10000;
 pub const AGENT_PROTOCOL_MAX_ROWS: usize = i32::MAX as usize;
 pub const QUERY_CANCELED: &str = "Query canceled";
+pub const METADATA_POOL_BUSY_ERROR: &str = "DBX metadata pool is busy; please retry";
+
+/// Returns true when a metadata request failed because all pool/client slots
+/// were temporarily occupied. This is deliberately separate from
+/// `is_connection_error`: a saturated pool is healthy and must not trigger a
+/// shared-pool reconnect.
+pub fn is_pool_saturation_error(err: &str) -> bool {
+    let lower = err.to_lowercase();
+    lower.contains("connection pool checkout timed out [stage=wait") || lower.contains("dbx metadata pool is busy")
+}
 /// Fallback when a Mongo connection hits the generic SQL executor instead of the shell path.
 /// Wording must match packages/mongo-shell `MONGO_SHELL_COMMAND_HINT`
 /// (desktop/CLI diagnose first; this is only the Rust SQL-executor backstop).
@@ -636,7 +646,9 @@ impl DbOperationBudget {
     }
 
     pub fn from_connection_config(config: &ConnectionConfig) -> Self {
-        Self::from_config(config.effective_connect_timeout_secs(), Some(config.query_timeout_secs))
+        // effective_query_timeout_secs, not the raw field: it preserves 0 ("no limit")
+        // and applies the per-database-type floor Cloud Spanner needs for DDL.
+        Self::from_config(config.effective_connect_timeout_secs(), Some(config.effective_query_timeout_secs()))
     }
 
     /// Use global default values (when no connection config is available).
@@ -1070,7 +1082,7 @@ pub fn agent_close_query_session_params(session_id: &str) -> serde_json::Value {
 
 pub fn is_connection_error(err: &str) -> bool {
     let lower = err.to_lowercase();
-    if is_dbx_query_timeout_error(&lower) || is_agent_rpc_timeout_error(&lower) {
+    if is_dbx_query_timeout_error(&lower) || is_agent_rpc_timeout_error(&lower) || is_pool_saturation_error(err) {
         return false;
     }
     lower.contains("connection")
@@ -2762,12 +2774,18 @@ trait MysqlBatchStatementExecutor {
 
     async fn execute_statement(&mut self, statement: &str) -> Result<Vec<db::mysql::MySqlQueryResult>, String>;
 
-    async fn execute_non_result_batch(&mut self, statements: &[String]) -> db::mysql::MySqlNonResultBatchOutcome {
+    async fn execute_non_result_batch(
+        &mut self,
+        statements: &[String],
+        on_result: &mut (dyn FnMut(usize, &db::QueryResult) + Send),
+    ) -> db::mysql::MySqlNonResultBatchOutcome {
         let mut results = Vec::with_capacity(statements.len());
-        for statement in statements {
+        for (statement_index, statement) in statements.iter().enumerate() {
             match self.execute_statement(statement).await {
                 Ok(statement_results) if statement_results.len() == 1 => {
-                    results.push(statement_results.into_iter().next().expect("single MySQL batch result").result);
+                    let result = statement_results.into_iter().next().expect("single MySQL batch result").result;
+                    on_result(statement_index, &result);
+                    results.push(result);
                 }
                 Ok(_) => {
                     return db::mysql::MySqlNonResultBatchOutcome {
@@ -2818,17 +2836,26 @@ impl MysqlBatchStatementExecutor for MysqlBatchConnection<'_> {
         .await
     }
 
-    async fn execute_non_result_batch(&mut self, statements: &[String]) -> db::mysql::MySqlNonResultBatchOutcome {
+    async fn execute_non_result_batch(
+        &mut self,
+        statements: &[String],
+        on_result: &mut (dyn FnMut(usize, &db::QueryResult) + Send),
+    ) -> db::mysql::MySqlNonResultBatchOutcome {
         let sql = statements.join(";\n");
+        let mut completed_results = Vec::with_capacity(statements.len());
+        let mut record_result = |statement_index: usize, result: &db::QueryResult| {
+            completed_results.push(result.clone());
+            on_result(statement_index, result);
+        };
         match wait_for_result_opt(
             self.cancel_token.clone(),
             self.query_timeout,
-            db::mysql::execute_non_result_batch_on_conn(&mut *self.conn, &sql, statements.len()),
+            db::mysql::execute_non_result_batch_on_conn(&mut *self.conn, &sql, statements.len(), &mut record_result),
         )
         .await
         {
             Ok(outcome) => outcome,
-            Err(error) => db::mysql::MySqlNonResultBatchOutcome { results: Vec::new(), error: Some(error) },
+            Err(error) => db::mysql::MySqlNonResultBatchOutcome { results: completed_results, error: Some(error) },
         }
     }
 }
@@ -2913,19 +2940,21 @@ where
             statement_index + 1
         };
         if batch_end > statement_index + 1 {
-            let outcome = executor.execute_non_result_batch(&statements[statement_index..batch_end]).await;
+            let mut report_result = |offset: usize, result: &db::QueryResult| {
+                report_execute_multi_progress(progress, statement_index + offset, statements.len(), result, true, None);
+            };
+            let outcome =
+                executor.execute_non_result_batch(&statements[statement_index..batch_end], &mut report_result).await;
             let completed = outcome.results.len();
             for (offset, result) in outcome.results.into_iter().enumerate() {
                 results.push(ExecuteMultiResult::success_with_index(result, statement_index + offset));
             }
-            if completed > 0 {
-                let last_index = statement_index + completed - 1;
-                let last_result = &results.last().expect("completed MySQL batch result").result;
-                report_execute_multi_progress(progress, last_index, statements.len(), last_result, true, None);
-            }
             if let Some(error) = outcome.error {
-                let failed_index = statement_index + completed;
                 let action = mysql_batch_pool_error_action(db_type, &error);
+                if completed >= batch_end - statement_index {
+                    return (results, Some(action));
+                }
+                let failed_index = statement_index + completed;
                 let result = error_query_result(error.clone());
                 let backend_error = crate::backend_error::BackendError::from_legacy_backend(&error);
                 report_execute_multi_progress(
@@ -3849,7 +3878,7 @@ pub async fn execute_statements_in_transaction_on_pool_typed(
 /// Owned pool variants for safe dispatch across async boundaries.
 enum TxPath {
     Pg(deadpool_postgres::Pool),
-    Mysql(mysql_async::Pool, bool),
+    Mysql(db::mysql::MySqlPool, bool),
     Sqlite(db::sqlite::SqliteHandle),
     CloudflareD1(db::cloudflare_d1_driver::CloudflareD1Client),
     Agent(Arc<crate::db::agent_driver::PooledAgentClient>),
@@ -3962,7 +3991,7 @@ async fn exec_tx_pg_statements(
 async fn exec_tx_mysql_inner(
     state: &AppState,
     pool_key: &str,
-    pool: mysql_async::Pool,
+    pool: db::mysql::MySqlPool,
     statements: &[String],
     start: std::time::Instant,
     budget: DbOperationBudget,
@@ -4299,7 +4328,7 @@ async fn begin_transaction_session(
         TxnPoolHandle::Postgres(pg_pool) => {
             let conn = pg_pool.get().await.map_err(|e| format!("Failed to get Postgres connection: {e}"))?;
             let begin_sql = postgres_transaction_begin_sql(consistent_snapshot);
-            conn.execute(begin_sql, &[]).await.map_err(|e| format!("BEGIN failed: {e}"))?;
+            conn.execute_typed(begin_sql, &[]).await.map_err(|e| format!("BEGIN failed: {e}"))?;
             if let Some(schema) = schema {
                 db::postgres::set_postgres_search_path(
                     &conn,
@@ -4585,7 +4614,7 @@ where
         TxnConnection::Postgres(conn) => {
             let mut batch = Vec::with_capacity(batch_size);
             let mut total_rows = 0_u64;
-            let result = db::postgres::stream_select_query_inner(conn, sql, None, &mut |item| {
+            let result = db::postgres::stream_select_query_inner_unnamed(conn, sql, None, &mut |item| {
                 if let db::postgres::PostgresQueryStreamItem::Row(row) = item {
                     batch.push(row);
                     total_rows += 1;
@@ -4672,7 +4701,7 @@ where
 async fn rollback_manual_txn_connection(conn: &mut TxnConnection) -> Result<(), String> {
     match conn {
         TxnConnection::Postgres(conn) => {
-            conn.execute("ROLLBACK", &[]).await.map_err(|e| format!("ROLLBACK failed: {e}"))?;
+            conn.execute_typed("ROLLBACK", &[]).await.map_err(|e| format!("ROLLBACK failed: {e}"))?;
         }
         TxnConnection::Mysql(conn) => {
             conn.query_drop("ROLLBACK").await.map_err(|e| format!("ROLLBACK failed: {e}"))?;
@@ -4730,9 +4759,9 @@ async fn execute_manual_txn_postgres_statement(
     row_limit: usize,
 ) -> Result<db::QueryResult, String> {
     if db::postgres::postgres_statement_returns_rows(sql) {
-        db::postgres::execute_select_query(conn, sql, std::time::Instant::now(), row_limit).await
+        db::postgres::execute_select_query_unnamed(conn, sql, std::time::Instant::now(), row_limit).await
     } else {
-        let affected = conn.execute(sql, &[]).await.map_err(|e| format!("Query failed: {e}"))?;
+        let affected = conn.execute_typed(sql, &[]).await.map_err(|e| format!("Query failed: {e}"))?;
         Ok(db::QueryResult {
             columns: vec![],
             column_types: Vec::new(),
@@ -4823,7 +4852,7 @@ pub async fn commit_manual_transaction(state: &AppState, txn_session_id: &str) -
     let mut conn = session.connection.lock().await;
     match &mut *conn {
         TxnConnection::Postgres(conn) => {
-            conn.execute("COMMIT", &[]).await.map_err(|e| format!("COMMIT failed: {e}"))?;
+            conn.execute_typed("COMMIT", &[]).await.map_err(|e| format!("COMMIT failed: {e}"))?;
         }
         TxnConnection::Mysql(conn) => {
             conn.query_drop("COMMIT").await.map_err(|e| format!("COMMIT failed: {e}"))?;
@@ -5557,9 +5586,17 @@ for line in sys.stdin:
             self.statement_outcomes.pop_front().expect("test outcome for single statement")
         }
 
-        async fn execute_non_result_batch(&mut self, statements: &[String]) -> db::mysql::MySqlNonResultBatchOutcome {
+        async fn execute_non_result_batch(
+            &mut self,
+            statements: &[String],
+            on_result: &mut (dyn FnMut(usize, &db::QueryResult) + Send),
+        ) -> db::mysql::MySqlNonResultBatchOutcome {
             self.batches.push(statements.to_vec());
-            self.batch_outcomes.pop_front().expect("test outcome for pipelined statements")
+            let outcome = self.batch_outcomes.pop_front().expect("test outcome for pipelined statements");
+            for (statement_index, result) in outcome.results.iter().enumerate() {
+                on_result(statement_index, result);
+            }
+            outcome
         }
     }
 
@@ -5807,7 +5844,7 @@ for line in sys.stdin:
         );
         assert_eq!(
             progress_events.lock().unwrap().iter().map(|event| event.completed).collect::<Vec<_>>(),
-            vec![1, 3, 4]
+            vec![1, 2, 3, 4]
         );
         assert_eq!(error_action, None);
     }
@@ -5828,6 +5865,11 @@ for line in sys.stdin:
             batches: Vec::new(),
             statements: Vec::new(),
         };
+        let progress_events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let progress: ExecuteMultiProgressCallback = {
+            let progress_events = Arc::clone(&progress_events);
+            Arc::new(move |event| progress_events.lock().unwrap().push(event))
+        };
 
         let (results, error_action) = execute_mysql_batch_statements(
             &mut executor,
@@ -5837,7 +5879,7 @@ for line in sys.stdin:
             None,
             false,
             Some(MYSQL_MULTI_STATEMENT_BATCH_MAX_BYTES),
-            None,
+            Some(&progress),
         )
         .await;
 
@@ -5847,6 +5889,15 @@ for line in sys.stdin:
         assert_eq!(results[0].statement_index, Some(0));
         assert_eq!(results[1].statement_index, Some(1));
         assert!(results[1].execution_error);
+        assert_eq!(
+            progress_events
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|event| (event.statement_index, event.success))
+                .collect::<Vec<_>>(),
+            vec![(0, true), (1, false)]
+        );
         assert_eq!(error_action, Some(PoolErrorAction::Keep));
     }
 
@@ -5879,6 +5930,52 @@ for line in sys.stdin:
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].statement_index, Some(0));
         assert!(results[0].execution_error);
+        assert_eq!(error_action, Some(PoolErrorAction::Discard));
+    }
+
+    #[tokio::test]
+    async fn mysql_pipelined_batch_does_not_add_a_failure_after_every_statement_completed() {
+        let statements =
+            vec!["INSERT INTO users(id) VALUES (1)".to_string(), "INSERT INTO users(id) VALUES (2)".to_string()];
+        let mut executor = FakePipelinedMysqlBatchExecutor {
+            batch_outcomes: std::collections::VecDeque::from([db::mysql::MySqlNonResultBatchOutcome {
+                results: vec![empty_query_result(1), empty_query_result(1)],
+                error: Some(QUERY_CANCELED.to_string()),
+            }]),
+            statement_outcomes: std::collections::VecDeque::new(),
+            batches: Vec::new(),
+            statements: Vec::new(),
+        };
+        let progress_events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let progress: ExecuteMultiProgressCallback = {
+            let progress_events = Arc::clone(&progress_events);
+            Arc::new(move |event| progress_events.lock().unwrap().push(event))
+        };
+
+        let (results, error_action) = execute_mysql_batch_statements(
+            &mut executor,
+            &statements,
+            Some(DatabaseType::Mysql),
+            db::mysql::MySqlQueryDialect::default(),
+            None,
+            false,
+            Some(MYSQL_MULTI_STATEMENT_BATCH_MAX_BYTES),
+            Some(&progress),
+        )
+        .await;
+
+        assert_eq!(results.len(), statements.len());
+        assert!(results.iter().all(|result| !result.execution_error));
+        assert_eq!(results.iter().map(|result| result.statement_index).collect::<Vec<_>>(), vec![Some(0), Some(1)]);
+        assert_eq!(
+            progress_events
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|event| (event.statement_index, event.completed, event.total, event.success))
+                .collect::<Vec<_>>(),
+            vec![(0, 1, 2, true), (1, 2, 2, true)]
+        );
         assert_eq!(error_action, Some(PoolErrorAction::Discard));
     }
 
@@ -6905,17 +7002,43 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn is_connection_error_detects_deadpool_pool_timeouts() {
+    fn is_connection_error_distinguishes_checkout_saturation_from_connection_timeouts() {
         // deadpool-postgres PoolError::Timeout messages (contain "pool" + "timeout" but not "timed out")
         assert!(is_connection_error("pool wait timeout"));
         assert!(is_connection_error("pool create timeout"));
         assert!(is_connection_error("pool recycle timeout"));
         // checkout helper timeout messages
-        assert!(is_connection_error("PostgreSQL connection pool checkout timed out (5s)"));
-        assert!(is_connection_error("MySQL get connection timed out"));
+        assert!(!is_connection_error("PostgreSQL connection pool checkout timed out [stage=wait, timeout_ms=5000]"));
+        assert!(is_connection_error("PostgreSQL connection pool checkout timed out [stage=create, timeout_ms=5000]"));
+        assert!(is_connection_error("PostgreSQL connection pool checkout timed out [stage=recycle, timeout_ms=5000]"));
+        assert!(!is_connection_error("MySQL connection pool checkout timed out [stage=wait, timeout_ms=5000]"));
+        assert!(!is_connection_error(METADATA_POOL_BUSY_ERROR));
         assert!(is_connection_error("MySQL ping timed out"));
         assert!(is_connection_error("MySQL kill connection checkout timed out"));
         assert!(is_connection_error("MySQL KILL QUERY timed out"));
+
+        assert!(is_pool_saturation_error(
+            "PostgreSQL connection pool checkout timed out [stage=wait, timeout_ms=5000]"
+        ));
+        assert!(is_pool_saturation_error("MySQL connection pool checkout timed out [stage=wait, timeout_ms=5000]"));
+        assert!(!is_pool_saturation_error(
+            "PostgreSQL connection pool checkout timed out [stage=create, timeout_ms=5000]"
+        ));
+        assert!(is_pool_saturation_error(METADATA_POOL_BUSY_ERROR));
+        assert_eq!(
+            pool_error_action(
+                Some(DatabaseType::Mysql),
+                "MySQL connection pool checkout timed out [stage=wait, timeout_ms=5000]"
+            ),
+            PoolErrorAction::Keep
+        );
+        assert_eq!(
+            pool_error_action(
+                Some(DatabaseType::Postgres),
+                "PostgreSQL connection pool checkout timed out [stage=wait, timeout_ms=5000]"
+            ),
+            PoolErrorAction::Keep
+        );
     }
 
     #[test]

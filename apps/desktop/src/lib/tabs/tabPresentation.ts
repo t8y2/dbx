@@ -134,6 +134,10 @@ export function tabDisplayTitle(tab: QueryTab, t: Translate): string {
   if (tab.mode === "mqtt") {
     return `${connectionDisplayName(tab.connectionId)} - ${t("connection.mqttConsoleTitle")}`;
   }
+  if (tab.mode === "dolt-version-control") {
+    const branch = tab.workspaceBranch?.trim();
+    return `${connectionDisplayName(tab.connectionId)} VCS@${database}${branch ? `.${branch}` : ""}`;
+  }
   if (tab.mode === "databases") {
     if (compact) return t("tabs.databases");
     return `${t("tabs.databases")}@${connectionDisplayName(tab.connectionId)}`;
@@ -452,5 +456,6 @@ export function tabModeLabel(tab: QueryTab, t: Translate): string {
   if (tab.mode === "databases") return t("tabs.databases");
   if (tab.mode === "objects") return t("tabs.objects");
   if (tab.mode === "users") return t("tabs.users");
+  if (tab.mode === "dolt-version-control") return t("doltVersionControl.title");
   return tab.mode;
 }

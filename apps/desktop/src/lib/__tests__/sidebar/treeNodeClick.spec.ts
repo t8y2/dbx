@@ -78,6 +78,12 @@ describe("treeNodeClick", () => {
     expect(treeNodeRowDoubleClickAction("connection", false, "double", true, "postgres", false)).toBe("toggle");
   });
 
+  it("expands the connection node on double-click activation even when the database browser is available", () => {
+    expect(treeNodeRowDoubleClickAction("connection", false, "double", true, "postgres", true)).toBe("toggle");
+    expect(treeNodeRowDoubleClickAction("connection", false, "double", true, "mysql", true)).toBe("toggle");
+    expect(treeNodeRowDoubleClickAction("connection", false, "double", false, "postgres", true)).toBe("none");
+  });
+
   it("opens the object browser on single click when the database single-click switch is on", () => {
     expect(treeNodeRowAction("database", true, "single", "postgres", true, true)).toBe("open-object-browser-and-expand");
     expect(treeNodeRowAction("database", false, "single", "postgres", true, true)).toBe("open-object-browser");

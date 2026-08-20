@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EDITOR_SETTINGS_DRAFT_KEYS, editorSettingsDraftFromSettings, editorSettingsDraftChanged, editorSettingsPatchFromDraft, normalizeQueryResultMaxRowsDraft, normalizeTableOpenPageSizeDraft } from "../editorSettingsDraft";
+import { EDITOR_SETTINGS_DRAFT_KEYS, editorSettingsDraftFromSettings, editorSettingsDraftChanged, editorSettingsPatchFromDraft, normalizeQueryResultMaxRowsDraft, normalizeTableOpenPageSizeDraft, shouldConfirmEditorSettingsDialogClose } from "../editorSettingsDraft";
 import type { EditorSettings } from "@/stores/settingsStore";
 
 function makeSettings(overrides: Partial<EditorSettings> = {}): EditorSettings {
@@ -67,6 +67,25 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
 
   it("includes data grid type colors", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("colorizeDataGridCellTypes");
+  });
+
+  it("includes the type color scheme in the apply-footer draft", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridTypeColorSchemes");
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("activeDataGridTypeColorSchemeId");
+
+    const base = editorSettingsDraftFromSettings(makeSettings({ dataGridTypeColorSchemes: [], activeDataGridTypeColorSchemeId: "auto" }));
+    const withScheme = editorSettingsDraftFromSettings(
+      makeSettings({
+        dataGridTypeColorSchemes: [{ id: "type-colors-1", name: "配色方案 1", colors: { integer: "#254fce", numeric: "#0e7490", string: "#fdc9c9", boolean: "#100cc2", temporal: "#7e22ce", structured: "#be185d", identifier: "#92400e", binary: "#b91c1c", spatial: "#047857" } }],
+        activeDataGridTypeColorSchemeId: "type-colors-1",
+      }),
+    );
+
+    expect(editorSettingsDraftChanged(withScheme, base)).toBe(true);
+    expect(editorSettingsPatchFromDraft(withScheme, base)).toEqual({
+      dataGridTypeColorSchemes: [{ id: "type-colors-1", name: "配色方案 1", colors: { integer: "#254fce", numeric: "#0e7490", string: "#fdc9c9", boolean: "#100cc2", temporal: "#7e22ce", structured: "#be185d", identifier: "#92400e", binary: "#b91c1c", spatial: "#047857" } }],
+      activeDataGridTypeColorSchemeId: "type-colors-1",
+    });
   });
 
   it("includes the data grid filter view", () => {
@@ -342,6 +361,33 @@ describe("editorSettingsDraftChanged - tabLayout", () => {
     const draft = editorSettingsDraftFromSettings(settings);
     const base = editorSettingsDraftFromSettings(settings);
     expect(editorSettingsDraftChanged(draft, base)).toBe(false);
+  });
+});
+
+describe("shouldConfirmEditorSettingsDialogClose", () => {
+  // Regression for https://github.com/t8y2/dbx/issues/5905: customizing a
+  // shortcut or the sidebar activation mode and then dismissing the dialog
+  // via Escape/outside-click/the "Close" button (anything other than Apply)
+  // must not silently drop the draft.
+  it("requests confirmation when the dialog is closing with an unsaved shortcut/sidebarActivation edit", () => {
+    const settings = makeSettings({ sidebarActivation: "single" } as Partial<EditorSettings>);
+    const base = editorSettingsDraftFromSettings(settings);
+    const draft = editorSettingsDraftFromSettings(settings);
+    draft.sidebarActivation = "double";
+
+    expect(shouldConfirmEditorSettingsDialogClose(false, editorSettingsDraftChanged(draft, base))).toBe(true);
+  });
+
+  it("does not block closing when there is no unsaved draft", () => {
+    const settings = makeSettings();
+    const base = editorSettingsDraftFromSettings(settings);
+    const draft = editorSettingsDraftFromSettings(settings);
+
+    expect(shouldConfirmEditorSettingsDialogClose(false, editorSettingsDraftChanged(draft, base))).toBe(false);
+  });
+
+  it("never blocks opening the dialog, even with a stale dirty flag", () => {
+    expect(shouldConfirmEditorSettingsDialogClose(true, true)).toBe(false);
   });
 });
 

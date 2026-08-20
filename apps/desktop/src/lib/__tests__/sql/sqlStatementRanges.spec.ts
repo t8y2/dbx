@@ -584,6 +584,43 @@ GET /_cat/indices`;
     expect(range?.sql.trim()).toBe("SELECT *\nFROM system_dept");
   });
 
+  it("returns the previous statement when the cursor sits after a trailing line comment behind its semicolon", () => {
+    // 复现场景：每条语句以 `; -- 备注` 结尾，光标停在第一条的行尾注释之后
+    const sql = "SELECT T.*,T.ROWID FROM offer t WHERE t.offer_name = 'V3 Red Mi'; -- 114808\nSELECT T.*,T.ROWID FROM offer t WHERE t.offer_name = 'Emery Mann-6264-postpaid-2'; -- 127923";
+    const pos = sql.indexOf("\n");
+    const range = statementRangeAtCursor(sql, pos, "oracle");
+    expect(range?.sql).toBe("SELECT T.*,T.ROWID FROM offer t WHERE t.offer_name = 'V3 Red Mi'");
+  });
+
+  it("returns the current statement when the cursor is inside the trailing line comment", () => {
+    const sql = "SELECT 1; -- 114808\nSELECT 2; -- 127923";
+    const pos = sql.indexOf("114808") + 2;
+    const range = statementRangeAtCursor(sql, pos);
+    expect(range?.sql.trim()).toBe("SELECT 1");
+  });
+
+  it("returns the current statement when the cursor is after a trailing block comment behind its semicolon", () => {
+    const sql = "SELECT 1; /* 备注 */\nSELECT 2;";
+    const pos = sql.indexOf("\n");
+    const range = statementRangeAtCursor(sql, pos);
+    expect(range?.sql.trim()).toBe("SELECT 1");
+  });
+
+  it("returns the current statement after a multiline trailing block comment", () => {
+    const sql = "SELECT 1; /* 第一行\n第二行 */\nSELECT 2;";
+    const pos = sql.indexOf("*/") + 2;
+    const range = statementRangeAtCursor(sql, pos);
+    expect(range?.sql.trim()).toBe("SELECT 1");
+  });
+
+  it("still returns the next statement when the cursor is at the start of its line after a trailing comment", () => {
+    // 回归：换行后的光标不再归属上一条语句
+    const sql = "SELECT 1; -- 114808\nSELECT 2; -- 127923";
+    const pos = sql.indexOf("SELECT 2");
+    const range = statementRangeAtCursor(sql, pos);
+    expect(range?.sql.trim()).toBe("SELECT 2");
+  });
+
   it("keeps a semicolon-line-end cursor on the current multi-line statement", () => {
     const sql = "SELECT *\nFROM system_dept;";
     const gapPos = sql.indexOf(";") + 1;

@@ -24,7 +24,7 @@ function withLaunchConfig(dbx: Record<string, unknown>, config?: McpLaunchConfig
   return dbx;
 }
 
-function tomlStringArray(values: readonly string[]): string {
+function quotedStringArray(values: readonly string[]): string {
   return `[${values.map((value) => JSON.stringify(value)).join(", ")}]`;
 }
 
@@ -74,12 +74,29 @@ export function buildMcpCodexConfig(config?: McpLaunchConfig): string {
   const lines = ["[mcp_servers.dbx]", `command = ${JSON.stringify(launch.command)}`];
 
   if (launch.args && launch.args.length > 0) {
-    lines.push(`args = ${tomlStringArray(launch.args)}`);
+    lines.push(`args = ${quotedStringArray(launch.args)}`);
   }
   if (launch.env && Object.keys(launch.env).length > 0) {
     lines.push("", "[mcp_servers.dbx.env]");
     for (const [key, value] of Object.entries(launch.env)) {
       lines.push(`${key} = ${JSON.stringify(value)}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+export function buildMcpDeepSeekHarnessConfig(config?: McpLaunchConfig): string {
+  const launch = launchConfig(config);
+  const lines = ["- insert:", "    - id: mcp-dbx", "      name: '@deepseek-ai/dsh-mcp-client'", "      config:", "        serverName: dbx", "        transport: stdio", `        command: ${JSON.stringify(launch.command)}`];
+
+  if (launch.args && launch.args.length > 0) {
+    lines.push(`        args: ${quotedStringArray(launch.args)}`);
+  }
+  if (launch.env && Object.keys(launch.env).length > 0) {
+    lines.push("        env:");
+    for (const [key, value] of Object.entries(launch.env)) {
+      lines.push(`          ${JSON.stringify(key)}: ${JSON.stringify(value)}`);
     }
   }
 

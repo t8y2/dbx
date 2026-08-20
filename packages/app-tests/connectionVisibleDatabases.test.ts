@@ -100,6 +100,15 @@ test("OceanBase Oracle uses schema filtering for visible object selection", () =
   assert.equal(connectionUsesVisibleSchemaFilter(config({ db_type: "mysql", driver_profile: "oceanbase" })), false);
 });
 
+test("OceanBase Oracle applies Oracle system schema visibility rules", () => {
+  const schemas = ["APP", "SYS", "SYSTEM", "APEX_240100", "FLOWS_240100", "APP$USER"];
+
+  assert.deepEqual(filterSchemaNamesForVisiblePicker(schemas, config({ db_type: "oceanbase-oracle", username: "APP" })), ["APP"]);
+  assert.deepEqual(filterSchemaNamesForVisiblePicker(schemas, config({ db_type: "oceanbase-oracle", username: "SYS" })), ["APP", "SYS"]);
+  assert.deepEqual(filterSchemaNamesForConnection(schemas, config({ db_type: "oceanbase-oracle", show_system_schemas: true }), ""), schemas);
+  assert.deepEqual(filterSchemaNamesForConnection(schemas, config({ db_type: "oceanbase-oracle", visible_schemas: { "": ["SYS", "APEX_240100", "FLOWS_240100", "APP$USER"] } }), ""), ["SYS", "APEX_240100", "FLOWS_240100", "APP$USER"]);
+});
+
 test("Oracle JDBC uses schema filtering for visible object selection", () => {
   const connection = config({
     db_type: "jdbc",

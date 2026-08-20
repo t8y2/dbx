@@ -107,6 +107,43 @@ WHERE s.DB_ID = CURRENT_DB_ID
   AND s.SCHEMA_NAME = ?
   AND t.TABLE_NAME = ?
 ORDER BY i.INDEX_NAME`
+
+// Index scope and partition metadata are queried separately from the stable
+// index listing query.  This keeps ordinary index discovery compatible with
+// older Xugu catalog versions while allowing newer versions to preserve
+// LOCAL/GLOBAL partition semantics in reconstructed DDL.
+const xuguIndexPartitionAttributesSQL = `
+SELECT i.INDEX_NAME, i.IS_LOCAL, i.PARTI_TYPE, i.PARTI_NUM, i.PARTI_KEY,
+       i.SUBPARTI_TYPE, i.SUBPARTI_NUM, i.SUBPARTI_KEY
+FROM ALL_INDEXES i
+JOIN ALL_TABLES t ON t.DB_ID = i.DB_ID AND t.TABLE_ID = i.TABLE_ID
+JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
+WHERE s.DB_ID = CURRENT_DB_ID
+  AND s.SCHEMA_NAME = ?
+  AND t.TABLE_NAME = ?
+ORDER BY i.INDEX_NAME`
+const xuguIndexPartitionsSQL = `
+SELECT i.INDEX_NAME, p.PARTI_NO, p.PARTI_NAME, p.PARTI_VAL
+FROM ALL_IDX_PARTIS p
+JOIN ALL_INDEXES i ON i.DB_ID = p.DB_ID AND i.INDEX_ID = p.INDEX_ID
+JOIN ALL_TABLES t ON t.DB_ID = i.DB_ID AND t.TABLE_ID = i.TABLE_ID
+JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
+WHERE s.DB_ID = CURRENT_DB_ID
+  AND s.SCHEMA_NAME = ?
+  AND t.TABLE_NAME = ?
+  AND i.IS_PRIMARY = FALSE
+ORDER BY i.INDEX_NAME, p.PARTI_NO`
+const xuguIndexSubpartitionsSQL = `
+SELECT i.INDEX_NAME, p.SUBPARTI_NO, p.SUBPARTI_NAME, p.SUBPARTI_VAL
+FROM ALL_IDX_SUBPARTIS p
+JOIN ALL_INDEXES i ON i.DB_ID = p.DB_ID AND i.INDEX_ID = p.INDEX_ID
+JOIN ALL_TABLES t ON t.DB_ID = i.DB_ID AND t.TABLE_ID = i.TABLE_ID
+JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
+WHERE s.DB_ID = CURRENT_DB_ID
+  AND s.SCHEMA_NAME = ?
+  AND t.TABLE_NAME = ?
+  AND i.IS_PRIMARY = FALSE
+ORDER BY i.INDEX_NAME, p.SUBPARTI_NO`
 const xuguTableMetadataSQL = `
 SELECT t.TEMP_TYPE, t.ON_COMMIT_DEL, t.PCTFREE, t.COPY_NUM,
        t.PARTI_TYPE, t.PARTI_NUM, t.PARTI_KEY,
@@ -183,33 +220,61 @@ WHERE s.DB_ID = CURRENT_DB_ID
 ORDER BY p.SUBPARTI_NO`
 
 var xuguDataTypes = []string{
-	"BOOLEAN",
-	"INTEGER",
-	"SMALLINT",
 	"BIGINT",
-	"FLOAT",
-	"NUMERIC",
-	"CHAR",
-	"VARCHAR",
-	"CLOB",
-	"DATE",
-	"TIME",
-	"TIMESTAMP",
 	"BINARY",
-	"VARBINARY",
+	"BIT",
 	"BLOB",
-	"XML",
 	"BOOL",
-	"INT",
-	"SHORT",
-	"LONGINT",
-	"LONG",
-	"REAL",
+	"BOOLEAN",
+	"CHAR",
+	"CHAR[]",
+	"CLOB",
+	"CLOB[]",
+	"DATE",
+	"DATETIME",
+	"DATETIME WITH TIME ZONE",
 	"DECIMAL",
-	"TEXT",
+	"DOUBLE",
+	"DOUBLE[]",
+	"FLOAT",
+	"GUID",
+	"INT",
+	"INTEGER",
+	"INTEGER[]",
+	"INTERVAL DAY",
+	"INTERVAL DAY TO HOUR",
+	"INTERVAL DAY TO MINUTE",
+	"INTERVAL DAY TO SECOND",
+	"INTERVAL HOUR",
+	"INTERVAL HOUR TO MINUTE",
+	"INTERVAL HOUR TO SECOND",
+	"INTERVAL MINUTE",
+	"INTERVAL MINUTE TO SECOND",
+	"INTERVAL MONTH",
+	"INTERVAL SECOND",
+	"INTERVAL YEAR",
+	"INTERVAL YEAR TO MONTH",
+	"JSON",
+	"LONG",
+	"LONGINT",
 	"NCHAR",
+	"NUMERIC",
 	"NVARCHAR",
 	"NVARCHAR2",
+	"REAL",
+	"ROWID",
+	"SHORT",
+	"SMALLINT",
+	"TEXT",
+	"TIME",
+	"TIME WITH TIME ZONE",
+	"TIMESTAMP",
+	"TIMESTAMP WITH TIME ZONE",
+	"TINYINT",
+	"VARBINARY",
+	"VARBIT",
+	"VARCHAR",
+	"XML",
 }
 
 type request struct {
@@ -358,7 +423,20 @@ type indexInfo struct {
 	IndexType       *string  `json:"index_type"`
 	IncludedColumns []string `json:"included_columns"`
 	Comment         *string  `json:"comment"`
-	keys            []xuguIndexKey
+	// Partition fields are intentionally internal. The generic DBX index
+	// protocol does not yet model Xugu-specific index partition clauses, but
+	// the DDL exporter must retain them to avoid changing index semantics.
+	IsLocal             bool                `json:"-"`
+	PartitionType       int                 `json:"-"`
+	PartitionCount      int                 `json:"-"`
+	PartitionKey        string              `json:"-"`
+	SubpartitionType    int                 `json:"-"`
+	SubpartitionCount   int                 `json:"-"`
+	SubpartitionKey     string              `json:"-"`
+	PartitionRowsLoaded bool                `json:"-"`
+	IndexPartitions     []xuguPartitionInfo `json:"-"`
+	IndexSubpartitions  []xuguPartitionInfo `json:"-"`
+	keys                []xuguIndexKey
 }
 
 func (i indexInfo) MarshalJSON() ([]byte, error) {
@@ -1636,7 +1714,7 @@ func isXuguMetadataAccessError(err error) bool {
 	catalogObject := false
 	for _, object := range []string{
 		"DATABASES", "SCHEMAS", "TABLES", "VIEWS", "COLUMNS", "CONSTRAINTS", "INDEXES",
-		"TRIGGERS", "PARTIS", "SUBPARTIS", "SEQUENCES", "SYNONYMS", "PROCEDURES", "PACKAGES", "TYPES",
+		"TRIGGERS", "PARTIS", "SUBPARTIS", "IDX_PARTIS", "IDX_SUBPARTIS", "SEQUENCES", "SYNONYMS", "PROCEDURES", "PACKAGES", "TYPES",
 	} {
 		if strings.Contains(message, "ALL_"+object) || strings.Contains(message, "SYS_"+object) {
 			catalogObject = true
@@ -2620,7 +2698,88 @@ func (s *server) listIndexes(schema, table string) ([]indexInfo, error) {
 		item.IncludedColumns = []string{}
 		result = append(result, item)
 	}
+	// LOCAL/GLOBAL attributes are best-effort metadata. Keep the stable index
+	// listing usable when an older Xugu catalog does not expose these columns.
+	s.loadIndexPartitionMetadata(catalogSchema, catalogTable, result)
 	return emptyIfNil(result), rows.Err()
+}
+
+// loadIndexPartitionMetadata enriches the stable index list with Xugu's
+// partition scope and partition definitions. The generic DBX index payload
+// does not expose these Xugu-specific fields, so they remain internal and are
+// consumed by table DDL reconstruction only.
+func (s *server) loadIndexPartitionMetadata(schema, table string, indexes []indexInfo) {
+	if len(indexes) == 0 {
+		return
+	}
+	byName := make(map[string]*indexInfo, len(indexes))
+	for i := range indexes {
+		byName[indexes[i].Name] = &indexes[i]
+	}
+
+	rows, err := s.queryRows(xuguTableCatalogQuery(xuguIndexPartitionAttributesSQL, schema, table), nil)
+	if err != nil {
+		return
+	}
+	func() {
+		defer s.closeRows(rows)
+		for rows.Next() {
+			var name, local, partitionType, partitionCount, partitionKey any
+			var subpartitionType, subpartitionCount, subpartitionKey any
+			if err := rows.Scan(&name, &local, &partitionType, &partitionCount, &partitionKey,
+				&subpartitionType, &subpartitionCount, &subpartitionKey); err != nil {
+				return
+			}
+			item := byName[xuguString(name)]
+			if item == nil {
+				continue
+			}
+			item.IsLocal = truthy(local)
+			item.PartitionType = xuguInt(partitionType)
+			item.PartitionCount = xuguInt(partitionCount)
+			item.PartitionKey = xuguString(partitionKey)
+			item.SubpartitionType = xuguInt(subpartitionType)
+			item.SubpartitionCount = xuguInt(subpartitionCount)
+			item.SubpartitionKey = xuguString(subpartitionKey)
+		}
+	}()
+
+	rows, err = s.queryRows(xuguTableCatalogQuery(xuguIndexPartitionsSQL, schema, table), nil)
+	if err != nil {
+		return
+	}
+	func() {
+		defer s.closeRows(rows)
+		for rows.Next() {
+			var name, position, partitionName, partitionValue any
+			if err := rows.Scan(&name, &position, &partitionName, &partitionValue); err != nil {
+				return
+			}
+			if item := byName[xuguString(name)]; item != nil {
+				item.IndexPartitions = append(item.IndexPartitions, xuguPartitionInfo{
+					Name: xuguString(partitionName), Value: xuguString(partitionValue),
+				})
+				item.PartitionRowsLoaded = true
+			}
+		}
+	}()
+
+	rows, err = s.queryRows(xuguTableCatalogQuery(xuguIndexSubpartitionsSQL, schema, table), nil)
+	if err != nil {
+		return
+	}
+	defer s.closeRows(rows)
+	for rows.Next() {
+		var name, position, partitionName, partitionValue any
+		if err := rows.Scan(&name, &position, &partitionName, &partitionValue); err != nil {
+			return
+		}
+		if item := byName[xuguString(name)]; item != nil {
+			item.IndexSubpartitions = append(item.IndexSubpartitions, xuguPartitionInfo{
+				Name: xuguString(partitionName), Value: xuguString(partitionValue),
+			})
+		}
+	}
 }
 
 func (s *server) listForeignKeys(schema, table string) ([]foreignKeyInfo, error) {
@@ -4527,16 +4686,132 @@ func (s *server) appendTableIndexDDL(schema, table, ddl string) string {
 			builder.WriteString(renderXuguIndexKey(key))
 		}
 		builder.WriteByte(')')
-		if index.IndexType != nil && strings.TrimSpace(*index.IndexType) != "" {
-			builder.WriteString(" INDEXTYPE IS ")
-			builder.WriteString(strings.TrimSpace(*index.IndexType))
-		}
+		appendXuguIndexOptions(&builder, index)
 		builder.WriteByte(';')
 	}
 	if builder.Len() == 0 {
 		return ddl
 	}
 	return appendDDLStatement(ddl, builder.String())
+}
+
+func appendXuguIndexOptions(builder *strings.Builder, index indexInfo) {
+	if index.IndexType != nil && strings.TrimSpace(*index.IndexType) != "" {
+		builder.WriteString(" INDEXTYPE IS ")
+		builder.WriteString(strings.TrimSpace(*index.IndexType))
+	}
+	if index.IsLocal {
+		builder.WriteString(" LOCAL")
+		return
+	}
+	if index.PartitionType == 0 || !index.PartitionRowsLoaded {
+		return
+	}
+	partitionDDL := renderXuguIndexPartitionDDL(index)
+	if partitionDDL != "" {
+		builder.WriteString(" GLOBAL")
+		builder.WriteString(partitionDDL)
+	}
+}
+
+func renderXuguIndexPartitionDDL(index indexInfo) string {
+	typeName := xuguPartitionType(index.PartitionType)
+	key := strings.TrimSpace(index.PartitionKey)
+	if typeName == "" || key == "" {
+		return ""
+	}
+
+	var builder strings.Builder
+	builder.WriteString(" PARTITION BY ")
+	builder.WriteString(typeName)
+	builder.WriteString(" (")
+	builder.WriteString(key)
+	builder.WriteByte(')')
+	if index.PartitionType == 3 {
+		if index.PartitionCount <= 0 {
+			return ""
+		}
+		builder.WriteString(fmt.Sprintf(" PARTITIONS %d", index.PartitionCount))
+	} else if len(index.IndexPartitions) > 0 {
+		for _, partition := range index.IndexPartitions {
+			if strings.TrimSpace(partition.Name) == "" || strings.TrimSpace(partition.Value) == "" {
+				return ""
+			}
+		}
+		builder.WriteString(" PARTITIONS (\n")
+		for i, partition := range index.IndexPartitions {
+			if i > 0 {
+				builder.WriteString(",\n")
+			}
+			builder.WriteString("  ")
+			builder.WriteString(quoteIdentifier(partition.Name))
+			builder.WriteByte(' ')
+			if index.PartitionType == 1 {
+				builder.WriteString("VALUES LESS THAN (")
+			} else {
+				builder.WriteString("VALUES (")
+			}
+			builder.WriteString(strings.TrimSpace(partition.Value))
+			builder.WriteByte(')')
+		}
+		builder.WriteString("\n)")
+	} else {
+		return ""
+	}
+
+	subType := xuguPartitionType(index.SubpartitionType)
+	subKey := strings.TrimSpace(index.SubpartitionKey)
+	if subType == "" || subKey == "" {
+		return builder.String()
+	}
+	builder.WriteString(" SUBPARTITION BY ")
+	builder.WriteString(subType)
+	builder.WriteString(" (")
+	builder.WriteString(subKey)
+	builder.WriteByte(')')
+	if index.SubpartitionType == 3 {
+		if index.SubpartitionCount <= 0 {
+			return builderWithoutSubpartitionDDL(index, builder)
+		}
+		builder.WriteString(fmt.Sprintf(" SUBPARTITIONS %d", index.SubpartitionCount))
+	} else if len(index.IndexSubpartitions) > 0 {
+		for _, partition := range index.IndexSubpartitions {
+			if strings.TrimSpace(partition.Name) == "" || strings.TrimSpace(partition.Value) == "" {
+				return builderWithoutSubpartitionDDL(index, builder)
+			}
+		}
+		builder.WriteString(" SUBPARTITIONS (\n")
+		for i, partition := range index.IndexSubpartitions {
+			if i > 0 {
+				builder.WriteString(",\n")
+			}
+			builder.WriteString("  ")
+			builder.WriteString(quoteIdentifier(partition.Name))
+			builder.WriteByte(' ')
+			if index.SubpartitionType == 1 {
+				builder.WriteString("VALUES LESS THAN (")
+			} else {
+				builder.WriteString("VALUES (")
+			}
+			builder.WriteString(strings.TrimSpace(partition.Value))
+			builder.WriteByte(')')
+		}
+		builder.WriteString("\n)")
+	}
+	return builder.String()
+}
+
+// builderWithoutSubpartitionDDL returns the complete first-level definition
+// when Xugu exposes a subpartition marker but not enough detail to replay it.
+// Emitting an incomplete SUBPARTITION clause is worse than preserving a valid
+// global index DDL without that optional detail.
+func builderWithoutSubpartitionDDL(index indexInfo, builder strings.Builder) string {
+	firstLevel := index
+	firstLevel.SubpartitionType = 0
+	firstLevel.SubpartitionKey = ""
+	firstLevel.SubpartitionCount = 0
+	firstLevel.IndexSubpartitions = nil
+	return renderXuguIndexPartitionDDL(firstLevel)
 }
 
 // uniqueKeyColumnSets returns column lists for PRIMARY KEY and UNIQUE constraints.
@@ -4682,17 +4957,31 @@ func columnTypeDDL(column columnInfo) string {
 	if column.CharacterMaximumLength != nil {
 		return fmt.Sprintf("%s(%d)", dataType, *column.CharacterMaximumLength)
 	}
-	if column.NumericPrecision != nil && column.NumericScale != nil {
-		return fmt.Sprintf("%s(%d,%d)", dataType, *column.NumericPrecision, *column.NumericScale)
+	if column.NumericPrecision != nil {
+		if column.NumericScale != nil {
+			return fmt.Sprintf("%s(%d,%d)", dataType, *column.NumericPrecision, *column.NumericScale)
+		}
+		return xuguSingleParameterTypeDDL(dataType, *column.NumericPrecision)
 	}
 	return dataType
+}
+
+func xuguSingleParameterTypeDDL(dataType string, parameter int) string {
+	switch dataType {
+	case "TIME WITH TIME ZONE":
+		return fmt.Sprintf("TIME(%d) WITH TIME ZONE", parameter)
+	case "TIMESTAMP WITH TIME ZONE":
+		return fmt.Sprintf("TIMESTAMP(%d) WITH TIME ZONE", parameter)
+	default:
+		return fmt.Sprintf("%s(%d)", dataType, parameter)
+	}
 }
 
 func decodeXuguScale(dataType string, scale *int) (*int, *int, *int) {
 	if scale == nil || *scale < 0 {
 		return nil, nil, nil
 	}
-	upper := strings.ToUpper(dataType)
+	upper := strings.Join(strings.Fields(strings.ToUpper(dataType)), " ")
 	if strings.Contains(upper, "CHAR") || strings.Contains(upper, "BINARY") {
 		length := *scale
 		return nil, nil, &length
@@ -4701,6 +4990,10 @@ func decodeXuguScale(dataType string, scale *int) (*int, *int, *int) {
 		precision := *scale / 65536
 		numericScale := *scale % 65536
 		return &precision, &numericScale, nil
+	}
+	if upper == "BIT" || upper == "VARBIT" || upper == "TIME" || upper == "TIME WITH TIME ZONE" || upper == "TIMESTAMP" || upper == "TIMESTAMP WITH TIME ZONE" {
+		precision := *scale
+		return &precision, nil, nil
 	}
 	return nil, nil, nil
 }

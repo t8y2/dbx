@@ -9,12 +9,14 @@ const apiMock = vi.hoisted(() => ({
   buildCreateTableSql: vi.fn(),
   buildDuplicateTableStructureSql: vi.fn(),
   buildMysqlAutoIncrementSql: vi.fn(),
+  buildVacuumTableSql: vi.fn(),
 }));
 
 vi.mock("@/lib/backend/api", () => apiMock);
 
 import {
   buildDuplicateTableStructurePlan,
+  buildVacuumTableSql,
   buildMysqlAutoIncrementSql,
   collectDuplicateTableColumnComments,
   damengDropSchemaExecutionSchema,
@@ -63,6 +65,29 @@ describe("MySQL AUTO_INCREMENT administration", () => {
       }),
     ).resolves.toContain("18446744073709551615");
     expect(apiMock.buildMysqlAutoIncrementSql).toHaveBeenCalledWith(expect.objectContaining({ value: "18446744073709551615" }));
+  });
+});
+
+describe("PostgreSQL-family VACUUM administration", () => {
+  it("forwards independent FULL and ANALYZE options", async () => {
+    apiMock.buildVacuumTableSql.mockResolvedValue('VACUUM FULL ANALYZE "public"."events";');
+
+    await expect(
+      buildVacuumTableSql({
+        databaseType: "postgres",
+        schema: "public",
+        tableName: "events",
+        full: true,
+        analyze: true,
+      }),
+    ).resolves.toBe('VACUUM FULL ANALYZE "public"."events";');
+    expect(apiMock.buildVacuumTableSql).toHaveBeenCalledWith({
+      databaseType: "postgres",
+      schema: "public",
+      tableName: "events",
+      full: true,
+      analyze: true,
+    });
   });
 });
 
@@ -398,6 +423,25 @@ describe("buildDuplicateTableStructurePlan", () => {
     expect(apiMock.listIndexes).not.toHaveBeenCalled();
     expect(apiMock.buildCreateTableSql).not.toHaveBeenCalled();
     expect(plan).toEqual({ sql: 'CREATE TABLE "copy" (LIKE "source" INCLUDING ALL);', sourceColumns: undefined, executeAsScript: false });
+  });
+
+  it("forwards the connection identifier quote so dual-dialect clones stay executable", async () => {
+    // Cloud Spanner's PostgreSQL dialect quotes with double quotes while GoogleSQL uses backticks,
+    // and only the connected agent knows which. Dropping the quote here would make the backend fall
+    // back to the static per-type mapping and emit a syntax error for one of the two dialects.
+    apiMock.buildDuplicateTableStructureSql.mockResolvedValue('CREATE TABLE "copy" AS SELECT * FROM "source" WHERE false;');
+
+    await buildDuplicateTableStructurePlan({
+      connectionId: "spanner-1",
+      database: "projects/p/instances/i/databases/d",
+      databaseType: "spanner",
+      schema: "public",
+      sourceName: "source",
+      targetName: "copy",
+      identifierQuote: '"',
+    });
+
+    expect(apiMock.buildDuplicateTableStructureSql).toHaveBeenCalledWith(expect.objectContaining({ identifierQuote: '"' }));
   });
 
   it("keeps Oracle cloning available when optional table comment loading fails", async () => {

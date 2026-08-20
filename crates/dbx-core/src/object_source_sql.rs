@@ -347,6 +347,7 @@ fn object_type_keyword(object_type: &ObjectSourceKind) -> &'static str {
         ObjectSourceKind::Procedure => "PROCEDURE",
         ObjectSourceKind::Function => "FUNCTION",
         ObjectSourceKind::Trigger => "TRIGGER",
+        ObjectSourceKind::Event => "EVENT",
         ObjectSourceKind::Sequence => "SEQUENCE",
         ObjectSourceKind::Synonym => "SYNONYM",
         ObjectSourceKind::Package => "PACKAGE",

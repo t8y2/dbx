@@ -15,6 +15,8 @@ use futures::{io::AsyncReadExt, io::AsyncWriteExt, TryStreamExt};
 use percent_encoding::percent_decode_str;
 use std::{collections::HashSet, time::Duration};
 
+use crate::mongo_oidc::MongoOidcBrowserOpener;
+
 pub use super::document_result::DocumentQueryResult;
 /// Backward-compatible name for callers of Mongo-specific APIs.
 pub type MongoDocumentResult = DocumentQueryResult;
@@ -66,12 +68,36 @@ pub struct MongoCloneCollectionResult {
 }
 
 pub async fn connect(url: &str, timeout: Duration, idle_timeout: Duration) -> Result<Client, String> {
+    connect_with_oidc(url, timeout, idle_timeout, None).await
+}
+
+pub async fn connect_with_oidc(
+    url: &str,
+    timeout: Duration,
+    idle_timeout: Duration,
+    oidc_browser_opener: Option<MongoOidcBrowserOpener>,
+) -> Result<Client, String> {
     let url = normalize_mongo_uri_direct_connection(url);
     let is_multi_host = is_multi_host_mongo_uri(&url);
     let parse_timeout = if is_multi_host { std::cmp::max(timeout * 2, Duration::from_secs(10)) } else { timeout };
 
     with_connection_timeout("MongoDB", parse_timeout, async {
         let mut options = ClientOptions::parse(&url).await.map_err(|e| format!("MongoDB connection failed: {e}"))?;
+        if let Some(credential) = options.credential.as_mut().filter(|credential| {
+            credential
+                .mechanism
+                .as_ref()
+                .is_some_and(|mechanism| matches!(mechanism, mongodb::options::AuthMechanism::MongoDbOidc))
+        }) {
+            // ENVIRONMENT selects the driver's built-in machine flow. Only
+            // install DBX's browser callback for interactive human OIDC.
+            if !mongo_oidc_uses_machine_environment(credential.mechanism_properties.as_ref()) {
+                let opener = oidc_browser_opener.ok_or_else(|| {
+                    "MongoDB OIDC browser authentication is only available in the DBX desktop app".to_string()
+                })?;
+                credential.oidc_callback = crate::mongo_oidc::human_callback(opener);
+            }
+        }
         options.connect_timeout = Some(timeout);
         options.server_selection_timeout =
             if is_multi_host { Some(std::cmp::max(timeout * 2, Duration::from_secs(10))) } else { Some(timeout) };
@@ -152,6 +178,28 @@ fn mongo_url_param_is_direct_connection_true(part: &str) -> bool {
 }
 
 pub async fn test_connection(client: &Client, timeout: Duration, database: Option<&str>) -> Result<(), String> {
+    test_connection_with_timeout(client, timeout, database).await
+}
+
+pub async fn test_connection_for_url(
+    client: &Client,
+    url: &str,
+    timeout: Duration,
+    database: Option<&str>,
+) -> Result<(), String> {
+    let timeout = if mongo_uri_uses_oidc(url) {
+        timeout.saturating_add(crate::mongo_oidc::OIDC_BROWSER_AUTH_TIMEOUT)
+    } else {
+        timeout
+    };
+    test_connection_with_timeout(client, timeout, database).await
+}
+
+async fn test_connection_with_timeout(
+    client: &Client,
+    timeout: Duration,
+    database: Option<&str>,
+) -> Result<(), String> {
     let database = database.map(str::trim).filter(|value| !value.is_empty()).unwrap_or("admin");
     let client = client.clone();
     let database = database.to_string();
@@ -164,6 +212,24 @@ pub async fn test_connection(client: &Client, timeout: Duration, database: Optio
             .map_err(|e| format!("MongoDB connection failed: {e}"))
     })
     .await
+}
+
+pub fn mongo_uri_uses_oidc(uri: &str) -> bool {
+    uri.split_once('?')
+        .map(|(_, query)| {
+            query.split('#').next().unwrap_or("").split('&').any(|part| {
+                let Some((key, value)) = part.split_once('=') else {
+                    return false;
+                };
+                percent_decode_str(key).decode_utf8_lossy().eq_ignore_ascii_case("authMechanism")
+                    && percent_decode_str(value).decode_utf8_lossy().eq_ignore_ascii_case("MONGODB-OIDC")
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn mongo_oidc_uses_machine_environment(properties: Option<&mongodb::bson::Document>) -> bool {
+    properties.is_some_and(|properties| properties.contains_key("ENVIRONMENT"))
 }
 
 pub async fn server_version(client: &Client, database: &str) -> Result<String, String> {
@@ -2662,6 +2728,22 @@ fn expand_object_id_string_array(items: &[serde_json::Value]) -> Bson {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_oidc_auth_mechanism_in_mongo_uri() {
+        assert!(mongo_uri_uses_oidc("mongodb://localhost/test?authSource=%24external&authMechanism=MONGODB-OIDC"));
+        assert!(mongo_uri_uses_oidc(
+            "mongodb://localhost/test?authMechanism%3Dignored=x&authMechanism=mongodb-oidc#fragment"
+        ));
+        assert!(!mongo_uri_uses_oidc("mongodb://localhost/test?authSource=admin&authMechanism=SCRAM-SHA-256"));
+    }
+
+    #[test]
+    fn preserves_mongodb_driver_machine_oidc_environment() {
+        assert!(mongo_oidc_uses_machine_environment(Some(&mongodb::bson::doc! { "ENVIRONMENT": "k8s" })));
+        assert!(!mongo_oidc_uses_machine_environment(Some(&mongodb::bson::doc! { "TOKEN_RESOURCE": "resource" })));
+        assert!(!mongo_oidc_uses_machine_environment(None));
+    }
 
     #[test]
     fn parses_find_collation_options() {

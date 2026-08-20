@@ -759,6 +759,187 @@ pub async fn save_meilisearch_document_batch_core(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+pub async fn meilisearch_search_documents_core(
+    state: &AppState,
+    connection_id: &str,
+    index: &str,
+    q: Option<&str>,
+    filter: Option<&str>,
+    sort: Option<&str>,
+    limit: u64,
+    offset: u64,
+    hybrid_embedder: Option<&str>,
+    hybrid_semantic_ratio: Option<f64>,
+    show_ranking_score: bool,
+    ranking_score_threshold: Option<f64>,
+) -> Result<crate::db::meilisearch_driver::MeilisearchSearchResult, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::Meilisearch(client) => {
+            let client = client.clone();
+            drop(connections);
+            let hybrid = hybrid_embedder.map(|embedder| crate::db::meilisearch_driver::MeilisearchHybrid {
+                embedder: embedder.to_string(),
+                semantic_ratio: hybrid_semantic_ratio.unwrap_or(0.5),
+            });
+            crate::db::meilisearch_driver::search_documents(
+                &client,
+                index,
+                q,
+                filter,
+                sort,
+                limit,
+                offset,
+                hybrid.as_ref(),
+                show_ranking_score,
+                ranking_score_threshold,
+            )
+            .await
+        }
+        _ => Err("Not a Meilisearch connection".to_string()),
+    }
+}
+
+pub async fn meilisearch_fetch_document_page_core(
+    state: &AppState,
+    connection_id: &str,
+    index: &str,
+    filter: Option<&str>,
+    sort: Option<&str>,
+    limit: u64,
+    offset: u64,
+) -> Result<crate::db::meilisearch_driver::MeilisearchDocumentPage, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::Meilisearch(client) => {
+            let client = client.clone();
+            drop(connections);
+            crate::db::meilisearch_driver::fetch_document_page(&client, index, offset, limit, filter, sort).await
+        }
+        _ => Err("Not a Meilisearch connection".to_string()),
+    }
+}
+
+pub async fn meilisearch_get_index_settings_core(
+    state: &AppState,
+    connection_id: &str,
+    index: &str,
+) -> Result<serde_json::Value, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::Meilisearch(client) => {
+            let client = client.clone();
+            drop(connections);
+            crate::db::meilisearch_driver::get_index_settings(&client, index).await
+        }
+        _ => Err("Not a Meilisearch connection".to_string()),
+    }
+}
+
+pub async fn meilisearch_get_document_core(
+    state: &AppState,
+    connection_id: &str,
+    index: &str,
+    id: &str,
+) -> Result<String, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::Meilisearch(client) => {
+            let client = client.clone();
+            drop(connections);
+            crate::db::meilisearch_driver::get_document(&client, index, id).await
+        }
+        _ => Err("Not a Meilisearch connection".to_string()),
+    }
+}
+
+pub async fn meilisearch_update_index_settings_core(
+    state: &AppState,
+    connection_id: &str,
+    index: &str,
+    settings: &serde_json::Value,
+) -> Result<(), String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::Meilisearch(client) => {
+            let client = client.clone();
+            drop(connections);
+            crate::db::meilisearch_driver::update_index_settings(&client, index, settings).await
+        }
+        _ => Err("Not a Meilisearch connection".to_string()),
+    }
+}
+
+pub async fn meilisearch_get_index_stats_core(
+    state: &AppState,
+    connection_id: &str,
+    index: &str,
+) -> Result<serde_json::Value, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::Meilisearch(client) => {
+            let client = client.clone();
+            drop(connections);
+            crate::db::meilisearch_driver::get_index_stats(&client, index).await
+        }
+        _ => Err("Not a Meilisearch connection".to_string()),
+    }
+}
+
+pub async fn meilisearch_get_index_overview_core(
+    state: &AppState,
+    connection_id: &str,
+    index: &str,
+) -> Result<crate::db::meilisearch_driver::MeilisearchIndexOverview, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::Meilisearch(client) => {
+            let client = client.clone();
+            drop(connections);
+            crate::db::meilisearch_driver::get_index_overview(&client, index).await
+        }
+        _ => Err("Not a Meilisearch connection".to_string()),
+    }
+}
+
+pub async fn meilisearch_delete_index_core(state: &AppState, connection_id: &str, index: &str) -> Result<(), String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::Meilisearch(client) => {
+            let client = client.clone();
+            drop(connections);
+            crate::db::meilisearch_driver::delete_index(&client, index).await
+        }
+        _ => Err("Not a Meilisearch connection".to_string()),
+    }
+}
+
+pub async fn meilisearch_delete_all_documents_core(
+    state: &AppState,
+    connection_id: &str,
+    index: &str,
+) -> Result<(), String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::Meilisearch(client) => {
+            let client = client.clone();
+            drop(connections);
+            crate::db::meilisearch_driver::delete_all_documents(&client, index).await
+        }
+        _ => Err("Not a Meilisearch connection".to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

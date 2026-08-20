@@ -13,6 +13,7 @@ import {
   removeConnectionFromSidebarLayout,
   emptyLayout,
   remapSidebarLayoutConnectionIds,
+  filterSidebarLayoutByConnectionIds,
   collapseAllGroups,
   buildConnectionGroupPathMap,
 } from "../../apps/desktop/src/lib/sidebar/sidebarLayout.ts";
@@ -108,6 +109,80 @@ test("reconcileLayout removes groups with no order entry", () => {
   const result = reconcileLayout(["a"], layout);
   assert.equal(result.groups.length, 1);
   assert.equal(result.groups[0].id, "g1");
+});
+
+test("filterSidebarLayoutByConnectionIds keeps selected connections and drops empty groups", () => {
+  const layout: SidebarLayout = {
+    groups: [
+      { id: "prod", name: "Prod", collapsed: false },
+      { id: "dev", name: "Dev", collapsed: false },
+    ],
+    order: [
+      {
+        type: "group",
+        id: "prod",
+        children: [
+          { type: "connection", id: "a" },
+          { type: "connection", id: "b" },
+        ],
+      },
+      {
+        type: "group",
+        id: "dev",
+        children: [{ type: "connection", id: "c" }],
+      },
+      { type: "connection", id: "d" },
+    ],
+  };
+
+  const filtered = filterSidebarLayoutByConnectionIds(layout, ["a", "c"]);
+  assert.deepEqual(
+    filtered.groups.map((group) => group.name),
+    ["Prod", "Dev"],
+  );
+  assert.deepEqual(filtered.order, [
+    { type: "group", id: "prod", children: [{ type: "connection", id: "a" }] },
+    { type: "group", id: "dev", children: [{ type: "connection", id: "c" }] },
+  ]);
+});
+
+test("filterSidebarLayoutByConnectionIds drops nested groups that become empty", () => {
+  const layout: SidebarLayout = {
+    groups: [
+      { id: "prod", name: "Prod", collapsed: false },
+      { id: "staging", name: "Staging", collapsed: false },
+    ],
+    order: [
+      {
+        type: "group",
+        id: "prod",
+        children: [
+          {
+            type: "group",
+            id: "staging",
+            children: [{ type: "connection", id: "b" }],
+          },
+          { type: "connection", id: "a" },
+        ],
+      },
+    ],
+  };
+
+  const filtered = filterSidebarLayoutByConnectionIds(layout, ["a"]);
+  assert.deepEqual(
+    filtered.groups.map((group) => group.id),
+    ["prod"],
+  );
+  assert.deepEqual(filtered.order, [{ type: "group", id: "prod", children: [{ type: "connection", id: "a" }] }]);
+});
+
+test("filterSidebarLayoutByConnectionIds does not append missing selected ids", () => {
+  const layout: SidebarLayout = {
+    groups: [],
+    order: [{ type: "connection", id: "a" }],
+  };
+  const filtered = filterSidebarLayoutByConnectionIds(layout, ["a", "missing"]);
+  assert.deepEqual(filtered.order, [{ type: "connection", id: "a" }]);
 });
 
 test("remapSidebarLayoutConnectionIds preserves imported grouping with new connection ids", () => {
@@ -284,7 +359,7 @@ test("collapseAllGroups keeps other groups collapsed after one group is reopened
 // --- moveConnectionToGroup ---
 
 test("moveConnectionToGroup moves connection into a group", () => {
-  let layout: SidebarLayout = {
+  const layout: SidebarLayout = {
     groups: [{ id: "g1", name: "G", collapsed: false }],
     order: [
       { type: "group", id: "g1", connectionIds: [] },
@@ -299,7 +374,7 @@ test("moveConnectionToGroup moves connection into a group", () => {
 });
 
 test("moveConnectionToGroup moves connection out of a group", () => {
-  let layout: SidebarLayout = {
+  const layout: SidebarLayout = {
     groups: [{ id: "g1", name: "G", collapsed: false }],
     order: [{ type: "group", id: "g1", connectionIds: ["a"] }],
   };

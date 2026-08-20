@@ -360,9 +360,10 @@ fn is_write_sql_with_database_type(sql: &str, database_type: Option<DatabaseType
         None => crate::sql::split_sql_statements(sql),
     };
 
-    statements
-        .iter()
-        .any(|statement| is_write_sql_statement(statement, detect_mysql_executable_comments, detect_select_into))
+    let allow_mysql_checksum = database_type == Some(DatabaseType::Mysql);
+    statements.iter().any(|statement| {
+        is_write_sql_statement(statement, detect_mysql_executable_comments, detect_select_into, allow_mysql_checksum)
+    })
 }
 
 /// The explain flows toggle plan capture with a standalone SET statement:
@@ -448,7 +449,12 @@ fn contains_unquoted_keyword(sql: &str, dialect: &dyn sqlparser::dialect::Dialec
     })
 }
 
-fn is_write_sql_statement(sql: &str, detect_mysql_executable_comments: bool, detect_select_into: bool) -> bool {
+fn is_write_sql_statement(
+    sql: &str,
+    detect_mysql_executable_comments: bool,
+    detect_select_into: bool,
+    allow_mysql_checksum: bool,
+) -> bool {
     // 1. Strip comments and string literals
     let (cleaned, has_mysql_executable_comment) =
         strip_sql_comments_and_literals_with_metadata(sql, detect_mysql_executable_comments);
@@ -468,7 +474,7 @@ fn is_write_sql_statement(sql: &str, detect_mysql_executable_comments: bool, det
     // 2. Check if first keyword is a read keyword
     let starts_with_read = READ_SQL_KEYWORDS.iter().any(|kw| {
         upper.starts_with(kw) && (upper.len() == kw.len() || !upper.as_bytes()[kw.len()].is_ascii_alphanumeric())
-    });
+    }) || (allow_mysql_checksum && starts_with_keyword(&upper, "CHECKSUM TABLE"));
 
     // 3. Special handling for PRAGMA: only allow safe read-only forms
     if !starts_with_read && starts_with_keyword(&upper, "PRAGMA") {
@@ -1544,6 +1550,14 @@ mod tests {
             check_read_only("SHOW CREATE TABLE users; DELETE FROM users", "prod-db", DatabaseType::Mysql);
         assert!(show_create_err.is_err());
         assert!(show_create_err.unwrap_err().contains("Write operation"));
+    }
+
+    #[test]
+    fn check_read_only_allows_mysql_checksum_only_for_mysql() {
+        assert_eq!(check_read_only("CHECKSUM TABLE `issue6693_repro`", "mysql", DatabaseType::Mysql), Ok(()));
+        assert!(check_read_only("CHECKSUM TABLE users", "postgres", DatabaseType::Postgres).is_err());
+        assert!(check_read_only("CHECKSUM TABLE users", "sqlite", DatabaseType::Sqlite).is_err());
+        assert!(check_read_only("CHECKSUM TABLE users; DROP TABLE users", "mysql", DatabaseType::Mysql).is_err());
     }
 
     #[test]

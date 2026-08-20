@@ -136,10 +136,14 @@ type server struct {
 	usePgDefaultExpression     bool
 	usePgViewDefinition        bool
 	usePgFunctionDefinition    bool
+	useLegacyRoutineDefinition bool
 	catalogIdentityUnsupported bool
 	catalogOIDUnsupported      bool
 	infoColumnTypeUnsupported  bool
 	infoUdtNameUnsupported     bool
+	indexOrdinalityUnsupported bool
+	triggerPrettyUnsupported   bool
+	triggerInternalUnsupported bool
 	currentSchema              string
 	schemaSet                  bool
 	sessions                   map[string]*querySession
@@ -407,7 +411,7 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		result, err := s.listTriggers(stringParam(params, "schema"), stringParam(params, "table"))
 		return result, false, err
 	case "get_object_source":
-		result, err := s.getObjectSource(stringParam(params, "schema"), stringParam(params, "name"), stringParam(params, "object_type"))
+		result, err := s.getObjectSourceForRelation(stringParam(params, "schema"), stringParam(params, "name"), stringParam(params, "object_type"), stringParam(params, "relation_name"))
 		return result, false, err
 	case "get_type_details":
 		result, err := s.getTypeDetails(stringParam(params, "schema"), stringParam(params, "name"))
@@ -461,13 +465,18 @@ func (s *server) connect(cp connectParams) error {
 	s.db = db
 	s.params = cp
 	s.mode = detectKingbaseMode(db, cp.MySQLCompatMode)
+	s.mode.legacyV7 = detectKingbaseV7(db)
 	s.usePgDefaultExpression = false
 	s.usePgViewDefinition = false
 	s.usePgFunctionDefinition = false
+	s.useLegacyRoutineDefinition = false
 	s.catalogIdentityUnsupported = false
 	s.catalogOIDUnsupported = false
 	s.infoColumnTypeUnsupported = false
 	s.infoUdtNameUnsupported = false
+	s.indexOrdinalityUnsupported = false
+	s.triggerPrettyUnsupported = false
+	s.triggerInternalUnsupported = false
 	return nil
 }
 
@@ -502,12 +511,25 @@ func openAndPingDB(cp connectParams, timeout time.Duration, opener kingbaseDBOpe
 		if db != nil {
 			_ = db.Close()
 		}
-		if index == 0 && len(attempts) == 2 && errors.Is(err, gokb.ErrSSLNotSupported) {
+		if index == 0 && len(attempts) == 2 && shouldRetryKingbaseWithoutSSL(err) {
 			continue
 		}
 		return nil, err
 	}
 	return nil, errors.New("kingbase connection failed")
+}
+
+func shouldRetryKingbaseWithoutSSL(err error) bool {
+	if errors.Is(err, gokb.ErrSSLNotSupported) {
+		return true
+	}
+	if err == nil {
+		return false
+	}
+
+	// KingBase V7 can accept the SSLRequest and then reject the TLS handshake,
+	// so gokb returns the TLS alert instead of ErrSSLNotSupported.
+	return strings.Contains(strings.ToLower(err.Error()), "remote error: tls: handshake failure")
 }
 
 func openDBWithSSLMode(cp connectParams, sslMode string) (*sql.DB, error) {
@@ -531,10 +553,14 @@ func (s *server) disconnect() error {
 	s.usePgDefaultExpression = false
 	s.usePgViewDefinition = false
 	s.usePgFunctionDefinition = false
+	s.useLegacyRoutineDefinition = false
 	s.catalogIdentityUnsupported = false
 	s.catalogOIDUnsupported = false
 	s.infoColumnTypeUnsupported = false
 	s.infoUdtNameUnsupported = false
+	s.indexOrdinalityUnsupported = false
+	s.triggerPrettyUnsupported = false
+	s.triggerInternalUnsupported = false
 	s.currentSchema = ""
 	s.schemaSet = false
 	if s.db == nil {

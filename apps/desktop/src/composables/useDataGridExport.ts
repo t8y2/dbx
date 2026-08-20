@@ -426,6 +426,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     }
     return buildDataGridCopyInsertStatement({
       databaseType: databaseType.value,
+      identifierQuote: options.identifierQuote?.value,
       tableMeta: tableMeta.value,
       columns: data.columns,
       columnTypes: data.columnTypes,
@@ -1250,6 +1251,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         const exportData = sqlInsertExportData(result);
         const content = await formatSqlInsert({
           databaseType: databaseType.value,
+          identifierQuote: options.identifierQuote?.value,
           schema: tableMeta.value?.schema,
           tableName: tableMeta.value?.tableName || "table_name",
           columns: exportData.columns,
@@ -1271,6 +1273,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         const exportData = sqlInsertExportData(result);
         const content = await formatSqlInsert({
           databaseType: databaseType.value,
+          identifierQuote: options.identifierQuote?.value,
           schema: tableMeta.value?.schema,
           tableName: tableMeta.value?.tableName || "table_name",
           columns: exportData.columns,

@@ -122,6 +122,7 @@ pub enum ObjectSourceKind {
     Procedure,
     Function,
     Trigger,
+    Event,
     Sequence,
     Synonym,
     Package,
@@ -144,6 +145,8 @@ pub struct ObjectSource {
 pub struct ColumnInfo {
     pub name: String,
     pub data_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_schema: Option<String>,
     pub is_nullable: bool,
     pub column_default: Option<String>,
     pub is_primary_key: bool,

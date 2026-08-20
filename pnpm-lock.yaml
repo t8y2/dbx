@@ -145,7 +145,7 @@ importers:
         version: 9.0.0
       dom-to-image-more:
         specifier: ^3.7.2
-        version: 3.7.2
+        version: 3.10.2
       echarts:
         specifier: ^6.1.0
         version: 6.1.0
@@ -268,22 +268,22 @@ importers:
   packages/cli:
     optionalDependencies:
       '@dbx-app/cli-darwin-arm64':
-        specifier: 0.4.64
+        specifier: 0.4.68
         version: link:../cli-darwin-arm64
       '@dbx-app/cli-darwin-x64':
-        specifier: 0.4.64
+        specifier: 0.4.68
         version: link:../cli-darwin-x64
       '@dbx-app/cli-linux-arm64-gnu':
-        specifier: 0.4.64
+        specifier: 0.4.68
         version: link:../cli-linux-arm64-gnu
       '@dbx-app/cli-linux-x64-gnu':
-        specifier: 0.4.64
+        specifier: 0.4.68
         version: link:../cli-linux-x64-gnu
       '@dbx-app/cli-win32-arm64':
-        specifier: 0.4.64
+        specifier: 0.4.68
         version: link:../cli-win32-arm64
       '@dbx-app/cli-win32-x64':
-        specifier: 0.4.64
+        specifier: 0.4.68
         version: link:../cli-win32-x64
 
   packages/cli-darwin-arm64: {}
@@ -316,22 +316,22 @@ importers:
         version: 4.1.8(@types/node@22.19.19)(happy-dom@20.10.6)(vite@8.2.1(@types/node@22.19.19)(esbuild@0.28.0)(jiti@2.7.0)(stylus@0.57.0)(tsx@4.22.4)(yaml@2.8.4))
     optionalDependencies:
       '@dbx-app/mcp-darwin-arm64':
-        specifier: 0.4.64
+        specifier: 0.4.68
         version: link:../mcp-darwin-arm64
       '@dbx-app/mcp-darwin-x64':
-        specifier: 0.4.64
+        specifier: 0.4.68
         version: link:../mcp-darwin-x64
       '@dbx-app/mcp-linux-arm64-gnu':
-        specifier: 0.4.64
+        specifier: 0.4.68
         version: link:../mcp-linux-arm64-gnu
       '@dbx-app/mcp-linux-x64-gnu':
-        specifier: 0.4.64
+        specifier: 0.4.68
         version: link:../mcp-linux-x64-gnu
       '@dbx-app/mcp-win32-arm64':
-        specifier: 0.4.64
+        specifier: 0.4.68
         version: link:../mcp-win32-arm64
       '@dbx-app/mcp-win32-x64':
-        specifier: 0.4.64
+        specifier: 0.4.68
         version: link:../mcp-win32-x64
 
   packages/mcp-win32-arm64: {}
@@ -2223,8 +2223,8 @@ packages:
   dom-serializer@2.0.0:
     resolution: {integrity: sha512-wIkAryiqt/nV5EQKqQpo3SToSOV9J0DnbJqwK7Wv/Trc92zIAYZ4FlMu+JPFW1DfGFt81ZTCGgDEabffXeLyJg==}
 
-  dom-to-image-more@3.7.2:
-    resolution: {integrity: sha512-uQf+pHv6eQhgfI8t2bFuinV0KsPyT8TZgCLwcSU8uBVgN9v6leb0mMpvp6HQAlAcplP3NCcGjxbdqef6pTzvmw==}
+  dom-to-image-more@3.10.2:
+    resolution: {integrity: sha512-+ZNbiRB7Fpsfzn8WSCmAIKUFSXp8uahlI+LsY8t8oWtAATqokeKS3eD3oQikheouap6aVMht8y0b4oAobWRr9w==}
 
   domelementtype@2.3.0:
     resolution: {integrity: sha512-OLETBj6w0OsagBwdXnPdN0cnMfF9opN69co+7ZrbfPGrdpPVNBUj02spi6B1N7wChLQiPn4CSH/zJvXw56gmHw==}
@@ -5872,7 +5872,7 @@ snapshots:
       domhandler: 5.0.3
       entities: 4.5.0
 
-  dom-to-image-more@3.7.2: {}
+  dom-to-image-more@3.10.2: {}
 
   domelementtype@2.3.0: {}
 

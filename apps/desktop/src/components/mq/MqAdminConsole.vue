@@ -27,6 +27,7 @@ import TenantsPanel from "./TenantsPanel.vue";
 import NamespacesPanel from "./NamespacesPanel.vue";
 import TopicsPanel from "./TopicsPanel.vue";
 import SubscriptionsPanel from "./SubscriptionsPanel.vue";
+import KafkaConsumerGroupsPanel from "./KafkaConsumerGroupsPanel.vue";
 import MonitoringPanel from "./MonitoringPanel.vue";
 import ProducerConsumerPanel from "./ProducerConsumerPanel.vue";
 import PoliciesPanel from "./PoliciesPanel.vue";
@@ -174,6 +175,7 @@ function tabLabelKey(tab: MqTab): string {
     namespaces: "mqAdmin.tabNamespaces",
     topics: "mqAdmin.tabTopics",
     subscriptions: "mqAdmin.tabSubscriptions",
+    consumerGroups: "mqAdmin.tabConsumerGroups",
     monitoring: "mqAdmin.tabMonitoring",
     clients: "mqAdmin.tabClients",
     producers: "mqAdmin.tabProducers",
@@ -302,6 +304,17 @@ function handleNavigateTab(payload: { tab: MqTab; topic?: TopicInfo; subscriptio
     preferDlqTopic.value = payload.preferDlqTopic;
   }
   setActiveTab(payload.tab);
+}
+
+function handleKafkaConsumerGroupTopicSelected(topic: string) {
+  selectedTopic.value = {
+    name: topic,
+    shortName: topic,
+    partitioned: false,
+    persistent: true,
+  };
+  selectedSubscriptionName.value = undefined;
+  setActiveTab("subscriptions");
 }
 
 function handleSubscriptionSelected(subscription: string) {
@@ -472,6 +485,7 @@ onMounted(async () => {
         :supports-expire-messages="canExpireMessages"
         @subscription-selected="handleSubscriptionSelected"
       />
+      <KafkaConsumerGroupsPanel v-else-if="activeTab === 'consumerGroups' && isKafkaCluster" :connection-id="connectionId" @navigate-subscriptions="handleKafkaConsumerGroupTopicSelected" />
       <RabbitMqMonitoringPanel v-else-if="activeTab === 'monitoring' && isRabbitMqCluster && canClusterMonitor" :connection-id="connectionId" />
       <MonitoringPanel v-else-if="activeTab === 'monitoring'" :connection-id="connectionId" :topic="selectedTopic" :tenant="effectiveTenant" :namespace="effectiveNamespace" :mq-system-kind="mqSystemKind" @navigate-tab="handleNavigateTab" />
       <RabbitMqClientsPanel v-else-if="activeTab === 'clients' && isRabbitMqCluster && canManageClientConnections" :connection-id="connectionId" :namespace="effectiveNamespace" :read-only="readOnly" />

@@ -154,6 +154,17 @@ describe("shortcutRegistry editor actions", () => {
     expect(DEFAULT_SHORTCUT_SETTINGS.extendSelection).toBe("Alt+W");
   });
 
+  it("registers an IDEA/DataGrip-style Alt+/ shortcut for manually triggering completion", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "triggerCompletion");
+
+    expect(definition).toMatchObject({ scope: "editor", defaultShortcut: "Alt+/" });
+    expect(DEFAULT_SHORTCUT_SETTINGS.triggerCompletion).toBe("Alt+/");
+    expect(formatShortcut(DEFAULT_SHORTCUT_SETTINGS.triggerCompletion, "Win32")).toBe("Alt+/");
+    expect(formatShortcut(DEFAULT_SHORTCUT_SETTINGS.triggerCompletion, "MacIntel")).toBe("Alt+/");
+    expect(shortcutToCodeMirrorKey(DEFAULT_SHORTCUT_SETTINGS.triggerCompletion)).toBe("Alt-/");
+    expect(findShortcutConflict("triggerCompletion", DEFAULT_SHORTCUT_SETTINGS.triggerCompletion, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
+  });
+
   it("detects conflicts between formatter editor shortcuts and other editor shortcuts", () => {
     const shortcuts = normalizeShortcutSettings({ duplicateLine: "Mod+F" });
 

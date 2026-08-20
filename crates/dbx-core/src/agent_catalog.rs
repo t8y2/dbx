@@ -36,8 +36,13 @@ const MONGODB_PROFILES: &[AgentDriverProfile] = &[AgentDriverProfile {
     store_visible: false,
 }];
 
-const H2_PROFILES: &[AgentDriverProfile] =
-    &[AgentDriverProfile { profile: "h2-legacy", key: "h2-legacy", label: "H2 2.1 Legacy", store_visible: true }];
+const H2_PROFILES: &[AgentDriverProfile] = &[
+    AgentDriverProfile { profile: "h2-legacy", key: "h2", label: "H2 2.1 Legacy", store_visible: false },
+    AgentDriverProfile { profile: "h2-v1", key: "h2", label: "H2 1.x", store_visible: false },
+    AgentDriverProfile { profile: "h2-v2", key: "h2", label: "H2 2.0–2.1", store_visible: false },
+    AgentDriverProfile { profile: "h2-v3", key: "h2", label: "H2 2.2+", store_visible: false },
+    AgentDriverProfile { profile: "h2-custom", key: "h2", label: "H2 Custom JAR", store_visible: false },
+];
 
 const EXTRA_AGENT_LABELS: &[(&str, &str)] = &[
     ("duckdb", "DuckDB"),
@@ -65,7 +70,7 @@ const AGENT_CATALOG: &[AgentCatalogEntry] = &[
     AgentCatalogEntry {
         db_type: DatabaseType::Kingbase,
         key: "kingbase",
-        label: "人大金仓 KingbaseES",
+        label: "金仓KingbaseES",
         store_visible: true,
         profiles: &[],
     },
@@ -254,9 +259,30 @@ const AGENT_CATALOG: &[AgentCatalogEntry] = &[
         profiles: &[],
     },
     AgentCatalogEntry {
+        db_type: DatabaseType::Spanner,
+        key: "spanner",
+        label: "Google Cloud Spanner",
+        store_visible: true,
+        profiles: &[],
+    },
+    AgentCatalogEntry {
         db_type: DatabaseType::Kylin,
         key: "kylin",
         label: "Apache Kylin",
+        store_visible: true,
+        profiles: &[],
+    },
+    AgentCatalogEntry {
+        db_type: DatabaseType::Ignite,
+        key: "ignite",
+        label: "Apache Ignite",
+        store_visible: true,
+        profiles: &[],
+    },
+    AgentCatalogEntry {
+        db_type: DatabaseType::Ignite3,
+        key: "ignite3",
+        label: "Apache Ignite 3",
         store_visible: true,
         profiles: &[],
     },
@@ -398,11 +424,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn h2_legacy_profile_uses_separate_agent() {
+    fn h2_profiles_share_the_same_agent() {
         assert_eq!(agent_key(&DatabaseType::H2, None), Some("h2"));
         assert_eq!(agent_key(&DatabaseType::H2, Some("h2")), Some("h2"));
-        assert_eq!(agent_key(&DatabaseType::H2, Some("h2-legacy")), Some("h2-legacy"));
-        assert!(driver_store_entries().any(|(key, label)| key == "h2-legacy" && label == "H2 2.1 Legacy"));
+        assert_eq!(agent_key(&DatabaseType::H2, Some("h2-legacy")), Some("h2"));
+        assert_eq!(agent_key(&DatabaseType::H2, Some("h2-v1")), Some("h2"));
+        assert_eq!(agent_key(&DatabaseType::H2, Some("h2-v2")), Some("h2"));
+        assert_eq!(agent_key(&DatabaseType::H2, Some("h2-v3")), Some("h2"));
+        assert_eq!(agent_key(&DatabaseType::H2, Some("h2-custom")), Some("h2"));
+        assert!(!driver_store_entries().any(|(key, _)| key == "h2-legacy"));
     }
 
     #[test]

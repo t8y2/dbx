@@ -210,6 +210,8 @@ async fn live_postgres_transfer_upserts_generated_always_identity_values() {
         &target_db_type,
         &source_pool_key,
         &target_pool_key,
+        &std::collections::HashMap::new(),
+        &mut Vec::new(),
         |_| {},
     )
     .await
@@ -241,6 +243,8 @@ async fn live_postgres_transfer_upserts_generated_always_identity_values() {
         &target_db_type,
         &source_pool_key,
         &target_pool_key,
+        &std::collections::HashMap::new(),
+        &mut Vec::new(),
         |_| {},
     )
     .await
@@ -428,6 +432,8 @@ async fn live_postgres_transfer_preserves_data_and_schema_objects() {
             &target_db_type,
             &source_pool_key,
             &target_pool_key,
+            &std::collections::HashMap::new(),
+            &mut Vec::new(),
             |_| {},
         )
         .await
@@ -710,6 +716,8 @@ async fn live_postgres_transfer_skips_create_ddl_for_existing_target_table() {
         &target_db_type,
         &source_pool_key,
         &target_pool_key,
+        &std::collections::HashMap::new(),
+        &mut Vec::new(),
         |_| {},
     )
     .await
@@ -831,6 +839,8 @@ async fn live_postgres_transfer_creates_selected_sequence_before_referencing_tab
         &target_db_type,
         &source_pool_key,
         &target_pool_key,
+        &std::collections::HashMap::new(),
+        &mut Vec::new(),
         |_| {},
     )
     .await

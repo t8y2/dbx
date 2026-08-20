@@ -112,8 +112,8 @@ export function matchesShortcut(event: ShortcutLikeEvent, shortcut: string, plat
   return matchesShortcutKey(event, key, platform);
 }
 
-function actionShortcut(actionId: ShortcutActionId, shortcuts?: Partial<ShortcutSettings>): string {
-  return normalizeShortcutSettings(shortcuts)[actionId];
+function actionShortcut(actionId: ShortcutActionId, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): string {
+  return normalizeShortcutSettings(shortcuts, platform)[actionId];
 }
 
 const SWITCH_TO_TAB_ACTIONS: ShortcutActionId[] = ["switchToTab1", "switchToTab2", "switchToTab3", "switchToTab4", "switchToTab5", "switchToTab6", "switchToTab7", "switchToTab8", "switchToTab9"];
@@ -231,12 +231,38 @@ export function isQuickOpenShortcut(event: ShortcutLikeEvent, shortcuts?: Partia
   return matchesShortcut(event, actionShortcut("quickOpen", shortcuts));
 }
 
+export function isNavigateTabHistoryBackShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
+  return matchesShortcut(event, actionShortcut("navigateTabHistoryBack", shortcuts, platform), platform);
+}
+
+export function isNavigateTabHistoryForwardShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
+  return matchesShortcut(event, actionShortcut("navigateTabHistoryForward", shortcuts, platform), platform);
+}
+
+export function handleTabHistoryNavigationShortcut(event: ShortcutLikeEvent, shortcuts: Partial<ShortcutSettings> | undefined, navigate: (direction: -1 | 1) => boolean, platform = globalThis.navigator?.platform || ""): boolean {
+  if (isNavigateTabHistoryBackShortcut(event, shortcuts, platform)) return navigate(-1);
+  if (isNavigateTabHistoryForwardShortcut(event, shortcuts, platform)) return navigate(1);
+  return false;
+}
+
 export function isSwitchToPreviousTabShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("switchToPreviousTab", shortcuts));
 }
 
 export function isSwitchToNextTabShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("switchToNextTab", shortcuts));
+}
+
+/**
+ * JetBrains-style tab switcher: exact match advances forward; adding Shift to
+ * the configured combo (Ctrl+Shift+Tab by default) moves backward. Returns
+ * null when the event is not the switcher shortcut.
+ */
+export function tabSwitcherDirectionFromShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): -1 | 1 | null {
+  const shortcut = actionShortcut("tabSwitcher", shortcuts, platform);
+  if (matchesShortcut(event, shortcut, platform)) return 1;
+  if (event.shiftKey && matchesShortcut({ ...event, shiftKey: false }, shortcut, platform)) return -1;
+  return null;
 }
 
 export function switchToTabIndexFromShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): number | null {

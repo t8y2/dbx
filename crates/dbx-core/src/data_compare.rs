@@ -735,13 +735,29 @@ fn collect_compare_rows(
     for row in rows {
         let key = key_for_row(&row, key_columns, column_indexes);
         if items.contains_key(&key) {
-            return Err(format!("Duplicate {label} key: {key}"));
+            return Err(duplicate_key_error(label, key_columns, &key));
         }
         order.push(key.clone());
         items.insert(key, normalize_row_len(row, columns.len()));
     }
 
     Ok((items, order))
+}
+
+/// Formats a duplicate-key error so the user can tell which side (source or
+/// target) failed, which columns make up the key and which key value repeated.
+///
+/// Single-column keys render as `Duplicate source key for column(s) [id]: "1"`;
+/// composite keys render as `Duplicate target key for column(s) [a, b]: ["1", "2"]`.
+fn duplicate_key_error(label: &str, key_columns: &[String], key: &str) -> String {
+    let columns = key_columns.join(", ");
+    let key_display = if key_columns.len() > 1 {
+        let values = key.split('\u{001f}').collect::<Vec<_>>();
+        format!("[{}]", values.join(", "))
+    } else {
+        key.to_string()
+    };
+    format!("Duplicate {label} key for column(s) [{columns}]: {key_display}")
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2283,7 +2299,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_duplicate_row_keys() {
+    fn rejects_duplicate_row_keys_with_key_column_context() {
         let err = compare_data_rows(CompareDataRowsOptions {
             columns: vec!["id".to_string(), "name".to_string()],
             key_columns: vec!["id".to_string()],
@@ -2292,7 +2308,38 @@ mod tests {
         })
         .expect_err("duplicate source keys should fail");
 
-        assert!(err.contains("Duplicate source key"));
+        assert!(err.contains("Duplicate source key for column(s) [id]: 1"), "{err}");
+    }
+
+    #[test]
+    fn rejects_duplicate_target_keys_with_key_column_context() {
+        let err = compare_data_rows(CompareDataRowsOptions {
+            columns: vec!["id".to_string(), "name".to_string()],
+            key_columns: vec!["id".to_string()],
+            source_rows: vec![vec![json!(1), json!("Ada")]],
+            target_rows: vec![vec![json!(1), json!("Ada")], vec![json!(1), json!("Ada Clone")]],
+        })
+        .expect_err("duplicate target keys should fail");
+
+        assert!(err.contains("Duplicate target key for column(s) [id]: 1"), "{err}");
+    }
+
+    #[test]
+    fn rejects_duplicate_composite_keys_with_both_columns_named() {
+        let err = compare_data_rows(CompareDataRowsOptions {
+            columns: vec!["tenant_id".to_string(), "user_id".to_string(), "name".to_string()],
+            key_columns: vec!["tenant_id".to_string(), "user_id".to_string()],
+            source_rows: vec![
+                vec![json!("A"), json!(1001), json!("Ada")],
+                vec![json!("A"), json!(1001), json!("Ada Clone")],
+            ],
+            target_rows: vec![vec![json!("A"), json!(1001), json!("Ada")]],
+        })
+        .expect_err("duplicate composite source keys should fail");
+
+        assert!(err.contains("Duplicate source key"), "{err}");
+        assert!(err.contains("[tenant_id, user_id]"), "{err}");
+        assert!(err.contains("[\"A\", 1001]"), "{err}");
     }
 
     #[test]

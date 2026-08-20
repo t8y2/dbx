@@ -64,6 +64,23 @@ export function databaseObjectTreeQuerySchema(dbType: DatabaseType | undefined, 
   return schema || database;
 }
 
+/**
+ * Resolves the metadata scope for a database-level truncate/empty operation.
+ *
+ * This intentionally does NOT reuse `databaseObjectTreeQuerySchema`, which
+ * falls back to the database name when no schema is set. That fallback is wrong
+ * for database nodes on schema-aware engines: PostgreSQL would look for a
+ * schema named after the database and SQL Server the same, producing an empty
+ * list or the wrong scope. For those engines a database node has no schema
+ * context, so an empty scope is returned and the backend enumerates every user
+ * schema. Flat engines (MySQL etc.) keep using the database name, which their
+ * object listing already treats as the metadata scope.
+ */
+export function databaseScopeMetadataSchema(dbType: DatabaseType | undefined, database: string, schema?: string): string {
+  if (schema) return schema;
+  return isSchemaAware(dbType) ? "" : database;
+}
+
 export function databaseObjectTreeNodeSchema(dbType: DatabaseType | undefined, database: string, schema?: string): string | undefined {
   if (usesDatabaseObjectTreeMode(dbType)) return undefined;
   if (schema) return schema;

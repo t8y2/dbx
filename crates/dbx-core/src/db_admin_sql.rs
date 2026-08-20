@@ -579,50 +579,196 @@ pub struct DatabaseScopeSqlOptions {
     pub schema: Option<String>,
     #[serde(default)]
     pub objects: Vec<ObjectInfo>,
+    /// Foreign-key edges in the target scope, used to order table statements
+    /// child-first so a referencing table is always cleared/dropped before the
+    /// table it references. Empty for dialects that do not need ordering
+    /// (PostgreSQL-family relies on TRUNCATE ... CASCADE instead).
+    #[serde(default)]
+    pub foreign_keys: Vec<DatabaseScopeForeignKey>,
+}
+
+/// A foreign-key edge inside a database scope: `child` references `parent`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseScopeForeignKey {
+    pub child_schema: Option<String>,
+    pub child_table: String,
+    pub parent_schema: Option<String>,
+    pub parent_table: String,
+}
+
+fn database_scope_table_key(schema: Option<&str>, table: &str) -> String {
+    let schema = schema.unwrap_or("").trim().to_ascii_lowercase();
+    format!("{}.{}", schema, table.trim().to_ascii_lowercase())
+}
+
+/// Orders tables child-first (referencing table before referenced table) using
+/// the supplied foreign-key edges, so `DELETE FROM`/`DROP TABLE` statements
+/// never hit a live foreign key when the dependency graph is acyclic. Cycles
+/// cannot be ordered topologically; their tables keep the original metadata
+/// order and are appended after the acyclic part, which keeps the output
+/// deterministic and total (every input table appears exactly once).
+pub fn sort_database_scope_tables_child_first(
+    tables: Vec<(Option<String>, String)>,
+    foreign_keys: &[DatabaseScopeForeignKey],
+) -> Vec<(Option<String>, String)> {
+    let table_keys: Vec<String> = tables
+        .iter()
+        .map(|(schema, table)| database_scope_table_key(schema.as_deref(), table))
+        .collect();
+    let index_of = |key: &str| table_keys.iter().position(|candidate| candidate == key);
+
+    // Edge child -> parent: the child must be emitted before the parent.
+    let mut edges: Vec<(usize, usize)> = Vec::new();
+    for foreign_key in foreign_keys {
+        let child = database_scope_table_key(foreign_key.child_schema.as_deref(), &foreign_key.child_table);
+        let parent = database_scope_table_key(foreign_key.parent_schema.as_deref(), &foreign_key.parent_table);
+        if child == parent {
+            continue;
+        }
+        let (Some(child_index), Some(parent_index)) = (index_of(&child), index_of(&parent)) else {
+            continue;
+        };
+        edges.push((child_index, parent_index));
+    }
+    if edges.is_empty() {
+        return tables;
+    }
+
+    // Kahn's algorithm over the child -> parent edges: a table becomes
+    // emittable once every table that references it has been emitted.
+    let mut waiting_parents: Vec<Vec<usize>> = table_keys.iter().map(|_| Vec::new()).collect();
+    let mut unemitted_references = vec![0usize; tables.len()];
+    for &(child_index, parent_index) in &edges {
+        waiting_parents[child_index].push(parent_index);
+        unemitted_references[parent_index] += 1;
+    }
+
+    let mut ordered_indices = Vec::with_capacity(tables.len());
+    let mut queue: std::collections::VecDeque<usize> = unemitted_references
+        .iter()
+        .enumerate()
+        .filter(|(_, pending)| **pending == 0)
+        .map(|(index, _)| index)
+        .collect();
+    while let Some(index) = queue.pop_front() {
+        ordered_indices.push(index);
+        for &parent_index in &waiting_parents[index] {
+            unemitted_references[parent_index] -= 1;
+            if unemitted_references[parent_index] == 0 {
+                queue.push_back(parent_index);
+            }
+        }
+    }
+
+    if ordered_indices.len() == tables.len() {
+        return ordered_indices.into_iter().map(|index| tables[index].clone()).collect();
+    }
+    // Cyclic remainder: keep the original metadata order for determinism.
+    let mut cyclic: Vec<usize> = (0..tables.len()).filter(|index| unemitted_references[*index] > 0).collect();
+    cyclic.sort_unstable();
+    ordered_indices.extend(cyclic);
+    ordered_indices.into_iter().map(|index| tables[index].clone()).collect()
 }
 
 /// Builds SQL that removes all row data from every table in the target
 /// database/schema while preserving table structures (columns, indexes,
-/// constraints, triggers). Per-table deletes naturally satisfy foreign-key
-/// ordering, so the generated script is safe to run inside a single
-/// transaction on transactional dialects.
+/// constraints, triggers).
+///
+/// Foreign-key safety comes from two cooperating layers:
+/// - this generator orders tables child-first using the foreign-key edges
+///   collected by the caller (which has the connection metadata), so an
+///   acyclic schema can never fail on a parent-before-child delete;
+/// - PostgreSQL-family dialects additionally use `TRUNCATE ... CASCADE`, which
+///   recursively clears referencing tables and makes the order irrelevant
+///   (covering cyclic graphs too).
+///
+/// The caller is expected to execute the returned statements through the
+/// single-connection transactional channel (`execute_statements_in_transaction`),
+/// so a mid-script failure rolls the whole script back instead of leaving a
+/// partially truncated database.
 pub fn build_truncate_database_sql(options: DatabaseScopeSqlOptions) -> Result<Vec<String>, String> {
     let database_type = options.database_type;
     let fallback_schema = options.schema.as_deref();
+    let tables: Vec<(Option<String>, String)> = options
+        .objects
+        .iter()
+        .filter(|object| normalize_database_scope_object_type(&object.object_type) == "TABLE")
+        .map(|object| (object.schema.as_deref().or(fallback_schema).map(str::to_string), object.name.clone()))
+        .collect();
+    if tables.is_empty() {
+        return Ok(Vec::new());
+    }
+    let postgres_cascade = supports_truncate_table_cascade(database_type);
+    // PostgreSQL-family relies on CASCADE; every other dialect relies on the
+    // child-first ordering computed from the caller's foreign-key metadata.
+    let ordered_tables = if postgres_cascade {
+        tables
+    } else {
+        sort_database_scope_tables_child_first(tables, &options.foreign_keys)
+    };
+
     let mut statements = Vec::new();
-    for object in &options.objects {
-        if normalize_database_scope_object_type(&object.object_type) != "TABLE" {
-            continue;
+    for (schema, table_name) in ordered_tables {
+        if postgres_cascade {
+            statements.push(build_truncate_table_sql(TableAdminSqlOptions {
+                database_type,
+                schema,
+                table_name,
+                cascade: Some(true),
+            }));
+        } else {
+            statements.push(build_empty_table_sql(TableAdminSqlOptions {
+                database_type,
+                schema,
+                table_name,
+                cascade: None,
+            }));
         }
-        statements.push(build_empty_table_sql(TableAdminSqlOptions {
-            database_type,
-            schema: object.schema.as_deref().or(fallback_schema).map(str::to_string),
-            table_name: object.name.clone(),
-            cascade: None,
-        }));
     }
     Ok(statements)
 }
 
 /// Builds SQL that drops every user object in the target database/schema
-/// (views, materialized views, procedures, functions, tables, sequences and
-/// custom types), leaving an empty shell while keeping the database itself.
+/// (events, views, materialized views, procedures, functions, tables,
+/// sequences and custom types), leaving an empty shell while keeping the
+/// database itself.
 ///
 /// Objects are emitted in dependency-reverse order: dependent views/routines
-/// first, then tables (with CASCADE on PostgreSQL-family dialects so their
-/// triggers, indexes and foreign keys are removed too), and finally sequences
-/// and custom types. Dialects that do not support a given object kind simply
-/// skip it.
+/// first, then tables child-first by foreign-key dependency (with CASCADE on
+/// PostgreSQL-family dialects so their triggers, indexes and foreign keys are
+/// removed too), and finally sequences, custom types and events. The
+/// child-first table ordering comes from the foreign-key edges collected by
+/// the caller, so a referencing table is always dropped before the table it
+/// references on dialects without CASCADE.
+///
+/// The caller is expected to execute the returned statements through the
+/// single-connection transactional channel (`execute_statements_in_transaction`).
+/// Dialects with transactional DDL then get all-or-nothing semantics; MySQL
+/// DDL auto-commits per statement, which is an engine limitation the child-first
+/// ordering mitigates by removing the foreign-key failure path for acyclic
+/// schemas.
+///
+/// The support matrix is explicit: tables, views, materialized views,
+/// procedures, functions, MySQL events and (dialect-gated) sequences and
+/// custom types are covered, while table child objects (indexes, triggers,
+/// foreign keys, constraints, partitions) are removed together with their
+/// parent table. Any other object kind returned by the metadata listing
+/// (for example MySQL events on non-MySQL-family servers, Oracle synonyms or
+/// packages) is reported as an error instead of being silently skipped, so an
+/// operation can never report success while leaving objects behind.
 pub fn build_empty_database_sql(options: DatabaseScopeSqlOptions) -> Result<Vec<String>, String> {
     let database_type = options.database_type;
     let fallback_schema = options.schema.as_deref();
     let cascade = supports_drop_table_cascade(database_type);
-    let mut statements = Vec::new();
+    let mysql_family = matches!(database_type, Some(DatabaseType::Mysql | DatabaseType::Goldendb));
     let mut views = Vec::new();
     let mut routines = Vec::new();
-    let mut tables = Vec::new();
+    let mut table_refs = Vec::new();
     let mut sequences = Vec::new();
     let mut types = Vec::new();
+    let mut events = Vec::new();
+    let mut unsupported = Vec::new();
 
     for object in &options.objects {
         let object_schema = object.schema.as_deref().or(fallback_schema).map(str::to_string);
@@ -655,23 +801,41 @@ pub fn build_empty_database_sql(options: DatabaseScopeSqlOptions) -> Result<Vec<
                 name: object.name.clone(),
                 signature: object.signature.clone(),
             }),
-            "TABLE" => tables.push(TableAdminSqlOptions {
-                database_type,
-                schema: object_schema,
-                table_name: object.name.clone(),
-                cascade: Some(cascade),
-            }),
+            "TABLE" => table_refs.push((object_schema, object.name.clone())),
             "SEQUENCE" if supports_drop_sequence(database_type) => sequences.push(object),
+            "SEQUENCE" => unsupported.push((normalize_database_scope_object_type(&object.object_type), object.name.clone())),
             "TYPE" if supports_drop_type(database_type) => types.push(object),
-            // Triggers, indexes, foreign keys and similar child objects are
+            "TYPE" => unsupported.push((normalize_database_scope_object_type(&object.object_type), object.name.clone())),
+            "EVENT" if mysql_family => events.push(object),
+            "EVENT" => unsupported.push((normalize_database_scope_object_type(&object.object_type), object.name.clone())),
+            // Indexes, triggers, foreign keys, constraints and partitions are
             // removed together with their parent table (CASCADE or table drop).
-            _ => {}
+            "INDEX" | "TRIGGER" | "FOREIGN KEY" | "FOREIGNKEY" | "CONSTRAINT" | "PRIMARY KEY"
+            | "PRIMARYKEY" | "UNIQUE" | "CHECK" | "KEY" | "PARTITION" | "SUBPARTITION" | "COLUMN" => {}
+            other => unsupported.push((other.to_string(), object.name.clone())),
         }
     }
 
+    if !unsupported.is_empty() {
+        let mut kinds: Vec<String> = unsupported.iter().map(|(kind, _)| kind.clone()).collect();
+        kinds.sort();
+        kinds.dedup();
+        let examples = unsupported
+            .iter()
+            .take(3)
+            .map(|(kind, name)| format!("{kind} `{name}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "Cannot empty the database: {} object kind(s) are not covered by the generated script and would be left behind (e.g. {}). Drop them manually first or scope the operation to a supported object kind.",
+            kinds.join(", "),
+            examples
+        ));
+    }
+
     // Emit in a deterministic dependency-reverse order: materialized views
-    // before views, procedures before functions, then tables, sequences and
-    // custom types last.
+    // before views, procedures before functions, then tables child-first by
+    // foreign-key dependency, sequences, custom types and events last.
     views.sort_by_key(|options| match options.object_type {
         DatabaseObjectType::MaterializedView => 0,
         _ => 1,
@@ -680,14 +844,25 @@ pub fn build_empty_database_sql(options: DatabaseScopeSqlOptions) -> Result<Vec<
         DatabaseObjectType::Procedure => 0,
         _ => 1,
     });
+    let ordered_table_refs = if cascade {
+        table_refs
+    } else {
+        sort_database_scope_tables_child_first(table_refs, &options.foreign_keys)
+    };
+    let mut statements = Vec::new();
     for view in views {
         statements.push(build_drop_object_sql(view));
     }
     for routine in routines {
         statements.push(build_drop_object_sql(routine));
     }
-    for table in tables {
-        statements.push(build_drop_table_sql(table));
+    for (schema, table_name) in ordered_table_refs {
+        statements.push(build_drop_table_sql(TableAdminSqlOptions {
+            database_type,
+            schema,
+            table_name,
+            cascade: Some(cascade),
+        }));
     }
     for object in sequences {
         statements.push(format!(
@@ -698,6 +873,12 @@ pub fn build_empty_database_sql(options: DatabaseScopeSqlOptions) -> Result<Vec<
     for object in types {
         statements.push(format!(
             "DROP TYPE {};",
+            qualified_name(database_type, object.schema.as_deref().or(fallback_schema), &object.name)
+        ));
+    }
+    for object in events {
+        statements.push(format!(
+            "DROP EVENT {};",
             qualified_name(database_type, object.schema.as_deref().or(fallback_schema), &object.name)
         ));
     }
@@ -2365,16 +2546,35 @@ mod tests {
     }
 
     fn scope_statements(database_type: DatabaseType, objects: Vec<ObjectInfo>, schema: Option<&str>) -> Vec<String> {
+        scope_statements_with_fks(database_type, objects, schema, Vec::new())
+    }
+
+    fn scope_statements_with_fks(
+        database_type: DatabaseType,
+        objects: Vec<ObjectInfo>,
+        schema: Option<&str>,
+        foreign_keys: Vec<DatabaseScopeForeignKey>,
+    ) -> Vec<String> {
         build_truncate_database_sql(DatabaseScopeSqlOptions {
             database_type: Some(database_type),
             schema: schema.map(str::to_string),
             objects,
+            foreign_keys,
         })
         .unwrap()
     }
 
+    fn scope_foreign_key(child: &str, parent: &str) -> DatabaseScopeForeignKey {
+        DatabaseScopeForeignKey {
+            child_schema: None,
+            child_table: child.to_string(),
+            parent_schema: None,
+            parent_table: parent.to_string(),
+        }
+    }
+
     #[test]
-    fn truncate_database_filters_non_table_objects_and_generates_per_table_deletes() {
+    fn truncate_database_filters_non_table_objects_and_generates_fk_safe_sql() {
         let statements = scope_statements(
             DatabaseType::Postgres,
             vec![
@@ -2386,13 +2586,22 @@ mod tests {
             Some("shop"),
         );
 
-        assert_eq!(statements, vec!["DELETE FROM \"shop\".\"orders\";", "DELETE FROM \"shop\".\"audit_log\";"]);
+        // PostgreSQL-family truncates with CASCADE so a parent table can never
+        // fail because a child still references it, regardless of metadata order.
+        assert_eq!(
+            statements,
+            vec!["TRUNCATE TABLE \"shop\".\"orders\" CASCADE;", "TRUNCATE TABLE \"shop\".\"audit_log\" CASCADE;"]
+        );
     }
 
     #[test]
-    fn truncate_database_uses_dialect_specific_empty_sql() {
+    fn truncate_database_uses_dialect_specific_fk_safe_sql() {
         let objects = vec![scope_object("t1", "TABLE", None), scope_object("t2", "TABLE", None)];
 
+        // MySQL-family relies on child-first ordering from foreign-key edges;
+        // without edges the metadata order is kept (no session-variable toggles,
+        // which would leak a disabled FOREIGN_KEY_CHECKS into the pool when a
+        // later statement fails).
         assert_eq!(
             scope_statements(DatabaseType::Mysql, objects.clone(), None),
             vec!["DELETE FROM `t1`;", "DELETE FROM `t2`;"]
@@ -2402,7 +2611,24 @@ mod tests {
             vec!["ALTER TABLE `t1` DELETE WHERE 1 = 1;", "ALTER TABLE `t2` DELETE WHERE 1 = 1;"]
         );
         assert_eq!(
-            scope_statements(DatabaseType::Sqlite, objects, None),
+            scope_statements(DatabaseType::Sqlite, objects.clone(), None),
+            vec!["DELETE FROM \"t1\";", "DELETE FROM \"t2\";"]
+        );
+        // SQL Server relies on child-first ordering plus the caller's
+        // single-connection transactional execution channel; the generator
+        // itself emits plain DELETEs without transaction control so the
+        // executor's BEGIN/COMMIT/ROLLBACK stay authoritative.
+        assert_eq!(
+            scope_statements(DatabaseType::SqlServer, objects, None),
+            vec!["DELETE FROM [t1];", "DELETE FROM [t2];"]
+        );
+    }
+
+    #[test]
+    fn truncate_database_preserves_metadata_order_for_other_dialects() {
+        let objects = vec![scope_object("t1", "TABLE", None), scope_object("t2", "TABLE", None)];
+        assert_eq!(
+            scope_statements(DatabaseType::Oracle, objects, None),
             vec!["DELETE FROM \"t1\";", "DELETE FROM \"t2\";"]
         );
     }
@@ -2424,6 +2650,7 @@ mod tests {
             database_type: Some(DatabaseType::Postgres),
             schema: Some("shop".to_string()),
             objects,
+            foreign_keys: Vec::new(),
         })
         .unwrap();
 
@@ -2444,11 +2671,13 @@ mod tests {
     #[test]
     fn empty_database_skips_cascade_for_non_postgres_family() {
         let objects = vec![scope_object("orders", "TABLE", None), scope_object("orders_seq", "SEQUENCE", None)];
+        let tables_only = vec![scope_object("orders", "TABLE", None)];
 
         let mysql = build_empty_database_sql(DatabaseScopeSqlOptions {
             database_type: Some(DatabaseType::Mysql),
             schema: None,
-            objects: objects.clone(),
+            objects: tables_only.clone(),
+            foreign_keys: Vec::new(),
         })
         .unwrap();
         assert_eq!(mysql, vec!["DROP TABLE `orders`;"]);
@@ -2456,7 +2685,8 @@ mod tests {
         let sqlserver = build_empty_database_sql(DatabaseScopeSqlOptions {
             database_type: Some(DatabaseType::SqlServer),
             schema: Some("dbo".to_string()),
-            objects: objects.clone(),
+            objects: tables_only,
+            foreign_keys: Vec::new(),
         })
         .unwrap();
         assert_eq!(sqlserver, vec!["DROP TABLE [dbo].[orders];"]);
@@ -2465,6 +2695,7 @@ mod tests {
             database_type: Some(DatabaseType::Oracle),
             schema: Some("APP".to_string()),
             objects,
+            foreign_keys: Vec::new(),
         })
         .unwrap();
         assert_eq!(oracle, vec!["DROP TABLE \"APP\".\"orders\";", "DROP SEQUENCE \"APP\".\"orders_seq\";"]);
@@ -2478,9 +2709,229 @@ mod tests {
             database_type: Some(DatabaseType::Sqlite),
             schema: None,
             objects,
+            foreign_keys: Vec::new(),
         })
         .unwrap();
 
         assert_eq!(statements, vec!["DROP VIEW \"users_view\";", "DROP TABLE \"users\";"]);
+    }
+
+    #[test]
+    fn truncate_database_orders_child_first_using_foreign_key_edges() {
+        // orders -> customers: metadata returns the parent first, which a plain
+        // DELETE would reject under foreign-key enforcement.
+        let parent_first = vec![scope_object("customers", "TABLE", None), scope_object("orders", "TABLE", None)];
+        let foreign_keys = vec![scope_foreign_key("orders", "customers")];
+
+        // MySQL-family and SQL Server reorder child-first from the FK edges.
+        assert_eq!(
+            scope_statements_with_fks(DatabaseType::Mysql, parent_first.clone(), None, foreign_keys.clone()),
+            vec!["DELETE FROM `orders`;", "DELETE FROM `customers`;"]
+        );
+        assert_eq!(
+            scope_statements_with_fks(DatabaseType::SqlServer, parent_first.clone(), None, foreign_keys.clone()),
+            vec!["DELETE FROM [orders];", "DELETE FROM [customers];"]
+        );
+
+        // PostgreSQL-family TRUNCATE ... CASCADE recursively clears the child,
+        // so the metadata order is kept as-is.
+        assert_eq!(
+            scope_statements_with_fks(DatabaseType::Postgres, parent_first, None, foreign_keys),
+            vec!["TRUNCATE TABLE \"customers\" CASCADE;", "TRUNCATE TABLE \"orders\" CASCADE;"]
+        );
+    }
+
+    #[test]
+    fn empty_database_drops_mysql_events_and_skips_table_child_objects() {
+        let objects = vec![
+            scope_object("orders", "TABLE", None),
+            scope_object("orders_idx", "INDEX", None),
+            scope_object("orders_audit", "TRIGGER", None),
+            scope_object("archive_cleanup", "EVENT", None),
+        ];
+
+        let statements = build_empty_database_sql(DatabaseScopeSqlOptions {
+            database_type: Some(DatabaseType::Mysql),
+            schema: None,
+            objects,
+            foreign_keys: Vec::new(),
+        })
+        .unwrap();
+
+        // Indexes and triggers are dropped with their parent table; events are
+        // independent objects that must be dropped explicitly.
+        assert_eq!(statements, vec!["DROP TABLE `orders`;", "DROP EVENT `archive_cleanup`;"]);
+    }
+
+    #[test]
+    fn empty_database_orders_table_drops_child_first_using_foreign_key_edges() {
+        // customers <- orders <- order_items: metadata returns parents first.
+        let objects = vec![
+            scope_object("customers", "TABLE", Some("dbo")),
+            scope_object("order_items", "TABLE", Some("dbo")),
+            scope_object("orders", "TABLE", Some("dbo")),
+        ];
+        let foreign_keys = vec![
+            DatabaseScopeForeignKey {
+                child_schema: Some("dbo".to_string()),
+                child_table: "orders".to_string(),
+                parent_schema: Some("dbo".to_string()),
+                parent_table: "customers".to_string(),
+            },
+            DatabaseScopeForeignKey {
+                child_schema: Some("dbo".to_string()),
+                child_table: "order_items".to_string(),
+                parent_schema: Some("dbo".to_string()),
+                parent_table: "orders".to_string(),
+            },
+        ];
+
+        let statements = build_empty_database_sql(DatabaseScopeSqlOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            schema: Some("dbo".to_string()),
+            objects,
+            foreign_keys,
+        })
+        .unwrap();
+
+        // Child-first: order_items before orders before customers.
+        assert_eq!(
+            statements,
+            vec![
+                "DROP TABLE [dbo].[order_items];",
+                "DROP TABLE [dbo].[orders];",
+                "DROP TABLE [dbo].[customers];",
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_database_reports_unsupported_independent_object_kinds() {
+        // A non-MySQL-family server reporting an EVENT must not silently leave
+        // it behind.
+        let event_error = build_empty_database_sql(DatabaseScopeSqlOptions {
+            database_type: Some(DatabaseType::Postgres),
+            schema: Some("public".to_string()),
+            objects: vec![scope_object("orders", "TABLE", Some("public")), scope_object("archive_cleanup", "EVENT", Some("public"))],
+            foreign_keys: Vec::new(),
+        })
+        .unwrap_err();
+        assert!(event_error.contains("EVENT"), "unexpected error: {event_error}");
+        assert!(event_error.contains("archive_cleanup"));
+
+        // Oracle synonyms are independent user objects the generator cannot
+        // drop, so the operation must be blocked instead of reported as empty.
+        let synonym_error = build_empty_database_sql(DatabaseScopeSqlOptions {
+            database_type: Some(DatabaseType::Oracle),
+            schema: Some("APP".to_string()),
+            objects: vec![scope_object("public_alias", "SYNONYM", Some("APP"))],
+            foreign_keys: Vec::new(),
+        })
+        .unwrap_err();
+        assert!(synonym_error.contains("SYNONYM"), "unexpected error: {synonym_error}");
+
+        // A SEQUENCE on a dialect without DROP SEQUENCE support is also
+        // reported rather than silently ignored.
+        let sequence_error = build_empty_database_sql(DatabaseScopeSqlOptions {
+            database_type: Some(DatabaseType::Mysql),
+            schema: None,
+            objects: vec![scope_object("orders_seq", "SEQUENCE", None)],
+            foreign_keys: Vec::new(),
+        })
+        .unwrap_err();
+        assert!(sequence_error.contains("SEQUENCE"), "unexpected error: {sequence_error}");
+    }
+
+    #[test]
+    fn sort_database_scope_tables_orders_child_before_parent() {
+        let tables = vec![(None, "customers".to_string()), (None, "orders".to_string())];
+        let ordered =
+            sort_database_scope_tables_child_first(tables, &[scope_foreign_key("orders", "customers")]);
+        assert_eq!(
+            ordered,
+            vec![(None, "orders".to_string()), (None, "customers".to_string())]
+        );
+    }
+
+    #[test]
+    fn sort_database_scope_tables_orders_multi_level_chains() {
+        // invoices -> orders -> customers, plus an unrelated table.
+        let tables = vec![
+            (None, "customers".to_string()),
+            (None, "invoices".to_string()),
+            (None, "audit_log".to_string()),
+            (None, "orders".to_string()),
+        ];
+        let foreign_keys = vec![
+            scope_foreign_key("orders", "customers"),
+            scope_foreign_key("invoices", "orders"),
+        ];
+        let ordered = sort_database_scope_tables_child_first(tables, &foreign_keys);
+        assert_eq!(
+            ordered,
+            vec![
+                (None, "invoices".to_string()),
+                (None, "audit_log".to_string()),
+                (None, "orders".to_string()),
+                (None, "customers".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn sort_database_scope_tables_appends_cycles_in_metadata_order() {
+        // a <-> b cycle plus c -> a: the cycle cannot be ordered child-first;
+        // every table must still appear exactly once with a deterministic
+        // order (acyclic part first, cyclic remainder in metadata order).
+        let tables = vec![
+            (None, "a".to_string()),
+            (None, "b".to_string()),
+            (None, "c".to_string()),
+        ];
+        let foreign_keys = vec![
+            scope_foreign_key("a", "b"),
+            scope_foreign_key("b", "a"),
+            scope_foreign_key("c", "a"),
+        ];
+        let ordered = sort_database_scope_tables_child_first(tables, &foreign_keys);
+        assert_eq!(
+            ordered,
+            vec![(None, "c".to_string()), (None, "a".to_string()), (None, "b".to_string())]
+        );
+    }
+
+    #[test]
+    fn sort_database_scope_tables_matches_schema_qualified_names_case_insensitively() {
+        // SQL Server metadata uses schema-qualified names; matching must be
+        // case-insensitive and schema-aware so "dbo.orders" matches "dbo"."ORDERS".
+        let tables = vec![(Some("dbo".to_string()), "CUSTOMERS".to_string()), (Some("dbo".to_string()), "orders".to_string())];
+        let foreign_keys = vec![DatabaseScopeForeignKey {
+            child_schema: Some("dbo".to_string()),
+            child_table: "ORDERS".to_string(),
+            parent_schema: Some("DBO".to_string()),
+            parent_table: "customers".to_string(),
+        }];
+        let ordered = sort_database_scope_tables_child_first(tables, &foreign_keys);
+        assert_eq!(
+            ordered,
+            vec![(Some("dbo".to_string()), "orders".to_string()), (Some("dbo".to_string()), "CUSTOMERS".to_string())]
+        );
+    }
+
+    #[test]
+    fn sort_database_scope_tables_ignores_self_references_and_out_of_scope_edges() {
+        // A self-referencing table (e.g. employees.manager_id -> employees.id)
+        // cannot be ordered relative to itself and must not deadlock ordering.
+        let tables = vec![(None, "employees".to_string()), (None, "departments".to_string())];
+        let foreign_keys = vec![
+            scope_foreign_key("employees", "employees"),
+            scope_foreign_key("missing_child", "departments"),
+            scope_foreign_key("employees", "missing_parent"),
+        ];
+        let ordered = sort_database_scope_tables_child_first(tables, &foreign_keys);
+        assert_eq!(
+            ordered,
+            vec![(None, "employees".to_string()), (None, "departments".to_string())]
+        );
     }
 }

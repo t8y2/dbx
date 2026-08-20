@@ -526,29 +526,59 @@ async fn build_database_scope_sql(
     schema: Option<String>,
     database_type: Option<DatabaseType>,
     mode: DatabaseScopeSqlMode,
-) -> Result<String, String> {
+) -> Result<Vec<String>, String> {
     let schema = schema.unwrap_or_default();
     let object_types = match mode {
         DatabaseScopeSqlMode::Truncate => Some(vec!["TABLE".to_string()]),
         DatabaseScopeSqlMode::Empty => None,
     };
-    let objects = dbx_core::schema::list_objects_core(
-        state,
-        &connection_id,
-        &database,
-        &schema,
-        None,
-        None,
-        None,
-        object_types.as_deref(),
-    )
-    .await?;
-    let options = dbx_core::db_admin_sql::DatabaseScopeSqlOptions { database_type, schema: Some(schema), objects };
-    let statements = match mode {
-        DatabaseScopeSqlMode::Truncate => dbx_core::db_admin_sql::build_truncate_database_sql(options)?,
-        DatabaseScopeSqlMode::Empty => dbx_core::db_admin_sql::build_empty_database_sql(options)?,
+    let mut objects =
+        dbx_core::schema::list_objects_core(state, &connection_id, &database, &schema, None, None, None, object_types.as_deref())
+            .await?;
+    // A database-level operation arrives without an explicit schema. On
+    // schema-aware engines that must mean "every user schema", but their
+    // native object listing filters by an exact schema (PostgreSQL) or falls
+    // back to the user's default schema (SQL Server), so enumerate the user
+    // schemas and merge each schema's objects.
+    let mut options_schema = Some(schema.clone());
+    if schema.is_empty() {
+        let db_config = state.configs.read().await.get(&connection_id).cloned();
+        if db_config.as_ref().is_some_and(|config| dbx_core::sql_dialect::is_schema_aware(config.db_type)) {
+            let schemas = dbx_core::schema::list_database_scope_schemas(state, &connection_id, &database).await?;
+            let mut merged = Vec::new();
+            for schema_name in schemas {
+                let schema_objects = dbx_core::schema::list_objects_core(
+                    state,
+                    &connection_id,
+                    &database,
+                    &schema_name,
+                    None,
+                    None,
+                    None,
+                    object_types.as_deref(),
+                )
+                .await?;
+                merged.extend(schema_objects);
+            }
+            objects = merged;
+            // Each merged object already carries its own schema, so the
+            // fallback schema must not override it.
+            options_schema = None;
+        }
+    }
+    // Foreign-key edges let the generator order DELETE/DROP statements
+    // child-first on dialects without CASCADE support.
+    let foreign_keys = dbx_core::schema::list_database_scope_foreign_keys(state, &connection_id, &database).await;
+    let options = dbx_core::db_admin_sql::DatabaseScopeSqlOptions {
+        database_type,
+        schema: options_schema,
+        objects,
+        foreign_keys,
     };
-    Ok(statements.join("\n"))
+    match mode {
+        DatabaseScopeSqlMode::Truncate => dbx_core::db_admin_sql::build_truncate_database_sql(options),
+        DatabaseScopeSqlMode::Empty => dbx_core::db_admin_sql::build_empty_database_sql(options),
+    }
 }
 
 #[tauri::command]
@@ -558,7 +588,7 @@ pub async fn build_truncate_database_sql(
     database: String,
     schema: Option<String>,
     database_type: Option<DatabaseType>,
-) -> Result<String, String> {
+) -> Result<Vec<String>, String> {
     build_database_scope_sql(&state, connection_id, database, schema, database_type, DatabaseScopeSqlMode::Truncate)
         .await
 }
@@ -570,7 +600,7 @@ pub async fn build_empty_database_sql(
     database: String,
     schema: Option<String>,
     database_type: Option<DatabaseType>,
-) -> Result<String, String> {
+) -> Result<Vec<String>, String> {
     build_database_scope_sql(&state, connection_id, database, schema, database_type, DatabaseScopeSqlMode::Empty).await
 }
 

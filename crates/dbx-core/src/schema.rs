@@ -787,6 +787,95 @@ pub async fn list_schemas_core(state: &AppState, connection_id: &str, database: 
     list_schemas_core_with_visible_filter(state, connection_id, database, false).await
 }
 
+/// Lists the schemas a database-wide destructive scope (truncate/empty
+/// database) should operate on. Engine system schemas are always excluded --
+/// regardless of the connection's "show system schemas" setting -- so the
+/// generated DROP/TRUNCATE statements never target catalog or system objects.
+pub async fn list_database_scope_schemas(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+) -> Result<Vec<String>, String> {
+    let schemas = list_schemas_core(state, connection_id, database).await?;
+    Ok(schemas.into_iter().filter(|schema| !is_database_scope_system_schema(schema)).collect())
+}
+
+/// Collects the foreign-key edges inside a database scope for dialects whose
+/// generated DELETE/DROP statements must be ordered child-first (MySQL-family
+/// and SQL Server). PostgreSQL-family dialects rely on TRUNCATE/DROP CASCADE
+/// instead and get an empty list, as do dialects without foreign-key
+/// enforcement. A metadata query failure degrades to an empty list (original
+/// metadata order) rather than blocking the operation: the single-connection
+/// transactional execution channel still guarantees all-or-nothing semantics.
+pub async fn list_database_scope_foreign_keys(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+) -> Vec<crate::db_admin_sql::DatabaseScopeForeignKey> {
+    let pool_key = match state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await {
+        Ok(pool_key) => pool_key,
+        Err(error) => {
+            log::warn!(
+                "[schema][database_scope_foreign_keys] connection_id={} database={} pool error={}",
+                connection_id,
+                database,
+                error
+            );
+            return Vec::new();
+        }
+    };
+    let edges = {
+        let connections = state.connections.read().await;
+        match connections.get(&pool_key) {
+            Some(PoolKind::Mysql(pool, mode)) if *mode != MysqlMode::OceanBaseOracle => {
+                let pool = pool.clone();
+                drop(connections);
+                db::mysql::list_foreign_key_edges(&pool, database).await
+            }
+            Some(PoolKind::SqlServer(client)) => {
+                let client = client.clone();
+                drop(connections);
+                let edges = match lock_sqlserver_metadata_client(&client).await {
+                    Ok(mut client) => db::sqlserver::list_foreign_key_edges(&mut client).await,
+                    Err(error) => Err(error),
+                };
+                edges
+            }
+            _ => Ok(Vec::new()),
+        }
+    };
+    match edges {
+        Ok(edges) => edges
+            .into_iter()
+            .map(|(child_schema, child_table, parent_schema, parent_table)| {
+                crate::db_admin_sql::DatabaseScopeForeignKey { child_schema, child_table, parent_schema, parent_table }
+            })
+            .collect(),
+        Err(error) => {
+            log::warn!(
+                "[schema][database_scope_foreign_keys] connection_id={} database={} error={}; falling back to metadata order",
+                connection_id,
+                database,
+                error
+            );
+            Vec::new()
+        }
+    }
+}
+
+fn is_database_scope_system_schema(schema: &str) -> bool {
+    let normalized = schema.trim().to_ascii_lowercase();
+    normalized == "pg_catalog"
+        || normalized == "information_schema"
+        || normalized == "sys"
+        || normalized == "guest"
+        || normalized == "mysql"
+        || normalized == "performance_schema"
+        || normalized.starts_with("pg_toast")
+        || normalized.starts_with("pg_temp")
+        || normalized.starts_with("db_")
+}
+
 pub async fn list_schemas_core_with_visible_filter(
     state: &AppState,
     connection_id: &str,
@@ -3671,6 +3760,26 @@ for line in sys.stdin:
             Some(vec!["APP".to_string(), "REPORTING".to_string()])
         );
         assert_eq!(visible_schema_filter(Some(&config), "OTHER", true), None);
+    }
+
+    #[test]
+    fn database_scope_system_schemas_are_always_excluded() {
+        for schema in [
+            "pg_catalog",
+            "information_schema",
+            "sys",
+            "guest",
+            "mysql",
+            "performance_schema",
+            "pg_toast_temp_1",
+            "pg_temp_1",
+            "db_owner",
+        ] {
+            assert!(super::is_database_scope_system_schema(schema), "{schema} should be excluded");
+        }
+        for schema in ["public", "dbo", "APP", "shop", "reporting", "pg_extension_test"] {
+            assert!(!super::is_database_scope_system_schema(schema), "{schema} should be kept");
+        }
     }
 
     #[test]

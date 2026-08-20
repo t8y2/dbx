@@ -3,6 +3,8 @@ import { connectionNamespaceCreationTarget, databaseNodeNamespaceCreationTarget 
 import { editableDatabasePropertyGroups, editableSchemaPropertyGroups } from "@/lib/database/databasePropertyEditing";
 import { buildGetDatabaseCommentSql } from "@/lib/database/dbAdminSql";
 import {
+  databaseObjectTreeQuerySchema,
+  databaseScopeMetadataSchema,
   isSchemaAware,
   supportsConnectionScopedQueryExecution,
   supportsConnectionDatabaseBrowser,
@@ -217,5 +219,29 @@ describe("database namespace creation", () => {
     expect(databaseNodeNamespaceCreationTarget({ db_type: "goldendb" }, { type: "database", database: "app" })).toBeNull();
     expect(databaseNodeNamespaceCreationTarget({ db_type: "duckdb" }, { type: "database", database: "main" })).toBeNull();
     expect(databaseNodeNamespaceCreationTarget({ db_type: "jdbc" }, { type: "database", database: "main" })).toBeNull();
+  });
+});
+
+describe("database scope metadata schema", () => {
+  it("does not fall back to the database name for schema-aware database nodes", () => {
+    // Regression: reusing `databaseObjectTreeQuerySchema` used to hand the
+    // database name to list_objects as the schema on PostgreSQL/SQL Server,
+    // producing an empty list or the wrong scope.
+    expect(databaseObjectTreeQuerySchema("postgres", "mydb")).toBe("mydb");
+    expect(databaseObjectTreeQuerySchema("sqlserver", "mydb")).toBe("mydb");
+    expect(databaseScopeMetadataSchema("postgres", "mydb")).toBe("");
+    expect(databaseScopeMetadataSchema("sqlserver", "mydb")).toBe("");
+  });
+
+  it("keeps the database name as the scope for flat engines", () => {
+    expect(databaseScopeMetadataSchema("mysql", "app")).toBe("app");
+    expect(databaseScopeMetadataSchema("sqlite", "main")).toBe("main");
+    expect(databaseScopeMetadataSchema(undefined, "app")).toBe("app");
+  });
+
+  it("prefers an explicit schema context on any engine", () => {
+    expect(databaseScopeMetadataSchema("postgres", "mydb", "shop")).toBe("shop");
+    expect(databaseScopeMetadataSchema("sqlserver", "mydb", "dbo")).toBe("dbo");
+    expect(databaseScopeMetadataSchema("mysql", "app", "reporting")).toBe("reporting");
   });
 });

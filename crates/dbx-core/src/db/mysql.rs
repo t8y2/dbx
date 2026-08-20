@@ -5497,6 +5497,35 @@ pub async fn show_create_table_ddl(pool: &MySqlPool, database: &str, table: &str
         .ok_or_else(|| "Failed to read DDL".to_string())
 }
 
+/// Distinct foreign-key edges (child schema/table -> referenced parent
+/// schema/table) across the whole database, used to order database-scope
+/// DELETE/DROP statements child-first.
+pub async fn list_foreign_key_edges(
+    pool: &MySqlPool,
+    database: &str,
+) -> Result<Vec<(Option<String>, String, Option<String>, String)>, String> {
+    let sql = format!(
+        "SELECT DISTINCT TABLE_SCHEMA, TABLE_NAME, REFERENCED_TABLE_SCHEMA, REFERENCED_TABLE_NAME \
+         FROM information_schema.KEY_COLUMN_USAGE \
+         WHERE TABLE_SCHEMA = {} AND REFERENCED_TABLE_NAME IS NOT NULL",
+        quote_value(database),
+    );
+    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
+    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+    Ok(rows
+        .iter()
+        .map(|row| {
+            (
+                Some(get_str_by_name(row, "TABLE_SCHEMA")),
+                get_str_by_name(row, "TABLE_NAME"),
+                Some(get_str_by_name(row, "REFERENCED_TABLE_SCHEMA")),
+                get_str_by_name(row, "REFERENCED_TABLE_NAME"),
+            )
+        })
+        .collect())
+}
+
 pub async fn list_foreign_keys(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<ForeignKeyInfo>, String> {
     let column_sql = format!(
         "SELECT CONSTRAINT_NAME, COLUMN_NAME, REFERENCED_TABLE_SCHEMA, \

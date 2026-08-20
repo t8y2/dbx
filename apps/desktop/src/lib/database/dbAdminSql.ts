@@ -318,11 +318,23 @@ export interface DatabaseScopeSqlOptions {
   databaseType?: DatabaseType;
 }
 
-export function buildTruncateDatabaseSql(options: DatabaseScopeSqlOptions): Promise<string> {
+/**
+ * Returns the per-table statements for a database-level truncate operation.
+ * The statements are already ordered child-first by foreign-key dependency, so
+ * callers should execute them through the single-connection transactional
+ * channel (executeInTransaction) rather than as an auto-committed script.
+ */
+export function buildTruncateDatabaseSql(options: DatabaseScopeSqlOptions): Promise<string[]> {
   return api.buildTruncateDatabaseSql(options.connectionId, options.database, options.schema, options.databaseType);
 }
 
-export function buildEmptyDatabaseSql(options: DatabaseScopeSqlOptions): Promise<string> {
+/**
+ * Returns the drop statements for every user object in a database-level empty
+ * operation. The table drops are ordered child-first by foreign-key
+ * dependency; execute through the single-connection transactional channel
+ * (executeInTransaction) rather than as an auto-committed script.
+ */
+export function buildEmptyDatabaseSql(options: DatabaseScopeSqlOptions): Promise<string[]> {
   return api.buildEmptyDatabaseSql(options.connectionId, options.database, options.schema, options.databaseType);
 }
 

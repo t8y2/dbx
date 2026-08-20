@@ -2414,6 +2414,36 @@ pub async fn list_objects(client: &mut SqlServerClient, schema: &str) -> Result<
         .collect())
 }
 
+/// Distinct foreign-key edges (child schema/table -> referenced parent
+/// schema/table) across the current database, used to order database-scope
+/// DELETE/DROP statements child-first. Runs against `sys.foreign_keys` in the
+/// database the client is already scoped to.
+pub async fn list_foreign_key_edges(
+    client: &mut SqlServerClient,
+) -> Result<Vec<(Option<String>, String, Option<String>, String)>, String> {
+    const SQL: &str = "SELECT DISTINCT \
+         OBJECT_SCHEMA_NAME(fk.parent_object_id) AS child_schema, \
+         OBJECT_NAME(fk.parent_object_id) AS child_table, \
+         OBJECT_SCHEMA_NAME(fk.referenced_object_id) AS parent_schema, \
+         OBJECT_NAME(fk.referenced_object_id) AS parent_table \
+         FROM sys.foreign_keys fk \
+         WHERE fk.is_ms_shipped = 0";
+    let stream = client.query(SQL, &[]).await.map_err(|e| e.to_string())?;
+    let rows = stream.into_first_result().await.map_err(|e| e.to_string())?;
+    Ok(rows
+        .iter()
+        .map(|row| {
+            (
+                row.get::<&str, _>(0).map(str::to_string),
+                row.get::<&str, _>(1).unwrap_or("").to_string(),
+                row.get::<&str, _>(2).map(str::to_string),
+                row.get::<&str, _>(3).unwrap_or("").to_string(),
+            )
+        })
+        .filter(|(_, child_table, _, parent_table)| !child_table.is_empty() && !parent_table.is_empty())
+        .collect())
+}
+
 fn sqlserver_list_objects_sql(schema: &str) -> String {
     let s = schema.replace('\'', "''");
     let object_visibility = sqlserver_visible_object_predicate();

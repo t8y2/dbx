@@ -143,6 +143,7 @@ import { buildViewDdl } from "@/lib/table/viewDdl";
 import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
 import { getTableStructureCapabilities } from "@/lib/table/tableStructureCapabilities";
 import { connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { databaseScopeMetadataSchema } from "@/lib/database/databaseFeatureSupport";
 import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
 import { defaultPasteTableMode, pasteTableModeCopiesData, supportsWholeRowTableDataCopy, tableClipboardMatchesTarget, tableClipboardMenuState, tableClipboardSourceContext, tableDataCopyColumnOptions, type TableClipboardContext, type TableClipboardTableContext } from "@/lib/table/tableClipboard";
 import { selectedSidebarBatchTargets, selectedTreeNodesInVisibleOrder as orderSelectedTreeNodes } from "@/lib/sidebar/sidebarTreeSelection";
@@ -2929,23 +2930,23 @@ function databaseScopeOptionsForNode(node: TreeNode) {
   return {
     connectionId: node.connectionId!,
     database: node.database || node.label,
-    schema: connectionObjectTreeQuerySchema(config, node.database || node.label, node.schema),
+    schema: databaseScopeMetadataSchema(config?.db_type, node.database || node.label, node.schema),
     databaseType: databaseTypeForNode(node),
   };
 }
 
 async function refreshTruncateDatabasePreviewSql() {
   const node = activeNode.value;
-  truncateDatabasePreviewSql.value = "";
+  truncateDatabasePreviewSql.value = [];
   if (!node.connectionId || node.type === "mongo-db") return;
-  truncateDatabasePreviewSql.value = await buildTruncateDatabaseSql(databaseScopeOptionsForNode(node)).catch(() => "");
+  truncateDatabasePreviewSql.value = await buildTruncateDatabaseSql(databaseScopeOptionsForNode(node)).catch(() => []);
 }
 
 async function refreshEmptyDatabasePreviewSql() {
   const node = activeNode.value;
-  emptyDatabasePreviewSql.value = "";
+  emptyDatabasePreviewSql.value = [];
   if (!node.connectionId || node.type === "mongo-db") return;
-  emptyDatabasePreviewSql.value = await buildEmptyDatabaseSql(databaseScopeOptionsForNode(node)).catch(() => "");
+  emptyDatabasePreviewSql.value = await buildEmptyDatabaseSql(databaseScopeOptionsForNode(node)).catch(() => []);
 }
 
 async function refreshDropSchemaPreviewSql() {
@@ -3546,15 +3547,21 @@ async function confirmTruncateDatabase() {
   truncateDatabaseLoading.value = true;
   try {
     await connectionStore.ensureConnected(connectionId);
-    const sql = truncateDatabasePreviewSql.value || (await buildTruncateDatabaseSql(databaseScopeOptionsForNode(node)));
-    if (!sql.trim()) {
+    const statements = truncateDatabasePreviewSql.value.length ? truncateDatabasePreviewSql.value : await buildTruncateDatabaseSql(databaseScopeOptionsForNode(node));
+    if (!statements.length) {
       toast(t("contextMenu.databaseScopeEmpty"), 3000);
       return;
     }
-    const executed = await executeTreeNodeSqlWithProductionGuard(node, sql, {
-      database: node.database || node.label,
-      schema: node.schema,
-      executeAsScript: true,
+    const database = node.database || node.label;
+    // Destructive scope: execute on the single-connection transactional channel
+    // so a mid-script failure rolls every statement back instead of leaving a
+    // partially truncated database (per-table auto-commit would).
+    const executed = await executeWithProductionSqlGuard({
+      connection: connectionStore.getConfig(connectionId),
+      database,
+      sql: statements.join("\n"),
+      source: t("production.sourceSidebar"),
+      execute: () => api.executeInTransaction(connectionId, database, statements, node.schema),
     });
     if (!executed) return;
     toast(t("contextMenu.truncateDatabaseSuccess", { name: node.label }), 3000);
@@ -3580,15 +3587,21 @@ async function confirmEmptyDatabase() {
   emptyDatabaseLoading.value = true;
   try {
     await connectionStore.ensureConnected(connectionId);
-    const sql = emptyDatabasePreviewSql.value || (await buildEmptyDatabaseSql(databaseScopeOptionsForNode(node)));
-    if (!sql.trim()) {
+    const statements = emptyDatabasePreviewSql.value.length ? emptyDatabasePreviewSql.value : await buildEmptyDatabaseSql(databaseScopeOptionsForNode(node));
+    if (!statements.length) {
       toast(t("contextMenu.databaseScopeEmpty"), 3000);
       return;
     }
-    const executed = await executeTreeNodeSqlWithProductionGuard(node, sql, {
-      database: node.database || node.label,
-      schema: node.schema,
-      executeAsScript: true,
+    const database = node.database || node.label;
+    // Destructive scope: execute on the single-connection transactional channel
+    // so a mid-script failure rolls every statement back instead of leaving a
+    // partially emptied database (per-table auto-commit would).
+    const executed = await executeWithProductionSqlGuard({
+      connection: connectionStore.getConfig(connectionId),
+      database,
+      sql: statements.join("\n"),
+      source: t("production.sourceSidebar"),
+      execute: () => api.executeInTransaction(connectionId, database, statements, node.schema),
     });
     if (!executed) return;
     toast(t("contextMenu.emptyDatabaseSuccess", { name: node.label }), 3000);
@@ -4250,7 +4263,7 @@ routeDangerDialog(showTruncateDatabaseConfirm, () =>
     title: t("contextMenu.confirmTruncateDatabaseTitle"),
     message: t("contextMenu.confirmTruncateDatabaseMessage", { name: activeNode.value.label }),
     get sql() {
-      return truncateDatabasePreviewSql.value;
+      return truncateDatabasePreviewSql.value.join("\n");
     },
     confirmLabel: t("contextMenu.truncateDatabase"),
     get loading() {
@@ -4266,7 +4279,7 @@ routeDangerDialog(showEmptyDatabaseConfirm, () =>
     title: t("contextMenu.confirmEmptyDatabaseTitle"),
     message: t("contextMenu.confirmEmptyDatabaseMessage", { name: activeNode.value.label }),
     get sql() {
-      return emptyDatabasePreviewSql.value;
+      return emptyDatabasePreviewSql.value.join("\n");
     },
     confirmLabel: t("contextMenu.emptyDatabase"),
     get loading() {

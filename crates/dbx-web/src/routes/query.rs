@@ -758,14 +758,14 @@ async fn build_database_scope_sql(
     state: &WebState,
     req: BuildDatabaseScopeSqlRequest,
     mode: DatabaseScopeSqlMode,
-) -> Result<String, AppError> {
+) -> Result<Vec<String>, AppError> {
     let database = req.database;
     let schema = req.schema.unwrap_or_default();
     let object_types = match mode {
         DatabaseScopeSqlMode::Truncate => Some(vec!["TABLE".to_string()]),
         DatabaseScopeSqlMode::Empty => None,
     };
-    let objects = dbx_core::schema::list_objects_core(
+    let mut objects = dbx_core::schema::list_objects_core(
         &state.app,
         &req.connection_id,
         &database,
@@ -777,33 +777,68 @@ async fn build_database_scope_sql(
     )
     .await
     .map_err(AppError::from)?;
+    // A database-level operation arrives without an explicit schema. On
+    // schema-aware engines that must mean "every user schema", but their
+    // native object listing filters by an exact schema (PostgreSQL) or falls
+    // back to the user's default schema (SQL Server), so enumerate the user
+    // schemas and merge each schema's objects.
+    let mut options_schema = Some(schema.clone());
+    if schema.is_empty() {
+        let db_config = state.app.configs.read().await.get(&req.connection_id).cloned();
+        if db_config.as_ref().is_some_and(|config| dbx_core::sql_dialect::is_schema_aware(config.db_type)) {
+            let schemas = dbx_core::schema::list_database_scope_schemas(&state.app, &req.connection_id, &database)
+                .await
+                .map_err(AppError::from)?;
+            let mut merged = Vec::new();
+            for schema_name in schemas {
+                let schema_objects = dbx_core::schema::list_objects_core(
+                    &state.app,
+                    &req.connection_id,
+                    &database,
+                    &schema_name,
+                    None,
+                    None,
+                    None,
+                    object_types.as_deref(),
+                )
+                .await
+                .map_err(AppError::from)?;
+                merged.extend(schema_objects);
+            }
+            objects = merged;
+            // Each merged object already carries its own schema, so the
+            // fallback schema must not override it.
+            options_schema = None;
+        }
+    }
+    // Foreign-key edges let the generator order DELETE/DROP statements
+    // child-first on dialects without CASCADE support.
+    let foreign_keys = dbx_core::schema::list_database_scope_foreign_keys(&state.app, &req.connection_id, &database).await;
     let options = dbx_core::db_admin_sql::DatabaseScopeSqlOptions {
         database_type: req.database_type,
-        schema: Some(schema),
+        schema: options_schema,
         objects,
+        foreign_keys,
     };
-    let statements = match mode {
+    match mode {
         DatabaseScopeSqlMode::Truncate => {
-            dbx_core::db_admin_sql::build_truncate_database_sql(options).map_err(AppError::from)?
+            dbx_core::db_admin_sql::build_truncate_database_sql(options).map_err(AppError::from)
         }
-        DatabaseScopeSqlMode::Empty => {
-            dbx_core::db_admin_sql::build_empty_database_sql(options).map_err(AppError::from)?
-        }
-    };
-    Ok(statements.join("\n"))
+        DatabaseScopeSqlMode::Empty => dbx_core::db_admin_sql::build_empty_database_sql(options).map_err(AppError::from),
+    }
 }
 
 pub async fn build_truncate_database_sql(
     State(state): State<Arc<WebState>>,
     Json(req): Json<BuildDatabaseScopeSqlRequest>,
-) -> Result<Json<String>, AppError> {
+) -> Result<Json<Vec<String>>, AppError> {
     build_database_scope_sql(&state, req, DatabaseScopeSqlMode::Truncate).await.map(Json)
 }
 
 pub async fn build_empty_database_sql(
     State(state): State<Arc<WebState>>,
     Json(req): Json<BuildDatabaseScopeSqlRequest>,
-) -> Result<Json<String>, AppError> {
+) -> Result<Json<Vec<String>>, AppError> {
     build_database_scope_sql(&state, req, DatabaseScopeSqlMode::Empty).await.map(Json)
 }
 

@@ -1451,11 +1451,11 @@ export async function buildDropDatabaseSql(options: DatabaseNameSqlOptions): Pro
   return invoke("build_drop_database_sql", { options });
 }
 
-export async function buildTruncateDatabaseSql(connectionId: string, database: string, schema?: string | null, databaseType?: DatabaseType): Promise<string> {
+export async function buildTruncateDatabaseSql(connectionId: string, database: string, schema?: string | null, databaseType?: DatabaseType): Promise<string[]> {
   return invoke("build_truncate_database_sql", { connectionId, database, schema, databaseType });
 }
 
-export async function buildEmptyDatabaseSql(connectionId: string, database: string, schema?: string | null, databaseType?: DatabaseType): Promise<string> {
+export async function buildEmptyDatabaseSql(connectionId: string, database: string, schema?: string | null, databaseType?: DatabaseType): Promise<string[]> {
   return invoke("build_empty_database_sql", { connectionId, database, schema, databaseType });
 }
 

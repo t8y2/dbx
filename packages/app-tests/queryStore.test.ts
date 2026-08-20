@@ -296,6 +296,33 @@ test("external SQL file paths persist with open query tabs", async () => {
   }
 });
 
+test("legacy Oracle query tabs restore with the manual transaction default", async () => {
+  const restoreStorage = installMemoryStorage();
+  try {
+    setActivePinia(createPinia());
+    let connectionStore = useConnectionStore();
+    connectionStore.connections = [oracleConn("oracle-1")];
+    let store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "ORCL", "Query");
+    await store.flushPendingPersist();
+
+    const storageKey = "dbx-app-state:open_tabs";
+    const saved = JSON.parse(localStorage.getItem(storageKey) ?? "null");
+    delete saved.tabs[0].autoCommit;
+    localStorage.setItem(storageKey, JSON.stringify(saved));
+
+    setActivePinia(createPinia());
+    connectionStore = useConnectionStore();
+    connectionStore.connections = [oracleConn("oracle-1")];
+    store = useQueryStore();
+    await store.initOpenTabs();
+
+    assert.equal(store.tabs.find((tab) => tab.id === tabId)?.autoCommit, false);
+  } finally {
+    restoreStorage();
+  }
+});
+
 test("clean saved SQL tabs persist without duplicating SQL text", async () => {
   const restoreStorage = installMemoryStorage();
   try {
@@ -2008,6 +2035,7 @@ test("normalizes unquoted Oracle query identifiers before loading editable metad
 
   try {
     const tabId = store.createTab("oracle-1", "ORCL", "Query 1", "query", "app");
+    store.setAutoCommit(tabId, true);
     await store.executeTabSql(tabId, "select id, name from users");
 
     const tab = store.tabs.find((item) => item.id === tabId);
@@ -4418,6 +4446,7 @@ for (const pageSize of [1_000, 25_000, 100_000]) {
     settingsStore.updateEditorSettings({ pageSize });
     connectionStore.addEphemeralConnection(oracleConn("oracle-1"));
     const tabId = store.createTab("oracle-1", "ORCL", "Query", "query", "APP");
+    store.setAutoCommit(tabId, true);
 
     globalThis.fetch = withConnectionHealthMock(async (input, init) => {
       const url = String(input);
@@ -6678,6 +6707,7 @@ test("query execution waits for a cleared schema client session to close", async
 
   connectionStore.addEphemeralConnection(oracleConn("oracle-1"));
   const tabId = store.createTab("oracle-1", "ORCL", "Query", "query", "REPORTING");
+  store.setAutoCommit(tabId, true);
   let resolveClientSessionClose: ((response: Response) => void) | undefined;
   let executeRequests = 0;
 
@@ -6740,7 +6770,9 @@ test("failed schema session reset blocks query and Oracle explain execution", as
 
   connectionStore.addEphemeralConnection(oracleConn("oracle-1"));
   const queryTabId = store.createTab("oracle-1", "ORCL", "Query", "query", "REPORTING");
+  store.setAutoCommit(queryTabId, true);
   const explainTabId = store.createTab("oracle-1", "ORCL", "Explain", "query", "REPORTING");
+  store.setAutoCommit(explainTabId, true);
 
   globalThis.fetch = async (input) => {
     const url = String(input);
@@ -7181,6 +7213,7 @@ for (const resultState of [
     settingsStore.updateEditorSettings({ pageSize: 100_000, autoCalculateTotalRows: true });
     connectionStore.addEphemeralConnection(oracleConn("oracle-1"));
     const tabId = store.createTab("oracle-1", "ORCL", "Query", "query", "APP");
+    store.setAutoCommit(tabId, true);
     const tab = store.tabs.find((item) => item.id === tabId);
     assert.ok(tab);
 
@@ -7255,6 +7288,8 @@ for (const paginationMode of [
     settingsStore.updateEditorSettings({ autoCalculateTotalRows: true });
     connectionStore.addEphemeralConnection(paginationMode.useAgentResultSession ? oracleConn("conn-1") : conn("conn-1"));
     const tabId = store.createTab("conn-1", "db", "Query", "query", "public");
+    // Oracle defaults to manual TX; these cases exercise auto-commit pagination.
+    store.setAutoCommit(tabId, true);
     const tab = store.tabs.find((item) => item.id === tabId);
     assert.ok(tab);
 

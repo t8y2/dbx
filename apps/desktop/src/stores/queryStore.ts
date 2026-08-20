@@ -35,7 +35,7 @@ import { redisCommandResultToQueryResult } from "@/lib/redis/redisQueryResult";
 import { nextRedisCommandDb } from "@/lib/redis/redisCommandSession";
 import { isRedisMutatingCommand } from "@/lib/redis/redisCommandTable";
 import { usesAgentCursorForQuery } from "@/lib/database/databaseDriverManifest";
-import { supportsClearableQuerySchema } from "@/lib/database/databaseFeatureSupport";
+import { defaultAutoCommitForDbType, supportsClearableQuerySchema } from "@/lib/database/databaseFeatureSupport";
 import { canInsertTableRows, canUseKeylessRowPredicate, DBX_ROWID_COLUMN, editablePrimaryKeys, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { TABLE_DATA_EXPORT_PAGE_SIZE } from "@/lib/table/tableDataExport";
 import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
@@ -1509,9 +1509,12 @@ export const useQueryStore = defineStore("query", () => {
   function applyRestoredOpenTabs(restored: { tabs: QueryTab[]; activeTabId: string | null }) {
     const connectionStore = useConnectionStore();
     for (const tab of restored.tabs) {
-      if (tab.mode !== "data") continue;
       const connection = connectionStore.getConfig(tab.connectionId);
-      if (connection) tab.schema = connectionObjectTreeNodeSchema(connection, tab.database, tab.schema);
+      if (tab.mode === "query" && tab.autoCommit === undefined) {
+        tab.autoCommit = defaultAutoCommitForDbType(connection?.db_type);
+      } else if (tab.mode === "data" && connection) {
+        tab.schema = connectionObjectTreeNodeSchema(connection, tab.database, tab.schema);
+      }
     }
     tabs.value = restored.tabs;
     activeTabId.value = restored.activeTabId;
@@ -1657,6 +1660,7 @@ export const useQueryStore = defineStore("query", () => {
     }
 
     const id = uuid();
+    const dbType = useConnectionStore().getConfig(connectionId)?.db_type;
     const tab: QueryTab = {
       id,
       title: title || `query_${tabs.value.length + 1}`,
@@ -1671,6 +1675,7 @@ export const useQueryStore = defineStore("query", () => {
       isCancelling: false,
       isExplaining: false,
       mode,
+      ...(mode === "query" ? { autoCommit: defaultAutoCommitForDbType(dbType) } : {}),
     };
     if (mode === "query") tab.originalSql = initialSql ?? "";
     const activeIndex = options.insertAfterActive ? tabs.value.findIndex((item) => item.id === activeTabId.value) : -1;
@@ -1748,6 +1753,7 @@ export const useQueryStore = defineStore("query", () => {
     // File-backed tabs are identified by their full path, not their basename.
     // Bypassing createTab avoids overwriting another file with the same name.
     const id = uuid();
+    const dbType = useConnectionStore().getConfig(connectionId)?.db_type;
     const tab: QueryTab = {
       id,
       title: "",
@@ -1763,6 +1769,7 @@ export const useQueryStore = defineStore("query", () => {
       isCancelling: false,
       isExplaining: false,
       mode: "query",
+      autoCommit: defaultAutoCommitForDbType(dbType),
     };
     tabs.value.push(tab);
     activeTabId.value = id;
@@ -3022,7 +3029,10 @@ export const useQueryStore = defineStore("query", () => {
 
   function rollbackTabTransaction(tab: QueryTab, options?: { resetAutoCommit?: boolean }) {
     if (tab.txnSessionId) void rollbackTransaction(tab.id);
-    if (options?.resetAutoCommit) tab.autoCommit = true;
+    if (options?.resetAutoCommit) {
+      const dbType = useConnectionStore().getConfig(tab.connectionId)?.db_type;
+      tab.autoCommit = defaultAutoCommitForDbType(dbType);
+    }
     tab.txnAutoRolledBack = false;
   }
 
@@ -3161,6 +3171,7 @@ export const useQueryStore = defineStore("query", () => {
 
     const id = uuid();
     const restoredPosition = restoreSavedSqlEditorPosition(file.id, file.sql);
+    const dbType = useConnectionStore().getConfig(target.connectionId)?.db_type;
     const tab: QueryTab = {
       id,
       title: file.name,
@@ -3176,6 +3187,7 @@ export const useQueryStore = defineStore("query", () => {
       isCancelling: false,
       isExplaining: false,
       mode: "query",
+      autoCommit: defaultAutoCommitForDbType(dbType),
       editorSelection: restoredPosition.selection,
       editorViewport: restoredPosition.viewport,
     };
@@ -5175,13 +5187,17 @@ export const useQueryStore = defineStore("query", () => {
       queryExecutionLog("error", "error", { traceId, elapsed: elapsed(), error: e });
       // Sync connection state if the error indicates a lost connection
       useConnectionStore().recordConnectionLostError(executionConnectionId ?? tab.connectionId, e);
-      // Handle manual transaction auto-rollback (e.g. deadlock detected by server,
-      // statement error inside a manual transaction, or idle timeout).
+      // Handle manual transaction auto-rollback (idle timeout only for the banner;
+      // other statement failures still clear the session without the 5-minute notice).
       if (tab.autoCommit === false) {
         const errMsg: string = e?.message ?? String(e);
-        if (/rolled.?back/i.test(errMsg) || errMsg.includes("已自动回滚")) {
+        const idleTimeout = /5 minutes of inactivity/i.test(errMsg) || errMsg.includes("5 分钟无操作") || errMsg.includes("已自动回滚");
+        if (idleTimeout) {
           tab.txnSessionId = undefined;
           tab.txnAutoRolledBack = true;
+        } else if (/rolled.?back/i.test(errMsg) || /transaction session not found/i.test(errMsg) || /agent runtime terminated/i.test(errMsg)) {
+          tab.txnSessionId = undefined;
+          tab.txnAutoRolledBack = false;
         }
       }
       const current = findExecutionTab(id);
@@ -5881,6 +5897,7 @@ export const useQueryStore = defineStore("query", () => {
   function openResultArchiveTab(archive: DecodedQueryResultArchive): string | undefined {
     const id = uuid();
     const title = archive.tab.title.trim() || t("tabs.importedResultArchive");
+    const dbType = useConnectionStore().getConfig(archive.tab.connectionId)?.db_type;
     const tab: QueryTab = {
       id,
       title,
@@ -5897,6 +5914,7 @@ export const useQueryStore = defineStore("query", () => {
       isCancelling: false,
       isExplaining: false,
       mode: "query",
+      autoCommit: defaultAutoCommitForDbType(dbType),
     };
     if (!restoreCachedResultPayload(tab, archive.snapshot)) return undefined;
     const activeRun = tab.resultRuns?.find((run) => run.id === tab.activeResultRunId) ?? tab.resultRuns?.[0];

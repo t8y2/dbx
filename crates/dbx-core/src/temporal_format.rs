@@ -1,5 +1,6 @@
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use serde_json::Value;
+use std::borrow::Cow;
 use std::fmt::Write as _;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,17 +193,51 @@ pub fn format_temporal_export_value(value: &Value, data_type: Option<&str>, patt
         .unwrap_or_else(|| value.clone())
 }
 
+fn active_temporal_pattern(pattern: Option<&str>) -> Option<&str> {
+    pattern.filter(|pattern| !pattern.trim().is_empty())
+}
+
+pub fn format_temporal_export_row_cow<'a>(
+    row: &'a [Value],
+    column_types: &[Option<String>],
+    pattern: Option<&str>,
+) -> Cow<'a, [Value]> {
+    let Some(pattern) = active_temporal_pattern(pattern) else {
+        return Cow::Borrowed(row);
+    };
+    if !column_types.iter().any(|data_type| temporal_kind(data_type.as_deref()).is_some()) {
+        return Cow::Borrowed(row);
+    }
+    Cow::Owned(
+        row.iter()
+            .enumerate()
+            .map(|(index, value)| {
+                format_temporal_export_value(
+                    value,
+                    column_types.get(index).and_then(|data_type| data_type.as_deref()),
+                    Some(pattern),
+                )
+            })
+            .collect(),
+    )
+}
+
 pub fn format_temporal_export_row(row: &[Value], column_types: &[Option<String>], pattern: Option<&str>) -> Vec<Value> {
-    row.iter()
-        .enumerate()
-        .map(|(index, value)| {
-            format_temporal_export_value(
-                value,
-                column_types.get(index).and_then(|data_type| data_type.as_deref()),
-                pattern,
-            )
-        })
-        .collect()
+    format_temporal_export_row_cow(row, column_types, pattern).into_owned()
+}
+
+pub fn format_temporal_export_rows_cow<'a>(
+    rows: &'a [Vec<Value>],
+    column_types: &[Option<String>],
+    pattern: Option<&str>,
+) -> Cow<'a, [Vec<Value>]> {
+    let Some(pattern) = active_temporal_pattern(pattern) else {
+        return Cow::Borrowed(rows);
+    };
+    if !column_types.iter().any(|data_type| temporal_kind(data_type.as_deref()).is_some()) {
+        return Cow::Borrowed(rows);
+    }
+    Cow::Owned(rows.iter().map(|row| format_temporal_export_row(row, column_types, Some(pattern))).collect())
 }
 
 pub fn format_temporal_export_rows(
@@ -210,7 +245,28 @@ pub fn format_temporal_export_rows(
     column_types: &[Option<String>],
     pattern: Option<&str>,
 ) -> Vec<Vec<Value>> {
-    rows.iter().map(|row| format_temporal_export_row(row, column_types, pattern)).collect()
+    format_temporal_export_rows_cow(rows, column_types, pattern).into_owned()
+}
+
+pub fn format_temporal_export_row_with_string_types_cow<'a>(
+    row: &'a [Value],
+    column_types: &[String],
+    pattern: Option<&str>,
+) -> Cow<'a, [Value]> {
+    let Some(pattern) = active_temporal_pattern(pattern) else {
+        return Cow::Borrowed(row);
+    };
+    if !column_types.iter().any(|data_type| temporal_kind(Some(data_type)).is_some()) {
+        return Cow::Borrowed(row);
+    }
+    Cow::Owned(
+        row.iter()
+            .enumerate()
+            .map(|(index, value)| {
+                format_temporal_export_value(value, column_types.get(index).map(String::as_str), Some(pattern))
+            })
+            .collect(),
+    )
 }
 
 pub fn format_temporal_export_row_with_string_types(
@@ -218,10 +274,23 @@ pub fn format_temporal_export_row_with_string_types(
     column_types: &[String],
     pattern: Option<&str>,
 ) -> Vec<Value> {
-    row.iter()
-        .enumerate()
-        .map(|(index, value)| format_temporal_export_value(value, column_types.get(index).map(String::as_str), pattern))
-        .collect()
+    format_temporal_export_row_with_string_types_cow(row, column_types, pattern).into_owned()
+}
+
+pub fn format_temporal_export_rows_with_string_types_cow<'a>(
+    rows: &'a [Vec<Value>],
+    column_types: &[String],
+    pattern: Option<&str>,
+) -> Cow<'a, [Vec<Value>]> {
+    let Some(pattern) = active_temporal_pattern(pattern) else {
+        return Cow::Borrowed(rows);
+    };
+    if !column_types.iter().any(|data_type| temporal_kind(Some(data_type)).is_some()) {
+        return Cow::Borrowed(rows);
+    }
+    Cow::Owned(
+        rows.iter().map(|row| format_temporal_export_row_with_string_types(row, column_types, Some(pattern))).collect(),
+    )
 }
 
 pub fn format_temporal_export_rows_with_string_types(
@@ -229,40 +298,44 @@ pub fn format_temporal_export_rows_with_string_types(
     column_types: &[String],
     pattern: Option<&str>,
 ) -> Vec<Vec<Value>> {
-    rows.iter().map(|row| format_temporal_export_row_with_string_types(row, column_types, pattern)).collect()
+    format_temporal_export_rows_with_string_types_cow(rows, column_types, pattern).into_owned()
 }
 
-pub fn normalize_temporal_import_value(value: &Value, data_type: Option<&str>, pattern: Option<&str>) -> Value {
+pub(crate) fn normalize_temporal_import_value_cow<'a>(
+    value: &'a Value,
+    data_type: Option<&str>,
+    pattern: Option<&str>,
+) -> Cow<'a, Value> {
     let Some(kind) = temporal_kind(data_type) else {
-        return value.clone();
+        return Cow::Borrowed(value);
     };
     let Some(raw) = value.as_str() else {
-        return value.clone();
+        return Cow::Borrowed(value);
     };
     let Some(parsed) = parse_temporal(raw.trim(), pattern) else {
-        return value.clone();
+        return Cow::Borrowed(value);
     };
 
     let normalized = match (kind, parsed) {
         (TemporalKind::Date, ParsedTemporal::Zoned(value)) => value.date_naive().format("%Y-%m-%d").to_string(),
         (TemporalKind::Date, ParsedTemporal::DateTime(value)) => value.date().format("%Y-%m-%d").to_string(),
         (TemporalKind::Date, ParsedTemporal::Date(value)) => value.format("%Y-%m-%d").to_string(),
-        (TemporalKind::Date, ParsedTemporal::Time(_)) => return value.clone(),
+        (TemporalKind::Date, ParsedTemporal::Time(_)) => return Cow::Borrowed(value),
         (TemporalKind::Time, ParsedTemporal::Zoned(value)) => value.time().format("%H:%M:%S%.f").to_string(),
         (TemporalKind::Time, ParsedTemporal::DateTime(value)) => value.time().format("%H:%M:%S%.f").to_string(),
         (TemporalKind::Time, ParsedTemporal::Time(value)) => value.format("%H:%M:%S%.f").to_string(),
-        (TemporalKind::Time, ParsedTemporal::Date(_)) => return value.clone(),
+        (TemporalKind::Time, ParsedTemporal::Date(_)) => return Cow::Borrowed(value),
         (TemporalKind::DateTime, ParsedTemporal::Zoned(value)) => {
             value.naive_local().format("%Y-%m-%d %H:%M:%S%.f").to_string()
         }
         (TemporalKind::DateTime, ParsedTemporal::DateTime(value)) => value.format("%Y-%m-%d %H:%M:%S%.f").to_string(),
         (TemporalKind::DateTime, ParsedTemporal::Date(date)) => {
             let Some(value) = date.and_hms_opt(0, 0, 0) else {
-                return value.clone();
+                return Cow::Borrowed(value);
             };
             value.format("%Y-%m-%d %H:%M:%S").to_string()
         }
-        (TemporalKind::DateTime, ParsedTemporal::Time(_)) => return value.clone(),
+        (TemporalKind::DateTime, ParsedTemporal::Time(_)) => return Cow::Borrowed(value),
         (TemporalKind::DateTimeWithTimeZone, ParsedTemporal::Zoned(value)) => {
             value.format("%Y-%m-%dT%H:%M:%S%.f%:z").to_string()
         }
@@ -271,13 +344,17 @@ pub fn normalize_temporal_import_value(value: &Value, data_type: Option<&str>, p
         }
         (TemporalKind::DateTimeWithTimeZone, ParsedTemporal::Date(date)) => {
             let Some(value) = date.and_hms_opt(0, 0, 0) else {
-                return value.clone();
+                return Cow::Borrowed(value);
             };
             value.format("%Y-%m-%d %H:%M:%S").to_string()
         }
-        (TemporalKind::DateTimeWithTimeZone, ParsedTemporal::Time(_)) => return value.clone(),
+        (TemporalKind::DateTimeWithTimeZone, ParsedTemporal::Time(_)) => return Cow::Borrowed(value),
     };
-    Value::String(normalized)
+    Cow::Owned(Value::String(normalized))
+}
+
+pub fn normalize_temporal_import_value(value: &Value, data_type: Option<&str>, pattern: Option<&str>) -> Value {
+    normalize_temporal_import_value_cow(value, data_type, pattern).into_owned()
 }
 
 #[cfg(test)]
@@ -356,6 +433,33 @@ mod tests {
                 None
             ),
             json!("2024-02-25T13:02:15+08:00")
+        );
+    }
+
+    #[test]
+    fn export_cow_borrows_when_no_formatting_is_needed() {
+        let row = vec![json!(1), json!("2024-02-25 13:02:15")];
+        let rows = vec![row.clone()];
+
+        assert!(matches!(
+            format_temporal_export_row_cow(&row, &[None, Some("TIMESTAMP".to_string())], None),
+            Cow::Borrowed(_)
+        ));
+        assert!(matches!(
+            format_temporal_export_rows_cow(&rows, &[None, Some("VARCHAR".to_string())], Some("YYYY/MM/DD")),
+            Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn import_cow_borrows_unchanged_values_and_owns_normalized_values() {
+        let text = json!("plain");
+        assert!(matches!(normalize_temporal_import_value_cow(&text, Some("TEXT"), None), Cow::Borrowed(_)));
+
+        let timestamp = json!("2024/2/25 13:02:15");
+        assert_eq!(
+            normalize_temporal_import_value_cow(&timestamp, Some("TIMESTAMP"), None).into_owned(),
+            json!("2024-02-25 13:02:15")
         );
     }
 }

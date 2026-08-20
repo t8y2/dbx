@@ -371,7 +371,19 @@ export const useConnectionStore = defineStore("connection", () => {
   let savedSqlFilesByDatabase = indexSavedSqlFilesByDatabase(savedSqlStore.allFiles);
   const connections = ref<ConnectionConfig[]>([]);
   const isDesktop = isTauriRuntime();
-  const activeConnectionId = ref<string | null>(localStorage.getItem(ACTIVE_CONNECTION_STORAGE_KEY));
+  // Prefer a safe read so Node/vitest (missing or partial storage mocks) do not
+  // throw when query tabs resolve connection db_type defaults via this store.
+  const activeConnectionId = ref<string | null>(
+    (() => {
+      try {
+        const storage = globalThis.localStorage;
+        if (!storage || typeof storage.getItem !== "function") return null;
+        return storage.getItem(ACTIVE_CONNECTION_STORAGE_KEY);
+      } catch {
+        return null;
+      }
+    })(),
+  );
   const selectedTreeNodeId = ref<string | null>(null);
   const selectedTreeNodeIds = ref<string[]>([]);
   // O(1) membership set — rebuilds only when selectedTreeNodeIds changes.
@@ -386,8 +398,14 @@ export const useConnectionStore = defineStore("connection", () => {
   const treeClipboard = ref<TreeClipboard | null>(null);
 
   watch(activeConnectionId, (id) => {
-    if (id) localStorage.setItem(ACTIVE_CONNECTION_STORAGE_KEY, id);
-    else localStorage.removeItem(ACTIVE_CONNECTION_STORAGE_KEY);
+    try {
+      const storage = globalThis.localStorage;
+      if (!storage || typeof storage.setItem !== "function" || typeof storage.removeItem !== "function") return;
+      if (id) storage.setItem(ACTIVE_CONNECTION_STORAGE_KEY, id);
+      else storage.removeItem(ACTIVE_CONNECTION_STORAGE_KEY);
+    } catch {
+      // Ignore storage failures in non-browser / partial mock environments.
+    }
   });
   const treeNodes = ref<TreeNode[]>([]);
   const sidebarDatabaseStorageCache = new Map<string, { expiresAt: number; value: DatabaseStorageInfo[] }>();

@@ -12,6 +12,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -2845,4 +2846,312 @@ func TestOracleCursorSurvivesDeadlineWindow(t *testing.T) {
 	if rowCount != 3 {
 		t.Fatalf("expected 3 rows, got %d", rowCount)
 	}
+}
+
+func TestManualTransactionBeginCommitRollback(t *testing.T) {
+	db, driver := openOracleManualTxTestDB(t)
+	s := newServer()
+	s.db = db
+
+	if err := s.beginManualTransaction(""); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if !s.hasManualTransaction() {
+		t.Fatal("expected open manual transaction")
+	}
+	if err := s.beginManualTransaction(""); err == nil {
+		t.Fatal("second begin should fail")
+	}
+
+	result, err := s.executeQuery(queryOptions{SQL: "UPDATE t SET a = 1", MaxRows: 10})
+	if err != nil {
+		t.Fatalf("update in txn: %v", err)
+	}
+	if result.AffectedRows != 1 {
+		t.Fatalf("expected 1 affected row, got %d", result.AffectedRows)
+	}
+
+	selectResult, err := s.executeQuery(queryOptions{SQL: "SELECT a FROM t", MaxRows: 10})
+	if err != nil {
+		t.Fatalf("select in txn: %v", err)
+	}
+	if len(selectResult.Rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(selectResult.Rows))
+	}
+
+	if err := s.commitManualTransaction(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if s.hasManualTransaction() {
+		t.Fatal("transaction should be closed after commit")
+	}
+	if !driver.committed {
+		t.Fatal("expected driver commit")
+	}
+	if driver.rolledBack {
+		t.Fatal("commit path should not rollback")
+	}
+
+	if err := s.beginManualTransaction(""); err != nil {
+		t.Fatalf("re-begin: %v", err)
+	}
+	if _, err := s.executeQuery(queryOptions{SQL: "DELETE FROM t", MaxRows: 10}); err != nil {
+		t.Fatalf("delete in txn: %v", err)
+	}
+	if err := s.rollbackManualTransaction(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	if !driver.rolledBack {
+		t.Fatal("expected driver rollback")
+	}
+	if err := s.commitManualTransaction(); err == nil {
+		t.Fatal("commit without open txn should fail")
+	}
+	if err := s.rollbackManualTransaction(); err == nil {
+		t.Fatal("rollback without open txn should fail")
+	}
+}
+
+// TestManualTransactionSkipsPerStatementSetSchema guards against Oracle's
+// implicit COMMIT before+after DDL (ALTER SESSION SET CURRENT_SCHEMA is DDL).
+// Once a manual transaction is open and the schema is pinned at BEGIN time,
+// executeQuery/executeQueryPage/startTableRead must NOT re-issue ALTER SESSION
+// per statement, otherwise prior DML in the same transaction is silently
+// committed and Rollback can no longer undo it.
+func TestManualTransactionSkipsPerStatementSetSchema(t *testing.T) {
+	db, driver := openOracleManualTxTestDB(t)
+	s := newServer()
+	s.db = db
+
+	if err := s.beginManualTransaction("APP_TEST"); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+
+	// Run a couple of statements with a non-empty schema; before the fix each
+	// call would issue an extra ALTER SESSION SET CURRENT_SCHEMA inside the tx.
+	if _, err := s.executeQuery(queryOptions{SQL: "UPDATE t SET a = 1", Schema: "APP_TEST", MaxRows: 10}); err != nil {
+		t.Fatalf("update in txn: %v", err)
+	}
+	if _, err := s.executeQuery(queryOptions{SQL: "DELETE FROM t", Schema: "APP_TEST", MaxRows: 10}); err != nil {
+		t.Fatalf("delete in txn: %v", err)
+	}
+
+	alterSessionCount := 0
+	for _, q := range driver.execs {
+		if strings.Contains(strings.ToUpper(q), "ALTER SESSION SET CURRENT_SCHEMA") {
+			alterSessionCount++
+		}
+	}
+	// Exactly one ALTER SESSION is expected: the one issued by
+	// beginManualTransaction when pinning the schema. Any additional one would
+	// mean per-statement setSchema ran inside the open transaction and would
+	// trigger an implicit COMMIT of the preceding DML.
+	if alterSessionCount != 1 {
+		t.Fatalf("expected exactly 1 ALTER SESSION (from begin), got %d; per-statement setSchema must be skipped during manual tx", alterSessionCount)
+	}
+
+	if err := s.rollbackManualTransaction(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+}
+
+func TestManualTransactionDisconnectRollsBack(t *testing.T) {
+	db, driver := openOracleManualTxTestDB(t)
+	s := newServer()
+	s.db = db
+	if err := s.beginManualTransaction(""); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := s.disconnect(); err != nil {
+		t.Fatalf("disconnect: %v", err)
+	}
+	if s.hasManualTransaction() {
+		t.Fatal("disconnect should clear manual transaction")
+	}
+	if !driver.rolledBack {
+		t.Fatal("disconnect should rollback open manual transaction")
+	}
+}
+
+func TestManualTransactionBlocksOneShotTransaction(t *testing.T) {
+	db, _ := openOracleManualTxTestDB(t)
+	s := newServer()
+	s.db = db
+	if err := s.beginManualTransaction(""); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	_, err := s.executeTransaction(map[string]json.RawMessage{
+		"statements": json.RawMessage(`["UPDATE t SET a = 1"]`),
+	})
+	if err == nil || !strings.Contains(err.Error(), "manual transaction") {
+		t.Fatalf("expected manual transaction conflict, got %v", err)
+	}
+}
+
+func TestRuntimeHandshakeAdvertisesTransactionCapability(t *testing.T) {
+	runtime := newRuntimeServer()
+	resp, shutdown := runtime.handleLine(`{"jsonrpc":"2.0","id":7,"method":"handshake","params":{"appVersion":"dev"}}`)
+	if shutdown || resp.Error != nil {
+		t.Fatalf("unexpected handshake response: shutdown=%v error=%v", shutdown, resp.Error)
+	}
+	data, err := json.Marshal(resp.Result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		Capabilities []string `json:"capabilities"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatal(err)
+	}
+	if !contains(result.Capabilities, "transaction") {
+		t.Fatalf("expected transaction capability, got %v", result.Capabilities)
+	}
+}
+
+func TestManualTransactionRPCDispatch(t *testing.T) {
+	db, driver := openOracleManualTxTestDB(t)
+	s := newServer()
+	s.db = db
+
+	resp, _ := s.handleLine(`{"jsonrpc":"2.0","id":1,"method":"begin_manual_transaction","params":{}}`)
+	if resp.Error != nil {
+		t.Fatalf("begin rpc: %v", resp.Error)
+	}
+	resp, _ = s.handleLine(`{"jsonrpc":"2.0","id":2,"method":"execute_query","params":{"sql":"UPDATE t SET a = 2","maxRows":10}}`)
+	if resp.Error != nil {
+		t.Fatalf("execute rpc: %v", resp.Error)
+	}
+	resp, _ = s.handleLine(`{"jsonrpc":"2.0","id":3,"method":"commit_manual_transaction","params":{}}`)
+	if resp.Error != nil {
+		t.Fatalf("commit rpc: %v", resp.Error)
+	}
+	if !driver.committed {
+		t.Fatal("expected commit via RPC")
+	}
+}
+
+type oracleManualTxDriver struct {
+	mu         sync.Mutex
+	committed  bool
+	rolledBack bool
+	execs      []string
+	queries    []string
+}
+
+func openOracleManualTxTestDB(t *testing.T) (*sql.DB, *oracleManualTxDriver) {
+	t.Helper()
+	driverName := "oracle-test-manual-tx-" + strings.ReplaceAll(t.Name(), "/", "-") + "-" + time.Now().Format("150405.000000000")
+	drv := &oracleManualTxDriver{}
+	sql.Register(driverName, drv)
+	db, err := sql.Open(driverName, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
+	return db, drv
+}
+
+func (d *oracleManualTxDriver) Open(string) (driver.Conn, error) {
+	return &oracleManualTxConn{driver: d}, nil
+}
+
+type oracleManualTxConn struct {
+	driver *oracleManualTxDriver
+	closed bool
+}
+
+func (c *oracleManualTxConn) Prepare(string) (driver.Stmt, error) {
+	return nil, errors.New("use Query/Exec context APIs")
+}
+
+func (c *oracleManualTxConn) Close() error {
+	c.closed = true
+	return nil
+}
+
+func (c *oracleManualTxConn) Begin() (driver.Tx, error) {
+	return c.BeginTx(context.Background(), driver.TxOptions{})
+}
+
+func (c *oracleManualTxConn) BeginTx(context.Context, driver.TxOptions) (driver.Tx, error) {
+	c.driver.mu.Lock()
+	defer c.driver.mu.Unlock()
+	c.driver.committed = false
+	c.driver.rolledBack = false
+	return &oracleManualTx{driver: c.driver}, nil
+}
+
+var (
+	_ driver.ConnBeginTx    = (*oracleManualTxConn)(nil)
+	_ driver.ExecerContext  = (*oracleManualTxConn)(nil)
+	_ driver.QueryerContext = (*oracleManualTxConn)(nil)
+)
+
+func (c *oracleManualTxConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
+	c.driver.mu.Lock()
+	defer c.driver.mu.Unlock()
+	c.driver.execs = append(c.driver.execs, query)
+	return driver.RowsAffected(1), nil
+}
+
+func (c *oracleManualTxConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	c.driver.mu.Lock()
+	defer c.driver.mu.Unlock()
+	c.driver.queries = append(c.driver.queries, query)
+	return &oracleManualTxRows{
+		columns: []string{"A"},
+		values:  [][]driver.Value{{int64(1)}},
+	}, nil
+}
+
+type oracleManualTx struct {
+	driver *oracleManualTxDriver
+	done   bool
+}
+
+func (t *oracleManualTx) Commit() error {
+	t.driver.mu.Lock()
+	defer t.driver.mu.Unlock()
+	if t.done {
+		return errors.New("transaction already finished")
+	}
+	t.done = true
+	t.driver.committed = true
+	return nil
+}
+
+func (t *oracleManualTx) Rollback() error {
+	t.driver.mu.Lock()
+	defer t.driver.mu.Unlock()
+	if t.done {
+		return errors.New("transaction already finished")
+	}
+	t.done = true
+	t.driver.rolledBack = true
+	return nil
+}
+
+// database/sql routes Exec/Query on *sql.Tx through the underlying conn while the
+// transaction is open when the driver implements ExecerContext/QueryerContext.
+// Keep explicit Tx methods unused; Conn methods above serve sticky TX execution.
+
+type oracleManualTxRows struct {
+	columns []string
+	values  [][]driver.Value
+	next    int
+}
+
+func (r *oracleManualTxRows) Columns() []string { return r.columns }
+func (r *oracleManualTxRows) Close() error      { return nil }
+func (r *oracleManualTxRows) Next(dest []driver.Value) error {
+	if r.next >= len(r.values) {
+		return io.EOF
+	}
+	copy(dest, r.values[r.next])
+	r.next++
+	return nil
 }

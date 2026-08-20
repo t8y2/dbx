@@ -149,6 +149,7 @@ import type {
   DataGridColumnValueFilterConditionOptions,
   DataGridColumnValuesFilterConditionOptions,
   DataGridContextFilterConditionOptions,
+  DataGridConditionalUpdateSqlOptions,
   DataGridCountSqlOptions,
   DataGridCopyInsertStatementOptions,
   DataGridCopyUpdateStatementOptions,
@@ -1032,6 +1033,34 @@ export async function executeQuery(
   });
 }
 
+export async function executeConditionalUpdate(
+  connectionId: string,
+  database: string,
+  sql: string,
+  schema?: string,
+  executionId?: string,
+  options?: {
+    maxRows?: number;
+    catalog?: string;
+    fetchSize?: number;
+    pageSize?: number;
+    rowOffset?: number;
+    resultSessionId?: string;
+    clientSessionId?: string;
+    timeoutSecs?: number;
+    executionMode?: "simple" | "postgres_read_only_transaction";
+  },
+): Promise<QueryResult> {
+  return post("/api/query/execute-conditional-update", {
+    connectionId,
+    database,
+    sql,
+    schema,
+    executionId,
+    ...options,
+  });
+}
+
 export async function executeMulti(
   connectionId: string,
   database: string,
@@ -1202,6 +1231,15 @@ export async function rollbackManualTransaction(_txnSessionId: string): Promise<
 export async function cancelQuery(executionId: string): Promise<boolean> {
   const result = await post<boolean | { cancelled?: boolean }>("/api/query/cancel", { executionId });
   return typeof result === "boolean" ? result : result.cancelled === true;
+}
+
+export interface ConditionalUpdateCancellationResult {
+  requested: boolean;
+  terminal: boolean;
+}
+
+export async function cancelConditionalUpdate(executionId: string): Promise<ConditionalUpdateCancellationResult> {
+  return post("/api/query/cancel-conditional-update", { executionId });
 }
 
 export async function analyzeSqlReferences(sql: string, dialect?: string): Promise<SqlReferenceAnalysis> {
@@ -1433,6 +1471,11 @@ export async function buildDataGridColumnDistinctValuesSql(options: DataGridColu
 
 export async function buildDataGridCountSql(options: DataGridCountSqlOptions): Promise<string> {
   return post("/api/query/build-data-grid-count-sql", { options });
+}
+
+export async function buildDataGridConditionalUpdateSql(options: DataGridConditionalUpdateSqlOptions): Promise<string | undefined> {
+  const result = await post<string | null>("/api/query/build-data-grid-conditional-update-sql", { options });
+  return result ?? undefined;
 }
 
 export async function buildHiveTablePropertiesSql(options: HiveTablePropertiesSqlOptions): Promise<string> {

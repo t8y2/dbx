@@ -179,6 +179,14 @@ enum ConnectionDatabaseInfoSource {
 pub enum TxnConnection {
     Postgres(Box<deadpool_postgres::Object>),
     Mysql(mysql_async::Conn),
+    /// Dedicated agent multi_session workload client with an open sticky TX.
+    Agent {
+        client: Arc<db::agent_driver::PooledAgentClient>,
+        /// Client-session id used when opening the dedicated agent pool.
+        client_session_id: String,
+        database: Option<String>,
+        cleanup_guard: ClientSessionPoolCleanupGuard,
+    },
 }
 
 pub struct TransactionSession {
@@ -377,7 +385,7 @@ struct PoolRoutingControl {
     task_supervisor: TaskSupervisor,
 }
 
-pub(crate) struct ClientSessionPoolCleanupGuard {
+pub struct ClientSessionPoolCleanupGuard {
     pool_key: String,
     routing: PoolRoutingControl,
     armed: bool,
@@ -436,12 +444,20 @@ impl PoolRoutingControl {
             let mut removed = vec![(pool_key.to_string(), pool)];
             if replace_agent_runtime {
                 let sibling_keys = shared_runtime_sibling_keys(&connections, &removed[0].1);
-                for key in sibling_keys {
-                    if let Some(pool) = connections.remove(&key) {
-                        removed.push((key, pool));
+                let protects_manual_txn = sibling_keys.iter().any(|key| is_manual_transaction_pool_key(key))
+                    || is_manual_transaction_pool_key(pool_key);
+                if protects_manual_txn {
+                    log::warn!(
+                        "Skipping shared Agent runtime kill for '{pool_key}' because a manual-transaction session is active on the same runtime"
+                    );
+                } else {
+                    for key in sibling_keys {
+                        if let Some(pool) = connections.remove(&key) {
+                            removed.push((key, pool));
+                        }
                     }
+                    fail_stop_removed_agent_pool(pool_key, &removed[0].1);
                 }
-                fail_stop_removed_agent_pool(pool_key, &removed[0].1);
             }
             removed
         };
@@ -473,14 +489,30 @@ impl PoolRoutingControl {
                         _ => None,
                     })
                     .collect::<Vec<_>>();
-                let removed = runtime_keys
-                    .into_iter()
-                    .filter_map(|key| connections.remove(&key).map(|pool| (key, pool)))
-                    .collect::<Vec<_>>();
-                if !expected_client.fail_stop() {
-                    log::warn!("Failed to terminate the shared Agent runtime while detaching pool '{pool_key}'");
+                // Sticky manual-transaction sessions pin work on the shared runtime.
+                // Prefer quarantining only the failed route over killing every sibling TX.
+                let protects_manual_txn = runtime_keys.iter().any(|key| is_manual_transaction_pool_key(key))
+                    || is_manual_transaction_pool_key(pool_key);
+                if protects_manual_txn {
+                    log::warn!(
+                        "Agent pool '{pool_key}' requested runtime replacement, but a manual-transaction session shares the runtime; detaching only this pool"
+                    );
+                    if is_current {
+                        let pool = connections.remove(pool_key).expect("current Agent pool must still exist");
+                        vec![(pool_key.to_string(), pool)]
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    let removed = runtime_keys
+                        .into_iter()
+                        .filter_map(|key| connections.remove(&key).map(|pool| (key, pool)))
+                        .collect::<Vec<_>>();
+                    if !expected_client.fail_stop() {
+                        log::warn!("Failed to terminate the shared Agent runtime while detaching pool '{pool_key}'");
+                    }
+                    removed
                 }
-                removed
             } else {
                 let pool = connections.remove(pool_key).expect("current Agent pool must still exist");
                 vec![(pool_key.to_string(), pool)]
@@ -512,20 +544,40 @@ impl PoolRoutingControl {
             PoolKind::Agent(client) => Some(client.clone()),
             _ => None,
         };
+        let protects_manual_txn = match agent_client.as_ref() {
+            Some(client) if client.uses_shared_runtime() => {
+                let connections = self.connections.read().await;
+                connections.iter().any(|(key, pool)| {
+                    is_manual_transaction_pool_key(key)
+                        && matches!(pool, PoolKind::Agent(sibling) if client.shares_runtime_with(sibling))
+                })
+            }
+            _ => false,
+        };
         match tokio::time::timeout(Duration::from_secs(POOL_CLOSE_TIMEOUT_SECS), close_pool_kind(pool)).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
                 log::warn!("Failed to close connection pool '{pool_key}': {error}");
-                if let Some(client) = agent_client.filter(|_| should_replace_agent_runtime(&error)) {
+                if protects_manual_txn {
+                    log::warn!(
+                        "Leaving shared Agent runtime running after close failure for '{pool_key}' to protect sibling sessions"
+                    );
+                } else if let Some(client) = agent_client.filter(|_| should_replace_agent_runtime(&error)) {
                     self.replace_runtime_after_close_failure(&pool_key, &client).await;
                 }
             }
             Err(_) => {
-                log::warn!(
-                    "Timed out closing connection pool '{pool_key}' after {POOL_CLOSE_TIMEOUT_SECS}s; replacing a shared Agent runtime when present."
-                );
-                if let Some(client) = agent_client {
-                    self.replace_runtime_after_close_failure(&pool_key, &client).await;
+                if protects_manual_txn {
+                    log::warn!(
+                        "Timed out closing shared Agent pool '{pool_key}' after {POOL_CLOSE_TIMEOUT_SECS}s; leaving the runtime running so sibling sessions (e.g. manual transactions) stay alive"
+                    );
+                } else {
+                    log::warn!(
+                        "Timed out closing connection pool '{pool_key}' after {POOL_CLOSE_TIMEOUT_SECS}s; replacing a shared Agent runtime when present."
+                    );
+                    if let Some(client) = agent_client {
+                        self.replace_runtime_after_close_failure(&pool_key, &client).await;
+                    }
                 }
             }
         }
@@ -1501,13 +1553,19 @@ impl AppState {
             // candidate never reaches this point, so the existing route keeps its state.
             routing.stop_keepalive(&pool_key);
             activity.insert(pool_key.clone(), PoolActivity::now());
-            self.start_keepalive_task(
-                &pool_key,
-                &pool,
-                config,
-                #[cfg(feature = "mq-admin")]
-                mq_keepalive_adapter.clone(),
-            );
+            // Manual-transaction sessions pin a sticky connection/TX. Keepalive
+            // detach on these pools was able to tear down the shared agent runtime
+            // (and any open TX) when close timed out — skip probes for them.
+            let skip_keepalive = pool_key.contains(":session:manual-txn-");
+            if !skip_keepalive {
+                self.start_keepalive_task(
+                    &pool_key,
+                    &pool,
+                    config,
+                    #[cfg(feature = "mq-admin")]
+                    mq_keepalive_adapter.clone(),
+                );
+            }
             break Ok(connections.insert(pool_key.clone(), pool));
         };
         let previous = match previous {
@@ -3699,6 +3757,21 @@ impl AppState {
         .await
     }
 
+    pub(crate) async fn workload_session_pool_cleanup_guard(
+        &self,
+        connection_id: &str,
+        database: Option<&str>,
+        client_session_id: &str,
+    ) -> Option<ClientSessionPoolCleanupGuard> {
+        self.client_session_pool_cleanup_guard_for_role(
+            connection_id,
+            database,
+            client_session_id,
+            AgentSessionRole::Workload,
+        )
+        .await
+    }
+
     async fn client_session_pool_cleanup_guard_for_role(
         &self,
         connection_id: &str,
@@ -5059,6 +5132,10 @@ fn is_session_scoped_pool_key(pool_key: &str) -> bool {
     pool_key.contains(":session:")
 }
 
+fn is_manual_transaction_pool_key(pool_key: &str) -> bool {
+    pool_key.contains(":session:manual-txn-")
+}
+
 pub(crate) fn config_for_pool_key<'a>(
     pool_key: &str,
     configs: &'a HashMap<String, ConnectionConfig>,
@@ -5620,7 +5697,7 @@ mod tests {
         redacted_connection_url_for_endpoint, redis_sentinel_transport_id, redis_sentinel_transport_prefix,
         sqlserver_legacy_agent_config, sqlserver_legacy_driver_error, sqlserver_uses_legacy_driver,
         task_client_session_id, upsert_connection_url_param, uses_bare_mysql_pool, uses_tcp_probe,
-        validate_connection_url_params, validate_h2_database_path, AppState, MysqlMode, PoolKind,
+        validate_connection_url_params, validate_h2_database_path, AppState, MysqlMode, PoolKind, TxnConnection,
         GAUSSDB_M_JDBC_DRIVER_CLASS, GAUSSDB_M_JDBC_DRIVER_PROFILE, PRESTOSQL_JDBC_DRIVER_CLASS,
     };
     use crate::agent_connection::{
@@ -7843,6 +7920,39 @@ for line in sys.stdin:
     }
 
     #[tokio::test]
+    async fn metadata_close_replace_runtime_preserves_manual_transaction_sibling() {
+        let (state, dir) = test_app_state().await;
+        let (runtime, metadata_client, manual_txn_client) =
+            replace_runtime_on_error_clients(&dir, "close_session").await;
+        let mut config = mysql_config(Some("analytics"));
+        config.id = "conn".to_string();
+        config.db_type = DatabaseType::Dameng;
+        state.configs.write().await.insert(config.id.clone(), config);
+        let metadata_pool_key = "conn:analytics:session:metadata-session:role:metadata";
+        let manual_txn_pool_key = "conn:analytics:session:manual-txn-test";
+        {
+            let mut connections = state.connections.write().await;
+            connections.insert(metadata_pool_key.to_string(), PoolKind::Agent(metadata_client));
+            connections.insert(manual_txn_pool_key.to_string(), PoolKind::Agent(manual_txn_client));
+        }
+        {
+            let mut activity = state.pool_activity.write().await;
+            activity.insert(metadata_pool_key.to_string(), super::PoolActivity::now());
+            activity.insert(manual_txn_pool_key.to_string(), super::PoolActivity::now());
+        }
+
+        assert!(state.close_metadata_session_pool("conn", Some("analytics"), "metadata-session").await.unwrap());
+
+        assert!(!state.connections.read().await.contains_key(metadata_pool_key));
+        assert!(state.connections.read().await.contains_key(manual_txn_pool_key));
+        assert!(state.pool_activity.read().await.contains_key(manual_txn_pool_key));
+        assert!(!runtime.is_failed());
+
+        state.shutdown(Duration::from_secs(1)).await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
     async fn reclaim_close_replace_runtime_never_restores_failed_pool() {
         let (state, dir) = test_app_state().await;
         let (runtime, reclaimed_client, sibling_client) = replace_runtime_on_error_clients(&dir, "close_session").await;
@@ -8328,6 +8438,43 @@ for line in sys.stdin:
         }
         assert_eq!(state.supervised_task_count(), 0);
 
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn manual_transaction_connection_drop_detaches_session_pool() {
+        let (state, dir) = test_app_state().await;
+        let (runtime, manual_txn_client, _sibling_client) = replace_runtime_on_error_clients(&dir, "unused").await;
+        let mut config = mysql_config(Some("analytics"));
+        config.id = "conn".to_string();
+        config.db_type = DatabaseType::Dameng;
+        state.configs.write().await.insert(config.id.clone(), config);
+
+        let client_session_id = "manual-txn-test";
+        let pool_key = "conn:analytics:session:manual-txn-test";
+        state.connections.write().await.insert(pool_key.to_string(), PoolKind::Agent(manual_txn_client.clone()));
+        state.pool_activity.write().await.insert(pool_key.to_string(), super::PoolActivity::now());
+        let cleanup_guard =
+            state.workload_session_pool_cleanup_guard("conn", Some("analytics"), client_session_id).await.unwrap();
+
+        drop(TxnConnection::Agent {
+            client: manual_txn_client,
+            client_session_id: client_session_id.to_string(),
+            database: Some("analytics".to_string()),
+            cleanup_guard,
+        });
+
+        for _ in 0..100 {
+            if !state.connections.read().await.contains_key(pool_key) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!state.connections.read().await.contains_key(pool_key));
+        assert!(!state.pool_activity.read().await.contains_key(pool_key));
+        assert!(!runtime.is_failed());
+
+        state.shutdown(Duration::from_secs(1)).await;
         let _ = std::fs::remove_dir_all(dir);
     }
 

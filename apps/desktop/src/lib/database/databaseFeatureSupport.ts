@@ -229,7 +229,7 @@ export function usesPostgresLikeStructureCopy(dbType?: DatabaseType): boolean {
   return !!dbType && PG_LIKE_STRUCTURE_TYPES.has(dbType);
 }
 
-const TRANSACTION_SUPPORTED_TYPES: readonly string[] = ["postgres", "mysql"];
+const TRANSACTION_SUPPORTED_TYPES: readonly string[] = ["postgres", "mysql", "oracle"];
 
 /**
  * Returns true if the given database type supports explicit transaction control
@@ -237,4 +237,12 @@ const TRANSACTION_SUPPORTED_TYPES: readonly string[] = ["postgres", "mysql"];
  */
 export function supportsTransaction(dbType?: string): boolean {
   return !!dbType && TRANSACTION_SUPPORTED_TYPES.includes(dbType);
+}
+
+/**
+ * Default auto-commit mode when opening a query tab for the given database type.
+ * Oracle defaults to manual transactions so edits require an explicit Commit.
+ */
+export function defaultAutoCommitForDbType(dbType?: string): boolean {
+  return dbType !== "oracle";
 }

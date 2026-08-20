@@ -150,9 +150,12 @@ function toggleSqlSemanticDiagnostics() {
     sqlSemanticDiagnosticsMode: sqlSemanticDiagnosticsEnabled.value ? "disabled" : "enabled",
   });
 }
+const isTransactionActive = computed(() => !!props.txnSessionId);
+const isManualTransactionMode = computed(() => props.autoCommit === false || isTransactionActive.value);
+const transactionModeBadge = computed(() => (isManualTransactionMode.value ? "M" : "A"));
 const transactionTooltip = computed(() => {
   const isAgent = (props.activeConnection?.db_type as string) === "agent";
-  const isManual = props.autoCommit === false;
+  const isManual = isManualTransactionMode.value;
   if (isAgent && isManual) return t("toolbar.manualTransactionAgent");
   if (isAgent) return t("toolbar.autoCommitAgent");
   return isManual ? t("toolbar.manualTransaction") : t("toolbar.autoCommit");
@@ -162,7 +165,6 @@ const executeButtonClass = computed(() => {
   return activeProductionContext.value.active ? "bg-red-500/10 text-red-700 hover:bg-red-500/20 hover:text-red-800 dark:text-red-300 dark:hover:text-red-200" : "bg-emerald-500/10 text-emerald-700 hover:bg-emerald-500/20 hover:text-emerald-800 dark:text-emerald-300 dark:hover:text-emerald-200";
 });
 
-const isTransactionActive = computed(() => !!props.txnSessionId);
 const canMultiExecute = computed(() => {
   if (!supportsQueryExecution(props.activeConnection?.db_type)) return false;
   if (props.activeTab.isExecuting || props.activeTab.isExplaining || props.activeTab.isCancelling) return false;
@@ -306,41 +308,6 @@ async function changeCatalog(selectedCatalog: string) {
         </TooltipTrigger>
         <TooltipContent>{{ explainAnalyzeTooltip }}</TooltipContent>
       </Tooltip>
-      <!-- Transaction toggle -->
-      <Tooltip v-if="supportsTransaction">
-        <TooltipTrigger as-child>
-          <Button
-            variant="ghost"
-            size="icon"
-            class="h-6 w-6"
-            :class="isTransactionActive || autoCommit === false ? 'bg-orange-100 text-orange-600 dark:bg-orange-900/30 dark:text-orange-300' : 'text-orange-600/70 hover:bg-orange-500/10 hover:text-orange-700 dark:text-orange-300/70 dark:hover:text-orange-200'"
-            :disabled="activeTab.isExecuting || activeTab.isExplaining"
-            @click="emit('update:autoCommit', autoCommit === false)"
-          >
-            <span class="text-xs font-bold leading-none">Tx</span>
-          </Button>
-        </TooltipTrigger>
-        <TooltipContent>{{ transactionTooltip }}</TooltipContent>
-      </Tooltip>
-      <!-- Commit button (only when transaction is active) -->
-      <Tooltip v-if="isTransactionActive">
-        <TooltipTrigger as-child>
-          <Button variant="ghost" size="icon" class="h-6 w-6 text-green-600 hover:bg-green-500/10 hover:text-green-700 dark:text-green-300 dark:hover:text-green-200" :disabled="activeTab.isExecuting" @click="emit('commit')">
-            <Check class="h-3.5 w-3.5" />
-          </Button>
-        </TooltipTrigger>
-        <TooltipContent>{{ t("toolbar.commit") }}</TooltipContent>
-      </Tooltip>
-
-      <!-- Rollback button (only when transaction is active) -->
-      <Tooltip v-if="isTransactionActive">
-        <TooltipTrigger as-child>
-          <Button variant="ghost" size="icon" class="h-6 w-6 text-red-600 hover:bg-red-500/10 hover:text-red-700 dark:text-red-300 dark:hover:text-red-200" :disabled="activeTab.isExecuting" @click="emit('rollback')">
-            <RotateCcw class="h-3.5 w-3.5" />
-          </Button>
-        </TooltipTrigger>
-        <TooltipContent>{{ t("toolbar.rollback") }}</TooltipContent>
-      </Tooltip>
       <Tooltip>
         <TooltipTrigger as-child>
           <Button variant="ghost" size="icon" class="h-6 w-6 text-amber-600 hover:bg-amber-500/10 hover:text-amber-700 dark:text-amber-300 dark:hover:text-amber-200" :disabled="activeTab.isExecuting || activeTab.isExplaining || !activeTab.sql.trim()" @click="emit('formatSql')">
@@ -441,6 +408,48 @@ async function changeCatalog(selectedCatalog: string) {
         </TooltipTrigger>
         <TooltipContent>{{ t("toolbar.multiDbExecute") }}</TooltipContent>
       </Tooltip>
+      <div v-if="supportsTransaction" class="ml-1 flex items-center gap-0.5 border-l border-border/60 pl-1" role="group" :aria-label="transactionTooltip">
+        <!-- Transaction toggle -->
+        <Tooltip>
+          <TooltipTrigger as-child>
+            <Button
+              variant="ghost"
+              size="icon"
+              class="h-6 w-8 px-1"
+              :class="isManualTransactionMode ? 'bg-orange-100 text-orange-600 dark:bg-orange-900/30 dark:text-orange-300' : 'text-orange-600/70 hover:bg-orange-500/10 hover:text-orange-700 dark:text-orange-300/70 dark:hover:text-orange-200'"
+              :disabled="activeTab.isExecuting || activeTab.isExplaining"
+              :aria-label="transactionTooltip"
+              :aria-pressed="isManualTransactionMode"
+              @click="emit('update:autoCommit', autoCommit === false)"
+            >
+              <span class="inline-flex items-center gap-px leading-none" aria-hidden="true">
+                <span class="text-[11px] font-bold">Tx:</span>
+                <span class="inline-flex h-3 min-w-3 items-center justify-center rounded-[3px] border border-current px-px text-[8px] font-extrabold leading-none">{{ transactionModeBadge }}</span>
+              </span>
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>{{ transactionTooltip }}</TooltipContent>
+        </Tooltip>
+        <!-- Commit button (only when transaction is active) -->
+        <Tooltip v-if="isTransactionActive">
+          <TooltipTrigger as-child>
+            <Button variant="ghost" size="icon" class="h-6 w-6 text-green-600 hover:bg-green-500/10 hover:text-green-700 dark:text-green-300 dark:hover:text-green-200" :disabled="activeTab.isExecuting" :aria-label="t('toolbar.commit')" @click="emit('commit')">
+              <Check class="h-3.5 w-3.5" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>{{ t("toolbar.commit") }}</TooltipContent>
+        </Tooltip>
+
+        <!-- Rollback button (only when transaction is active) -->
+        <Tooltip v-if="isTransactionActive">
+          <TooltipTrigger as-child>
+            <Button variant="ghost" size="icon" class="h-6 w-6 text-red-600 hover:bg-red-500/10 hover:text-red-700 dark:text-red-300 dark:hover:text-red-200" :disabled="activeTab.isExecuting" :aria-label="t('toolbar.rollback')" @click="emit('rollback')">
+              <RotateCcw class="h-3.5 w-3.5" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>{{ t("toolbar.rollback") }}</TooltipContent>
+        </Tooltip>
+      </div>
     </div>
     <span class="flex-1 min-w-0" />
     <div class="flex items-center gap-2 shrink-0">

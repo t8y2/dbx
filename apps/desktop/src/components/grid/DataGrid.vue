@@ -66,6 +66,7 @@ import DataGridToolbar from "@/components/grid/DataGridToolbar.vue";
 import DataGridExtractorDialog from "@/components/grid/DataGridExtractorDialog.vue";
 import DataGridColumnHeader from "@/components/grid/DataGridColumnHeader.vue";
 import DataGridQueryControls from "@/components/grid/DataGridQueryControls.vue";
+import DataGridFilterBuilder from "@/components/grid/DataGridFilterBuilder.vue";
 import DataGridFilterWorkbench from "@/components/grid/DataGridFilterWorkbench.vue";
 import DataGridTextFilterWorkbench from "@/components/grid/DataGridTextFilterWorkbench.vue";
 import TemporalCellEditor from "@/components/grid/TemporalCellEditor.vue";
@@ -101,7 +102,7 @@ import {
   isTdengineExistingRowReadonlyColumn,
   usesSyntheticRowIdKey,
 } from "@/lib/table/tableEditing";
-import { buildDataGridColumnDistinctValuesSql, buildDataGridContextFilterCondition, buildDataGridCountSql, buildHiveTablePropertiesSql, type DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
+import { buildDataGridColumnDistinctValuesSql, buildDataGridConditionalUpdateSql, buildDataGridContextFilterCondition, buildDataGridCountSql, buildHiveTablePropertiesSql, type DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
 import {
   buildVisibleTransposeRows,
   averageTransposeRecordWidth,
@@ -836,6 +837,17 @@ function onGridContextMenuClose() {
 
 const bulkEditDialogOpen = ref(false);
 const bulkEditValue = ref("");
+const bulkEditScope = ref<"selection" | "condition">("selection");
+const conditionalBulkEditConditionSource = ref<"current" | "builder" | "sql">("builder");
+const conditionalBulkEditCurrentWhereInput = ref("");
+const conditionalBulkEditWhereInput = ref("");
+const conditionalBulkEditMatchCount = ref<number | undefined>(undefined);
+const conditionalBulkEditMatchCountLoading = ref(false);
+const conditionalBulkEditMatchCountError = ref("");
+const conditionalBulkEditMatchCountStale = ref(false);
+const conditionalBulkEditConfirmOpen = ref(false);
+const conditionalBulkEditStatement = ref("");
+let conditionalBulkEditMatchCountRequestId = 0;
 const inlineBulkEditActive = ref(false);
 const copyColumnNamesDialogOpen = ref(false);
 const copyColumnNamesDialogColumns = ref<string[]>([]);
@@ -966,27 +978,70 @@ const filterBuilderColumns = computed(() => props.tableMeta?.columns ?? []);
 const filterBuilderColumnOptions = computed(() => filterBuilderColumns.value.map((column) => column.name));
 const structuredFilterCacheKey = computed(() => props.cacheKey || [props.connectionId ?? "", props.database ?? "", props.context ?? "", props.tableMeta?.schema ?? "", props.tableMeta?.tableName ?? ""].join("\u0001"));
 const structuredFilterScopeKey = computed(() => [props.connectionId ?? "", props.database ?? "", props.schema ?? "", props.context ?? "", props.tableMeta?.schema ?? "", props.tableMeta?.tableName ?? "", filterBuilderColumnOptions.value.join("\0")].join("\u0001"));
+function isStructuredFilterRuleComplete(rule: StructuredFilterRule): boolean {
+  return filterModeIsSupportedForDatabase(rule.mode, resolvedDatabaseType.value) && filterModeHasCompleteValue(rule.mode, rule.rawValue, rule.rawEndValue);
+}
+
+async function buildStructuredFilterCondition(rule: StructuredFilterRule): Promise<string | undefined> {
+  const columnInfo = filterBuilderColumns.value.find((column) => column.name === rule.columnName);
+  const usesList = filterModeUsesList(rule.mode);
+  const usesRange = filterModeUsesRange(rule.mode);
+  return (
+    (await buildDataGridContextFilterCondition({
+      databaseType: resolvedDatabaseType.value,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
+      columnName: rule.columnName,
+      columnInfo,
+      mode: rule.mode,
+      value: !usesList && filterModeNeedsValue(rule.mode) ? parseFilterValue(rule.rawValue, columnInfo, resolvedDatabaseType.value) : null,
+      values: usesList ? parseFilterValues(rule.rawValue, columnInfo, resolvedDatabaseType.value) : undefined,
+      endValue: usesRange ? parseFilterValue(rule.rawEndValue, columnInfo, resolvedDatabaseType.value) : undefined,
+    })) ?? undefined
+  );
+}
+
 const filterBuilder = useDataGridFilterBuilder({
   columns: filterBuilderColumnOptions,
   createId: uuid,
-  isComplete: (rule) => filterModeIsSupportedForDatabase(rule.mode, resolvedDatabaseType.value) && filterModeHasCompleteValue(rule.mode, rule.rawValue, rule.rawEndValue),
-  buildCondition: async (rule) => {
-    const columnInfo = filterBuilderColumns.value.find((column) => column.name === rule.columnName);
-    const usesList = filterModeUsesList(rule.mode);
-    const usesRange = filterModeUsesRange(rule.mode);
-    return (
-      (await buildDataGridContextFilterCondition({
-        databaseType: resolvedDatabaseType.value,
-        columnName: rule.columnName,
-        columnInfo,
-        mode: rule.mode,
-        value: !usesList && filterModeNeedsValue(rule.mode) ? parseFilterValue(rule.rawValue, columnInfo, resolvedDatabaseType.value) : null,
-        values: usesList ? parseFilterValues(rule.rawValue, columnInfo, resolvedDatabaseType.value) : undefined,
-        endValue: usesRange ? parseFilterValue(rule.rawEndValue, columnInfo, resolvedDatabaseType.value) : undefined,
-      })) ?? undefined
-    );
-  },
+  isComplete: isStructuredFilterRuleComplete,
+  buildCondition: buildStructuredFilterCondition,
 });
+const conditionalBulkEditFilterBuilder = useDataGridFilterBuilder({
+  columns: filterBuilderColumnOptions,
+  createId: uuid,
+  isComplete: isStructuredFilterRuleComplete,
+  buildCondition: buildStructuredFilterCondition,
+});
+const conditionalBulkEditRules = conditionalBulkEditFilterBuilder.rules;
+const conditionalBulkEditColumnSearch = conditionalBulkEditFilterBuilder.columnSearch;
+const filteredConditionalBulkEditColumns = conditionalBulkEditFilterBuilder.filteredColumns;
+
+function addConditionalBulkEditRule() {
+  if (!conditionalBulkEditRules.value.length) {
+    conditionalBulkEditFilterBuilder.ensureRule();
+    return;
+  }
+  conditionalBulkEditFilterBuilder.addRule();
+}
+
+function resetConditionalBulkEditMatchCountPreview() {
+  conditionalBulkEditMatchCountRequestId++;
+  conditionalBulkEditMatchCount.value = undefined;
+  conditionalBulkEditMatchCountLoading.value = false;
+  conditionalBulkEditMatchCountError.value = "";
+  conditionalBulkEditMatchCountStale.value = false;
+}
+
+function invalidateConditionalBulkEditMatchCountPreview() {
+  conditionalBulkEditMatchCountRequestId++;
+  if (conditionalBulkEditMatchCount.value !== undefined || conditionalBulkEditMatchCountLoading.value) conditionalBulkEditMatchCountStale.value = true;
+  conditionalBulkEditMatchCount.value = undefined;
+  conditionalBulkEditMatchCountLoading.value = false;
+  conditionalBulkEditMatchCountError.value = "";
+}
+
+watch([conditionalBulkEditConditionSource, conditionalBulkEditCurrentWhereInput, conditionalBulkEditWhereInput, conditionalBulkEditRules], invalidateConditionalBulkEditMatchCountPreview, { deep: true });
+
 const structuredFilterRules = filterBuilder.rules;
 const filterBuilderOpen = filterBuilder.open;
 const filterBuilderColumnSearch = filterBuilder.columnSearch;
@@ -3571,6 +3626,8 @@ const {
   requestDeleteRows,
   cloneRows: cloneEditorRows,
   saveChanges,
+  executeConditionalUpdate,
+  cancelConditionalUpdate,
   discardChanges,
   canUndoPendingChange,
   canRedoPendingChange,
@@ -3579,6 +3636,9 @@ const {
   rowDataWithChanges,
   ensureQuickEntryDraftRow,
   isSavingNewRow,
+  isConditionalUpdateActive,
+  conditionalUpdateExecution,
+  coerceCellValue,
   canEditColumn,
   resetGridVerticalScroll,
   getResetScrollAfterResult,
@@ -3696,7 +3756,7 @@ const showDataGridTopbar = computed(
 );
 
 function canEditRowItem(item: RowItem | undefined): boolean {
-  return !!props.editable && !!item && !item.isDeleted && (item.isNew || item.isDraft || canEditExistingRows.value);
+  return !isConditionalUpdateActive.value && !!props.editable && !!item && !item.isDeleted && (item.isNew || item.isDraft || canEditExistingRows.value);
 }
 
 function canEditCellItem(item: RowItem | undefined, columnIndex: number): boolean {
@@ -7632,15 +7692,157 @@ function setSelectionNull() {
 
 function openBulkEditDialog() {
   if (!props.editable || !selectionHasEditableCells()) return;
+  const currentWhere = currentWhereInput()?.trim() ?? "";
   bulkEditValue.value = "";
+  bulkEditScope.value = "selection";
+  conditionalBulkEditCurrentWhereInput.value = currentWhere;
+  conditionalBulkEditWhereInput.value = currentWhere;
+  conditionalBulkEditConditionSource.value = currentWhere ? "current" : "builder";
+  conditionalBulkEditFilterBuilder.reset();
+  resetConditionalBulkEditMatchCountPreview();
   bulkEditDialogOpen.value = true;
 }
 
-function applyBulkEditValue() {
+interface ConditionalBulkEditTarget {
+  columnIndex: number;
+  columnName: string;
+}
+
+const conditionalBulkEditTarget = computed<ConditionalBulkEditTarget | null>(() => {
+  if (props.context !== "table-data" || resolvedDatabaseType.value !== "mysql" || !props.connectionId || !props.tableMeta || props.customSaveHandler || hasPendingChanges.value) return null;
+
+  let visibleColumnIndex: number | undefined;
+  if (selectedRange.value) {
+    if (selectedRange.value.startCol !== selectedRange.value.endCol) return null;
+    visibleColumnIndex = selectedRange.value.startCol;
+  } else if (hasColumnSelection.value) {
+    const selectedColumns = selectedVisibleColumnIndexes();
+    if (selectedColumns.length !== 1) return null;
+    visibleColumnIndex = selectedColumns[0];
+  }
+  if (visibleColumnIndex === undefined) return null;
+
+  const columnIndex = actualColumnIndex(visibleColumnIndex);
+  const sourceColumn = props.sourceColumns ? props.sourceColumns[columnIndex] : props.result.columns[columnIndex];
+  if (!sourceColumn) return null;
+  const columnInfo = props.tableMeta.columns.find((column) => column.name.toLowerCase() === sourceColumn.toLowerCase());
+  if (!columnInfo) return null;
+  if (columnInfo.is_primary_key || props.tableMeta.primaryKeys.some((primaryKey) => primaryKey.toLowerCase() === columnInfo.name.toLowerCase())) return null;
+  const extra = columnInfo.extra?.toLowerCase() ?? "";
+  if (extra.includes("generated always as") && !extra.includes("identity")) return null;
+  if (!selectionHasEditableCells()) return null;
+  const hasExistingTarget = editableSelectionCells().some(({ item }) => !item.isNew && !item.isDraft);
+  if (!hasExistingTarget) return null;
+  return { columnIndex, columnName: columnInfo.name };
+});
+
+async function currentConditionalBulkEditWhere(): Promise<string> {
+  switch (conditionalBulkEditConditionSource.value) {
+    case "current":
+      return conditionalBulkEditCurrentWhereInput.value.trim();
+    case "builder":
+      return conditionalBulkEditFilterBuilder.buildWhere();
+    case "sql":
+      return conditionalBulkEditWhereInput.value.trim();
+  }
+}
+
+async function previewConditionalBulkEditMatchCount() {
+  if (!props.connectionId || !props.tableMeta) return;
+  const requestId = ++conditionalBulkEditMatchCountRequestId;
+  conditionalBulkEditMatchCount.value = undefined;
+  conditionalBulkEditMatchCountError.value = "";
+  conditionalBulkEditMatchCountStale.value = false;
+  conditionalBulkEditMatchCountLoading.value = true;
+  try {
+    const whereInput = await currentConditionalBulkEditWhere();
+    if (!whereInput) {
+      conditionalBulkEditMatchCountError.value = t("grid.conditionalBulkEditConditionRequired");
+      return;
+    }
+    const sql = await buildDataGridCountSql({
+      databaseType: resolvedDatabaseType.value,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
+      catalog: props.tableMeta.catalog,
+      database: props.tableMeta.database,
+      schema: props.tableMeta.schema,
+      tableName: props.tableMeta.tableName,
+      whereInput,
+    });
+    const result = await api.executeQuery(props.connectionId, props.executionDatabase ?? props.database ?? "", sql, undefined, undefined, dataGridCountQueryOptions(connectionStore.getConfig(props.connectionId), settingsStore.editorSettings.globalQueryTimeoutSecs));
+    const count = Number(result.rows?.[0]?.[0] ?? 0);
+    if (!Number.isFinite(count) || count < 0) throw new Error("Invalid row count returned by the database");
+    if (requestId !== conditionalBulkEditMatchCountRequestId) return;
+    conditionalBulkEditMatchCount.value = count;
+  } catch (error: any) {
+    if (requestId !== conditionalBulkEditMatchCountRequestId) return;
+    conditionalBulkEditMatchCountError.value = t("grid.conditionalBulkEditPreviewCountFailed", { message: error?.message || String(error) });
+  } finally {
+    if (requestId === conditionalBulkEditMatchCountRequestId) conditionalBulkEditMatchCountLoading.value = false;
+  }
+}
+
+async function applyBulkEditValue() {
+  if (bulkEditScope.value === "condition") {
+    const target = conditionalBulkEditTarget.value;
+    if (!target || !props.tableMeta) {
+      toast(t("grid.conditionalBulkEditUnavailable"), 5000);
+      return;
+    }
+    try {
+      const whereInput = await currentConditionalBulkEditWhere();
+      if (!whereInput) {
+        toast(t("grid.conditionalBulkEditConditionRequired"), 5000);
+        return;
+      }
+      const value = bulkEditValue.value === "" ? null : coerceCellValue(bulkEditValue.value, undefined, target.columnIndex);
+      const statement = await buildDataGridConditionalUpdateSql({
+        databaseType: resolvedDatabaseType.value,
+        identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
+        tableMeta: props.tableMeta,
+        columnName: target.columnName,
+        value,
+        whereInput,
+      });
+      if (!statement) {
+        toast(t("grid.conditionalBulkEditUnavailable"), 5000);
+        return;
+      }
+      conditionalBulkEditStatement.value = statement;
+      bulkEditDialogOpen.value = false;
+      conditionalBulkEditConfirmOpen.value = true;
+    } catch (error: any) {
+      toast(t("grid.conditionalBulkEditPrepareFailed", { message: error?.message || String(error) }), 5000);
+    }
+    return;
+  }
+
   // Empty input sets the selected cells to SQL NULL (the placeholder hints "Value, or NULL").
   const value = bulkEditValue.value === "" ? null : bulkEditValue.value;
   if (!fillSelectionWithValue(value)) return;
   bulkEditDialogOpen.value = false;
+}
+
+async function confirmConditionalBulkEdit() {
+  const statement = conditionalBulkEditStatement.value;
+  if (!statement) return;
+  conditionalBulkEditConfirmOpen.value = false;
+  const result = await executeConditionalUpdate(statement);
+  if (!result) {
+    if (saveError.value) toast(saveError.value, 5000);
+    return;
+  }
+  conditionalBulkEditStatement.value = "";
+  if (typeof result.affectedRows === "number") {
+    toast(t("grid.conditionalBulkEditAppliedCount", { count: result.affectedRows }));
+  } else {
+    toast(t("grid.conditionalBulkEditApplied"));
+  }
+}
+
+async function cancelRunningConditionalBulkEdit() {
+  const cancelled = await cancelConditionalUpdate();
+  if (!cancelled && saveError.value) toast(saveError.value, 5000);
 }
 
 interface EditableSelectionCell {
@@ -10731,7 +10933,7 @@ function currentGridContextMenuItems(): ContextMenuItem[] {
     ref="gridRef"
     data-grid-root
     data-grid-active="true"
-    class="h-full flex flex-col overflow-hidden outline-none"
+    class="relative h-full flex flex-col overflow-hidden outline-none"
     :class="{
       'data-grid--editing-cell': !!editingCell,
       'data-grid--dark': isDark,
@@ -12594,7 +12796,45 @@ function currentGridContextMenuItems(): ContextMenuItem[] {
       :copy-column-detail-column-name="copyColumnDetailColumnName"
     />
 
-    <DataGridBulkEditDialog v-if="bulkEditDialogMounted" v-model:open="bulkEditDialogOpen" v-model:value="bulkEditValue" :selected-cell-count="selectedCellCount" @apply="applyBulkEditValue" />
+    <DataGridBulkEditDialog
+      v-if="bulkEditDialogMounted"
+      v-model:open="bulkEditDialogOpen"
+      v-model:value="bulkEditValue"
+      v-model:scope="bulkEditScope"
+      v-model:condition-source="conditionalBulkEditConditionSource"
+      v-model:where-input="conditionalBulkEditWhereInput"
+      :selected-cell-count="selectedCellCount"
+      :conditional-available="!!conditionalBulkEditTarget"
+      :conditional-column="conditionalBulkEditTarget?.columnName"
+      :current-where="conditionalBulkEditCurrentWhereInput"
+      :conditional-count="conditionalBulkEditMatchCount"
+      :conditional-count-loading="conditionalBulkEditMatchCountLoading"
+      :conditional-count-error="conditionalBulkEditMatchCountError"
+      :conditional-count-stale="conditionalBulkEditMatchCountStale"
+      @apply="applyBulkEditValue"
+      @preview-count="previewConditionalBulkEditMatchCount"
+    >
+      <template #condition-builder>
+        <div class="space-y-2">
+          <DataGridFilterBuilder
+            :rules="conditionalBulkEditRules"
+            :columns="filterBuilderColumnOptions"
+            :filtered-columns="filteredConditionalBulkEditColumns"
+            :mode-options="filterModeOptions"
+            :column-search="conditionalBulkEditColumnSearch"
+            :show-header="false"
+            :show-footer="false"
+            layout="panel"
+            @add="addConditionalBulkEditRule"
+            @remove="conditionalBulkEditFilterBuilder.removeRule($event)"
+            @move="(id, targetIndex) => conditionalBulkEditFilterBuilder.moveRule(id, targetIndex)"
+            @update-rule="(id, patch) => conditionalBulkEditFilterBuilder.updateRule(id, patch)"
+            @update:column-search="conditionalBulkEditColumnSearch = $event"
+          />
+          <Button variant="outline" size="sm" :disabled="!filterBuilderColumnOptions.length" @click="addConditionalBulkEditRule">{{ t("grid.filterBuilderAddRule") }}</Button>
+        </div>
+      </template>
+    </DataGridBulkEditDialog>
     <DataGridInsertRowsDialog v-if="insertRowsDialogMounted" v-model:open="insertRowsDialogOpen" :can-place-at-selection="canPlaceInsertAtSelection" :initial-position="insertPosition" @insert="insertRows" />
 
     <DataGridExtractorDialog v-model:open="extractorConfigOpen" :preference="selectedCopyPreference" :options="settingsStore.editorSettings.dataGridExtractorOptions" :items="copyPreferenceMenuItems" :preview="previewWithPreference" @save="saveExtractorConfiguration" />
@@ -12627,6 +12867,18 @@ function currentGridContextMenuItems(): ContextMenuItem[] {
       <SqlPreviewPanel :sql="previewSqlText" :loading="isPreviewLoading" :can-undo="canUndoPendingChange" :can-redo="canRedoPendingChange" @undo="undoGridChange" @redo="redoGridChange" @close="closeSqlPreview" />
     </div>
 
+    <DangerConfirmDialog
+      v-model:open="conditionalBulkEditConfirmOpen"
+      :title="t('grid.conditionalBulkEditConfirmTitle')"
+      :message="t('grid.conditionalBulkEditConfirmMessage')"
+      :sql="conditionalBulkEditStatement"
+      :confirm-label="t('grid.conditionalBulkEditConfirm')"
+      :close-on-confirm="false"
+      @confirm="confirmConditionalBulkEdit"
+    />
+    <div v-if="isConditionalUpdateActive" class="absolute inset-0 z-50 flex items-center justify-center bg-background/75 backdrop-blur-[1px]">
+      <QueryLoadingState class="p-6" :show-cancel="true" :cancelling="conditionalUpdateExecution?.cancelling" @cancel="cancelRunningConditionalBulkEdit" />
+    </div>
     <DangerConfirmDialog
       v-model:open="showDeleteRowConfirm"
       :message="

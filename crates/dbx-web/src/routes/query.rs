@@ -1,10 +1,12 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::State;
 use axum::http::{header, HeaderMap, HeaderValue};
 use axum::response::Response;
 use axum::Json;
 use serde::Deserialize;
+use tokio::sync::oneshot;
 
 use crate::error::AppError;
 use crate::state::WebState;
@@ -41,6 +43,8 @@ pub struct ExecuteQueryRequest {
 pub struct CancelRequest {
     pub execution_id: String,
 }
+
+const CONDITIONAL_UPDATE_CANCEL_WAIT: Duration = Duration::from_secs(10);
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -326,6 +330,12 @@ pub struct BuildDataGridCountSqlRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct BuildDataGridConditionalUpdateSqlRequest {
+    pub options: dbx_core::data_grid_sql::DataGridConditionalUpdateSqlOptions,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BuildHiveTablePropertiesSqlRequest {
     pub options: dbx_core::data_grid_sql::HiveTablePropertiesSqlOptions,
 }
@@ -401,6 +411,83 @@ pub async fn execute_query(
     Ok(Json(result))
 }
 
+pub async fn execute_conditional_update(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Json(req): Json<ExecuteQueryRequest>,
+) -> Result<Json<dbx_core::db::QueryResult>, AppError> {
+    let allow_database_switch = req.client_session_id.as_deref().is_some_and(|id| !id.trim().is_empty());
+    super::mcp_policy::ensure_sql(&state, &headers, &req.connection_id, &req.database, &req.sql, allow_database_switch)
+        .await?;
+
+    let execution_id = req.execution_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let registered = state.app.running_queries.register_task_for_terminal_confirmation(
+        execution_id.clone(),
+        RunningTaskMetadata::query(req.connection_id.clone(), req.database.clone(), req.client_session_id.clone()),
+    );
+    let cancel_token = registered.token();
+    let response_timeout = dbx_core::query::query_timeout_duration(req.timeout_secs);
+    let app = state.app.clone();
+    let (result_tx, result_rx) = oneshot::channel();
+
+    tokio::spawn(async move {
+        let result = dbx_core::query::execute_sql_statement_with_options_typed(
+            &app,
+            &req.connection_id,
+            &req.database,
+            &req.sql,
+            req.schema.as_deref(),
+            Some(cancel_token),
+            dbx_core::query::QueryExecutionOptions {
+                max_rows: req.max_rows,
+                fetch_size: req.fetch_size,
+                page_size: req.page_size,
+                row_offset: req.row_offset,
+                max_result_bytes: req.max_result_bytes,
+                result_key_columns: req.result_key_columns,
+                table_data_preview: req.table_data_preview,
+                catalog: req.catalog,
+                result_session_id: req.result_session_id,
+                client_session_id: req.client_session_id,
+                // The outer response timeout reports uncertainty to the client
+                // without dropping this task. The task remains reachable for a
+                // later cancel and only releases its registration on terminal
+                // completion.
+                timeout_secs: Some(0),
+                await_cancel_completion: true,
+                execution_id: Some(execution_id),
+                use_transaction: req.use_transaction,
+                execution_mode: req.execution_mode.unwrap_or_default(),
+                ..Default::default()
+            },
+        )
+        .await;
+        let _ = result_tx.send(result);
+        drop(registered);
+    });
+
+    let result = match response_timeout {
+        Some(timeout) => match tokio::time::timeout(timeout, result_rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => return Err(AppError::internal("Conditional update execution task stopped unexpectedly")),
+            Err(_) => {
+                return Err(AppError::from(
+                    dbx_core::query::QueryExecutionError::Timeout(format!(
+                        "Query timed out after {} seconds",
+                        timeout.as_secs().max(1)
+                    ))
+                    .into_backend_error(),
+                ));
+            }
+        },
+        None => match result_rx.await {
+            Ok(result) => result,
+            Err(_) => return Err(AppError::internal("Conditional update execution task stopped unexpectedly")),
+        },
+    };
+    result.map(Json).map_err(|error| AppError::from(error.into_backend_error()))
+}
+
 pub async fn execute_multi(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
@@ -441,6 +528,7 @@ pub async fn execute_multi(
             result_session_id: req.result_session_id,
             client_session_id: req.client_session_id,
             timeout_secs: req.timeout_secs,
+            await_cancel_completion: false,
             execution_id: Some(execution_id),
             use_transaction: req.use_transaction,
             continue_on_error: req.continue_on_error.unwrap_or(false),
@@ -505,6 +593,13 @@ pub async fn cancel_query(
 ) -> Json<serde_json::Value> {
     let cancelled = state.app.running_queries.cancel(&req.execution_id);
     Json(serde_json::json!({ "cancelled": cancelled }))
+}
+
+pub async fn cancel_conditional_update(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<CancelRequest>,
+) -> Json<dbx_core::query_cancel::CancellationWaitResult> {
+    Json(state.app.running_queries.cancel_and_wait(&req.execution_id, CONDITIONAL_UPDATE_CANCEL_WAIT).await)
 }
 
 pub async fn close_query_session(
@@ -938,6 +1033,12 @@ pub async fn build_data_grid_column_distinct_values_sql(
 
 pub async fn build_data_grid_count_sql(Json(req): Json<BuildDataGridCountSqlRequest>) -> Json<String> {
     Json(dbx_core::data_grid_sql::build_data_grid_count_sql(req.options))
+}
+
+pub async fn build_data_grid_conditional_update_sql(
+    Json(req): Json<BuildDataGridConditionalUpdateSqlRequest>,
+) -> Json<Option<String>> {
+    Json(dbx_core::data_grid_sql::build_data_grid_conditional_update_sql(req.options))
 }
 
 pub async fn build_hive_table_properties_sql(Json(req): Json<BuildHiveTablePropertiesSqlRequest>) -> Json<String> {

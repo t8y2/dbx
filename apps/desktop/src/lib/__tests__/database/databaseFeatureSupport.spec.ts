@@ -3,6 +3,7 @@ import { connectionNamespaceCreationTarget, databaseNodeNamespaceCreationTarget 
 import { editableDatabasePropertyGroups, editableSchemaPropertyGroups } from "@/lib/database/databasePropertyEditing";
 import { buildGetDatabaseCommentSql } from "@/lib/database/dbAdminSql";
 import {
+  defaultAutoCommitForDbType,
   isSchemaAware,
   supportsConnectionScopedQueryExecution,
   supportsConnectionDatabaseBrowser,
@@ -89,6 +90,7 @@ describe("supportsTransaction", () => {
   it("returns true for supported database types", () => {
     expect(supportsTransaction("postgres")).toBe(true);
     expect(supportsTransaction("mysql")).toBe(true);
+    expect(supportsTransaction("oracle")).toBe(true);
   });
 
   it("returns false for unsupported database types", () => {
@@ -101,7 +103,6 @@ describe("supportsTransaction", () => {
     expect(supportsTransaction("sqlite")).toBe(false);
     expect(supportsTransaction("clickhouse")).toBe(false);
     expect(supportsTransaction("sqlserver")).toBe(false);
-    expect(supportsTransaction("oracle")).toBe(false);
     expect(supportsTransaction("dameng")).toBe(false);
     expect(supportsTransaction("rqlite")).toBe(false);
     expect(supportsTransaction("agent")).toBe(false);
@@ -109,6 +110,19 @@ describe("supportsTransaction", () => {
 
   it("returns false for undefined or empty input", () => {
     expect(supportsTransaction(undefined)).toBe(false);
+  });
+});
+
+describe("defaultAutoCommitForDbType", () => {
+  it("defaults Oracle query tabs to manual transactions", () => {
+    expect(defaultAutoCommitForDbType("oracle")).toBe(false);
+  });
+
+  it("defaults other databases to auto-commit", () => {
+    expect(defaultAutoCommitForDbType("mysql")).toBe(true);
+    expect(defaultAutoCommitForDbType("postgres")).toBe(true);
+    expect(defaultAutoCommitForDbType("dameng")).toBe(true);
+    expect(defaultAutoCommitForDbType(undefined)).toBe(true);
   });
 });
 

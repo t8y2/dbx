@@ -7,8 +7,8 @@ use dbx_core::connection::AppState;
 use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
 use dbx_core::query::{
     execute_multi_core, execute_multi_core_with_options_for_client_and_progress,
-    execute_multi_core_with_options_for_client_typed, execute_sql_statement, ExecuteMultiProgressCallback,
-    QueryExecutionOptions,
+    execute_multi_core_with_options_for_client_typed, execute_sql_statement, execute_sql_statement_with_options_typed,
+    ExecuteMultiProgressCallback, QueryExecutionOptions,
 };
 use dbx_core::query_result_export::{export_query_result_core, ExportStatus, QueryResultExportRequest};
 use dbx_core::sql::{split_sql_statements_for_database, SqlFileRequest};
@@ -759,6 +759,124 @@ async fn live_mysql_query_cancel_kills_running_sleep() {
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
     let result = result.unwrap();
     assert_eq!(result.rows, vec![vec![serde_json::json!("1")]]);
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_SQL_FILE_MYSQL_* env vars pointing at a writable MySQL connection"]
+async fn live_mysql_conditional_update_timeout_cancels_before_reload() {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let connection_id = format!("live-mysql-conditional-update-{suffix}");
+    let database = std::env::var("DBX_LIVE_SQL_FILE_MYSQL_DATABASE").expect("DBX_LIVE_SQL_FILE_MYSQL_DATABASE");
+    let config = live_mysql_sql_file_config(&connection_id);
+    let (app_state, db_path) = app_state_with_config(config).await;
+    let state = Arc::new(app_state);
+    let table = format!("dbx_conditional_update_{}", &suffix[..8]);
+    let trigger = format!("dbx_conditional_update_delay_{}", &suffix[..8]);
+
+    execute_sql_statement(
+        &state,
+        &connection_id,
+        &database,
+        &format!("CREATE TABLE `{table}` (id INT PRIMARY KEY, value INT NOT NULL)"),
+        None,
+        None,
+    )
+    .await
+    .expect("create conditional update table");
+    execute_sql_statement(
+        &state,
+        &connection_id,
+        &database,
+        &format!("INSERT INTO `{table}` (id, value) VALUES (1, 1)"),
+        None,
+        None,
+    )
+    .await
+    .expect("seed conditional update table");
+    execute_sql_statement(
+        &state,
+        &connection_id,
+        &database,
+        &format!("CREATE TRIGGER `{trigger}` BEFORE UPDATE ON `{table}` FOR EACH ROW BEGIN DO SLEEP(30); END"),
+        None,
+        None,
+    )
+    .await
+    .expect("create delayed update trigger");
+
+    let execution_id = format!("conditional-update-{suffix}");
+    let registered =
+        state.running_queries.register_task_for_terminal_confirmation(execution_id.clone(), Default::default());
+    let cancel_token = registered.token();
+    let (result_tx, mut result_rx) = tokio::sync::oneshot::channel();
+    let task_state = state.clone();
+    let task_connection_id = connection_id.clone();
+    let task_database = database.clone();
+    let task_table = table.clone();
+    let task_execution_id = execution_id.clone();
+    tokio::spawn(async move {
+        let result = execute_sql_statement_with_options_typed(
+            &task_state,
+            &task_connection_id,
+            &task_database,
+            &format!("UPDATE `{task_table}` SET value = 2 WHERE id = 1"),
+            None,
+            Some(cancel_token),
+            QueryExecutionOptions {
+                // The request-facing timeout belongs to the caller. Keep this
+                // database task running so its registration remains cancellable.
+                timeout_secs: Some(0),
+                await_cancel_completion: true,
+                execution_id: Some(task_execution_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let _ = result_tx.send(result);
+        drop(registered);
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while state.running_queries.diagnostics().interrupt_registrations != 1 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("delayed update should register a MySQL interrupt");
+    assert!(tokio::time::timeout(Duration::from_secs(1), &mut result_rx).await.is_err());
+
+    let cancellation = state.running_queries.cancel_and_wait(&execution_id, Duration::from_secs(10)).await;
+    assert!(cancellation.requested);
+    assert!(cancellation.terminal);
+    let _ = result_rx.await.expect("conditional update task should report a terminal result");
+
+    let reload = execute_sql_statement(
+        &state,
+        &connection_id,
+        &database,
+        &format!("SELECT value FROM `{table}` WHERE id = 1"),
+        None,
+        None,
+    )
+    .await
+    .expect("reload row after cancellation");
+    assert_eq!(reload.rows.len(), 1);
+    assert_eq!(json_cell_text(&reload.rows[0][0]), "1");
+
+    execute_sql_statement(
+        &state,
+        &connection_id,
+        &database,
+        &format!("DROP TRIGGER IF EXISTS `{trigger}`"),
+        None,
+        None,
+    )
+    .await
+    .expect("drop delayed update trigger");
+    execute_sql_statement(&state, &connection_id, &database, &format!("DROP TABLE IF EXISTS `{table}`"), None, None)
+        .await
+        .expect("drop conditional update table");
+    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]

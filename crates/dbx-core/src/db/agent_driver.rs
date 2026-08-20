@@ -880,6 +880,11 @@ impl PooledAgentClient {
         self.shared_runtime.as_ref().is_none_or(|runtime| !runtime.is_failed())
     }
 
+    /// True when this client is attached to a multi-session shared agent process.
+    pub fn uses_shared_runtime(&self) -> bool {
+        self.shared_runtime.is_some()
+    }
+
     /// Terminates a protocol-v2 shared runtime without waiting for the logical session lock.
     /// Legacy single-session clients can only be killed immediately when they are not busy.
     pub fn fail_stop(&self) -> bool {
@@ -1151,12 +1156,15 @@ pub enum AgentMethod {
     GetExplainInfo,
     ExecuteBatch,
     ExecuteTransaction,
+    BeginManualTransaction,
+    CommitManualTransaction,
+    RollbackManualTransaction,
     Disconnect,
     Shutdown,
 }
 
 impl AgentMethod {
-    pub const ALL: [Self; 36] = [
+    pub const ALL: [Self; 39] = [
         Self::Handshake,
         Self::Connect,
         Self::OpenSession,
@@ -1191,6 +1199,9 @@ impl AgentMethod {
         Self::GetExplainInfo,
         Self::ExecuteBatch,
         Self::ExecuteTransaction,
+        Self::BeginManualTransaction,
+        Self::CommitManualTransaction,
+        Self::RollbackManualTransaction,
         Self::Disconnect,
         Self::Shutdown,
     ];
@@ -1232,6 +1243,9 @@ impl AgentMethod {
             Self::GetExplainInfo => "get_explain_info",
             Self::ExecuteBatch => "execute_batch",
             Self::ExecuteTransaction => "execute_transaction",
+            Self::BeginManualTransaction => "begin_manual_transaction",
+            Self::CommitManualTransaction => "commit_manual_transaction",
+            Self::RollbackManualTransaction => "rollback_manual_transaction",
             Self::Disconnect => "disconnect",
             Self::Shutdown => "shutdown",
         }
@@ -2448,6 +2462,24 @@ impl AgentDriverClient {
             .await
     }
 
+    pub async fn begin_manual_transaction<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        schema: Option<&str>,
+    ) -> Result<T, String> {
+        self.invalidate_cached_query();
+        self.call_method(AgentMethod::BeginManualTransaction, agent_manual_transaction_params(schema)).await
+    }
+
+    pub async fn commit_manual_transaction<T: DeserializeOwned + Send + 'static>(&mut self) -> Result<T, String> {
+        self.invalidate_cached_query();
+        self.call_method(AgentMethod::CommitManualTransaction, serde_json::json!({})).await
+    }
+
+    pub async fn rollback_manual_transaction<T: DeserializeOwned + Send + 'static>(&mut self) -> Result<T, String> {
+        self.invalidate_cached_query();
+        self.call_method(AgentMethod::RollbackManualTransaction, serde_json::json!({})).await
+    }
+
     pub async fn execute_batch<T: DeserializeOwned + Send + 'static>(
         &mut self,
         database: Option<&str>,
@@ -2851,6 +2883,14 @@ pub fn agent_transaction_params(database: Option<&str>, statements: &[String], s
         "statements": statements,
         "schema": schema,
     })
+}
+
+pub fn agent_manual_transaction_params(schema: Option<&str>) -> Value {
+    let schema = schema.map(str::trim).filter(|schema| !schema.is_empty());
+    match schema {
+        Some(schema) => serde_json::json!({ "schema": schema }),
+        None => serde_json::json!({}),
+    }
 }
 
 pub fn mongo_database_params(database: &str) -> Value {
@@ -4476,6 +4516,9 @@ for line in sys.stdin:
         assert_eq!(AgentMethod::CloseTableReadSession.as_str(), "close_table_read_session");
         assert_eq!(AgentMethod::ExecuteBatch.as_str(), "execute_batch");
         assert_eq!(AgentMethod::ExecuteTransaction.as_str(), "execute_transaction");
+        assert_eq!(AgentMethod::BeginManualTransaction.as_str(), "begin_manual_transaction");
+        assert_eq!(AgentMethod::CommitManualTransaction.as_str(), "commit_manual_transaction");
+        assert_eq!(AgentMethod::RollbackManualTransaction.as_str(), "rollback_manual_transaction");
         assert_eq!(AgentMethod::Disconnect.as_str(), "disconnect");
         assert_eq!(AgentMethod::Shutdown.as_str(), "shutdown");
     }

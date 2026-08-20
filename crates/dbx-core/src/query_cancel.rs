@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 /// How long a [`RegisteredQuery::detach`]ed registration stays reachable for
@@ -65,9 +66,18 @@ impl RunningTaskMetadata {
 struct RunningTask {
     registration_id: u64,
     token: CancellationToken,
+    completion: watch::Sender<bool>,
+    remember_completion: bool,
     metadata: RunningTaskMetadata,
     pool_key: Option<String>,
     interrupt: Option<InterruptFn>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancellationWaitResult {
+    pub requested: bool,
+    pub terminal: bool,
 }
 
 #[derive(Clone, Default)]
@@ -80,6 +90,7 @@ pub struct RunningQueries {
     // before its interrupt handle was ready — inserted a closure keyed to
     // an execution id nothing would ever look at again, leaking it forever.
     inner: Arc<Mutex<HashMap<String, RunningTask>>>,
+    completed: Arc<Mutex<HashMap<String, std::time::Instant>>>,
     next_registration_id: Arc<AtomicU64>,
 }
 
@@ -89,20 +100,65 @@ impl RunningQueries {
     }
 
     pub fn register_task(&self, execution_id: String, metadata: RunningTaskMetadata) -> RegisteredQuery {
+        self.register_task_with_completion_tracking(execution_id, metadata, false)
+    }
+
+    /// Register an operation whose terminal state may need to be confirmed
+    /// after the caller has already observed a timeout.
+    pub fn register_task_for_terminal_confirmation(
+        &self,
+        execution_id: String,
+        metadata: RunningTaskMetadata,
+    ) -> RegisteredQuery {
+        self.register_task_with_completion_tracking(execution_id, metadata, true)
+    }
+
+    fn register_task_with_completion_tracking(
+        &self,
+        execution_id: String,
+        metadata: RunningTaskMetadata,
+        remember_completion: bool,
+    ) -> RegisteredQuery {
         let token = CancellationToken::new();
         let registration_id = self.next_registration_id.fetch_add(1, Ordering::Relaxed) + 1;
-        let previous = self.inner.lock().unwrap_or_else(|e| e.into_inner()).insert(
-            execution_id.clone(),
-            RunningTask { registration_id, token: token.clone(), metadata, pool_key: None, interrupt: None },
-        );
-        if let Some(previous) = previous {
+        let (completion, _) = watch::channel(false);
+        let previous = {
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let mut completed = self.completed.lock().unwrap_or_else(|e| e.into_inner());
+            completed.retain(|_, completed_at| completed_at.elapsed() < DETACHED_REGISTRATION_GRACE_PERIOD);
+            completed.remove(&execution_id);
+            inner.insert(
+                execution_id.clone(),
+                RunningTask {
+                    registration_id,
+                    token: token.clone(),
+                    completion,
+                    remember_completion,
+                    metadata,
+                    pool_key: None,
+                    interrupt: None,
+                },
+            )
+        };
+        if let Some(mut previous) = previous {
             previous.token.cancel();
-            if let Some(interrupt) = previous.interrupt {
+            previous.completion.send_replace(true);
+            if let Some(interrupt) = previous.interrupt.take() {
                 interrupt();
             }
         }
 
         RegisteredQuery { execution_id, registration_id, token, running_queries: self.clone(), detached: false }
+    }
+
+    fn completed_execution_is_terminal(&self, execution_id: &str) -> bool {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if inner.contains_key(execution_id) {
+            return false;
+        }
+        let mut completed = self.completed.lock().unwrap_or_else(|e| e.into_inner());
+        completed.retain(|_, completed_at| completed_at.elapsed() < DETACHED_REGISTRATION_GRACE_PERIOD);
+        completed.contains_key(execution_id)
     }
 
     /// Hands over the driver-specific interrupt handle (e.g. a MySQL
@@ -115,30 +171,74 @@ impl RunningQueries {
     /// of being stored, which would otherwise leak it forever (nothing ever
     /// visits an interrupt for a task that no longer exists).
     pub fn register_interrupt(&self, execution_id: &str, interrupt: impl Fn() + Send + 'static) {
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(task) = inner.get_mut(execution_id) {
-            task.interrupt = Some(Box::new(interrupt));
-            return;
+        let mut interrupt = Some(Box::new(interrupt) as InterruptFn);
+        {
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(task) = inner.get_mut(execution_id) {
+                if !task.token.is_cancelled() {
+                    task.interrupt = interrupt.take();
+                    return;
+                }
+            }
         }
-        drop(inner);
-        interrupt();
+        interrupt.expect("interrupt must remain available for a cancelled or missing task")();
     }
 
     pub fn cancel(&self, execution_id: &str) -> bool {
-        let task = {
+        let (interrupt, completed_task) = {
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            inner.remove(execution_id)
-        };
-        match task {
-            Some(task) => {
-                if let Some(interrupt) = task.interrupt {
-                    interrupt();
-                }
-                task.token.cancel();
-                true
+            let Some(task) = inner.get_mut(execution_id) else {
+                return false;
+            };
+            task.token.cancel();
+            if task.remember_completion {
+                (task.interrupt.take(), None)
+            } else {
+                let mut task = inner.remove(execution_id).expect("registered task must still exist");
+                (task.interrupt.take(), Some(task))
             }
-            None => false,
+        };
+        if let Some(interrupt) = interrupt {
+            interrupt();
         }
+        if let Some(task) = completed_task {
+            task.completion.send_replace(true);
+        }
+        true
+    }
+
+    /// A cancellation signal is not a terminal execution result. Wait for the
+    /// owning task to finish before reporting that callers may reconcile data.
+    pub async fn cancel_and_wait(&self, execution_id: &str, timeout: Duration) -> CancellationWaitResult {
+        let Some(mut completion) = ({
+            let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner.get(execution_id).map(|task| task.completion.subscribe())
+        }) else {
+            return CancellationWaitResult {
+                requested: false,
+                terminal: self.completed_execution_is_terminal(execution_id),
+            };
+        };
+        if !self.cancel(execution_id) {
+            return CancellationWaitResult {
+                requested: false,
+                terminal: self.completed_execution_is_terminal(execution_id),
+            };
+        }
+
+        let terminal = tokio::time::timeout(timeout, async {
+            loop {
+                if *completion.borrow() {
+                    return;
+                }
+                if completion.changed().await.is_err() {
+                    return;
+                }
+            }
+        })
+        .await
+        .is_ok();
+        CancellationWaitResult { requested: true, terminal }
     }
 
     pub fn cancel_connection(&self, connection_id: &str) -> usize {
@@ -218,9 +318,22 @@ impl RunningQueries {
     }
 
     fn remove(&self, execution_id: &str, registration_id: u64) {
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if inner.get(execution_id).is_some_and(|task| task.registration_id == registration_id) {
-            inner.remove(execution_id);
+        let removed = {
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let should_remove = inner.get(execution_id).is_some_and(|task| task.registration_id == registration_id);
+            if !should_remove {
+                return;
+            }
+            if inner.get(execution_id).is_some_and(|task| task.remember_completion) {
+                self.completed
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(execution_id.to_string(), std::time::Instant::now());
+            }
+            inner.remove(execution_id)
+        };
+        if let Some(task) = removed {
+            task.completion.send_replace(true);
         }
     }
 }
@@ -314,7 +427,7 @@ impl Drop for RegisteredQuery {
 #[cfg(test)]
 mod tests {
     use super::{RunningQueries, RunningTaskKind, RunningTaskMetadata, DETACHED_REGISTRATION_GRACE_PERIOD};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn cancel_marks_registered_query_as_cancelled() {
@@ -425,6 +538,66 @@ mod tests {
         assert!(running.cancel("exec-client"));
     }
 
+    #[tokio::test]
+    async fn cancel_and_wait_requires_the_execution_guard_to_finish() {
+        let running = RunningQueries::default();
+        let registered = running.register_task_for_terminal_confirmation("exec-1".to_string(), Default::default());
+        let waiting = {
+            let running = running.clone();
+            tokio::spawn(async move { running.cancel_and_wait("exec-1", Duration::from_secs(1)).await })
+        };
+
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished());
+        drop(registered);
+
+        let result = waiting.await.unwrap();
+        assert!(result.requested);
+        assert!(result.terminal);
+    }
+
+    #[tokio::test]
+    async fn cancel_and_wait_recognizes_a_recently_completed_execution() {
+        let running = RunningQueries::default();
+        let registered = running.register_task_for_terminal_confirmation("exec-1".to_string(), Default::default());
+        drop(registered);
+
+        let result = running.cancel_and_wait("exec-1", Duration::from_secs(1)).await;
+        assert!(!result.requested);
+        assert!(result.terminal);
+    }
+
+    #[tokio::test]
+    async fn terminal_completion_is_available_after_cancel_wait_times_out() {
+        let running = RunningQueries::default();
+        let registered = running.register_task_for_terminal_confirmation("exec-1".to_string(), Default::default());
+
+        let first = running.cancel_and_wait("exec-1", Duration::from_millis(1)).await;
+        assert!(first.requested);
+        assert!(!first.terminal);
+
+        drop(registered);
+        let later = running.cancel_and_wait("exec-1", Duration::from_secs(1)).await;
+        assert!(!later.requested);
+        assert!(later.terminal);
+    }
+
+    #[tokio::test]
+    async fn stale_terminal_completion_is_reclaimed() {
+        let running = RunningQueries::default();
+        running
+            .completed
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert("exec-1".to_string(), Instant::now() - DETACHED_REGISTRATION_GRACE_PERIOD);
+
+        let result = running.cancel_and_wait("exec-1", Duration::from_secs(1)).await;
+
+        assert!(!result.requested);
+        assert!(!result.terminal);
+        assert!(running.completed.lock().unwrap_or_else(|error| error.into_inner()).is_empty());
+    }
+
     #[test]
     fn stale_registration_drop_does_not_remove_replacement() {
         let running = RunningQueries::default();
@@ -532,6 +705,26 @@ mod tests {
 
         drop(registered);
 
+        assert_eq!(running.registration_counts(), (0, 0));
+    }
+
+    #[test]
+    fn late_interrupt_after_tracked_cancel_runs_immediately_but_waits_for_guard_cleanup() {
+        let running = RunningQueries::default();
+        let registered = running.register_task_for_terminal_confirmation("exec-1".to_string(), Default::default());
+
+        assert!(running.cancel("exec-1"));
+
+        let interrupted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = interrupted.clone();
+        running.register_interrupt("exec-1", move || {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        assert!(interrupted.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(running.registration_counts(), (1, 0));
+
+        drop(registered);
         assert_eq!(running.registration_counts(), (0, 0));
     }
 

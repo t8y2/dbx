@@ -32,7 +32,7 @@ test("mutation families retain accepted targets, failures, and refresh work", ()
     const body = functionBody(name);
     assert.match(body, /sidebarDangerTarget\.value \?\? activeNode\.value/);
     assert.match(body, /refreshMutatedTableDataTabsForNode\(node\)/);
-    assert.match(body, /tableOperationFailed/);
+    assert.match(body, /toastDangerOperationError\(node\.label/);
   }
 
   for (const name of ["confirmCreateNacosNamespace", "confirmEditNacosNamespace", "confirmDropDatabase"]) {

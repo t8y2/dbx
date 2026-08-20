@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { CompletionAssistantCandidate, TreeNode } from "@/types/database";
-import { buildPackageMemberNodes, markPackageNodesExpandable } from "@/lib/sidebar/packageMembers";
+import { buildPackageMemberNodes, markPackageNodesExpandable, packageMemberGroupOwnerId } from "@/lib/sidebar/packageMembers";
 
 function packageNode(): TreeNode {
   return {
@@ -42,6 +42,9 @@ describe("package member tree", () => {
     expect(result[1]?.children?.map((node) => node.label)).toEqual(["lookup"]);
     expect(result.flatMap((node) => node.children ?? []).every((node) => node.parentName === "business_api" && node.parentSchema === "app_schema" && node.parentType === "package" && node.valid === false)).toBe(true);
     expect(new Set(result.flatMap((node) => node.children ?? []).map((node) => node.id)).size).toBe(3);
+    expect(packageMemberGroupOwnerId(result[0]!)).toBe(packageNode().id);
+    expect(packageMemberGroupOwnerId({ ...result[0]!, parentType: undefined })).toBeNull();
+    expect(packageMemberGroupOwnerId({ ...result[0]!, id: "invalid" })).toBeNull();
   });
 
   it("keeps package body source metadata on the package without adding a duplicate body node", () => {

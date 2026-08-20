@@ -3496,15 +3496,15 @@ export const useQueryStore = defineStore("query", () => {
   };
 
   /**
-   * Resolve multi-source result columns (by projection ordinal) back to exactly
-   * one base column per source, then surface the resolved column comments and a
+   * Resolve result columns (by projection ordinal) back to exactly one base
+   * column per source, then surface the resolved column comments and a
    * result->source mapping. Reuses the same database-aware binder
    * as the editability analysis, so `name AS username` (uniquely resolvable
    * unqualified alias) maps back to its physical column and quoted mixed-case
    * identifiers keep exact casing. Ambiguous or unresolved columns yield
    * `undefined` (no comment) instead of first-source-wins on a shared name.
    */
-  function resolveMultiSourceColumnInfo(dbType: string, analysis: EditableQueryInfo, resultColumns: string[], loadedSources: LoadedEditableSource[]): { comments: Array<string | undefined>; mapping: Array<QueryResultSourceColumnRef | undefined> } {
+  function resolveResultColumnInfo(dbType: string, analysis: EditableQueryInfo, resultColumns: string[], loadedSources: LoadedEditableSource[]): { comments: Array<string | undefined>; mapping: Array<QueryResultSourceColumnRef | undefined> } {
     const refs = resolveSourceColumnsByOrdinal(
       dbType,
       analysis,
@@ -3826,7 +3826,7 @@ export const useQueryStore = defineStore("query", () => {
           }),
         ),
       );
-      const displayInfo = resolveMultiSourceColumnInfo(dbType, analysis, tab.result.columns, loadedSources);
+      const displayInfo = resolveResultColumnInfo(dbType, analysis, tab.result.columns, loadedSources);
       const readOnlyPatch: QueryMetadataPatch = {
         queryAnalysis: undefined,
         querySourceColumns: undefined,
@@ -3967,6 +3967,7 @@ export const useQueryStore = defineStore("query", () => {
         const metadataAnalysis = expandStarProjectionColumnsForSource(bindColumnsForSource(dbType, loaded.analysis, loaded.source, loaded.tableMeta.columns, allSourceColumns), loaded.source, loaded.tableMeta.columns);
         const syntheticRowIdProjection = hiddenPrimaryKeys.find((projection) => projection.sourceName.toUpperCase() === DBX_ROWID_COLUMN);
         const primaryKeys = loaded.tableMeta.primaryKeys.length === 0 && syntheticRowIdProjection ? [DBX_ROWID_COLUMN] : loaded.tableMeta.primaryKeys;
+        const keylessResultInfo = primaryKeys.length === 0 ? resolveResultColumnInfo(dbType, analysis, tab.result.columns, loadedSources) : undefined;
         const sourceColumns = sourceColumnsForResult(metadataAnalysis, tab.result.columns, loaded.source.key);
         if (sourceColumns && syntheticRowIdProjection) {
           const resultIndex = tab.result.columns.findIndex((column) => column.toLowerCase() === syntheticRowIdProjection.alias.toLowerCase());
@@ -3978,6 +3979,7 @@ export const useQueryStore = defineStore("query", () => {
             querySourceColumns: undefined,
             queryEditabilityReason: "no-primary-key",
             tableMeta: loaded.tableMeta,
+            resultColumnComments: keylessResultInfo?.comments,
           };
         }
 
@@ -4005,6 +4007,7 @@ export const useQueryStore = defineStore("query", () => {
           querySourceColumns: sourceColumns,
           queryEditabilityReason: undefined,
           tableMeta: primaryKeys === loaded.tableMeta.primaryKeys ? loaded.tableMeta : { ...loaded.tableMeta, primaryKeys },
+          resultColumnComments: keylessResultInfo?.comments,
         };
       }
 
@@ -4012,7 +4015,7 @@ export const useQueryStore = defineStore("query", () => {
       // table's metadata is already loaded. Surface per-ordinal column comments
       // and a display-only result->source mapping so the data grid can still
       // show comments for joined results (fixes #2129 / #6352).
-      const multiSourceInfo = loadedSources.length > 1 ? resolveMultiSourceColumnInfo(dbType, analysis, tab.result.columns, loadedSources) : undefined;
+      const multiSourceInfo = loadedSources.length > 1 ? resolveResultColumnInfo(dbType, analysis, tab.result.columns, loadedSources) : undefined;
 
       if (candidates.length === 0) {
         return {

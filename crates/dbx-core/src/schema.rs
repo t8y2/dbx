@@ -5272,6 +5272,18 @@ struct ObjectListOutcome {
     paging_applied: bool,
 }
 
+async fn list_native_postgres_objects(
+    pool: &deadpool_postgres::Pool,
+    config: &ConnectionConfig,
+    schema: &str,
+) -> Result<Vec<db::ObjectInfo>, String> {
+    if config.db_type == DatabaseType::Redshift {
+        db::postgres::list_redshift_objects(pool, schema, true, true).await
+    } else {
+        db::postgres::list_objects(pool, schema, true, true, false).await
+    }
+}
+
 fn unpaged_object_list(objects: Vec<db::ObjectInfo>) -> ObjectListOutcome {
     ObjectListOutcome { objects, paging_applied: false }
 }
@@ -5398,7 +5410,7 @@ async fn list_objects_once(
                     if let Some(config) = fallback_config.as_ref() {
                         match native_postgres_metadata_pool(state, connection_id, database, config).await {
                             Ok(Some(pool)) => {
-                                return db::postgres::list_objects(&pool, schema, true, true, false)
+                                return list_native_postgres_objects(&pool, config, schema)
                                     .await
                                     .map(unpaged_object_list)
                             }
@@ -5427,7 +5439,7 @@ async fn list_objects_once(
                         if let Some(pool) =
                             native_postgres_metadata_pool(state, connection_id, database, config).await?
                         {
-                            return db::postgres::list_objects(&pool, schema, true, true, false)
+                            return list_native_postgres_objects(&pool, config, schema)
                                 .await
                                 .map(unpaged_object_list)
                                 .map_err(|fallback_error| {
@@ -5472,6 +5484,13 @@ async fn list_objects_once(
         }
         PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_cloudberry_config) => {
             db::cloudberry::list_objects(p, schema).await.map(unpaged_object_list)
+        }
+        PoolKind::Postgres(p) if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Redshift) => {
+            let include_relations = object_types_include_relations(object_types);
+            let include_routines = object_types_include_routines(object_types);
+            db::postgres::list_redshift_objects(p, schema, include_relations, include_routines)
+                .await
+                .map(unpaged_object_list)
         }
         PoolKind::Postgres(p) => {
             let include_relations = object_types_include_relations(object_types);
@@ -5549,7 +5568,7 @@ async fn list_completion_objects_once(
                     if let Some(config) = fallback_config.as_ref() {
                         match native_postgres_metadata_pool(state, connection_id, database, config).await {
                             Ok(Some(pool)) => {
-                                return db::postgres::list_objects(&pool, schema, true, true, false)
+                                return list_native_postgres_objects(&pool, config, schema)
                                     .await
                                     .map(filter_completion_objects)
                             }
@@ -5574,7 +5593,7 @@ async fn list_completion_objects_once(
                         if let Some(pool) =
                             native_postgres_metadata_pool(state, connection_id, database, config).await?
                         {
-                            return db::postgres::list_objects(&pool, schema, true, true, false)
+                            return list_native_postgres_objects(&pool, config, schema)
                                 .await
                                 .map(filter_completion_objects)
                                 .map_err(|fallback_error| {
@@ -5606,6 +5625,9 @@ async fn list_completion_objects_once(
         }
         PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_cloudberry_config) => {
             db::cloudberry::list_objects(p, schema).await.map(filter_completion_objects)
+        }
+        PoolKind::Postgres(p) if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Redshift) => {
+            db::postgres::list_redshift_objects(p, schema, false, true).await.map(filter_completion_objects)
         }
         PoolKind::Postgres(p) => {
             db::postgres::list_objects(p, schema, true, true, false).await.map(filter_completion_objects)

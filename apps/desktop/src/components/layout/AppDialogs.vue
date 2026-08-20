@@ -15,6 +15,7 @@ const DatabaseDocsDialog = defineAsyncComponent(() => import("@/components/docs/
 const TableImportDialog = defineAsyncComponent(() => import("@/components/import/TableImportDialog.vue"));
 const FieldLineageDialog = defineAsyncComponent(() => import("@/components/lineage/FieldLineageDialog.vue"));
 const ConfigPassphraseDialog = defineAsyncComponent(() => import("@/components/config/ConfigPassphraseDialog.vue"));
+const ConfigConnectionSelectDialog = defineAsyncComponent(() => import("@/components/config/ConfigConnectionSelectDialog.vue"));
 const DatabaseSearchDialog = defineAsyncComponent(() => import("@/components/search/DatabaseSearchDialog.vue"));
 const SshHostKeyPromptDialog = defineAsyncComponent(() => import("@/components/ssh/SshHostKeyPromptDialog.vue"));
 const ConnectionPasswordPromptDialog = defineAsyncComponent(() => import("@/components/connection/ConnectionPasswordPromptDialog.vue"));
@@ -275,11 +276,21 @@ watch(
     :prefill-tables="dialogs.databaseExportPrefillTables.value"
     :prefill-all-databases="dialogs.databaseExportAllDatabases.value"
   />
+  <ConfigConnectionSelectDialog
+    v-if="dialogs.showConfigConnectionSelectDialog.value"
+    :open="dialogs.showConfigConnectionSelectDialog.value"
+    :mode="dialogs.configConnectionSelectMode.value"
+    :busy="dialogs.applyingImportSelection.value"
+    :connections="dialogs.configConnectionSelectList.value"
+    @update:open="dialogs.onConfigConnectionSelectOpenChange"
+    @confirm="dialogs.onConfigConnectionSelectConfirm"
+  />
   <ConfigPassphraseDialog
     v-if="dialogs.showConfigPassphraseDialog.value"
-    v-model:open="dialogs.showConfigPassphraseDialog.value"
+    :open="dialogs.showConfigPassphraseDialog.value"
     :mode="dialogs.configPassphraseMode.value"
     :external-error="dialogs.configPassphraseError.value"
+    @update:open="dialogs.onConfigPassphraseOpenChange"
     @confirm="dialogs.configPassphraseMode.value === 'export' ? dialogs.onExportConfirm($event) : dialogs.onImportConfirm($event)"
   />
   <Dialog v-model:open="dialogs.showImportLayoutConfirm.value">

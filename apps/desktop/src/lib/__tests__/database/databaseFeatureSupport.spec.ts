@@ -12,6 +12,7 @@ import {
   supportsQueryEditorBlockComments,
   supportsSqlInListPaste,
   supportsTableImport,
+  supportsTableVacuum,
   supportsTransaction,
   usesConnectionOnlyQueryTarget,
   usesTreeSchemaMode,
@@ -158,6 +159,20 @@ describe("supportsQueryEditorBlockComments", () => {
     expect(supportsQueryEditorBlockComments("redis")).toBe(false);
     expect(supportsQueryEditorBlockComments("mongodb")).toBe(false);
     expect(supportsQueryEditorBlockComments("elasticsearch")).toBe(false);
+  });
+});
+
+describe("supportsTableVacuum", () => {
+  it("enables VACUUM for the supported PostgreSQL family", () => {
+    for (const databaseType of ["postgres", "gaussdb", "opengauss", "kingbase", "vastbase", "highgo", "uxdb", "kwdb"] as const) {
+      expect(supportsTableVacuum(databaseType)).toBe(true);
+    }
+  });
+
+  it("does not enable VACUUM for unrelated database types", () => {
+    for (const databaseType of ["mysql", "sqlite", "redshift", "oracle", "jdbc"] as const) {
+      expect(supportsTableVacuum(databaseType)).toBe(false);
+    }
   });
 });
 

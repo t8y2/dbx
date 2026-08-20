@@ -184,7 +184,7 @@
         # ------------------------------------------------------------------ #
         packages.dbx-desktop = pkgs.stdenv.mkDerivation (finalAttrs: {
           pname = "dbx-desktop";
-          version = "0.5.88";
+          version = "0.5.89";
 
           src = pkgs.lib.cleanSource ./.;
 
@@ -252,7 +252,7 @@
             icon = "dbx";
             desktopName = "DBX";
             genericName = "Database Management Tool";
-            comment = "Open-source database management tool for 80+ databases";
+            comment = "Open-source database management tool for 90+ databases";
             categories = [ "Development" "Database" ];
             keywords = [
               "database"
@@ -414,7 +414,7 @@
           meta = with pkgs.lib; {
             description = "DBX desktop — open-source database management tool (Tauri 2)";
             longDescription = ''
-              DBX is a lightweight (~15 MB) database management tool supporting 80+
+              DBX is a lightweight (~15 MB) database management tool supporting 90+
               databases. Built with Tauri 2, Vue 3, and Rust. No Java, no Chromium.
             '';
             license = licenses.asl20;

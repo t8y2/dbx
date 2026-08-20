@@ -10,6 +10,10 @@ dependencies {
 }
 
 tasks.named('shadowJar') {
+    dependencies {
+        exclude(dependency('com.google.code.gson:gson'))
+        exclude(dependency('com.google.errorprone:error_prone_annotations'))
+    }
     // The published fat jar still carries stale BouncyCastle signature files (META-INF/BC2048KE.SF
     // and its .DSA). Their digests no longer match the rewritten manifest, so keeping them makes the
     // JVM fail with "SecurityException: Invalid signature file digest for Manifest main attributes".

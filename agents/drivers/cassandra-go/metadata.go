@@ -82,6 +82,15 @@ type triggerInfo struct {
 	Timing string `json:"timing"`
 }
 
+const cassandraListTriggersCQL = "SELECT trigger_name, options FROM system_schema.triggers WHERE keyspace_name = ? AND table_name = ?"
+
+type metadataIterator interface {
+	Scan(...any) bool
+	Close() error
+}
+
+type metadataQuery func(string, ...any) metadataIterator
+
 type metadataListConstraints struct {
 	Filter      string
 	Limit       int
@@ -312,6 +321,35 @@ func (s *server) querySystemIndexes(schema, table string) ([]indexInfo, error) {
 			IndexType:       optionalString(indexType),
 			IncludedColumns: []string{},
 		})
+		options = nil
+	}
+	if err := iter.Close(); err != nil {
+		return nil, err
+	}
+	sort.Slice(result, func(left, right int) bool { return result[left].Name < result[right].Name })
+	return result, nil
+}
+
+func (s *server) listTriggers(schema, table string) ([]triggerInfo, error) {
+	session, err := s.runtime.sessionFor("")
+	if err != nil {
+		return nil, err
+	}
+	return listTriggersWithQuery(func(query string, values ...any) metadataIterator {
+		return session.Query(query, values...).Iter()
+	}, schema, table)
+}
+
+func listTriggersWithQuery(query metadataQuery, schema, table string) ([]triggerInfo, error) {
+	iter := query(cassandraListTriggersCQL, schema, table)
+	result := []triggerInfo{}
+	var name string
+	var options map[string]string
+	for iter.Scan(&name, &options) {
+		// Cassandra trigger metadata stores only the trigger class. Cassandra
+		// invokes every trigger before any DML statement, so expose those fixed
+		// semantics through the common TriggerInfo contract.
+		result = append(result, triggerInfo{Name: name, Event: "DML", Timing: "BEFORE"})
 		options = nil
 	}
 	if err := iter.Close(); err != nil {

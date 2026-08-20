@@ -1205,6 +1205,34 @@ fn format_export_table_ddl(ddl: &str, database_type: Option<DatabaseType>, opts:
     format!("{ddl};")
 }
 
+fn split_postgres_export_table_triggers(ddl: &str, database_type: DatabaseType) -> (String, Vec<String>) {
+    if database_type != DatabaseType::Postgres {
+        return (ddl.to_string(), Vec::new());
+    }
+
+    let mut table_statements = Vec::new();
+    let mut trigger_statements = Vec::new();
+    for range in crate::db::ddl_scan::top_level_statement_ranges(ddl) {
+        let statement = ddl[range].trim();
+        if statement.is_empty() {
+            continue;
+        }
+        let mut words = statement.split_ascii_whitespace().take(3).map(str::to_ascii_uppercase);
+        let first = words.next();
+        let second = words.next();
+        let third = words.next();
+        if first.as_deref() == Some("CREATE")
+            && (second.as_deref() == Some("TRIGGER")
+                || (second.as_deref() == Some("CONSTRAINT") && third.as_deref() == Some("TRIGGER")))
+        {
+            trigger_statements.push(statement.to_string());
+        } else {
+            table_statements.push(statement.to_string());
+        }
+    }
+    (table_statements.join("\n"), trigger_statements)
+}
+
 fn postgres_sequence_qualified_name(schema: &str, sequence_name: &str) -> String {
     let db_type = DatabaseType::Postgres;
     if schema.trim().is_empty() {
@@ -2103,6 +2131,7 @@ async fn export_database_sql_core_inner(
 
     let mut object_index: usize = 0;
     let mut total_rows_exported = 0_u64;
+    let mut deferred_postgres_triggers = Vec::new();
     // total_objects is known later for the write phase; preparing updates stay
     // presence-only so the UI does not show a counter that later resets.
     emit_database_export_running(&on_progress, &request.export_id, "", 0, 0, 0, true);
@@ -2318,6 +2347,8 @@ async fn export_database_sql_core_inner(
             };
             match ddl_result {
                 Ok(ddl) => {
+                    let (ddl, triggers) = split_postgres_export_table_triggers(&ddl, db_type);
+                    deferred_postgres_triggers.extend(triggers);
                     let ddl = format_export_table_ddl(
                         &ddl,
                         Some(db_type),
@@ -2701,6 +2732,15 @@ async fn export_database_sql_core_inner(
         }
     }
 
+    // PostgreSQL trigger definitions reference their trigger functions. The
+    // table DDL builder returns both statements together, while schema-wide
+    // routines are exported below the tables. Keep triggers part of table
+    // structure, but write them only after routines so the resulting script
+    // is executable in file order.
+    for trigger in deferred_postgres_triggers {
+        writeln!(file, "{trigger}\n").map_err(|e| format!("Failed to write file: {e}"))?;
+    }
+
     // For MySQL: re-enable foreign key checks
     if matches!(db_type, DatabaseType::Mysql) {
         writeln!(file, "SET FOREIGN_KEY_CHECKS = 1;").map_err(|e| format!("Failed to write file: {e}"))?;
@@ -2775,10 +2815,10 @@ mod tests {
         generate_postgres_sequence_setval_sql, is_postgres_extension_member_routine, mysql_database_export_preamble,
         mysql_view_dependencies_from_rows, mysql_view_dependencies_sql, normalize_export_table_ddl,
         record_export_destination_identity, record_export_error, replace_database_export_select_list,
-        sort_export_views_by_dependencies, write_database_export_rows, BuildDatabaseSqlExportOptions,
-        BuildExportInsertStatementsOptions, DatabaseExportObjectCounts, DatabaseExportRequest, DdlNormalizeOptions,
-        ExportedTableSql, PostgresExportExtension, PostgresExportSequence, PostgresExtensionMembers,
-        DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT,
+        sort_export_views_by_dependencies, split_postgres_export_table_triggers, write_database_export_rows,
+        BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions, DatabaseExportObjectCounts,
+        DatabaseExportRequest, DdlNormalizeOptions, ExportedTableSql, PostgresExportExtension, PostgresExportSequence,
+        PostgresExtensionMembers, DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT,
     };
     use super::{concurrent_metadata_prefetch_allowed, database_export_metadata_prefetch_concurrency};
     use crate::connection::AppState;
@@ -2913,6 +2953,33 @@ mod tests {
         assert!(is_postgres_extension_member_routine(&routine("similarity", "text, text"), &members));
         assert!(!is_postgres_extension_member_routine(&routine("similarity", "integer, integer"), &members));
         assert!(!is_postgres_extension_member_routine(&routine("user_similarity", "text, text"), &members));
+    }
+
+    #[test]
+    fn postgres_database_export_defers_table_triggers_without_splitting_function_bodies() {
+        let ddl = "CREATE TABLE \"public\".\"work_log\" (\n  \"id\" bigint,\n  \"note\" text DEFAULT ';'::text\n);\n\nCREATE INDEX \"idx_work_log\" ON \"public\".\"work_log\" (\"id\");\n\nCREATE TRIGGER trg_work_log BEFORE INSERT OR UPDATE ON public.work_log FOR EACH ROW EXECUTE FUNCTION fn_work_log_update();";
+
+        let (table_ddl, triggers) = split_postgres_export_table_triggers(ddl, DatabaseType::Postgres);
+
+        assert!(table_ddl.contains("CREATE TABLE"));
+        assert!(table_ddl.contains("DEFAULT ';'::text"));
+        assert!(table_ddl.contains("CREATE INDEX"));
+        assert!(!table_ddl.contains("CREATE TRIGGER"));
+        assert_eq!(triggers.len(), 1);
+        assert!(triggers[0].starts_with("CREATE TRIGGER trg_work_log"));
+    }
+
+    #[test]
+    fn postgres_database_export_defers_constraint_triggers_only_for_postgres() {
+        let ddl = "CREATE TABLE \"public\".\"items\" (\"id\" bigint);\nCREATE CONSTRAINT TRIGGER items_check AFTER INSERT ON public.items DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION check_items();";
+
+        let (postgres_table, postgres_triggers) = split_postgres_export_table_triggers(ddl, DatabaseType::Postgres);
+        assert!(!postgres_table.contains("CREATE CONSTRAINT TRIGGER"));
+        assert_eq!(postgres_triggers.len(), 1);
+
+        let (mysql_ddl, mysql_triggers) = split_postgres_export_table_triggers(ddl, DatabaseType::Mysql);
+        assert_eq!(mysql_ddl, ddl);
+        assert!(mysql_triggers.is_empty());
     }
 
     #[test]

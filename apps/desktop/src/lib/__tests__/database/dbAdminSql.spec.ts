@@ -9,12 +9,14 @@ const apiMock = vi.hoisted(() => ({
   buildCreateTableSql: vi.fn(),
   buildDuplicateTableStructureSql: vi.fn(),
   buildMysqlAutoIncrementSql: vi.fn(),
+  buildVacuumTableSql: vi.fn(),
 }));
 
 vi.mock("@/lib/backend/api", () => apiMock);
 
 import {
   buildDuplicateTableStructurePlan,
+  buildVacuumTableSql,
   buildMysqlAutoIncrementSql,
   collectDuplicateTableColumnComments,
   damengDropSchemaExecutionSchema,
@@ -63,6 +65,29 @@ describe("MySQL AUTO_INCREMENT administration", () => {
       }),
     ).resolves.toContain("18446744073709551615");
     expect(apiMock.buildMysqlAutoIncrementSql).toHaveBeenCalledWith(expect.objectContaining({ value: "18446744073709551615" }));
+  });
+});
+
+describe("PostgreSQL-family VACUUM administration", () => {
+  it("forwards independent FULL and ANALYZE options", async () => {
+    apiMock.buildVacuumTableSql.mockResolvedValue('VACUUM FULL ANALYZE "public"."events";');
+
+    await expect(
+      buildVacuumTableSql({
+        databaseType: "postgres",
+        schema: "public",
+        tableName: "events",
+        full: true,
+        analyze: true,
+      }),
+    ).resolves.toBe('VACUUM FULL ANALYZE "public"."events";');
+    expect(apiMock.buildVacuumTableSql).toHaveBeenCalledWith({
+      databaseType: "postgres",
+      schema: "public",
+      tableName: "events",
+      full: true,
+      analyze: true,
+    });
   });
 });
 

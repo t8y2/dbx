@@ -3,6 +3,7 @@ import { computed, createApp, nextTick, onActivated, onBeforeUnmount, ref, watch
 import { RecycleScroller } from "vue-virtual-scroller";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import {
+  Activity,
   ArrowDown,
   ArrowRightLeft,
   ArrowUp,
@@ -61,7 +62,7 @@ import XlsxHeaderDialog from "@/components/export/XlsxHeaderDialog.vue";
 import * as api from "@/lib/backend/api";
 import type { ColumnInfo, ConnectionConfig, ForeignKeyInfo, IndexInfo, ObjectBrowserViewMode, ObjectBrowserViewport, ObjectInfo, ObjectSourceKind, ObjectStatistics, TableInfoTab, TreeNode, TriggerInfo } from "@/types/database";
 import { sortTablesByFkDependency, type TableWithFk } from "@/lib/table/tableDependencySort";
-import { isSchemaAware, supportsTransfer } from "@/lib/database/databaseCapabilities";
+import { isSchemaAware, supportsTableVacuum, supportsTransfer } from "@/lib/database/databaseCapabilities";
 import { supportsSchemaDiagram, supportsTableImport, supportsTableStructureEditing, supportsTableTruncate } from "@/lib/database/databaseFeatureSupport";
 import { codeMirrorSqlDialect, connectionObjectTreeNodeSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { getTableMetadataCapabilities, type TableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
@@ -73,6 +74,7 @@ import {
   buildCopyTableDataSql,
   buildEmptyTableSql,
   buildTruncateTableSql,
+  buildVacuumTableSql,
   supportsDropTableCascade,
   supportsTruncateTableCascade,
   type TableAdminSqlOptions,
@@ -246,6 +248,12 @@ const showTruncateConfirm = ref(false);
 const truncateTarget = ref<ObjectBrowserRow | null>(null);
 const truncatePreviewSql = ref("");
 const truncateTableCascade = ref(false);
+const showVacuumConfirm = ref(false);
+const vacuumTarget = ref<ObjectBrowserRow | null>(null);
+const vacuumPreviewSql = ref("");
+const vacuumTableFull = ref(false);
+const vacuumTableAnalyze = ref(false);
+const vacuumExecuting = ref(false);
 const showEmptyConfirm = ref(false);
 const emptyTarget = ref<ObjectBrowserRow | null>(null);
 const emptyPreviewSql = ref("");
@@ -299,6 +307,8 @@ const canOpenStructureEditor = computed(() => supportsTableStructureEditing(tabl
 const canOpenDiagram = computed(() => !!props.database && supportsSchemaDiagram(effectiveDatabaseType.value));
 const canOpenTableImport = computed(() => !!props.database && supportsTableImport(effectiveDatabaseType.value));
 const supportsTruncateTable = computed(() => supportsTableTruncate(effectiveDatabaseType.value));
+const supportsVacuumTable = computed(() => !props.connection.read_only && supportsTableVacuum(effectiveDatabaseType.value));
+const vacuumRiskMessage = computed(() => (vacuumExecuting.value ? t("contextMenu.vacuumTableRunningHint") : vacuumTableFull.value ? t("contextMenu.vacuumTableFullRisk") : vacuumTableAnalyze.value ? t("contextMenu.vacuumTableAnalyzeRisk") : t("contextMenu.vacuumTableDefaultRisk")));
 const sourceDialect = computed(() => codeMirrorSqlDialect(effectiveDatabaseType.value));
 const sourceFormatDialect = computed<SqlFormatDialect>(() => sqlFormatDialectForDbType(effectiveDatabaseType.value));
 const objectFilters = computed<ObjectFilter[]>(() =>
@@ -2361,6 +2371,55 @@ async function confirmTruncateTable() {
   truncateTarget.value = null;
 }
 
+async function refreshVacuumPreviewSql() {
+  const row = vacuumTarget.value;
+  vacuumPreviewSql.value = "";
+  if (!row) return;
+  vacuumPreviewSql.value = await buildVacuumTableSql({
+    databaseType: effectiveDatabaseType.value,
+    schema: row.schema || selectedSchema.value,
+    tableName: row.name,
+    full: vacuumTableFull.value,
+    analyze: vacuumTableAnalyze.value,
+  }).catch(() => "");
+}
+
+function requestVacuumTable(row: ObjectBrowserRow) {
+  if (!supportsVacuumTable.value) return;
+  vacuumTarget.value = row;
+  vacuumTableFull.value = false;
+  vacuumTableAnalyze.value = false;
+  vacuumPreviewSql.value = "";
+  void refreshVacuumPreviewSql();
+  showVacuumConfirm.value = true;
+}
+
+async function confirmVacuumTable() {
+  const row = vacuumTarget.value;
+  if (!row || vacuumExecuting.value) return;
+  vacuumExecuting.value = true;
+  try {
+    const sql =
+      vacuumPreviewSql.value ||
+      (await buildVacuumTableSql({
+        databaseType: effectiveDatabaseType.value,
+        schema: row.schema || selectedSchema.value,
+        tableName: row.name,
+        full: vacuumTableFull.value,
+        analyze: vacuumTableAnalyze.value,
+      }));
+    const executed = await executeObjectBrowserSqlWithProductionGuard(sql, () => api.executeQuery(props.connection.id, props.database, sql, row.schema || selectedSchema.value));
+    if (!executed) return;
+    toast(t("contextMenu.vacuumTableSuccess", { name: row.name }));
+    showVacuumConfirm.value = false;
+    vacuumTarget.value = null;
+  } catch (e: any) {
+    toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
+  } finally {
+    vacuumExecuting.value = false;
+  }
+}
+
 async function refreshEmptyPreviewSql(row: ObjectBrowserRow) {
   emptyPreviewSql.value = "";
   emptyPreviewSql.value = await buildEmptyTableSql(tableAdminSqlOptions(row)).catch(() => "");
@@ -2764,6 +2823,32 @@ function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     ];
   }
   const useBatchActions = isSelectedBatchTableContext(item);
+  const moreActions: ContextMenuItem[] = [];
+  if (supportsVacuumTable.value) {
+    moreActions.push({ label: t("contextMenu.vacuumTable"), action: () => requestVacuumTable(item), icon: Activity, variant: "destructive" as const });
+  }
+  if (supportsTruncateTable.value) {
+    moreActions.push({
+      label: useBatchActions ? selectedBatchTableCountLabel("batchTruncate") : t("contextMenu.truncateTable"),
+      action: useBatchActions ? requestBatchTruncateTables : () => requestTruncateTable(item),
+      icon: Scissors,
+      variant: "destructive" as const,
+    });
+  }
+  moreActions.push(
+    {
+      label: useBatchActions ? selectedBatchTableCountLabel("batchEmpty") : t("contextMenu.emptyTable"),
+      action: useBatchActions ? requestBatchEmptyTables : () => requestEmptyTable(item),
+      icon: Eraser,
+      variant: "destructive" as const,
+    },
+    {
+      label: useBatchActions ? selectedBatchTableCountLabel("batchDrop") : t("contextMenu.dropTable"),
+      action: useBatchActions ? requestBatchDropTables : () => requestDrop(item),
+      icon: Trash2,
+      variant: "destructive" as const,
+    },
+  );
   return [
     { label: t("contextMenu.viewData"), action: () => openViewData(item), icon: Table2 },
     {
@@ -2785,28 +2870,7 @@ function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     { label: t("contextMenu.duplicateStructure"), action: () => requestDuplicateStructure(item), icon: CopyPlus },
     ...tableClipboardMenuItems(item),
     { label: "", separator: true },
-    ...(supportsTruncateTable.value
-      ? [
-          {
-            label: useBatchActions ? selectedBatchTableCountLabel("batchTruncate") : t("contextMenu.truncateTable"),
-            action: useBatchActions ? requestBatchTruncateTables : () => requestTruncateTable(item),
-            icon: Scissors,
-            variant: "destructive" as const,
-          },
-        ]
-      : []),
-    {
-      label: useBatchActions ? selectedBatchTableCountLabel("batchEmpty") : t("contextMenu.emptyTable"),
-      action: useBatchActions ? requestBatchEmptyTables : () => requestEmptyTable(item),
-      icon: Eraser,
-      variant: "destructive" as const,
-    },
-    {
-      label: useBatchActions ? selectedBatchTableCountLabel("batchDrop") : t("contextMenu.dropTable"),
-      action: useBatchActions ? requestBatchDropTables : () => requestDrop(item),
-      icon: Trash2,
-      variant: "destructive" as const,
-    },
+    { label: t("common.more"), icon: ListTree, children: moreActions },
     { label: "", separator: true },
     { label: t("contextMenu.copyName"), action: () => copyName(item), icon: Copy },
   ];
@@ -3545,6 +3609,31 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       </DialogFooter>
     </DialogContent>
   </Dialog>
+
+  <DangerConfirmDialog
+    v-model:open="showVacuumConfirm"
+    :title="t('contextMenu.vacuumTableTitle')"
+    :message="t('contextMenu.vacuumTableMessage', { name: vacuumTarget?.name ?? '' })"
+    :details-text="vacuumRiskMessage"
+    :sql="vacuumPreviewSql"
+    :confirm-label="vacuumExecuting ? t('contextMenu.vacuumTableRunning') : vacuumTableFull ? t('contextMenu.vacuumTableFullConfirm') : t('contextMenu.vacuumTable')"
+    :loading="vacuumExecuting"
+    :close-on-confirm="false"
+    @confirm="confirmVacuumTable"
+  >
+    <template #options>
+      <div class="mb-3 flex gap-3 rounded-md border bg-muted/20 px-3 py-2 text-sm">
+        <label class="flex items-center gap-2" :title="t('contextMenu.vacuumTableAnalyzeHint')">
+          <input v-model="vacuumTableAnalyze" :disabled="vacuumExecuting" type="checkbox" class="h-3.5 w-3.5 shrink-0 accent-primary" @change="refreshVacuumPreviewSql" />
+          <span class="font-medium text-foreground">ANALYZE</span>
+        </label>
+        <label class="flex items-center gap-2" :title="t('contextMenu.vacuumTableFullHint')">
+          <input v-model="vacuumTableFull" :disabled="vacuumExecuting" type="checkbox" class="h-3.5 w-3.5 shrink-0 accent-destructive" @change="refreshVacuumPreviewSql" />
+          <span class="font-medium" :class="vacuumTableFull ? 'text-destructive' : 'text-foreground'">FULL</span>
+        </label>
+      </div>
+    </template>
+  </DangerConfirmDialog>
 
   <DangerConfirmDialog
     v-model:open="showTruncateConfirm"

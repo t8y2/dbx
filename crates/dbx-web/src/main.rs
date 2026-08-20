@@ -481,6 +481,7 @@ async fn main() {
         .route("/query/build-drop-table-child-object-sql", post(routes::query::build_drop_table_child_object_sql))
         .route("/query/build-empty-table-sql", post(routes::query::build_empty_table_sql))
         .route("/query/build-truncate-table-sql", post(routes::query::build_truncate_table_sql))
+        .route("/query/build-vacuum-table-sql", post(routes::query::build_vacuum_table_sql))
         .route("/query/build-mysql-auto-increment-sql", post(routes::query::build_mysql_auto_increment_sql))
         .route("/query/build-drop-database-sql", post(routes::query::build_drop_database_sql))
         .route("/query/build-create-schema-sql", post(routes::query::build_create_schema_sql))

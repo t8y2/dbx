@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use crate::agent_catalog;
 use crate::agent_manager::{
     AgentDriverInfo, AgentInstallCancellation, AgentManager, AgentRegistry, ArtifactFormat, InstalledDriver,
-    JavaRuntimeMode, DEFAULT_JRE_KEY,
+    JavaRuntimeMode, OperationLockHandle, DEFAULT_JRE_KEY,
 };
 use crate::DownloadSource;
 
@@ -581,7 +581,7 @@ async fn ensure_agent_driver_ready_from(
     }
 
     let _installation_guard = am.installation_operation_lock.read().await;
-    let driver_lock = driver_operation_lock(am, db_type).await;
+    let driver_lock = driver_operation_lock(am, db_type);
     let _driver_guard = driver_lock.lock().await;
 
     // Another fallback may have completed installation while this task waited.
@@ -779,14 +779,16 @@ async fn can_fallback_to_local_agent(
     !cancellations.iter().any(|token| token.is_cancelled())
 }
 
-async fn driver_operation_lock(am: &AgentManager, db_type: &str) -> Arc<tokio::sync::Mutex<()>> {
-    let mut locks = am.driver_operation_locks.lock().await;
-    locks.entry(db_type.to_string()).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone()
+fn driver_operation_lock<'a>(am: &'a AgentManager, db_type: &str) -> OperationLockHandle<'a> {
+    let mut locks = am.driver_operation_locks.lock().expect("driver operation lock table poisoned");
+    let lock = locks.entry(db_type.to_string()).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone();
+    OperationLockHandle::new(&am.driver_operation_locks, db_type, lock)
 }
 
-async fn jre_operation_lock(am: &AgentManager, jre_key: &str) -> Arc<tokio::sync::Mutex<()>> {
-    let mut locks = am.jre_install_locks.lock().await;
-    locks.entry(jre_key.to_string()).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone()
+fn jre_operation_lock<'a>(am: &'a AgentManager, jre_key: &str) -> OperationLockHandle<'a> {
+    let mut locks = am.jre_install_locks.lock().expect("JRE install lock table poisoned");
+    let lock = locks.entry(jre_key.to_string()).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone();
+    OperationLockHandle::new(&am.jre_install_locks, jre_key, lock)
 }
 
 /// Future that resolves as soon as any cancellation token fires.
@@ -818,20 +820,22 @@ async fn lock_or_cancel<'a>(
 
 pub async fn uninstall_agent_driver(am: &AgentManager, db_type: &str) -> Result<(), String> {
     let _installation_guard = am.installation_operation_lock.read().await;
-    let driver_lock = driver_operation_lock(am, db_type).await;
-    let _driver_guard = driver_lock.lock().await;
-    prune_driver_download_cache(am, db_type)?;
-    let jar_path = am.driver_jar_path(db_type);
-    if jar_path.exists() {
-        std::fs::remove_file(&jar_path).map_err(|err| err.to_string())?;
-    }
-    if let Some(driver_dir) = jar_path.parent() {
-        if driver_dir.exists() {
-            std::fs::remove_dir_all(driver_dir).map_err(|err| err.to_string())?;
+    {
+        let driver_lock = driver_operation_lock(am, db_type);
+        let _driver_guard = driver_lock.lock().await;
+        prune_driver_download_cache(am, db_type)?;
+        let jar_path = am.driver_jar_path(db_type);
+        if jar_path.exists() {
+            std::fs::remove_file(&jar_path).map_err(|err| err.to_string())?;
         }
+        if let Some(driver_dir) = jar_path.parent() {
+            if driver_dir.exists() {
+                std::fs::remove_dir_all(driver_dir).map_err(|err| err.to_string())?;
+            }
+        }
+        am.mutate_state(|state| state.installed_drivers.remove(db_type))?;
+        am.stop_daemon_by_key(db_type).await;
     }
-    am.mutate_state(|state| state.installed_drivers.remove(db_type))?;
-    am.stop_daemon_by_key(db_type).await;
     Ok(())
 }
 
@@ -843,26 +847,31 @@ pub async fn uninstall_agent_jre(am: &AgentManager, jre_key: &str) -> Result<(),
     // Keep the dependency check and removal atomic with respect to driver
     // installs/uninstalls that may add or remove a dependency on this JRE.
     let _installation_guard = am.installation_operation_lock.write().await;
-    let jre_lock = jre_operation_lock(am, jre_key).await;
-    let _jre_guard = jre_lock.lock().await;
-    let local_state = am.load_state();
-    let dependents: Vec<&str> = local_state
-        .installed_drivers
-        .keys()
-        .filter(|db_type| am.installed_driver_jre_dependency(&local_state, db_type) == Some(jre_key))
-        .map(|k| k.as_str())
-        .collect();
-    if !dependents.is_empty() {
-        return Err(format!("JRE {jre_key} is in use by drivers: {}. Uninstall them first.", dependents.join(", ")));
+    {
+        let jre_lock = jre_operation_lock(am, jre_key);
+        let _jre_guard = jre_lock.lock().await;
+        let local_state = am.load_state();
+        let dependents: Vec<&str> = local_state
+            .installed_drivers
+            .keys()
+            .filter(|db_type| am.installed_driver_jre_dependency(&local_state, db_type) == Some(jre_key))
+            .map(|k| k.as_str())
+            .collect();
+        if !dependents.is_empty() {
+            return Err(format!(
+                "JRE {jre_key} is in use by drivers: {}. Uninstall them first.",
+                dependents.join(", ")
+            ));
+        }
+        // Stop daemons first so any java.exe holding the JRE files exits before
+        // we try to remove the directory (Windows ERROR_ACCESS_DENIED otherwise).
+        am.stop_daemons().await;
+        let jre_dir = am.jre_dir(jre_key);
+        if let Err(err) = remove_jre_dir_with_retry(&jre_dir) {
+            return Err(format_jre_dir_remove_error(&jre_dir, &err));
+        }
+        am.mutate_state(|state| state.jre_versions.remove(jre_key))?;
     }
-    // Stop daemons first so any java.exe holding the JRE files exits before
-    // we try to remove the directory (Windows ERROR_ACCESS_DENIED otherwise).
-    am.stop_daemons().await;
-    let jre_dir = am.jre_dir(jre_key);
-    if let Err(err) = remove_jre_dir_with_retry(&jre_dir) {
-        return Err(format_jre_dir_remove_error(&jre_dir, &err));
-    }
-    am.mutate_state(|state| state.jre_versions.remove(jre_key))?;
     Ok(())
 }
 
@@ -883,7 +892,7 @@ pub async fn reinstall_agent_jre_from(
     // Replacing a JRE must not race a driver operation that is using or about
     // to persist a dependency on the same runtime.
     let _installation_guard = am.installation_operation_lock.write().await;
-    let jre_lock = jre_operation_lock(am, jre_key).await;
+    let jre_lock = jre_operation_lock(am, jre_key);
     let _jre_guard = jre_lock.lock().await;
     let registry = fetch_registry_from(source).await?;
     let jre_info = registry.resolve_jre(jre_key).ok_or_else(|| format!("No JRE definition for version: {jre_key}"))?;
@@ -989,7 +998,7 @@ async fn install_agent_driver_with_batch(
     cancellation: Option<&Arc<AgentInstallCancellation>>,
 ) -> Result<(), String> {
     let _installation_guard = am.installation_operation_lock.read().await;
-    let driver_lock = driver_operation_lock(am, db_type).await;
+    let driver_lock = driver_operation_lock(am, db_type);
     // A cancel that fires while the driver lock is held elsewhere must abort
     // promptly instead of waiting for the lock holder to finish.
     let owned_tokens;
@@ -1051,7 +1060,7 @@ async fn install_agent_driver_from_registry_locked(
     cancellations: &[&AgentInstallCancellation],
 ) -> Result<(), String> {
     let _installation_guard = am.installation_operation_lock.read().await;
-    let driver_lock = driver_operation_lock(am, db_type).await;
+    let driver_lock = driver_operation_lock(am, db_type);
     assert!(!cancellations.is_empty(), "batch driver cancellation token is always registered");
     // A cancelled batch row must not wait for the current lock holder to
     // finish before observing its cancellation tokens.
@@ -1146,7 +1155,7 @@ async fn ensure_jre_from_registry(
 
     // Acquire (or create) the per-JRE-key mutex so that concurrent driver
     // installs sharing the same JRE download it exactly once.
-    let lock = jre_operation_lock(am, jre_key).await;
+    let lock = jre_operation_lock(am, jre_key);
     // A cancel that fires while another install holds the JRE lock must abort
     // promptly instead of waiting for the lock holder to finish.
     let _jre_guard = lock_or_cancel(&lock, cancellations).await?;
@@ -2862,7 +2871,7 @@ pub async fn import_agent_driver(am: &AgentManager, db_type: &str, source_path: 
     // install operation and per-driver locks so an import cannot race an
     // install, Upgrade All, or uninstall for this driver.
     let _installation_guard = am.installation_operation_lock.read().await;
-    let driver_lock = driver_operation_lock(am, db_type).await;
+    let driver_lock = driver_operation_lock(am, db_type);
     let _driver_guard = driver_lock.lock().await;
 
     if !source_path.is_file() {
@@ -3135,6 +3144,28 @@ mod agent_registry_install_tests {
     fn test_manager(name: &str) -> AgentManager {
         let dir = std::env::temp_dir().join(format!("dbx-agent-registry-install-{name}-{}", uuid::Uuid::new_v4()));
         AgentManager::new_with_base_dir(dir)
+    }
+
+    #[test]
+    fn driver_operation_lock_is_removed_after_last_handle_drops() {
+        let manager = test_manager("driver-lock-cleanup");
+        let lock = driver_operation_lock(&manager, "oracle");
+
+        assert_eq!(manager.driver_operation_locks.lock().unwrap().len(), 1);
+        drop(lock);
+        assert!(manager.driver_operation_locks.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn jre_operation_lock_stays_until_all_handles_drop() {
+        let manager = test_manager("jre-lock-cleanup");
+        let first = jre_operation_lock(&manager, DEFAULT_JRE_KEY);
+        let second = jre_operation_lock(&manager, DEFAULT_JRE_KEY);
+
+        drop(first);
+        assert_eq!(manager.jre_install_locks.lock().unwrap().len(), 1);
+        drop(second);
+        assert!(manager.jre_install_locks.lock().unwrap().is_empty());
     }
 
     fn write_test_agent_jar(path: &Path) {
@@ -4255,7 +4286,7 @@ mod agent_registry_install_tests {
             &manager.driver_native_path(db_type),
             native_bytes,
         );
-        let first_lock = driver_operation_lock(&manager, "oracle").await;
+        let first_lock = driver_operation_lock(&manager, "oracle");
         let first_guard = first_lock.lock().await;
         let token = manager.begin_install_cancellation(&install_cancellation_key("batch-test")).await;
         let progress = |_| {};
@@ -4303,7 +4334,7 @@ mod agent_registry_install_tests {
         let source = manager.base_dir().join("dbx-agent-h2.jar");
         std::fs::create_dir_all(source.parent().unwrap()).unwrap();
         write_test_agent_jar(&source);
-        let lock = driver_operation_lock(&manager, db_type).await;
+        let lock = driver_operation_lock(&manager, db_type);
         let first_guard = lock.lock().await;
 
         let blocked =
@@ -4501,7 +4532,7 @@ mod agent_registry_install_tests {
         let cancellation = manager.begin_install_cancellation(db_type).await;
         let cancel_handle = Arc::clone(&cancellation);
         // Hold the driver lock so the install blocks on it.
-        let lock = driver_operation_lock(&manager, db_type).await;
+        let lock = driver_operation_lock(&manager, db_type);
         let _guard = lock.lock().await;
 
         let install_manager = Arc::clone(&manager);
@@ -4530,6 +4561,8 @@ mod agent_registry_install_tests {
         // Cancellation observed while waiting on the lock must never persist state.
         assert!(!manager.load_state().installed_drivers.contains_key(db_type));
         drop(_guard);
+        drop(lock);
+        assert!(manager.driver_operation_locks.lock().unwrap().is_empty());
         manager.finish_install_cancellation(db_type, &cancel_handle).await;
     }
 
@@ -4541,7 +4574,7 @@ mod agent_registry_install_tests {
         let cancellation = manager.begin_install_cancellation(&install_cancellation_key("jre-lock-wait")).await;
         let cancel_handle = Arc::clone(&cancellation);
         // Hold the JRE lock so the install blocks on it before downloading.
-        let lock = jre_operation_lock(&manager, DEFAULT_JRE_KEY).await;
+        let lock = jre_operation_lock(&manager, DEFAULT_JRE_KEY);
         let _guard = lock.lock().await;
 
         let install_manager = Arc::clone(&manager);
@@ -4574,6 +4607,8 @@ mod agent_registry_install_tests {
         assert!(!manager.jre_dir(DEFAULT_JRE_KEY).exists());
         assert!(manager.load_state().jre_versions.is_empty());
         drop(_guard);
+        drop(lock);
+        assert!(manager.jre_install_locks.lock().unwrap().is_empty());
         manager.finish_install_cancellation(&install_cancellation_key("jre-lock-wait"), &cancel_handle).await;
     }
 
@@ -4772,7 +4807,7 @@ mod agent_registry_install_tests {
         let token_b = manager.begin_install_cancellation(&install_cancellation_key(op_b)).await;
 
         // Hold the driver lock so both installs block on it.
-        let lock = driver_operation_lock(&manager, db_type).await;
+        let lock = driver_operation_lock(&manager, db_type);
         let _guard = lock.lock().await;
 
         let manager_a = Arc::clone(&manager);

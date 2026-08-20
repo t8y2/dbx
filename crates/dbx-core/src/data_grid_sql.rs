@@ -1818,9 +1818,7 @@ fn data_grid_save_execution_schema(
     driver_profile: Option<&str>,
     table_meta: &DataGridTableMeta,
 ) -> Option<String> {
-    let is_gaussdb_m = database_type == Some(DatabaseType::Gaussdb)
-        && driver_profile.is_some_and(|profile| profile.eq_ignore_ascii_case("gaussdb-m"));
-    if matches!(database_type, Some(DatabaseType::Neo4j | DatabaseType::Oracle)) || is_gaussdb_m {
+    if matches!(database_type, Some(DatabaseType::Neo4j | DatabaseType::Oracle)) {
         return None;
     }
     crate::sql_dialect::table_data_schema(database_type, driver_profile, table_meta.schema.as_deref())
@@ -5607,36 +5605,6 @@ mod tests {
 
         assert_eq!(result.validation_error, None);
         assert_eq!(result.statements, vec!["UPDATE schema_01.table_01 SET name = 'new' WHERE id = 1;"]);
-        assert_eq!(result.execution_schema.as_deref(), Some("schema_01"));
-    }
-
-    #[test]
-    fn gaussdb_m_save_preserves_database_qualifier_without_execution_schema() {
-        let result = prepare_data_grid_save_for_driver_profile(
-            DataGridSaveStatementOptions {
-                database_type: Some(DatabaseType::Gaussdb),
-                identifier_quote: Some("`".to_string()),
-                table_meta: DataGridTableMeta {
-                    catalog: None,
-                    database: Some("muts".to_string()),
-                    schema: Some("muts".to_string()),
-                    table_name: "mk_sv_busi_param".to_string(),
-                    primary_keys: vec!["id".to_string()],
-                    columns: Some(vec![column("id", "integer", false, None), column("name", "varchar", false, None)]),
-                },
-                columns: vec!["id".to_string(), "name".to_string()],
-                source_columns: None,
-                rows: vec![vec![json!(1), json!("old")]],
-                dirty_rows: vec![(0, vec![(1, json!("new"))])],
-                deleted_rows: vec![],
-                new_rows: vec![],
-            },
-            Some("GaussDB-M"),
-        );
-
-        assert_eq!(result.validation_error, None);
-        assert_eq!(result.statements, vec!["UPDATE muts.mk_sv_busi_param SET name = 'new' WHERE id = 1;"]);
-        assert_eq!(result.execution_schema, None);
     }
 
     #[test]

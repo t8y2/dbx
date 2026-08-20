@@ -91,6 +91,18 @@ describe("production SQL safety", () => {
     }
   });
 
+  it("detects VACUUM in a production PostgreSQL database", () => {
+    const pg = connection({ db_type: "postgres", production_databases: ["prod_app"] });
+    for (const sql of ['VACUUM "public"."orders"', 'VACUUM ANALYZE "public"."orders"', 'VACUUM FULL ANALYZE "public"."orders"']) {
+      expect(assessProductionSql(sql, pg, "prod_app")).toMatchObject({ active: true, isMutation: true, databases: ["prod_app"] });
+    }
+  });
+
+  it("detects qualified VACUUM targets for database-qualified dialects", () => {
+    const mysql = connection({ db_type: "mysql", production_databases: ["prod_app"] });
+    expect(assessProductionSql("VACUUM FULL prod_app.orders", mysql, "staging")).toMatchObject({ active: true, isMutation: true, databases: ["prod_app"] });
+  });
+
   it("detects qualified procedure calls and privilege targets", () => {
     for (const sql of ["CALL prod_app.purge_users()", "CALL `prod_app`.`purge_users`()", "GRANT ALL ON prod_app.* TO 'u'@'%'", "GRANT EXECUTE ON PROCEDURE prod_app.purge_users TO 'u'@'%'"]) {
       expect(assessProductionSql(sql, connection(), "staging")).toMatchObject({ active: true, isMutation: true, databases: ["prod_app"] });

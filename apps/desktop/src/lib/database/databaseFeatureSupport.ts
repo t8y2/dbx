@@ -1,7 +1,7 @@
 import type { ConnectionConfig, DatabaseType, TreeNodeType } from "@/types/database";
 import { supportsDatabaseFeature } from "@/lib/database/databaseDriverManifest";
 import { canEditTableStructure } from "@/lib/table/tableStructureCapabilities";
-import { CLEARABLE_QUERY_SCHEMA_TYPES, DATABASE_OBJECT_TREE_TYPES, DATABASE_SCHEMA_QUALIFIED_TYPES, FETCH_FIRST_TYPES, PG_LIKE_STRUCTURE_TYPES, SCHEMA_AWARE_TYPES, SINGLE_DATABASE_TYPES, TREE_SCHEMA_TYPES } from "@/lib/database/databaseCapabilitySets";
+import { CLEARABLE_QUERY_SCHEMA_TYPES, DATABASE_OBJECT_TREE_TYPES, DATABASE_SCHEMA_QUALIFIED_TYPES, FETCH_FIRST_TYPES, PG_LIKE_STRUCTURE_TYPES, PG_VACUUM_TYPES, SCHEMA_AWARE_TYPES, SINGLE_DATABASE_TYPES, TREE_SCHEMA_TYPES } from "@/lib/database/databaseCapabilitySets";
 import { supportsRegisteredConnectionScopedQueryExecution, supportsRegisteredQueryTargetDatabaseListing, usesRegisteredConnectionOnlyQueryTarget } from "@/lib/database/sqlExecutionTargetRegistry";
 
 export function isSchemaAware(dbType?: DatabaseType): boolean {
@@ -117,6 +117,15 @@ export function supportsQueryExecution(dbType?: DatabaseType): boolean {
   return supportsDatabaseFeature(dbType, "queryExecution");
 }
 
+/**
+ * The AI assistant currently builds its context from database/table metadata.
+ * Connection-only query targets (for example etcd and ZooKeeper) do not expose
+ * that hierarchy, so they must not be offered by sidebar "Add to AI" actions.
+ */
+export function supportsAiAssistantContext(dbType?: DatabaseType): boolean {
+  return supportsQueryExecution(dbType) && !usesConnectionOnlyQueryTarget(dbType);
+}
+
 export function supportsConnectionScopedQueryExecution(dbType?: DatabaseType): boolean {
   return supportsRegisteredConnectionScopedQueryExecution(dbType);
 }
@@ -210,6 +219,10 @@ export function supportsObjectBrowserTreeNode(dbType: DatabaseType | undefined, 
 
 export function supportsTableTruncate(dbType?: DatabaseType): boolean {
   return !!dbType && dbType !== "impala" && dbType !== "sqlite" && dbType !== "rqlite" && dbType !== "turso" && dbType !== "cloudflare-d1" && dbType !== "duckdb" && dbType !== "influxdb" && dbType !== "victoriametrics" && dbType !== "manticoresearch";
+}
+
+export function supportsTableVacuum(dbType?: DatabaseType): boolean {
+  return !!dbType && PG_VACUUM_TYPES.has(dbType);
 }
 
 export function usesPostgresLikeStructureCopy(dbType?: DatabaseType): boolean {

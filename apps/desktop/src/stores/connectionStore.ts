@@ -21,7 +21,6 @@ import type {
   TableNameFilter,
   TableInfo,
   TreeNode,
-  TunnelProfile,
   VectorCollectionMeta,
 } from "@/types/database";
 import {
@@ -63,6 +62,7 @@ import {
   type DropPosition,
   type ReorderEntriesOptions,
 } from "@/lib/sidebar/sidebarLayout";
+import { buildConnectionConfigBundle, filterSidebarLayoutByConnectionIds, filterTunnelProfilesByIds, parseConnectionConfigObject, referencedTunnelProfileIds, selectConnectionConfigBundle, snapshotConnectionsForExport, type ConnectionConfigBundle } from "@/lib/connection/connectionConfigTransfer";
 import type { SqlCompletionColumn, SqlCompletionForeignKey, SqlCompletionObject, SqlCompletionTable } from "@/lib/sql/sqlCompletion";
 import { mergeSqlObjectNavigationType, sqlObjectNavigationTypeFromTableType } from "@/lib/sql/sqlNavigation";
 import * as api from "@/lib/backend/api";
@@ -136,7 +136,7 @@ import { appendVisibleDatabaseSelection } from "@/lib/connection/connectionVisib
 import { buildXuguTypeMemberNodes, isXuguTypeMemberContainer } from "@/lib/sidebar/xuguTypeMembers";
 import { isXuguPublicSynonymScope, sortXuguSchemaInfos, xuguSchemaDisplayName, XUGU_PUBLIC_SYNONYM_SCOPE } from "@/lib/sidebar/xuguPublicSynonyms";
 import { filterNacosNamespacesForSidebar, normalizeNacosNamespacesForDisplay } from "@/lib/nacos/nacosNamespaceVisibility";
-import { buildPackageMemberNodes, markPackageNodesExpandable } from "@/lib/sidebar/packageMembers";
+import { buildPackageMemberNodes, markPackageNodesExpandable, packageMemberGroupOwnerId } from "@/lib/sidebar/packageMembers";
 import { configuredDatabaseProductName, connectionConfigFingerprint, normalizeDatabaseConnectionInfo } from "@/lib/connection/connectionDatabaseInfo";
 import { driverProfileObjectTreeProfileForConnection } from "@/lib/database/driverProfileExtensions";
 import { createMetadataLoadTrace, logMetadataLoadTrace, MetadataLoadCoordinator, type MetadataLoadTraceLogger } from "@/lib/metadata/metadataLoadCoordinator";
@@ -5121,6 +5121,14 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function loadObjectGroupChildren(node: TreeNode, options?: LoadTreeOptions) {
+    const packageOwnerId = packageMemberGroupOwnerId(node);
+    const packageConfig = node.connectionId ? getConfig(node.connectionId) : undefined;
+    if (packageOwnerId && effectiveDatabaseTypeForConnection(packageConfig) === "xugu") {
+      const packageNode = findNode(treeNodes.value, packageOwnerId);
+      if (packageNode?.type === "package") await loadPackageMembers(packageNode, options);
+      return;
+    }
+
     const configForScope = node.connectionId ? getConfig(node.connectionId) : undefined;
     const objectTypesForScope = objectTypesForGroupNode(node.type);
     const pageSizeForScope = sidebarObjectGroupPageSize();
@@ -6139,6 +6147,11 @@ export const useConnectionStore = defineStore("connection", () => {
       await loadTables(node.connectionId, node.database, node.schema, options);
     } else if ((node.type === "table" || node.type === "view" || node.type === "materialized_view") && node.connectionId && hasTreeNodeDatabaseContext(node)) {
       await loadTableGroups(node.connectionId, node.database, node.label, node.schema, node.id, node.catalog);
+    } else if (node.type === "type" && isXuguTypeMemberContainer(node, getConfig(node.connectionId || "")?.db_type)) {
+      // Xugu object types expose attributes and methods through the scoped
+      // completion endpoint. Do not route them through the generic custom-type
+      // loader, which treats the type name as a table and issues getColumns.
+      await loadXuguTypeMembers(node, options);
     } else if (node.type === "type") {
       await loadCustomTypeChildren(node, options);
     } else if (node.type === "group-columns" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.tableName) {
@@ -6467,17 +6480,17 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
-  async function loadXuguTypeMembers(node: TreeNode, options?: Pick<LoadTreeOptions, "preserveCollapsedChildren">): Promise<void> {
+  async function loadXuguTypeMembers(node: TreeNode, options?: Pick<LoadTreeOptions, "force" | "preserveCollapsedChildren">): Promise<void> {
     if (!isXuguTypeMemberContainer(node, getConfig(node.connectionId || "")?.db_type)) return;
     const connectionId = node.connectionId;
     const database = node.database;
     if (!connectionId || !database) return;
-    if (node.isExpanded) {
+    if (node.isExpanded && !options?.force) {
       node.isExpanded = false;
       if (!sidebarSearchQuery.value && !options?.preserveCollapsedChildren) releaseCollapsedTreeNodeChildren(node.id);
       return;
     }
-    if (node.children && node.children.length > 0) {
+    if (!options?.force && node.children && node.children.length > 0) {
       node.isExpanded = true;
       return;
     }
@@ -7773,18 +7786,17 @@ export const useConnectionStore = defineStore("connection", () => {
     await refreshNodes(treeNodes.value);
   }
 
-  async function exportConnectionsToFile(passphrase: string) {
+  async function exportConnectionsToFile(passphrase: string, selectedConnectionIds?: Iterable<string>) {
     const { encryptConfig } = await import("@/lib/backend/configCrypto");
     const tunnelProfileStore = useTunnelProfileStore();
     await tunnelProfileStore.init();
     // Older DBX versions ignore inheritance flags, so always include the
     // effective numeric values as a backward-compatible snapshot.
-    const exportedConnections = connections.value.map((connection) => ({
-      ...connection,
-      connect_timeout_secs: connection.connect_timeout_inherit === true ? settingsStore.editorSettings.globalConnectTimeoutSecs : connection.connect_timeout_secs,
-      query_timeout_secs: connection.query_timeout_inherit === true ? settingsStore.editorSettings.globalQueryTimeoutSecs : connection.query_timeout_secs,
-    }));
-    const exportData = { connections: exportedConnections, layout: sidebarLayout.value, tunnelProfiles: tunnelProfileStore.profiles };
+    const exportedConnections = snapshotConnectionsForExport(connections.value, {
+      connectTimeoutSecs: () => settingsStore.editorSettings.globalConnectTimeoutSecs,
+      queryTimeoutSecs: () => settingsStore.editorSettings.globalQueryTimeoutSecs,
+    });
+    const exportData = buildConnectionConfigBundle(exportedConnections, sidebarLayout.value, tunnelProfileStore.profiles, selectedConnectionIds);
     const json = JSON.stringify(exportData);
     const payload = await encryptConfig(json, passphrase);
     const content = JSON.stringify(payload, null, 2);
@@ -7991,15 +8003,13 @@ export const useConnectionStore = defineStore("connection", () => {
     return { content, encrypted: isEncryptedConfig(parsed) };
   }
 
-  async function importConnectionsFromFile(content: string, passphrase: string | null): Promise<{ count: number; layout?: SidebarLayout }> {
-    let imported: ConnectionConfig[] = [];
-    let importedLayout: SidebarLayout | undefined;
-    let importedTunnelProfiles: TunnelProfile[] = [];
-
+  async function parseConnectionsImport(content: string, passphrase: string | null): Promise<ConnectionConfigBundle> {
     if (!passphrase && content.trimStart().startsWith("<")) {
       const { parseNavicatConnections } = await import("@/lib/imports/navicatImport");
-      imported = await parseNavicatConnections(content);
-    } else if (!passphrase) {
+      return { connections: await parseNavicatConnections(content) };
+    }
+
+    if (!passphrase) {
       const { isDbeaverImportPayload, parseDbeaverImport } = await import("@/lib/imports/dbeaverImport");
       const { isDataGripImportPayload, parseDataGripImport } = await import("@/lib/imports/datagripImport");
       if (isDataGripImportPayload(content)) {
@@ -8011,89 +8021,61 @@ export const useConnectionStore = defineStore("connection", () => {
         };
         pendingDataGripPayload = payload;
         const result = parseDataGripImport(payload);
-        imported = result.connections;
-        importedLayout = result.layout;
-      } else if (isDbeaverImportPayload(content)) {
+        return { connections: result.connections, layout: result.layout };
+      }
+      if (isDbeaverImportPayload(content)) {
         const result = await parseDbeaverImport(content);
-        imported = result.connections;
-        importedLayout = result.layout;
-      } else {
-        const parsed = JSON.parse(content);
-
-        if (Array.isArray(parsed)) {
-          imported = parsed;
-        } else if (parsed.format === "dbx-config" && Array.isArray(parsed.connections)) {
-          imported = parsed.connections;
-        } else if (parsed.connections && Array.isArray(parsed.connections)) {
-          imported = parsed.connections;
-          if (parsed.layout?.groups && parsed.layout?.order) {
-            importedLayout = parsed.layout;
-          }
-          if (Array.isArray(parsed.tunnelProfiles)) {
-            importedTunnelProfiles = parsed.tunnelProfiles;
-          }
-        } else {
-          imported = [];
-        }
+        return { connections: result.connections, layout: result.layout };
       }
-    } else {
-      const parsed = JSON.parse(content);
-
-      if (passphrase) {
-        const { decryptConfig } = await import("@/lib/backend/configCrypto");
-        const json = await decryptConfig(parsed, passphrase);
-        const decrypted = JSON.parse(json);
-        if (Array.isArray(decrypted)) {
-          imported = decrypted;
-        } else if (decrypted.connections) {
-          imported = decrypted.connections;
-          if (decrypted.layout?.groups && decrypted.layout?.order) {
-            importedLayout = decrypted.layout;
-          }
-          if (Array.isArray(decrypted.tunnelProfiles)) {
-            importedTunnelProfiles = decrypted.tunnelProfiles;
-          }
-        } else {
-          imported = [];
-        }
-      }
+      return parseConnectionConfigObject(JSON.parse(content));
     }
 
-    // Profiles keep their original ids: imported connections reference them
-    // via transport_layers[].profile_id, so regenerating ids would break the
-    // links. Same-id profiles are overwritten with the imported copy.
+    const { decryptConfig } = await import("@/lib/backend/configCrypto");
+    const json = await decryptConfig(JSON.parse(content), passphrase);
+    return parseConnectionConfigObject(JSON.parse(json));
+  }
+
+  async function applyConnectionsImport(preview: ConnectionConfigBundle, selectedConnectionIds?: Iterable<string>): Promise<{ count: number; layout?: SidebarLayout }> {
+    const selected = selectConnectionConfigBundle(preview, selectedConnectionIds);
+    const imported = selected.connections.map((connection) => ({ ...connection }));
+    let importedLayout = selected.layout;
+    const importedConnections: ConnectionConfig[] = [];
+    const importedConnectionIdMap = new Map<string, string>();
+    for (const config of imported) {
+      const duplicate = [...connections.value, ...importedConnections].find((connection) => connection.name === config.name && connection.host === config.host && connection.port === config.port);
+      if (duplicate) {
+        if (typeof config.id === "string") importedConnectionIdMap.set(config.id, duplicate.id);
+        continue;
+      }
+      const importedId = config.id;
+      config.id = uuid();
+      if (typeof importedId === "string") importedConnectionIdMap.set(importedId, config.id);
+      importedConnections.push(normalizeConnection(config));
+    }
+    const importedTunnelProfileIds = referencedTunnelProfileIds(importedConnections);
+    const importedTunnelProfiles = filterTunnelProfilesByIds(selected.tunnelProfiles ?? [], importedTunnelProfileIds);
     if (importedTunnelProfiles.length) {
-      const tunnelProfileStore = useTunnelProfileStore();
-      await tunnelProfileStore.init();
-      const merged = [...tunnelProfileStore.profiles];
+      const importedTunnelProfileStore = useTunnelProfileStore();
+      await importedTunnelProfileStore.init();
+      const merged = [...importedTunnelProfileStore.profiles];
       for (const profile of importedTunnelProfiles) {
         if (!profile || typeof profile.id !== "string" || !profile.id) continue;
         const index = merged.findIndex((existing) => existing.id === profile.id);
         if (index >= 0) merged[index] = profile;
         else merged.push(profile);
       }
-      await tunnelProfileStore.saveProfiles(merged);
+      await importedTunnelProfileStore.saveProfiles(merged);
     }
-
-    let count = 0;
-    const importedConnectionIdMap = new Map<string, string>();
-    for (const config of imported) {
-      const duplicate = connections.value.find((c) => c.name === config.name && c.host === config.host && c.port === config.port);
-      if (!duplicate) {
-        const importedId = config.id;
-        config.id = uuid();
-        if (typeof importedId === "string") importedConnectionIdMap.set(importedId, config.id);
-        const normalized = normalizeConnection(config);
-        await addConnection(normalized);
-        count++;
-      } else if (typeof config.id === "string") {
-        importedConnectionIdMap.set(config.id, duplicate.id);
-      }
-    }
+    for (const connection of importedConnections) await addConnection(connection);
     if (importedLayout) {
-      importedLayout = remapSidebarLayoutConnectionIds(importedLayout, importedConnectionIdMap);
+      importedLayout = filterSidebarLayoutByConnectionIds(remapSidebarLayoutConnectionIds(importedLayout, importedConnectionIdMap), importedConnectionIdMap.values());
     }
-    return { count, layout: importedLayout };
+    return { count: importedConnections.length, layout: importedLayout };
+  }
+
+  async function importConnectionsFromFile(content: string, passphrase: string | null, selectedConnectionIds?: Iterable<string>): Promise<{ count: number; layout?: SidebarLayout }> {
+    const preview = await parseConnectionsImport(content, passphrase);
+    return applyConnectionsImport(preview, selectedConnectionIds);
   }
 
   /** Read macOS Keychain passwords for DataGrip connections and update them. */
@@ -8368,6 +8350,8 @@ export const useConnectionStore = defineStore("connection", () => {
     invalidateMetadataCache,
     exportConnectionsToFile,
     readImportFile,
+    parseConnectionsImport,
+    applyConnectionsImport,
     importConnectionsFromFile,
     applyDataGripKeychainPasswords,
     applySidebarLayout,

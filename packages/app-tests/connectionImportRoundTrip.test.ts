@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { createPinia, setActivePinia } from "pinia";
 import { useConnectionStore } from "../../apps/desktop/src/stores/connectionStore.ts";
 import { hasSidebarLayoutEntries } from "../../apps/desktop/src/lib/sidebar/sidebarLayout.ts";
-import type { ConnectionConfig, SidebarLayout, TreeNode } from "../../apps/desktop/src/types/database.ts";
+import { decryptConfig } from "../../apps/desktop/src/lib/backend/configCrypto.ts";
+import type { ConnectionConfig, SidebarLayout, TreeNode, TunnelProfile } from "../../apps/desktop/src/types/database.ts";
 
 const PASSPHRASE = "round-trip-pass";
 
@@ -58,9 +59,9 @@ function installExportCapture() {
   };
 }
 
-function installBackend(initialConnections: ConnectionConfig[], initialLayout: SidebarLayout | null) {
+function installBackend(initialConnections: ConnectionConfig[], initialLayout: SidebarLayout | null, initialProfiles: TunnelProfile[] = []) {
   const originalFetch = globalThis.fetch;
-  const state = { connections: initialConnections, layout: initialLayout };
+  const state = { connections: initialConnections, layout: initialLayout, profiles: initialProfiles };
 
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -75,6 +76,12 @@ function installBackend(initialConnections: ConnectionConfig[], initialLayout: S
     }
     if (url === "/api/connection/save") {
       state.connections = JSON.parse(String(init?.body ?? "[]"));
+      return json(null);
+    }
+    if (url === "/api/tunnel-profiles/list") return json(state.profiles);
+    if (url === "/api/tunnel-profiles/save") {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { profiles?: TunnelProfile[] };
+      state.profiles = body.profiles ?? [];
       return json(null);
     }
     return json(null);
@@ -158,16 +165,7 @@ test("importing a dbx export merges into the existing sidebar instead of replaci
 
     // The machine's own folder and its connection must survive untouched, and
     // every imported connection must land in its exported folder.
-    assert.deepEqual(outline(store.treeNodes), [
-      "[Local Folder]",
-      "Local Folder/Local DB",
-      "[Prod]",
-      "Prod/Prod DB 1",
-      "Prod/Prod DB 2",
-      "[Dev]",
-      "Dev/Dev DB 1",
-      "Scratch",
-    ]);
+    assert.deepEqual(outline(store.treeNodes), ["[Local Folder]", "Local Folder/Local DB", "[Prod]", "Prod/Prod DB 1", "Prod/Prod DB 2", "[Dev]", "Dev/Dev DB 1", "Scratch"]);
     assert.equal(store.connections.length, 5);
   } finally {
     storage.restore();
@@ -196,6 +194,181 @@ test("re-importing the same dbx export does not duplicate connections", async ()
 
     assert.equal(store.connections.length, 4);
     assert.deepEqual(outline(store.treeNodes), ["[Prod]", "Prod/Prod DB 1", "Prod/Prod DB 2", "[Dev]", "Dev/Dev DB 1", "Scratch"]);
+  } finally {
+    storage.restore();
+    backend.restore();
+  }
+});
+
+function tunnelLayer(id: string, profileId: string) {
+  return { type: "ssh" as const, id, host: "", port: 22, user: "", profile_id: profileId };
+}
+
+async function decryptExport(content: string) {
+  return JSON.parse(await decryptConfig(JSON.parse(content), PASSPHRASE));
+}
+
+test("selective encrypted export keeps only chosen connections, layout, and tunnel profiles", async () => {
+  const backend = installBackend([], null, [
+    { type: "ssh", id: "tunnel-1", host: "bastion-1", port: 22, user: "root" },
+    { type: "ssh", id: "tunnel-2", host: "bastion-2", port: 22, user: "root" },
+  ]);
+  const capture = installExportCapture();
+  const storage = installMemoryStorage();
+  try {
+    setActivePinia(createPinia());
+    const store = useConnectionStore();
+    await store.initFromDisk();
+
+    const prod = store.createConnectionGroup("Prod");
+    const dev = store.createConnectionGroup("Dev");
+    await store.addConnection({ ...conn("a-1", "Prod DB 1", 3306), transport_layers: [tunnelLayer("layer-a", "tunnel-1")] }, prod);
+    await store.addConnection({ ...conn("a-2", "Prod DB 2", 3307), transport_layers: [tunnelLayer("layer-b", "tunnel-2")] }, prod);
+    await store.addConnection({ ...conn("a-3", "Dev DB 1", 3308), transport_layers: [tunnelLayer("layer-c", "tunnel-1")] }, dev);
+    await store.addConnection(conn("a-4", "Scratch", 3309), null);
+
+    const selected = store.connections.filter((connection) => connection.name === "Prod DB 1" || connection.name === "Dev DB 1").map((connection) => connection.id);
+    await store.exportConnectionsToFile(PASSPHRASE, selected);
+    const decrypted = await decryptExport(await capture.content());
+
+    assert.deepEqual(
+      decrypted.connections.map((connection: ConnectionConfig) => connection.name),
+      ["Prod DB 1", "Dev DB 1"],
+    );
+    assert.equal(
+      decrypted.connections.some((connection: ConnectionConfig) => connection.name === "Prod DB 2" || connection.name === "Scratch"),
+      false,
+    );
+    assert.deepEqual(
+      decrypted.tunnelProfiles.map((profile: TunnelProfile) => profile.id),
+      ["tunnel-1"],
+    );
+    assert.deepEqual(
+      decrypted.layout.groups.map((group: { name: string }) => group.name),
+      ["Prod", "Dev"],
+    );
+    const layoutIds: string[] = [];
+    const walk = (entries: Array<{ type: string; id: string; children?: typeof entries }>) => {
+      for (const entry of entries) {
+        if (entry.type === "connection") layoutIds.push(entry.id);
+        else if (entry.children) walk(entry.children);
+      }
+    };
+    walk(decrypted.layout.order);
+    assert.deepEqual(layoutIds.sort(), selected.slice().sort());
+  } finally {
+    storage.restore();
+    capture.restore();
+    backend.restore();
+  }
+});
+
+test("selective encrypted import applies only chosen connections and later remaining ones", async () => {
+  const exported = await exportFromMachineA();
+  const backend = installBackend([], null);
+  const storage = installMemoryStorage();
+  try {
+    setActivePinia(createPinia());
+    const store = useConnectionStore();
+    await store.initFromDisk();
+
+    const preview = await store.parseConnectionsImport(exported, PASSPHRASE);
+    assert.equal(store.connections.length, 0);
+    const firstIds = preview.connections.filter((connection) => connection.name === "Prod DB 1" || connection.name === "Dev DB 1").map((connection) => connection.id);
+    const first = await store.applyConnectionsImport(preview, firstIds);
+    assert.equal(first.count, 2);
+    if (first.layout) store.applySidebarLayout(first.layout);
+    assert.deepEqual(store.connections.map((connection) => connection.name).sort(), ["Dev DB 1", "Prod DB 1"]);
+    assert.deepEqual(outline(store.treeNodes), ["[Prod]", "Prod/Prod DB 1", "[Dev]", "Dev/Dev DB 1"]);
+
+    const again = await store.applyConnectionsImport(preview, firstIds);
+    assert.equal(again.count, 0);
+
+    const remainingIds = preview.connections.filter((connection) => connection.name === "Prod DB 2").map((connection) => connection.id);
+    const remaining = await store.applyConnectionsImport(preview, remainingIds);
+    assert.equal(remaining.count, 1);
+    if (remaining.layout) store.applySidebarLayout(remaining.layout);
+    assert.deepEqual(store.connections.map((connection) => connection.name).sort(), ["Dev DB 1", "Prod DB 1", "Prod DB 2"]);
+    assert.deepEqual(outline(store.treeNodes), ["[Prod]", "Prod/Prod DB 1", "Prod/Prod DB 2", "[Dev]", "Dev/Dev DB 1"]);
+  } finally {
+    storage.restore();
+    backend.restore();
+  }
+});
+
+test("duplicate imports do not overwrite tunnel profiles before connection deduplication", async () => {
+  const existingProfile = { type: "ssh", id: "tunnel-duplicate", host: "local-bastion", port: 22, user: "root" } as TunnelProfile;
+  const backend = installBackend([conn("local-duplicate", "Duplicate", 3306)], null, [existingProfile]);
+  const storage = installMemoryStorage();
+  try {
+    setActivePinia(createPinia());
+    const store = useConnectionStore();
+    await store.initFromDisk();
+
+    const preview = {
+      connections: [
+        { ...conn("import-duplicate", "Duplicate", 3306), transport_layers: [tunnelLayer("duplicate-layer", "tunnel-duplicate")] },
+        { ...conn("import-new", "New", 3307), transport_layers: [tunnelLayer("new-layer", "tunnel-new")] },
+      ],
+      tunnelProfiles: [{ ...existingProfile, host: "imported-bastion" }, { type: "ssh", id: "tunnel-new", host: "new-bastion", port: 22, user: "root" } as TunnelProfile],
+    };
+
+    const result = await store.applyConnectionsImport(preview);
+
+    assert.equal(result.count, 1);
+    assert.deepEqual(
+      backend.state.profiles.map((profile) => ({ id: profile.id, host: profile.host })),
+      [
+        { id: "tunnel-duplicate", host: "local-bastion" },
+        { id: "tunnel-new", host: "new-bastion" },
+      ],
+    );
+    assert.deepEqual(store.connections.map((connection) => connection.name).sort(), ["Duplicate", "New"]);
+  } finally {
+    storage.restore();
+    backend.restore();
+  }
+});
+
+test("wrong passphrase and preview-only parse do not mutate local connections", async () => {
+  const exported = await exportFromMachineA();
+  const backend = installBackend([], null);
+  const storage = installMemoryStorage();
+  try {
+    setActivePinia(createPinia());
+    const store = useConnectionStore();
+    await store.initFromDisk();
+
+    await assert.rejects(() => store.parseConnectionsImport(exported, "wrong-pass"), /wrong_passphrase/);
+    assert.equal(store.connections.length, 0);
+
+    const preview = await store.parseConnectionsImport(exported, PASSPHRASE);
+    assert.equal(preview.connections.length, 4);
+    assert.equal(store.connections.length, 0);
+  } finally {
+    storage.restore();
+    backend.restore();
+  }
+});
+
+test("plain legacy dbx config still imports a selected subset", async () => {
+  const backend = installBackend([], null);
+  const storage = installMemoryStorage();
+  try {
+    setActivePinia(createPinia());
+    const store = useConnectionStore();
+    await store.initFromDisk();
+
+    const content = JSON.stringify({
+      connections: [conn("old-a", "Legacy A", 3306), conn("old-b", "Legacy B", 3307), conn("old-c", "Legacy C", 3308)],
+    });
+    const preview = await store.parseConnectionsImport(content, null);
+    const result = await store.applyConnectionsImport(
+      preview,
+      preview.connections.filter((connection) => connection.name !== "Legacy B").map((connection) => connection.id),
+    );
+    assert.equal(result.count, 2);
+    assert.deepEqual(store.connections.map((connection) => connection.name).sort(), ["Legacy A", "Legacy C"]);
   } finally {
     storage.restore();
     backend.restore();

@@ -114,6 +114,31 @@ describe("sqlFormatter", () => {
     expect(formatted).toContain("AS id");
   });
 
+  it("formats complete backtick-quoted spans with the PostgreSQL dialect", async () => {
+    const formatted = await formatSqlText("select `schema`.`odd``name` from user;", "postgres");
+
+    expect(formatted).toBe("SELECT\n  `schema`.`odd``name`\nFROM\n  user;");
+  });
+
+  it("keeps PostgreSQL double-quoted identifiers and casts unchanged", async () => {
+    const formatted = await formatSqlText('select "display""name" from records where payload::jsonb is not null;', "postgres");
+
+    expect(formatted).toBe('SELECT\n  "display""name"\nFROM\n  records\nWHERE\n  payload::jsonb IS NOT NULL;');
+  });
+
+  it("keeps MySQL backtick formatting unchanged", async () => {
+    const formatted = await formatSqlText("select `schema`.`odd``name` from `user`;", "mysql");
+
+    expect(formatted).toBe("SELECT\n  `schema`.`odd``name`\nFROM\n  `user`;");
+  });
+
+  it("keeps malformed PostgreSQL backtick input unchanged while editing", async () => {
+    const sql = "select `id from user;";
+
+    await expect(formatSqlText(sql, "postgres")).rejects.toThrow("Parse error: Unexpected");
+    await expect(formatSqlForEditing(sql, "postgres")).resolves.toBe(sql);
+  });
+
   it("formats Dameng SQL with a standalone trailing dot without changing the invalid token", async () => {
     const sql = `SELECT JS1.REC_CREATOR as "recCreator", JS1.REC_CREATOR_JOB_ID as "recCreatorJobId" FROM APSSC.TMPJS01 JS1 WHERE 1=1 AND JS1.SUBSTR(REC_CREATE_TIME,1,8) = ? ORDER BY DECODE(JS1.STATUS,'DRAFT',1,'PENDING_APPROVAL',2,'APPROVED',3,'POSTED',4,'REJECTED',5,'DELETED',6), JS1.REC_CREATE_TIME DESC .`;
 

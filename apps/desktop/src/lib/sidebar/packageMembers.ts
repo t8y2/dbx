@@ -1,5 +1,14 @@
 import type { CompletionAssistantCandidate, DatabaseType, TreeNode, TreeNodeType } from "@/types/database";
 
+const PACKAGE_MEMBER_GROUP_MARKER = ":members:";
+
+export function packageMemberGroupOwnerId(node: TreeNode): string | null {
+  if (node.parentType !== "package" || (node.type !== "group-procedures" && node.type !== "group-functions")) return null;
+  const markerIndex = node.id.lastIndexOf(PACKAGE_MEMBER_GROUP_MARKER);
+  if (markerIndex <= 0) return null;
+  return node.id.slice(0, markerIndex);
+}
+
 export function markPackageNodesExpandable(nodes: TreeNode[]): TreeNode[] {
   return nodes.map((node) => (node.type === "package" ? { ...node, children: node.children ?? [] } : node));
 }

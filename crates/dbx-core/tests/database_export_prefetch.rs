@@ -3,6 +3,8 @@
 
 mod support;
 
+use std::process::Command;
+
 use dbx_core::connection::AppState;
 use dbx_core::database_export::{export_database_sql_core, DatabaseExportRequest};
 use dbx_core::storage::Storage;
@@ -41,7 +43,12 @@ async fn run_database_export_writes_structure_and_data_for_all_tables() {
          INSERT INTO parent VALUES (1, 'alpha'), (2, 'beta');\
          INSERT INTO child VALUES (10, 1, 'first-child'), (11, 2, NULL);\
          INSERT INTO standalone_a VALUES (100, '{\"k\": \"v\"}');\
-         INSERT INTO standalone_b VALUES (200, '2024-05-06T07:08:09Z');",
+         INSERT INTO standalone_b VALUES (200, '2024-05-06T07:08:09Z');\
+         CREATE FUNCTION update_standalone_b_timestamp() RETURNS trigger LANGUAGE plpgsql AS $$\
+           BEGIN NEW.created_at = now(); RETURN NEW; END;\
+         $$;\
+         CREATE TRIGGER trg_standalone_b_timestamp BEFORE INSERT OR UPDATE ON standalone_b \
+           FOR EACH ROW EXECUTE FUNCTION update_standalone_b_timestamp();",
     );
 
     let dir = std::env::temp_dir().join(format!("dbx-export-prefetch-{}", uuid::Uuid::new_v4()));
@@ -63,7 +70,7 @@ async fn run_database_export_writes_structure_and_data_for_all_tables() {
         excluded_tables: Vec::new(),
         include_structure: true,
         include_data: true,
-        include_objects: false,
+        include_objects: true,
         include_create_database: false,
         drop_table_if_exists: true,
         omit_auto_increment: false,
@@ -92,6 +99,42 @@ async fn run_database_export_writes_structure_and_data_for_all_tables() {
     let parent_pos = exported.find("CREATE TABLE \"public\".\"parent\"").unwrap();
     let child_pos = exported.find("CREATE TABLE \"public\".\"child\"").unwrap();
     assert!(parent_pos < child_pos, "parent table DDL should precede child table DDL");
+
+    let function_pos = exported.find("FUNCTION public.update_standalone_b_timestamp()").unwrap();
+    let trigger_pos = exported.find("CREATE TRIGGER trg_standalone_b_timestamp").unwrap();
+    assert!(function_pos < trigger_pos, "trigger function must be exported before its trigger:\n{exported}");
+
+    psql(&container, "DROP SCHEMA IF EXISTS replay CASCADE; CREATE SCHEMA replay");
+    let replay_file = dir.join("replay.sql");
+    let replayable = exported.replace("\"public\".", "\"replay\".").replace("public.", "replay.");
+    std::fs::write(&replay_file, format!("SET search_path TO replay;\n{replayable}")).unwrap();
+    let container_replay_file = "/var/lib/postgresql/data/dbx-issue-6739-replay.sql";
+    let copied = Command::new("docker")
+        .args(["cp", replay_file.to_str().unwrap(), &format!("{}:{container_replay_file}", container.name)])
+        .output()
+        .expect("copy replay SQL into PostgreSQL container");
+    assert!(copied.status.success(), "docker cp failed: {}", String::from_utf8_lossy(&copied.stderr));
+    let replayed = Command::new("docker")
+        .args([
+            "exec",
+            &container.name,
+            "psql",
+            "-U",
+            "postgres",
+            "-d",
+            "postgres",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-f",
+            container_replay_file,
+        ])
+        .output()
+        .expect("replay exported SQL");
+    assert!(
+        replayed.status.success(),
+        "replaying exported SQL should create the trigger after its function: {}",
+        String::from_utf8_lossy(&replayed.stderr)
+    );
 
     // 空表只导结构不导数据
     assert!(

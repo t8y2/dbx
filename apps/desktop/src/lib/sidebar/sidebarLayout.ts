@@ -107,6 +107,55 @@ export function reconcileLayout(connectionIds: string[], layout: SidebarLayout |
   return { groups, order };
 }
 
+/**
+ * Keep only the selected connections and drop groups that become empty.
+ * Unlike {@link reconcileLayout}, missing selected ids are not appended as
+ * ungrouped leftovers — the caller already owns the selected set.
+ */
+export function filterSidebarLayoutByConnectionIds(layout: SidebarLayout | null | undefined, connectionIds: Iterable<string>): SidebarLayout {
+  const selectedIds = Array.from(new Set(Array.from(connectionIds).filter((id) => id.length > 0)));
+  if (!layout) {
+    return {
+      groups: [],
+      order: selectedIds.map((id) => ({ type: "connection" as const, id })),
+    };
+  }
+
+  const validIds = new Set(selectedIds);
+  const validGroups = new Set(layout.groups.map((group) => group.id));
+  const seenConnections = new Set<string>();
+  const seenGroups = new Set<string>();
+
+  const prune = (entry: SidebarOrderEntry): SidebarOrderEntry | null => {
+    if (entry.type === "connection") {
+      if (!validIds.has(entry.id) || seenConnections.has(entry.id)) return null;
+      seenConnections.add(entry.id);
+      return { type: "connection", id: entry.id };
+    }
+    if (!validGroups.has(entry.id) || seenGroups.has(entry.id)) return null;
+    seenGroups.add(entry.id);
+    const children = entryChildren(entry).map(prune).filter(Boolean) as SidebarOrderEntry[];
+    if (!children.length) return null;
+    return { type: "group", id: entry.id, children };
+  };
+
+  const order = layout.order.map(prune).filter(Boolean) as SidebarOrderEntry[];
+  const usedGroupIds = new Set<string>();
+  const collectGroups = (entries: SidebarOrderEntry[]) => {
+    for (const entry of entries) {
+      if (entry.type !== "group") continue;
+      usedGroupIds.add(entry.id);
+      collectGroups(entry.children ?? []);
+    }
+  };
+  collectGroups(order);
+
+  return {
+    groups: layout.groups.filter((group) => usedGroupIds.has(group.id)).map((group) => ({ ...group })),
+    order,
+  };
+}
+
 export function remapSidebarLayoutConnectionIds(layout: SidebarLayout, connectionIdMap: Map<string, string>): SidebarLayout {
   const remapEntries = (entries: SidebarOrderEntry[]): SidebarOrderEntry[] =>
     entries.flatMap((entry): SidebarOrderEntry[] => {

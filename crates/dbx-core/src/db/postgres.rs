@@ -4116,6 +4116,26 @@ fn list_object_routines_sql(include_timestamps: bool, has_proc_prokind: bool, ha
      WHERE n.nspname = $1 AND NOT p.proisagg AND NOT p.proiswindow"
 }
 
+fn redshift_routine_objects_sql() -> &'static str {
+    "SELECT function_name AS object_name, \
+       CASE function_type \
+         WHEN 'STORED PROCEDURE' THEN 'PROCEDURE' \
+         ELSE 'FUNCTION' \
+       END AS object_type, \
+       NULL::varchar AS object_comment, \
+       NULL::varchar AS created_at, \
+       NULL::varchar AS updated_at, \
+       NULL::varchar AS parent_schema, \
+       NULL::varchar AS parent_name, \
+       argument_type AS signature, \
+       CASE function_type WHEN 'STORED PROCEDURE' THEN 2 ELSE 3 END AS sort_order \
+     FROM svv_redshift_functions \
+     WHERE database_name = current_database() \
+       AND schema_name = $1 \
+       AND function_type IN ('STORED PROCEDURE', 'REGULAR FUNCTION') \
+     ORDER BY sort_order, object_name"
+}
+
 /// SQL for listing user-defined types in one schema.
 ///
 /// Only explicitly created types are returned: base types (b), standalone
@@ -4361,8 +4381,37 @@ pub async fn list_objects(
         }
     };
 
-    Ok(rows
-        .iter()
+    Ok(object_rows_to_infos(&rows, schema))
+}
+
+pub async fn list_redshift_objects(
+    pool: &Pool,
+    schema: &str,
+    include_relations: bool,
+    include_routines: bool,
+) -> Result<Vec<ObjectInfo>, String> {
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let mut rows = Vec::new();
+
+    if include_relations {
+        // Redshift does not support PostgreSQL's generic file, object-location,
+        // or transaction-ID helpers, so skip the timestamp variant entirely.
+        rows = list_objects_rows(&client, schema, false, false, false, false, true, false, false).await?;
+    }
+
+    if include_routines {
+        let routine_rows = client
+            .query_typed(redshift_routine_objects_sql(), &[(&schema, Type::VARCHAR)])
+            .await
+            .map_err(|error| format!("Redshift routine metadata query failed: {error}"))?;
+        rows.extend(routine_rows);
+    }
+
+    Ok(object_rows_to_infos(&rows, schema))
+}
+
+fn object_rows_to_infos(rows: &[Row], schema: &str) -> Vec<ObjectInfo> {
+    rows.iter()
         .map(|row| {
             let object_type = pg_row_try_string(row, 1);
             let raw_signature = row.try_get::<_, Option<String>>(7).ok().flatten();
@@ -4389,7 +4438,7 @@ pub async fn list_objects(
                 xugu_type_members_expandable: None,
             }
         })
-        .collect())
+        .collect()
 }
 
 fn custom_type_list_metadata(value: Option<&str>) -> (Option<String>, Option<bool>) {
@@ -10814,6 +10863,29 @@ mod tests {
         let sql = list_objects_sql(false, false, false, false, true, true, false);
         assert!(sql.contains("pg_get_function_arguments(p.oid) AS signature"));
         assert!(!sql.contains("pg_get_function_identity_arguments"));
+    }
+
+    #[test]
+    fn redshift_routine_objects_sql_uses_supported_catalog_view() {
+        let sql = redshift_routine_objects_sql();
+        assert!(sql.contains("FROM svv_redshift_functions"));
+        assert!(sql.contains("database_name = current_database()"));
+        assert!(sql.contains("schema_name = $1"));
+        assert!(sql.contains("'STORED PROCEDURE'"));
+        assert!(sql.contains("'REGULAR FUNCTION'"));
+        assert!(!sql.contains("pg_proc"));
+        assert!(!sql.contains("pg_get_function"));
+        assert!(!sql.contains("UNION"));
+    }
+
+    #[test]
+    fn redshift_relation_objects_sql_avoids_unsupported_postgres_helpers() {
+        let sql = list_objects_sql(false, false, false, false, true, false, false);
+        assert!(sql.contains("pg_catalog.pg_class"));
+        assert!(!sql.contains("pg_catalog.pg_proc"));
+        assert!(!sql.contains("pg_stat_file"));
+        assert!(!sql.contains("pg_relation_filepath"));
+        assert!(!sql.contains("pg_xact_commit_timestamp"));
     }
 
     #[test]

@@ -112,6 +112,20 @@ pub struct TableAdminSqlOptions {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct VacuumTableSqlOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_type: Option<DatabaseType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    pub table_name: String,
+    #[serde(default)]
+    pub full: bool,
+    #[serde(default)]
+    pub analyze: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MysqlAutoIncrementSqlOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_type: Option<DatabaseType>,
@@ -557,6 +571,32 @@ pub fn build_truncate_table_sql(options: TableAdminSqlOptions) -> String {
         };
         format!("TRUNCATE TABLE {table}{cascade};")
     }
+}
+
+pub fn build_vacuum_table_sql(options: VacuumTableSqlOptions) -> Result<String, String> {
+    if !supports_vacuum_table(options.database_type) {
+        return Err(format!("VACUUM is not supported for {}.", database_label(options.database_type)));
+    }
+    let table = qualified_name(options.database_type, options.schema.as_deref(), &options.table_name);
+    let full = if options.full { " FULL" } else { "" };
+    let analyze = if options.analyze { " ANALYZE" } else { "" };
+    Ok(format!("VACUUM{full}{analyze} {table};"))
+}
+
+fn supports_vacuum_table(database_type: Option<DatabaseType>) -> bool {
+    matches!(
+        database_type,
+        Some(
+            DatabaseType::Postgres
+                | DatabaseType::Gaussdb
+                | DatabaseType::Kwdb
+                | DatabaseType::Kingbase
+                | DatabaseType::Highgo
+                | DatabaseType::Uxdb
+                | DatabaseType::Vastbase
+                | DatabaseType::OpenGauss
+        )
+    )
 }
 
 pub fn build_mysql_auto_increment_sql(options: MysqlAutoIncrementSqlOptions) -> Result<String, String> {
@@ -1382,6 +1422,58 @@ mod tests {
             build_create_user_sql("app\"user", "pa'ss", "main\"space"),
             "CREATE USER \"app\"\"user\" IDENTIFIED BY 'pa''ss' DEFAULT TABLESPACE \"main\"\"space\";"
         );
+    }
+
+    #[test]
+    fn builds_vacuum_table_sql_for_all_options() {
+        let base = VacuumTableSqlOptions {
+            database_type: Some(DatabaseType::Postgres),
+            schema: Some("public".to_string()),
+            table_name: "events".to_string(),
+            full: false,
+            analyze: false,
+        };
+        assert_eq!(build_vacuum_table_sql(base.clone()).unwrap(), "VACUUM \"public\".\"events\";");
+        assert_eq!(
+            build_vacuum_table_sql(VacuumTableSqlOptions { analyze: true, ..base.clone() }).unwrap(),
+            "VACUUM ANALYZE \"public\".\"events\";"
+        );
+        assert_eq!(
+            build_vacuum_table_sql(VacuumTableSqlOptions { full: true, ..base.clone() }).unwrap(),
+            "VACUUM FULL \"public\".\"events\";"
+        );
+        assert_eq!(
+            build_vacuum_table_sql(VacuumTableSqlOptions { full: true, analyze: true, ..base }).unwrap(),
+            "VACUUM FULL ANALYZE \"public\".\"events\";"
+        );
+    }
+
+    #[test]
+    fn vacuum_is_restricted_to_supported_postgres_family_types() {
+        for database_type in [
+            DatabaseType::Postgres,
+            DatabaseType::Gaussdb,
+            DatabaseType::OpenGauss,
+            DatabaseType::Kingbase,
+            DatabaseType::Vastbase,
+        ] {
+            assert!(build_vacuum_table_sql(VacuumTableSqlOptions {
+                database_type: Some(database_type),
+                schema: None,
+                table_name: "events".to_string(),
+                full: false,
+                analyze: false,
+            })
+            .is_ok());
+        }
+        assert!(build_vacuum_table_sql(VacuumTableSqlOptions {
+            database_type: Some(DatabaseType::Mysql),
+            schema: None,
+            table_name: "events".to_string(),
+            full: false,
+            analyze: false,
+        })
+        .is_err());
     }
 
     #[test]

@@ -175,6 +175,12 @@ pub struct BuildTableAdminSqlRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct BuildVacuumTableSqlRequest {
+    pub options: dbx_core::db_admin_sql::VacuumTableSqlOptions,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BuildMysqlAutoIncrementSqlRequest {
     pub options: dbx_core::db_admin_sql::MysqlAutoIncrementSqlOptions,
 }
@@ -727,6 +733,10 @@ pub async fn build_empty_table_sql(Json(req): Json<BuildTableAdminSqlRequest>) -
 
 pub async fn build_truncate_table_sql(Json(req): Json<BuildTableAdminSqlRequest>) -> Json<String> {
     Json(dbx_core::db_admin_sql::build_truncate_table_sql(req.options))
+}
+
+pub async fn build_vacuum_table_sql(Json(req): Json<BuildVacuumTableSqlRequest>) -> Result<Json<String>, AppError> {
+    dbx_core::db_admin_sql::build_vacuum_table_sql(req.options).map(Json).map_err(AppError::from)
 }
 
 pub async fn build_mysql_auto_increment_sql(

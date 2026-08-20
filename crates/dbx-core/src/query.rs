@@ -2950,8 +2950,11 @@ where
                 results.push(ExecuteMultiResult::success_with_index(result, statement_index + offset));
             }
             if let Some(error) = outcome.error {
-                let failed_index = statement_index + completed;
                 let action = mysql_batch_pool_error_action(db_type, &error);
+                if completed >= batch_end - statement_index {
+                    return (results, Some(action));
+                }
+                let failed_index = statement_index + completed;
                 let result = error_query_result(error.clone());
                 let backend_error = crate::backend_error::BackendError::from_legacy_backend(&error);
                 report_execute_multi_progress(
@@ -5927,6 +5930,52 @@ for line in sys.stdin:
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].statement_index, Some(0));
         assert!(results[0].execution_error);
+        assert_eq!(error_action, Some(PoolErrorAction::Discard));
+    }
+
+    #[tokio::test]
+    async fn mysql_pipelined_batch_does_not_add_a_failure_after_every_statement_completed() {
+        let statements =
+            vec!["INSERT INTO users(id) VALUES (1)".to_string(), "INSERT INTO users(id) VALUES (2)".to_string()];
+        let mut executor = FakePipelinedMysqlBatchExecutor {
+            batch_outcomes: std::collections::VecDeque::from([db::mysql::MySqlNonResultBatchOutcome {
+                results: vec![empty_query_result(1), empty_query_result(1)],
+                error: Some(QUERY_CANCELED.to_string()),
+            }]),
+            statement_outcomes: std::collections::VecDeque::new(),
+            batches: Vec::new(),
+            statements: Vec::new(),
+        };
+        let progress_events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let progress: ExecuteMultiProgressCallback = {
+            let progress_events = Arc::clone(&progress_events);
+            Arc::new(move |event| progress_events.lock().unwrap().push(event))
+        };
+
+        let (results, error_action) = execute_mysql_batch_statements(
+            &mut executor,
+            &statements,
+            Some(DatabaseType::Mysql),
+            db::mysql::MySqlQueryDialect::default(),
+            None,
+            false,
+            Some(MYSQL_MULTI_STATEMENT_BATCH_MAX_BYTES),
+            Some(&progress),
+        )
+        .await;
+
+        assert_eq!(results.len(), statements.len());
+        assert!(results.iter().all(|result| !result.execution_error));
+        assert_eq!(results.iter().map(|result| result.statement_index).collect::<Vec<_>>(), vec![Some(0), Some(1)]);
+        assert_eq!(
+            progress_events
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|event| (event.statement_index, event.completed, event.total, event.success))
+                .collect::<Vec<_>>(),
+            vec![(0, 1, 2, true), (1, 2, 2, true)]
+        );
         assert_eq!(error_action, Some(PoolErrorAction::Discard));
     }
 

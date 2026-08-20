@@ -51,6 +51,32 @@ struct AuthorizationCallback {
     state: String,
 }
 
+#[derive(Clone, Copy)]
+enum OidcEndpointPolicy {
+    HttpsOnly,
+    #[cfg(test)]
+    AllowLoopbackHttp,
+}
+
+impl OidcEndpointPolicy {
+    fn parse_url(self, value: &str, description: &str) -> Result<Url, MongoError> {
+        let url = Url::parse(value).map_err(|err| oidc_error(format!("invalid {description}: {err}")))?;
+        if url.scheme() == "https" {
+            return Ok(url);
+        }
+        #[cfg(test)]
+        if matches!(self, Self::AllowLoopbackHttp)
+            && url.scheme() == "http"
+            && url.host_str().is_some_and(|host| {
+                host == "localhost" || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
+            })
+        {
+            return Ok(url);
+        }
+        Err(oidc_error(format!("{description} must use HTTPS")))
+    }
+}
+
 fn browser_flow_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -60,8 +86,8 @@ fn oidc_error(message: impl Into<String>) -> MongoError {
     MongoError::custom(format!("MongoDB OIDC authentication failed: {}", message.into()))
 }
 
-fn discovery_url(issuer: &str) -> Result<Url, MongoError> {
-    let mut url = Url::parse(issuer).map_err(|err| oidc_error(format!("invalid issuer URL: {err}")))?;
+fn discovery_url_with_policy(issuer: &str, endpoint_policy: OidcEndpointPolicy) -> Result<Url, MongoError> {
+    let mut url = endpoint_policy.parse_url(issuer, "issuer URL")?;
     if url.query().is_some() || url.fragment().is_some() {
         return Err(oidc_error("issuer URL must not contain a query or fragment"));
     }
@@ -70,17 +96,30 @@ fn discovery_url(issuer: &str) -> Result<Url, MongoError> {
     Ok(url)
 }
 
-fn normalize_issuer(issuer: &str) -> &str {
-    issuer.trim_end_matches('/')
+fn validate_discovery_document(
+    issuer: &str,
+    document: OidcDiscoveryDocument,
+    endpoint_policy: OidcEndpointPolicy,
+) -> Result<OidcDiscoveryDocument, MongoError> {
+    if document.issuer != issuer {
+        return Err(oidc_error("provider metadata issuer does not exactly match the MongoDB server response"));
+    }
+    endpoint_policy.parse_url(&document.issuer, "provider metadata issuer")?;
+    endpoint_policy.parse_url(&document.authorization_endpoint, "authorization endpoint")?;
+    endpoint_policy.parse_url(&document.token_endpoint, "token endpoint")?;
+    Ok(document)
 }
 
-async fn discover_provider(issuer: &str) -> Result<OidcDiscoveryDocument, MongoError> {
+async fn discover_provider(
+    issuer: &str,
+    endpoint_policy: OidcEndpointPolicy,
+) -> Result<OidcDiscoveryDocument, MongoError> {
     let client = reqwest::Client::builder()
         .timeout(HTTP_TIMEOUT)
         .build()
         .map_err(|err| oidc_error(format!("failed to create HTTP client: {err}")))?;
     let response = client
-        .get(discovery_url(issuer)?)
+        .get(discovery_url_with_policy(issuer, endpoint_policy)?)
         .send()
         .await
         .map_err(|err| oidc_error(format!("failed to load provider metadata: {err}")))?;
@@ -92,13 +131,7 @@ async fn discover_provider(issuer: &str) -> Result<OidcDiscoveryDocument, MongoE
         .json::<OidcDiscoveryDocument>()
         .await
         .map_err(|err| oidc_error(format!("invalid provider metadata: {err}")))?;
-    if normalize_issuer(&document.issuer) != normalize_issuer(issuer) {
-        return Err(oidc_error("provider metadata issuer does not match the MongoDB server response"));
-    }
-    Url::parse(&document.authorization_endpoint)
-        .map_err(|err| oidc_error(format!("invalid authorization endpoint: {err}")))?;
-    Url::parse(&document.token_endpoint).map_err(|err| oidc_error(format!("invalid token endpoint: {err}")))?;
-    Ok(document)
+    validate_discovery_document(issuer, document, endpoint_policy)
 }
 
 fn random_url_safe_value() -> String {
@@ -123,14 +156,15 @@ fn requested_scopes(scopes: Option<Vec<String>>, supported_scopes: Option<&[Stri
     scopes.join(" ")
 }
 
-fn authorization_url(
+fn authorization_url_with_policy(
     endpoint: &str,
     client_id: &str,
     scopes: &str,
     state: &str,
     code_challenge: &str,
+    endpoint_policy: OidcEndpointPolicy,
 ) -> Result<Url, MongoError> {
-    let mut url = Url::parse(endpoint).map_err(|err| oidc_error(format!("invalid authorization endpoint: {err}")))?;
+    let mut url = endpoint_policy.parse_url(endpoint, "authorization endpoint")?;
     url.query_pairs_mut()
         .append_pair("response_type", "code")
         .append_pair("client_id", client_id)
@@ -196,21 +230,25 @@ fn parse_callback_target(target: &str) -> Result<AuthorizationCallback, String> 
 }
 
 async fn wait_for_callback(listener: TcpListener, expected_state: &str) -> Result<String, MongoError> {
-    loop {
+    'requests: loop {
         let (mut stream, _) =
             listener.accept().await.map_err(|err| oidc_error(format!("callback listener failed: {err}")))?;
         let mut buffer = Vec::with_capacity(1024);
         loop {
             if buffer.len() == MAX_CALLBACK_REQUEST_BYTES {
-                return Err(oidc_error("browser callback request exceeded the size limit"));
+                write_callback_response(&mut stream, false).await;
+                continue 'requests;
             }
             let mut chunk = [0_u8; 1024];
             let remaining = MAX_CALLBACK_REQUEST_BYTES - buffer.len();
             let read_len = remaining.min(chunk.len());
-            let bytes_read = stream
-                .read(&mut chunk[..read_len])
-                .await
-                .map_err(|err| oidc_error(format!("failed to read browser callback: {err}")))?;
+            let bytes_read = match stream.read(&mut chunk[..read_len]).await {
+                Ok(bytes_read) => bytes_read,
+                Err(_) => {
+                    write_callback_response(&mut stream, false).await;
+                    continue 'requests;
+                }
+            };
             if bytes_read == 0 {
                 break;
             }
@@ -220,32 +258,33 @@ async fn wait_for_callback(listener: TcpListener, expected_state: &str) -> Resul
             }
         }
         let request = String::from_utf8_lossy(&buffer);
-        let target = request
-            .lines()
-            .next()
-            .and_then(|line| line.split_whitespace().nth(1))
-            .ok_or_else(|| oidc_error("invalid browser callback request"))?;
-        let callback = match parse_callback_target(target) {
+        let target = request.lines().next().and_then(|line| line.split_whitespace().nth(1)).map(str::to_owned);
+        let Some(target) = target else {
+            write_callback_response(&mut stream, false).await;
+            continue;
+        };
+        let callback = match parse_callback_target(&target) {
             Ok(callback) => callback,
-            Err(error) if error == "unexpected callback path" => {
+            Err(_) => {
                 write_callback_response(&mut stream, false).await;
                 continue;
-            }
-            Err(error) => {
-                write_callback_response(&mut stream, false).await;
-                return Err(oidc_error(error));
             }
         };
         if callback.state != expected_state {
             write_callback_response(&mut stream, false).await;
-            return Err(oidc_error("browser callback state did not match the authorization request"));
+            continue;
         }
         write_callback_response(&mut stream, true).await;
         return Ok(callback.code);
     }
 }
 
-async fn request_token(token_endpoint: &str, parameters: &[(&str, &str)]) -> Result<OidcTokenResponse, MongoError> {
+async fn request_token(
+    token_endpoint: &str,
+    parameters: &[(&str, &str)],
+    endpoint_policy: OidcEndpointPolicy,
+) -> Result<OidcTokenResponse, MongoError> {
+    let token_endpoint = endpoint_policy.parse_url(token_endpoint, "token endpoint")?;
     let client = reqwest::Client::builder()
         .timeout(HTTP_TIMEOUT)
         .build()
@@ -281,6 +320,24 @@ async fn request_token(token_endpoint: &str, parameters: &[(&str, &str)]) -> Res
     Ok(token)
 }
 
+fn callback_deadline(timeout: Option<Instant>) -> Instant {
+    timeout.unwrap_or_else(|| Instant::now() + DEFAULT_CALLBACK_TIMEOUT)
+}
+
+fn remaining_callback_timeout(deadline: Instant) -> Result<Duration, MongoError> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(oidc_error("browser authentication timed out"));
+    }
+    Ok(remaining)
+}
+
+async fn lock_browser_flow_until(deadline: Instant) -> Result<tokio::sync::MutexGuard<'static, ()>, MongoError> {
+    tokio::time::timeout(remaining_callback_timeout(deadline)?, browser_flow_lock().lock())
+        .await
+        .map_err(|_| oidc_error("browser authentication timed out"))
+}
+
 fn driver_token_response(token: OidcTokenResponse, previous_refresh_token: Option<String>) -> IdpServerResponse {
     let expires = token.expires_in.and_then(|seconds| Instant::now().checked_add(Duration::from_secs(seconds)));
     IdpServerResponse::builder()
@@ -294,10 +351,19 @@ async fn authenticate(
     context: CallbackContext,
     opener: MongoOidcBrowserOpener,
 ) -> Result<IdpServerResponse, MongoError> {
+    authenticate_with_policy(context, opener, OidcEndpointPolicy::HttpsOnly).await
+}
+
+async fn authenticate_with_policy(
+    context: CallbackContext,
+    opener: MongoOidcBrowserOpener,
+    endpoint_policy: OidcEndpointPolicy,
+) -> Result<IdpServerResponse, MongoError> {
+    let deadline = callback_deadline(context.timeout);
     let info =
         context.idp_info.ok_or_else(|| oidc_error("MongoDB server did not provide identity provider details"))?;
     let client_id = info.client_id.ok_or_else(|| oidc_error("MongoDB server did not provide an OIDC client ID"))?;
-    let discovery = discover_provider(&info.issuer).await?;
+    let discovery = discover_provider(&info.issuer, endpoint_policy).await?;
 
     if let Some(refresh_token) = context.refresh_token.clone() {
         if let Ok(token) = request_token(
@@ -307,6 +373,7 @@ async fn authenticate(
                 ("client_id", client_id.as_str()),
                 ("refresh_token", refresh_token.as_str()),
             ],
+            endpoint_policy,
         )
         .await
         {
@@ -314,7 +381,7 @@ async fn authenticate(
         }
     }
 
-    let _browser_guard = browser_flow_lock().lock().await;
+    let _browser_guard = lock_browser_flow_until(deadline).await?;
     let listener = TcpListener::bind(OIDC_CALLBACK_ADDRESS)
         .await
         .map_err(|err| oidc_error(format!("cannot listen on {OIDC_REDIRECT_URI}: {err}")))?;
@@ -322,14 +389,18 @@ async fn authenticate(
     let verifier = random_url_safe_value();
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
     let scopes = requested_scopes(info.request_scopes, discovery.scopes_supported.as_deref());
-    let authorization_url =
-        authorization_url(&discovery.authorization_endpoint, &client_id, &scopes, &state, &challenge)?;
+    let authorization_url = authorization_url_with_policy(
+        &discovery.authorization_endpoint,
+        &client_id,
+        &scopes,
+        &state,
+        &challenge,
+        endpoint_policy,
+    )?;
+    remaining_callback_timeout(deadline)?;
     opener(authorization_url.as_str()).map_err(oidc_error)?;
 
-    let timeout = context
-        .timeout
-        .map(|deadline| deadline.saturating_duration_since(Instant::now()))
-        .unwrap_or(DEFAULT_CALLBACK_TIMEOUT);
+    let timeout = remaining_callback_timeout(deadline)?;
     let code = tokio::time::timeout(timeout, wait_for_callback(listener, &state))
         .await
         .map_err(|_| oidc_error("browser authentication timed out"))??;
@@ -342,6 +413,7 @@ async fn authenticate(
             ("redirect_uri", OIDC_REDIRECT_URI),
             ("code_verifier", verifier.as_str()),
         ],
+        endpoint_policy,
     )
     .await?;
     Ok(driver_token_response(token, None))
@@ -363,11 +435,16 @@ mod tests {
     };
 
     use mongodb::options::oidc::{CallbackContext, IdpServerInfo};
-    use tokio::{io::AsyncWriteExt, net::TcpListener, task::JoinHandle};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, TcpStream},
+        task::JoinHandle,
+    };
 
     use super::{
-        authenticate, authorization_url, discovery_url, parse_callback_target, requested_scopes,
-        MongoOidcBrowserOpener, OIDC_REDIRECT_URI,
+        authenticate_with_policy, authorization_url_with_policy, discovery_url_with_policy, parse_callback_target,
+        request_token, requested_scopes, validate_discovery_document, wait_for_callback, MongoOidcBrowserOpener,
+        OidcDiscoveryDocument, OidcEndpointPolicy, OIDC_REDIRECT_URI,
     };
 
     async fn read_http_request(stream: &mut tokio::net::TcpStream) -> String {
@@ -454,21 +531,105 @@ mod tests {
     }
 
     #[test]
+    fn oidc_endpoints_require_https_and_exact_issuer_match() {
+        assert!(discovery_url_with_policy("http://idp.example", OidcEndpointPolicy::HttpsOnly).is_err());
+        assert!(authorization_url_with_policy(
+            "http://idp.example/authorize",
+            "dbx-client",
+            "openid",
+            "state",
+            "challenge",
+            OidcEndpointPolicy::HttpsOnly,
+        )
+        .is_err());
+        let issuer = "https://idp.example/realms/dbx";
+        let document = OidcDiscoveryDocument {
+            issuer: issuer.to_string(),
+            authorization_endpoint: "https://idp.example/authorize".to_string(),
+            token_endpoint: "https://idp.example/token".to_string(),
+            scopes_supported: None,
+        };
+        assert!(validate_discovery_document(issuer, document, OidcEndpointPolicy::HttpsOnly).is_ok());
+        let trailing_slash = OidcDiscoveryDocument {
+            issuer: format!("{issuer}/"),
+            authorization_endpoint: "https://idp.example/authorize".to_string(),
+            token_endpoint: "https://idp.example/token".to_string(),
+            scopes_supported: None,
+        };
+        assert!(validate_discovery_document(issuer, trailing_slash, OidcEndpointPolicy::HttpsOnly).is_err());
+        let insecure_endpoint = OidcDiscoveryDocument {
+            issuer: issuer.to_string(),
+            authorization_endpoint: "http://idp.example/authorize".to_string(),
+            token_endpoint: "https://idp.example/token".to_string(),
+            scopes_supported: None,
+        };
+        assert!(validate_discovery_document(issuer, insecure_endpoint, OidcEndpointPolicy::HttpsOnly).is_err());
+    }
+
+    #[tokio::test]
+    async fn token_endpoint_requires_https_before_network_request() {
+        let error = request_token("http://idp.example/token", &[], OidcEndpointPolicy::HttpsOnly)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("token endpoint must use HTTPS"));
+    }
+
+    #[tokio::test]
+    async fn callback_ignores_invalid_requests_until_matching_state() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let callback = tokio::spawn(wait_for_callback(listener, "expected-state"));
+
+        for target in ["/redirect?code=wrong&state=wrong-state", "/redirect?error=access_denied"] {
+            let mut stream = TcpStream::connect(address).await.unwrap();
+            stream
+                .write_all(format!("GET {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").as_bytes())
+                .await
+                .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).await.unwrap();
+            assert!(response.starts_with("HTTP/1.1 400 Bad Request"));
+        }
+
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        stream
+            .write_all(b"GET /redirect?code=valid-code&state=expected-state HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await.unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert_eq!(callback.await.unwrap().unwrap(), "valid-code");
+    }
+
+    #[tokio::test]
+    async fn browser_lock_timeout_includes_time_waiting_for_lock() {
+        let _guard = super::browser_flow_lock().lock().await;
+        let error =
+            super::lock_browser_flow_until(Instant::now() + Duration::from_millis(20)).await.unwrap_err().to_string();
+        assert!(error.contains("browser authentication timed out"));
+    }
+
+    #[test]
     fn discovery_url_preserves_issuer_path() {
         assert_eq!(
-            discovery_url("https://idp.example/realms/dbx").unwrap().as_str(),
+            discovery_url_with_policy("https://idp.example/realms/dbx", OidcEndpointPolicy::HttpsOnly)
+                .unwrap()
+                .as_str(),
             "https://idp.example/realms/dbx/.well-known/openid-configuration"
         );
     }
 
     #[test]
     fn authorization_request_uses_pkce_and_registered_redirect() {
-        let url = authorization_url(
+        let url = authorization_url_with_policy(
             "https://idp.example/authorize",
             "dbx-client",
             "openid profile offline_access",
             "expected-state",
             "challenge",
+            OidcEndpointPolicy::HttpsOnly,
         )
         .unwrap();
         let params = url.query_pairs().collect::<std::collections::HashMap<_, _>>();
@@ -523,7 +684,10 @@ mod tests {
             Ok(())
         });
 
-        let token = authenticate(callback_context(issuer, None), opener).await.unwrap();
+        let token =
+            authenticate_with_policy(callback_context(issuer, None), opener, OidcEndpointPolicy::AllowLoopbackHttp)
+                .await
+                .unwrap();
         server.await.unwrap();
 
         assert_eq!(token.access_token, "authorization-token");
@@ -546,8 +710,13 @@ mod tests {
         let (issuer, requests, server) = start_mock_oidc_server(2).await;
         let opener: MongoOidcBrowserOpener = Arc::new(|_| Err("browser should not be opened".to_string()));
 
-        let token =
-            authenticate(callback_context(issuer, Some("cached-refresh-token".to_string())), opener).await.unwrap();
+        let token = authenticate_with_policy(
+            callback_context(issuer, Some("cached-refresh-token".to_string())),
+            opener,
+            OidcEndpointPolicy::AllowLoopbackHttp,
+        )
+        .await
+        .unwrap();
         server.await.unwrap();
 
         assert_eq!(token.access_token, "refreshed-token");

@@ -661,16 +661,8 @@ pub fn build_empty_database_sql(options: DatabaseScopeSqlOptions) -> Result<Vec<
                 table_name: object.name.clone(),
                 cascade: Some(cascade),
             }),
-            "SEQUENCE" => {
-                if supports_drop_sequence(database_type) {
-                    sequences.push(object);
-                }
-            }
-            "TYPE" => {
-                if supports_drop_type(database_type) {
-                    types.push(object);
-                }
-            }
+            "SEQUENCE" if supports_drop_sequence(database_type) => sequences.push(object),
+            "TYPE" if supports_drop_type(database_type) => types.push(object),
             // Triggers, indexes, foreign keys and similar child objects are
             // removed together with their parent table (CASCADE or table drop).
             _ => {}

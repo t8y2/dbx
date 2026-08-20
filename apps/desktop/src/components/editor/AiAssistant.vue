@@ -1063,6 +1063,8 @@ async function loadDatabases(connection = props.connection): Promise<string[]> {
 async function changeConnection(connectionId: string) {
   const conn = connectionStore.getConfig(connectionId);
   if (!conn) return;
+  if (props.connection?.id === connectionId) return;
+  clearContextReferences();
   connectionStore.activeConnectionId = connectionId;
   const tab = props.tab;
   const tabId = tab ? tab.id : queryStore.createTab(connectionId, resolveDefaultDatabase(conn, []));
@@ -1087,6 +1089,8 @@ function changeNamespace(value: string) {
   const connection = props.connection;
   if (!tab || !connection) return;
   const namespace = decodeSelectableDatabaseValue(connection.db_type, value);
+  if (resolveAiNamespaceSelection(tab, connection).value === namespace) return;
+  clearContextReferences();
   if (resolveAiNamespaceSelection(tab, connection).kind === "schema") {
     queryStore.updateSchema(tab.id, namespace || undefined);
   } else {
@@ -2942,7 +2946,23 @@ function setPrompt(text: string) {
   nextTick(() => promptTextareaRef.value?.focus());
 }
 
-defineExpose({ triggerAction, setPrompt });
+function addTableMention(target: { schema?: string; table: string }) {
+  const table = target.table.trim();
+  if (!table) return;
+  addSelectedMention({ kind: "table", schema: target.schema, name: table, tableType: "TABLE" });
+  nextTick(() => promptTextareaRef.value?.focus());
+}
+
+function clearContextReferences() {
+  selectedMentions.value = [];
+  selectedSqlFileMentions.value = [];
+  mentionCache.value = {};
+  mentionCandidates.value = [];
+  mentionOpen.value = false;
+  mentionError.value = "";
+}
+
+defineExpose({ triggerAction, setPrompt, addTableMention, clearContextReferences });
 
 const messageRenderer = computed(() => {
   const appearance = aiCodeAppearance.value;

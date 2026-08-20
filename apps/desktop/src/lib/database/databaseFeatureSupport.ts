@@ -92,6 +92,15 @@ export function supportsQueryExecution(dbType?: DatabaseType): boolean {
   return supportsDatabaseFeature(dbType, "queryExecution");
 }
 
+/**
+ * The AI assistant currently builds its context from database/table metadata.
+ * Connection-only query targets (for example etcd and ZooKeeper) do not expose
+ * that hierarchy, so they must not be offered by sidebar "Add to AI" actions.
+ */
+export function supportsAiAssistantContext(dbType?: DatabaseType): boolean {
+  return supportsQueryExecution(dbType) && !usesConnectionOnlyQueryTarget(dbType);
+}
+
 export function supportsConnectionScopedQueryExecution(dbType?: DatabaseType): boolean {
   return supportsRegisteredConnectionScopedQueryExecution(dbType);
 }

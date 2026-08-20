@@ -2614,6 +2614,7 @@ export default withEnglishFallback({
     damengJobAdmin: "达梦代理作业",
     openDamengJobAdmin: "打开达梦代理作业",
     newQuery: "新建查询",
+    addToAi: "添加到 AI",
     instanceInfo: "实例信息",
     newInsert: "新建新增",
     newSql: "新建 SQL",

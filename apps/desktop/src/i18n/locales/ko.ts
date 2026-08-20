@@ -2534,6 +2534,7 @@ export default withEnglishFallback({
     duplicateConnection: "연결 복제",
     duplicateSelectedConnections: "선택한 연결 {count}개 복제",
     newQuery: "새 쿼리",
+    addToAi: "AI에 추가",
     instanceInfo: "인스턴스 정보",
     newSql: "새 SQL",
     generateSql: "SQL 생성",

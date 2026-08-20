@@ -2646,6 +2646,7 @@ export default withEnglishFallback({
     duplicateConnection: "接続を複製",
     duplicateSelectedConnections: "選択した{count}件の接続を複製",
     newQuery: "新しいクエリ",
+    addToAi: "AI に追加",
     newSql: "新しいSQL",
     generateSql: "SQLを生成",
     newInsert: "新しいINSERT",

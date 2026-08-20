@@ -2621,6 +2621,7 @@ export default withEnglishFallback({
     duplicateConnection: "複製連線",
     duplicateSelectedConnections: "複製選取的 {count} 個連線",
     newQuery: "建立查詢",
+    addToAi: "加入 AI",
     instanceInfo: "實例資訊",
     newSql: "新增 SQL",
     generateSql: "產生 SQL",

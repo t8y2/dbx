@@ -2623,6 +2623,7 @@ export default withEnglishFallback({
     duplicateSelectedConnections: "Duplicar {count} conexões selecionadas",
     instanceInfo: "Informações da Instância",
     newQuery: "Nova Consulta",
+    addToAi: "Adicionar à IA",
     newSql: "Novo SQL",
     generateSql: "Gerar SQL",
     newInsert: "Novo Insert",

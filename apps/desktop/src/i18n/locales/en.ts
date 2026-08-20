@@ -2690,6 +2690,7 @@ export default {
     duplicateConnection: "Duplicate Connection",
     duplicateSelectedConnections: "Duplicate Selected {count} Connections",
     newQuery: "New Query",
+    addToAi: "Add to AI",
     instanceInfo: "Instance Info",
     newSql: "New SQL",
     generateSql: "Generate SQL",

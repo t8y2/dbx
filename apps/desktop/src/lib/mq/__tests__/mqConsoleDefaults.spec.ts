@@ -85,6 +85,17 @@ describe("mqConsoleDefaults", () => {
     expect(resolveAvailableMqTabs({ systemKind: "kafka", capabilities: caps })).toContain("messages");
   });
 
+  it("keeps Kafka topic subscriptions alongside the cluster-wide consumer groups tab", () => {
+    const tabs = resolveAvailableMqTabs({
+      systemKind: "kafka",
+      capabilities: defaultMqCapabilitiesForSystemKind("kafka"),
+    });
+
+    expect(tabs).toContain("subscriptions");
+    expect(tabs).toContain("consumerGroups");
+    expect(tabs.indexOf("consumerGroups")).toBe(tabs.indexOf("subscriptions") + 1);
+  });
+
   it("exposes the namespaces tab for RabbitMQ vhost management", () => {
     const caps = defaultMqCapabilitiesForSystemKind("rabbitmq");
     expect(resolveAvailableMqTabs({ systemKind: "rabbitmq", capabilities: caps })).toEqual(["namespaces", "topics", "subscriptions", "monitoring", "clients", "messages", "broker", "policies", "permissions"]);

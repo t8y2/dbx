@@ -21,6 +21,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
+import java.sql.SQLClientInfoException;
 import java.sql.SQLFeatureNotSupportedException;
 import java.sql.Statement;
 import java.sql.Time;
@@ -623,9 +624,141 @@ final class DbxJdbcPluginTest {
 
             assertFalse(response.has("error"), response.toString());
             assertEquals("row-value", response.path("result").path("rows").path(0).path(0).asText());
-            assertEquals(List.of("executeQuery"), calls);
+            assertEquals(List.of("createStatement", "executeQuery"), calls);
         } finally {
             DriverManager.deregisterDriver(driver);
+        }
+    }
+
+    @Test
+    void tdengineUrlsApplyDatabaseClientInfoBeforeCreatingStatement() throws Exception {
+        for (String url : List.of(
+            "jdbc:taos://dbx-fake:6030",
+            "jdbc:taos-ws://dbx-fake:6041",
+            "jdbc:taos-rs://dbx-fake:6041"
+        )) {
+            List<String> calls = new ArrayList<>();
+            String prefix = url.substring(0, url.indexOf("//"));
+            Driver driver = new BrokenResultSetDriver(prefix, true, -1, calls);
+            DriverManager.registerDriver(driver);
+            String connection = """
+                {
+                  "connection_string": "%s",
+                  "connect_timeout_secs": 30
+                }
+                """.formatted(url);
+            try {
+                JsonNode response = request("executeQuery", """
+                    {
+                      "connection": %s,
+                      "database": "bopu_light",
+                      "sql": "SELECT v FROM meters"
+                    }
+                    """.formatted(connection));
+
+                assertFalse(response.has("error"), response.toString());
+                assertEquals(
+                    List.of(
+                        "setCatalog:bopu_light",
+                        "setClientInfo:dbname:bopu_light",
+                        "createStatement",
+                        "executeQuery"
+                    ),
+                    calls,
+                    url
+                );
+            } finally {
+                closeAndDeregister(connection, driver);
+            }
+        }
+    }
+
+    @Test
+    void ordinaryJdbcDatabaseContextDoesNotSetTdengineClientInfo() throws Exception {
+        List<String> calls = new ArrayList<>();
+        Driver driver = new BrokenResultSetDriver("jdbc:dbx-context:", true, -1, calls);
+        DriverManager.registerDriver(driver);
+        String connection = """
+            {
+              "connection_string": "jdbc:dbx-context:demo",
+              "connect_timeout_secs": 30
+            }
+            """;
+        try {
+            JsonNode response = request("executeQuery", """
+                {
+                  "connection": %s,
+                  "database": "app",
+                  "sql": "SELECT v FROM meters"
+                }
+                """.formatted(connection));
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals(List.of("setCatalog:app", "createStatement", "execute", "executeQuery"), calls);
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
+    }
+
+    @Test
+    void tdengineBlankDatabaseSkipsDatabaseContext() throws Exception {
+        List<String> calls = new ArrayList<>();
+        Driver driver = new BrokenResultSetDriver("jdbc:taos-rs:", true, -1, calls);
+        DriverManager.registerDriver(driver);
+        String connection = """
+            {
+              "connection_string": "jdbc:taos-rs://dbx-fake:6041",
+              "connect_timeout_secs": 30
+            }
+            """;
+        try {
+            JsonNode response = request("executeQuery", """
+                {
+                  "connection": %s,
+                  "database": "   ",
+                  "sql": "SELECT v FROM meters"
+                }
+                """.formatted(connection));
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals(List.of("createStatement", "executeQuery"), calls);
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
+    }
+
+    @Test
+    void tdengineClientInfoCompatibilityFailuresDoNotBlockQueries() throws Exception {
+        for (Throwable failure : List.of(
+            new SQLClientInfoException(),
+            new UnsupportedOperationException("unsupported"),
+            new AbstractMethodError("unsupported")
+        )) {
+            List<String> calls = new ArrayList<>();
+            Driver driver = new BrokenResultSetDriver("jdbc:taos-rs:", true, -1, calls, failure);
+            DriverManager.registerDriver(driver);
+            String connection = """
+                {
+                  "connection_string": "jdbc:taos-rs://dbx-fake:6041",
+                  "connect_timeout_secs": 30
+                }
+                """;
+            try {
+                JsonNode response = request("executeQuery", """
+                    {
+                      "connection": %s,
+                      "database": "bopu_light",
+                      "sql": "SELECT v FROM meters"
+                    }
+                    """.formatted(connection));
+
+                assertFalse(response.has("error"), failure.getClass().getSimpleName() + ": " + response);
+                assertEquals("setCatalog:bopu_light", calls.get(0));
+                assertEquals("setClientInfo:dbname:bopu_light", calls.get(1));
+                assertEquals("executeQuery", calls.get(calls.size() - 1));
+            } finally {
+                closeAndDeregister(connection, driver);
+            }
         }
     }
 
@@ -818,6 +951,117 @@ final class DbxJdbcPluginTest {
         method.invoke(null, connection, "jdbc:phoenix:localhost", pagedQueryConnection(calls, false));
 
         assertEquals(List.of("getAutoCommit", "setAutoCommit:true"), calls);
+    }
+
+    @Test
+    void phoenixDirectUrlPropertiesArePassedToTheDriver() throws Exception {
+        RecordingConnectDriver driver = new RecordingConnectDriver("jdbc:phoenix:");
+        DriverManager.registerDriver(driver);
+        String connection = """
+            {
+              "connection_string": "jdbc:phoenix:ambari01,ambari02,ambari03:2181:/hbase-unsecure;phoenix.schema.isNamespaceMappingEnabled=true;phoenix.schema.mapSystemTablesToNamespace=true;user=url-user",
+              "username": "phoenix-user",
+              "connect_timeout_secs": 30
+            }
+            """;
+        try {
+            JsonNode response = request("testConnection", """
+                { "connection": %s }
+                """.formatted(connection));
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals(
+                "jdbc:phoenix:ambari01,ambari02,ambari03:2181:/hbase-unsecure;phoenix.schema.isNamespaceMappingEnabled=true;phoenix.schema.mapSystemTablesToNamespace=true;user=url-user",
+                driver.urls.get(0)
+            );
+            assertEquals("true", driver.properties.get(0).getProperty("phoenix.schema.isNamespaceMappingEnabled"));
+            assertEquals("true", driver.properties.get(0).getProperty("phoenix.schema.mapSystemTablesToNamespace"));
+            assertEquals("phoenix-user", driver.properties.get(0).getProperty("user"));
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
+    }
+
+    @Test
+    void phoenixConnectionUrlParamsUseSemicolonAndReachDriverProperties() throws Exception {
+        RecordingConnectDriver driver = new RecordingConnectDriver("jdbc:phoenix:");
+        DriverManager.registerDriver(driver);
+        String connection = """
+            {
+              "connection_string": "jdbc:phoenix:zk1,zk2:2181:/hbase-unsecure",
+              "url_params": "phoenix.schema.isNamespaceMappingEnabled=true;phoenix.schema.mapSystemTablesToNamespace=true",
+              "connect_timeout_secs": 30
+            }
+            """;
+        try {
+            JsonNode response = request("testConnection", """
+                { "connection": %s }
+                """.formatted(connection));
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals(
+                "jdbc:phoenix:zk1,zk2:2181:/hbase-unsecure;phoenix.schema.isNamespaceMappingEnabled=true;phoenix.schema.mapSystemTablesToNamespace=true",
+                driver.urls.get(0)
+            );
+            assertEquals("true", driver.properties.get(0).getProperty("phoenix.schema.isNamespaceMappingEnabled"));
+            assertEquals("true", driver.properties.get(0).getProperty("phoenix.schema.mapSystemTablesToNamespace"));
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
+    }
+
+    @Test
+    void phoenixUrlPropertyParsingIgnoresMalformedSegmentsAndPreservesEqualsInValue() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod("applyPhoenixUrlProperties", String.class, Properties.class);
+        method.setAccessible(true);
+        Properties properties = new Properties();
+
+        method.invoke(
+            null,
+            "jdbc:phoenix;broken;=ignored;phoenix.query.custom=a=b",
+            properties
+        );
+
+        assertEquals("a=b", properties.getProperty("phoenix.query.custom"));
+        assertFalse(properties.containsKey("broken"));
+        assertFalse(properties.containsKey(""));
+    }
+
+    @Test
+    void phoenixThinUrlParamsUseSemicolonSyntax() throws Exception {
+        JsonNode connection = MAPPER.readTree("""
+            {
+              "connection_string": "jdbc:phoenix:thin:url=http://127.0.0.1:8765;serialization=PROTOBUF",
+              "url_params": "authentication=SPNEGO"
+            }
+            """);
+
+        assertEquals(
+            "jdbc:phoenix:thin:url=http://127.0.0.1:8765;serialization=PROTOBUF;authentication=SPNEGO",
+            DbxJdbcPlugin.jdbcUrl(connection)
+        );
+    }
+
+    @Test
+    void nonPhoenixSemicolonUrlPropertiesAreNotCopiedToDriverProperties() throws Exception {
+        RecordingConnectDriver driver = new RecordingConnectDriver("jdbc:dbx-semicolon:");
+        DriverManager.registerDriver(driver);
+        String connection = """
+            {
+              "connection_string": "jdbc:dbx-semicolon:demo;custom.option=true",
+              "connect_timeout_secs": 30
+            }
+            """;
+        try {
+            JsonNode response = request("testConnection", """
+                { "connection": %s }
+                """.formatted(connection));
+
+            assertFalse(response.has("error"), response.toString());
+            assertFalse(driver.properties.get(0).containsKey("custom.option"));
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
     }
 
     @Test
@@ -3418,16 +3662,28 @@ final class DbxJdbcPluginTest {
         private final boolean executeReturnsResultSet;
         private final int updateCount;
         private final List<String> calls;
+        private final Throwable clientInfoFailure;
 
         private BrokenResultSetDriver(String urlPrefix, boolean executeReturnsResultSet, int updateCount) {
-            this(urlPrefix, executeReturnsResultSet, updateCount, new ArrayList<>());
+            this(urlPrefix, executeReturnsResultSet, updateCount, new ArrayList<>(), null);
         }
 
         private BrokenResultSetDriver(String urlPrefix, boolean executeReturnsResultSet, int updateCount, List<String> calls) {
+            this(urlPrefix, executeReturnsResultSet, updateCount, calls, null);
+        }
+
+        private BrokenResultSetDriver(
+            String urlPrefix,
+            boolean executeReturnsResultSet,
+            int updateCount,
+            List<String> calls,
+            Throwable clientInfoFailure
+        ) {
             this.urlPrefix = urlPrefix;
             this.executeReturnsResultSet = executeReturnsResultSet;
             this.updateCount = updateCount;
             this.calls = calls;
+            this.clientInfoFailure = clientInfoFailure;
         }
 
         @Override
@@ -3435,7 +3691,7 @@ final class DbxJdbcPluginTest {
             if (!acceptsURL(url)) {
                 return null;
             }
-            return brokenResultSetConnection(executeReturnsResultSet, updateCount, calls);
+            return brokenResultSetConnection(executeReturnsResultSet, updateCount, calls, clientInfoFailure);
         }
 
         @Override
@@ -3469,15 +3725,36 @@ final class DbxJdbcPluginTest {
         }
     }
 
-    private static Connection brokenResultSetConnection(boolean executeReturnsResultSet, int updateCount, List<String> calls) {
+    private static Connection brokenResultSetConnection(
+        boolean executeReturnsResultSet,
+        int updateCount,
+        List<String> calls,
+        Throwable clientInfoFailure
+    ) {
         return (Connection) Proxy.newProxyInstance(
             DbxJdbcPluginTest.class.getClassLoader(),
             new Class<?>[] { Connection.class },
-            (proxy, method, args) -> switch (method.getName()) {
-                case "createStatement" -> brokenResultSetStatement(executeReturnsResultSet, updateCount, calls);
-                case "isClosed" -> false;
-                case "close" -> null;
-                default -> defaultValue(method.getReturnType());
+            (proxy, method, args) -> {
+                if ("setClientInfo".equals(method.getName())) {
+                    calls.add("setClientInfo:" + args[0] + ":" + args[1]);
+                    if (clientInfoFailure != null) {
+                        throw clientInfoFailure;
+                    }
+                    return null;
+                }
+                return switch (method.getName()) {
+                    case "createStatement" -> {
+                        calls.add("createStatement");
+                        yield brokenResultSetStatement(executeReturnsResultSet, updateCount, calls);
+                    }
+                    case "setCatalog" -> {
+                        calls.add("setCatalog:" + args[0]);
+                        yield null;
+                    }
+                    case "isClosed" -> false;
+                    case "close" -> null;
+                    default -> defaultValue(method.getReturnType());
+                };
             }
         );
     }

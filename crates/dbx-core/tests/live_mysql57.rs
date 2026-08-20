@@ -103,6 +103,30 @@ async fn live_mysql57_text_protocol_select_succeeds() {
 }
 
 #[tokio::test]
+#[ignore = "requires the remote DBX MySQL 5.7 smoke-test container"]
+async fn live_mysql57_checksum_table_returns_native_result_set() {
+    let url = std::env::var("DBX_LIVE_MYSQL57_URL").expect("DBX_LIVE_MYSQL57_URL");
+    let pool = dbx_core::db::mysql::connect(&url, std::time::Duration::from_secs(5)).await.unwrap();
+
+    // 使用部署脚本预置的表验证 MySQL 5.7 原生 CHECKSUM TABLE 返回值没有被执行器丢弃。
+    let result = dbx_core::db::mysql::execute_query_with_max_rows(
+        &pool,
+        "CHECKSUM TABLE `dbx_smoke`",
+        false,
+        Some(10),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.columns, vec!["Table", "Checksum"]);
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0].len(), 2);
+    assert!(result.rows[0][0].as_str().is_some_and(|table| table.ends_with(".dbx_smoke")));
+    assert!(!result.rows[0][1].is_null());
+}
+
+#[tokio::test]
 #[ignore = "requires a MySQL endpoint that permits stored procedure creation"]
 async fn live_mysql_stored_procedure_preserves_all_result_sets() {
     let url = std::env::var("DBX_LIVE_MYSQL57_URL").expect("DBX_LIVE_MYSQL57_URL");
@@ -450,6 +474,7 @@ async fn live_mysql_query_result_export_xlsx_streams_single_query_without_duplic
         export_table_name: None,
         export_column_types: None,
         column_comments: None,
+        identifier_quote: None,
         numeric_column_right_align: false,
     };
     let done_seen = AtomicBool::new(false);
@@ -540,6 +565,7 @@ async fn live_mysql_xlsx_export_can_outlive_query_timeout_while_rows_keep_arrivi
         export_table_name: None,
         export_column_types: None,
         column_comments: None,
+        identifier_quote: None,
         numeric_column_right_align: false,
     };
     let rows_exported = AtomicU64::new(0);
@@ -702,9 +728,10 @@ async fn live_oceanbase_mysql_setup_applies_query_timeout() {
 async fn live_mysql_query_cancel_kills_running_sleep() {
     let url = std::env::var("DBX_LIVE_MYSQL_CANCEL_URL").expect("DBX_LIVE_MYSQL_CANCEL_URL");
 
-    let opts = mysql_async::OptsBuilder::from_opts(mysql_async::Opts::from_url(&url).unwrap())
-        .pool_opts(mysql_async::PoolOpts::new().with_constraints(mysql_async::PoolConstraints::new(1, 1).unwrap()));
-    let pool = mysql_async::Pool::new(opts);
+    let pool =
+        dbx_core::db::mysql::connect_bare_with_pool_limit_and_setup(&url, std::time::Duration::from_secs(10), 1, &[])
+            .await
+            .unwrap();
     let mut conn = dbx_core::db::mysql::get_conn_with_health_check(&pool).await.unwrap();
     let connection_id = mysql_async::Conn::id(&conn);
     let kill_opts = conn.opts().clone();

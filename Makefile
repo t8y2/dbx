@@ -61,6 +61,10 @@ install:
 docs-install:
 	cd docs && $(PNPM) install --frozen-lockfile
 
+ifeq ($(OS),Windows_NT)
+check-tauri-dev-port:
+	@powershell -NoProfile -Command "if (Get-NetTCPConnection -LocalPort $(TAURI_DEV_PORT) -State Listen -ErrorAction SilentlyContinue) { Write-Host 'Port $(TAURI_DEV_PORT) is already in use. DBX Tauri dev requires http://localhost:$(TAURI_DEV_PORT).'; Write-Host ''; Get-NetTCPConnection -LocalPort $(TAURI_DEV_PORT) -State Listen -ErrorAction SilentlyContinue | Format-Table LocalAddress,LocalPort,OwningProcess -AutoSize; Write-Host 'Stop the process above, then run make dev again.'; exit 1 }"
+else
 check-tauri-dev-port:
 	@if lsof -nP -iTCP:$(TAURI_DEV_PORT) -sTCP:LISTEN >/dev/null 2>&1; then \
 		echo "Port $(TAURI_DEV_PORT) is already in use. DBX Tauri dev requires http://localhost:$(TAURI_DEV_PORT)."; \
@@ -70,6 +74,7 @@ check-tauri-dev-port:
 		echo "Stop the process above, then run make dev again. Example: kill <PID>"; \
 		exit 1; \
 	fi
+endif
 
 dev: node_modules/.modules.yaml check-tauri-dev-port
 	$(PNPM) dev:tauri

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, nextTick, watch, onMounted, onBeforeUnmount } from "vue";
+import { computed, ref, shallowRef, nextTick, watch, onMounted, onBeforeUnmount } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
 import { RefreshCw, Trash2, Plus, Save, ChevronDown, ChevronLeft, ChevronRight, Table2, Braces, X, Search, Wrench, Filter, Columns3Cog, SquareDashed, Minus, Rows3, AlignLeft, AlignRight, EyeOff, Palette } from "@lucide/vue";
@@ -116,6 +116,13 @@ const DYNAMODB_DEFAULT_EXPORT_ROW_LIMIT = 10_000;
 
 const documents = ref<JsonRecord[]>([]);
 const copyDocuments = ref<JsonRecord[]>([]);
+const gridRows = shallowRef<QueryResult["rows"]>([]);
+// Set only when the most recent load() appended a continuation segment onto
+// the existing documents (infinite scroll); undefined for a full replace.
+// Mirrors QueryResult.appended_from_row_count so DataGrid's infinite-scroll
+// bookkeeping (see appendQueryResultSegment in queryStore.ts) can tell a
+// genuine append apart from a stale/failed one.
+const appendedFromRowCount = ref<number | undefined>(undefined);
 const mongoCopyDocumentsAvailable = ref(false);
 const lastGridColumns = ref<string[]>([]);
 const lastGridColumnTypes = ref<string[]>([]);
@@ -354,6 +361,57 @@ const deleteDetails = computed(() => {
   return t("dangerDialog.mongoFieldDetails", { field: pending.name || t("mongo.field") });
 });
 
+function documentGridColumns(documentsToRender: JsonRecord[]): string[] {
+  const keySet = new Set<string>();
+  keySet.add("_id");
+  for (const doc of documentsToRender) {
+    for (const key of Object.keys(doc)) {
+      if (key !== "_id") keySet.add(key);
+    }
+  }
+  return [...keySet];
+}
+
+function documentGridRow(doc: JsonRecord, columns: string[], kind: DocumentStoreKind): QueryResult["rows"][number] {
+  return columns.map((column) => {
+    const value = mongoDocumentDisplayValue(doc[column]);
+    if (value === undefined || value === null) return null;
+    if (column === "_id") return kind === "mongodb" ? mongoDocumentIdForGrid(value) : documentStoreValueForGrid(value, kind);
+    if (typeof value === "object") return documentStoreValueForGrid(value, kind);
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
+    return String(value);
+  });
+}
+
+function sameGridColumns(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((column, index) => column === right[index]);
+}
+
+function commitLoadedDocuments(nextDocuments: JsonRecord[], nextCopyDocuments: JsonRecord[], hasTypePreservingCopyDocuments: boolean, append: boolean, kind: DocumentStoreKind) {
+  const previousDocumentCount = documents.value.length;
+  const combinedDocuments = append ? [...documents.value, ...nextDocuments] : nextDocuments;
+  const nextColumns = combinedDocuments.length > 0 ? documentGridColumns(combinedDocuments) : lastGridColumns.value;
+  const canAppendGridRows = append && gridRows.value.length === previousDocumentCount && sameGridColumns(lastGridColumns.value, nextColumns);
+
+  documents.value = combinedDocuments;
+  copyDocuments.value = append ? [...copyDocuments.value, ...nextCopyDocuments] : nextCopyDocuments;
+  mongoCopyDocumentsAvailable.value = append ? mongoCopyDocumentsAvailable.value && hasTypePreservingCopyDocuments : hasTypePreservingCopyDocuments;
+
+  if (combinedDocuments.length > 0) {
+    lastGridColumns.value = nextColumns;
+    lastGridColumnTypes.value = kind === "mongodb" ? mongoDocumentGridColumnTypes(combinedDocuments, nextColumns) : [];
+  }
+
+  if (canAppendGridRows) {
+    appendedFromRowCount.value = previousDocumentCount;
+    gridRows.value = [...gridRows.value, ...nextDocuments.map((document) => documentGridRow(document, nextColumns, kind))];
+    return;
+  }
+
+  appendedFromRowCount.value = undefined;
+  gridRows.value = combinedDocuments.map((document) => documentGridRow(document, nextColumns, kind));
+}
+
 const gridResult = computed<QueryResult>(() => {
   const docs = documents.value;
   if (!docs.length) {
@@ -367,28 +425,17 @@ const gridResult = computed<QueryResult>(() => {
     };
   }
 
-  const keySet = new Set<string>();
-  keySet.add("_id");
-  for (const doc of docs) {
-    for (const key of Object.keys(doc)) {
-      if (key !== "_id") keySet.add(key);
-    }
-  }
-  const columns = [...keySet];
-  const columnTypes = documentStoreProvider.value.kind === "mongodb" ? mongoDocumentGridColumnTypes(docs, columns) : undefined;
-
-  const rows = docs.map((doc) =>
-    columns.map((col) => {
-      const val = mongoDocumentDisplayValue(doc[col]);
-      if (val === undefined || val === null) return null;
-      if (col === "_id") return documentStoreProvider.value.kind === "mongodb" ? mongoDocumentIdForGrid(val) : documentStoreValueForGrid(val, documentStoreProvider.value.kind);
-      if (typeof val === "object") return documentStoreValueForGrid(val, documentStoreProvider.value.kind);
-      if (typeof val === "string" || typeof val === "number" || typeof val === "boolean") return val;
-      return String(val);
-    }),
-  );
-
-  return { columns, column_types: columnTypes, rows, mongo_documents: docs, mongo_copy_documents: copyDocuments.value, affected_rows: 0, execution_time_ms: 0, truncated: false };
+  return {
+    columns: lastGridColumns.value,
+    column_types: lastGridColumnTypes.value,
+    rows: gridRows.value,
+    mongo_documents: docs,
+    mongo_copy_documents: copyDocuments.value,
+    affected_rows: 0,
+    execution_time_ms: 0,
+    truncated: false,
+    appended_from_row_count: appendedFromRowCount.value,
+  };
 });
 
 async function exportAllDocumentStoreDocuments(onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void): Promise<QueryResult | undefined> {
@@ -922,7 +969,7 @@ async function gridSave(changes: DocumentGridChanges) {
     }
 
     await api.documentSaveMeilisearchBatch(props.connectionId, props.collection, updates, deleteIds, inserts);
-    await load();
+    await reloadDocumentsAfterMutationOrRefresh();
     return;
   }
 
@@ -994,7 +1041,7 @@ async function gridSave(changes: DocumentGridChanges) {
     page.value = 0;
     resetDynamoDbPagination();
   }
-  await load();
+  await reloadDocumentsAfterMutationOrRefresh();
 }
 
 function buildPathIdentityInsertDocument(row: MongoInputValue[], columns: string[], kind: Exclude<DocumentStoreKind, "mongodb">): JsonRecord {
@@ -1275,7 +1322,7 @@ function applyElasticsearchSearchTotal(searchTotal: number, isExact: boolean, fi
   startElasticsearchExactCount(filter);
 }
 
-async function load(options: { page?: number } = {}) {
+async function load(options: { page?: number; append?: boolean; offset?: number; limit?: number } = {}) {
   if (documentLoadExecutionId.value) void api.cancelQuery(documentLoadExecutionId.value);
   const requestGeneration = ++documentRequestGeneration;
   const executionId = uuid();
@@ -1309,8 +1356,9 @@ async function load(options: { page?: number } = {}) {
     if (storeKind === "dynamodb" && requestPage > 0 && !cursor) {
       throw new Error(t("dynamodb.pageCursorUnavailable"));
     }
-    const skip = storeKind === "dynamodb" ? 0 : requestPage * pageSize.value;
-    const result = await api.documentFindDocuments(connectionId, database, collection, skip, documentRequestLimit.value, filter, undefined, sort, undefined, executionId, cursor);
+    const skip = storeKind === "dynamodb" ? 0 : (options.offset ?? requestPage * pageSize.value);
+    const requestLimit = options.limit ?? (storeKind === "elasticsearch" && paginationTotal.value !== undefined ? documentPageRequestLimit(requestPage, pageSize.value, paginationTotal.value) : pageSize.value);
+    const result = await api.documentFindDocuments(connectionId, database, collection, skip, requestLimit, filter, undefined, sort, undefined, executionId, cursor);
     if (documentLoadExecutionId.value !== executionId) return;
     if (connectionId !== props.connectionId || database !== props.database || collection !== props.collection || storeKind !== documentStoreProvider.value.kind) return;
     const nextDocuments =
@@ -1327,26 +1375,13 @@ async function load(options: { page?: number } = {}) {
     const nextCopyDocuments = hasTypePreservingCopyDocuments ? result.extended_documents!.map(asRecord) : nextDocuments;
     // Commit page + rows together so stale rows never briefly show last-page indexes.
     if (options.page !== undefined) page.value = options.page;
-    documents.value = nextDocuments;
-    copyDocuments.value = nextCopyDocuments;
-    mongoCopyDocumentsAvailable.value = hasTypePreservingCopyDocuments;
+    commitLoadedDocuments(nextDocuments, nextCopyDocuments, hasTypePreservingCopyDocuments, options.append === true, storeKind);
     loadedDocumentQueryTotalCountRequest = countRequest;
     if (storeKind === "dynamodb") {
       const nextCursors = dynamodbPageCursors.value.slice(0, requestPage + 1);
       nextCursors[requestPage + 1] = result.next_cursor;
       dynamodbPageCursors.value = nextCursors;
       dynamodbHasNextCursor.value = !!result.next_cursor;
-    }
-    if (nextDocuments.length > 0) {
-      const keySet = new Set<string>();
-      keySet.add("_id");
-      for (const doc of nextDocuments) {
-        for (const key of Object.keys(doc)) {
-          if (key !== "_id") keySet.add(key);
-        }
-      }
-      lastGridColumns.value = [...keySet];
-      lastGridColumnTypes.value = storeKind === "mongodb" ? mongoDocumentGridColumnTypes(nextDocuments, lastGridColumns.value) : [];
     }
     if (storeKind === "elasticsearch") {
       applyElasticsearchSearchTotal(result.total, result.total_is_exact !== false, filter);
@@ -1416,7 +1451,17 @@ async function countExactDocumentTotal(): Promise<number | undefined> {
 async function refreshDocuments() {
   if (documentStoreProvider.value.kind === "elasticsearch") resetElasticsearchTotals({ preservePaginationTotal: true });
   if (documentStoreProvider.value.kind === "dynamodb") resetDynamoDbExactCount();
-  await load();
+  await reloadDocumentsAfterMutationOrRefresh();
+}
+
+async function reloadDocumentsAfterMutationOrRefresh() {
+  if (!settingsStore.editorSettings.infiniteScroll) {
+    await load();
+    return;
+  }
+  page.value = 0;
+  dataGridRef.value?.resetInfiniteScrollState?.();
+  await load({ page: 0, offset: 0 });
 }
 
 async function cancelDocumentLoad() {
@@ -1443,7 +1488,14 @@ function applyFilter() {
 }
 
 async function paginate(offset: number, limit: number) {
+  const normalizedOffset = Math.max(0, Math.trunc(offset));
   const normalizedLimit = normalizeResultPageSize(limit, pageSize.value);
+  if (documentStoreProvider.value.kind !== "dynamodb" && settingsStore.editorSettings.infiniteScroll && normalizedOffset > 0 && normalizedOffset === documents.value.length) {
+    const requestedPage = Math.floor(normalizedOffset / pageSize.value);
+    const nextPage = clampDocumentPage(requestedPage, pageSize.value, paginationTotal.value);
+    await load({ page: nextPage, append: true, offset: normalizedOffset, limit: normalizedLimit });
+    return;
+  }
   const pageSizeChanged = normalizedLimit !== pageSize.value;
   pageSize.value = normalizedLimit;
   if (documentStoreProvider.value.kind === "dynamodb" && pageSizeChanged) {
@@ -1452,10 +1504,10 @@ async function paginate(offset: number, limit: number) {
     await load({ page: 0 });
     return;
   }
-  const requestedPage = Math.floor(Math.max(0, offset) / normalizedLimit);
+  const requestedPage = Math.floor(normalizedOffset / normalizedLimit);
   const nextPage = clampDocumentPage(requestedPage, normalizedLimit, paginationTotal.value);
   if (documentStoreProvider.value.kind !== "dynamodb") {
-    await load({ page: nextPage });
+    await load({ page: nextPage, offset: nextPage * normalizedLimit, limit: normalizedLimit });
     return;
   }
   for (let cursorPage = 0; cursorPage <= nextPage; cursorPage += 1) {
@@ -1854,7 +1906,7 @@ async function saveDoc() {
       page.value = 0;
       resetDynamoDbPagination();
     }
-    await load();
+    await reloadDocumentsAfterMutationOrRefresh();
     if (selectedIdx.value !== null && documents.value[selectedIdx.value]) {
       editJson.value = stringifyDocumentStoreValue(documents.value[selectedIdx.value], documentStoreProvider.value.kind, 2);
     }

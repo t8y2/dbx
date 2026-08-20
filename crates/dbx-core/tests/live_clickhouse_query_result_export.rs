@@ -104,6 +104,7 @@ async fn live_clickhouse_query_result_export_xlsx_streams_random_order_query_onc
         export_table_name: None,
         export_column_types: None,
         column_comments: None,
+        identifier_quote: None,
         numeric_column_right_align: false,
     };
     let done_seen = AtomicBool::new(false);

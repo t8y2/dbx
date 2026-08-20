@@ -65,6 +65,25 @@ AI 助手 → DBX MCP → 你的数据库 → 返回结果
 | Cursor | `.cursor/mcp.json` |
 | Windsurf | MCP 配置 |
 | VS Code + Copilot | MCP 扩展/配置 |
+| DeepSeek Harness | `$DSH_HOME/profiles/<profile>/cordis.patch.yml` |
+
+### DeepSeek Harness
+
+DeepSeek Harness 通过 Cordis 插件条目加载 MCP Server，不读取 `mcpServers` JSON。安装 `@dbx-app/mcp-server` 后，为 `web` profile 将以下条目合并到 `$DSH_HOME/profiles/web/cordis.patch.yml`：未设置 `DSH_HOME` 时默认为 `~/.dsh`。
+
+```yaml
+- insert:
+    - id: mcp-dbx
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: dbx
+        transport: stdio
+        command: dbx-mcp-server
+```
+
+保留最外层的 `- insert:`，不要覆盖文件中已有的 patch 条目。使用其他 DSH profile 时，将路径中的 `web` 替换为对应 profile 名称。DSH 进程的 `PATH` 必须能找到 `dbx-mcp-server`；必要时请改用可执行文件的绝对路径。
+
+运行 `dsh web --dump-config` 检查组合后的配置，再重启 DSH 或等待热加载应用该 patch。模型侧工具名为 `mcp__dbx__<tool>`。请保持 `serverName: dbx` 稳定，避免工具名和权限规则发生变化。连接访问范围和执行模式仍统一在 **DBX 设置 → MCP** 中管理。
 
 ## 工具列表
 
@@ -122,13 +141,13 @@ DuckDB 使用独立的 DBX DuckDB 驱动。通过本地 MCP 查询 DuckDB 前，
 
 ### Agent/JDBC 数据库
 
-Oracle、人大金仓和虚谷需要匹配的 DBX 原生 Agent，但不需要 JRE。达梦、DB2、Hive、Trino、Snowflake、SAP HANA 等 JDBC Agent 数据库需要匹配的 Agent、JDBC 驱动和 JRE。请先在 DBX 中安装所需组件，再使用 MCP。
+Oracle、金仓KingbaseES 和虚谷需要匹配的 DBX 原生 Agent，但不需要 JRE。达梦、DB2、Hive、Trino、Snowflake、SAP HANA 等 JDBC Agent 数据库需要匹配的 Agent、JDBC 驱动和 JRE。请先在 DBX 中安装所需组件，再使用 MCP。
 
 ### DBX Web / Docker 模式
 
 设置 `DBX_WEB_URL` 后，MCP 会使用部署的 DBX Web 后端，而不是读取本机连接。如果 Web 登录启用了密码保护，还要设置 `DBX_WEB_PASSWORD`，值为 Web 登录页使用的密码。
 
-DBX Web 请求遵循标准系统代理环境变量：https 地址读取 `HTTPS_PROXY`/`https_proxy`，http 地址读取 `HTTP_PROXY`/`http_proxy`，`ALL_PROXY`/`all_proxy` 作为兜底，`NO_PROXY`/`no_proxy`（逗号分隔的主机列表，例如 `localhost,127.0.0.1,.internal.example`）作为绕过列表。代理值为空或未设置时直连（不走代理）。支持 HTTP、HTTPS 与 SOCKS5 代理（`http://127.0.0.1:7890` 或 `socks5://127.0.0.1:1080`）；需要认证的代理使用标准 `user:password@host:port` URL 形式，例如 `http://admin:admin123@127.0.0.1:7890`。如需为每次 DBX Web 请求附加自定义请求头（例如网关前的令牌认证），将 `DBX_WEB_HEADERS` 设置为 JSON 对象，键为请求头名称、值为字符串，例如 `{"Authorization":"Bearer <token>"}`。同样的变量在 DBX CLI 的 Web 模式下同样生效。
+DBX Web 请求遵循标准系统代理环境变量：https 地址读取 `HTTPS_PROXY`/`https_proxy`，http 地址读取 `HTTP_PROXY`/`http_proxy`，`ALL_PROXY`/`all_proxy` 作为兜底，`NO_PROXY`/`no_proxy`（逗号分隔的主机列表，例如 `localhost,127.0.0.1,.internal.example`）作为绕过列表。代理值为空或未设置时直连（不走代理）。支持 HTTP、HTTPS 与 SOCKS5 代理（`http://127.0.0.1:7890` 或 `socks5://127.0.0.1:1080`）；需要认证的代理使用标准 `user:password@host:port` URL 形式，例如 `http://admin:admin123@127.0.0.1:7890`。如需为每次 DBX Web 请求附加自定义请求头（例如网关前的令牌认证），将 `DBX_WEB_HEADERS` 设置为 JSON 对象，键为请求头名称、值为字符串，例如 `{"Authorization":"Bearer <token>"}`。目标为自签名 HTTPS 时，证书验证默认开启：设置 `DBX_WEB_INSECURE_SKIP_VERIFY=1` 可跳过验证，或设置 `DBX_WEB_CA_CERT` 指向 PEM/DER CA 文件以信任私有 CA。同样的变量在 DBX CLI 的 Web 模式下同样生效。
 
 DBX Web 和 Docker 同样需要独立 DuckDB 驱动。首次启动后可通过 Driver Manager 安装；Docker 会把驱动保存到 `/app/data/agents`，挂载 `/app/data` 数据卷后升级容器不会丢失。
 
@@ -158,6 +177,8 @@ DBX 在 **设置 → MCP** 中保存一份权威策略，并在每次请求时�
 | `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` | DBX Web 请求的标准系统代理变量；空值表示不走代理。认证格式 `http://user:pass@host:port` |
 | `NO_PROXY` | 上述代理的标准绕过列表（逗号分隔主机） |
 | `DBX_WEB_HEADERS` | DBX Web 请求附加的请求头 JSON 对象，例如 `{"Authorization":"Bearer token"}` |
+| `DBX_WEB_INSECURE_SKIP_VERIFY` | `1`/`true` 时跳过 TLS 证书验证（用于自签名 DBX Web 后端；默认验证） |
+| `DBX_WEB_CA_CERT` | DBX Web TLS 验证时信任的 PEM/DER CA 文件 |
 | `DBX_MCP_ALLOW_WRITES` | 仅用于升级兼容：`0`/`false` 使尚未配置的策略保持只读 |
 | `DBX_MCP_SCOPE_CONNECTION_ID` | 兼容旧配置：限制为一个连接 ID |
 | `DBX_MCP_SCOPE_CONNECTION_IDS` | 兼容旧配置：限制为多个连接 ID |

@@ -3,6 +3,7 @@ use dbx_core::database_export::{begin_database_backup_snapshot_core, export_data
 use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
 use dbx_core::query::{
     begin_manual_transaction, commit_manual_transaction, execute_in_manual_transaction, rollback_manual_transaction,
+    stream_rows_in_manual_transaction,
 };
 use dbx_core::storage::Storage;
 use std::time::{Duration, Instant};
@@ -16,6 +17,7 @@ fn live_config(prefix: &str, db_type: DatabaseType, default_port: u16) -> Connec
     let username = std::env::var(format!("{prefix}_USER")).expect("live DB user env var");
     let password = std::env::var(format!("{prefix}_PASSWORD")).expect("live DB password env var");
     let database = std::env::var(format!("{prefix}_DATABASE")).expect("live DB database env var");
+    let url_params = std::env::var(format!("{prefix}_URL_PARAMS")).ok();
 
     serde_json::from_value(serde_json::json!({
         "id": format!("manual-txn-{prefix}"),
@@ -29,7 +31,8 @@ fn live_config(prefix: &str, db_type: DatabaseType, default_port: u16) -> Connec
         "connect_timeout_secs": 5,
         "query_timeout_secs": 30,
         "idle_timeout_secs": 60,
-        "keepalive_interval_secs": 0
+        "keepalive_interval_secs": 0,
+        "url_params": url_params
     }))
     .expect("live connection config should deserialize")
 }
@@ -50,6 +53,9 @@ async fn live_manual_transaction_postgres_preserves_typed_selects_and_empty_meta
     let (state, db_path) = app_state_with_config(config.clone()).await;
 
     let txn = begin_manual_transaction(&state, &config.id, &database, None, None).await.expect("begin");
+    execute_in_manual_transaction(&state, &txn, "DEALLOCATE ALL", &database, None, Some(10))
+        .await
+        .expect("simulate lost prepared statements");
     let typed = execute_in_manual_transaction(
         &state,
         &txn,
@@ -77,6 +83,38 @@ async fn live_manual_transaction_postgres_preserves_typed_selects_and_empty_meta
     assert!(empty[0].rows.is_empty());
 
     commit_manual_transaction(&state, &txn).await.expect("commit");
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_MANUAL_TXN_POSTGRES_* env vars pointing at writable PostgreSQL"]
+async fn live_postgres_backup_snapshot_streams_after_server_deallocates_statements() {
+    let config = live_config("DBX_LIVE_MANUAL_TXN_POSTGRES", DatabaseType::Postgres, 5432);
+    let database = config.database.clone().expect("database");
+    let (state, db_path) = app_state_with_config(config.clone()).await;
+
+    let snapshot = begin_database_backup_snapshot_core(&state, &config.id, &database).await.expect("begin snapshot");
+    execute_in_manual_transaction(&state, &snapshot.session_id, "DEALLOCATE ALL", &database, None, Some(10))
+        .await
+        .expect("simulate lost prepared statements");
+
+    let mut batches = Vec::new();
+    let row_count = stream_rows_in_manual_transaction(
+        &state,
+        &snapshot.session_id,
+        "SELECT 1::int4 AS value UNION ALL SELECT 2::int4",
+        1,
+        |batch| {
+            batches.push(batch);
+            Ok(())
+        },
+    )
+    .await
+    .expect("stream through backup snapshot");
+    assert_eq!(row_count, 2);
+    assert_eq!(batches, vec![vec![vec![serde_json::json!(1)]], vec![vec![serde_json::json!(2)]]]);
+
+    rollback_manual_transaction(&state, &snapshot.session_id).await.expect("rollback snapshot");
     let _ = std::fs::remove_file(db_path);
 }
 

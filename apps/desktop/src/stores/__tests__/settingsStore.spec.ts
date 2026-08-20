@@ -345,6 +345,13 @@ describe("right sidebar panel transitions", () => {
 });
 
 describe("normalizeDesktopSettings", () => {
+  it("normalizes the metadata cache memory budget", () => {
+    expect(normalizeDesktopSettings({}).metadata_cache_max_memory_mb).toBe(64);
+    expect(normalizeDesktopSettings({ metadata_cache_max_memory_mb: 1 }).metadata_cache_max_memory_mb).toBe(16);
+    expect(normalizeDesktopSettings({ metadata_cache_max_memory_mb: 384 }).metadata_cache_max_memory_mb).toBe(384);
+    expect(normalizeDesktopSettings({ metadata_cache_max_memory_mb: 513 }).metadata_cache_max_memory_mb).toBe(64);
+  });
+
   it("defaults DuckDB worker process isolation to disabled for old settings", () => {
     expect(normalizeDesktopSettings({}).duckdb_worker_process_isolation).toBe(false);
   });

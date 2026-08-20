@@ -65,3 +65,16 @@ pub async fn cancel_database_export(export_id: String) -> Result<(), String> {
     dbx_core::database_export::set_export_cancelled(&export_id).await;
     Ok(())
 }
+
+/// Records a scheduled backup destination's filesystem identity as soon as
+/// the schedule is saved, not just after its first successful export. See
+/// `record_export_destination_identity` for why this eager recording is
+/// needed. Called from the schedule editor when a schedule is created or
+/// edited (`apps/desktop/src/components/backup/ScheduledDatabaseBackupSettings.vue`).
+#[tauri::command]
+pub async fn record_database_export_destination(
+    state: State<'_, Arc<AppState>>,
+    directory: String,
+) -> Result<(), String> {
+    dbx_core::database_export::record_export_destination_identity(&state, std::path::Path::new(&directory)).await
+}

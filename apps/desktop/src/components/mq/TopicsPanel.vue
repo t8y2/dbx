@@ -12,6 +12,7 @@ import ExchangesPanel from "./ExchangesPanel.vue";
 import MqTypeFilterBar from "./shared/MqTypeFilterBar.vue";
 import type { MqTab } from "@/lib/mq/mqConsoleDefaults";
 import { isAllVhostsNamespace, resolveMqRowNamespace } from "@/lib/mq/mqConsoleDefaults";
+import { formatMqRateCompact, rabbitMqArgumentsSummary, rabbitMqFeatureBadges, rabbitMqQueueType, type RabbitMqFeatureBadge } from "@/lib/mq/rabbitmqQueueFeatures";
 import { formatError } from "@/lib/backend/errorUtils";
 import { DEFAULT_ROCKETMQ_TOPIC_TYPE_FILTERS, isProtectedRocketMqTopic, isRocketMqBusinessMessageType, matchesRocketMqTypeFilters, resolveRocketMqMessageType, ROCKETMQ_CREATABLE_TOPIC_MESSAGE_TYPES, ROCKETMQ_TOPIC_MESSAGE_TYPES } from "@/lib/mq/rocketmqTopicTypes";
 import { useMqMutationGuard } from "@/composables/useMqMutationGuard";
@@ -141,22 +142,35 @@ const virtualTopicRows = computed<VirtualTopicRow[]>(() =>
 const topicsGridTemplate = computed(() => {
   const cols: string[] = ["minmax(180px, 1.6fr)"];
   if (showNamespaceColumn.value) cols.push("minmax(100px, 0.8fr)");
-  cols.push("120px");
-  if (!isRocketMqCluster.value) cols.push("140px");
+  if (isRabbitMqCluster.value) {
+    // RabbitMQ queues: type(+state) | features | messages | consumers | rates | actions
+    cols.push("110px", "170px", "90px", "70px", "190px");
+  } else {
+    cols.push("120px");
+  }
+  if (!isRocketMqCluster.value && !isRabbitMqCluster.value) cols.push("140px");
   // RocketMQ keeps tiled row actions (status/route/consumers/…) — reserve a wider actions column.
-  cols.push(isRocketMqCluster.value ? "minmax(560px, 2.2fr)" : "minmax(200px, 1fr)");
+  cols.push(isRocketMqCluster.value ? "minmax(560px, 2.2fr)" : "minmax(150px, 1fr)");
   return cols.join(" ");
 });
 
 /** Min content width from grid track mins + gaps + padding; enables shared horizontal scroll. */
 const topicsTableMinWidthPx = computed(() => {
-  let min = 180 + 120; // name + type
+  let min = 180; // name
   if (showNamespaceColumn.value) min += 100;
-  if (!isRocketMqCluster.value) min += 140;
-  min += isRocketMqCluster.value ? 560 : 200;
-  let colCount = 3;
+  let colCount = 0;
+  if (isRabbitMqCluster.value) {
+    // type + features + messages + consumers + rates + actions
+    min += 110 + 170 + 90 + 70 + 190 + 150;
+    colCount = 7; // name, type, features, messages, consumers, rates, actions
+  } else {
+    min += 120; // type
+    if (!isRocketMqCluster.value) min += 140; // partitions
+    min += isRocketMqCluster.value ? 560 : 200; // actions
+    // RocketMQ: name + type + actions. Others: + partitions.
+    colCount = isRocketMqCluster.value ? 3 : 4;
+  }
   if (showNamespaceColumn.value) colCount += 1;
-  if (!isRocketMqCluster.value) colCount += 1;
   min += (colCount - 1) * 8; // column-gap
   min += 24; // horizontal padding
   return min;
@@ -175,6 +189,37 @@ function topicRowSelected(topic: TopicInfo): boolean {
 
 function rabbitMqReadyMessageCount(topic: TopicInfo): number {
   return topic.messagesReady ?? topic.messageCount ?? 0;
+}
+
+/** Queue type label for the type column; unknown types are never guessed. */
+function rabbitMqQueueTypeLabel(topic: TopicInfo): string {
+  return rabbitMqQueueType(topic) ?? t("mqTopics.rabbitmqQueueTypeUnknown");
+}
+
+function rabbitMqQueueTypeBadgeClass(topic: TopicInfo): string {
+  const type = rabbitMqQueueType(topic);
+  if (type === "quorum") return "badge-info";
+  if (type === "stream") return "badge-warning";
+  return "badge-default";
+}
+
+function rabbitMqFeatureBadgesFor(topic: TopicInfo): RabbitMqFeatureBadge[] {
+  return rabbitMqFeatureBadges(topic);
+}
+
+/** Tooltip for the message-count column: Ready / Unacked / Total / Consumers. */
+function rabbitMqMessageCountTitle(topic: TopicInfo): string {
+  const parts = [`${t("mqRabbitMqMonitoring.messagesReady")}: ${topic.messagesReady ?? "-"}`, `${t("mqRabbitMqMonitoring.messagesUnacked")}: ${topic.messagesUnacked ?? "-"}`, `${t("mqTopics.messageCount")}: ${topic.messageCount ?? "-"}`];
+  if (topic.consumerCount !== undefined) parts.push(`${t("mqTopics.consumers")}: ${topic.consumerCount}`);
+  if (topic.state) parts.push(`${t("mqTopics.rabbitmqState")}: ${topic.state}`);
+  const summary = rabbitMqArgumentsSummary(topic);
+  if (summary) parts.push(`${t("mqTopics.rabbitmqArguments")}: ${summary}`);
+  return parts.join(" · ");
+}
+
+/** Tooltip for the rates column; rates are msg/s sampled by the management API. */
+function rabbitMqRatesTitle(): string {
+  return `${t("mqTopics.rabbitmqPublishRate")} / ${t("mqTopics.rabbitmqDeliverRate")} / ${t("mqTopics.rabbitmqAckRate")} (msg/s)`;
 }
 
 function toggleRabbitMqMessageSort() {
@@ -551,7 +596,9 @@ watch(newPartitions, () => {
           <div class="topics-table-header" :style="{ gridTemplateColumns: topicsGridTemplate }">
             <div class="topics-col">{{ t("mqTopics.name") }}</div>
             <div v-if="showNamespaceColumn" class="topics-col">{{ t("mqAdmin.namespace") }}</div>
-            <div class="topics-col">{{ t("mqTopics.type") }}</div>
+            <div v-if="isRabbitMqCluster" class="topics-col">{{ t("mqTopics.rabbitmqQueueType") }}</div>
+            <div v-else class="topics-col">{{ t("mqTopics.type") }}</div>
+            <div v-if="isRabbitMqCluster" class="topics-col">{{ t("mqTopics.rabbitmqFeatures") }}</div>
             <div v-if="isRabbitMqCluster" class="topics-col">
               <button type="button" class="topics-sort-button" data-testid="rabbitmq-message-sort" @click="toggleRabbitMqMessageSort">
                 {{ t("mqTopics.messageCount") }}
@@ -559,6 +606,8 @@ watch(newPartitions, () => {
               </button>
             </div>
             <div v-else-if="!isRocketMqCluster" class="topics-col">{{ t("mqTopics.partitions") }}</div>
+            <div v-if="isRabbitMqCluster" class="topics-col">{{ t("mqTopics.consumers") }}</div>
+            <div v-if="isRabbitMqCluster" class="topics-col" :title="rabbitMqRatesTitle()">{{ t("mqTopics.rabbitmqRates") }}</div>
             <div class="topics-col">{{ t("mqTopics.actions") }}</div>
           </div>
           <RecycleScroller class="topics-scroller" :items="virtualTopicRows" :item-size="TOPIC_ROW_HEIGHT" :buffer="200" key-field="id">
@@ -571,17 +620,39 @@ watch(newPartitions, () => {
                   </div>
                 </div>
                 <div v-if="showNamespaceColumn" class="topics-col">{{ row.topic.namespace || "-" }}</div>
-                <div class="topics-col">
+                <div v-if="isRabbitMqCluster" class="topics-col">
+                  <span class="badge" :class="rabbitMqQueueTypeBadgeClass(row.topic)" :title="t('mqTopics.rabbitmqQueueTypeHint')">
+                    {{ rabbitMqQueueTypeLabel(row.topic) }}
+                  </span>
+                  <span v-if="row.topic.state" class="queue-state" :title="t('mqTopics.rabbitmqState')">{{ row.topic.state }}</span>
+                </div>
+                <div v-else class="topics-col">
                   <span class="badge" :class="topicTypeBadgeClass(row.topic)">
                     {{ topicTypeLabel(row.topic) }}
                   </span>
                 </div>
-                <div v-if="isRabbitMqCluster" class="topics-col" data-testid="rabbitmq-message-count" :title="`${t('mqRabbitMqMonitoring.messagesReady')}: ${rabbitMqReadyMessageCount(row.topic)} · ${t('mqRabbitMqMonitoring.messagesUnacked')}: ${row.topic.messagesUnacked ?? 0}`">
+                <div v-if="isRabbitMqCluster" class="topics-col" data-testid="rabbitmq-features">
+                  <span v-if="rabbitMqFeatureBadgesFor(row.topic).length" class="feature-badges">
+                    <span v-for="badge in rabbitMqFeatureBadgesFor(row.topic)" :key="badge.key" class="feature-badge" :class="badge.kind === 'feature' ? 'feature-flag' : ''" :title="badge.title">
+                      {{ badge.label }}
+                    </span>
+                  </span>
+                  <span v-else class="text-muted">-</span>
+                </div>
+                <div v-if="isRabbitMqCluster" class="topics-col" data-testid="rabbitmq-message-count" :title="rabbitMqMessageCountTitle(row.topic)">
                   {{ rabbitMqReadyMessageCount(row.topic) }}
                 </div>
                 <div v-else-if="!isRocketMqCluster" class="topics-col">
                   <span v-if="row.topic.partitioned">{{ row.topic.partitions ? t("mqTopics.partitionCount", { count: row.topic.partitions }) : t("mqTopics.partitionsUnknown") }}</span>
                   <span v-else class="text-muted">-</span>
+                </div>
+                <div v-if="isRabbitMqCluster" class="topics-col" data-testid="rabbitmq-consumers">{{ row.topic.consumerCount ?? "-" }}</div>
+                <div v-if="isRabbitMqCluster" class="topics-col topics-rates" data-testid="rabbitmq-rates" :title="rabbitMqRatesTitle()">
+                  <span>{{ formatMqRateCompact(row.topic.publishRate) }}</span>
+                  <span class="rate-sep">/</span>
+                  <span>{{ formatMqRateCompact(row.topic.deliverRate) }}</span>
+                  <span class="rate-sep">/</span>
+                  <span>{{ formatMqRateCompact(row.topic.ackRate) }}</span>
                 </div>
                 <div class="topics-col actions" @click.stop>
                   <template v-if="isRocketMqCluster">
@@ -1035,6 +1106,53 @@ watch(newPartitions, () => {
 .text-muted {
   color: var(--color-text-tertiary);
   font-style: italic;
+}
+
+/* RabbitMQ queue feature badges (compact, tooltip-bearing). */
+.queue-state {
+  margin-left: 4px;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+}
+
+.feature-badges {
+  display: inline-flex;
+  gap: 3px;
+  flex-wrap: nowrap;
+  overflow: hidden;
+}
+
+.feature-badge {
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: var(--dbx-radius-fixed-4);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.5;
+  background: var(--color-background-secondary);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  cursor: help;
+}
+
+.feature-badge.feature-flag {
+  background: var(--color-warning-alpha);
+  border-color: transparent;
+  color: var(--color-warning);
+}
+
+.topics-rates {
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: help;
+}
+
+.topics-rates .rate-sep {
+  margin: 0 3px;
+  color: var(--color-text-tertiary);
 }
 
 .actions {

@@ -39,8 +39,8 @@ describe("databaseObjectCapabilities", () => {
   });
 
   it("exposes triggers only for native MySQL among MySQL-compatible paths", () => {
-    expect(sidebarObjectKindsForDatabase("mysql")).toEqual(["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "TRIGGER"]);
-    expect(databaseObjectCapabilities("mysql").sourceReadable).toEqual(["VIEW", "PROCEDURE", "FUNCTION", "TRIGGER"]);
+    expect(sidebarObjectKindsForDatabase("mysql")).toEqual(["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "EVENT"]);
+    expect(databaseObjectCapabilities("mysql").sourceReadable).toEqual(["VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "EVENT"]);
 
     expect(sidebarObjectKindsForDatabase("doris")).toEqual(["TABLE", "VIEW"]);
     expect(sidebarObjectKindsForDatabase("starrocks")).toEqual(["TABLE", "VIEW", "MATERIALIZED_VIEW"]);
@@ -60,6 +60,12 @@ describe("databaseObjectCapabilities", () => {
     for (const dbType of ["highgo", "uxdb", "redshift", "kwdb"] as const) {
       expect(sidebarObjectKindsForDatabase(dbType), dbType).not.toContain("TYPE");
     }
+  });
+
+  it("exposes schema triggers for Kingbase without widening Vastbase", () => {
+    expect(sidebarObjectKindsForDatabase("kingbase")).toContain("TRIGGER");
+    expect(databaseObjectCapabilities("kingbase").sourceReadable).toContain("TRIGGER");
+    expect(sidebarObjectKindsForDatabase("vastbase")).not.toContain("TRIGGER");
   });
 
   it("only Xugu TYPE nodes can open object source", () => {

@@ -87,8 +87,9 @@ test("document table wires on-demand exact total counting for estimated mongo to
 
 test("document pagination commits page index with fetched rows", () => {
   const source = documentBrowserSource();
-  assert.match(source, /async function load\(options: \{ page\?: number \} = \{\}\)/);
-  assert.match(source, /(?:void|await) load\(\{ page: nextPage \}\)/);
+  assert.match(source, /async function load\(options: \{ page\?: number; append\?: boolean; offset\?: number; limit\?: number \} = \{\}\)/);
+  assert.match(source, /await load\(\{ page: nextPage, append: true, offset: normalizedOffset, limit: normalizedLimit \}\)/);
+  assert.match(source, /await load\(\{ page: nextPage, offset: nextPage \* normalizedLimit, limit: normalizedLimit \}\)/);
   assert.match(source, /if \(options\.page !== undefined\) page\.value = options\.page;/);
 });
 

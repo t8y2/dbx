@@ -29,6 +29,8 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.clients.consumer.OffsetAndMetadata;
+import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.admin.AlterConfigOp;
 import org.apache.kafka.clients.admin.Config;
 import org.apache.kafka.clients.admin.ConfigEntry;
@@ -54,6 +56,87 @@ import org.junit.jupiter.api.io.TempDir;
 class KafkaAgentTest {
     @TempDir
     Path tempDir;
+
+    @Test
+    void consumerGroupSnapshotCalculatesLagAndSortsTopicsAndPartitions() {
+        TopicPartition alphaOne = new TopicPartition("alpha", 1);
+        TopicPartition alphaZero = new TopicPartition("alpha", 0);
+        TopicPartition betaZero = new TopicPartition("beta", 0);
+
+        Map<String, Object> group = KafkaAgent.consumerGroupSnapshotRow(
+            "orders-service",
+            "STABLE",
+            false,
+            2,
+            Arrays.asList(betaZero, alphaOne, alphaZero),
+            Map.of(
+                alphaZero, new OffsetAndMetadata(8),
+                alphaOne, new OffsetAndMetadata(20),
+                betaZero, new OffsetAndMetadata(5)
+            ),
+            true,
+            Map.of(alphaZero, 10L, alphaOne, 24L, betaZero, 6L),
+            Collections.emptyList()
+        );
+
+        assertEquals(List.of("alpha", "beta"), group.get("topics"));
+        assertEquals(7L, group.get("totalLag"));
+        assertEquals(true, group.get("lagAvailable"));
+        assertEquals(2, group.get("memberCount"));
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> partitions = (List<Map<String, Object>>) group.get("partitions");
+        assertEquals(
+            List.of("alpha:0", "alpha:1", "beta:0"),
+            partitions.stream()
+                .map(partition -> partition.get("topic") + ":" + partition.get("partition"))
+                .toList()
+        );
+    }
+
+    @Test
+    void consumerGroupSnapshotDoesNotReportUnknownLagAsZero() {
+        TopicPartition assignedOnly = new TopicPartition("orders", 0);
+        Map<String, Object> group = KafkaAgent.consumerGroupSnapshotRow(
+            "new-consumer",
+            "EMPTY",
+            false,
+            0,
+            Collections.singletonList(assignedOnly),
+            Collections.emptyMap(),
+            true,
+            Collections.singletonMap(assignedOnly, 42L),
+            Collections.emptyList()
+        );
+
+        assertEquals(false, group.get("lagAvailable"));
+        assertNull(group.get("totalLag"));
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> partitions = (List<Map<String, Object>>) group.get("partitions");
+        assertNull(partitions.get(0).get("currentOffset"));
+        assertNull(partitions.get(0).get("lag"));
+    }
+
+    @Test
+    void consumerGroupSnapshotPreservesPartialFailuresWithoutInventingLag() {
+        TopicPartition partition = new TopicPartition("orders", 0);
+        Map<String, Object> group = KafkaAgent.consumerGroupSnapshotRow(
+            "orders-service",
+            "UNKNOWN",
+            false,
+            null,
+            Collections.emptyList(),
+            Collections.singletonMap(partition, new OffsetAndMetadata(9)),
+            true,
+            Collections.emptyMap(),
+            Collections.singletonList("End offsets unavailable for 1 partition(s)")
+        );
+
+        assertEquals(false, group.get("lagAvailable"));
+        assertNull(group.get("totalLag"));
+        assertNull(group.get("memberCount"));
+        assertEquals("End offsets unavailable for 1 partition(s)", group.get("error"));
+    }
 
     @Test
     void explicitConsumerGroupOffsetsAcceptOneBoundedPartitionOffset() {
@@ -414,6 +497,30 @@ class KafkaAgentTest {
         assertEquals("dbx", kafkaProperties.getProperty("client.id"));
         assertNull(kafkaProperties.getProperty("zookeeper.sasl.client"));
         assertNull(kafkaProperties.getProperty("zookeeper.ssl.trustStore.password"));
+    }
+
+    @Test
+    void producerDefaultsToLegacyCompatibleNonIdempotentDelivery() {
+        JsonObject connection = new JsonObject();
+        connection.addProperty("bootstrap_servers", "legacy-broker:9092");
+
+        Properties properties = KafkaAgent.producerProperties(connection);
+
+        assertEquals("all", properties.getProperty(ProducerConfig.ACKS_CONFIG));
+        assertEquals("false", properties.getProperty(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG));
+    }
+
+    @Test
+    void producerAllowsExplicitIdempotenceForModernBrokers() {
+        JsonObject extraProperties = new JsonObject();
+        extraProperties.addProperty(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "true");
+        JsonObject connection = new JsonObject();
+        connection.addProperty("bootstrap_servers", "modern-broker:9092");
+        connection.add("properties", extraProperties);
+
+        Properties properties = KafkaAgent.producerProperties(connection);
+
+        assertEquals("true", properties.getProperty(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG));
     }
 
     @Test

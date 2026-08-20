@@ -577,6 +577,8 @@ pub enum DatabaseType {
     Cassandra,
     #[serde(rename = "bigquery")]
     Bigquery,
+    #[serde(rename = "spanner")]
+    Spanner,
     Kylin,
     Sundb,
     Oscar,
@@ -600,6 +602,8 @@ pub enum DatabaseType {
     VictoriaMetrics,
     #[serde(rename = "questdb")]
     Questdb,
+    Ignite,
+    Ignite3,
     Jdbc,
     /// Message queue admin connection (Pulsar / Kafka / RocketMQ). The specific
     /// system is determined by `external_config.systemKind`.
@@ -927,12 +931,22 @@ impl ConnectionConfig {
         }
     }
 
+    /// Cloud Spanner schema changes are long-running operations rather than plain
+    /// statements. Measured against the real service, `CREATE INDEX` on an *empty*
+    /// table took 22.9-33.6s over seven runs, so the generic default fails
+    /// intermittently — and the failure is misleading, because the operation keeps
+    /// running server-side and completes, leaving a retry to report
+    /// `Duplicate name in schema`. Raising a floor mirrors what
+    /// `connection::agent_connect_timeout` already does for Access.
+    const SPANNER_MIN_QUERY_TIMEOUT_SECS: u64 = 120;
+
     pub fn effective_query_timeout_secs(&self) -> u64 {
         if self.query_timeout_secs == 0 {
-            0
-        } else {
-            self.query_timeout_secs.max(1)
+            // An explicit 0 is the UI's "no limit"; a floor must not impose one.
+            return 0;
         }
+        let floor = if self.db_type == DatabaseType::Spanner { Self::SPANNER_MIN_QUERY_TIMEOUT_SECS } else { 1 };
+        self.query_timeout_secs.max(floor)
     }
 
     pub fn effective_database(&self) -> Option<&str> {
@@ -992,6 +1006,11 @@ impl ConnectionConfig {
 
     pub fn canonicalized(&self) -> Self {
         let mut config = self.clone();
+        if config.uses_mongodb_oidc() {
+            config.password.clear();
+            config.driver_profile = Some("mongodb".to_string());
+            config.driver_label = Some("MongoDB".to_string());
+        }
         if config.db_type == DatabaseType::SqlServer
             && sqlserver_legacy_compatibility_param(config.url_params.as_deref())
         {
@@ -1012,6 +1031,16 @@ impl ConnectionConfig {
             }
         }
         config
+    }
+
+    pub fn uses_mongodb_oidc(&self) -> bool {
+        if self.db_type != DatabaseType::MongoDb {
+            return false;
+        }
+        if let Some(connection_string) = self.connection_string.as_deref().filter(|value| !value.trim().is_empty()) {
+            return mongo_connection_string_uses_oidc(connection_string);
+        }
+        self.url_params.as_deref().is_some_and(mongo_url_params_use_oidc)
     }
 
     pub fn uses_redis_sentinel(&self) -> bool {
@@ -1143,6 +1172,8 @@ impl ConnectionConfig {
                 }
             }
             DatabaseType::Questdb => format!("questdb://{host}:{port}{db_part}"),
+            DatabaseType::Ignite => format!("ignite://{host}:{port}{db_part}"),
+            DatabaseType::Ignite3 => format!("ignite3://{host}:{port}{db_part}"),
             DatabaseType::Gbase => format!("gbase://{host}:{port}{db_part}"),
             DatabaseType::H2 => format!("h2://{host}:{port}{db_part}"),
             DatabaseType::Snowflake => format!("snowflake://{host}/{db_part}"),
@@ -1157,6 +1188,7 @@ impl ConnectionConfig {
             DatabaseType::Neo4j => format!("neo4j://{host}:{port}{db_part}"),
             DatabaseType::Cassandra => format!("cassandra://{host}:{port}{db_part}"),
             DatabaseType::Bigquery => format!("bigquery://{host}/{db_part}"),
+            DatabaseType::Spanner => self.spanner_display_url(&host, port),
             DatabaseType::Kylin => format!("kylin://{host}:{port}{db_part}"),
             DatabaseType::Sundb => format!("sundb://{host}:{port}{db_part}"),
             DatabaseType::Oscar => format!("oscar://{host}:{port}{db_part}"),
@@ -1260,6 +1292,8 @@ impl ConnectionConfig {
                 let db_part = mongo_uri_db_part_for_suffix(&db_part, &suffix);
                 if self.username.is_empty() {
                     format!("mongodb://{host}:{port}{db_part}{suffix}")
+                } else if mongo_url_params_use_oidc(&params) {
+                    format!("mongodb://{username}@{host}:{port}{db_part}{suffix}")
                 } else {
                     format!("mongodb://{username}:{password}@{host}:{port}{db_part}{suffix}")
                 }
@@ -1347,6 +1381,12 @@ impl ConnectionConfig {
             DatabaseType::Questdb => {
                 format!("questdb://{}:{}@{host}:{port}{db_part}", username, password)
             }
+            DatabaseType::Ignite => {
+                format!("ignite://{}:{}@{host}:{port}{db_part}", username, password)
+            }
+            DatabaseType::Ignite3 => {
+                format!("ignite3://{}:{}@{host}:{port}{db_part}", username, password)
+            }
             DatabaseType::Gbase => {
                 format!("gbase://{}:{}@{host}:{port}{db_part}", username, password)
             }
@@ -1399,6 +1439,9 @@ impl ConnectionConfig {
             DatabaseType::Bigquery => {
                 format!("bigquery://{}:{}@{host}/{db_part}", username, password)
             }
+            // Spanner authenticates through driver properties (`credentials=…`), never
+            // through username/password, so the display URL carries neither.
+            DatabaseType::Spanner => self.spanner_display_url(&host, port),
             DatabaseType::Kylin => {
                 format!("kylin://{}:{}@{host}:{port}{db_part}", username, password)
             }
@@ -1450,6 +1493,25 @@ impl ConnectionConfig {
             DatabaseType::Mqtt => self.mqtt_broker_url(),
             DatabaseType::Nacos => self.nacos_admin_url(),
             DatabaseType::Consul => self.consul_api_url(),
+        }
+    }
+
+    /// Display-only URL for Cloud Spanner connections.
+    ///
+    /// Spanner is agent-backed: the real JDBC URL is assembled inside the Spanner
+    /// agent from the structured `ConnectParams`, so this string is used purely for
+    /// the sidebar / connection card / logs. `database` holds the full resource path
+    /// `projects/{p}/instances/{i}/databases/{d}`, which the shared
+    /// [`encode_url_part`] would mangle into `projects%2Fmy%2Dproject%2F…` because it
+    /// escapes every non-alphanumeric byte. [`encode_spanner_resource_path`] keeps the
+    /// separators and unreserved characters readable instead. `host` is empty for real
+    /// Cloud Spanner and only set for the emulator or a custom endpoint.
+    fn spanner_display_url(&self, host: &str, port: u16) -> String {
+        let path = self.effective_database().map(encode_spanner_resource_path).unwrap_or_default();
+        if host.is_empty() {
+            format!("spanner:///{path}")
+        } else {
+            format!("spanner://{host}:{port}/{path}")
         }
     }
 
@@ -1819,11 +1881,39 @@ fn normalize_mongo_url_params(value: &str, force_tls: bool, default_auth_source:
         }
     }
 
-    if default_auth_source && !parts.iter().any(|part| url_param_key_is(part, "authSource")) {
+    if parts.iter().any(|part| mongo_url_param_equals(part, "authMechanism", "MONGODB-OIDC")) {
+        parts.retain(|part| !url_param_key_is(part, "authSource"));
+        parts.push("authSource=%24external".to_string());
+    } else if default_auth_source && !parts.iter().any(|part| url_param_key_is(part, "authSource")) {
         parts.push("authSource=admin".to_string());
     }
 
     parts.join("&")
+}
+
+fn mongo_url_params_use_oidc(value: &str) -> bool {
+    value.trim_start_matches('?').split('&').any(|part| mongo_url_param_equals(part, "authMechanism", "MONGODB-OIDC"))
+}
+
+fn mongo_connection_string_uses_oidc(value: &str) -> bool {
+    let value = value.trim();
+    if !value.get(.."mongodb://".len()).is_some_and(|prefix| prefix.eq_ignore_ascii_case("mongodb://"))
+        && !value.get(.."mongodb+srv://".len()).is_some_and(|prefix| prefix.eq_ignore_ascii_case("mongodb+srv://"))
+    {
+        return false;
+    }
+    value
+        .split_once('?')
+        .map(|(_, query)| mongo_url_params_use_oidc(query.split('#').next().unwrap_or("")))
+        .unwrap_or(false)
+}
+
+fn mongo_url_param_equals(part: &str, expected_key: &str, expected_value: &str) -> bool {
+    let Some((key, value)) = part.split_once('=') else {
+        return false;
+    };
+    key.trim().eq_ignore_ascii_case(expected_key)
+        && percent_decode_str(value).decode_utf8_lossy().trim().eq_ignore_ascii_case(expected_value)
 }
 
 /// The Rust MongoDB driver uses rustls by default, which does not accept
@@ -2260,7 +2350,7 @@ fn jdbc_transport_rest(url: &str) -> Option<&str> {
     }
 }
 
-pub fn rewrite_jdbc_url_host(url: &str, new_host: &str, new_port: u16) -> String {
+pub fn rewrite_jdbc_url_host(url: &str, new_host: &str, new_port: u16) -> Result<String, String> {
     let normalized_url = url.to_ascii_uppercase();
     let normalized_rest = jdbc_transport_rest(url).map(str::to_ascii_uppercase).unwrap_or_default();
     if normalized_rest.starts_with("ORACLE:") && normalized_url.contains("(HOST=") && normalized_url.contains("(PORT=")
@@ -2269,11 +2359,41 @@ pub fn rewrite_jdbc_url_host(url: &str, new_host: &str, new_port: u16) -> String
     }
 
     let Some((old_host, old_port)) = parse_jdbc_host_port(url) else {
-        return url.to_string();
+        return Err(format!(
+            "Cannot route JDBC connection string through transport endpoint {new_host}:{new_port}: unsupported URL format"
+        ));
     };
+
+    if let Some(after_sqlserver) = normalized_rest.strip_prefix("SQLSERVER://") {
+        let authority = after_sqlserver.split(';').next().unwrap_or_default();
+        if authority.contains('\\') {
+            return Err(format!(
+                "Cannot route JDBC connection string through transport endpoint {new_host}:{new_port}: SQL Server named instances are not supported"
+            ));
+        }
+        if normalized_url.contains(";FAILOVERPARTNER=") {
+            return Err(format!(
+                "Cannot route JDBC connection string through transport endpoint {new_host}:{new_port}: SQL Server failover partner addresses cannot be safely routed"
+            ));
+        }
+    }
+
     let old_authority = format!("{old_host}:{old_port}");
-    let new_authority = format!("{new_host}:{new_port}");
-    url.replacen(&old_authority, &new_authority, 1)
+    let new_authority = format!("{}:{new_port}", bracket_ipv6(new_host));
+    let rewritten = url.replacen(&old_authority, &new_authority, 1);
+    if rewritten == url {
+        return Err(format!(
+            "Cannot route JDBC connection string through transport endpoint {new_host}:{new_port}: endpoint {old_authority} is not present in the URL"
+        ));
+    }
+    match parse_jdbc_host_port(&rewritten) {
+        Some((host, port)) if host.trim_matches(['[', ']']) == new_host.trim_matches(['[', ']']) && port == new_port => {
+            Ok(rewritten)
+        }
+        _ => Err(format!(
+            "Cannot route JDBC connection string through transport endpoint {new_host}:{new_port}: the rewritten URL does not resolve to a single local endpoint"
+        )),
+    }
 }
 
 fn oracle_descriptor_value(descriptor: &str, key: &str) -> Option<String> {
@@ -2284,9 +2404,21 @@ fn oracle_descriptor_value(descriptor: &str, key: &str) -> Option<String> {
     Some(descriptor[value_start..value_end].trim().to_string())
 }
 
-fn rewrite_oracle_descriptor_host(url: &str, new_host: &str, new_port: u16) -> String {
+fn rewrite_oracle_descriptor_host(url: &str, new_host: &str, new_port: u16) -> Result<String, String> {
+    let upper = url.to_ascii_uppercase();
+    let address_count = upper.matches("(ADDRESS=").count();
+    if address_count != 1 {
+        return Err(format!(
+            "Cannot route Oracle JDBC descriptor through transport endpoint {new_host}:{new_port}: descriptor must contain a single ADDRESS entry, found {address_count}"
+        ));
+    }
+    if upper.matches("(HOST=").count() != 1 || upper.matches("(PORT=").count() != 1 {
+        return Err(format!(
+            "Cannot route Oracle JDBC descriptor through transport endpoint {new_host}:{new_port}: descriptor must contain exactly one HOST and one PORT"
+        ));
+    }
     let rewritten_host = replace_oracle_descriptor_value(url, "HOST", new_host);
-    replace_oracle_descriptor_value(&rewritten_host, "PORT", &new_port.to_string())
+    Ok(replace_oracle_descriptor_value(&rewritten_host, "PORT", &new_port.to_string()))
 }
 
 fn replace_oracle_descriptor_value(input: &str, key: &str, value: &str) -> String {
@@ -2303,6 +2435,30 @@ fn replace_oracle_descriptor_value(input: &str, key: &str, value: &str) -> Strin
 
 fn encode_url_part(value: &str) -> String {
     utf8_percent_encode(value, NON_ALPHANUMERIC).to_string()
+}
+
+/// Percent-encode set for Spanner resource paths: everything [`NON_ALPHANUMERIC`]
+/// escapes, minus the RFC 3986 *unreserved* characters, which must stay literal.
+///
+/// `-` matters most in practice: GCP project and instance IDs allow only lowercase
+/// letters, digits and hyphens, so without this a hyphenated project would render as
+/// `my%2Dproject` in every Spanner connection.
+const SPANNER_PATH_ENCODE_SET: &percent_encoding::AsciiSet =
+    &NON_ALPHANUMERIC.remove(b'-').remove(b'_').remove(b'.').remove(b'~');
+
+/// Percent-encode a Spanner resource path, keeping the `/` separators and the RFC 3986
+/// unreserved characters literal while still escaping everything else (spaces become
+/// `%20`).
+///
+/// Display-only. Native drivers must keep using [`encode_url_part`] — their URLs are
+/// real DSNs, where an unescaped `/` or `-` in a database name can change how the
+/// connection string parses.
+fn encode_spanner_resource_path(value: &str) -> String {
+    value
+        .split('/')
+        .map(|segment| utf8_percent_encode(segment, SPANNER_PATH_ENCODE_SET).to_string())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn bracket_ipv6(host: &str) -> String {
@@ -2599,6 +2755,32 @@ mod tests {
         config.db_type = DatabaseType::Postgres;
         assert_eq!(config.effective_database(), Some(" analytics "));
         assert_eq!(config.connection_url(), "postgres://root:secret@10.1.2.3:2883/%20analytics%20?sslmode=prefer");
+    }
+
+    /// Spanner keeps the full resource path in `database`. Its URL is display-only (the
+    /// agent builds the real JDBC URL), so the separators and the RFC 3986 unreserved
+    /// characters must stay literal instead of being mangled into
+    /// `projects%2Fmy%2Dproject%2F…` by the shared `encode_url_part`. Hyphens matter in
+    /// practice: GCP project and instance IDs allow only lowercase letters, digits and
+    /// hyphens. Characters that genuinely need escaping (here a space) still are.
+    #[test]
+    fn spanner_display_url_keeps_resource_path_separators() {
+        let mut config = mysql_config("", "", Some("projects/my-project/instances/my-instance/databases/my db"));
+        config.db_type = DatabaseType::Spanner;
+        config.host = String::new();
+        config.port = 443;
+
+        assert_eq!(config.connection_url(), "spanner:///projects/my-project/instances/my-instance/databases/my%20db");
+        // Display and redacted forms match: Spanner carries no credentials in the URL.
+        assert_eq!(config.redacted_connection_url(), config.connection_url());
+
+        // Emulator / custom endpoint: the host and port are shown.
+        config.host = "localhost".to_string();
+        config.port = 9010;
+        assert_eq!(
+            config.connection_url(),
+            "spanner://localhost:9010/projects/my-project/instances/my-instance/databases/my%20db"
+        );
     }
 
     #[test]
@@ -2903,6 +3085,45 @@ mod tests {
         config.query_timeout_secs = 3600;
 
         assert_eq!(config.effective_query_timeout_secs(), 3600);
+    }
+
+    #[test]
+    fn spanner_query_timeout_floor_covers_schema_change_latency() {
+        // A Cloud Spanner CREATE INDEX is a long-running operation: measured against
+        // the real service it took 22.9-33.6s on an empty table, so the generic
+        // desktop default of 30s fails intermittently.
+        let mut config = mysql_config("root", "", None);
+        config.db_type = DatabaseType::Spanner;
+        config.query_timeout_secs = 30;
+
+        assert_eq!(config.effective_query_timeout_secs(), 120);
+    }
+
+    #[test]
+    fn spanner_query_timeout_floor_never_lowers_a_higher_setting() {
+        let mut config = mysql_config("root", "", None);
+        config.db_type = DatabaseType::Spanner;
+        config.query_timeout_secs = 600;
+
+        assert_eq!(config.effective_query_timeout_secs(), 600);
+    }
+
+    #[test]
+    fn spanner_query_timeout_floor_respects_the_no_limit_setting() {
+        // 0 is the UI's "unlimited"; a floor must not turn that into a 120s cap.
+        let mut config = mysql_config("root", "", None);
+        config.db_type = DatabaseType::Spanner;
+        config.query_timeout_secs = 0;
+
+        assert_eq!(config.effective_query_timeout_secs(), 0);
+    }
+
+    #[test]
+    fn query_timeout_floor_is_scoped_to_spanner() {
+        let mut config = mysql_config("root", "", None);
+        config.query_timeout_secs = 30;
+
+        assert_eq!(config.effective_query_timeout_secs(), 30);
     }
 
     #[test]
@@ -3617,6 +3838,57 @@ mod tests {
     }
 
     #[test]
+    fn mongodb_oidc_form_url_uses_external_auth_without_password() {
+        let mut config = mongodb_config("employee@example.com", "stale-secret", Some("app"));
+        config.url_params = Some("authSource=admin&authMechanism=MONGODB-OIDC".to_string());
+
+        assert_eq!(
+            config.connection_url(),
+            "mongodb://employee%40example%2Ecom@10.1.2.3:17000/app?authMechanism=MONGODB-OIDC&authSource=%24external"
+        );
+        assert!(!config.connection_url().contains("stale-secret"));
+    }
+
+    #[test]
+    fn mongodb_oidc_form_url_without_username_uses_external_auth() {
+        let mut config = mongodb_config("", "", Some("app"));
+        config.url_params = Some("authMechanism=MONGODB-OIDC".to_string());
+
+        assert_eq!(
+            config.connection_url(),
+            "mongodb://10.1.2.3:17000/app?authMechanism=MONGODB-OIDC&authSource=%24external"
+        );
+    }
+
+    #[test]
+    fn mongodb_oidc_canonicalization_removes_password_and_legacy_driver() {
+        let mut form_config = mongodb_config("employee@example.com", "stale-secret", Some("app"));
+        form_config.driver_profile = Some("mongodb-legacy".to_string());
+        form_config.driver_label = Some("MongoDB (Legacy)".to_string());
+        form_config.url_params = Some("authMechanism=MONGODB-OIDC".to_string());
+
+        let form_canonical = form_config.canonicalized();
+        assert!(form_canonical.password.is_empty());
+        assert_eq!(form_canonical.driver_profile.as_deref(), Some("mongodb"));
+        assert_eq!(form_canonical.driver_label.as_deref(), Some("MongoDB"));
+
+        let mut url_config = mongodb_config("", "stale-secret", None);
+        url_config.driver_profile = Some("mongodb-legacy".to_string());
+        url_config.connection_string =
+            Some("mongodb+srv://cluster.example.com/app?authSource=%24external&authMechanism=MONGODB-OIDC".to_string());
+        let url_canonical = url_config.canonicalized();
+        assert!(url_canonical.password.is_empty());
+        assert_eq!(url_canonical.driver_profile.as_deref(), Some("mongodb"));
+
+        let mut scram_config = mongodb_config("user", "secret", Some("app"));
+        scram_config.driver_profile = Some("mongodb-legacy".to_string());
+        scram_config.url_params = Some("authMechanism=SCRAM-SHA-1".to_string());
+        let scram_canonical = scram_config.canonicalized();
+        assert_eq!(scram_canonical.password, "secret");
+        assert_eq!(scram_canonical.driver_profile.as_deref(), Some("mongodb-legacy"));
+    }
+
+    #[test]
     fn redacted_mysql_url_omits_credentials() {
         let config = mysql_config("user@tenant#cluster", "p@ss:word#1", Some("db/name"));
 
@@ -3965,7 +4237,7 @@ mod tests {
             "jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=orahost)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=orcl)))";
 
         assert_eq!(
-            super::rewrite_jdbc_url_host(url, "127.0.0.1", 11521),
+            super::rewrite_jdbc_url_host(url, "127.0.0.1", 11521).unwrap(),
             "jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=127.0.0.1)(PORT=11521))(CONNECT_DATA=(SERVICE_NAME=orcl)))"
         );
     }
@@ -3997,25 +4269,25 @@ mod tests {
     #[test]
     fn rewrite_jdbc_url_postgresql() {
         let url = "jdbc:postgresql://myhost:5432/mydb";
-        let rewritten = super::rewrite_jdbc_url_host(url, "127.0.0.1", 54321);
+        let rewritten = super::rewrite_jdbc_url_host(url, "127.0.0.1", 54321).unwrap();
         assert_eq!(rewritten, "jdbc:postgresql://127.0.0.1:54321/mydb");
     }
 
     #[test]
     fn rewrite_jdbcx_url_preserves_extension() {
         let url = "jdbcx:script:mysql://db.example.com:3306/app";
-        let rewritten = super::rewrite_jdbc_url_host(url, "127.0.0.1", 13306);
+        let rewritten = super::rewrite_jdbc_url_host(url, "127.0.0.1", 13306).unwrap();
         assert_eq!(rewritten, "jdbcx:script:mysql://127.0.0.1:13306/app");
 
         let sqlserver = "jdbcx:query:sqlserver://sql.example.com:1433;databaseName=app";
-        let rewritten = super::rewrite_jdbc_url_host(sqlserver, "127.0.0.1", 11433);
+        let rewritten = super::rewrite_jdbc_url_host(sqlserver, "127.0.0.1", 11433).unwrap();
         assert_eq!(rewritten, "jdbcx:query:sqlserver://127.0.0.1:11433;databaseName=app");
     }
 
     #[test]
     fn rewrite_jdbcx_oracle_descriptor() {
         let url = "jdbcx:web:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=orahost)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=orcl)))";
-        let rewritten = super::rewrite_jdbc_url_host(url, "127.0.0.1", 11521);
+        let rewritten = super::rewrite_jdbc_url_host(url, "127.0.0.1", 11521).unwrap();
         assert_eq!(
             rewritten,
             "jdbcx:web:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=127.0.0.1)(PORT=11521))(CONNECT_DATA=(SERVICE_NAME=orcl)))"
@@ -4025,21 +4297,42 @@ mod tests {
     #[test]
     fn rewrite_jdbc_url_oracle() {
         let url = "jdbc:oracle:thin:@orahost:1521:ORCL";
-        let rewritten = super::rewrite_jdbc_url_host(url, "127.0.0.1", 54321);
+        let rewritten = super::rewrite_jdbc_url_host(url, "127.0.0.1", 54321).unwrap();
         assert_eq!(rewritten, "jdbc:oracle:thin:@127.0.0.1:54321:ORCL");
     }
 
     #[test]
     fn rewrite_jdbc_url_sqlserver() {
         let url = "jdbc:sqlserver://mshost:1433;databaseName=master";
-        let rewritten = super::rewrite_jdbc_url_host(url, "127.0.0.1", 54321);
+        let rewritten = super::rewrite_jdbc_url_host(url, "127.0.0.1", 54321).unwrap();
         assert_eq!(rewritten, "jdbc:sqlserver://127.0.0.1:54321;databaseName=master");
     }
 
     #[test]
-    fn rewrite_jdbc_url_unparseable_returns_original() {
+    fn rewrite_jdbc_url_unparseable_errors() {
         let url = "jdbc:custom:some-opaque-string";
-        let rewritten = super::rewrite_jdbc_url_host(url, "127.0.0.1", 54321);
-        assert_eq!(rewritten, url);
+        let err = super::rewrite_jdbc_url_host(url, "127.0.0.1", 54321).unwrap_err();
+        assert!(err.contains("unsupported URL format"), "{err}");
+    }
+
+    #[test]
+    fn rewrite_jdbc_url_host_rejects_sqlserver_named_instance() {
+        let url = r"jdbc:sqlserver://db\SQLEXPRESS:1433;databaseName=app";
+        let err = super::rewrite_jdbc_url_host(url, "127.0.0.1", 45678).unwrap_err();
+        assert!(err.to_lowercase().contains("named instance"), "{err}");
+    }
+
+    #[test]
+    fn rewrite_jdbc_url_host_rejects_sqlserver_failover_partner() {
+        let url = "jdbc:sqlserver://db1:1433;failoverPartner=db2:1433;databaseName=app";
+        let err = super::rewrite_jdbc_url_host(url, "127.0.0.1", 45678).unwrap_err();
+        assert!(err.contains("failover partner"), "{err}");
+    }
+
+    #[test]
+    fn rewrite_jdbc_url_host_rejects_multi_address_oracle_descriptor() {
+        let url = "jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS_LIST=(ADDRESS=(PROTOCOL=TCP)(HOST=db1)(PORT=1521))(ADDRESS=(PROTOCOL=TCP)(HOST=db2)(PORT=1521)))(CONNECT_DATA=(SERVICE_NAME=orcl)))";
+        let err = super::rewrite_jdbc_url_host(url, "127.0.0.1", 11521).unwrap_err();
+        assert!(err.contains("single ADDRESS entry"), "{err}");
     }
 }

@@ -48,6 +48,9 @@ for TLS or mTLS connections.
   paging, and sequential batch/transaction execution.
 - Table sessions expose databases, tables, TIME/TAG/FIELD column categories,
   comments, queries, DDL, paging, and database switching.
+- Query results annotate timestamp columns as `TIMESTAMP(ms|us|ns)` using the
+  server-reported `TimestampPrecision`. Raw timestamp integers are transported
+  as decimal strings so nanosecond values are not rounded by JavaScript.
 - The Agent keeps one physical IoTDB session per logical DBX session and
   invalidates that session after cancellation, timeout, or connection failure.
 

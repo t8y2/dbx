@@ -10,7 +10,7 @@ DBX uses a hybrid driver architecture: built-in Rust drivers, standalone native 
 | Driver Type       | How It Works                         | Best For                                                                                                                                                        |
 | ----------------- | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Native (built-in) | Rust drivers compiled into DBX       | MySQL, PostgreSQL, SQLite, SQL Server, Redis, MongoDB, ClickHouse, and more                                                                                      |
-| Native Agent / external driver | Standalone Go/Rust process or sidecar managed by DBX | Oracle, KingBase, XuguDB, DuckDB, and connections such as RabbitMQ that require a separate runtime |
+| Native Agent / external driver | Standalone Go/Rust process or sidecar managed by DBX | Oracle, KingbaseES, XuguDB, DuckDB, and connections such as RabbitMQ that require a separate runtime |
 | JDBC Agent        | Java subprocess managed by DBX       | Databases that require JDBC: GaussDB, openGauss, DM, HighGo, Vastbase, UXDB, Trino, Hive, DB2, Informix, Neo4j, TDengine, YashanDB, GoldenDB, Kylin, SunDB, and more |
 
 <Callout type="info">Built-in drivers work immediately. Native Agents and sidecars need platform files, while JDBC Agents also need a JRE. The connection dialog prompts for missing components, but automatic installation depends on network access, platform, licensing, and current settings.</Callout>
@@ -83,11 +83,11 @@ For environments without internet access, DBX supports offline driver installati
 
 This is useful for air-gapped networks, strict firewall environments, or pre-approved driver versions in enterprise settings.
 
-Every agent provides a single-driver ZIP that can be installed with **Import offline package**. Java agent packages are platform-independent and do not duplicate the JRE, while native agents such as Kingbase, Oracle, and Xugu provide separate packages for each OS and CPU architecture.
+Every agent provides a single-driver ZIP that can be installed with **Import offline package**. Java agent packages are platform-independent and do not duplicate the JRE, while native agents such as KingbaseES, Oracle, and Xugu provide separate packages for each OS and CPU architecture.
 
 If the target machine does not already have the managed JRE required by a Java agent, import the matching JRE package once or use the full offline bundle containing every driver and the JRE.
 
-### Importing Kingbase on Windows
+### Importing KingbaseES on Windows
 
 Download `dbx-agent-kingbase-<version>-windows-x64.zip` for Windows x64 or `dbx-agent-kingbase-<version>-windows-aarch64.zip` for Windows ARM64, then choose **Import offline package** in Driver Manager. Do not import a Linux or macOS package.
 

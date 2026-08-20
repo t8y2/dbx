@@ -1,5 +1,5 @@
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
-import { isSchemaAware, usesDatabaseObjectTreeMode, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
+import { isSchemaAware, spannerObjectTreeSchema, usesDatabaseObjectTreeMode, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
 import type { CodeMirrorSqlDialectName } from "@/lib/editor/codemirrorSqlDialect";
 
 type JdbcDialectConnection = Partial<Pick<ConnectionConfig, "db_type" | "driver_profile" | "driver_label" | "connection_string" | "url_params" | "jdbc_driver_class" | "jdbc_driver_paths" | "database_info" | "external_config">>;
@@ -7,9 +7,11 @@ type JdbcDialectConnection = Partial<Pick<ConnectionConfig, "db_type" | "driver_
 export type GaussdbIdentifierQuoteStyle = "auto" | "double" | "backtick";
 export type GaussdbConnectionMode = "native" | "m-jdbc";
 export type GaussdbTargetServerType = "master" | "slave" | "any";
+export type GaussdbCountQueryDop = 1 | 2 | 4 | 8 | 16;
 
 const GAUSSDB_IDENTIFIER_QUOTE_STYLE_KEY = "gaussdbIdentifierQuoteStyle";
 const GAUSSDB_TARGET_SERVER_TYPE_KEY = "gaussdbTargetServerType";
+const GAUSSDB_COUNT_QUERY_DOP_KEY = "gaussdbCountQueryDop";
 export const GAUSSDB_M_JDBC_DRIVER_PROFILE = "gaussdb-m";
 export const GAUSSDB_M_JDBC_DRIVER_CLASS = "com.huawei.gaussdb.jdbc.Driver";
 
@@ -79,6 +81,12 @@ export function connectionShouldLoadIdentifierQuote(connection: JdbcDialectConne
   if (!connection) return false;
   if (connection.db_type === "gbase" && isGbase8sProfile(connection.driver_profile)) return true;
   if (connection.db_type === "kingbase") return true;
+  // Cloud Spanner is dual-dialect: the agent reports a backtick for GoogleSQL and
+  // a double quote for PostgreSQL-dialect databases. The backend counts Spanner
+  // unconditionally in `uses_connection_identifier_quote`, so the UI must fetch
+  // the reported quote or every locally built statement would use the GoogleSQL
+  // default against a PostgreSQL-dialect database.
+  if (connection.db_type === "spanner") return true;
   if (gaussdbIdentifierQuoteStyle(connection) !== "auto") return false;
   if (connection.db_type === "gaussdb") return true;
   if (connection.db_type !== "jdbc") return false;
@@ -205,8 +213,22 @@ export function connectionQueryExecutionSchema(connection: JdbcDialectConnection
 export function connectionObjectTreeQuerySchema(connection: JdbcDialectConnection | undefined, database: string, schema?: string): string {
   if (connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "databend") return schema || database;
   if (connectionUsesDatabaseObjectTreeMode(connection)) return "";
-  if (effectiveDatabaseTypeForConnection(connection) === "informix") return schema || "";
+  const type = effectiveDatabaseTypeForConnection(connection);
+  if (type === "informix") return schema || "";
+  if (type === "spanner") return spannerObjectTreeSchema(schema);
   return schema || database;
+}
+
+/**
+ * Metadata schema for query paths that treat the database name as the schema when a
+ * connection exposes no schema level (MySQL, HBase, and the other flat engines).
+ * Cloud Spanner is the exception: its database is a resource path, so the blank
+ * GoogleSQL schema has to be sent instead of the path. Behavior for every other
+ * database type is exactly `schema || database`.
+ */
+export function connectionDatabaseMetadataSchema(connection: JdbcDialectConnection | undefined, database: string, schema?: string): string {
+  if (schema) return schema;
+  return effectiveDatabaseTypeForConnection(connection) === "spanner" ? "" : database;
 }
 
 export function metadataSchemaForConnection(connection: JdbcDialectConnection | undefined, database: string, schema?: string): string {
@@ -221,6 +243,7 @@ export function connectionObjectTreeNodeSchema(connection: JdbcDialectConnection
   const type = effectiveDatabaseTypeForConnection(connection);
   if (type === "informix") return schema || undefined;
   if (type === "sqlite") return schema || database;
+  if (type === "spanner") return spannerObjectTreeSchema(schema);
   if (!type) return schema;
   return isSchemaAware(type) ? schema || database : undefined;
 }
@@ -237,6 +260,27 @@ export function codeMirrorSqlDialectForConnection(connection?: JdbcDialectConnec
   const databaseType = effectiveDatabaseTypeForConnection(connection);
   if (databaseType === "clickhouse") return "clickhouse";
   return codeMirrorSqlDialect(databaseType);
+}
+
+export function gaussdbCountQueryDop(connection: JdbcDialectConnection | undefined): GaussdbCountQueryDop {
+  const external = externalConfigRecord(connection?.external_config);
+  const value = external[GAUSSDB_COUNT_QUERY_DOP_KEY];
+  return value === 2 || value === 4 || value === 8 || value === 16 ? value : 1;
+}
+
+export function setGaussdbCountQueryDop(connection: Pick<ConnectionConfig, "db_type"> & Partial<Pick<ConnectionConfig, "external_config">>, value: GaussdbCountQueryDop) {
+  const external = externalConfigRecord(connection.external_config);
+  if (value === 1) {
+    delete external[GAUSSDB_COUNT_QUERY_DOP_KEY];
+  } else {
+    external[GAUSSDB_COUNT_QUERY_DOP_KEY] = value;
+  }
+  connection.external_config = Object.keys(external).length > 0 ? external : undefined;
+}
+
+export function gaussdbCountQueryDopHint(connection: JdbcDialectConnection | undefined): string | undefined {
+  const dop = gaussdbCountQueryDop(connection);
+  return dop > 1 ? `/*+ set(query_dop ${dop}) */` : undefined;
 }
 
 function isJdbcAseProfile(connection?: JdbcDialectConnection): boolean {

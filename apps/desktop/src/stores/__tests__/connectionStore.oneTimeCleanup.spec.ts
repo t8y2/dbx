@@ -1,6 +1,6 @@
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ConnectionConfig } from "@/types/database";
+import type { ConnectionConfig, SidebarLayout } from "@/types/database";
 
 function installLocalStorage() {
   const data = new Map<string, string>();
@@ -18,9 +18,15 @@ function installApiMocks() {
     connectDb: vi.fn().mockResolvedValue("preview-1"),
     disconnectDb: vi.fn().mockResolvedValue(undefined),
     deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+    loadConnections: vi.fn().mockResolvedValue([]),
+    loadEditorSettings: vi.fn().mockResolvedValue(null),
+    loadPinnedTreeNodeIds: vi.fn().mockResolvedValue([]),
     loadSchemaCache: vi.fn().mockResolvedValue(null),
+    loadTunnelProfiles: vi.fn().mockResolvedValue([]),
     saveConnections: vi.fn().mockResolvedValue(undefined),
+    saveEditorSettings: vi.fn().mockResolvedValue(undefined),
     saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    loadSidebarLayout: vi.fn().mockResolvedValue(null),
     connectionDatabaseInfo: vi.fn().mockResolvedValue(undefined),
     listInstalledAgents: vi.fn().mockResolvedValue([]),
     sessionCredentialStatus: vi.fn().mockResolvedValue(false),
@@ -77,6 +83,34 @@ describe("connectionStore one_time runtime cleanup", () => {
     expect(disconnectDb).toHaveBeenCalledWith("preview-1");
   });
 
+  it("initFromDisk preserves an open one_time connection during a persisted-list reload", async () => {
+    installApiMocks();
+    const { loadConnections } = await import("@/lib/backend/api");
+    vi.mocked(loadConnections).mockResolvedValue([previewConnection({ id: "saved-1", name: "Saved", one_time: false })]);
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [previewConnection({ id: "deeplink-1", name: "Deeplink", one_time: true })];
+
+    await store.initFromDisk();
+
+    expect(store.connections.map((connection) => connection.id)).toEqual(["saved-1", "deeplink-1"]);
+    expect(store.getConfig("deeplink-1")).toMatchObject({ name: "Deeplink", one_time: true });
+  });
+
+  it("does not retain a stale saved connection removed from persisted storage", async () => {
+    installApiMocks();
+    const { loadConnections } = await import("@/lib/backend/api");
+    vi.mocked(loadConnections).mockResolvedValue([]);
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [previewConnection({ id: "removed-1", name: "Removed", one_time: false })];
+
+    await store.initFromDisk();
+
+    expect(store.getConfig("removed-1")).toBeUndefined();
+    expect(store.connections).toEqual([]);
+  });
+
   it("removeConnection leaves saved connections to the save_connections sync", async () => {
     installApiMocks();
     const { useConnectionStore } = await import("@/stores/connectionStore");
@@ -103,6 +137,27 @@ describe("connectionStore one_time runtime cleanup", () => {
 
     await store.removeConnection("preview-1");
 
+    expect(queryStore.tabs.some((tab) => tab.connectionId === "preview-1")).toBe(false);
+  });
+
+  it("deleteConnectionGroups closes the tabs of removed one_time connections", async () => {
+    installApiMocks();
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useConnectionStore();
+    const queryStore = useQueryStore();
+    const layout: SidebarLayout = {
+      groups: [{ id: "group-1", name: "Group", collapsed: false }],
+      order: [{ type: "group", id: "group-1", children: [{ type: "connection", id: "preview-1" }] }],
+    };
+    store.connections = [previewConnection()];
+    store.sidebarLayout = layout;
+    queryStore.createTab("preview-1", "", "sales.parquet", "query");
+
+    await store.deleteConnectionGroups(["group-1"], true);
+
+    const { disconnectDb } = await import("@/lib/backend/api");
+    expect(disconnectDb).toHaveBeenCalledWith("preview-1");
     expect(queryStore.tabs.some((tab) => tab.connectionId === "preview-1")).toBe(false);
   });
 

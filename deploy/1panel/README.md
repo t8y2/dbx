@@ -2,7 +2,7 @@
 
 25+ databases in 15 MB. Desktop & Docker self-hosting, with built-in AI assistant.
 
-Supported databases: MySQL, PostgreSQL, SQLite, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, Elasticsearch, MariaDB, TiDB, OceanBase, openGauss, GaussDB, KingBase, and more.
+Supported databases: MySQL, PostgreSQL, SQLite, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, Elasticsearch, MariaDB, TiDB, OceanBase, openGauss, GaussDB, KingbaseES, and more.
 
 ## Features
 

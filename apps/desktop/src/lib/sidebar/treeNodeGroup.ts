@@ -5,6 +5,7 @@ const treeGroupNodeTypes = new Set<TreeNodeType>([
   "group-indexes",
   "group-fkeys",
   "group-triggers",
+  "group-events",
   "group-constraints",
   "group-table-partitions",
   "group-table-subpartitions",

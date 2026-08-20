@@ -2031,7 +2031,7 @@ dependencies = [
 
 [[package]]
 name = "dbx"
-version = "0.5.86"
+version = "0.5.90"
 dependencies = [
  "anyhow",
  "axum",
@@ -2071,6 +2071,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-fs",
  "tauri-plugin-log",
+ "tauri-plugin-opener",
  "tauri-plugin-process",
  "tauri-plugin-shell",
  "tauri-plugin-single-instance",
@@ -2088,7 +2089,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-cli"
-version = "0.4.64"
+version = "0.4.68"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -2169,6 +2170,7 @@ dependencies = [
  "utoipa",
  "uuid",
  "webpki-roots 0.26.11",
+ "windows-sys 0.61.2",
  "winnow 1.0.4",
  "zip",
  "zstd",
@@ -2176,25 +2178,28 @@ dependencies = [
 
 [[package]]
 name = "dbx-mcp"
-version = "0.4.64"
+version = "0.4.68"
 dependencies = [
  "async-trait",
  "dbx-core",
  "dirs",
  "reqwest 0.12.28",
  "rmcp",
+ "rustls 0.23.43",
+ "rustls-pemfile 2.2.0",
  "schemars 1.2.2",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-rustls 0.26.4",
  "url",
  "uuid",
 ]
 
 [[package]]
 name = "dbx-web"
-version = "0.5.86"
+version = "0.5.90"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",
@@ -6237,7 +6242,7 @@ dependencies = [
 [[package]]
 name = "postgres-protocol"
 version = "0.6.12"
-source = "git+https://github.com/t8y2/tokio-postgres-gaussdb.git?rev=115f9fef10f0fc3669b5337955e4eb461fc349a6#115f9fef10f0fc3669b5337955e4eb461fc349a6"
+source = "git+https://github.com/t8y2/tokio-postgres-gaussdb.git?rev=ac8ad476de59093d33ab9f294531c956e0c6a724#ac8ad476de59093d33ab9f294531c956e0c6a724"
 dependencies = [
  "base64 0.23.0",
  "byteorder",
@@ -6256,7 +6261,7 @@ dependencies = [
 [[package]]
 name = "postgres-types"
 version = "0.2.14"
-source = "git+https://github.com/t8y2/tokio-postgres-gaussdb.git?rev=115f9fef10f0fc3669b5337955e4eb461fc349a6#115f9fef10f0fc3669b5337955e4eb461fc349a6"
+source = "git+https://github.com/t8y2/tokio-postgres-gaussdb.git?rev=ac8ad476de59093d33ab9f294531c956e0c6a724#ac8ad476de59093d33ab9f294531c956e0c6a724"
 dependencies = [
  "bytes",
  "chrono",
@@ -8539,6 +8544,7 @@ dependencies = [
  "gtk",
  "heck 0.5.0",
  "http 1.5.0",
+ "image",
  "jni 0.21.1",
  "libc",
  "log",
@@ -8748,6 +8754,28 @@ dependencies = [
  "tauri-plugin",
  "thiserror 2.0.19",
  "time",
+]
+
+[[package]]
+name = "tauri-plugin-opener"
+version = "2.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17e1bea14edce6b793a04e2417e3fd924b9bc4faae83cdee7d714156cceeed29"
+dependencies = [
+ "dunce",
+ "glob",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "open",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-plugin",
+ "thiserror 2.0.19",
+ "url",
+ "windows 0.61.3",
+ "zbus",
 ]
 
 [[package]]
@@ -9197,7 +9225,7 @@ dependencies = [
 [[package]]
 name = "tokio-postgres"
 version = "0.7.18"
-source = "git+https://github.com/t8y2/tokio-postgres-gaussdb.git?rev=115f9fef10f0fc3669b5337955e4eb461fc349a6#115f9fef10f0fc3669b5337955e4eb461fc349a6"
+source = "git+https://github.com/t8y2/tokio-postgres-gaussdb.git?rev=ac8ad476de59093d33ab9f294531c956e0c6a724#ac8ad476de59093d33ab9f294531c956e0c6a724"
 dependencies = [
  "async-trait",
  "byteorder",

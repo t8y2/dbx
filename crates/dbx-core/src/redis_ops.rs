@@ -42,7 +42,7 @@ pub async fn redis_scan_keys_core(
 ///
 /// Performs up to `max_iterations` SCAN cycles server-side in a single API
 /// call, dramatically reducing frontend↔backend roundtrips when fetching many
-/// keys (e.g. "fetch all" in the key browser). TYPE metadata is optional.
+/// keys (e.g. "fetch all" in the key browser). TYPE and TTL metadata is optional.
 pub async fn redis_scan_keys_batch_core(
     state: &AppState,
     connection_id: &str,
@@ -362,6 +362,38 @@ pub async fn redis_delete_key_in_db_core(
                 }
             }
         }
+        _ => Err("Not a Redis connection".to_string()),
+    }
+}
+
+pub async fn redis_rename_key_in_db_core(
+    state: &AppState,
+    connection_id: &str,
+    db: u32,
+    key_raw: &str,
+    new_key_raw: &str,
+) -> Result<(), String> {
+    ensure_redis_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    let pool = connections.get(connection_id).ok_or("Connection not found")?;
+    let key = redis_driver::redis_key_raw_to_bytes(key_raw)?;
+    let new_key = redis_driver::redis_key_raw_to_bytes(new_key_raw)?;
+    if key == new_key {
+        return Ok(());
+    }
+    match pool {
+        PoolKind::Redis(redis) => match redis {
+            RedisConnection::Direct(con) => {
+                let mut con = con.lock().await;
+                redis_driver::select_db(&mut *con, db).await?;
+                redis_driver::rename_key(&mut *con, &key, &new_key).await
+            }
+            RedisConnection::Cluster(cluster) => {
+                redis_driver::ensure_cluster_db(db)?;
+                let mut con = redis_driver::cluster_key_connection(cluster, &key).await?;
+                redis_driver::rename_key(&mut con, &key, &new_key).await
+            }
+        },
         _ => Err("Not a Redis connection".to_string()),
     }
 }

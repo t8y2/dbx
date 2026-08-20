@@ -188,6 +188,55 @@ fn extracts_multi_column_sql_in_as_row_value_tuples() {
 }
 
 #[test]
+fn sql_in_list_deduplicates_single_selected_values() {
+    let mut request = request(DataGridExtractorId::SqlInList);
+    request.selected_column_indexes = vec![0];
+    request.rows = vec![
+        vec![json!(1), json!("first")],
+        vec![json!(1), json!("unselected value differs")],
+        vec![json!(2), json!("last")],
+    ];
+
+    let result = extract_data_grid_selection(request).expect("SQL IN extraction");
+
+    assert_eq!(result.text, "(1, 2)");
+}
+
+#[test]
+fn sql_in_list_deduplicates_multi_column_tuples_in_first_seen_order() {
+    let mut request = request(DataGridExtractorId::SqlInList);
+    request.rows = vec![
+        vec![json!(2), json!("Grace")],
+        vec![json!(1), json!("Ada")],
+        vec![json!(2), json!("Grace")],
+        vec![json!(1), json!("Lovelace")],
+        vec![json!(1), json!("Ada")],
+    ];
+
+    let result = extract_data_grid_selection(request).expect("SQL IN extraction");
+
+    assert_eq!(result.text, "((2, 'Grace'), (1, 'Ada'), (1, 'Lovelace'))");
+}
+
+#[test]
+fn sql_in_list_deduplicates_only_identical_rendered_literals() {
+    let mut request = request(DataGridExtractorId::SqlInList);
+    request.selected_column_indexes = vec![0];
+    request.rows = vec![
+        vec![json!(1)],
+        vec![json!("1")],
+        vec![Value::Null],
+        vec![Value::Null],
+        vec![json!("O'Reilly")],
+        vec![json!("O'Reilly")],
+    ];
+
+    let result = extract_data_grid_selection(request).expect("SQL IN extraction");
+
+    assert_eq!(result.text, "(1, '1', NULL, 'O''Reilly')");
+}
+
+#[test]
 fn preserves_duplicate_json_columns_without_overwriting_values() {
     let mut request = request(DataGridExtractorId::Json);
     request.columns[1].display_name = "id".to_string();
@@ -244,6 +293,53 @@ fn builds_updates_with_hidden_primary_keys_and_selected_columns() {
         result.text,
         "UPDATE \"public\".\"users\" SET \"name\" = 'Ada' WHERE \"id\" = 1;\nUPDATE \"public\".\"users\" SET \"name\" = 'Grace, Hopper' WHERE \"id\" = 2;"
     );
+}
+
+#[test]
+fn sql_copy_honors_kingbase_mysql_compat_connection_identifier_quote() {
+    let table_meta = DataGridTableMeta {
+        catalog: None,
+        database: None,
+        schema: Some("audit-schema".to_string()),
+        table_name: "events".to_string(),
+        primary_keys: vec!["id".to_string()],
+        columns: Some(vec![
+            DataGridColumnInfo {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                is_nullable: false,
+                is_primary_key: true,
+                column_default: None,
+                extra: None,
+            },
+            DataGridColumnInfo {
+                name: "event_type".to_string(),
+                data_type: "varchar".to_string(),
+                is_nullable: false,
+                is_primary_key: false,
+                column_default: None,
+                extra: None,
+            },
+        ]),
+    };
+
+    let mut insert = request(DataGridExtractorId::SqlInserts);
+    insert.database_type = Some(DatabaseType::Kingbase);
+    insert.identifier_quote = Some("`".to_string());
+    insert.table_meta = Some(table_meta.clone());
+    insert.columns = vec![column("id", 0), column("event_type", 1)];
+    insert.rows = vec![vec![json!(1), json!("login")]];
+    let insert_result = extract_data_grid_selection(insert).expect("Kingbase SQL INSERT extraction");
+    assert_eq!(insert_result.text, "INSERT INTO `audit-schema`.`events` (`id`, `event_type`) VALUES (1, 'login');");
+
+    let mut updates = request(DataGridExtractorId::SqlUpdates);
+    updates.database_type = Some(DatabaseType::Kingbase);
+    updates.identifier_quote = Some("`".to_string());
+    updates.table_meta = Some(table_meta);
+    updates.columns = vec![column("id", 0), column("event_type", 1)];
+    updates.rows = vec![vec![json!(1), json!("logout")]];
+    let updates_result = extract_data_grid_selection(updates).expect("Kingbase SQL UPDATE extraction");
+    assert_eq!(updates_result.text, "UPDATE `audit-schema`.`events` SET `event_type` = 'logout' WHERE `id` = 1;");
 }
 
 #[test]
@@ -355,26 +451,60 @@ fn extracts_compact_json_when_pretty_printing_is_disabled() {
 fn converts_snake_case_json_field_names_only_when_enabled() {
     let mut request = request(DataGridExtractorId::Json);
     request.columns = vec![
-        column("user_id", 0),
-        column("ORDER_ITEM_ID", 1),
-        column("alreadyCamel", 2),
-        column("_display__name_", 3),
-        column("naïve_value", 4),
+        column("ID", 0),
+        column("CODE", 1),
+        column("NAME", 2),
+        column("CREATE_TIME", 3),
+        column("user_id", 4),
+        column("ORDER_ITEM_ID", 5),
+        column("alreadyCamel", 6),
+        column("_display__name_", 7),
+        column("naïve_value", 8),
     ];
-    request.selected_column_indexes = vec![0, 1, 2, 3, 4];
-    request.rows = vec![vec![json!(7), json!(9), json!("kept"), json!("Ada"), json!(true)]];
+    request.selected_column_indexes = vec![0, 1, 2, 3, 4, 5, 6, 7, 8];
+    request.rows = vec![vec![
+        json!(1),
+        json!("A01"),
+        json!("Ada"),
+        json!("2026-08-16T08:52:23Z"),
+        json!(7),
+        json!(9),
+        json!("kept"),
+        json!("Ada"),
+        json!(true),
+    ]];
 
     let unchanged = extract_data_grid_selection(request.clone()).expect("default JSON extraction");
     assert_eq!(
         serde_json::from_str::<Value>(&unchanged.text).expect("valid default JSON"),
-        json!([{"user_id": 7, "ORDER_ITEM_ID": 9, "alreadyCamel": "kept", "_display__name_": "Ada", "naïve_value": true}])
+        json!([{
+            "ID": 1,
+            "CODE": "A01",
+            "NAME": "Ada",
+            "CREATE_TIME": "2026-08-16T08:52:23Z",
+            "user_id": 7,
+            "ORDER_ITEM_ID": 9,
+            "alreadyCamel": "kept",
+            "_display__name_": "Ada",
+            "naïve_value": true
+        }])
     );
 
     request.options.json.camel_case_field_names = true;
     let converted = extract_data_grid_selection(request).expect("camel-case JSON extraction");
     assert_eq!(
         serde_json::from_str::<Value>(&converted.text).expect("valid converted JSON"),
-        json!([{"userId": 7, "orderItemId": 9, "alreadyCamel": "kept", "displayName": "Ada", "naïveValue": true}])
+        json!([{
+            "id": 1,
+            "code": "A01",
+            "name": "Ada",
+            "createTime": "2026-08-16T08:52:23Z",
+            "userId": 7,
+            "orderItemId": 9,
+            "alreadyCamel": "kept",
+            "displayName": "Ada",
+            "naïveValue": true
+        }])
     );
 }
 
@@ -397,6 +527,21 @@ fn converts_json_lines_names_and_suffixes_post_conversion_collisions() {
         rows,
         vec![json!({"userId": 1, "userId_2": 2, "___": 3}), json!({"userId": 4, "userId_2": 5, "___": 6})]
     );
+    assert_eq!(result.warnings.len(), 1);
+    assert_eq!(result.warnings[0].code, DataGridExtractWarningCode::DuplicateJsonColumnNames);
+}
+
+#[test]
+fn suffixes_collisions_after_normalizing_uppercase_json_names() {
+    let mut request = request(DataGridExtractorId::Json);
+    request.columns = vec![column("ID", 0), column("id", 1)];
+    request.selected_column_indexes = vec![0, 1];
+    request.rows = vec![vec![json!(1), json!(2)]];
+    request.options.json.camel_case_field_names = true;
+
+    let result = extract_data_grid_selection(request).expect("normalized JSON extraction");
+
+    assert_eq!(serde_json::from_str::<Value>(&result.text).expect("valid JSON"), json!([{"id": 1, "id_2": 2}]));
     assert_eq!(result.warnings.len(), 1);
     assert_eq!(result.warnings[0].code, DataGridExtractWarningCode::DuplicateJsonColumnNames);
 }
@@ -472,9 +617,29 @@ fn select_row_falls_back_to_all_columns_without_usable_identity() {
 }
 
 #[test]
+fn select_cells_joins_multiple_columns_and_rows() {
+    // A genuine multi-cell selection (same-row columns AND'd, multi-row
+    // selections OR'd) is allowed for SELECT and reuses the WHERE predicate
+    // builder, matching "Copy as WHERE clause" for the same selection.
+    let mut request = request(DataGridExtractorId::SqlSelect);
+    request.table_meta = Some(DataGridTableMeta {
+        catalog: None,
+        database: None,
+        schema: None,
+        table_name: "users".to_string(),
+        primary_keys: vec!["id".to_string()],
+        columns: None,
+    });
+
+    let result = extract_data_grid_selection(request).expect("multi-cell SELECT extraction");
+
+    assert_eq!(result.text, "SELECT * FROM \"users\" WHERE (\"id\" = 1 AND \"name\" = 'Ada') OR (\"id\" = 2 AND \"name\" = 'Grace, Hopper');");
+}
+
+#[test]
 fn select_rejects_ambiguous_selection_and_missing_target() {
     let error = extract_data_grid_selection(request(DataGridExtractorId::SqlSelect))
-        .expect_err("multiple cells without a table must fail");
+        .expect_err("cells without a table must fail");
     assert_eq!(error.code, DataGridExtractErrorCode::MissingTableMetadata);
 
     let mut request = request(DataGridExtractorId::SqlSelect);
@@ -486,7 +651,12 @@ fn select_rejects_ambiguous_selection_and_missing_target() {
         primary_keys: Vec::new(),
         columns: None,
     });
-    let error = extract_data_grid_selection(request).expect_err("multiple cells must fail");
+    request.selection_kind = DataGridSelectionKind::Columns;
+    let error = extract_data_grid_selection(request.clone()).expect_err("column selection must fail");
+    assert_eq!(error.code, DataGridExtractErrorCode::InvalidSelectSelection);
+
+    request.selection_kind = DataGridSelectionKind::Rows;
+    let error = extract_data_grid_selection(request).expect_err("multiple selected rows must fail");
     assert_eq!(error.code, DataGridExtractErrorCode::InvalidSelectSelection);
 }
 
@@ -523,12 +693,55 @@ fn where_clause_applies_mysql_json_cast() {
             },
         ]),
     });
+    let mut select_request = request.clone();
+    select_request.extractor = DataGridExtractorId::SqlSelect;
     let result = extract_data_grid_selection(request).expect("WHERE extraction");
     assert!(
         result.text.contains("CAST(") && result.text.contains(" AS JSON)"),
         "expected MySQL JSON CAST predicate, got: {}",
         result.text
     );
+
+    let select_result = extract_data_grid_selection(select_request).expect("SELECT extraction");
+    assert!(
+        select_result.text.starts_with("SELECT * FROM `t` WHERE ")
+            && select_result.text.contains("CAST(")
+            && select_result.text.contains(" AS JSON)"),
+        "expected MySQL JSON CAST predicate in SELECT, got: {}",
+        select_result.text
+    );
+}
+
+#[test]
+fn select_cells_falls_back_to_display_name_like_where_clause() {
+    // SELECT built from a cell selection reuses write_where_clause, so a
+    // missing source_name must fall back to display_name exactly like WHERE
+    // does, instead of erroring — the two must stay in lockstep for the
+    // identical selection.
+    let mut request = request(DataGridExtractorId::SqlSelect);
+    request.table_meta = Some(DataGridTableMeta {
+        catalog: None,
+        database: None,
+        schema: None,
+        table_name: "users".to_string(),
+        primary_keys: vec!["id".to_string()],
+        columns: None,
+    });
+    request.columns = vec![
+        DataGridExtractColumn { display_name: "id".to_string(), source_name: None, source_index: 0 },
+        column("name", 1),
+    ];
+    let mut where_request = request.clone();
+    where_request.extractor = DataGridExtractorId::WhereClause;
+
+    let result = extract_data_grid_selection(request).expect("SELECT extraction with missing source_name");
+    assert_eq!(
+        result.text,
+        "SELECT * FROM \"users\" WHERE (\"id\" = 1 AND \"name\" = 'Ada') OR (\"id\" = 2 AND \"name\" = 'Grace, Hopper');"
+    );
+
+    let where_result = extract_data_grid_selection(where_request).expect("WHERE extraction with missing source_name");
+    assert_eq!(where_result.text, "(\"id\" = 1 AND \"name\" = 'Ada') OR (\"id\" = 2 AND \"name\" = 'Grace, Hopper')");
 }
 
 #[test]
@@ -546,6 +759,7 @@ fn build_data_grid_copy_update_statements_returns_empty_for_mongodb() {
     use crate::data_grid_sql::{build_data_grid_copy_update_statements, DataGridCopyUpdateStatementOptions};
     let options = DataGridCopyUpdateStatementOptions {
         database_type: Some(DatabaseType::MongoDb),
+        identifier_quote: None,
         table_meta: DataGridTableMeta {
             catalog: None,
             database: None,

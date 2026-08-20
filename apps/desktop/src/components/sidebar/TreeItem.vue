@@ -16,6 +16,7 @@ import {
   Link,
   Link2,
   Zap,
+  Clock,
   ListTree,
   FileCode,
   Network,
@@ -34,6 +35,7 @@ import {
   Lock,
   Archive,
   Square,
+  Minus,
   X,
   CircleX,
   RefreshCw,
@@ -56,11 +58,13 @@ import { formatSidebarObjectStorage } from "@/lib/sidebar/sidebarDatabaseStorage
 import { dataTabOpenModeFromTreeClick } from "@/lib/sidebar/dataTabOpenPolicy";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { connectionDisplayUrlScheme } from "@/lib/connection/connectionPresentation";
+import { encodeSpannerResourcePath } from "@/lib/connection/spannerResourcePath";
 import { hexToRgba } from "@/lib/common/color";
 import { sidebarDisplayTableName } from "@/lib/sidebar/sidebarTableNameDisplay";
 import { shouldMeasureSidebarLabelOverflow } from "@/lib/sidebar/sidebarLabelTooltip";
 import { filterSidebarModifierSelectionIds, supportsSidebarModifierSelection, treeSelectionRangeIdsByIndex, treeSelectionRangeIds } from "@/lib/sidebar/sidebarTreeSelection";
 import { applyConnectionMultiSelection, applyTreeNodeSelection, connectionMultiSelectionAfterToggle } from "@/lib/sidebar/sidebarConnectionMultiSelect";
+import { connectionBearingGroupIdsUnder, connectionIdsUnderGroup } from "@/lib/sidebar/sidebarLayout";
 import { isSidebarDatabaseOpenForVisual } from "@/lib/sidebar/sidebarDatabaseOpenState";
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
 import { connectionCanConfigureSidebarVisibleDatabases } from "@/lib/sidebar/sidebarVisibleFilterMenu";
@@ -165,6 +169,7 @@ const props = defineProps<{
   node: TreeNode;
   depth: number;
   reorderDisabled?: boolean;
+  moveToGroupOnly?: boolean;
   referenceDragDisabled?: boolean;
   pendingRename?: boolean;
   highlighted?: boolean;
@@ -249,6 +254,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Link, colorClass: "text-blue-400" };
     case "group-triggers":
       return { icon: Zap, colorClass: "text-orange-400" };
+    case "group-events":
+      return { icon: Clock, colorClass: "text-orange-400" };
     case "group-constraints":
       return { icon: Key, colorClass: "text-amber-500" };
     case "group-table-partitions":
@@ -276,6 +283,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Link, colorClass: "text-blue-300" };
     case "trigger":
       return { icon: Zap, colorClass: "text-orange-300" };
+    case "event":
+      return { icon: Clock, colorClass: "text-orange-300" };
     case "redis-db":
       return { icon: Database, colorClass: "text-red-400" };
     case "mq-tenant":
@@ -450,7 +459,8 @@ function connectionTooltipUrl(config: ConnectionConfig): string {
   const user = cleanTooltipValue(config.username);
   const userInfo = user ? `${encodeURIComponent(user)}@` : "";
   const database = cleanTooltipValue(config.database);
-  const path = database ? `/${encodeURIComponent(database)}` : "";
+  const encodedDatabase = config.db_type === "spanner" ? encodeSpannerResourcePath(database) : encodeURIComponent(database);
+  const path = database ? `/${encodedDatabase}` : "";
   const params = cleanTooltipValue(config.url_params);
   const query = params ? (params.startsWith("?") ? params : `?${params}`) : "";
   return redactedConnectionString(`${scheme}://${userInfo}${hostForDisplay(host)}${port}${path}${query}`);
@@ -530,6 +540,14 @@ function visibleTreeNodes(): TreeNode[] {
   return flattenTree(connectionStore.treeNodes).map((item) => item.node);
 }
 
+function connectionIdsForSelection(): Set<string> {
+  return new Set(connectionStore.connections.map((connection) => connection.id));
+}
+
+function connectionGroupIdsForSelection(): Set<string> {
+  return new Set(connectionStore.sidebarLayout.groups.map((group) => group.id));
+}
+
 function selectSingleTreeNode(node: TreeNode) {
   // Re-clicking the selected row should not replace the selection array and
   // force visible tree rows to recompute.
@@ -558,7 +576,8 @@ function toggleTreeNodeSelection(node: TreeNode) {
       activeNodeId: node.id,
       anchorNodeId: node.id,
     },
-    new Set(connectionStore.connections.map((connection) => connection.id)),
+    connectionIdsForSelection(),
+    connectionGroupIdsForSelection(),
   );
 }
 
@@ -580,7 +599,8 @@ function selectTreeNodeRange(node: TreeNode) {
         activeNodeId: node.id,
         anchorNodeId: anchorId,
       },
-      new Set(connectionStore.connections.map((connection) => connection.id)),
+      connectionIdsForSelection(),
+      connectionGroupIdsForSelection(),
     );
     return;
   }
@@ -598,7 +618,8 @@ function selectTreeNodeRange(node: TreeNode) {
       activeNodeId: node.id,
       anchorNodeId: anchorId,
     },
-    new Set(connectionStore.connections.map((connection) => connection.id)),
+    connectionIdsForSelection(),
+    connectionGroupIdsForSelection(),
   );
 }
 
@@ -608,9 +629,19 @@ function selectedConnectionIdsForAction(): string[] {
 }
 
 const isConnectionSelectionChecked = computed(() => {
-  if (!connectionStore.connectionMultiSelectActive || activeNode.value.type !== "connection" || !activeNode.value.connectionId) return false;
+  if (!isConnectionMultiSelectActive() || activeNode.value.type !== "connection" || !activeNode.value.connectionId) return false;
   return connectionStore.selectedTreeNodeIds.includes(activeNode.value.connectionId);
 });
+
+function isConnectionGroupMultiSelectActive(): boolean {
+  if (!connectionStore.connectionMultiSelectActive) return false;
+  const firstSelectedId = connectionStore.selectedTreeNodeIds[0];
+  return !!firstSelectedId && connectionStore.sidebarLayout.groups.some((group) => group.id === firstSelectedId);
+}
+
+function isConnectionMultiSelectActive(): boolean {
+  return connectionStore.connectionMultiSelectActive && !isConnectionGroupMultiSelectActive();
+}
 
 function toggleConnectionMultiSelection(event: MouseEvent) {
   event.preventDefault();
@@ -621,6 +652,56 @@ function toggleConnectionMultiSelection(event: MouseEvent) {
   // runs when the checkbox is clicked, while the checked state updates often.
   const current = { connectionIds: selectedConnectionIdsForAction(), active: connectionStore.connectionMultiSelectActive };
   applyConnectionMultiSelection(connectionStore, connectionMultiSelectionAfterToggle(current, activeNode.value.connectionId));
+  rowRef.value?.focus({ preventScroll: true });
+}
+
+function connectionIdsForActiveGroupSelection(): string[] {
+  if (activeNode.value.type !== "connection-group") return [];
+  const groupConnectionIds = connectionIdsUnderGroup(connectionStore.sidebarLayout, activeNode.value.id);
+  const projectedConnectionIds = sidebarTreeContext?.getProjectedConnectionIds?.();
+  return projectedConnectionIds ? groupConnectionIds.filter((id) => projectedConnectionIds.has(id)) : groupConnectionIds;
+}
+
+const connectionGroupSelectionState = computed<"none" | "partial" | "all">(() => {
+  const groupConnectionIds = connectionIdsForActiveGroupSelection();
+  if (groupConnectionIds.length === 0) return "none";
+  const selectedIds = connectionStore.selectedTreeNodeIdsSet;
+  const selectedCount = groupConnectionIds.filter((id) => selectedIds.has(id)).length;
+  if (selectedCount === 0) return "none";
+  if (selectedCount === groupConnectionIds.length) return "all";
+  return "partial";
+});
+
+function toggleConnectionGroupMultiSelection(event: MouseEvent) {
+  event.preventDefault();
+  event.stopPropagation();
+  if (activeNode.value.type !== "connection-group") return;
+
+  const groupConnectionIds = connectionIdsForActiveGroupSelection();
+  if (groupConnectionIds.length === 0) return;
+
+  // 当前是分组多选（Ctrl/Shift 框选分组行）时，改为级联选中连接并重新开始
+  const baseConnectionIds = isConnectionMultiSelectActive() ? selectedConnectionIdsForAction() : [];
+  const next = new Set(baseConnectionIds);
+  const allSelected = groupConnectionIds.every((id) => next.has(id));
+  if (allSelected) {
+    // 分组下连接已全部勾选：取消勾选这些连接，保留其他已勾选的连接
+    for (const id of groupConnectionIds) next.delete(id);
+  } else {
+    // 分组下连接未全部勾选：级联勾选全部连接，并保留其他已勾选的连接
+    for (const id of groupConnectionIds) next.add(id);
+    // 自动展开该分组及含连接的子分组：折叠状态下选中的连接不可见，
+    // 会被树的选择修剪逻辑清空，展开后选择才能保留并可被右键操作
+    connectionStore.expandConnectionGroups(connectionBearingGroupIdsUnder(connectionStore.sidebarLayout, activeNode.value.id));
+  }
+
+  const connectionIds = [...next];
+  applyConnectionMultiSelection(connectionStore, {
+    connectionIds,
+    activeConnectionId: connectionIds[0] ?? null,
+    anchorConnectionId: connectionIds[0] ?? null,
+    active: connectionIds.length > 0,
+  });
   rowRef.value?.focus({ preventScroll: true });
 }
 
@@ -950,7 +1031,7 @@ const {
   // together; otherwise just the grabbed one (issue #681).
   const selected = connectionStore.selectedTreeNodeIds;
   const draggedIds = selected.length > 1 && selected.includes(draggedId) ? [...selected] : [draggedId];
-  connectionStore.reorderSidebarEntries(draggedIds, targetId, position);
+  connectionStore.reorderSidebarEntries(draggedIds, targetId, position, { preserveSameGroupOrder: props.moveToGroupOnly });
 });
 
 const canReorderTreeNode = computed(() => {
@@ -993,6 +1074,12 @@ function updateTreeDragTarget(event: MouseEvent) {
     return;
   }
   updateTarget(event, activeNode.value.id, activeNode.value.type);
+  // While the list is display-sorted, the underlying manual order used for
+  // before/after positioning is invisible, so only moving into a different
+  // group (a display-order-independent operation) is a coherent drop.
+  if (props.moveToGroupOnly && dragState.dropPosition !== "inside") {
+    clearTarget(activeNode.value.id);
+  }
 }
 
 function clearTreeDragTarget() {
@@ -1255,7 +1342,7 @@ function onKeydown(event: KeyboardEvent) {
     <LightTooltip :text="visibleLabel(node)" :disabled="isTooltipDisabled()" side="right" :side-offset="8" :delay="0" :close-delay="30" :surface="detailTooltip ? 'popover' : 'foreground'">
       <div
         ref="rowRef"
-        class="group flex cursor-default items-center gap-2 py-1 px-2 relative outline-none"
+        class="group flex cursor-default items-center gap-2 min-h-7 py-1 px-2 relative outline-none"
         style="contain: layout style"
         :class="[
           rowWidthClass,
@@ -1338,6 +1425,7 @@ function onKeydown(event: KeyboardEvent) {
                   node.type === 'group-procedures' ||
                   node.type === 'group-functions' ||
                   node.type === 'group-triggers' ||
+                  node.type === 'group-events' ||
                   node.type === 'group-sequences' ||
                   node.type === 'group-synonyms' ||
                   node.type === 'group-packages' ||
@@ -1369,7 +1457,7 @@ function onKeydown(event: KeyboardEvent) {
         </div>
         <span v-if="node.type === 'connection' && node.connectionId && connectionStore.connectedIds.has(node.connectionId)" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
         <span v-if="databaseOpenVisual.showsIndicator" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
-        <Badge v-if="isConnectionReadonly" variant="secondary" class="h-4 px-1.5 text-[10px] gap-0.5"><Lock class="w-2.5 h-2.5" />{{ t("connection.readOnlyBadge") }}</Badge>
+        <Badge v-if="isConnectionReadonly" variant="secondary" class="h-4 px-1.5 text-[10px] gap-0.5"> <Lock class="w-2.5 h-2.5" />{{ t("connection.readOnlyBadge") }} </Badge>
         <ConnectionErrorIndicator v-if="node.type === 'connection'" :connection-id="node.connectionId" trigger-class="h-4 w-4" />
         <span v-if="formattedObjectStorage()" class="ml-auto shrink-0 text-right text-xs tabular-nums text-muted-foreground">{{ formattedObjectStorage() }}</span>
         <button
@@ -1387,12 +1475,28 @@ function onKeydown(event: KeyboardEvent) {
           v-if="node.type === 'connection'"
           type="button"
           class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground/55 opacity-0 transition-colors transition-opacity hover:bg-secondary/45 hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover/sidebar-row:opacity-100"
-          :class="[{ 'opacity-100': isConnectionSelectionChecked || connectionStore.connectionMultiSelectActive }, isConnecting ? '' : 'ml-auto']"
+          :class="[{ 'opacity-100': isConnectionSelectionChecked || isConnectionMultiSelectActive() }, isConnecting ? '' : 'ml-auto']"
           :aria-label="isConnectionSelectionChecked ? t('connectionGroup.deselectConnection') : t('connectionGroup.selectConnection')"
           @mousedown.stop
           @click="toggleConnectionMultiSelection"
         >
           <Check v-if="isConnectionSelectionChecked" class="h-3 w-3 text-primary" />
+          <Square v-else class="h-3 w-3 stroke-[1.7]" />
+        </button>
+        <button
+          v-if="node.type === 'connection-group'"
+          type="button"
+          role="checkbox"
+          data-sidebar-group-selection-toggle="true"
+          class="ml-auto flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground/55 opacity-0 transition-colors transition-opacity hover:bg-secondary/45 hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover/sidebar-row:opacity-100"
+          :class="{ 'opacity-100': isConnectionMultiSelectActive() || isConnectionGroupMultiSelectActive() || connectionGroupSelectionState !== 'none' }"
+          :aria-label="connectionGroupSelectionState === 'all' ? t('connectionGroup.deselectGroup') : t('connectionGroup.selectGroup')"
+          :aria-checked="connectionGroupSelectionState === 'partial' ? 'mixed' : connectionGroupSelectionState === 'all'"
+          @mousedown.stop
+          @click="toggleConnectionGroupMultiSelection"
+        >
+          <Check v-if="connectionGroupSelectionState === 'all'" class="h-3 w-3 text-primary" />
+          <Minus v-else-if="connectionGroupSelectionState === 'partial'" class="h-3 w-3 text-primary" />
           <Square v-else class="h-3 w-3 stroke-[1.7]" />
         </button>
       </div>
@@ -1518,6 +1622,7 @@ function onKeydown(event: KeyboardEvent) {
 .tree-item-active {
   background-color: var(--tree-connection-active-bg, rgb(235 235 235)) !important;
 }
+
 :root.dark .tree-item-active {
   background-color: var(--tree-connection-active-bg, rgb(36 36 36)) !important;
 }
@@ -1526,6 +1631,7 @@ function onKeydown(event: KeyboardEvent) {
 .tree-item-active:focus {
   background-color: var(--tree-connection-active-focus-bg, rgb(211 227 245)) !important;
 }
+
 :root.dark .tree-item-active:focus {
   background-color: var(--tree-connection-active-focus-bg, rgb(33 60 89)) !important;
 }
@@ -1535,6 +1641,7 @@ function onKeydown(event: KeyboardEvent) {
   background-color: var(--tree-connection-active-bg, rgb(235 235 235)) !important;
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--foreground) 14%, transparent);
 }
+
 :root.dark .tree-item-active--selection-set:focus {
   background-color: var(--tree-connection-active-bg, rgb(36 36 36)) !important;
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--foreground) 18%, transparent);

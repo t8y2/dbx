@@ -41,11 +41,16 @@ func TestKingbaseIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = server.disconnect() })
+	schema, err := server.effectiveSchema("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	qualifiedSchema := quoteIdentifier(schema)
 	cleanup := []string{
-		"DROP VIEW IF EXISTS public." + quoteIdentifier(view),
-		"DROP FUNCTION IF EXISTS public." + quoteIdentifier(function) + "()",
-		"DROP TABLE IF EXISTS public." + quoteIdentifier(child),
-		"DROP TABLE IF EXISTS public." + quoteIdentifier(parent),
+		"DROP VIEW IF EXISTS " + qualifiedSchema + "." + quoteIdentifier(view),
+		"DROP FUNCTION IF EXISTS " + qualifiedSchema + "." + quoteIdentifier(function) + "()",
+		"DROP TABLE IF EXISTS " + qualifiedSchema + "." + quoteIdentifier(child),
+		"DROP TABLE IF EXISTS " + qualifiedSchema + "." + quoteIdentifier(parent),
 	}
 	t.Cleanup(func() {
 		for _, statement := range cleanup {
@@ -53,60 +58,60 @@ func TestKingbaseIntegration(t *testing.T) {
 		}
 	})
 
-	mustExecute(t, server, "CREATE TABLE public."+quoteIdentifier(parent)+" (id integer PRIMARY KEY, name varchar(64) NOT NULL)")
-	mustExecute(t, server, "COMMENT ON TABLE public."+quoteIdentifier(parent)+" IS '订单父表'")
-	mustExecute(t, server, "COMMENT ON COLUMN public."+quoteIdentifier(parent)+".id IS '主键编号'")
-	mustExecute(t, server, "COMMENT ON COLUMN public."+quoteIdentifier(parent)+".name IS '客户''名称'")
-	mustExecute(t, server, "CREATE TABLE public."+quoteIdentifier(child)+" (id integer PRIMARY KEY, parent_id integer REFERENCES public."+quoteIdentifier(parent)+"(id))")
-	mustExecute(t, server, "CREATE INDEX "+quoteIdentifier(child+"_parent_idx")+" ON public."+quoteIdentifier(child)+"(parent_id)")
-	mustExecute(t, server, "CREATE VIEW public."+quoteIdentifier(view)+" AS SELECT id, name FROM public."+quoteIdentifier(parent))
-	mustExecute(t, server, "CREATE FUNCTION public."+quoteIdentifier(function)+"() RETURNS text AS $$ SELECT 'dbx'; $$ LANGUAGE SQL")
+	mustExecute(t, server, "CREATE TABLE "+qualifiedSchema+"."+quoteIdentifier(parent)+" (id integer PRIMARY KEY, name varchar(64) NOT NULL)")
+	mustExecute(t, server, "COMMENT ON TABLE "+qualifiedSchema+"."+quoteIdentifier(parent)+" IS '订单父表'")
+	mustExecute(t, server, "COMMENT ON COLUMN "+qualifiedSchema+"."+quoteIdentifier(parent)+".id IS '主键编号'")
+	mustExecute(t, server, "COMMENT ON COLUMN "+qualifiedSchema+"."+quoteIdentifier(parent)+".name IS '客户''名称'")
+	mustExecute(t, server, "CREATE TABLE "+qualifiedSchema+"."+quoteIdentifier(child)+" (id integer PRIMARY KEY, parent_id integer REFERENCES "+qualifiedSchema+"."+quoteIdentifier(parent)+"(id))")
+	mustExecute(t, server, "CREATE INDEX "+quoteIdentifier(child+"_parent_idx")+" ON "+qualifiedSchema+"."+quoteIdentifier(child)+"(parent_id)")
+	mustExecute(t, server, "CREATE VIEW "+qualifiedSchema+"."+quoteIdentifier(view)+" AS SELECT id, name FROM "+qualifiedSchema+"."+quoteIdentifier(parent))
+	mustExecute(t, server, "CREATE FUNCTION "+qualifiedSchema+"."+quoteIdentifier(function)+"() RETURNS text AS $$ SELECT 'dbx'; $$ LANGUAGE SQL")
 
-	tables, err := server.listTables("public", metadataListConstraints{Filter: suffix})
+	tables, err := server.listTables(schema, metadataListConstraints{Filter: suffix})
 	if err != nil || len(tables) < 3 {
 		t.Fatalf("list tables failed: count=%d err=%v", len(tables), err)
 	}
-	columns, err := server.getColumns("public", child)
+	columns, err := server.getColumns(schema, child)
 	if err != nil || len(columns) != 2 || !columns[0].IsPrimaryKey {
 		t.Fatalf("get columns failed: columns=%v err=%v", columns, err)
 	}
-	parentColumns, err := server.getColumns("public", parent)
+	parentColumns, err := server.getColumns(schema, parent)
 	if err != nil || len(parentColumns) != 2 || parentColumns[0].Comment == nil || *parentColumns[0].Comment != "主键编号" || parentColumns[1].Comment == nil || *parentColumns[1].Comment != "客户'名称" {
 		t.Fatalf("get commented columns failed: columns=%v err=%v", parentColumns, err)
 	}
-	ddl, err := server.getTableDDL("public", parent)
+	ddl, err := server.getTableDDL(schema, parent)
 	if err != nil {
 		t.Fatalf("get table DDL failed: %v", err)
 	}
-	qualifiedParent := quoteIdentifier("public") + "." + quoteIdentifier(parent)
+	qualifiedParent := qualifiedSchema + "." + quoteIdentifier(parent)
 	for _, expected := range []string{
 		"COMMENT ON TABLE " + qualifiedParent + " IS '订单父表';",
-		"COMMENT ON COLUMN " + qualifiedParent + "." + quoteIdentifier("id") + " IS '主键编号';",
-		"COMMENT ON COLUMN " + qualifiedParent + "." + quoteIdentifier("name") + " IS '客户''名称';",
+		"COMMENT ON COLUMN " + qualifiedParent + "." + quoteIdentifier(parentColumns[0].Name) + " IS '主键编号';",
+		"COMMENT ON COLUMN " + qualifiedParent + "." + quoteIdentifier(parentColumns[1].Name) + " IS '客户''名称';",
 	} {
 		if !strings.Contains(ddl, expected) {
 			t.Fatalf("table DDL missing %q:\n%s", expected, ddl)
 		}
 	}
-	indexes, err := server.listIndexes("public", child)
+	indexes, err := server.listIndexes(schema, child)
 	if err != nil || len(indexes) < 2 {
 		t.Fatalf("list indexes failed: indexes=%v err=%v", indexes, err)
 	}
-	foreignKeys, err := server.listForeignKeys("public", child)
+	foreignKeys, err := server.listForeignKeys(schema, child)
 	if err != nil || len(foreignKeys) != 1 || foreignKeys[0].RefTable != parent {
 		t.Fatalf("list foreign keys failed: keys=%v err=%v", foreignKeys, err)
 	}
-	source, err := server.getObjectSource("public", function, "FUNCTION")
+	source, err := server.getObjectSource(schema, function, "FUNCTION")
 	if err != nil || !strings.Contains(fmt.Sprint(source["source"]), function) {
 		t.Fatalf("get function source failed: source=%v err=%v", source, err)
 	}
-	viewSource, err := server.getObjectSource("public", view, "VIEW")
+	viewSource, err := server.getObjectSource(schema, view, "VIEW")
 	if err != nil || !strings.Contains(fmt.Sprint(viewSource["source"]), parent) {
 		t.Fatalf("get view source failed: source=%v err=%v", viewSource, err)
 	}
 
 	transactionParams := map[string]json.RawMessage{
-		"schema":     rawJSON("public"),
+		"schema":     rawJSON(schema),
 		"statements": rawJSON([]string{"INSERT INTO " + quoteIdentifier(parent) + " VALUES (1, 'one')", "INSERT INTO " + quoteIdentifier(child) + " VALUES (1, 1)"}),
 	}
 	if _, err := server.executeTransaction(transactionParams); err != nil {

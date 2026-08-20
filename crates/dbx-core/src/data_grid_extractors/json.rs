@@ -143,7 +143,7 @@ fn unique_json_names(
 
 fn lower_camel_json_name(name: &str) -> String {
     if !name.contains('_') {
-        return name.to_owned();
+        return if name.chars().any(char::is_lowercase) { name.to_owned() } else { name.to_lowercase() };
     }
 
     let mut words = name.split('_').filter(|word| !word.is_empty());

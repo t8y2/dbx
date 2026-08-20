@@ -86,6 +86,7 @@ const ZooKeeperKeyBrowser = defineAsyncComponent(() => import("@/components/zook
 const ConsulOverview = defineAsyncComponent(() => import("@/components/consul/ConsulOverview.vue"));
 const ConsulWorkspace = defineAsyncComponent(() => import("@/components/consul/ConsulWorkspace.vue"));
 const DocumentBrowser = defineAsyncComponent(() => import("@/components/document/DocumentBrowser.vue"));
+const MeilisearchIndexView = defineAsyncComponent(() => import("@/components/meilisearch/MeilisearchIndexView.vue"));
 const MongoGridFsBrowser = defineAsyncComponent(() => import("@/components/document/MongoGridFsBrowser.vue"));
 const MongoBucketBrowser = defineAsyncComponent(() => import("@/components/document/MongoBucketBrowser.vue"));
 const VectorBrowser = defineAsyncComponent(() => import("@/components/vector/VectorBrowser.vue"));
@@ -96,6 +97,7 @@ const MqttAdminConsole = defineAsyncComponent(() => import("@/components/mqtt/Mq
 const NacosAdminConsole = defineAsyncComponent(() => import("@/components/nacos/NacosAdminConsole.vue"));
 const NacosAccessControlConsole = defineAsyncComponent(() => import("@/components/nacos/NacosAccessControlConsole.vue"));
 const NacosDashboard = defineAsyncComponent(() => import("@/components/nacos/NacosDashboard.vue"));
+const DoltVersionControl = defineAsyncComponent(() => import("@/components/dolt/DoltVersionControl.vue"));
 const DatabaseBrowser = defineAsyncComponent(() => import("@/components/objects/DatabaseBrowser.vue"));
 const ObjectBrowser = defineAsyncComponent(() => import("@/components/objects/ObjectBrowser.vue"));
 const TableStructureEditor = defineAsyncComponent(() => import("@/components/structure/TableStructureEditor.vue"));
@@ -222,6 +224,12 @@ const emit = defineEmits<{
 const { t, locale } = useI18n();
 const queryStore = useQueryStore();
 const connectionStore = useConnectionStore();
+
+function groupedQueryReadonlyColumnIndexes(tab: QueryTab): number[] | undefined {
+  if (!tab.queryAnalysis?.groupByColumns?.length || !tab.querySourceColumns || !tab.tableMeta?.primaryKeys.length) return undefined;
+  const primaryKeys = new Set(tab.tableMeta.primaryKeys);
+  return tab.querySourceColumns.flatMap((column, index) => (column && primaryKeys.has(column) ? [index] : []));
+}
 const settingsStore = useSettingsStore();
 const booleanDisplayMode = computed(() => settingsStore.editorSettings.dataGridBooleanDisplayMode);
 const setBooleanDisplayMode = (mode: "checkbox" | "dropdown") => settingsStore.updateEditorSettings({ dataGridBooleanDisplayMode: mode });
@@ -986,6 +994,10 @@ function requestQueryEditorExecuteInNewResultTab() {
   return queryEditorRef.value?.requestExecuteInNewResultTab();
 }
 
+function acceptQueryEditorExecutionViewport(requestId: number) {
+  return queryEditorRef.value?.acceptGutterExecutionViewport(requestId) ?? false;
+}
+
 async function handleExportQuery(payload: { sql: string; format: "csv" | "xlsx" | "txt"; columnComments?: (string | null)[] }) {
   const tab = props.activeTab;
   if (!tab || tab.mode !== "query") return;
@@ -1018,7 +1030,19 @@ async function executeRedisCommand(command: string): Promise<boolean> {
   return (await redisKeyBrowserRef.value?.executeCommand?.(command)) ?? false;
 }
 
-defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, handleModRTarget, requestQueryEditorExecute, requestQueryEditorExecuteInNewResultTab, pasteClipboardAsSqlInCondition, applyTableStructureChanges, insertRedisCommand, executeRedisCommand });
+defineExpose({
+  focusSearch,
+  refreshData,
+  refreshQueryEditorCompletionCache,
+  handleModRTarget,
+  requestQueryEditorExecute,
+  requestQueryEditorExecuteInNewResultTab,
+  acceptQueryEditorExecutionViewport,
+  pasteClipboardAsSqlInCondition,
+  applyTableStructureChanges,
+  insertRedisCommand,
+  executeRedisCommand,
+});
 </script>
 
 <template>
@@ -1568,6 +1592,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                 :loading="activeTab.isExecuting"
                 :editable="!!activeTab.queryAnalysis || !!mongoQueryResultSaveHandler"
                 :source-columns="activeTab.querySourceColumns"
+                :readonly-column-indexes="groupedQueryReadonlyColumnIndexes(activeTab)"
                 :result-column-comments="activeTab.resultColumnComments"
                 :query-display-source-columns="activeTab.queryDisplaySourceColumns"
                 :custom-save-handler="mongoQueryResultSaveHandler"
@@ -2068,6 +2093,13 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
       </div>
     </template>
 
+    <!-- Meilisearch index detail -->
+    <template v-else-if="activeTab.mode === 'meilisearch'">
+      <div class="flex-1 min-h-0">
+        <MeilisearchIndexView :key="activeTab.id" :connection-id="activeTab.connectionId" :index="activeTab.sql" />
+      </div>
+    </template>
+
     <template v-else-if="activeTab.mode === 'mongo-gridfs'">
       <div class="flex-1 min-h-0">
         <MongoGridFsBrowser :key="activeTab.id" :connection-id="activeTab.connectionId" :database="activeTab.database" />
@@ -2193,6 +2225,12 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
     <template v-else-if="activeTab.mode === 'nacos-dashboard'">
       <div class="min-h-0 flex-1">
         <NacosDashboard :key="activeTab.id" :connection-id="activeTab.connectionId" />
+      </div>
+    </template>
+
+    <template v-else-if="activeTab.mode === 'dolt-version-control'">
+      <div class="min-h-0 flex-1">
+        <DoltVersionControl :key="activeTab.id" :connection-id="activeTab.connectionId" :database="activeTab.database" :initial-branch="activeTab.workspaceBranch" />
       </div>
     </template>
 

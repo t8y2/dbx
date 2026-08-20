@@ -176,6 +176,18 @@ pub async fn redis_delete_key(
 }
 
 #[tauri::command]
+pub async fn redis_rename_key(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    db: u32,
+    key_raw: String,
+    new_key_raw: String,
+) -> Result<(), String> {
+    ensure_connection_writable(&state, &connection_id, "RENAMENX").await?;
+    dbx_core::redis_ops::redis_rename_key_in_db_core(&state, &connection_id, db, &key_raw, &new_key_raw).await
+}
+
+#[tauri::command]
 pub async fn redis_hash_set(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

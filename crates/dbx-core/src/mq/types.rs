@@ -340,6 +340,36 @@ pub struct TopicInfo {
     /// RabbitMQ messages delivered but not yet acknowledged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub messages_unacked: Option<i64>,
+    /// RabbitMQ queue: auto-delete flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_delete: Option<bool>,
+    /// RabbitMQ queue: exclusive flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclusive: Option<bool>,
+    /// RabbitMQ queue: state (running / idle / flow / blocked ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    /// RabbitMQ queue: type (classic / quorum / stream), from the management
+    /// API `type` field or the x-queue-type argument on older versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_type: Option<String>,
+    /// RabbitMQ queue: x-arguments, preserving the original JSON value types
+    /// (numbers, booleans, nested objects/arrays) returned by the management API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<serde_json::Value>,
+    /// RabbitMQ queue: consumer count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumer_count: Option<i64>,
+    /// RabbitMQ queue: publish rate (msg/s). Absent when the management API
+    /// sampled no message_stats data for this queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publish_rate: Option<f64>,
+    /// RabbitMQ queue: deliver/get rate (msg/s).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deliver_rate: Option<f64>,
+    /// RabbitMQ queue: ack rate (msg/s).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ack_rate: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
@@ -365,6 +395,12 @@ pub struct TopicStats {
     pub msg_out_counter: i64,
     pub subscription_count: u32,
     pub producer_count: u32,
+    /// RabbitMQ: true when the management API exposed no `message_stats`
+    /// sample for the queue, so the msg_rate_* / counter fields are NOT
+    /// meaningful — consumers must render them as "no data" instead of
+    /// presenting the zero placeholder as a real rate of 0.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rates_unavailable: bool,
     /// Original raw stats JSON, for the detail view / advanced inspection.
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub raw: serde_json::Value,
@@ -429,6 +465,50 @@ pub struct SubscriptionInfo {
     pub backlog_unavailable: Option<bool>,
 }
 
+/// One Kafka topic-partition's committed and log-end offsets for a consumer group.
+/// Optional offsets distinguish unavailable data from a healthy zero lag.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KafkaConsumerGroupPartitionLag {
+    pub topic: String,
+    pub partition: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_offset: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_offset: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lag: Option<i64>,
+}
+
+/// Cluster-wide Kafka consumer group summary with its partition lag details.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KafkaConsumerGroupSummary {
+    pub group_id: String,
+    pub state: String,
+    #[serde(default)]
+    pub simple_group: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_count: Option<u32>,
+    #[serde(default)]
+    pub topics: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_lag: Option<i64>,
+    #[serde(default)]
+    pub lag_available: bool,
+    #[serde(default)]
+    pub partitions: Vec<KafkaConsumerGroupPartitionLag>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KafkaConsumerGroupSnapshot {
+    #[serde(default)]
+    pub groups: Vec<KafkaConsumerGroupSummary>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConsumerInfo {
@@ -482,6 +562,41 @@ mod reset_position_tests {
         assert_eq!(value, serde_json::json!({ "kind": "partitionOffset", "partition": 3, "offset": 27 }));
         let decoded: ResetPosition = serde_json::from_value(value).expect("deserialize reset position");
         assert!(matches!(decoded, ResetPosition::PartitionOffset { partition: 3, offset: 27 }));
+    }
+}
+
+#[cfg(test)]
+mod kafka_consumer_group_snapshot_tests {
+    use super::KafkaConsumerGroupSnapshot;
+
+    #[test]
+    fn preserves_unavailable_offsets_as_none() {
+        let snapshot: KafkaConsumerGroupSnapshot = serde_json::from_value(serde_json::json!({
+            "groups": [{
+                "groupId": "orders-service",
+                "state": "STABLE",
+                "simpleGroup": false,
+                "memberCount": 1,
+                "topics": ["orders"],
+                "totalLag": null,
+                "lagAvailable": false,
+                "partitions": [{
+                    "topic": "orders",
+                    "partition": 0,
+                    "currentOffset": 8,
+                    "endOffset": null,
+                    "lag": null
+                }],
+                "error": "End offsets unavailable for 1 partition(s)"
+            }]
+        }))
+        .expect("deserialize Kafka consumer group snapshot");
+
+        assert_eq!(snapshot.groups[0].total_lag, None);
+        assert!(!snapshot.groups[0].lag_available);
+        assert_eq!(snapshot.groups[0].partitions[0].current_offset, Some(8));
+        assert_eq!(snapshot.groups[0].partitions[0].end_offset, None);
+        assert_eq!(snapshot.groups[0].partitions[0].lag, None);
     }
 }
 

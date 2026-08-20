@@ -20,7 +20,7 @@ use crate::connection::{task_client_session_id, AppState, PoolKind};
 use crate::models::connection::DatabaseType;
 use crate::transfer::{
     execute_on_pool, generate_insert_typed, generate_insert_typed_sql_batches, get_columns_for_transfer,
-    normalize_integer_literal, qualified_table, quote_identifier, SqlBatchLimits,
+    normalize_integer_literal, normalize_thousands_numeric_literal, qualified_table, quote_identifier, SqlBatchLimits,
 };
 
 pub const DEFAULT_PREVIEW_LIMIT: usize = 50;
@@ -3360,8 +3360,15 @@ fn normalize_import_value(
     date_time_format: Option<&str>,
 ) -> serde_json::Value {
     let normalized = normalize_import_temporal_value(value, data_type, db_type, kingbase_oracle_mode, date_time_format);
-    let integer_text =
-        normalized.as_str().map(str::to_owned).or_else(|| normalized.as_number().map(ToString::to_string));
+    // Strip validated thousands separators before integer canonicalization so "1,234.00"
+    // still collapses to a plain integer literal for integer targets.
+    let thousands_canonical =
+        normalized.as_str().and_then(|value| normalize_thousands_numeric_literal(value, db_type, data_type));
+    let integer_text = thousands_canonical
+        .as_deref()
+        .or_else(|| normalized.as_str())
+        .map(str::to_owned)
+        .or_else(|| normalized.as_number().map(ToString::to_string));
     if let Some(integer_text) = integer_text
         .as_deref()
         .and_then(|value| normalize_integer_literal(value, db_type, data_type))
@@ -3369,6 +3376,9 @@ fn normalize_import_value(
     {
         // Normalize before both INSERT and COPY paths; COPY does not pass through SQL literal escaping.
         return serde_json::Value::Number(integer_text.into());
+    }
+    if let Some(canonical) = thousands_canonical {
+        return serde_json::Value::String(canonical);
     }
     normalized
 }
@@ -8499,6 +8509,188 @@ mod tests {
         assert_eq!(display(1234.5, "[$-407]#,##0.00"), "1.234,50");
         assert_eq!(display(1234.5, "[$-409]#,##0.00"), "1,234.50");
         assert_eq!(display(12.5, "["), "12.5");
+    }
+
+    fn postgres_import_batches(
+        rows: Vec<Vec<serde_json::Value>>,
+        target_types: &[(&str, &str)],
+    ) -> Vec<ImportSqlBatch> {
+        let data = ParsedImportFile {
+            columns: target_types.iter().map(|(column, _)| column.to_string()).collect(),
+            rows,
+            total_rows: 1,
+            effective_encoding: None,
+        };
+        let mappings = target_types
+            .iter()
+            .map(|(column, _)| TableImportColumnMapping {
+                source_column: column.to_string(),
+                target_column: column.to_string(),
+                target_data_type: None,
+            })
+            .collect::<Vec<_>>();
+        let target_column_types = target_types
+            .iter()
+            .map(|(column, data_type)| (column.to_string(), data_type.to_string()))
+            .collect::<Vec<_>>();
+        build_import_insert_batches(
+            &data,
+            &mappings,
+            &target_column_types,
+            "issue_6491",
+            "",
+            &DatabaseType::Postgres,
+            500,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn postgres_import_converts_valid_thousands_separators_for_numeric_targets() {
+        for (value, data_type, expected) in [
+            ("1,234.56", "numeric(18,2)", "'1234.56'"),
+            ("-1,234.56", "numeric(18,2)", "'-1234.56'"),
+            ("+1,234.56", "numeric(18,2)", "'1234.56'"),
+            ("1,234.00", "numeric(18,2)", "'1234.00'"),
+            ("1,234,567.89", "decimal(12,2)", "'1234567.89'"),
+            ("1,234", "bigint", "'1234'"),
+            ("12,345", "integer", "'12345'"),
+            ("1,234,567,890", "bigint", "'1234567890'"),
+            ("1,234.5", "double precision", "'1234.5'"),
+            ("1,234.5", "real", "'1234.5'"),
+        ] {
+            let batches = postgres_import_batches(vec![vec![serde_json::json!(value)]], &[("amount", data_type)]);
+            assert_eq!(
+                batches[0].sql,
+                format!("INSERT INTO \"issue_6491\" (\"amount\") VALUES\n({expected})"),
+                "{value} -> {data_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn postgres_import_preserves_thousands_separators_for_text_targets() {
+        for data_type in ["varchar(64)", "text"] {
+            let batches = postgres_import_batches(vec![vec![serde_json::json!("1,234.56")]], &[("amount", data_type)]);
+            assert_eq!(
+                batches[0].sql,
+                format!("INSERT INTO \"issue_6491\" (\"amount\") VALUES\n('1,234.56')"),
+                "{data_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn postgres_import_keeps_malformed_grouping_untouched() {
+        for value in ["1,23,4", "12,34.56", "1,,234", ",123", "123,", "1,234,", "1,234.5.6", "abc,123", "1,234abc"] {
+            let batches = postgres_import_batches(vec![vec![serde_json::json!(value)]], &[("amount", "numeric(18,2)")]);
+            assert_eq!(
+                batches[0].sql,
+                format!("INSERT INTO \"issue_6491\" (\"amount\") VALUES\n('{value}')"),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn postgres_import_keeps_plain_numeric_and_empty_values_unchanged() {
+        for (value, data_type, expected) in [
+            (serde_json::json!("1234.56"), "numeric(18,2)", "'1234.56'"),
+            (serde_json::json!("0"), "numeric(18,2)", "'0'"),
+            (serde_json::json!("1234.56"), "bigint", "'1234.56'"),
+            (serde_json::json!(1234.56), "numeric(18,2)", "1234.56"),
+        ] {
+            let label = value.to_string();
+            let batches = postgres_import_batches(vec![vec![value]], &[("amount", data_type)]);
+            assert_eq!(
+                batches[0].sql,
+                format!("INSERT INTO \"issue_6491\" (\"amount\") VALUES\n({expected})"),
+                "{label} -> {data_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn postgres_copy_import_uses_canonical_numeric_text() {
+        let plan = CompiledImportPlan {
+            mapped_source_indexes: vec![0],
+            target_columns: vec!["amount".to_string()],
+            column_types: vec![Some("numeric(18,2)".to_string())],
+        };
+        let (_, data) =
+            build_postgres_copy_text_batch(&[vec![serde_json::json!("1,234.56")]], &plan, "issue_6491", "", None)
+                .unwrap();
+        assert_eq!(data, b"1234.56\n");
+    }
+
+    #[test]
+    fn excel_text_cell_with_thousands_separator_imports_to_postgres_numeric() {
+        let path = std::env::temp_dir().join(format!("dbx-table-import-6491-{}.xlsx", uuid::Uuid::new_v4()));
+        let sheet_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <dimension ref="A1:A3"/>
+  <sheetData>
+    <row r="1"><c r="A1" t="inlineStr"><is><t>amount</t></is></c></row>
+    <row r="2"><c r="A2" t="inlineStr"><is><t>1,234.56</t></is></c></row>
+    <row r="3"><c r="A3" t="inlineStr"><is><t>-1,234</t></is></c></row>
+  </sheetData>
+</worksheet>"#;
+        std::fs::write(&path, build_preview_test_xlsx(sheet_xml, None)).unwrap();
+        let options = TableImportParseOptions::default();
+
+        let data = parse_xlsx_file_with_options(&path.to_string_lossy(), &options, 10).unwrap();
+        assert_eq!(data.rows, vec![vec![serde_json::json!("1,234.56")], vec![serde_json::json!("-1,234")]]);
+        let mappings = vec![TableImportColumnMapping {
+            source_column: "amount".to_string(),
+            target_column: "amount".to_string(),
+            target_data_type: None,
+        }];
+        let batches = build_import_insert_batches(
+            &data,
+            &mappings,
+            &[("amount".to_string(), "numeric(18,2)".to_string())],
+            "issue_6491",
+            "",
+            &DatabaseType::Postgres,
+            500,
+        )
+        .unwrap();
+
+        assert_eq!(batches[0].sql, "INSERT INTO \"issue_6491\" (\"amount\") VALUES\n('1234.56'),\n('-1234')");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn csv_thousands_separator_uses_same_numeric_normalization() {
+        let parsed = parse_csv_bytes(b"amount\n\"1,234.56\"\n\"12,345\"\n", 10).unwrap();
+        let mappings = vec![TableImportColumnMapping {
+            source_column: "amount".to_string(),
+            target_column: "amount".to_string(),
+            target_data_type: None,
+        }];
+        let batches = build_import_insert_batches(
+            &parsed,
+            &mappings,
+            &[("amount".to_string(), "numeric(18,2)".to_string())],
+            "issue_6491",
+            "",
+            &DatabaseType::Postgres,
+            500,
+        )
+        .unwrap();
+
+        assert_eq!(batches[0].sql, "INSERT INTO \"issue_6491\" (\"amount\") VALUES\n('1234.56'),\n('12345')");
+        let text_batches = build_import_insert_batches(
+            &parsed,
+            &mappings,
+            &[("amount".to_string(), "varchar(32)".to_string())],
+            "issue_6491",
+            "",
+            &DatabaseType::Postgres,
+            500,
+        )
+        .unwrap();
+        assert_eq!(text_batches[0].sql, "INSERT INTO \"issue_6491\" (\"amount\") VALUES\n('1,234.56'),\n('12,345')");
     }
 
     #[test]

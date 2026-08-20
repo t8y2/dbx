@@ -3,7 +3,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { applyLegacyWebViewClass, isLegacyWebView, LEGACY_WEBVIEW_CLASS, missingLegacyWebViewCapabilities } from "@/lib/ui/legacyWebView";
 
-const supportedFeatures = new Set(["oklch", "color-mix-oklab", "color-mix-oklch", "has-selector", "dynamic-viewport", "min-function"]);
+const supportedFeatures = new Set(["oklch", "color-mix-oklab", "color-mix-oklch", "has-selector", "dynamic-viewport", "min-function", "media-query-range"]);
 
 function mockCssSupports(features: Set<string>) {
   vi.stubGlobal("CSS", {
@@ -27,6 +27,16 @@ function mockCssSupports(features: Set<string>) {
       return features.has(key);
     },
   });
+  vi.stubGlobal("matchMedia", (query: string) => ({
+    matches: query === "(width >= 0px)" ? features.has("media-query-range") : false,
+    media: query,
+    onchange: null,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    addListener: vi.fn(),
+    removeListener: vi.fn(),
+    dispatchEvent: vi.fn(),
+  }));
 }
 
 afterEach(() => {
@@ -45,14 +55,21 @@ describe("legacy WebView detection", () => {
     mockCssSupports(new Set(["oklch"]));
 
     expect(isLegacyWebView()).toBe(true);
-    expect(missingLegacyWebViewCapabilities()).toEqual(["color-mix-oklab", "color-mix-oklch", "has-selector", "dynamic-viewport", "min-function"]);
+    expect(missingLegacyWebViewCapabilities()).toEqual(["color-mix-oklab", "color-mix-oklch", "has-selector", "dynamic-viewport", "min-function", "media-query-range"]);
   });
 
   it("does not treat one color-mix interpolation space as the other", () => {
     mockCssSupports(new Set(["oklch", "color-mix-oklab", "has-selector", "dynamic-viewport", "min-function"]));
 
     expect(isLegacyWebView()).toBe(true);
-    expect(missingLegacyWebViewCapabilities()).toEqual(["color-mix-oklch"]);
+    expect(missingLegacyWebViewCapabilities()).toEqual(["color-mix-oklch", "media-query-range"]);
+  });
+
+  it("marks a WebView without media query range syntax as legacy", () => {
+    mockCssSupports(new Set(["oklch", "color-mix-oklab", "color-mix-oklch", "has-selector", "dynamic-viewport", "min-function"]));
+
+    expect(isLegacyWebView()).toBe(true);
+    expect(missingLegacyWebViewCapabilities()).toEqual(["media-query-range"]);
   });
 
   it("adds and removes the root class idempotently", () => {

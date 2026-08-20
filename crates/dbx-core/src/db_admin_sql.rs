@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::models::connection::DatabaseType;
-use crate::sql_dialect::{is_schema_aware, profile_for, qualified_table_name, quote_table_identifier};
+use crate::sql_dialect::{
+    is_schema_aware, profile_for, qualified_table_name, quote_table_data_identifier, quote_table_identifier,
+    uses_connection_identifier_quote,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -87,6 +90,8 @@ pub struct DropObjectSqlOptions {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identifier_quote: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -99,6 +104,24 @@ pub struct TableAdminSqlOptions {
     pub table_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cascade: Option<bool>,
+    /// Quote character reported by the connected server, for types whose quote is not a property of
+    /// the database type alone. See [`qualified_name_with_quote`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identifier_quote: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VacuumTableSqlOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_type: Option<DatabaseType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    pub table_name: String,
+    #[serde(default)]
+    pub full: bool,
+    #[serde(default)]
+    pub analyze: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -179,6 +202,8 @@ pub struct DuplicateTableStructureSqlOptions {
     pub table_comment: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub column_comments: Vec<DuplicateTableColumnComment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identifier_quote: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -205,6 +230,8 @@ pub struct CopyTableDataSqlOptions {
     pub sqlserver_identity_insert: bool,
     #[serde(default)]
     pub normalize_new_target_name: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identifier_quote: Option<String>,
 }
 
 const MYSQL_COMPATIBLE_PROFILES: &[&str] = &["mysql", "mariadb", "tidb", "oceanbase", "custom_mysql"];
@@ -370,13 +397,23 @@ pub fn build_drop_object_sql(options: DropObjectSqlOptions) -> String {
     format!(
         "DROP {} {}{};",
         object_type_keyword(options.object_type),
-        qualified_name(options.database_type, options.schema.as_deref(), &options.name),
+        qualified_name_with_quote(
+            options.database_type,
+            options.schema.as_deref(),
+            &options.name,
+            options.identifier_quote.as_deref(),
+        ),
         signature
     )
 }
 
 pub fn build_drop_table_sql(options: TableAdminSqlOptions) -> String {
-    let table = qualified_name(options.database_type, options.schema.as_deref(), &options.table_name);
+    let table = qualified_name_with_quote(
+        options.database_type,
+        options.schema.as_deref(),
+        &options.table_name,
+        options.identifier_quote.as_deref(),
+    );
     if matches!(options.database_type, Some(DatabaseType::Iotdb)) {
         return format!("DELETE TIMESERIES {};", iotdb_timeseries_pattern(&table));
     } else if matches!(options.database_type, Some(DatabaseType::InfluxDb)) {
@@ -485,10 +522,17 @@ pub fn build_drop_table_child_object_sql(options: DropTableChildObjectSqlOptions
 }
 
 pub fn build_empty_table_sql(options: TableAdminSqlOptions) -> String {
-    let table = qualified_name(options.database_type, options.schema.as_deref(), &options.table_name);
+    let table = qualified_name_with_quote(
+        options.database_type,
+        options.schema.as_deref(),
+        &options.table_name,
+        options.identifier_quote.as_deref(),
+    );
     match options.database_type {
         Some(DatabaseType::ClickHouse) => format!("ALTER TABLE {table} DELETE WHERE 1 = 1;"),
-        Some(DatabaseType::Bigquery) => format!("DELETE FROM {table} WHERE TRUE;"),
+        // BigQuery and Spanner both reject an unqualified `DELETE FROM t`; DML requires a
+        // WHERE clause.
+        Some(DatabaseType::Bigquery | DatabaseType::Spanner) => format!("DELETE FROM {table} WHERE TRUE;"),
         Some(
             DatabaseType::Cassandra
             | DatabaseType::Hive
@@ -504,9 +548,18 @@ pub fn build_empty_table_sql(options: TableAdminSqlOptions) -> String {
 }
 
 pub fn build_truncate_table_sql(options: TableAdminSqlOptions) -> String {
-    let table = qualified_name(options.database_type, options.schema.as_deref(), &options.table_name);
+    let table = qualified_name_with_quote(
+        options.database_type,
+        options.schema.as_deref(),
+        &options.table_name,
+        options.identifier_quote.as_deref(),
+    );
     if matches!(options.database_type, Some(DatabaseType::Iotdb)) {
         format!("DELETE FROM {};", iotdb_timeseries_pattern(&table))
+    } else if matches!(options.database_type, Some(DatabaseType::Spanner)) {
+        // Spanner has no TRUNCATE statement (it reports `Unknown statement`), and its DML
+        // requires a WHERE clause. Unlike BigQuery it cannot use the TRUNCATE fallback.
+        format!("DELETE FROM {table} WHERE TRUE;")
     } else if matches!(options.database_type, Some(DatabaseType::Sqlite | DatabaseType::DuckDb)) {
         format!("DELETE FROM {table};")
     } else {
@@ -518,6 +571,32 @@ pub fn build_truncate_table_sql(options: TableAdminSqlOptions) -> String {
         };
         format!("TRUNCATE TABLE {table}{cascade};")
     }
+}
+
+pub fn build_vacuum_table_sql(options: VacuumTableSqlOptions) -> Result<String, String> {
+    if !supports_vacuum_table(options.database_type) {
+        return Err(format!("VACUUM is not supported for {}.", database_label(options.database_type)));
+    }
+    let table = qualified_name(options.database_type, options.schema.as_deref(), &options.table_name);
+    let full = if options.full { " FULL" } else { "" };
+    let analyze = if options.analyze { " ANALYZE" } else { "" };
+    Ok(format!("VACUUM{full}{analyze} {table};"))
+}
+
+fn supports_vacuum_table(database_type: Option<DatabaseType>) -> bool {
+    matches!(
+        database_type,
+        Some(
+            DatabaseType::Postgres
+                | DatabaseType::Gaussdb
+                | DatabaseType::Kwdb
+                | DatabaseType::Kingbase
+                | DatabaseType::Highgo
+                | DatabaseType::Uxdb
+                | DatabaseType::Vastbase
+                | DatabaseType::OpenGauss
+        )
+    )
 }
 
 pub fn build_mysql_auto_increment_sql(options: MysqlAutoIncrementSqlOptions) -> Result<String, String> {
@@ -648,7 +727,12 @@ pub fn build_drop_schema_sql(options: SchemaNameSqlOptions) -> String {
 }
 
 pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOptions) -> String {
-    let source = qualified_name(options.database_type, options.schema.as_deref(), &options.source_name);
+    let source = qualified_name_with_quote(
+        options.database_type,
+        options.schema.as_deref(),
+        &options.source_name,
+        options.identifier_quote.as_deref(),
+    );
     let target =
         qualified_duplicate_target_name(options.database_type, options.schema.as_deref(), &options.target_name);
     let structure_sql =
@@ -693,11 +777,21 @@ pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOp
 }
 
 pub fn build_copy_table_data_sql(options: CopyTableDataSqlOptions) -> String {
-    let source = qualified_name(options.database_type, options.schema.as_deref(), &options.source_name);
+    let source = qualified_name_with_quote(
+        options.database_type,
+        options.schema.as_deref(),
+        &options.source_name,
+        options.identifier_quote.as_deref(),
+    );
     let target = if options.normalize_new_target_name {
         qualified_duplicate_target_name(options.database_type, options.schema.as_deref(), &options.target_name)
     } else {
-        qualified_name(options.database_type, options.schema.as_deref(), &options.target_name)
+        qualified_name_with_quote(
+            options.database_type,
+            options.schema.as_deref(),
+            &options.target_name,
+            options.identifier_quote.as_deref(),
+        )
     };
     let Some(columns) = options.columns.filter(|columns| !columns.is_empty()) else {
         return format!("INSERT INTO {target} SELECT * FROM {source};");
@@ -816,12 +910,14 @@ pub fn build_rename_object_sql(options: RenameObjectSqlOptions) -> Result<String
 }
 
 fn is_postgres_like_rename(database_type: DatabaseType) -> bool {
+    // openGauss 兼容 PG 的 ALTER TABLE/VIEW ... RENAME TO 语法，与 gaussdb 等同开放重命名能力。
     matches!(
         database_type,
         DatabaseType::Postgres
             | DatabaseType::Redshift
             | DatabaseType::Gaussdb
             | DatabaseType::Kwdb
+            | DatabaseType::OpenGauss
             | DatabaseType::Kingbase
             | DatabaseType::Highgo
             | DatabaseType::Uxdb
@@ -886,6 +982,33 @@ fn qualified_name(database_type: Option<DatabaseType>, schema: Option<&str>, nam
         )
     } else {
         quote_rename_identifier(database_type, name)
+    }
+}
+
+/// Same as [`qualified_name`], but honours the quote character the connected server reported.
+///
+/// The static per-type mapping cannot describe a database whose quote depends on the connection.
+/// Cloud Spanner is the case that forces this: GoogleSQL quotes with backticks while its PostgreSQL
+/// dialect quotes with double quotes, the dialect is fixed when the database is created, and only
+/// the connected agent knows which one applies. Emitting the static answer produces admin SQL that
+/// is a syntax error for every PostgreSQL-dialect Spanner database.
+///
+/// Falls back to [`qualified_name`] whenever no connection quote applies, so every other database
+/// type — and Spanner itself before the agent has reported a quote — keeps its existing output.
+fn qualified_name_with_quote(
+    database_type: Option<DatabaseType>,
+    schema: Option<&str>,
+    name: &str,
+    identifier_quote: Option<&str>,
+) -> String {
+    if !uses_connection_identifier_quote(database_type, identifier_quote) {
+        return qualified_name(database_type, schema, name);
+    }
+    let quoted = |value: &str| quote_table_data_identifier(database_type, value, identifier_quote);
+    if database_type.is_some_and(is_schema_aware) && schema.is_some_and(|schema| !schema.is_empty()) {
+        format!("{}.{}", quoted(schema.unwrap()), quoted(name))
+    } else {
+        quoted(name)
     }
 }
 
@@ -1302,12 +1425,65 @@ mod tests {
     }
 
     #[test]
+    fn builds_vacuum_table_sql_for_all_options() {
+        let base = VacuumTableSqlOptions {
+            database_type: Some(DatabaseType::Postgres),
+            schema: Some("public".to_string()),
+            table_name: "events".to_string(),
+            full: false,
+            analyze: false,
+        };
+        assert_eq!(build_vacuum_table_sql(base.clone()).unwrap(), "VACUUM \"public\".\"events\";");
+        assert_eq!(
+            build_vacuum_table_sql(VacuumTableSqlOptions { analyze: true, ..base.clone() }).unwrap(),
+            "VACUUM ANALYZE \"public\".\"events\";"
+        );
+        assert_eq!(
+            build_vacuum_table_sql(VacuumTableSqlOptions { full: true, ..base.clone() }).unwrap(),
+            "VACUUM FULL \"public\".\"events\";"
+        );
+        assert_eq!(
+            build_vacuum_table_sql(VacuumTableSqlOptions { full: true, analyze: true, ..base }).unwrap(),
+            "VACUUM FULL ANALYZE \"public\".\"events\";"
+        );
+    }
+
+    #[test]
+    fn vacuum_is_restricted_to_supported_postgres_family_types() {
+        for database_type in [
+            DatabaseType::Postgres,
+            DatabaseType::Gaussdb,
+            DatabaseType::OpenGauss,
+            DatabaseType::Kingbase,
+            DatabaseType::Vastbase,
+        ] {
+            assert!(build_vacuum_table_sql(VacuumTableSqlOptions {
+                database_type: Some(database_type),
+                schema: None,
+                table_name: "events".to_string(),
+                full: false,
+                analyze: false,
+            })
+            .is_ok());
+        }
+        assert!(build_vacuum_table_sql(VacuumTableSqlOptions {
+            database_type: Some(DatabaseType::Mysql),
+            schema: None,
+            table_name: "events".to_string(),
+            full: false,
+            analyze: false,
+        })
+        .is_err());
+    }
+
+    #[test]
     fn builds_drop_and_clear_table_sql() {
         let options = TableAdminSqlOptions {
             database_type: Some(DatabaseType::Postgres),
             schema: Some("public".to_string()),
             table_name: "events".to_string(),
             cascade: None,
+            identifier_quote: None,
         };
         assert_eq!(build_drop_table_sql(options.clone()), "DROP TABLE \"public\".\"events\";");
         assert_eq!(
@@ -1316,6 +1492,7 @@ mod tests {
                 schema: Some("public".to_string()),
                 table_name: "events".to_string(),
                 cascade: Some(true),
+                identifier_quote: None,
             }),
             "DROP TABLE \"public\".\"events\" CASCADE;"
         );
@@ -1325,6 +1502,7 @@ mod tests {
                 schema: None,
                 table_name: "events".to_string(),
                 cascade: Some(true),
+                identifier_quote: None,
             }),
             "DROP TABLE `events`;"
         );
@@ -1336,6 +1514,7 @@ mod tests {
                 schema: Some("public".to_string()),
                 table_name: "events".to_string(),
                 cascade: Some(true),
+                identifier_quote: None,
             }),
             "TRUNCATE TABLE \"public\".\"events\" CASCADE;"
         );
@@ -1345,6 +1524,7 @@ mod tests {
                 schema: None,
                 table_name: "events".to_string(),
                 cascade: Some(true),
+                identifier_quote: None,
             }),
             "TRUNCATE TABLE `events`;"
         );
@@ -1354,6 +1534,7 @@ mod tests {
                 schema: None,
                 table_name: "PresetSubjectInfo".to_string(),
                 cascade: None,
+                identifier_quote: None,
             }),
             "ALTER TABLE `PresetSubjectInfo` DELETE WHERE 1 = 1;"
         );
@@ -1363,6 +1544,7 @@ mod tests {
                 schema: None,
                 table_name: "PresetSubjectInfo".to_string(),
                 cascade: None,
+                identifier_quote: None,
             }),
             "TRUNCATE TABLE `PresetSubjectInfo`;"
         );
@@ -1372,8 +1554,76 @@ mod tests {
                 schema: None,
                 table_name: "events".to_string(),
                 cascade: None,
+                identifier_quote: None,
             }),
             "DELETE FROM `events` WHERE TRUE;"
+        );
+        // Spanner rejects both a WHERE-less DELETE and TRUNCATE TABLE (`Unknown statement`),
+        // so unlike BigQuery it must not fall through to the TRUNCATE default.
+        assert_eq!(
+            build_empty_table_sql(TableAdminSqlOptions {
+                database_type: Some(DatabaseType::Spanner),
+                schema: None,
+                table_name: "events".to_string(),
+                cascade: None,
+                identifier_quote: None,
+            }),
+            "DELETE FROM `events` WHERE TRUE;"
+        );
+        assert_eq!(
+            build_truncate_table_sql(TableAdminSqlOptions {
+                database_type: Some(DatabaseType::Spanner),
+                schema: None,
+                table_name: "events".to_string(),
+                cascade: None,
+                identifier_quote: None,
+            }),
+            "DELETE FROM `events` WHERE TRUE;"
+        );
+        // A `public` schema means the PostgreSQL dialect, where backticks are a syntax error, so the
+        // quote has to come from the connection rather than from the static per-type mapping.
+        assert_eq!(
+            build_truncate_table_sql(TableAdminSqlOptions {
+                database_type: Some(DatabaseType::Spanner),
+                schema: Some("public".to_string()),
+                table_name: "events".to_string(),
+                cascade: Some(true),
+                identifier_quote: Some("\"".to_string()),
+            }),
+            "DELETE FROM \"public\".\"events\" WHERE TRUE;"
+        );
+        assert_eq!(
+            build_empty_table_sql(TableAdminSqlOptions {
+                database_type: Some(DatabaseType::Spanner),
+                schema: Some("public".to_string()),
+                table_name: "events".to_string(),
+                cascade: None,
+                identifier_quote: Some("\"".to_string()),
+            }),
+            "DELETE FROM \"public\".\"events\" WHERE TRUE;"
+        );
+        // GoogleSQL reports a backtick, which matches the static mapping.
+        assert_eq!(
+            build_truncate_table_sql(TableAdminSqlOptions {
+                database_type: Some(DatabaseType::Spanner),
+                schema: None,
+                table_name: "OrderItems".to_string(),
+                cascade: None,
+                identifier_quote: Some("`".to_string()),
+            }),
+            "DELETE FROM `OrderItems` WHERE TRUE;"
+        );
+        // Before the agent has reported a quote the static GoogleSQL answer is the only one
+        // available; this documents the fallback rather than a PostgreSQL-dialect expectation.
+        assert_eq!(
+            build_truncate_table_sql(TableAdminSqlOptions {
+                database_type: Some(DatabaseType::Spanner),
+                schema: Some("public".to_string()),
+                table_name: "events".to_string(),
+                cascade: None,
+                identifier_quote: None,
+            }),
+            "DELETE FROM `public`.`events` WHERE TRUE;"
         );
         assert_eq!(
             build_empty_table_sql(TableAdminSqlOptions {
@@ -1381,6 +1631,7 @@ mod tests {
                 schema: None,
                 table_name: "events".to_string(),
                 cascade: None,
+                identifier_quote: None,
             }),
             "TRUNCATE TABLE \"events\";"
         );
@@ -1390,6 +1641,7 @@ mod tests {
                 schema: None,
                 table_name: "events".to_string(),
                 cascade: None,
+                identifier_quote: None,
             }),
             "DELETE FROM \"events\";"
         );
@@ -1399,6 +1651,7 @@ mod tests {
                 schema: Some("root.test".to_string()),
                 table_name: "DCU_101".to_string(),
                 cascade: None,
+                identifier_quote: None,
             }),
             "DELETE TIMESERIES root.test.DCU_101.*;"
         );
@@ -1408,6 +1661,7 @@ mod tests {
                 schema: Some("root.test".to_string()),
                 table_name: "root.test.DCU_101".to_string(),
                 cascade: None,
+                identifier_quote: None,
             }),
             "DELETE FROM root.test.DCU_101.*;"
         );
@@ -1417,6 +1671,7 @@ mod tests {
                 schema: Some("root.test".to_string()),
                 table_name: "DCU_101".to_string(),
                 cascade: None,
+                identifier_quote: None,
             }),
             "DELETE FROM root.test.DCU_101.*;"
         );
@@ -1427,6 +1682,7 @@ mod tests {
                 schema: None,
                 table_name: "table_sample".to_string(),
                 cascade: None,
+                identifier_quote: None,
             }),
             "TRUNCATE TABLE `table_sample`;"
         );
@@ -1436,6 +1692,7 @@ mod tests {
                 schema: None,
                 table_name: "table_sample".to_string(),
                 cascade: None,
+                identifier_quote: None,
             }),
             "TRUNCATE TABLE `table_sample`;"
         );
@@ -1500,6 +1757,7 @@ mod tests {
                 schema: Some("dbo".to_string()),
                 name: "refresh_cache".to_string(),
                 signature: None,
+                identifier_quote: None,
             }),
             "DROP PROCEDURE [dbo].[refresh_cache];"
         );
@@ -1510,6 +1768,7 @@ mod tests {
                 schema: Some("public".to_string()),
                 name: "calc".to_string(),
                 signature: Some("integer, integer".to_string()),
+                identifier_quote: None,
             }),
             "DROP FUNCTION \"public\".\"calc\"(integer, integer);"
         );
@@ -1677,6 +1936,7 @@ mod tests {
                 target_name: "users_copy".to_string(),
                 table_comment: None,
                 column_comments: vec![],
+                identifier_quote: None,
             }),
             "CREATE TABLE `users_copy` LIKE `users`;"
         );
@@ -1688,6 +1948,7 @@ mod tests {
                 target_name: "users_copy".to_string(),
                 table_comment: None,
                 column_comments: vec![],
+                identifier_quote: None,
             }),
             "CREATE TABLE \"public\".\"users_copy\" (LIKE \"public\".\"users\" INCLUDING ALL);"
         );
@@ -1699,6 +1960,7 @@ mod tests {
                 target_name: "connection_test_copy".to_string(),
                 table_comment: None,
                 column_comments: vec![],
+                identifier_quote: None,
             }),
             "CREATE TABLE `dbx_demo`.`connection_test_copy` LIKE `dbx_demo`.`connection_test`;"
         );
@@ -1710,6 +1972,7 @@ mod tests {
                 target_name: "orders_copy".to_string(),
                 table_comment: None,
                 column_comments: vec![],
+                identifier_quote: None,
             }),
             "CREATE TABLE `dbx_demo`.`orders_copy` LIKE `dbx_demo`.`orders`;"
         );
@@ -1721,6 +1984,7 @@ mod tests {
                 target_name: "customer_orders_copy".to_string(),
                 table_comment: Some("  Customer's orders; archive  ".to_string()),
                 column_comments: vec![],
+                identifier_quote: None,
             }),
             "CREATE TABLE \"public\".\"customer_orders_copy\" (LIKE \"public\".\"customer_orders\" INCLUDING ALL);\nCOMMENT ON TABLE \"public\".\"customer_orders_copy\" IS '  Customer''s orders; archive  ';"
         );
@@ -1732,6 +1996,7 @@ mod tests {
                 target_name: "users_copy".to_string(),
                 table_comment: None,
                 column_comments: vec![],
+                identifier_quote: None,
             }),
             "CREATE TABLE \"public\".\"users_copy\" (LIKE \"public\".\"users\" INCLUDING ALL);"
         );
@@ -1743,6 +2008,7 @@ mod tests {
                 target_name: "users_copy".to_string(),
                 table_comment: None,
                 column_comments: vec![],
+                identifier_quote: None,
             }),
             "SELECT TOP 0 * INTO [dbo].[users_copy] FROM [dbo].[users];"
         );
@@ -1754,6 +2020,7 @@ mod tests {
                 target_name: "USERS_COPY".to_string(),
                 table_comment: None,
                 column_comments: vec![],
+                identifier_quote: None,
             }),
             "CREATE TABLE \"HR\".\"USERS_COPY\" AS SELECT * FROM \"HR\".\"USERS\" WHERE 1=0"
         );
@@ -1771,6 +2038,7 @@ mod tests {
                 DuplicateTableColumnComment { name: "STATUS".to_string(), comment: "active  ".to_string() },
                 DuplicateTableColumnComment { name: "EMPTY".to_string(), comment: " \t\n".to_string() },
             ],
+            identifier_quote: None,
         });
         assert_eq!(
             dameng_sql,
@@ -1793,6 +2061,7 @@ mod tests {
             target_name: "users_copy".to_string(),
             table_comment: Some("line1\\path\nline2".to_string()),
             column_comments: vec![],
+            identifier_quote: None,
         });
         assert_eq!(
             dameng_escape_sql,
@@ -1807,6 +2076,7 @@ mod tests {
                 target_name: "UsersCopy".to_string(),
                 table_comment: None,
                 column_comments: vec![],
+                identifier_quote: None,
             }),
             "CREATE TABLE \"APP\".\"UsersCopy\" AS SELECT * FROM \"APP\".\"USERS\" WHERE 1=0"
         );
@@ -1824,6 +2094,7 @@ mod tests {
                 target_name: "copy".to_string(),
                 table_comment: Some("owner\\'s; archive".to_string()),
                 column_comments: vec![],
+                identifier_quote: None,
             });
             let expected_literal = if database_type == DatabaseType::Redshift {
                 "'owner\\\\\\'s; archive'"
@@ -1847,6 +2118,7 @@ mod tests {
                 target_name: "tb_a_copy".to_string(),
                 table_comment: None,
                 column_comments: vec![],
+                identifier_quote: None,
             }),
             "CREATE TABLE \"SQLUSER\".\"tb_a_copy\" AS SELECT * FROM \"SQLUSER\".\"tb_a\" WHERE 1=0"
         );
@@ -1858,6 +2130,7 @@ mod tests {
                 target_name: "users_copy".to_string(),
                 table_comment: Some("ignored by QuestDB".to_string()),
                 column_comments: vec![],
+                identifier_quote: None,
             }),
             "CREATE TABLE `users_copy` (LIKE `users`);"
         );
@@ -1875,6 +2148,7 @@ mod tests {
                 postgres_overriding_system_value: false,
                 sqlserver_identity_insert: false,
                 normalize_new_target_name: false,
+                identifier_quote: None,
             }),
             "INSERT INTO \"users_copy\" SELECT * FROM \"users\";"
         );
@@ -1888,6 +2162,7 @@ mod tests {
                 postgres_overriding_system_value: false,
                 sqlserver_identity_insert: false,
                 normalize_new_target_name: false,
+                identifier_quote: None,
             }),
             "INSERT INTO `users_copy` (`id`, `name`) SELECT `id`, `name` FROM `users`;"
         );
@@ -1901,6 +2176,7 @@ mod tests {
                 postgres_overriding_system_value: true,
                 sqlserver_identity_insert: false,
                 normalize_new_target_name: false,
+                identifier_quote: None,
             }),
             "INSERT INTO \"public\".\"users_copy\" (\"id\", \"name\") OVERRIDING SYSTEM VALUE SELECT \"id\", \"name\" FROM \"public\".\"users\";"
         );
@@ -1914,6 +2190,7 @@ mod tests {
                 postgres_overriding_system_value: false,
                 sqlserver_identity_insert: true,
                 normalize_new_target_name: false,
+                identifier_quote: None,
             }),
             "SET IDENTITY_INSERT [dbo].[users_copy] ON;\nINSERT INTO [dbo].[users_copy] ([id], [name]) SELECT [id], [name] FROM [dbo].[users];\nSET IDENTITY_INSERT [dbo].[users_copy] OFF;"
         );
@@ -1927,6 +2204,7 @@ mod tests {
                 postgres_overriding_system_value: false,
                 sqlserver_identity_insert: false,
                 normalize_new_target_name: true,
+                identifier_quote: None,
             }),
             "INSERT INTO \"APP\".USERS_COPY SELECT * FROM \"APP\".\"users\";"
         );
@@ -1940,6 +2218,7 @@ mod tests {
                 postgres_overriding_system_value: false,
                 sqlserver_identity_insert: false,
                 normalize_new_target_name: false,
+                identifier_quote: None,
             }),
             "INSERT INTO \"APP\".\"users_copy\" SELECT * FROM \"APP\".\"users\";"
         );
@@ -2030,6 +2309,36 @@ mod tests {
         assert_eq!(
             build_rename_object_sql(RenameObjectSqlOptions {
                 database_type: Some(DatabaseType::Postgres),
+                object_type: DatabaseObjectType::View,
+                schema: Some("public".to_string()),
+                old_name: "active_users".to_string(),
+                new_name: "enabled_users".to_string(),
+            })
+            .unwrap(),
+            "ALTER VIEW \"public\".\"active_users\" RENAME TO \"enabled_users\";"
+        );
+    }
+
+    #[test]
+    fn builds_opengauss_table_and_view_rename_sql() {
+        // openGauss 兼容 PG 重命名语法，与 gaussdb 等 PG 系数据库保持一致（右键“重命名”菜单入口）。
+        assert!(supports_object_rename(Some(DatabaseType::OpenGauss), DatabaseObjectType::Table));
+        assert!(supports_object_rename(Some(DatabaseType::OpenGauss), DatabaseObjectType::View));
+        assert!(supports_object_rename(Some(DatabaseType::OpenGauss), DatabaseObjectType::MaterializedView));
+        assert_eq!(
+            build_rename_object_sql(RenameObjectSqlOptions {
+                database_type: Some(DatabaseType::OpenGauss),
+                object_type: DatabaseObjectType::Table,
+                schema: Some("public".to_string()),
+                old_name: "orders".to_string(),
+                new_name: "archived orders".to_string(),
+            })
+            .unwrap(),
+            "ALTER TABLE \"public\".\"orders\" RENAME TO \"archived orders\";"
+        );
+        assert_eq!(
+            build_rename_object_sql(RenameObjectSqlOptions {
+                database_type: Some(DatabaseType::OpenGauss),
                 object_type: DatabaseObjectType::View,
                 schema: Some("public".to_string()),
                 old_name: "active_users".to_string(),

@@ -59,6 +59,8 @@ fn structure_change_options(
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     }
 }
 
@@ -73,6 +75,7 @@ fn index(name: &str, columns: &[&str]) -> EditableStructureIndex {
         index_type: String::new(),
         included_columns: Vec::new(),
         comment: String::new(),
+        concurrently: false,
         original: None,
         marked_for_drop: false,
     }
@@ -110,6 +113,8 @@ fn index_change_options(
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     }
 }
 
@@ -185,6 +190,8 @@ fn builds_mysql_column_and_index_changes() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -398,6 +405,8 @@ fn builds_xugu_type_change_with_native_syntax() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -508,6 +517,48 @@ fn builds_postgres_type_change_that_drops_default() {
 }
 
 #[test]
+fn builds_xugu_timezone_temporal_precision_in_final_ddl() {
+    let mut local_time = column("local_time");
+    local_time.data_type = "TIME(3) WITH TIME ZONE".to_string();
+    let mut created_at = column("created_at");
+    created_at.data_type = "TIMESTAMP(6) WITH TIME ZONE".to_string();
+    let created = build_create_table_sql(structure_change_options(
+        DatabaseType::Xugu,
+        Some("public"),
+        "events",
+        vec![local_time, created_at],
+    ));
+    assert_eq!(
+        created.statements,
+        vec![
+            r#"CREATE TABLE "public"."events" (
+  "local_time" TIME(3) WITH TIME ZONE,
+  "created_at" TIMESTAMP(6) WITH TIME ZONE
+);"#
+        ]
+    );
+
+    let mut altered_at = column("created_at");
+    altered_at.data_type = "TIMESTAMP(6) WITH TIME ZONE".to_string();
+    altered_at.original = Some(ColumnInfo {
+        name: "created_at".to_string(),
+        data_type: "TIMESTAMP".to_string(),
+        is_nullable: true,
+        ..Default::default()
+    });
+    let altered = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+        database_type: Some(DatabaseType::Xugu),
+        schema: Some("public".to_string()),
+        table_name: "events".to_string(),
+        column: altered_at,
+    });
+    assert_eq!(
+        altered.statements,
+        vec![r#"ALTER TABLE "public"."events" ALTER COLUMN "created_at" TIMESTAMP(6) WITH TIME ZONE;"#]
+    );
+}
+
+#[test]
 fn builds_postgres_array_and_domain_type_casts_without_affecting_xugu() {
     let mut tags = column("tags");
     tags.data_type = "text[]".to_string();
@@ -563,6 +614,8 @@ fn builds_mysql_unsigned_integer_column_with_length_before_attribute() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -595,6 +648,8 @@ fn doris_table_editor_renames_column_without_mysql_change_syntax() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -651,6 +706,8 @@ fn dameng_integer_column_omits_mysql_display_width() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -690,6 +747,8 @@ fn builds_highgo_foreign_key_changes_with_postgres_syntax() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -758,6 +817,8 @@ fn builds_informix_column_and_index_changes() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -811,6 +872,8 @@ fn oracle_does_not_generate_drop_sql_for_all_columns() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.statements, Vec::<String>::new());
@@ -869,6 +932,8 @@ fn oracle_create_table_preserves_character_length_units() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert!(result.statements[0].contains("\"BYTE_COL\" VARCHAR2(12 BYTE)"));
@@ -955,6 +1020,8 @@ fn iris_drop_index_includes_table_name() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -993,6 +1060,8 @@ fn iris_ignores_comment_changes_but_keeps_supported_column_alters() {
         triggers: Vec::new(),
         table_comment: Some("new table description".to_string()),
         original_table_comment: Some("old table description".to_string()),
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(
@@ -1071,6 +1140,8 @@ fn oracle_compatible_databases_keep_comment_on_sql() {
             triggers: Vec::new(),
             table_comment: Some("new table description".to_string()),
             original_table_comment: Some("old table description".to_string()),
+            partitioned: false,
+            is_gaussdb_m_mode: false,
         });
 
         assert_eq!(result.warnings, Vec::<String>::new(), "{database_type:?}");
@@ -1102,6 +1173,8 @@ fn mysql_create_index_with_comment() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1132,6 +1205,8 @@ fn manticoresearch_builds_create_table_sql_only() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1172,6 +1247,8 @@ fn manticoresearch_builds_add_and_drop_column_sql() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1235,6 +1312,8 @@ fn gbase8a_uses_limited_mysql_ddl() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(
@@ -1302,6 +1381,8 @@ fn gbase8a_allows_mysql_style_column_reorder() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1334,6 +1415,8 @@ fn manticoresearch_does_not_drop_id_column() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.statements, Vec::<String>::new());
@@ -1399,6 +1482,8 @@ fn manticoresearch_warns_when_existing_column_properties_change() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.statements, Vec::<String>::new());
@@ -1431,6 +1516,8 @@ fn manticoresearch_ignores_mysql_column_options() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1466,6 +1553,8 @@ fn manticoresearch_builds_text_column_properties() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1493,6 +1582,8 @@ fn manticoresearch_builds_json_secondary_index_property() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1516,6 +1607,8 @@ fn mysql_create_unique_index_with_comment_and_btree() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1541,6 +1634,8 @@ fn mysql_create_functional_index_preserves_key_part_syntax() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1566,6 +1661,8 @@ fn mysql_add_timestamp_column_drops_invalid_precision() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1591,6 +1688,8 @@ fn mysql_add_timestamp_column_preserves_valid_precision() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1623,6 +1722,8 @@ fn builds_postgres_create_table_with_comments_and_index() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1652,6 +1753,8 @@ fn quotes_expression_like_new_index_columns_without_provenance() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1721,6 +1824,8 @@ fn create_table_trims_table_name_whitespace_for_all_statements() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1755,6 +1860,8 @@ fn warns_for_sqlite_unsafe_column_changes() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.statements, Vec::<String>::new());
@@ -1793,6 +1900,8 @@ fn qualifies_attached_sqlite_table_and_index_changes() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1859,6 +1968,8 @@ fn builds_rqlite_changes_with_sqlite_dialect() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1886,6 +1997,8 @@ fn builds_kingbase_add_column_without_column_keyword() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1948,6 +2061,8 @@ fn builds_mysql_column_reorder_statements() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2001,6 +2116,8 @@ fn mysql_add_column_before_existing_column_does_not_reorder_shifted_column() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2061,6 +2178,8 @@ fn mysql_existing_column_reorder_does_not_reorder_columns_shifted_by_prior_move(
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2133,6 +2252,8 @@ fn mysql_moving_first_column_to_end_uses_single_reorder_statement() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2155,6 +2276,8 @@ fn builds_sql_server_quoted_column_and_index_statements() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2183,6 +2306,8 @@ fn sqlserver_strips_mysql_display_width_from_fixed_integer_types() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2205,6 +2330,8 @@ fn sqlserver_strips_scale_from_float() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2227,6 +2354,8 @@ fn sqlserver_preserves_float_mantissa_bits() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2274,6 +2403,8 @@ fn sqlserver_default_changes_drop_old_constraints_with_isolated_batches() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2454,6 +2585,8 @@ fn sqlserver_unchanged_foreign_key_does_not_warn_when_saving_other_changes() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2481,6 +2614,8 @@ fn sqlserver_add_column_with_identity() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2508,6 +2643,8 @@ fn dameng_add_column_with_identity() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2534,6 +2671,8 @@ fn dameng_rejects_identity_on_incompatible_type() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.statements, Vec::<String>::new());
@@ -2564,6 +2703,8 @@ fn sqlserver_rejects_identity_on_incompatible_type() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.statements, Vec::<String>::new());
@@ -2597,6 +2738,8 @@ fn sqlserver_changed_foreign_key_still_warns_as_unsupported() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.statements, Vec::<String>::new());
@@ -2635,6 +2778,8 @@ fn sqlserver_unchanged_identity_extra_does_not_mark_existing_column_changed() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2673,6 +2818,8 @@ fn dameng_unchanged_identity_extra_does_not_mark_existing_column_changed() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2718,6 +2865,8 @@ fn dameng_rejects_adding_second_identity_column() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, vec!["Dameng tables can have only one identity column."]);
@@ -2767,6 +2916,8 @@ fn sqlserver_existing_column_identity_change_warns_without_unchanged_foreign_key
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.statements, Vec::<String>::new());
@@ -2796,6 +2947,8 @@ fn builds_duckdb_create_table_statements() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2839,6 +2992,8 @@ fn builds_clickhouse_nullable_comment_and_reorder_statements() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2883,6 +3038,8 @@ fn builds_h2_schema_qualified_existing_column_statements() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3295,6 +3452,8 @@ fn mysql_create_table_with_auto_increment() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3320,6 +3479,8 @@ fn mysql_create_table_keeps_column_charset_collation_and_comment() {
         triggers: Vec::new(),
         table_comment: Some("User accounts".to_string()),
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3349,6 +3510,8 @@ fn mysql_compatible_databases_do_not_emit_mysql_column_charset_clauses() {
             triggers: Vec::new(),
             table_comment: None,
             original_table_comment: None,
+            partitioned: false,
+            is_gaussdb_m_mode: false,
         });
 
         assert_eq!(result.warnings, Vec::<String>::new());
@@ -3375,6 +3538,8 @@ fn mysql_create_table_with_on_update_current_timestamp() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3401,6 +3566,8 @@ fn postgres_create_table_with_identity() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3429,6 +3596,8 @@ fn dameng_create_table_with_identity() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3453,6 +3622,8 @@ fn dameng_create_table_preserves_character_length_units() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3485,6 +3656,8 @@ fn dameng_alter_column_preserves_character_length_unit() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3518,6 +3691,8 @@ fn dameng_rejects_multiple_identity_columns() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert!(result.statements.is_empty());
@@ -3544,6 +3719,8 @@ fn dameng_rejects_zero_identity_increment() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert!(result.statements.is_empty());
@@ -3571,6 +3748,8 @@ fn sqlserver_create_table_with_identity() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3593,6 +3772,8 @@ fn mysql_quotes_datetime_literal_default() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3615,6 +3796,8 @@ fn mysql_does_not_quote_current_timestamp() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3638,6 +3821,8 @@ fn mysql_does_not_quote_temporal_function_with_parens() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3660,6 +3845,8 @@ fn mysql_date_literal_default_is_quoted() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3682,6 +3869,8 @@ fn mysql_time_literal_default_is_quoted() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3704,6 +3893,8 @@ fn non_temporal_types_are_not_quoted() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3764,6 +3955,34 @@ fn mysql_single_column_alter_quotes_datetime_literal() {
 }
 
 #[test]
+fn mysql_single_generated_column_change_is_blocked_without_expression_metadata() {
+    let mut generated = column("total");
+    generated.data_type = "decimal(14,2)".to_string();
+    generated.extra = Some(ColumnExtra::default());
+    generated.original = Some(ColumnInfo {
+        name: "total".to_string(),
+        data_type: "decimal(12,2)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: Some("STORED GENERATED".to_string()),
+        comment: None,
+        ..Default::default()
+    });
+
+    let result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "products".to_string(),
+        column: generated,
+    });
+
+    assert!(result.statements.is_empty());
+    assert_eq!(result.warnings.len(), 1);
+    assert!(result.warnings[0].contains("generation expression could not be loaded"));
+}
+
+#[test]
 fn builds_mysql_foreign_key_changes() {
     let mut existing = foreign_key("fk_orders_users", "user_id", "users", "id");
     existing.on_delete = "CASCADE".to_string();
@@ -3799,6 +4018,8 @@ fn builds_mysql_foreign_key_changes() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3826,6 +4047,8 @@ fn builds_mysql_composite_foreign_key() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3856,6 +4079,8 @@ fn builds_oracle_foreign_key_with_supported_actions() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3890,6 +4115,8 @@ fn builds_oracle_foreign_key_replacement() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3922,6 +4149,8 @@ fn builds_mysql_trigger_changes() {
         triggers: vec![existing],
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3965,6 +4194,8 @@ fn unchanged_postgres_trigger_does_not_block_column_rename() {
         triggers: vec![existing],
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3991,6 +4222,8 @@ fn changed_postgres_trigger_remains_unsupported() {
         triggers: vec![existing],
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert!(result.statements.is_empty());
@@ -4022,6 +4255,8 @@ fn rejects_editing_existing_oracle_trigger_without_complete_source() {
         triggers: vec![existing],
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert!(result.statements.is_empty());
@@ -4043,6 +4278,8 @@ fn builds_oracle_statement_trigger_without_row_clause() {
         triggers: vec![trigger("ORDERS_AUDIT", "BEFORE STATEMENT", "UPDATE OF STATUS", "BEGIN\n  NULL;\nEND;\n/")],
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -4075,6 +4312,8 @@ fn drops_existing_oracle_trigger_without_reconstructing_it() {
         triggers: vec![existing],
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -4093,6 +4332,8 @@ fn rejects_unsupported_oracle_compound_trigger_shape() {
         triggers: vec![trigger("ORDERS_CT", "COMPOUND", "UPDATE", "BEGIN\n  NULL;\nEND;")],
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert!(result.statements.is_empty());
@@ -4115,6 +4356,8 @@ fn mysql_varchar_default_is_quoted() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -4138,6 +4381,8 @@ fn mysql_char_default_is_quoted() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -4160,6 +4405,8 @@ fn mysql_text_default_is_quoted() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -4182,6 +4429,8 @@ fn mysql_enum_default_is_quoted() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -4204,6 +4453,8 @@ fn mysql_int_default_is_not_quoted() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -4332,6 +4583,8 @@ fn mysql_character_column_add_with_charset_collation() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -4362,6 +4615,8 @@ fn mysql_numeric_column_omits_charset_collation_in_column_definition() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -4402,6 +4657,8 @@ fn mysql_numeric_column_ignores_charset_collation_in_change_detection() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     // No ALTER should be emitted — charset/collation changes on
@@ -4437,6 +4694,8 @@ fn mysql_character_column_detects_charset_collation_change() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -4477,6 +4736,8 @@ fn mysql_character_column_preserves_charset_collation_on_other_change() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -4484,6 +4745,116 @@ fn mysql_character_column_preserves_charset_collation_on_other_change() {
         result.statements,
         vec!["ALTER TABLE `users` MODIFY COLUMN `name` varchar(255) CHARACTER SET `utf8mb4` COLLATE `utf8mb4_unicode_ci` DEFAULT 'guest';"]
     );
+}
+
+#[test]
+fn mysql_generated_column_preserves_expression_when_modified() {
+    let mut generated = column("total");
+    generated.data_type = "decimal(14,2)".to_string();
+    generated.is_nullable = false;
+    generated.comment = "Computed total".to_string();
+    generated.extra = Some(ColumnExtra::default());
+    generated.original = Some(ColumnInfo {
+        name: "total".to_string(),
+        data_type: "decimal(12,2)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: Some("GENERATED ALWAYS AS (`price` * `quantity`) STORED".to_string()),
+        comment: None,
+        ..Default::default()
+    });
+    generated.original_position = Some(0);
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Mysql,
+        None,
+        "products",
+        vec![generated],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE `products` MODIFY COLUMN `total` decimal(14,2) GENERATED ALWAYS AS (`price` * `quantity`) STORED NOT NULL COMMENT 'Computed total';"
+        ]
+    );
+}
+
+#[test]
+fn mysql_unchanged_generated_column_is_not_modified_with_other_columns() {
+    let mut generated = column("total");
+    generated.data_type = "decimal(12,2)".to_string();
+    generated.extra = Some(ColumnExtra::default());
+    generated.original = Some(ColumnInfo {
+        name: "total".to_string(),
+        data_type: "decimal(12,2)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: Some("STORED GENERATED".to_string()),
+        comment: None,
+        ..Default::default()
+    });
+    generated.original_position = Some(0);
+
+    let mut status = column("status");
+    status.data_type = "varchar(50)".to_string();
+    status.comment = "状态1".to_string();
+    status.original = Some(ColumnInfo {
+        name: "status".to_string(),
+        data_type: "varchar(50)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+        ..Default::default()
+    });
+    status.original_position = Some(1);
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Mysql,
+        None,
+        "product_info",
+        vec![generated, status],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["ALTER TABLE `product_info` MODIFY COLUMN `status` varchar(50) COMMENT '状态1';"]
+    );
+}
+
+#[test]
+fn mysql_generated_column_change_is_blocked_without_expression_metadata() {
+    let mut generated = column("total");
+    generated.data_type = "decimal(14,2)".to_string();
+    generated.extra = Some(ColumnExtra::default());
+    generated.original = Some(ColumnInfo {
+        name: "total".to_string(),
+        data_type: "decimal(12,2)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: Some("STORED GENERATED".to_string()),
+        comment: None,
+        ..Default::default()
+    });
+    generated.original_position = Some(0);
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Mysql,
+        None,
+        "products",
+        vec![generated],
+    ));
+
+    assert!(result.statements.is_empty());
+    assert_eq!(result.warnings.len(), 1);
+    assert!(result.warnings[0].contains("generation expression could not be loaded"));
 }
 
 // ---- Oscar (神通) ----
@@ -4512,6 +4883,8 @@ fn oscar_create_table_with_primary_key_and_comments() {
         triggers: Vec::new(),
         table_comment: Some("user table".to_string()),
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -4702,6 +5075,8 @@ fn oscar_drop_index_with_schema_qualifier() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -4720,8 +5095,648 @@ fn oscar_table_comment_uses_comment_on_table() {
         triggers: Vec::new(),
         table_comment: Some("new comment".to_string()),
         original_table_comment: Some("old comment".to_string()),
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(result.statements, vec!["COMMENT ON TABLE \"SYSDBA\".\"users\" IS 'new comment';"]);
+}
+
+#[test]
+fn postgres_existing_index_concurrent_request_rejected() {
+    let mut idx = existing_index("idx_users_email", &["email"], false);
+    idx.concurrently = true;
+
+    let result = build_table_structure_change_sql(index_change_options(DatabaseType::Postgres, Some("public"), idx));
+
+    // Fail closed: a concurrent request on an existing index is refused up
+    // front. No DROP INDEX and no plain (blocking) CREATE INDEX may be
+    // generated behind the caller's back.
+    assert_eq!(
+        result.warnings,
+        vec![
+            "CREATE INDEX CONCURRENTLY is only supported for newly created indexes. Editing an existing index \"idx_users_email\" with Concurrent enabled is not supported."
+        ]
+    );
+    assert!(result.statements.is_empty(), "no statements may be generated, got: {:?}", result.statements);
+}
+
+#[test]
+fn postgres_existing_index_concurrent_flag_with_real_change_still_rejected() {
+    // The concurrent flag combined with a real edit (renamed index) must still
+    // be rejected rather than rebuilt the regular way.
+    let mut idx = existing_index("idx_users_email", &["email"], false);
+    idx.name = "idx_users_email_new".to_string();
+    idx.concurrently = true;
+
+    let result = build_table_structure_change_sql(index_change_options(DatabaseType::Postgres, Some("public"), idx));
+
+    assert_eq!(result.warnings.len(), 1);
+    assert!(result.warnings[0].contains("only supported for newly created indexes"));
+    assert!(result.statements.is_empty(), "no statements may be generated, got: {:?}", result.statements);
+}
+
+#[test]
+fn postgres_default_index_keeps_plain_create_index() {
+    let idx = index("idx_users_email", &["email"]);
+    assert!(!idx.concurrently);
+
+    let result = build_table_structure_change_sql(index_change_options(DatabaseType::Postgres, Some("public"), idx));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["CREATE INDEX \"idx_users_email\" ON \"public\".\"USERS\" (\"email\");"]);
+}
+
+#[test]
+fn postgres_concurrent_index_emits_concurrently() {
+    let mut idx = index("idx_users_email", &["email"]);
+    idx.concurrently = true;
+
+    let result = build_table_structure_change_sql(index_change_options(DatabaseType::Postgres, Some("public"), idx));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["CREATE INDEX CONCURRENTLY \"idx_users_email\" ON \"public\".\"USERS\" (\"email\");"]
+    );
+}
+
+#[test]
+fn postgres_partitioned_parent_concurrent_request_rejected() {
+    let mut idx = index("idx_users_email", &["email"]);
+    idx.concurrently = true;
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Postgres),
+        schema: Some("public".to_string()),
+        table_name: "USERS".to_string(),
+        columns: Vec::new(),
+        indexes: vec![idx],
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        partitioned: true,
+        is_gaussdb_m_mode: false,
+    });
+
+    // Fail closed: PostgreSQL rejects CREATE INDEX CONCURRENTLY on a
+    // partitioned parent, so the request is refused up front instead of
+    // downgrading to a blocking CREATE INDEX.
+    assert_eq!(
+        result.warnings,
+        vec![
+            "CREATE INDEX CONCURRENTLY is not supported on PostgreSQL partitioned parent tables. Create indexes concurrently on individual partitions and attach them separately."
+        ]
+    );
+    assert!(result.statements.is_empty(), "no statements may be generated, got: {:?}", result.statements);
+}
+
+#[test]
+fn postgres_partitioned_parent_plain_index_unchanged() {
+    let idx = index("idx_users_email", &["email"]);
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Postgres),
+        schema: Some("public".to_string()),
+        table_name: "USERS".to_string(),
+        columns: Vec::new(),
+        indexes: vec![idx],
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        partitioned: true,
+        is_gaussdb_m_mode: false,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["CREATE INDEX \"idx_users_email\" ON \"public\".\"USERS\" (\"email\");"]);
+}
+
+#[test]
+fn postgres_partitioned_option_defaults_to_false() {
+    let json = serde_json::json!({
+        "databaseType": "postgres",
+        "schema": "public",
+        "tableName": "users",
+        "columns": [],
+        "indexes": [],
+        "foreignKeys": [],
+        "triggers": [],
+        "tableComment": null,
+        "originalTableComment": null,
+    });
+    let options: TableStructureSqlOptions = serde_json::from_value(json).unwrap();
+    assert!(!options.partitioned);
+}
+
+#[test]
+fn postgres_create_table_partitioned_concurrent_request_rejected() {
+    // The new-table path (`build_create_table_sql`) is a separate entry point
+    // and must refuse partitioned-parent concurrent requests the same way.
+    let mut idx = index("idx_events_id", &["id"]);
+    idx.concurrently = true;
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Postgres),
+        schema: Some("public".to_string()),
+        table_name: "events".to_string(),
+        columns: vec![column("id")],
+        indexes: vec![idx],
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        partitioned: true,
+        is_gaussdb_m_mode: false,
+    });
+
+    assert_eq!(
+        result.warnings,
+        vec![
+            "CREATE INDEX CONCURRENTLY is not supported on PostgreSQL partitioned parent tables. Create indexes concurrently on individual partitions and attach them separately."
+        ]
+    );
+    assert!(result.statements.is_empty(), "no statements may be generated, got: {:?}", result.statements);
+}
+
+#[test]
+fn mysql_stale_concurrently_flag_is_ignored() {
+    // Non-PostgreSQL engines cannot request a concurrent build at all; a stale
+    // or forged `concurrently` flag must not error and must not alter the SQL.
+    let mut idx = index("idx_users_email", &["email"]);
+    idx.concurrently = true;
+
+    let result = build_table_structure_change_sql(index_change_options(DatabaseType::Mysql, Some("public"), idx));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["CREATE INDEX `idx_users_email` ON `USERS` (`email`);"]);
+}
+
+#[test]
+fn mysql_existing_index_with_stale_concurrently_flag_ignored() {
+    // An existing-index edit on a non-PostgreSQL engine is driven by the actual
+    // field changes; a stale concurrently flag alone must not force a rebuild.
+    let idx = existing_index("idx_users_email", &["email"], false);
+    let mut changed = idx;
+    changed.concurrently = true;
+
+    let result = build_table_structure_change_sql(index_change_options(DatabaseType::Mysql, Some("public"), changed));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert!(result.statements.is_empty(), "no rebuild for a flag-only change, got: {:?}", result.statements);
+}
+
+#[test]
+fn postgres_concurrent_unique_index() {
+    let mut idx = index("uniq_users_email", &["email"]);
+    idx.is_unique = true;
+    idx.concurrently = true;
+
+    let result = build_table_structure_change_sql(index_change_options(DatabaseType::Postgres, Some("public"), idx));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["CREATE UNIQUE INDEX CONCURRENTLY \"uniq_users_email\" ON \"public\".\"USERS\" (\"email\");"]
+    );
+}
+
+#[test]
+fn postgres_concurrent_partial_index_keeps_where_clause() {
+    let mut idx = index("idx_users_active", &["status"]);
+    idx.filter = "status = 'active'".to_string();
+    idx.concurrently = true;
+
+    let result = build_table_structure_change_sql(index_change_options(DatabaseType::Postgres, Some("public"), idx));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "CREATE INDEX CONCURRENTLY \"idx_users_active\" ON \"public\".\"USERS\" (\"status\") WHERE status = 'active';"
+        ]
+    );
+}
+
+#[test]
+fn postgres_concurrent_include_index() {
+    let mut idx = index("idx_users_email", &["email"]);
+    idx.included_columns = vec!["name".to_string(), "created_at".to_string()];
+    idx.concurrently = true;
+
+    let result = build_table_structure_change_sql(index_change_options(DatabaseType::Postgres, Some("public"), idx));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "CREATE INDEX CONCURRENTLY \"idx_users_email\" ON \"public\".\"USERS\" (\"email\") INCLUDE (\"name\", \"created_at\");"
+        ]
+    );
+}
+
+#[test]
+fn postgres_concurrent_index_with_using_and_comment() {
+    let mut idx = index("idx_users_name", &["name"]);
+    idx.index_type = "gin".to_string();
+    idx.comment = "search".to_string();
+    idx.concurrently = true;
+
+    let result = build_table_structure_change_sql(index_change_options(DatabaseType::Postgres, Some("public"), idx));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "CREATE INDEX CONCURRENTLY \"idx_users_name\" ON \"public\".\"USERS\" USING GIN (\"name\");",
+            "COMMENT ON INDEX \"idx_users_name\" IS 'search';",
+        ]
+    );
+}
+
+#[test]
+fn postgres_create_table_concurrent_index() {
+    let mut id = column("id");
+    id.data_type = "integer".to_string();
+    id.is_nullable = false;
+    let mut idx = index("idx_users_name", &["name"]);
+    idx.concurrently = true;
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Postgres),
+        schema: Some("public".to_string()),
+        table_name: "users".to_string(),
+        columns: vec![id],
+        indexes: vec![idx],
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "CREATE TABLE \"public\".\"users\" (\n  \"id\" integer NOT NULL\n);",
+            "CREATE INDEX CONCURRENTLY \"idx_users_name\" ON \"public\".\"users\" (\"name\");",
+        ]
+    );
+}
+
+#[test]
+fn postgres_serde_missing_concurrently_field_defaults_to_false() {
+    let json = serde_json::json!({
+        "id": "idx_users_email",
+        "name": "idx_users_email",
+        "columns": ["email"],
+        "isUnique": false,
+        "isPrimary": false,
+        "filter": "",
+        "indexType": "",
+        "includedColumns": [],
+        "comment": "",
+        "markedForDrop": false,
+    });
+    let index: EditableStructureIndex = serde_json::from_value(json).unwrap();
+    assert!(!index.concurrently);
+}
+
+#[test]
+fn postgres_serde_concurrently_field_roundtrip() {
+    let json = serde_json::json!({
+        "id": "idx_users_email",
+        "name": "idx_users_email",
+        "columns": ["email"],
+        "isUnique": false,
+        "isPrimary": false,
+        "filter": "",
+        "indexType": "",
+        "includedColumns": [],
+        "comment": "",
+        "concurrently": true,
+        "markedForDrop": false,
+    });
+    let index: EditableStructureIndex = serde_json::from_value(json).unwrap();
+    assert!(index.concurrently);
+}
+
+#[test]
+fn kingbase_concurrent_flag_is_ignored() {
+    let mut idx = index("idx_users_email", &["email"]);
+    idx.concurrently = true;
+
+    let result = build_table_structure_change_sql(index_change_options(DatabaseType::Kingbase, Some("public"), idx));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["CREATE INDEX \"idx_users_email\" ON \"public\".\"USERS\" (\"email\");"]);
+}
+
+#[test]
+fn pg_family_concurrent_flag_is_ignored() {
+    for database_type in [
+        DatabaseType::Gaussdb,
+        DatabaseType::OpenGauss,
+        DatabaseType::Highgo,
+        DatabaseType::Uxdb,
+        DatabaseType::Vastbase,
+        DatabaseType::Kwdb,
+        DatabaseType::Firebird,
+    ] {
+        let mut idx = index("idx_users_email", &["email"]);
+        idx.concurrently = true;
+        let result = build_table_structure_change_sql(index_change_options(database_type, Some("public"), idx));
+        assert_eq!(result.warnings, Vec::<String>::new());
+        assert_eq!(
+            result.statements,
+            vec!["CREATE INDEX \"idx_users_email\" ON \"public\".\"USERS\" (\"email\");"],
+            "{database_type:?} must not emit CONCURRENTLY"
+        );
+    }
+}
+
+#[test]
+fn non_postgres_concurrent_flag_is_ignored() {
+    for database_type in [DatabaseType::Mysql, DatabaseType::Sqlite, DatabaseType::SqlServer] {
+        let mut idx = index("idx_users_email", &["email"]);
+        idx.concurrently = true;
+        let result = build_table_structure_change_sql(index_change_options(database_type, None, idx));
+        assert_eq!(result.warnings, Vec::<String>::new());
+        let statements = result.statements.join("\n");
+        assert!(
+            !statements.contains("CONCURRENTLY"),
+            "{database_type:?} must not emit CONCURRENTLY, got: {statements}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GaussDB M-mode index tests
+// ---------------------------------------------------------------------------
+
+fn gaussdb_m_options(columns: Vec<EditableStructureColumn>) -> TableStructureSqlOptions {
+    TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Gaussdb),
+        schema: None,
+        table_name: "USERS".to_string(),
+        columns,
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: true,
+    }
+}
+
+fn gaussdb_m_index(name: &str, columns: &[&str]) -> EditableStructureIndex {
+    EditableStructureIndex {
+        id: name.to_string(),
+        name: name.to_string(),
+        columns: columns.iter().map(|c| c.to_string()).collect(),
+        is_unique: false,
+        is_primary: false,
+        filter: String::new(),
+        index_type: String::new(),
+        included_columns: Vec::new(),
+        comment: String::new(),
+        concurrently: false,
+        original: None,
+        marked_for_drop: false,
+    }
+}
+
+fn gaussdb_m_existing_index(
+    name: &str,
+    columns: &[&str],
+    is_unique: bool,
+    index_type: Option<&str>,
+) -> EditableStructureIndex {
+    let mut idx = gaussdb_m_index(name, columns);
+    idx.is_unique = is_unique;
+    idx.index_type = index_type.unwrap_or("").to_string();
+    idx.original = Some(IndexInfo {
+        name: name.to_string(),
+        columns: columns.iter().map(|c| c.to_string()).collect(),
+        is_unique,
+        is_primary: false,
+        filter: None,
+        index_type: index_type.map(|s| s.to_string()),
+        included_columns: None,
+        comment: None,
+        key_is_expression: Vec::new(),
+    });
+    idx
+}
+
+#[test]
+fn gaussdb_m_create_index_uses_backtick_quoting() {
+    let mut options = gaussdb_m_options(vec![column("id")]);
+    options.indexes = vec![gaussdb_m_index("idx_email", &["email"])];
+    let result = build_table_structure_change_sql(options);
+    assert_eq!(result.warnings, Vec::<String>::new());
+    let sql = result.statements.join("\n");
+    assert!(sql.contains("CREATE INDEX `idx_email` ON `USERS`"));
+    assert!(sql.contains("(`email`)"));
+}
+
+#[test]
+fn gaussdb_m_create_unique_index() {
+    let mut options = gaussdb_m_options(vec![column("id")]);
+    let mut idx = gaussdb_m_index("idx_email", &["email"]);
+    idx.is_unique = true;
+    options.indexes = vec![idx];
+    let result = build_table_structure_change_sql(options);
+    assert_eq!(result.warnings, Vec::<String>::new());
+    let sql = result.statements.join("\n");
+    assert!(sql.contains("CREATE UNIQUE INDEX `idx_email` ON `USERS`"));
+}
+
+#[test]
+fn gaussdb_m_create_index_with_ubtree_using_clause() {
+    let mut options = gaussdb_m_options(vec![column("id")]);
+    let mut idx = gaussdb_m_index("idx_email", &["email"]);
+    idx.index_type = "UBTREE".to_string();
+    options.indexes = vec![idx];
+    let result = build_table_structure_change_sql(options);
+    assert_eq!(result.warnings, Vec::<String>::new());
+    let sql = result.statements.join("\n");
+    // GaussDB M-mode maps UBTREE/BTREE to USING UBTREE
+    assert!(sql.contains("USING UBTREE"), "Expected USING UBTREE, got: {sql}");
+}
+
+#[test]
+fn gaussdb_m_create_index_with_btree_also_emits_ubtree() {
+    let mut options = gaussdb_m_options(vec![column("id")]);
+    let mut idx = gaussdb_m_index("idx_email", &["email"]);
+    idx.index_type = "BTREE".to_string();
+    options.indexes = vec![idx];
+    let result = build_table_structure_change_sql(options);
+    assert_eq!(result.warnings, Vec::<String>::new());
+    let sql = result.statements.join("\n");
+    // BTREE in the DB is also rendered as USING UBTREE for GaussDB M
+    assert!(sql.contains("USING UBTREE"), "Expected USING UBTREE, got: {sql}");
+}
+
+#[test]
+fn gaussdb_m_create_index_with_comment() {
+    let mut options = gaussdb_m_options(vec![column("id")]);
+    let mut idx = gaussdb_m_index("idx_email", &["email"]);
+    idx.comment = "index comment".to_string();
+    options.indexes = vec![idx];
+    let result = build_table_structure_change_sql(options);
+    assert_eq!(result.warnings, Vec::<String>::new());
+    let sql = result.statements.join("\n");
+    assert!(sql.contains("COMMENT 'index comment'"));
+}
+
+#[test]
+fn gaussdb_m_drop_index_does_not_use_on_table() {
+    let mut idx = gaussdb_m_existing_index("idx_email", &["email"], false, None);
+    idx.marked_for_drop = true;
+    let options = gaussdb_m_options(vec![column("id")]);
+    let options = TableStructureSqlOptions { indexes: vec![idx], ..options };
+    let result = build_table_structure_change_sql(options);
+    assert_eq!(result.warnings, Vec::<String>::new());
+    let sql = result.statements.join("\n");
+    // GaussDB M-mode must NOT use MySQL-style "DROP INDEX ... ON table"
+    assert!(!sql.contains("ON `USERS`"), "Must not use MySQL ON clause: {sql}");
+    // Must use PostgreSQL-style "DROP INDEX name"
+    assert!(sql.contains("DROP INDEX `idx_email`"), "Expected DROP INDEX without ON: {sql}");
+}
+
+#[test]
+fn gaussdb_m_rebuild_index_drops_and_creates() {
+    let mut idx = gaussdb_m_existing_index("idx_email", &["email"], false, None);
+    idx.columns = vec!["email".to_string(), "name".to_string()]; // change: add column
+    let options = gaussdb_m_options(vec![column("id")]);
+    let options = TableStructureSqlOptions { indexes: vec![idx], ..options };
+    let result = build_table_structure_change_sql(options);
+    assert_eq!(result.warnings, Vec::<String>::new());
+    let sql = result.statements.join("\n");
+    assert!(sql.contains("DROP INDEX `idx_email`"), "Must drop old index: {sql}");
+    assert!(sql.contains("CREATE INDEX `idx_email` ON `USERS`"), "Must recreate index: {sql}");
+    assert!(sql.contains("(`email`, `name`)"), "Must include new column: {sql}");
+}
+
+#[test]
+fn gaussdb_m_create_index_with_composite_columns() {
+    let mut options = gaussdb_m_options(vec![column("id")]);
+    options.indexes = vec![gaussdb_m_index("idx_name_email", &["last_name", "first_name", "email"])];
+    let result = build_table_structure_change_sql(options);
+    assert_eq!(result.warnings, Vec::<String>::new());
+    let sql = result.statements.join("\n");
+    assert!(sql.contains("(`last_name`, `first_name`, `email`)"));
+}
+
+#[test]
+fn gaussdb_m_create_prefix_index_quotes_column_before_length() {
+    let mut options = gaussdb_m_options(vec![column("email")]);
+    options.indexes = vec![gaussdb_m_index("idx_email", &["email(10)"])];
+    let result = build_table_structure_change_sql(options);
+    assert_eq!(result.warnings, Vec::<String>::new());
+    let sql = result.statements.join("\n");
+    assert!(sql.contains("(`email`(10))"), "Expected prefix length outside the quoted identifier: {sql}");
+    assert!(!sql.contains("`email(10)`"), "Prefix length must not be quoted as part of the identifier: {sql}");
+}
+
+#[test]
+fn gaussdb_m_create_table_uses_backtick_quoting() {
+    let cols = vec![column("id"), column("name")];
+    let mut options = gaussdb_m_options(cols);
+    options.indexes = vec![gaussdb_m_index("idx_name", &["name"])];
+    let result = build_create_table_sql(options);
+    assert!(result.warnings.is_empty());
+    let sql = result.statements.join("\n");
+    assert!(sql.contains("CREATE TABLE `USERS`"));
+    assert!(sql.contains("`id` varchar(255)"));
+    assert!(sql.contains("`name` varchar(255)"));
+    assert!(sql.contains("CREATE INDEX `idx_name` ON `USERS`"));
+}
+
+#[test]
+fn gaussdb_m_create_table_does_not_add_charset_or_collation() {
+    let mut col = column("name");
+    col.character_set = "utf8mb4".to_string();
+    col.collation = "utf8mb4_unicode_ci".to_string();
+    let options = gaussdb_m_options(vec![col]);
+    let result = build_create_table_sql(options);
+    assert!(result.warnings.is_empty());
+    let sql = result.statements.join("\n");
+    // GaussDB M must NOT emit MySQL CHARACTER SET/COLLATE clauses
+    assert!(!sql.contains("CHARACTER SET"), "Must not emit CHARACTER SET: {sql}");
+    assert!(!sql.contains("COLLATE"), "Must not emit COLLATE: {sql}");
+}
+
+#[test]
+fn gaussdb_m_create_table_comment_uses_mysql_syntax() {
+    let options = TableStructureSqlOptions {
+        table_comment: Some("User accounts table".to_string()),
+        original_table_comment: None,
+        ..gaussdb_m_options(vec![column("id")])
+    };
+    let result = build_create_table_sql(options);
+    assert!(result.warnings.is_empty());
+    let sql = result.statements.join("\n");
+    // GaussDB M uses MySQL-style inline COMMENT = '...'
+    assert!(sql.contains("COMMENT = 'User accounts table'"), "Expected MySQL-style comment, got: {sql}");
+}
+
+#[test]
+fn gaussdb_m_rebuild_index_changing_type_from_btree_to_ubtree() {
+    let mut idx = gaussdb_m_existing_index("idx_email", &["email"], false, Some("BTREE"));
+    idx.index_type = "UBTREE".to_string();
+    let options = gaussdb_m_options(vec![column("id")]);
+    let options = TableStructureSqlOptions { indexes: vec![idx], ..options };
+    let result = build_table_structure_change_sql(options);
+    assert_eq!(result.warnings, Vec::<String>::new());
+    let sql = result.statements.join("\n");
+    assert!(sql.contains("DROP INDEX `idx_email`"));
+    assert!(sql.contains("USING UBTREE"));
+}
+
+#[test]
+fn gaussdb_m_rebuild_index_unchanged_type_does_not_rebuild() {
+    // When the index type from SHOW INDEX is "BTREE" and the user doesn't
+    // change it, the editor should send "BTREE" back (which maps to
+    // USING UBTREE in SQL). But since normalized_index_type("BTREE") ==
+    // "BTREE" and original.index_type == Some("BTREE"), they match — no rebuild.
+    let mut idx = gaussdb_m_existing_index("idx_email", &["email"], false, Some("BTREE"));
+    idx.index_type = "BTREE".to_string(); // same type
+                                          // No columns — just test the index itself has no change
+    let options = TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Gaussdb),
+        schema: None,
+        table_name: "USERS".to_string(),
+        columns: Vec::new(),
+        indexes: vec![idx],
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        partitioned: false,
+        is_gaussdb_m_mode: true,
+    };
+    let result = build_table_structure_change_sql(options);
+    assert!(result.warnings.is_empty());
+    assert!(result.statements.is_empty(), "Expected no DDL for unchanged index, got: {:?}", result.statements);
+}
+
+#[test]
+fn gaussdb_m_create_table_with_primary_key() {
+    let mut pk_col = column("id");
+    pk_col.is_primary_key = true;
+    pk_col.is_nullable = false;
+    pk_col.data_type = "bigint".to_string();
+    let options = gaussdb_m_options(vec![pk_col]);
+    let result = build_create_table_sql(options);
+    assert!(result.warnings.is_empty());
+    let sql = result.statements.join("\n");
+    assert!(sql.contains("PRIMARY KEY (`id`)"));
 }

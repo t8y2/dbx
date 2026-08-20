@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,6 +42,9 @@ SELECT VERSION
 FROM PRODUCT_COMPONENT_VERSION
 WHERE PRODUCT LIKE 'Oracle Database%'
   AND ROWNUM = 1`
+
+const oracleDisableSegmentAttributesSQL = `BEGIN DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'SEGMENT_ATTRIBUTES', FALSE); END;`
+const oracleEnableSegmentAttributesSQL = `BEGIN DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'SEGMENT_ATTRIBUTES', TRUE); END;`
 
 var (
 	oraclePlSQLBlockStartRegexp          = regexp.MustCompile(`(?is)^\s*(?:DECLARE|BEGIN|CREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:EDITIONABLE|NONEDITIONABLE)\s+)?(?:FUNCTION|PROCEDURE|TRIGGER|PACKAGE(?:\s+BODY)?|TYPE(?:\s+BODY)?))\b`)
@@ -99,13 +103,20 @@ SELECT t.TABLE_NAME AS OBJECT_NAME,
 FROM ALL_TABLES t
 WHERE t.OWNER = :1
   AND t.NESTED = 'NO'
+  AND NOT EXISTS (
+    SELECT 1
+    FROM ALL_OBJECTS mv
+    WHERE mv.OWNER = t.OWNER
+      AND mv.OBJECT_NAME = t.TABLE_NAME
+      AND mv.OBJECT_TYPE = 'MATERIALIZED VIEW'
+  )
 UNION ALL
 SELECT o.OBJECT_NAME,
-       'VIEW' AS TABLE_TYPE,
+       CASE o.OBJECT_TYPE WHEN 'MATERIALIZED VIEW' THEN 'MATERIALIZED_VIEW' ELSE o.OBJECT_TYPE END AS TABLE_TYPE,
        CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
 FROM ALL_OBJECTS o
 WHERE o.OWNER = :2
-  AND o.OBJECT_TYPE = 'VIEW'
+  AND o.OBJECT_TYPE IN ('VIEW', 'MATERIALIZED VIEW')
 )`
 const oracleListTablesSessionUserBaseSQL = `
 SELECT OBJECT_NAME, TABLE_TYPE, COMMENTS
@@ -115,12 +126,18 @@ SELECT t.TABLE_NAME AS OBJECT_NAME,
        CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
 FROM USER_TABLES t
 WHERE t.NESTED = 'NO'
+  AND NOT EXISTS (
+    SELECT 1
+    FROM USER_OBJECTS mv
+    WHERE mv.OBJECT_NAME = t.TABLE_NAME
+      AND mv.OBJECT_TYPE = 'MATERIALIZED VIEW'
+  )
 UNION ALL
 SELECT o.OBJECT_NAME,
-       'VIEW' AS TABLE_TYPE,
+       CASE o.OBJECT_TYPE WHEN 'MATERIALIZED VIEW' THEN 'MATERIALIZED_VIEW' ELSE o.OBJECT_TYPE END AS TABLE_TYPE,
        CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
 FROM USER_OBJECTS o
-WHERE o.OBJECT_TYPE = 'VIEW'
+WHERE o.OBJECT_TYPE IN ('VIEW', 'MATERIALIZED VIEW')
 )`
 const oracleListTablesOrderSQL = `ORDER BY OBJECT_NAME`
 const oracleListTablesSQL = oracleListTablesBaseSQL + "\n" + oracleListTablesOrderSQL
@@ -133,13 +150,24 @@ SELECT t.TABLE_NAME AS OBJECT_NAME,
 FROM ALL_TABLES t
 WHERE t.OWNER = :1
   AND t.NESTED = 'NO'
+  AND NOT EXISTS (
+    SELECT 1
+    FROM ALL_OBJECTS mv
+    WHERE mv.OWNER = t.OWNER
+      AND mv.OBJECT_NAME = t.TABLE_NAME
+      AND mv.OBJECT_TYPE = 'MATERIALIZED VIEW'
+  )
 UNION ALL
 SELECT o.OBJECT_NAME,
-       CASE o.OBJECT_TYPE WHEN 'PACKAGE BODY' THEN 'PACKAGE_BODY' ELSE o.OBJECT_TYPE END AS OBJECT_TYPE,
+       CASE o.OBJECT_TYPE
+         WHEN 'PACKAGE BODY' THEN 'PACKAGE_BODY'
+         WHEN 'MATERIALIZED VIEW' THEN 'MATERIALIZED_VIEW'
+         ELSE o.OBJECT_TYPE
+       END AS OBJECT_TYPE,
        CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
 FROM ALL_OBJECTS o
 WHERE o.OWNER = :2
-  AND o.OBJECT_TYPE IN ('VIEW', 'PROCEDURE', 'FUNCTION', 'PACKAGE', 'PACKAGE BODY')
+  AND o.OBJECT_TYPE IN ('VIEW', 'MATERIALIZED VIEW', 'PROCEDURE', 'FUNCTION', 'PACKAGE', 'PACKAGE BODY')
 UNION ALL
 SELECT s.SYNONYM_NAME AS OBJECT_NAME,
        'SYNONYM' AS OBJECT_TYPE,
@@ -155,12 +183,22 @@ SELECT t.TABLE_NAME AS OBJECT_NAME,
        CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
 FROM USER_TABLES t
 WHERE t.NESTED = 'NO'
+  AND NOT EXISTS (
+    SELECT 1
+    FROM USER_OBJECTS mv
+    WHERE mv.OBJECT_NAME = t.TABLE_NAME
+      AND mv.OBJECT_TYPE = 'MATERIALIZED VIEW'
+  )
 UNION ALL
 SELECT o.OBJECT_NAME,
-       CASE o.OBJECT_TYPE WHEN 'PACKAGE BODY' THEN 'PACKAGE_BODY' ELSE o.OBJECT_TYPE END AS OBJECT_TYPE,
+       CASE o.OBJECT_TYPE
+         WHEN 'PACKAGE BODY' THEN 'PACKAGE_BODY'
+         WHEN 'MATERIALIZED VIEW' THEN 'MATERIALIZED_VIEW'
+         ELSE o.OBJECT_TYPE
+       END AS OBJECT_TYPE,
        CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
 FROM USER_OBJECTS o
-WHERE o.OBJECT_TYPE IN ('VIEW', 'PROCEDURE', 'FUNCTION', 'PACKAGE', 'PACKAGE BODY')
+WHERE o.OBJECT_TYPE IN ('VIEW', 'MATERIALIZED VIEW', 'PROCEDURE', 'FUNCTION', 'PACKAGE', 'PACKAGE BODY')
 UNION ALL
 SELECT s.SYNONYM_NAME AS OBJECT_NAME,
        'SYNONYM' AS OBJECT_TYPE,
@@ -170,11 +208,12 @@ FROM USER_SYNONYMS s
 const oracleListObjectsOrderSQL = `ORDER BY CASE OBJECT_TYPE
   WHEN 'TABLE' THEN 0
   WHEN 'VIEW' THEN 1
-  WHEN 'PROCEDURE' THEN 2
-  WHEN 'FUNCTION' THEN 3
-  WHEN 'SYNONYM' THEN 4
-  WHEN 'PACKAGE' THEN 5
-  ELSE 6
+  WHEN 'MATERIALIZED_VIEW' THEN 2
+  WHEN 'PROCEDURE' THEN 3
+  WHEN 'FUNCTION' THEN 4
+  WHEN 'SYNONYM' THEN 5
+  WHEN 'PACKAGE' THEN 6
+  ELSE 7
 END, OBJECT_NAME`
 const oracleListObjectsSQL = oracleListObjectsBaseSQL + "\n" + oracleListObjectsOrderSQL
 const oracleListTriggersSQL = `
@@ -843,7 +882,7 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		schema := stringParam(params, "schema")
 		table := stringParam(params, "table")
 		objectType := stringParam(params, "object_type")
-		ddl, err := s.getTableDDL(schema, table, objectType)
+		ddl, err := s.getTableDDLWithOptions(schema, table, objectType, boolParam(params, "portable"))
 		return ddl, false, err
 	case "execute_query":
 		var opts queryOptions
@@ -2881,6 +2920,10 @@ func (s *server) normalizeSchemaForIdentity(schema string) (string, error) {
 }
 
 func (s *server) getTableDDL(schema, table, objectType string) (string, error) {
+	return s.getTableDDLWithOptions(schema, table, objectType, false)
+}
+
+func (s *server) getTableDDLWithOptions(schema, table, objectType string, portable bool) (string, error) {
 	var err error
 	schema, err = s.normalizeSchema(schema)
 	if err != nil {
@@ -2898,9 +2941,32 @@ func (s *server) getTableDDL(schema, table, objectType string) (string, error) {
 		return s.buildViewDDL(schema, table)
 	}
 	var ddl string
-	err = db.QueryRow("SELECT DBMS_METADATA.GET_DDL(:1, :2, :3) FROM DUAL", objectType, table, schema).Scan(&ddl)
+	var indexDDLs []string
+	if portable && objectType == "TABLE" {
+		var metadataErr error
+		err = withOraclePortableMetadataSession(db, func(conn *sql.Conn) error {
+			metadataErr = conn.QueryRowContext(
+				context.Background(),
+				"SELECT DBMS_METADATA.GET_DDL(:1, :2, :3) FROM DUAL",
+				objectType,
+				table,
+				schema,
+			).Scan(&ddl)
+			indexDDLs, _ = loadTableIndexDDLsFromConn(conn, schema, table)
+			return nil
+		})
+		if err != nil {
+			return "", err
+		}
+		err = metadataErr
+	} else {
+		err = db.QueryRow("SELECT DBMS_METADATA.GET_DDL(:1, :2, :3) FROM DUAL", objectType, table, schema).Scan(&ddl)
+	}
 	if err == nil && strings.TrimSpace(ddl) != "" {
 		if objectType == "TABLE" {
+			if portable {
+				return s.appendTableDependentDDLWithIndexes(schema, table, ddl, indexDDLs), nil
+			}
 			return s.appendTableDependentDDL(schema, table, ddl), nil
 		}
 		return ddl, nil
@@ -2910,12 +2976,41 @@ func (s *server) getTableDDL(schema, table, objectType string) (string, error) {
 		if fallbackErr != nil {
 			return "", fallbackErr
 		}
+		if portable {
+			return s.appendTableDependentDDLWithIndexes(schema, table, fallback, indexDDLs), nil
+		}
 		return s.appendTableDependentDDL(schema, table, fallback), nil
 	}
 	return "", err
 }
 
+func withOraclePortableMetadataSession(db *sql.DB, operation func(*sql.Conn) error) (err error) {
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		return err
+	}
+	if _, err = conn.ExecContext(context.Background(), oracleDisableSegmentAttributesSQL); err != nil {
+		_ = conn.Close()
+		return fmt.Errorf("failed to disable Oracle segment attributes: %w", err)
+	}
+	defer func() {
+		if _, resetErr := conn.ExecContext(context.Background(), oracleEnableSegmentAttributesSQL); resetErr != nil {
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+			if err == nil {
+				err = fmt.Errorf("failed to restore Oracle segment attributes: %w", resetErr)
+			}
+		}
+		_ = conn.Close()
+	}()
+	return operation(conn)
+}
+
 func (s *server) appendTableDependentDDL(schema, table, tableDDL string) string {
+	indexDDLs, _ := s.loadTableIndexDDLs(schema, table)
+	return s.appendTableDependentDDLWithIndexes(schema, table, tableDDL, indexDDLs)
+}
+
+func (s *server) appendTableDependentDDLWithIndexes(schema, table, tableDDL string, indexDDLs []string) string {
 	var builder strings.Builder
 	baseDDL := strings.TrimSpace(tableDDL)
 	builder.WriteString(baseDDL)
@@ -2931,10 +3026,8 @@ func (s *server) appendTableDependentDDL(schema, table, tableDDL string) string 
 		dependentAppended = true
 	}
 
-	if indexDDLs, err := s.loadTableIndexDDLs(schema, table); err == nil {
-		for _, ddl := range indexDDLs {
-			appendDependent(ddl)
-		}
+	for _, ddl := range indexDDLs {
+		appendDependent(ddl)
 	}
 	if triggerDDLs, err := s.loadTableTriggerDDLs(schema, table); err == nil {
 		for _, ddl := range triggerDDLs {
@@ -2949,8 +3042,7 @@ func (s *server) appendTableDependentDDL(schema, table, tableDDL string) string 
 	return builder.String()
 }
 
-func (s *server) loadTableIndexDDLs(schema, table string) ([]string, error) {
-	rows, err := s.queryRows(`
+const oracleTableIndexDDLsSQL = `
 SELECT DBMS_METADATA.GET_DDL('INDEX', i.INDEX_NAME, i.OWNER)
 FROM ALL_INDEXES i
 WHERE i.TABLE_OWNER = :1
@@ -2964,11 +3056,27 @@ WHERE i.TABLE_OWNER = :1
       AND c.CONSTRAINT_TYPE IN ('P', 'U')
       AND c.INDEX_NAME IS NOT NULL
   )
-ORDER BY i.INDEX_NAME`, []any{schema, table, schema, table})
+ORDER BY i.INDEX_NAME`
+
+func (s *server) loadTableIndexDDLs(schema, table string) ([]string, error) {
+	rows, err := s.queryRows(oracleTableIndexDDLsSQL, []any{schema, table, schema, table})
 	if err != nil {
 		return nil, err
 	}
 	defer s.closeRows(rows)
+	return scanOracleDDLs(rows)
+}
+
+func loadTableIndexDDLsFromConn(conn *sql.Conn, schema, table string) ([]string, error) {
+	rows, err := conn.QueryContext(context.Background(), oracleTableIndexDDLsSQL, schema, table, schema, table)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanOracleDDLs(rows)
+}
+
+func scanOracleDDLs(rows *sql.Rows) ([]string, error) {
 	var result []string
 	for rows.Next() {
 		var ddl sql.NullString
@@ -4741,6 +4849,15 @@ func intParam(params map[string]json.RawMessage, key string) int {
 		return 0
 	}
 	var value int
+	_ = json.Unmarshal(params[key], &value)
+	return value
+}
+
+func boolParam(params map[string]json.RawMessage, key string) bool {
+	if params == nil || len(params[key]) == 0 {
+		return false
+	}
+	var value bool
 	_ = json.Unmarshal(params[key], &value)
 	return value
 }

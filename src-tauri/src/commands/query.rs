@@ -51,7 +51,7 @@ pub async fn execute_query(
     });
     let cancel_token = registered_query.as_ref().map(|query| query.token());
 
-    dbx_core::query::execute_sql_statement_with_options_typed(
+    let result = dbx_core::query::execute_sql_statement_with_options_typed(
         &state,
         &connection_id,
         &database,
@@ -72,8 +72,20 @@ pub async fn execute_query(
             ..Default::default()
         },
     )
-    .await
-    .map_err(dbx_core::query::QueryExecutionError::into_backend_error)
+    .await;
+
+    if matches!(result, Err(dbx_core::query::QueryExecutionError::Timeout(_))) {
+        // We're giving up on waiting, not cancelling: the statement may
+        // still be executing server-side. Keep the registration (and any
+        // KILL-QUERY-style interrupt registered against it) reachable so a
+        // later explicit cancel_query call can still reach it, instead of
+        // losing that capability the instant this command returns.
+        if let Some(registered_query) = registered_query {
+            registered_query.detach();
+        }
+    }
+
+    result.map_err(dbx_core::query::QueryExecutionError::into_backend_error)
 }
 
 #[tauri::command]
@@ -499,6 +511,11 @@ pub fn build_empty_table_sql(options: dbx_core::db_admin_sql::TableAdminSqlOptio
 #[tauri::command]
 pub fn build_truncate_table_sql(options: dbx_core::db_admin_sql::TableAdminSqlOptions) -> Result<String, String> {
     Ok(dbx_core::db_admin_sql::build_truncate_table_sql(options))
+}
+
+#[tauri::command]
+pub fn build_vacuum_table_sql(options: dbx_core::db_admin_sql::VacuumTableSqlOptions) -> Result<String, String> {
+    dbx_core::db_admin_sql::build_vacuum_table_sql(options)
 }
 
 #[tauri::command]

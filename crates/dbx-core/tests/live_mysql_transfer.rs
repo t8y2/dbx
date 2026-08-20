@@ -181,6 +181,8 @@ async fn live_mysql_transfer_downgrades_unsupported_source_collations() {
             &DatabaseType::Mysql,
             &source_pool_key,
             &target_pool_key,
+            &std::collections::HashMap::new(),
+            &mut Vec::new(),
             |_| {},
         )
         .await?;
@@ -238,6 +240,8 @@ async fn live_mysql_transfer_downgrades_unsupported_source_collations() {
                 &DatabaseType::Mysql,
                 &source_pool_key,
                 &modern_target_pool_key,
+                &std::collections::HashMap::new(),
+                &mut Vec::new(),
                 |_| {},
             )
             .await?,
@@ -340,6 +344,8 @@ async fn live_mysql_transfer_preserves_spatial_values_and_modes() {
             &DatabaseType::Mysql,
             &source_pool_key,
             &target_pool_key,
+            &std::collections::HashMap::new(),
+            &mut Vec::new(),
             |_| {},
         )
         .await?;
@@ -393,6 +399,8 @@ async fn live_mysql_transfer_preserves_spatial_values_and_modes() {
             &DatabaseType::Mysql,
             &source_pool_key,
             &target_pool_key,
+            &std::collections::HashMap::new(),
+            &mut Vec::new(),
             |_| {},
         )
         .await?;
@@ -427,6 +435,8 @@ async fn live_mysql_transfer_preserves_spatial_values_and_modes() {
             &DatabaseType::Mysql,
             &source_pool_key,
             &target_pool_key,
+            &std::collections::HashMap::new(),
+            &mut Vec::new(),
             |_| {},
         )
         .await?;
@@ -531,6 +541,8 @@ async fn live_mysql_transfer_structure_overwrite_rejects_incompatible_target_col
             &DatabaseType::Mysql,
             &source_pool_key,
             &target_pool_key,
+            &std::collections::HashMap::new(),
+            &mut Vec::new(),
             |_| {},
         )
         .await;
@@ -579,6 +591,8 @@ async fn live_mysql_transfer_structure_overwrite_rejects_incompatible_target_col
             &DatabaseType::Mysql,
             &source_pool_key,
             &target_pool_key,
+            &std::collections::HashMap::new(),
+            &mut Vec::new(),
             |_| {},
         )
         .await;

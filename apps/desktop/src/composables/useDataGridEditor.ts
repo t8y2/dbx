@@ -86,6 +86,7 @@ export interface UseDataGridEditorOptions {
     | undefined
   >;
   sourceColumns?: ComputedRef<Array<string | undefined> | undefined>;
+  readonlyColumnIndexes?: ComputedRef<ReadonlySet<number> | undefined>;
   canEditExistingRows?: ComputedRef<boolean>;
   onExecuteSql: ComputedRef<((sql: string) => Promise<void>) | undefined>;
   customSaveHandler?: ComputedRef<CustomSaveHandler | undefined>;
@@ -104,6 +105,7 @@ export interface UseDataGridEditorOptions {
   cacheKey?: ComputedRef<string | undefined>;
   /** 保存成功后结果负载被原地修改时通知宿主，使缓存的字节估算失效。 */
   onResultPayloadMutated?: () => void;
+  prepareFullReload?: () => void;
   emit: {
     (event: "reload", sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number): void;
   };
@@ -200,6 +202,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     database,
     tableMeta,
     sourceColumns = computed(() => undefined),
+    readonlyColumnIndexes = computed(() => undefined),
     canEditExistingRows = computed(() => true),
     onExecuteSql,
     customSaveHandler,
@@ -606,7 +609,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
 
   function canEditColumn(columnIndex: number): boolean {
     const sources = sourceColumns.value;
-    return !sources || sources[columnIndex] !== undefined;
+    return (!sources || sources[columnIndex] !== undefined) && !readonlyColumnIndexes.value?.has(columnIndex);
   }
 
   // --- Row data helpers ---
@@ -1453,6 +1456,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   function reloadCurrentData() {
+    options.prepareFullReload?.();
     options.emit("reload", sql.value, searchText.value, options.currentWhereInput.value, orderByInput.value.trim() || undefined, pageSize.value, (currentPage.value - 1) * pageSize.value);
   }
 
@@ -1490,6 +1494,10 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     isSaving.value = true;
     snapshot.newRowRefs.forEach((row) => savingNewRows.add(row));
     const shouldReloadAfterSave = snapshot.newRows.length > 0 || snapshot.deletedRows.size > 0;
+    // SQL saves may update columns the client can't predict (e.g. an ON UPDATE CURRENT_TIMESTAMP
+    // column or a trigger), so reload after a pure row update too. Custom (non-SQL) data sources
+    // keep the original behavior below, unchanged.
+    const shouldReloadAfterSqlSave = shouldReloadAfterSave || snapshot.dirtyRows.size > 0;
 
     if (customHandler) {
       try {
@@ -1609,7 +1617,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     clearSavedPendingChanges(snapshot);
     if (!hasPendingChanges.value) exitTransaction();
     clearPendingChangeHistory();
-    if (shouldReloadAfterSave) {
+    if (shouldReloadAfterSqlSave) {
       reloadCurrentData();
     }
     await finishSaveChanges(snapshot);

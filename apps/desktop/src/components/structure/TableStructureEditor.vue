@@ -25,7 +25,7 @@ import { type SqlHighlighter, createShikiSqlHighlighter } from "@/lib/sql/sqlHig
 import { joinSqlStatementsForScript } from "@/lib/sql/sqlBatchScript";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
-import { queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
+import { queryTimeoutSecsForConcurrentIndex, queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { invalidateObjectDdl, loadObjectDdl } from "@/lib/metadata/objectDdlCache";
 import { loadObjectMetadataFacet, type ObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
@@ -38,6 +38,7 @@ import { getSqliteDataTypeHelp } from "@/lib/table/sqliteDataTypeHelp";
 import { getTableMetadataCapabilities, firstStructureMetadataTab, isStructureMetadataTabSupported } from "@/lib/table/tableMetadataCapabilities";
 import { hasTableStructureRefreshWork, unloadedTableStructureRefreshScope, visibleTableStructureRefreshScope, type TableStructureRefreshScope } from "@/lib/table/tableStructureMetadataLoading";
 import { canAddTableStructureColumn, getTableStructureCapabilities, hasLocalTableColumnOrderChange, isPhysicalTableColumnOrderChange, sanitizeStructureIndexesForCapabilities, supportsLocalTableColumnReorder } from "@/lib/table/tableStructureCapabilities";
+import { getConcurrentIndexAvailability, concurrentIndexNamesInStatements, normalizeUnsupportedConcurrentIndexes, type ConcurrentIndexAvailability } from "@/lib/table/concurrentIndexAvailability";
 import { orderedColumnIndexes, uniqueDataGridColumnOrderKeys } from "@/lib/dataGrid/dataGridColumnOrder";
 import { loadTableDataGridColumnOrder, notifyTableDataGridColumnOrderChanged, removeTableDataGridColumnOrder, saveTableDataGridColumnOrder, tableDataGridColumnOrderScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 import { connectionObjectTreeQuerySchema, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
@@ -55,6 +56,7 @@ import {
   createForeignKeyDrafts,
   createIndexDrafts,
   createTriggerDrafts,
+  dataTypeBaseInputValue,
   dataTypeLengthInputValue,
   dataTypeLengthUnitValue,
   defaultNewColumnDataType,
@@ -78,7 +80,6 @@ import {
   resolveInsertColumnIndex,
   restoreCharacterLengthUnitsAfterSave,
   sameStructureIndexType,
-  splitDataType,
   tableStructureIdentifierComparisonKey,
   toColumnNames,
 } from "@/lib/table/tableStructureEditorState";
@@ -207,6 +208,21 @@ const copySourceColumnsLoading = ref(false);
 const copySourceError = ref("");
 let copySourceColumnsRequestId = 0;
 const indexes = ref<EditableStructureIndex[]>([]);
+/** PostgreSQL partitioned parent (`relkind = 'p'`): `CREATE INDEX CONCURRENTLY`
+ * is rejected by the server on such tables, so the option is disabled here and
+ * the SQL builder refuses any concurrent request on it (fail closed). */
+const isPartitionedParent = ref(false);
+/** Whether the last partition-status probe succeeded. When it cannot be
+ * verified (probe failed), Concurrent is disabled — we must not assume a
+ * non-partitioned table we could not check. */
+const partitionStatusKnown = ref(true);
+/** Set when a `concurrently: true` index draft had to be normalized away
+ * because Concurrent availability became unknown/unsupported (partition probe
+ * failure, partitioned parent, capability loss). While set, no SQL is
+ * generated and Save stays blocked until the user re-verifies (the next
+ * successful probe clears it) — a cleared flag must never silently degrade
+ * into a blocking `CREATE INDEX`. */
+const concurrentAvailabilityInvalidated = ref(false);
 const pendingStatements = ref<string[]>([]);
 const warnings = ref<string[]>([]);
 const sqliteSchemaRevision = ref<string>();
@@ -254,7 +270,8 @@ function indexChanged(index: EditableStructureIndex): boolean {
     !sameText(index.filter, original.filter) ||
     !sameStructureIndexType(index.indexType, original.index_type) ||
     !sameList(index.includedColumns, original.included_columns) ||
-    !sameText(index.comment, original.comment)
+    !sameText(index.comment, original.comment) ||
+    !!index.concurrently
   );
 }
 
@@ -303,7 +320,7 @@ const STRUCTURE_COLUMNS_WIDTHS_STORAGE_KEY = "dbx-structure-editor-column-widths
 const STRUCTURE_INDEX_COLUMNS_WIDTHS_STORAGE_KEY = "dbx-structure-editor-index-column-widths";
 const STRUCTURE_SQL_PREVIEW_COLLAPSED_STORAGE_KEY = "dbx-structure-editor-sql-preview-collapsed";
 const STRUCTURE_COLUMN_WIDTH_COUNT = 12;
-const STRUCTURE_INDEX_COLUMN_WIDTH_COUNT = 8;
+const STRUCTURE_INDEX_COLUMN_WIDTH_COUNT = 9;
 const PERSISTED_STRUCTURE_INDEX_COLUMN_WIDTHS = new Set([0, 1, 6]);
 const structureDensityMetrics: Record<
   StructureEditorDensity,
@@ -328,7 +345,7 @@ const structureDensityMetrics: Record<
 > = {
   compact: {
     columns: [28, 168, 136, 82, 60, 52, 108, 220, 80, 120, 144, 108],
-    indexes: [120, 180, 60, 88, 124, 144, 120, 70],
+    indexes: [120, 180, 60, 88, 124, 144, 120, 84, 70],
     minColumnWidth: 24,
     minLengthColumnWidth: 140,
     minIndexColumnWidth: 48,
@@ -346,7 +363,7 @@ const structureDensityMetrics: Record<
   },
   standard: {
     columns: [32, 200, 160, 104, 72, 64, 128, 260, 90, 140, 160, 136],
-    indexes: [148, 224, 72, 108, 148, 180, 148, 84],
+    indexes: [148, 224, 72, 108, 148, 180, 148, 100, 84],
     minColumnWidth: 28,
     minLengthColumnWidth: 156,
     minIndexColumnWidth: 60,
@@ -364,7 +381,7 @@ const structureDensityMetrics: Record<
   },
   comfortable: {
     columns: [36, 232, 188, 116, 84, 76, 152, 300, 100, 160, 188, 148],
-    indexes: [176, 260, 84, 124, 176, 216, 176, 104],
+    indexes: [176, 260, 84, 124, 176, 216, 176, 116, 104],
     minColumnWidth: 32,
     minLengthColumnWidth: 176,
     minIndexColumnWidth: 64,
@@ -663,8 +680,15 @@ const indexTypesByDb: Record<string, string[]> = {
   sqlserver: ["CLUSTERED", "NONCLUSTERED", "COLUMNSTORE", "NONCLUSTERED COLUMNSTORE", "XML", "SPATIAL"],
   oracle: ["NORMAL", "BITMAP", "FUNCTION-BASED NORMAL", "FUNCTION-BASED DOMAIN", "DOMAIN", "CLUSTER"],
   sqlite: ["BTREE"],
+  "gaussdb-m": ["UBTREE"],
 };
-const indexTypeOptions = computed(() => (structureCapabilities.value.indexType ? (indexTypesByDb[structureDialect.value] ?? []) : []));
+const indexTypeOptions = computed(() => {
+  if (!structureCapabilities.value.indexType) return [];
+  if (connection.value?.driver_profile?.toLowerCase() === "gaussdb-m") {
+    return indexTypesByDb["gaussdb-m"];
+  }
+  return indexTypesByDb[structureDialect.value] ?? [];
+});
 
 interface DefaultValuePreset {
   label: string;
@@ -825,7 +849,17 @@ const colLabels = computed(() => {
   labels.push({ key: "actions", label: t("structureEditor.actions"), widthIndex: 11 });
   return labels;
 });
-const indexColLabels = computed(() => [t("structureEditor.indexName"), t("structureEditor.indexColumns"), t("structureEditor.unique"), t("structureEditor.indexType"), t("structureEditor.includedColumns"), t("structureEditor.filter"), t("structureEditor.comment"), t("structureEditor.actions")]);
+const indexColLabels = computed(() => [
+  t("structureEditor.indexName"),
+  t("structureEditor.indexColumns"),
+  t("structureEditor.unique"),
+  t("structureEditor.indexType"),
+  t("structureEditor.includedColumns"),
+  t("structureEditor.filter"),
+  t("structureEditor.comment"),
+  t("structureEditor.concurrent"),
+  t("structureEditor.actions"),
+]);
 const filteredColumnRowIds = computed(() => {
   const query = columnSearchText.value.trim().toLowerCase();
   if (!query) return new Set<string>();
@@ -864,13 +898,13 @@ const targetLabel = computed(() => buildStructureTargetLabel(connection.value?.n
 
 function isManticoreTextColumn(column: EditableStructureColumn): boolean {
   if (databaseType.value !== "manticoresearch") return false;
-  const baseType = splitDataType(column.dataType).baseType.trim().toLowerCase();
+  const baseType = dataTypeBaseInputValue(databaseType.value, column.dataType).trim().toLowerCase();
   return baseType === "text" || baseType === "string";
 }
 
 function isManticoreJsonColumn(column: EditableStructureColumn): boolean {
   if (databaseType.value !== "manticoresearch") return false;
-  return splitDataType(column.dataType).baseType.trim().toLowerCase() === "json";
+  return dataTypeBaseInputValue(databaseType.value, column.dataType).trim().toLowerCase() === "json";
 }
 
 let sqlPreviewRequestId = 0;
@@ -1089,7 +1123,15 @@ function restoreDraft(draft: TableStructureEditorDraft) {
   tableComment.value = draft.tableComment || "";
   originalTableComment.value = draft.originalTableComment || "";
   columns.value = cloneDraftValue(draft.columns || []);
-  indexes.value = cloneDraftValue(draft.indexes || []);
+  // Existing-index edits never support Concurrent (the checkbox is disabled and
+  // the core builder rejects the request), so a stale `concurrently: true`
+  // saved in a restored draft must not be submitted or deadlock the save.
+  indexes.value = cloneDraftValue(draft.indexes || []).map((index) => (index.original ? { ...index, concurrently: false } : index));
+  // Re-run the availability normalization against the current inputs (e.g. a
+  // re-activated editor may already carry an unknown/unsupported partition
+  // status): restored new-index Concurrent choices that became illegal are
+  // normalized away with the same fail-closed invalidation as a probe failure.
+  normalizeConcurrentIndexDraftsForCurrentAvailability();
   foreignKeys.value = cloneDraftValue(draft.foreignKeys || []);
   constraints.value = cloneDraftValue(draft.constraints || []);
   // Drafts created before constraint loading existed have no saved facet.
@@ -1306,14 +1348,39 @@ function structureChangeOptions(): BuildTableStructureChangeSqlOptions {
     triggers: triggers.value,
     tableComment: tableComment.value,
     originalTableComment: isCreateMode.value ? undefined : originalTableComment.value,
+    partitioned: isPartitionedParent.value,
+    isGaussdbMMode: connection.value?.driver_profile?.toLowerCase() === "gaussdb-m",
   };
 }
 
 async function refreshSqlPreview() {
   const requestId = ++sqlPreviewRequestId;
+  if (concurrentAvailabilityInvalidated.value) {
+    // Availability gap in effect: never regenerate SQL here — doing so would
+    // turn a lost Concurrent request into a silent blocking CREATE INDEX. Keep
+    // the explicit error visible until a later probe re-verifies the table.
+    pendingStatements.value = [];
+    warnings.value = [t("structureEditor.concurrentUnavailableBlocksSave")];
+    sqliteSchemaRevision.value = undefined;
+    sqlPreviewLoading.value = false;
+    sqlPreviewPending.value = false;
+    return;
+  }
   if (!hasPendingStructureChanges()) {
     pendingStatements.value = [];
     warnings.value = [];
+    sqliteSchemaRevision.value = undefined;
+    sqlPreviewLoading.value = false;
+    sqlPreviewPending.value = false;
+    return;
+  }
+  // Layer B: a stale `concurrently: true` whose availability is no longer
+  // enabled must never reach the SQL builder, even if normalization was
+  // skipped (race, restored draft, non-UI caller).
+  const blockingConcurrentWarning = concurrentIndexBlockingWarning();
+  if (blockingConcurrentWarning) {
+    pendingStatements.value = [];
+    warnings.value = [blockingConcurrentWarning];
     sqliteSchemaRevision.value = undefined;
     sqlPreviewLoading.value = false;
     sqlPreviewPending.value = false;
@@ -1350,6 +1417,7 @@ const canApply = computed(
     !sqlPreviewPending.value &&
     pendingStatements.value.length > 0 &&
     warnings.value.length === 0 &&
+    !concurrentAvailabilityInvalidated.value &&
     (!hasSqliteTypeChange.value || !!sqliteSchemaRevision.value) &&
     !!props.connectionId &&
     (isCreateMode.value ? !!newTableName.value.trim() : !!props.tableName),
@@ -1371,6 +1439,9 @@ function resetState() {
   constraintsLoading.value = false;
   triggersLoading.value = false;
   errorMessage.value = "";
+  isPartitionedParent.value = false;
+  partitionStatusKnown.value = true;
+  concurrentAvailabilityInvalidated.value = false;
   columns.value = [];
   indexes.value = [];
   pendingStatements.value = [];
@@ -1442,7 +1513,7 @@ async function fetchTableCommentValue(connectionId: string, database: string, sc
   }
 }
 
-function loadCachedTableComment(request: ReturnType<typeof ddlRequest>, force = false): Promise<{ value: string | undefined; cacheStatus: "disk" | "remote" }> {
+function loadCachedTableComment(request: ReturnType<typeof ddlRequest>, force = false): Promise<{ value: string | undefined; cacheStatus: "memory" | "disk" | "remote" }> {
   return loadObjectMetadataFacet(request, "comment", () => fetchTableCommentValue(request.connectionId, request.database, request.schema, request.tableName, request.catalog), { force });
 }
 
@@ -1469,25 +1540,37 @@ async function loadStructure(
 
     const metadataRequest = ddlRequest();
     const forceMetadata = options.forceMetadata === true;
+    const partitionStatusPromise =
+      databaseType.value === "postgres" && !isCreateMode.value
+        ? api
+            .getTablePartitionStatus(connectionId, database, schema, tableName)
+            // No reactive mutation inside the catch: a stale request must not
+            // overwrite a newer probe's result (the structureLoadRequestId
+            // guard below decides). Fail closed — without a verified partition
+            // status we cannot rule out a partitioned parent, so Concurrent is
+            // treated as unavailable until a later reload re-runs the probe.
+            .then((status) => ({ known: true, status }))
+            .catch(() => ({ known: false, status: { isPartitionedParent: false, isPartition: false } }))
+        : Promise.resolve({ known: true, status: { isPartitionedParent: false, isPartition: false } });
     const columnsPromise = scope.columns ? loadObjectMetadataFacet(metadataRequest, "columns", () => api.getColumns(connectionId, database, schema, tableName, catalog), { force: forceMetadata }).then((result) => result.value) : Promise.resolve(undefined);
     const indexesPromise = scope.indexes
       ? tableMetadataCapabilities.value.indexes
-        ? loadObjectMetadataFacet(metadataRequest, "indexes", () => api.listIndexes(connectionId, database, schema, tableName, catalog).catch(() => []), { force: forceMetadata }).then((result) => result.value)
+        ? loadObjectMetadataFacet(metadataRequest, "indexes", () => api.listIndexes(connectionId, database, schema, tableName, catalog), { force: forceMetadata }).then((result) => result.value)
         : Promise.resolve([])
       : Promise.resolve(undefined);
     const foreignKeysPromise = scope.foreignKeys
       ? tableMetadataCapabilities.value.foreignKeys
-        ? loadObjectMetadataFacet(metadataRequest, "foreign-keys", () => api.listForeignKeys(connectionId, database, schema, tableName, catalog).catch(() => []), { force: forceMetadata }).then((result) => result.value)
+        ? loadObjectMetadataFacet(metadataRequest, "foreign-keys", () => api.listForeignKeys(connectionId, database, schema, tableName, catalog), { force: forceMetadata }).then((result) => result.value)
         : Promise.resolve([])
       : Promise.resolve(undefined);
     const constraintsPromise = scope.constraints
       ? tableMetadataCapabilities.value.constraints
-        ? loadObjectMetadataFacet(metadataRequest, "constraints", () => api.listConstraints(connectionId, database, schema, tableName, catalog).catch(() => []), { force: forceMetadata }).then((result) => result.value)
+        ? loadObjectMetadataFacet(metadataRequest, "constraints", () => api.listConstraints(connectionId, database, schema, tableName, catalog), { force: forceMetadata }).then((result) => result.value)
         : Promise.resolve([])
       : Promise.resolve(undefined);
     const triggersPromise = scope.triggers
       ? tableMetadataCapabilities.value.triggers
-        ? loadObjectMetadataFacet(metadataRequest, "triggers", () => api.listTriggers(connectionId, database, schema, tableName, catalog).catch(() => []), { force: forceMetadata }).then((result) => result.value)
+        ? loadObjectMetadataFacet(metadataRequest, "triggers", () => api.listTriggers(connectionId, database, schema, tableName, catalog), { force: forceMetadata }).then((result) => result.value)
         : Promise.resolve([])
       : Promise.resolve(undefined);
     const tableCommentPromise = scope.tableComment && structureCapabilities.value.comment ? loadCachedTableComment(metadataRequest, forceMetadata).then((result) => result.value) : Promise.resolve(undefined);
@@ -1520,6 +1603,20 @@ async function loadStructure(
       tableComment.value = nextTableComment;
       loadedMetadataFacets.add("comment");
     }
+    const partitionStatus = await partitionStatusPromise;
+    if (requestId === structureLoadRequestId) {
+      partitionStatusKnown.value = partitionStatus.known;
+      isPartitionedParent.value = partitionStatus.status.isPartitionedParent;
+      // Availability inputs changed: fail closed while the status is unknown,
+      // but preserve the user's Concurrent intent so a later successful probe
+      // can regenerate the same SQL. Definitive unsupported states still clear
+      // the flag. A partitioned parent or unknown status keeps Save blocked.
+      normalizeConcurrentIndexDraftsForCurrentAvailability();
+      if (partitionStatus.known && !partitionStatus.status.isPartitionedParent && structureCapabilities.value.indexConcurrent && structureCapabilities.value.createIndex && concurrentAvailabilityInvalidated.value) {
+        concurrentAvailabilityInvalidated.value = false;
+        scheduleSqlPreviewRefresh();
+      }
+    }
     const applySecondaryMetadata = async () => {
       const [nextIndexes, nextForeignKeys, nextConstraints, nextTriggers] = await Promise.all([indexesPromise, foreignKeysPromise, constraintsPromise, triggersPromise]);
       if (requestId !== structureLoadRequestId) return;
@@ -1547,6 +1644,7 @@ async function loadStructure(
     const secondaryMetadataPromise = applySecondaryMetadata()
       .catch((error) => {
         console.warn("[DBX][structure-editor:secondary-metadata-failed]", error);
+        if (showErrors && requestId === structureLoadRequestId) errorMessage.value = error?.message || String(error);
       })
       .finally(() => {
         if (requestId === structureLoadRequestId) setSecondaryMetadataLoading(scope, false);
@@ -1971,14 +2069,14 @@ function removeMysqlEnumValue(column: EditableStructureColumn, index: number) {
 }
 
 function updateColumnDataTypeLength(column: EditableStructureColumn, value: string | number) {
-  const baseType = splitDataType(column.dataType).baseType;
+  const baseType = dataTypeBaseInputValue(databaseType.value, column.dataType);
   column.dataType = combineDataTypeForDatabaseWithLengthUnit(databaseType.value, baseType, String(value), dataTypeLengthUnitValue(databaseType.value, column.dataType));
   syncSqlServerIdentityForDataType(column);
   syncDamengIdentityForDataType(column);
 }
 
 function updateColumnDataTypeLengthUnit(column: EditableStructureColumn, value: unknown) {
-  const baseType = splitDataType(column.dataType).baseType;
+  const baseType = dataTypeBaseInputValue(databaseType.value, column.dataType);
   const unit = value === "__default" ? "" : String(value ?? "");
   column.dataType = combineDataTypeForDatabaseWithLengthUnit(databaseType.value, baseType, dataTypeLengthInputValue(databaseType.value, column.dataType), unit);
   syncSqlServerIdentityForDataType(column);
@@ -2287,7 +2385,7 @@ function isColumnLengthDisabled(column: EditableStructureColumn): boolean {
   if (isColumnTypeDisabled(column)) {
     return true;
   }
-  const baseType = splitDataType(column.dataType).baseType.trim().toLowerCase();
+  const baseType = dataTypeBaseInputValue(databaseType.value, column.dataType).trim().toLowerCase();
   return isDataTypeLengthDisabled(databaseType.value, baseType);
 }
 
@@ -2345,6 +2443,7 @@ function addIndex() {
     indexType: "",
     includedColumns: [],
     comment: "",
+    concurrently: false,
     markedForDrop: false,
   });
   void nextTick(() => {
@@ -2366,15 +2465,24 @@ function existingIndexNamesForDraft(index: EditableStructureIndex): string[] {
 }
 
 function generatedIndexNameForDraft(index: EditableStructureIndex, columnsForName = index.columns): string {
-  return generateUniqueIndexName(structureIndexTableName(), columnsForName, existingIndexNamesForDraft(index));
+  const name = generateUniqueIndexName(structureIndexTableName(), columnsForName, existingIndexNamesForDraft(index));
+  // GaussDB M-mode expects lowercase index names (MySQL-compatible).
+  return connection.value?.driver_profile?.toLowerCase() === "gaussdb-m" ? name.toLowerCase() : name;
 }
 
 function refreshAutoIndexName(index: EditableStructureIndex, previousColumns = index.columns) {
   if (index.original || index.nameEdited) return;
+  const isGaussdbM = connection.value?.driver_profile?.toLowerCase() === "gaussdb-m";
   const previousName = generateIndexName(structureIndexTableName(), previousColumns);
   const previousUniqueName = generateUniqueIndexName(structureIndexTableName(), previousColumns, existingIndexNamesForDraft(index));
   const currentName = index.name.trim();
-  if (currentName && currentName !== previousName && currentName !== previousUniqueName) return;
+  if (currentName) {
+    if (isGaussdbM) {
+      if (currentName.toLowerCase() !== previousName.toLowerCase() && currentName.toLowerCase() !== previousUniqueName.toLowerCase()) return;
+    } else if (currentName !== previousName && currentName !== previousUniqueName) {
+      return;
+    }
+  }
   index.name = generatedIndexNameForDraft(index);
 }
 
@@ -2425,6 +2533,89 @@ function canEditIndexDraft(index: EditableStructureIndex): boolean {
   if (index.markedForDrop || index.isPrimary) return false;
   if (!index.original) return structureCapabilities.value.createIndex;
   return structureCapabilities.value.rebuildIndex && structureCapabilities.value.createIndex && structureCapabilities.value.dropIndex;
+}
+
+/**
+ * Whether the Concurrent checkbox is actionable for this index draft.
+ *
+ * Plan A scope guard (PR #6361 review): concurrent builds apply only to newly
+ * created indexes on non-partitioned tables. Editing an existing index would
+ * require a `DROP INDEX CONCURRENTLY` + `CREATE INDEX CONCURRENTLY` replace
+ * flow (not implemented yet), PostgreSQL rejects `CREATE INDEX CONCURRENTLY`
+ * on partitioned parents, and an unverifiable partition status fails closed —
+ * all of those disable the checkbox here. The core SQL builder enforces the
+ * same scope as a hard error, so this is only the first layer.
+ */
+function concurrentIndexAvailability(index: EditableStructureIndex): ConcurrentIndexAvailability {
+  if (indexesLoading.value) return { enabled: false, reason: "unknown" };
+  return concurrentIndexAvailabilityState(index);
+}
+
+/** Same decision as [`concurrentIndexAvailability`], independent of the
+ * indexes-loading flag — state-normalization runs while metadata may still be
+ * in flight, and must decide on the availability inputs alone. */
+function concurrentIndexAvailabilityState(index: EditableStructureIndex): ConcurrentIndexAvailability {
+  return getConcurrentIndexAvailability({
+    hasOriginal: !!index.original,
+    isPrimary: index.isPrimary,
+    markedForDrop: index.markedForDrop,
+    isPartitionedParent: isPartitionedParent.value,
+    partitionStatusKnown: partitionStatusKnown.value,
+    supportsIndexConcurrent: structureCapabilities.value.indexConcurrent,
+    supportsCreateIndex: structureCapabilities.value.createIndex,
+  });
+}
+
+/**
+ * Layer A — invalidate `concurrently: true` drafts whenever Concurrent becomes
+ * unavailable. Transiently unknown partition status preserves the flag so a
+ * later successful probe can recover the user's intent; definitive unsupported
+ * states clear it. In both cases, empty pending SQL and keep Save blocked until
+ * availability is verified again.
+ */
+function normalizeConcurrentIndexDraftsForCurrentAvailability(): boolean {
+  // Engines that cannot express Concurrent (non-PostgreSQL dialects) ignore a
+  // stale flag in the core builder and render no checkbox; blocking the save
+  // there would only trap a draft carried over from a PostgreSQL session.
+  if (!structureCapabilities.value.indexConcurrent) return false;
+  const { indexes: normalized, invalidatedIds } = normalizeUnsupportedConcurrentIndexes(indexes.value, concurrentIndexAvailabilityState);
+  if (invalidatedIds.length === 0) return false;
+  indexes.value = normalized;
+  concurrentAvailabilityInvalidated.value = true;
+  pendingStatements.value = [];
+  warnings.value = [t("structureEditor.concurrentUnavailableBlocksSave")];
+  sqlPreviewLoading.value = false;
+  sqlPreviewPending.value = false;
+  errorMessage.value = t("structureEditor.concurrentUnavailableBlocksSave");
+  return true;
+}
+
+/** Layer B — a `concurrently: true` draft whose availability is no longer
+ * enabled must never reach the SQL builder or the execute path. Returns the
+ * blocking message, or null when the request stays legal. */
+function concurrentIndexBlockingWarning(): string | null {
+  // Non-concurrent-capable engines cannot express the request in SQL; the core
+  // builder ignores the flag, so there is no stale-concurrent hazard to block.
+  if (!structureCapabilities.value.indexConcurrent) return null;
+  const stale = indexes.value.find((index) => index.concurrently && !concurrentIndexAvailability(index).enabled);
+  return stale ? t("structureEditor.concurrentUnavailableBlocksSave") : null;
+}
+
+function canEditIndexConcurrent(index: EditableStructureIndex): boolean {
+  return concurrentIndexAvailability(index).enabled;
+}
+
+function concurrentIndexCellTitle(index: EditableStructureIndex): string {
+  switch (concurrentIndexAvailability(index).reason) {
+    case "existing":
+      return t("structureEditor.concurrentExistingIndexTooltip");
+    case "partitioned":
+      return t("structureEditor.concurrentPartitionedTooltip");
+    case "unknown":
+      return t("structureEditor.concurrentUnavailableTooltip");
+    default:
+      return t("structureEditor.concurrentTooltip");
+  }
 }
 
 function canEditIndexFilter(index: EditableStructureIndex): boolean {
@@ -2571,6 +2762,14 @@ function toggleSqlPreviewCollapsed() {
 
 async function applyChanges() {
   if (!canApply.value || !props.connectionId || !props.database) return false;
+  // Layer B runtime guard: a stale `concurrently: true` whose availability is
+  // no longer enabled must never be executed — reject the save with an
+  // explicit error even if normalization was skipped (race / non-UI caller).
+  const blockingConcurrentWarning = concurrentIndexBlockingWarning() ?? (concurrentAvailabilityInvalidated.value ? t("structureEditor.concurrentUnavailableBlocksSave") : null);
+  if (blockingConcurrentWarning) {
+    errorMessage.value = blockingConcurrentWarning;
+    return false;
+  }
   const sql = previewSqlText.value;
   const connection = store.getConfig(props.connectionId);
   const productionContext = productionContextForDatabase(connection, props.database);
@@ -2587,6 +2786,27 @@ async function applyChanges() {
   saving.value = true;
   errorMessage.value = "";
   const refreshScope = captureStructureRefreshScope();
+  // Plan A guard: concurrent builds only run with a long-enough query timeout
+  // (a cancelled build leaves an INVALID index behind), and are blocked
+  // up-front when a same-name INVALID index already exists.
+  const hasConcurrentIndexBuild = pendingStatements.value.some((statement) => statement.includes("CONCURRENTLY"));
+  if (hasConcurrentIndexBuild && !isCreateMode.value && databaseType.value === "postgres" && props.tableName) {
+    const concurrentIndexNames = concurrentIndexNamesInStatements(pendingStatements.value);
+    if (concurrentIndexNames.length > 0) {
+      try {
+        const invalidIndexes = await api.listInvalidIndexes(props.connectionId, props.database, metadataSchema.value, props.tableName);
+        const blocked = concurrentIndexNames.filter((name) => invalidIndexes.includes(name));
+        if (blocked.length > 0) {
+          errorMessage.value = t("structureEditor.invalidIndexBlocksSave", { indexNames: blocked.join(", ") });
+          saving.value = false;
+          return false;
+        }
+      } catch {
+        // Metadata probe failure must not block the save; the failure-time
+        // hint below still surfaces leftovers if the build errors out.
+      }
+    }
+  }
   const characterLengthUnitsAfterSave = new Map<string, string>();
   if (supportsCharacterLengthUnits.value) {
     for (const column of columns.value) {
@@ -2596,10 +2816,15 @@ async function applyChanges() {
     }
   }
   const startedAt = Date.now();
+  // Concurrent batches get at least the dedicated 30-minute floor while
+  // preserving an unlimited setting (0) and any larger configured timeout;
+  // non-concurrent batches keep the configured timeout unchanged.
+  const configuredTimeoutSecs = queryTimeoutSecsForConnection(connection, settingsStore.editorSettings.globalQueryTimeoutSecs);
+  const executionTimeoutSecs = queryTimeoutSecsForConcurrentIndex(configuredTimeoutSecs, hasConcurrentIndexBuild);
   try {
     const result = hasSqliteTypeChange.value
       ? await api.applySqliteTableStructureChange(props.connectionId, props.database, structureChangeOptions(), sqliteSchemaRevision.value!)
-      : await api.executeBatch(props.connectionId, props.database, pendingStatements.value, props.schema, queryTimeoutSecsForConnection(connection, settingsStore.editorSettings.globalQueryTimeoutSecs));
+      : await api.executeBatch(props.connectionId, props.database, pendingStatements.value, props.schema, executionTimeoutSecs);
     await recordStructureHistory(sql, startedAt, true, result);
     if (!isCreateMode.value && props.tableName) {
       invalidateTableMetadataCache({ connectionId: props.connectionId, database: props.database, schema: metadataSchema.value, tableName: props.tableName });
@@ -2629,7 +2854,11 @@ async function applyChanges() {
     }
     return true;
   } catch (e: any) {
-    errorMessage.value = e?.message || String(e);
+    const rawMessage = e?.message || String(e);
+    // A cancelled/errored concurrent build leaves a same-name INVALID index
+    // behind; surface that so retries are not silently doomed.
+    const invalidIndexHint = hasConcurrentIndexBuild && /already exists/i.test(rawMessage) ? `\n\n${t("structureEditor.invalidIndexRetryHint")}` : "";
+    errorMessage.value = `${rawMessage}${invalidIndexHint}`;
     await recordStructureHistory(sql, startedAt, false, undefined, errorMessage.value);
     return false;
   } finally {
@@ -2814,6 +3043,14 @@ function applyInitialStructureTarget() {
 
 watch(tableMetadataCapabilities, (capabilities) => {
   if (!localIsStructureMetadataTabSupported(activeTab.value, capabilities)) activeTab.value = localFirstStructureMetadataTab(capabilities);
+});
+
+watch(structureCapabilities, () => {
+  // Capability loss (e.g. PostgreSQL < 11 without concurrent index support)
+  // invalidates any selected Concurrent flag the same way a probe failure
+  // does; the normalization is idempotent and no-ops while availability stays
+  // enabled.
+  normalizeConcurrentIndexDraftsForCurrentAvailability();
 });
 
 watch([() => props.initialTab, () => props.initialTabRequestId, () => props.initialTarget], () => {
@@ -3100,7 +3337,7 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                   <td :class="structureCellClass">
                     <SearchableSelect
                       v-if="!isColumnTypeDisabled(column)"
-                      :model-value="splitDataType(column.dataType).baseType"
+                      :model-value="dataTypeBaseInputValue(databaseType, column.dataType)"
                       :options="dataTypeOptions"
                       :placeholder="t('structureEditor.typePlaceholder')"
                       :search-placeholder="t('structureEditor.typePlaceholder')"
@@ -3112,7 +3349,7 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                       :trigger-class="[structureMonoControlClass, 'w-full']"
                       @update:model-value="(v: string) => updateColumnDataType(column, v)"
                     />
-                    <Input v-else :model-value="gaussdbMDataTypeDisplayName(splitDataType(column.dataType).baseType)" :class="[structureMonoControlClass, 'w-full']" disabled />
+                    <Input v-else :model-value="gaussdbMDataTypeDisplayName(dataTypeBaseInputValue(databaseType, column.dataType))" :class="[structureMonoControlClass, 'w-full']" disabled />
                   </td>
                   <td v-if="columnEditorControls.length" :class="structureCellClass">
                     <Popover v-if="isMysqlEnumDataType(databaseType, column.dataType)">
@@ -3522,6 +3759,13 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                   </td>
                   <td :class="structureCellClass">
                     <Input v-model="index.comment" :class="[structureControlClass, indexSearchFieldClass(index, index.comment)]" :disabled="!canEditIndexComment(index)" />
+                  </td>
+                  <td :class="structureCellClass">
+                    <label v-if="structureCapabilities.indexConcurrent" class="flex items-center gap-1.5" :title="concurrentIndexCellTitle(index)">
+                      <input v-model="index.concurrently" type="checkbox" :class="structureCheckboxClass" :disabled="!canEditIndexConcurrent(index)" />
+                      <span>{{ index.concurrently ? t("structureEditor.yes") : t("structureEditor.no") }}</span>
+                    </label>
+                    <span v-else class="text-[length:var(--structure-font-size)] text-muted-foreground">—</span>
                   </td>
                   <td :class="structureLastCellClass">
                     <Badge v-if="index.isPrimary" variant="outline">{{ t("structureEditor.primary") }}</Badge>

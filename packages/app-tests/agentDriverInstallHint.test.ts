@@ -100,6 +100,13 @@ test("uses unified Oracle and selected profile keys for update hints", () => {
   );
 });
 
+test("uses one H2 agent for every H2 profile", () => {
+  for (const profile of ["h2", "h2-v1", "h2-v2", "h2-v3", "h2-custom", "h2-legacy"]) {
+    assert.equal(agentDriverInstallKey("h2", profile), "h2");
+    assert.equal(showAgentDriverInstallHint("h2", [{ db_type: "h2", installed: true }], profile), false);
+  }
+});
+
 test("appends agent driver update hints once", () => {
   const hint = "Driver update available.";
   assert.equal(appendAgentDriverUpdateHint("Original error", hint), "Original error\n\nDriver update available.");

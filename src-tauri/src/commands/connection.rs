@@ -29,10 +29,24 @@ fn gaussdb_m_jdbc_command_config(config: &ConnectionConfig, host: &str, port: u1
     gaussdb_uses_m_jdbc_driver(config).then(|| gaussdb_m_jdbc_config_for_endpoint(config, host, port))
 }
 
-fn mongo_legacy_connect_params(config: &ConnectionConfig, host: &str, port: u16) -> serde_json::Value {
-    serde_json::json!({
-        "connection": agent_connect_params(config, host, port, config.effective_database().unwrap_or(""))
-    })
+fn jdbc_command_config_for_endpoint(
+    config: &ConnectionConfig,
+    host: &str,
+    port: u16,
+) -> Result<ConnectionConfig, String> {
+    let mut jdbc_config = config.clone();
+    if host != config.host || port != config.port {
+        if let Some(ref url) = jdbc_config.connection_string {
+            jdbc_config.connection_string = Some(rewrite_jdbc_url_host(url, host, port)?);
+        }
+    }
+    Ok(jdbc_config)
+}
+
+fn mongo_legacy_connect_params(config: &ConnectionConfig, host: &str, port: u16) -> Result<serde_json::Value, String> {
+    Ok(serde_json::json!({
+        "connection": agent_connect_params(config, host, port, config.effective_database().unwrap_or(""))?
+    }))
 }
 
 fn mongo_legacy_fallback_error(native_error: &str, stage: &str, fallback_error: &str) -> String {
@@ -96,7 +110,7 @@ async fn test_agent_connection(
     host: &str,
     port: u16,
 ) -> Result<ConnectionTestResult, String> {
-    let connect_params = agent_connect_params(config, host, port, config.database.as_deref().unwrap_or(""));
+    let connect_params = agent_connect_params(config, host, port, config.database.as_deref().unwrap_or(""))?;
     let result = state
         .agent_manager
         .call_daemon_method_with_timeout::<serde_json::Value>(
@@ -123,7 +137,7 @@ async fn test_agent_connection(
                             host,
                             port,
                             alternate_config.database.as_deref().unwrap_or(""),
-                        ),
+                        )?,
                         Some(agent_connect_timeout(&alternate_config)),
                     )
                     .await
@@ -159,7 +173,7 @@ async fn connect_agent_pool(
     host: &str,
     port: u16,
 ) -> Result<PoolKind, String> {
-    let connect_params = agent_connect_params(config, host, port, config.effective_database().unwrap_or(""));
+    let connect_params = agent_connect_params(config, host, port, config.effective_database().unwrap_or(""))?;
     let mut client = state.agent_manager.spawn(&config.db_type, config.driver_profile.as_deref()).await?;
     let connect_result = client
         .call_method_with_timeout::<serde_json::Value>(
@@ -179,7 +193,7 @@ async fn connect_agent_pool(
                         host,
                         port,
                         alternate_config.effective_database().unwrap_or(""),
-                    ),
+                    )?,
                     Some(agent_connect_timeout(&alternate_config)),
                 )
                 .await
@@ -199,9 +213,10 @@ mod tests {
     #[cfg(feature = "mq-admin")]
     use super::load_connection_configs;
     use super::{
-        connect_sqlite_from_config, gaussdb_m_jdbc_command_config, mark_mongo_legacy_driver,
-        mongo_legacy_connect_params, mongo_legacy_fallback_error, persist_mongo_legacy_driver_profile,
-        save_connection_configs, sync_connection_configs, MONGO_LEGACY_DRIVER_LABEL, MONGO_LEGACY_DRIVER_PROFILE,
+        connect_sqlite_from_config, gaussdb_m_jdbc_command_config, jdbc_command_config_for_endpoint,
+        mark_mongo_legacy_driver, mongo_legacy_connect_params, mongo_legacy_fallback_error,
+        persist_mongo_legacy_driver_profile, save_connection_configs, sync_connection_configs,
+        MONGO_LEGACY_DRIVER_LABEL, MONGO_LEGACY_DRIVER_PROFILE,
     };
     use dbx_core::connection::{AppState, PoolKind};
     use dbx_core::models::connection::{AttachedDatabaseConfig, ConnectionConfig, DatabaseType};
@@ -418,10 +433,41 @@ mod tests {
     }
 
     #[test]
+    fn jdbc_command_config_rewrites_url_for_transport_endpoint() {
+        let mut config = mongodb_config();
+        config.db_type = DatabaseType::Jdbc;
+        config.host = "db.example.test".to_string();
+        config.port = 3306;
+        config.connection_string = Some("jdbc:mysql://db.example.test:3306".to_string());
+
+        let tunneled = jdbc_command_config_for_endpoint(&config, "127.0.0.1", 45678).unwrap();
+        assert_eq!(tunneled.connection_string.as_deref(), Some("jdbc:mysql://127.0.0.1:45678"));
+
+        let direct = jdbc_command_config_for_endpoint(&config, &config.host, config.port).unwrap();
+        assert_eq!(direct.connection_string, config.connection_string);
+    }
+
+    #[test]
+    fn jdbc_command_config_rejects_named_instance_url_for_transport_endpoint() {
+        let mut config = mongodb_config();
+        config.db_type = DatabaseType::Jdbc;
+        config.host = "db.example.test".to_string();
+        config.port = 1433;
+        config.connection_string =
+            Some(r"jdbc:sqlserver://db.example.test\SQLEXPRESS:1433;databaseName=app".to_string());
+
+        let err = jdbc_command_config_for_endpoint(&config, "127.0.0.1", 45678).unwrap_err();
+        assert!(err.to_lowercase().contains("named instance"), "{err}");
+
+        let direct = jdbc_command_config_for_endpoint(&config, &config.host, config.port).unwrap();
+        assert_eq!(direct.connection_string, config.connection_string);
+    }
+
+    #[test]
     fn mongo_legacy_connect_params_preserve_auth_options() {
         let config = mongodb_config();
 
-        let params = mongo_legacy_connect_params(&config, "172.22.4.42", 27017);
+        let params = mongo_legacy_connect_params(&config, "172.22.4.42", 27017).unwrap();
 
         assert_eq!(params["connection"]["database"], "RestCloud_V45PUB_Gateway");
         assert_eq!(params["connection"]["url_params"], "authSource=admin&authMechanism=SCRAM-SHA-1");
@@ -939,6 +985,7 @@ async fn test_connection_with_info_inner(
     state: &Arc<AppState>,
     config: ConnectionConfig,
 ) -> Result<ConnectionTestResult, String> {
+    let config = if config.uses_mongodb_oidc() { config.canonicalized() } else { config };
     let tunnel_id = format!("{}:test", config.id);
     let has_transport_layers = config.has_effective_transport_layers();
     let connection_id = if has_transport_layers { tunnel_id.as_str() } else { config.id.as_str() };
@@ -1067,21 +1114,34 @@ async fn test_connection_with_info_inner(
             #[cfg(not(feature = "duckdb-sidecar"))]
             DatabaseType::DuckDb => Err("DuckDB support is not compiled in this build".to_string()),
             DatabaseType::MongoDb => {
-                if mongo_uses_legacy_driver(&config) {
+                let uses_oidc = db::mongo_driver::mongo_uri_uses_oidc(&url);
+                if mongo_uses_legacy_driver(&config) && !uses_oidc {
                     let am = &state.agent_manager;
                     let mut client = am.spawn(&config.db_type, config.driver_profile.as_deref()).await?;
                     client
-                        .connect(mongo_legacy_connect_params(&config, &host, port))
+                        .connect(mongo_legacy_connect_params(&config, &host, port)?)
                         .await
                         .map_err(|err| mongo_legacy_error_with_auth_hint(&err))?;
                     client.disconnect().await.ok();
                     return Ok(ConnectionTestResult::success("Connection successful (via legacy driver)"));
                 }
 
-                let native_err = match db::mongo_driver::connect(&url, connect_timeout, idle_timeout).await {
+                let native_err = match db::mongo_driver::connect_with_oidc(
+                    &url,
+                    connect_timeout,
+                    idle_timeout,
+                    state.mongo_oidc_browser_opener(),
+                )
+                .await
+                {
                     Ok(client) => {
-                        match db::mongo_driver::test_connection(&client, connect_timeout, config.effective_database())
-                            .await
+                        match db::mongo_driver::test_connection_for_url(
+                            &client,
+                            &url,
+                            connect_timeout,
+                            config.effective_database(),
+                        )
+                        .await
                         {
                             Ok(()) => return Ok(ConnectionTestResult::success("Connection successful")),
                             Err(e) => e,
@@ -1089,10 +1149,10 @@ async fn test_connection_with_info_inner(
                     }
                     Err(e) => e,
                 };
-                if should_retry_mongo_with_legacy_driver(&native_err) {
+                if !uses_oidc && should_retry_mongo_with_legacy_driver(&native_err) {
                     let mut client =
                         spawn_mongo_legacy_fallback_agent(state.as_ref(), &config.db_type, &native_err).await?;
-                    client.connect(mongo_legacy_connect_params(&config, &host, port)).await.map_err(|err| {
+                    client.connect(mongo_legacy_connect_params(&config, &host, port)?).await.map_err(|err| {
                         mongo_legacy_fallback_error(
                             &native_err,
                             "Fallback with MongoDB (Legacy) driver failed",
@@ -1326,7 +1386,7 @@ async fn test_connection_with_info_inner(
                 }
             }
             DatabaseType::PrestoSql => {
-                let jdbc_config = prestosql_jdbc_config_for_endpoint(&config, &host, port);
+                let jdbc_config = prestosql_jdbc_config_for_endpoint(&config, &host, port)?;
                 match state.test_external_driver_with_info("jdbc", &jdbc_config).await {
                     Ok(details) => {
                         database_info = details.database_info;
@@ -1336,12 +1396,7 @@ async fn test_connection_with_info_inner(
                 }
             }
             DatabaseType::Jdbc => {
-                let mut jdbc_config = config.clone();
-                if host != config.host || port != config.port {
-                    if let Some(ref url) = jdbc_config.connection_string {
-                        jdbc_config.connection_string = Some(rewrite_jdbc_url_host(url, &host, port));
-                    }
-                }
+                let jdbc_config = jdbc_command_config_for_endpoint(&config, &host, port)?;
                 match state.test_external_driver_with_info("jdbc", &jdbc_config).await {
                     Ok(details) => {
                         database_info = details.database_info;
@@ -1452,22 +1507,31 @@ pub async fn connect_db(
         #[cfg(not(feature = "duckdb-sidecar"))]
         DatabaseType::DuckDb => return Err("DuckDB support is not compiled in this build".to_string()),
         DatabaseType::MongoDb => {
-            if mongo_uses_legacy_driver(&db_config) {
+            let uses_oidc = db::mongo_driver::mongo_uri_uses_oidc(&url);
+            if mongo_uses_legacy_driver(&db_config) && !uses_oidc {
                 let mut client =
                     state.agent_manager.spawn(&db_config.db_type, Some(MONGO_LEGACY_DRIVER_PROFILE)).await?;
                 state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
                 client
-                    .connect(mongo_legacy_connect_params(&db_config, &host, port))
+                    .connect(mongo_legacy_connect_params(&db_config, &host, port)?)
                     .await
                     .map_err(|err| mongo_legacy_error_with_auth_hint(&err))?;
                 state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
                 PoolKind::agent(client)
             } else {
-                let native_err = match db::mongo_driver::connect(&url, connect_timeout, idle_timeout).await {
+                let native_err = match db::mongo_driver::connect_with_oidc(
+                    &url,
+                    connect_timeout,
+                    idle_timeout,
+                    state.mongo_oidc_browser_opener(),
+                )
+                .await
+                {
                     Ok(client) => {
                         state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
-                        match db::mongo_driver::test_connection(
+                        match db::mongo_driver::test_connection_for_url(
                             &client,
+                            &url,
                             connect_timeout,
                             db_config.effective_database(),
                         )
@@ -1501,13 +1565,13 @@ pub async fn connect_db(
                     }
                     Err(e) => e,
                 };
-                if should_retry_mongo_with_legacy_driver(&native_err) {
+                if !uses_oidc && should_retry_mongo_with_legacy_driver(&native_err) {
                     log::info!("Native MongoDB driver failed ({native_err}), falling back to agent driver");
                     let mut client =
                         spawn_mongo_legacy_fallback_agent(state.inner().as_ref(), &db_config.db_type, &native_err)
                             .await?;
                     state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
-                    client.connect(mongo_legacy_connect_params(&db_config, &host, port)).await.map_err(|err| {
+                    client.connect(mongo_legacy_connect_params(&db_config, &host, port)?).await.map_err(|err| {
                         mongo_legacy_fallback_error(
                             &native_err,
                             "Fallback with MongoDB (Legacy) driver failed",
@@ -1717,10 +1781,13 @@ pub async fn connect_db(
             connect_agent_pool(state.inner(), &db_config, &host, port).await?
         }
         DatabaseType::PrestoSql => {
-            let jdbc_config = prestosql_jdbc_config_for_endpoint(&db_config, &host, port);
+            let jdbc_config = prestosql_jdbc_config_for_endpoint(&db_config, &host, port)?;
             state.external_driver_pool("jdbc", &jdbc_config).await?
         }
-        DatabaseType::Jdbc => state.external_driver_pool("jdbc", &db_config).await?,
+        DatabaseType::Jdbc => {
+            let jdbc_config = jdbc_command_config_for_endpoint(&db_config, &host, port)?;
+            state.external_driver_pool("jdbc", &jdbc_config).await?
+        }
         #[cfg(feature = "mq-admin")]
         DatabaseType::Mqtt => {
             let mqtt_config = dbx_core::mqtt::types::MqttConnectionConfig::from_connection(&db_config)?;

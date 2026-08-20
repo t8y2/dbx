@@ -39,6 +39,7 @@ export function createDraftIndex(tableName: string, columns: string[], existingI
     indexType: "",
     includedColumns: [],
     comment: "",
+    concurrently: false,
     markedForDrop: false,
   };
 }

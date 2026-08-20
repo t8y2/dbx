@@ -19,6 +19,22 @@ describe("expandSqlVariables", () => {
     expect(expandSqlVariables(sql).sql).toBe("select * from t where created_at < '2026-07-04 00:00:00'");
   });
 
+  it("inlines a declared shell-style reference", () => {
+    const sql = ["@set postid = '224';", "select * from t where post_id = ${postid}"].join("\n");
+    expect(expandSqlVariables(sql).sql).toBe("select * from t where post_id = '224'");
+  });
+
+  it("uses declarations from the surrounding document for a selected statement", () => {
+    const selectedSql = "select * from t where post_id = ${postid}";
+    const declarationSql = ["@set postid = '224';", selectedSql].join("\n");
+    expect(expandSqlVariables(selectedSql, { declarationSql }).sql).toBe("select * from t where post_id = '224'");
+  });
+
+  it("leaves undeclared shell-style references for parameter prompting", () => {
+    const sql = ["@set postid = '224';", "select ${postid}, ${missing}"].join("\n");
+    expect(expandSqlVariables(sql).sql).toBe("select '224', ${missing}");
+  });
+
   it("expands the same variable in multiple places", () => {
     const sql = ["@set tenant = 42;", "select @tenant, count(*) from t where tenant_id = @tenant"].join("\n");
     expect(expandSqlVariables(sql).sql).toBe("select 42, count(*) from t where tenant_id = 42");

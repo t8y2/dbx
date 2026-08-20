@@ -99,7 +99,7 @@ pub fn analyze_sql_references(sql: &str, dialect: Option<&str>) -> Result<SqlRef
         sql.to_string()
     };
 
-    let statements = match normalized_dialect.as_str() {
+    let parsed_statements = match normalized_dialect.as_str() {
         "postgres" => Parser::parse_sql(&PostgreSqlDialect {}, &parser_sql),
         "mysql" => Parser::parse_sql(&MySqlDialect {}, &parser_sql),
         "sqlite" => Parser::parse_sql(&SQLiteDialect {}, &parser_sql),
@@ -107,8 +107,21 @@ pub fn analyze_sql_references(sql: &str, dialect: Option<&str>) -> Result<SqlRef
         "clickhouse" => Parser::parse_sql(&ClickHouseDialect {}, &parser_sql),
         "duckdb" => Parser::parse_sql(&DuckDbDialect {}, &parser_sql),
         _ => Parser::parse_sql(&GenericDialect {}, &parser_sql),
-    }
-    .map_err(|err| err.to_string())?;
+    };
+    let statements = match parsed_statements {
+        Ok(statements) => {
+            if normalized_dialect == "postgres" && postgres_create_procedure_is_missing_body(&parser_sql) {
+                return Err("Expected: procedure body after AS, found: EOF".to_string());
+            }
+            statements
+        }
+        Err(error)
+            if normalized_dialect == "postgres" && is_postgres_create_procedure_parser_gap(&parser_sql, &error) =>
+        {
+            return Ok(SqlReferenceAnalysis { tables: vec![], columns: vec![], scopes: vec![] });
+        }
+        Err(error) => return Err(error.to_string()),
+    };
 
     let mut analyzer = Analyzer { is_sqlserver: normalized_dialect == "sqlserver", ..Analyzer::default() };
     for statement in statements {
@@ -544,6 +557,189 @@ fn starts_with_duckdb_parser_gap_sql(sql: &str) -> bool {
 
 fn starts_with_postgres_parser_gap_sql(sql: &str) -> bool {
     POSTGRES_DEFAULT_PRIVILEGES_RE.is_match(sql)
+}
+
+struct PostgresCreateProcedureLayout {
+    tokens: Vec<TokenWithSpan>,
+    significant_indexes: Vec<usize>,
+    or_replace_indexes: Option<[usize; 2]>,
+    parameters_open_position: usize,
+    parameters_close_position: usize,
+}
+
+fn postgres_create_procedure_layout(sql: &str) -> Option<PostgresCreateProcedureLayout> {
+    let dialect = PostgreSqlDialect {};
+    let tokens = Tokenizer::new(&dialect, sql).tokenize_with_location().ok()?;
+    let significant_indexes: Vec<usize> = tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(index, token)| (!matches!(token.token, Token::Whitespace(_))).then_some(index))
+        .collect();
+    let mut position = 0;
+
+    if significant_indexes.get(position).and_then(|index| token_keyword(&tokens[*index])) != Some(Keyword::CREATE) {
+        return None;
+    }
+    position += 1;
+
+    let or_replace_indexes = if significant_indexes.get(position).and_then(|index| token_keyword(&tokens[*index]))
+        == Some(Keyword::OR)
+        && significant_indexes.get(position + 1).and_then(|index| token_keyword(&tokens[*index]))
+            == Some(Keyword::REPLACE)
+    {
+        let indexes = [significant_indexes[position], significant_indexes[position + 1]];
+        position += 2;
+        Some(indexes)
+    } else {
+        None
+    };
+
+    if significant_indexes.get(position).and_then(|index| token_keyword(&tokens[*index])) != Some(Keyword::PROCEDURE) {
+        return None;
+    }
+    position += 1;
+
+    if !matches!(tokens[significant_indexes.get(position).copied()?].token, Token::Word(_)) {
+        return None;
+    }
+    position += 1;
+    while matches!(significant_indexes.get(position).map(|index| &tokens[*index].token), Some(Token::Period)) {
+        position += 1;
+        if !matches!(tokens[significant_indexes.get(position).copied()?].token, Token::Word(_)) {
+            return None;
+        }
+        position += 1;
+    }
+
+    let parameters_open_index = significant_indexes.get(position).copied()?;
+    if !matches!(tokens[parameters_open_index].token, Token::LParen) {
+        return None;
+    }
+    let parameters_close_index = matching_parenthesis_index(&tokens, parameters_open_index)?;
+    let parameters_close_position = significant_indexes.iter().position(|index| *index == parameters_close_index)?;
+    if !postgres_procedure_parameters_are_nonempty(&tokens, &significant_indexes, position, parameters_close_position) {
+        return None;
+    }
+
+    Some(PostgresCreateProcedureLayout {
+        tokens,
+        significant_indexes,
+        or_replace_indexes,
+        parameters_open_position: position,
+        parameters_close_position,
+    })
+}
+
+fn postgres_procedure_parameters_are_nonempty(
+    tokens: &[TokenWithSpan],
+    significant_indexes: &[usize],
+    open_position: usize,
+    close_position: usize,
+) -> bool {
+    if close_position == open_position + 1 {
+        return true;
+    }
+
+    let mut depth = 1;
+    let mut parameter_has_tokens = false;
+    for index in significant_indexes.iter().take(close_position).skip(open_position + 1).copied() {
+        match tokens[index].token {
+            Token::LParen => {
+                depth += 1;
+                parameter_has_tokens = true;
+            }
+            Token::RParen => depth -= 1,
+            Token::Comma if depth == 1 => {
+                if !parameter_has_tokens {
+                    return false;
+                }
+                parameter_has_tokens = false;
+            }
+            _ if depth == 1 => parameter_has_tokens = true,
+            _ => {}
+        }
+    }
+    parameter_has_tokens
+}
+
+fn postgres_create_procedure_is_missing_body(sql: &str) -> bool {
+    let Some(layout) = postgres_create_procedure_layout(sql) else {
+        return false;
+    };
+    let mut tail = &layout.significant_indexes[layout.parameters_close_position + 1..];
+    while let Some(index) = tail.last() {
+        if matches!(layout.tokens[*index].token, Token::SemiColon) {
+            tail = &tail[..tail.len() - 1];
+        } else {
+            break;
+        }
+    }
+    tail.last().and_then(|index| token_keyword(&layout.tokens[*index])) == Some(Keyword::AS)
+}
+
+fn is_postgres_create_procedure_parser_gap(sql: &str, error: &ParserError) -> bool {
+    let Some(mut layout) = postgres_create_procedure_layout(sql) else {
+        return false;
+    };
+    let Some(body_position) =
+        (layout.parameters_close_position + 1..layout.significant_indexes.len()).find(|position| {
+            matches!(layout.tokens[layout.significant_indexes[*position]].token, Token::DollarQuotedString(_))
+        })
+    else {
+        return false;
+    };
+    let as_index = layout.significant_indexes[body_position - 1];
+    if token_keyword(&layout.tokens[as_index]) != Some(Keyword::AS) {
+        return false;
+    }
+    let trailing = &layout.significant_indexes[body_position + 1..];
+    if !(trailing.is_empty() || trailing.len() == 1 && matches!(layout.tokens[trailing[0]].token, Token::SemiColon)) {
+        return false;
+    }
+
+    let ParserError::ParserError(message) = error else {
+        return false;
+    };
+    let error_matches_gap = if layout.or_replace_indexes.is_some() {
+        message.starts_with(
+            "Expected: [EXTERNAL] TABLE or [MATERIALIZED] VIEW or FUNCTION after CREATE OR REPLACE, found: PROCEDURE at ",
+        )
+    } else {
+        message.starts_with(&format!(
+            "Expected: an SQL statement, found: {} at ",
+            layout.tokens[layout.significant_indexes[body_position]]
+        ))
+    };
+    if !error_matches_gap {
+        return false;
+    }
+
+    let mut depth = 1;
+    for position in layout.parameters_open_position + 1..layout.parameters_close_position {
+        let index = layout.significant_indexes[position];
+        match layout.tokens[index].token {
+            Token::LParen => depth += 1,
+            Token::RParen => depth -= 1,
+            _ if depth == 1 && token_keyword(&layout.tokens[index]) == Some(Keyword::DEFAULT) => {
+                layout.tokens[index].token = Token::Eq;
+            }
+            _ => {}
+        }
+    }
+
+    let dialect = PostgreSqlDialect {};
+    let body_index = layout.significant_indexes[body_position];
+    let replacement = match Tokenizer::new(&dialect, "BEGIN SELECT 1; END").tokenize_with_location() {
+        Ok(tokens) => tokens,
+        Err(_) => return false,
+    };
+    layout.tokens.splice(body_index..=body_index, replacement);
+    if let Some([or_index, replace_index]) = layout.or_replace_indexes {
+        layout.tokens.remove(replace_index);
+        layout.tokens.remove(or_index);
+    }
+
+    Parser::new(&dialect).with_tokens_with_locations(layout.tokens).parse_statements().is_ok()
 }
 
 fn normalize_clickhouse_join_order_for_parser(sql: &str) -> String {

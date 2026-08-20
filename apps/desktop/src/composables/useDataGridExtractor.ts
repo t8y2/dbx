@@ -100,9 +100,15 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     // harness and non-right-click paths leave it at -1.
     const hasRightClickContext = !!contextCell && options.contextSelectionIsSynthetic.value;
     // SQL predicates generated from the context menu must describe the cell the
-    // user right-clicked, even when an existing row or range selection remains
-    // active underneath that menu.
-    const contextPredicateCell = hasContextPredicateTarget(extractor) ? contextCell : null;
+    // user right-clicked, even when an existing row selection remains active
+    // underneath that menu. But when the right-click lands inside an existing
+    // *multi-cell* selection (matrix has more than one row/column and the
+    // selection wasn't just synthesized by this right-click), the predicate
+    // must cover the whole selection, not collapse to the single cell the
+    // mouse happened to land on — otherwise copying a 2+ cell selection as
+    // SQL SELECT/WHERE silently drops every cell but the last one clicked.
+    const contextCellIsInsideMultiCellSelection = isMultiCellSelection && !options.contextSelectionIsSynthetic.value;
+    const contextPredicateCell = hasContextPredicateTarget(extractor) && !contextCellIsInsideMultiCellSelection ? contextCell : null;
     // When the user already has a single-cell selection and right-clicks the same
     // cell, contextSelectionIsSynthetic is false but we still have a valid context
     // cell. For INSERT/UPDATE extractors, we include all visible non-PK columns
@@ -269,19 +275,28 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
         // The context-menu target is validated by buildRequest below.
       } else if (options.hasRowSelection.value) {
         if (options.selectedRowIds.value.size !== 1) return false;
-      } else if (matrix) {
-        if (matrix.rowIndexes.length !== 1 || matrix.columnIndexes.length !== 1) return false;
-      } else if (!options.contextCell.value || !options.contextSelectionIsSynthetic.value) {
+      } else if (!matrix && (!options.contextCell.value || !options.contextSelectionIsSynthetic.value)) {
         return false;
       }
       const request = buildRequest(extractor, extractorOptions);
-      if (!request?.tableMeta?.tableName.trim() || request.rows.length !== 1) return false;
+      // A genuine multi-cell selection is allowed to span multiple rows/columns
+      // (same-row columns AND together, same-column rows OR together — see
+      // write_sql_select), but row-checkbox selection still targets exactly one
+      // row: there's no well-defined single predicate for multiple whole rows.
+      if (!request?.tableMeta?.tableName.trim() || request.rows.length === 0) return false;
       if (request.selectionKind === "columns") return false;
-      if (request.selectionKind === "cells" && request.selectedColumnIndexes.length !== 1) return false;
+      if (request.selectionKind === "rows" && request.rows.length !== 1) return false;
+      if (request.selectionKind === "cells" && request.selectedColumnIndexes.length === 0) return false;
       return request.columns.length > 0 && request.columns.every((column) => !!(column.sourceName ?? column.displayName)?.trim());
     }
     if (extractor === "where-clause" && contextPredicateTarget) {
-      return buildRequest(extractor, extractorOptions) !== null;
+      // A whole-column selection (selected via the column header) fills the
+      // matrix with every loaded row, which is a different affordance from a
+      // genuine multi-cell range selection. Right-clicking inside it must not
+      // silently OR a predicate across every loaded row — sql-select already
+      // guards this via the "columns" selectionKind check above.
+      const request = buildRequest(extractor, extractorOptions);
+      return request !== null && request.selectionKind !== "columns";
     }
     if (extractor === "raw") {
       const request = buildRequest(extractor, extractorOptions);

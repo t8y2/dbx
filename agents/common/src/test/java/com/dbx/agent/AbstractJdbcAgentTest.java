@@ -16,6 +16,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.Map;
 import java.util.List;
+import java.util.Properties;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -25,6 +26,19 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class AbstractJdbcAgentTest {
+    @Test
+    void buildsStandardJdbcCredentialPropertiesByDefault() {
+        TestAgent agent = new TestAgent(new TrackingConnection());
+
+        Properties properties = agent.buildConnectionProperties(
+            new ConnectParams("localhost", 0, "demo", "user", "secret", "", "", false)
+        );
+
+        assertEquals("user", properties.getProperty("user"));
+        assertEquals("secret", properties.getProperty("password"));
+        assertEquals(2, properties.size());
+    }
+
     @Test
     void ownsConnectionLifecycleAndConnectedState() {
         TrackingConnection tracking = new TrackingConnection();

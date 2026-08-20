@@ -232,6 +232,130 @@ pub async fn document_save_meilisearch_batch(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn meilisearch_search_documents(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    index: String,
+    q: Option<String>,
+    filter: Option<String>,
+    sort: Option<String>,
+    limit: u64,
+    offset: u64,
+    hybrid_embedder: Option<String>,
+    hybrid_semantic_ratio: Option<f64>,
+    show_ranking_score: Option<bool>,
+    ranking_score_threshold: Option<f64>,
+) -> Result<dbx_core::db::meilisearch_driver::MeilisearchSearchResult, String> {
+    dbx_core::document_ops::meilisearch_search_documents_core(
+        &state,
+        &connection_id,
+        &index,
+        q.as_deref(),
+        filter.as_deref(),
+        sort.as_deref(),
+        limit,
+        offset,
+        hybrid_embedder.as_deref(),
+        hybrid_semantic_ratio,
+        show_ranking_score.unwrap_or(false),
+        ranking_score_threshold,
+    )
+    .await
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn meilisearch_fetch_documents(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    index: String,
+    filter: Option<String>,
+    sort: Option<String>,
+    limit: u64,
+    offset: u64,
+) -> Result<dbx_core::db::meilisearch_driver::MeilisearchDocumentPage, String> {
+    dbx_core::document_ops::meilisearch_fetch_document_page_core(
+        &state,
+        &connection_id,
+        &index,
+        filter.as_deref(),
+        sort.as_deref(),
+        limit,
+        offset,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn meilisearch_get_document(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    index: String,
+    id: String,
+) -> Result<String, String> {
+    dbx_core::document_ops::meilisearch_get_document_core(&state, &connection_id, &index, &id).await
+}
+
+#[tauri::command]
+pub async fn meilisearch_get_index_settings(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    index: String,
+) -> Result<serde_json::Value, String> {
+    dbx_core::document_ops::meilisearch_get_index_settings_core(&state, &connection_id, &index).await
+}
+
+#[tauri::command]
+pub async fn meilisearch_update_index_settings(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    index: String,
+    settings: serde_json::Value,
+) -> Result<(), String> {
+    ensure_connection_writable(&state, &connection_id, "Update settings").await?;
+    dbx_core::document_ops::meilisearch_update_index_settings_core(&state, &connection_id, &index, &settings).await
+}
+
+#[tauri::command]
+pub async fn meilisearch_get_index_stats(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    index: String,
+) -> Result<serde_json::Value, String> {
+    dbx_core::document_ops::meilisearch_get_index_stats_core(&state, &connection_id, &index).await
+}
+
+#[tauri::command]
+pub async fn meilisearch_get_index_overview(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    index: String,
+) -> Result<dbx_core::db::meilisearch_driver::MeilisearchIndexOverview, String> {
+    dbx_core::document_ops::meilisearch_get_index_overview_core(&state, &connection_id, &index).await
+}
+
+#[tauri::command]
+pub async fn meilisearch_delete_index(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    index: String,
+) -> Result<(), String> {
+    ensure_connection_writable(&state, &connection_id, "Delete index").await?;
+    dbx_core::document_ops::meilisearch_delete_index_core(&state, &connection_id, &index).await
+}
+
+#[tauri::command]
+pub async fn meilisearch_delete_all_documents(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    index: String,
+) -> Result<(), String> {
+    ensure_connection_writable(&state, &connection_id, "Delete all documents").await?;
+    dbx_core::document_ops::meilisearch_delete_all_documents_core(&state, &connection_id, &index).await
+}
+
+#[tauri::command]
 pub async fn document_list_gridfs_buckets(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

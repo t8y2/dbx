@@ -4,6 +4,40 @@ use super::indexes::has_existing_index_change;
 use super::types::{EditableStructureColumn, TableStructureSqlOptions};
 use super::util::clean;
 
+/// Hard errors for `CREATE INDEX CONCURRENTLY` requests the editor cannot
+/// honor safely. Unlike the advisory warnings in [`validate_draft`], these
+/// reject the whole save plan: the caller asked for a non-blocking build and
+/// the only way to honor that is the requested concurrent DDL, so falling back
+/// to blocking index DDL must never happen silently.
+///
+/// Only real PostgreSQL advertises `index_concurrent`, so stale/forged
+/// `concurrently` flags on other engines are ignored here (they cannot express
+/// a concurrent request in the first place).
+pub(super) fn validate_concurrent_index_scope(options: &TableStructureSqlOptions) -> Vec<String> {
+    let mut errors = Vec::new();
+    let capabilities = capabilities_for(options.database_type);
+    if !capabilities.index_concurrent || capabilities.dialect != StructureDialect::Postgres {
+        return errors;
+    }
+    for index in options.indexes.iter().filter(|index| !index.marked_for_drop) {
+        if !index.concurrently {
+            continue;
+        }
+        if index.original.is_some() {
+            errors.push(format!(
+                "CREATE INDEX CONCURRENTLY is only supported for newly created indexes. Editing an existing index \"{}\" with Concurrent enabled is not supported.",
+                index.name
+            ));
+        } else if options.partitioned {
+            errors.push(
+                "CREATE INDEX CONCURRENTLY is not supported on PostgreSQL partitioned parent tables. Create indexes concurrently on individual partitions and attach them separately."
+                    .to_string(),
+            );
+        }
+    }
+    errors
+}
+
 pub(super) fn validate_draft(options: &TableStructureSqlOptions) -> Vec<String> {
     let mut warnings = Vec::new();
     let active_columns: Vec<_> = options.columns.iter().filter(|column| !column.marked_for_drop).collect();

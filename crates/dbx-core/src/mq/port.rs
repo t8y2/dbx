@@ -156,6 +156,13 @@ pub trait MessageQueueAdmin: Send + Sync {
         self.list_subscriptions(topic).await
     }
 
+    /// Kafka-only cluster-wide consumer group snapshot. Other MQ systems keep
+    /// the default unsupported response instead of leaking Kafka concepts into
+    /// their existing subscription APIs.
+    async fn get_kafka_consumer_group_snapshot(&self) -> Result<KafkaConsumerGroupSnapshot, String> {
+        Err("Kafka consumer group snapshots are not supported by this MQ system".to_string())
+    }
+
     async fn create_subscription(&self, topic: &TopicRef, sub: &str, pos: ResetPosition) -> Result<(), String>;
     async fn delete_subscription(&self, topic: &TopicRef, sub: &str, force: bool) -> Result<(), String>;
     async fn skip_messages(&self, topic: &TopicRef, sub: &str, count: SkipCount) -> Result<(), String>;

@@ -34,6 +34,37 @@ fn quotes_identifiers_by_database_type() {
     assert_eq!(quote_table_identifier(Some(DatabaseType::Jdbc), "users_1"), "users_1");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Jdbc), "user name"), "user name");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Iotdb), "root.test.device2"), "root.test.device2");
+    assert_eq!(quote_table_identifier(Some(DatabaseType::Spanner), "user`name"), "`user``name`");
+}
+
+/// Spanner databases are created in one of two immutable dialects. The connected
+/// agent reports the correct identifier quote; when it is missing the static mapping
+/// must fall back to GoogleSQL (backticks), because GoogleSQL treats double quotes as
+/// string literals and would reject `SELECT * FROM "users"`.
+#[test]
+fn quotes_spanner_identifiers_by_connection_dialect() {
+    // GoogleSQL dialect: agent reports a backtick.
+    assert_eq!(quote_table_data_identifier(Some(DatabaseType::Spanner), "order", Some("`")), "`order`");
+    assert_eq!(quote_table_data_identifier(Some(DatabaseType::Spanner), "user`name", Some("`")), "`user``name`");
+
+    // PostgreSQL dialect: agent reports a double quote.
+    assert_eq!(quote_table_data_identifier(Some(DatabaseType::Spanner), "order", Some("\"")), "\"order\"");
+    assert_eq!(quote_table_data_identifier(Some(DatabaseType::Spanner), "user\"name", Some("\"")), "\"user\"\"name\"");
+
+    // No quote reported (metadata probe failed / caller outside the desktop store):
+    // fall back to the GoogleSQL default rather than the ANSI double quote.
+    assert_eq!(quote_table_data_identifier(Some(DatabaseType::Spanner), "order", None), "`order`");
+
+    // GoogleSQL's default schema is the empty string and must not produce `` ``.`t` ``,
+    // which Spanner rejects with `Invalid empty identifier`.
+    assert_eq!(
+        table_data_qualified_table_name(Some(DatabaseType::Spanner), Some(""), "singers", Some("`")),
+        "`singers`"
+    );
+    assert_eq!(
+        table_data_qualified_table_name(Some(DatabaseType::Spanner), Some("public"), "singers", Some("\"")),
+        "\"public\".\"singers\""
+    );
 }
 
 #[test]
@@ -82,6 +113,11 @@ fn qualifies_schema_only_for_schema_aware_databases() {
     assert_eq!(qualified_table_name(Some(DatabaseType::Informix), Some("xtdpcky"), "users"), "xtdpcky.users");
     assert_eq!(qualified_table_name(Some(DatabaseType::Sqlite), Some("analytics"), "users"), "\"analytics\".\"users\"");
     assert_eq!(qualified_table_name(Some(DatabaseType::Jdbc), Some("cbsdw_dwd"), "dwd_test_df"), "dwd_test_df");
+    // GoogleSQL's default schema is the empty string: the qualifier (and its dot) must be
+    // dropped entirely, otherwise Spanner reports `Invalid empty identifier`.
+    assert_eq!(qualified_table_name(Some(DatabaseType::Spanner), Some(""), "users"), "`users`");
+    assert_eq!(qualified_table_name(Some(DatabaseType::Spanner), None, "users"), "`users`");
+    assert_eq!(qualified_table_name(Some(DatabaseType::Spanner), Some("public"), "users"), "`public`.`users`");
     assert_eq!(qualified_table_name(Some(DatabaseType::Iotdb), Some("root.test"), "device2"), "root.test.device2");
     assert_eq!(
         qualified_table_name(Some(DatabaseType::Iotdb), Some("root.test"), "root.test.device2"),
@@ -127,6 +163,8 @@ fn maps_table_pagination_strategy_by_database_type() {
         TablePaginationStrategy::Unbounded
     );
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Jdbc)), TablePaginationStrategy::AgentMaxRows);
+    // Both Spanner dialects support `LIMIT n OFFSET m`; pin the fallback.
+    assert_eq!(table_pagination_strategy(Some(DatabaseType::Spanner)), TablePaginationStrategy::LimitOffset);
     assert_eq!(table_pagination_strategy(None), TablePaginationStrategy::LimitOffset);
 }
 
@@ -291,6 +329,53 @@ fn builds_select_sql_with_limit_syntax_for_database_type() {
         }),
         "SELECT * FROM root.test.device2 LIMIT 100;"
     );
+}
+
+#[test]
+fn jdbc_tdengine_table_preview_qualifies_selected_database() {
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Jdbc),
+            driver_profile: Some(" TDENGINE ".to_string()),
+            schema: None,
+            database: Some("bopu_light".to_string()),
+            table_name: "mppd_pwr_862288087612675".to_string(),
+            limit: Some(100),
+            ..Default::default()
+        }),
+        "SELECT * FROM `bopu_light`.`mppd_pwr_862288087612675`;"
+    );
+
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Jdbc),
+            driver_profile: Some("tdengine".to_string()),
+            schema: Some("fallback_db".to_string()),
+            database: Some("   ".to_string()),
+            table_name: "meter`readings".to_string(),
+            limit: Some(100),
+            ..Default::default()
+        }),
+        "SELECT * FROM `fallback_db`.`meter``readings`;"
+    );
+}
+
+#[test]
+fn jdbc_non_tdengine_and_unscoped_tdengine_previews_remain_unqualified() {
+    for (driver_profile, database) in [(Some("postgres"), Some("analytics")), (Some("tdengine"), None)] {
+        assert_eq!(
+            build_table_data_select_sql(TableDataSelectSqlOptions {
+                database_type: Some(DatabaseType::Jdbc),
+                driver_profile: driver_profile.map(str::to_string),
+                schema: None,
+                database: database.map(str::to_string),
+                table_name: "readings".to_string(),
+                limit: Some(100),
+                ..Default::default()
+            }),
+            "SELECT * FROM readings;"
+        );
+    }
 }
 
 #[test]
@@ -705,11 +790,12 @@ fn builds_mysql_table_data_large_value_previews_without_truncating_keys() {
     });
 
     assert!(sql.starts_with("SELECT `id`, LEFT(`payload`, 4097) AS `payload`"));
-    assert!(sql.contains("CONCAT('T:4096:', OCTET_LENGTH(`payload`)) AS `__DBX_LARGE_VALUE_BYTES_T_1`"));
+    assert!(sql.contains("CONCAT('T:4096:', LENGTH(`payload`)) AS `__DBX_LARGE_VALUE_BYTES_T_1`"));
     assert!(sql.contains("LEFT(`raw_value`, 4097) AS `raw_value`"));
-    assert!(sql.contains("CONCAT('B:4096:', OCTET_LENGTH(`raw_value`)) AS `__DBX_LARGE_VALUE_BYTES_B_2`"));
+    assert!(sql.contains("CONCAT('B:4096:', LENGTH(`raw_value`)) AS `__DBX_LARGE_VALUE_BYTES_B_2`"));
     assert!(sql.contains("LEFT(`metadata`, 4097) AS `metadata`"));
-    assert!(sql.contains("CONCAT('T:4096:', OCTET_LENGTH(`metadata`)) AS `__DBX_LARGE_VALUE_BYTES_J_3`"));
+    assert!(sql.contains("CONCAT('T:4096:', LENGTH(`metadata`)) AS `__DBX_LARGE_VALUE_BYTES_J_3`"));
+    assert!(!sql.contains("OCTET_LENGTH"));
     assert!(!sql.contains("__DBX_LARGE_VALUE_BYTES_0"));
 }
 
@@ -741,10 +827,10 @@ fn previews_mysql_bounded_string_columns_only_above_the_active_budget() {
     });
 
     assert!(sql.starts_with("SELECT `id`, `image_mime`, LEFT(`image_data`, 420) AS `image_data`"));
-    assert!(sql.contains("CONCAT('B:419:', OCTET_LENGTH(`image_data`)) AS `__DBX_LARGE_VALUE_BYTES_B_2`, LEFT(`image_url`, 420) AS `image_url`"));
-    assert!(sql.contains("CONCAT('T:419:', OCTET_LENGTH(`image_url`)) AS `__DBX_LARGE_VALUE_BYTES_T_3`"));
+    assert!(sql.contains("CONCAT('B:419:', LENGTH(`image_data`)) AS `__DBX_LARGE_VALUE_BYTES_B_2`, LEFT(`image_url`, 420) AS `image_url`"));
+    assert!(sql.contains("CONCAT('T:419:', LENGTH(`image_url`)) AS `__DBX_LARGE_VALUE_BYTES_T_3`"));
     assert!(sql.contains("LEFT(`large_note`, 420) AS `large_note`"));
-    assert!(sql.contains("CONCAT('T:419:', OCTET_LENGTH(`large_note`)) AS `__DBX_LARGE_VALUE_BYTES_T_4`"));
+    assert!(sql.contains("CONCAT('T:419:', LENGTH(`large_note`)) AS `__DBX_LARGE_VALUE_BYTES_T_4`"));
     assert!(sql.contains("LEFT(`large_binary`, 420) AS `large_binary`"));
     assert!(!sql.contains("LEFT(`image_mime`"));
 }

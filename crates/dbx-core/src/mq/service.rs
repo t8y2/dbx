@@ -399,6 +399,14 @@ pub async fn mq_enrich_subscriptions_core(
     adapter.enrich_subscriptions(&topic).await
 }
 
+pub async fn mq_get_kafka_consumer_group_snapshot_core(
+    state: &AppState,
+    conn_id: &str,
+) -> Result<KafkaConsumerGroupSnapshot, String> {
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.get_kafka_consumer_group_snapshot().await
+}
+
 pub async fn mq_create_subscription_core(
     state: &AppState,
     conn_id: &str,

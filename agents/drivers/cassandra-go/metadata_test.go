@@ -1,11 +1,36 @@
 package main
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 
 	gocql "github.com/apache/cassandra-gocql-driver/v2"
 )
+
+type triggerMetadataIterator struct {
+	rows []struct {
+		name    string
+		options map[string]string
+	}
+	index    int
+	closeErr error
+}
+
+func (i *triggerMetadataIterator) Scan(dest ...any) bool {
+	if i.index >= len(i.rows) {
+		return false
+	}
+	row := i.rows[i.index]
+	i.index++
+	*dest[0].(*string) = row.name
+	*dest[1].(*map[string]string) = row.options
+	return true
+}
+
+func (i *triggerMetadataIterator) Close() error {
+	return i.closeErr
+}
 
 func TestColumnsIndexesAndDDLFromMetadata(t *testing.T) {
 	textType := gocql.NewNativeType(4, gocql.TypeVarchar, "")
@@ -82,5 +107,55 @@ func TestTargetColumnsHandlesCollectionIndexes(t *testing.T) {
 func TestQuoteCQLIdentifierEscapesQuotes(t *testing.T) {
 	if got := quoteCQLIdentifier(`a"b`); got != `"a""b"` {
 		t.Fatalf("unexpected quoted identifier: %s", got)
+	}
+}
+
+func TestListTriggersQueriesExactTableAndMapsMetadata(t *testing.T) {
+	var statement string
+	var values []any
+	triggers, err := listTriggersWithQuery(func(query string, args ...any) metadataIterator {
+		statement = query
+		values = args
+		return &triggerMetadataIterator{rows: []struct {
+			name    string
+			options map[string]string
+		}{
+			{name: "capture_changes", options: map[string]string{"class": "example.CaptureDataTrigger"}},
+		}}
+	}, "dev", "example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if statement != cassandraListTriggersCQL {
+		t.Fatalf("unexpected trigger query: %s", statement)
+	}
+	if !reflect.DeepEqual(values, []any{"dev", "example"}) {
+		t.Fatalf("trigger filters = %#v", values)
+	}
+	want := []triggerInfo{{Name: "capture_changes", Event: "DML", Timing: "BEFORE"}}
+	if !reflect.DeepEqual(triggers, want) {
+		t.Fatalf("triggers = %#v, want %#v", triggers, want)
+	}
+}
+
+func TestListTriggersReturnsEmptySlice(t *testing.T) {
+	triggers, err := listTriggersWithQuery(func(string, ...any) metadataIterator {
+		return &triggerMetadataIterator{}
+	}, "dev", "empty_table")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if triggers == nil || len(triggers) != 0 {
+		t.Fatalf("triggers = %#v, want a non-nil empty slice", triggers)
+	}
+}
+
+func TestListTriggersReturnsQueryError(t *testing.T) {
+	wantErr := errors.New("trigger metadata unavailable")
+	triggers, err := listTriggersWithQuery(func(string, ...any) metadataIterator {
+		return &triggerMetadataIterator{closeErr: wantErr}
+	}, "dev", "example")
+	if !errors.Is(err, wantErr) || triggers != nil {
+		t.Fatalf("triggers = %#v, err = %v", triggers, err)
 	}
 }

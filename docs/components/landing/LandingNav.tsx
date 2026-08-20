@@ -94,8 +94,8 @@ export function LandingNav({ lang, active }: { lang: "en" | "cn"; active?: "home
   return (
     <nav ref={ref} className={`landing-nav${menuOpen ? " is-menu-open" : ""}`} aria-label={lang === "cn" ? "主导航" : "Primary navigation"}>
       <div className="landing-nav-inner flex items-center justify-between max-w-[1180px] h-16 mx-auto px-7 max-[760px]:min-h-[60px] max-[760px]:h-auto max-[760px]:px-[18px] max-[760px]:py-2">
-        <Link href={`/${lang}`} className="landing-nav-brand flex min-h-11 items-center gap-2.5 text-landing-ink text-2xl font-[820]" onClick={() => setMenuOpen(false)}>
-          <img src="/logo.png" alt="" aria-hidden="true" width={28} height={28} />
+        <Link href={`/${lang}`} prefetch={false} className="landing-nav-brand flex min-h-11 items-center gap-2.5 text-landing-ink text-2xl font-[820]" onClick={() => setMenuOpen(false)}>
+          <img src="/logo-64.png" alt="" aria-hidden="true" width={28} height={28} />
           <span>DBX</span>
         </Link>
         <div className="flex items-center gap-1">
@@ -103,6 +103,7 @@ export function LandingNav({ lang, active }: { lang: "en" | "cn"; active?: "home
             <Link
               key={item.id}
               href={item.href}
+              prefetch={false}
               aria-current={active === item.id ? "page" : undefined}
               className={`landing-nav-link inline-flex h-9 items-center rounded-[7px] px-[10px] text-[13px] font-medium max-[760px]:hidden ${item.tabletHidden ? "max-[900px]:hidden" : ""} ${active === item.id ? "text-landing-ink" : "text-landing-muted"}`}
             >
@@ -112,7 +113,7 @@ export function LandingNav({ lang, active }: { lang: "en" | "cn"; active?: "home
           <Link href="https://github.com/t8y2/dbx" target="_blank" rel="noopener noreferrer" aria-label="GitHub" title="GitHub" className="landing-nav-link inline-flex size-9 items-center justify-center rounded-[7px] text-landing-muted max-[760px]:hidden">
             <Github size={18} strokeWidth={2} />
           </Link>
-          <Link href={langHref} aria-label={t.langLabel} title={t.langLabel} className="landing-nav-link ml-1.5 inline-flex h-9 items-center justify-center rounded-[7px] border border-landing-line px-3 text-[12px] font-[650] tracking-tight text-landing-muted" onClick={() => setMenuOpen(false)}>
+          <Link href={langHref} prefetch={false} aria-label={t.langLabel} title={t.langLabel} className="landing-nav-link ml-1.5 inline-flex h-9 items-center justify-center rounded-[7px] border border-landing-line px-3 text-[12px] font-[650] tracking-tight text-landing-muted" onClick={() => setMenuOpen(false)}>
             文/A
           </Link>
           <button
@@ -134,6 +135,7 @@ export function LandingNav({ lang, active }: { lang: "en" | "cn"; active?: "home
             <Link
               key={item.id}
               href={item.href}
+              prefetch={false}
               aria-current={active === item.id ? "page" : undefined}
               className="landing-mobile-menu-link"
               onClick={() => setMenuOpen(false)}

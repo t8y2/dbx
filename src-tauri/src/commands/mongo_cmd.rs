@@ -87,6 +87,27 @@ pub async fn mongo_drop_collection(
 }
 
 #[tauri::command]
+pub async fn vector_drop_database(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+) -> Result<(), String> {
+    ensure_connection_writable(&state, &connection_id, "Drop database").await?;
+    dbx_core::schema::drop_vector_database_core(&state, &connection_id, &database).await
+}
+
+#[tauri::command]
+pub async fn vector_drop_collection(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    collection: String,
+) -> Result<(), String> {
+    ensure_connection_writable(&state, &connection_id, "Drop collection").await?;
+    dbx_core::schema::drop_vector_collection_core(&state, &connection_id, &database, &collection).await
+}
+
+#[tauri::command]
 pub async fn mongo_rename_collection(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

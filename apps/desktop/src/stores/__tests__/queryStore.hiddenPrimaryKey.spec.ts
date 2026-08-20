@@ -53,6 +53,8 @@ vi.mock("@/stores/connectionStore", () => ({
     getConfig: getConnectionConfig,
     lookupLocalCompletionTables,
     recordConnectionLostError: vi.fn(),
+    // 与真实 store 一致：setTableMeta 写入 tableMeta 时记录连接元数据代次
+    metadataGenerationFor: () => 0,
   }),
 }));
 
@@ -1282,6 +1284,59 @@ describe("queryStore hidden primary key editing", () => {
     const tab = store.tabs.find((item) => item.id === tabId)!;
     await vi.waitFor(() => expect(tab.resultTotalRowCount).toBe(123));
     expect(tab.resultTotalRowCountLoading).toBe(false);
+  });
+
+  it.each([
+    ["disabled by default", undefined, undefined],
+    ["explicitly enabled", { gaussdbCountQueryDop: 8 }, "/*+ set(query_dop 8) */"],
+  ])("keeps GaussDB count parallelism %s", async (_label, externalConfig, expectedCountHint) => {
+    editorSettings.autoCalculateTotalRows = true;
+    getConnectionConfig.mockReturnValue({
+      id: "gaussdb-1",
+      name: "GaussDB",
+      db_type: "gaussdb",
+      database: "app",
+      query_timeout_secs: 30,
+      external_config: externalConfig,
+    });
+    executeMulti.mockResolvedValue([
+      {
+        columns: ["id", "name"],
+        rows: Array.from({ length: 100 }, (_, index) => [index + 1, `user-${index + 1}`]),
+        affected_rows: 0,
+        execution_time_ms: 1,
+      },
+    ]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("gaussdb-1", "app", "users", "data", "public");
+    store.setTableMeta(tabId, {
+      schema: "public",
+      tableName: "users",
+      columns: [
+        { name: "id", data_type: "int", is_nullable: false, is_primary_key: true, column_default: null, extra: null },
+        { name: "name", data_type: "varchar", is_nullable: true, is_primary_key: false, column_default: null, extra: null },
+      ],
+      primaryKeys: ["id"],
+    });
+
+    await store.executeTabSql(tabId, "SELECT id, name FROM users LIMIT 100", {
+      pagination: { limit: 100, offset: 0 },
+    });
+
+    await vi.waitFor(() =>
+      expect(buildDataGridCountSql).toHaveBeenCalledWith({
+        databaseType: "gaussdb",
+        identifierQuote: undefined,
+        catalog: undefined,
+        database: undefined,
+        schema: "public",
+        tableName: "users",
+        whereInput: undefined,
+        countHint: expectedCountHint,
+      }),
+    );
   });
 
   it("stops appending when a SQL Server query has no bounded next-page plan", async () => {

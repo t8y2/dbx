@@ -8,6 +8,7 @@ use crate::ai_cli_agent::{
     model_infos, parse_cli_jsonl_event, run_cli_jsonl_agent, toml_string, toml_string_array, CliAgentCommandSpec,
     CliAgentJsonlDialect, CliAgentProcessSpec, CliAgentRunOptions,
 };
+use base64::Engine;
 use serde_json::{json, Value};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet};
@@ -523,6 +524,51 @@ pub fn build_codex_prompt(system_prompt: &str, messages: &[crate::ai::AiMessage]
     build_cli_agent_prompt("Codex", system_prompt, messages, allow_write_sql)
 }
 
+fn materialize_codex_images(
+    images: &[crate::ai::AiInlineImage],
+) -> Result<(Option<tempfile::TempDir>, Vec<PathBuf>), String> {
+    const MAX_CODEX_IMAGE_BASE64_CHARS: usize = 7 * 1024 * 1024;
+    if images.is_empty() {
+        return Ok((None, Vec::new()));
+    }
+
+    let directory = tempfile::Builder::new().prefix("dbx-ai-images-").tempdir().map_err(|error| {
+        format!("[codexImageAttachmentFailed] Could not create image attachment directory: {error}")
+    })?;
+    let mut paths = Vec::with_capacity(images.len());
+    for (index, image) in images.iter().enumerate() {
+        if image.data.is_empty() || image.data.len() > MAX_CODEX_IMAGE_BASE64_CHARS {
+            return Err("[codexImageAttachmentFailed] Image attachment exceeds the supported size limit".to_string());
+        }
+        let extension = match image.media_type.as_str() {
+            "image/png" => "png",
+            "image/jpeg" => "jpg",
+            "image/gif" => "gif",
+            "image/webp" => "webp",
+            _ => {
+                return Err(format!("[codexImageAttachmentFailed] Unsupported image media type: {}", image.media_type))
+            }
+        };
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&image.data)
+            .map_err(|error| format!("[codexImageAttachmentFailed] Could not decode image attachment: {error}"))?;
+        let path = directory.path().join(format!("attachment-{}.{}", index + 1, extension));
+        std::fs::write(&path, bytes)
+            .map_err(|error| format!("[codexImageAttachmentFailed] Could not write image attachment: {error}"))?;
+        paths.push(path);
+    }
+    Ok((Some(directory), paths))
+}
+
+fn attach_codex_images(command: &mut CodexCommandSpec, image_paths: &[PathBuf]) {
+    let prompt_index = command.args.iter().rposition(|arg| arg == "-").unwrap_or(command.args.len());
+    let args = image_paths
+        .iter()
+        .flat_map(|path| ["--image".to_string(), path.to_string_lossy().into_owned()])
+        .collect::<Vec<_>>();
+    command.args.splice(prompt_index..prompt_index, args);
+}
+
 pub async fn list_codex_models(config: &AiConfig) -> Result<Vec<AiModelInfo>, String> {
     validate_codex_program(config)?;
     let command = resolve_codex_command(config).await;
@@ -958,16 +1004,19 @@ pub fn parse_codex_jsonl_event(line: &str) -> Option<Vec<AgentEvent>> {
 pub async fn run_codex_agent(
     config: &AiConfig,
     prompt: &str,
+    images: &[crate::ai::AiInlineImage],
     options: CodexRunOptions,
     cancelled: &Notify,
     on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
 ) -> Result<String, String> {
     validate_codex_program(config)?;
+    let (_image_directory, image_paths) = materialize_codex_images(images)?;
     let effective_config = capability_aware_codex_config(config).await;
     let mut command = build_codex_exec_command(&effective_config, prompt, &options);
     let resolved_command = resolve_codex_command(config).await;
     command.program = resolved_command.program;
     command.args.splice(0..0, resolved_command.args);
+    attach_codex_images(&mut command, &image_paths);
     let env = codex_process_env(config, &command)?;
     run_cli_jsonl_agent(
         CliAgentProcessSpec {
@@ -992,11 +1041,11 @@ mod tests {
     #[cfg(not(windows))]
     use super::shell_quote;
     use super::{
-        build_codex_exec_command, classify_codex_spawn_error, codex_cli_env, codex_enabled_tools,
+        attach_codex_images, build_codex_exec_command, classify_codex_spawn_error, codex_cli_env, codex_enabled_tools,
         codex_model_cache_key, is_path_like_program, legacy_minimal_effort, list_codex_models_cached,
-        parse_codex_app_server_models, parse_codex_jsonl_event, parse_codex_models, validate_codex_program,
-        with_codex_model_discovery_timeout, CachedCodexModels, CodexModelCacheClass, CodexModelDiscovery,
-        CodexRunOptions, CODEX_MODEL_COMPATIBILITY_CACHE_TTL, CODEX_MODEL_COMPATIBILITY_TIMEOUT,
+        materialize_codex_images, parse_codex_app_server_models, parse_codex_jsonl_event, parse_codex_models,
+        validate_codex_program, with_codex_model_discovery_timeout, CachedCodexModels, CodexModelCacheClass,
+        CodexModelDiscovery, CodexRunOptions, CODEX_MODEL_COMPATIBILITY_CACHE_TTL, CODEX_MODEL_COMPATIBILITY_TIMEOUT,
         CODEX_MODEL_DISCOVERY_TIMEOUT, CODEX_MODEL_NEGATIVE_CACHE_TTL, CODEX_MODEL_SUCCESS_CACHE_TTL,
         DEFAULT_CODEX_MODELS,
     };
@@ -1009,8 +1058,8 @@ mod tests {
     };
     use crate::agent_events::AgentEvent;
     use crate::ai::{
-        AiApiStyle, AiAuthMethod, AiCapabilitySource, AiConfig, AiEffortCapability, AiEffortSelection, AiProvider,
-        AiReasoningLevel,
+        AiApiStyle, AiAuthMethod, AiCapabilitySource, AiConfig, AiEffortCapability, AiEffortSelection, AiInlineImage,
+        AiProvider, AiReasoningLevel,
     };
     use crate::ai_cli_agent::{model_infos, CliAgentCommandSpec};
     use serde_json::json;
@@ -1088,6 +1137,23 @@ mod tests {
         assert!(spec.args.contains(&"mcp_servers.dbx.env.DBX_MCP_ALLOW_DANGEROUS_SQL=\"0\"".to_string()));
         assert!(spec.args.contains(&"mcp_servers.dbx.env.DBX_MCP_SCOPE_CONNECTION_ID=\"conn-1\"".to_string()));
         assert!(spec.args.iter().any(|arg| arg.contains("dbx_execute_query")));
+    }
+
+    #[test]
+    fn codex_image_attachment_uses_image_argument_and_clean_prompt() {
+        let prompt = "inspect this";
+        let images = vec![AiInlineImage { media_type: "image/png".to_string(), data: "aGVsbG8=".to_string() }];
+        let (directory, paths) = materialize_codex_images(&images).unwrap();
+        let mut command = build_codex_exec_command(&codex_config("default"), prompt, &run_options());
+        attach_codex_images(&mut command, &paths);
+
+        assert_eq!(prompt, "inspect this");
+        assert!(directory.is_some());
+        assert_eq!(std::fs::read(&paths[0]).unwrap(), b"hello");
+        let image_arg = command.args.iter().position(|arg| arg == "--image").unwrap();
+        let prompt_arg = command.args.iter().position(|arg| arg == "-").unwrap();
+        assert_eq!(command.args[image_arg + 1], paths[0].to_string_lossy());
+        assert!(image_arg < prompt_arg);
     }
 
     #[test]

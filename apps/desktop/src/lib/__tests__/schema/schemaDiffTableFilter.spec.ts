@@ -44,4 +44,67 @@ describe("schemaDiffTableFilter", () => {
 
     expect(result.sourceTables.map((table) => table.name)).toEqual(["users", "monthly_users"]);
   });
+
+  // ---- Visual (explicit) table selection (#6533) ----
+  const all: TableInfo[] = [
+    { name: "users", table_type: "BASE TABLE" },
+    { name: "active_users", table_type: "BASE TABLE" },
+    { name: "orders", table_type: "BASE TABLE" },
+    { name: "orders_bak", table_type: "BASE TABLE" },
+  ];
+  const baseOptions = { ...DEFAULT_MYSQL_OPTIONS, tables: true, views: true };
+
+  it("keeps legacy behavior when no visual selection is set (undefined selection = no restriction)", () => {
+    const options = { ...baseOptions, tableIncludePattern: "^orders$", tableExcludePattern: "_bak$" };
+    const result = filterSchemaDiffTables(all, all, compileSchemaDiffTableFilter(options), options, undefined);
+    expect(result.sourceTables.map((t) => t.name)).toEqual(["orders"]);
+  });
+
+  it("restricts to the explicitly selected tables only", () => {
+    const result = filterSchemaDiffTables(all, all, compileSchemaDiffTableFilter(baseOptions), baseOptions, ["users", "orders"]);
+    expect(result.sourceTables.map((t) => t.name)).toEqual(["users", "orders"]);
+  });
+
+  it("intersects visual selection with the include regex", () => {
+    const options = { ...baseOptions, tableIncludePattern: "^users$" };
+    const result = filterSchemaDiffTables(all, all, compileSchemaDiffTableFilter(options), options, ["users", "orders"]);
+    expect(result.sourceTables.map((t) => t.name)).toEqual(["users"]);
+  });
+
+  it("intersects visual selection with the exclude regex", () => {
+    const options = { ...baseOptions, tableExcludePattern: "_bak$" };
+    const result = filterSchemaDiffTables(all, all, compileSchemaDiffTableFilter(options), options, ["orders", "orders_bak"]);
+    expect(result.sourceTables.map((t) => t.name)).toEqual(["orders"]);
+  });
+
+  it("treats an explicitly empty selection ([]) as selecting nothing, distinct from undefined", () => {
+    const result = filterSchemaDiffTables(all, all, compileSchemaDiffTableFilter(baseOptions), baseOptions, []);
+    expect(result.sourceTables).toEqual([]);
+  });
+
+  it("keeps selected source tables when same-name targets are missing", () => {
+    const sourceOnly: TableInfo[] = [
+      { name: "a", table_type: "BASE TABLE" },
+      { name: "b", table_type: "BASE TABLE" },
+      { name: "c", table_type: "BASE TABLE" },
+    ];
+    const targetPartly: TableInfo[] = [
+      { name: "a", table_type: "BASE TABLE" },
+      { name: "c", table_type: "BASE TABLE" },
+    ];
+    const result = filterSchemaDiffTables(sourceOnly, targetPartly, compileSchemaDiffTableFilter(baseOptions), baseOptions, ["a", "b", "c"]);
+    expect(result.sourceTables.map((t) => t.name)).toEqual(["a", "b", "c"]);
+    expect(result.targetTables.map((t) => t.name)).toEqual(["a", "c"]);
+  });
+
+  it("does not include unselected target tables that would otherwise look like drops", () => {
+    const source: TableInfo[] = [{ name: "a", table_type: "BASE TABLE" }];
+    const target: TableInfo[] = [
+      { name: "a", table_type: "BASE TABLE" },
+      { name: "b", table_type: "BASE TABLE" },
+    ];
+    const result = filterSchemaDiffTables(source, target, compileSchemaDiffTableFilter(baseOptions), baseOptions, ["a"]);
+    expect(result.sourceTables.map((t) => t.name)).toEqual(["a"]);
+    expect(result.targetTables.map((t) => t.name)).toEqual(["a"]);
+  });
 });

@@ -99,6 +99,14 @@ const STATE_COOKIE = "dbx_oauth_state";
 const SESSION_COOKIE = "dbx_contributor_session";
 const ISSUE_SESSION_COOKIE = "dbx_issue_session";
 const ISSUE_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+const IMMUTABLE_ASSET_CACHE_CONTROL = "public, max-age=31536000, immutable";
+const IMAGE_ASSET_CACHE_CONTROL = "public, max-age=86400, stale-while-revalidate=604800";
+
+export function staticAssetCacheControl(pathname: string): string | null {
+  if (pathname.startsWith("/_next/static/")) return IMMUTABLE_ASSET_CACHE_CONTROL;
+  if (/\.(?:avif|gif|ico|jpe?g|png|svg|webp)$/i.test(pathname)) return IMAGE_ASSET_CACHE_CONTROL;
+  return null;
+}
 
 function base64UrlEncode(bytes: Uint8Array): string {
   let binary = "";
@@ -623,6 +631,16 @@ export default {
     if (url.pathname === "/api/auth/me" && request.method === "GET") return currentUser(request, env);
     if (url.pathname === "/api/auth/logout" && request.method === "POST") return logout();
     if (url.pathname === "/api/contributor-avatar" && request.method === "GET") return contributorAvatar(request);
-    return env.ASSETS.fetch(request);
+    const response = await env.ASSETS.fetch(request);
+    const cacheControl = staticAssetCacheControl(url.pathname);
+    if (!cacheControl || response.status < 200 || response.status >= 400) return response;
+
+    const headers = new Headers(response.headers);
+    headers.set("Cache-Control", cacheControl);
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    });
   },
 };

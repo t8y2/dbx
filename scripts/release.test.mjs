@@ -7,6 +7,7 @@ import test from "node:test";
 
 const repoRoot = new URL("..", import.meta.url).pathname;
 const releaseScript = join(repoRoot, "scripts/release.mjs");
+const packagesWorkflow = join(repoRoot, ".github/workflows/mcp-release.yml");
 
 function runRelease(args, env = {}) {
   return spawnSync(process.execPath, [releaseScript, ...args], {
@@ -101,4 +102,12 @@ test("rollback rejects prerelease tag syntax", () => {
 
   assert.equal(result.status, 1);
   assert.match(result.stderr, /only supports stable vX\.Y\.Z app releases/);
+});
+
+test("launcher packages bypass filtered publishing for provenance", () => {
+  const workflow = readFileSync(packagesWorkflow, "utf8");
+
+  assert.match(workflow, /pnpm publish "\.\/packages\/cli" --access public --provenance --no-git-checks/);
+  assert.match(workflow, /pnpm publish "\.\/packages\/mcp-server" --access public --provenance --no-git-checks/);
+  assert.doesNotMatch(workflow, /pnpm --filter "@dbx-app\/(?:cli|mcp-server)" publish/);
 });

@@ -28,6 +28,7 @@ vi.mock("@/stores/connectionStore", () => ({
     getConfig: () => ({ id: "connection-1", db_type: mocks.databaseType }),
     ensureConnected: mocks.ensureConnected,
     connectionIdentifierQuote: () => undefined,
+    metadataGenerationFor: () => 0,
     refreshObjectListTreeNode: vi.fn(),
     invalidateCompletionTableCache: mocks.invalidateCompletionTableCache,
   }),

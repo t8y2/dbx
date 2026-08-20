@@ -78,6 +78,15 @@ pub struct RedisKeyRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RedisRenameKeyRequest {
+    pub connection_id: String,
+    pub db: u32,
+    pub key_raw: String,
+    pub new_key_raw: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RedisStreamEntriesRequest {
     pub connection_id: String,
     pub db: u32,
@@ -481,6 +490,23 @@ pub async fn delete_key(
     dbx_core::redis_ops::redis_delete_key_in_db_core(&state.app, &req.connection_id, req.db, &req.key_raw)
         .await
         .map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn rename_key(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<RedisRenameKeyRequest>,
+) -> Result<Json<()>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "RENAMENX").await?;
+    dbx_core::redis_ops::redis_rename_key_in_db_core(
+        &state.app,
+        &req.connection_id,
+        req.db,
+        &req.key_raw,
+        &req.new_key_raw,
+    )
+    .await
+    .map_err(AppError::from)?;
     Ok(Json(()))
 }
 

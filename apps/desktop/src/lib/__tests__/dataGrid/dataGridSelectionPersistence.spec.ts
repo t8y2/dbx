@@ -141,6 +141,19 @@ describe("data grid selection persistence", () => {
     expect(restore(columnSnapshot, { visibleColumnIndexes: [2, 0] })).toEqual({ kind: "columns", columnIndexes: [1, 0] });
   });
 
+  it("restores primary-key row and cell selections after an edited-row reload reorders results", () => {
+    const rowSnapshot = captureDataGridSelection(baseOptions({ selectedRowIds: new Set([1]), lastClickedRowIndex: 1 }))!;
+    const cellSnapshot = captureDataGridSelection(baseOptions({ selectionAnchor: { rowIndex: 1, colIndex: 2 }, selectionFocus: { rowIndex: 1, colIndex: 2 } }))!;
+    const refreshedRows = [
+      [3, 20, "Linus"],
+      [1, 10, "Ada"],
+      [2, 10, "Grace updated"],
+    ];
+
+    expect(restore(rowSnapshot, { rows: refreshedRows })).toEqual({ kind: "rows", rowIds: [2], anchorRowIndex: 2, scrollRowIndex: 2 });
+    expect(restore(cellSnapshot, { rows: refreshedRows })).toEqual({ kind: "range", anchor: { rowIndex: 2, colIndex: 2 }, focus: { rowIndex: 2, colIndex: 2 }, selectingAll: false, scrollRowIndex: 2 });
+  });
+
   it("keeps select-all semantics when the refreshed result gains rows", () => {
     const snapshot = captureDataGridSelection(baseOptions({ selectionAnchor: { rowIndex: 0, colIndex: 0 }, selectionFocus: { rowIndex: 2, colIndex: 2 }, selectingAll: true }))!;
 

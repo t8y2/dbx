@@ -27,6 +27,7 @@ import java.sql.Types;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 
 class OceanBaseOracleAgentTest {
     @Test
@@ -68,6 +69,36 @@ class OceanBaseOracleAgentTest {
             "jdbc:oceanbase://oceanbase.example.com:2881/sys?compatibleOjdbcVersion=6&useSSL=false",
             OceanBaseOracleAgent.buildUrl(params)
         );
+    }
+
+    @Test
+    void schemaListingReturnsEveryNonBlankUserWithoutHardSystemExclusions() {
+        List<String> sql = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, schemaConnection(sql, resultSet(
+            new String[]{"USERNAME"},
+            new Object[][]{
+                {"SYS"},
+                {null},
+                {"   "},
+                {"APEX_240100"},
+                {"APP$USER"},
+                {"REPORTING"}
+            }
+        )));
+
+        Assertions.assertEquals(
+            List.of("SYS", "APEX_240100", "APP$USER", "REPORTING"),
+            agent.listSchemas()
+        );
+        String schemaSql = sql.get(0).toUpperCase(Locale.ROOT);
+        Assertions.assertTrue(schemaSql.contains("FROM ALL_USERS"), schemaSql);
+        Assertions.assertTrue(schemaSql.contains("USERNAME IS NOT NULL"), schemaSql);
+        Assertions.assertFalse(schemaSql.contains("NOT IN"), schemaSql);
+        Assertions.assertFalse(schemaSql.contains("USERNAME NOT LIKE"), schemaSql);
+        Assertions.assertTrue(schemaSql.contains("CURRENT_SCHEMA') THEN 0"), schemaSql);
+        Assertions.assertTrue(schemaSql.contains("SESSION_USER') THEN 1"), schemaSql);
+        Assertions.assertTrue(schemaSql.endsWith("ELSE 2\nEND, USERNAME"), schemaSql);
     }
 
     @Test
@@ -434,6 +465,28 @@ class OceanBaseOracleAgentTest {
         return proxy(Connection.class, (method, args) -> {
             if ("prepareStatement".equals(method.getName())) {
                 sql.add(String.valueOf(args[0]));
+                return statement;
+            }
+            if ("isClosed".equals(method.getName())) {
+                return false;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static Connection schemaConnection(List<String> sql, ResultSet resultSet) {
+        Statement statement = proxy(Statement.class, (method, args) -> {
+            if ("executeQuery".equals(method.getName())) {
+                sql.add(String.valueOf(args[0]));
+                return resultSet;
+            }
+            if ("close".equals(method.getName())) {
+                return null;
+            }
+            return defaultValue(method.getReturnType());
+        });
+        return proxy(Connection.class, (method, args) -> {
+            if ("createStatement".equals(method.getName())) {
                 return statement;
             }
             if ("isClosed".equals(method.getName())) {

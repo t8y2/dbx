@@ -366,4 +366,140 @@ describe("queryStore multi-source result column comments", () => {
     expect(tab.queryDisplaySourceColumns).toBeUndefined();
     expect(tab.querySourceColumns).toEqual(["id", "amount"]);
   });
+
+  it("stores PostgreSQL keyless SELECT-star comments by result ordinal without changing editability", async () => {
+    getConnectionConfig.mockReturnValue({ id: "pg-1", name: "PostgreSQL", db_type: "postgres", database: "app", query_timeout_secs: 30 });
+    analyzeEditableQueryEditability.mockResolvedValue({
+      editable: true,
+      analysis: {
+        schema: "public",
+        tableName: "people",
+        selectStar: true,
+        columns: [],
+      },
+    });
+    getColumns.mockResolvedValue([column("name", "姓名"), column("email", "邮箱")]);
+    executeMulti.mockResolvedValue([
+      {
+        columns: ["name", "email"],
+        rows: [["Alice", "alice@example.com"]],
+        affected_rows: 0,
+        execution_time_ms: 1,
+      },
+    ]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "Query");
+
+    await store.executeTabSql(tabId, "SELECT * FROM public.people");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.resultColumnComments).toBeDefined());
+    expect(tab.resultColumnComments).toEqual(["姓名", "邮箱"]);
+    expect(tab.tableMeta?.primaryKeys).toEqual([]);
+    expect(tab.queryAnalysis).toBeDefined();
+    expect(tab.queryEditabilityReason).toBeUndefined();
+  });
+
+  it("does not add explicit result comments to an adjacent keyed PostgreSQL query", async () => {
+    getConnectionConfig.mockReturnValue({ id: "pg-1", name: "PostgreSQL", db_type: "postgres", database: "app", query_timeout_secs: 30 });
+    analyzeEditableQueryEditability.mockResolvedValue({
+      editable: true,
+      analysis: {
+        schema: "public",
+        tableName: "people",
+        selectStar: true,
+        columns: [],
+      },
+    });
+    getColumns.mockResolvedValue([column("id", "编号", true), column("name", "姓名")]);
+    executeMulti.mockResolvedValue([
+      {
+        columns: ["id", "name"],
+        rows: [[1, "Alice"]],
+        affected_rows: 0,
+        execution_time_ms: 1,
+      },
+    ]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "Query");
+
+    await store.executeTabSql(tabId, "SELECT * FROM public.people");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.tableMeta?.primaryKeys).toEqual(["id"]));
+    expect(tab.resultColumnComments).toBeUndefined();
+    expect(tab.queryAnalysis).toBeDefined();
+    expect(tab.queryEditabilityReason).toBeUndefined();
+  });
+
+  it("keeps keyless ordinal metadata empty when PostgreSQL columns have no comments", async () => {
+    getConnectionConfig.mockReturnValue({ id: "pg-1", name: "PostgreSQL", db_type: "postgres", database: "app", query_timeout_secs: 30 });
+    analyzeEditableQueryEditability.mockResolvedValue({
+      editable: true,
+      analysis: {
+        schema: "public",
+        tableName: "people",
+        selectStar: true,
+        columns: [],
+      },
+    });
+    getColumns.mockResolvedValue([column("name", null), column("email", null)]);
+    executeMulti.mockResolvedValue([
+      {
+        columns: ["name", "email"],
+        rows: [["Alice", "alice@example.com"]],
+        affected_rows: 0,
+        execution_time_ms: 1,
+      },
+    ]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "Query");
+
+    await store.executeTabSql(tabId, "SELECT * FROM public.people");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.resultColumnComments).toBeDefined());
+    expect(tab.resultColumnComments).toEqual([undefined, undefined]);
+  });
+
+  it("keeps unsupported keyless row predicates read-only while surfacing comments", async () => {
+    getConnectionConfig.mockReturnValue({ id: "trino-1", name: "Trino", db_type: "trino", database: "app", query_timeout_secs: 30 });
+    analyzeEditableQueryEditability.mockResolvedValue({
+      editable: true,
+      analysis: {
+        schema: "public",
+        tableName: "people",
+        selectStar: true,
+        columns: [],
+      },
+    });
+    getColumns.mockResolvedValue([column("name", "display name")]);
+    executeMulti.mockResolvedValue([
+      {
+        columns: ["name"],
+        rows: [["Alice"]],
+        affected_rows: 0,
+        execution_time_ms: 1,
+      },
+    ]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("trino-1", "app", "Query");
+
+    await store.executeTabSql(tabId, "SELECT * FROM public.people");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.resultColumnComments).toBeDefined());
+    expect(tab.resultColumnComments).toEqual(["display name"]);
+    expect(tab.queryAnalysis).toBeUndefined();
+    expect(tab.querySourceColumns).toBeUndefined();
+    expect(tab.queryEditabilityReason).toBe("no-primary-key");
+  });
 });

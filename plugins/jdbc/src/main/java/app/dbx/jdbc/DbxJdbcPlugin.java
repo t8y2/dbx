@@ -30,6 +30,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
+import java.sql.SQLClientInfoException;
 import java.sql.SQLFeatureNotSupportedException;
 import java.lang.reflect.Method;
 import java.sql.Statement;
@@ -74,12 +75,15 @@ public final class DbxJdbcPlugin {
         false,
         false,
         false,
+        null,
         StatementMaxRowsMode.READ_LOOP_ONLY
     );
     private static final JdbcDriverQuirks USE_CATALOG_QUIRKS = DEFAULT_QUIRKS.withUseCatalogFallbackSql(true);
     private static final JdbcDriverQuirks HIVE_QUIRKS = USE_CATALOG_QUIRKS.withSchemasAsDatabasesFallback(true);
     private static final JdbcDriverQuirks KINGBASE_QUIRKS = DEFAULT_QUIRKS.withIgnoreCatalogForSchemaMetadata(true);
-    private static final JdbcDriverQuirks TAOS_QUIRKS = DEFAULT_QUIRKS.withPreferExecuteQueryForResultSetSql(true);
+    private static final JdbcDriverQuirks TAOS_QUIRKS = DEFAULT_QUIRKS
+        .withPreferExecuteQueryForResultSetSql(true)
+        .withDatabaseClientInfoProperty("dbname");
     private static final JdbcDriverQuirks YASHAN_QUIRKS = new JdbcDriverQuirks(
         true,
         true,
@@ -88,6 +92,7 @@ public final class DbxJdbcPlugin {
         false,
         false,
         false,
+        null,
         StatementMaxRowsMode.APPLY_STATEMENT_MAX_ROWS
     );
     private static final JdbcDriverQuirks IRIS_QUIRKS = new JdbcDriverQuirks(
@@ -98,6 +103,7 @@ public final class DbxJdbcPlugin {
         false,
         false,
         false,
+        null,
         StatementMaxRowsMode.READ_LOOP_ONLY
     );
     private static final JdbcDriverQuirks ORACLE_QUIRKS = new JdbcDriverQuirks(
@@ -108,6 +114,7 @@ public final class DbxJdbcPlugin {
         false,
         false,
         false,
+        null,
         StatementMaxRowsMode.APPLY_STATEMENT_MAX_ROWS
     );
     private static final List<JdbcDriverQuirkRule> DRIVER_QUIRK_RULES = List.of(
@@ -122,7 +129,8 @@ public final class DbxJdbcPlugin {
         new JdbcDriverQuirkRule("jdbc:oracle:", ORACLE_QUIRKS),
         new JdbcDriverQuirkRule("jdbc:dm:", ORACLE_QUIRKS),
         new JdbcDriverQuirkRule("jdbc:taos:", TAOS_QUIRKS),
-        new JdbcDriverQuirkRule("jdbc:taos-ws:", TAOS_QUIRKS)
+        new JdbcDriverQuirkRule("jdbc:taos-ws:", TAOS_QUIRKS),
+        new JdbcDriverQuirkRule("jdbc:taos-rs:", TAOS_QUIRKS)
     );
     private static String registeredDriverKey = "";
     private static String sharedConnectionKey = "";
@@ -137,6 +145,7 @@ public final class DbxJdbcPlugin {
         boolean ignoreCatalogForSchemaMetadata,
         boolean preferExecuteQueryForResultSetSql,
         boolean schemasAsDatabasesFallback,
+        String databaseClientInfoProperty,
         StatementMaxRowsMode statementMaxRowsMode
     ) {
         JdbcDriverQuirks withUseCatalogFallbackSql(boolean value) {
@@ -148,6 +157,7 @@ public final class DbxJdbcPlugin {
                 ignoreCatalogForSchemaMetadata,
                 preferExecuteQueryForResultSetSql,
                 schemasAsDatabasesFallback,
+                databaseClientInfoProperty,
                 statementMaxRowsMode
             );
         }
@@ -161,6 +171,7 @@ public final class DbxJdbcPlugin {
                 value,
                 preferExecuteQueryForResultSetSql,
                 schemasAsDatabasesFallback,
+                databaseClientInfoProperty,
                 statementMaxRowsMode
             );
         }
@@ -174,6 +185,7 @@ public final class DbxJdbcPlugin {
                 ignoreCatalogForSchemaMetadata,
                 value,
                 schemasAsDatabasesFallback,
+                databaseClientInfoProperty,
                 statementMaxRowsMode
             );
         }
@@ -186,6 +198,21 @@ public final class DbxJdbcPlugin {
                 useCatalogFallbackSql,
                 ignoreCatalogForSchemaMetadata,
                 preferExecuteQueryForResultSetSql,
+                value,
+                databaseClientInfoProperty,
+                statementMaxRowsMode
+            );
+        }
+
+        JdbcDriverQuirks withDatabaseClientInfoProperty(String value) {
+            return new JdbcDriverQuirks(
+                skipExecutionContext,
+                useOracleMetadata,
+                caseInsensitiveSchemaMetadata,
+                useCatalogFallbackSql,
+                ignoreCatalogForSchemaMetadata,
+                preferExecuteQueryForResultSetSql,
+                schemasAsDatabasesFallback,
                 value,
                 statementMaxRowsMode
             );
@@ -525,6 +552,7 @@ public final class DbxJdbcPlugin {
         JdbcUrlCredentials urlCredentials = extractJdbcUrlCredentials(url);
         url = urlCredentials.url;
         Properties properties = new Properties();
+        applyPhoenixUrlProperties(url, properties);
         String username = optionalText(connection, "username");
         String password = optionalText(connection, "password");
         if (username == null) {
@@ -559,11 +587,45 @@ public final class DbxJdbcPlugin {
     }
 
     private static boolean isPhoenixConnection(JsonNode connection, String url) {
-        if (urlMatchesPrefix(url, "jdbc:phoenix:")) {
+        if (isPhoenixUrl(url)) {
             return true;
         }
         String driverClass = optionalText(connection, "jdbc_driver_class");
         return driverClass != null && driverClass.equalsIgnoreCase("org.apache.phoenix.jdbc.PhoenixDriver");
+    }
+
+    private static void applyPhoenixUrlProperties(String url, Properties properties) {
+        if (!isPhoenixDirectUrl(url)) {
+            return;
+        }
+        int propertiesStart = url.indexOf(';');
+        if (propertiesStart < 0) {
+            return;
+        }
+        // Phoenix builds its HBase client configuration from Driver.connect Properties,
+        // while arbitrary semicolon URL attributes are not merged into QueryServices.
+        for (String part : url.substring(propertiesStart + 1).split(";")) {
+            int equals = part.indexOf('=');
+            if (equals <= 0) {
+                continue;
+            }
+            String key = part.substring(0, equals).trim();
+            if (!key.isEmpty()) {
+                properties.setProperty(key, part.substring(equals + 1).trim());
+            }
+        }
+    }
+
+    private static boolean isPhoenixDirectUrl(String url) {
+        return isPhoenixUrl(url) && !urlMatchesPrefix(url, "jdbc:phoenix:thin:");
+    }
+
+    private static boolean isPhoenixUrl(String url) {
+        String prefix = "jdbc:phoenix";
+        if (url == null || !url.regionMatches(true, 0, prefix, 0, prefix.length())) {
+            return false;
+        }
+        return url.length() == prefix.length() || url.charAt(prefix.length()) == ':' || url.charAt(prefix.length()) == ';';
     }
 
     private static void applyJdbcxExtensionSecurity(JsonNode connection, String url, Properties properties) {
@@ -1505,7 +1567,8 @@ public final class DbxJdbcPlugin {
     }
 
     private static void applyExecutionContext(JsonNode connection, Connection conn, String database, String schema) throws SQLException {
-        if (driverQuirks(connection).skipExecutionContext()) {
+        JdbcDriverQuirks quirks = driverQuirks(connection);
+        if (quirks.skipExecutionContext()) {
             return;
         }
         String catalog = emptyToNull(database);
@@ -1514,7 +1577,13 @@ public final class DbxJdbcPlugin {
                 conn.setCatalog(catalog);
             } catch (SQLFeatureNotSupportedException | AbstractMethodError | UnsupportedOperationException ignored) {
             }
-            if (driverQuirks(connection).useCatalogFallbackSql()) {
+            if (quirks.databaseClientInfoProperty() != null) {
+                try {
+                    conn.setClientInfo(quirks.databaseClientInfoProperty(), catalog);
+                } catch (SQLClientInfoException | AbstractMethodError | UnsupportedOperationException ignored) {
+                }
+            }
+            if (quirks.useCatalogFallbackSql()) {
                 applyUseCatalogFallback(conn, catalog);
             }
         }
@@ -2889,7 +2958,11 @@ public final class DbxJdbcPlugin {
     }
 
     private static String jdbcUrlParamSeparator(String base) {
-        if (urlMatchesPrefix(base, "jdbc:sqlserver:") || urlMatchesPrefix(base, "jdbc:dremio:")) {
+        if (
+            urlMatchesPrefix(base, "jdbc:sqlserver:") ||
+            urlMatchesPrefix(base, "jdbc:dremio:") ||
+            isPhoenixUrl(base)
+        ) {
             return base.endsWith(";") ? "" : ";";
         }
         if (jdbcUrlUsesColonProperties(base)) {

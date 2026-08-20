@@ -7250,6 +7250,9 @@ async fn external_driver_gaussdb_m_indexes(
         sql_string(table),
     );
     log::debug!("[gaussdb-m][list_indexes] sql={sql}");
+
+    let timeout = agent_metadata_timeout(Some(config));
+
     let result: db::QueryResult = session
         .invoke_with_timeout(
             "executeQuery",
@@ -7258,20 +7261,25 @@ async fn external_driver_gaussdb_m_indexes(
                 "database": database,
                 "schema": schema,
                 "sql": sql,
-                "maxRows": 0,
+                "maxRows": 1000,
+                "fetchSize": 1000,
+                "timeoutSecs": 60,
             }),
-            agent_metadata_timeout(Some(config)),
+            timeout,
         )
         .await?;
+
     log::debug!("[gaussdb-m][list_indexes] row_count={}", result.rows.len());
 
-    let col_index: std::collections::HashMap<&str, usize> =
-        result.columns.iter().enumerate().map(|(i, name)| (name.as_str(), i)).collect();
+    let col_index: std::collections::HashMap<String, usize> =
+        result.columns.iter().enumerate().map(|(i, name)| (name.to_uppercase(), i)).collect();
     let get_str = |row: &[serde_json::Value], key: &str| -> String {
-        col_index.get(key).and_then(|&i| row.get(i)).and_then(|v| v.as_str()).unwrap_or("").to_string()
+        let upper = key.to_uppercase();
+        col_index.get(&upper).and_then(|&i| row.get(i)).and_then(|v| v.as_str()).unwrap_or("").to_string()
     };
     let get_i64 = |row: &[serde_json::Value], key: &str| -> Option<i64> {
-        col_index.get(key).and_then(|&i| row.get(i)).and_then(|v| v.as_i64())
+        let upper = key.to_uppercase();
+        col_index.get(&upper).and_then(|&i| row.get(i)).and_then(|v| v.as_i64())
     };
 
     let mut indexes: Vec<db::IndexInfo> = Vec::new();
@@ -7285,6 +7293,7 @@ async fn external_driver_gaussdb_m_indexes(
     for row in &result.rows {
         let name = get_str(row, "INDEX_NAME");
         if name.is_empty() {
+            log::debug!("[gaussdb-m][list_indexes] skipping row with empty INDEX_NAME: {:?}", row);
             continue;
         }
 

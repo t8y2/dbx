@@ -2363,9 +2363,10 @@ impl NacosAdmin for NacosOpenApiAdmin {
         ];
         let mut v1_form =
             vec![("namespaceName".to_string(), namespace_name), ("namespaceDesc".to_string(), namespace_desc)];
-        // Nacos consoles generate an ID client-side when the field is empty;
-        // both server APIs still require the generated value in the request.
-        v3_form.push(("namespaceId".to_string(), namespace_id.clone()));
+        // Nacos consoles generate an ID client-side when the field is empty,
+        // but the V3 Admin and Console forms expose different parameter names.
+        let v3_namespace_id_key = if self.is_v3_console() { "customNamespaceId" } else { "namespaceId" };
+        v3_form.push((v3_namespace_id_key.to_string(), namespace_id.clone()));
         v1_form.push(("customNamespaceId".to_string(), namespace_id.clone()));
         v1_form.push(("namespaceId".to_string(), namespace_id));
 
@@ -5708,6 +5709,36 @@ mod tests {
                 namespace_id: Some("team-dev".to_string()),
                 namespace_name: "Team Development".to_string(),
                 namespace_desc: Some("Development environment".to_string()),
+            })
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v3_console_namespace_creation_uses_custom_namespace_id() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert_eq!(request.split_whitespace().next(), Some("POST"));
+            assert_eq!(request.split_whitespace().nth(1), Some("/nacos/v3/console/core/namespace"));
+            assert_eq!(request_form_value(&request, "customNamespaceId"), Some("team-console"));
+            assert!(request_form_value(&request, "namespaceId").is_none());
+            write_json_response(&mut socket, r#"{"code":0,"message":"success","data":true}"#).await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.context_path = "/nacos".to_string();
+        config.version_mode = Some(NacosVersionMode::V3);
+        config.api_plane = Some(NacosApiPlane::Console);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        admin
+            .create_namespace(NacosNamespaceCreate {
+                namespace_id: Some("team-console".to_string()),
+                namespace_name: "Team Console".to_string(),
+                namespace_desc: None,
             })
             .await
             .unwrap();

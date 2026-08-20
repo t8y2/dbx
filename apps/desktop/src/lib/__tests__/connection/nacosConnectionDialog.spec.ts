@@ -110,7 +110,7 @@ describe("Nacos connection dialog layout", () => {
     expect(source).toContain('if (isNacosV3AdminPlane.value) return "nacos.nacosV3AdminManagedNamespacesHint"');
     expect(source).toContain('if (isNacosV3ConsolePlane.value) return "nacos.nacosV3ConsoleManagedNamespacesHint"');
     expect(source).toContain('v-if="isNacosV3AdminPlane" class="flex gap-2 rounded-md border border-amber-500/30');
-    expect(source).toContain("isNacosV3AdminPlane.value\n      ? manualNamespaces\n      : await resolveManualNacosNamespaceNames(manualNamespaces)");
+    expect(source).toMatch(/const resolvedNamespaces = isNacosV3AdminPlane\.value\s*\?\s*manualNamespaces\s*:\s*await resolveManualNacosNamespaceNames\(manualNamespaces\);/);
   });
 
   it("opens namespace access setup instead of showing a save validation error", () => {

@@ -71,7 +71,8 @@ describe("settings store type color scheme persistence", () => {
   it("stages scheme edits in the settings draft", () => {
     const dialogSource = readFileSync(new URL("../../components/editor/EditorSettingsDialog.vue", import.meta.url), "utf8");
 
-    expect(dialogSource).toContain("editDataGridTypeColorSchemes.value = structuredClone(schemes)");
+    expect(dialogSource).toContain("editDataGridTypeColorSchemes.value = cloneDataGridTypeColorSchemes(schemes)");
+    expect(dialogSource).not.toContain("structuredClone(settingsStore.editorSettings.dataGridTypeColorSchemes)");
     expect(dialogSource).toContain("editActiveDataGridTypeColorSchemeId.value = activeId");
     expect(dialogSource).not.toMatch(/settingsStore\.updateEditorSettings\w*\(\{[^}]*DataGridTypeColorScheme/);
   });

@@ -1,10 +1,12 @@
 import { readFileSync } from "node:fs";
+import { reactive } from "vue";
 import { describe, expect, it } from "vitest";
 import {
   DATA_GRID_TYPE_COLOR_KEYS,
   DATA_GRID_TYPE_COLOR_SCHEME_AUTO_ID,
   DEFAULT_DATA_GRID_TYPE_COLORS_DARK,
   DEFAULT_DATA_GRID_TYPE_COLORS_LIGHT,
+  cloneDataGridTypeColorSchemes,
   dataGridTypeColorCssVar,
   defaultDataGridTypeColors,
   normalizeActiveDataGridTypeColorSchemeId,
@@ -55,6 +57,16 @@ describe("data grid type color keys", () => {
 });
 
 describe("data grid type color normalization", () => {
+  it("clones Vue reactive schemes into detached plain data", () => {
+    const schemes = reactive([scheme("mine", { integer: "#123456" })]);
+
+    const cloned = cloneDataGridTypeColorSchemes(schemes);
+
+    expect(cloned).toEqual(schemes);
+    cloned[0].colors.integer = "#abcdef";
+    expect(schemes[0].colors.integer).toBe("#123456");
+  });
+
   it("keeps valid six-digit hex values", () => {
     expect(normalizeDataGridTypeColors({ ...DEFAULT_DATA_GRID_TYPE_COLORS_LIGHT, integer: "#ABCDEF" }).integer).toBe("#ABCDEF");
   });

@@ -38,6 +38,7 @@ Each agent runs as a standalone process and communicates with DBX via stdin/stdo
 | bigquery | Google BigQuery | BigQuery JDBC |
 | kylin | Apache Kylin | Kylin JDBC |
 | ignite | Apache Ignite | Ignite JDBC thin (ignite-core) |
+| ignite3 | Apache Ignite 3 | Ignite 3 JDBC thin (ignite-jdbc) |
 | sundb | SunDB | SunDB JDBC |
 | tdengine | TDengine 2.4+ | taos-connector-rust native WebSocket agent |
 | yashandb | 崖山 YashanDB | YashanDB JDBC |

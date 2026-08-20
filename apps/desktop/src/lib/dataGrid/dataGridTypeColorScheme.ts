@@ -16,6 +16,18 @@ export const DATA_GRID_TYPE_COLOR_KEYS = DATA_GRID_TYPE_VISUAL_KINDS.filter((kin
 /** Sentinel scheme id meaning "leave the stylesheet defaults alone and follow light/dark". */
 export const DATA_GRID_TYPE_COLOR_SCHEME_AUTO_ID = "auto";
 
+/**
+ * @param schemes Schemes from persisted settings, Vue reactive state, or dialog drafts
+ * @return Plain detached copies safe to keep in another reactive buffer
+ */
+export function cloneDataGridTypeColorSchemes(schemes: readonly DataGridTypeColorScheme[]): DataGridTypeColorScheme[] {
+  return schemes.map((scheme) => ({
+    id: scheme.id,
+    name: scheme.name,
+    colors: { ...scheme.colors },
+  }));
+}
+
 // Keep these in sync with the :root / :root.dark blocks in styles/globals.css.
 // dataGridTypeColorScheme.spec.ts asserts the two stay identical.
 export const DEFAULT_DATA_GRID_TYPE_COLORS_LIGHT: DataGridTypeColors = {

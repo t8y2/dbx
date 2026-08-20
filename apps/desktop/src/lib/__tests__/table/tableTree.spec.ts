@@ -248,6 +248,38 @@ describe("programmable database objects", () => {
     ]);
   });
 
+  it("groups MySQL scheduled events under a dedicated Events group", () => {
+    const objects: ObjectInfo[] = [{ name: "event_daily_middle_db_sync", object_type: "EVENT", schema: "shop" }];
+
+    const groups = buildGroupedObjectTreeNodes({ ...context, schema: "shop", objects, databaseType: "mysql" });
+    const eventGroup = groups.find((node) => node.type === "group-events");
+
+    expect(eventGroup).toEqual(expect.objectContaining({ objectCount: 1, label: "tree.events" }));
+    expect(eventGroup?.children).toEqual([expect.objectContaining({ type: "event", objectName: "event_daily_middle_db_sync" })]);
+  });
+
+  it("keeps table-scoped Kingbase triggers distinct and source-addressable", () => {
+    const objects: ObjectInfo[] = [
+      { name: "audit_before", object_type: "TRIGGER", schema: "public", parent_schema: "public", parent_name: "items" },
+      { name: "audit_before", object_type: "TRIGGER", schema: "public", parent_schema: "public", parent_name: "orders" },
+    ];
+
+    const simple = buildSimpleObjectTreeNodes({ ...context, schema: "public", objects, databaseType: "kingbase" });
+    expect(simple.map((node) => ({ label: node.label, tableName: node.tableName }))).toEqual([
+      { label: "audit_before (items)", tableName: "items" },
+      { label: "audit_before (orders)", tableName: "orders" },
+    ]);
+    expect(new Set(simple.map((node) => node.id)).size).toBe(2);
+
+    const grouped = buildGroupedObjectTreeNodes({ ...context, schema: "public", objects, databaseType: "kingbase" });
+    const triggers = grouped.find((node) => node.type === "group-triggers")?.children ?? [];
+    expect(triggers.map((node) => ({ label: node.label, objectName: node.objectName, tableName: node.tableName }))).toEqual([
+      { label: "audit_before (items)", objectName: "audit_before", tableName: "items" },
+      { label: "audit_before (orders)", objectName: "audit_before", tableName: "orders" },
+    ]);
+    expect(new Set(triggers.map((node) => node.id)).size).toBe(2);
+  });
+
   it("groups Xugu private synonyms as source objects", () => {
     const objects: ObjectInfo[] = [{ name: "SYN_SHOP_USERS", object_type: "SYNONYM", schema: "SYSDBA", valid: true }];
 

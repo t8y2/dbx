@@ -19,25 +19,53 @@ pub(super) fn column_definition(dialect: StructureDialect, column: &EditableStru
             parts.push(format!("COLLATE {}", quote_ident(dialect, &column.collation)));
         }
     }
+    let mysql_generated_clause =
+        (dialect == StructureDialect::Mysql).then(|| original_mysql_generated_clause(column)).flatten();
+    if let Some(generated_clause) = mysql_generated_clause.as_ref() {
+        parts.push(generated_clause.clone());
+    }
     if !column.is_nullable && !is_oracle_like(dialect) && dialect != StructureDialect::ClickHouse {
         parts.push("NOT NULL".to_string());
     }
-    if let Some(extra_clause) = column_extra_clause(dialect, column) {
-        parts.push(extra_clause);
+    if mysql_generated_clause.is_none() {
+        if let Some(extra_clause) = column_extra_clause(dialect, column) {
+            parts.push(extra_clause);
+        }
     }
     let default_value = normalize_default(Some(&column.default_value));
-    if !default_value.is_empty() {
+    if mysql_generated_clause.is_none() && !default_value.is_empty() {
         parts.push(format!("DEFAULT {}", format_default_for_sql(dialect, &column.data_type, &default_value)));
     }
-    if let Some(on_update) = column.extra.as_ref().and_then(|e| e.on_update_current_timestamp).filter(|v| *v) {
-        if on_update && dialect == StructureDialect::Mysql {
-            parts.push("ON UPDATE CURRENT_TIMESTAMP".to_string());
+    if mysql_generated_clause.is_none() {
+        if let Some(on_update) = column.extra.as_ref().and_then(|e| e.on_update_current_timestamp).filter(|v| *v) {
+            if on_update && dialect == StructureDialect::Mysql {
+                parts.push("ON UPDATE CURRENT_TIMESTAMP".to_string());
+            }
         }
     }
     if matches!(dialect, StructureDialect::Mysql | StructureDialect::Doris) && !clean(&column.comment).is_empty() {
         parts.push(format!("COMMENT {}", quote_string(&clean(&column.comment))));
     }
     parts.join(" ")
+}
+
+pub(super) fn original_mysql_generated_clause(column: &EditableStructureColumn) -> Option<String> {
+    let extra = column.original.as_ref()?.extra.as_deref()?.trim();
+    let normalized = extra.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
+    (normalized.starts_with("generated ") && normalized.contains(" as (")).then(|| extra.to_string())
+}
+
+pub(super) fn original_is_mysql_generated_column(column: &EditableStructureColumn) -> bool {
+    let Some(extra) = column.original.as_ref().and_then(|original| original.extra.as_deref()) else {
+        return false;
+    };
+    let mut tokens = extra.split_whitespace();
+    let first = tokens.next();
+    first.is_some_and(|token| token.eq_ignore_ascii_case("generated"))
+        || matches!(first, Some(token) if token.eq_ignore_ascii_case("virtual")
+            || token.eq_ignore_ascii_case("stored")
+            || token.eq_ignore_ascii_case("persistent"))
+            && tokens.next().is_some_and(|token| token.eq_ignore_ascii_case("generated"))
 }
 
 pub(super) fn column_extra_clause(dialect: StructureDialect, column: &EditableStructureColumn) -> Option<String> {

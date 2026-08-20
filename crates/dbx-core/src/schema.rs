@@ -2278,7 +2278,7 @@ async fn list_tables_once(
                 let tables = db::ob_oracle::list_tables(p, schema).await?;
                 Ok(filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter))
             } else if mysql_table_list_source_for_config(db_config.as_ref()) == MysqlTableListSource::ShowFullTables {
-                db::mysql::list_shardingsphere_tables(p, mysql_table_metadata_catalog(database, schema))
+                db::mysql::list_logical_tables_show(p, mysql_table_metadata_catalog(database, schema))
                     .await
                     .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter))
             } else {
@@ -2739,10 +2739,11 @@ fn is_shardingsphere_proxy_version(version: &str) -> bool {
 }
 
 fn mysql_table_list_source_for_config(config: Option<&ConnectionConfig>) -> MysqlTableListSource {
-    if config
-        .and_then(|config| config.database_info.as_ref())
-        .and_then(|info| info.product_version.as_deref())
-        .is_some_and(is_shardingsphere_proxy_version)
+    if config.is_some_and(db::tdsql_mysql::is_config)
+        || config
+            .and_then(|config| config.database_info.as_ref())
+            .and_then(|info| info.product_version.as_deref())
+            .is_some_and(is_shardingsphere_proxy_version)
     {
         MysqlTableListSource::ShowFullTables
     } else {
@@ -2770,16 +2771,16 @@ mod tests {
         dameng_object_statistics_rows_only_sql, dameng_object_statistics_user_segments_sql, deduplicate_column_infos,
         ephemeral_agent_metadata_session_id, external_driver_uses_mysql_ddl, filter_mongodb_agent_collections,
         filter_mysql_system_databases_for_config, filter_object_infos, filter_table_infos, filter_visible_schema_names,
-        gaussdb_m_view_object_source_sql, gbase8a_object_statistics_sql, is_agent_postgres_metadata_fallback_config,
-        is_mysql_external_driver_config, is_retryable_metadata_error, metadata_error_action,
-        metadata_name_or_comment_matches, mysql_database_list_timeout, mysql_external_driver_ddl_from_query_result,
-        mysql_external_driver_ddl_sql, mysql_object_source_ddl_column_index, mysql_object_source_sql,
-        mysql_table_list_source_for_config, mysql_table_metadata_catalog, normalize_information_schema_table_type,
-        oracle_columns_from_query_result, oracle_columns_sql, oracle_object_statistics_dba_segments_sql,
-        oracle_object_statistics_from_query_result, oracle_object_statistics_rows_only_sql,
-        oracle_object_statistics_sql, oracle_object_statistics_user_segments_sql,
-        oracle_table_comment_from_query_result, oracle_table_comment_sql, oracle_table_comments_sql,
-        presto_like_columns_from_query_result, presto_like_information_schema_columns_sql,
+        finalize_object_source, gaussdb_m_view_object_source_sql, gbase8a_object_statistics_sql,
+        is_agent_postgres_metadata_fallback_config, is_mysql_external_driver_config, is_retryable_metadata_error,
+        metadata_error_action, metadata_name_or_comment_matches, mysql_database_list_timeout,
+        mysql_external_driver_ddl_from_query_result, mysql_external_driver_ddl_sql,
+        mysql_object_source_ddl_column_index, mysql_object_source_sql, mysql_table_list_source_for_config,
+        mysql_table_metadata_catalog, normalize_information_schema_table_type, oracle_columns_from_query_result,
+        oracle_columns_sql, oracle_object_statistics_dba_segments_sql, oracle_object_statistics_from_query_result,
+        oracle_object_statistics_rows_only_sql, oracle_object_statistics_sql,
+        oracle_object_statistics_user_segments_sql, oracle_table_comment_from_query_result, oracle_table_comment_sql,
+        oracle_table_comments_sql, presto_like_columns_from_query_result, presto_like_information_schema_columns_sql,
         presto_like_information_schema_tables_sql, presto_like_tables_from_query_result, replace_metadata_runtime,
         should_query_oracle_columns_via_sql_first, table_comments_from_query_result, table_name_filter_matches,
         tdengine_table_comment_like_pattern, tdengine_table_comment_sql, tdengine_table_comments_sql,
@@ -3345,6 +3346,27 @@ mod tests {
     }
 
     #[test]
+    fn mysql_object_source_sql_emits_show_create_event() {
+        assert_eq!(
+            mysql_object_source_sql("tenant_db", "event_daily_sync", &db::ObjectSourceKind::Event),
+            "SHOW CREATE EVENT `tenant_db`.`event_daily_sync`"
+        );
+    }
+
+    #[test]
+    fn mysql_event_object_source_is_read_only() {
+        let source = finalize_object_source(db::ObjectSource {
+            name: "event_daily_sync".to_string(),
+            object_type: db::ObjectSourceKind::Event,
+            schema: None,
+            source: "CREATE EVENT event_daily_sync ON SCHEDULE EVERY 1 DAY DO SELECT 1".to_string(),
+            editable: None,
+        });
+
+        assert_eq!(source.editable, Some(false));
+    }
+
+    #[test]
     fn mysql_object_source_sql_emits_show_create_materialized_view() {
         // Regression for the review comment: Doris / StarRocks ride on the MySQL
         // protocol, so the MV branch of mysql_object_source_sql must produce a
@@ -3372,6 +3394,10 @@ mod tests {
         assert_eq!(mysql_object_source_ddl_column_index(&db::ObjectSourceKind::Procedure), 2);
         assert_eq!(mysql_object_source_ddl_column_index(&db::ObjectSourceKind::Function), 2);
         assert_eq!(mysql_object_source_ddl_column_index(&db::ObjectSourceKind::Trigger), 2);
+        // SHOW CREATE EVENT returns (Event, sql_mode, time_zone, Create Event, …) —
+        // one extra time_zone column before the DDL, verified against a real MySQL
+        // 8.0 instance (`SHOW CREATE EVENT` for a live event).
+        assert_eq!(mysql_object_source_ddl_column_index(&db::ObjectSourceKind::Event), 3);
     }
 
     #[test]
@@ -3729,6 +3755,7 @@ for line in sys.stdin:
             message_count: None,
             messages_ready: None,
             messages_unacked: None,
+            ..Default::default()
         }]);
 
         assert_eq!(tables.len(), 1);
@@ -3791,6 +3818,22 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn doris_show_metadata_resolves_effective_database_like_plain_mysql() {
+        // A qualified `db.table` reference in a MySQL-family dialect puts the
+        // database in the `schema` parameter (two-part names), so the
+        // Doris/StarRocks show-metadata column branch must resolve its
+        // effective database with `mysql_table_metadata_catalog` — schema
+        // first, database fallback — exactly like the plain MySQL branch.
+        // Otherwise an empty (or different) tab/execution database sends the
+        // column lookup to the wrong namespace and column comments are lost
+        // (fixes #6590).
+        assert_eq!(super::mysql_table_metadata_catalog("", "analytics"), "analytics");
+        assert_eq!(super::mysql_table_metadata_catalog("default_db", "analytics"), "analytics");
+        assert_eq!(super::mysql_table_metadata_catalog("analytics", ""), "analytics");
+        assert_eq!(super::mysql_table_metadata_catalog("", ""), "");
+    }
+
+    #[test]
     fn doris_database_list_keeps_system_databases() {
         let databases = vec![test_database_info("information_schema"), test_database_info("analytics")];
         let config = test_connection_config(DatabaseType::Doris);
@@ -3821,6 +3864,7 @@ for line in sys.stdin:
     #[test]
     fn shardingsphere_proxy_marker_is_ascii_case_insensitive_and_exact() {
         assert!(super::is_shardingsphere_proxy_version("5.7.22-ShardingSphere-Proxy 5.5.2"));
+        assert!(super::is_shardingsphere_proxy_version("8.0.27-ShardingSphere-Proxy 5.5.2"));
         assert!(super::is_shardingsphere_proxy_version("8.0.36-SHARDINGSPHERE-PROXY 5.5.2"));
         assert!(!super::is_shardingsphere_proxy_version("8.0.36-ShardingSphere Proxy 5.5.2"));
         assert!(!super::is_shardingsphere_proxy_version("8.0.36-MySQL Community Server"));
@@ -3840,6 +3884,14 @@ for line in sys.stdin:
         config.database_info.as_mut().unwrap().product_version = Some("8.0.36-MySQL Community Server".to_string());
         assert_eq!(mysql_table_list_source_for_config(Some(&config)), MysqlTableListSource::InformationSchema);
         assert_eq!(mysql_table_list_source_for_config(None), MysqlTableListSource::InformationSchema);
+    }
+
+    #[test]
+    fn tdsql_profile_uses_logical_show_full_tables_source() {
+        let mut config = test_connection_config(DatabaseType::Mysql);
+        config.driver_profile = Some("TDSQL".to_string());
+
+        assert_eq!(mysql_table_list_source_for_config(Some(&config)), MysqlTableListSource::ShowFullTables);
     }
 
     #[test]
@@ -5220,6 +5272,18 @@ struct ObjectListOutcome {
     paging_applied: bool,
 }
 
+async fn list_native_postgres_objects(
+    pool: &deadpool_postgres::Pool,
+    config: &ConnectionConfig,
+    schema: &str,
+) -> Result<Vec<db::ObjectInfo>, String> {
+    if config.db_type == DatabaseType::Redshift {
+        db::postgres::list_redshift_objects(pool, schema, true, true).await
+    } else {
+        db::postgres::list_objects(pool, schema, true, true, false).await
+    }
+}
+
 fn unpaged_object_list(objects: Vec<db::ObjectInfo>) -> ObjectListOutcome {
     ObjectListOutcome { objects, paging_applied: false }
 }
@@ -5346,7 +5410,7 @@ async fn list_objects_once(
                     if let Some(config) = fallback_config.as_ref() {
                         match native_postgres_metadata_pool(state, connection_id, database, config).await {
                             Ok(Some(pool)) => {
-                                return db::postgres::list_objects(&pool, schema, true, true, false)
+                                return list_native_postgres_objects(&pool, config, schema)
                                     .await
                                     .map(unpaged_object_list)
                             }
@@ -5375,7 +5439,7 @@ async fn list_objects_once(
                         if let Some(pool) =
                             native_postgres_metadata_pool(state, connection_id, database, config).await?
                         {
-                            return db::postgres::list_objects(&pool, schema, true, true, false)
+                            return list_native_postgres_objects(&pool, config, schema)
                                 .await
                                 .map(unpaged_object_list)
                                 .map_err(|fallback_error| {
@@ -5405,6 +5469,10 @@ async fn list_objects_once(
                 db::starrocks::list_table_objects(p, database).await.map(unpaged_object_list)
             } else if db_config.as_ref().is_some_and(db::mysql_compatible::uses_show_metadata) {
                 db::mysql::list_table_objects_show(p, database).await.map(unpaged_object_list)
+            } else if mysql_table_list_source_for_config(db_config.as_ref()) == MysqlTableListSource::ShowFullTables {
+                db::mysql::list_objects_with_logical_tables(p, database, object_types, mysql_limit, mysql_offset)
+                    .await
+                    .map(|result| ObjectListOutcome { objects: result.objects, paging_applied: result.paging_applied })
             } else {
                 db::mysql::list_objects(p, database, object_types, mysql_limit, mysql_offset)
                     .await
@@ -5416,6 +5484,13 @@ async fn list_objects_once(
         }
         PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_cloudberry_config) => {
             db::cloudberry::list_objects(p, schema).await.map(unpaged_object_list)
+        }
+        PoolKind::Postgres(p) if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Redshift) => {
+            let include_relations = object_types_include_relations(object_types);
+            let include_routines = object_types_include_routines(object_types);
+            db::postgres::list_redshift_objects(p, schema, include_relations, include_routines)
+                .await
+                .map(unpaged_object_list)
         }
         PoolKind::Postgres(p) => {
             let include_relations = object_types_include_relations(object_types);
@@ -5493,7 +5568,7 @@ async fn list_completion_objects_once(
                     if let Some(config) = fallback_config.as_ref() {
                         match native_postgres_metadata_pool(state, connection_id, database, config).await {
                             Ok(Some(pool)) => {
-                                return db::postgres::list_objects(&pool, schema, true, true, false)
+                                return list_native_postgres_objects(&pool, config, schema)
                                     .await
                                     .map(filter_completion_objects)
                             }
@@ -5518,7 +5593,7 @@ async fn list_completion_objects_once(
                         if let Some(pool) =
                             native_postgres_metadata_pool(state, connection_id, database, config).await?
                         {
-                            return db::postgres::list_objects(&pool, schema, true, true, false)
+                            return list_native_postgres_objects(&pool, config, schema)
                                 .await
                                 .map(filter_completion_objects)
                                 .map_err(|fallback_error| {
@@ -5550,6 +5625,9 @@ async fn list_completion_objects_once(
         }
         PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_cloudberry_config) => {
             db::cloudberry::list_objects(p, schema).await.map(filter_completion_objects)
+        }
+        PoolKind::Postgres(p) if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Redshift) => {
+            db::postgres::list_redshift_objects(p, schema, false, true).await.map(filter_completion_objects)
         }
         PoolKind::Postgres(p) => {
             db::postgres::list_objects(p, schema, true, true, false).await.map(filter_completion_objects)
@@ -6076,7 +6154,12 @@ async fn get_columns_core_for_session_inner(
                 db::manticoresearch::get_columns(p, metadata_database, table).await.map(deduplicate_column_infos)
             }
             PoolKind::Mysql(p, _) if db_config.as_ref().is_some_and(db::mysql_compatible::uses_show_metadata) => {
-                let metadata_database = mysql_show_metadata_database_for_config(db_config.as_ref(), database);
+                // Resolve the metadata database exactly like the plain MySQL
+                // branch below: a qualified `db.table` reference puts the
+                // database in `schema` (MySQL-family two-part names), so an
+                // empty or different tab/execution database must not send the
+                // lookup to the wrong namespace (fixes #6590).
+                let effective_db = mysql_table_metadata_catalog(database, schema);
                 // Doris/StarRocks previously went straight to `SHOW COLUMNS` for
                 // speed (see perf(doris) commit), but `SHOW COLUMNS` reports the
                 // `Key` column as `YES`/`NO` rather than MySQL's `PRI`, so primary
@@ -6085,7 +6168,7 @@ async fn get_columns_core_for_session_inner(
                 // correctly identifies primary keys (and only real primary keys,
                 // not duplicate-key sort columns) — and falls back to `SHOW COLUMNS`
                 // automatically when information_schema is unavailable.
-                db::mysql::get_columns(p, metadata_database, table).await.map(deduplicate_column_infos)
+                db::mysql::get_columns(p, effective_db, table).await.map(deduplicate_column_infos)
             }
             PoolKind::Mysql(p, mode) => {
                 let effective_db = mysql_table_metadata_catalog(database, schema);
@@ -7200,6 +7283,7 @@ fn sqlite_object_type(kind: &db::ObjectSourceKind) -> &'static str {
         db::ObjectSourceKind::Procedure
         | db::ObjectSourceKind::Function
         | db::ObjectSourceKind::Trigger
+        | db::ObjectSourceKind::Event
         | db::ObjectSourceKind::Sequence
         | db::ObjectSourceKind::Synonym
         | db::ObjectSourceKind::Package
@@ -7215,7 +7299,8 @@ fn sqlserver_object_type_filter(kind: &db::ObjectSourceKind) -> &'static str {
         db::ObjectSourceKind::Procedure => "'P'",
         db::ObjectSourceKind::Function => "'FN','IF','TF','FS','FT'",
         db::ObjectSourceKind::Trigger => "'TR'",
-        db::ObjectSourceKind::Sequence
+        db::ObjectSourceKind::Event
+        | db::ObjectSourceKind::Sequence
         | db::ObjectSourceKind::Synonym
         | db::ObjectSourceKind::Package
         | db::ObjectSourceKind::PackageBody
@@ -7453,6 +7538,7 @@ fn postgres_object_source_sql_inner(
             )
         }
         db::ObjectSourceKind::Trigger
+        | db::ObjectSourceKind::Event
         | db::ObjectSourceKind::Synonym
         | db::ObjectSourceKind::Package
         | db::ObjectSourceKind::PackageBody
@@ -7468,6 +7554,7 @@ pub fn oracle_object_source_sql(schema: &str, name: &str, kind: &db::ObjectSourc
         db::ObjectSourceKind::Procedure => "PROCEDURE",
         db::ObjectSourceKind::Function => "FUNCTION",
         db::ObjectSourceKind::Trigger => "TRIGGER",
+        db::ObjectSourceKind::Event => "EVENT",
         db::ObjectSourceKind::Sequence => "SEQUENCE",
         db::ObjectSourceKind::Synonym => "SYNONYM",
         db::ObjectSourceKind::Package => "PACKAGE",
@@ -7524,6 +7611,7 @@ pub fn mysql_object_source_sql(database: &str, name: &str, kind: &db::ObjectSour
         db::ObjectSourceKind::Procedure => format!("SHOW CREATE PROCEDURE {qualified_name}"),
         db::ObjectSourceKind::Function => format!("SHOW CREATE FUNCTION {qualified_name}"),
         db::ObjectSourceKind::Trigger => format!("SHOW CREATE TRIGGER {qualified_name}"),
+        db::ObjectSourceKind::Event => format!("SHOW CREATE EVENT {qualified_name}"),
         db::ObjectSourceKind::Sequence
         | db::ObjectSourceKind::Synonym
         | db::ObjectSourceKind::Package
@@ -7550,6 +7638,8 @@ pub fn mysql_object_source_sql(database: &str, name: &str, kind: &db::ObjectSour
 ///   `(Name, DDL)` → DDL at index `1`.
 /// - `SHOW CREATE PROCEDURE`, `SHOW CREATE FUNCTION`, `SHOW CREATE TRIGGER` →
 ///   `(Name, sql_mode, DDL, …)` → DDL at index `2`.
+/// - `SHOW CREATE EVENT` → `(Event, sql_mode, time_zone, Create Event, …)` →
+///   DDL at index `3` (it has an extra `time_zone` column before the DDL).
 ///
 /// Encoded as a function so the index can be unit-tested without a live DB.
 pub(crate) fn mysql_object_source_ddl_column_index(kind: &db::ObjectSourceKind) -> usize {
@@ -7564,6 +7654,7 @@ pub(crate) fn mysql_object_source_ddl_column_index(kind: &db::ObjectSourceKind) 
         | db::ObjectSourceKind::PackageBody
         | db::ObjectSourceKind::Type
         | db::ObjectSourceKind::TypeBody => 2,
+        db::ObjectSourceKind::Event => 3,
     }
 }
 
@@ -7769,7 +7860,7 @@ pub async fn get_object_source_core(
     signature: Option<&str>,
     relation_name: Option<&str>,
 ) -> Result<db::ObjectSource, String> {
-    let mut source = retry_metadata_connection(state, connection_id, Some(database), || {
+    let source = retry_metadata_connection(state, connection_id, Some(database), || {
         get_object_source_once(
             state,
             connection_id,
@@ -7782,10 +7873,17 @@ pub async fn get_object_source_core(
         )
     })
     .await?;
+    Ok(finalize_object_source(source))
+}
+
+fn finalize_object_source(mut source: db::ObjectSource) -> db::ObjectSource {
     if matches!(source.object_type, db::ObjectSourceKind::Procedure | db::ObjectSourceKind::Function) {
         source.source = normalize_routine_object_source(source.source);
     }
-    Ok(source)
+    if matches!(source.object_type, db::ObjectSourceKind::Event) {
+        source.editable = Some(false);
+    }
+    source
 }
 
 async fn get_object_source_once(
@@ -7873,7 +7971,14 @@ async fn get_object_source_once(
             } else {
                 let mut client = client.lock().await;
                 let result: db::ObjectSource = client
-                    .get_object_source(database, schema, name, &object_type, agent_metadata_timeout(db_config.as_ref()))
+                    .get_object_source_for_relation(
+                        database,
+                        schema,
+                        name,
+                        &object_type,
+                        relation_name,
+                        agent_metadata_timeout(db_config.as_ref()),
+                    )
                     .await?;
                 return Ok(result);
             }
@@ -9812,9 +9917,17 @@ pub async fn pg_ddl_with_partitions(
     let Some(root) =
         tree.iter().find(|node| !node.parent_oid.is_some_and(|parent_oid| tree_oids.contains(&parent_oid)))
     else {
-        return Err(format!(
-            "relation \"{schema}\".\"{table}\" was not found or is not a table/partition/foreign table"
-        ));
+        // The tree query only matches relkind IN ('r','p','f'), so an empty
+        // tree could mean the relation doesn't exist at all, or that it
+        // exists but is a view/sequence/other non-table object. Look up its
+        // relkind (if any) to tell those two cases apart in the error.
+        return Err(match db::postgres::postgres_relation_relkind(pool, schema, table).await {
+            Ok(Some(relkind)) => format!(
+                "relation \"{schema}\".\"{table}\" is a {}, not a table/partition/foreign table",
+                db::postgres::postgres_owner_object_type(&relkind)
+            ),
+            _ => format!("relation \"{schema}\".\"{table}\" was not found or is not a table/partition/foreign table"),
+        });
     };
 
     let oids: Vec<i64> = tree.iter().map(|node| node.oid).collect();
@@ -9841,6 +9954,18 @@ pub async fn pg_ddl_with_partitions(
         db::postgres::get_table_partition_local_objects_for_relations(pool, &oids),
     )?;
 
+    // `list_foreign_keys_for_relations` is keyed by (schema, table) since its
+    // query is information_schema-based, unlike every other *_by_oid map
+    // here. Remap it once so the render loop below can look fkeys up by oid
+    // like everything else, instead of cloning a fresh (schema, table) key
+    // on every node it renders.
+    let relation_oid_by_pair: HashMap<(String, String), i64> =
+        relations.into_iter().map(|(oid, schema, table)| ((schema, table), oid)).collect();
+    let fkeys_by_oid: HashMap<i64, Vec<db::ForeignKeyInfo>> = fkeys_by_relation
+        .into_iter()
+        .filter_map(|(key, fkeys)| relation_oid_by_pair.get(&key).map(|oid| (*oid, fkeys)))
+        .collect();
+
     // Group children by parent oid, each group ordered by relname to match
     // `list_table_partitions`' `ORDER BY c.relname` (today's traversal order).
     let mut children_by_parent: HashMap<i64, Vec<&db::postgres::PostgresPartitionTreeNode>> = HashMap::new();
@@ -9859,7 +9984,7 @@ pub async fn pg_ddl_with_partitions(
         &children_by_parent,
         &columns_by_oid,
         &indexes_by_oid,
-        &fkeys_by_relation,
+        &fkeys_by_oid,
         &comments_by_oid,
         &triggers_by_oid,
         &checks_by_oid,
@@ -9880,7 +10005,7 @@ fn render_postgres_partition_tree_node(
     children_by_parent: &HashMap<i64, Vec<&db::postgres::PostgresPartitionTreeNode>>,
     columns_by_oid: &HashMap<i64, Vec<db::ColumnInfo>>,
     indexes_by_oid: &HashMap<i64, Vec<db::IndexInfo>>,
-    fkeys_by_relation: &HashMap<(String, String), Vec<db::ForeignKeyInfo>>,
+    fkeys_by_oid: &HashMap<i64, Vec<db::ForeignKeyInfo>>,
     comments_by_oid: &HashMap<i64, Option<String>>,
     triggers_by_oid: &HashMap<i64, Vec<String>>,
     checks_by_oid: &HashMap<i64, Vec<(String, String)>>,
@@ -9903,8 +10028,8 @@ fn render_postgres_partition_tree_node(
 
         let columns = columns_by_oid.get(&node.oid).unwrap_or(&empty_columns);
         let indexes = indexes_by_oid.get(&node.oid).unwrap_or(&empty_indexes);
-        let fkeys = fkeys_by_relation.get(&(node.schema.clone(), node.table.clone())).unwrap_or(&empty_fkeys);
-        let comment = comments_by_oid.get(&node.oid).cloned().flatten();
+        let fkeys = fkeys_by_oid.get(&node.oid).unwrap_or(&empty_fkeys);
+        let comment = comments_by_oid.get(&node.oid).and_then(|comment| comment.as_deref());
         let triggers = triggers_by_oid.get(&node.oid).unwrap_or(&empty_triggers);
         let checks = checks_by_oid.get(&node.oid).unwrap_or(&empty_checks);
         let local_objects = local_objects_by_oid.get(&node.oid).unwrap_or(&empty_local_objects);
@@ -9920,7 +10045,7 @@ fn render_postgres_partition_tree_node(
                 indexes,
                 fkeys,
                 checks,
-                comment.as_deref(),
+                comment,
                 &node.partition_info,
                 local_objects,
             ),
@@ -10195,13 +10320,82 @@ fn append_opengauss_trigger_definitions(mut ddl: String, trigger_definitions: &[
     ddl
 }
 
+/// Cloudberry's native `pg_get_tabledef` (a community-maintained PL/pgSQL
+/// function most Cloudberry/Greenplum installs have, not a built-in) renders
+/// exactly one relation — for a partitioned table it emits that table's own
+/// `CREATE TABLE ... PARTITION BY ...`, never its partitions' own `CREATE
+/// TABLE ... PARTITION OF ...` statements, regardless of whether the table
+/// was created with classic Greenplum or PostgreSQL-style declarative
+/// partition syntax. When `include_partitions` is requested, fetch the same
+/// partition tree the plain-Postgres path uses and append each descendant's
+/// own native DDL, so Cloudberry's more accurate native rendering (storage
+/// options, distribution policy, external-table clauses) is still used per
+/// relation instead of falling back to the generic renderer for the whole
+/// tree.
+async fn cloudberry_native_tree_ddl(
+    pool: &deadpool_postgres::Pool,
+    schema: &str,
+    table: &str,
+    include_partitions: bool,
+) -> Result<String, String> {
+    let root_ddl = db::cloudberry::table_ddl(pool, schema, table).await?;
+    if !include_partitions {
+        return Ok(root_ddl);
+    }
+    let tree = db::postgres::fetch_postgres_partition_tree(pool, schema, table).await?;
+    if tree.len() <= 1 {
+        return Ok(root_ddl);
+    }
+    let tree_oids: HashSet<i64> = tree.iter().map(|node| node.oid).collect();
+    let Some(root) =
+        tree.iter().find(|node| !node.parent_oid.is_some_and(|parent_oid| tree_oids.contains(&parent_oid)))
+    else {
+        return Ok(root_ddl);
+    };
+
+    let mut children_by_parent: HashMap<i64, Vec<&db::postgres::PostgresPartitionTreeNode>> = HashMap::new();
+    for node in &tree {
+        if let Some(parent_oid) = node.parent_oid {
+            children_by_parent.entry(parent_oid).or_default().push(node);
+        }
+    }
+    for children in children_by_parent.values_mut() {
+        children.sort_by(|a, b| a.table.cmp(&b.table));
+    }
+
+    let mut descendants = Vec::new();
+    let mut visited: HashSet<i64> = HashSet::new();
+    let mut stack: Vec<&db::postgres::PostgresPartitionTreeNode> = vec![root];
+    while let Some(node) = stack.pop() {
+        if !visited.insert(node.oid) {
+            continue;
+        }
+        if node.oid != root.oid {
+            descendants.push(node);
+        }
+        if let Some(children) = children_by_parent.get(&node.oid) {
+            for child in children.iter().rev() {
+                stack.push(child);
+            }
+        }
+    }
+
+    let mut ddl = root_ddl;
+    for node in descendants {
+        let child_ddl = db::cloudberry::table_ddl(pool, &node.schema, &node.table).await?;
+        ddl.push('\n');
+        ddl.push_str(&child_ddl);
+    }
+    Ok(ddl)
+}
+
 pub async fn cloudberry_ddl(
     pool: &deadpool_postgres::Pool,
     schema: &str,
     table: &str,
     include_partitions: bool,
 ) -> Result<String, String> {
-    match db::cloudberry::table_ddl(pool, schema, table).await {
+    match cloudberry_native_tree_ddl(pool, schema, table, include_partitions).await {
         Ok(ddl) => Ok(ddl),
         Err(native_error) => {
             let base_ddl = pg_ddl_for_options(pool, schema, table, include_partitions).await.map_err(|fallback_error| {
@@ -10228,6 +10422,39 @@ pub async fn opentenbase_ddl(
     include_partitions: bool,
 ) -> Result<String, String> {
     let ddl = pg_ddl_for_options(pool, schema, table, include_partitions).await?;
+    if include_partitions {
+        // The rendered ddl may cover the whole partition tree (root plus
+        // every partition), each as its own `CREATE [FOREIGN] TABLE`
+        // statement, so distribution policies need to be looked up and
+        // applied per relation rather than once for the root.
+        let relations: Vec<(String, String)> = db::ddl_scan::top_level_statement_ranges(&ddl)
+            .into_iter()
+            .filter_map(|range| db::ddl_scan::parse_create_table_relation(&ddl[range]))
+            .collect();
+        return match db::opentenbase::table_distribution_for_relations(pool, &relations).await {
+            Ok(distributions) => match db::opentenbase::append_distribution_clauses(&ddl, &distributions) {
+                Ok(ddl) => Ok(ddl),
+                Err(error) => {
+                    log::warn!(
+                        "[schema][opentenbase:table-ddl-distribution-render-fallback] schema={} table={} error={}",
+                        schema,
+                        table,
+                        error
+                    );
+                    Ok(ddl)
+                }
+            },
+            Err(error) => {
+                log::warn!(
+                    "[schema][opentenbase:table-ddl-distribution-query-fallback] schema={} table={} error={}",
+                    schema,
+                    table,
+                    error
+                );
+                Ok(ddl)
+            }
+        };
+    }
     match db::opentenbase::table_distribution(pool, schema, table).await {
         Ok(Some(distribution)) => match db::opentenbase::append_distribution_clause(&ddl, &distribution) {
             Ok(ddl) => Ok(ddl),

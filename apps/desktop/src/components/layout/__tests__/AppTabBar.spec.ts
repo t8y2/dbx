@@ -66,3 +66,19 @@ describe("AppTabBar right-side close action", () => {
     expect(tabBarSource).toMatch(/emit\("close-driver-store"\);\s*if \(shouldActivateSettings\) emit\("activate-settings-page"\);/);
   });
 });
+
+describe("AppTabBar overflow search", () => {
+  it("filters every open tab by its display and source titles", () => {
+    expect(tabBarSource).toContain('const tabSearchQuery = ref("");');
+    expect(tabBarSource).toContain("const filteredOpenTabs = computed(() => {");
+    expect(tabBarSource).toContain("return queryStore.tabs.filter((tab) => tabTitleText(tab).toLocaleLowerCase().includes(query) || tab.title.toLocaleLowerCase().includes(query));");
+  });
+
+  it("provides the same focused search control and empty state in both overflow menus", () => {
+    expect(tabBarSource.match(/<Input data-tab-search-input=/g)).toHaveLength(2);
+    expect(tabBarSource.match(/v-for="tab in filteredOpenTabs"/g)).toHaveLength(2);
+    expect(tabBarSource.match(/tabs\.noMatchingTabs/g)).toHaveLength(2);
+    expect(tabBarSource).toContain('[data-tab-search-input="regular"]');
+    expect(tabBarSource).toContain('[data-tab-search-input="fixed"]');
+  });
+});

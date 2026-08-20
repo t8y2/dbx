@@ -3,7 +3,8 @@ import { useI18n } from "vue-i18n";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
 import { hasSidebarLayoutEntries } from "@/lib/sidebar/sidebarLayout";
-import type { SidebarLayout } from "@/types/database";
+import type { ConnectionConfigBundle } from "@/lib/connection/connectionConfigTransfer";
+import type { ConnectionConfig, SidebarLayout } from "@/types/database";
 
 const showTransferDialog = ref(false);
 const showSchemaDiffDialog = ref(false);
@@ -22,6 +23,13 @@ const showConfigPassphraseDialog = ref(false);
 const configPassphraseMode = ref<"export" | "import">("export");
 const configPassphraseError = ref("");
 const pendingImportContent = ref("");
+const showConfigConnectionSelectDialog = ref(false);
+const configConnectionSelectMode = ref<"export" | "import">("export");
+const configConnectionSelectList = ref<ConnectionConfig[]>([]);
+const pendingExportConnectionIds = ref<string[]>([]);
+const pendingImportPreview = ref<ConnectionConfigBundle | null>(null);
+const pendingImportSource = ref<"dbx" | "navicat" | "dbeaver" | "datagrip">("dbx");
+const applyingImportSelection = ref(false);
 
 const transferPrefillConnectionId = ref("");
 const transferPrefillDatabase = ref("");
@@ -266,8 +274,56 @@ export function useDialogSources() {
     );
   } // end watchersRegistered
 
+  function clearPendingImportState() {
+    pendingImportContent.value = "";
+    pendingImportPreview.value = null;
+    pendingImportSource.value = "dbx";
+    configConnectionSelectList.value = [];
+    configPassphraseError.value = "";
+  }
+
+  function clearPendingExportState() {
+    pendingExportConnectionIds.value = [];
+    configConnectionSelectList.value = [];
+    configPassphraseError.value = "";
+  }
+
+  function openConnectionSelect(mode: "export" | "import", connections: ConnectionConfig[]) {
+    configConnectionSelectMode.value = mode;
+    configConnectionSelectList.value = connections;
+    showConfigConnectionSelectDialog.value = true;
+  }
+
+  function importSuccessMessage(source: "dbx" | "navicat" | "dbeaver" | "datagrip", count: number, keychainFilled = 0) {
+    if (count <= 0) return t("configExport.importNone");
+    if (source === "navicat") return t("configExport.importNavicatSuccess", { count });
+    if (source === "dbeaver") return t("configExport.importDbeaverSuccess", { count });
+    if (source === "datagrip") return t("configExport.importDatagripSuccess", { count, filled: keychainFilled });
+    return t("configExport.importSuccess", { count });
+  }
+
+  async function finishImport(source: "dbx" | "navicat" | "dbeaver" | "datagrip", count: number, layout?: SidebarLayout) {
+    let keychainFilled = 0;
+    if (source === "datagrip" && count > 0) {
+      keychainFilled = await connectionStore.applyDataGripKeychainPasswords();
+    }
+    toast(importSuccessMessage(source, count, keychainFilled), source === "dbx" ? 2000 : 4000);
+    if (hasSidebarLayoutEntries(layout)) {
+      pendingImportLayout.value = layout;
+      showImportLayoutConfirm.value = true;
+    }
+    clearPendingImportState();
+  }
+
   // Config export/import helpers
   function onExportClick() {
+    clearPendingExportState();
+    openConnectionSelect("export", connectionStore.connections);
+  }
+
+  function onExportConnectionsSelected(connectionIds: string[]) {
+    pendingExportConnectionIds.value = connectionIds;
+    showConfigConnectionSelectDialog.value = false;
     configPassphraseMode.value = "export";
     configPassphraseError.value = "";
     showConfigPassphraseDialog.value = true;
@@ -275,8 +331,9 @@ export function useDialogSources() {
 
   async function onExportConfirm(passphrase: string) {
     try {
-      await connectionStore.exportConnectionsToFile(passphrase);
+      await connectionStore.exportConnectionsToFile(passphrase, pendingExportConnectionIds.value);
       showConfigPassphraseDialog.value = false;
+      clearPendingExportState();
       toast(t("configExport.exportSuccess"), 2000);
     } catch (e: any) {
       configPassphraseError.value = e?.message === "crypto_unavailable" ? t("configExport.cryptoUnavailable") : e?.message || String(e);
@@ -287,52 +344,78 @@ export function useDialogSources() {
     try {
       const result = await connectionStore.readImportFile(source);
       if (!result) return;
+      clearPendingImportState();
       pendingImportContent.value = result.content;
+      pendingImportSource.value = source;
       if (result.encrypted) {
         configPassphraseMode.value = "import";
         configPassphraseError.value = "";
         showConfigPassphraseDialog.value = true;
-      } else {
-        const { count, layout } = await connectionStore.importConnectionsFromFile(result.content, null);
-        // For DataGrip imports, read Keychain passwords
-        let keychainFilled = 0;
-        if (source === "datagrip" && count > 0) {
-          keychainFilled = await connectionStore.applyDataGripKeychainPasswords();
-        }
-        toast(
-          count > 0
-            ? source === "navicat"
-              ? t("configExport.importNavicatSuccess", { count })
-              : source === "dbeaver"
-                ? t("configExport.importDbeaverSuccess", { count })
-                : source === "datagrip"
-                  ? t("configExport.importDatagripSuccess", { count: count, filled: keychainFilled })
-                  : t("configExport.importSuccess", { count })
-            : t("configExport.importNone"),
-          4000,
-        );
-        if (hasSidebarLayoutEntries(layout)) {
-          pendingImportLayout.value = layout;
-          showImportLayoutConfirm.value = true;
-        }
+        return;
       }
+      const preview = await connectionStore.parseConnectionsImport(result.content, null);
+      pendingImportPreview.value = preview;
+      if (source === "dbx") {
+        openConnectionSelect("import", preview.connections);
+        return;
+      }
+      const { count, layout } = await connectionStore.applyConnectionsImport(preview);
+      await finishImport(source, count, layout);
     } catch (e: any) {
+      clearPendingImportState();
       toast(e?.message || String(e), 4000);
     }
   }
 
   async function onImportConfirm(passphrase: string) {
     try {
-      const { count, layout } = await connectionStore.importConnectionsFromFile(pendingImportContent.value, passphrase);
+      const preview = await connectionStore.parseConnectionsImport(pendingImportContent.value, passphrase);
+      pendingImportPreview.value = preview;
       showConfigPassphraseDialog.value = false;
-      toast(count > 0 ? t("configExport.importSuccess", { count }) : t("configExport.importNone"), 2000);
-      if (hasSidebarLayoutEntries(layout)) {
-        pendingImportLayout.value = layout;
-        showImportLayoutConfirm.value = true;
-      }
+      configPassphraseError.value = "";
+      openConnectionSelect("import", preview.connections);
     } catch (e: any) {
       configPassphraseError.value = e?.message === "wrong_passphrase" ? t("configExport.wrongPassphrase") : e?.message === "crypto_unavailable" ? t("configExport.cryptoUnavailable") : e?.message || String(e);
     }
+  }
+
+  async function onImportConnectionsSelected(connectionIds: string[]) {
+    const preview = pendingImportPreview.value;
+    if (!preview) return;
+    if (applyingImportSelection.value) return;
+    applyingImportSelection.value = true;
+    try {
+      const { count, layout } = await connectionStore.applyConnectionsImport(preview, connectionIds);
+      showConfigConnectionSelectDialog.value = false;
+      await finishImport(pendingImportSource.value, count, layout);
+    } catch (e: any) {
+      toast(e?.message || String(e), 4000);
+    } finally {
+      applyingImportSelection.value = false;
+    }
+  }
+
+  function onConfigConnectionSelectConfirm(connectionIds: string[]) {
+    if (configConnectionSelectMode.value === "export") {
+      onExportConnectionsSelected(connectionIds);
+      return;
+    }
+    void onImportConnectionsSelected(connectionIds);
+  }
+
+  function onConfigConnectionSelectOpenChange(open: boolean) {
+    if (!open && configConnectionSelectMode.value === "import" && applyingImportSelection.value) return;
+    showConfigConnectionSelectDialog.value = open;
+    // Export selection closing to open the passphrase dialog must keep the
+    // chosen ids. Only import preview is discarded when the user cancels.
+    if (!open && configConnectionSelectMode.value === "import") clearPendingImportState();
+  }
+
+  function onConfigPassphraseOpenChange(open: boolean) {
+    showConfigPassphraseDialog.value = open;
+    if (open) return;
+    if (configPassphraseMode.value === "export") clearPendingExportState();
+    else if (!pendingImportPreview.value) clearPendingImportState();
   }
 
   return {
@@ -353,6 +436,10 @@ export function useDialogSources() {
     configPassphraseMode,
     configPassphraseError,
     pendingImportContent,
+    showConfigConnectionSelectDialog,
+    applyingImportSelection,
+    configConnectionSelectMode,
+    configConnectionSelectList,
     transferPrefillConnectionId,
     transferPrefillDatabase,
     transferPrefillCatalog,
@@ -404,5 +491,8 @@ export function useDialogSources() {
     onExportConfirm,
     onImportClick,
     onImportConfirm,
+    onConfigConnectionSelectConfirm,
+    onConfigConnectionSelectOpenChange,
+    onConfigPassphraseOpenChange,
   };
 }

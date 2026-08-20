@@ -42,7 +42,7 @@ pub async fn redis_scan_keys_core(
 ///
 /// Performs up to `max_iterations` SCAN cycles server-side in a single API
 /// call, dramatically reducing frontend↔backend roundtrips when fetching many
-/// keys (e.g. "fetch all" in the key browser). TYPE metadata is optional.
+/// keys (e.g. "fetch all" in the key browser). TYPE and TTL metadata is optional.
 pub async fn redis_scan_keys_batch_core(
     state: &AppState,
     connection_id: &str,

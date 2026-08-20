@@ -1725,6 +1725,10 @@ fn is_mysql_family_target(target_db: &DatabaseType) -> bool {
     )
 }
 
+fn supports_deferred_mysql_foreign_keys(target_db: &DatabaseType) -> bool {
+    is_mysql_family_target(target_db) && crate::table_structure_sql::supports_foreign_keys(*target_db)
+}
+
 /// QuestDB is not included. It only uses the PGWire protocol. SQL DDL syntax is not compatible.
 fn is_postgres_family_target(target_db: &DatabaseType) -> bool {
     matches!(
@@ -1958,15 +1962,13 @@ fn generate_postgres_index_ddl(indexes: &[db::IndexInfo], table: &str, schema: &
     statements
 }
 
-fn generate_postgres_foreign_key_ddl(
-    foreign_keys: &[db::ForeignKeyInfo],
-    table: &str,
-    source_schema: &str,
-    target_schema: &str,
-) -> Vec<String> {
-    let full_table = qualified_table(table, target_schema, &DatabaseType::Postgres, None);
+/// Groups foreign keys by constraint name, preserving first-seen order — MySQL
+/// and Postgres both report one row per (constraint, column) pair for
+/// multi-column foreign keys, so callers need the columns regrouped by
+/// constraint before they can emit one `ADD CONSTRAINT` statement per key.
+fn group_foreign_keys_by_constraint_name(foreign_keys: &[db::ForeignKeyInfo]) -> Vec<(&str, Vec<&db::ForeignKeyInfo>)> {
     let mut grouped: HashMap<&str, Vec<&db::ForeignKeyInfo>> = HashMap::new();
-    let mut order = Vec::new();
+    let mut order: Vec<&str> = Vec::new();
 
     for foreign_key in foreign_keys {
         if !grouped.contains_key(foreign_key.name.as_str()) {
@@ -1975,11 +1977,19 @@ fn generate_postgres_foreign_key_ddl(
         grouped.entry(foreign_key.name.as_str()).or_default().push(foreign_key);
     }
 
+    order.into_iter().filter_map(|name| grouped.remove(name).map(|group| (name, group))).collect()
+}
+
+fn generate_postgres_foreign_key_ddl(
+    foreign_keys: &[db::ForeignKeyInfo],
+    table: &str,
+    source_schema: &str,
+    target_schema: &str,
+) -> Vec<String> {
+    let full_table = qualified_table(table, target_schema, &DatabaseType::Postgres, None);
+
     let mut statements = Vec::new();
-    for name in order {
-        let Some(group) = grouped.get(name) else {
-            continue;
-        };
+    for (name, group) in group_foreign_keys_by_constraint_name(foreign_keys) {
         let columns = group
             .iter()
             .map(|foreign_key| quote_identifier(&foreign_key.column, &DatabaseType::Postgres))
@@ -2000,6 +2010,80 @@ fn generate_postgres_foreign_key_ddl(
             "ALTER TABLE {full_table} ADD CONSTRAINT {} FOREIGN KEY ({columns}) REFERENCES {referenced_table} ({ref_columns})",
             quote_identifier(name, &DatabaseType::Postgres)
         ));
+    }
+
+    statements
+}
+
+/// Builds deferred `ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY` statements for a
+/// MySQL-family target table from structured source foreign key metadata.
+///
+/// Used instead of inline `CREATE TABLE ... FOREIGN KEY` so table creation order
+/// never has to satisfy foreign key dependencies — this is what makes transferring
+/// tables with a foreign key cycle (or any dependency the sort couldn't fully
+/// resolve) possible at all, mirroring the existing Postgres transfer path.
+fn generate_mysql_foreign_key_alter_statements(
+    foreign_keys: &[db::ForeignKeyInfo],
+    request: &TransferRequest,
+    target_table: &str,
+    target_db_type: &DatabaseType,
+) -> Vec<String> {
+    // MySQL has no separate "schema" concept — `database` doubles as the schema,
+    // and callers that leave `source_schema` empty (the common case for MySQL
+    // transfers) still need something to compare `ForeignKeyInfo.ref_schema`
+    // against. Mirrors `mysql_table_metadata_catalog`'s schema-or-database
+    // fallback (crates/dbx-core/src/schema.rs), which is private to that module.
+    let source_database = if request.source_schema.trim().is_empty() {
+        request.source_database.as_str()
+    } else {
+        request.source_schema.as_str()
+    };
+
+    let full_table = quote_identifier(target_table, target_db_type);
+    let mut statements = Vec::new();
+    for (name, group) in group_foreign_keys_by_constraint_name(foreign_keys) {
+        let columns = group
+            .iter()
+            .map(|foreign_key| quote_identifier(&foreign_key.column, target_db_type))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let ref_columns = group
+            .iter()
+            .map(|foreign_key| quote_identifier(&foreign_key.ref_column, target_db_type))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let referenced_table = match group[0].ref_schema.as_deref() {
+            // Referenced table lives in the same database this transfer is
+            // reading from, so it's part of (or expected to be part of) this
+            // transfer batch — resolve its target-side name the same way every
+            // other transferred table's name is resolved (case rules, etc.).
+            Some(ref_schema) if ref_schema == source_database => {
+                quote_identifier(&request.target_table_name(&group[0].ref_table), target_db_type)
+            }
+            // Genuine cross-database foreign key pointing outside the transfer's
+            // selected tables: that table was never created or renamed by this
+            // transfer, so reference it by its original database/name, assumed
+            // to already exist unchanged on the target server.
+            Some(ref_schema) => {
+                format!(
+                    "{}.{}",
+                    quote_identifier(ref_schema, target_db_type),
+                    quote_identifier(&group[0].ref_table, target_db_type)
+                )
+            }
+            None => quote_identifier(&request.target_table_name(&group[0].ref_table), target_db_type),
+        };
+        let mut statement = format!(
+            "ALTER TABLE {full_table} ADD CONSTRAINT {} FOREIGN KEY ({columns}) REFERENCES {referenced_table} ({ref_columns})",
+            quote_identifier(name, target_db_type)
+        );
+        if let Some(on_delete) = group[0].on_delete.as_deref() {
+            statement.push_str(&format!(" ON DELETE {on_delete}"));
+        }
+        if let Some(on_update) = group[0].on_update.as_deref() {
+            statement.push_str(&format!(" ON UPDATE {on_update}"));
+        }
+        statements.push(statement);
     }
 
     statements
@@ -4412,7 +4496,7 @@ fn transfer_ddl_statements(sql: &str, db_type: &DatabaseType) -> Vec<String> {
         } else {
             statements
                 .into_iter()
-                .map(|statement| sanitize_postgres_transfer_ddl_statement(&statement))
+                .map(|statement| strip_inline_foreign_key_constraint_lines(&statement))
                 .filter(|statement| !is_postgres_post_table_index_statement(statement))
                 .collect()
         }
@@ -4428,7 +4512,13 @@ fn transfer_ddl_statements(sql: &str, db_type: &DatabaseType) -> Vec<String> {
     }
 }
 
-fn sanitize_postgres_transfer_ddl_statement(statement: &str) -> String {
+/// Strips inline `CONSTRAINT ... FOREIGN KEY ... REFERENCES ...` lines from a
+/// `CREATE TABLE` statement, fixing up the now-dangling trailing comma on the
+/// preceding line. Dialect-agnostic: relies only on the ` FOREIGN KEY ` clause
+/// text, which both Postgres and MySQL-family `SHOW CREATE TABLE` output share,
+/// and on foreign key constraints always being the last items before the closing
+/// paren (true for both dialects' DDL dumps).
+fn strip_inline_foreign_key_constraint_lines(statement: &str) -> String {
     if !statement.trim_start().to_ascii_uppercase().starts_with("CREATE TABLE ") {
         return statement.to_string();
     }
@@ -6092,7 +6182,29 @@ pub async fn clear_cancelled(transfer_id: &str) {
     CANCELLED.write().await.remove(transfer_id);
 }
 
-/// Sort table names by foreign key dependency.
+/// Fetches full foreign key metadata for each of `tables`, one
+/// `list_foreign_keys_core` call per table. Always inserts an entry per input
+/// table (even when it has zero foreign keys), so callers can use
+/// `HashMap::get` to distinguish "checked, no FKs" from "not fetched" — the
+/// latter tells `transfer_table` it needs to fall back to a live query.
+async fn fetch_foreign_keys_for_tables(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    tables: &[String],
+) -> Result<HashMap<String, Vec<db::ForeignKeyInfo>>, String> {
+    let mut result = HashMap::new();
+    for table in tables {
+        let fks = crate::schema::list_foreign_keys_core(state, connection_id, database, schema, table).await?;
+        result.insert(table.clone(), fks);
+    }
+    Ok(result)
+}
+
+/// Sort table names by foreign key dependency, also returning the full foreign
+/// key metadata fetched along the way (keyed by table name) so callers doing a
+/// data transfer don't have to re-query the same metadata per table later.
 ///
 /// When `parents_first` is true (data transfer / SQL export), referenced (parent)
 /// tables come before referencing (child) tables so inserts don't violate FK
@@ -6103,16 +6215,21 @@ pub async fn clear_cancelled(transfer_id: &str) {
 ///
 /// Uses Kahn's algorithm for topological sort; tables involved in cycles keep
 /// their original relative order after all cycle-free tables.
-pub async fn sort_tables_by_fk_dependency(
+///
+/// The returned map is empty when `tables.len() <= 1` (no fetch needed to sort)
+/// or when `connection_id` is a native Postgres connection (dependencies there
+/// come from a single batched `list_table_dependencies` query that doesn't
+/// build per-table `ForeignKeyInfo` — Postgres transfers don't consult this map).
+pub async fn sort_tables_by_fk_dependency_with_foreign_keys(
     state: &AppState,
     connection_id: &str,
     database: &str,
     schema: &str,
     tables: &[String],
     parents_first: bool,
-) -> Result<Vec<String>, String> {
+) -> Result<(Vec<String>, HashMap<String, Vec<db::ForeignKeyInfo>>), String> {
     if tables.len() <= 1 {
-        return Ok(tables.to_vec());
+        return Ok((tables.to_vec(), HashMap::new()));
     }
 
     let db_type = state
@@ -6131,18 +6248,36 @@ pub async fn sort_tables_by_fk_dependency(
     } else {
         None
     };
-    let dependencies = if let Some(pool) = postgres_pool {
-        db::postgres::list_table_dependencies(&pool, schema).await?
+    let (dependencies, foreign_keys_by_table) = if let Some(pool) = postgres_pool {
+        (db::postgres::list_table_dependencies(&pool, schema).await?, HashMap::new())
     } else {
-        let mut dependencies = Vec::new();
-        for table in tables {
-            let fks = crate::schema::list_foreign_keys_core(state, connection_id, database, schema, table).await?;
-            dependencies.extend(fks.into_iter().map(|fk| (table.clone(), fk.ref_table)));
-        }
-        dependencies
+        let foreign_keys_by_table =
+            fetch_foreign_keys_for_tables(state, connection_id, database, schema, tables).await?;
+        let dependencies = foreign_keys_by_table
+            .iter()
+            .flat_map(|(table, fks)| fks.iter().map(move |fk| (table.clone(), fk.ref_table.clone())))
+            .collect::<Vec<_>>();
+        (dependencies, foreign_keys_by_table)
     };
 
-    Ok(sort_table_names_by_dependencies(tables, &dependencies, parents_first))
+    Ok((sort_table_names_by_dependencies(tables, &dependencies, parents_first), foreign_keys_by_table))
+}
+
+/// Sort table names by foreign key dependency. See
+/// `sort_tables_by_fk_dependency_with_foreign_keys` for the full behavior —
+/// this is a thin wrapper that discards the fetched foreign key metadata, kept
+/// for callers that only need table order (batch drop, database export).
+pub async fn sort_tables_by_fk_dependency(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    tables: &[String],
+    parents_first: bool,
+) -> Result<Vec<String>, String> {
+    sort_tables_by_fk_dependency_with_foreign_keys(state, connection_id, database, schema, tables, parents_first)
+        .await
+        .map(|(sorted, _)| sorted)
 }
 
 fn native_postgres_dependency_pool(pool_kind: Option<&PoolKind>) -> Option<deadpool_postgres::Pool> {
@@ -6591,6 +6726,8 @@ pub async fn transfer_table<F>(
     target_db_type: &DatabaseType,
     source_pool_key: &str,
     target_pool_key: &str,
+    known_foreign_keys: &HashMap<String, Vec<db::ForeignKeyInfo>>,
+    pending_fk_alters: &mut Vec<(String, String)>,
     mut progress_callback: F,
 ) -> Result<u64, String>
 where
@@ -6878,6 +7015,49 @@ where
                     request.target_catalog.as_deref(),
                 )
             };
+            // MySQL-family targets: create the bare table first and add any foreign
+            // keys via ALTER TABLE afterward, instead of relying on inline
+            // `CREATE TABLE ... FOREIGN KEY` constraints. Inline FKs require every
+            // referenced table to already exist, which the dependency sort can't
+            // always guarantee (foreign key cycles have no valid creation order at
+            // all) — mirrors the same defer-FK-creation approach already used for
+            // Postgres transfers.
+            let mut ddl = ddl;
+            let mut deferred_fk_alters: Vec<String> = Vec::new();
+            if supports_deferred_mysql_foreign_keys(target_db_type) {
+                // Reuse the FK metadata `sort_tables_by_fk_dependency_with_foreign_keys`
+                // already fetched for the whole batch when the caller provided it;
+                // only fall back to a live query for callers that don't pre-fetch
+                // (tests, or a native-Postgres source where the sort path takes a
+                // different, cheaper route that doesn't build per-table FK lists).
+                let foreign_keys = if let Some(fks) = known_foreign_keys.get(table) {
+                    Ok(fks.clone())
+                } else {
+                    crate::schema::list_foreign_keys_core(
+                        state,
+                        &request.source_connection_id,
+                        &request.source_database,
+                        &request.source_schema,
+                        table,
+                    )
+                    .await
+                };
+                match foreign_keys {
+                    Ok(foreign_keys) if !foreign_keys.is_empty() => {
+                        ddl = strip_inline_foreign_key_constraint_lines(&ddl);
+                        deferred_fk_alters = generate_mysql_foreign_key_alter_statements(
+                            &foreign_keys,
+                            request,
+                            &target_table,
+                            target_db_type,
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        log::warn!("[transfer] failed to inspect source foreign keys for {table}: {e}");
+                    }
+                }
+            }
             log::info!("[transfer] creating target table: {}", ddl.chars().take(200).collect::<String>());
             let target_table_created = transfer_create_table_created(
                 execute_transfer_create_table_ddl_on_pool(
@@ -6891,6 +7071,8 @@ where
                 "Failed to create table",
             )?;
             if target_table_created {
+                pending_fk_alters
+                    .extend(deferred_fk_alters.into_iter().map(|statement| (target_table.clone(), statement)));
                 let comment_stmts = generate_comment_ddl(
                     &columns,
                     &target_table,
@@ -7468,9 +7650,10 @@ where
             | db::ObjectSourceKind::Synonym
             | db::ObjectSourceKind::Package
             | db::ObjectSourceKind::PackageBody => object.source.clone(),
-            db::ObjectSourceKind::Trigger | db::ObjectSourceKind::Type | db::ObjectSourceKind::TypeBody => {
-                object.source.clone()
-            }
+            db::ObjectSourceKind::Trigger
+            | db::ObjectSourceKind::Event
+            | db::ObjectSourceKind::Type
+            | db::ObjectSourceKind::TypeBody => object.source.clone(),
         };
         let statements = build_executable_object_source_statements(EditableObjectSourceSqlInput {
             database_type: DatabaseType::Postgres,
@@ -8337,6 +8520,180 @@ mod tests {
             );
             let event = mysql_event_ddl("shop", "ev1", "ENABLE", "EVERY 1 DAY", "DELETE FROM logs");
             assert_eq!(event, "CREATE EVENT `ev1` ON SCHEDULE EVERY 1 DAY ENABLE DO DELETE FROM logs");
+        }
+
+        #[test]
+        fn deferred_mysql_foreign_keys_follow_target_ddl_capability() {
+            for target in [DatabaseType::Mysql, DatabaseType::StarRocks, DatabaseType::Goldendb, DatabaseType::Sundb] {
+                assert!(supports_deferred_mysql_foreign_keys(&target), "{target:?}");
+            }
+            assert!(!supports_deferred_mysql_foreign_keys(&DatabaseType::Doris));
+        }
+
+        #[test]
+        fn strips_inline_foreign_keys_from_mysql_create_table() {
+            let ddl = "CREATE TABLE `child` (\n  `id` int NOT NULL,\n  `parent_id` int NOT NULL,\n  PRIMARY KEY (`id`),\n  KEY `fk_child_parent` (`parent_id`),\n  CONSTRAINT `fk_child_parent` FOREIGN KEY (`parent_id`) REFERENCES `parent` (`id`)\n) ENGINE=InnoDB";
+
+            let stripped = strip_inline_foreign_key_constraint_lines(ddl);
+
+            assert!(!stripped.to_ascii_uppercase().contains("FOREIGN KEY"), "{stripped}");
+            assert!(stripped.contains("KEY `fk_child_parent` (`parent_id`)"), "{stripped}");
+        }
+
+        #[test]
+        fn generates_deferred_mysql_foreign_key_alter_statements() {
+            let foreign_keys = vec![db::ForeignKeyInfo {
+                name: "fk_child_parent".to_string(),
+                column: "parent_id".to_string(),
+                ref_schema: None,
+                ref_table: "parent".to_string(),
+                ref_column: "id".to_string(),
+                on_update: None,
+                on_delete: Some("CASCADE".to_string()),
+            }];
+            let request = test_transfer_request(vec!["child", "parent"]);
+
+            let statements =
+                generate_mysql_foreign_key_alter_statements(&foreign_keys, &request, "child", &DatabaseType::Mysql);
+
+            assert_eq!(
+                statements,
+                vec![
+                    "ALTER TABLE `child` ADD CONSTRAINT `fk_child_parent` FOREIGN KEY (`parent_id`) REFERENCES `parent` (`id`) ON DELETE CASCADE"
+                        .to_string()
+                ]
+            );
+        }
+
+        #[test]
+        fn same_database_mysql_foreign_key_applies_target_table_name_rules() {
+            // test_transfer_request's source_schema is "source_schema" — the
+            // referenced table's ref_schema matching that exactly is what marks it
+            // as part of this transfer batch (see mysql_table_metadata_catalog-style
+            // fallback in generate_mysql_foreign_key_alter_statements).
+            let foreign_keys = vec![db::ForeignKeyInfo {
+                name: "fk_child_parent".to_string(),
+                column: "parent_id".to_string(),
+                ref_schema: Some("source_schema".to_string()),
+                ref_table: "Parent".to_string(),
+                ref_column: "id".to_string(),
+                on_update: None,
+                on_delete: None,
+            }];
+            let mut request = test_transfer_request(vec!["child", "Parent"]);
+            request.target_table_name_case = TransferTableNameCase::Lower;
+
+            let statements =
+                generate_mysql_foreign_key_alter_statements(&foreign_keys, &request, "child", &DatabaseType::Mysql);
+
+            // Referenced table is in-batch, so its target-side name (lowercased per
+            // target_table_name_case) is used, unqualified — it lives in whatever
+            // database this ALTER TABLE already runs against.
+            assert_eq!(
+                statements,
+                vec![
+                    "ALTER TABLE `child` ADD CONSTRAINT `fk_child_parent` FOREIGN KEY (`parent_id`) REFERENCES `parent` (`id`)"
+                        .to_string()
+                ]
+            );
+        }
+
+        #[test]
+        fn cross_database_mysql_foreign_key_keeps_original_schema_and_name() {
+            let foreign_keys = vec![db::ForeignKeyInfo {
+                name: "fk_child_parent".to_string(),
+                column: "parent_id".to_string(),
+                ref_schema: Some("other_db".to_string()),
+                ref_table: "Parent".to_string(),
+                ref_column: "id".to_string(),
+                on_update: None,
+                on_delete: None,
+            }];
+            let mut request = test_transfer_request(vec!["child"]);
+            // Even with a target-side rename policy configured, a table outside the
+            // transfer batch (different database) must not be renamed — we never
+            // created or renamed it, so it must be referenced exactly as it exists
+            // on the target server.
+            request.target_table_name_case = TransferTableNameCase::Lower;
+
+            let statements =
+                generate_mysql_foreign_key_alter_statements(&foreign_keys, &request, "child", &DatabaseType::Mysql);
+
+            assert_eq!(
+                statements,
+                vec![
+                    "ALTER TABLE `child` ADD CONSTRAINT `fk_child_parent` FOREIGN KEY (`parent_id`) REFERENCES `other_db`.`Parent` (`id`)"
+                        .to_string()
+                ]
+            );
+        }
+
+        #[test]
+        fn group_foreign_keys_by_constraint_name_preserves_first_seen_order() {
+            let foreign_keys = vec![
+                db::ForeignKeyInfo {
+                    name: "fk_b".to_string(),
+                    column: "b1".to_string(),
+                    ref_schema: None,
+                    ref_table: "t2".to_string(),
+                    ref_column: "id".to_string(),
+                    on_update: None,
+                    on_delete: None,
+                },
+                db::ForeignKeyInfo {
+                    name: "fk_a".to_string(),
+                    column: "a1".to_string(),
+                    ref_schema: None,
+                    ref_table: "t3".to_string(),
+                    ref_column: "id".to_string(),
+                    on_update: None,
+                    on_delete: None,
+                },
+                // Second column of the same multi-column fk_a constraint — must be
+                // grouped with the first, not treated as a new constraint.
+                db::ForeignKeyInfo {
+                    name: "fk_a".to_string(),
+                    column: "a2".to_string(),
+                    ref_schema: None,
+                    ref_table: "t3".to_string(),
+                    ref_column: "id2".to_string(),
+                    on_update: None,
+                    on_delete: None,
+                },
+            ];
+
+            let grouped = group_foreign_keys_by_constraint_name(&foreign_keys);
+
+            assert_eq!(grouped.len(), 2);
+            assert_eq!(grouped[0].0, "fk_b");
+            assert_eq!(grouped[0].1.len(), 1);
+            assert_eq!(grouped[1].0, "fk_a");
+            assert_eq!(grouped[1].1.len(), 2);
+            assert_eq!(grouped[1].1[0].column, "a1");
+            assert_eq!(grouped[1].1[1].column, "a2");
+        }
+
+        #[test]
+        fn foreign_key_cycle_survives_dependency_sort_via_deferred_alters() {
+            // A <-> B mutual reference has no valid CREATE TABLE order at all — the
+            // dependency sort can only push both to the back (see
+            // table_dependency_sort_ignores_duplicates_and_out_of_scope_tables-style
+            // cycle handling); the transfer must not depend on ordering to succeed,
+            // only on foreign keys being added after every table exists.
+            let tables = vec!["b_department".to_string(), "c_employee".to_string()];
+            let dependencies = vec![
+                ("b_department".to_string(), "c_employee".to_string()),
+                ("c_employee".to_string(), "b_department".to_string()),
+            ];
+
+            let sorted = sort_table_names_by_dependencies(&tables, &dependencies, true);
+
+            // Whatever order the sort settles on, both tables are present — proving
+            // table creation alone can proceed regardless of the cycle, which is the
+            // property the deferred-ALTER approach relies on.
+            assert_eq!(sorted.len(), 2);
+            assert!(sorted.contains(&"b_department".to_string()));
+            assert!(sorted.contains(&"c_employee".to_string()));
         }
     }
 

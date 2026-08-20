@@ -105,9 +105,23 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
   const normalizedSettings = normalizeSqlFormatterSettings(settings);
   const options = sqlFormatterOptions(normalizedSettings);
   const language = formatterLanguage(dialect);
+  const formatterOptions =
+    language === "postgresql"
+      ? {
+          ...options,
+          paramTypes: {
+            ...options.paramTypes,
+            // PostgreSQL itself uses double quotes, but users commonly format
+            // imported MySQL-style SQL before correcting it. Treat complete
+            // backtick spans as opaque tokens so the PostgreSQL lexer can keep
+            // formatting the surrounding statement without rewriting them.
+            custom: [...options.paramTypes.custom, { regex: "`(?:``|[^`])*`" }],
+          },
+        }
+      : options;
   const formatWithFallback = (input: string): string => {
     try {
-      return format(input, { language, ...options });
+      return format(input, { language, ...formatterOptions });
     } catch (err) {
       // The generic "sql" dialect can't parse many real-world constructs (PostgreSQL
       // `::` casts, GaussDB/openGauss materialized-view DDL, T-SQL specifics, ...).

@@ -89,6 +89,7 @@ describe("AGENT_DRIVER_CATEGORY_MAP integrity", () => {
       "exasol",
       "hive",
       "ignite",
+      "ignite3",
       "kylin",
       "phoenix",
       "prestosql",

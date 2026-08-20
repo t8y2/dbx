@@ -103,6 +103,30 @@ async fn live_mysql57_text_protocol_select_succeeds() {
 }
 
 #[tokio::test]
+#[ignore = "requires the remote DBX MySQL 5.7 smoke-test container"]
+async fn live_mysql57_checksum_table_returns_native_result_set() {
+    let url = std::env::var("DBX_LIVE_MYSQL57_URL").expect("DBX_LIVE_MYSQL57_URL");
+    let pool = dbx_core::db::mysql::connect(&url, std::time::Duration::from_secs(5)).await.unwrap();
+
+    // 使用部署脚本预置的表验证 MySQL 5.7 原生 CHECKSUM TABLE 返回值没有被执行器丢弃。
+    let result = dbx_core::db::mysql::execute_query_with_max_rows(
+        &pool,
+        "CHECKSUM TABLE `dbx_smoke`",
+        false,
+        Some(10),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.columns, vec!["Table", "Checksum"]);
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0].len(), 2);
+    assert!(result.rows[0][0].as_str().is_some_and(|table| table.ends_with(".dbx_smoke")));
+    assert!(!result.rows[0][1].is_null());
+}
+
+#[tokio::test]
 #[ignore = "requires a MySQL endpoint that permits stored procedure creation"]
 async fn live_mysql_stored_procedure_preserves_all_result_sets() {
     let url = std::env::var("DBX_LIVE_MYSQL57_URL").expect("DBX_LIVE_MYSQL57_URL");

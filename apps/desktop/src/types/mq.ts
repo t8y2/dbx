@@ -162,6 +162,24 @@ export interface TopicInfo {
   messagesReady?: number;
   /** RabbitMQ messages delivered but not yet acknowledged. */
   messagesUnacked?: number;
+  /** RabbitMQ queue: auto-delete flag. */
+  autoDelete?: boolean;
+  /** RabbitMQ queue: exclusive flag. */
+  exclusive?: boolean;
+  /** RabbitMQ queue: state (running / idle / flow / blocked ...). */
+  state?: string;
+  /** RabbitMQ queue: type (classic / quorum / stream), from the management API `type` field or x-queue-type. */
+  queueType?: string;
+  /** RabbitMQ queue: x-arguments preserving the original JSON value types. */
+  arguments?: Record<string, unknown>;
+  /** RabbitMQ queue: consumer count. */
+  consumerCount?: number;
+  /** RabbitMQ queue: publish rate (msg/s) when the management API sampled message_stats. */
+  publishRate?: number;
+  /** RabbitMQ queue: deliver/get rate (msg/s). */
+  deliverRate?: number;
+  /** RabbitMQ queue: ack rate (msg/s). */
+  ackRate?: number;
 }
 
 export interface ListTopicsOpts {
@@ -179,6 +197,8 @@ export interface TopicStats {
   msgOutCounter: number;
   subscriptionCount: number;
   producerCount: number;
+  /** RabbitMQ: true when the management API exposed no message_stats sample, so msgRateIn/Out must be rendered as "no data" rather than a real rate of 0. */
+  ratesUnavailable?: boolean;
   raw?: unknown;
 }
 
@@ -200,6 +220,30 @@ export interface SubscriptionInfo {
   messageModel?: string;
   /** When true, backlog probe failed — do not render msgBacklog as healthy zero. */
   backlogUnavailable?: boolean;
+}
+
+export interface KafkaConsumerGroupPartitionLag {
+  topic: string;
+  partition: number;
+  currentOffset?: number;
+  endOffset?: number;
+  lag?: number;
+}
+
+export interface KafkaConsumerGroupSummary {
+  groupId: string;
+  state: string;
+  simpleGroup: boolean;
+  memberCount?: number;
+  topics: string[];
+  totalLag?: number;
+  lagAvailable: boolean;
+  partitions: KafkaConsumerGroupPartitionLag[];
+  error?: string;
+}
+
+export interface KafkaConsumerGroupSnapshot {
+  groups: KafkaConsumerGroupSummary[];
 }
 
 export interface RocketMqConsumerGroupConfig {

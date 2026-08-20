@@ -7,7 +7,7 @@ import { uuid } from "@/lib/common/utils";
 import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { effectiveDatabaseTypeForConnection, connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema } from "@/lib/database/jdbcDialect";
 import { getCachedTableMetadata, loadTableMetadata, TABLE_METADATA_CACHE_TTL_MS, tableMetadataToDataTabMeta } from "@/lib/metadata/tableMetadataCache";
-import { canApplyDataTabMetadata, dataTabMetadataNeedsRefresh, findExistingDataTabCandidate, type DataTabOpenMode, type DataTabReuseMode } from "@/lib/sidebar/dataTabOpenPolicy";
+import { canApplyDataTabMetadata, dataTabMetadataNeedsRefresh, findExistingDataTabCandidate, isDataTabMetadataLifecycleStale, type DataTabOpenMode, type DataTabReuseMode } from "@/lib/sidebar/dataTabOpenPolicy";
 import type { SidebarDataOpenRequest } from "@/lib/sidebar/sidebarDataOpenCoordinator";
 import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
@@ -93,6 +93,11 @@ export function useSidebarDataOpenRuntime() {
       });
       try {
         if (ensureConnected) await connectionStore.ensureConnected(node.connectionId);
+        // 记录启动时的连接元数据代次：加载期间若跨过生命周期边界（disconnect /
+        // 关库 / 死池重连），结果已过期，不得写回 tab（PR #6640 review
+        // blocker 1 的 tab-local 半边——shared 缓存写回已有 per-scope 失效代
+        // 数保护，tab 写回此前没有）。
+        const metadataGenerationAtStart = connectionStore.metadataGenerationFor(node.connectionId, node.database);
         const loadedMetadata = await loadTableMetadata({
           connectionId: node.connectionId,
           database: node.database,
@@ -104,6 +109,15 @@ export function useSidebarDataOpenRuntime() {
           catalog: node.catalog,
           traceLogger: isDebugLoggingEnabled() ? (event) => openDataLog("debug", "metadata:trace", { sourceTraceId: traceId, ...event }) : undefined,
         });
+        if (connectionStore.metadataGenerationFor(node.connectionId, node.database) !== metadataGenerationAtStart) {
+          openDataLog("info", "metadata:superseded-by-connection-generation", {
+            traceId,
+            tabId: targetTabId,
+            columnCount: loadedMetadata.metadata.columns.length,
+            elapsed: elapsed(),
+          });
+          return;
+        }
         if (!canApplyTableMetadata(targetTabId)) {
           openDataLog("info", "metadata:stale", {
             traceId,
@@ -161,7 +175,10 @@ export function useSidebarDataOpenRuntime() {
     if (existingSameTableTab && (existingSameTableTab.isExecuting || canActivateExistingDataTableTab(existingSameTableTab, { activateExecuting: false }))) {
       queryStore.switchTab(existingSameTableTab.id);
       logPhase("existing-tab-activated", { table: node.label });
-      if (dataTabMetadataNeedsRefresh(existingSameTableTab, DATA_TAB_METADATA_TTL_MS)) {
+      // 代次失配视同冷缓存（即使位于 30s TTL 窗口内也要重建）：disconnect /
+      // 关库 / 死池重连都可能不改变 timestamp 判定而改变连接生命周期
+      const connectionGeneration = connectionStore.metadataGenerationFor(node.connectionId, node.database);
+      if (isDataTabMetadataLifecycleStale(existingSameTableTab, connectionGeneration) || dataTabMetadataNeedsRefresh(existingSameTableTab, DATA_TAB_METADATA_TTL_MS)) {
         // 真实列缺失时行标识未知：启动刷新的同时必须挂起编辑门控（所有
         // "真实列缺失且启动刷新"的入口统一置 pending）
         if (!existingSameTableTab.tableMeta?.columns.length) existingSameTableTab.tableMetaPending = true;

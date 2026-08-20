@@ -29,6 +29,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { continuousQueryResultMaxRows } from "@/lib/dataGrid/queryResultRowLimit";
 import {
   appendRedisKeysToTreeIndex,
+  buildRedisKeyTree,
   canBuildRedisFuzzyTree,
   collectExpandedGroupIds,
   collectRedisGroupKeyRaws,
@@ -57,6 +58,8 @@ import { getRedisCreateKeyTypeHelp, redisCreateKeyTypeHelpOptionOnOpen, shouldAc
 import { optionHelpPanelOffsetTop } from "@/lib/common/optionHelpPanelOffset";
 import { applyRedisExpiryPolicy, type RedisExpiryMode, validateRedisExpiry } from "@/lib/redis/redisExpiry";
 import { shouldLoadMoreRedisKeys } from "@/lib/redis/redisKeyInfiniteScroll";
+import { formatTtl } from "@/lib/common/ttlFormat";
+import { computeTtlCountdownValue } from "@/lib/redis/redisAutoRefresh";
 
 const { t, locale } = useI18n();
 const { toast } = useToast();
@@ -229,7 +232,23 @@ watch(redisKeySeparator, () => {
   rebuildTree(false);
 });
 const lastTotalKeys = ref(0);
-const displayedKeyCount = computed(() => (isFetchingAll.value ? fetchAllLoadedCount.value : flatKeys.value.length));
+// “仅看无过期”过滤开关：开启后只保留 TTL 为 -1（永不过期）的已加载 key。
+// TTL 为 -2 的行（fetch-all 链路未查询 TTL）不会出现在过滤结果里。
+const noExpiryOnly = ref(false);
+// 过滤后的平铺 key 列表：未开启过滤时与 flatKeys 完全一致，避免额外开销
+const filteredFlatKeys = computed(() => (noExpiryOnly.value ? flatKeys.value.filter((key) => key.ttl === -1) : flatKeys.value));
+// 过滤后的树：独立重建而不复用 treeIndex，避免污染后续 SCAN 增量合并的全量树基准；
+// 分组 id 只由 db+路径决定，与全量树一致，因此展开状态可直接复用
+const filteredTreeKeys = computed(() => {
+  if (!noExpiryOnly.value) return treeKeys.value;
+  return buildRedisKeyTree(filteredFlatKeys.value, props.db, redisKeySeparator.value);
+});
+const displayedKeyCount = computed(() => {
+  if (isFetchingAll.value) return fetchAllLoadedCount.value;
+  // 过滤时展示匹配数量，便于确认“无过期”key 的规模
+  if (noExpiryOnly.value) return filteredFlatKeys.value.length;
+  return flatKeys.value.length;
+});
 const fetchAllProgressText = computed(() => {
   if (!isFetchingAll.value) return "";
   if (lastTotalKeys.value > 0) {
@@ -335,7 +354,62 @@ async function updateCreateKeyTypeHelpOffset() {
 watch(activeCreateKeyTypeHelp, () => {
   void updateCreateKeyTypeHelpOffset();
 });
-const visibleRows = computed(() => (useFlatKeySearchRows.value ? flatKeys.value.map((key) => redisKeyToFlatTreeRow(key, props.db)) : flattenVisibleRedisKeyTree(treeKeys.value, expandedGroupIds.value)));
+const visibleRows = computed(() => {
+  return useFlatKeySearchRows.value ? filteredFlatKeys.value.map((key) => redisKeyToFlatTreeRow(key, props.db)) : flattenVisibleRedisKeyTree(filteredTreeKeys.value, expandedGroupIds.value);
+});
+// 列表行的 TTL 徽标文案：-1 表示永不过期，展示本地化文案；
+// 大于 0 时展示本地倒计时后的剩余时间，倒计时归零展示已过期；其余（-2 未查询）不显示
+function redisTtlBadgeText(ttl: number, displayTtl: number): string | null {
+  if (ttl === -1) return t("redis.noExpiry");
+  if (ttl > 0 && displayTtl <= 0) return t("redis.expired");
+  return formatTtl(displayTtl, t);
+}
+// 列表行的 TTL 徽标配色：永不过期用琥珀色，已过期或 1 小时内即将过期用红色警示，其余用中性色
+function redisTtlBadgeClass(ttl: number, displayTtl: number): string {
+  if (ttl === -1) return "border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-300";
+  if (displayTtl <= 3600) return "border-red-300 bg-red-50 text-red-600 dark:border-red-500/40 dark:bg-red-500/10 dark:text-red-300";
+  return "border-border bg-muted/60 text-muted-foreground";
+}
+// 记录每个 key 的 TTL 被观测到的时刻（毫秒）；本地倒计时 = 观测时的 TTL - 已流逝时间，
+// 与右侧详情面板同源（computeTtlCountdownValue），不需要额外的网络请求
+const ttlObservedAtByRaw = new Map<string, number>();
+// 驱动列表行 TTL 倒计时的当前时刻，仅在存在需要倒计时的 key 时每秒更新
+const listTtlNowMs = ref(Date.now());
+let listTtlTimer: ReturnType<typeof setInterval> | null = null;
+
+// 批次加载/详情回写等入口统一记录 key 的 TTL 观测时刻；非正 TTL 无需倒计时，移除旧记录
+function recordKeyTtlObservedAt(key: RedisKeyInfo) {
+  const ttl = key.ttl ?? -2;
+  if (ttl > 0) {
+    ttlObservedAtByRaw.set(key.key_raw, Date.now());
+  } else {
+    ttlObservedAtByRaw.delete(key.key_raw);
+  }
+}
+
+// 列表行展示的 TTL：正 TTL 按观测时刻到当前时刻的流逝本地递减；-1/-2 原样透传
+function redisRowDisplayTtl(ttl: number, keyRaw: string): number {
+  if (ttl <= 0) return ttl;
+  const observedAt = ttlObservedAtByRaw.get(keyRaw) ?? Date.now();
+  return computeTtlCountdownValue(ttl, observedAt, listTtlNowMs.value);
+}
+
+// 按需启停倒计时定时器：只在组件激活且存在正 TTL 的 key 时运行，避免空转
+function syncListTtlTimer() {
+  const needed = redisBrowserIsActive && flatKeys.value.some((key) => (key.ttl ?? -2) > 0);
+  if (needed && !listTtlTimer) {
+    listTtlNowMs.value = Date.now();
+    listTtlTimer = setInterval(() => {
+      listTtlNowMs.value = Date.now();
+    }, 1000);
+  } else if (!needed && listTtlTimer) {
+    clearInterval(listTtlTimer);
+    listTtlTimer = null;
+  }
+}
+
+// flatKeys 的每次变更都是整体替换数组，浅监听即可感知增删改
+watch(flatKeys, syncListTtlTimer);
 let commandHistoryId = 0;
 
 function resetCheckedKeys() {
@@ -597,6 +671,8 @@ async function fetchScanBatchPage(maxIterations: number, options: { count?: numb
 
 function appendScanResult(result: RedisScanResult, options: { updateTree?: boolean; buffer?: RedisKeyInfo[] } = {}): number {
   const newKeys = collectUniqueRedisKeys(result.keys, loadedKeyRaws);
+  // 批次到达前端即为 TTL 的观测时刻，直连合并与 Fetch All 缓冲两条路径在此统一记录
+  for (const key of newKeys) recordKeyTtlObservedAt(key);
   if (options.buffer) {
     for (const key of newKeys) options.buffer.push(key);
   } else if (newKeys.length > 0) {
@@ -658,6 +734,7 @@ async function loadKeys() {
   fetchAllLoadedCount.value = 0;
   loading.value = true;
   loadedKeyRaws.clear();
+  ttlObservedAtByRaw.clear();
   flatKeys.value = [];
   treeKeys.value = [];
   treeIndex = null;
@@ -856,6 +933,7 @@ function onRowClick(node: RedisKeyTreeNode, event?: MouseEvent) {
 function removeKnownKey(keyRaw: string) {
   if (!flatKeys.value.some((key) => key.key_raw === keyRaw)) return;
   loadedKeyRaws.delete(keyRaw);
+  ttlObservedAtByRaw.delete(keyRaw);
   flatKeys.value = flatKeys.value.filter((key) => key.key_raw !== keyRaw);
   if (selectedKeyRaw.value === keyRaw) selectedKeyRaw.value = null;
   if (useFlatKeySearchRows.value) {
@@ -890,6 +968,10 @@ function onKeyRenamed(oldKeyRaw: string, newKeyRaw: string, newKeyDisplay: strin
 
   loadedKeyRaws.delete(oldKeyRaw);
   loadedKeyRaws.add(newKeyRaw);
+  // 改名不换 TTL，观测时刻随 key 一起迁移，倒计时不中断
+  const observedAt = ttlObservedAtByRaw.get(oldKeyRaw);
+  ttlObservedAtByRaw.delete(oldKeyRaw);
+  if (observedAt !== undefined) ttlObservedAtByRaw.set(newKeyRaw, observedAt);
   flatKeys.value = flatKeys.value.map((key) => (key.key_raw === oldKeyRaw ? { ...key, key_raw: newKeyRaw, key_display: newKeyDisplay } : key));
   if (selectedKeyRaw.value === oldKeyRaw) selectedKeyRaw.value = newKeyRaw;
   if (checkedKeys.value.has(oldKeyRaw)) {
@@ -926,6 +1008,8 @@ function onKeyLoaded(value: RedisValue) {
   const keyInfo = redisValueToKeyInfo(value);
   const existingIndex = flatKeys.value.findIndex((key) => key.key_raw === keyInfo.key_raw);
   if (existingIndex < 0) return;
+  // 详情面板回写了最新的 TTL，同步刷新观测时刻，保证两侧倒计时一致
+  recordKeyTtlObservedAt(keyInfo);
   flatKeys.value = flatKeys.value.map((key, index) => (index === existingIndex ? keyInfo : key));
   loadedKeyRaws.add(keyInfo.key_raw);
   if (useFlatKeySearchRows.value) {
@@ -995,6 +1079,7 @@ function resetLoadedKeys() {
   fetchAllStopRequested.value = false;
   fetchAllLoadedCount.value = 0;
   loadedKeyRaws.clear();
+  ttlObservedAtByRaw.clear();
   flatKeys.value = [];
   treeKeys.value = [];
   treeIndex = null;
@@ -1019,7 +1104,10 @@ async function deleteKeyRaws(keys: string[]) {
       deletedCount += await api.redisDeleteKeys(props.connectionId, props.db, batch);
     }
     const deleted = new Set(uniqueKeys);
-    for (const key of deleted) loadedKeyRaws.delete(key);
+    for (const key of deleted) {
+      loadedKeyRaws.delete(key);
+      ttlObservedAtByRaw.delete(key);
+    }
     flatKeys.value = flatKeys.value.filter((key) => !deleted.has(key.key_raw));
     if (selectedKeyRaw.value && deleted.has(selectedKeyRaw.value)) {
       selectedKeyRaw.value = null;
@@ -1245,6 +1333,8 @@ function upsertCreatedKey(value: RedisValue) {
     value_preview: redisValuePreview(value),
   };
   const existingIndex = flatKeys.value.findIndex((key) => key.key_raw === keyInfo.key_raw);
+  // 新建 key 携带的 TTL 以当前时刻为观测起点
+  recordKeyTtlObservedAt(keyInfo);
   if (existingIndex >= 0) {
     flatKeys.value = flatKeys.value.map((key, index) => (index === existingIndex ? keyInfo : key));
   } else {
@@ -1764,6 +1854,8 @@ function pauseRedisBrowserBackgroundWork() {
   // keys that were never rendered.
   const discardIncompleteFetchAll = isFetchingAll.value;
   redisBrowserIsActive = false;
+  // 组件停用/卸载后不再展示列表，停掉 TTL 倒计时定时器
+  syncListTtlTimer();
   // 与 onUnmounted 对称：组件被 keep-alive 包裹，停用时（onDeactivated）若不取消挂起的 rAF，
   // 帧回调仍会在隐藏组件上触发并调用 loadMore() 跑一次冗余 SCAN，故在此一并取消并置 0。
   if (redisInfiniteScrollFrame) cancelAnimationFrame(redisInfiniteScrollFrame);
@@ -1783,6 +1875,8 @@ function pauseRedisBrowserBackgroundWork() {
 function resumeRedisBrowserBackgroundWork() {
   redisBrowserIsActive = true;
   registerRedisDbFlushedListener();
+  // 重新激活后恢复 TTL 倒计时定时器
+  syncListTtlTimer();
 }
 
 async function clearInMemoryHistory() {
@@ -1985,19 +2079,35 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
                   @keydown="onSearchKeydown"
                 />
               </div>
-              <Button
-                v-if="searchMode === 'key'"
-                variant="ghost"
-                size="sm"
-                class="h-8 max-w-full shrink-0 whitespace-nowrap px-2 text-xs"
-                :class="fuzzyKeySearch ? 'bg-accent text-accent-foreground' : 'border border-dashed border-border/70 text-muted-foreground hover:text-foreground'"
-                :title="t('redis.fuzzyMatchTitle')"
-                :aria-pressed="fuzzyKeySearch"
-                @click="toggleFuzzyKeySearch"
-              >
-                <Asterisk class="redis-fuzzy-icon h-3 w-3 mr-1" />
-                <span class="redis-fuzzy-label">{{ t("redis.fuzzyMatch") }}</span>
-              </Button>
+              <div class="flex shrink-0 items-center gap-1">
+                <Button
+                  v-if="searchMode === 'key'"
+                  variant="ghost"
+                  size="sm"
+                  class="h-8 max-w-full shrink-0 whitespace-nowrap px-2 text-xs"
+                  :class="fuzzyKeySearch ? 'bg-accent text-accent-foreground' : 'border border-dashed border-border/70 text-muted-foreground hover:text-foreground'"
+                  :title="t('redis.fuzzyMatchTitle')"
+                  :aria-pressed="fuzzyKeySearch"
+                  @click="toggleFuzzyKeySearch"
+                >
+                  <Asterisk class="redis-fuzzy-icon h-3 w-3 mr-1" />
+                  <span class="redis-fuzzy-label">{{ t("redis.fuzzyMatch") }}</span>
+                </Button>
+                <!-- 仅看无过期：在已加载结果里过滤出 TTL 为 -1 的 key，方便批量定位未设置过期时间的缓存 -->
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  class="h-8 shrink-0 whitespace-nowrap px-2 text-xs"
+                  :class="noExpiryOnly ? 'bg-accent text-accent-foreground' : 'border border-dashed border-border/70 text-muted-foreground hover:text-foreground'"
+                  :title="t('redis.noExpiryOnlyTitle')"
+                  :aria-pressed="noExpiryOnly"
+                  data-redis-no-expiry-filter
+                  @click="noExpiryOnly = !noExpiryOnly"
+                >
+                  <Clock class="h-3 w-3 mr-1" />
+                  <span>{{ t("redis.noExpiryOnly") }}</span>
+                </Button>
+              </div>
             </div>
           </div>
 
@@ -2016,6 +2126,10 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
           <div v-else-if="loading && flatKeys.length === 0" class="flex-1 flex items-center justify-center gap-2 text-muted-foreground text-xs">
             <Loader2 class="w-3.5 h-3.5 animate-spin" />
             <span>{{ loadingEmptyText }}</span>
+          </div>
+          <!-- 过滤开启但没有命中任何无过期 key 时，给出明确空态提示而不是空白列表 -->
+          <div v-else-if="noExpiryOnly && visibleRows.length === 0" class="flex-1 flex items-center justify-center text-muted-foreground text-xs p-4 text-center">
+            {{ t("redis.noExpiryKeysEmpty") }}
           </div>
           <RecycleScroller v-else ref="redisKeyScrollerRef" class="redis-key-scroller flex-1" :items="visibleRows" :item-size="30" :buffer="600" :skip-hover="true" key-field="id" @scroll="onRedisKeyScroll" @resize="maybeAutoLoadMoreRedisKeys">
             <template #default="{ item: row }">
@@ -2067,6 +2181,14 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
                   </div>
                   <div class="flex shrink-0 items-center justify-end gap-1">
                     <Badge v-if="row.node.kind === 'leaf' && row.node.keyType" variant="outline" class="text-xs px-1.5 py-0" :class="typeColor(row.node.keyType)">{{ row.node.keyType }}</Badge>
+                    <!-- TTL 徽标：与类型徽标保持一致的胶囊样式，永不过期为琥珀色、临近过期/已过期为红色警示 -->
+                    <span
+                      v-if="row.node.kind === 'leaf' && redisTtlBadgeText(row.node.ttl, redisRowDisplayTtl(row.node.ttl, row.node.keyRaw))"
+                      class="inline-flex shrink-0 items-center whitespace-nowrap rounded border px-1.5 py-0.5 text-[11px] leading-none"
+                      :class="redisTtlBadgeClass(row.node.ttl, redisRowDisplayTtl(row.node.ttl, row.node.keyRaw))"
+                      :title="row.node.ttl === -1 ? t('redis.noExpiry') : t('redis.ttlCountdownTitle')"
+                      >{{ redisTtlBadgeText(row.node.ttl, redisRowDisplayTtl(row.node.ttl, row.node.keyRaw)) }}</span
+                    >
                     <Button v-if="row.node.kind === 'group' && !isFuzzyHierarchyView" variant="ghost" size="icon" class="h-5 w-5 shrink-0 text-destructive opacity-0 group-hover:opacity-100" :title="t('redis.deleteGroup')" :disabled="selectionBusy" @click="requestGroupDelete(row.node, $event)">
                       <Trash2 class="h-3 w-3" />
                     </Button>

@@ -70,6 +70,8 @@ type objectInfo struct {
 	Name           string  `json:"name"`
 	ObjectType     string  `json:"object_type"`
 	Schema         string  `json:"schema"`
+	ParentSchema   *string `json:"parent_schema,omitempty"`
+	ParentName     *string `json:"parent_name,omitempty"`
 	Comment        *string `json:"comment"`
 	Valid          *bool   `json:"valid,omitempty"`
 	CustomTypeKind *string `json:"custom_type_kind,omitempty"`
@@ -1123,6 +1125,13 @@ WHERE n.nspname = %s ORDER BY p.proname`, catalog, function, catalog, function, 
 			_ = rows.Close()
 		}
 	}
+	if constraintsAllowTriggers(constraints) {
+		triggers, triggerErr := s.listTriggerObjects(effective)
+		if triggerErr != nil {
+			return nil, fmt.Errorf("list triggers in schema %q: %w", effective, triggerErr)
+		}
+		result = append(result, triggers...)
+	}
 	if constraintsAllowTypes(constraints) {
 		types, typesErr := s.listCustomTypes(effective)
 		if typesErr != nil {
@@ -1146,6 +1155,50 @@ WHERE n.nspname = %s ORDER BY p.proname`, catalog, function, catalog, function, 
 		return filtered[i].Name < filtered[j].Name
 	})
 	return pageObjects(filtered, constraints), nil
+}
+
+func (s *server) listTriggerObjects(schema string) ([]objectInfo, error) {
+	effective, err := s.effectiveSchema(schema)
+	if err != nil {
+		return nil, err
+	}
+	catalog, prefix := "sys_catalog", "sys"
+	if s.mode.postgresCatalog {
+		catalog, prefix = "pg_catalog", "pg"
+	}
+	queryForCatalog := func() string {
+		internalPredicate := "NOT tg.tgisinternal"
+		if s.triggerInternalUnsupported {
+			internalPredicate = "tg.tgkind <> 'c'"
+		}
+		return fmt.Sprintf(`SELECT tg.tgname, c.relname, d.description
+FROM %s.%s_trigger tg JOIN %s.%s_class c ON c.oid = tg.tgrelid
+JOIN %s.%s_namespace n ON n.oid = c.relnamespace
+LEFT JOIN %s.%s_description d ON d.objoid = tg.oid AND d.objsubid = 0
+WHERE n.nspname = %s AND %s ORDER BY c.relname, tg.tgname`, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(effective), internalPredicate)
+	}
+	rows, err := s.metadataQuery(queryForCatalog())
+	if err != nil && !s.triggerInternalUnsupported && isUndefinedColumn(err, "tgisinternal") {
+		s.triggerInternalUnsupported = true
+		rows, err = s.metadataQuery(queryForCatalog())
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []objectInfo{}
+	for rows.Next() {
+		var name, parentName string
+		var comment sql.NullString
+		if err := rows.Scan(&name, &parentName, &comment); err != nil {
+			return nil, err
+		}
+		result = append(result, objectInfo{
+			Name: name, ObjectType: "TRIGGER", Schema: effective,
+			ParentSchema: stringPtr(effective), ParentName: stringPtr(parentName), Comment: nullStringPtr(comment),
+		})
+	}
+	return result, rows.Err()
 }
 
 func (s *server) completionAssistantSearch(request completionAssistantRequest) (completionAssistantResponse, error) {
@@ -1728,6 +1781,10 @@ WHERE n.nspname = %s AND c.relname = %s AND %s ORDER BY tg.tgname`, catalog, pre
 }
 
 func (s *server) getObjectSource(schema, name, objectType string) (map[string]any, error) {
+	return s.getObjectSourceForRelation(schema, name, objectType, "")
+}
+
+func (s *server) getObjectSourceForRelation(schema, name, objectType, relationName string) (map[string]any, error) {
 	effective, err := s.effectiveSchema(schema)
 	if err != nil {
 		return nil, err
@@ -1787,11 +1844,26 @@ func (s *server) getObjectSource(schema, name, objectType string) (map[string]an
 				err = queryLegacySource()
 			}
 		}
+	} else if kind == "TRIGGER" {
+		definitions, triggerErr := s.listTriggerDefinitionsFor(effective, relationName, name)
+		if triggerErr != nil {
+			err = triggerErr
+		} else if len(definitions) == 1 {
+			source = definitions[0]
+		} else if len(definitions) > 1 {
+			err = fmt.Errorf("trigger %q is ambiguous in schema %q; relation_name is required", name, effective)
+		} else {
+			err = sql.ErrNoRows
+		}
 	}
 	if err != nil && err != sql.ErrNoRows {
 		return nil, err
 	}
-	return map[string]any{"name": name, "object_type": objectType, "schema": effective, "source": source}, nil
+	result := map[string]any{"name": name, "object_type": objectType, "schema": effective, "source": source}
+	if kind == "TRIGGER" {
+		result["editable"] = false
+	}
+	return result, nil
 }
 
 func (s *server) getTableDDL(schema, table string) (string, error) {
@@ -1896,6 +1968,10 @@ WHERE n.nspname = %s AND t.relname = %s AND NOT ix.indisprimary ORDER BY i.relna
 }
 
 func (s *server) listTriggerDefinitions(schema, table string) ([]string, error) {
+	return s.listTriggerDefinitionsFor(schema, table, "")
+}
+
+func (s *server) listTriggerDefinitionsFor(schema, table, trigger string) ([]string, error) {
 	effective, err := s.effectiveSchema(schema)
 	if err != nil {
 		return nil, err
@@ -1914,9 +1990,17 @@ func (s *server) listTriggerDefinitions(schema, table string) ([]string, error) 
 		if s.triggerInternalUnsupported {
 			internalPredicate = "tg.tgkind <> 'c'"
 		}
+		relationFilter := ""
+		if strings.TrimSpace(table) != "" {
+			relationFilter = " AND c.relname = " + quoteLiteral(table)
+		}
+		triggerFilter := ""
+		if strings.TrimSpace(trigger) != "" {
+			triggerFilter = " AND tg.tgname = " + quoteLiteral(trigger)
+		}
 		return fmt.Sprintf(`SELECT %s(%s)
 FROM %s.%s_trigger tg JOIN %s.%s_class c ON c.oid = tg.tgrelid JOIN %s.%s_namespace n ON n.oid = c.relnamespace
-WHERE n.nspname = %s AND c.relname = %s AND %s ORDER BY tg.tgname`, triggerDefinitionFunction, arguments, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(effective), quoteLiteral(table), internalPredicate)
+WHERE n.nspname = %s%s%s AND %s ORDER BY c.relname, tg.tgname`, triggerDefinitionFunction, arguments, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(effective), relationFilter, triggerFilter, internalPredicate)
 	}
 	var rows *sql.Rows
 	for {
@@ -2149,7 +2233,7 @@ func normalizeTableType(value string) string {
 	switch normalized {
 	case "BASE_TABLE", "PARTITIONED_TABLE":
 		return "TABLE"
-	case "MATERIALIZED_VIEW", "FOREIGN_TABLE", "VIEW", "TABLE", "TYPE", "TYPE_BODY":
+	case "MATERIALIZED_VIEW", "FOREIGN_TABLE", "VIEW", "TABLE", "TRIGGER", "TYPE", "TYPE_BODY":
 		return normalized
 	default:
 		return "TABLE"
@@ -2221,6 +2305,18 @@ func constraintsAllowRoutines(constraints metadataListConstraints) bool {
 	}
 	for _, kind := range constraints.ObjectTypes {
 		if routineObjectType(kind) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// Schema triggers are opt-in because legacy unfiltered object calls predate
+// this object family. Sidebar requests include explicit object types, while
+// completion callers keep their existing bounded result set.
+func constraintsAllowTriggers(constraints metadataListConstraints) bool {
+	for _, kind := range constraints.ObjectTypes {
+		if normalizeTableType(kind) == "TRIGGER" {
 			return true
 		}
 	}
@@ -2303,8 +2399,10 @@ func objectOrder(kind string) int {
 		return 4
 	case "FUNCTION":
 		return 5
-	case "TYPE":
+	case "TRIGGER":
 		return 6
+	case "TYPE":
+		return 7
 	default:
 		return 9
 	}

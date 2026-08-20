@@ -112,8 +112,8 @@ export function matchesShortcut(event: ShortcutLikeEvent, shortcut: string, plat
   return matchesShortcutKey(event, key, platform);
 }
 
-function actionShortcut(actionId: ShortcutActionId, shortcuts?: Partial<ShortcutSettings>): string {
-  return normalizeShortcutSettings(shortcuts)[actionId];
+function actionShortcut(actionId: ShortcutActionId, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): string {
+  return normalizeShortcutSettings(shortcuts, platform)[actionId];
 }
 
 const SWITCH_TO_TAB_ACTIONS: ShortcutActionId[] = ["switchToTab1", "switchToTab2", "switchToTab3", "switchToTab4", "switchToTab5", "switchToTab6", "switchToTab7", "switchToTab8", "switchToTab9"];
@@ -229,6 +229,20 @@ export function isViewTableDdlShortcut(event: ShortcutLikeEvent, shortcuts?: Par
 
 export function isQuickOpenShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("quickOpen", shortcuts));
+}
+
+export function isNavigateTabHistoryBackShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
+  return matchesShortcut(event, actionShortcut("navigateTabHistoryBack", shortcuts, platform), platform);
+}
+
+export function isNavigateTabHistoryForwardShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
+  return matchesShortcut(event, actionShortcut("navigateTabHistoryForward", shortcuts, platform), platform);
+}
+
+export function handleTabHistoryNavigationShortcut(event: ShortcutLikeEvent, shortcuts: Partial<ShortcutSettings> | undefined, navigate: (direction: -1 | 1) => boolean, platform = globalThis.navigator?.platform || ""): boolean {
+  if (isNavigateTabHistoryBackShortcut(event, shortcuts, platform)) return navigate(-1);
+  if (isNavigateTabHistoryForwardShortcut(event, shortcuts, platform)) return navigate(1);
+  return false;
 }
 
 export function isSwitchToPreviousTabShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {

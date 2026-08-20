@@ -1383,6 +1383,8 @@ async fn live_sqlserver_transfer_table_skips_rowversion_insert_column() {
         &DatabaseType::SqlServer,
         &source_pool_key,
         &target_pool_key,
+        &std::collections::HashMap::new(),
+        &mut Vec::new(),
         |_| {},
     )
     .await;

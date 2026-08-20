@@ -120,6 +120,7 @@ const driverLabels: Record<string, string> = {
   highgo: "HighGo",
   hive: "Apache Hive",
   ignite: "Apache Ignite",
+  ignite3: "Apache Ignite 3",
   informix: "Informix",
   iotdb: "Apache IoTDB",
   iris: "InterSystems IRIS",

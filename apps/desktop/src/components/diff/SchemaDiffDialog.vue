@@ -870,10 +870,16 @@ const targetConnectionInfo = computed(() => {
         </DialogTitle>
       </DialogHeader>
 
-      <div class="flex-1 min-h-0 overflow-hidden flex flex-col">
+      <!-- Result step relies on splitpanes to manage its own scroll/heights, so it keeps
+           `overflow-hidden`; the config step's tall content (e.g. the table multi-select
+           added in the "compare specific tables" feature) can overflow a fixed-height
+           dialog, so it must be allowed to scroll vertically instead of being clipped --
+           otherwise the Compare button at the bottom becomes unreachable. -->
+      <div :class="[step === 'result' ? 'overflow-hidden' : 'overflow-y-auto', 'flex-1 min-h-0 flex flex-col']">
         <!-- Config Step -->
         <SchemaDiffConfigStep
           v-if="step === 'config'"
+          class="shrink-0"
           v-model:source-connection-id="sourceConnectionId"
           v-model:source-database="sourceDatabase"
           v-model:source-schema="sourceSchema"

@@ -1,8 +1,8 @@
 <div align="center">
-  <p style="font-size: 18px; white-space: nowrap;"><strong>80+ databases in 20 MB. Desktop, Docker, CLI, built-in AI assistant, and MCP Server.</strong></p>
+  <p style="font-size: 18px; white-space: nowrap;"><strong>90+ databases in 20 MB. Desktop, Docker, CLI, built-in AI assistant, and MCP Server.</strong></p>
 
   <p>
-    <img src="https://dl.dbxio.com/assets/readme-hero-20260816.png" alt="DBX screenshot" width="820" />
+    <img src="https://dl.dbxio.com/assets/readme-hero-20260820.png" alt="DBX screenshot" width="820" />
   </p>
 
   <p>
@@ -89,7 +89,7 @@
 
 ## Features
 
-### 80+ Databases, One Tool
+### 90+ Databases, One Tool
 
 MySQL, PostgreSQL, SQLite, Cloudflare D1, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, Elasticsearch, Easysearch, Meilisearch, Qdrant, Milvus, Weaviate, MariaDB, TiDB, OceanBase, openGauss, GaussDB, KWDB, KingbaseES, Vastbase, GoldenDB, Doris, SelectDB, StarRocks, Manticore Search, Redshift, DM, TDengine, XuguDB, CockroachDB, Access, HighGo, UXDB, Dolt, and more. Agent-based profiles extend DBX to H2, Snowflake, Trino, PrestoSQL, Hive, DB2, Informix, Neo4j, Cassandra, BigQuery, Kylin, SunDB, JDBCX, and custom JDBC connections. New native and agent-driven drivers also cover Databricks, SAP HANA, Teradata, Vertica, Firebird, Exasol, YashanDB, GBase 8a/8s, Databend, RQLite, Turso, InfluxDB, QuestDB, IoTDB, etcd, ZooKeeper, Nacos, Consul KV, IRIS, and more. Message queue admin is also available for Pulsar, Kafka, and RocketMQ. All in a single ~20 MB app. No bundled Chromium.
 
@@ -468,11 +468,11 @@ DBX is free and open source, but ongoing maintenance, database compatibility tes
 
 ## Star History
 
-<a href="https://www.star-history.com/?repos=t8y2%2Fdbx&type=date&legend=top-left">
+<a href="https://star-history.dera.page/#t8y2/dbx&type=date">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=t8y2/dbx&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=t8y2/dbx&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=t8y2/dbx&type=date&legend=top-left" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=t8y2/dbx&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=t8y2/dbx&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://star-history.dera.page/svg?repos=t8y2/dbx&type=date&legend=top-left" />
  </picture>
 </a>
 

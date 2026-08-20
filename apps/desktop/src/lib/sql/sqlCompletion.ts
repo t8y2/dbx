@@ -624,6 +624,10 @@ const JOIN_MODIFIER_KEYWORD_PHRASES = ["LEFT JOIN", "RIGHT JOIN", "INNER JOIN", 
 const MAX_TABLE_COMPLETION_ITEMS = 200;
 const EXACT_LABEL_MATCH_BOOST = 10000;
 
+function isTableTriggerKeyword(keyword: string, options: SqlSemanticBuildOptions): boolean {
+  return TABLE_TRIGGER_KEYWORDS.has(keyword) || (keyword === "desc" && resolveSqlDialectId(options) === "mysql");
+}
+
 // Keywords that only make sense in DDL / statement-start contexts (not inside SELECT/INSERT/UPDATE/DELETE)
 const DDL_ONLY_KEYWORDS = new Set([
   "CREATE",
@@ -2136,7 +2140,7 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
   const deleteInfo = detectDeleteCompletionContext(beforeCursor);
   const oracleTableFunctionContext = detectOracleTableFunctionContext(beforeCursor);
 
-  const afterTableTrigger = TABLE_TRIGGER_KEYWORDS.has(lastWord) || (JOIN_MODIFIERS.has(lastWord) && isFollowedByJoin(beforeToken)) || isInTableListContext(beforeToken);
+  const afterTableTrigger = isTableTriggerKeyword(lastWord, options) || (JOIN_MODIFIERS.has(lastWord) && isFollowedByJoin(beforeToken)) || isInTableListContext(beforeToken);
   const exclusiveTableSuggestions = EXCLUSIVE_TABLE_TRIGGER_KEYWORDS.has(lastWord) || (JOIN_MODIFIERS.has(lastWord) && isFollowedByJoin(beforeToken)) || isInTableListContext(beforeToken);
   const tableAliasAfterCursor = hasTableAliasAfterCursor(sql, cursor);
   const autoAliasTableCompletions = (lastWord === "from" || lastWord === "join" || (JOIN_MODIFIERS.has(lastWord) && isFollowedByJoin(beforeToken)) || isInTableListContext(beforeToken)) && !tableAliasAfterCursor;

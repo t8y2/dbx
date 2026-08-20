@@ -181,6 +181,7 @@ fn add_mq_routes(router: Router<Arc<WebState>>) -> Router<Arc<WebState>> {
         .route("/mq/messages/trace", post(routes::mq::query_message_trace))
         .route("/mq/subscriptions/list", post(routes::mq::list_subscriptions))
         .route("/mq/subscriptions/enrich", post(routes::mq::enrich_subscriptions))
+        .route("/mq/kafka/consumer-groups", post(routes::mq::get_kafka_consumer_group_snapshot))
         .route("/mq/subscriptions/create", post(routes::mq::create_subscription))
         .route("/mq/subscriptions/delete", post(routes::mq::delete_subscription))
         .route("/mq/subscriptions/skip-messages", post(routes::mq::skip_messages))
@@ -800,6 +801,18 @@ async fn main() {
         .route("/document-store/update-document", post(routes::document_store::update_document))
         .route("/document-store/delete-document", post(routes::document_store::delete_document))
         .route("/document-store/save-meilisearch-batch", post(routes::document_store::save_meilisearch_batch))
+        .route("/document-store/meilisearch/search", post(routes::document_store::meilisearch_search))
+        .route("/document-store/meilisearch/documents/fetch", post(routes::document_store::meilisearch_fetch_documents))
+        .route("/document-store/meilisearch/documents/get", post(routes::document_store::meilisearch_get_document))
+        .route("/document-store/meilisearch/settings/get", post(routes::document_store::meilisearch_get_settings))
+        .route("/document-store/meilisearch/settings/update", post(routes::document_store::meilisearch_update_settings))
+        .route("/document-store/meilisearch/stats", post(routes::document_store::meilisearch_get_stats))
+        .route("/document-store/meilisearch/overview", post(routes::document_store::meilisearch_get_overview))
+        .route("/document-store/meilisearch/index/delete", post(routes::document_store::meilisearch_delete_index))
+        .route(
+            "/document-store/meilisearch/documents/delete-all",
+            post(routes::document_store::meilisearch_delete_all_documents),
+        )
         .route("/mongo/find-documents", post(routes::mongo::find_documents))
         .route("/mongo/parse-shell-command", post(routes::mongo::parse_shell_command))
         .route("/mongo/explain-find", post(routes::mongo::explain_find))

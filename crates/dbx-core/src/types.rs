@@ -122,6 +122,7 @@ pub enum ObjectSourceKind {
     Procedure,
     Function,
     Trigger,
+    Event,
     Sequence,
     Synonym,
     Package,

@@ -175,7 +175,7 @@ describe("connectionStore metadata loading", () => {
       fallback_used: false,
     });
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
-    vi.doMock("@/lib/backend/api", () => ({ checkConnectionHealth: vi.fn().mockResolvedValue(undefined), completionAssistantSearch }));
+    vi.doMock("@/lib/backend/api", () => ({ checkConnectionHealth: vi.fn().mockResolvedValue(undefined), completionAssistantSearch, deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined), listInstalledAgents: vi.fn().mockResolvedValue([]) }));
 
     const { useConnectionStore } = await import("@/stores/connectionStore");
     const store = useConnectionStore();
@@ -188,7 +188,7 @@ describe("connectionStore metadata loading", () => {
       database: "app_db",
       schema: "app_schema",
       children: [],
-      isExpanded: false,
+      isExpanded: true,
     };
     store.connections = [connection];
     store.connectedIds = new Set([connection.id]);
@@ -219,6 +219,18 @@ describe("connectionStore metadata loading", () => {
     ]);
     expect(packageNode.children?.flatMap((group) => group.children ?? []).map((child) => child.label)).toEqual(["process_item(p_id IN INT)", "process_item(p_code IN VARCHAR)", "item_count"]);
     expect(packageNode.children?.flatMap((group) => group.children ?? []).every((child) => child.parentName === "business_api")).toBe(true);
+
+    completionAssistantSearch.mockResolvedValueOnce({
+      candidates: [{ name: "next_item", kind: "function", data_type: "INT" }],
+      incomplete: false,
+      fallback_used: false,
+    });
+    const functionGroup = packageNode.children?.find((child) => child.type === "group-functions");
+    await store.refreshTreeNode(functionGroup!);
+
+    expect(completionAssistantSearch).toHaveBeenCalledTimes(2);
+    expect(packageNode.children?.map((child) => [child.type, child.objectCount])).toEqual([["group-functions", 1]]);
+    expect(packageNode.children?.[0]?.children?.map((child) => child.label)).toEqual(["next_item"]);
   }, 15000);
 
   it("loads Xugu object type members through the scoped completion endpoint", async () => {
@@ -287,6 +299,48 @@ describe("connectionStore metadata loading", () => {
     expect(typeNode.children?.[0].children?.map((child) => child.label)).toEqual(["street (VARCHAR(120))", "created_at (DATETIME)"]);
     expect(typeNode.children?.[1].children?.map((child) => child.label)).toEqual(["FUNCTION format(p_locale IN VARCHAR) → VARCHAR"]);
     expect(typeNode.children?.every((child) => child.parentName === "ADDRESS_T")).toBe(true);
+  }, 15000);
+
+  it("keeps expanded Xugu type members loaded during forced tree refresh", async () => {
+    const completionAssistantSearch = vi.fn(async (request: { object_kinds?: string[] }) => ({
+      candidates: request.object_kinds?.includes("column") ? [{ name: "street", kind: "column", data_type: "VARCHAR(120)" }] : [],
+      incomplete: false,
+      fallback_used: false,
+    }));
+    const getCustomTypeDetails = vi.fn().mockRejectedValue(new Error("custom type loader must not be called for Xugu types"));
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      getCustomTypeDetails,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = xuguConnection();
+    const typeNode: TreeNode = {
+      id: "xugu-1:app_db:app_schema:type:address_t",
+      label: "ADDRESS_T",
+      type: "type",
+      objectName: "ADDRESS_T",
+      connectionId: connection.id,
+      database: "app_db",
+      schema: "app_schema",
+      xuguTypeMembersExpandable: true,
+      children: [],
+      isExpanded: false,
+    };
+    store.connections = [connection];
+    store.connectedIds = new Set([connection.id]);
+    store.treeNodes = [typeNode];
+
+    await store.refreshTreeNode(typeNode);
+
+    expect(getCustomTypeDetails).not.toHaveBeenCalled();
+    expect(completionAssistantSearch).toHaveBeenCalledTimes(2);
+    expect(typeNode.children?.map((child) => [child.type, child.objectCount])).toEqual([["type-attributes", 1]]);
+    expect(typeNode.isExpanded).toBe(true);
   }, 15000);
 
   it("hides the Xugu type expander after loading no members", async () => {

@@ -10,164 +10,17 @@
 //!     number of partitions.
 //! Needs local Docker; skips cleanly when unavailable.
 
+mod support;
+
 use std::process::Command;
 
 use dbx_core::connection::AppState;
 use dbx_core::database_export::{export_database_sql_core, DatabaseExportRequest};
-use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
 use dbx_core::storage::Storage;
-
-struct DockerPostgres {
-    name: String,
-    port: u16,
-    remove_on_drop: bool,
-}
-
-impl Drop for DockerPostgres {
-    fn drop(&mut self) {
-        if self.remove_on_drop {
-            let _ = Command::new("docker").args(["rm", "-f", &self.name]).status();
-        }
-    }
-}
-
-fn docker_ready() -> bool {
-    Command::new("docker")
-        .args(["version", "--format", "{{.Server.Version}}"])
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
-
-fn start_docker_postgres(name_prefix: &str) -> Option<DockerPostgres> {
-    if let Ok(name) = std::env::var("DBX_TEST_POSTGRES_CONTAINER") {
-        let port = std::env::var("DBX_TEST_POSTGRES_PORT")
-            .expect("DBX_TEST_POSTGRES_PORT must accompany DBX_TEST_POSTGRES_CONTAINER")
-            .parse()
-            .expect("DBX_TEST_POSTGRES_PORT must be a valid port");
-        return Some(DockerPostgres { name, port, remove_on_drop: false });
-    }
-    if !docker_ready() {
-        eprintln!("skipping docker-backed partition ddl test because Docker is unavailable");
-        return None;
-    }
-
-    let port = portpicker::pick_unused_port().expect("pick unused postgres port");
-    let container =
-        DockerPostgres { name: format!("{name_prefix}-{}", uuid::Uuid::new_v4()), port, remove_on_drop: true };
-
-    let status = Command::new("docker")
-        .args([
-            "run",
-            "-d",
-            "--rm",
-            "--name",
-            &container.name,
-            "-e",
-            "POSTGRES_PASSWORD=postgres",
-            "-e",
-            "POSTGRES_USER=postgres",
-            "-e",
-            "POSTGRES_DB=postgres",
-            "-p",
-            &format!("{port}:5432"),
-            "postgres:16-alpine",
-        ])
-        .status()
-        .expect("start docker postgres");
-    assert!(status.success(), "docker run postgres container should succeed");
-
-    let mut consecutive_ok = 0;
-    for _ in 0..120 {
-        let ready = Command::new("docker")
-            .args(["exec", &container.name, "psql", "-U", "postgres", "-d", "postgres", "-c", "SELECT 1"])
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false);
-        consecutive_ok = if ready { consecutive_ok + 1 } else { 0 };
-        if consecutive_ok >= 2 {
-            return Some(container);
-        }
-        std::thread::sleep(std::time::Duration::from_millis(500));
-    }
-    panic!("postgres container did not become ready");
-}
-
-fn psql(container: &DockerPostgres, sql: &str) {
-    let output = Command::new("docker")
-        .args(["exec", &container.name, "psql", "-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", sql])
-        .output()
-        .expect("run psql");
-    assert!(output.status.success(), "psql failed: {}", String::from_utf8_lossy(&output.stderr));
-}
-
-fn psql_allow_failure(container: &DockerPostgres, sql: &str) -> bool {
-    Command::new("docker")
-        .args(["exec", &container.name, "psql", "-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", sql])
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
-
-fn postgres_test_config(id: &str, port: u16) -> ConnectionConfig {
-    ConnectionConfig {
-        docs_notes_path: None,
-        id: id.to_string(),
-        name: id.to_string(),
-        note: String::new(),
-        db_type: DatabaseType::Postgres,
-        driver_profile: None,
-        driver_label: None,
-        url_params: None,
-        agent_java_options: Vec::new(),
-        host: "127.0.0.1".to_string(),
-        port,
-        username: "postgres".to_string(),
-        password: "postgres".to_string(),
-        database: Some("postgres".to_string()),
-        default_schema: None,
-        visible_databases: None,
-        visible_schemas: None,
-        attached_databases: Vec::new(),
-        init_script: None,
-        color: None,
-        transport_layers: Vec::new(),
-        connect_timeout_secs: 5,
-        query_timeout_secs: 30,
-        idle_timeout_secs: 60,
-        keepalive_interval_secs: 0,
-        ssl: false,
-        ca_cert_path: String::new(),
-        client_cert_path: String::new(),
-        client_key_path: String::new(),
-        sysdba: false,
-        oracle_connection_type: None,
-        connection_string: None,
-        redis_connection_mode: None,
-        redis_sentinel_master: String::new(),
-        redis_sentinel_nodes: String::new(),
-        redis_sentinel_username: String::new(),
-        redis_sentinel_password: String::new(),
-        redis_sentinel_tls: false,
-        redis_cluster_nodes: String::new(),
-        redis_key_separator: dbx_core::models::connection::default_redis_key_separator(),
-        redis_scan_page_size: None,
-        redis_database_aliases: Default::default(),
-        etcd_endpoints: String::new(),
-        gbase_server: String::new(),
-        informix_server: String::new(),
-        external_config: None,
-        jdbc_driver_class: None,
-        jdbc_driver_paths: Vec::new(),
-        one_time: false,
-        save_password: true,
-        read_only: false,
-        is_production: false,
-        production_databases: vec![],
-        show_system_schemas: false,
-        database_info: None,
-    }
-}
+use support::{
+    postgres_test_config, psql, psql_allow_failure, start_docker_postgres, start_docker_postgres_with_server_args,
+    DockerPostgres,
+};
 
 /// Full database export of a partitioned schema must not duplicate any
 /// relation's `CREATE TABLE`/`CREATE FOREIGN TABLE`, must faithfully replay
@@ -432,4 +285,157 @@ async fn partition_tree_ddl_query_count_does_not_scale_with_partition_count() {
         large_count <= small_count + 10,
         "query count should not scale with partition count: small={small_count} large={large_count}"
     );
+}
+
+/// A tree-DDL request for a relation that exists but isn't a
+/// table/partition/foreign table (e.g. a view) must say so specifically,
+/// not fall back to a generic "not found" message that also covers a
+/// relation that doesn't exist at all.
+#[tokio::test]
+async fn display_ddl_error_distinguishes_wrong_relkind_from_missing_relation() {
+    let Some(container) = start_docker_postgres("dbx-partition-ddl-relkind-error") else {
+        return;
+    };
+
+    psql(&container, "CREATE VIEW v AS SELECT 1 AS id");
+
+    let dir = std::env::temp_dir().join(format!("dbx-partition-relkind-error-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let state = AppState::new(storage);
+    let connection_id = "partition-relkind-error-conn";
+    state.configs.write().await.insert(connection_id.to_string(), postgres_test_config(connection_id, container.port));
+
+    let view_error =
+        dbx_core::schema::get_table_display_ddl_core(&state, connection_id, "postgres", "public", "v", None)
+            .await
+            .expect_err("requesting tree DDL for a view must fail");
+    assert!(view_error.contains("is a VIEW"), "expected a relkind-specific error, got: {view_error}");
+
+    let missing_error = dbx_core::schema::get_table_display_ddl_core(
+        &state,
+        connection_id,
+        "postgres",
+        "public",
+        "does_not_exist",
+        None,
+    )
+    .await
+    .expect_err("requesting tree DDL for a missing relation must fail");
+    assert!(missing_error.contains("was not found"), "expected a not-found error, got: {missing_error}");
+    assert!(!missing_error.contains("is a"), "not-found error should not claim a relkind: {missing_error}");
+}
+
+/// Cloudberry/Greenplum's `pg_get_tabledef` (a community PL/pgSQL function
+/// most installs have, not a catalog builtin) renders exactly the one
+/// relation it's asked for — never its partitions' own `CREATE TABLE ...
+/// PARTITION OF ...` statements. `cloudberry_ddl(..., include_partitions:
+/// true)` must still return every partition's DDL by walking the same
+/// partition tree the plain-Postgres path uses, instead of silently
+/// returning just the root's DDL whenever the native call succeeds. This
+/// installs a minimal stand-in `pg_get_tabledef` (mirroring the real one's
+/// single-relation behavior) rather than the full upstream script, since
+/// only that single-relation behavior is what the fix under test reacts to.
+#[tokio::test]
+async fn cloudberry_native_ddl_still_includes_every_partition() {
+    let Some(container) = start_docker_postgres("dbx-cloudberry-partition-ddl") else {
+        return;
+    };
+
+    psql(
+        &container,
+        "CREATE OR REPLACE FUNCTION pg_get_tabledef(in_schema text, in_table text, _verbose boolean) \
+         RETURNS text AS $$ SELECT format('CREATE TABLE \"%s\".\"%s\" (id integer) /* stub-native-ddl */;', in_schema, in_table) $$ \
+         LANGUAGE sql",
+    );
+    psql(&container, "CREATE TABLE t (id integer NOT NULL) PARTITION BY RANGE (id)");
+    psql(&container, "CREATE TABLE t_p1 PARTITION OF t FOR VALUES FROM (0) TO (100)");
+    psql(&container, "CREATE TABLE t_p2 PARTITION OF t FOR VALUES FROM (100) TO (200)");
+
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", container.port);
+    let pool = dbx_core::db::postgres::connect(&url, std::time::Duration::from_secs(5)).await.expect("connect");
+
+    let ddl =
+        dbx_core::schema::cloudberry_ddl(&pool, "public", "t", true).await.expect("cloudberry ddl with partitions");
+    assert_eq!(
+        ddl.matches("stub-native-ddl").count(),
+        3,
+        "expected the root plus both partitions to each get their own native DDL: {ddl}"
+    );
+    assert!(ddl.contains("CREATE TABLE \"public\".\"t\""));
+    assert!(ddl.contains("CREATE TABLE \"public\".\"t_p1\""));
+    assert!(ddl.contains("CREATE TABLE \"public\".\"t_p2\""));
+
+    let single_ddl =
+        dbx_core::schema::cloudberry_ddl(&pool, "public", "t", false).await.expect("cloudberry ddl without partitions");
+    assert_eq!(single_ddl.matches("stub-native-ddl").count(), 1, "expected only the root's own DDL: {single_ddl}");
+}
+
+/// `opentenbase_ddl(..., include_partitions: true)` must query and append
+/// each partition's own `DISTRIBUTE BY` clause, not just the tree root's.
+/// OpenTenBase itself has no simple single-container way to stand up (its
+/// own docs only cover a multi-node `pgxc_ctl deploy`/`init` cluster built
+/// from source), so this runs the actual, unmodified
+/// `TABLE_DISTRIBUTION_FOR_RELATIONS_SQL` query against a real PostgreSQL
+/// container with a stand-in `pg_catalog.pgxc_class` table shaped like
+/// OpenTenBase's real one — exercising the real SQL (join, `unnest($1::
+/// text[], $2::text[])` parameter binding, casts, row parsing), not just the
+/// clause-insertion string logic around it.
+#[tokio::test]
+async fn opentenbase_tree_ddl_gives_every_partition_its_own_distribute_by() {
+    let Some(container) =
+        start_docker_postgres_with_server_args("dbx-opentenbase-partition-ddl", &["-c", "allow_system_table_mods=on"])
+    else {
+        return;
+    };
+
+    psql(
+        &container,
+        "CREATE TABLE pg_catalog.pgxc_class (pcrelid oid PRIMARY KEY, pclocatortype \"char\", discolnums smallint[])",
+    );
+    psql(&container, "CREATE TABLE t (id integer NOT NULL, region text NOT NULL) PARTITION BY RANGE (id)");
+    psql(&container, "CREATE TABLE t_p1 PARTITION OF t FOR VALUES FROM (0) TO (100)");
+    psql(&container, "CREATE TABLE t_p2 PARTITION OF t FOR VALUES FROM (100) TO (200)");
+    // Root distributes by `region` (attnum 2); t_p1 distributes by `id`
+    // (attnum 1) instead, to prove each relation's own policy is looked up
+    // independently rather than the root's being reused for every relation.
+    // t_p2 deliberately has no pgxc_class row at all — it must be left
+    // without a DISTRIBUTE BY clause rather than erroring the whole DDL.
+    psql(&container, "INSERT INTO pg_catalog.pgxc_class VALUES ('t'::regclass, 'H', ARRAY[2]::smallint[])");
+    psql(&container, "INSERT INTO pg_catalog.pgxc_class VALUES ('t_p1'::regclass, 'H', ARRAY[1]::smallint[])");
+
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", container.port);
+    let pool = dbx_core::db::postgres::connect(&url, std::time::Duration::from_secs(5)).await.expect("connect");
+
+    let distributions = dbx_core::db::opentenbase::table_distribution_for_relations(
+        &pool,
+        &[("public".to_string(), "t".to_string()), ("public".to_string(), "t_p1".to_string())],
+    )
+    .await
+    .expect("batched distribution query");
+    assert_eq!(
+        distributions.get(&("public".to_string(), "t".to_string())),
+        Some(&dbx_core::db::opentenbase::DistributionPolicy::Hash(vec!["region".to_string()]))
+    );
+    assert_eq!(
+        distributions.get(&("public".to_string(), "t_p1".to_string())),
+        Some(&dbx_core::db::opentenbase::DistributionPolicy::Hash(vec!["id".to_string()]))
+    );
+
+    let ddl = dbx_core::schema::opentenbase_ddl(&pool, "public", "t", true).await.expect("opentenbase tree ddl");
+    assert!(
+        ddl.contains("\"t\" (\n  \"id\" integer NOT NULL,\n  \"region\" text NOT NULL\n) PARTITION BY RANGE (id)\nDISTRIBUTE BY HASH (\"region\");"),
+        "root should get its own DISTRIBUTE BY HASH (region): {ddl}"
+    );
+    assert!(
+        ddl.contains(
+            "\"t_p1\" PARTITION OF \"public\".\"t\" FOR VALUES FROM (0) TO (100)\nDISTRIBUTE BY HASH (\"id\");"
+        ),
+        "t_p1 should get its own DISTRIBUTE BY HASH (id), independent of the root's: {ddl}"
+    );
+    assert!(
+        ddl.contains("\"t_p2\" PARTITION OF \"public\".\"t\" FOR VALUES FROM (100) TO (200);"),
+        "t_p2 has no pgxc_class row and must not get a DISTRIBUTE BY clause: {ddl}"
+    );
+    assert_eq!(ddl.matches("DISTRIBUTE BY").count(), 2);
 }

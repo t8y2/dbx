@@ -68,6 +68,7 @@ const assetIcons: Record<string, string> = {
   trino: "trino",
   kylin: "apache_kylin",
   ignite: "apache_ignite",
+  ignite3: "apache_ignite",
   cockroachdb: "cockroachdb",
   db2: "db2",
   dremio: "dremio",

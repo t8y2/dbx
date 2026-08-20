@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { ACCESS_AGENT_MIN_CONNECT_TIMEOUT_SECS, AGENT_DRIVER_MIN_CONNECT_TIMEOUT_SECS, connectionAttemptOriginalErrorMessage, connectionAttemptTimeoutMessage, connectionAttemptTimeoutMs, CONNECTION_ATTEMPT_TIMEOUT_BUFFER_MS } from "@/lib/connection/connectionAttemptTimeout";
+import {
+  ACCESS_AGENT_MIN_CONNECT_TIMEOUT_SECS,
+  AGENT_DRIVER_MIN_CONNECT_TIMEOUT_SECS,
+  connectionAttemptOriginalErrorMessage,
+  connectionAttemptTimeoutMessage,
+  connectionAttemptTimeoutMs,
+  CONNECTION_ATTEMPT_TIMEOUT_BUFFER_MS,
+  MONGO_LEGACY_FALLBACK_TIMEOUT_BUFFER_MS,
+  MONGO_OIDC_BROWSER_AUTH_TIMEOUT_MS,
+} from "@/lib/connection/connectionAttemptTimeout";
 
 describe("connectionAttemptTimeout", () => {
   it("uses a 10s default for regular database connections", () => {
@@ -40,6 +49,21 @@ describe("connectionAttemptTimeout", () => {
 
   it("respects a user configured Access timeout above the default floor", () => {
     expect(connectionAttemptTimeoutMs({ db_type: "access", connect_timeout_secs: 45, transport_layers: [] })).toBe(47_000);
+  });
+
+  it("keeps the legacy fallback buffer for regular MongoDB connections", () => {
+    expect(connectionAttemptTimeoutMs({ db_type: "mongodb", connect_timeout_secs: 5, transport_layers: [] })).toBe(5_000 + CONNECTION_ATTEMPT_TIMEOUT_BUFFER_MS + MONGO_LEGACY_FALLBACK_TIMEOUT_BUFFER_MS);
+  });
+
+  it("allows the MongoDB OIDC browser flow to use its full five-minute budget", () => {
+    expect(
+      connectionAttemptTimeoutMs({
+        db_type: "mongodb",
+        connect_timeout_secs: 5,
+        transport_layers: [],
+        connection_string: "mongodb+srv://cluster.example.com/app?authMechanism=MONGODB-OIDC&authSource=%24external",
+      }),
+    ).toBe(5_000 + CONNECTION_ATTEMPT_TIMEOUT_BUFFER_MS + MONGO_OIDC_BROWSER_AUTH_TIMEOUT_MS);
   });
 
   it("adds HTTP tunnel setup and tunneled endpoint probe budgets", () => {

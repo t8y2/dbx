@@ -26,4 +26,17 @@ describe("SchemaDiffDialog fullscreen layout", () => {
   it("lets the deploy confirm dialog body shrink so a long destructive statement can't push the footer buttons off-screen", () => {
     expect(dialogSource).toContain('<div class="py-2 space-y-3 min-w-0">');
   });
+
+  it("lets the config step scroll vertically so the Compare button stays reachable when 'compare specific tables' is enabled", () => {
+    // Regression for #6627: the "compare specific tables" feature (#6533/#6540) grows the
+    // config step (table multi-select + same-name match). Under a fixed-height dialog that
+    // step used to be clipped (`overflow-hidden`), pushing the Compare button below the
+    // visible area with no way to scroll to it. The container must scroll on all steps
+    // except the result step, which relies on splitpanes to manage its own height.
+    expect(dialogSource).toContain("step === 'result' ? 'overflow-hidden' : 'overflow-y-auto'");
+    // The config step must not be flex-shrunk (which would swallow its height and suppress
+    // the scrollbar); only then does the taller-than-dialog content actually overflow and
+    // become reachable via scrolling.
+    expect(dialogSource).toMatch(/<SchemaDiffConfigStep\n[\s\S]*?class="shrink-0"/);
+  });
 });

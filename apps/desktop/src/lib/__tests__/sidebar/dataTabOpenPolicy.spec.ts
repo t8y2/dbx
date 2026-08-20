@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canApplyDataTabMetadata, dataTabMetadataNeedsRefresh, dataTabOpenModeFromTreeClick, findExistingDataTabCandidate } from "@/lib/sidebar/dataTabOpenPolicy";
+import { canApplyDataTabMetadata, dataTabMetadataNeedsRefresh, dataTabOpenModeFromTreeClick, findExistingDataTabCandidate, isDataTabMetadataLifecycleStale } from "@/lib/sidebar/dataTabOpenPolicy";
 import type { QueryTab } from "@/types/database";
 
 function click(modifiers: Partial<Pick<MouseEvent, "metaKey" | "ctrlKey" | "altKey" | "shiftKey">> = {}) {
@@ -165,5 +165,23 @@ describe("dataTabOpenPolicy", () => {
 
     tab.tableMetaUpdatedAt = now - ttl;
     expect(dataTabMetadataNeedsRefresh(tab, ttl, now)).toBe(true);
+  });
+
+  it("treats missing freshness or a generation mismatch as lifecycle-stale", () => {
+    const tab = dataTab("users", "users");
+    tab.tableMeta = {
+      schema: "public",
+      tableName: "users",
+      columns: [{ name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+      primaryKeys: ["id"],
+    };
+    tab.tableMetaUpdatedAt = Date.now();
+    tab.tableMetaGeneration = 0;
+
+    expect(isDataTabMetadataLifecycleStale(tab, 0)).toBe(false);
+    expect(isDataTabMetadataLifecycleStale(tab, 1)).toBe(true);
+
+    tab.tableMetaUpdatedAt = undefined;
+    expect(isDataTabMetadataLifecycleStale(tab, 0)).toBe(true);
   });
 });

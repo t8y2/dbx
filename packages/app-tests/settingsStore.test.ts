@@ -7,6 +7,7 @@ import { DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS } from "../../apps/desktop/src/lib
 import { DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY, SYSTEM_UI_FONT_FAMILY } from "../../apps/desktop/src/lib/app/appFonts.ts";
 import { tableOpenPageLimit } from "../../apps/desktop/src/lib/table/tableOpenPageLimit.ts";
 import { AI_PROVIDER_PRESETS, DEFAULT_EDITOR_SETTINGS, EXECUTE_MODE_CURRENT_DEFAULT_VERSION, normalizeAiConfig, normalizeEditorSettings, useSettingsStore } from "../../apps/desktop/src/stores/settingsStore.ts";
+import { DEFAULT_SHORTCUT_SETTINGS, tabNavigationHistoryDefaultShortcut, type ShortcutSettings } from "../../apps/desktop/src/lib/editor/shortcutRegistry.ts";
 
 const saveEditorSettingsMock = vi.hoisted(() => vi.fn());
 vi.mock("../../apps/desktop/src/lib/backend/api", async (importOriginal) => {
@@ -384,6 +385,8 @@ test("defaults shortcut settings", () => {
   assert.equal(settings.shortcuts.newQuery, "Mod+T");
   assert.equal(settings.shortcuts.openSettings, "Mod+,");
   assert.equal(settings.shortcuts.focusSearch, "Mod+F");
+  assert.equal(settings.shortcuts.navigateTabHistoryBack, tabNavigationHistoryDefaultShortcut("back"));
+  assert.equal(settings.shortcuts.navigateTabHistoryForward, tabNavigationHistoryDefaultShortcut("forward"));
   assert.equal(settings.shortcuts.zoomInUi, "Mod+=");
   assert.equal(settings.shortcuts.zoomOutUi, "Mod+-");
   assert.equal(settings.shortcuts.resetUiZoom, "Mod+0");
@@ -415,6 +418,47 @@ test("keeps saved shortcut overrides", () => {
   assert.equal(settings.shortcuts.zoomInUi, "Alt+Mod+=");
   assert.equal(settings.shortcuts.editSidebarConnection, "Alt+E");
   assert.equal(settings.shortcuts.saveSql, "Mod+S");
+});
+
+test("preserves adjacent tab shortcuts and persists unbound history actions when upgrading legacy settings", async () => {
+  const legacyShortcuts: Partial<ShortcutSettings> = { ...DEFAULT_SHORTCUT_SETTINGS };
+  delete legacyShortcuts.navigateTabHistoryBack;
+  delete legacyShortcuts.navigateTabHistoryForward;
+  legacyShortcuts.switchToPreviousTab = tabNavigationHistoryDefaultShortcut("back");
+  legacyShortcuts.switchToNextTab = tabNavigationHistoryDefaultShortcut("forward");
+
+  await withMockLocalStorage(
+    {
+      "dbx-app-state:editor_settings": JSON.stringify({
+        executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
+        shortcuts: legacyShortcuts,
+      }),
+    },
+    async () => {
+      setActivePinia(createPinia());
+      const migratedStore = useSettingsStore();
+      await migratedStore.initEditorSettings();
+
+      assert.equal(migratedStore.editorSettings.shortcuts.switchToPreviousTab, tabNavigationHistoryDefaultShortcut("back"));
+      assert.equal(migratedStore.editorSettings.shortcuts.switchToNextTab, tabNavigationHistoryDefaultShortcut("forward"));
+      assert.equal(migratedStore.editorSettings.shortcuts.navigateTabHistoryBack, "");
+      assert.equal(migratedStore.editorSettings.shortcuts.navigateTabHistoryForward, "");
+
+      await vi.waitFor(() => {
+        const saved = saveEditorSettingsMock.mock.calls.at(-1)?.[0] as { shortcuts?: ShortcutSettings } | undefined;
+        assert.equal(saved?.shortcuts?.navigateTabHistoryBack, "");
+        assert.equal(saved?.shortcuts?.navigateTabHistoryForward, "");
+      });
+
+      setActivePinia(createPinia());
+      const reloadedStore = useSettingsStore();
+      await reloadedStore.initEditorSettings();
+      assert.equal(reloadedStore.editorSettings.shortcuts.switchToPreviousTab, tabNavigationHistoryDefaultShortcut("back"));
+      assert.equal(reloadedStore.editorSettings.shortcuts.switchToNextTab, tabNavigationHistoryDefaultShortcut("forward"));
+      assert.equal(reloadedStore.editorSettings.shortcuts.navigateTabHistoryBack, "");
+      assert.equal(reloadedStore.editorSettings.shortcuts.navigateTabHistoryForward, "");
+    },
+  );
 });
 
 test("defaults sidebar activation to single click", () => {

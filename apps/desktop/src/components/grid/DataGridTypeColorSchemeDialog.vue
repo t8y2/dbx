@@ -8,7 +8,7 @@ import ColorSpectrumPicker from "@/components/ui/ColorSpectrumPicker.vue";
 import { Copy, Pencil, Plus, RotateCcw, Trash2 } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { useTheme } from "@/composables/useTheme";
-import { DATA_GRID_TYPE_COLOR_SCHEME_AUTO_ID, type DataGridTypeColorKey, type DataGridTypeColorScheme, defaultDataGridTypeColors, normalizeDataGridTypeColors } from "@/lib/dataGrid/dataGridTypeColorScheme";
+import { DATA_GRID_TYPE_COLOR_SCHEME_AUTO_ID, cloneDataGridTypeColorSchemes, type DataGridTypeColorKey, type DataGridTypeColorScheme, defaultDataGridTypeColors, normalizeDataGridTypeColors } from "@/lib/dataGrid/dataGridTypeColorScheme";
 
 interface Props {
   open: boolean;
@@ -29,9 +29,6 @@ const localSchemes = ref<DataGridTypeColorScheme[]>([]);
 const activeEditId = ref(DATA_GRID_TYPE_COLOR_SCHEME_AUTO_ID);
 const renamingId = ref<string | null>(null);
 const renamingName = ref("");
-function cloneSchemes(schemes: DataGridTypeColorScheme[]): DataGridTypeColorScheme[] {
-  return schemes.map((scheme) => ({ ...scheme, colors: { ...scheme.colors } }));
-}
 
 // Everything below edits this buffer only. Nothing reaches the settings store
 // until Done, so Cancel just drops it.
@@ -39,7 +36,7 @@ watch(
   () => props.open,
   (isOpen) => {
     if (!isOpen) return;
-    localSchemes.value = cloneSchemes(props.schemes);
+    localSchemes.value = cloneDataGridTypeColorSchemes(props.schemes);
     activeEditId.value = props.activeSchemeId;
     renamingId.value = null;
   },
@@ -127,7 +124,7 @@ function confirmRename() {
 function handleDone() {
   emit(
     "change",
-    cloneSchemes(localSchemes.value).map((scheme) => ({ ...scheme, colors: normalizeDataGridTypeColors(scheme.colors) })),
+    cloneDataGridTypeColorSchemes(localSchemes.value).map((scheme) => ({ ...scheme, colors: normalizeDataGridTypeColors(scheme.colors) })),
     activeEditId.value,
   );
   emit("update:open", false);

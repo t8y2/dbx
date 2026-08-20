@@ -14,6 +14,8 @@ export const fallbackCreateDatabaseCharset = fallbackCreateDatabaseCharsetMetada
 
 export const sidebarTreeDialogOwner = shallowRef<symbol | null>(null);
 export const sidebarDangerTarget = shallowRef<TreeNode | null>(null);
+export const sidebarDangerRunningExecutionId = ref<string>("");
+export const sidebarDangerRunningCancel = ref<(() => void | Promise<void>) | null>(null);
 export const sidebarFormTarget = shallowRef<TreeNode | null>(null);
 export const connectionDeleteTargetSnapshot = ref<ConnectionDeleteTarget[]>([]);
 export const connectionGroupDeleteTargetSnapshot = ref<ConnectionGroupDeleteTarget[]>([]);

@@ -1,6 +1,6 @@
 # DBX
 
-> DBX is an open-source database workspace that manages 80+ databases in a roughly 20 MB desktop application. It also supports Docker self-hosting, an AI SQL assistant, a CLI, and an MCP Server for AI coding agents.
+> DBX is an open-source database workspace that manages 90+ databases in a roughly 20 MB desktop application. It also supports Docker self-hosting, an AI SQL assistant, a CLI, and an MCP Server for AI coding agents.
 
 Canonical website: https://dbxio.com
 Source repository: https://github.com/t8y2/dbx
@@ -9,7 +9,7 @@ License: Apache-2.0
 ## Product facts
 
 - Platforms: Windows, macOS (Apple Silicon and Intel), Linux, and Docker self-hosting.
-- Database coverage: 80+ SQL, NoSQL, vector, time-series, embedded databases, compatible engines, and message queues.
+- Database coverage: 90+ SQL, NoSQL, vector, time-series, embedded databases, compatible engines, and message queues.
 - Representative databases: MySQL, PostgreSQL, SQLite, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, MariaDB, Doris, Dameng, GaussDB, Kafka, and RabbitMQ.
 - Main workflows: connection management, SQL editing, data browsing and editing, schema browsing, schema diff, import/export, SSH tunnels, and query history.
 - AI workflows: generate, explain, optimize, and repair SQL with user-configured model providers.

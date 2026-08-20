@@ -22,6 +22,7 @@ const mocks = vi.hoisted(() => ({
   setTableMeta: vi.fn(),
   clearInvalidDataTabSort: vi.fn(),
   activeResultExecutionTarget: vi.fn(),
+  metadataGeneration: 0,
 }));
 
 vi.mock("vue-i18n", () => ({
@@ -43,6 +44,7 @@ vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     getConfig: mocks.getConfig,
     ensureConnected: mocks.ensureConnected,
+    metadataGenerationFor: () => mocks.metadataGeneration,
   }),
 }));
 
@@ -74,6 +76,7 @@ vi.mock("@/stores/queryStore", () => ({
       const tab = mocks.tabs.find((item) => item.id === id);
       if (tab) {
         tab.tableMeta = meta;
+        tab.tableMetaGeneration = mocks.metadataGeneration;
         tab.tableMetaUpdatedAt = Date.now();
         // 与真实 store 一致：仅真实元数据（columns 非空）落地才结束行标识等待
         if (meta.columns.length > 0) tab.tableMetaPending = false;
@@ -111,6 +114,7 @@ function tableDataTab(patch: Partial<QueryTab> = {}): QueryTab {
     isCancelling: false,
     isExplaining: false,
     tableMetaUpdatedAt: Date.now(),
+    tableMetaGeneration: 0,
     tableMeta: {
       schema: "public",
       tableName: "users",
@@ -131,6 +135,7 @@ describe("useDataGridActions", () => {
     mocks.infiniteScroll = true;
     mocks.queryResultMaxRowsEnabled = true;
     mocks.queryResultMaxRows = 10_000;
+    mocks.metadataGeneration = 0;
     mocks.getConfig.mockReturnValue({ id: "postgres-1", db_type: "postgres" });
     mocks.buildTableSelectSql.mockResolvedValue("SELECT * FROM public.users LIMIT 100 OFFSET 0");
     mocks.buildSortedQuerySql.mockResolvedValue({ ok: true, sql: "SELECT sorted" });
@@ -397,6 +402,105 @@ describe("useDataGridActions", () => {
       expect(mocks.getColumns).toHaveBeenCalled();
       expect(tab.tableMetaPending).toBe(false);
     });
+  });
+
+  it("rebuilds table metadata before the first toolbar reload after a reconnect boundary", async () => {
+    const tab = tableDataTab({
+      tableMetaUpdatedAt: undefined,
+      tableMetaGeneration: 0,
+      tableMeta: {
+        schema: "public",
+        tableName: "users",
+        tableType: "TABLE",
+        columns: [{ name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+        primaryKeys: ["id"],
+      },
+    });
+    mocks.tabs.push(tab);
+    mocks.metadataGeneration = 1;
+    mocks.getColumns.mockResolvedValueOnce([
+      { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+      { name: "age", data_type: "integer", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ]);
+    mocks.listIndexes.mockResolvedValueOnce([]);
+    const actions = useDataGridActions(computed(() => tab));
+
+    await actions.onReloadData(tab.sql, "", "", "", undefined, undefined, "refresh");
+
+    expect(mocks.getColumns).toHaveBeenCalledTimes(1);
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ columns: ["id", "age"] }));
+    expect(tab.tableMeta?.columns.map((column) => column.name)).toEqual(["id", "age"]);
+    expect(tab.tableMetaGeneration).toBe(1);
+    expect(tab.tableMetaUpdatedAt).toBeDefined();
+    expect(mocks.executeTabSql).toHaveBeenCalledTimes(1);
+  });
+
+  it("rebuilds table metadata on the first toolbar reload after a dead-pool reconnect", async () => {
+    const tab = tableDataTab({
+      tableMetaGeneration: 0,
+      tableMeta: {
+        schema: "public",
+        tableName: "users",
+        tableType: "TABLE",
+        columns: [{ name: "old_name", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null }],
+        primaryKeys: [],
+      },
+    });
+    mocks.tabs.push(tab);
+    mocks.ensureConnected.mockImplementationOnce(async () => {
+      mocks.metadataGeneration = 1;
+    });
+    mocks.getColumns.mockResolvedValueOnce([{ name: "new_name", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null }]);
+    const actions = useDataGridActions(computed(() => tab));
+
+    await actions.onReloadData(tab.sql, "", "", "", undefined, undefined, "refresh");
+
+    expect(mocks.ensureConnected).toHaveBeenCalled();
+    expect(mocks.getColumns).toHaveBeenCalledTimes(1);
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ columns: ["new_name"] }));
+    expect(mocks.executeTabSql).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not refetch metadata on a warm toolbar reload in the same generation", async () => {
+    const tab = tableDataTab();
+    mocks.tabs.push(tab);
+    const actions = useDataGridActions(computed(() => tab));
+
+    await actions.onReloadData(tab.sql, "", "", "", undefined, undefined, "refresh");
+
+    expect(mocks.getColumns).not.toHaveBeenCalled();
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ columns: ["id"] }));
+    expect(mocks.executeTabSql).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops an in-flight toolbar metadata write after disconnect bumps generation", async () => {
+    const tab = tableDataTab({
+      tableMetaUpdatedAt: undefined,
+      tableMetaGeneration: 0,
+    });
+    mocks.tabs.push(tab);
+    mocks.metadataGeneration = 0;
+    let resolveColumns!: (columns: Array<{ name: string; data_type: string; is_nullable: boolean; column_default: null; is_primary_key: boolean; extra: null }>) => void;
+    mocks.getColumns.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveColumns = resolve;
+      }),
+    );
+    const actions = useDataGridActions(computed(() => tab));
+    const reload = actions.onReloadData(tab.sql, "", "", "", undefined, undefined, "refresh");
+    await vi.waitFor(() => expect(mocks.getColumns).toHaveBeenCalledTimes(1));
+
+    mocks.metadataGeneration = 1;
+    tab.tableMetaUpdatedAt = undefined;
+    resolveColumns([{ name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null }]);
+    await reload;
+
+    expect(mocks.setTableMeta).not.toHaveBeenCalled();
+    expect(tab.tableMeta?.columns.map((column) => column.name)).toEqual(["id"]);
+    expect(tab.tableMetaUpdatedAt).toBeUndefined();
+    expect(tab.tableMetaGeneration).toBe(0);
+    expect(mocks.buildTableSelectSql).not.toHaveBeenCalled();
+    expect(mocks.executeTabSql).not.toHaveBeenCalled();
   });
 
   it("excludes hidden primary keys and remaps the selected column for database sorting", async () => {

@@ -11,7 +11,8 @@ export interface BuildRenameObjectSqlOptions {
   newName: string;
 }
 
-const postgresLikeRenameTypes = new Set<DatabaseType>(["postgres", "redshift", "gaussdb", "kwdb", "kingbase", "highgo", "uxdb", "vastbase"]);
+// openGauss 兼容 PostgreSQL 的 ALTER TABLE/VIEW ... RENAME TO 语法，需与 gaussdb 等 PG 系数据库同等开放重命名能力
+const postgresLikeRenameTypes = new Set<DatabaseType>(["postgres", "redshift", "gaussdb", "kwdb", "opengauss", "kingbase", "highgo", "uxdb", "vastbase"]);
 
 const oracleLikeRenameTypes = new Set<DatabaseType>(["oracle", "dameng"]);
 

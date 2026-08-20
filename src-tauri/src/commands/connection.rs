@@ -985,6 +985,7 @@ async fn test_connection_with_info_inner(
     state: &Arc<AppState>,
     config: ConnectionConfig,
 ) -> Result<ConnectionTestResult, String> {
+    let config = if config.uses_mongodb_oidc() { config.canonicalized() } else { config };
     let tunnel_id = format!("{}:test", config.id);
     let has_transport_layers = config.has_effective_transport_layers();
     let connection_id = if has_transport_layers { tunnel_id.as_str() } else { config.id.as_str() };
@@ -1113,7 +1114,8 @@ async fn test_connection_with_info_inner(
             #[cfg(not(feature = "duckdb-sidecar"))]
             DatabaseType::DuckDb => Err("DuckDB support is not compiled in this build".to_string()),
             DatabaseType::MongoDb => {
-                if mongo_uses_legacy_driver(&config) {
+                let uses_oidc = db::mongo_driver::mongo_uri_uses_oidc(&url);
+                if mongo_uses_legacy_driver(&config) && !uses_oidc {
                     let am = &state.agent_manager;
                     let mut client = am.spawn(&config.db_type, config.driver_profile.as_deref()).await?;
                     client
@@ -1124,10 +1126,22 @@ async fn test_connection_with_info_inner(
                     return Ok(ConnectionTestResult::success("Connection successful (via legacy driver)"));
                 }
 
-                let native_err = match db::mongo_driver::connect(&url, connect_timeout, idle_timeout).await {
+                let native_err = match db::mongo_driver::connect_with_oidc(
+                    &url,
+                    connect_timeout,
+                    idle_timeout,
+                    state.mongo_oidc_browser_opener(),
+                )
+                .await
+                {
                     Ok(client) => {
-                        match db::mongo_driver::test_connection(&client, connect_timeout, config.effective_database())
-                            .await
+                        match db::mongo_driver::test_connection_for_url(
+                            &client,
+                            &url,
+                            connect_timeout,
+                            config.effective_database(),
+                        )
+                        .await
                         {
                             Ok(()) => return Ok(ConnectionTestResult::success("Connection successful")),
                             Err(e) => e,
@@ -1135,7 +1149,7 @@ async fn test_connection_with_info_inner(
                     }
                     Err(e) => e,
                 };
-                if should_retry_mongo_with_legacy_driver(&native_err) {
+                if !uses_oidc && should_retry_mongo_with_legacy_driver(&native_err) {
                     let mut client =
                         spawn_mongo_legacy_fallback_agent(state.as_ref(), &config.db_type, &native_err).await?;
                     client.connect(mongo_legacy_connect_params(&config, &host, port)?).await.map_err(|err| {
@@ -1493,7 +1507,8 @@ pub async fn connect_db(
         #[cfg(not(feature = "duckdb-sidecar"))]
         DatabaseType::DuckDb => return Err("DuckDB support is not compiled in this build".to_string()),
         DatabaseType::MongoDb => {
-            if mongo_uses_legacy_driver(&db_config) {
+            let uses_oidc = db::mongo_driver::mongo_uri_uses_oidc(&url);
+            if mongo_uses_legacy_driver(&db_config) && !uses_oidc {
                 let mut client =
                     state.agent_manager.spawn(&db_config.db_type, Some(MONGO_LEGACY_DRIVER_PROFILE)).await?;
                 state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
@@ -1504,11 +1519,19 @@ pub async fn connect_db(
                 state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
                 PoolKind::agent(client)
             } else {
-                let native_err = match db::mongo_driver::connect(&url, connect_timeout, idle_timeout).await {
+                let native_err = match db::mongo_driver::connect_with_oidc(
+                    &url,
+                    connect_timeout,
+                    idle_timeout,
+                    state.mongo_oidc_browser_opener(),
+                )
+                .await
+                {
                     Ok(client) => {
                         state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
-                        match db::mongo_driver::test_connection(
+                        match db::mongo_driver::test_connection_for_url(
                             &client,
+                            &url,
                             connect_timeout,
                             db_config.effective_database(),
                         )
@@ -1542,7 +1565,7 @@ pub async fn connect_db(
                     }
                     Err(e) => e,
                 };
-                if should_retry_mongo_with_legacy_driver(&native_err) {
+                if !uses_oidc && should_retry_mongo_with_legacy_driver(&native_err) {
                     log::info!("Native MongoDB driver failed ({native_err}), falling back to agent driver");
                     let mut client =
                         spawn_mongo_legacy_fallback_agent(state.inner().as_ref(), &db_config.db_type, &native_err)

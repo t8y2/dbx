@@ -45,6 +45,19 @@ test("keeps WHERE and ORDER BY histories separate", () => {
   assert.deepEqual(loadDataGridConditionHistory("orderBy", scope), ["created_at DESC"]);
 });
 
+test.each(["where", "orderBy"] as const)("keeps the newest 20 %s history entries", (kind) => {
+  const scope = { connectionId: "c1", database: "app", schema: "public", tableName: "users" };
+
+  for (let index = 1; index <= 21; index += 1) {
+    rememberDataGridConditionHistory(kind, scope, `condition ${index}`);
+  }
+
+  assert.deepEqual(
+    loadDataGridConditionHistory(kind, scope),
+    Array.from({ length: 20 }, (_, index) => `condition ${21 - index}`),
+  );
+});
+
 test("filters history by partial input and isolates different tables", () => {
   const users = { connectionId: "c1", database: "app", schema: "public", tableName: "users" };
   const orders = { connectionId: "c1", database: "app", schema: "public", tableName: "orders" };

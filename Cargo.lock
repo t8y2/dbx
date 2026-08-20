@@ -1983,7 +1983,7 @@ dependencies = [
 
 [[package]]
 name = "dbx"
-version = "0.5.88"
+version = "0.5.89"
 dependencies = [
  "anyhow",
  "axum",
@@ -2021,6 +2021,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-fs",
  "tauri-plugin-log",
+ "tauri-plugin-opener",
  "tauri-plugin-process",
  "tauri-plugin-shell",
  "tauri-plugin-single-instance",
@@ -2037,7 +2038,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-cli"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -2126,7 +2127,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-mcp"
-version = "0.4.66"
+version = "0.4.67"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -2147,7 +2148,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-web"
-version = "0.5.88"
+version = "0.5.89"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",
@@ -8443,6 +8444,7 @@ dependencies = [
  "gtk",
  "heck 0.5.0",
  "http 1.5.0",
+ "image",
  "jni 0.21.1",
  "libc",
  "log",
@@ -8652,6 +8654,28 @@ dependencies = [
  "tauri-plugin",
  "thiserror 2.0.19",
  "time",
+]
+
+[[package]]
+name = "tauri-plugin-opener"
+version = "2.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17e1bea14edce6b793a04e2417e3fd924b9bc4faae83cdee7d714156cceeed29"
+dependencies = [
+ "dunce",
+ "glob",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "open",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-plugin",
+ "thiserror 2.0.19",
+ "url",
+ "windows 0.61.3",
+ "zbus",
 ]
 
 [[package]]

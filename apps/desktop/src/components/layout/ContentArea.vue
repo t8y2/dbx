@@ -86,6 +86,7 @@ const ZooKeeperKeyBrowser = defineAsyncComponent(() => import("@/components/zook
 const ConsulOverview = defineAsyncComponent(() => import("@/components/consul/ConsulOverview.vue"));
 const ConsulWorkspace = defineAsyncComponent(() => import("@/components/consul/ConsulWorkspace.vue"));
 const DocumentBrowser = defineAsyncComponent(() => import("@/components/document/DocumentBrowser.vue"));
+const MeilisearchIndexView = defineAsyncComponent(() => import("@/components/meilisearch/MeilisearchIndexView.vue"));
 const MongoGridFsBrowser = defineAsyncComponent(() => import("@/components/document/MongoGridFsBrowser.vue"));
 const MongoBucketBrowser = defineAsyncComponent(() => import("@/components/document/MongoBucketBrowser.vue"));
 const VectorBrowser = defineAsyncComponent(() => import("@/components/vector/VectorBrowser.vue"));
@@ -2089,6 +2090,13 @@ defineExpose({
     <template v-else-if="activeTab.mode === 'mongo'">
       <div class="flex-1 min-h-0">
         <DocumentBrowser ref="documentBrowserRef" :key="activeTab.id" :connection-id="activeTab.connectionId" :database="activeTab.database" :collection="activeTab.sql" :database-type="activeEffectiveDatabaseType" :table-meta="activeTab.tableMeta" />
+      </div>
+    </template>
+
+    <!-- Meilisearch index detail -->
+    <template v-else-if="activeTab.mode === 'meilisearch'">
+      <div class="flex-1 min-h-0">
+        <MeilisearchIndexView :key="activeTab.id" :connection-id="activeTab.connectionId" :index="activeTab.sql" />
       </div>
     </template>
 

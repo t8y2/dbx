@@ -1,7 +1,15 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+
+/// How long a [`RegisteredQuery::detach`]ed registration stays reachable for
+/// an explicit cancel before it is automatically reclaimed. Bounds the
+/// resource this leaves behind (pool-activity accounting, and — while it
+/// exists — any KILL-QUERY-style interrupt) to a single session's worth of
+/// recently-timed-out operations, rather than leaking indefinitely.
+const DETACHED_REGISTRATION_GRACE_PERIOD: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RunningQueryDiagnostics {
@@ -88,7 +96,7 @@ impl RunningQueries {
             }
         }
 
-        RegisteredQuery { execution_id, registration_id, token, running_queries: self.clone() }
+        RegisteredQuery { execution_id, registration_id, token, running_queries: self.clone(), detached: false }
     }
 
     pub fn register_interrupt(&self, execution_id: &str, interrupt: impl Fn() + Send + 'static) {
@@ -230,23 +238,49 @@ pub struct RegisteredQuery {
     registration_id: u64,
     token: CancellationToken,
     running_queries: RunningQueries,
+    detached: bool,
 }
 
 impl RegisteredQuery {
     pub fn token(&self) -> CancellationToken {
         self.token.clone()
     }
+
+    /// Consumes the guard without immediately removing its `RunningQueries`
+    /// entry.
+    ///
+    /// Used when a caller is giving up on *waiting* for a query (e.g. a
+    /// client-observed timeout) but the statement may still be executing
+    /// server-side: the registration — and any KILL-QUERY-style interrupt
+    /// registered against it — must stay reachable so a later explicit
+    /// `cancel()` can still reach it, instead of losing that capability the
+    /// instant the caller stops awaiting the result. The entry is still
+    /// reclaimed automatically after [`DETACHED_REGISTRATION_GRACE_PERIOD`]
+    /// so it does not leak forever if nobody ever revisits it.
+    pub fn detach(mut self) {
+        self.detached = true;
+        let running_queries = self.running_queries.clone();
+        let execution_id = self.execution_id.clone();
+        let registration_id = self.registration_id;
+        tokio::spawn(async move {
+            tokio::time::sleep(DETACHED_REGISTRATION_GRACE_PERIOD).await;
+            running_queries.remove(&execution_id, registration_id);
+        });
+    }
 }
 
 impl Drop for RegisteredQuery {
     fn drop(&mut self) {
-        self.running_queries.remove(&self.execution_id, self.registration_id);
+        if !self.detached {
+            self.running_queries.remove(&self.execution_id, self.registration_id);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{RunningQueries, RunningTaskKind, RunningTaskMetadata};
+    use super::{RunningQueries, RunningTaskKind, RunningTaskMetadata, DETACHED_REGISTRATION_GRACE_PERIOD};
+    use std::time::Duration;
 
     #[test]
     fn cancel_marks_registered_query_as_cancelled() {
@@ -280,6 +314,46 @@ mod tests {
         drop(registered);
 
         assert!(!running.has("exec-1"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn detached_registration_survives_and_stays_cancellable() {
+        let running = RunningQueries::default();
+        let interrupted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = interrupted.clone();
+        let registered = running.register("exec-timeout".to_string());
+        running.register_interrupt("exec-timeout", move || {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        // Simulate the Tauri command giving up on waiting (client-observed
+        // timeout) while the statement may still be running server-side.
+        registered.detach();
+        assert!(running.has("exec-timeout"));
+
+        // A later explicit cancel must still reach the (still registered)
+        // KILL-QUERY-style interrupt.
+        assert!(running.cancel("exec-timeout"));
+        assert!(interrupted.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn detached_registration_is_reclaimed_after_the_grace_period() {
+        let running = RunningQueries::default();
+        let registered = running.register("exec-timeout".to_string());
+
+        registered.detach();
+        assert!(running.has("exec-timeout"));
+
+        // Let the spawned cleanup task reach its `sleep().await` and
+        // register its timer before we fast-forward the clock, then let it
+        // run to completion afterward.
+        tokio::task::yield_now().await;
+        tokio::time::advance(DETACHED_REGISTRATION_GRACE_PERIOD + Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        assert!(!running.has("exec-timeout"));
     }
 
     #[test]

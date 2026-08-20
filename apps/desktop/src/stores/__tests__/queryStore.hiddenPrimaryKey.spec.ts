@@ -53,6 +53,8 @@ vi.mock("@/stores/connectionStore", () => ({
     getConfig: getConnectionConfig,
     lookupLocalCompletionTables,
     recordConnectionLostError: vi.fn(),
+    // 与真实 store 一致：setTableMeta 写入 tableMeta 时记录连接元数据代次
+    metadataGenerationFor: () => 0,
   }),
 }));
 

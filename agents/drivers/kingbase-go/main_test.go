@@ -1801,6 +1801,86 @@ func TestListObjectsUsesCatalogRoutinesOutsideMySQLCompat(t *testing.T) {
 	}
 }
 
+func TestListObjectsOnlyTriggersWithParentIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		mode    kingbaseMode
+		catalog string
+		prefix  string
+	}{
+		{name: "sys catalog", catalog: "sys_catalog", prefix: "sys"},
+		{name: "pg catalog", mode: kingbaseMode{postgresCatalog: true}, catalog: "pg_catalog", prefix: "pg"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+				triggerTable := test.catalog + "." + test.prefix + "_trigger"
+				if !strings.Contains(query, "FROM "+triggerTable+" tg") || !strings.Contains(query, "NOT tg.tgisinternal") {
+					return nil, errors.New("trigger-only request issued an unexpected query: " + query)
+				}
+				if !strings.Contains(query, test.catalog+"."+test.prefix+"_description") || !strings.Contains(query, "n.nspname = 'team''s'") {
+					return nil, errors.New("trigger query lost comment or quoted schema metadata: " + query)
+				}
+				return &valueRows{
+					columns: []string{"tgname", "relname", "description"},
+					rows: [][]driver.Value{
+						{"audit_before", "items", "items audit"},
+						{"audit_before", "orders", nil},
+					},
+				}, nil
+			}}
+			server := newServer()
+			server.db = openMetadataDB(t, state)
+			server.mode = test.mode
+
+			objects, err := server.listObjects("team's", metadataListConstraints{ObjectTypes: []string{"TRIGGER"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(objects) != 2 {
+				t.Fatalf("expected both table-scoped triggers, got %#v", objects)
+			}
+			for index, parent := range []string{"items", "orders"} {
+				object := objects[index]
+				if object.Name != "audit_before" || object.ObjectType != "TRIGGER" || object.Schema != "team's" || object.ParentSchema == nil || *object.ParentSchema != "team's" || object.ParentName == nil || *object.ParentName != parent {
+					t.Fatalf("unexpected trigger object at %d: %#v", index, object)
+				}
+			}
+			if queries := state.snapshotQueries(); len(queries) != 1 {
+				t.Fatalf("trigger-only request must use one bounded catalog query: %v", queries)
+			}
+			constraints := metadataListConstraints{ObjectTypes: []string{"TRIGGER"}}
+			if constraintsAllowsTableLike(constraints) || constraintsAllowRoutines(constraints) || constraintsAllowTypes(constraints) || !constraintsAllowTriggers(constraints) {
+				t.Fatalf("trigger-only constraint leaked into another object family: %#v", constraints)
+			}
+		})
+	}
+}
+
+func TestListObjectsTriggerFallbackExcludesConstraintTriggers(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		if strings.Contains(query, "tg.tgisinternal") {
+			return nil, &gokb.Error{Code: gokb.ErrorCode("42703"), Message: "column TG.TGISINTERNAL does not exist"}
+		}
+		if !strings.Contains(query, "tg.tgkind <> 'c'") {
+			return nil, errors.New("legacy trigger query did not exclude constraint triggers: " + query)
+		}
+		return &valueRows{
+			columns: []string{"tgname", "relname", "description"},
+			rows:    [][]driver.Value{{"audit_before", "orders", nil}},
+		}, nil
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	objects, err := server.listObjects("public", metadataListConstraints{ObjectTypes: []string{"TRIGGER"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(objects) != 1 || objects[0].ParentName == nil || *objects[0].ParentName != "orders" || !server.triggerInternalUnsupported {
+		t.Fatalf("unexpected legacy trigger objects: %#v", objects)
+	}
+}
+
 func TestListObjectsKeepsTablesWhenMySQLCompatRoutineQueryFails(t *testing.T) {
 	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
 		switch {
@@ -2204,6 +2284,59 @@ func TestRoutineSourceUsesKingbaseCatalogFunction(t *testing.T) {
 	}
 	if !strings.HasPrefix(source["source"].(string), "CREATE FUNCTION public.format_name()") {
 		t.Fatalf("unexpected routine source: %#v", source)
+	}
+}
+
+func TestTriggerObjectSourceUsesOwningRelation(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		for _, fragment := range []string{
+			"SELECT sys_catalog.sys_get_triggerdef(tg.oid, true)",
+			"FROM sys_catalog.sys_trigger tg",
+			"n.nspname = 'public'",
+			"c.relname = 'orders'",
+			"tg.tgname = 'audit_before'",
+			"NOT tg.tgisinternal",
+		} {
+			if !strings.Contains(query, fragment) {
+				return nil, errors.New("trigger source query missing " + fragment + ": " + query)
+			}
+		}
+		return &valueRows{columns: []string{"definition"}, rows: [][]driver.Value{{"CREATE TRIGGER audit_before BEFORE INSERT ON public.orders EXECUTE FUNCTION public.audit_row()"}}}, nil
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	source, err := server.getObjectSourceForRelation("public", "audit_before", "TRIGGER", "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fmt.Sprint(source["source"]), "ON public.orders") {
+		t.Fatalf("unexpected trigger source: %#v", source)
+	}
+	if source["editable"] != false {
+		t.Fatalf("trigger source must remain read-only: %#v", source)
+	}
+}
+
+func TestTriggerObjectSourceRejectsAmbiguousNameWithoutRelation(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		if strings.Contains(query, "AND c.relname =") || !strings.Contains(query, "tg.tgname = 'audit_before'") {
+			return nil, errors.New("unexpected unscoped trigger source query: " + query)
+		}
+		return &valueRows{
+			columns: []string{"definition"},
+			rows: [][]driver.Value{
+				{"CREATE TRIGGER audit_before BEFORE INSERT ON public.items EXECUTE FUNCTION public.audit_row()"},
+				{"CREATE TRIGGER audit_before BEFORE INSERT ON public.orders EXECUTE FUNCTION public.audit_row()"},
+			},
+		}, nil
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	_, err := server.getObjectSource("public", "audit_before", "TRIGGER")
+	if err == nil || !strings.Contains(err.Error(), "relation_name is required") {
+		t.Fatalf("ambiguous trigger name must require its owning relation: %v", err)
 	}
 }
 

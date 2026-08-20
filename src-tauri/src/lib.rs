@@ -33,6 +33,7 @@ use tauri::{Emitter, Manager};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 #[cfg(any(windows, target_os = "linux"))]
 use tauri_plugin_deep_link::DeepLinkExt;
+use tauri_plugin_opener::OpenerExt;
 
 const DESKTOP_TRAY_ID: &str = "main-tray";
 const APP_CLOSE_REQUESTED_EVENT: &str = "dbx-app-close-requested";
@@ -1321,6 +1322,7 @@ pub fn run() {
     };
 
     let builder = builder
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
@@ -1463,6 +1465,13 @@ pub fn run() {
             };
             state.set_duckdb_worker_process_isolation_enabled(desktop_settings.duckdb_worker_process_isolation);
             state.set_duckdb_worker_max_processes(desktop_settings.duckdb_worker_max_processes);
+            let oidc_app_handle = app.handle().clone();
+            state.set_mongo_oidc_browser_opener(Arc::new(move |url| {
+                oidc_app_handle
+                    .opener()
+                    .open_url(url, None::<&str>)
+                    .map_err(|err| format!("Failed to open the system browser: {err}"))
+            }));
             let state = Arc::new(state);
             app.manage(state.clone());
             app.manage(commands::redis_pubsub_server::start_pubsub_server(state.clone()));
@@ -2038,6 +2047,15 @@ pub fn run() {
             commands::mongo_cmd::mongo_update_documents,
             commands::document_cmd::document_delete_document,
             commands::document_cmd::document_save_meilisearch_batch,
+            commands::document_cmd::meilisearch_search_documents,
+            commands::document_cmd::meilisearch_fetch_documents,
+            commands::document_cmd::meilisearch_get_document,
+            commands::document_cmd::meilisearch_get_index_settings,
+            commands::document_cmd::meilisearch_update_index_settings,
+            commands::document_cmd::meilisearch_get_index_stats,
+            commands::document_cmd::meilisearch_get_index_overview,
+            commands::document_cmd::meilisearch_delete_index,
+            commands::document_cmd::meilisearch_delete_all_documents,
             commands::hbase_cmd::hbase_get_table_schema,
             commands::hbase_cmd::hbase_scan_rows,
             commands::hbase_cmd::hbase_get_row,
@@ -2098,6 +2116,8 @@ pub fn run() {
             commands::mq_cmd::mq_list_subscriptions,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_enrich_subscriptions,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_get_kafka_consumer_group_snapshot,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_create_subscription,
             #[cfg(feature = "mq-admin")]

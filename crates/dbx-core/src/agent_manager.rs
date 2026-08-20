@@ -1,6 +1,7 @@
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::Read;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -15,6 +16,41 @@ use crate::models::connection::DatabaseType;
 pub const DEFAULT_JRE_KEY: &str = "21";
 pub const DOWNLOAD_CACHE_DIR_NAME: &str = "download-cache";
 pub const DOWNLOAD_CACHE_MAX_AGE_DAYS: u64 = 7;
+
+pub(crate) type OperationLockTable = StdMutex<std::collections::HashMap<String, Arc<Mutex<()>>>>;
+
+pub(crate) struct OperationLockHandle<'a> {
+    table: &'a OperationLockTable,
+    key: String,
+    lock: Arc<Mutex<()>>,
+}
+
+impl<'a> OperationLockHandle<'a> {
+    pub(crate) fn new(table: &'a OperationLockTable, key: &str, lock: Arc<Mutex<()>>) -> Self {
+        Self { table, key: key.to_string(), lock }
+    }
+}
+
+impl Deref for OperationLockHandle<'_> {
+    type Target = Mutex<()>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.lock
+    }
+}
+
+impl Drop for OperationLockHandle<'_> {
+    fn drop(&mut self) {
+        let Ok(mut locks) = self.table.lock() else {
+            return;
+        };
+        let should_remove =
+            locks.get(&self.key).is_some_and(|lock| Arc::ptr_eq(lock, &self.lock) && Arc::strong_count(lock) == 2);
+        if should_remove {
+            locks.remove(&self.key);
+        }
+    }
+}
 
 /// Cooperative cancellation token for an agent driver install/upgrade.
 ///
@@ -541,10 +577,10 @@ pub struct AgentManager {
     pub(crate) state_lock: StdMutex<()>,
     /// Per-JRE-key install locks so that concurrent driver installs sharing the
     /// same JRE download it only once (DCL pattern: lock → re-check installed → download).
-    pub(crate) jre_install_locks: Mutex<std::collections::HashMap<String, Arc<Mutex<()>>>>,
+    pub(crate) jre_install_locks: OperationLockTable,
     /// Per-driver locks serialize install, import, and uninstall operations
     /// targeting the same on-disk agent files.
-    pub(crate) driver_operation_locks: Mutex<std::collections::HashMap<String, Arc<Mutex<()>>>>,
+    pub(crate) driver_operation_locks: OperationLockTable,
     /// Driver operations may run concurrently, but JRE replacement/removal
     /// must exclude them until their dependent driver state is persisted.
     pub(crate) installation_operation_lock: tokio::sync::RwLock<()>,
@@ -579,8 +615,8 @@ impl AgentManager {
             daemons: Mutex::new(std::collections::HashMap::new()),
             connection_runtimes: Mutex::new(std::collections::HashMap::new()),
             state_lock: StdMutex::new(()),
-            jre_install_locks: Mutex::new(std::collections::HashMap::new()),
-            driver_operation_locks: Mutex::new(std::collections::HashMap::new()),
+            jre_install_locks: StdMutex::new(std::collections::HashMap::new()),
+            driver_operation_locks: StdMutex::new(std::collections::HashMap::new()),
             installation_operation_lock: tokio::sync::RwLock::new(()),
             install_cancellations: Mutex::new(std::collections::HashMap::new()),
         };

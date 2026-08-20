@@ -144,11 +144,12 @@ export function useSqlExecution(deps: {
 
   async function resolvedExecutableSql(source?: SqlExecutionOverride): Promise<{ sql: string; sourceOffset?: number; editorViewportRequestId?: number }> {
     const atSetEnabled = resolveSqlVariableSyntaxToggles(settingsStore.editorSettings.sqlVariableSyntaxOverrides, deps.activeConnection.value?.db_type, settingsStore.editorSettings.sqlVariableSubstitutionEnabled).atSet;
-    const expand = (sql: string) => (atSetEnabled ? expandSqlVariables(sql).sql : sql);
+    const expand = (sql: string, declarationSql?: string) => (atSetEnabled ? expandSqlVariables(sql, { declarationSql }).sql : sql);
     if (typeof source === "string") return { sql: expand(source) };
 
     const resolved = deps.resolveExecutableSql ? await deps.resolveExecutableSql(source) : isSqlExecutionSnapshot(source) ? resolveExecutableSql(source.fullSql, source.selectedSql, { cursorPos: source.cursorPos }) : deps.executableSql.value;
-    const sql = expand(resolved);
+    const declarationSql = isSqlExecutionSnapshot(source) ? source.fullSql.slice(0, source.selectionTo) : resolved;
+    const sql = expand(resolved, declarationSql);
     const editorViewportRequestId = isSqlExecutionSnapshot(source) ? source.editorViewportRequestId : undefined;
     if (!isSqlExecutionSnapshot(source) || !source.selectedSql.trim() || sql !== resolved) return { sql, editorViewportRequestId };
 

@@ -36,5 +36,6 @@ export interface SidebarDangerDialogRequest {
   option?: SidebarDangerDialogOption;
   options?: SidebarDangerDialogOption[];
   textInput?: SidebarDangerDialogTextInput;
+  cancelRunning?: () => void | Promise<void>;
   confirm: () => void | boolean | Promise<void | boolean>;
 }

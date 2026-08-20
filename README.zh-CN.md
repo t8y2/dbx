@@ -1,8 +1,8 @@
 <div align="center">
-  <p style="font-size: 18px; white-space: nowrap;"><strong>20 MB 驾驭 80+ 种数据库。桌面端、Docker、CLI、内置 AI 助手与 MCP Server。</strong></p>
+  <p style="font-size: 18px; white-space: nowrap;"><strong>20 MB 驾驭 90+ 种数据库。桌面端、Docker、CLI、内置 AI 助手与 MCP Server。</strong></p>
 
   <p>
-    <img src="https://dl.dbxio.com/assets/readme-hero-20260816.png" alt="DBX 截图" width="820" />
+    <img src="https://dl.dbxio.com/assets/readme-hero-20260820.png" alt="DBX 截图" width="820" />
   </p>
 
   <p>
@@ -89,7 +89,7 @@
 
 ## 功能特性
 
-### 80+ 种数据库，一个工具搞定
+### 90+ 种数据库，一个工具搞定
 
 MySQL、PostgreSQL、SQLite、Cloudflare D1、Redis、MongoDB、DuckDB、ClickHouse、SQL Server、Oracle、Elasticsearch、Easysearch、Meilisearch、MariaDB、TiDB、OceanBase、openGauss、GaussDB、KWDB、KingbaseES、Vastbase、GoldenDB、Doris、SelectDB、StarRocks、Manticore Search、Redshift、DM、TDengine、虚谷 XuguDB、CockroachDB、Access、HighGo、UXDB、Dolt 等数据库都能直接连接。Agent 配置还可扩展到 H2、Snowflake、Trino、Hive、DB2、Informix、Neo4j、Cassandra、BigQuery、Kylin、SunDB、JDBCX 和自定义 JDBC。新增的原生与 Agent 驱动还覆盖了 Databricks、SAP HANA、Teradata、Vertica、Firebird、Exasol、崖山 YashanDB、GBase、Databend、RQLite、Turso、InfluxDB、QuestDB、IoTDB、etcd、ZooKeeper、Nacos、Consul KV、IRIS 等。全部装进约 20 MB 的应用里，不内嵌 Chromium。
 
@@ -482,7 +482,7 @@ DBX 是免费开源项目，但持续维护、数据库兼容性测试、基础�
 
 <details>
 <summary><strong>DBX 和 DBeaver / TablePlus / Beekeeper Studio 有什么区别？</strong></summary>
-DBX 仅 20 MB，无需运行时依赖（无需 Java、无需 Python）。AI 和 MCP 是原生内置功能，不是插件。单一代码库同时支持 80+ 数据库、桌面端、Docker 和 Web。
+DBX 仅 20 MB，无需运行时依赖（无需 Java、无需 Python）。AI 和 MCP 是原生内置功能，不是插件。单一代码库同时支持 90+ 数据库、桌面端、Docker 和 Web。
 </details>
 
 <details>
@@ -503,11 +503,11 @@ MySQL、PostgreSQL、SQLite、Cloudflare D1、Redis、MongoDB、DuckDB、ClickHo
 
 ## Star History
 
-<a href="https://www.star-history.com/?repos=t8y2%2Fdbx&type=date&legend=top-left">
+<a href="https://star-history.dera.page/#t8y2/dbx&type=date">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=t8y2/dbx&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=t8y2/dbx&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=t8y2/dbx&type=date&legend=top-left" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=t8y2/dbx&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=t8y2/dbx&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://star-history.dera.page/svg?repos=t8y2/dbx&type=date&legend=top-left" />
  </picture>
 </a>
 

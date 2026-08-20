@@ -8,6 +8,8 @@ const mocks = vi.hoisted(() => ({
   executeMulti: vi.fn(),
   getConnectionConfig: vi.fn(),
   saveOpenTabsState: vi.fn(),
+  loadTableMetadata: vi.fn(),
+  metadataGeneration: 0,
 }));
 
 vi.mock("@/lib/backend/api", () => ({
@@ -23,8 +25,17 @@ vi.mock("@/stores/connectionStore", () => ({
     ensureConnected: vi.fn().mockResolvedValue(undefined),
     getConfig: mocks.getConnectionConfig,
     recordConnectionLostError: vi.fn(),
+    metadataGenerationFor: () => mocks.metadataGeneration,
   }),
 }));
+
+vi.mock("@/lib/metadata/tableMetadataCache", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/metadata/tableMetadataCache")>();
+  return {
+    ...actual,
+    loadTableMetadata: mocks.loadTableMetadata,
+  };
+});
 
 vi.mock("@/stores/settingsStore", () => ({
   useSettingsStore: () => ({
@@ -47,6 +58,7 @@ describe("queryStore table data refresh", () => {
     vi.unstubAllGlobals();
     installLocalStorage();
     setActivePinia(createPinia());
+    mocks.metadataGeneration = 0;
     mocks.getConnectionConfig.mockReturnValue({
       id: "pg-1",
       name: "Postgres",
@@ -593,6 +605,130 @@ describe("queryStore table data refresh", () => {
     const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
     expect(tab.isExecuting).toBe(false);
     expect(tab.result?.execution_error).toBe(true);
+    expect(mocks.executeMulti).not.toHaveBeenCalled();
+  });
+
+  it("rebuilds table metadata from the new connection before the first reload after a reconnect boundary", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "users", "data", "public");
+    // 断链前的旧结构：只有 [id]
+    store.setTableMeta(tabId, {
+      schema: "public",
+      tableName: "users",
+      tableType: "TABLE",
+      columns: [{ name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+      primaryKeys: ["id"],
+    });
+    const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    // 外部 ALTER TABLE ... ADD age：DBX 断开→重连。disconnect 会 bump 连接代次
+    // 并清 freshness 戳（staleConnectionDataTabMetadata），此处等价模拟：
+    // 旧代次(0)的 tableMeta 已与新代次(1)失配，reload 必须重建结构
+    mocks.metadataGeneration = 1;
+    tab.tableMetaUpdatedAt = undefined;
+    mocks.loadTableMetadata.mockResolvedValue({
+      metadata: {
+        schema: "public",
+        tableName: "users",
+        tableType: "TABLE",
+        database: "app",
+        columns: [
+          { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+          { name: "age", data_type: "integer", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+        ],
+        indexes: [],
+        primaryKeys: ["id"],
+        cachedAt: Date.now(),
+      },
+      cacheStatus: "miss",
+      ageMs: 0,
+    });
+
+    await store.refreshDataTab(tabId);
+
+    // 重建从新连接源头强制拉取（force），不再使用旧显式列列表
+    expect(mocks.loadTableMetadata).toHaveBeenCalledTimes(1);
+    expect(mocks.loadTableMetadata).toHaveBeenCalledWith(
+      expect.objectContaining({
+        connectionId: "pg-1",
+        database: "app",
+        schema: "public",
+        tableName: "users",
+        force: true,
+      }),
+    );
+    // 重建后的新列 [id, age] 进入 SQL 构建并写回 tab
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ columns: ["id", "age"] }));
+    expect(tab.tableMeta?.columns.map((column) => column.name)).toEqual(["id", "age"]);
+    expect(tab.tableMetaUpdatedAt).toBeDefined();
+    expect(tab.tableMetaGeneration).toBe(1);
+  });
+
+  it("does not rebuild metadata on a warm reload in the same connection generation", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "users", "data", "public");
+    store.setTableMeta(tabId, {
+      schema: "public",
+      tableName: "users",
+      tableType: "TABLE",
+      columns: [{ name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+      primaryKeys: ["id"],
+    });
+
+    await store.refreshDataTab(tabId);
+
+    // 同代次（0）内正常刷新：直接复用 tab 元数据，不重新拉取结构
+    expect(mocks.loadTableMetadata).not.toHaveBeenCalled();
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ columns: ["id"] }));
+  });
+
+  it("abandons a forced metadata rebuild when generation changes mid-flight", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "users", "data", "public");
+    store.setTableMeta(tabId, {
+      schema: "public",
+      tableName: "users",
+      tableType: "TABLE",
+      columns: [{ name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+      primaryKeys: ["id"],
+    });
+    const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    mocks.metadataGeneration = 1;
+    tab.tableMetaUpdatedAt = undefined;
+    let resolveMetadata!: (value: Awaited<ReturnType<typeof mocks.loadTableMetadata>>) => void;
+    mocks.loadTableMetadata.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveMetadata = resolve;
+      }),
+    );
+
+    const refresh = store.refreshDataTab(tabId);
+    await vi.waitFor(() => expect(mocks.loadTableMetadata).toHaveBeenCalledTimes(1));
+    mocks.metadataGeneration = 2;
+    resolveMetadata({
+      metadata: {
+        schema: "public",
+        tableName: "users",
+        tableType: "TABLE",
+        database: "app",
+        columns: [
+          { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+          { name: "age", data_type: "integer", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+        ],
+        indexes: [],
+        primaryKeys: ["id"],
+        cachedAt: Date.now(),
+      },
+      cacheStatus: "miss",
+      ageMs: 0,
+    });
+    await expect(refresh).resolves.toBe(false);
+
+    expect(tab.tableMeta?.columns.map((column) => column.name)).toEqual(["id"]);
+    expect(tab.tableMetaUpdatedAt).toBeUndefined();
+    expect(mocks.buildTableSelectSql).not.toHaveBeenCalled();
     expect(mocks.executeMulti).not.toHaveBeenCalled();
   });
 });

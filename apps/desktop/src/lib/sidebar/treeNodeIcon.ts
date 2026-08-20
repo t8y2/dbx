@@ -1,5 +1,5 @@
 import type { Component } from "vue";
-import { Archive, Braces, Columns3, Database, Eye, FileCode, FolderClosed, FolderOpen, Gauge, Key, Link, Link2, ListTree, Network, Package, Plus, ScrollText, Server, ShieldCheck, Table, TableProperties, UsersRound, Zap } from "@lucide/vue";
+import { Archive, Braces, Clock, Columns3, Database, Eye, FileCode, FolderClosed, FolderOpen, Gauge, Key, Link, Link2, ListTree, Network, Package, Plus, ScrollText, Server, ShieldCheck, Table, TableProperties, UsersRound, Zap } from "@lucide/vue";
 import type { ColumnInfo, TreeNode } from "@/types/database";
 
 export type TreeNodeIconInfo = {
@@ -68,6 +68,10 @@ export function getTreeNodeIconInfo(node: TreeNode): TreeNodeIconInfo | null {
       return { icon: Zap, colorClass: "text-orange-400" };
     case "trigger":
       return { icon: Zap, colorClass: "text-orange-300" };
+    case "group-events":
+      return { icon: Clock, colorClass: "text-orange-400" };
+    case "event":
+      return { icon: Clock, colorClass: "text-orange-300" };
     case "group-constraints":
     case "constraint":
       return { icon: Key, colorClass: "text-amber-500" };

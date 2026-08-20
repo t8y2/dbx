@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "@/lib/backend/api";
-import { executeObjectSourceSave, formatObjectSourceSaveError, resolveObjectSourceEditDraft } from "@/lib/table/objectSourceEditor";
+import { executeObjectSourceSave, formatObjectSourceSaveError, resolveObjectSourceEditDraft, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
+import { supportsObjectRename } from "@/lib/table/objectRenameSql";
 import { formatSqlForDisplay } from "@/lib/sql/sqlFormatter";
 
 vi.mock("@/lib/backend/api", () => ({
@@ -11,6 +12,17 @@ vi.mock("@/lib/backend/api", () => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
+});
+
+describe("openGauss rename capabilities", () => {
+  it("keeps direct object renames without enabling source-backed routine rebuilds", () => {
+    expect(supportsObjectRename("opengauss", "TABLE")).toBe(true);
+    expect(supportsObjectRename("opengauss", "VIEW")).toBe(true);
+    expect(supportsObjectRename("opengauss", "MATERIALIZED_VIEW")).toBe(true);
+    expect(supportsSourceBackedRoutineRename("opengauss", "FUNCTION")).toBe(false);
+    expect(supportsSourceBackedRoutineRename("opengauss", "PROCEDURE")).toBe(false);
+    expect(supportsSourceBackedRoutineRename("postgres", "FUNCTION")).toBe(true);
+  });
 });
 
 describe("executeObjectSourceSave", () => {

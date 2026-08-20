@@ -77,6 +77,7 @@ export const DATABASE_PROPERTY_EDITING_MATRIX = {
   bigquery: { deferred: "dataset properties need project/location-specific handling" },
   kylin: { deferred: "project/model lifecycle is not SQL database property editing" },
   ignite: { deferred: "schema properties need product-specific handling" },
+  ignite3: { deferred: "schema properties need product-specific handling" },
   sundb: { deferred: "property semantics not verified for first pass" },
   oscar: { deferred: "schema properties need product-specific handling" },
   tdengine: { deferred: "database property editing not verified for first pass" },

@@ -14,6 +14,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Properties;
 
 public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
     private static final String GAUSSDB_COMPATIBILITY_SQL =
@@ -457,7 +458,18 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
     protected abstract String buildJdbcUrl(ConnectParams params);
 
     protected Connection openConnection(ConnectParams params) throws Exception {
-        return DriverManager.getConnection(buildJdbcUrl(params), params.getUsername(), params.getPassword());
+        return DriverManager.getConnection(buildJdbcUrl(params), buildConnectionProperties(params));
+    }
+
+    protected Properties buildConnectionProperties(ConnectParams params) {
+        Properties properties = new Properties();
+        if (params.getUsername() != null) {
+            properties.setProperty("user", params.getUsername());
+        }
+        if (params.getPassword() != null) {
+            properties.setProperty("password", params.getPassword());
+        }
+        return properties;
     }
 
     protected Connection openTestConnection(ConnectParams params) throws Exception {

@@ -72,6 +72,7 @@ export const databaseSupport: DatabaseSupportItem[] = [
   { id: "cassandra", name: "Cassandra", icon: "/icons/database/cassandra.svg", tone: "#1287b1" },
   { id: "kylin", name: "Kylin", icon: "/icons/database/apache_kylin.svg", tone: "#fb8c00" },
   { id: "ignite", name: "Ignite", icon: "/icons/database/apache_ignite.svg", tone: "#ef2c2c" },
+  { id: "ignite3", name: "Ignite 3", icon: "/icons/database/apache_ignite.svg", tone: "#ef2c2c" },
   { id: "dremio", name: "Dremio", icon: "/icons/database/dremio.svg", tone: "#30bdbe" },
   { id: "oscar", name: "OSCAR", icon: "/icons/database/oscar.png", tone: "#1b8dff" },
   { id: "influxdb", name: "InfluxDB", icon: "/icons/database/influxdb.svg", tone: "#22adf6" },

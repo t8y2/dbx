@@ -77,6 +77,7 @@ export const DATABASE_NAMESPACE_CREATION_MATRIX = {
   bigquery: { deferred: "dataset creation needs project/location options" },
   kylin: { deferred: "project/model lifecycle is not SQL database creation" },
   ignite: { deferred: "schema lifecycle is managed through cluster/cache configuration" },
+  ignite3: { deferred: "schema lifecycle is managed through cluster configuration" },
   sundb: { deferred: "creation semantics not verified for first pass" },
   oscar: { database: "schema" },
   tdengine: { connection: "database" },

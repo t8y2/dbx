@@ -65,6 +65,25 @@ AI 助手 → DBX MCP → 你的数据库 → 返回结果
 | Cursor | `.cursor/mcp.json` |
 | Windsurf | MCP 配置 |
 | VS Code + Copilot | MCP 扩展/配置 |
+| DeepSeek Harness | `$DSH_HOME/profiles/<profile>/cordis.patch.yml` |
+
+### DeepSeek Harness
+
+DeepSeek Harness 通过 Cordis 插件条目加载 MCP Server，不读取 `mcpServers` JSON。安装 `@dbx-app/mcp-server` 后，为 `web` profile 将以下条目合并到 `$DSH_HOME/profiles/web/cordis.patch.yml`：未设置 `DSH_HOME` 时默认为 `~/.dsh`。
+
+```yaml
+- insert:
+    - id: mcp-dbx
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: dbx
+        transport: stdio
+        command: dbx-mcp-server
+```
+
+保留最外层的 `- insert:`，不要覆盖文件中已有的 patch 条目。使用其他 DSH profile 时，将路径中的 `web` 替换为对应 profile 名称。DSH 进程的 `PATH` 必须能找到 `dbx-mcp-server`；必要时请改用可执行文件的绝对路径。
+
+运行 `dsh web --dump-config` 检查组合后的配置，再重启 DSH 或等待热加载应用该 patch。模型侧工具名为 `mcp__dbx__<tool>`。请保持 `serverName: dbx` 稳定，避免工具名和权限规则发生变化。连接访问范围和执行模式仍统一在 **DBX 设置 → MCP** 中管理。
 
 ## 工具列表
 

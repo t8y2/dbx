@@ -856,12 +856,14 @@ pub fn build_rename_object_sql(options: RenameObjectSqlOptions) -> Result<String
 }
 
 fn is_postgres_like_rename(database_type: DatabaseType) -> bool {
+    // openGauss 兼容 PG 的 ALTER TABLE/VIEW ... RENAME TO 语法，与 gaussdb 等同开放重命名能力。
     matches!(
         database_type,
         DatabaseType::Postgres
             | DatabaseType::Redshift
             | DatabaseType::Gaussdb
             | DatabaseType::Kwdb
+            | DatabaseType::OpenGauss
             | DatabaseType::Kingbase
             | DatabaseType::Highgo
             | DatabaseType::Uxdb
@@ -2122,6 +2124,36 @@ mod tests {
         assert_eq!(
             build_rename_object_sql(RenameObjectSqlOptions {
                 database_type: Some(DatabaseType::Postgres),
+                object_type: DatabaseObjectType::View,
+                schema: Some("public".to_string()),
+                old_name: "active_users".to_string(),
+                new_name: "enabled_users".to_string(),
+            })
+            .unwrap(),
+            "ALTER VIEW \"public\".\"active_users\" RENAME TO \"enabled_users\";"
+        );
+    }
+
+    #[test]
+    fn builds_opengauss_table_and_view_rename_sql() {
+        // openGauss 兼容 PG 重命名语法，与 gaussdb 等 PG 系数据库保持一致（右键“重命名”菜单入口）。
+        assert!(supports_object_rename(Some(DatabaseType::OpenGauss), DatabaseObjectType::Table));
+        assert!(supports_object_rename(Some(DatabaseType::OpenGauss), DatabaseObjectType::View));
+        assert!(supports_object_rename(Some(DatabaseType::OpenGauss), DatabaseObjectType::MaterializedView));
+        assert_eq!(
+            build_rename_object_sql(RenameObjectSqlOptions {
+                database_type: Some(DatabaseType::OpenGauss),
+                object_type: DatabaseObjectType::Table,
+                schema: Some("public".to_string()),
+                old_name: "orders".to_string(),
+                new_name: "archived orders".to_string(),
+            })
+            .unwrap(),
+            "ALTER TABLE \"public\".\"orders\" RENAME TO \"archived orders\";"
+        );
+        assert_eq!(
+            build_rename_object_sql(RenameObjectSqlOptions {
+                database_type: Some(DatabaseType::OpenGauss),
                 object_type: DatabaseObjectType::View,
                 schema: Some("public".to_string()),
                 old_name: "active_users".to_string(),

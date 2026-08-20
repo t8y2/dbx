@@ -2051,9 +2051,21 @@ impl AgentDriverClient {
         object_type: &K,
         timeout_duration: Option<Duration>,
     ) -> Result<T, String> {
+        self.get_object_source_for_relation(database, schema, name, object_type, None, timeout_duration).await
+    }
+
+    pub async fn get_object_source_for_relation<T: DeserializeOwned + Send + 'static, K: Serialize>(
+        &mut self,
+        database: &str,
+        schema: &str,
+        name: &str,
+        object_type: &K,
+        relation_name: Option<&str>,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
         self.call_method_with_timeout(
             AgentMethod::GetObjectSource,
-            agent_object_source_params(database, schema, name, object_type),
+            agent_object_source_params_with_relation(database, schema, name, object_type, relation_name),
             timeout_duration,
         )
         .await
@@ -2806,7 +2818,22 @@ pub fn agent_schema_table_params(database: &str, schema: &str, table: &str) -> V
 }
 
 pub fn agent_object_source_params<K: Serialize>(database: &str, schema: &str, name: &str, object_type: &K) -> Value {
-    serde_json::json!({ "database": database, "schema": schema, "name": name, "object_type": object_type })
+    agent_object_source_params_with_relation(database, schema, name, object_type, None)
+}
+
+pub fn agent_object_source_params_with_relation<K: Serialize>(
+    database: &str,
+    schema: &str,
+    name: &str,
+    object_type: &K,
+    relation_name: Option<&str>,
+) -> Value {
+    let mut params =
+        serde_json::json!({ "database": database, "schema": schema, "name": name, "object_type": object_type });
+    if let Some(relation_name) = relation_name.map(str::trim).filter(|value| !value.is_empty()) {
+        params["relation_name"] = Value::String(relation_name.to_string());
+    }
+    params
 }
 
 pub fn agent_type_details_params(database: &str, schema: &str, name: &str) -> Value {
@@ -3204,16 +3231,16 @@ impl Drop for AgentDriverClient {
 mod tests {
     use super::{
         agent_close_query_session_params, agent_error_from_legacy, agent_handshake_params, agent_java_args,
-        agent_java_args_with_extra, agent_java_args_with_extra_opts, agent_object_source_params, agent_proxy_env_vars,
-        agent_schema_params, agent_schema_table_params, agent_supports_capability, agent_transaction_params,
-        append_legacy_error_context, decode_agent_response, format_agent_process_error, format_agent_startup_error,
-        is_agent_rpc_response_error, is_unsupported_handshake_error, legacy_agent_call_error, mongo_collection_params,
-        mongo_database_params, mongo_document_id_params, parse_agent_java_opts, read_agent_line,
-        start_stderr_collector, validate_dameng_java_system_properties, AgentCallError, AgentCapability,
-        AgentDriverClient, AgentErrorCategory, AgentErrorContext, AgentErrorStage, AgentHandshake, AgentKvMethod,
-        AgentLaunchSpec, AgentMethod, AgentOperationOutcome, AgentRuntimeClient, AgentSessionDisposition,
-        AgentTableReadCloseParams, AgentTableReadPageParams, AgentTableReadStartParams, MongoAgentMethod, StderrTail,
-        AGENT_PROTOCOL_VERSION,
+        agent_java_args_with_extra, agent_java_args_with_extra_opts, agent_object_source_params,
+        agent_object_source_params_with_relation, agent_proxy_env_vars, agent_schema_params, agent_schema_table_params,
+        agent_supports_capability, agent_transaction_params, append_legacy_error_context, decode_agent_response,
+        format_agent_process_error, format_agent_startup_error, is_agent_rpc_response_error,
+        is_unsupported_handshake_error, legacy_agent_call_error, mongo_collection_params, mongo_database_params,
+        mongo_document_id_params, parse_agent_java_opts, read_agent_line, start_stderr_collector,
+        validate_dameng_java_system_properties, AgentCallError, AgentCapability, AgentDriverClient, AgentErrorCategory,
+        AgentErrorContext, AgentErrorStage, AgentHandshake, AgentKvMethod, AgentLaunchSpec, AgentMethod,
+        AgentOperationOutcome, AgentRuntimeClient, AgentSessionDisposition, AgentTableReadCloseParams,
+        AgentTableReadPageParams, AgentTableReadStartParams, MongoAgentMethod, StderrTail, AGENT_PROTOCOL_VERSION,
     };
     use crate::agent_recovery::{RecoveryDecision, RecoveryPolicy, RecoveryScope};
     use std::io::Cursor;
@@ -4693,6 +4720,16 @@ for line in sys.stdin:
                 "schema": "public",
                 "name": "active_users",
                 "object_type": "VIEW",
+            })
+        );
+        assert_eq!(
+            agent_object_source_params_with_relation("sales", "public", "audit_before", &"TRIGGER", Some("orders")),
+            serde_json::json!({
+                "database": "sales",
+                "schema": "public",
+                "name": "audit_before",
+                "object_type": "TRIGGER",
+                "relation_name": "orders",
             })
         );
         assert_eq!(agent_close_query_session_params("session-1"), serde_json::json!({ "sessionId": "session-1" }));

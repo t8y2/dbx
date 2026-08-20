@@ -1168,6 +1168,7 @@ mod tests {
             &[crate::ai::AiMessage {
                 role: "user".to_string(),
                 content: "Count the keys".to_string(),
+                images: Vec::new(),
                 tool_call_id: None,
                 tool_calls: Vec::new(),
             }],

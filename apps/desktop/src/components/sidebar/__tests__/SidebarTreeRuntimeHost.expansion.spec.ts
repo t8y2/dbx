@@ -322,4 +322,71 @@ describe("SidebarTreeRuntimeHost expansion", () => {
       }),
     );
   });
+
+  it("toggles Xugu package member groups locally instead of loading schema routines", async () => {
+    const packageFunctionGroup: TreeNode = {
+      id: "xugu:SHOP_DEMO:APP_TEST:package:PKG_CUSTOMER:members:functions",
+      label: "tree.functions",
+      type: "group-functions",
+      parentType: "package",
+      parentName: "PKG_CUSTOMER",
+      parentSchema: "APP_TEST",
+      connectionId: "xugu",
+      database: "SHOP_DEMO",
+      schema: "APP_TEST",
+      objectCount: 401,
+      isExpanded: false,
+      children: Array.from({ length: 401 }, (_, index) => ({
+        id: `xugu:SHOP_DEMO:APP_TEST:package:PKG_CUSTOMER:member:function:FUNC_${index}`,
+        label: `FUNC_${index}()`,
+        type: "function" as const,
+        parentType: "package" as const,
+        parentName: "PKG_CUSTOMER",
+        parentSchema: "APP_TEST",
+        connectionId: "xugu",
+        database: "SHOP_DEMO",
+        schema: "APP_TEST",
+        objectName: `FUNC_${index}`,
+        signature: "",
+      })),
+    };
+    connectionStore.treeNodes = [packageFunctionGroup];
+    connectionStore.getConfig.mockReturnValue({ db_type: "xugu" });
+    connectionStore.canUseLoadedTreeNodeToggle.mockReturnValue(false);
+
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const toggled = vi.fn();
+    const app = createApp(
+      defineComponent({
+        setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node: packageFunctionGroup, depth: 0, onNodeToggled: toggled }),
+      }),
+    );
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    host.value?.toggleNode(packageFunctionGroup);
+    await nextTick();
+
+    expect(packageFunctionGroup.isExpanded).toBe(true);
+    expect(connectionStore.loadObjectGroupChildren).not.toHaveBeenCalled();
+    expect(toggled).toHaveBeenCalledWith(packageFunctionGroup, true);
+
+    host.value?.toggleNode(packageFunctionGroup);
+    await nextTick();
+
+    expect(packageFunctionGroup.isExpanded).toBe(false);
+    expect(connectionStore.loadObjectGroupChildren).not.toHaveBeenCalled();
+
+    expect(connectionStore.releaseCollapsedTreeNodeChildren).not.toHaveBeenCalled();
+    expect(packageFunctionGroup.children).toHaveLength(401);
+
+    host.value?.toggleNode(packageFunctionGroup);
+    await nextTick();
+
+    expect(packageFunctionGroup.isExpanded).toBe(true);
+    expect(packageFunctionGroup.children).toHaveLength(401);
+  });
 });

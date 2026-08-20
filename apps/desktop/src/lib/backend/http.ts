@@ -47,6 +47,7 @@ import type {
 } from "@/types/database";
 import { normalizeRustMongoCommand, type MongoCommand } from "@/lib/mongo/mongoShellCommand";
 import { BackendErrorException, type BackendError } from "@/lib/backend/errorUtils";
+import { decodeMeilisearchDocumentPage, decodeMeilisearchSearchResult, type MeilisearchDocumentPage, type MeilisearchDocumentPageWire, type MeilisearchSearchResult, type MeilisearchSearchWireResult } from "@/lib/backend/meilisearchTransport";
 import type { CollectionInfo } from "@/types/database";
 import type { SchemaDiffPreparation, SchemaDiffPreparationOptions, TableDiff, FunctionDiff, SequenceDiff, RuleDiff, OwnerDiff } from "@/lib/schema/schemaDiff";
 import type { SidebarObjectKind } from "@/lib/database/databaseObjectCapabilities";
@@ -139,6 +140,7 @@ import type {
   AppSupportInfo,
   PromptTemplate,
   SshPromptResolution,
+  MeilisearchIndexOverview,
 } from "@/lib/backend/tauri";
 import type { QueryEditability } from "@/lib/sql/sqlAnalysis";
 import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
@@ -3890,6 +3892,90 @@ export async function documentSaveMeilisearchBatch(connectionId: string, collect
     updates,
     deleteIds,
     inserts,
+  });
+}
+
+export async function meilisearchSearchDocuments(
+  connectionId: string,
+  index: string,
+  params: { q?: string | null; filter?: string | null; sort?: string | null; limit: number; offset: number; hybridEmbedder?: string | null; hybridSemanticRatio?: number | null; showRankingScore?: boolean; rankingScoreThreshold?: number | null },
+): Promise<MeilisearchSearchResult> {
+  const result = await post<MeilisearchSearchWireResult>("/api/document-store/meilisearch/search", {
+    connectionId,
+    index,
+    q: params.q ?? null,
+    filter: params.filter ?? null,
+    sort: params.sort ?? null,
+    limit: params.limit,
+    offset: params.offset,
+    hybridEmbedder: params.hybridEmbedder ?? null,
+    hybridSemanticRatio: params.hybridSemanticRatio ?? null,
+    showRankingScore: params.showRankingScore ?? false,
+    rankingScoreThreshold: params.rankingScoreThreshold ?? null,
+  });
+  return decodeMeilisearchSearchResult(result);
+}
+
+export async function meilisearchFetchDocuments(connectionId: string, index: string, params: { filter?: string | null; sort?: string | null; limit: number; offset: number }): Promise<MeilisearchDocumentPage> {
+  const page = await post<MeilisearchDocumentPageWire>("/api/document-store/meilisearch/documents/fetch", {
+    connectionId,
+    index,
+    filter: params.filter ?? null,
+    sort: params.sort ?? null,
+    limit: params.limit,
+    offset: params.offset,
+  });
+  return decodeMeilisearchDocumentPage(page);
+}
+
+export async function meilisearchGetDocument(connectionId: string, index: string, id: string): Promise<string> {
+  return post("/api/document-store/meilisearch/documents/get", {
+    connectionId,
+    index,
+    id,
+  });
+}
+
+export async function meilisearchGetIndexSettings(connectionId: string, index: string): Promise<Record<string, any>> {
+  return post("/api/document-store/meilisearch/settings/get", {
+    connectionId,
+    index,
+  });
+}
+
+export async function meilisearchUpdateIndexSettings(connectionId: string, index: string, settings: Record<string, any>): Promise<void> {
+  return post("/api/document-store/meilisearch/settings/update", {
+    connectionId,
+    index,
+    settings,
+  });
+}
+
+export async function meilisearchGetIndexStats(connectionId: string, index: string): Promise<{ numberOfDocuments: number; isIndexing: boolean; fieldDistribution: Record<string, number> } & Record<string, any>> {
+  return post("/api/document-store/meilisearch/stats", {
+    connectionId,
+    index,
+  });
+}
+
+export async function meilisearchGetIndexOverview(connectionId: string, index: string): Promise<MeilisearchIndexOverview> {
+  return post("/api/document-store/meilisearch/overview", {
+    connectionId,
+    index,
+  });
+}
+
+export async function meilisearchDeleteIndex(connectionId: string, index: string): Promise<void> {
+  return post("/api/document-store/meilisearch/index/delete", {
+    connectionId,
+    index,
+  });
+}
+
+export async function meilisearchDeleteAllDocuments(connectionId: string, index: string): Promise<void> {
+  return post("/api/document-store/meilisearch/documents/delete-all", {
+    connectionId,
+    index,
   });
 }
 

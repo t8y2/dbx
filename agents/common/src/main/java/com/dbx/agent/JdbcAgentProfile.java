@@ -165,7 +165,7 @@ public class JdbcAgentProfile {
         return schemaSwitchPrefix + " " + quote + schema.replace(quote, quote + quote) + quote;
     }
 
-    private static String appendUrlParams(String url, String urlParams) {
+    public static String appendUrlParams(String url, String urlParams) {
         String params = trimUrlParams(urlParams);
         if (params.isEmpty()) {
             return url;

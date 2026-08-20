@@ -146,6 +146,7 @@ public final class KafkaAgent {
             case "mq_alter_topic_config" -> alterTopicConfig(params);
             // Consumer groups
             case "mq_list_consumer_groups" -> listConsumerGroups(params);
+            case "mq_get_consumer_group_snapshot" -> getConsumerGroupSnapshot(params);
             case "mq_describe_consumer_group" -> describeConsumerGroup(params);
             case "mq_delete_consumer_group" -> deleteConsumerGroup(params);
             case "mq_reset_consumer_group_offsets" -> resetConsumerGroupOffsets(params);
@@ -969,6 +970,208 @@ public final class KafkaAgent {
         }
         result.sort(Comparator.comparing(m -> (String) m.get("groupId")));
         return Collections.singletonMap("groups", result);
+    }
+
+    private static Object getConsumerGroupSnapshot(JsonObject params) throws Exception {
+        AdminClient admin = requireAdmin();
+        int timeout = requestTimeout(params);
+        Collection<ConsumerGroupListing> listings = admin.listConsumerGroups(
+                new ListConsumerGroupsOptions().timeoutMs(timeout))
+            .all().get(timeout, TimeUnit.MILLISECONDS);
+
+        List<ConsumerGroupListing> sortedListings = new ArrayList<>(listings);
+        sortedListings.sort(Comparator.comparing(ConsumerGroupListing::groupId));
+        if (sortedListings.isEmpty()) {
+            return Collections.singletonMap("groups", Collections.emptyList());
+        }
+
+        List<String> groupIds = sortedListings.stream()
+            .map(ConsumerGroupListing::groupId)
+            .toList();
+        Map<String, ConsumerGroupDescription> descriptions = new HashMap<>();
+        Map<String, Map<TopicPartition, OffsetAndMetadata>> committedOffsets = new HashMap<>();
+        Map<String, Boolean> committedOffsetsAvailable = new HashMap<>();
+        Map<String, LinkedHashSet<String>> errors = new HashMap<>();
+
+        DescribeConsumerGroupsResult described = admin.describeConsumerGroups(
+            groupIds,
+            new DescribeConsumerGroupsOptions().timeoutMs(timeout)
+        );
+        for (String groupId : groupIds) {
+            try {
+                descriptions.put(
+                    groupId,
+                    described.describedGroups().get(groupId).get(timeout, TimeUnit.MILLISECONDS)
+                );
+            } catch (Exception error) {
+                snapshotErrors(errors, groupId).add("Consumer group details unavailable: " + normalizeErrorMessage(error));
+            }
+        }
+
+        Map<String, ListConsumerGroupOffsetsSpec> offsetSpecs = new LinkedHashMap<>();
+        for (String groupId : groupIds) {
+            offsetSpecs.put(groupId, new ListConsumerGroupOffsetsSpec());
+        }
+        ListConsumerGroupOffsetsResult offsetsResult = admin.listConsumerGroupOffsets(
+            offsetSpecs,
+            new ListConsumerGroupOffsetsOptions().timeoutMs(timeout)
+        );
+        for (String groupId : groupIds) {
+            try {
+                Map<TopicPartition, OffsetAndMetadata> groupOffsets = offsetsResult
+                    .partitionsToOffsetAndMetadata(groupId)
+                    .get(timeout, TimeUnit.MILLISECONDS);
+                committedOffsets.put(groupId, groupOffsets == null ? Collections.emptyMap() : groupOffsets);
+                committedOffsetsAvailable.put(groupId, true);
+            } catch (Exception error) {
+                committedOffsets.put(groupId, Collections.emptyMap());
+                committedOffsetsAvailable.put(groupId, false);
+                snapshotErrors(errors, groupId).add("Committed offsets unavailable: " + normalizeErrorMessage(error));
+            }
+        }
+
+        Map<String, Set<TopicPartition>> assignedPartitions = new HashMap<>();
+        Set<TopicPartition> allPartitions = new LinkedHashSet<>();
+        for (String groupId : groupIds) {
+            Set<TopicPartition> assigned = new LinkedHashSet<>();
+            ConsumerGroupDescription description = descriptions.get(groupId);
+            if (description != null) {
+                for (MemberDescription member : description.members()) {
+                    assigned.addAll(member.assignment().topicPartitions());
+                }
+            }
+            assignedPartitions.put(groupId, assigned);
+            allPartitions.addAll(assigned);
+            allPartitions.addAll(committedOffsets.getOrDefault(groupId, Collections.emptyMap()).keySet());
+        }
+
+        Map<TopicPartition, Long> endOffsets = new HashMap<>();
+        Map<TopicPartition, String> endOffsetErrors = new HashMap<>();
+        if (!allPartitions.isEmpty()) {
+            Map<TopicPartition, OffsetSpec> endOffsetSpecs = new LinkedHashMap<>();
+            for (TopicPartition topicPartition : allPartitions) {
+                endOffsetSpecs.put(topicPartition, OffsetSpec.latest());
+            }
+            try {
+                ListOffsetsResult latestOffsets = admin.listOffsets(
+                    endOffsetSpecs,
+                    new ListOffsetsOptions().timeoutMs(timeout)
+                );
+                for (TopicPartition topicPartition : allPartitions) {
+                    try {
+                        ListOffsetsResult.ListOffsetsResultInfo info = latestOffsets
+                            .partitionResult(topicPartition)
+                            .get(timeout, TimeUnit.MILLISECONDS);
+                        endOffsets.put(topicPartition, info.offset());
+                    } catch (Exception error) {
+                        endOffsetErrors.put(topicPartition, normalizeErrorMessage(error));
+                    }
+                }
+            } catch (Exception error) {
+                String message = normalizeErrorMessage(error);
+                for (TopicPartition topicPartition : allPartitions) {
+                    endOffsetErrors.put(topicPartition, message);
+                }
+            }
+        }
+
+        List<Map<String, Object>> groups = new ArrayList<>();
+        for (ConsumerGroupListing listing : sortedListings) {
+            String groupId = listing.groupId();
+            ConsumerGroupDescription description = descriptions.get(groupId);
+            Set<TopicPartition> groupPartitions = new LinkedHashSet<>(
+                assignedPartitions.getOrDefault(groupId, Collections.emptySet())
+            );
+            groupPartitions.addAll(committedOffsets.getOrDefault(groupId, Collections.emptyMap()).keySet());
+            long unavailableEndOffsetCount = groupPartitions.stream()
+                .filter(endOffsetErrors::containsKey)
+                .count();
+            if (unavailableEndOffsetCount > 0) {
+                snapshotErrors(errors, groupId).add(
+                    "End offsets unavailable for " + unavailableEndOffsetCount + " partition(s)"
+                );
+            }
+            groups.add(consumerGroupSnapshotRow(
+                groupId,
+                description != null
+                    ? description.state().name()
+                    : listing.state().map(Enum::name).orElse("UNKNOWN"),
+                listing.isSimpleConsumerGroup(),
+                description == null ? null : description.members().size(),
+                assignedPartitions.getOrDefault(groupId, Collections.emptySet()),
+                committedOffsets.getOrDefault(groupId, Collections.emptyMap()),
+                committedOffsetsAvailable.getOrDefault(groupId, false),
+                endOffsets,
+                errors.getOrDefault(groupId, new LinkedHashSet<>())
+            ));
+        }
+
+        return Collections.singletonMap("groups", groups);
+    }
+
+    private static LinkedHashSet<String> snapshotErrors(
+        Map<String, LinkedHashSet<String>> errors,
+        String groupId
+    ) {
+        return errors.computeIfAbsent(groupId, ignored -> new LinkedHashSet<>());
+    }
+
+    static Map<String, Object> consumerGroupSnapshotRow(
+        String groupId,
+        String state,
+        boolean simpleGroup,
+        Integer memberCount,
+        Collection<TopicPartition> assignedPartitions,
+        Map<TopicPartition, OffsetAndMetadata> committedOffsets,
+        boolean committedOffsetsAvailable,
+        Map<TopicPartition, Long> endOffsets,
+        Collection<String> errors
+    ) {
+        Set<TopicPartition> topicPartitions = new LinkedHashSet<>(assignedPartitions);
+        topicPartitions.addAll(committedOffsets.keySet());
+        List<TopicPartition> sortedPartitions = new ArrayList<>(topicPartitions);
+        sortedPartitions.sort(Comparator
+            .comparing(TopicPartition::topic)
+            .thenComparingInt(TopicPartition::partition));
+
+        Set<String> topics = new TreeSet<>();
+        List<Map<String, Object>> partitions = new ArrayList<>();
+        long totalLag = 0;
+        boolean lagAvailable = committedOffsetsAvailable && !sortedPartitions.isEmpty();
+        for (TopicPartition topicPartition : sortedPartitions) {
+            topics.add(topicPartition.topic());
+            OffsetAndMetadata committed = committedOffsets.get(topicPartition);
+            Long currentOffset = committed == null ? null : committed.offset();
+            Long endOffset = endOffsets.get(topicPartition);
+            Long lag = currentOffset == null || endOffset == null
+                ? null
+                : Math.max(0, endOffset - currentOffset);
+            if (lag == null) {
+                lagAvailable = false;
+            } else {
+                totalLag += lag;
+            }
+
+            Map<String, Object> partition = new LinkedHashMap<>();
+            partition.put("topic", topicPartition.topic());
+            partition.put("partition", topicPartition.partition());
+            partition.put("currentOffset", currentOffset);
+            partition.put("endOffset", endOffset);
+            partition.put("lag", lag);
+            partitions.add(partition);
+        }
+
+        Map<String, Object> group = new LinkedHashMap<>();
+        group.put("groupId", groupId);
+        group.put("state", state);
+        group.put("simpleGroup", simpleGroup);
+        group.put("memberCount", memberCount);
+        group.put("topics", new ArrayList<>(topics));
+        group.put("totalLag", lagAvailable ? totalLag : null);
+        group.put("lagAvailable", lagAvailable);
+        group.put("partitions", partitions);
+        group.put("error", errors.isEmpty() ? null : String.join("; ", errors));
+        return group;
     }
 
     private static Object describeConsumerGroup(JsonObject params) throws Exception {

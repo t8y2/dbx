@@ -40,7 +40,7 @@ console.log(`Static export verified: ${files.length} files contain no GitHub API
 const requiredContent = [
   { file: "en.html", includes: ['<html lang="en"', '"@type":"SoftwareApplication"'] },
   { file: "cn.html", includes: ['<html lang="zh-CN"', '"@type":"SoftwareApplication"'] },
-  { file: "llms.txt", includes: ["80+ database", "20 MB", "Apache-2.0"] },
+  { file: "llms.txt", includes: ["90+ database", "20 MB", "Apache-2.0"] },
 ];
 
 for (const requirement of requiredContent) {

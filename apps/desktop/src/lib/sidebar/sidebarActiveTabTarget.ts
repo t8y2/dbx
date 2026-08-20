@@ -116,6 +116,17 @@ export function activeTabSidebarTarget(tab: QueryTab | undefined | null): Active
     };
   }
 
+  if (tab.mode === "meilisearch") {
+    const collectionName = tab.sql || tab.title;
+    if (!collectionName) return null;
+    return {
+      type: "mongo-collection",
+      connectionId: tab.connectionId,
+      database: tab.database,
+      collectionName,
+    };
+  }
+
   if (tab.mode === "mongo-bucket") {
     return {
       type: "mongo-gridfs",

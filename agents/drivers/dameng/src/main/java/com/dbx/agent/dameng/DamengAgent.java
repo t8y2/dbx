@@ -1851,7 +1851,8 @@ public final class DamengAgent extends AbstractJdbcAgent {
                 case Types.FLOAT, Types.REAL -> rs.getFloat(index);
                 case Types.DOUBLE -> rs.getDouble(index);
                 case Types.DECIMAL, Types.NUMERIC -> rs.getBigDecimal(index);
-                case Types.BOOLEAN, Types.BIT -> rs.getBoolean(index);
+                case Types.BOOLEAN -> rs.getBoolean(index);
+                case Types.BIT -> rs.getByte(index);
                 case Types.CHAR, Types.VARCHAR, Types.LONGVARCHAR,
                     Types.NCHAR, Types.NVARCHAR, Types.LONGNVARCHAR,
                     Types.CLOB, Types.NCLOB -> rs.getString(index);

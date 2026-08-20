@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { connectionIdsInGroups, deleteGroups, findConnectionGroupPath } from "@/lib/sidebar/sidebarLayout";
+import { connectionIdsInGroups, deleteGroups, findConnectionGroupPath, reorderEntries } from "@/lib/sidebar/sidebarLayout";
 import type { SidebarLayout } from "@/types/database";
 
 const layout: SidebarLayout = {
@@ -21,6 +21,34 @@ const layout: SidebarLayout = {
       ],
     },
     { type: "connection", id: "root" },
+  ],
+};
+
+const dragLayout: SidebarLayout = {
+  groups: [
+    { id: "alpha", name: "Alpha", collapsed: false },
+    { id: "beta", name: "Beta", collapsed: false },
+    { id: "nested", name: "Nested", collapsed: false },
+  ],
+  order: [
+    {
+      type: "group",
+      id: "alpha",
+      children: [
+        { type: "connection", id: "alpha-first" },
+        {
+          type: "group",
+          id: "nested",
+          children: [{ type: "connection", id: "nested-connection" }],
+        },
+        { type: "connection", id: "alpha-second" },
+      ],
+    },
+    {
+      type: "group",
+      id: "beta",
+      children: [{ type: "connection", id: "beta-connection" }],
+    },
   ],
 };
 
@@ -78,6 +106,99 @@ describe("connection group deletion", () => {
         { type: "connection", id: "nested" },
         { type: "connection", id: "grouped" },
         { type: "connection", id: "root" },
+      ],
+    });
+  });
+});
+
+describe("sorted sidebar move-only drops", () => {
+  const preserveSameGroupOrder = { preserveSameGroupOrder: true };
+
+  it("keeps a same-folder connection drop from rewriting hidden manual order", () => {
+    expect(reorderEntries(dragLayout, ["alpha-first"], "alpha", "inside", preserveSameGroupOrder)).toBe(dragLayout);
+  });
+
+  it("keeps a same-folder multi-selection drop from rewriting hidden manual order", () => {
+    expect(reorderEntries(dragLayout, ["alpha-first", "alpha-second"], "alpha", "inside", preserveSameGroupOrder)).toBe(dragLayout);
+  });
+
+  it("keeps a same-folder group drop from rewriting hidden manual order", () => {
+    expect(reorderEntries(dragLayout, ["nested"], "alpha", "inside", preserveSameGroupOrder)).toBe(dragLayout);
+  });
+
+  it("moves cross-folder entries while preserving selected entries already in the target folder", () => {
+    expect(reorderEntries(dragLayout, ["alpha-first", "beta-connection"], "alpha", "inside", preserveSameGroupOrder)).toEqual({
+      ...dragLayout,
+      order: [
+        {
+          type: "group",
+          id: "alpha",
+          children: [
+            { type: "connection", id: "alpha-first" },
+            {
+              type: "group",
+              id: "nested",
+              children: [{ type: "connection", id: "nested-connection" }],
+            },
+            { type: "connection", id: "alpha-second" },
+            { type: "connection", id: "beta-connection" },
+          ],
+        },
+        { type: "group", id: "beta", children: [] },
+      ],
+    });
+  });
+
+  it("preserves ordinary same-folder inside reordering outside move-only mode", () => {
+    expect(reorderEntries(dragLayout, ["alpha-first"], "alpha", "inside")).toEqual({
+      ...dragLayout,
+      order: [
+        {
+          type: "group",
+          id: "alpha",
+          children: [
+            {
+              type: "group",
+              id: "nested",
+              children: [{ type: "connection", id: "nested-connection" }],
+            },
+            { type: "connection", id: "alpha-second" },
+            { type: "connection", id: "alpha-first" },
+          ],
+        },
+        {
+          type: "group",
+          id: "beta",
+          children: [{ type: "connection", id: "beta-connection" }],
+        },
+      ],
+    });
+  });
+
+  it("still moves a group across folders in move-only mode", () => {
+    expect(reorderEntries(dragLayout, ["nested"], "beta", "inside", preserveSameGroupOrder)).toEqual({
+      ...dragLayout,
+      order: [
+        {
+          type: "group",
+          id: "alpha",
+          children: [
+            { type: "connection", id: "alpha-first" },
+            { type: "connection", id: "alpha-second" },
+          ],
+        },
+        {
+          type: "group",
+          id: "beta",
+          children: [
+            { type: "connection", id: "beta-connection" },
+            {
+              type: "group",
+              id: "nested",
+              children: [{ type: "connection", id: "nested-connection" }],
+            },
+          ],
+        },
       ],
     });
   });

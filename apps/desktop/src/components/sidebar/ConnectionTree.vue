@@ -62,7 +62,7 @@ import { sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
 import { createSidebarActionTarget, findSidebarActionTarget, matchesSidebarActionTarget, type SidebarActionTarget } from "@/lib/sidebar/sidebarActionTarget";
 import { syncSidebarTreeNodeExpansion } from "@/lib/sidebar/sidebarTreeExpansion";
 import type { SidebarDangerDialogOption, SidebarDangerDialogRequest } from "@/lib/sidebar/sidebarDangerDialog";
-import { resetSidebarTreeDialogState } from "./sidebarTreeDialogState";
+import { resetSidebarTreeDialogState, sidebarDangerRunningExecutionId } from "./sidebarTreeDialogState";
 import { SidebarDangerConfirmDialog, SidebarDdlViewDialog, SidebarObjectSourceDialog, SidebarProcedureExecutionDialog, SidebarVisibleDatabasesDialog, SidebarVisibleNacosNamespacesDialog, SidebarVisibleSchemasDialog } from "./sidebarAsyncDialogs";
 import { sortConnectionListForDisplay } from "@/lib/sidebar/connectionListSort";
 import { sidebarDisplayTableName } from "@/lib/sidebar/sidebarTableNameDisplay";
@@ -97,12 +97,14 @@ const sidebarContextMenuRef = ref<{ close: () => void } | null>(null);
 const sidebarContextMenuItems = ref<ContextMenuItem[]>([]);
 const emit = defineEmits<{
   "open-settings": [initialTab: string];
+  "add-to-ai": [node: TreeNode];
 }>();
 
 const sidebarContextMenuTarget = ref<SidebarActionTarget | null>(null);
 const sidebarDangerDialogRequest = ref<SidebarDangerDialogRequest | null>(null);
 const sidebarDangerDialogOpen = ref(false);
 const sidebarDangerDialogConfirming = ref(false);
+const sidebarDangerDialogCancelling = ref(false);
 const sidebarTreeItemDialogController = ref<Record<string, any> | null>(null);
 const sidebarInstallExtensionTarget = ref<TreeNode | null>(null);
 const sidebarInstallExtensionDialogRef = ref<InstanceType<typeof InstallExtensionDialog> | null>(null);
@@ -317,9 +319,9 @@ watch([deferredSearchQuery, regexMode], ([newQuery, isRegexMode], [oldQuery, was
     });
 });
 
-const searchableObjectGroupTypes = new Set<TreeNodeType>(["group-tables", "group-dolt-system-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-triggers", "group-sequences", "group-synonyms", "group-packages", "group-types"]);
+const searchableObjectGroupTypes = new Set<TreeNodeType>(["group-tables", "group-dolt-system-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-triggers", "group-events", "group-sequences", "group-synonyms", "group-packages", "group-types"]);
 const simpleObjectParentTypes = new Set<TreeNodeType>(["database", "schema", "linked-server-schema"]);
-const simpleObjectChildTypes = new Set<TreeNodeType>(["table", "view", "materialized_view", "procedure", "function", "trigger", "sequence", "synonym", "package", "package-body", "type", "type-body", "load-more"]);
+const simpleObjectChildTypes = new Set<TreeNodeType>(["table", "view", "materialized_view", "procedure", "function", "trigger", "event", "sequence", "synonym", "package", "package-body", "type", "type-body", "load-more"]);
 
 function isSimpleObjectSearchParent(node: TreeNode): boolean {
   return settingsStore.editorSettings.sidebarObjectDisplay === "simple" && simpleObjectParentTypes.has(node.type) && node.isExpanded === true && (!!node.children?.some((child) => simpleObjectChildTypes.has(child.type)) || !!store.sidebarTableSearchQueries[node.id]?.trim());
@@ -668,6 +670,19 @@ const filteredNodes = computed(() => {
   return nodes;
 });
 
+const projectedConnectionIds = computed<ReadonlySet<string> | null>(() => {
+  if (!isRootListPartial.value && !deferredSearchQuery.value) return null;
+  const connectionIds = new Set<string>();
+  const visit = (nodes: readonly TreeNode[]) => {
+    for (const node of nodes) {
+      if (node.type === "connection" && node.connectionId) connectionIds.add(node.connectionId);
+      if (node.children?.length) visit(node.children);
+    }
+  };
+  visit(filteredNodes.value);
+  return connectionIds;
+});
+
 const flatNodes = computed<FlatTreeNode[]>(() =>
   insertSidebarTableSearchControls(flattenTree(filteredNodes.value), {
     enabled: settingsStore.editorSettings.sidebarTableSearchEnabled && !isTreeSearchFiltering.value,
@@ -942,7 +957,7 @@ const stickyHeaderStyle = computed<CSSProperties>(() => {
 
 // Reset tracking when the tree rebuilds (connect/disconnect/collapse) so a
 // stale scrollTop doesn't keep the overlay mounted after a structural change.
-watch(flatNodes, (nodes) => {
+watch(flatNodes, (nodes, previousNodes) => {
   const contextMenuTarget = sidebarContextMenuTarget.value;
   if (contextMenuTarget) {
     const visibleContextMenuTarget = nodes.find(({ node }) => matchesSidebarActionTarget(node, contextMenuTarget))?.node;
@@ -954,6 +969,25 @@ watch(flatNodes, (nodes) => {
   }
   stickyScrollTop.value = 0;
   void nextTick(scheduleSidebarScrollMetricsUpdate);
+  // After a structural change (list grew/shrunk, e.g. a Dameng connection
+  // expands or collapses) reconcile the virtual scroller with the browser's
+  // scroll position. The recycle pool is rebuilt from the live scrollTop, but
+  // scrollTop is only clamped on the next layout, so right after a shrink the
+  // pool can still target a window beyond the new content — the viewport then
+  // lands inside the end spacer and shows a blank region until the next scroll
+  // event. Reading scrollHeight forces that layout (applying the clamp), then
+  // one explicit pool refresh keeps the rendered window aligned. Only needed
+  // when the item count changed; reorders are already rebuilt by the library.
+  if (nodes.length === (previousNodes?.length ?? -1)) return;
+  void nextTick(() => {
+    const scroller = treeScrollerRef.value;
+    if (!scroller || !useVirtualTree.value) return;
+    const el = scroller.$el as HTMLElement | undefined;
+    if (!el) return;
+    const maxScrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
+    if (el.scrollTop > maxScrollTop) el.scrollTop = maxScrollTop;
+    scroller.updateVisibleItems(true);
+  });
 });
 
 const sidebarTreeOverflowClass = computed(() => (settingsStore.editorSettings.sidebarAllowHorizontalScroll ? "overflow-x-auto sidebar-tree-horizontal-scroll" : "overflow-x-hidden"));
@@ -1124,6 +1158,7 @@ const pasteHandlerRegistry = createSidebarPasteHandlerRegistry();
 provide(sidebarTreeContextKey, {
   getVisibleNodes: () => selectableVisibleNodes.value,
   getVisibleNodeIndex: (id: string) => selectableVisibleNodeIndexById.value.get(id) ?? -1,
+  getProjectedConnectionIds: () => projectedConnectionIds.value,
   // Cover both sides of the input debounce: the immediate query prevents a
   // collapse while a projection is about to start, and the deferred query
   // keeps the currently rendered projection alive while clearing settles.
@@ -1561,6 +1596,11 @@ function openSidebarContextMenu(event: MouseEvent, node: TreeNode, openContextMe
 function openSidebarDangerDialog(request: SidebarDangerDialogRequest) {
   sidebarDangerDialogRequest.value = request;
   sidebarDangerDialogConfirming.value = false;
+  // Defense in depth: sidebarDangerDialogCancelling is a singleton shared
+  // across every danger dialog. It should already settle on its own (see
+  // confirmCancelWithRetryAndTimeout), but a fresh dialog must never inherit
+  // a stuck "cancelling" state from a previous one.
+  sidebarDangerDialogCancelling.value = false;
   sidebarDangerDialogOpen.value = true;
 }
 
@@ -1569,11 +1609,46 @@ async function confirmSidebarDangerDialog() {
   if (!request || sidebarDangerDialogConfirming.value) return;
   if (request.closeOnConfirm !== false) sidebarDangerDialogOpen.value = false;
   sidebarDangerDialogConfirming.value = true;
+  let completed: void | boolean = undefined;
   try {
-    const completed = await request.confirm();
-    if (completed !== false) sidebarDangerDialogOpen.value = false;
+    completed = await request.confirm();
   } finally {
+    // A danger operation that hit a client-observed timeout is kept alive
+    // (still cancellable) rather than settled outright — sidebarDangerRunningExecutionId
+    // stays populated in that case, so keep the dialog "loading" (Cancel
+    // Query still live, manual dismiss blocked) instead of closing on a
+    // stale timeout result. The watcher below finishes the job once the
+    // execution actually settles.
+    if (!sidebarDangerRunningExecutionId.value) {
+      sidebarDangerDialogConfirming.value = false;
+      if (completed !== false) sidebarDangerDialogOpen.value = false;
+    }
+  }
+}
+
+// Finishes closing a danger dialog left open past a client-observed timeout
+// once the deferred execution is actually confirmed cancelled — see
+// confirmSidebarDangerDialog above.
+watch(sidebarDangerRunningExecutionId, (value) => {
+  if (!value && sidebarDangerDialogConfirming.value) {
     sidebarDangerDialogConfirming.value = false;
+    sidebarDangerDialogOpen.value = false;
+  }
+});
+
+async function cancelSidebarDangerDialogRunning() {
+  const request = sidebarDangerDialogRequest.value;
+  if (!request?.cancelRunning || sidebarDangerDialogCancelling.value) return;
+  sidebarDangerDialogCancelling.value = true;
+  try {
+    await request.cancelRunning();
+  } catch (error: any) {
+    // Current cancelRunning implementations already swallow their own
+    // rejections; this is a defensive fallback so the user still gets
+    // feedback if a future implementation throws instead.
+    toast(t("contextMenu.tableOperationFailed", { message: error?.message || String(error) }), 5000);
+  } finally {
+    sidebarDangerDialogCancelling.value = false;
   }
 }
 
@@ -2086,6 +2161,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
       @open-visible-schemas="openSidebarVisibleSchemas"
       @open-visible-nacos-namespaces="openSidebarVisibleNacosNamespaces"
       @open-table-name-filters="openSidebarTableNameFilters"
+      @add-to-ai="(node) => emit('add-to-ai', node)"
       @request-group-rename="startRenamingCreatedGroup"
       @request-saved-sql-rename="startRenamingSavedSqlNode"
       @open-danger-dialog="openSidebarDangerDialog"
@@ -2213,7 +2289,8 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
             <TreeItem
               :node="item.node"
               :depth="item.depth"
-              :reorder-disabled="isRootListPartial || isConnectionListAlphabeticallySorted"
+              :reorder-disabled="isRootListPartial"
+              :move-to-group-only="isConnectionListAlphabeticallySorted"
               :pending-rename="pendingRenameNodeId === item.node.id"
               :highlighted="highlightedNodeId === item.node.id"
               :comment-label-width="sidebarCommentLabelWidths.get(item.node.id)"
@@ -2260,7 +2337,8 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
               :key="item.id"
               :node="item.node"
               :depth="item.depth"
-              :reorder-disabled="isRootListPartial || isConnectionListAlphabeticallySorted"
+              :reorder-disabled="isRootListPartial"
+              :move-to-group-only="isConnectionListAlphabeticallySorted"
               :pending-rename="pendingRenameNodeId === item.node.id"
               :highlighted="highlightedNodeId === item.id"
               :comment-label-width="sidebarCommentLabelWidths.get(item.node.id)"
@@ -2398,7 +2476,10 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
       :confirm-label="sidebarDangerDialogRequest.confirmLabel"
       :loading="sidebarDangerDialogConfirming || sidebarDangerDialogRequest.loading"
       :close-on-confirm="false"
+      :cancelable="!!sidebarDangerDialogRequest.cancelRunning"
+      :cancel-running-loading="sidebarDangerDialogCancelling"
       @confirm="confirmSidebarDangerDialog"
+      @cancel-running="cancelSidebarDangerDialogRunning"
     >
       <template #options>
         <div v-if="sidebarDangerDialogConfirming && sidebarDangerDialogRequest.progress" class="mb-3 rounded-md border bg-muted/20 px-3 py-2.5">

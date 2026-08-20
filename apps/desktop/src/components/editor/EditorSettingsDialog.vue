@@ -59,7 +59,7 @@ import { isAiConnectionTestConfigCurrent } from "@/lib/ai/aiConnectionTest";
 import { MAX_AGENT_TURNS_DEFAULT, MAX_AGENT_TURNS_MAX, MAX_AGENT_TURNS_MIN, maxAgentTurnsOutOfRange, normalizeMaxAgentTurns } from "@/lib/ai/maxAgentTurns";
 import ThemeCustomizerDialog from "./ThemeCustomizerDialog.vue";
 import DataGridTypeColorSchemeDialog from "@/components/grid/DataGridTypeColorSchemeDialog.vue";
-import { DATA_GRID_TYPE_COLOR_SCHEME_AUTO_ID, type DataGridTypeColorScheme } from "@/lib/dataGrid/dataGridTypeColorScheme";
+import { DATA_GRID_TYPE_COLOR_SCHEME_AUTO_ID, cloneDataGridTypeColorSchemes, type DataGridTypeColorScheme } from "@/lib/dataGrid/dataGridTypeColorScheme";
 import TunnelProfileManager from "@/components/connection/TunnelProfileManager.vue";
 import DangerConfirmDialog from "./DangerConfirmDialog.vue";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
@@ -112,7 +112,7 @@ import { currentExecutableStatementRange, type SqlTextRange } from "@/lib/sql/sq
 import { executableStatementRangeCacheForDoc, executableStatementRangeStartingAt, type ExecutableStatementRangeCache } from "@/lib/sql/executableStatementRangeCache";
 import { EMPTY_TABLE_COLUMN_TEMPLATE_DATA_TYPE, parseTableColumnTemplateFields, TABLE_COLUMN_TEMPLATE_DATABASE_TYPES, tableColumnTemplateRowsToSettings } from "@/lib/table/tableColumnTemplates";
 import { DEFAULT_SQL_VARIABLE_SYNTAX_TOGGLES, normalizeSqlVariableSyntaxOverrides, SQL_VARIABLE_SYNTAX_DATABASE_TYPES, SQL_VARIABLE_SYNTAX_KEYS, SQL_VARIABLE_SYNTAX_TOKENS, type SqlVariableSyntaxOverrides, type SqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
-import { buildMcpCherryStudioConfig, buildMcpCodexConfig, buildMcpJsonConfig, buildMcpOpenCodeConfig, buildMcpPiConfig, buildMcpTraeConfig, buildMcpVsCodeConfig, mcpWebBackendUrl, type McpLaunchConfig } from "@/lib/mcp/mcpConfigTemplates";
+import { buildMcpCherryStudioConfig, buildMcpCodexConfig, buildMcpDeepSeekHarnessConfig, buildMcpJsonConfig, buildMcpOpenCodeConfig, buildMcpPiConfig, buildMcpTraeConfig, buildMcpVsCodeConfig, mcpWebBackendUrl, type McpLaunchConfig } from "@/lib/mcp/mcpConfigTemplates";
 import { beginMcpStatusRequest, mcpUpdateAvailability } from "@/lib/mcp/mcpUpdateStatus";
 import { isMcpPolicyMutationBlocked, MCP_CAPABILITY_ROWS, MCP_EXECUTION_MODE_COLUMNS, mcpExecutionModeFromPolicy, mcpPolicyFieldsForExecutionMode, type McpExecutionMode } from "@/lib/mcp/mcpPolicySelection";
 import { isMacOS, isWindows } from "@/lib/backend/platform";
@@ -308,7 +308,7 @@ const editUiScale = ref(settingsStore.editorSettings.uiScale);
 const editTheme = ref(settingsStore.editorSettings.theme);
 const editCustomThemes = ref<CustomTheme[]>([...settingsStore.editorSettings.customThemes]);
 const editActiveCustomThemeId = ref(settingsStore.editorSettings.activeCustomThemeId);
-const editDataGridTypeColorSchemes = ref<DataGridTypeColorScheme[]>(structuredClone(settingsStore.editorSettings.dataGridTypeColorSchemes));
+const editDataGridTypeColorSchemes = ref<DataGridTypeColorScheme[]>(cloneDataGridTypeColorSchemes(settingsStore.editorSettings.dataGridTypeColorSchemes));
 const editActiveDataGridTypeColorSchemeId = ref(settingsStore.editorSettings.activeDataGridTypeColorSchemeId);
 const showThemeCustomizer = ref(false);
 const showDataGridTypeColorScheme = ref(false);
@@ -825,7 +825,7 @@ function syncEditorSettingsDraftFromStore() {
   editShowColumnTypesInHeader.value = settingsStore.editorSettings.showColumnTypesInHeader;
   editDataGridShowTransposeFieldMetadata.value = settingsStore.editorSettings.dataGridShowTransposeFieldMetadata;
   editColorizeDataGridCellTypes.value = settingsStore.editorSettings.colorizeDataGridCellTypes;
-  editDataGridTypeColorSchemes.value = structuredClone(settingsStore.editorSettings.dataGridTypeColorSchemes);
+  editDataGridTypeColorSchemes.value = cloneDataGridTypeColorSchemes(settingsStore.editorSettings.dataGridTypeColorSchemes);
   editActiveDataGridTypeColorSchemeId.value = settingsStore.editorSettings.activeDataGridTypeColorSchemeId;
   editShowIndexIndicatorsInHeader.value = settingsStore.editorSettings.showIndexIndicatorsInHeader;
   editCompactColumnHeaderActions.value = settingsStore.editorSettings.compactColumnHeaderActions;
@@ -1432,7 +1432,7 @@ function handleThemeSave(updatedThemes: CustomTheme[], activeId: string) {
 }
 
 function handleDataGridTypeColorSchemeChange(schemes: DataGridTypeColorScheme[], activeId: string) {
-  editDataGridTypeColorSchemes.value = structuredClone(schemes);
+  editDataGridTypeColorSchemes.value = cloneDataGridTypeColorSchemes(schemes);
   editActiveDataGridTypeColorSchemeId.value = activeId;
 }
 
@@ -1814,7 +1814,7 @@ async function exportDebugLogs() {
 }
 
 // ---------- MCP Server ----------
-type McpConfigTab = "claude" | "cursor" | "trae" | "vscode" | "windsurf" | "codex" | "opencode" | "pi" | "cherry-studio";
+type McpConfigTab = "claude" | "cursor" | "trae" | "vscode" | "windsurf" | "codex" | "deepseek-harness" | "opencode" | "pi" | "cherry-studio";
 type McpCopyKind = "install" | "uninstall" | `${McpConfigTab}-config`;
 
 const mcpStatus = ref<McpServerStatus | null>(null);
@@ -1924,6 +1924,7 @@ const mcpVsCodeRecommendedConfig = computed(() => buildMcpVsCodeConfig(mcpLaunch
 const mcpCherryStudioRecommendedConfig = computed(() => buildMcpCherryStudioConfig(mcpLaunchConfig.value));
 
 const mcpCodexRecommendedConfig = computed(() => buildMcpCodexConfig(mcpLaunchConfig.value));
+const mcpDeepSeekHarnessRecommendedConfig = computed(() => buildMcpDeepSeekHarnessConfig(mcpLaunchConfig.value));
 
 const mcpOpenCodeRecommendedConfig = computed(() => buildMcpOpenCodeConfig(mcpLaunchConfig.value));
 const mcpPiRecommendedConfig = computed(() => buildMcpPiConfig(mcpLaunchConfig.value));
@@ -6633,6 +6634,7 @@ onUnmounted(() => {
                     <TabsTrigger value="vscode" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">VS Code</TabsTrigger>
                     <TabsTrigger value="windsurf" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">Windsurf</TabsTrigger>
                     <TabsTrigger value="codex" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">Codex</TabsTrigger>
+                    <TabsTrigger value="deepseek-harness" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">DeepSeek Harness</TabsTrigger>
                     <TabsTrigger value="opencode" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">OpenCode</TabsTrigger>
                     <TabsTrigger value="pi" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">Pi</TabsTrigger>
                     <TabsTrigger value="cherry-studio" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">Cherry Studio</TabsTrigger>
@@ -6717,6 +6719,21 @@ onUnmounted(() => {
                         <pre class="overflow-x-auto whitespace-pre text-xs leading-relaxed"><code>{{ mcpCodexRecommendedConfig }}</code></pre>
                         <Button type="button" variant="outline" size="icon" class="absolute right-2 top-2 h-7 w-7" :title="t('common.copy')" @click="copyMcpText('codex-config', mcpCodexRecommendedConfig)">
                           <CheckCircle2 v-if="mcpCopied === 'codex-config'" class="h-3.5 w-3.5 text-green-500" />
+                          <Copy v-else class="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                    </div>
+                  </TabsContent>
+
+                  <TabsContent value="deepseek-harness" class="m-0">
+                    <div class="space-y-2">
+                      <div class="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                        {{ t("settings.mcpDeepSeekHarnessConfigPath") }}
+                      </div>
+                      <div class="relative rounded-md border bg-background p-3">
+                        <pre class="overflow-x-auto whitespace-pre text-xs leading-relaxed"><code>{{ mcpDeepSeekHarnessRecommendedConfig }}</code></pre>
+                        <Button type="button" variant="outline" size="icon" class="absolute right-2 top-2 h-7 w-7" :title="t('common.copy')" @click="copyMcpText('deepseek-harness-config', mcpDeepSeekHarnessRecommendedConfig)">
+                          <CheckCircle2 v-if="mcpCopied === 'deepseek-harness-config'" class="h-3.5 w-3.5 text-green-500" />
                           <Copy v-else class="h-3.5 w-3.5" />
                         </Button>
                       </div>
@@ -7172,6 +7189,32 @@ onUnmounted(() => {
 
 .settings-option-stack > * + * {
   margin-top: 0.625rem;
+}
+
+.settings-mcp-config-tabs {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklab, var(--muted-foreground) 22%, transparent) transparent;
+}
+
+.settings-mcp-config-tabs:hover {
+  scrollbar-color: color-mix(in oklab, var(--muted-foreground) 38%, transparent) transparent;
+}
+
+.settings-mcp-config-tabs::-webkit-scrollbar {
+  height: 3px;
+}
+
+.settings-mcp-config-tabs::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.settings-mcp-config-tabs::-webkit-scrollbar-thumb {
+  border-radius: 9999px;
+  background: color-mix(in oklab, var(--muted-foreground) 22%, transparent);
+}
+
+.settings-mcp-config-tabs:hover::-webkit-scrollbar-thumb {
+  background: color-mix(in oklab, var(--muted-foreground) 38%, transparent);
 }
 
 html.dbx-legacy-webview .settings-shortcut-row:hover .settings-shortcut-action-button,

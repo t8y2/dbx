@@ -7,6 +7,7 @@ use super::column_alter::{
 };
 use super::column_format::{
     column_definition, has_dameng_identity, is_dameng_identity_compatible_type, is_mysql_character_data_type,
+    original_is_mysql_generated_column, original_mysql_generated_clause,
 };
 use super::comments::build_sqlserver_column_comment_sql;
 use super::dialect::{capabilities_for, database_label, is_oracle_like, StructureDialect};
@@ -163,6 +164,16 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
             || (has_rename && !capabilities.rename_column)
             || (has_attribute_change && !capabilities.alter_existing_column && dialect != StructureDialect::Sqlite)
         {
+            continue;
+        }
+        if dialect == StructureDialect::Mysql
+            && original_is_mysql_generated_column(column)
+            && original_mysql_generated_clause(column).is_none()
+        {
+            warnings.push(format!(
+                "Column \"{}\" is generated, but its generation expression could not be loaded; no ALTER statement was generated to avoid removing the generated-column definition.",
+                original.name
+            ));
             continue;
         }
         if !has_rename && !has_attribute_change && !has_position_change {

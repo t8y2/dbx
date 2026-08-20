@@ -208,6 +208,34 @@ describe("useSqlExecution", () => {
     expect(executeCurrentSql).toHaveBeenCalledWith(selectedSql, { sourceOffset: selectionFrom });
   });
 
+  it("expands preceding @set values in a selected shell-style statement", async () => {
+    const selectedSql = "SELECT * FROM patrol WHERE post_id = ${postid};";
+    const fullSql = ["@set postid = '224';", selectedSql, "@set postid = 'future';"].join("\n");
+    const selectionFrom = fullSql.indexOf("SELECT");
+    const selectionTo = selectionFrom + selectedSql.length;
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql: fullSql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("postgres"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const executeCurrentSql = vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (activeTab.value) activeTab.value.result = { columns: ["post_id"], rows: [["224"]], affected_rows: 0, execution_time_ms: 1 };
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => selectedSql),
+      resolveExecutableSql: async () => selectedSql,
+      activeOutputView,
+    });
+
+    await execution.tryExecute({ fullSql, selectedSql, cursorPos: selectionFrom, selectionFrom, selectionTo });
+
+    expect(execution.showSqlParameterDialog.value).toBe(false);
+    expect(executeCurrentSql).toHaveBeenCalledWith("SELECT * FROM patrol WHERE post_id = '224';", {});
+  });
+
   it("opens the execution summary for a multi-statement batch", async () => {
     const sql = "SELECT 1;\nSELECT 2;";
     const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });

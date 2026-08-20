@@ -14,7 +14,7 @@ export interface InsertValuesClause {
   database?: string;
   /** Explicit column list, or null when `INSERT INTO t VALUES` has no column list. */
   columns: string[] | null;
-  /** For each VALUES row, start offsets of top-level value expressions. */
+  /** For each VALUES row or SELECT projection list, start offsets of top-level expressions. */
   rows: number[][];
   span: SqlSemanticSpan;
 }
@@ -164,6 +164,82 @@ function parseValuesRows(tokens: readonly SqlSemanticToken[], valuesIndex: numbe
   return rows;
 }
 
+function findWordIndexAtDepth(tokens: readonly SqlSemanticToken[], word: string, from: number, depth: number): number {
+  const needle = word.toLowerCase();
+  for (let index = from; index < tokens.length; index += 1) {
+    const item = tokens[index];
+    if (item?.depth === depth && item.kind === "word" && item.normalized === needle) return index;
+  }
+  return -1;
+}
+
+function findClosingParenIndex(tokens: readonly SqlSemanticToken[], openIndex: number): number {
+  const open = tokens[openIndex];
+  if (!open || open.text !== "(") return -1;
+  for (let index = openIndex + 1; index < tokens.length; index += 1) {
+    const item = tokens[index];
+    if (item?.text === ")" && item.depth === open.depth) return index;
+  }
+  return -1;
+}
+
+const SELECT_CLAUSE_BOUNDARIES = new Set(["from", "into", "where", "group", "having", "order", "offset", "fetch", "for", "option", "union", "except", "intersect", "limit", "qualify", "window"]);
+
+function isSelectClauseBoundary(item: SqlSemanticToken | undefined, depth: number): boolean {
+  if (!item || item.depth !== depth || item.kind !== "word") return false;
+  return SELECT_CLAUSE_BOUNDARIES.has(item.normalized);
+}
+
+function isWildcardProjection(tokens: readonly SqlSemanticToken[], from: number, to: number, depth: number): boolean {
+  const topLevel = tokens.slice(from, to).filter((item) => item.depth === depth);
+  if (topLevel[topLevel.length - 1]?.text !== "*") return false;
+  if (topLevel.length === 1) return true;
+  return topLevel.length % 2 === 1 && topLevel.every((item, index) => (index % 2 === 0 ? (index === topLevel.length - 1 ? item.text === "*" : tokenIsIdentifier(item)) : item.text === "."));
+}
+
+function selectProjectionStarts(tokens: readonly SqlSemanticToken[], selectIndex: number): number[] {
+  const select = tokens[selectIndex];
+  if (!select) return [];
+  const depth = select.depth;
+  let index = selectIndex + 1;
+
+  if (tokens[index]?.depth === depth && tokens[index]?.kind === "word" && (tokens[index]?.normalized === "all" || tokens[index]?.normalized === "distinct")) {
+    index += 1;
+  }
+
+  const maybeTop = tokens[index];
+  const topValue = tokens[index + 1];
+  const hasTopModifier = maybeTop?.depth === depth && maybeTop.kind === "word" && maybeTop.normalized === "top" && topValue?.depth === depth && (topValue.text === "(" || topValue.kind === "number" || topValue.kind === "parameter" || (topValue.kind === "word" && topValue.text.startsWith("@")));
+  if (hasTopModifier) {
+    index += 1;
+    if (tokens[index]?.text === "(") {
+      const closeIndex = findClosingParenIndex(tokens, index);
+      if (closeIndex < 0) return [];
+      index = closeIndex + 1;
+    } else {
+      index += 1;
+    }
+    if (tokens[index]?.depth === depth && tokens[index]?.normalized === "percent") index += 1;
+    if (tokens[index]?.depth === depth && tokens[index]?.normalized === "with" && tokens[index + 1]?.depth === depth && tokens[index + 1]?.normalized === "ties") index += 2;
+  }
+
+  const starts: number[] = [];
+  let expressionStart = index;
+  for (; index < tokens.length; index += 1) {
+    const item = tokens[index];
+    if (!item) break;
+    if (isSelectClauseBoundary(item, depth)) break;
+    if (item.text !== "," || item.depth !== depth) continue;
+    if (index <= expressionStart || isWildcardProjection(tokens, expressionStart, index, depth)) return [];
+    starts.push(tokens[expressionStart]!.span.start);
+    expressionStart = index + 1;
+  }
+
+  if (index <= expressionStart || isWildcardProjection(tokens, expressionStart, index, depth)) return [];
+  starts.push(tokens[expressionStart]!.span.start);
+  return starts;
+}
+
 function parseInsertClause(tokens: readonly SqlSemanticToken[], span: SqlSemanticSpan): InsertValuesClause | null {
   const insertIndex = findWordIndex(tokens, "insert");
   if (insertIndex < 0) return null;
@@ -200,13 +276,14 @@ function parseInsertClause(tokens: readonly SqlSemanticToken[], span: SqlSemanti
     index = columnList.nextIndex;
   }
 
-  const valuesIndex = findWordIndex(tokens, "values", index);
-  const selectIndex = findWordIndex(tokens, "select", index);
-  if (valuesIndex < 0) return null;
-  if (selectIndex >= 0 && selectIndex < valuesIndex) return null;
+  const sourceDepth = tokens[insertIndex]?.depth ?? 0;
+  const valuesIndex = findWordIndexAtDepth(tokens, "values", index, sourceDepth);
+  const selectIndex = findWordIndexAtDepth(tokens, "select", index, sourceDepth);
+  if (valuesIndex < 0 && selectIndex < 0) return null;
 
-  const rows = parseValuesRows(tokens, valuesIndex);
+  const rows = selectIndex >= 0 && (valuesIndex < 0 || selectIndex < valuesIndex) ? [selectProjectionStarts(tokens, selectIndex)] : parseValuesRows(tokens, valuesIndex);
   if (rows.length === 0) return null;
+  if (rows[0]?.length === 0) return null;
 
   return {
     table: tableInfo.name,
@@ -488,7 +565,7 @@ function mergeTextRanges(ranges: readonly TextRange[]): TextRange[] {
   return merged;
 }
 
-/** Parse INSERT ... VALUES clauses only inside the given document ranges (expanded to statement windows). */
+/** Parse INSERT ... VALUES/SELECT clauses only inside the given document ranges (expanded to statement windows). */
 export function parseInsertValuesClausesInRanges(sql: string, ranges: readonly TextRange[]): InsertValuesClause[] {
   if (!sql.trim() || ranges.length === 0) return [];
   const windows = mergeTextRanges(ranges.map((range) => expandToSqlStatementWindow(sql, range.from, range.to)));
@@ -503,7 +580,7 @@ export function parseInsertValuesClausesInRanges(sql: string, ranges: readonly T
   return clauses;
 }
 
-/** Parse all INSERT ... VALUES clauses in `sql` (multi-statement aware). Prefer ranged parsing for editors. */
+/** Parse all INSERT ... VALUES/SELECT clauses in `sql` (multi-statement aware). Prefer ranged parsing for editors. */
 export function parseInsertValuesClauses(sql: string, dialectId = "mysql"): InsertValuesClause[] {
   if (!sql.trim()) return [];
   const allTokens = tokenizeSqlSemantic(sql, dialectId);

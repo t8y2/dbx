@@ -152,6 +152,21 @@ fn sql_risk_allowed(risk: SqlRisk, permissions: AgentSqlPermissions) -> bool {
     }
 }
 
+/// Returns true when an Agent attempted a write or DDL call before DBX has a
+/// user-confirmed SQL binding for the current run. The caller must turn that
+/// attempt into a confirmation proposal instead of sending it to the database.
+pub fn write_requires_confirmation(
+    sql: &str,
+    db_type: DatabaseType,
+    permissions: &AgentSqlPermissions,
+) -> Result<bool, String> {
+    if permissions.allow_writes || permissions.allow_dangerous || permissions.confirmed_write_sql.is_some() {
+        return Ok(false);
+    }
+    let risk = crate::sql_risk::classify_sql_risk_for_database(sql, db_type)?;
+    Ok(matches!(risk, SqlRisk::Write | SqlRisk::Ddl))
+}
+
 /// Returns true for vector database types (Qdrant, Milvus, Weaviate, ChromaDb).
 /// If modifying this, also update VECTOR_DB_TYPES in apps/desktop/src/lib/ai.ts.
 pub fn is_vector_db(db_type: DatabaseType) -> bool {
@@ -328,7 +343,7 @@ fn execute_query_tool(sql_permissions: AgentSqlPermissions) -> ToolDefinition {
     } else if sql_permissions.allow_writes {
         "Execute SQL after the user explicitly confirmed this operation. Read queries and non-DDL writes are allowed for this run."
     } else {
-        "Execute a read-only SQL query and return results (max 50 rows). Only SELECT, WITH, SHOW, DESCRIBE, EXPLAIN statements are allowed. Write operations (INSERT/UPDATE/DELETE/DDL) are blocked."
+        "Execute a read-only SQL query and return results (max 50 rows). This run cannot execute writes or DDL because no specific SQL has been confirmed yet; this does not mean the database itself is read-only. When the user requests a write, first propose the exact SQL in one ```sql code block and ask for confirmation. After confirmation, DBX starts a new run that can execute only that exact SQL. Only SELECT, WITH, SHOW, DESCRIBE, EXPLAIN statements may be executed in this run."
     };
     ToolDefinition {
         name: "execute_query",
@@ -712,12 +727,26 @@ async fn execute_execute_query(
     // Classify SQL risk using the concrete database dialect.
     let risk = crate::sql_risk::classify_sql_risk_for_database(sql, *db_type)?;
     let connection_config = state.configs.read().await.get(connection_id).cloned();
-    if let Some(config) = connection_config {
-        if risk != SqlRisk::ReadOnly && crate::production_safety::targets_production_database(&config, database, sql) {
-            return Err("Blocked: AI agents cannot execute writes or DDL on a production database. Return the SQL for the user to review and execute manually in DBX.".to_string());
-        }
+    let targets_production = connection_config.as_ref().is_some_and(|config| {
+        risk != SqlRisk::ReadOnly && crate::production_safety::targets_production_database(config, database, sql)
+    });
+    let risk_allowed = sql_risk_allowed(risk, sql_permissions.clone());
+    let confirmed_sql_matches =
+        risk == SqlRisk::ReadOnly || sql_matches_confirmed_write(sql, &sql_permissions.confirmed_write_sql);
+
+    // Keep permission diagnostics useful without logging SQL, connection details, or result data.
+    log::debug!(
+        "[agent:execute_query:permission] risk={risk:?} targets_production={targets_production} allow_writes={} allow_dangerous={} has_confirmed_sql={} confirmed_sql_matches={confirmed_sql_matches} will_execute={}",
+        sql_permissions.allow_writes,
+        sql_permissions.allow_dangerous,
+        sql_permissions.confirmed_write_sql.is_some(),
+        !targets_production && risk_allowed && confirmed_sql_matches,
+    );
+
+    if targets_production {
+        return Err("Blocked: AI agents cannot execute writes or DDL on a production database. Return the SQL for the user to review and execute manually in DBX.".to_string());
     }
-    if !sql_risk_allowed(risk, sql_permissions.clone()) {
+    if !risk_allowed {
         if risk == SqlRisk::Transaction {
             return Err("Blocked: transaction control statements are not available to the AI agent.".to_string());
         }
@@ -729,7 +758,7 @@ async fn execute_execute_query(
 
     // When the user confirmed a specific write SQL, the agent must
     // execute only that SQL — not an arbitrary different statement.
-    if risk != SqlRisk::ReadOnly && !sql_matches_confirmed_write(sql, &sql_permissions.confirmed_write_sql) {
+    if !confirmed_sql_matches {
         let confirmed = sql_permissions.confirmed_write_sql.as_deref().unwrap_or("");
         return Err(format!(
             "Blocked: the executed SQL does not match the user-confirmed SQL.\n\
@@ -1436,6 +1465,52 @@ for line in sys.stdin:
             SqlRisk::Transaction,
             AgentSqlPermissions { allow_writes: true, allow_dangerous: true, confirmed_write_sql: None }
         ));
+    }
+
+    #[test]
+    fn unconfirmed_sql_tool_describes_the_confirmation_flow() {
+        let execute_query = all_tools(DatabaseType::Postgres, AgentSqlPermissions::default())
+            .into_iter()
+            .find(|tool| tool.name == "execute_query")
+            .expect("PostgreSQL Agent mode should expose execute_query");
+
+        assert!(execute_query.description.contains("no specific SQL has been confirmed yet"));
+        assert!(execute_query.description.contains("does not mean the database itself is read-only"));
+        assert!(execute_query.description.contains("propose the exact SQL in one ```sql code block"));
+        assert!(!sql_risk_allowed(SqlRisk::Write, AgentSqlPermissions::default()));
+        assert!(!sql_risk_allowed(SqlRisk::Ddl, AgentSqlPermissions::default()));
+    }
+
+    #[test]
+    fn write_confirmation_is_required_only_for_unconfirmed_write_or_ddl() {
+        let permissions = AgentSqlPermissions::default();
+        assert!(write_requires_confirmation("INSERT INTO users (id) VALUES (1)", DatabaseType::Postgres, &permissions)
+            .unwrap());
+        assert!(write_requires_confirmation("CREATE TABLE users (id INT)", DatabaseType::Mysql, &permissions).unwrap());
+        assert!(!write_requires_confirmation("SELECT * FROM users", DatabaseType::Postgres, &permissions).unwrap());
+
+        let confirmed = confirmed_write_sql_permissions(false, true, Some("CREATE TABLE users (id INT)".to_string()));
+        assert!(
+            !write_requires_confirmation("CREATE TABLE users (id INT)", DatabaseType::Postgres, &confirmed).unwrap()
+        );
+    }
+
+    #[test]
+    fn confirmed_postgres_article_tags_insert_is_write_enabled_for_nonproduction_agent() {
+        let sql = "INSERT INTO \"public\".\"article_tags\" (article_id, tag_id)\nVALUES (1, 4), (2, 4), (3, 8), (4, 5), (4, 6);";
+        let permissions = confirmed_write_sql_permissions(false, true, Some(sql.to_string()));
+
+        assert!(permissions.allow_writes);
+        assert!(permissions.allow_dangerous);
+        assert!(sql_risk_allowed(SqlRisk::Write, permissions.clone()));
+        assert!(sql_matches_confirmed_write(sql, &permissions.confirmed_write_sql));
+
+        let execute_query = all_tools(DatabaseType::Postgres, permissions)
+            .into_iter()
+            .find(|tool| tool.name == "execute_query")
+            .expect("PostgreSQL Agent mode should expose execute_query");
+        assert!(execute_query.description.contains("writes"));
+        assert!(!execute_query.description.contains("Write operations (INSERT/UPDATE/DELETE/DDL) are blocked"));
     }
 
     #[test]

@@ -8,6 +8,12 @@ pub enum AgentEvent {
     TurnStart { turn: u32 },
     /// Text delta from the LLM response.
     TextDelta { delta: String },
+    /// Request a localized, exact-SQL confirmation after an unconfirmed write
+    /// tool call. The desktop client owns the user-facing wording.
+    WriteSqlConfirmationRequired { sql: String },
+    /// Tell the desktop client to show localized manual-review guidance after
+    /// an AI write attempt against a production target.
+    ProductionWriteBlocked { sql: String },
     /// Reasoning/thinking delta (for models that support it).
     ReasoningDelta { delta: String },
     /// The LLM wants to call a tool.

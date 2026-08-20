@@ -132,7 +132,7 @@ import { parseExplainResult, parseOracleExplainText, type ParsedExplainPlan } fr
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { AI_TABLE_MENTION_CANDIDATE_LIMIT, AI_TABLE_MENTION_SCHEMA_LIMIT, filterAiTableMentionCandidates, formatAiTableMention, parseAiTableMentions, type AiTableMention } from "@/lib/ai/aiTableMentions";
 import { isAiPromptImeCompositionEvent, shouldSubmitAiPromptOnKeydown } from "@/lib/ai/aiPromptKeyboard";
-import { looksLikeActionProposal, containsChinese, looksLikeWriteSqlProposal, shouldGrantWriteSqlOnShortAffirmative } from "@/lib/ai/aiProposalDetect";
+import { isActionableWriteProposalMessage, isActionableWriteSqlProposal, looksLikeActionProposal, looksLikeWriteSqlProposal, shouldGrantWriteSqlOnShortAffirmative } from "@/lib/ai/aiProposalDetect";
 import { visibleToActualIndex } from "@/lib/ai/aiMessageEdit";
 import { shouldShowReasoningCharCount, reasoningCharCountClass } from "@/lib/ai/aiReasoningPresentation";
 import { saveTextFile } from "@/lib/export/saveTextFile";
@@ -199,8 +199,11 @@ interface ChatMessage {
   reasoning?: string;
   isThinking?: boolean;
   agentSteps?: AiAgentStepItem[];
-  /** Hidden system-generated context summary; not rendered in chat UI but included in LLM history. */
-  kind?: "contextSummary";
+  /** Hidden system-generated context summary; not rendered in chat UI but included in LLM history.
+   *  `writeSqlConfirmation` / `productionWriteBlocked` mark backend-generated,
+   *  localized confirmation/block messages so the UI does not re-detect them
+   *  from text phrasing. */
+  kind?: "contextSummary" | "writeSqlConfirmation" | "productionWriteBlocked";
   /** Per-message token stats from the last agent run; ephemeral, not persisted. */
   tokens?: { input: number; output: number };
 }
@@ -906,7 +909,15 @@ const proposalConfirmMessage = computed<ChatMessage | null>(() => {
     if (msg.kind === "contextSummary") continue;
     if (msg.role !== "assistant") return null;
     if (!msg.content) return null;
-    return looksLikeActionProposal(msg.content) ? msg : null;
+    // Backend-generated write confirmations are localized, so the English/Chinese
+    // phrase detectors cannot recognize them; the `kind` marker plus one exact
+    // SQL block is the structural proof of actionability.
+    if (msg.kind === "writeSqlConfirmation") return extractSingleSqlCodeBlock(msg.content) ? msg : null;
+    if (!looksLikeActionProposal(msg.content)) return null;
+    // A generic write question cannot authorize a later, unseen tool call.
+    // Hide its action bar until the assistant displays one exact SQL block.
+    if (looksLikeWriteSqlProposal(msg.content) && !isActionableWriteSqlProposal(msg.content)) return null;
+    return msg;
   }
   return null;
 });
@@ -940,17 +951,17 @@ function sendProposalReply(positive: boolean) {
   if (isGenerating.value) return;
   const target = proposalConfirmMessage.value;
   if (!target) return;
-  if (positive && productionContext.value.active && looksLikeWriteSqlProposal(target.content)) {
+  const isWriteConfirmation = isActionableWriteProposalMessage(target);
+  if (positive && productionContext.value.active && (target.kind === "writeSqlConfirmation" || looksLikeWriteSqlProposal(target.content))) {
     const sql = extractFirstSqlCodeBlock(target.content);
     if (sql) emit("replaceSql", sql);
     toast(t("production.aiReviewRequired"), 5000);
     return;
   }
-  const isZh = containsChinese(target.content || "");
-  const replyZh = positive ? "请执行上面你刚提议的操作，不要再反问确认。" : "不用执行上面提到的操作，继续当前对话。";
-  const replyEn = positive ? "Execute the action you just proposed above; do not ask for confirmation again." : "Do not execute the action mentioned above; continue the current conversation.";
-  prompt.value = isZh ? replyZh : replyEn;
-  if (positive && assistantMode.value === "agent" && looksLikeWriteSqlProposal(target.content)) {
+  // Write confirmations carry the exact-SQL reply; other action proposals keep
+  // the generic wording so the model does not receive SQL-specific instructions.
+  prompt.value = positive ? (isWriteConfirmation ? t("ai.writeSqlConfirmationReplyYes") : t("ai.proposalConfirmReplyYes")) : isWriteConfirmation ? t("ai.writeSqlConfirmationReplyNo") : t("ai.proposalConfirmReplyNo");
+  if (positive && assistantMode.value === "agent" && isWriteConfirmation) {
     confirmedWriteSqlText = extractSingleSqlCodeBlock(target.content);
     if (confirmedWriteSqlText) {
       allowWriteSqlForNextRun = true;
@@ -1139,6 +1150,31 @@ function appendAssistantDelta(assistantIdx: number, delta: string) {
   if (msg.isThinking) msg.isThinking = false;
   pendingAssistantDelta += delta;
   scheduleAssistantDeltaFlush(assistantIdx);
+}
+
+function replaceAssistantText(assistantIdx: number, content: string) {
+  // A model can stream prose or a code block before returning a write tool call.
+  // Discard that partial output so the confirmation detector sees exactly one SQL block.
+  if (assistantDeltaFrame !== null) {
+    cancelAnimationFrame(assistantDeltaFrame);
+    assistantDeltaFrame = null;
+  }
+  pendingAssistantDelta = "";
+  pendingAssistantReasoning = "";
+  pendingAssistantIndex = -1;
+  const msg = messages.value[assistantIdx];
+  if (!msg) return;
+  msg.content = content;
+  msg.reasoning = undefined;
+  msg.isThinking = false;
+}
+
+function writeSqlConfirmationText(sql: string): string {
+  return `${t("ai.writeSqlConfirmationRequired")}\n\n\`\`\`sql\n${sql.trim()}\n\`\`\`\n\n${t("ai.writeSqlConfirmationQuestion")}`;
+}
+
+function productionWriteBlockedText(sql: string): string {
+  return `${t("ai.productionWriteBlocked")}\n\n\`\`\`sql\n${sql.trim()}\n\`\`\``;
 }
 
 function appendAssistantReasoning(assistantIdx: number, delta: string) {
@@ -2449,6 +2485,16 @@ async function send() {
         if (event.type === "text_delta" && event.delta) {
           appendAssistantDelta(assistantIdx, event.delta);
         }
+        if (event.type === "write_sql_confirmation_required") {
+          replaceAssistantText(assistantIdx, writeSqlConfirmationText(event.sql));
+          const msg = messages.value[assistantIdx];
+          if (msg) msg.kind = "writeSqlConfirmation";
+        }
+        if (event.type === "production_write_blocked") {
+          replaceAssistantText(assistantIdx, productionWriteBlockedText(event.sql));
+          const msg = messages.value[assistantIdx];
+          if (msg) msg.kind = "productionWriteBlocked";
+        }
         if (event.type === "reasoning_delta" && event.delta) {
           appendAssistantReasoning(assistantIdx, event.delta);
         }
@@ -3293,11 +3339,11 @@ async function openExternalUrl(url: string) {
                 <div v-if="msg === proposalConfirmMessage" class="mt-2 flex gap-2" :title="t('ai.proposalConfirmTitle')">
                   <Button size="sm" variant="default" class="h-7 gap-1 text-[11px]" @click="sendProposalReply(true)">
                     <Check class="h-3 w-3" />
-                    {{ t("ai.proposalConfirmYes") }}
+                    {{ t(isActionableWriteProposalMessage(msg) ? "ai.writeSqlConfirmYes" : "ai.proposalConfirmYes") }}
                   </Button>
                   <Button size="sm" variant="outline" class="h-7 gap-1 text-[11px]" @click="sendProposalReply(false)">
                     <X class="h-3 w-3" />
-                    {{ t("ai.proposalConfirmNo") }}
+                    {{ t(isActionableWriteProposalMessage(msg) ? "ai.writeSqlConfirmNo" : "ai.proposalConfirmNo") }}
                   </Button>
                 </div>
               </div>

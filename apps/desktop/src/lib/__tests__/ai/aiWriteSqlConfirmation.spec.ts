@@ -1,11 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { containsWriteSql, looksLikeActionProposal, looksLikeWriteSqlProposal, shouldGrantWriteSqlOnShortAffirmative, type WriteSqlGrantParams } from "@/lib/ai/aiProposalDetect";
+import { containsWriteSql, isActionableWriteProposalMessage, isActionableWriteSqlProposal, looksLikeActionProposal, looksLikeWriteSqlProposal, shouldGrantWriteSqlOnShortAffirmative, type WriteSqlGrantParams } from "@/lib/ai/aiProposalDetect";
 import { aiSkillForAction } from "@/lib/ai/aiSkills";
 import { extractFirstSqlCodeBlock, extractSingleSqlCodeBlock, countSqlCodeBlocks } from "@/lib/ai/aiSqlExecutionPolicy";
 
 // ── looksLikeWriteSqlProposal ──────────────────────────────────────────────
 
 describe("looksLikeWriteSqlProposal", () => {
+  it("detects the backend-generated write confirmation proposal", () => {
+    const proposal = ["This database change requires your explicit confirmation before DBX can execute it.", "", "```sql", "CREATE TABLE users (id INT);", "```", "", "Should I execute this SQL statement?"].join("\n");
+    expect(looksLikeActionProposal(proposal)).toBe(true);
+    expect(looksLikeWriteSqlProposal(proposal)).toBe(true);
+    expect(extractSingleSqlCodeBlock(proposal)).toBe("CREATE TABLE users (id INT);");
+  });
+
   it("detects zh write-SQL proposal (CREATE in last line)", () => {
     expect(looksLikeWriteSqlProposal("需要我执行 CREATE TABLE users 吗？")).toBe(true);
   });
@@ -102,15 +109,15 @@ describe("looksLikeWriteSqlProposal", () => {
 describe("shouldGrantWriteSqlOnShortAffirmative (manual-typing confirmation)", () => {
   const writeProposal = {
     role: "assistant" as const,
-    content: "已经分析了表结构。\n需要我执行这条 CREATE TABLE users 语句吗？",
+    content: "已经分析了表结构。\n```sql\nCREATE TABLE users (id INT);\n```\n需要我执行这条 CREATE TABLE users 语句吗？",
   };
   const insertProposal = {
     role: "assistant" as const,
-    content: "I understand the schema.\nShould I run this INSERT for you?",
+    content: "I understand the schema.\n```sql\nINSERT INTO users (id) VALUES (1);\n```\nShould I run this INSERT for you?",
   };
   const writeProposalEn = {
     role: "assistant" as const,
-    content: "Should I execute this CREATE TABLE users?",
+    content: "```sql\nCREATE TABLE users (id INT);\n```\nShould I execute this CREATE TABLE users?",
   };
   // Prompt-mirrored generic confirmation with SQL code block.
   const genericZhProposal = {
@@ -143,6 +150,44 @@ describe("shouldGrantWriteSqlOnShortAffirmative (manual-typing confirmation)", (
 
   it("grants for generic confirmation phrase when message has SQL code block", () => {
     expect(shouldGrantWriteSqlOnShortAffirmative(params({ messages: [{ role: "user", content: "创建表" }, genericZhProposal] }))).toBe(true);
+  });
+
+  it("does NOT grant for a generic write question without reviewable SQL", () => {
+    const genericWriteQuestion = "需要我执行这条 INSERT 语句吗？";
+    expect(looksLikeWriteSqlProposal(genericWriteQuestion)).toBe(true);
+    expect(isActionableWriteSqlProposal(genericWriteQuestion)).toBe(false);
+    expect(
+      shouldGrantWriteSqlOnShortAffirmative(
+        params({
+          messages: [
+            { role: "user", content: "插入数据" },
+            { role: "assistant", content: genericWriteQuestion },
+          ],
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("grants for a backend-generated localized confirmation via its structural kind", () => {
+    // The exact wording DBX renders from i18n (en): it does NOT contain an
+    // English/Chinese ask phrase, so the text detectors reject it.
+    const localizedEn = "This SQL changes data or schema. Review it carefully before execution.\n\n```sql\nCREATE TABLE users (id INT);\n```\n\nExecute this SQL once?";
+    expect(looksLikeActionProposal(localizedEn)).toBe(false);
+    expect(isActionableWriteSqlProposal(localizedEn)).toBe(false);
+    // The backend marks the message, making it actionable without phrase detection.
+    expect(isActionableWriteProposalMessage({ role: "assistant", content: localizedEn, kind: "writeSqlConfirmation" })).toBe(true);
+    expect(
+      shouldGrantWriteSqlOnShortAffirmative(
+        params({
+          messages: [
+            { role: "user", content: "创建表" },
+            { role: "assistant", content: localizedEn, kind: "writeSqlConfirmation" },
+          ],
+        }),
+      ),
+    ).toBe(true);
+    // A production-block message must never be treated as a confirmable write.
+    expect(isActionableWriteProposalMessage({ role: "assistant", content: localizedEn, kind: "productionWriteBlocked" })).toBe(false);
   });
 
   it("skips contextSummary messages to find the assistant message", () => {

@@ -437,6 +437,8 @@ export async function aiStream(sessionId: string, request: AiCompletionRequest, 
 export type AgentEvent =
   | { type: "turn_start"; turn: number }
   | { type: "text_delta"; delta: string }
+  | { type: "write_sql_confirmation_required"; sql: string }
+  | { type: "production_write_blocked"; sql: string }
   | { type: "reasoning_delta"; delta: string }
   | {
       type: "tool_call_start";
@@ -849,7 +851,7 @@ export interface AiChatMessage {
   content: string;
   mentions?: unknown[];
   reasoning?: string;
-  kind?: "contextSummary";
+  kind?: "contextSummary" | "writeSqlConfirmation" | "productionWriteBlocked";
 }
 
 export interface AiConversation {

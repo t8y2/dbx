@@ -6901,6 +6901,7 @@ export default withEnglishFallback({
     restore: "Restaurar",
     registerInstance: "Registrar instancia",
     deregister: "Dar de baja",
+    nacosContextPathHint: "Cuando se deja vacío, se usa el valor predeterminado del modo de conexión actual; si se usa explícitamente la ruta raíz del servicio, complete /; en escenarios de proxy inverso, puede completar prefijos como /nacos.",
   },
   databaseBrowser: {
     search: "Buscar bases de datos...",

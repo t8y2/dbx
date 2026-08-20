@@ -6226,6 +6226,7 @@ export default withEnglishFallback({
     restore: "還原",
     registerInstance: "註冊實例",
     deregister: "註銷",
+    nacosContextPathHint: "留空時使用目前連線模式的預設值；明確使用服務根路徑請填寫 /，反向代理情境可填寫 /nacos 等前綴。",
   },
   userAdmin: {
     title: "使用者與權限",

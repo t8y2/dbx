@@ -6902,6 +6902,7 @@ export default withEnglishFallback({
     restore: "Ripristina",
     registerInstance: "Registra istanza",
     deregister: "Rimuovi",
+    nacosContextPathHint: "Se lasciato vuoto, viene utilizzato il valore predefinito della modalità di connessione corrente; se si utilizza esplicitamente il percorso radice del servizio, inserire /; in scenari di proxy inverso, è possibile inserire prefissi come /nacos.",
   },
   databaseBrowser: {
     search: "Cerca database...",

@@ -6954,6 +6954,7 @@ export default withEnglishFallback({
     restore: "元に戻す",
     registerInstance: "インスタンスを登録",
     deregister: "解除",
+    nacosContextPathHint: "空欄の場合は現在の接続モードのデフォルト値を使用します。サービスルートパスを明示的に使用する場合は / を入力し、リバースプロキシのシナリオでは /nacos などのプレフィックスを入力できます。",
   },
   databaseBrowser: {
     search: "データベースを検索...",

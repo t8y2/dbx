@@ -312,6 +312,7 @@ pub fn prepare_data_grid_save_for_driver_profile(
             execution_schema: data_grid_save_execution_schema(
                 options.database_type,
                 driver_profile,
+                options.identifier_quote.as_deref(),
                 &options.table_meta,
             ),
         };
@@ -321,7 +322,12 @@ pub fn prepare_data_grid_save_for_driver_profile(
         validation_error: None,
         statements: build_data_grid_save_statements(&options, driver_profile),
         rollback_statements: build_data_grid_rollback_statements(&options, driver_profile),
-        execution_schema: data_grid_save_execution_schema(options.database_type, driver_profile, &options.table_meta),
+        execution_schema: data_grid_save_execution_schema(
+            options.database_type,
+            driver_profile,
+            options.identifier_quote.as_deref(),
+            &options.table_meta,
+        ),
     }
 }
 
@@ -1816,11 +1822,13 @@ fn copy_column_info(
 fn data_grid_save_execution_schema(
     database_type: Option<DatabaseType>,
     driver_profile: Option<&str>,
+    identifier_quote: Option<&str>,
     table_meta: &DataGridTableMeta,
 ) -> Option<String> {
-    let is_gaussdb_m = database_type == Some(DatabaseType::Gaussdb)
-        && driver_profile.is_some_and(|profile| profile.eq_ignore_ascii_case("gaussdb-m"));
-    if matches!(database_type, Some(DatabaseType::Neo4j | DatabaseType::Oracle)) || is_gaussdb_m {
+    let uses_gaussdb_database_namespace = database_type == Some(DatabaseType::Gaussdb)
+        && (driver_profile.is_some_and(|profile| profile.eq_ignore_ascii_case("gaussdb-m"))
+            || identifier_quote.is_some_and(|quote| quote.trim() == "`"));
+    if matches!(database_type, Some(DatabaseType::Neo4j | DatabaseType::Oracle)) || uses_gaussdb_database_namespace {
         return None;
     }
     crate::sql_dialect::table_data_schema(database_type, driver_profile, table_meta.schema.as_deref())
@@ -5551,6 +5559,35 @@ mod tests {
                 new_rows: vec![],
             },
             Some("GaussDB-M"),
+        );
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["UPDATE muts.mk_sv_busi_param SET name = 'new' WHERE id = 1;"]);
+        assert_eq!(result.execution_schema, None);
+    }
+
+    #[test]
+    fn gaussdb_b_compat_save_preserves_database_qualifier_without_execution_schema() {
+        let result = prepare_data_grid_save_for_driver_profile(
+            DataGridSaveStatementOptions {
+                database_type: Some(DatabaseType::Gaussdb),
+                identifier_quote: Some("`".to_string()),
+                table_meta: DataGridTableMeta {
+                    catalog: None,
+                    database: Some("muts".to_string()),
+                    schema: Some("muts".to_string()),
+                    table_name: "mk_sv_busi_param".to_string(),
+                    primary_keys: vec!["id".to_string()],
+                    columns: Some(vec![column("id", "integer", false, None), column("name", "varchar", false, None)]),
+                },
+                columns: vec!["id".to_string(), "name".to_string()],
+                source_columns: None,
+                rows: vec![vec![json!(1), json!("old")]],
+                dirty_rows: vec![(0, vec![(1, json!("new"))])],
+                deleted_rows: vec![],
+                new_rows: vec![],
+            },
+            Some("gaussdb"),
         );
 
         assert_eq!(result.validation_error, None);

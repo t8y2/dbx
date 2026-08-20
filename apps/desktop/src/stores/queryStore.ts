@@ -3582,11 +3582,7 @@ export const useQueryStore = defineStore("query", () => {
     // unqualified object reference. Resolve metadata through the login's
     // default schema (with the driver's dbo fallback) so metadata and writes
     // target the same object as the original SELECT.
-    let schema = source.schema || (dbType === "sqlserver" ? "" : tab.schema);
-    if (!schema) {
-      if (dbType === "postgres" || dbType === "kwdb") schema = "public";
-      else schema = "";
-    }
+    const schema = source.schema || (dbType === "sqlserver" ? "" : tab.schema) || "";
     // Oracle-family connection databases are service names, not schemas. When
     // the query does not qualify a schema, let the driver resolve the current
     // login user's schema instead of looking up metadata under the service name.
@@ -3594,7 +3590,11 @@ export const useQueryStore = defineStore("query", () => {
     // search_path. Do not reinterpret the selected database as a schema; the
     // agent resolves the visible relation's actual namespace with the columns.
     const useCurrentVastbaseSchema = dbType === "vastbase" && !source.schema && !tab.schema;
-    const resolvedSchema = (dbType === "sqlserver" && !source.schema) || (ORACLE_LIKE_METADATA_TYPES.has(dbType) && !schema) || useCurrentVastbaseSchema ? "" : metadataSchemaForConnection(conn, metadataDatabase, schema || undefined);
+    // PostgreSQL-compatible unqualified names also resolve through the
+    // connection's search_path. Keep the metadata request unqualified when no
+    // schema was selected instead of assuming public (or the database name).
+    const useCurrentPostgresSchema = (dbType === "postgres" || dbType === "kwdb") && !source.schema && !tab.schema;
+    const resolvedSchema = (dbType === "sqlserver" && !source.schema) || (ORACLE_LIKE_METADATA_TYPES.has(dbType) && !schema) || useCurrentVastbaseSchema || useCurrentPostgresSchema ? "" : metadataSchemaForConnection(conn, metadataDatabase, schema || undefined);
     const metadataSchema = normalizeUppercaseFoldedMetadataIdentifier(dbType, resolvedSchema || undefined, source.schema ? source.schemaQuoted : false) || "";
     const metadataTableName = normalizeUppercaseFoldedMetadataIdentifier(dbType, source.tableName, source.tableNameQuoted)!;
     const metadataCatalog = normalizeUppercaseFoldedMetadataIdentifier(dbType, source.catalog, source.catalogQuoted);

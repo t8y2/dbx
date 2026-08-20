@@ -8,9 +8,9 @@ pub use dbx_core::agent_connection::{
 };
 pub use dbx_core::connection::{
     agent_connect_timeout, connect_bare_metadata_pool, connect_mysql_metadata_pool, connection_configs_pool_equivalent,
-    connection_url_for_endpoint, gaussdb_m_jdbc_config_for_endpoint, gaussdb_uses_m_jdbc_driver,
-    metadata_connection_config, prestosql_jdbc_config_for_endpoint, probe_connection_endpoint,
-    redacted_connection_url_for_endpoint, AppState, MysqlMode, PoolKind,
+    connection_configs_session_credentials_compatible, connection_url_for_endpoint, gaussdb_m_jdbc_config_for_endpoint,
+    gaussdb_uses_m_jdbc_driver, metadata_connection_config, prestosql_jdbc_config_for_endpoint,
+    probe_connection_endpoint, redacted_connection_url_for_endpoint, AppState, MysqlMode, PoolKind,
 };
 use dbx_core::database_capabilities;
 use dbx_core::db;
@@ -283,6 +283,37 @@ mod tests {
         config.password = password.to_string();
         config.database = None;
         config.connection_string = None;
+        config
+    }
+
+    fn nacos_config(id: &str) -> ConnectionConfig {
+        let mut config = mongodb_config();
+        config.id = id.to_string();
+        config.name = "Nacos".to_string();
+        config.db_type = DatabaseType::Nacos;
+        config.driver_profile = None;
+        config.driver_label = None;
+        config.url_params = None;
+        config.host = "127.0.0.1".to_string();
+        config.port = 8848;
+        config.username = "ordinary-user".to_string();
+        config.password.clear();
+        config.database = None;
+        config.connection_string = None;
+        config.save_password = false;
+        config.visible_databases = Some(vec!["namespace-a".to_string()]);
+        config.external_config = Some(serde_json::json!({
+            "implementation": "nacos",
+            "versionMode": "v3",
+            "apiPlane": "admin",
+            "serverAddr": "http://127.0.0.1:8848",
+            "managedNamespaces": ["namespace-a"],
+            "auth": {
+                "kind": "usernamePassword",
+                "username": "ordinary-user",
+                "password": "old-password"
+            }
+        }));
         config
     }
 
@@ -745,6 +776,41 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    #[tokio::test]
+    async fn sync_connection_configs_preserves_nacos_session_password_for_scope_updates() {
+        let dir = std::env::temp_dir().join(format!("dbx-tauri-nacos-scope-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
+        let initial = nacos_config("nacos-a");
+        state.configs.write().await.insert(initial.id.clone(), initial.clone());
+        let _ = state.session_credentials.set("", &initial.id, "new-password");
+        state.session_credentials.set_for_purpose("", &initial.id, "nacos-primary-password", "new-password");
+
+        let mut scope_updated = initial.clone();
+        scope_updated.visible_databases = Some(vec!["namespace-a".to_string(), "namespace-b".to_string()]);
+        scope_updated.external_config.as_mut().unwrap()["managedNamespaces"] =
+            serde_json::json!(["namespace-a", "namespace-b"]);
+        let sync = sync_connection_configs(&state, std::slice::from_ref(&scope_updated)).await;
+
+        assert_eq!(sync.connection_pool_ids_to_drop.as_slice(), &[initial.id.clone()]);
+        assert_eq!(state.session_credentials.get("", &initial.id).as_deref(), Some("new-password"));
+        assert_eq!(
+            state.session_credentials.get_for_purpose("", &initial.id, "nacos-primary-password").as_deref(),
+            Some("new-password")
+        );
+
+        let mut endpoint_updated = scope_updated;
+        endpoint_updated.host = "nacos.internal".to_string();
+        endpoint_updated.external_config.as_mut().unwrap()["serverAddr"] =
+            serde_json::json!("http://nacos.internal:8848");
+        sync_connection_configs(&state, std::slice::from_ref(&endpoint_updated)).await;
+        assert!(!state.session_credentials.has("", &initial.id));
+        assert_eq!(state.session_credentials.get_for_purpose("", &initial.id, "nacos-primary-password"), None);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 
 #[tauri::command]
@@ -813,12 +879,14 @@ async fn sync_connection_configs(state: &AppState, configs: &[ConnectionConfig])
             if previous.db_type == DatabaseType::MessageQueue {
                 mq_adapter_ids_to_drop.insert(config.id.clone());
             }
+            if !connection_configs_session_credentials_compatible(&previous, config) {
+                // 端点或认证身份变化后，旧密码不能安全复用。显示范围等本地设置
+                // 不影响凭据归属，因此必须保留 no-save 连接的新会话密码。
+                state.session_credentials.clear_connection(&config.id);
+            }
             // 仅在真实连接参数变化时销毁池；save_password=false 连接因持久化
             // 空密码与运行态密码产生的差异被忽略（见 connection_configs_pool_equivalent）。
             if !connection_configs_pool_equivalent(&previous, config) {
-                // 连接端点/认证参数已变：旧会话凭据不再适配，清除以便下次重新输入，
-                // 避免复用旧密码去连新端点而直接认证失败。
-                state.session_credentials.clear_connection(&config.id);
                 connection_pool_ids_to_drop.insert(config.id.clone());
             }
         }
@@ -1834,6 +1902,23 @@ pub async fn forget_session_credential(state: State<'_, Arc<AppState>>, connecti
     }
     state.session_credentials.remove("", &connection_id);
     Ok(())
+}
+
+#[tauri::command]
+pub async fn replace_nacos_session_credential(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    username: String,
+    password: String,
+) -> Result<(), String> {
+    state
+        .replace_nacos_session_credential(
+            dbx_core::session_credentials::DESKTOP_OWNER,
+            &connection_id,
+            &username,
+            &password,
+        )
+        .await
 }
 
 /// 清空全部运行期会话凭据（桌面端退出前调用；Web 端登出时走 `auth.rs logout`）。

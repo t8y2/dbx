@@ -10,8 +10,9 @@ use crate::commands::connection::AppState;
 pub async fn nacos_test_connection(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
+    force_refresh: Option<bool>,
 ) -> Result<dbx_core::nacos::NacosConnectionInfo, String> {
-    dbx_core::nacos::service::nacos_test_connection_core(&state, &connection_id).await
+    dbx_core::nacos::service::nacos_test_connection_core(&state, &connection_id, force_refresh.unwrap_or(false)).await
 }
 
 #[tauri::command]
@@ -46,6 +47,15 @@ pub async fn nacos_update_namespace(
     req: dbx_core::nacos::NacosNamespaceUpdate,
 ) -> Result<(), String> {
     dbx_core::nacos::service::nacos_update_namespace_core(&state, &connection_id, req).await
+}
+
+#[tauri::command]
+pub async fn nacos_delete_namespace(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    namespace_id: String,
+) -> Result<(), String> {
+    dbx_core::nacos::service::nacos_delete_namespace_core(&state, &connection_id, namespace_id).await
 }
 
 #[tauri::command]

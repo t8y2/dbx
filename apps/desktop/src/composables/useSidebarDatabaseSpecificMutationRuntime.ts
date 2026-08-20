@@ -35,7 +35,9 @@ import {
 import { supportsMongoAllDriverMutations, supportsMongoIndexMutations, supportsNativeMongoDriverMutations } from "@/lib/mongo/mongoCapabilities";
 import { runMongoSidebarMutation } from "@/lib/sidebar/runMongoSidebarMutation";
 import { executeWithProductionContextGuard } from "@/lib/database/productionExecutionGuard";
+import { uuid } from "@/lib/common/utils";
 import { refreshLoadedMongoIndexes } from "@/lib/mongo/mongoIndexMetadata";
+import type { NacosAdminConfig } from "@/types/nacos";
 import {
   sidebarDangerTarget,
   sidebarFormTarget,
@@ -48,6 +50,8 @@ import {
   editNacosNamespaceName,
   editNacosNamespaceDesc,
   editNacosNamespaceLoading,
+  showDeleteNacosNamespaceConfirm,
+  deleteNacosNamespaceLoading,
   showDropMongoCollectionConfirm,
   dropMongoCollectionLoading,
   showDropMongoIndexConfirm,
@@ -658,11 +662,70 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     showCreateNacosNamespaceDialog.value = true;
   }
 
+  interface ExplicitNacosNamespaceScopeSnapshot {
+    visibleDatabases?: string[];
+    managedNamespaces?: string[];
+  }
+
+  function snapshotExplicitNacosNamespaceScope(connectionId: string): ExplicitNacosNamespaceScopeSnapshot {
+    const config = connectionStore.getConfig(connectionId);
+    if (!config || config.db_type !== "nacos") return {};
+    const externalConfig = (config.external_config || {}) as NacosAdminConfig;
+    return {
+      visibleDatabases: Array.isArray(config.visible_databases) ? [...config.visible_databases] : undefined,
+      managedNamespaces: Array.isArray(externalConfig.managedNamespaces) && externalConfig.managedNamespaces.length > 0 ? [...externalConfig.managedNamespaces] : undefined,
+    };
+  }
+
+  async function restoreExplicitNacosNamespaceScope(connectionId: string, snapshot: ExplicitNacosNamespaceScopeSnapshot): Promise<void> {
+    if (!snapshot.visibleDatabases && !snapshot.managedNamespaces) return;
+    const config = connectionStore.getConfig(connectionId);
+    if (!config || config.db_type !== "nacos") return;
+    const externalConfig = (config.external_config || {}) as NacosAdminConfig;
+    await connectionStore.updateConnection({
+      ...config,
+      visible_databases: snapshot.visibleDatabases ? [...snapshot.visibleDatabases] : config.visible_databases,
+      external_config: snapshot.managedNamespaces ? { ...externalConfig, managedNamespaces: [...snapshot.managedNamespaces] } : externalConfig,
+    });
+  }
+
+  async function updateExplicitNacosNamespaceScope(connectionId: string, namespaceId: string, action: "add" | "remove"): Promise<boolean> {
+    const config = connectionStore.getConfig(connectionId);
+    if (!config || config.db_type !== "nacos") return false;
+    const externalConfig = (config.external_config || {}) as NacosAdminConfig;
+    const hasVisibleScope = Array.isArray(config.visible_databases);
+    const hasManagedScope = Array.isArray(externalConfig.managedNamespaces) && externalConfig.managedNamespaces.length > 0;
+    if (!hasVisibleScope && !hasManagedScope) return false;
+
+    const mutate = (values: string[] | undefined) => {
+      const normalized = new Set((values || []).map((value) => value.trim()).filter(Boolean));
+      if (action === "add") normalized.add(namespaceId);
+      else normalized.delete(namespaceId);
+      return [...normalized];
+    };
+    await connectionStore.updateConnection({
+      ...config,
+      visible_databases: hasVisibleScope ? mutate(config.visible_databases) : config.visible_databases,
+      external_config: hasManagedScope ? { ...externalConfig, managedNamespaces: mutate(externalConfig.managedNamespaces) } : externalConfig,
+    });
+    return true;
+  }
+
+  async function refreshNacosNamespacesAfterMutation(connectionId: string) {
+    try {
+      await connectionStore.loadNacosNamespaces(connectionId, { force: true });
+      return true;
+    } catch (error: any) {
+      toast(translateBackendError(t, error), 5000);
+      return false;
+    }
+  }
+
   async function confirmCreateNacosNamespace() {
     const node = sidebarFormTarget.value ?? activeNode.value;
     const namespaceName = createNacosNamespaceName.value.trim();
     if (!node.connectionId || !namespaceName || createNacosNamespaceLoading.value) return;
-    const namespaceId = createNacosNamespaceId.value.trim();
+    const namespaceId = createNacosNamespaceId.value.trim() || uuid();
     const confirmed = await executeWithProductionContextGuard({
       connection: connectionStore.getConfig(node.connectionId),
       database: namespaceId || undefined,
@@ -674,16 +737,22 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     createNacosNamespaceLoading.value = true;
     try {
       await api.nacosCreateNamespace(node.connectionId, {
-        namespaceId: namespaceId || undefined,
+        namespaceId,
         namespaceName,
         namespaceDesc: createNacosNamespaceDesc.value.trim() || namespaceName,
       });
+      try {
+        await updateExplicitNacosNamespaceScope(node.connectionId, namespaceId, "add");
+      } catch (error: any) {
+        toast(t("connection.saveFailed", { message: translateBackendError(t, error) }), 5000);
+      }
       notifyNacosNamespacesChanged(node.connectionId);
       showCreateNacosNamespaceDialog.value = false;
-      await connectionStore.loadNacosNamespaces(node.connectionId, { force: true });
-      const liveNode = findSidebarActionTarget(connectionStore.treeNodes, node);
-      if (liveNode) liveNode.isExpanded = true;
       toast(t("nacos.namespaceCreated", { name: namespaceName }), 3000);
+      if (await refreshNacosNamespacesAfterMutation(node.connectionId)) {
+        const liveNode = findSidebarActionTarget(connectionStore.treeNodes, node);
+        if (liveNode) liveNode.isExpanded = true;
+      }
     } catch (error: any) {
       toast(t("contextMenu.tableOperationFailed", { message: translateBackendError(t, error) }), 5000);
     } finally {
@@ -717,13 +786,58 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
         namespaceName,
         namespaceDesc: editNacosNamespaceDesc.value.trim() || namespaceName,
       });
+      notifyNacosNamespacesChanged(node.connectionId);
       showEditNacosNamespaceDialog.value = false;
-      await connectionStore.loadNacosNamespaces(node.connectionId, { force: true });
       toast(t("nacos.namespaceUpdated", { name: namespaceName }), 3000);
+      await refreshNacosNamespacesAfterMutation(node.connectionId);
     } catch (error: any) {
       toast(t("contextMenu.tableOperationFailed", { message: translateBackendError(t, error) }), 5000);
     } finally {
       editNacosNamespaceLoading.value = false;
+    }
+  }
+
+  function openDeleteNacosNamespaceConfirm() {
+    deleteNacosNamespaceLoading.value = false;
+    showDeleteNacosNamespaceConfirm.value = true;
+  }
+
+  async function confirmDeleteNacosNamespace() {
+    const node = sidebarDangerTarget.value ?? activeNode.value;
+    const namespaceId = node.nacosNamespace?.trim() || "";
+    if (node.type !== "nacos-namespace" || !node.connectionId || !namespaceId || deleteNacosNamespaceLoading.value) return;
+    const confirmed = await executeWithProductionContextGuard({
+      connection: connectionStore.getConfig(node.connectionId),
+      database: namespaceId,
+      reviewText: `${t("nacos.deleteNamespace")}: ${node.nacosNamespaceName || node.label}`,
+      source: t("production.sourceSidebar"),
+      execute: async () => true,
+    });
+    if (confirmed !== true) return;
+    deleteNacosNamespaceLoading.value = true;
+    const scopeSnapshot = snapshotExplicitNacosNamespaceScope(node.connectionId);
+    let scopeUpdated = false;
+    try {
+      // Persist the local scope first. A local save failure must abort before
+      // the irreversible remote deletion. If Nacos rejects the deletion, the
+      // original scope is restored below.
+      scopeUpdated = await updateExplicitNacosNamespaceScope(node.connectionId, namespaceId, "remove");
+      await api.nacosDeleteNamespace(node.connectionId, namespaceId);
+      notifyNacosNamespacesChanged(node.connectionId);
+      showDeleteNacosNamespaceConfirm.value = false;
+      toast(t("nacos.namespaceDeleted", { name: node.nacosNamespaceName || node.label }), 3000);
+      await refreshNacosNamespacesAfterMutation(node.connectionId);
+    } catch (error: any) {
+      if (scopeUpdated) {
+        try {
+          await restoreExplicitNacosNamespaceScope(node.connectionId, scopeSnapshot);
+        } catch (rollbackError: any) {
+          toast(t("connection.saveFailed", { message: translateBackendError(t, rollbackError) }), 5000);
+        }
+      }
+      toast(t("contextMenu.tableOperationFailed", { message: translateBackendError(t, error) }), 5000);
+    } finally {
+      deleteNacosNamespaceLoading.value = false;
     }
   }
 
@@ -985,6 +1099,8 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     confirmCreateNacosNamespace,
     openEditNacosNamespaceDialog,
     confirmEditNacosNamespace,
+    openDeleteNacosNamespaceConfirm,
+    confirmDeleteNacosNamespace,
     dropMongoCollection,
     dropMongoIndex,
     dropAllMongoIndexes,

@@ -45,6 +45,18 @@ impl CredentialKey {
     }
 }
 
+#[derive(Clone, Eq, Hash, PartialEq)]
+struct PurposeCredentialKey {
+    credential: CredentialKey,
+    purpose: String,
+}
+
+impl PurposeCredentialKey {
+    fn new(owner_scope: &str, connection_id: &str, purpose: &str) -> Self {
+        Self { credential: CredentialKey::new(owner_scope, connection_id), purpose: purpose.to_string() }
+    }
+}
+
 struct SessionCredential {
     password: String,
     generation: u64,
@@ -53,12 +65,18 @@ struct SessionCredential {
 #[derive(Default)]
 struct SessionCredentialState {
     credentials: HashMap<CredentialKey, SessionCredential>,
+    purpose_credentials: HashMap<PurposeCredentialKey, SessionCredential>,
     pool_credential_owners: HashMap<String, String>,
     next_generation: u64,
 }
 
 pub struct SessionCredentialWriteToken {
     key: CredentialKey,
+    generation: u64,
+}
+
+pub struct PurposeSessionCredentialWriteToken {
+    key: PurposeCredentialKey,
     generation: u64,
 }
 
@@ -120,6 +138,39 @@ impl SessionCredentialStore {
         state.credentials.get(&CredentialKey::new(owner_scope, connection_id)).map(|entry| entry.password.clone())
     }
 
+    /// Stores an additional transient secret for a connection-specific purpose.
+    pub fn set_for_purpose(&self, owner_scope: &str, connection_id: &str, purpose: &str, password: &str) {
+        let _ = self.set_for_purpose_with_token(owner_scope, connection_id, purpose, password);
+    }
+
+    /// Stores a purpose-specific secret and returns a token that can roll back
+    /// this exact write without deleting a newer concurrent value.
+    pub fn set_for_purpose_with_token(
+        &self,
+        owner_scope: &str,
+        connection_id: &str,
+        purpose: &str,
+        password: &str,
+    ) -> Option<PurposeSessionCredentialWriteToken> {
+        if purpose.is_empty() || password.is_empty() {
+            return None;
+        }
+        let mut state = self.state.write().unwrap_or_else(|error| error.into_inner());
+        state.next_generation = state.next_generation.checked_add(1).expect("session credential generation overflow");
+        let key = PurposeCredentialKey::new(owner_scope, connection_id, purpose);
+        let generation = state.next_generation;
+        state.purpose_credentials.insert(key.clone(), SessionCredential { password: password.to_string(), generation });
+        Some(PurposeSessionCredentialWriteToken { key, generation })
+    }
+
+    pub fn get_for_purpose(&self, owner_scope: &str, connection_id: &str, purpose: &str) -> Option<String> {
+        let state = self.state.read().unwrap_or_else(|error| error.into_inner());
+        state
+            .purpose_credentials
+            .get(&PurposeCredentialKey::new(owner_scope, connection_id, purpose))
+            .map(|entry| entry.password.clone())
+    }
+
     /// 某个 owner 作用域下是否存在本次运行期临时密码。
     pub fn has(&self, owner_scope: &str, connection_id: &str) -> bool {
         self.get(owner_scope, connection_id).is_some()
@@ -129,6 +180,9 @@ impl SessionCredentialStore {
     pub fn remove(&self, owner_scope: &str, connection_id: &str) {
         let mut state = self.state.write().unwrap_or_else(|error| error.into_inner());
         state.credentials.remove(&CredentialKey::new(owner_scope, connection_id));
+        state.purpose_credentials.retain(|key, _| {
+            key.credential.owner_scope != owner_scope || key.credential.connection_id != connection_id
+        });
     }
 
     /// 仅当指定写入仍是当前值时删除，用于连接失败回滚，避免旧 attempt 删除更新密码。
@@ -142,11 +196,24 @@ impl SessionCredentialStore {
         is_current
     }
 
+    pub fn remove_purpose_if_current(&self, token: &PurposeSessionCredentialWriteToken) -> bool {
+        let mut state = self.state.write().unwrap_or_else(|error| error.into_inner());
+        let is_current = state
+            .purpose_credentials
+            .get(&token.key)
+            .is_some_and(|credential| credential.generation == token.generation);
+        if is_current {
+            state.purpose_credentials.remove(&token.key);
+        }
+        is_current
+    }
+
     /// 清除某个 owner 作用域下的全部凭据（Web 登出 / 登录会话失效），不影响其他
     /// 登录会话的凭据。
     pub fn clear_owner(&self, owner_scope: &str) {
         let mut state = self.state.write().unwrap_or_else(|error| error.into_inner());
         state.credentials.retain(|key, _| key.owner_scope != owner_scope);
+        state.purpose_credentials.retain(|key, _| key.credential.owner_scope != owner_scope);
     }
 
     /// 全局连接配置被编辑、删除或复用 ID 时，原子清除所有 owner 的临时凭据和
@@ -154,6 +221,7 @@ impl SessionCredentialStore {
     pub fn clear_connection(&self, connection_id: &str) {
         let mut state = self.state.write().unwrap_or_else(|error| error.into_inner());
         state.credentials.retain(|key, _| key.connection_id != connection_id);
+        state.purpose_credentials.retain(|key, _| key.credential.connection_id != connection_id);
         let pool_prefix = format!("{connection_id}:");
         state
             .pool_credential_owners
@@ -164,6 +232,7 @@ impl SessionCredentialStore {
     pub fn clear(&self) {
         let mut state = self.state.write().unwrap_or_else(|error| error.into_inner());
         state.credentials.clear();
+        state.purpose_credentials.clear();
     }
 
     pub fn record_pool_owner(&self, pool_key: &str, owner_scope: &str) {
@@ -195,7 +264,7 @@ impl SessionCredentialStore {
 
     fn credential_count(&self) -> usize {
         let state = self.state.read().unwrap_or_else(|error| error.into_inner());
-        state.credentials.len()
+        state.credentials.len() + state.purpose_credentials.len()
     }
 }
 
@@ -286,6 +355,32 @@ mod tests {
         assert!(!store.has("token-y", "conn-a"));
         assert!(!store.has("token-y", "conn-b"));
         assert!(store.has("token-x", "conn-a"));
+    }
+
+    #[test]
+    fn purpose_credentials_follow_owner_and_connection_cleanup() {
+        let store = SessionCredentialStore::new();
+        store.set_for_purpose("token-x", "conn-a", "nacos-primary", "new-secret");
+        store.set_for_purpose("token-y", "conn-a", "nacos-primary", "other-secret");
+
+        assert_eq!(store.get_for_purpose("token-x", "conn-a", "nacos-primary").as_deref(), Some("new-secret"));
+        assert_eq!(store.get_for_purpose("token-y", "conn-a", "nacos-primary").as_deref(), Some("other-secret"));
+        store.clear_owner("token-x");
+        assert_eq!(store.get_for_purpose("token-x", "conn-a", "nacos-primary"), None);
+        store.clear_connection("conn-a");
+        assert_eq!(store.get_for_purpose("token-y", "conn-a", "nacos-primary"), None);
+    }
+
+    #[test]
+    fn stale_purpose_write_token_cannot_remove_newer_credential() {
+        let store = SessionCredentialStore::new();
+        let first = store.set_for_purpose_with_token("token-x", "conn-a", "nacos-console", "first-secret").unwrap();
+        let second = store.set_for_purpose_with_token("token-x", "conn-a", "nacos-console", "second-secret").unwrap();
+
+        assert!(!store.remove_purpose_if_current(&first));
+        assert_eq!(store.get_for_purpose("token-x", "conn-a", "nacos-console").as_deref(), Some("second-secret"));
+        assert!(store.remove_purpose_if_current(&second));
+        assert_eq!(store.get_for_purpose("token-x", "conn-a", "nacos-console"), None);
     }
 
     #[test]

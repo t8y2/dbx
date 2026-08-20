@@ -91,6 +91,9 @@ const {
   editNacosNamespaceDesc,
   editNacosNamespaceLoading,
   confirmEditNacosNamespace,
+  showDeleteNacosNamespaceConfirm,
+  deleteNacosNamespaceLoading,
+  confirmDeleteNacosNamespace,
   showRenameMongoCollectionDialog,
   renameMongoCollectionName,
   renameMongoCollectionError,
@@ -182,6 +185,7 @@ watch(
     showEditDatabasePropertiesDialog,
     showCreateNacosNamespaceDialog,
     showEditNacosNamespaceDialog,
+    showDeleteNacosNamespaceConfirm,
     showRenameMongoCollectionDialog,
     showCloneMongoCollectionDialog,
     showCreateMongoIndexDialog,
@@ -716,6 +720,26 @@ watch(
         <Button variant="outline" :disabled="editNacosNamespaceLoading" @click="showEditNacosNamespaceDialog = false">{{ t("dangerDialog.cancel") }}</Button>
         <Button :disabled="!editNacosNamespaceName.trim() || editNacosNamespaceLoading" @click="confirmEditNacosNamespace">
           {{ editNacosNamespaceLoading ? t("nacos.updatingNamespace") : t("dangerDialog.confirm") }}
+        </Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
+
+  <Dialog v-model:open="showDeleteNacosNamespaceConfirm">
+    <DialogContent class="sm:max-w-[420px]">
+      <DialogHeader>
+        <DialogTitle>{{ t("nacos.deleteNamespace") }}</DialogTitle>
+      </DialogHeader>
+      <div class="flex items-start gap-3 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm">
+        <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
+        <p class="min-w-0 break-words text-muted-foreground [overflow-wrap:anywhere]">
+          {{ t("nacos.deleteNamespaceDescription", { name: node.nacosNamespaceName || node.label, id: node.nacosNamespace || "public" }) }}
+        </p>
+      </div>
+      <DialogFooter>
+        <Button variant="outline" :disabled="deleteNacosNamespaceLoading" @click="showDeleteNacosNamespaceConfirm = false">{{ t("dangerDialog.cancel") }}</Button>
+        <Button variant="destructive" :disabled="deleteNacosNamespaceLoading" @click="confirmDeleteNacosNamespace">
+          {{ deleteNacosNamespaceLoading ? t("nacos.deletingNamespace") : t("dangerDialog.confirm") }}
         </Button>
       </DialogFooter>
     </DialogContent>

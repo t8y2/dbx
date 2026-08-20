@@ -49,8 +49,8 @@ import type {
   NacosSearchProgress,
 } from "@/types/nacos";
 
-export async function nacosTestConnection(connectionId: string): Promise<NacosConnectionInfo> {
-  return invoke("nacos_test_connection", { connectionId });
+export async function nacosTestConnection(connectionId: string, forceRefresh = false): Promise<NacosConnectionInfo> {
+  return invoke("nacos_test_connection", { connectionId, forceRefresh });
 }
 
 export async function nacosListNamespaces(connectionId: string): Promise<NacosNamespaceInfo[]> {
@@ -67,6 +67,10 @@ export async function nacosCreateNamespace(connectionId: string, req: NacosNames
 
 export async function nacosUpdateNamespace(connectionId: string, req: NacosNamespaceUpdate): Promise<void> {
   return invoke("nacos_update_namespace", { connectionId, req });
+}
+
+export async function nacosDeleteNamespace(connectionId: string, namespaceId: string): Promise<void> {
+  return invoke("nacos_delete_namespace", { connectionId, namespaceId });
 }
 
 export async function nacosListConfigs(connectionId: string, query: NacosConfigQuery): Promise<NacosConfigList> {

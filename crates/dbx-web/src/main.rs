@@ -335,6 +335,10 @@ async fn main() {
         .route("/connection/check-health", post(routes::connection::check_connection_health))
         .route("/connection/session-credential-status", post(routes::connection::session_credential_status))
         .route("/connection/forget-session-credential", post(routes::connection::forget_session_credential))
+        .route(
+            "/connection/replace-nacos-session-credential",
+            post(routes::connection::replace_nacos_session_credential),
+        )
         .route("/connection/identifier-quote", post(routes::connection::connection_identifier_quote))
         .route("/connection/close-database", post(routes::connection::close_database_connection))
         .route("/connection/save", post(routes::connection::save_connections))
@@ -726,6 +730,7 @@ async fn main() {
         .route("/nacos/sidebar/snapshot", post(routes::nacos::sidebar_snapshot))
         .route("/nacos/namespaces/create", post(routes::nacos::create_namespace))
         .route("/nacos/namespaces/update", post(routes::nacos::update_namespace))
+        .route("/nacos/namespaces/delete", post(routes::nacos::delete_namespace))
         .route("/nacos/configs/list", post(routes::nacos::list_configs))
         .route("/nacos/configs/get", post(routes::nacos::get_config))
         .route("/nacos/configs/publish", post(routes::nacos::publish_config))

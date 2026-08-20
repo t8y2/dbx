@@ -9,13 +9,16 @@ import type { NacosConnectionInfo } from "@/types/nacos";
 const mocks = vi.hoisted(() => ({
   connectionInfo: null as NacosConnectionInfo | null,
   ensureConnected: vi.fn(async () => undefined),
-}));
-
-vi.mock("@/lib/backend/api", () => ({
+  refreshLegacyWorkspace: vi.fn(async () => undefined),
+  refreshEnhancedWorkspace: vi.fn(async () => undefined),
   nacosTestConnection: vi.fn(async () => {
     if (!mocks.connectionInfo) throw new Error("missing Nacos connection fixture");
     return mocks.connectionInfo;
   }),
+}));
+
+vi.mock("@/lib/backend/api", () => ({
+  nacosTestConnection: (...args: unknown[]) => mocks.nacosTestConnection(...args),
 }));
 
 vi.mock("@/stores/connectionStore", () => ({
@@ -31,7 +34,10 @@ vi.mock("@/components/nacos/NacosAccessControl.vue", async () => {
   return {
     default: {
       props: ["tab"],
-      setup: (props: { tab: string }) => () => h("div", { "data-testid": "nacos-access-control-workspace", "data-tab": props.tab }),
+      setup: (props: { tab: string }, { expose }: { expose: (value: { refresh: () => Promise<void> }) => void }) => {
+        expose({ refresh: mocks.refreshLegacyWorkspace });
+        return () => h("div", { "data-testid": "nacos-access-control-workspace", "data-tab": props.tab });
+      },
     },
   };
 });
@@ -41,11 +47,14 @@ vi.mock("@/components/nacos/NacosRoleAccessControl.vue", async () => {
   return {
     default: {
       props: ["capabilities"],
-      setup: (props: { capabilities: { createUser: { supported: boolean } } }) => () =>
-        h("div", {
-          "data-testid": "nacos-role-access-control-workspace",
-          "data-can-create-user": String(props.capabilities.createUser.supported),
-        }),
+      setup: (props: { capabilities: { createUser: { supported: boolean } } }, { expose }: { expose: (value: { refresh: () => Promise<void> }) => void }) => {
+        expose({ refresh: mocks.refreshEnhancedWorkspace });
+        return () =>
+          h("div", {
+            "data-testid": "nacos-role-access-control-workspace",
+            "data-can-create-user": String(props.capabilities.createUser.supported),
+          });
+      },
     },
   };
 });
@@ -96,6 +105,39 @@ describe("NacosAccessControlConsole", () => {
     expect(legacySource).toContain("blacklist: [...userForm.value.blacklist]");
     expect(legacySource).not.toContain('<textarea v-model="userForm.whitelist"');
     expect(legacySource).not.toContain('<textarea v-model="userForm.blacklist"');
+  });
+
+  it("invalidates the r-nacos namespace picker when namespaces change", () => {
+    expect(legacySource).toContain('import { subscribeNacosNamespacesChanged, type NacosNamespacesChangedDetail } from "@/lib/nacos/nacosNamespaceCache"');
+    expect(legacySource).toContain("stopNacosNamespacesChangedListener = subscribeNacosNamespacesChanged(handleNacosNamespacesChanged)");
+    expect(legacySource).toContain("if (detail.connectionId !== props.connectionId) return");
+    expect(legacySource).toContain("if (userDialogOpen.value && isRNacos.value) void loadUserFormNamespaces(true)");
+    expect(legacySource).toContain("stopNacosNamespacesChangedListener?.()");
+  });
+
+  it("notifies users when an official Nacos password reset succeeds or fails", () => {
+    expect(legacySource).toContain('const userOperationNotice = ref<{ kind: "success" | "error"; message: string } | null>(null)');
+    expect(legacySource).toContain("await syncCurrentConnectionPassword(username, userForm.value.password)");
+    expect(legacySource).toContain('userOperationNotice.value = { kind: "error", message: t("nacos.passwordResetFailed", { message }) }');
+    expect(legacySource).toContain('v-if="userOperationNotice"');
+  });
+
+  it("requires exact username confirmation before deleting a user in the legacy workspace", () => {
+    expect(legacySource).toContain("const userDeleteConfirmed = computed(() => userDeleteConfirmation.value === pendingUserDelete.value?.username)");
+    expect(legacySource).toContain('@click="openDeleteUser(user)"');
+    expect(legacySource).toContain('t("nacos.accessDeleteUserConfirmationLabel")');
+    expect(legacySource).toContain(':disabled="deletingUser || !userDeleteConfirmed"');
+  });
+
+  it("does not hide user deletion solely because the user has ROLE_ADMIN", () => {
+    expect(legacySource).not.toContain('if (user.roles.includes("ROLE_ADMIN")) return');
+    expect(legacySource).not.toContain("v-if=\"!user.roles.includes('ROLE_ADMIN')\"");
+  });
+
+  it("uses the same role creation icon in the legacy and enhanced workspaces", () => {
+    expect(legacySource).toContain('import { KeyRound, Loader2, Pencil, Plus, RefreshCw, Search, ShieldCheck, ShieldPlus, Trash2, UserRound } from "@lucide/vue"');
+    expect(legacySource).toContain('@click="openAssignRole"><ShieldPlus class="h-3.5 w-3.5" />{{ t("nacos.assignRole") }}');
+    expect(readFileSync(resolve(process.cwd(), "apps/desktop/src/components/nacos/NacosRoleAccessControl.vue"), "utf8")).toContain('<ShieldPlus v-else class="h-3.5 w-3.5" />');
   });
 
   it("switches tabs when navigating between associated users and roles", () => {
@@ -200,6 +242,53 @@ describe("NacosAccessControlConsole", () => {
     const workspace = host.querySelector('[data-testid="nacos-role-access-control-workspace"]');
     expect(workspace).not.toBeNull();
     expect(workspace?.getAttribute("data-can-create-user")).toBe("false");
+  });
+
+  it("refreshes the enhanced workspace snapshot after refreshing connection capabilities", async () => {
+    const supported = { supported: true };
+    mocks.connectionInfo = {
+      serverAddr: "http://127.0.0.1:8848",
+      displayServerAddr: "http://127.0.0.1:8848",
+      namespace: "",
+      auth: "usernamePassword",
+      capabilities: {
+        supportsConfigManagement: true,
+        supportsServiceManagement: true,
+        supportsInstanceUpdate: true,
+        supportsRawApi: true,
+        accessControl: {
+          mode: "roleBindings",
+          listUsers: supported,
+          createUser: supported,
+          updateUser: supported,
+          deleteUser: supported,
+          listRoleBindings: supported,
+          assignRole: supported,
+          removeRole: supported,
+          listPermissions: supported,
+          grantPermission: supported,
+          revokePermission: supported,
+          enhancedWorkspace: true,
+          supportsNamespacePrivileges: false,
+        },
+      },
+    };
+
+    const host = document.createElement("div");
+    document.body.append(host);
+    const app = createApp(NacosAccessControlConsole, { connectionId: "nacos-refresh" });
+    mountedApps.push({ app, host });
+    app.mount(host);
+    await settle();
+    mocks.refreshEnhancedWorkspace.mockClear();
+
+    const refreshButton = [...host.querySelectorAll("button")].find((button) => button.textContent?.includes("nacos.refresh"));
+    expect(refreshButton).toBeDefined();
+    refreshButton?.click();
+    await settle();
+
+    expect(mocks.nacosTestConnection).toHaveBeenLastCalledWith("nacos-refresh", true);
+    expect(mocks.refreshEnhancedWorkspace).toHaveBeenCalledTimes(1);
   });
 
   it("internationalizes the sidebar entry, including trees persisted with the old label", () => {

@@ -394,6 +394,10 @@ export async function forgetSessionCredential(connectionId: string): Promise<voi
   return post("/api/connection/forget-session-credential", { connectionId });
 }
 
+export async function replaceNacosSessionCredential(connectionId: string, username: string, password: string): Promise<void> {
+  return post("/api/connection/replace-nacos-session-credential", { connectionId, username, password });
+}
+
 export async function checkConnectionHealth(connectionId: string): Promise<void> {
   return post("/api/connection/check-health", { connectionId });
 }
@@ -3171,8 +3175,8 @@ export async function consulMeshExportedServicesApply(connectionId: string, name
 // Nacos
 // ---------------------------------------------------------------------------
 
-export async function nacosTestConnection(connectionId: string): Promise<NacosConnectionInfo> {
-  return post("/api/nacos/test-connection", { connectionId });
+export async function nacosTestConnection(connectionId: string, forceRefresh = false): Promise<NacosConnectionInfo> {
+  return post("/api/nacos/test-connection", { connectionId, forceRefresh });
 }
 
 export async function nacosListNamespaces(connectionId: string): Promise<NacosNamespaceInfo[]> {
@@ -3189,6 +3193,10 @@ export async function nacosCreateNamespace(connectionId: string, req: NacosNames
 
 export async function nacosUpdateNamespace(connectionId: string, req: NacosNamespaceUpdate): Promise<void> {
   return post("/api/nacos/namespaces/update", { connectionId, req });
+}
+
+export async function nacosDeleteNamespace(connectionId: string, namespaceId: string): Promise<void> {
+  return post("/api/nacos/namespaces/delete", { connectionId, namespaceId });
 }
 
 export async function nacosListConfigs(connectionId: string, query: NacosConfigQuery): Promise<NacosConfigList> {

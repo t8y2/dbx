@@ -2422,6 +2422,7 @@ impl Storage {
                     // This preference is an exception: retaining the old password would
                     // make a no-save connection silently authenticate without prompting.
                     persist_secret_in_tx(&tx, &config.id, "password", "")?;
+                    delete_secret_prefix_in_tx(&tx, &config.id, NACOS_AUTH_SECRET_PREFIX)?;
                 }
                 let mut sanitized = config;
                 sanitized.password = String::new();
@@ -2827,6 +2828,31 @@ impl Storage {
     ) -> Result<bool, String> {
         if config.db_type != DatabaseType::Nacos {
             return Ok(false);
+        }
+        if !config.save_password {
+            let primary_needs_rewrite = nacos_auth_object(config.external_config.as_ref())
+                .filter(|auth| auth.get("kind").and_then(serde_json::Value::as_str) == Some("usernamePassword"))
+                .and_then(|auth| auth.get("password").and_then(serde_json::Value::as_str))
+                .is_some_and(|password| !password.is_empty());
+            let console_needs_rewrite = nacos_console_auth_object(config.external_config.as_ref())
+                .filter(|auth| auth.get("kind").and_then(serde_json::Value::as_str) == Some("usernamePassword"))
+                .and_then(|auth| auth.get("password").and_then(serde_json::Value::as_str))
+                .is_some_and(|password| !password.is_empty());
+            scrub_nacos_auth_secrets(config);
+
+            let connection_id = connection_id.to_string();
+            let key_prefix = format!("{NACOS_AUTH_SECRET_PREFIX}%");
+            self.with_conn(move |conn| {
+                conn.execute(
+                    "DELETE FROM connection_secrets WHERE connection_id = ?1 AND key LIKE ?2",
+                    params![connection_id, key_prefix],
+                )
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+            })
+            .await?;
+
+            return Ok(primary_needs_rewrite || console_needs_rewrite);
         }
         let mut rewritten = false;
         if let Some(auth) = nacos_auth_object_mut(config.external_config.as_mut()) {
@@ -3934,7 +3960,7 @@ fn persist_mq_token_signing_secret_in_tx(
 }
 
 fn persist_nacos_auth_secrets_in_tx(tx: &rusqlite::Transaction<'_>, config: &ConnectionConfig) -> Result<(), String> {
-    if config.db_type != DatabaseType::Nacos {
+    if config.db_type != DatabaseType::Nacos || !config.save_password {
         delete_secret_prefix_in_tx(tx, &config.id, NACOS_AUTH_SECRET_PREFIX)?;
         return Ok(());
     }
@@ -4596,6 +4622,24 @@ mod tests {
         config.external_config.as_ref()?.get("auth")?.get("password")?.as_str()
     }
 
+    fn nacos_console_auth_password(config: &ConnectionConfig) -> Option<&str> {
+        config.external_config.as_ref()?.get("rnacosConsoleAuth")?.get("password")?.as_str()
+    }
+
+    fn nacos_connection_with_console_auth(
+        id: &str,
+        primary_password: &str,
+        console_password: &str,
+    ) -> ConnectionConfig {
+        let mut config = nacos_connection(id, primary_password);
+        config.external_config.as_mut().unwrap()["rnacosConsoleAuth"] = serde_json::json!({
+            "kind": "usernamePassword",
+            "username": "console",
+            "password": console_password
+        });
+        config
+    }
+
     async fn create_data_dir_with_connection(name: &str, connection_id: &str, token: &str) -> std::path::PathBuf {
         let data_dir = temp_data_dir(name);
         let storage = Storage::open(&data_dir.join("dbx.db")).await.unwrap();
@@ -5034,6 +5078,76 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("console-secret")
         );
+    }
+
+    #[tokio::test]
+    async fn save_connections_does_not_persist_nacos_passwords_when_save_password_is_false() {
+        let path = temp_db_path("nacos-auth-no-save");
+        let storage = Storage::open(&path).await.unwrap();
+        let mut config = nacos_connection_with_console_auth("nacos", "primary-secret", "console-secret");
+        config.save_password = false;
+
+        storage.save_connections(&[config]).await.unwrap();
+
+        assert_eq!(storage.get_secret("nacos", NACOS_AUTH_PASSWORD_KEY).await.unwrap(), None);
+        assert_eq!(storage.get_secret("nacos", NACOS_RNACOS_CONSOLE_PASSWORD_KEY).await.unwrap(), None);
+        let loaded = storage.load_connections().await.unwrap();
+        assert_eq!(nacos_auth_password(&loaded[0]), Some(""));
+        assert_eq!(nacos_console_auth_password(&loaded[0]), Some(""));
+    }
+
+    #[tokio::test]
+    async fn switching_nacos_password_saving_off_removes_all_stored_auth_secrets() {
+        let path = temp_db_path("nacos-auth-disable-save");
+        let storage = Storage::open(&path).await.unwrap();
+        let mut config = nacos_connection_with_console_auth("nacos", "primary-secret", "console-secret");
+        storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
+        assert!(storage.get_secret("nacos", NACOS_AUTH_PASSWORD_KEY).await.unwrap().is_some());
+        assert!(storage.get_secret("nacos", NACOS_RNACOS_CONSOLE_PASSWORD_KEY).await.unwrap().is_some());
+
+        config.save_password = false;
+        storage.save_connections(&[config]).await.unwrap();
+
+        assert_eq!(storage.get_secret("nacos", NACOS_AUTH_PASSWORD_KEY).await.unwrap(), None);
+        assert_eq!(storage.get_secret("nacos", NACOS_RNACOS_CONSOLE_PASSWORD_KEY).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn metadata_sync_removes_nacos_auth_secrets_when_password_saving_is_disabled() {
+        let path = temp_db_path("nacos-auth-no-save-metadata-sync");
+        let storage = Storage::open(&path).await.unwrap();
+        let mut config = nacos_connection_with_console_auth("nacos", "primary-secret", "console-secret");
+        storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
+
+        config.save_password = false;
+        storage.save_connection_metadata_preserving_secrets(&[config]).await.unwrap();
+
+        assert_eq!(storage.get_secret("nacos", NACOS_AUTH_PASSWORD_KEY).await.unwrap(), None);
+        assert_eq!(storage.get_secret("nacos", NACOS_RNACOS_CONSOLE_PASSWORD_KEY).await.unwrap(), None);
+        let loaded = storage.load_connections().await.unwrap();
+        assert_eq!(nacos_auth_password(&loaded[0]), Some(""));
+        assert_eq!(nacos_console_auth_password(&loaded[0]), Some(""));
+    }
+
+    #[tokio::test]
+    async fn load_connections_cleans_legacy_nacos_passwords_when_saving_is_disabled() {
+        let path = temp_db_path("nacos-auth-no-save-legacy-cleanup");
+        let storage = Storage::open(&path).await.unwrap();
+        let mut config = nacos_connection_with_console_auth("nacos", "legacy-primary-secret", "legacy-console-secret");
+        config.save_password = false;
+        insert_raw_connection(&storage, &config).await;
+        storage.set_secret("nacos", NACOS_AUTH_PASSWORD_KEY, "stale-primary-secret").await.unwrap();
+        storage.set_secret("nacos", NACOS_RNACOS_CONSOLE_PASSWORD_KEY, "stale-console-secret").await.unwrap();
+
+        let loaded = storage.load_connections().await.unwrap();
+
+        assert_eq!(nacos_auth_password(&loaded[0]), Some(""));
+        assert_eq!(nacos_console_auth_password(&loaded[0]), Some(""));
+        assert_eq!(storage.get_secret("nacos", NACOS_AUTH_PASSWORD_KEY).await.unwrap(), None);
+        assert_eq!(storage.get_secret("nacos", NACOS_RNACOS_CONSOLE_PASSWORD_KEY).await.unwrap(), None);
+        let raw_json = raw_connection_json(&storage, "nacos").await;
+        assert!(!raw_json.contains("legacy-primary-secret"));
+        assert!(!raw_json.contains("legacy-console-secret"));
     }
 
     #[tokio::test]

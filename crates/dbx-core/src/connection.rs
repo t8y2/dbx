@@ -26,6 +26,7 @@ use crate::models::connection::{
     database_info_from_protocol_value, parse_jdbc_host_port, parse_mongo_first_host, rewrite_jdbc_url_host,
     ConnectionConfig, ConnectionTestResult, DatabaseConnectionInfo, DatabaseType, TransportLayerConfig,
 };
+use crate::nacos::config::{NACOS_CONSOLE_SESSION_PASSWORD, NACOS_PRIMARY_SESSION_PASSWORD};
 use crate::path_utils::expand_tilde;
 use crate::plugins::{PluginDriverSession, PluginRegistry, PluginRuntimeEnv};
 use crate::query_cancel::RunningQueries;
@@ -2933,7 +2934,28 @@ impl AppState {
         connection_id: &str,
         config: &ConnectionConfig,
     ) -> Result<crate::nacos::config::NacosAdminConfig, String> {
-        let nacos_config = crate::nacos::config::NacosAdminConfig::from_connection(config)?;
+        let mut nacos_config = crate::nacos::config::NacosAdminConfig::from_connection(config)?;
+        if !config.save_password {
+            let owner = crate::session_credentials::current_credential_owner().unwrap_or_default();
+            let primary_password = self
+                .session_credentials
+                .get_for_purpose(&owner, connection_id, NACOS_PRIMARY_SESSION_PASSWORD)
+                .or_else(|| self.session_credentials.get(&owner, connection_id));
+            if let (Some(password), crate::nacos::config::NacosAuthConfig::UsernamePassword { password: target, .. }) =
+                (primary_password, &mut nacos_config.auth)
+            {
+                *target = password;
+            }
+            if let (
+                Some(password),
+                crate::nacos::config::NacosRNacosConsoleAuth::UsernamePassword { password: target, .. },
+            ) = (
+                self.session_credentials.get_for_purpose(&owner, connection_id, NACOS_CONSOLE_SESSION_PASSWORD),
+                &mut nacos_config.rnacos_console_auth,
+            ) {
+                *target = password;
+            }
+        }
         if !config.has_effective_transport_layers() {
             return Ok(nacos_config);
         }
@@ -2997,6 +3019,57 @@ impl AppState {
                 Err(error)
             }
         }
+    }
+
+    pub async fn replace_nacos_session_credential(
+        &self,
+        owner_scope: &str,
+        connection_id: &str,
+        username: &str,
+        password: &str,
+    ) -> Result<(), String> {
+        let username = username.trim();
+        if username.is_empty() || password.is_empty() {
+            return Err("Nacos username and replacement password are required".to_string());
+        }
+        let config = self.configs.read().await.get(connection_id).cloned().ok_or("Connection not found")?;
+        if config.db_type != DatabaseType::Nacos {
+            return Err("Connection is not a Nacos connection".to_string());
+        }
+        if config.save_password {
+            return Err("Connection saves its password; update the persisted connection instead".to_string());
+        }
+        let nacos_config = crate::nacos::config::NacosAdminConfig::from_connection(&config)?;
+        let primary_matches = matches!(
+            &nacos_config.auth,
+            crate::nacos::config::NacosAuthConfig::UsernamePassword { username: current, .. } if current == username
+        );
+        let console_matches = matches!(
+            &nacos_config.rnacos_console_auth,
+            crate::nacos::config::NacosRNacosConsoleAuth::UsernamePassword { username: current, .. } if current == username
+        );
+        if !primary_matches && !console_matches {
+            return Err(format!("Nacos user {username} is not used by this connection"));
+        }
+        if primary_matches {
+            let _ = self.session_credentials.set(owner_scope, connection_id, password);
+            self.session_credentials.set_for_purpose(
+                owner_scope,
+                connection_id,
+                NACOS_PRIMARY_SESSION_PASSWORD,
+                password,
+            );
+        }
+        if console_matches {
+            self.session_credentials.set_for_purpose(
+                owner_scope,
+                connection_id,
+                NACOS_CONSOLE_SESSION_PASSWORD,
+                password,
+            );
+        }
+        self.nacos_registry.drop_connection(connection_id).await;
+        Ok(())
     }
 
     async fn remove_stale_connection_pool(&self, pool_key: &str) -> bool {
@@ -4840,6 +4913,60 @@ pub fn connection_configs_pool_equivalent(a: &ConnectionConfig, b: &ConnectionCo
     false
 }
 
+/// Whether transient credentials can safely survive a persisted config update.
+///
+/// This comparison is intentionally conservative: only presentation, local
+/// visibility, and runtime-policy fields are ignored. Endpoint, account,
+/// transport, TLS, driver, and unclassified external-config changes still
+/// invalidate credentials. Nacos managed namespaces are a local discovery
+/// scope and therefore do not change which account a transient password
+/// belongs to.
+pub fn connection_configs_session_credentials_compatible(a: &ConnectionConfig, b: &ConnectionConfig) -> bool {
+    fn normalize(mut config: ConnectionConfig) -> ConnectionConfig {
+        config.name.clear();
+        config.note.clear();
+        config.driver_label = None;
+        config.default_schema = None;
+        config.visible_databases = None;
+        config.visible_schemas = None;
+        config.show_system_schemas = false;
+        config.color = None;
+        config.docs_notes_path = None;
+        config.connect_timeout_secs = 0;
+        config.query_timeout_secs = 0;
+        config.idle_timeout_secs = 0;
+        config.keepalive_interval_secs = 0;
+        config.redis_key_separator.clear();
+        config.redis_scan_page_size = None;
+        config.redis_database_aliases.clear();
+        config.one_time = false;
+        config.read_only = false;
+        config.is_production = false;
+        config.production_databases.clear();
+        config.database_info = None;
+
+        if config.db_type == DatabaseType::Nacos {
+            if let Some(external) = config.external_config.as_mut().and_then(serde_json::Value::as_object_mut) {
+                external.remove("managedNamespaces");
+                external.remove("managed_namespaces");
+                if !config.save_password {
+                    for key in ["auth", "rnacosConsoleAuth", "rnacos_console_auth"] {
+                        if let Some(auth) = external.get_mut(key).and_then(serde_json::Value::as_object_mut) {
+                            auth.insert("password".to_string(), serde_json::Value::String(String::new()));
+                        }
+                    }
+                }
+            }
+        }
+        if !config.save_password {
+            config.password.clear();
+        }
+        config
+    }
+
+    normalize(a.clone()) == normalize(b.clone())
+}
+
 fn pool_key_for_session_role(
     config: Option<&ConnectionConfig>,
     base_pool_key: String,
@@ -5287,17 +5414,17 @@ async fn detect_ob_oracle_mode(config: &ConnectionConfig, pool: &db::mysql::MySq
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_connect_timeout, connection_configs_pool_equivalent, connection_probe_endpoints,
-        connection_remote_endpoint, connection_url_for_endpoint, database_connection_config,
-        database_connection_config_with_catalog, gaussdb_identifier_quote_from_query_result,
-        gaussdb_m_jdbc_config_for_endpoint, gaussdb_uses_m_jdbc_driver, kafka_single_loopback_bootstrap_endpoint,
-        metadata_connection_config, mysql_metadata_fallback_url, mysql_pool_setup_queries,
-        oceanbase_mysql_setup_queries, prestosql_jdbc_config_for_endpoint, redacted_connection_url_for_endpoint,
-        redis_sentinel_transport_id, redis_sentinel_transport_prefix, sqlserver_legacy_agent_config,
-        sqlserver_legacy_driver_error, sqlserver_uses_legacy_driver, task_client_session_id,
-        upsert_connection_url_param, uses_bare_mysql_pool, uses_tcp_probe, validate_connection_url_params,
-        validate_h2_database_path, AppState, MysqlMode, PoolKind, GAUSSDB_M_JDBC_DRIVER_CLASS,
-        GAUSSDB_M_JDBC_DRIVER_PROFILE, PRESTOSQL_JDBC_DRIVER_CLASS,
+        agent_connect_timeout, connection_configs_pool_equivalent, connection_configs_session_credentials_compatible,
+        connection_probe_endpoints, connection_remote_endpoint, connection_url_for_endpoint,
+        database_connection_config, database_connection_config_with_catalog,
+        gaussdb_identifier_quote_from_query_result, gaussdb_m_jdbc_config_for_endpoint, gaussdb_uses_m_jdbc_driver,
+        kafka_single_loopback_bootstrap_endpoint, metadata_connection_config, mysql_metadata_fallback_url,
+        mysql_pool_setup_queries, oceanbase_mysql_setup_queries, prestosql_jdbc_config_for_endpoint,
+        redacted_connection_url_for_endpoint, redis_sentinel_transport_id, redis_sentinel_transport_prefix,
+        sqlserver_legacy_agent_config, sqlserver_legacy_driver_error, sqlserver_uses_legacy_driver,
+        task_client_session_id, upsert_connection_url_param, uses_bare_mysql_pool, uses_tcp_probe,
+        validate_connection_url_params, validate_h2_database_path, AppState, MysqlMode, PoolKind,
+        GAUSSDB_M_JDBC_DRIVER_CLASS, GAUSSDB_M_JDBC_DRIVER_PROFILE, PRESTOSQL_JDBC_DRIVER_CLASS,
     };
     use crate::agent_connection::{
         agent_connect_params, mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver,
@@ -5459,6 +5586,59 @@ mod tests {
 
         // 完全相等（含相同密码）→ true。
         assert!(connection_configs_pool_equivalent(&a, &a.clone()));
+    }
+
+    #[test]
+    fn session_credentials_survive_nacos_scope_and_display_updates() {
+        let mut initial = mysql_config(None);
+        initial.db_type = DatabaseType::Nacos;
+        initial.save_password = false;
+        initial.password = "old-session-secret".to_string();
+        initial.visible_databases = Some(vec!["namespace-a".to_string()]);
+        initial.external_config = Some(serde_json::json!({
+            "implementation": "nacos",
+            "versionMode": "v3",
+            "apiPlane": "admin",
+            "serverAddr": "http://127.0.0.1:8848",
+            "managedNamespaces": ["namespace-a"],
+            "auth": {
+                "kind": "usernamePassword",
+                "username": "ordinary-user",
+                "password": "old-session-secret"
+            }
+        }));
+
+        let mut updated = initial.clone();
+        updated.name = "Renamed Nacos".to_string();
+        updated.note = "Local note".to_string();
+        updated.visible_databases = Some(vec!["namespace-a".to_string(), "namespace-b".to_string()]);
+        updated.external_config.as_mut().unwrap()["managedNamespaces"] =
+            serde_json::json!(["namespace-a", "namespace-b"]);
+        updated.external_config.as_mut().unwrap()["auth"]["password"] = serde_json::json!("new-session-secret");
+
+        assert!(connection_configs_session_credentials_compatible(&initial, &updated));
+
+        let mut scrubbed = updated.clone();
+        scrubbed.external_config.as_mut().unwrap()["auth"].as_object_mut().unwrap().remove("password");
+        assert!(connection_configs_session_credentials_compatible(&initial, &scrubbed));
+
+        updated.external_config.as_mut().unwrap()["serverAddr"] = serde_json::json!("http://127.0.0.1:8080");
+        assert!(!connection_configs_session_credentials_compatible(&initial, &updated));
+    }
+
+    #[test]
+    fn session_credentials_do_not_survive_nacos_account_updates() {
+        let mut initial = mysql_config(None);
+        initial.db_type = DatabaseType::Nacos;
+        initial.save_password = false;
+        initial.external_config = Some(serde_json::json!({
+            "serverAddr": "http://127.0.0.1:8848",
+            "auth": { "kind": "usernamePassword", "username": "user-a", "password": "secret" }
+        }));
+        let mut updated = initial.clone();
+        updated.external_config.as_mut().unwrap()["auth"]["username"] = serde_json::json!("user-b");
+
+        assert!(!connection_configs_session_credentials_compatible(&initial, &updated));
     }
 
     #[tokio::test]

@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
-import { KeyRound, Loader2, Pencil, Plus, RefreshCw, Search, ShieldCheck, Trash2, UserRound } from "@lucide/vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { KeyRound, Loader2, Pencil, Plus, RefreshCw, Search, ShieldCheck, ShieldPlus, Trash2, UserRound } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -11,9 +11,10 @@ import { Switch } from "@/components/ui/switch";
 import NacosNamespaceMultiSelect from "@/components/nacos/NacosNamespaceMultiSelect.vue";
 import * as api from "@/lib/backend/api";
 import { executeWithProductionContextGuard } from "@/lib/database/productionExecutionGuard";
+import { subscribeNacosNamespacesChanged, type NacosNamespacesChangedDetail } from "@/lib/nacos/nacosNamespaceCache";
 import { normalizeNacosNamespacesForDisplay } from "@/lib/nacos/nacosNamespaceVisibility";
 import { useConnectionStore } from "@/stores/connectionStore";
-import type { NacosConnectionInfo, NacosNamespaceInfo, NacosNamespacePrivilege, NacosOperationCapability, NacosRoleBinding, NacosUserInfo } from "@/types/nacos";
+import type { NacosAdminConfig, NacosConnectionInfo, NacosNamespaceInfo, NacosNamespacePrivilege, NacosOperationCapability, NacosRoleBinding, NacosUserInfo } from "@/types/nacos";
 
 const props = defineProps<{
   connectionId: string;
@@ -30,6 +31,7 @@ type UserDialogMode = "create" | "edit" | "reset";
 const users = ref<NacosUserInfo[]>([]);
 const usersLoading = ref(false);
 const usersError = ref("");
+const userOperationNotice = ref<{ kind: "success" | "error"; message: string } | null>(null);
 const userSearch = ref("");
 const userPageNo = ref(1);
 const userPageSize = ref(20);
@@ -53,6 +55,7 @@ const userFormNamespaces = ref<NacosNamespaceInfo[]>([]);
 const userFormNamespacesLoading = ref(false);
 const userFormNamespacesError = ref("");
 const pendingUserDelete = ref<NacosUserInfo | null>(null);
+const userDeleteConfirmation = ref("");
 const deletingUser = ref(false);
 const roleDialogOpen = ref(false);
 const roleDialogError = ref("");
@@ -67,12 +70,15 @@ const rnacosCaptchaImage = ref("");
 const rnacosCaptcha = ref("");
 const rnacosAuthError = ref("");
 let rnacosRetry: (() => Promise<void>) | null = null;
+let latestUserFormNamespacesRequestId = 0;
+let stopNacosNamespacesChangedListener: (() => void) | null = null;
 
 const accessControl = computed(() => props.connectionInfo?.capabilities.accessControl);
 const mode = computed(() => accessControl.value?.mode ?? "unavailable");
 const isRNacos = computed(() => mode.value === "embeddedRoles");
 const userTotalPages = computed(() => Math.max(1, Math.ceil(userTotal.value / Math.max(1, userPageSize.value))));
 const roleTotalPages = computed(() => Math.max(1, Math.ceil(roleTotal.value / Math.max(1, rolePageSize.value))));
+const userDeleteConfirmed = computed(() => userDeleteConfirmation.value === pendingUserDelete.value?.username);
 
 function createUserForm() {
   return {
@@ -264,20 +270,35 @@ async function loadRoles(page = rolePageNo.value) {
 
 async function loadUserFormNamespaces(force = false) {
   if (!isRNacos.value || userFormNamespacesLoading.value || (userFormNamespaces.value.length && !force)) return;
+  const connectionId = props.connectionId;
+  const requestId = ++latestUserFormNamespacesRequestId;
   userFormNamespacesLoading.value = true;
   userFormNamespacesError.value = "";
   try {
-    userFormNamespaces.value = normalizeNacosNamespacesForDisplay(await api.nacosListNamespaces(props.connectionId));
+    const namespaces = normalizeNacosNamespacesForDisplay(await api.nacosListNamespaces(connectionId));
+    if (requestId !== latestUserFormNamespacesRequestId || connectionId !== props.connectionId) return;
+    userFormNamespaces.value = namespaces;
   } catch (error) {
+    if (requestId !== latestUserFormNamespacesRequestId || connectionId !== props.connectionId) return;
     userFormNamespacesError.value = error instanceof Error ? error.message : String(error);
   } finally {
-    userFormNamespacesLoading.value = false;
+    if (requestId === latestUserFormNamespacesRequestId) userFormNamespacesLoading.value = false;
   }
+}
+
+function handleNacosNamespacesChanged(detail: NacosNamespacesChangedDetail) {
+  if (detail.connectionId !== props.connectionId) return;
+  latestUserFormNamespacesRequestId += 1;
+  userFormNamespaces.value = [];
+  userFormNamespacesError.value = "";
+  userFormNamespacesLoading.value = false;
+  if (userDialogOpen.value && isRNacos.value) void loadUserFormNamespaces(true);
 }
 
 function openCreateUser() {
   userDialogMode.value = "create";
   userDialogError.value = "";
+  userOperationNotice.value = null;
   userForm.value = createUserForm();
   userDialogOpen.value = true;
   void loadUserFormNamespaces();
@@ -286,6 +307,7 @@ function openCreateUser() {
 function openEditUser(user: NacosUserInfo) {
   userDialogMode.value = isRNacos.value ? "edit" : "reset";
   userDialogError.value = "";
+  userOperationNotice.value = null;
   const privilege = user.namespacePrivilege;
   userForm.value = {
     username: user.username,
@@ -305,8 +327,10 @@ function openEditUser(user: NacosUserInfo) {
 watch(
   () => props.connectionId,
   () => {
+    latestUserFormNamespacesRequestId += 1;
     userFormNamespaces.value = [];
     userFormNamespacesError.value = "";
+    userFormNamespacesLoading.value = false;
   },
 );
 
@@ -320,6 +344,7 @@ function toggleRNacosRole(role: string, checked: boolean) {
 async function saveUser() {
   if (userSaving.value) return;
   const username = userForm.value.username.trim();
+  const resettingPassword = userDialogMode.value === "reset";
   if (!username || (userDialogMode.value !== "edit" && !userForm.value.password)) {
     userDialogError.value = t("nacos.userCredentialsRequired");
     return;
@@ -350,12 +375,59 @@ async function saveUser() {
       }
       userDialogOpen.value = false;
       await loadUsers(1);
+      if (resettingPassword) {
+        const handledConnectionCredential = await syncCurrentConnectionPassword(username, userForm.value.password);
+        if (!handledConnectionCredential) {
+          userOperationNotice.value = { kind: "success", message: t("nacos.passwordResetSucceeded", { username }) };
+        }
+      }
     });
   } catch (error) {
-    userDialogError.value = error instanceof Error ? error.message : String(error);
+    const message = error instanceof Error ? error.message : String(error);
+    userDialogError.value = message;
+    if (resettingPassword) userOperationNotice.value = { kind: "error", message: t("nacos.passwordResetFailed", { message }) };
   } finally {
     userSaving.value = false;
   }
+}
+
+async function syncCurrentConnectionPassword(username: string, password: string): Promise<boolean> {
+  const config = connectionStore.getConfig(props.connectionId);
+  if (!config || config.db_type !== "nacos") return false;
+  const hasExternalConfig = !!config.external_config && typeof config.external_config === "object";
+  const externalConfig = (config.external_config || {}) as NacosAdminConfig;
+  const primaryAuth = externalConfig.auth;
+  const primaryMatches = (primaryAuth?.kind === "usernamePassword" && primaryAuth.username === username) || (!hasExternalConfig && config.username === username);
+  const consoleAuth = externalConfig.rnacosConsoleAuth;
+  const consoleMatches = consoleAuth?.kind === "usernamePassword" && consoleAuth.username === username;
+  if (!primaryMatches && !consoleMatches) return false;
+  if (config.save_password === false) {
+    try {
+      await api.replaceNacosSessionCredential(props.connectionId, username, password);
+      userOperationNotice.value = { kind: "success", message: `${t("nacos.passwordResetSucceeded", { username })} ${t("nacos.currentSessionPasswordUpdated")}` };
+    } catch {
+      userOperationNotice.value = { kind: "success", message: `${t("nacos.passwordResetSucceeded", { username })} ${t("nacos.currentPasswordNotSaved")}` };
+    }
+    return true;
+  }
+  const nextExternal: NacosAdminConfig | undefined = hasExternalConfig
+    ? {
+        ...externalConfig,
+        auth: primaryMatches ? { kind: "usernamePassword", username, password } : primaryAuth,
+        rnacosConsoleAuth: consoleMatches ? { kind: "usernamePassword", username, password } : consoleAuth,
+      }
+    : undefined;
+  try {
+    await connectionStore.updateConnection({
+      ...config,
+      password: primaryMatches ? password : config.password,
+      external_config: nextExternal,
+    });
+    userOperationNotice.value = { kind: "success", message: `${t("nacos.passwordResetSucceeded", { username })} ${t("nacos.currentPasswordSaved")}` };
+  } catch {
+    userOperationNotice.value = { kind: "success", message: `${t("nacos.passwordResetSucceeded", { username })} ${t("nacos.currentPasswordNotSaved")}` };
+  }
+  return true;
 }
 
 async function deleteUser() {
@@ -367,6 +439,7 @@ async function deleteUser() {
     await withRNacosAuthentication(async () => {
       await api.nacosDeleteUser(props.connectionId, user.username);
       pendingUserDelete.value = null;
+      userDeleteConfirmation.value = "";
       await loadUsers(Math.min(userPageNo.value, userTotalPages.value));
     });
   } catch (error) {
@@ -374,6 +447,16 @@ async function deleteUser() {
   } finally {
     deletingUser.value = false;
   }
+}
+
+function openDeleteUser(user: NacosUserInfo) {
+  pendingUserDelete.value = user;
+  userDeleteConfirmation.value = "";
+}
+
+function closeDeleteUser() {
+  pendingUserDelete.value = null;
+  userDeleteConfirmation.value = "";
 }
 
 function openAssignRole() {
@@ -439,8 +522,19 @@ watch(
 );
 
 onMounted(() => {
+  stopNacosNamespacesChangedListener = subscribeNacosNamespacesChanged(handleNacosNamespacesChanged);
   if (props.tab === "users") void loadUsers(1);
   else void loadRoles(1);
+});
+
+onBeforeUnmount(() => {
+  latestUserFormNamespacesRequestId += 1;
+  stopNacosNamespacesChangedListener?.();
+  stopNacosNamespacesChangedListener = null;
+});
+
+defineExpose({
+  refresh: () => (props.tab === "users" ? loadUsers() : loadRoles()),
 });
 </script>
 
@@ -464,6 +558,9 @@ onMounted(() => {
       </header>
       <div v-if="!listUsersCapability().supported" class="border-b bg-muted/30 px-3 py-2 text-xs text-muted-foreground">{{ capabilityReason(listUsersCapability()) }}</div>
       <div v-if="usersError" class="border-b px-3 py-2 text-xs text-destructive">{{ usersError }}</div>
+      <div v-if="userOperationNotice" class="border-b px-3 py-2 text-xs" :class="userOperationNotice.kind === 'success' ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300' : 'bg-destructive/10 text-destructive'" role="status" aria-live="polite">
+        {{ userOperationNotice.message }}
+      </div>
       <div class="min-h-0 flex-1 overflow-auto">
         <table class="w-full min-w-[680px] text-sm">
           <thead class="sticky top-0 z-10 bg-muted/70 text-left text-xs text-muted-foreground">
@@ -493,7 +590,7 @@ onMounted(() => {
                 <div class="flex justify-end gap-1">
                   <Button size="sm" variant="ghost" class="h-7 w-7 p-0" :disabled="!isWritable(updateUserCapability())" :title="isRNacos ? t('nacos.editUser') : t('nacos.resetUserPassword')" @click="openEditUser(user)"
                     ><Pencil v-if="isRNacos" class="h-3.5 w-3.5" /><KeyRound v-else class="h-3.5 w-3.5" /></Button
-                  ><Button size="sm" variant="ghost" class="h-7 w-7 p-0 text-destructive hover:text-destructive" :disabled="!isWritable(deleteUserCapability())" :title="t('nacos.deleteUser')" @click="pendingUserDelete = user"><Trash2 class="h-3.5 w-3.5" /></Button>
+                  ><Button size="sm" variant="ghost" class="h-7 w-7 p-0 text-destructive hover:text-destructive" :disabled="!isWritable(deleteUserCapability())" :title="t('nacos.deleteUser')" @click="openDeleteUser(user)"><Trash2 class="h-3.5 w-3.5" /></Button>
                 </div>
               </td>
             </tr>
@@ -519,7 +616,7 @@ onMounted(() => {
         <Button size="sm" variant="outline" class="h-8 w-8 px-0" :disabled="rolesLoading || !listRolesCapability().supported" :title="!listRolesCapability().supported ? capabilityReason(listRolesCapability()) : t('nacos.refresh')" :aria-label="t('nacos.refresh')" @click="loadRoles(1)"
           ><Loader2 v-if="rolesLoading" class="h-3.5 w-3.5 animate-spin" /><RefreshCw v-else class="h-3.5 w-3.5"
         /></Button>
-        <Button size="sm" class="h-8 gap-1.5" :disabled="!isWritable(assignRoleCapability())" :title="!isWritable(assignRoleCapability()) ? capabilityReason(assignRoleCapability()) : undefined" @click="openAssignRole"><Plus class="h-3.5 w-3.5" />{{ t("nacos.assignRole") }}</Button>
+        <Button size="sm" class="h-8 gap-1.5" :disabled="!isWritable(assignRoleCapability())" :title="!isWritable(assignRoleCapability()) ? capabilityReason(assignRoleCapability()) : undefined" @click="openAssignRole"><ShieldPlus class="h-3.5 w-3.5" />{{ t("nacos.assignRole") }}</Button>
       </header>
       <div v-if="rolesError" class="border-b px-3 py-2 text-xs text-destructive">{{ rolesError }}</div>
       <div class="min-h-0 flex-1 overflow-auto">
@@ -645,14 +742,22 @@ onMounted(() => {
     ></Dialog
   >
 
-  <Dialog :open="!!pendingUserDelete" @update:open="!$event && (pendingUserDelete = null)"
+  <Dialog :open="!!pendingUserDelete" @update:open="!$event && closeDeleteUser()"
     ><DialogContent class="sm:max-w-md"
       ><DialogHeader
         ><DialogTitle>{{ t("nacos.deleteUserTitle") }}</DialogTitle
         ><DialogDescription>{{ t("nacos.deleteUserDescription", { username: pendingUserDelete?.username }) }}</DialogDescription></DialogHeader
-      ><DialogFooter
-        ><Button variant="outline" :disabled="deletingUser" @click="pendingUserDelete = null">{{ t("nacos.cancel") }}</Button
-        ><Button variant="destructive" :disabled="deletingUser" @click="deleteUser"><Loader2 v-if="deletingUser" class="mr-2 h-4 w-4 animate-spin" />{{ t("nacos.delete") }}</Button></DialogFooter
+      >
+      <div class="grid gap-1.5">
+        <Label for="legacy-delete-user-confirm">{{ t("nacos.accessDeleteUserConfirmationLabel") }}</Label>
+        <p id="legacy-delete-user-confirm-hint" class="text-xs text-muted-foreground">
+          {{ t("nacos.accessDeleteUserConfirmationHint") }} <code class="select-all rounded bg-muted px-1.5 py-0.5 font-mono text-foreground">{{ pendingUserDelete?.username }}</code>
+        </p>
+        <Input id="legacy-delete-user-confirm" v-model="userDeleteConfirmation" autocomplete="off" :placeholder="t('nacos.accessDeleteUserConfirmationPlaceholder')" aria-describedby="legacy-delete-user-confirm-hint" />
+      </div>
+      <DialogFooter
+        ><Button variant="outline" :disabled="deletingUser" @click="closeDeleteUser">{{ t("nacos.cancel") }}</Button
+        ><Button variant="destructive" :disabled="deletingUser || !userDeleteConfirmed" @click="deleteUser"><Loader2 v-if="deletingUser" class="mr-2 h-4 w-4 animate-spin" />{{ t("nacos.delete") }}</Button></DialogFooter
       ></DialogContent
     ></Dialog
   >

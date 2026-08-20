@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::models::connection::ConnectionConfig;
+use crate::models::connection::{ConnectionConfig, DatabaseType};
+
+pub const NACOS_PRIMARY_SESSION_PASSWORD: &str = "nacos-primary-password";
+pub const NACOS_CONSOLE_SESSION_PASSWORD: &str = "nacos-console-password";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -33,6 +36,14 @@ pub enum NacosVersionMode {
     V3,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum NacosApiPlane {
+    #[default]
+    Admin,
+    Console,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum NacosMetricsMode {
@@ -60,6 +71,8 @@ pub struct NacosAdminConfig {
     pub implementation: Option<NacosImplementation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version_mode: Option<NacosVersionMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_plane: Option<NacosApiPlane>,
     pub server_addr: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub display_server_addr: String,
@@ -99,6 +112,47 @@ pub struct NacosAdminConfig {
     pub connect_override: Option<NacosConnectOverride>,
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct NacosTransientPasswords {
+    pub primary: Option<String>,
+    pub console: Option<String>,
+}
+
+fn take_username_password(value: Option<&mut serde_json::Value>) -> Option<String> {
+    let auth = value?.as_object_mut()?;
+    if auth.get("kind").and_then(serde_json::Value::as_str) != Some("usernamePassword") {
+        return None;
+    }
+    let password = auth.get_mut("password")?;
+    let secret = password.as_str()?.to_string();
+    *password = serde_json::Value::String(String::new());
+    (!secret.is_empty()).then_some(secret)
+}
+
+/// Removes no-save Nacos passwords from a runtime configuration and returns
+/// them for placement in the owner-scoped in-memory credential store.
+pub fn take_transient_passwords(config: &mut ConnectionConfig) -> NacosTransientPasswords {
+    if config.db_type != DatabaseType::Nacos || config.save_password {
+        return NacosTransientPasswords::default();
+    }
+
+    let top_level_password = std::mem::take(&mut config.password);
+    let Some(external) = config.external_config.as_mut().and_then(serde_json::Value::as_object_mut) else {
+        return NacosTransientPasswords {
+            primary: (!top_level_password.is_empty()).then_some(top_level_password),
+            console: None,
+        };
+    };
+
+    NacosTransientPasswords {
+        // NacosAdminConfig::from_connection treats external_config as the
+        // canonical source when present, so a stale top-level password must
+        // never override an explicitly empty external auth password.
+        primary: take_username_password(external.get_mut("auth")),
+        console: take_username_password(external.get_mut("rnacosConsoleAuth")),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NacosConnectOverride {
@@ -127,6 +181,7 @@ impl NacosAdminConfig {
             NacosAdminConfig {
                 implementation: None,
                 version_mode: None,
+                api_plane: None,
                 server_addr: format!("{scheme}://{}:{}", cfg.host.trim(), cfg.port),
                 display_server_addr: String::new(),
                 namespace: cfg.database.clone().unwrap_or_default(),
@@ -169,6 +224,7 @@ impl NacosAdminConfig {
             && !context_path_is_explicit_root
             && matches!(self.implementation, Some(NacosImplementation::Nacos))
             && matches!(self.version_mode, Some(NacosVersionMode::V3))
+            && self.api_plane() == NacosApiPlane::Admin
         {
             self.context_path = "/nacos".to_string();
         }
@@ -207,6 +263,10 @@ impl NacosAdminConfig {
     pub fn with_connect_override(mut self, host: &str, port: u16) -> Self {
         self.connect_override = Some(NacosConnectOverride { host: host.to_string(), port });
         self
+    }
+
+    pub fn api_plane(&self) -> NacosApiPlane {
+        self.api_plane.unwrap_or_default()
     }
 
     pub fn with_server_endpoint(mut self, host: &str, port: u16) -> Result<Self, String> {
@@ -486,6 +546,21 @@ mod tests {
     }
 
     #[test]
+    fn explicit_nacos_v3_console_defaults_to_root_context() {
+        let cfg = connection_with_external(serde_json::json!({
+            "implementation": "nacos",
+            "versionMode": "v3",
+            "apiPlane": "console",
+            "serverAddr": "http://127.0.0.1:8080",
+            "auth": { "kind": "none" }
+        }));
+
+        let parsed = NacosAdminConfig::from_connection(&cfg).unwrap();
+        assert_eq!(parsed.api_plane(), NacosApiPlane::Console);
+        assert_eq!(parsed.context_path, "");
+    }
+
+    #[test]
     fn explicit_nacos_v3_root_context_is_preserved() {
         let cfg = connection_with_external(serde_json::json!({
             "implementation": "nacos",
@@ -509,6 +584,43 @@ mod tests {
         assert_eq!(parsed.server_addr, "http://127.0.0.1:8848");
         assert_eq!(parsed.context_path, "");
         assert!(matches!(parsed.auth, NacosAuthConfig::UsernamePassword { .. }));
+    }
+
+    #[test]
+    fn takes_no_save_external_passwords_without_removing_other_fields() {
+        let mut cfg = connection_with_external(serde_json::json!({
+            "implementation": "rnacos",
+            "serverAddr": "http://127.0.0.1:8848",
+            "managedNamespaces": ["team-a"],
+            "auth": { "kind": "usernamePassword", "username": "primary", "password": "primary-secret" },
+            "rnacosConsoleAuth": { "kind": "usernamePassword", "username": "console", "password": "console-secret" }
+        }));
+        cfg.save_password = false;
+        cfg.password = "stale-top-level-secret".to_string();
+
+        let passwords = take_transient_passwords(&mut cfg);
+
+        assert_eq!(passwords.primary.as_deref(), Some("primary-secret"));
+        assert_eq!(passwords.console.as_deref(), Some("console-secret"));
+        assert!(cfg.password.is_empty());
+        let external = cfg.external_config.as_ref().unwrap();
+        assert_eq!(external["auth"]["password"], "");
+        assert_eq!(external["rnacosConsoleAuth"]["password"], "");
+        assert_eq!(external["managedNamespaces"], serde_json::json!(["team-a"]));
+    }
+
+    #[test]
+    fn takes_legacy_top_level_password_only_without_external_config() {
+        let mut cfg = connection_with_external(serde_json::Value::Null);
+        cfg.external_config = None;
+        cfg.save_password = false;
+        cfg.password = "legacy-secret".to_string();
+
+        let passwords = take_transient_passwords(&mut cfg);
+
+        assert_eq!(passwords.primary.as_deref(), Some("legacy-secret"));
+        assert_eq!(passwords.console, None);
+        assert!(cfg.password.is_empty());
     }
 
     #[test]

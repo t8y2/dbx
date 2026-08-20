@@ -932,6 +932,10 @@ export async function forgetSessionCredential(connectionId: string): Promise<voi
   return invokeBackend("forget_session_credential", { connectionId });
 }
 
+export async function replaceNacosSessionCredential(connectionId: string, username: string, password: string): Promise<void> {
+  return invokeBackend("replace_nacos_session_credential", { connectionId, username, password });
+}
+
 export async function checkConnectionHealth(connectionId: string): Promise<void> {
   return invokeBackend("check_connection_health", { connectionId });
 }

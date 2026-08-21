@@ -2511,6 +2511,7 @@ export default {
       notRequested: "Run not requested",
       skipped: "Not run",
       callingTool: "Calling tool...",
+      executing: "Executing…",
       toolDone: "Tool completed",
       toolError: "Tool error",
       executeSafe: "Safety check passed · Executed",

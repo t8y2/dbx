@@ -2487,6 +2487,7 @@ export default withEnglishFallback({
       notRequested: "未請求執行",
       skipped: "未執行",
       callingTool: "正在調用工具...",
+      executing: "執行中…",
       toolDone: "工具調用完成",
       toolError: "工具調用出錯",
       executeSafe: "安全檢查通過 · 已執行",

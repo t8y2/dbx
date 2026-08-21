@@ -2594,6 +2594,7 @@ export default withEnglishFallback({
       notRequested: "Execução não solicitada",
       skipped: "Não executado",
       callingTool: "Chamando ferramenta...",
+      executing: "Executando…",
       toolDone: "Ferramenta concluída",
       toolError: "Erro da ferramenta",
       executeSafe: "Verificação de segurança aprovada · Executado",

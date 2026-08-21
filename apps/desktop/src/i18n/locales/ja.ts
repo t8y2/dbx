@@ -2626,6 +2626,7 @@ export default withEnglishFallback({
       notRequested: "実行は要求されていません",
       skipped: "未実行",
       callingTool: "ツールを呼び出し中...",
+      executing: "実行中…",
       toolDone: "ツール完了",
       toolError: "ツールエラー",
       executeSafe: "安全チェック通過 · 実行済み",

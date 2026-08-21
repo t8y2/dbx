@@ -14,6 +14,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Clock,
+  Hourglass,
   CircleSlash,
   Copy,
   Database,
@@ -116,7 +117,7 @@ import { buildAiAgentPlan } from "@/lib/ai/aiAgentPlan";
 import { extractFirstSqlCodeBlock, extractSingleSqlCodeBlock } from "@/lib/ai/aiSqlExecutionPolicy";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
-import { buildAiAgentStepItems, toolCallStepKey, upsertAgentStep, type AiAgentStepItem, type AiAgentStepTone } from "@/lib/ai/aiAgentStepPresentation";
+import { buildAiAgentStepItems, formatToolDurationMs, toolCallStepKey, upsertAgentStep, type AiAgentStepItem, type AiAgentStepTone } from "@/lib/ai/aiAgentStepPresentation";
 import { createAiShikiCodeHighlighter, type AiCodeHighlighter } from "@/lib/ai/aiCodeHighlighter";
 import { createAiMessageRenderer } from "@/lib/ai/aiMessageRender";
 import { formatAiInlineMarkdown, handleAiMarkdownLinkClick } from "@/lib/ai/aiMarkdown";
@@ -1284,6 +1285,12 @@ function agentStepClass(tone: AiAgentStepTone): string {
   }
 }
 
+/** True when a step renders a right-aligned tail: a running tool step
+ *  (spinner + "executing") or a completed tool step with a computed duration. */
+function agentStepHasTail(step: AiAgentStepItem): boolean {
+  return (step.tone === "active" && !!step.toolName) || step.durationMs !== undefined;
+}
+
 /** Extract tool result content from the AgentEvent result value */
 function extractToolResultContent(result: unknown): string | undefined {
   if (!result) return undefined;
@@ -1327,7 +1334,7 @@ function parseExplainFromData(explainData: unknown, dbType: string): ParsedExpla
   }
 }
 
-function agentEventToStep(event: AgentEvent, index: number): AiAgentStepItem | undefined {
+function agentEventToStep(event: AgentEvent, index: number, now: number): AiAgentStepItem | undefined {
   if (event.type === "context_compacted") {
     return {
       key: `compact-${index}`,
@@ -1350,6 +1357,7 @@ function agentEventToStep(event: AgentEvent, index: number): AiAgentStepItem | u
       tone: "active",
       toolName: event.tool_name,
       toolArgs: event.args as Record<string, unknown>,
+      startedAtMs: now,
     };
   }
 
@@ -1366,6 +1374,7 @@ function agentEventToStep(event: AgentEvent, index: number): AiAgentStepItem | u
     toolResult: extractToolResultContent(event.result),
     explainData: extractExplainData(event.result),
     isError: event.is_error,
+    endedAtMs: now,
   };
 }
 
@@ -2614,7 +2623,7 @@ async function send() {
           const msg = messages.value[assistantIdx];
           if (msg) {
             if (!msg.agentSteps) msg.agentSteps = [];
-            const step = agentEventToStep(event, agentEvents.length - 1);
+            const step = agentEventToStep(event, agentEvents.length - 1, Date.now());
             if (step) upsertAgentStep(msg.agentSteps, step);
           }
           pendingCompaction.value = { summary: event.summary, compactedMessages: event.compacted_messages };
@@ -2624,7 +2633,7 @@ async function send() {
           const msg = messages.value[assistantIdx];
           if (msg) {
             if (!msg.agentSteps) msg.agentSteps = [];
-            const step = agentEventToStep(event, agentEvents.length - 1);
+            const step = agentEventToStep(event, agentEvents.length - 1, Date.now());
             if (step) upsertAgentStep(msg.agentSteps, step);
           }
         }
@@ -2670,7 +2679,7 @@ async function send() {
       if (msg && agentEvents.length > 0 && !msg.agentSteps?.length) {
         const steps: AiAgentStepItem[] = [];
         agentEvents.forEach((e, index) => {
-          const step = agentEventToStep(e, index);
+          const step = agentEventToStep(e, index, Date.now());
           if (step) upsertAgentStep(steps, step);
         });
         if (steps.length) msg.agentSteps = steps;
@@ -3407,10 +3416,18 @@ async function openExternalUrl(url: string) {
                 <div v-if="msg.agentSteps?.length" class="mb-2 space-y-1">
                   <div v-for="step in msg.agentSteps" :key="step.key" class="rounded border text-[10px]" :class="agentStepClass(step.tone)">
                     <button class="flex w-full items-center gap-1 px-2 py-1.5 text-left" @click="step.toolResult || step.toolArgs?.sql ? toggleStep(step.key) : undefined">
-                      <component :is="agentStepIcon(step.tone)" class="h-3 w-3 shrink-0" />
+                      <Loader2 v-if="step.tone === 'active' && step.toolName" class="h-3 w-3 shrink-0 animate-spin" />
+                      <component :is="agentStepIcon(step.tone)" v-else class="h-3 w-3 shrink-0" />
                       <span class="font-medium">{{ t(step.labelKey) }}</span>
                       <span v-if="step.toolName" class="text-muted-foreground">: {{ step.toolName }}</span>
-                      <ChevronRight v-if="step.toolResult || step.toolArgs?.sql" class="ml-auto h-3 w-3 shrink-0 transition-transform duration-150" :class="{ 'rotate-90': expandedSteps.has(step.key) }" />
+                      <template v-if="step.tone === 'active' && step.toolName">
+                        <span class="ml-auto flex shrink-0 items-center gap-1">
+                          <Loader2 class="h-3 w-3 animate-spin" />
+                          <span>{{ t("ai.agentSteps.executing") }}</span>
+                        </span>
+                      </template>
+                      <span v-else-if="step.durationMs !== undefined" class="ml-auto shrink-0 tabular-nums" :class="step.tone === 'danger' ? 'text-red-600 dark:text-red-400' : 'text-chart-2'">{{ formatToolDurationMs(step.durationMs) }}</span>
+                      <ChevronRight v-if="step.toolResult || step.toolArgs?.sql" class="h-3 w-3 shrink-0 transition-transform duration-150" :class="[{ 'rotate-90': expandedSteps.has(step.key) }, !agentStepHasTail(step) ? 'ml-auto' : '']" />
                     </button>
                     <div v-if="expandedSteps.has(step.key)" class="border-t border-current/10 px-2 pb-2 pt-1">
                       <div v-if="step.toolArgs?.sql" class="mb-1 rounded bg-background/50 px-2 py-1 font-mono text-[10px] text-foreground/80 whitespace-pre-wrap">{{ step.toolArgs.sql }}</div>
@@ -3503,13 +3520,13 @@ async function openExternalUrl(url: string) {
                `phase !== 'finished'` guard hides it the instant agent_end/error
                arrives — before isGenerating clears — so a completed reply never
                shows a lingering "等待模型响应 · 已运行 0s". -->
-          <div v-if="isGenerating && generationStatus.phase !== 'finished'" class="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground" data-ai-generation-status>
+          <div v-if="isGenerating && generationStatus.phase !== 'finished'" class="flex min-w-0 items-center gap-[7px] text-xs text-muted-foreground" data-ai-generation-status>
             <!-- Screen-reader live region: announces discrete execution-state changes
                  (phase / tool / turn / idle crossing) only, never the per-second
                  elapsed numerals — see `liveAnnouncementText`. -->
             <span class="sr-only" role="status" aria-live="polite" aria-atomic="true">{{ statusLiveAnnouncement }}</span>
-            <Loader2 v-if="!generationStatusIdle" class="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden="true" />
-            <Clock v-else class="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+            <Loader2 v-if="!generationStatusIdle" class="h-3 w-3 shrink-0 animate-spin" aria-hidden="true" />
+            <Hourglass v-else class="h-3 w-3 shrink-0" aria-hidden="true" />
             <!-- Idle-with-tool copy MUST win over the running-tool layout: PRD copy
                  priority 1 (idle >20s, "等待此步骤完成 · 最后活动 Ns 前 · 正在执行 {tool}")
                  outranks priority 2 ("第 N 轮 · 正在执行 {tool} · 已运行 Ns"), matching
@@ -3519,12 +3536,12 @@ async function openExternalUrl(url: string) {
             <template v-if="generationStatusIdle && generationStatus.activeTool && generationStatus.phase !== 'cancelling'">
               <span class="whitespace-nowrap tabular-nums">{{ t("ai.status.idle", { idle: statusIdleSeconds }) }}</span>
               <span class="whitespace-nowrap">{{ t("ai.status.runningToolAction") }}</span>
-              <span class="whitespace-nowrap rounded-[5px] border border-chart-2/30 bg-chart-2/10 px-1.5 py-px font-mono text-[10px] text-chart-2">{{ statusToolLabel }}</span>
+              <span class="whitespace-nowrap rounded-[5px] border border-chart-2/30 bg-chart-2/12 px-1.5 py-px font-mono text-[10px] text-chart-2">{{ statusToolLabel }}</span>
             </template>
             <template v-else-if="generationStatusRunningTool">
-              <span v-if="statusTurnBadge" class="whitespace-nowrap rounded-[5px] border border-border px-1 font-mono text-[10px] text-muted-foreground">{{ statusTurnBadge }}</span>
+              <span v-if="statusTurnBadge" class="whitespace-nowrap rounded-[5px] border border-border px-[5px] font-mono text-[10px] text-muted-foreground">{{ statusTurnBadge }}</span>
               <span class="whitespace-nowrap">{{ t("ai.status.runningToolAction") }}</span>
-              <span class="whitespace-nowrap rounded-[5px] border border-chart-2/30 bg-chart-2/10 px-1.5 py-px font-mono text-[10px] text-chart-2">{{ statusToolLabel }}</span>
+              <span class="whitespace-nowrap rounded-[5px] border border-chart-2/30 bg-chart-2/12 px-1.5 py-px font-mono text-[10px] text-chart-2">{{ statusToolLabel }}</span>
               <span class="whitespace-nowrap tabular-nums">{{ t("ai.status.runningToolElapsed", { elapsed: statusElapsedSeconds }) }}</span>
             </template>
             <span v-else class="min-w-0 tabular-nums">{{ generationStatusText }}</span>
@@ -3753,7 +3770,7 @@ async function openExternalUrl(url: string) {
           <input ref="csvFileInputRef" type="file" multiple accept="image/png,image/jpeg,image/gif,image/webp,.csv,.md,.markdown,.txt,.text,.json,.yaml,.yml,.xml,.log,.tsv" class="hidden" @change="onCsvFileSelected" />
           <!-- Gentle >60s hint (Issue #6743 feature 1): never asserts the request is
                stuck/hung, only that it is running long and may be waited on or stopped. -->
-          <div v-if="statusLongRunningHintVisible" class="mb-1.5 flex items-center gap-1.5 rounded-[7px] border border-warning/30 bg-warning/10 px-2 py-1 text-[11px] text-warning">
+          <div v-if="statusLongRunningHintVisible" class="mb-1.5 flex items-center gap-1.5 rounded-[7px] border border-warning/30 bg-warning/10 px-[9px] py-[5px] text-[11px] text-warning">
             <Clock class="h-3.5 w-3.5 shrink-0" />
             <span>{{ t("ai.status.longRunningHint") }}</span>
           </div>

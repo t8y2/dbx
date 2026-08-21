@@ -289,4 +289,29 @@ describe("AI assistant clear/switch cancels an in-flight request (issue #5941, P
     expect(body).toContain("if (isGenerating.value) abandonInFlightRequest();");
     expect(body).not.toContain("cancelStream();");
   });
+
+  it("agent step cards render a running-tool tail and a computed duration tail", () => {
+    // Issue #6743 (feature-1 gap): per-tool execution time in the agent step cards —
+    // mockup shows a spinner + "执行中…" tail on running steps and `0.8s`/`1.2s` on
+    // completed steps. The step-row template must special-case running tool steps
+    // (spinner icon + executing tail) and completed tool steps (tabular duration).
+    const stepsStart = source.indexOf('v-for="step in msg.agentSteps"');
+    expect(stepsStart, "expected to find the agent-steps v-for in AiAssistant.vue").toBeGreaterThanOrEqual(0);
+    const stepsBlock = source.slice(stepsStart);
+    // Running tool step: spinner leading icon + right-aligned "executing…" tail.
+    expect(stepsBlock).toContain("step.tone === 'active' && step.toolName");
+    expect(stepsBlock).toContain('t("ai.agentSteps.executing")');
+    // Completed tool step: right-aligned tabular duration tail.
+    expect(stepsBlock).toContain("formatToolDurationMs(step.durationMs)");
+  });
+
+  it("the status-line idle branch swaps Clock for Hourglass (mockup alignment)", () => {
+    // Mockup: idle state shows a non-spinning hourglass (spinner animation stops);
+    // only the >60s hint below keeps the Clock. The swap must live in the status
+    // line's spinner/clock slot, not touch the hint.
+    const statusLineIdx = source.indexOf("data-ai-generation-status");
+    expect(statusLineIdx).toBeGreaterThanOrEqual(0);
+    const statusBlock = source.slice(statusLineIdx);
+    expect(statusBlock).toContain("<Hourglass v-else");
+  });
 });

@@ -2361,6 +2361,7 @@ export default withEnglishFallback({
       notRequested: "실행 요청되지 않음",
       skipped: "실행되지 않음",
       callingTool: "도구 호출 중...",
+      executing: "실행 중…",
       toolDone: "도구 완료",
       toolError: "도구 오류",
       executeSafe: "안전성 검사 통과 · 실행됨",

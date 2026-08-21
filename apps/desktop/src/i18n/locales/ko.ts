@@ -576,6 +576,8 @@ export default withEnglishFallback({
     postgresSslModeRequire: "필수",
     postgresSslModeVerifyCa: "CA 확인",
     postgresSslModeVerifyFull: "전체 확인",
+    postgresLegacyTls: "레거시 TLS 호환성",
+    postgresLegacyTlsHint: "TLS 1.2 정적 RSA 키 교환만 지원하는 서버와의 연결을 지원합니다. 기본 모드보다 보안 수준이 낮으므로 서버 TLS 구성을 업그레이드할 수 없는 경우에만 활성화하세요.",
     postgresServerCert: "서버 CA",
     postgresRootCertPlaceholder: "/path/to/ca.crt",
     postgresRootCertHint: "서버 인증서가 사설 CA로 서명된 경우 verify-ca 또는 verify-full에 사용하세요.",

@@ -5180,6 +5180,9 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     items.push({ label: "", separator: true });
     items.push({ label: t("contextMenu.viewData"), action: toggle, icon: TableProperties });
     items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+    if (canRenameMongoCollection.value) {
+      items.push({ label: t("contextMenu.renameObject"), action: openRenameMongoCollectionDialog, icon: Pencil, shortcut: shortcutRename });
+    }
     if (canDropMilvusCollection.value) {
       items.push({ label: "", separator: true });
       items.push({ label: t("contextMenu.dropCollection"), action: dropMilvusCollection, icon: Trash2, shortcut: shortcutDelete, variant: "destructive" as const });

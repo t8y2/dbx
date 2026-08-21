@@ -195,11 +195,11 @@ const previewVisible = computed(() => open.value && !!props.source);
 
           <div class="flex items-center justify-between gap-2">
             <Label class="text-xs">{{ t("codeSnapshot.windowControls") }}</Label>
-            <Switch v-model:checked="showTrafficLights" />
+            <Switch v-model="showTrafficLights" />
           </div>
           <div class="flex items-center justify-between gap-2">
             <Label class="text-xs">{{ t("codeSnapshot.lineNumbers") }}</Label>
-            <Switch v-model:checked="showLineNumbers" />
+            <Switch v-model="showLineNumbers" />
           </div>
 
           <div class="grid gap-1.5">

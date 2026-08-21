@@ -83,7 +83,7 @@ import type { DriverProfileWorkspaceScope } from "@/lib/database/driverProfileEx
 import type { MultiDbExecutionTarget, MultiDbResultRunExecution } from "@/types/sqlExecution";
 
 const ORACLE_LIKE_METADATA_TYPES = new Set<string>(["oracle", "dameng", "oceanbase-oracle"]);
-const ORACLE_DEFERRED_LOB_TYPES = new Set<string>(["CLOB", "NCLOB", "BLOB", "BFILE"]);
+const ORACLE_DEFERRED_LOB_TYPES = new Set<string>(["CLOB", "NCLOB", "BLOB", "BFILE", "XMLTYPE", "SYS.XMLTYPE"]);
 
 // Bounded concurrency for grouped-query display column loads, scoped per
 // connection so different connections never block each other. Matches the
@@ -2300,9 +2300,16 @@ export const useQueryStore = defineStore("query", () => {
 
   const hasDirtyTabs = computed(() => tabs.value.some((tab) => isTabDirty(tab)));
   const shouldConfirmUnsavedSqlClose = computed(() => useSettingsStore().editorSettings.confirmUnsavedSqlClose);
+  const keepUnsavedTabsDraftsOnAppClose = computed(() => useSettingsStore().editorSettings.appCloseUnsavedTabsMode === "keep-drafts");
+  const requiresAppCloseDraftPersist = computed(() => shouldConfirmUnsavedSqlClose.value && keepUnsavedTabsDraftsOnAppClose.value && tabs.value.some((tab) => tab.mode === "query" && isTabDirty(tab)));
+
+  function shouldConfirmTabOnAppClose(tab: QueryTab): boolean {
+    if (!shouldConfirmTabClose(tab)) return false;
+    return !keepUnsavedTabsDraftsOnAppClose.value || tab.mode !== "query";
+  }
 
   const closeConfirmDirtyTabIds = computed(() => {
-    if (isConfirmingAppClose.value) return tabs.value.filter((tab) => isTabDirty(tab)).map((tab) => tab.id);
+    if (isConfirmingAppClose.value) return tabs.value.filter((tab) => shouldConfirmTabOnAppClose(tab)).map((tab) => tab.id);
     if (pendingBatchCloseTabIds.value) {
       return pendingBatchCloseTabIds.value
         .map((id) => tabs.value.find((tab) => tab.id === id))
@@ -2670,7 +2677,7 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   function requestAppCloseConfirmation() {
-    const dirtyTab = tabs.value.find((tab) => shouldConfirmTabClose(tab));
+    const dirtyTab = tabs.value.find((tab) => shouldConfirmTabOnAppClose(tab));
     if (!dirtyTab) return false;
     isConfirmingAppClose.value = true;
     showDirtyTabCloseConfirm(dirtyTab, "app");
@@ -3782,7 +3789,7 @@ export const useQueryStore = defineStore("query", () => {
         });
         void fullMetadataPromise.catch((error) => queryExecutionLog("warn", "metadata:table-prefetch:failed", { traceId, error, elapsed: elapsed() }));
         const indexes = await loadTableIndexes(target.request);
-        if (primaryKeyIndex(indexes) && projectsAllColumnsForSource(target.analysis, target.source.key)) {
+        if (primaryKeyIndex(indexes) && projectsAllColumnsForSource(target.analysis, target.source.key) && tab.autoCommit !== false) {
           return unchanged;
         }
         loaded = loadedEditableSourceFromMetadata(target, (await fullMetadataPromise).metadata);
@@ -4922,6 +4929,11 @@ export const useQueryStore = defineStore("query", () => {
       const frontendTimeoutSecs = frontendQueryTimeoutSecsForSql(sqlToExecute, effectiveDbType, queryTimeoutSecs);
       const sourceLabelDatabase = targetDatabase || conn?.database;
       const executionClientSessionId = options?.pagination?.clientSessionId ?? (tab.mode === "query" || tab.mode === "data" ? tabClientSessionId(tab) : undefined);
+      const currentBeforeDispatch = findExecutionTab(id);
+      if (currentBeforeDispatch?.executionId !== executionId || currentBeforeDispatch.isCancelling) {
+        queryExecutionLog("info", "dispatch:skipped-cancelled", { traceId, elapsed: elapsed() });
+        return false;
+      }
 
       let executionPromise: Promise<QueryResult[]>;
       if (tab.autoCommit === false) {
@@ -4932,7 +4944,7 @@ export const useQueryStore = defineStore("query", () => {
         }
         queryExecutionLog("info", "execute-in-txn:invoke", { traceId, txnSessionId: tab.txnSessionId, elapsed: elapsed() });
         executionDispatched = true;
-        executionPromise = api.executeInManualTransaction(tab.txnSessionId, sqlToExecute, executionDatabase, executionSchema, pageLimit ?? agentProtocolQueryResultMaxRows(queryResultMaxRows));
+        executionPromise = api.executeInManualTransaction(tab.txnSessionId, sqlToExecute, executionDatabase, executionSchema, pageLimit ?? agentProtocolQueryResultMaxRows(queryResultMaxRows), useOracleLobPreview);
       } else {
         queryExecutionLog("info", "execute-multi:start", { traceId, elapsed: elapsed() });
         // Query and data tabs use a tab-scoped pool so repeated executions keep
@@ -6290,6 +6302,7 @@ export const useQueryStore = defineStore("query", () => {
     closeConfirmContext,
     closeConfirmDirtyTabIds,
     hasDirtyTabs,
+    requiresAppCloseDraftPersist,
     isConfirmingAppClose,
     createTab,
     openObjectSourceTab,

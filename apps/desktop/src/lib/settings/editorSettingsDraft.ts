@@ -27,6 +27,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "sqlSemanticDiagnosticsMode",
   "confirmDangerousSqlExecution",
   "confirmUnsavedSqlClose",
+  "appCloseUnsavedTabsMode",
   "savedSqlOpenTargetMode",
   "appLayout",
   "tabLayout",

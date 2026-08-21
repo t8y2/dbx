@@ -1290,6 +1290,7 @@ pub fn run() {
 
     let builder = if should_enable_single_instance(cfg!(debug_assertions)) {
         builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
+            let app_open_requested = args.iter().any(|arg| commands::deep_link::is_app_open_deep_link(arg));
             let links = commands::deep_link::connection_deep_links_from_args(args.clone());
             open_connection_deep_links(app, links);
 
@@ -1314,7 +1315,7 @@ pub fn run() {
             // simply vanished - so make the reason recoverable from the logs.
             if !show_main_window(app) {
                 eprintln!(
-                    "[WINDOW] single-instance handoff could not reveal the main window; {}",
+                    "[WINDOW] single-instance handoff could not reveal the main window; app_open_requested={app_open_requested}; {}",
                     main_window_probe_state(app)
                 );
             }
@@ -2011,12 +2012,13 @@ pub fn run() {
             commands::sqlite_backup::backup_sqlite_database,
             commands::mongo_cmd::mongo_list_databases,
             commands::mongo_cmd::mongo_list_collections,
-            commands::mongo_cmd::vector_collection_detail,
+            commands::vector_cmd::vector_collection_detail,
             commands::mongo_cmd::mongo_create_database,
             commands::mongo_cmd::mongo_drop_database,
             commands::mongo_cmd::mongo_drop_collection,
-            commands::mongo_cmd::vector_drop_database,
-            commands::mongo_cmd::vector_drop_collection,
+            commands::vector_cmd::vector_drop_database,
+            commands::vector_cmd::vector_drop_collection,
+            commands::vector_cmd::vector_rename_collection,
             commands::mongo_cmd::mongo_rename_collection,
             commands::mongo_cmd::mongo_clone_collection,
             commands::docs::docs_collect_snapshot,

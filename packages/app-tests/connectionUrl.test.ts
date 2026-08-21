@@ -162,6 +162,15 @@ test("removes only the connection name from URL params", () => {
 test("parses mysql TLS URL params into the SSL switch state", () => {
   assert.equal(parseConnectionUrl("mysql://root@tidb.example.com:4000/test?ssl-mode=required").ssl, true);
   assert.equal(parseConnectionUrl("mysql://root@tidb.example.com:4000/test?require_ssl=true").ssl, true);
+  assert.equal(parseConnectionUrl("jdbc:mysql://db.example.com/test?useSSL=true&requireSSL=true&verifyServerCertificate=true").ssl, true);
+  assert.equal(parseConnectionUrl("jdbc:mysql://db.example.com/test?verifyServerCertificate=true").ssl, true);
+  assert.equal(parseConnectionUrl("jdbc:mysql://db.example.com/test?useSSL=false").ssl, false);
+  assert.equal(parseConnectionUrl("jdbc:mysql://db.example.com/test?useSSL=false&requireSSL=true&verifyServerCertificate=true").ssl, false);
+});
+
+test("uses the last duplicate MySQL JDBC TLS parameter", () => {
+  assert.equal(parseConnectionUrl("jdbc:mysql://db.example.com/test?useSSL=false&useSSL=true&requireSSL=true").ssl, true);
+  assert.equal(parseConnectionUrl("jdbc:mysql://db.example.com/test?useSSL=true&useSSL=false&requireSSL=true").ssl, false);
 });
 
 test("parses TiDB Cloud MySQL URLs as TLS connections", () => {

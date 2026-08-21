@@ -1390,13 +1390,14 @@ export async function beginManualTransaction(connectionId: string, database: str
   return invoke("begin_manual_transaction", { connectionId, database, schema, catalog });
 }
 
-export async function executeInManualTransaction(txnSessionId: string, sql: string, database: string, schema?: string, maxRows?: number): Promise<QueryResult[]> {
+export async function executeInManualTransaction(txnSessionId: string, sql: string, database: string, schema?: string, maxRows?: number, tableDataPreview?: boolean): Promise<QueryResult[]> {
   return invoke("execute_in_manual_transaction", {
     txnSessionId,
     sql,
     database,
     schema,
     maxRows,
+    tableDataPreview,
   });
 }
 
@@ -3563,6 +3564,10 @@ export async function vectorDropDatabase(connectionId: string, database: string)
 
 export async function vectorDropCollection(connectionId: string, database: string, collection: string): Promise<void> {
   return invoke("vector_drop_collection", { connectionId, database, collection });
+}
+
+export async function vectorRenameCollection(connectionId: string, database: string, collection: string, newName: string): Promise<void> {
+  return invoke("vector_rename_collection", { connectionId, database, collection, newName });
 }
 
 export async function elasticsearchListIndices(connectionId: string): Promise<string[]> {

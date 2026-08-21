@@ -277,6 +277,11 @@ pub(super) fn build_mysql_existing_column_sql(
     column: &EditableStructureColumn,
     position_clause: &str,
 ) -> Vec<String> {
+    let operation = build_mysql_existing_column_clause(column, position_clause);
+    vec![format!("ALTER TABLE {table} {operation};")]
+}
+
+pub(super) fn build_mysql_existing_column_clause(column: &EditableStructureColumn, position_clause: &str) -> String {
     let original_name = column.original.as_ref().map(|original| original.name.as_str()).unwrap_or(&column.name);
     let operation = if column.name == original_name {
         format!("MODIFY COLUMN {}", column_definition(StructureDialect::Mysql, column))
@@ -287,7 +292,7 @@ pub(super) fn build_mysql_existing_column_sql(
             column_definition(StructureDialect::Mysql, column)
         )
     };
-    vec![format!("ALTER TABLE {table} {operation}{position_clause};")]
+    format!("{operation}{position_clause}")
 }
 
 pub(super) fn build_doris_existing_column_sql(

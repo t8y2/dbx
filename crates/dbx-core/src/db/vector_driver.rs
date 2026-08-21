@@ -264,6 +264,50 @@ pub async fn drop_collection(client: &VectorClient, database: &str, collection: 
     .map(|_| ())
 }
 
+fn validate_milvus_collection_rename(
+    client: &VectorClient,
+    database: &str,
+    source_collection: &str,
+    target_collection: &str,
+) -> Result<(), String> {
+    if client.kind != VectorDbKind::Milvus {
+        return Err("Collection rename is only supported for Milvus connections".to_string());
+    }
+    if database.is_empty() {
+        return Err("Database name must not be empty".to_string());
+    }
+    if source_collection.is_empty() {
+        return Err("Source collection name must not be empty".to_string());
+    }
+    if target_collection.is_empty() {
+        return Err("Target collection name must not be empty".to_string());
+    }
+    if source_collection == target_collection {
+        return Err("Source and target collection names must differ".to_string());
+    }
+    Ok(())
+}
+
+/// Rename a Milvus collection through the v2 REST API.
+pub async fn rename_collection(
+    client: &VectorClient,
+    database: &str,
+    collection: &str,
+    new_name: &str,
+) -> Result<(), String> {
+    validate_milvus_collection_rename(client, database, collection, new_name)?;
+    send_json(
+        client.post("/v2/vectordb/collections/rename").json(&serde_json::json!({
+            "dbName": database,
+            "collectionName": collection,
+            "newCollectionName": new_name,
+        })),
+        client.kind,
+    )
+    .await
+    .map(|_| ())
+}
+
 async fn list_milvus_databases(client: &VectorClient) -> Result<Vec<String>, String> {
     // Older Milvus versions (pre-2.2) do not expose the databases endpoint; fall back to the
     // configured database (or "default") so the connection stays browsable instead of failing the whole tree load.
@@ -966,9 +1010,9 @@ fn format_reqwest_error(err: &reqwest::Error) -> String {
 mod tests {
     use super::{
         chroma_get_response_to_rows, default_collection_query, milvus_collection_schema, milvus_database_names,
-        rest_query_result, starts_with_http_method, test_connection, test_connection_request, values_to_query_result,
-        vector_auth, weaviate_collection_names_from_schema, weaviate_vector_dimension_from_graphql, CollectionInfo,
-        VectorAuth, VectorClient, VectorDbKind,
+        rename_collection, rest_query_result, starts_with_http_method, test_connection, test_connection_request,
+        values_to_query_result, vector_auth, weaviate_collection_names_from_schema,
+        weaviate_vector_dimension_from_graphql, CollectionInfo, VectorAuth, VectorClient, VectorDbKind,
     };
     use serde_json::{json, Value};
     use std::time::{Duration, Instant};
@@ -1004,9 +1048,31 @@ mod tests {
         let (request_tx, request_rx) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            let mut request = [0_u8; 8192];
-            let read = stream.read(&mut request).await.unwrap();
-            request_tx.send(String::from_utf8_lossy(&request[..read]).into_owned()).unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0_u8; 2048];
+                let read = stream.read(&mut chunk).await.unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+                let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length").then(|| value.trim().to_owned())
+                    })
+                    .and_then(|length| length.parse::<usize>().ok())
+                    .unwrap_or(0);
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+            request_tx.send(String::from_utf8_lossy(&request).into_owned()).unwrap();
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
                 body.len(),
@@ -1293,6 +1359,36 @@ mod tests {
             "http://localhost:8000/api/v2/tenants/default_tenant/databases/default_database/collections"
         );
         assert!(request.headers().get("x-chroma-token").is_none());
+    }
+
+    #[tokio::test]
+    async fn milvus_rename_collection_uses_v2_api_and_expected_names() {
+        let (url, request_rx, server) = spawn_recording_json_response_server(json!({ "code": 0 })).await;
+        let client = VectorClient::new(VectorDbKind::Milvus, &url, None, None, false, Duration::from_secs(1));
+
+        rename_collection(&client, "analytics", "events", "events_archive").await.unwrap();
+        let request = request_rx.await.unwrap();
+
+        assert!(request.starts_with("POST /v2/vectordb/collections/rename HTTP/1.1\r\n"));
+        let request_body: Value = serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(
+            request_body,
+            json!({
+                "dbName": "analytics",
+                "collectionName": "events",
+                "newCollectionName": "events_archive",
+            })
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn milvus_collection_rename_rejects_invalid_targets_before_sending() {
+        let client =
+            VectorClient::new(VectorDbKind::Milvus, "http://127.0.0.1:1", None, None, false, Duration::from_secs(1));
+
+        assert!(rename_collection(&client, "default", "events", "events").await.unwrap_err().contains("differ"));
+        assert!(rename_collection(&client, "default", "events", "").await.unwrap_err().contains("must not be empty"));
     }
 
     #[test]

@@ -1,5 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
-import { appendLargeValueCells, canUseTableDataLargeValuePreview, createResultScopedPendingRequests, largeValueCellMap, remapLargeValueCells, TABLE_DATA_CELL_PREVIEW_SIZE, TABLE_DATA_PREVIEW_CONTENT_MAX_BYTES, tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
+import {
+  appendLargeValueCells,
+  canUseTableDataLargeValuePreview,
+  createResultScopedPendingRequests,
+  createResultScopedRowCache,
+  isTableDataVisiblePreviewColumn,
+  largeValueCellMap,
+  remapLargeValueCells,
+  TABLE_DATA_CELL_PREVIEW_SIZE,
+  TABLE_DATA_PREVIEW_CONTENT_MAX_BYTES,
+  tableDataLargeValuePreviewOptions,
+  tableDataVisiblePreviewContentBytes,
+  tableDataVisiblePreviewRowRange,
+} from "@/lib/dataGrid/dataGridLargeValues";
 import { buildDataGridCellDetail } from "@/lib/dataGrid/dataGridDetail";
 import type { ColumnInfo } from "@/types/database";
 
@@ -64,6 +77,59 @@ describe("data grid large-value metadata", () => {
       const serializedBytes = new TextEncoder().encode(serializedContent).byteLength * previewCellCount;
       expect(serializedBytes).toBeLessThanOrEqual(TABLE_DATA_PREVIEW_CONTENT_MAX_BYTES);
     }
+  });
+
+  it("selects the visible rows plus a bounded viewport buffer", () => {
+    expect(tableDataVisiblePreviewRowRange(26 * 50, 26 * 20, 26, 10_000)).toEqual({ start: 30, end: 90 });
+    expect(tableDataVisiblePreviewRowRange(0, 26 * 20, 26, 10_000)).toEqual({ start: 0, end: 60 });
+    expect(tableDataVisiblePreviewRowRange(26 * 9_990, 26 * 20, 26, 10_000)).toEqual({ start: 9_940, end: 10_000 });
+    expect(tableDataVisiblePreviewRowRange(0, 0, 26, 0)).toBeNull();
+  });
+
+  it("hydrates only textual large-value types in the visible area", () => {
+    expect(isTableDataVisiblePreviewColumn("mysql", "longtext")).toBe(true);
+    expect(isTableDataVisiblePreviewColumn("mysql", "varchar(8000)")).toBe(true);
+    expect(isTableDataVisiblePreviewColumn("mysql", "longblob")).toBe(false);
+    expect(isTableDataVisiblePreviewColumn("postgres", "character varying(8000)")).toBe(true);
+    expect(isTableDataVisiblePreviewColumn("postgres", "jsonb")).toBe(true);
+    expect(isTableDataVisiblePreviewColumn("postgres", "text[]")).toBe(false);
+    expect(isTableDataVisiblePreviewColumn("postgres", "vector(1536)")).toBe(false);
+    expect(isTableDataVisiblePreviewColumn("oracle", "clob")).toBe(false);
+  });
+
+  it("evicts old preview rows while retaining the active viewport", () => {
+    const cache = createResultScopedRowCache<string>(2);
+    cache.remember(1, 2, "one");
+    cache.remember(2, 2, "two");
+    cache.remember(3, 2, "three");
+
+    expect(cache.get(1, 2)).toBe("one");
+    expect(cache.evict(new Set([1]))).toEqual([{ rowIndex: 2, columnIndex: 2, value: "two" }]);
+    expect(cache.has(1, 2)).toBe(true);
+    expect(cache.has(2, 2)).toBe(false);
+    expect(cache.has(3, 2)).toBe(true);
+
+    cache.forget(1, 2);
+    expect(cache.has(1, 2)).toBe(false);
+  });
+
+  it("bounds cached preview content while preserving the newest active rows", () => {
+    const cache = createResultScopedRowCache<string>(10, { maxBytes: 6, sizeOf: (value) => value.length });
+    cache.remember(1, 1, "one");
+    cache.remember(2, 1, "two");
+    cache.remember(3, 1, "four");
+
+    expect(cache.evict(new Set([3]))).toEqual([
+      { rowIndex: 1, columnIndex: 1, value: "one" },
+      { rowIndex: 2, columnIndex: 1, value: "two" },
+    ]);
+    expect(cache.has(3, 1)).toBe(true);
+
+    const oversizedActive = createResultScopedRowCache<string>(10, { maxBytes: 3, sizeOf: (value) => value.length });
+    oversizedActive.remember(1, 1, "four");
+    expect(oversizedActive.evict(new Set([1]))).toEqual([{ rowIndex: 1, columnIndex: 1, value: "four" }]);
+    expect(oversizedActive.has(1, 1)).toBe(false);
+    expect(tableDataVisiblePreviewContentBytes("🙂")).toBe(4);
   });
 
   it("uses the active MySQL page budget to select bounded preview columns", () => {

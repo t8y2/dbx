@@ -40,6 +40,7 @@ import {
   type DataTabReuseMode,
   type DataGridFilterEditorView,
   type OpenTabsRestoreMode,
+  type AppCloseUnsavedTabsMode,
   type SidebarObjectInfoMode,
   type SqlSemanticDiagnosticsMode,
   type SavedSqlOpenTargetMode,
@@ -335,6 +336,7 @@ const editSqlSemanticDiagnosticsEnabled = ref(settingsStore.editorSettings.sqlSe
 const editConfirmDangerousSqlExecution = ref(settingsStore.editorSettings.confirmDangerousSqlExecution);
 const editContinueOnErrorOnBatch = ref(settingsStore.editorSettings.continueOnErrorOnBatch);
 const editConfirmUnsavedSqlClose = ref(settingsStore.editorSettings.confirmUnsavedSqlClose);
+const editAppCloseUnsavedTabsMode = ref<AppCloseUnsavedTabsMode>(settingsStore.editorSettings.appCloseUnsavedTabsMode);
 const editSavedSqlOpenTargetMode = ref<SavedSqlOpenTargetMode>(settingsStore.editorSettings.savedSqlOpenTargetMode);
 const editAppLayout = ref(settingsStore.editorSettings.appLayout);
 const editTabLayout = ref(settingsStore.editorSettings.tabLayout);
@@ -533,6 +535,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     confirmDangerousSqlExecution: editConfirmDangerousSqlExecution.value,
     continueOnErrorOnBatch: editContinueOnErrorOnBatch.value,
     confirmUnsavedSqlClose: editConfirmUnsavedSqlClose.value,
+    appCloseUnsavedTabsMode: editAppCloseUnsavedTabsMode.value,
     savedSqlOpenTargetMode: editSavedSqlOpenTargetMode.value,
     appLayout: editAppLayout.value,
     tabLayout: editTabLayout.value,
@@ -818,6 +821,7 @@ function syncEditorSettingsDraftFromStore() {
   editConfirmDangerousSqlExecution.value = settingsStore.editorSettings.confirmDangerousSqlExecution;
   editContinueOnErrorOnBatch.value = settingsStore.editorSettings.continueOnErrorOnBatch;
   editConfirmUnsavedSqlClose.value = settingsStore.editorSettings.confirmUnsavedSqlClose;
+  editAppCloseUnsavedTabsMode.value = settingsStore.editorSettings.appCloseUnsavedTabsMode;
   editSavedSqlOpenTargetMode.value = settingsStore.editorSettings.savedSqlOpenTargetMode;
   editAppLayout.value = settingsStore.editorSettings.appLayout;
   editTabLayout.value = settingsStore.editorSettings.tabLayout;
@@ -1067,6 +1071,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editConfirmDangerousSqlExecution.value = DEFAULT_EDITOR_SETTINGS.confirmDangerousSqlExecution;
     editContinueOnErrorOnBatch.value = DEFAULT_EDITOR_SETTINGS.continueOnErrorOnBatch;
     editConfirmUnsavedSqlClose.value = DEFAULT_EDITOR_SETTINGS.confirmUnsavedSqlClose;
+    editAppCloseUnsavedTabsMode.value = DEFAULT_EDITOR_SETTINGS.appCloseUnsavedTabsMode;
     editSavedSqlOpenTargetMode.value = DEFAULT_EDITOR_SETTINGS.savedSqlOpenTargetMode;
     editClickTableNavigationTarget.value = DEFAULT_EDITOR_SETTINGS.clickTableNavigationTarget;
     editSqlVariableSubstitutionEnabled.value = DEFAULT_EDITOR_SETTINGS.sqlVariableSubstitutionEnabled;
@@ -1175,6 +1180,7 @@ function resetAllDefaults() {
   editSqlSemanticDiagnosticsEnabled.value = DEFAULT_EDITOR_SETTINGS.sqlSemanticDiagnosticsEnabled;
   editConfirmDangerousSqlExecution.value = DEFAULT_EDITOR_SETTINGS.confirmDangerousSqlExecution;
   editConfirmUnsavedSqlClose.value = DEFAULT_EDITOR_SETTINGS.confirmUnsavedSqlClose;
+  editAppCloseUnsavedTabsMode.value = DEFAULT_EDITOR_SETTINGS.appCloseUnsavedTabsMode;
   editSavedSqlOpenTargetMode.value = DEFAULT_EDITOR_SETTINGS.savedSqlOpenTargetMode;
   editSqlVariableSubstitutionEnabled.value = DEFAULT_EDITOR_SETTINGS.sqlVariableSubstitutionEnabled;
   editSqlVariableSyntaxOverrides.value = normalizeSqlVariableSyntaxOverrides(DEFAULT_EDITOR_SETTINGS.sqlVariableSyntaxOverrides);
@@ -4046,6 +4052,27 @@ onUnmounted(() => {
                     </p>
                   </div>
                   <Switch id="editor-confirm-unsaved-sql-close" v-model="editConfirmUnsavedSqlClose" class="mt-0.5" />
+                </div>
+
+                <div v-if="editConfirmUnsavedSqlClose" class="space-y-2 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="flex items-center gap-2">
+                    <Label for="app-close-unsaved-tabs-mode">{{ t("settings.appCloseUnsavedTabsMode") }}</Label>
+                    <HelpTooltip :label="t('settings.appCloseUnsavedTabsMode')">
+                      {{ t("settings.appCloseUnsavedTabsModeDescription") }}
+                    </HelpTooltip>
+                  </div>
+                  <Select v-model="editAppCloseUnsavedTabsMode">
+                    <SelectTrigger id="app-close-unsaved-tabs-mode" class="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="prompt">{{ t("settings.appCloseUnsavedTabsModePrompt") }}</SelectItem>
+                      <SelectItem value="keep-drafts">{{ t("settings.appCloseUnsavedTabsModeKeepDrafts") }}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p class="text-xs text-muted-foreground">
+                    {{ t("settings.appCloseUnsavedTabsModeHint") }}
+                  </p>
                 </div>
 
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">

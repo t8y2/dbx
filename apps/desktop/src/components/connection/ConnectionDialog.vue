@@ -4529,6 +4529,15 @@ function mysqlTlsModeFromParams(params: string | undefined, ssl: boolean | undef
       return "verify_identity";
   }
 
+  const jdbcUseSsl = getUrlParam(params, "useSSL").trim().toLowerCase();
+  const jdbcRequireSsl = getUrlParam(params, "requireSSL").trim().toLowerCase();
+  const jdbcVerifyServerCertificate = getUrlParam(params, "verifyServerCertificate").trim().toLowerCase();
+  const isTrue = (value: string) => ["true", "1", "yes", "on"].includes(value);
+  if (isTrue(jdbcVerifyServerCertificate) && (isTrue(jdbcUseSsl) || isTrue(jdbcRequireSsl))) return "verify_ca";
+  if (isTrue(jdbcRequireSsl)) return "required";
+  if (["false", "0", "no", "off"].includes(jdbcUseSsl)) return "disabled";
+  if (isTrue(jdbcUseSsl)) return "preferred";
+
   if (!ssl && getUrlParam(params, "require_ssl").toLowerCase() !== "true") return "disabled";
   if (getUrlParam(params, "verify_identity").toLowerCase() === "true") return "verify_identity";
   if (getUrlParam(params, "verify_ca").toLowerCase() === "true") return "verify_ca";
@@ -4536,7 +4545,7 @@ function mysqlTlsModeFromParams(params: string | undefined, ssl: boolean | undef
 }
 
 function applyMysqlTlsMode(params: string | undefined, mode: string): string {
-  let next = deleteUrlParams(params, ["ssl-mode", "sslmode", "require_ssl", "verify_ca", "verify_identity"]);
+  let next = deleteUrlParams(params, ["ssl-mode", "sslmode", "sslMode", "require_ssl", "verify_ca", "verify_identity", "useSSL", "requireSSL", "verifyServerCertificate"]);
   if (mode === "disabled") {
     return setUrlParam(next, "ssl-mode", "disabled");
   }

@@ -707,6 +707,7 @@ export const documentDeleteGridFsFile = forward("documentDeleteGridFsFile");
 export const vectorGetCollectionDetail = forward("vectorGetCollectionDetail");
 export const vectorDropDatabase = forward("vectorDropDatabase");
 export const vectorDropCollection = forward("vectorDropCollection");
+export const vectorRenameCollection = forward("vectorRenameCollection");
 export const mongoCreateDatabase = forward("mongoCreateDatabase");
 export const mongoDropDatabase = forward("mongoDropDatabase");
 export const mongoDropCollection = forward("mongoDropCollection");

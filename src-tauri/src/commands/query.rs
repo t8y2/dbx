@@ -455,14 +455,16 @@ pub async fn execute_in_manual_transaction(
     database: String,
     schema: Option<String>,
     max_rows: Option<usize>,
-) -> Result<Vec<db::QueryResult>, String> {
-    dbx_core::query::execute_in_manual_transaction(
+    table_data_preview: Option<bool>,
+) -> Result<Vec<dbx_core::query::ExecuteMultiResult>, String> {
+    dbx_core::query::execute_in_manual_transaction_with_options(
         &state,
         &txn_session_id,
         &sql,
         &database,
         schema.as_deref(),
         max_rows,
+        table_data_preview.unwrap_or(false),
     )
     .await
 }

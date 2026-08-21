@@ -1876,8 +1876,18 @@ func TestListObjectsSQLUsesSplitDictionaryQuery(t *testing.T) {
 	if !strings.Contains(sqlText, "'PACKAGE BODY'") || !strings.Contains(sqlText, "PACKAGE_BODY") {
 		t.Fatalf("object listing should include package bodies with normalized type, got: %s", oracleListObjectsSQL)
 	}
+	if !strings.Contains(sqlText, "'SEQUENCE'") {
+		t.Fatalf("object listing should include sequences, got: %s", oracleListObjectsSQL)
+	}
 	if !strings.Contains(sqlText, "ALL_SYNONYMS") || !strings.Contains(sqlText, "'SYNONYM' AS OBJECT_TYPE") {
 		t.Fatalf("object listing should include schema synonyms, got: %s", oracleListObjectsSQL)
+	}
+}
+
+func TestListSessionUserObjectsSQLIncludesSequences(t *testing.T) {
+	sqlText := strings.ToUpper(oracleListObjectsSessionUserBaseSQL)
+	if !strings.Contains(sqlText, "FROM USER_OBJECTS") || !strings.Contains(sqlText, "'SEQUENCE'") {
+		t.Fatalf("session-user object listing should include sequences, got: %s", oracleListObjectsSessionUserBaseSQL)
 	}
 }
 
@@ -2288,6 +2298,24 @@ func TestRewriteOracleLOBSelectStarAsDeferredValues(t *testing.T) {
 	}
 }
 
+func TestRewriteOracleXMLTypeAsDeferredValue(t *testing.T) {
+	sqlText, err := rewriteOracleSelectSQL(
+		`SELECT t.ID, t.XML_CONTENT FROM TEST_LOBS t WHERE t.ID = 1`,
+		fakeOracleColumnLoader([]oracleColumnMeta{
+			{Name: "ID", DataType: "NUMBER"},
+			{Name: "XML_CONTENT", DataType: "SYS.XMLTYPE"},
+		}),
+		true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `SELECT t.ID, CASE WHEN t."XML_CONTENT" IS NULL THEN NULL ELSE '<XMLTYPE>' END AS "XML_CONTENT", CASE WHEN t."XML_CONTENT" IS NULL THEN NULL ELSE 'D:1' END AS "__DBX_LARGE_VALUE_BYTES_C_1" FROM TEST_LOBS t WHERE t.ID = 1`
+	if sqlText != want {
+		t.Fatalf("rewriteOracleSelectSQL() = %s, want %s", sqlText, want)
+	}
+}
+
 func TestRewriteOracleLOBExplicitColumnUsesVisibleResultIndex(t *testing.T) {
 	sqlText, err := rewriteOracleSelectSQL(
 		`SELECT t.ID, t.PAYLOAD AS body, LENGTH(t.PAYLOAD) AS payload_length FROM TEST_LOBS t`,
@@ -2459,6 +2487,30 @@ func TestGetObjectSourceUsesDBMSMetadataForSynonym(t *testing.T) {
 	}
 	if result["source"] != ddl || result["object_type"] != "SYNONYM" {
 		t.Fatalf("unexpected synonym source: %#v", result)
+	}
+	if scripted.next != len(scripted.steps) {
+		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
+	}
+}
+
+func TestGetObjectSourceUsesDBMSMetadataForSequence(t *testing.T) {
+	const ddl = `CREATE SEQUENCE "HR"."ORDER_SEQ" MINVALUE 1 MAXVALUE 9999999999999999999999999999 INCREMENT BY 1 START WITH 42 CACHE 20 NOORDER NOCYCLE NOKEEP NOSCALE GLOBAL`
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "DBMS_METADATA.GET_DDL(:1, :2, :3)",
+			args:          []driver.Value{"SEQUENCE", "ORDER_SEQ", "HR"},
+			rows:          [][]driver.Value{{ddl}},
+		},
+	})
+	s := newServer()
+	s.db = db
+
+	result, err := s.getObjectSource("HR", "ORDER_SEQ", "SEQUENCE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result["source"] != ddl || result["object_type"] != "SEQUENCE" {
+		t.Fatalf("unexpected sequence source: %#v", result)
 	}
 	if scripted.next != len(scripted.steps) {
 		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)

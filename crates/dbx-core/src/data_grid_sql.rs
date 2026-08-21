@@ -399,7 +399,11 @@ pub fn build_data_grid_copy_update_statements(options: DataGridCopyUpdateStateme
                 format!(
                     "{} = {}",
                     data_grid_identifier(options.database_type, column, options.identifier_quote.as_deref()),
-                    format_grid_sql_literal(row.get(*index).unwrap_or(&Value::Null), options.database_type, *info)
+                    format_grid_assignment_sql_literal(
+                        row.get(*index).unwrap_or(&Value::Null),
+                        options.database_type,
+                        *info,
+                    )
                 )
             })
             .collect::<Vec<_>>()
@@ -1486,7 +1490,7 @@ fn build_data_grid_rollback_statements(
         let values = insert_pairs
             .iter()
             .map(|(column, value)| {
-                format_grid_sql_literal(value, options.database_type, column_info_for(column_info, column))
+                format_grid_assignment_sql_literal(value, options.database_type, column_info_for(column_info, column))
             })
             .collect::<Vec<_>>()
             .join(", ");
@@ -1544,7 +1548,7 @@ fn build_data_grid_rollback_statements(
                 format!(
                     "{} = {}",
                     data_grid_identifier(options.database_type, column, options.identifier_quote.as_deref()),
-                    format_grid_sql_literal(
+                    format_grid_assignment_sql_literal(
                         row.get(*column_index).unwrap_or(&Value::Null),
                         options.database_type,
                         column_info_for(column_info, column)
@@ -1837,7 +1841,7 @@ fn build_hive_values_insert(
             if save_literals {
                 format_grid_save_sql_literal(value, options.database_type, info)
             } else {
-                format_grid_sql_literal(value, options.database_type, info)
+                format_grid_assignment_sql_literal(value, options.database_type, info)
             }
         })
         .collect::<Vec<_>>()
@@ -1905,21 +1909,25 @@ fn format_grid_copy_insert_sql_literal(
             }
         }
     }
-    // JSON columns may expose a JSON array/object value (e.g. `[1,2,3]` or `{}`)
-    // instead of its string form. Keep it as a single JSON literal rather than
-    // letting format_grid_sql_literal serialize it as a PostgreSQL-style array
-    // (`{...}`). Serialize the value back to compact JSON text, format that as a
-    // string literal, then cast it for MySQL so it inserts as JSON.
-    if column_info.is_some_and(|column| {
-        let dt = column.data_type.trim();
-        dt.eq_ignore_ascii_case("json") || dt.eq_ignore_ascii_case("jsonb")
-    }) && (value.is_array() || value.is_object())
-    {
-        let json_text = value.to_string();
-        let string_literal = format_grid_sql_literal(&Value::String(json_text), database_type, column_info);
-        return mysql_json_predicate_literal(string_literal, database_type, column_info);
+    format_grid_assignment_sql_literal(value, database_type, column_info)
+}
+
+fn format_grid_assignment_sql_literal(
+    value: &Value,
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+) -> String {
+    if (value.is_array() || value.is_object()) && is_json_document_column(column_info) {
+        return format_grid_sql_literal(&Value::String(value.to_string()), database_type, column_info);
     }
     format_grid_sql_literal(value, database_type, column_info)
+}
+
+fn is_json_document_column(column_info: Option<&DataGridColumnInfo>) -> bool {
+    column_info.is_some_and(|column| {
+        let data_type = column.data_type.trim();
+        data_type.eq_ignore_ascii_case("json") || data_type.eq_ignore_ascii_case("jsonb")
+    })
 }
 
 pub fn format_grid_sql_literal(
@@ -2142,7 +2150,7 @@ fn format_grid_save_sql_literal(
     if empty_string_saves_as_null(value, column_info) {
         "NULL".to_string()
     } else {
-        format_grid_sql_literal(value, database_type, column_info)
+        format_grid_assignment_sql_literal(value, database_type, column_info)
     }
 }
 
@@ -2676,9 +2684,9 @@ pub(crate) fn build_column_predicate(
     if value.is_null() {
         format!("{ident} IS NULL")
     } else if use_binary_text_comparison && uses_mysql_binary_text_predicate(database_type, value, column_info) {
-        format!("BINARY {ident} = {}", format_grid_sql_literal(value, database_type, column_info))
+        format!("BINARY {ident} = {}", format_grid_assignment_sql_literal(value, database_type, column_info))
     } else {
-        let literal = format_grid_sql_literal(value, database_type, column_info);
+        let literal = format_grid_assignment_sql_literal(value, database_type, column_info);
         if use_binary_text_comparison {
             if let Some(predicate) = postgres_keyless_json_predicate(database_type, &ident, &literal, column_info) {
                 return predicate;
@@ -3600,7 +3608,7 @@ mod tests {
             insert_mode: DataGridCopyInsertMode::Merged,
         });
 
-        assert_eq!(statement.as_deref(), Some("INSERT INTO table_name (`data`) VALUES (CAST('[1,2,3]' AS JSON));"));
+        assert_eq!(statement.as_deref(), Some("INSERT INTO table_name (`data`) VALUES ('[1,2,3]');"));
     }
 
     #[test]
@@ -3618,7 +3626,7 @@ mod tests {
             insert_mode: DataGridCopyInsertMode::Merged,
         });
 
-        assert_eq!(statement.as_deref(), Some("INSERT INTO table_name (`data`) VALUES (CAST('[]' AS JSON));"));
+        assert_eq!(statement.as_deref(), Some("INSERT INTO table_name (`data`) VALUES ('[]');"));
     }
 
     #[test]
@@ -3636,7 +3644,95 @@ mod tests {
             insert_mode: DataGridCopyInsertMode::Merged,
         });
 
-        assert_eq!(statement.as_deref(), Some("INSERT INTO table_name (`data`) VALUES (CAST('{\"a\":1}' AS JSON));"));
+        assert_eq!(statement.as_deref(), Some("INSERT INTO table_name (`data`) VALUES ('{\"a\":1}');"));
+    }
+
+    #[test]
+    fn copy_update_formats_mysql_json_documents_as_compact_strings() {
+        let statements = build_data_grid_copy_update_statements(DataGridCopyUpdateStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "documents".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "int", false, None), column("payload", "JSON", true, None)]),
+            },
+            columns: vec!["id".to_string(), "payload".to_string()],
+            source_columns: None,
+            rows: vec![
+                vec![json!(1), json!([111, 222, 333])],
+                vec![json!(2), json!({"nested": [1, 2]})],
+                vec![json!(3), json!([])],
+            ],
+        });
+
+        assert_eq!(
+            statements,
+            vec![
+                "UPDATE `documents` SET `payload` = '[111,222,333]' WHERE `id` = 1;",
+                "UPDATE `documents` SET `payload` = '{\"nested\":[1,2]}' WHERE `id` = 2;",
+                "UPDATE `documents` SET `payload` = '[]' WHERE `id` = 3;",
+            ]
+        );
+    }
+
+    #[test]
+    fn copy_update_preserves_json_scalars_and_generic_arrays() {
+        let json_statements = build_data_grid_copy_update_statements(DataGridCopyUpdateStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "documents".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "int", false, None), column("payload", "json", true, None)]),
+            },
+            columns: vec!["id".to_string(), "payload".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!(r#"[1,2]"#)], vec![json!(2), json!(true)], vec![json!(3), Value::Null]],
+        });
+        assert_eq!(
+            json_statements,
+            vec![
+                "UPDATE `documents` SET `payload` = '[1,2]' WHERE `id` = 1;",
+                "UPDATE `documents` SET `payload` = TRUE WHERE `id` = 2;",
+                "UPDATE `documents` SET `payload` = NULL WHERE `id` = 3;",
+            ]
+        );
+
+        let generic_statements = build_data_grid_copy_update_statements(DataGridCopyUpdateStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "arrays".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: None,
+            },
+            columns: vec!["id".to_string(), "payload".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!([1, 2])]],
+        });
+        assert_eq!(generic_statements, vec!["UPDATE `arrays` SET `payload` = '{1,2}' WHERE `id` = 1;"]);
+
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!([1, 2]),
+                Some(DatabaseType::Postgres),
+                Some(&column("items", "integer[]", true, None)),
+            ),
+            "'{1,2}'"
+        );
+        for database_type in [DatabaseType::ClickHouse, DatabaseType::Databend] {
+            assert_eq!(format_grid_sql_literal(&json!([1, 2]), Some(database_type), None), "[1,2]");
+        }
     }
 
     #[test]
@@ -6142,6 +6238,44 @@ mod tests {
         assert_eq!(
             delete.rollback_statements,
             vec![r#"INSERT INTO `app`.`documents` (`payload`, `note`) VALUES ('{"name":"before"}', 'row-a');"#]
+        );
+    }
+
+    #[test]
+    fn mysql_json_save_assignments_are_compact_and_predicates_stay_cast() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("app".to_string()),
+                table_name: "documents".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "int", false, None), column("payload", "JSON", true, None)]),
+            },
+            columns: vec!["id".to_string(), "payload".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!({"before": true})]],
+            dirty_rows: vec![(0, vec![(1, json!([]))])],
+            deleted_rows: vec![],
+            new_rows: vec![vec![json!(2), json!({"nested": [1, 2]})]],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![
+                "UPDATE `app`.`documents` SET `payload` = '[]' WHERE `id` = 1;",
+                "INSERT INTO `app`.`documents` (`id`, `payload`) VALUES (2, '{\"nested\":[1,2]}');",
+            ]
+        );
+        assert_eq!(
+            result.rollback_statements,
+            vec![
+                "DELETE FROM `app`.`documents` WHERE `id` = 2;",
+                "UPDATE `app`.`documents` SET `payload` = '{\"before\":true}' WHERE `id` = 1 AND `payload` = CAST('[]' AS JSON);",
+            ]
         );
     }
 

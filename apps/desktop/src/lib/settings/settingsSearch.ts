@@ -118,6 +118,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "editor-completion-trigger-mode", category: "editor", titleKey: "settings.completionTriggerMode", descriptionKey: "settings.completionTriggerModeDescription", targetId: "editor" },
   { id: "editor-auto-alias", category: "editor", titleKey: "settings.autoAliasTables", descriptionKey: "settings.autoAliasTablesDescription", targetId: "editor" },
   { id: "editor-unsaved-close", category: "editor", titleKey: "settings.confirmUnsavedSqlClose", descriptionKey: "settings.confirmUnsavedSqlCloseDescription", targetId: "editor" },
+  { id: "editor-app-close-unsaved-tabs", category: "editor", titleKey: "settings.appCloseUnsavedTabsMode", descriptionKey: "settings.appCloseUnsavedTabsModeDescription", targetId: "editor" },
   { id: "editor-prefill-query", category: "editor", titleKey: "settings.prefillNewQueryWithSelect", descriptionKey: "settings.prefillNewQueryWithSelectDescription", targetId: "editor" },
   { id: "editor-diagnostics", category: "editor", titleKey: "settings.sqlSemanticDiagnosticsEnabled", descriptionKey: "settings.sqlSemanticDiagnosticsEnabledDescription", targetId: "editor" },
   { id: "editor-sql-variables", category: "editor", titleKey: "settings.sqlVariableSyntax", descriptionKey: "settings.sqlVariableSyntaxDescription", targetId: "editor" },

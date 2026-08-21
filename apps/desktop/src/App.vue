@@ -40,6 +40,7 @@ import { useWebDavAutoUpload } from "@/composables/useWebDavAutoUpload";
 import { useScheduledDatabaseBackups } from "@/composables/useScheduledDatabaseBackups";
 import { shouldDrawDesktopWindowFrame } from "@/composables/useWindowControls";
 import { createOpenTabsRestorationBarrier, initializeDesktopOpenTabs, initializeOpenTabs, type OpenTabsRestorationBarrier } from "@/lib/app/openTabsStartup";
+import { finishAppCloseWithRequiredPersist } from "@/lib/app/appClosePersistence";
 import { useSaveSqlFolderSelection } from "@/composables/useSaveSqlFolderSelection";
 import "@/i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -1069,7 +1070,23 @@ async function finishPendingAppClose(action: AppCloseAction) {
   }
   pendingAppCloseAction.value = null;
   pendingSaveShouldCloseTab.value = true;
-  if (action === "quit") await disposeAllSqlServerActivityTraces().catch(() => undefined);
+  const disposeRuntimeBeforeClose = () => (action === "quit" ? disposeAllSqlServerActivityTraces().catch(() => undefined) : Promise.resolve());
+  if (queryStore.requiresAppCloseDraftPersist) {
+    await finishAppCloseWithRequiredPersist({
+      persist: () => queryStore.flushPendingPersist(),
+      beforeClose: disposeRuntimeBeforeClose,
+      close: () => performCloseAction(action),
+      onPersistError: (error) =>
+        toast(
+          t("settings.appCloseDraftPersistFailed", {
+            message: error instanceof Error ? error.message : String(error),
+          }),
+          8000,
+        ),
+    });
+    return;
+  }
+  await disposeRuntimeBeforeClose();
   await queryStore.flushPendingPersist().catch(() => undefined);
   await performCloseAction(action);
 }

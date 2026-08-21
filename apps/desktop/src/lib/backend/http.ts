@@ -1216,7 +1216,7 @@ export async function beginManualTransaction(_connectionId: string, _database: s
   throw new Error("Manual transaction management is only available in the desktop app.");
 }
 
-export async function executeInManualTransaction(_txnSessionId: string, _sql: string, _database: string, _schema?: string, _maxRows?: number): Promise<QueryResult[]> {
+export async function executeInManualTransaction(_txnSessionId: string, _sql: string, _database: string, _schema?: string, _maxRows?: number, _tableDataPreview?: boolean): Promise<QueryResult[]> {
   throw new Error("Manual transaction management is only available in the desktop app.");
 }
 
@@ -3633,7 +3633,7 @@ export async function vectorListCollections(connectionId: string, database?: str
 }
 
 export async function vectorGetCollectionDetail(connectionId: string, database: string, collection: string): Promise<CollectionInfo> {
-  return post("/api/mongo/vector-collection-detail", {
+  return post("/api/vector/collection-detail", {
     connectionId,
     database,
     collection,
@@ -3646,6 +3646,10 @@ export async function vectorDropDatabase(connectionId: string, database: string)
 
 export async function vectorDropCollection(connectionId: string, database: string, collection: string): Promise<void> {
   await post("/api/vector/drop-collection", { connectionId, database, collection });
+}
+
+export async function vectorRenameCollection(connectionId: string, database: string, collection: string, newName: string): Promise<void> {
+  await post("/api/vector/rename-collection", { connectionId, database, collection, newName });
 }
 
 export async function mongoFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, projection?: string, sort?: string, collation?: string, executionId?: string): Promise<MongoDocumentResult> {

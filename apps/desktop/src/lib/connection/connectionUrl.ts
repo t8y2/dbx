@@ -257,6 +257,18 @@ function queryParamValue(params: string, key: string): string | undefined {
   return undefined;
 }
 
+function queryParamLastValue(params: string, key: string): string | undefined {
+  let result: string | undefined;
+  for (const part of params.split(/[&;]/)) {
+    if (!part) continue;
+    const [rawKey, ...rest] = part.split("=");
+    if (decodeUrlPart(rawKey).toLowerCase() === key.toLowerCase()) {
+      result = decodeUrlPart(rest.join("=")).trim();
+    }
+  }
+  return result;
+}
+
 function extractHiveStructuredParams(params: string): { username?: string; password?: string; ssl: boolean; urlParams: string } {
   let username: string | undefined;
   let password: string | undefined;
@@ -334,10 +346,16 @@ function urlParamsRequireTls(dbType: DatabaseType, params: string): boolean {
   }
 
   if (dbType === "mysql") {
-    const requireSsl = queryParamValue(params, "require_ssl")?.toLowerCase();
+    const requireSsl = queryParamLastValue(params, "require_ssl")?.toLowerCase();
     if (requireSsl === "true" || requireSsl === "1" || requireSsl === "yes") return true;
-    const sslMode = (queryParamValue(params, "ssl-mode") || queryParamValue(params, "sslmode") || "").toLowerCase().replace("-", "_");
-    return sslMode === "required" || sslMode === "require" || sslMode === "verify_ca" || sslMode === "verify_identity";
+    const sslMode = (queryParamLastValue(params, "ssl-mode") || queryParamLastValue(params, "sslmode") || "").toLowerCase().replace("-", "_");
+    if (sslMode === "required" || sslMode === "require" || sslMode === "verify_ca" || sslMode === "verify_identity") return true;
+    if (requireSsl !== undefined || sslMode) return false;
+    const jdbcUseSsl = (queryParamLastValue(params, "useSSL") || "").toLowerCase();
+    const jdbcRequireSsl = (queryParamLastValue(params, "requireSSL") || "").toLowerCase();
+    const jdbcVerifyServerCertificate = (queryParamLastValue(params, "verifyServerCertificate") || "").toLowerCase();
+    if (["false", "0", "no", "off"].includes(jdbcUseSsl)) return false;
+    return ["true", "1", "yes", "on"].includes(jdbcRequireSsl) || ["true", "1", "yes", "on"].includes(jdbcVerifyServerCertificate);
   }
 
   if (dbType === "postgres" || dbType === "redshift" || dbType === "kwdb") {

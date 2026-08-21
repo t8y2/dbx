@@ -5522,6 +5522,16 @@ watch(
   },
 );
 
+watch(
+  () => connectionStore.completionCacheRevision(props.connectionId, props.database),
+  () => {
+    completionEpoch++;
+    refreshCompletionCache();
+    setSemanticDiagnostics([]);
+    scheduleSemanticDiagnostics();
+  },
+);
+
 watch([() => props.clientSessionId, () => props.completionContextVersion], () => {
   completionEpoch++;
   refreshCompletionCache();

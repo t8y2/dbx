@@ -682,6 +682,45 @@ describe("connectionStore completion assistant", () => {
     expect(getColumns.mock.calls.map((call) => call[3])).toEqual(["users", "orders", "users"]);
   });
 
+  it("does not let an invalidated column request overwrite fresh metadata", async () => {
+    const staleColumns = deferred<unknown[]>();
+    const freshColumns = deferred<unknown[]>();
+    const getColumns = vi.fn().mockReturnValueOnce(staleColumns.promise).mockReturnValueOnce(freshColumns.promise);
+    const column = (name: string) => ({
+      name,
+      data_type: "integer",
+      is_nullable: false,
+      column_default: null,
+      is_primary_key: false,
+      extra: null,
+      comment: null,
+    });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch: vi.fn().mockRejectedValue(new Error("assistant unavailable")),
+      getColumns,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [sqlServerConnection()];
+    store.connectedIds.add("sqlserver-1");
+
+    const staleRequest = store.listCompletionColumns("sqlserver-1", "app", "users", "dbo");
+    await vi.waitFor(() => expect(getColumns).toHaveBeenCalledTimes(1));
+    store.invalidateCompletionTableCache("sqlserver-1", "app", "users", "dbo");
+    const freshRequest = store.listCompletionColumns("sqlserver-1", "app", "users", "dbo");
+    freshColumns.resolve([column("fresh_column")]);
+    await expect(freshRequest).resolves.toEqual([expect.objectContaining({ name: "fresh_column" })]);
+
+    staleColumns.resolve([column("stale_column")]);
+    await expect(staleRequest).resolves.toEqual([expect.objectContaining({ name: "fresh_column" })]);
+    await expect(store.listCompletionColumns("sqlserver-1", "app", "users", "dbo")).resolves.toEqual([expect.objectContaining({ name: "fresh_column" })]);
+    expect(getColumns).toHaveBeenCalledTimes(2);
+  });
+
   it("keeps the same table cached in other catalogs", async () => {
     const getColumns = vi.fn(async (_connectionId: string, _database: string, _schema: string, table: string, catalog?: string) => [
       {

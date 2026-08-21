@@ -25,6 +25,14 @@ function mysqlTlsMode(config: ConnectionConfig): string {
   if (["disabled", "disable"].includes(mode)) return "disabled";
   if (["preferred", "prefer"].includes(mode)) return "preferred";
   if (["required", "require", "verify_ca", "verify_identity"].includes(mode)) return mode;
+  const jdbcUseSsl = urlParamValue(parsed, "useSSL").trim().toLowerCase();
+  const jdbcRequireSsl = urlParamValue(parsed, "requireSSL").trim().toLowerCase();
+  const jdbcVerifyServerCertificate = urlParamValue(parsed, "verifyServerCertificate").trim().toLowerCase();
+  const isTrue = (value: string) => ["true", "1", "yes", "on"].includes(value);
+  if (isTrue(jdbcVerifyServerCertificate) && (isTrue(jdbcUseSsl) || isTrue(jdbcRequireSsl))) return "verify_ca";
+  if (isTrue(jdbcRequireSsl)) return "required";
+  if (["false", "0", "no", "off"].includes(jdbcUseSsl)) return "disabled";
+  if (isTrue(jdbcUseSsl)) return "preferred";
   if (config.ssl || ["true", "1", "yes", "on"].includes(urlParamValue(parsed, "require_ssl").trim().toLowerCase())) return "required";
   return "disabled";
 }
@@ -66,6 +74,9 @@ export function appendConnectionErrorHints(config: ConnectionConfig | undefined,
   }
   if (mysqlTlsMode(config) === "disabled") return message;
   if (!isMysqlTlsLikeFailure(message)) return message;
+  if (/UnsupportedCertVersion/i.test(message)) {
+    return appendHint(message, t("connection.mysqlUnsupportedCertVersionHint"));
+  }
   const hint = t("connection.mysqlTlsConnectionFailureHint");
   return appendHint(message, hint);
 }

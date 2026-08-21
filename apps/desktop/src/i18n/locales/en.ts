@@ -574,6 +574,7 @@ export default {
     mysqlClientKeyPlaceholder: "/path/to/client.key",
     mysqlClientCertHint: "Client certificate and private key must be provided together when MySQL requires mTLS.",
     mysqlTlsConnectionFailureHint: "If the MySQL server does not require TLS, edit the connection, set TLS Mode to Disabled, and try again.",
+    mysqlUnsupportedCertVersionHint: "Strict verification does not support this server certificate version. Replace it with an X.509 v3 certificate, or use Required mode only on a trusted network.",
     mysqlClientCertBrowse: "Choose client certificate",
     mysqlClientKeyBrowse: "Choose client private key",
     postgresSslMode: "TLS Mode",

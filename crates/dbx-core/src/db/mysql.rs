@@ -18,7 +18,10 @@ use std::time::Duration;
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::models::connection::{ConnectionConfig, DatabaseConnectionInfo, DatabaseType};
+use crate::models::connection::{
+    is_mysql_jdbc_tls_param, mysql_jdbc_tls_mode, ConnectionConfig, DatabaseConnectionInfo, DatabaseType,
+    MysqlJdbcTlsMode,
+};
 use crate::schema::{table_name_filter_matches, TableNameFilter};
 use crate::sql::{starts_with_executable_sql_keyword, starts_with_executable_sql_keyword_for_database};
 use crate::types::{
@@ -1914,7 +1917,14 @@ fn mysql_url_requires_ssl(url: &str) -> bool {
     let Some((_, query)) = url.split_once('?') else {
         return false;
     };
-    query.split('&').any(|segment| {
+    let query = query.split('#').next().unwrap_or(query);
+    let has_native_tls_param = query.split('&').any(|segment| {
+        let key = segment.split_once('=').map(|(key, _)| key).unwrap_or(segment).trim();
+        key.eq_ignore_ascii_case("ssl-mode")
+            || key.eq_ignore_ascii_case("sslmode")
+            || key.eq_ignore_ascii_case("require_ssl")
+    });
+    let native_requires_ssl = query.split('&').any(|segment| {
         let Some((key, value)) = segment.split_once('=') else {
             return false;
         };
@@ -1928,7 +1938,13 @@ fn mysql_url_requires_ssl(url: &str) -> bool {
                     value.to_ascii_lowercase().replace('-', "_").as_str(),
                     "required" | "require" | "verify_ca" | "verify_identity"
                 ))
-    })
+    });
+    native_requires_ssl
+        || (!has_native_tls_param
+            && matches!(
+                mysql_jdbc_tls_mode(Some(query)),
+                Some(MysqlJdbcTlsMode::Required | MysqlJdbcTlsMode::VerifyCa)
+            ))
 }
 
 fn mysql_url_attempts_ssl(url: &str) -> bool {
@@ -1939,7 +1955,14 @@ fn mysql_url_attempts_ssl(url: &str) -> bool {
     let Some((_, query)) = url.split_once('?') else {
         return false;
     };
-    query.split('&').any(|segment| {
+    let query = query.split('#').next().unwrap_or(query);
+    let has_native_tls_param = query.split('&').any(|segment| {
+        let key = segment.split_once('=').map(|(key, _)| key).unwrap_or(segment).trim();
+        key.eq_ignore_ascii_case("ssl-mode")
+            || key.eq_ignore_ascii_case("sslmode")
+            || key.eq_ignore_ascii_case("require_ssl")
+    });
+    let native_attempts_ssl = query.split('&').any(|segment| {
         let Some((key, value)) = segment.split_once('=') else {
             return false;
         };
@@ -1947,7 +1970,13 @@ fn mysql_url_attempts_ssl(url: &str) -> bool {
         let value = value.trim();
         (key.eq_ignore_ascii_case("ssl-mode") || key.eq_ignore_ascii_case("sslmode"))
             && matches!(value.to_ascii_lowercase().replace('-', "_").as_str(), "preferred" | "prefer")
-    })
+    });
+    native_attempts_ssl
+        || (!has_native_tls_param
+            && matches!(
+                mysql_jdbc_tls_mode(Some(query)),
+                Some(MysqlJdbcTlsMode::Preferred | MysqlJdbcTlsMode::Required | MysqlJdbcTlsMode::VerifyCa)
+            ))
 }
 
 fn mysql_url_verifies_identity(url: &str) -> bool {
@@ -2069,6 +2098,13 @@ fn mysql_async_url(url: &str) -> Cow<'_, str> {
     let mut changed = false;
     let mut has_catalog = false;
     let mut enable_cleartext_plugin = false;
+    let has_native_tls_param = query.split('&').any(|segment| {
+        let key = segment.split_once('=').map(|(key, _)| key).unwrap_or(segment).trim();
+        key.eq_ignore_ascii_case("ssl-mode")
+            || key.eq_ignore_ascii_case("sslmode")
+            || key.eq_ignore_ascii_case("require_ssl")
+    });
+    let jdbc_tls_mode = mysql_jdbc_tls_mode(Some(query));
     for segment in query.split('&') {
         let segment = segment.trim();
         if segment.is_empty() {
@@ -2086,6 +2122,10 @@ fn mysql_async_url(url: &str) -> Cow<'_, str> {
         if is_mysql_cleartext_password_param(key) {
             changed = true;
             enable_cleartext_plugin |= mysql_url_param_value_is_true(value);
+            continue;
+        }
+        if is_mysql_jdbc_tls_param(key) {
+            changed = true;
             continue;
         }
         if is_dbx_handled_mysql_url_param(key) {
@@ -2120,6 +2160,22 @@ fn mysql_async_url(url: &str) -> Cow<'_, str> {
             continue;
         }
         filtered.push(segment.to_string());
+    }
+    if !has_native_tls_param {
+        match jdbc_tls_mode {
+            Some(MysqlJdbcTlsMode::Disabled) => filtered.push("require_ssl=false".to_string()),
+            Some(MysqlJdbcTlsMode::Preferred | MysqlJdbcTlsMode::Required) => {
+                filtered.push("require_ssl=true".to_string());
+                filtered.push("verify_ca=false".to_string());
+                filtered.push("verify_identity=false".to_string());
+            }
+            Some(MysqlJdbcTlsMode::VerifyCa) => {
+                filtered.push("require_ssl=true".to_string());
+                filtered.push("verify_ca=true".to_string());
+                filtered.push("verify_identity=false".to_string());
+            }
+            None => {}
+        }
     }
     if enable_cleartext_plugin {
         filtered.push("enable_cleartext_plugin=true".to_string());
@@ -7619,15 +7675,45 @@ mod tests {
     }
 
     #[test]
-    fn mysql_async_url_strips_jdbc_params() {
+    fn mysql_async_url_translates_connector_j_tls_params() {
         let url = "mysql://host:3306/db?useUnicode=true&characterEncoding=utf8&zeroDateTimeBehavior=convertToNull&useSSL=true&serverTimezone=GMT%2B8&allowPublicKeyRetrieval=true";
-        assert_eq!(mysql_async_url(url).as_ref(), "mysql://host:3306/db");
+        assert_eq!(
+            mysql_async_url(url).as_ref(),
+            "mysql://host:3306/db?require_ssl=true&verify_ca=false&verify_identity=false"
+        );
+    }
+
+    #[test]
+    fn mysql_async_url_translates_connector_j_required_verified_tls_params() {
+        let url = "mysql://host:3306/db?useSSL=true&requireSSL=true&verifyServerCertificate=true";
+        assert_eq!(
+            mysql_async_url(url).as_ref(),
+            "mysql://host:3306/db?require_ssl=true&verify_ca=true&verify_identity=false"
+        );
+    }
+
+    #[test]
+    fn mysql_async_url_prefers_native_tls_mode_over_connector_j_aliases() {
+        let url = "mysql://host:3306/db?sslMode=REQUIRED&useSSL=false&requireSSL=false";
+        assert_eq!(
+            mysql_async_url(url).as_ref(),
+            "mysql://host:3306/db?require_ssl=true&verify_ca=false&verify_identity=false"
+        );
     }
 
     #[test]
     fn mysql_async_url_keeps_valid_params_while_stripping_jdbc() {
         let url = "mysql://host:3306/db?useUnicode=true&characterEncoding=utf8&require_ssl=true&charset=utf8mb4&autoReconnect=true&allowMultiQueries=true";
         assert_eq!(mysql_async_url(url).as_ref(), "mysql://host:3306/db?require_ssl=true");
+    }
+
+    #[test]
+    fn connector_j_preferred_tls_falls_back_but_required_tls_does_not() {
+        assert_eq!(
+            ssl_fallback_url("mysql://host:3306/db?useSSL=true&characterEncoding=utf8"),
+            Some("mysql://host:3306/db?useSSL=true&characterEncoding=utf8&ssl-mode=disabled".to_string())
+        );
+        assert_eq!(ssl_fallback_url("mysql://host:3306/db?useSSL=true&requireSSL=true"), None);
     }
 
     #[test]

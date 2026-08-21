@@ -27,9 +27,9 @@ wry = { path = "vendor/wry" }
 tokio-postgres = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", rev = "ac8ad476de59093d33ab9f294531c956e0c6a724" }
 postgres-types = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", rev = "ac8ad476de59093d33ab9f294531c956e0c6a724" }
 postgres-protocol = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", rev = "ac8ad476de59093d33ab9f294531c956e0c6a724" }
-# Temporary compatibility patch for MySQL accounts using the deprecated
-# sha256_password auth plugin. Remove after upstream support lands.
-mysql_async = { git = "https://github.com/t8y2/mysql_async.git", rev = "b615bb0b10b5975182a4aa069cabc3d09021f6ab" }
+# Temporary compatibility patches for deprecated sha256_password accounts and
+# rustls dangerous-mode connections to legacy certificates. Remove after upstream support lands.
+mysql_async = { git = "https://github.com/zipg/mysql_async.git", rev = "4a9e60a62f5a48e35ef9ccc9fc8277d5012b19dd" }
 # Preserve readable SQL Server result sets when a row contains an unpaired
 # UTF-16 surrogate. Remove after the behavior is available in upstream tiberius.
 tiberius = { path = "vendor/tiberius" }

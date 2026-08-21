@@ -548,6 +548,7 @@ export default withEnglishFallback({
     mysqlClientKeyPlaceholder: "/percorso/per/client.key",
     mysqlClientCertHint: "Il certificato client e la chiave privata devono essere forniti insieme quando MySQL richiede mTLS.",
     mysqlTlsConnectionFailureHint: "Se il server MySQL non richiede TLS, modifica la connessione, imposta la modalità TLS su Disabilitata e riprova.",
+    mysqlUnsupportedCertVersionHint: "La verifica rigorosa non supporta questa versione del certificato del server. Sostituiscilo con un certificato X.509 v3 oppure usa la modalità Obbligatoria solo su una rete attendibile.",
     mysqlClientCertBrowse: "Scegli certificato client",
     mysqlClientKeyBrowse: "Scegli chiave privata client",
     postgresSslMode: "Modalità TLS",

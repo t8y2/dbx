@@ -549,6 +549,7 @@ export default withEnglishFallback({
     mysqlClientKeyPlaceholder: "/path/to/client.key",
     mysqlClientCertHint: "MySQL 要求 mTLS 時，用戶端憑證和私鑰必須一起填寫。",
     mysqlTlsConnectionFailureHint: "如果 MySQL 伺服器不要求 TLS，請編輯連線，在 TLS 模式中選擇「停用」後重試。",
+    mysqlUnsupportedCertVersionHint: "伺服器憑證版本不受嚴格驗證支援。請更換為 X.509 v3 憑證，或僅在可信任網路中改用「必要」模式。",
     mysqlClientCertBrowse: "選擇用戶端憑證",
     mysqlClientKeyBrowse: "選擇用戶端私鑰",
     postgresSslMode: "TLS 模式",

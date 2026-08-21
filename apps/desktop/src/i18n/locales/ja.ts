@@ -548,6 +548,7 @@ export default withEnglishFallback({
     mysqlClientKeyPlaceholder: "/path/to/client.key",
     mysqlClientCertHint: "MySQLがmTLSを要求する場合、クライアント証明書と秘密鍵の両方を指定する必要があります。",
     mysqlTlsConnectionFailureHint: "MySQLサーバーがTLSを要求しない場合は、接続を編集し、TLSモードを無効にしてから再試行してください。",
+    mysqlUnsupportedCertVersionHint: "厳密な検証では、このサーバー証明書のバージョンはサポートされていません。X.509 v3証明書に置き換えるか、信頼できるネットワークでのみ「必須」モードを使用してください。",
     mysqlClientCertBrowse: "クライアント証明書を選択",
     mysqlClientKeyBrowse: "クライアント秘密鍵を選択",
     postgresSslMode: "TLSモード",

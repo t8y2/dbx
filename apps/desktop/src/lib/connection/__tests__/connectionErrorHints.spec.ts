@@ -33,6 +33,7 @@ function jdbcConfig(): ConnectionConfig {
 
 const t = (key: string) => {
   if (key === "connection.mysqlTlsConnectionFailureHint") return "Set TLS Mode to Disabled.";
+  if (key === "connection.mysqlUnsupportedCertVersionHint") return "Replace the certificate or use Required mode.";
   if (key === "connection.mysqlMissingPasswordHint") return "No database password was sent.";
   if (key === "connection.jdbcMissingRuntimeDependencyHint") return "Install from Maven or import every dependency JAR.";
   return key;
@@ -51,6 +52,20 @@ describe("appendConnectionErrorHints", () => {
 
     expect(message).toContain("server does not have this capability");
     expect(message).toContain("Set TLS Mode to Disabled.");
+  });
+
+  it("recognizes Connector/J TLS aliases", () => {
+    const message = appendConnectionErrorHints(mysqlConfig("useSSL=true&requireSSL=true&verifyServerCertificate=true"), "MySQL connection failed: TLS handshake failed", t);
+
+    expect(message).toContain("Set TLS Mode to Disabled.");
+  });
+
+  it("uses a certificate-specific hint for unsupported certificate versions", () => {
+    const error = "MySQL connection failed: invalid peer certificate: Other(OtherError(UnsupportedCertVersion))";
+    const message = appendConnectionErrorHints(mysqlConfig("sslMode=VERIFY_CA"), error, t);
+
+    expect(message).toContain("Replace the certificate or use Required mode.");
+    expect(message).not.toContain("Set TLS Mode to Disabled.");
   });
 
   it("does not add the TLS hint when MySQL TLS is disabled", () => {

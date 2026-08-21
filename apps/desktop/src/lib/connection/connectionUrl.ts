@@ -337,7 +337,10 @@ function urlParamsRequireTls(dbType: DatabaseType, params: string): boolean {
     const requireSsl = queryParamValue(params, "require_ssl")?.toLowerCase();
     if (requireSsl === "true" || requireSsl === "1" || requireSsl === "yes") return true;
     const sslMode = (queryParamValue(params, "ssl-mode") || queryParamValue(params, "sslmode") || "").toLowerCase().replace("-", "_");
-    return sslMode === "required" || sslMode === "require" || sslMode === "verify_ca" || sslMode === "verify_identity";
+    if (sslMode === "required" || sslMode === "require" || sslMode === "verify_ca" || sslMode === "verify_identity") return true;
+    const jdbcRequireSsl = (queryParamValue(params, "requireSSL") || "").toLowerCase();
+    const jdbcVerifyServerCertificate = (queryParamValue(params, "verifyServerCertificate") || "").toLowerCase();
+    return ["true", "1", "yes", "on"].includes(jdbcRequireSsl) || ["true", "1", "yes", "on"].includes(jdbcVerifyServerCertificate);
   }
 
   if (dbType === "postgres" || dbType === "redshift" || dbType === "kwdb") {

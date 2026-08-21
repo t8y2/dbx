@@ -1738,7 +1738,11 @@ fn mysql_tls_file_param_is(key: &str, target: &str) -> bool {
 }
 
 fn mysql_url_params_tls_disabled(params: Option<&str>) -> bool {
-    params.unwrap_or("").trim().trim_start_matches('?').split('&').any(|part| {
+    let params = params.unwrap_or("").trim().trim_start_matches('?');
+    let has_native_tls_param = params.split('&').any(|part| {
+        url_param_key_is(part, "ssl-mode") || url_param_key_is(part, "sslmode") || url_param_key_is(part, "require_ssl")
+    });
+    let native_tls_disabled = params.split('&').any(|part| {
         let part = part.trim();
         if part.is_empty() {
             return false;
@@ -1751,11 +1755,17 @@ fn mysql_url_params_tls_disabled(params: Option<&str>) -> bool {
         (key.eq_ignore_ascii_case("require_ssl") && value.eq_ignore_ascii_case("false"))
             || ((key.eq_ignore_ascii_case("ssl-mode") || key.eq_ignore_ascii_case("sslmode"))
                 && matches!(value.to_ascii_lowercase().replace('-', "_").as_str(), "disabled" | "disable"))
-    })
+    });
+    native_tls_disabled
+        || (!has_native_tls_param && mysql_jdbc_tls_mode(Some(params)) == Some(MysqlJdbcTlsMode::Disabled))
 }
 
 fn mysql_url_params_require_tls(params: Option<&str>) -> bool {
-    params.unwrap_or("").trim().trim_start_matches('?').split('&').any(|part| {
+    let params = params.unwrap_or("").trim().trim_start_matches('?');
+    let has_native_tls_param = params.split('&').any(|part| {
+        url_param_key_is(part, "ssl-mode") || url_param_key_is(part, "sslmode") || url_param_key_is(part, "require_ssl")
+    });
+    let native_requires_tls = params.split('&').any(|part| {
         let part = part.trim();
         if part.is_empty() {
             return false;
@@ -1773,7 +1783,61 @@ fn mysql_url_params_require_tls(params: Option<&str>) -> bool {
                     value.to_ascii_lowercase().replace('-', "_").as_str(),
                     "required" | "require" | "verify_ca" | "verify_identity"
                 ))
-    })
+    });
+    native_requires_tls
+        || (!has_native_tls_param
+            && matches!(
+                mysql_jdbc_tls_mode(Some(params)),
+                Some(MysqlJdbcTlsMode::Required | MysqlJdbcTlsMode::VerifyCa)
+            ))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MysqlJdbcTlsMode {
+    Disabled,
+    Preferred,
+    Required,
+    VerifyCa,
+}
+
+pub(crate) fn is_mysql_jdbc_tls_param(key: &str) -> bool {
+    matches!(
+        percent_decode_str(key).decode_utf8_lossy().trim().to_ascii_lowercase().as_str(),
+        "usessl" | "requiressl" | "verifyservercertificate"
+    )
+}
+
+pub(crate) fn mysql_jdbc_tls_mode(params: Option<&str>) -> Option<MysqlJdbcTlsMode> {
+    let mut use_ssl = None;
+    let mut require_ssl = None;
+    let mut verify_server_certificate = None;
+
+    for part in params.unwrap_or("").trim().trim_start_matches('?').split('&') {
+        let Some((raw_key, raw_value)) = part.split_once('=') else {
+            continue;
+        };
+        let key = percent_decode_str(raw_key).decode_utf8_lossy().trim().to_ascii_lowercase();
+        let value = percent_decode_str(raw_value).decode_utf8_lossy();
+        let parsed_value = mysql_url_param_value_is_true(&value);
+        match key.as_str() {
+            "usessl" => use_ssl = Some(parsed_value),
+            "requiressl" => require_ssl = Some(parsed_value),
+            "verifyservercertificate" => verify_server_certificate = Some(parsed_value),
+            _ => {}
+        }
+    }
+
+    if verify_server_certificate == Some(true) && (use_ssl == Some(true) || require_ssl == Some(true)) {
+        Some(MysqlJdbcTlsMode::VerifyCa)
+    } else if require_ssl == Some(true) {
+        Some(MysqlJdbcTlsMode::Required)
+    } else if use_ssl == Some(false) {
+        Some(MysqlJdbcTlsMode::Disabled)
+    } else if use_ssl == Some(true) {
+        Some(MysqlJdbcTlsMode::Preferred)
+    } else {
+        None
+    }
 }
 
 fn normalize_bare_mysql_url_params(value: &str) -> String {
@@ -1804,6 +1868,10 @@ fn mysql_url_param_value_is_true(value: &str) -> bool {
 fn normalize_mysql_url_params(value: &str, force_tls: bool, accept_invalid_certs: bool) -> String {
     let value = value.trim_start_matches('?');
     let mut parts: Vec<String> = value.split('&').filter(|part| !part.is_empty()).map(str::to_string).collect();
+    let jdbc_tls_mode = mysql_jdbc_tls_mode(Some(value));
+    let has_native_tls_param = parts.iter().any(|part| {
+        url_param_key_is(part, "ssl-mode") || url_param_key_is(part, "sslmode") || url_param_key_is(part, "require_ssl")
+    });
     let enable_cleartext_plugin = parts.iter().any(|part| {
         let Some((key, value)) = part.split_once('=') else {
             return false;
@@ -1815,8 +1883,26 @@ fn normalize_mysql_url_params(value: &str, force_tls: bool, accept_invalid_certs
         let Some((key, _)) = part.split_once('=') else {
             return true;
         };
-        !is_mysql_cleartext_password_param(key.trim())
+        !is_mysql_cleartext_password_param(key.trim()) && !is_mysql_jdbc_tls_param(key.trim())
     });
+
+    if !has_native_tls_param {
+        match jdbc_tls_mode {
+            Some(MysqlJdbcTlsMode::Disabled) => parts.push("ssl-mode=disabled".to_string()),
+            Some(MysqlJdbcTlsMode::Preferred) => parts.push("ssl-mode=preferred".to_string()),
+            Some(MysqlJdbcTlsMode::Required) => {
+                parts.push("require_ssl=true".to_string());
+                parts.push("verify_ca=false".to_string());
+                parts.push("verify_identity=false".to_string());
+            }
+            Some(MysqlJdbcTlsMode::VerifyCa) => {
+                parts.push("require_ssl=true".to_string());
+                parts.push("verify_ca=true".to_string());
+                parts.push("verify_identity=false".to_string());
+            }
+            None => {}
+        }
+    }
 
     if force_tls {
         parts.retain(|part| {
@@ -3464,6 +3550,41 @@ mod tests {
         assert_eq!(
             config.connection_url(),
             "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=preferred&charset=utf8mb4"
+        );
+    }
+
+    #[test]
+    fn mysql_connector_j_tls_params_are_normalized() {
+        let mut config = mysql_config("root", "secret", Some("test"));
+        config.url_params = Some("useSSL=true&requireSSL=true&verifyServerCertificate=true".to_string());
+
+        assert_eq!(
+            config.connection_url(),
+            "mysql://root:secret@10.1.2.3:2883/test?require_ssl=true&verify_ca=true&verify_identity=false&charset=utf8mb4"
+        );
+    }
+
+    #[test]
+    fn mysql_connector_j_preferred_and_disabled_tls_modes_are_preserved() {
+        let mut config = mysql_config("root", "secret", Some("test"));
+        config.url_params = Some("useSSL=true".to_string());
+        assert_eq!(
+            config.connection_url(),
+            "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=preferred&charset=utf8mb4"
+        );
+
+        config.url_params = Some("useSSL=false".to_string());
+        assert_eq!(config.connection_url(), "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=disabled&charset=utf8mb4");
+    }
+
+    #[test]
+    fn mysql_native_tls_mode_takes_precedence_over_connector_j_aliases() {
+        let mut config = mysql_config("root", "secret", Some("test"));
+        config.url_params = Some("sslMode=REQUIRED&useSSL=false".to_string());
+
+        assert_eq!(
+            config.connection_url(),
+            "mysql://root:secret@10.1.2.3:2883/test?require_ssl=true&verify_ca=false&verify_identity=false&charset=utf8mb4"
         );
     }
 

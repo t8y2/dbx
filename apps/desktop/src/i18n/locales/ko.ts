@@ -568,6 +568,7 @@ export default withEnglishFallback({
     mysqlClientKeyPlaceholder: "/path/to/client.key",
     mysqlClientCertHint: "MySQL이 mTLS를 요구할 때 클라이언트 인증서와 개인 키를 함께 제공해야 합니다.",
     mysqlTlsConnectionFailureHint: "MySQL 서버가 TLS를 요구하지 않으면 연결을 편집하여 TLS 모드를 비활성화로 설정하고 다시 시도하세요.",
+    mysqlUnsupportedCertVersionHint: "엄격한 검증은 이 서버 인증서 버전을 지원하지 않습니다. X.509 v3 인증서로 교체하거나 신뢰할 수 있는 네트워크에서만 필수 모드를 사용하세요.",
     mysqlClientCertBrowse: "클라이언트 인증서 선택",
     mysqlClientKeyBrowse: "클라이언트 개인 키 선택",
     postgresSslMode: "TLS 모드",

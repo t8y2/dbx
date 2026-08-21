@@ -115,6 +115,17 @@ function gridCell(host: HTMLElement): HTMLElement {
   return cell;
 }
 
+function pasteGridCell(host: HTMLElement, value: string) {
+  const cell = gridCell(host);
+  cell.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0 }));
+  window.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, button: 0 }));
+  const paste = new Event("paste", { bubbles: true, cancelable: true });
+  Object.defineProperty(paste, "clipboardData", { value: { getData: () => value } });
+  const gridRoot = host.querySelector<HTMLElement>("[data-grid-root]");
+  if (!gridRoot) throw new Error("Data grid root not found");
+  gridRoot.dispatchEvent(paste);
+}
+
 function mountGrid(initialResult = largeValueResult()) {
   const result = shallowRef(markRaw(initialResult));
   const onExecuteSql = vi.fn().mockResolvedValue(undefined);
@@ -162,8 +173,19 @@ function mountGrid(initialResult = largeValueResult()) {
   // Mount once with the production-default Canvas mode so DataGrid finishes
   // setting up its column-width dependencies, then exercise the DOM grid.
   settingsStore.updateEditorSettings({ dataGridRenderMode: "dom" });
-  mountedApps.push({ app, host });
-  return { host, onExecuteSql, replaceResult: (nextResult: QueryResult) => (result.value = markRaw(nextResult)) };
+  const mounted = { app, host };
+  mountedApps.push(mounted);
+  return {
+    host,
+    onExecuteSql,
+    replaceResult: (nextResult: QueryResult) => (result.value = markRaw(nextResult)),
+    unmount: () => {
+      const index = mountedApps.indexOf(mounted);
+      if (index >= 0) mountedApps.splice(index, 1);
+      app.unmount();
+      host.remove();
+    },
+  };
 }
 
 async function settle() {
@@ -260,12 +282,7 @@ describe("DataGrid visible large-value preview lifecycle", () => {
     const { host } = mountGrid();
 
     await vi.waitFor(() => expect(gridCell(host).textContent).toContain("visible preview"));
-    const cell = gridCell(host);
-    cell.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0 }));
-    window.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, button: 0 }));
-    const paste = new Event("paste", { bubbles: true, cancelable: true });
-    Object.defineProperty(paste, "clipboardData", { value: { getData: () => "edited value" } });
-    host.querySelector<HTMLElement>("[data-grid-root]")?.dispatchEvent(paste);
+    pasteGridCell(host, "edited value");
 
     await vi.waitFor(() => expect(gridCell(host).textContent).toContain("edited value"));
   });
@@ -295,5 +312,87 @@ describe("DataGrid visible large-value preview lifecycle", () => {
     await vi.waitFor(() => expect(mocks.cancelQuery).toHaveBeenCalledWith(firstExecutionId));
     await vi.waitFor(() => expect(visibleHydrationCalls()).toHaveLength(2));
     expect(visibleHydrationCalls()[1]?.[4]).not.toBe(firstExecutionId);
+  });
+
+  it("does not cache a visible preview completed after the cell is edited", async () => {
+    const hydration = deferred<QueryResult[]>();
+    mocks.executeMulti.mockImplementation((...args: unknown[]) => {
+      const options = args[5] as { tableDataPreview?: boolean } | undefined;
+      return options?.tableDataPreview ? hydration.promise : Promise.resolve([hydratedResult(1, "full value")]);
+    });
+    const { host } = mountGrid();
+
+    await vi.waitFor(() => expect(visibleHydrationCalls()).toHaveLength(1));
+    pasteGridCell(host, "edited during hydration");
+    await vi.waitFor(() => expect(gridCell(host).textContent).toContain("edited during hydration"));
+
+    hydration.resolve([hydratedResult(1, "stale visible preview")]);
+    await settle();
+
+    expect(gridCell(host).textContent).toContain("edited during hydration");
+    expect(gridCell(host).textContent).not.toContain("stale visible preview");
+  });
+
+  it("invalidates hydrated previews across undo, scroll, and redo", async () => {
+    let visibleRequestCount = 0;
+    mocks.executeMulti.mockImplementation((...args: unknown[]) => {
+      const options = args[5] as { tableDataPreview?: boolean } | undefined;
+      if (!options?.tableDataPreview) return Promise.resolve([hydratedResult(1, "full value")]);
+      visibleRequestCount += 1;
+      return Promise.resolve([hydratedResult(1, visibleRequestCount === 1 ? "initial visible preview" : "undo visible preview")]);
+    });
+    const { host } = mountGrid();
+
+    await vi.waitFor(() => expect(gridCell(host).textContent).toContain("initial visible preview"));
+    pasteGridCell(host, "edited value");
+    await vi.waitFor(() => expect(gridCell(host).textContent).toContain("edited value"));
+
+    const gridRoot = host.querySelector<HTMLElement>("[data-grid-root]");
+    const scroller = host.querySelector<HTMLElement>(".data-grid-scroller");
+    if (!gridRoot || !scroller) throw new Error("Data grid controls not found");
+    gridRoot.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ctrlKey: true, key: "z" }));
+    await settle();
+    scroller.scrollTop = 26;
+    scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+
+    await vi.waitFor(() => expect(gridCell(host).textContent).toContain("undo visible preview"));
+    gridRoot.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ctrlKey: true, shiftKey: true, key: "z" }));
+
+    await vi.waitFor(() => expect(gridCell(host).textContent).toContain("edited value"));
+    expect(gridCell(host).textContent).not.toContain("undo visible preview");
+  });
+
+  it("does not start a stale query after deferred SQL construction and scrolling", async () => {
+    const firstBuild = deferred<string>();
+    mocks.buildTableSelectSql.mockImplementationOnce(() => firstBuild.promise).mockResolvedValueOnce("SELECT latest preview");
+    mocks.executeMulti.mockResolvedValue([hydratedResult(1, "latest visible preview")]);
+    const { host } = mountGrid();
+
+    await vi.waitFor(() => expect(mocks.buildTableSelectSql).toHaveBeenCalledTimes(1));
+    const scroller = host.querySelector<HTMLElement>(".data-grid-scroller");
+    if (!scroller) throw new Error("Data grid scroller not found");
+    scroller.scrollTop = 26;
+    scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+    await vi.waitFor(() => expect(mocks.buildTableSelectSql).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(visibleHydrationCalls()).toHaveLength(1));
+
+    firstBuild.resolve("SELECT stale preview");
+    await settle();
+
+    expect(visibleHydrationCalls()).toHaveLength(1);
+    expect(visibleHydrationCalls()[0]?.[2]).toBe("SELECT latest preview");
+  });
+
+  it("does not start a stale query after deferred SQL construction and unmount", async () => {
+    const build = deferred<string>();
+    mocks.buildTableSelectSql.mockImplementationOnce(() => build.promise);
+    const { unmount } = mountGrid();
+
+    await vi.waitFor(() => expect(mocks.buildTableSelectSql).toHaveBeenCalledTimes(1));
+    unmount();
+    build.resolve("SELECT stale preview");
+    await settle();
+
+    expect(visibleHydrationCalls()).toHaveLength(0);
   });
 });

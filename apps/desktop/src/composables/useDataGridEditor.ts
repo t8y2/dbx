@@ -407,14 +407,27 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   function restorePendingChangesSnapshot(snapshot: PendingChangesHistorySnapshot) {
+    const previousDirtyRows = dirtyRows.value;
+    const restoredDirtyRows = new Map([...snapshot.dirtyRows].map(([rowIndex, changes]) => [rowIndex, new Map(changes)]));
     newRows.value = snapshot.newRows.map((row) => [...row]);
     restoreNewRowMeta(snapshot.newRowMeta ?? []);
     quickEntryDraftRow.value = snapshot.quickEntryDraftRow ? [...snapshot.quickEntryDraftRow] : emptyDraftRow();
-    dirtyRows.value = new Map([...snapshot.dirtyRows].map(([rowIndex, changes]) => [rowIndex, new Map(changes)]));
+    dirtyRows.value = restoredDirtyRows;
     deletedRows.value = new Set(snapshot.deletedRows);
     transactionActive.value = snapshot.transactionActive === true && useTransaction.value === true;
     queuedAutoSaveChanges.clear();
     editingCell.value = null;
+    for (const rowIndex of new Set([...previousDirtyRows.keys(), ...restoredDirtyRows.keys()])) {
+      const previousChanges = previousDirtyRows.get(rowIndex);
+      const restoredChanges = restoredDirtyRows.get(rowIndex);
+      for (const columnIndex of new Set([...(previousChanges?.keys() ?? []), ...(restoredChanges?.keys() ?? [])])) {
+        const previousHasValue = previousChanges?.has(columnIndex) ?? false;
+        const restoredHasValue = restoredChanges?.has(columnIndex) ?? false;
+        if (previousHasValue !== restoredHasValue || previousChanges?.get(columnIndex) !== restoredChanges?.get(columnIndex)) {
+          onCellValueChanged?.(rowIndex, columnIndex);
+        }
+      }
+    }
     touchPendingChanges();
   }
 

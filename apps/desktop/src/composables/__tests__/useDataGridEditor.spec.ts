@@ -242,6 +242,21 @@ describe("useDataGridEditor cell mutation notifications", () => {
       [0, 1],
     ]);
   });
+
+  it("notifies cache owners when undo and redo replace dirty cells", () => {
+    const onCellValueChanged = vi.fn();
+    const editor = createEditor(undefined, true, undefined, undefined, [["Ada", "original", "Lovelace"]], onCellValueChanged);
+
+    editor.applyCellValue(0, 1, "edited");
+    onCellValueChanged.mockClear();
+    editor.undoPendingChange();
+    editor.redoPendingChange();
+
+    expect(onCellValueChanged.mock.calls).toEqual([
+      [0, 1],
+      [0, 1],
+    ]);
+  });
 });
 
 describe("useDataGridEditor appendPastedRowsToNewRow", () => {

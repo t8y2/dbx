@@ -4539,8 +4539,13 @@ const LARGE_VALUE_FETCH_MAX_ROWS = 200;
 const LARGE_VALUE_FETCH_TARGET_BYTES = 64 * 1024 * 1024;
 const pendingLargeValueHydrations = createResultScopedPendingRequests<boolean>();
 const largeValueCellsByKey = computed(() => largeValueCellMap(props.result));
-type VisibleLargeValuePreviewRequest = { item: RowItem; sourceIndex: number; initialValues: Map<number, CellValue> };
+type VisibleLargeValuePreviewRequest = {
+  item: RowItem;
+  sourceIndex: number;
+  initialValues: Map<number, { value: CellValue; revision: number }>;
+};
 const visibleLargeValuePreviewCaches = new WeakMap<QueryResult, ResultScopedRowCache<CellValue>>();
+const visibleLargeValuePreviewCellRevisions = new WeakMap<QueryResult, Map<string, number>>();
 const failedVisibleLargeValuePreviewResults = new WeakSet<QueryResult>();
 const visibleLargeValuePreviewVersion = ref(0);
 let visibleLargeValuePreviewTimer = 0;
@@ -4593,12 +4598,32 @@ function visibleLargeValuePreviewCache(result: QueryResult): ResultScopedRowCach
   return cache;
 }
 
+function visibleLargeValuePreviewCellRevisionKey(sourceIndex: number, columnIndex: number): string {
+  return `${sourceIndex}:${columnIndex}`;
+}
+
+function visibleLargeValuePreviewCellRevision(result: QueryResult, sourceIndex: number, columnIndex: number): number {
+  return visibleLargeValuePreviewCellRevisions.get(result)?.get(visibleLargeValuePreviewCellRevisionKey(sourceIndex, columnIndex)) ?? 0;
+}
+
+function bumpVisibleLargeValuePreviewCellRevision(result: QueryResult, sourceIndex: number, columnIndex: number) {
+  let revisions = visibleLargeValuePreviewCellRevisions.get(result);
+  if (!revisions) {
+    revisions = new Map<string, number>();
+    visibleLargeValuePreviewCellRevisions.set(result, revisions);
+  }
+  const key = visibleLargeValuePreviewCellRevisionKey(sourceIndex, columnIndex);
+  revisions.set(key, (revisions.get(key) ?? 0) + 1);
+}
+
 function invalidateVisibleLargeValuePreviewCell(rowId: number, columnIndex: number) {
   const item = getRowItem(rowId);
-  if (item?.sourceIndex === undefined) return;
+  const sourceIndex = item?.sourceIndex ?? (rowId >= 0 ? rowId : undefined);
+  if (sourceIndex === undefined) return;
+  bumpVisibleLargeValuePreviewCellRevision(props.result, sourceIndex, columnIndex);
   const cache = visibleLargeValuePreviewCaches.get(props.result);
-  if (!cache?.has(item.sourceIndex, columnIndex)) return;
-  cache.forget(item.sourceIndex, columnIndex);
+  if (!cache?.has(sourceIndex, columnIndex)) return;
+  cache.forget(sourceIndex, columnIndex);
   visibleLargeValuePreviewVersion.value += 1;
   scheduleCanvasDraw();
 }
@@ -4649,10 +4674,13 @@ async function hydrateVisibleLargeValuePreviews(generation: number) {
     if (!item || item.sourceIndex === undefined || item.isNew || item.isDraft) continue;
     activeSourceRows.add(item.sourceIndex);
     cache.touch(item.sourceIndex);
-    const initialValues = new Map<number, CellValue>();
+    const initialValues = new Map<number, { value: CellValue; revision: number }>();
     for (const columnIndex of targetColumnIndexes) {
       if (!isLargeValuePreview(item, columnIndex) || cache.has(item.sourceIndex, columnIndex)) continue;
-      initialValues.set(columnIndex, item.data[columnIndex] ?? null);
+      initialValues.set(columnIndex, {
+        value: item.data[columnIndex] ?? null,
+        revision: visibleLargeValuePreviewCellRevision(sourceResult, item.sourceIndex, columnIndex),
+      });
     }
     if (initialValues.size > 0) requests.set(item.sourceIndex, { item, sourceIndex: item.sourceIndex, initialValues });
   }
@@ -4692,6 +4720,7 @@ async function hydrateVisibleLargeValuePreviews(generation: number) {
     limit: requests.size,
     offset: 0,
   });
+  if (!visibleLargeValuePreviewActive || generation !== visibleLargeValuePreviewRequestedGeneration || props.result !== sourceResult) return;
   const connection = connectionStore.getConfig(props.connectionId);
   const executionId = uuid();
   visibleLargeValuePreviewExecutionIds.set(generation, executionId);
@@ -4728,7 +4757,7 @@ async function hydrateVisibleLargeValuePreviews(generation: number) {
     const resolvedRow = valuesByIdentity.get(identity);
     if (!resolvedRow) continue;
     for (const [columnIndex, initialValue] of request.initialValues) {
-      if (!currentLargeValueCells.has(largeValueCellKey(request.sourceIndex, columnIndex)) || currentRow[columnIndex] !== initialValue) continue;
+      if (!currentLargeValueCells.has(largeValueCellKey(request.sourceIndex, columnIndex)) || currentRow[columnIndex] !== initialValue.value || visibleLargeValuePreviewCellRevision(sourceResult, request.sourceIndex, columnIndex) !== initialValue.revision) continue;
       const sourceColumn = resultSourceColumns.value[columnIndex];
       const selectedIndex = selectedColumns.findIndex((column) => column.toLocaleLowerCase() === sourceColumn?.toLocaleLowerCase());
       const resultIndex = resultColumnIndexes[selectedIndex];

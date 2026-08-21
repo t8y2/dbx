@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const executeMulti = vi.fn();
 const executeQuery = vi.fn();
+const beginManualTransaction = vi.fn();
+const executeInManualTransaction = vi.fn();
 const analyzeEditableQueryEditability = vi.fn();
 const getColumns = vi.fn();
 const listIndexes = vi.fn();
@@ -38,6 +40,8 @@ vi.mock("@/lib/backend/api", () => ({
   buildSortedQuerySql,
   closeClientConnectionSession: vi.fn().mockResolvedValue(undefined),
   closeQuerySession: vi.fn().mockResolvedValue(undefined),
+  beginManualTransaction,
+  executeInManualTransaction,
   executeMulti,
   executeQuery,
   getColumns,
@@ -111,6 +115,15 @@ describe("queryStore hidden primary key editing", () => {
       execution_time_ms: 1,
     });
     executeMulti.mockResolvedValue([
+      {
+        columns: ["name", "__DBX_PK_0"],
+        rows: [["Alice", 7]],
+        affected_rows: 0,
+        execution_time_ms: 1,
+      },
+    ]);
+    beginManualTransaction.mockResolvedValue("txn-1");
+    executeInManualTransaction.mockResolvedValue([
       {
         columns: ["name", "__DBX_PK_0"],
         rows: [["Alice", 7]],
@@ -580,12 +593,69 @@ describe("queryStore hidden primary key editing", () => {
     const execution = store.executeTabSql(tabId, "SELECT t.* FROM APP.WIDE_TABLE t");
     await vi.waitFor(() => expect(executeMulti).toHaveBeenCalled());
     expect(executeMulti).toHaveBeenCalledWith("oracle-1", "ORCL", "SELECT t.* FROM APP.WIDE_TABLE t", undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
+    expect(executeMulti.mock.calls[0]?.[5]).not.toHaveProperty("tableDataPreview");
 
     columnsGate.resolve([
       { name: "ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
       { name: "NAME", data_type: "VARCHAR2(100)", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
     ]);
     await execution;
+  });
+
+  it("waits for first-run Oracle XMLTYPE metadata before manual transaction execution", async () => {
+    const columnsGate = deferred<Awaited<ReturnType<typeof getColumns>>>();
+    getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", query_timeout_secs: 30 });
+    getColumns.mockReturnValue(columnsGate.promise);
+    listIndexes.mockResolvedValue([{ name: "PK_WIDE_TABLE", columns: ["ID"], is_unique: true, is_primary: true }]);
+    lookupLocalCompletionTables.mockReturnValue([{ name: "WIDE_TABLE", type: "table", schema: "APP" }]);
+    analyzeEditableQueryEditability.mockImplementation(async () => ({
+      editable: true,
+      analysis: {
+        schema: "APP",
+        tableName: "WIDE_TABLE",
+        tableAlias: "t",
+        selectStar: true,
+        columns: [],
+      },
+    }));
+    executeInManualTransaction.mockResolvedValue([
+      {
+        columns: ["ID", "PAYLOAD"],
+        rows: [[1, "<XMLTYPE>"]],
+        affected_rows: 0,
+        execution_time_ms: 1,
+        large_value_cells: [{ row_index: 0, column_index: 1, original_bytes: 81920 }],
+      },
+    ]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "ORCL", "Query");
+    const execution = store.executeTabSql(tabId, "SELECT t.* FROM APP.WIDE_TABLE t");
+
+    await vi.waitFor(() => expect(listIndexes).toHaveBeenCalled());
+    expect(executeInManualTransaction).not.toHaveBeenCalled();
+
+    columnsGate.resolve([
+      { name: "ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+      { name: "PAYLOAD", data_type: "SYS.XMLTYPE", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ]);
+    await execution;
+
+    expect(beginManualTransaction).toHaveBeenCalledWith("oracle-1", "ORCL", undefined, undefined);
+    expect(executeInManualTransaction).toHaveBeenCalledWith("txn-1", "SELECT t.* FROM APP.WIDE_TABLE t", "ORCL", undefined, expect.any(Number), true);
+    expect(store.tabs.find((tab) => tab.id === tabId)?.result?.large_value_cells).toEqual([{ row_index: 0, column_index: 1, original_bytes: 81920 }]);
+  });
+
+  it("keeps manual non-Oracle queries out of table-data preview mode", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+    store.setAutoCommit(tabId, false);
+
+    await store.executeTabSql(tabId, "SELECT name FROM users");
+
+    expect(executeInManualTransaction).toHaveBeenCalledWith("txn-1", "SELECT name, `id` AS `__DBX_PK_0` FROM users", "app", undefined, expect.any(Number), false);
   });
 
   it("keeps a keyless Oracle query editable when its WHERE clause reads another table", async () => {

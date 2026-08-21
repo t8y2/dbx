@@ -6466,8 +6466,8 @@ export const useConnectionStore = defineStore("connection", () => {
     });
   }
 
-  async function completionAssistantSearch(request: CompletionAssistantRequest) {
-    return withCompletionInFlight(`assistant:${completionAssistantRequestKey(request)}`, async () => {
+  async function completionAssistantSearch(request: CompletionAssistantRequest, requestRevision = completionCacheRevision(request.connection_id, request.database)) {
+    return withCompletionInFlight(`${request.connection_id}:${request.database}:assistant:${requestRevision}:${completionAssistantRequestKey(request)}`, async () => {
       await ensureConnected(request.connection_id);
       return api.completionAssistantSearch(request);
     });
@@ -6697,23 +6697,26 @@ export const useConnectionStore = defineStore("connection", () => {
       }));
   }
 
-  async function listCompletionAssistantTables(connectionId: string, database: string, filter: string, limit?: number, schema?: string, globalSearch = false, currentSchema?: string): Promise<SqlCompletionTable[]> {
+  async function listCompletionAssistantTables(connectionId: string, database: string, filter: string, limit?: number, schema?: string, globalSearch = false, currentSchema?: string, requestRevision = completionCacheRevision(connectionId, database)): Promise<SqlCompletionTable[]> {
     const oracleAssistant = getConfig(connectionId)?.db_type === "oracle";
     const preferredSchema = oracleAssistant ? completionPreferredSchema(connectionId, globalSearch ? currentSchema : (schema ?? currentSchema)) : schema?.trim() || undefined;
     const objectKinds: CompletionAssistantObjectKind[] = ["table", "view"];
-    const response = await completionAssistantSearch({
-      connection_id: connectionId,
-      database,
-      schema: preferredSchema ?? null,
-      object_kinds: objectKinds,
-      mask: filter.trim(),
-      max_results: limit ?? 200,
-      global_search: globalSearch,
-      parent_schema: globalSearch ? null : (schema ?? null),
-      match_mode: "prefix",
-    });
+    const response = await completionAssistantSearch(
+      {
+        connection_id: connectionId,
+        database,
+        schema: preferredSchema ?? null,
+        object_kinds: objectKinds,
+        mask: filter.trim(),
+        max_results: limit ?? 200,
+        global_search: globalSearch,
+        parent_schema: globalSearch ? null : (schema ?? null),
+        match_mode: "prefix",
+      },
+      requestRevision,
+    );
     const tables = completionAssistantTables(response.candidates, preferredSchema, oracleAssistant);
-    indexCompletionTables(connectionId, database, schema, tables);
+    if (requestRevision === completionCacheRevision(connectionId, database)) indexCompletionTables(connectionId, database, schema, tables);
     return tables;
   }
 
@@ -6755,20 +6758,23 @@ export const useConnectionStore = defineStore("connection", () => {
     return objects;
   }
 
-  async function listCompletionAssistantColumns(connectionId: string, database: string, table: string, schema?: string, context?: { tableQuoted?: boolean; schemaQuoted?: boolean }): Promise<SqlCompletionColumn[]> {
-    const response = await completionAssistantSearch({
-      connection_id: connectionId,
-      database,
-      schema: schema ?? null,
-      object_kinds: ["column"],
-      mask: "",
-      max_results: 500,
-      parent_schema: schema ?? null,
-      parent_name: table,
-      match_mode: "prefix",
-    });
+  async function listCompletionAssistantColumns(connectionId: string, database: string, table: string, schema?: string, context?: { tableQuoted?: boolean; schemaQuoted?: boolean }, requestRevision = completionCacheRevision(connectionId, database)): Promise<SqlCompletionColumn[]> {
+    const response = await completionAssistantSearch(
+      {
+        connection_id: connectionId,
+        database,
+        schema: schema ?? null,
+        object_kinds: ["column"],
+        mask: "",
+        max_results: 500,
+        parent_schema: schema ?? null,
+        parent_name: table,
+        match_mode: "prefix",
+      },
+      requestRevision,
+    );
     const columns = completionAssistantColumns(response.candidates, table, schema, context);
-    if (columns.length > 0) indexCompletionColumns(connectionId, database, table, schema, columns);
+    if (columns.length > 0 && requestRevision === completionCacheRevision(connectionId, database)) indexCompletionColumns(connectionId, database, table, schema, columns);
     return columns;
   }
 
@@ -7137,6 +7143,7 @@ export const useConnectionStore = defineStore("connection", () => {
     if (completionTablesCache.value[cacheKey]) {
       return completionTablesCache.value[cacheKey];
     }
+    const requestRevision = completionCacheRevision(connectionId, database);
 
     return withCompletionInFlight(
       `${cacheKey}:tables`,
@@ -7147,7 +7154,7 @@ export const useConnectionStore = defineStore("connection", () => {
           if (normalizedFilter || limit) {
             let results: SqlCompletionTable[] = [];
             try {
-              results = await listCompletionAssistantTables(connectionId, database, trimmedFilter, limit, schema, globalSearch, currentSchema);
+              results = await listCompletionAssistantTables(connectionId, database, trimmedFilter, limit, schema, globalSearch, currentSchema, requestRevision);
             } catch {
               if (schema) {
                 const tables = await listCompletionTableMetadata(connectionId, database, schema, trimmedFilter, limit, catalog);
@@ -7165,7 +7172,7 @@ export const useConnectionStore = defineStore("connection", () => {
             if (results.length === 0 && relaxedFilter) {
               if (globalSearch) {
                 try {
-                  results = await listCompletionAssistantTables(connectionId, database, relaxedFilter, expandedCompletionLimit(limit), schema, true, currentSchema);
+                  results = await listCompletionAssistantTables(connectionId, database, relaxedFilter, expandedCompletionLimit(limit), schema, true, currentSchema, requestRevision);
                 } catch {
                   results = [];
                 }
@@ -7187,15 +7194,17 @@ export const useConnectionStore = defineStore("connection", () => {
               }
             }
             const limitedTables = limit ? dedupeCompletionTables(results).slice(0, limit) : results;
+            if (requestRevision !== completionCacheRevision(connectionId, database)) return listCompletionTables(connectionId, database, filter, limit, schema, globalSearch, currentSchema, catalog, options);
             completionTablesCache.value[cacheKey] = limitedTables;
             indexCompletionTables(connectionId, database, undefined, limitedTables, catalog);
             evictOldestCacheEntries(completionTablesCache.value, COMPLETION_CACHE_MAX);
             return completionTablesCache.value[cacheKey];
           }
 
+          let scopedTables: SqlCompletionTable[];
           if (schema) {
             const tables = await listCompletionTableMetadata(connectionId, database, schema, undefined, undefined, catalog);
-            completionTablesCache.value[cacheKey] = tables.map((table) => ({
+            scopedTables = tables.map((table) => ({
               name: table.name,
               catalog,
               schema,
@@ -7203,8 +7212,10 @@ export const useConnectionStore = defineStore("connection", () => {
               ...completionStableTableType(table.table_type),
             }));
           } else {
-            completionTablesCache.value[cacheKey] = lookupLocalCompletionTables(connectionId, database, normalizedFilter, limit, undefined, catalog);
+            scopedTables = lookupLocalCompletionTables(connectionId, database, normalizedFilter, limit, undefined, catalog);
           }
+          if (requestRevision !== completionCacheRevision(connectionId, database)) return listCompletionTables(connectionId, database, filter, limit, schema, globalSearch, currentSchema, catalog, options);
+          completionTablesCache.value[cacheKey] = scopedTables;
           indexCompletionTables(connectionId, database, undefined, completionTablesCache.value[cacheKey], catalog);
           evictOldestCacheEntries(completionTablesCache.value, COMPLETION_CACHE_MAX);
           return completionTablesCache.value[cacheKey];
@@ -7215,6 +7226,7 @@ export const useConnectionStore = defineStore("connection", () => {
         if (tables.length === 0 && relaxedFilter) {
           tables = await listCompletionTableMetadata(connectionId, database, querySchema, relaxedFilter, expandedCompletionLimit(limit), catalog);
         }
+        if (requestRevision !== completionCacheRevision(connectionId, database)) return listCompletionTables(connectionId, database, filter, limit, schema, globalSearch, currentSchema, catalog, options);
         completionTablesCache.value[cacheKey] = tables.map((table) => ({
           name: table.name,
           catalog,
@@ -7399,7 +7411,7 @@ export const useConnectionStore = defineStore("connection", () => {
           await ensureConnected(connectionId);
           if (!usesOracleCurrentSchema && !catalog) {
             try {
-              const assistantColumns = await listCompletionAssistantColumns(connectionId, database, completionTable, completionSchema, context);
+              const assistantColumns = await listCompletionAssistantColumns(connectionId, database, completionTable, completionSchema, context, requestRevision);
               if (assistantColumns.length > 0) {
                 const columns = assistantColumns.map((column) => ({
                   name: column.name,
@@ -7457,17 +7469,21 @@ export const useConnectionStore = defineStore("connection", () => {
 
     const cacheKey = `${connectionId}:${database}:${schema || ""}:${table}`;
     if (!completionForeignKeysCache.value[cacheKey]) {
+      const requestRevision = completionCacheRevision(connectionId, database);
       await withCompletionInFlight(
         `${cacheKey}:fkeys`,
         async () => {
           await ensureConnected(connectionId);
           const querySchema = metadataQuerySchema(connectionId, database, schema);
-          completionForeignKeysCache.value[cacheKey] = await api.listForeignKeys(connectionId, database, querySchema, table);
+          const foreignKeys = await api.listForeignKeys(connectionId, database, querySchema, table);
+          if (requestRevision !== completionCacheRevision(connectionId, database)) return;
+          completionForeignKeysCache.value[cacheKey] = foreignKeys;
           evictOldestCacheEntries(completionForeignKeysCache.value, COMPLETION_CACHE_MAX);
         },
         { scope: completionLimiterScope(connectionId, database), kind: "foreignKeys" },
       );
     }
+    if (!completionForeignKeysCache.value[cacheKey]) return listCompletionForeignKeys(connectionId, database, table, schema);
 
     const foreignKeys = sqlCompletionForeignKeys(completionForeignKeysCache.value[cacheKey]);
     indexCompletionForeignKeys(connectionId, database, table, schema, foreignKeys);

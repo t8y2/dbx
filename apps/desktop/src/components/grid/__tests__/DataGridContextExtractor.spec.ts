@@ -90,6 +90,17 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+function mockDeferredFullHydration(hydration: Promise<QueryResult[]>) {
+  mocks.executeMulti.mockImplementation((...args: unknown[]) => {
+    const options = args[5] as { tableDataPreview?: boolean } | undefined;
+    return options?.tableDataPreview ? Promise.resolve([hydratedResult(1, "visible preview")]) : hydration;
+  });
+}
+
+function fullHydrationCallCount() {
+  return mocks.executeMulti.mock.calls.filter((call) => !(call[5] as { tableDataPreview?: boolean } | undefined)?.tableDataPreview).length;
+}
+
 function mountGrid(initialResult = largeValueResult()) {
   const result = shallowRef(markRaw(initialResult));
   const onExecuteSql = vi.fn().mockResolvedValue(undefined);
@@ -179,11 +190,11 @@ afterEach(() => {
 describe("DataGrid context filter lifecycle", () => {
   it("keeps the right-click target through menu close and large-value hydration", async () => {
     const hydration = deferred<QueryResult[]>();
-    mocks.executeMulti.mockReturnValue(hydration.promise);
+    mockDeferredFullHydration(hydration.promise);
     const { host, onExecuteSql } = mountGrid();
 
     await startEqualsFilter(host);
-    await vi.waitFor(() => expect(mocks.executeMulti).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(fullHydrationCallCount()).toBe(1));
     expect(document.querySelector("[data-dbx-context-menu]")).toBeNull();
 
     hydration.resolve([hydratedResult(1, "full original value")]);
@@ -196,11 +207,11 @@ describe("DataGrid context filter lifecycle", () => {
 
   it("does not apply a completed hydration from a previous result set", async () => {
     const hydration = deferred<QueryResult[]>();
-    mocks.executeMulti.mockReturnValue(hydration.promise);
+    mockDeferredFullHydration(hydration.promise);
     const { host, onExecuteSql, replaceResult } = mountGrid();
 
     await startEqualsFilter(host);
-    await vi.waitFor(() => expect(mocks.executeMulti).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(fullHydrationCallCount()).toBe(1));
     replaceResult(largeValueResult(2, "new preview"));
     await settle();
     hydration.resolve([hydratedResult(1, "old value")]);

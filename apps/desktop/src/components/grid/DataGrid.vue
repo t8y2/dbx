@@ -4677,7 +4677,6 @@ async function hydrateVisibleLargeValuePreviews(generation: number) {
     limit: requests.size,
     offset: 0,
   });
-  const operation = dataGridResultLifecycle.beginOperation();
   const connection = connectionStore.getConfig(props.connectionId);
   const results = await api.executeMulti(props.connectionId, props.executionDatabase ?? props.database ?? "", sql, undefined, uuid(), {
     maxRows: requests.size,
@@ -4686,7 +4685,7 @@ async function hydrateVisibleLargeValuePreviews(generation: number) {
     tableDataPreview: true,
     timeoutSecs: queryTimeoutSecsForConnection(connection, settingsStore.editorSettings.globalQueryTimeoutSecs),
   });
-  if (!visibleLargeValuePreviewActive || generation !== visibleLargeValuePreviewRequestedGeneration || props.result !== sourceResult || !dataGridResultLifecycle.isCurrent(operation)) return;
+  if (!visibleLargeValuePreviewActive || generation !== visibleLargeValuePreviewRequestedGeneration || props.result !== sourceResult) return;
   const result = results[0];
   if (!result || result.execution_error) {
     throw new Error(result?.error ? translateBackendError(t, result.error) : String(result?.rows?.[0]?.[0] ?? t("grid.largeValueLoadFailed")));

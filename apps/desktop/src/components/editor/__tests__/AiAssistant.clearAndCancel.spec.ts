@@ -147,6 +147,11 @@ describe("AI assistant clear/switch cancels an in-flight request (issue #5941, P
     const sessionResetIdx = finallyBody.indexOf('currentSessionId.value = "";');
     expect(isGeneratingIdx).toBeGreaterThan(guardIdx);
     expect(sessionResetIdx).toBeGreaterThan(guardIdx);
+    // Issue #6743 feature 1 dual-path reset: the normal-completion path must stop
+    // the 1s status timer and clear the generation-status ref inside the guarded
+    // finally (the abandon path clears it via resetPendingRequestState()).
+    expect(finallyBody.indexOf("stopStatusTimer();")).toBeGreaterThan(guardIdx);
+    expect(finallyBody.indexOf("generationStatus.value = createGenerationStatus(Date.now());")).toBeGreaterThan(guardIdx);
   });
 
   // The three gaps below were called out on review of PR #6332: the generation guard
@@ -224,6 +229,12 @@ describe("AI assistant clear/switch cancels an in-flight request (issue #5941, P
     // compaction summary into the NEW conversation's transcript in its finally
     // block.
     expect(resetBody).toContain("pendingCompaction.value = null;");
+    // Issue #6743 feature 1: the live generation-status line is per-request
+    // transient state too — the 1s status timer and the status ref must be reset
+    // here, otherwise switching conversations leaks a stale status line (and a
+    // running interval) into the next generation.
+    expect(resetBody).toContain("stopStatusTimer();");
+    expect(resetBody).toContain("generationStatus.value = createGenerationStatus(Date.now());");
 
     const abandonBody = bodyOf("function abandonInFlightRequest(alreadyCancelledSessionId?: string)");
     expect(abandonBody).toContain("resetPendingRequestState();");

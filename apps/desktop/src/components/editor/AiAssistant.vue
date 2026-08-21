@@ -13,6 +13,7 @@ import {
   Check,
   ChevronLeft,
   ChevronRight,
+  Clock,
   CircleSlash,
   Copy,
   Database,
@@ -102,6 +103,7 @@ import {
 import { isAiConfigModelCandidate } from "@/lib/ai/aiConfigCandidates";
 import { deleteConversationWithCancellation, stopAiGenerationWithFallback } from "@/lib/ai/aiConversationLifecycle";
 import { AiGenerationGuard } from "@/lib/ai/aiGenerationGuard";
+import { applyStatusEvent, createGenerationStatus, markCancelling, shouldShowLongRunningHint, statusText, toolLabel, STATUS_IDLE_THRESHOLD_MS, type AiGenerationStatus } from "@/lib/ai/aiGenerationStatus";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { addConfiguredAiModel, aiModelOptions } from "@/lib/ai/aiConfigList";
 import { orderAiConfigsForDisplay } from "@/lib/ai/aiConfigOrdering";
@@ -370,6 +372,48 @@ let currentAssistantMessageIndex = -1;
 // to a different conversation. See lib/ai/aiGenerationGuard.ts for why this exists
 // instead of relying on isGenerating/currentSessionId alone.
 const aiGenerationGuard = new AiGenerationGuard();
+
+// Live generation-status line (Issue #6743 feature 1). `generationStatus` is the
+// per-request state machine fed by every `ai-agent-event`; `statusNow` is bumped
+// once per second so `statusText` recomputes elapsed/idle without re-rendering on
+// every event. Both are per-request transient state and MUST be reset on both the
+// normal `finally` path and `resetPendingRequestState()` (abandon path) — see the
+// dual-path note next to `resetPendingRequestState`.
+const generationStatus = ref<AiGenerationStatus>(createGenerationStatus(Date.now()));
+const statusNow = ref(Date.now());
+let statusInterval: ReturnType<typeof setInterval> | null = null;
+
+function startStatusTimer() {
+  stopStatusTimer();
+  statusNow.value = Date.now();
+  statusInterval = setInterval(() => {
+    statusNow.value = Date.now();
+  }, 1000);
+}
+
+function stopStatusTimer() {
+  if (statusInterval !== null) {
+    clearInterval(statusInterval);
+    statusInterval = null;
+  }
+}
+
+const generationStatusText = computed(() => statusText(generationStatus.value, statusNow.value, t));
+const statusElapsedSeconds = computed(() => Math.ceil((statusNow.value - generationStatus.value.startedAt) / 1000));
+const statusIdleSeconds = computed(() => (generationStatus.value.lastEventAt !== undefined ? Math.ceil((statusNow.value - generationStatus.value.lastEventAt) / 1000) : 0));
+/** Idle copy branch: an event was seen, but nothing has arrived for over 20s. */
+const generationStatusIdle = computed(() => {
+  const last = generationStatus.value.lastEventAt;
+  return last !== undefined && statusNow.value - last > STATUS_IDLE_THRESHOLD_MS;
+});
+const generationStatusRunningTool = computed(() => generationStatus.value.phase === "running_tool" && !!generationStatus.value.activeTool);
+const statusToolLabel = computed(() => {
+  const tool = generationStatus.value.activeTool;
+  return tool ? toolLabel(tool.name, t) : "";
+});
+const statusTurnBadge = computed(() => (generationStatus.value.turn !== undefined ? t("ai.status.turnBadge", { turn: generationStatus.value.turn + 1 }) : ""));
+/** Gentle >60s hint, hidden while the user is cancelling (they already decided to stop). */
+const statusLongRunningHintVisible = computed(() => generationStatus.value.phase !== "cancelling" && shouldShowLongRunningHint(generationStatus.value, statusNow.value));
 
 function startEditMessage(visibleIndex: number) {
   if (isGenerating.value) return;
@@ -892,11 +936,6 @@ function messageContentForModel(message: ChatMessage): string {
 function messageTitle(message: ChatMessage): string {
   return [messageMentionLabels(message).join(" "), message.content].filter(Boolean).join(" ") || t("ai.newChat");
 }
-
-const isWaitingForFirstDelta = computed(() => {
-  const last = messages.value[messages.value.length - 1];
-  return isGenerating.value && last?.role === "assistant" && !last.content && !last.reasoning;
-});
 
 /**
  * The last assistant message whose final line looks like an action
@@ -2339,11 +2378,15 @@ async function send() {
   // first, since clearMessages()/selectConversation() can invalidate it out from
   // under an in-flight send().
   isGenerating.value = true;
+  generationStatus.value = createGenerationStatus(Date.now());
+  startStatusTimer();
   const myGeneration = aiGenerationGuard.begin();
   if (!(await promptTemplateStore.ensureLoaded())) {
     clearPendingWriteGrant();
     if (aiGenerationGuard.isCurrent(myGeneration)) {
       isGenerating.value = false;
+      stopStatusTimer();
+      generationStatus.value = createGenerationStatus(Date.now());
       toast(t("ai.customInstructionsLoadFailed"), 5000);
     }
     return;
@@ -2477,6 +2520,10 @@ async function send() {
     // been registered with the backend yet (registration happens inside
     // runAgentStream() itself).
     if (!aiGenerationGuard.isCurrent(myGeneration)) return;
+    // The stream is about to reach the backend — transition the status line from
+    // `preparing` to `waiting_model` so it reads "等待模型响应" while no events have
+    // arrived yet (slow CLI first token included).
+    generationStatus.value = { ...generationStatus.value, phase: "waiting_model" };
     const history: AiMessage[] = messagesForAgentHistory(messages.value.slice(0, -2));
     await runAgentStream(
       {
@@ -2500,6 +2547,10 @@ async function send() {
         // shared state to write into.
         if (!aiGenerationGuard.isCurrent(myGeneration)) return;
         agentEvents.push(event);
+        // Feed every agent event into the generation-status state machine (Issue
+        // #6743 feature 1). `applyStatusEvent` refreshes lastEventAt, tracks the
+        // active tool / turn, and derives the phase purely from the event stream.
+        generationStatus.value = applyStatusEvent(generationStatus.value, event, Date.now());
         if (event.type === "text_delta" && event.delta) {
           appendAssistantDelta(assistantIdx, event.delta);
         }
@@ -2573,6 +2624,10 @@ async function send() {
       const msg = messages.value[assistantIdx];
       if (msg) msg.isThinking = false;
       isGenerating.value = false;
+      // Normal-path generation-status cleanup (dual-path reset — see
+      // resetPendingRequestState() below for the abandon-path equivalent).
+      stopStatusTimer();
+      generationStatus.value = createGenerationStatus(Date.now());
       // Render agent tool call steps from agent events (fallback when no real-time steps)
       if (msg && agentEvents.length > 0 && !msg.agentSteps?.length) {
         const steps: AiAgentStepItem[] = [];
@@ -2640,6 +2695,12 @@ function waitForGenerationToClear(timeoutMs: number): Promise<void> {
 }
 
 async function cancelStream() {
+  // User explicitly requested stop — reflect it in the status line (phase=cancelling)
+  // so it reads "正在取消…" while the backend cancellation is still settling.
+  if (isGenerating.value) {
+    generationStatus.value = markCancelling(generationStatus.value, Date.now());
+    statusNow.value = Date.now();
+  }
   await stopAiGenerationWithFallback({
     isGenerating: () => isGenerating.value,
     currentGeneration: () => aiGenerationGuard.peek(),
@@ -2675,6 +2736,11 @@ function resetPendingRequestState() {
   pendingAssistantReasoning = "";
   pendingAssistantIndex = -1;
   pendingCompaction.value = null;
+  // Abandon-path generation-status cleanup: a clear/switch/new-chat/unmount must
+  // stop the 1s status timer and clear the per-request status, otherwise switching
+  // conversations leaks a stale status line into the next generation.
+  stopStatusTimer();
+  generationStatus.value = createGenerationStatus(Date.now());
 }
 
 // `alreadyCancelledSessionId`: the session id a caller (cancelStream()) has
@@ -2972,6 +3038,7 @@ onUnmounted(() => {
   if (assistantDeltaFrame !== null) cancelAnimationFrame(assistantDeltaFrame);
   clearTimeout(mentionTimer);
   clearEffortMenuCloseTimer();
+  stopStatusTimer();
   // Must invalidate the generation the same way clearMessages()/selectConversation()
   // do, not just fire the best-effort cancelStream() RPC: if a request is still
   // mid-await (context preparation, or the backend hasn't registered a session id
@@ -3390,9 +3457,30 @@ async function openExternalUrl(url: string) {
             </div>
           </template>
 
-          <div v-if="isWaitingForFirstDelta" class="flex items-center gap-2 text-xs text-muted-foreground">
-            <Loader2 class="h-3.5 w-3.5 animate-spin" />
-            <span>{{ t("ai.thinking") }}</span>
+          <!-- Live generation-status line (Issue #6743 feature 1). Replaces the old
+               "Thinking..." placeholder and covers the WHOLE generation period
+               (`v-if="isGenerating"`), not just the wait for the first token. -->
+          <div v-if="isGenerating" class="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground" data-ai-generation-status>
+            <Loader2 v-if="!generationStatusIdle" class="h-3.5 w-3.5 shrink-0 animate-spin" />
+            <Clock v-else class="h-3.5 w-3.5 shrink-0" />
+            <!-- Idle-with-tool copy MUST win over the running-tool layout: PRD copy
+                 priority 1 (idle >20s, "等待此步骤完成 · 最后活动 Ns 前 · 正在执行 {tool}")
+                 outranks priority 2 ("第 N 轮 · 正在执行 {tool} · 已运行 Ns"), matching
+                 the pure `statusText()` branch order. Exclude the cancelling phase so
+                 "正在取消…" (checked first by `statusText`) is never masked by the idle
+                 copy while the user is stopping a long-running tool. -->
+            <template v-if="generationStatusIdle && generationStatus.activeTool && generationStatus.phase !== 'cancelling'">
+              <span class="whitespace-nowrap tabular-nums">{{ t("ai.status.idle", { idle: statusIdleSeconds }) }}</span>
+              <span class="whitespace-nowrap">{{ t("ai.status.runningToolAction") }}</span>
+              <span class="whitespace-nowrap rounded-[5px] border border-chart-2/30 bg-chart-2/10 px-1.5 py-px font-mono text-[10px] text-chart-2">{{ statusToolLabel }}</span>
+            </template>
+            <template v-else-if="generationStatusRunningTool">
+              <span v-if="statusTurnBadge" class="whitespace-nowrap rounded-[5px] border border-border px-1 font-mono text-[10px] text-muted-foreground">{{ statusTurnBadge }}</span>
+              <span class="whitespace-nowrap">{{ t("ai.status.runningToolAction") }}</span>
+              <span class="whitespace-nowrap rounded-[5px] border border-chart-2/30 bg-chart-2/10 px-1.5 py-px font-mono text-[10px] text-chart-2">{{ statusToolLabel }}</span>
+              <span class="whitespace-nowrap tabular-nums">{{ t("ai.status.runningToolElapsed", { elapsed: statusElapsedSeconds }) }}</span>
+            </template>
+            <span v-else class="min-w-0 tabular-nums">{{ generationStatusText }}</span>
           </div>
         </div>
       </ScrollArea>
@@ -3616,6 +3704,12 @@ async function openExternalUrl(url: string) {
             @paste="onPromptPaste"
           />
           <input ref="csvFileInputRef" type="file" multiple accept="image/png,image/jpeg,image/gif,image/webp,.csv,.md,.markdown,.txt,.text,.json,.yaml,.yml,.xml,.log,.tsv" class="hidden" @change="onCsvFileSelected" />
+          <!-- Gentle >60s hint (Issue #6743 feature 1): never asserts the request is
+               stuck/hung, only that it is running long and may be waited on or stopped. -->
+          <div v-if="statusLongRunningHintVisible" class="mb-1.5 flex items-center gap-1.5 rounded-[7px] border border-warning/30 bg-warning/10 px-2 py-1 text-[11px] text-warning">
+            <Clock class="h-3.5 w-3.5 shrink-0" />
+            <span>{{ t("ai.status.longRunningHint") }}</span>
+          </div>
           <div class="flex min-w-0 flex-nowrap items-center gap-1.5 overflow-hidden">
             <Tooltip>
               <TooltipTrigger as-child>

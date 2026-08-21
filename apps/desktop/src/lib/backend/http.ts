@@ -63,6 +63,8 @@ import type {
   DriverRuntimeSummary,
   UpgradeAllAgentDriversResult,
   AgentUpdateBlocker,
+  AgentOfflineExportPreview,
+  AgentOfflineExportResult,
   DesktopSettings,
   McpGlobalPolicy,
   SavedSqlSyncRequest,
@@ -643,6 +645,14 @@ export async function importAgentsFromZip(fileOrPath: string | File, operationId
   if (!res.ok) throw await backendResponseError(res);
   const result: { count: number } = await res.json();
   return result.count;
+}
+
+export async function previewAgentOfflineExport(): Promise<AgentOfflineExportPreview> {
+  throw new Error("Offline Agent package export is only available in the desktop app.");
+}
+
+export async function exportAgentsOffline(_path: string, _driverKeys: string[]): Promise<AgentOfflineExportResult> {
+  throw new Error("Offline Agent package export is only available in the desktop app.");
 }
 
 export async function importAgentDriver(dbType: string, pathOrFile: string | File): Promise<void> {

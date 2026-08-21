@@ -9,8 +9,8 @@ use sha2::{Digest, Sha256};
 
 use crate::agent_catalog;
 use crate::agent_manager::{
-    AgentDriverInfo, AgentInstallCancellation, AgentManager, AgentRegistry, ArtifactFormat, InstalledDriver,
-    JavaRuntimeMode, OperationLockHandle, DEFAULT_JRE_KEY,
+    AgentDriverInfo, AgentInstallCancellation, AgentManager, AgentRegistry, ArtifactFormat, ArtifactInfo,
+    InstalledDriver, JavaRuntimeMode, OperationLockHandle, DEFAULT_JRE_KEY,
 };
 use crate::DownloadSource;
 
@@ -2431,6 +2431,7 @@ pub fn inspect_offline_zip(zip_path: &Path) -> Result<OfflineImportPlan, String>
     let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("Invalid ZIP file: {e}"))?;
     let registry = read_registry_from_zip(&mut archive)?;
     let (jre_entries, driver_entries) = collect_offline_entries(&mut archive, &registry)?;
+    validate_offline_zip_preflight(&mut archive, &registry, &jre_entries, &driver_entries)?;
     Ok(OfflineImportPlan {
         driver_keys: driver_entries.into_iter().map(|(db_type, _, _)| db_type).collect(),
         includes_jre: !jre_entries.is_empty(),
@@ -2453,18 +2454,18 @@ pub async fn import_offline_zip(
     let registry = read_registry_from_zip(&mut archive)?;
 
     let platform = AgentManager::current_platform();
-    std::fs::create_dir_all(am.base_dir()).map_err(|e| format!("Failed to create agent directory: {e}"))?;
-    let mut local_state = am.load_state();
-    let mut result =
-        OfflineImportResult { jre_installed: Vec::new(), drivers_installed: Vec::new(), drivers_skipped: Vec::new() };
-
     let (jre_entries, driver_entries) = collect_offline_entries(&mut archive, &registry)?;
 
     let total = (jre_entries.len() + driver_entries.len()) as u32;
     if total == 0 {
         return Err(format!("Offline package contains no drivers compatible with platform: {platform}"));
     }
+    validate_offline_zip_preflight(&mut archive, &registry, &jre_entries, &driver_entries)?;
+    std::fs::create_dir_all(am.base_dir()).map_err(|e| format!("Failed to create agent directory: {e}"))?;
     validate_offline_driver_entries(am, &mut archive, &driver_entries)?;
+    let mut local_state = am.load_state();
+    let mut result =
+        OfflineImportResult { jre_installed: Vec::new(), drivers_installed: Vec::new(), drivers_skipped: Vec::new() };
     let mut current: u32 = 0;
 
     for (jre_key, entry_name, format) in &jre_entries {
@@ -2614,7 +2615,7 @@ fn collect_offline_entries(
             return Err(format!("Offline package contains an unsafe path: {}", entry.name()));
         };
         let name = path.to_string_lossy().replace('\\', "/");
-        if name.starts_with("jre/") && name.contains(platform) {
+        if name.starts_with("jre/") {
             let jre_format = if name.ends_with(".tar.zst") {
                 Some(ArtifactFormat::TarZstd)
             } else if name.ends_with(".tar.gz") {
@@ -2622,8 +2623,11 @@ fn collect_offline_entries(
             } else {
                 continue;
             };
-            let jre_key = extract_jre_key_from_filename(&name)
-                .ok_or_else(|| format!("Invalid JRE filename in offline package: {name}"))?;
+            let Some(jre_key) = jre_key_for_offline_entry(registry, platform, &name)
+                .or_else(|| name.contains(platform).then(|| extract_jre_key_from_filename(&name)).flatten())
+            else {
+                continue;
+            };
             validate_offline_identifier(&jre_key, "JRE")?;
             let replace = !jres.contains_key(&jre_key) || jre_format == Some(ArtifactFormat::TarZstd);
             if replace {
@@ -2649,6 +2653,105 @@ fn collect_offline_entries(
         jres.into_iter().map(|(jre_key, (name, format))| (jre_key, name, format)).collect(),
         drivers.into_iter().map(|(db_type, (name, is_native))| (db_type, name, is_native)).collect(),
     ))
+}
+
+fn validate_offline_zip_preflight(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+    registry: &AgentRegistry,
+    jre_entries: &[OfflineJreEntry],
+    driver_entries: &[OfflineDriverEntry],
+) -> Result<(), String> {
+    let platform = AgentManager::current_platform();
+    let has_jre_artifact_metadata =
+        registry.jre.iter().chain(registry.jres.values()).any(|jre| !jre.platforms.is_empty());
+    let packaged_jres = jre_entries.iter().map(|(key, _, _)| key.as_str()).collect::<std::collections::BTreeSet<_>>();
+
+    for (jre_key, entry_name, format) in jre_entries {
+        if let Some(artifact) = registry.resolve_jre(jre_key).and_then(|jre| jre.platforms.get(platform)) {
+            if artifact.format != *format {
+                return Err(format!("Offline JRE {jre_key} archive format does not match its registry metadata"));
+            }
+            validate_offline_zip_artifact(archive, entry_name, artifact, &format!("JRE {jre_key}"))?;
+        }
+    }
+
+    for (db_type, entry_name, is_native) in driver_entries {
+        let Some(driver) = registry.drivers.get(db_type) else {
+            // Older locally assembled ZIPs can identify a JAR solely from its
+            // canonical filename. Preserve that import path when no registry
+            // artifact metadata exists to validate.
+            continue;
+        };
+        let artifact = if *is_native {
+            driver.native.get(platform)
+        } else {
+            let jre_key = driver.jre.trim();
+            if !jre_key.is_empty() {
+                if let Some(jre) = registry.resolve_jre(jre_key) {
+                    if !jre.platforms.is_empty() && !jre.platforms.contains_key(platform) {
+                        return Err(format!(
+                            "Offline Java driver {db_type} requires JRE {jre_key}, which does not support the current platform: {platform}"
+                        ));
+                    }
+                    if !jre.platforms.is_empty() && !packaged_jres.contains(jre_key) {
+                        return Err(format!(
+                            "Offline Java driver {db_type} requires JRE {jre_key}, but the current-platform JRE artifact is missing"
+                        ));
+                    }
+                } else if has_jre_artifact_metadata {
+                    return Err(format!(
+                        "Offline Java driver {db_type} requires JRE {jre_key}, but that JRE is missing from the package registry"
+                    ));
+                }
+            }
+            driver.jar.as_ref()
+        };
+        if let Some(artifact) = artifact {
+            validate_offline_zip_artifact(archive, entry_name, artifact, &format!("driver {db_type}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_offline_zip_artifact(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+    entry_name: &str,
+    artifact: &ArtifactInfo,
+    label: &str,
+) -> Result<(), String> {
+    let mut entry = archive
+        .by_name(entry_name)
+        .map_err(|error| format!("Failed to read offline {label} artifact {entry_name}: {error}"))?;
+    if !entry.is_file() {
+        return Err(format!("Offline {label} artifact is not a regular file: {entry_name}"));
+    }
+    if artifact.size > 0 && entry.size() != artifact.size {
+        return Err(format!(
+            "Offline {label} artifact size mismatch: expected {} bytes, got {} bytes",
+            artifact.size,
+            entry.size()
+        ));
+    }
+    let Some(expected_sha256) = normalized_sha256(artifact.sha256.as_deref())? else {
+        return Ok(());
+    };
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = entry
+            .read(&mut buffer)
+            .map_err(|error| format!("Failed to hash offline {label} artifact {entry_name}: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    let actual_sha256 = format!("{:x}", digest.finalize());
+    if actual_sha256.eq_ignore_ascii_case(expected_sha256) {
+        Ok(())
+    } else {
+        Err(format!("Offline {label} artifact SHA-256 mismatch: expected {expected_sha256}, got {actual_sha256}"))
+    }
 }
 
 fn validate_offline_driver_entries(
@@ -2712,6 +2815,24 @@ fn extract_jre_key_from_filename(name: &str) -> Option<String> {
         return None;
     }
     Some(key.to_string())
+}
+
+fn jre_key_for_offline_entry(registry: &AgentRegistry, platform: &str, name: &str) -> Option<String> {
+    let filename = name.rsplit('/').next()?;
+    let registry_match = registry.jres.iter().find_map(|(key, jre)| {
+        let artifact = jre.platforms.get(platform)?;
+        (artifact.url.rsplit('/').next()? == filename).then(|| key.clone())
+    });
+    if registry_match.is_some() {
+        return registry_match;
+    }
+    if registry.jres.is_empty() {
+        let artifact = registry.jre.as_ref()?.platforms.get(platform)?;
+        if artifact.url.rsplit('/').next()? == filename {
+            return Some(DEFAULT_JRE_KEY.to_string());
+        }
+    }
+    None
 }
 
 fn extract_db_type_from_filename(name: &str) -> Option<String> {
@@ -2967,7 +3088,7 @@ fn jre_dir_contains_java(path: &Path) -> bool {
         || path.join("Contents").join("Home").join("bin").join(java_name).is_file()
 }
 
-fn validate_native_agent_binary(path: &Path) -> Result<(), String> {
+pub(crate) fn validate_native_agent_binary(path: &Path) -> Result<(), String> {
     let mut file = std::fs::File::open(path).map_err(|e| format!("Failed to read native agent: {e}"))?;
     let mut magic = [0_u8; 4];
     file.read_exact(&mut magic).map_err(|e| format!("Failed to read native agent header: {e}"))?;
@@ -3296,6 +3417,28 @@ mod agent_registry_install_tests {
             archive.finish().unwrap();
         }
         bytes.into_inner()
+    }
+
+    fn sha256_bytes(bytes: &[u8]) -> String {
+        format!("{:x}", Sha256::digest(bytes))
+    }
+
+    fn write_offline_zip(registry: &AgentRegistry, entries: &[(String, Vec<u8>)]) -> (tempfile::TempDir, PathBuf) {
+        use std::io::Write;
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("agents.zip");
+        let file = std::fs::File::create(&path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        archive.start_file("agent-registry.json", options).unwrap();
+        archive.write_all(&serde_json::to_vec(registry).unwrap()).unwrap();
+        for (name, bytes) in entries {
+            archive.start_file(name, options).unwrap();
+            archive.write_all(bytes).unwrap();
+        }
+        archive.finish().unwrap();
+        (temp, path)
     }
 
     fn build_tar_zstd_driver_package(
@@ -4881,6 +5024,266 @@ mod agent_registry_install_tests {
         assert!(cache_path.exists());
         assert!(!jar_path.exists());
         assert!(!manager.load_state().installed_drivers.contains_key(db_type));
+    }
+
+    #[tokio::test]
+    async fn offline_zip_rejects_a_cross_platform_java_dependency_before_install_changes() {
+        let platform = AgentManager::current_platform();
+        let foreign_platform = if platform == "linux-x64" { "macos-x64" } else { "linux-x64" };
+        let jre_key = "temurin-21";
+        let jar_name = "dbx-agent-h2.jar";
+        let jre_name = format!("dbx-jre-{jre_key}-{foreign_platform}.tar.gz");
+        let jar_bytes = test_agent_jar();
+        let jre_bytes = b"foreign-jre".to_vec();
+        let registry = AgentRegistry {
+            jre: None,
+            jres: [(
+                jre_key.to_string(),
+                JreInfo {
+                    version: "21.0.7".to_string(),
+                    platforms: [(
+                        foreign_platform.to_string(),
+                        ArtifactInfo {
+                            url: format!("offline://{jre_name}"),
+                            sha256: Some(sha256_bytes(&jre_bytes)),
+                            size: jre_bytes.len() as u64,
+                            format: None,
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            drivers: [(
+                "h2".to_string(),
+                DriverInfo {
+                    version: "1.0.0".to_string(),
+                    label: "H2".to_string(),
+                    min_app_version: "0.1.0".to_string(),
+                    jar: Some(ArtifactInfo {
+                        url: format!("offline://{jar_name}"),
+                        sha256: Some(sha256_bytes(&jar_bytes)),
+                        size: jar_bytes.len() as u64,
+                        format: None,
+                    }),
+                    native: std::collections::HashMap::new(),
+                    jre: jre_key.to_string(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let (_package_dir, package) = write_offline_zip(
+            &registry,
+            &[(format!("drivers/{jar_name}"), jar_bytes), (format!("jre/{jre_name}"), jre_bytes)],
+        );
+
+        let inspect_error = inspect_offline_zip(&package).unwrap_err();
+        assert!(inspect_error.contains("does not support the current platform"), "unexpected error: {inspect_error}");
+
+        let manager = test_manager("offline-cross-platform-java");
+        let existing_jar = manager.driver_jar_path("h2");
+        std::fs::create_dir_all(existing_jar.parent().unwrap()).unwrap();
+        std::fs::write(&existing_jar, b"existing-driver").unwrap();
+        manager
+            .mutate_state(|state| {
+                state.installed_drivers.insert(
+                    "h2".to_string(),
+                    InstalledDriver {
+                        version: "9.9.9".to_string(),
+                        installed_at: "before".to_string(),
+                        jre: jre_key.to_string(),
+                    },
+                );
+            })
+            .unwrap();
+
+        let import_error = import_offline_zip(&manager, &package, |_| {}).await.unwrap_err();
+        assert!(import_error.contains("does not support the current platform"), "unexpected error: {import_error}");
+        assert_eq!(std::fs::read(existing_jar).unwrap(), b"existing-driver");
+        assert_eq!(manager.load_state().installed_drivers["h2"].version, "9.9.9");
+        assert!(!manager.jre_dir(jre_key).exists());
+    }
+
+    #[test]
+    fn offline_zip_rejects_a_java_dependency_missing_from_a_registry_with_jre_metadata() {
+        let platform = AgentManager::current_platform();
+        let jar_name = "dbx-agent-h2.jar";
+        let jar_bytes = test_agent_jar();
+        let unrelated_jre_name = format!("dbx-jre-temurin-17-{platform}.tar.gz");
+        let unrelated_jre_bytes = b"unrelated-jre".to_vec();
+        let registry = AgentRegistry {
+            jre: None,
+            jres: [(
+                "temurin-17".to_string(),
+                JreInfo {
+                    version: "17.0.15".to_string(),
+                    platforms: [(
+                        platform.to_string(),
+                        ArtifactInfo {
+                            url: format!("offline://{unrelated_jre_name}"),
+                            sha256: Some(sha256_bytes(&unrelated_jre_bytes)),
+                            size: unrelated_jre_bytes.len() as u64,
+                            format: None,
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            drivers: [(
+                "h2".to_string(),
+                DriverInfo {
+                    version: "1.0.0".to_string(),
+                    label: "H2".to_string(),
+                    min_app_version: "0.1.0".to_string(),
+                    jar: Some(ArtifactInfo {
+                        url: format!("offline://{jar_name}"),
+                        sha256: Some(sha256_bytes(&jar_bytes)),
+                        size: jar_bytes.len() as u64,
+                        format: None,
+                    }),
+                    native: std::collections::HashMap::new(),
+                    jre: "temurin-21".to_string(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let (_package_dir, package) = write_offline_zip(
+            &registry,
+            &[(format!("drivers/{jar_name}"), jar_bytes), (format!("jre/{unrelated_jre_name}"), unrelated_jre_bytes)],
+        );
+
+        let error = inspect_offline_zip(&package).unwrap_err();
+        assert!(error.contains("missing from the package registry"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn offline_zip_rejects_registry_size_and_sha256_tampering() {
+        let platform = AgentManager::current_platform();
+        let entry_name = format!("dbx-agent-h2-{platform}");
+        let original = b"native-bytes".to_vec();
+        let tampered = b"native-byteS".to_vec();
+        assert_eq!(original.len(), tampered.len());
+
+        let registry_with = |size, sha256: String| AgentRegistry {
+            jre: None,
+            jres: std::collections::HashMap::new(),
+            drivers: [(
+                "h2".to_string(),
+                DriverInfo {
+                    version: "1.0.0".to_string(),
+                    label: "H2".to_string(),
+                    min_app_version: "0.1.0".to_string(),
+                    jar: None,
+                    native: [(
+                        platform.to_string(),
+                        ArtifactInfo {
+                            url: format!("offline://{entry_name}"),
+                            sha256: Some(sha256),
+                            size,
+                            format: None,
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                    jre: DEFAULT_JRE_KEY.to_string(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+
+        let size_registry = registry_with((original.len() + 1) as u64, sha256_bytes(&original));
+        let (_size_dir, size_package) =
+            write_offline_zip(&size_registry, &[(format!("drivers/{entry_name}"), original.clone())]);
+        let size_error = inspect_offline_zip(&size_package).unwrap_err();
+        assert!(size_error.contains("size mismatch"), "unexpected error: {size_error}");
+
+        let sha_registry = registry_with(original.len() as u64, sha256_bytes(&original));
+        let (_sha_dir, sha_package) = write_offline_zip(&sha_registry, &[(format!("drivers/{entry_name}"), tampered)]);
+        let sha_error = inspect_offline_zip(&sha_package).unwrap_err();
+        assert!(sha_error.contains("SHA-256 mismatch"), "unexpected error: {sha_error}");
+    }
+
+    #[test]
+    fn offline_zip_resolves_a_hyphenated_jre_key_from_the_registry_basename() {
+        let platform = AgentManager::current_platform();
+        let jre_key = "temurin-21";
+        let jar_name = "dbx-agent-h2.jar";
+        let jre_name = format!("dbx-jre-{jre_key}-21.0.7-{platform}.tar.gz");
+        let jar_bytes = test_agent_jar();
+        let jre_bytes = b"current-jre".to_vec();
+        let registry = AgentRegistry {
+            jre: None,
+            jres: [(
+                jre_key.to_string(),
+                JreInfo {
+                    version: "21.0.7".to_string(),
+                    platforms: [(
+                        platform.to_string(),
+                        ArtifactInfo {
+                            url: format!("offline://{jre_name}"),
+                            sha256: Some(sha256_bytes(&jre_bytes)),
+                            size: jre_bytes.len() as u64,
+                            format: None,
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            drivers: [(
+                "h2".to_string(),
+                DriverInfo {
+                    version: "1.0.0".to_string(),
+                    label: "H2".to_string(),
+                    min_app_version: "0.1.0".to_string(),
+                    jar: Some(ArtifactInfo {
+                        url: format!("offline://{jar_name}"),
+                        sha256: Some(sha256_bytes(&jar_bytes)),
+                        size: jar_bytes.len() as u64,
+                        format: None,
+                    }),
+                    native: std::collections::HashMap::new(),
+                    jre: jre_key.to_string(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let (_package_dir, package) = write_offline_zip(
+            &registry,
+            &[(format!("drivers/{jar_name}"), jar_bytes), (format!("jre/{jre_name}"), jre_bytes)],
+        );
+
+        let plan = inspect_offline_zip(&package).unwrap();
+        assert_eq!(plan.driver_keys, vec!["h2"]);
+        assert!(plan.includes_jre);
+    }
+
+    #[test]
+    fn offline_zip_keeps_legacy_jar_and_jre_entries_compatible_without_integrity_metadata() {
+        let platform = AgentManager::current_platform();
+        let jar_name = "dbx-agent-h2.jar";
+        let jre_name = format!("jre-21-{platform}.tar.gz");
+        let jar_bytes = test_agent_jar();
+        let registry = registry_with_jar("h2", "1.0.0", &format!("offline://{jar_name}"), jar_bytes.len() as u64);
+        let (_package_dir, package) = write_offline_zip(
+            &registry,
+            &[(format!("drivers/{jar_name}"), jar_bytes), (format!("jre/{jre_name}"), b"legacy-jre".to_vec())],
+        );
+
+        let plan = inspect_offline_zip(&package).unwrap();
+        assert_eq!(plan.driver_keys, vec!["h2"]);
+        assert!(plan.includes_jre);
     }
 
     #[tokio::test]

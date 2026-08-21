@@ -141,6 +141,33 @@ export interface AgentUpdateBlocker {
   label: string;
 }
 
+export type AgentOfflineArtifactKind = "jar" | "native";
+
+export type AgentOfflineExportUnavailableReason = "unmanagedInstall" | "localInstall" | "launchConfig" | "missingArtifact" | "invalidArtifact" | "unsafeSource" | "externalDriverRequired" | "missingManagedJre" | "invalidManagedJre";
+
+export interface AgentOfflineExportCandidate {
+  dbType: string;
+  label: string;
+  version: string;
+  size: number;
+  artifactKind: AgentOfflineArtifactKind | null;
+  requiredJre: string | null;
+  eligible: boolean;
+  unavailableReason: AgentOfflineExportUnavailableReason | null;
+}
+
+export interface AgentOfflineExportPreview {
+  platform: string;
+  candidates: AgentOfflineExportCandidate[];
+}
+
+export interface AgentOfflineExportResult {
+  platform: string;
+  driverCount: number;
+  jreCount: number;
+  bytes: number;
+}
+
 export type JavaRuntimeMode = "managed" | "system" | "custom";
 
 export interface JavaRuntimeConfig {
@@ -2025,6 +2052,14 @@ export async function importAgentsFromZip(path: string | File, operationId?: str
     throw new Error("Desktop offline package import requires a local file path");
   }
   return invoke("import_agents_from_zip", { path, operationId });
+}
+
+export async function previewAgentOfflineExport(): Promise<AgentOfflineExportPreview> {
+  return invoke("preview_agent_offline_export");
+}
+
+export async function exportAgentsOffline(path: string, driverKeys: string[]): Promise<AgentOfflineExportResult> {
+  return invoke("export_agents_offline", { path, driverKeys });
 }
 
 export async function importAgentDriver(dbType: string, path: string | File): Promise<void> {

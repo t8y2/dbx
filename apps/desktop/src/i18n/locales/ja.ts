@@ -1628,6 +1628,8 @@ export default withEnglishFallback({
     formatterMaskSuffix: "表示する接尾辞",
     formatterSavedCustom: "保存済みテンプレート",
     formatterNewCustom: "新しいテンプレート",
+    formatterDeleteCustom: "テンプレートを削除",
+    formatterDeleteCustomMessage: "「{name}」を削除しますか？このテンプレートを使用しているすべての列から書式設定が解除されます。",
     formatterCustomName: "テンプレート名",
     formatterCustomNamePlaceholder: "例: ユーザーラベル",
     formatterCustomTemplateInput: "テンプレート",

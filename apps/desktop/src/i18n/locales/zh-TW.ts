@@ -1611,6 +1611,8 @@ export default withEnglishFallback({
     formatterMaskSuffix: "字尾保留",
     formatterSavedCustom: "已儲存範本",
     formatterNewCustom: "建立範本",
+    formatterDeleteCustom: "刪除範本",
+    formatterDeleteCustomMessage: "確定刪除「{name}」嗎？所有使用此範本的欄位都會清除格式設定。",
     formatterCustomName: "範本名稱",
     formatterCustomNamePlaceholder: "例如：使用者標籤",
     formatterCustomTemplateInput: "範本",

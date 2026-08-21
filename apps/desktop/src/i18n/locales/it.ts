@@ -1610,6 +1610,8 @@ export default withEnglishFallback({
     formatterMaskSuffix: "Suffisso visibile",
     formatterSavedCustom: "Modelli salvati",
     formatterNewCustom: "Nuovo modello",
+    formatterDeleteCustom: "Elimina modello",
+    formatterDeleteCustomMessage: 'Eliminare "{name}"? La formattazione verrà rimossa da tutte le colonne che usano questo modello.',
     formatterCustomName: "Nome modello",
     formatterCustomNamePlaceholder: "Esempio: Etichetta utente",
     formatterCustomTemplateInput: "Modello",

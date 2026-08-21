@@ -1728,6 +1728,8 @@ export default {
     formatterMaskSuffix: "Visible suffix",
     formatterSavedCustom: "Saved templates",
     formatterNewCustom: "New template",
+    formatterDeleteCustom: "Delete template",
+    formatterDeleteCustomMessage: 'Delete "{name}"? Formatting will be cleared from every column using this template.',
     formatterCustomName: "Template name",
     formatterCustomNamePlaceholder: "Example: User label",
     formatterCustomTemplateInput: "Template",

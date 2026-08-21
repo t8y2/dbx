@@ -1612,6 +1612,8 @@ export default withEnglishFallback({
     formatterMaskSuffix: "Sufixo visível",
     formatterSavedCustom: "Templates salvos",
     formatterNewCustom: "Novo template",
+    formatterDeleteCustom: "Excluir template",
+    formatterDeleteCustomMessage: 'Excluir "{name}"? A formatação será removida de todas as colunas que usam este template.',
     formatterCustomName: "Nome do template",
     formatterCustomNamePlaceholder: "Exemplo: Rótulo do usuário",
     formatterCustomTemplateInput: "Template",

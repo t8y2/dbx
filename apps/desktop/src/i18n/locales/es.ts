@@ -1612,6 +1612,8 @@ export default withEnglishFallback({
     formatterMaskSuffix: "Sufijo visible",
     formatterSavedCustom: "Plantillas guardadas",
     formatterNewCustom: "Nueva plantilla",
+    formatterDeleteCustom: "Eliminar plantilla",
+    formatterDeleteCustomMessage: '¿Eliminar "{name}"? Se quitará el formato de todas las columnas que usen esta plantilla.',
     formatterCustomName: "Nombre de plantilla",
     formatterCustomNamePlaceholder: "Ejemplo: Etiqueta de usuario",
     formatterCustomTemplateInput: "Plantilla",

@@ -627,6 +627,36 @@ test("keeps only valid saved column formatter configs", () => {
   });
 });
 
+test("deleting a saved custom formatter clears every reference to it", async () => {
+  await withMockLocalStorage({}, async () => {
+    setActivePinia(createPinia());
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+    store.updateEditorSettings({
+      customColumnFormatters: {
+        fmt_remove: { id: "fmt_remove", name: "Remove me", template: "remove:${value}" },
+        fmt_keep: { id: "fmt_keep", name: "Keep me", template: "keep:${value}" },
+      },
+      columnFormatters: {
+        first: { kind: "custom-ref", formatterId: "fmt_remove" },
+        second: { kind: "custom-ref", formatterId: "fmt_remove" },
+        keep: { kind: "custom-ref", formatterId: "fmt_keep" },
+        mask: { kind: "mask", prefix: 1, suffix: 1 },
+      },
+    });
+
+    store.deleteCustomColumnFormatter("fmt_remove");
+
+    assert.deepEqual(store.editorSettings.customColumnFormatters, {
+      fmt_keep: { id: "fmt_keep", name: "Keep me", template: "keep:${value}" },
+    });
+    assert.deepEqual(store.editorSettings.columnFormatters, {
+      keep: { kind: "custom-ref", formatterId: "fmt_keep" },
+      mask: { kind: "mask", prefix: 1, suffix: 1 },
+    });
+  });
+});
+
 test("AI provider presets include common hosted and local providers", () => {
   assert.equal(AI_PROVIDER_PRESETS.gemini.endpoint, "https://generativelanguage.googleapis.com");
   assert.equal(AI_PROVIDER_PRESETS.gemini.model, "gemini-1.5-pro");

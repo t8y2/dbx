@@ -1653,6 +1653,8 @@ export default withEnglishFallback({
     formatterMaskSuffix: "后缀保留",
     formatterSavedCustom: "已保存模板",
     formatterNewCustom: "新建模板",
+    formatterDeleteCustom: "删除模板",
+    formatterDeleteCustomMessage: "确定删除“{name}”吗？所有使用该模板的字段都会清除格式化设置。",
     formatterCustomName: "模板名称",
     formatterCustomNamePlaceholder: "例如：用户标签",
     formatterCustomTemplateInput: "模板",

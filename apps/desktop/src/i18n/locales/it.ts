@@ -1419,6 +1419,12 @@ export default withEnglishFallback({
     noTable: "Nessuna tabella restituita",
     noSql: "SQL non disponibile",
     navigationHint: "Fai clic per visualizzare l'SQL; fai doppio clic per selezionarlo nell'editor.",
+    recoveryPrompt: "L'istruzione #{statement} non è riuscita; {count} istruzioni non sono state eseguite.",
+    stop: "Interrompi",
+    retry: "Riprova",
+    skipAndContinue: "Ignora e continua",
+    skipAll: "Ignora tutti gli errori",
+    skipAllHint: "Continua e ignora automaticamente gli errori successivi di questo batch",
     statuses: {
       pending: "In attesa",
       running: "In esecuzione",

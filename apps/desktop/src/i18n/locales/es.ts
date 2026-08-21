@@ -1421,6 +1421,12 @@ export default withEnglishFallback({
     noTable: "No se devolvió ninguna tabla de resultados",
     noSql: "SQL no disponible",
     navigationHint: "Haz clic para previsualizar el SQL; haz doble clic para enfocarlo en el editor.",
+    recoveryPrompt: "Falló la sentencia #{statement}; no se ejecutaron {count} sentencias.",
+    stop: "Detener",
+    retry: "Reintentar",
+    skipAndContinue: "Omitir y continuar",
+    skipAll: "Omitir todos los errores",
+    skipAllHint: "Continuar y omitir automáticamente los errores posteriores de este lote",
     statuses: {
       pending: "Pendiente",
       running: "Ejecutando",

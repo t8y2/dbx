@@ -1441,6 +1441,12 @@ export default withEnglishFallback({
     noTable: "結果テーブルは返されませんでした",
     noSql: "SQLを取得できません",
     navigationHint: "クリックでSQLをプレビューし、ダブルクリックでエディター内を選択します。",
+    recoveryPrompt: "ステートメント #{statement} が失敗し、残り {count} 件は未実行です。",
+    stop: "停止",
+    retry: "再試行",
+    skipAndContinue: "スキップして続行",
+    skipAll: "すべてのエラーをスキップ",
+    skipAllHint: "続行し、このバッチで後続のエラーを自動的にスキップします",
     statuses: {
       pending: "待機中",
       running: "実行中",

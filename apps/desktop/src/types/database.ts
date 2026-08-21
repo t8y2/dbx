@@ -772,6 +772,7 @@ export interface BatchSqlExecution {
   total: number;
   startedAt: number;
   finishedAt?: number;
+  recoveryDismissed?: boolean;
   items: BatchStatementExecutionItem[];
 }
 

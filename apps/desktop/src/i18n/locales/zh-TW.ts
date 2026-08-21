@@ -1420,6 +1420,12 @@ export default withEnglishFallback({
     noTable: "未回傳結果表",
     noSql: "無法取得 SQL",
     navigationHint: "按一下預覽 SQL，按兩下在編輯器中聚焦並選取。",
+    recoveryPrompt: "語句 #{statement} 執行失敗，剩餘 {count} 條未執行。",
+    stop: "停止",
+    retry: "重試",
+    skipAndContinue: "略過並繼續",
+    skipAll: "全部忽略",
+    skipAllHint: "繼續執行，並自動略過目前批次後續錯誤",
     statuses: {
       pending: "等待",
       running: "執行中",

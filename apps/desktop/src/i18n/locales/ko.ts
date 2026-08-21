@@ -1361,6 +1361,12 @@ export default withEnglishFallback({
     noTable: "반환된 결과 테이블이 없습니다",
     noSql: "SQL을 가져올 수 없습니다",
     navigationHint: "행을 클릭하여 SQL을 미리 보고 두 번 클릭하여 편집기에서 선택하세요.",
+    recoveryPrompt: "구문 #{statement} 실행에 실패하여 나머지 {count}개 구문이 실행되지 않았습니다.",
+    stop: "중지",
+    retry: "다시 시도",
+    skipAndContinue: "건너뛰고 계속",
+    skipAll: "모든 오류 건너뛰기",
+    skipAllHint: "계속 실행하고 이 배치의 이후 오류를 자동으로 건너뜁니다",
     statuses: {
       pending: "대기 중",
       running: "실행 중",

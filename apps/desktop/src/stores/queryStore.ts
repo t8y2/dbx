@@ -60,6 +60,7 @@ import { buildTabResultSnapshot, deleteTabResultSnapshot, pruneTabResultSnapshot
 import { estimateQueryResultsBytes, selectInactiveResultEvictions } from "@/lib/tabs/queryResultSize";
 import { queryResultBaseSql, queryResultExecutionSql, resultGridInstanceKey } from "@/lib/tabs/tabPresentation";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
+import { batchSqlRecoverySql, batchSqlRecoveryState, mergeBatchQueryResults, offsetBatchQueryResultIndexes, prepareBatchSqlRecovery, type BatchSqlRecoveryAction } from "@/lib/query/batchSqlRecovery";
 import { decodeQueryResultArchive, encodeQueryResultArchive, type DecodedQueryResultArchive } from "@/lib/query/queryResultArchive";
 import * as api from "@/lib/backend/api";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -101,6 +102,13 @@ const CANCEL_QUERY_TIMEOUT_MS = 10_000;
 const CANCEL_ACK_SETTLE_TIMEOUT_MS = 2_000;
 const SAVED_SQL_EDITOR_POSITION_PERSIST_DELAY_MS = 500;
 type CloseConfirmContext = "tab" | "batch" | "app";
+
+interface BatchSqlResumeOptions {
+  batch: BatchSqlExecution;
+  previousResults: QueryResult[];
+  startStatementIndex: number;
+  continueOnError: boolean;
+}
 
 function hasHiddenPhysicalRowKey(databaseType: DatabaseType | undefined, hiddenPrimaryKeys: HiddenPrimaryKeyProjection[]): boolean {
   return hiddenPrimaryKeys.some((projection) => !usesSyntheticRowIdKey(databaseType, [projection.sourceName]));
@@ -322,14 +330,15 @@ function applyBatchSqlProgress(
     error?: BackendError;
   },
   continueOnError: boolean,
+  statementOffset = 0,
 ) {
   const batch = batchSqlExecutionFor(tab, progress.executionId);
   if (!batch) return;
-  const previousCompleted = batch.completed;
-  const item = batch.items[progress.statementIndex];
+  const statementIndex = statementOffset + progress.statementIndex;
+  const item = batch.items[statementIndex];
   if (!item) return;
-  if (progress.success && progress.completed > previousCompleted + 1) {
-    for (let index = previousCompleted; index < progress.completed - 1; index += 1) {
+  if (progress.completed > 1) {
+    for (let index = statementOffset; index < statementOffset + progress.completed - 1; index += 1) {
       const completedItem = batch.items[index];
       if (completedItem && (completedItem.status === "pending" || completedItem.status === "running")) {
         completedItem.status = "success";
@@ -341,9 +350,9 @@ function applyBatchSqlProgress(
   item.affectedRows = progress.affectedRows;
   item.errorDetails = progress.error;
   item.error = progress.error ? translateBackendError(i18n.global.t, progress.error) : undefined;
-  batch.completed = Math.max(batch.completed, progress.completed);
-  if ((progress.success || continueOnError) && progress.completed < batch.total) {
-    const next = batch.items[progress.completed];
+  batch.completed = batch.items.filter((candidate) => candidate.status === "success" || candidate.status === "error").length;
+  if ((progress.success || continueOnError) && progress.completed < progress.total) {
+    const next = batch.items[statementOffset + progress.completed];
     if (next?.status === "pending") next.status = "running";
   }
 }
@@ -4217,6 +4226,7 @@ export const useQueryStore = defineStore("query", () => {
       targetContext?: SqlExecutionTargetContext;
       executionTarget?: MultiDbExecutionTarget;
       onExecutionStarted?: () => void;
+      batchResume?: BatchSqlResumeOptions;
     },
   ) {
     const tab = findExecutionTab(id);
@@ -4254,9 +4264,16 @@ export const useQueryStore = defineStore("query", () => {
     if (captureResultRun && tab.activeResultRunId) {
       pendingResultRunRestores.set(executionId, tab.activeResultRunId);
     }
-    tab.batchSqlExecution = undefined;
-    liveBatchSqlExecutions.delete(tab);
-    const preserveResultDuringExecution = options?.preserveResultDuringExecution === true || (tab.mode === "query" && !!tab.activeResultRunId && !tab.resultAutoSave && !captureResultRun);
+    const batchResume = options?.batchResume;
+    const continueOnBatchError = batchResume?.continueOnError ?? settingsStore.editorSettings.continueOnErrorOnBatch;
+    if (batchResume) {
+      tab.batchSqlExecution = prepareBatchSqlRecovery(batchResume.batch, executionId, batchResume.startStatementIndex);
+      liveBatchSqlExecutions.set(tab, tab.batchSqlExecution);
+    } else {
+      tab.batchSqlExecution = undefined;
+      liveBatchSqlExecutions.delete(tab);
+    }
+    const preserveResultDuringExecution = batchResume !== undefined || options?.preserveResultDuringExecution === true || (tab.mode === "query" && !!tab.activeResultRunId && !tab.resultAutoSave && !captureResultRun);
     const updateActiveResultRun = !!tab.activeResultRunId && preserveResultDuringExecution;
     if (!updateActiveResultRun) {
       tab.activeResultRunId = undefined;
@@ -4327,9 +4344,11 @@ export const useQueryStore = defineStore("query", () => {
       const executionDatabase = dataTabExecutionDatabase(conn, targetDatabase, executionCatalog);
       const useAgentCursor = usesAgentCursorForQuery(conn?.db_type);
       const queryTimeoutSecs = queryTimeoutSecsForConnection(conn, settingsStore.editorSettings.globalQueryTimeoutSecs);
-      const statementExecution = tab.mode === "query" ? createBatchSqlExecution(executionId, tab.sql, sql, effectiveDbType, options?.sourceOffset) : undefined;
-      tab.batchSqlExecution = statementExecution && (tab.autoCommit !== false || statementExecution.total === 1) ? statementExecution : undefined;
-      if (tab.batchSqlExecution) liveBatchSqlExecutions.set(tab, tab.batchSqlExecution);
+      if (!batchResume) {
+        const statementExecution = tab.mode === "query" ? createBatchSqlExecution(executionId, tab.sql, sql, effectiveDbType, options?.sourceOffset) : undefined;
+        tab.batchSqlExecution = statementExecution && (tab.autoCommit !== false || statementExecution.total === 1) ? statementExecution : undefined;
+        if (tab.batchSqlExecution) liveBatchSqlExecutions.set(tab, tab.batchSqlExecution);
+      }
       queryExecutionLog("info", "previous-session-close:start", { traceId, elapsed: elapsed() });
       await previousResultSessionClose;
       queryExecutionLog("info", "previous-session-close:done", { traceId, elapsed: elapsed() });
@@ -4800,7 +4819,7 @@ export const useQueryStore = defineStore("query", () => {
           sql,
         });
         const allResults: QueryResult[] = [];
-        const continueOnError = settingsStore.editorSettings.continueOnErrorOnBatch;
+        const continueOnError = continueOnBatchError;
         for (const request of elasticsearchRequests) {
           const current = findExecutionTab(id);
           if (current?.executionId !== executionId) break;
@@ -4964,7 +4983,7 @@ export const useQueryStore = defineStore("query", () => {
           ...(useOracleLobPreview ? { tableDataPreview: true } : {}),
           timeoutSecs: queryTimeoutSecs,
           catalog: executionCatalog,
-          continueOnError: settingsStore.editorSettings.continueOnErrorOnBatch,
+          continueOnError: continueOnBatchError,
         };
         queryExecutionLog("info", "execute-multi:invoke", {
           traceId,
@@ -4983,7 +5002,7 @@ export const useQueryStore = defineStore("query", () => {
                 (progress) => {
                   const current = findExecutionTab(id);
                   if (current?.executionId === executionId) {
-                    applyBatchSqlProgress(current, progress, settingsStore.editorSettings.continueOnErrorOnBatch);
+                    applyBatchSqlProgress(current, progress, continueOnBatchError, batchResume?.startStatementIndex ?? 0);
                   }
                 },
                 executionSchema,
@@ -4991,7 +5010,10 @@ export const useQueryStore = defineStore("query", () => {
               )
             : api.executeMulti(executionConnectionId, executionDatabase, sqlToExecute, executionSchema, executionId, executionOptions);
       }
-      const results = annotateQueryResultSources(markQueryResultsRowsRaw(await withFrontendQueryTimeout(executionPromise, frontendTimeoutSecs, t("editor.queryTimeoutError", { seconds: frontendTimeoutSecs }))), queryBaseSql, sourceLabelDatabase, effectiveDbType, options?.sourceOffset);
+      const results = offsetBatchQueryResultIndexes(
+        annotateQueryResultSources(markQueryResultsRowsRaw(await withFrontendQueryTimeout(executionPromise, frontendTimeoutSecs, t("editor.queryTimeoutError", { seconds: frontendTimeoutSecs }))), queryBaseSql, sourceLabelDatabase, effectiveDbType, options?.sourceOffset),
+        batchResume?.startStatementIndex ?? 0,
+      );
       reconcileBatchSqlResults(tab, executionId, results);
       const successfulOracleSchemaChanges = effectiveDbType === "oracle" ? results.filter((result) => result.execution_error !== true && isOracleCurrentSchemaStatement(result.sourceStatement)).length : 0;
       const successfulSapHanaSchemaChanges = effectiveDbType === "saphana" ? results.filter((result) => result.execution_error !== true && isSapHanaSetSchemaStatement(result.sourceStatement)).length : 0;
@@ -5042,7 +5064,14 @@ export const useQueryStore = defineStore("query", () => {
         const activeGroupResults = current.results;
         const shouldAppendResult = !!options?.appendResult && !!current.result;
         const shouldReplaceActiveResultInGroup = options?.replaceActiveResultInGroup === true && results.length === 1 && Array.isArray(activeGroupResults) && typeof activeGroupIndex === "number" && activeGroupIndex >= 0 && activeGroupIndex < activeGroupResults.length;
-        if (shouldAppendResult) {
+        if (batchResume) {
+          const mergedResults = mergeBatchQueryResults(batchResume.previousResults, results);
+          const preferredResult = results.find((result) => isQueryExecutionErrorResult(result)) ?? results[results.length - 1] ?? mergedResults[mergedResults.length - 1];
+          const resultIndex = preferredResult ? mergedResults.indexOf(preferredResult) : 0;
+          current.results = mergedResults.length > 1 ? mergedResults : undefined;
+          current.activeResultIndex = mergedResults.length > 1 ? Math.max(0, resultIndex) : undefined;
+          current.result = mergedResults[Math.max(0, resultIndex)];
+        } else if (shouldAppendResult) {
           if (results.length !== 1) throw new Error("Expected one result while loading the next segment");
           if (options.pagination?.offset !== current.result!.rows.length) {
             throw new Error("Ignoring a stale result segment whose offset no longer matches the loaded rows");
@@ -5070,8 +5099,8 @@ export const useQueryStore = defineStore("query", () => {
           current.result = results[0];
         }
         producedResult = current.result !== undefined;
-        current.resultBaseSql = shouldReplaceActiveResultInGroup ? (current.resultBaseSql ?? queryBaseSql) : queryBaseSql;
-        current.resultEditorFingerprint = shouldReplaceActiveResultInGroup ? (current.resultEditorFingerprint ?? executionEditorFingerprint) : executionEditorFingerprint;
+        current.resultBaseSql = batchResume ? batchResume.batch.submittedSql : shouldReplaceActiveResultInGroup ? (current.resultBaseSql ?? queryBaseSql) : queryBaseSql;
+        current.resultEditorFingerprint = batchResume ? batchResume.batch.editorFingerprint : shouldReplaceActiveResultInGroup ? (current.resultEditorFingerprint ?? executionEditorFingerprint) : executionEditorFingerprint;
         current.resultSortedSql = resultSortedSql;
         // Appended rows form one logical result starting at the original page.
         // Keep the base page state so later table refresh/cache recovery does
@@ -5278,6 +5307,36 @@ export const useQueryStore = defineStore("query", () => {
     }
     scheduleResultCacheTrim();
     return producedResult;
+  }
+
+  function dismissBatchSqlRecovery(id: string) {
+    const tab = findExecutionTab(id);
+    if (!tab?.batchSqlExecution || !batchSqlRecoveryState(tab)) return false;
+    tab.batchSqlExecution.recoveryDismissed = true;
+    return true;
+  }
+
+  async function resumeBatchSql(id: string, action: BatchSqlRecoveryAction) {
+    const tab = findExecutionTab(id);
+    const recovery = tab ? batchSqlRecoveryState(tab) : undefined;
+    const batch = tab?.batchSqlExecution;
+    if (!tab || !batch || !recovery) return false;
+
+    const startStatementIndex = action === "retry" ? recovery.failedStatementIndex : recovery.failedStatementIndex + 1;
+    const resumed = batchSqlRecoverySql(batch, startStatementIndex);
+    if (!resumed) return false;
+
+    const previousResults = tab.results?.slice() ?? (tab.result ? [tab.result] : []);
+    return await executeTabSql(id, resumed.sql, {
+      sourceOffset: resumed.sourceOffset,
+      preserveResultDuringExecution: true,
+      batchResume: {
+        batch: cloneBatchSqlExecution(batch)!,
+        previousResults,
+        startStatementIndex,
+        continueOnError: action === "skip-all",
+      },
+    });
   }
 
   async function explainTabSql(id: string, sql: string, databaseType?: DatabaseType, explainMode?: string) {
@@ -6391,6 +6450,8 @@ export const useQueryStore = defineStore("query", () => {
     executeCurrentTab,
     executeCurrentSql,
     executeTabSql,
+    dismissBatchSqlRecovery,
+    resumeBatchSql,
     activeResultExecutionTarget,
     getExecutionTab,
     createMultiDbExecutionWorker,

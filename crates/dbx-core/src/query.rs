@@ -237,6 +237,7 @@ impl ExecuteMultiResult {
         }
     }
 
+    #[cfg(test)]
     fn execution_error_with_index(result: db::QueryResult, statement_index: usize) -> Self {
         let error = error_from_query_result(&result);
         Self {
@@ -2881,6 +2882,14 @@ fn mysql_batch_pool_error_action(db_type: Option<DatabaseType>, error: &str) -> 
     }
 }
 
+fn mysql_batch_backend_error(action: PoolErrorAction, error: &str) -> crate::backend_error::BackendError {
+    if action == PoolErrorAction::Keep {
+        crate::backend_error::BackendError::from_sql_detail(error)
+    } else {
+        crate::backend_error::BackendError::from_legacy_backend(error)
+    }
+}
+
 fn mysql_non_result_batch_end(
     statements: &[String],
     start: usize,
@@ -2964,7 +2973,7 @@ where
                 }
                 let failed_index = statement_index + completed;
                 let result = error_query_result(error.clone());
-                let backend_error = crate::backend_error::BackendError::from_legacy_backend(&error);
+                let backend_error = mysql_batch_backend_error(action, &error);
                 report_execute_multi_progress(
                     progress,
                     failed_index,
@@ -3010,15 +3019,20 @@ where
             Err(err) => {
                 let action = mysql_batch_pool_error_action(db_type, &err);
                 let result = error_query_result(err.clone());
+                let backend_error = mysql_batch_backend_error(action, &err);
                 report_execute_multi_progress(
                     progress,
                     statement_index,
                     statements.len(),
                     &result,
                     false,
-                    Some(crate::backend_error::BackendError::from_legacy_backend(&err)),
+                    Some(backend_error.clone()),
                 );
-                results.push(ExecuteMultiResult::execution_error_with_index(result, statement_index));
+                results.push(ExecuteMultiResult::execution_error_with_backend(
+                    result,
+                    Some(statement_index),
+                    backend_error,
+                ));
                 // Statement errors are safe to collect, but connection-level failures leave
                 // the protocol state unusable and must still trigger pool cleanup.
                 if !should_continue_batch_after_error(continue_on_error, action) {
@@ -5889,7 +5903,7 @@ for line in sys.stdin:
                     success: false,
                     execution_time_ms: 0,
                     affected_rows: 0,
-                    error: Some(crate::backend_error::BackendError::from_legacy_backend("Duplicate entry")),
+                    error: Some(crate::backend_error::BackendError::from_sql_detail("Duplicate entry")),
                 },
             ]
         );
@@ -6002,6 +6016,7 @@ for line in sys.stdin:
         assert_eq!(results[0].statement_index, Some(0));
         assert_eq!(results[1].statement_index, Some(1));
         assert!(results[1].execution_error);
+        assert_eq!(results[1].error.as_ref().map(|error| error.code()), Some("DBX-JDBC-4001"));
         assert_eq!(
             progress_events
                 .lock()
@@ -6356,6 +6371,7 @@ for line in sys.stdin:
         assert_eq!(results.len(), 2);
         assert_eq!(results.iter().map(|result| result.statement_index).collect::<Vec<_>>(), vec![Some(0), Some(1)]);
         assert!(results[1].execution_error);
+        assert_eq!(results[1].error.as_ref().map(|error| error.code()), Some("DBX-LEGACY-0001"));
         assert_eq!(error_action, Some(PoolErrorAction::ReconnectAndRetry));
     }
 

@@ -1480,6 +1480,12 @@ export default {
     noTable: "No result table returned",
     noSql: "SQL unavailable",
     navigationHint: "Click a row to preview its SQL; double-click to focus it in the editor.",
+    recoveryPrompt: "Statement #{statement} failed; {count} statements were not run.",
+    stop: "Stop",
+    retry: "Retry",
+    skipAndContinue: "Skip and continue",
+    skipAll: "Skip all errors",
+    skipAllHint: "Continue and automatically skip later errors in this batch",
     statuses: {
       pending: "Pending",
       running: "Running",

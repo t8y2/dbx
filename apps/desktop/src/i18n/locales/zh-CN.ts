@@ -1404,6 +1404,12 @@ export default withEnglishFallback({
     noTable: "未返回结果表",
     noSql: "无法获取 SQL",
     navigationHint: "单击预览对应 SQL，双击在编辑器中聚焦并选中。",
+    recoveryPrompt: "语句 #{statement} 执行失败，剩余 {count} 条未执行。",
+    stop: "停止",
+    retry: "重试",
+    skipAndContinue: "跳过并继续",
+    skipAll: "全部忽略",
+    skipAllHint: "继续执行，并自动跳过当前批次后续错误",
     statuses: {
       pending: "等待",
       running: "执行中",

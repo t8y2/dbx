@@ -645,7 +645,8 @@ test("deleting a saved custom formatter clears every reference to it", async () 
       },
     });
 
-    store.deleteCustomColumnFormatter("fmt_remove");
+    const staleFormatter = store.editorSettings.customColumnFormatters.fmt_remove;
+    await store.deleteCustomColumnFormatter("fmt_remove");
 
     assert.deepEqual(store.editorSettings.customColumnFormatters, {
       fmt_keep: { id: "fmt_keep", name: "Keep me", template: "keep:${value}" },
@@ -654,6 +655,41 @@ test("deleting a saved custom formatter clears every reference to it", async () 
       keep: { kind: "custom-ref", formatterId: "fmt_keep" },
       mask: { kind: "mask", prefix: 1, suffix: 1 },
     });
+    assert.equal(store.upsertCustomColumnFormatter(staleFormatter), undefined);
+    assert.equal(store.editorSettings.customColumnFormatters.fmt_remove, undefined);
+  });
+});
+
+test("restores a deleted custom formatter when persistence fails", async () => {
+  await withMockLocalStorage({}, async () => {
+    setActivePinia(createPinia());
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+    store.updateEditorSettings({
+      customColumnFormatters: {
+        fmt_remove: { id: "fmt_remove", name: "Remove me", template: "remove:${value}" },
+      },
+      columnFormatters: {
+        first: { kind: "custom-ref", formatterId: "fmt_remove" },
+      },
+    });
+    await store.persistEditorSettings();
+    saveEditorSettingsMock.mockRejectedValueOnce(new Error("disk full"));
+
+    await assert.rejects(store.deleteCustomColumnFormatter("fmt_remove"), /disk full/);
+
+    assert.deepEqual(store.editorSettings.customColumnFormatters, {
+      fmt_remove: { id: "fmt_remove", name: "Remove me", template: "remove:${value}" },
+    });
+    assert.deepEqual(store.editorSettings.columnFormatters, {
+      first: { kind: "custom-ref", formatterId: "fmt_remove" },
+    });
+    assert.deepEqual(store.upsertCustomColumnFormatter({ id: "fmt_remove", name: "Updated", template: "updated:${value}" }), {
+      id: "fmt_remove",
+      name: "Updated",
+      template: "updated:${value}",
+    });
+    await store.persistEditorSettings();
   });
 });
 

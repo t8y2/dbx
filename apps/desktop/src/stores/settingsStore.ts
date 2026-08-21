@@ -1300,6 +1300,7 @@ export const useSettingsStore = defineStore("settings", () => {
   let editorSettingsAtomicUpdateQueue: Promise<void> = Promise.resolve();
   let editorSettingsPatchRevision = 0;
   const editorSettingsFieldRevisions = new Map<keyof EditorSettings, number>();
+  const deletedCustomColumnFormatterIds = new Set<string>();
   let pendingAiChatSelection: AiChatSelectionState | null = null;
   let aiChatSelectionSaveRunning = false;
 
@@ -1855,7 +1856,7 @@ export const useSettingsStore = defineStore("settings", () => {
 
   function upsertCustomColumnFormatter(formatter: CustomColumnFormatterConfig): CustomColumnFormatterConfig | undefined {
     const normalized = normalizeCustomColumnFormatter(formatter);
-    if (!normalized) return undefined;
+    if (!normalized || deletedCustomColumnFormatterIds.has(normalized.id)) return undefined;
     updateEditorSettings({
       customColumnFormatters: {
         ...editorSettings.value.customColumnFormatters,
@@ -1865,7 +1866,7 @@ export const useSettingsStore = defineStore("settings", () => {
     return normalized;
   }
 
-  function deleteCustomColumnFormatter(id: string) {
+  async function deleteCustomColumnFormatter(id: string): Promise<void> {
     const customColumnFormatters = {
       ...editorSettings.value.customColumnFormatters,
     };
@@ -1875,7 +1876,13 @@ export const useSettingsStore = defineStore("settings", () => {
         return formatter.kind !== "custom-ref" || formatter.formatterId !== id;
       }),
     );
-    updateEditorSettings({ customColumnFormatters, columnFormatters });
+    deletedCustomColumnFormatterIds.add(id);
+    try {
+      await updateEditorSettingsAndPersist({ customColumnFormatters, columnFormatters });
+    } catch (error) {
+      deletedCustomColumnFormatterIds.delete(id);
+      throw error;
+    }
   }
 
   return {

@@ -1066,6 +1066,7 @@ const formatterCustomId = ref(CUSTOM_FORMATTER_NEW);
 const formatterCustomName = ref("");
 const formatterCustomTemplate = ref("${value}");
 const formatterCustomDeleteOpen = ref(false);
+const formatterCustomDeleteLoading = ref(false);
 const formatterCustomDeleteId = ref("");
 const formatterCustomDeleteName = ref("");
 const formatterForeignKeyRefSchema = ref("");
@@ -1587,7 +1588,11 @@ function saveColumnFormatter(columnIndex: number) {
       name: formatterCustomName.value,
       template: formatterCustomTemplate.value,
     });
-    if (saved) formatter = { kind: "custom-ref", formatterId: saved.id };
+    if (!saved) {
+      selectCustomFormatter(CUSTOM_FORMATTER_NEW);
+      return;
+    }
+    formatter = { kind: "custom-ref", formatterId: saved.id };
   }
   settingsStore.updateColumnFormatter(key, formatter);
   closeColumnFormatter();
@@ -1638,18 +1643,21 @@ function requestDeleteCustomFormatter() {
   formatterCustomDeleteOpen.value = true;
 }
 
-function confirmDeleteCustomFormatter() {
+async function confirmDeleteCustomFormatter() {
   const id = formatterCustomDeleteId.value;
-  if (!id) return;
-  settingsStore.deleteCustomColumnFormatter(id);
-  if (formatterCustomId.value === id) {
-    formatterCustomId.value = CUSTOM_FORMATTER_NEW;
-    formatterCustomName.value = "";
-    formatterCustomTemplate.value = "${value}";
+  if (!id || formatterCustomDeleteLoading.value) return;
+  formatterCustomDeleteLoading.value = true;
+  try {
+    await settingsStore.deleteCustomColumnFormatter(id);
+    if (formatterCustomId.value === id) selectCustomFormatter(CUSTOM_FORMATTER_NEW);
+    formatterCustomDeleteOpen.value = false;
+    formatterCustomDeleteId.value = "";
+    formatterCustomDeleteName.value = "";
+  } catch (error) {
+    toast(t("grid.tableOperationFailed", { message: translateBackendError(t, error) }), 5000);
+  } finally {
+    formatterCustomDeleteLoading.value = false;
   }
-  formatterCustomDeleteOpen.value = false;
-  formatterCustomDeleteId.value = "";
-  formatterCustomDeleteName.value = "";
 }
 
 function createCustomFormatterId(): string {
@@ -12907,7 +12915,15 @@ function currentGridContextMenuItems(): ContextMenuItem[] {
       <SqlPreviewPanel :sql="previewSqlText" :loading="isPreviewLoading" :can-undo="canUndoPendingChange" :can-redo="canRedoPendingChange" @undo="undoGridChange" @redo="redoGridChange" @close="closeSqlPreview" />
     </div>
 
-    <DangerConfirmDialog v-model:open="formatterCustomDeleteOpen" :title="t('grid.formatterDeleteCustom')" :message="t('grid.formatterDeleteCustomMessage', { name: formatterCustomDeleteName })" :confirm-label="t('grid.formatterDeleteCustom')" @confirm="confirmDeleteCustomFormatter" />
+    <DangerConfirmDialog
+      v-model:open="formatterCustomDeleteOpen"
+      :title="t('grid.formatterDeleteCustom')"
+      :message="t('grid.formatterDeleteCustomMessage', { name: formatterCustomDeleteName })"
+      :confirm-label="t('grid.formatterDeleteCustom')"
+      :loading="formatterCustomDeleteLoading"
+      :close-on-confirm="false"
+      @confirm="confirmDeleteCustomFormatter"
+    />
     <DangerConfirmDialog
       v-model:open="conditionalBulkEditConfirmOpen"
       :title="t('grid.conditionalBulkEditConfirmTitle')"

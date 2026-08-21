@@ -12,9 +12,8 @@ interface FoldRange {
 }
 
 // `@codemirror/lang-sql`'s grammar is deliberately shallow (see its `foldNodeProp`, which only
-// covers the flat `Statement` and `BlockComment` nodes): `BEGIN`/`CASE`/`END` are just `Keyword`
-// leaf tokens with no enclosing block node, so there is nothing for tree-based folding to attach
-// to. This foldService reconstructs block structure from the token stream instead.
+// covers the flat `Statement` and `BlockComment` nodes). This service adds structure-aware folds
+// for procedural blocks and query expressions without replacing CodeMirror's native folds.
 //
 // Scoped to `BEGIN...END` and `CASE...END` (issue #6574) -- `BEGIN TRY`/`END TRY` and
 // `BEGIN CATCH`/`END CATCH` fall out of this for free, since `BEGIN` is matched regardless of a
@@ -65,6 +64,82 @@ function isSqlServerTransactionBegin(state: EditorState, tokens: SyntaxNode[], i
 // keep serving ranges computed from a stale or partial parse.
 const rangeCache = new WeakMap<Tree, Map<number, FoldRange>>();
 
+function addMultilineFoldRange(state: EditorState, ranges: Map<number, FoldRange>, openerPosition: number, endPosition: number, overwrite = false) {
+  const openerLine = state.doc.lineAt(openerPosition);
+  const endLine = state.doc.lineAt(endPosition);
+  if (openerLine.number === endLine.number || endPosition <= openerLine.to || (!overwrite && ranges.has(openerLine.number))) return;
+  ranges.set(openerLine.number, { from: openerLine.to, to: endPosition });
+}
+
+function queryParent(node: SyntaxNode): SyntaxNode | null {
+  for (let parent = node.parent; parent; parent = parent.parent) {
+    if (parent.name === "Parens" || parent.name === "Statement") return parent;
+  }
+  return null;
+}
+
+function queryScopeKey(node: SyntaxNode): string {
+  return `${node.name}:${node.from}:${node.to}`;
+}
+
+function queryScopeEnd(state: EditorState, scope: SyntaxNode): number {
+  const lastChild = scope.lastChild;
+  if (scope.name === "Parens" && lastChild?.name === ")") return lastChild.from;
+
+  let end = scope.to;
+  while (end > scope.from && /\s/.test(state.sliceDoc(end - 1, end))) end--;
+  if (end > scope.from && state.sliceDoc(end - 1, end) === ";") end--;
+  return end;
+}
+
+function isQueryParens(state: EditorState, node: SyntaxNode): boolean {
+  for (let child = node.firstChild; child; child = child.nextSibling) {
+    if (child.name === "(" || child.name === "LineComment" || child.name === "BlockComment") continue;
+    if (child.name !== "Keyword") return false;
+    const keyword = state.sliceDoc(child.from, child.to).toUpperCase();
+    return keyword === "SELECT" || keyword === "WITH";
+  }
+  return false;
+}
+
+interface QueryScopeTokens {
+  scope: SyntaxNode;
+  tokens: Array<{ node: SyntaxNode; keyword: "SELECT" | "UNION" }>;
+}
+
+function addQueryStructureFoldRanges(state: EditorState, tree: Tree, ranges: Map<number, FoldRange>) {
+  const scopes = new Map<string, QueryScopeTokens>();
+  tree.iterate({
+    enter(node) {
+      if (node.name === "Parens" && isQueryParens(state, node.node)) {
+        addMultilineFoldRange(state, ranges, node.from, queryScopeEnd(state, node.node));
+      }
+      if (node.name !== "Keyword") return;
+      const keyword = state.sliceDoc(node.from, node.to).toUpperCase();
+      if (keyword !== "SELECT" && keyword !== "UNION") return;
+      const scope = queryParent(node.node);
+      if (!scope) return;
+      const key = queryScopeKey(scope);
+      const group = scopes.get(key) ?? { scope, tokens: [] };
+      group.tokens.push({ node: node.node, keyword });
+      scopes.set(key, group);
+    },
+  });
+
+  for (const { scope, tokens } of scopes.values()) {
+    const unions = tokens.filter((token) => token.keyword === "UNION");
+    if (unions.length === 0) continue;
+    const selects = tokens.filter((token) => token.keyword === "SELECT");
+    for (const select of selects) {
+      const previousUnion = [...unions].reverse().find((union) => union.node.from < select.node.from);
+      const nextUnion = unions.find((union) => union.node.from > select.node.from);
+      if (!previousUnion && !nextUnion) continue;
+      const end = nextUnion?.node.from ?? queryScopeEnd(state, scope);
+      addMultilineFoldRange(state, ranges, select.node.from, end);
+    }
+  }
+}
+
 function computeBlockFoldRanges(state: EditorState): Map<number, FoldRange> {
   const tree = syntaxTree(state);
   const cached = rangeCache.get(tree);
@@ -98,7 +173,7 @@ function computeBlockFoldRanges(state: EditorState): Map<number, FoldRange> {
         // from/to formula below would otherwise invert (from > to) since `from` is the end of
         // that shared line while `to` is a position earlier on it.
         if (openerLine.number !== endLine.number) {
-          byOpenerLine.set(openerLine.number, { from: openerLine.to, to: token.from });
+          addMultilineFoldRange(state, byOpenerLine, opener.from, token.from, true);
         }
       }
     } else if (BLOCK_OPENERS.has(text) && (text !== "BEGIN" || !isSqlServerTransactionBegin(state, tokens, i))) {
@@ -106,11 +181,13 @@ function computeBlockFoldRanges(state: EditorState): Map<number, FoldRange> {
     }
   }
 
+  addQueryStructureFoldRanges(state, tree, byOpenerLine);
+
   rangeCache.set(tree, byOpenerLine);
   return byOpenerLine;
 }
 
-/** Folds `BEGIN...END` and `CASE...END` blocks in the SQL editor -- see module doc comment. */
+/** Adds procedural-block, query-parenthesis, and UNION-branch folds to the SQL editor. */
 export const sqlBlockFoldService = foldService.of((state, lineStart) => {
   const range = computeBlockFoldRanges(state).get(state.doc.lineAt(lineStart).number);
   return range ?? null;

@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
 import { sqlBlockFoldService } from "@/lib/editor/codemirrorSqlBlockFolding";
 
-function stateFor(doc: string, dialectName: "mysql" | "sqlserver" = "mysql"): EditorState {
+function stateFor(doc: string, dialectName: "mysql" | "postgres" | "sqlserver" = "mysql"): EditorState {
   const state = EditorState.create({
     doc,
     extensions: [langSql.sql({ dialect: createDbxCodeMirrorSqlDialect(langSql, dialectName) }), sqlBlockFoldService],
@@ -119,6 +119,79 @@ END`;
 
     expect(foldedTextAtLine(state, 1)).toBeNull();
     expect(foldedTextAtLine(state, 2)).toBeNull();
+  });
+
+  it("folds each CTE and nested FROM subquery in the reported PostgreSQL structure", () => {
+    const sql = `WITH t1 AS (
+    SELECT fee_code
+    FROM fact_activity
+)
+, t2 AS (
+    SELECT fee_code
+    FROM fact_verification
+)
+, t3 AS (
+    SELECT fee_code
+    FROM (
+        SELECT fee_code
+        FROM fact_extract
+    ) extracted
+)
+SELECT *
+FROM t1
+LEFT JOIN t2 ON t1.fee_code = t2.fee_code
+LEFT JOIN t3 ON t1.fee_code = t3.fee_code;`;
+    const state = stateFor(sql, "postgres");
+
+    expect(foldedTextAtLine(state, 1)).toBe("\n    SELECT fee_code\n    FROM fact_activity\n");
+    expect(foldedTextAtLine(state, 5)).toBe("\n    SELECT fee_code\n    FROM fact_verification\n");
+    expect(foldedTextAtLine(state, 9)).toContain("FROM (\n");
+    expect(foldedTextAtLine(state, 11)).toBe("\n        SELECT fee_code\n        FROM fact_extract\n    ");
+  });
+
+  it("folds a LEFT JOIN subquery from its opening line", () => {
+    const sql = `SELECT account.id
+FROM account
+LEFT JOIN (
+  SELECT account_id, SUM(amount) AS total
+  FROM fee
+  GROUP BY account_id
+) summary ON summary.account_id = account.id;`;
+    const state = stateFor(sql, "postgres");
+
+    expect(foldedTextAtLine(state, 3)).toBe("\n  SELECT account_id, SUM(amount) AS total\n  FROM fee\n  GROUP BY account_id\n");
+  });
+
+  it("folds SELECT branches around UNION ALL at the same query level", () => {
+    const sql = `WITH combined AS (
+  SELECT id, amount
+  FROM current_fees
+  UNION ALL
+  SELECT id, amount
+  FROM archived_fees
+)
+SELECT *
+FROM combined
+UNION ALL
+SELECT *
+FROM manual_fees;`;
+    const state = stateFor(sql, "postgres");
+
+    expect(foldedTextAtLine(state, 2)).toBe("\n  FROM current_fees\n  ");
+    expect(foldedTextAtLine(state, 5)).toBe("\n  FROM archived_fees\n");
+    expect(foldedTextAtLine(state, 8)).toBe("\nFROM combined\n");
+    expect(foldedTextAtLine(state, 11)).toBe("\nFROM manual_fees");
+  });
+
+  it("does not create query folds for keywords in strings, comments, or same-line subqueries", () => {
+    const sql = `SELECT '(SELECT fake)' AS text_value;
+-- LEFT JOIN (SELECT fake)
+SELECT * FROM (SELECT 1 AS value) one_line;`;
+    const state = stateFor(sql, "postgres");
+
+    expect(foldedTextAtLine(state, 1)).toBeNull();
+    expect(foldedTextAtLine(state, 2)).toBeNull();
+    expect(foldedTextAtLine(state, 3)).toBeNull();
   });
 
   it("regression: a BEGIN...END block entirely on one line must not produce an inverted fold range", () => {

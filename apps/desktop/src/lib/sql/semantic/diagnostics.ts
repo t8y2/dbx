@@ -32,6 +32,7 @@ export function sqlSemanticDiagnosticRangesForViewport(sql: string, visibleRange
   const selected: SqlTextRange[] = [];
   const seen = new Set<string>();
   for (const statement of statements) {
+    if (isSqlServerRoutineDefinitionStatement(statement.sql, databaseType)) continue;
     if (isOraclePlSqlStatement(statement.sql, databaseType)) continue;
     if (!visibleRanges.some((visibleRange) => rangesIntersect(statement, visibleRange))) continue;
     const key = `${statement.from}:${statement.to}`;
@@ -40,6 +41,40 @@ export function sqlSemanticDiagnosticRangesForViewport(sql: string, visibleRange
     selected.push({ from: statement.from, to: statement.to, sql: sql.slice(statement.from, statement.to) });
   }
   return selected;
+}
+
+function isSqlServerRoutineDefinitionStatement(sql: string, databaseType?: DatabaseType): boolean {
+  if (databaseType !== "sqlserver") return false;
+  const keywords = leadingUnquotedSqlKeywords(sql, 4);
+  const routineKeyword = (value: string | undefined) => value === "PROC" || value === "PROCEDURE" || value === "FUNCTION";
+  return (keywords[0] === "ALTER" && routineKeyword(keywords[1])) || (keywords[0] === "CREATE" && routineKeyword(keywords[1])) || (keywords[0] === "CREATE" && keywords[1] === "OR" && keywords[2] === "ALTER" && routineKeyword(keywords[3]));
+}
+
+function leadingUnquotedSqlKeywords(sql: string, limit: number): string[] {
+  const keywords: string[] = [];
+  let index = 0;
+  while (index < sql.length && keywords.length < limit) {
+    if (/\s/.test(sql[index])) {
+      index++;
+      continue;
+    }
+    if (sql.startsWith("--", index)) {
+      const newline = sql.indexOf("\n", index + 2);
+      index = newline < 0 ? sql.length : newline + 1;
+      continue;
+    }
+    if (sql.startsWith("/*", index)) {
+      const close = sql.indexOf("*/", index + 2);
+      if (close < 0) break;
+      index = close + 2;
+      continue;
+    }
+    const match = /^[A-Za-z]+/.exec(sql.slice(index));
+    if (!match) break;
+    keywords.push(match[0].toUpperCase());
+    index += match[0].length;
+  }
+  return keywords;
 }
 
 function mergeSqlServerDiagnosticBatchRanges(sql: string, statements: readonly SqlTextRange[]): SqlTextRange[] {

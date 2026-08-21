@@ -494,6 +494,55 @@ test("keeps ordinary SQL Server statements viewport-local", () => {
   );
 });
 
+test("skips SQL Server procedure definition batches", () => {
+  const sql = `ALTER PROCEDURE [COMMON].[TEST]
+@BeginTime varchar(100)=null,
+@EndTime varchar(100)=null
+AS
+BEGIN
+  SET NOCOUNT ON;
+  select datediff(DAY,CONVERT(datetime,@BeginTime,20),CONVERT(datetime,@EndTime,20)) as P_D00
+END`;
+
+  assert.deepEqual(sqlSemanticDiagnosticRangesForViewport(sql, [{ from: 0, to: sql.length }], "sqlserver"), []);
+});
+
+test("skips SQL Server function definition batches but keeps later query batches", () => {
+  const functionSql = `/* Date conversion helper */
+ALTER FUNCTION [COMMON].[uf_DateTime2Str]
+(
+  @date DATETIME,
+  @StyleID INT
+)
+RETURNS VARCHAR(20)
+AS
+BEGIN
+  IF ISNULL(@date,'') = ''
+    RETURN CONVERT(VARCHAR(20),GETDATE(),120)
+
+  DECLARE @Return VARCHAR(20),
+          @Str1   VARCHAR(8),
+          @Str2   VARCHAR(8)
+  SET @Str1 = CONVERT(VARCHAR(8),@date,112)
+  SET @Str2 = CONVERT(VARCHAR(8),@date,108)
+
+  IF @StyleID = 301
+    SET @Return = @Str1 + @Str2
+  ELSE
+    SET @Return = CONVERT(VARCHAR(20),@date,120)
+
+  RETURN @Return
+END`;
+  const sql = `${functionSql}\nGO\nSELECT missing_field FROM dbo.users;`;
+
+  const ranges = sqlSemanticDiagnosticRangesForViewport(sql, [{ from: 0, to: sql.length }], "sqlserver");
+
+  assert.deepEqual(
+    ranges.map((range) => range.sql),
+    ["SELECT missing_field FROM dbo.users"],
+  );
+});
+
 test("skips Oracle PL/SQL blocks when selecting semantic diagnostic ranges", () => {
   const sql = `DECLARE
   v_order_count NUMBER;

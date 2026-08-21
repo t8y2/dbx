@@ -1296,8 +1296,7 @@ export const useSettingsStore = defineStore("settings", () => {
   const isEditorSettingsLoaded = ref(false);
   let initEditorSettingsPromise: Promise<void> | null = null;
   let pendingEditorSettingsPatches: Partial<EditorSettings>[] = [];
-  let editorSettingsSaveQueue: Promise<void> | null = null;
-  let editorSettingsAtomicUpdateQueue: Promise<void> = Promise.resolve();
+  let editorSettingsOperationQueue: Promise<void> | null = null;
   let editorSettingsPatchRevision = 0;
   const editorSettingsFieldRevisions = new Map<keyof EditorSettings, number>();
   const customColumnFormatterDeleteVersions = new Map<string, number>();
@@ -1306,14 +1305,25 @@ export const useSettingsStore = defineStore("settings", () => {
 
   const editorSettings = ref<EditorSettings>(normalizeEditorSettings({}));
 
-  function enqueueEditorSettingsSave(): Promise<void> {
-    const saveCurrentSettings = () => api.saveEditorSettings(editorSettingsSnapshot(editorSettings.value));
-    const save = editorSettingsSaveQueue ? editorSettingsSaveQueue.catch(() => {}).then(saveCurrentSettings) : saveCurrentSettings();
-    const trackedSave = save.finally(() => {
-      if (editorSettingsSaveQueue === trackedSave) editorSettingsSaveQueue = null;
+  function enqueueEditorSettingsOperation<T>(operation: () => Promise<T>): Promise<T> {
+    const queuedOperation = editorSettingsOperationQueue ? editorSettingsOperationQueue.then(operation) : operation();
+    const trackedOperation = queuedOperation.then(
+      () => undefined,
+      () => undefined,
+    );
+    editorSettingsOperationQueue = trackedOperation;
+    void trackedOperation.finally(() => {
+      if (editorSettingsOperationQueue === trackedOperation) editorSettingsOperationQueue = null;
     });
-    editorSettingsSaveQueue = trackedSave;
-    return trackedSave;
+    return queuedOperation;
+  }
+
+  function persistCurrentEditorSettings(): Promise<void> {
+    return api.saveEditorSettings(editorSettingsSnapshot(editorSettings.value));
+  }
+
+  function enqueueEditorSettingsSave(): Promise<void> {
+    return enqueueEditorSettingsOperation(persistCurrentEditorSettings);
   }
 
   function saveEditorSettings() {
@@ -1816,12 +1826,7 @@ export const useSettingsStore = defineStore("settings", () => {
   }
 
   function enqueueEditorSettingsAtomicMutation<T>(mutation: () => Promise<T>): Promise<T> {
-    const update = editorSettingsAtomicUpdateQueue.catch(() => {}).then(mutation);
-    editorSettingsAtomicUpdateQueue = update.then(
-      () => undefined,
-      () => undefined,
-    );
-    return update;
+    return enqueueEditorSettingsOperation(mutation);
   }
 
   function updateEditorSettingsAndPersist(partial: Partial<EditorSettings>): Promise<void> {
@@ -1831,7 +1836,7 @@ export const useSettingsStore = defineStore("settings", () => {
       applyEditorSettingsPatch(partial);
       const revision = markEditorSettingsPatch(partial);
       try {
-        await enqueueEditorSettingsSave();
+        await persistCurrentEditorSettings();
       } catch (error) {
         const restored = editorSettingsSnapshot(editorSettings.value) as unknown as Record<string, unknown>;
         const previousSettings = previous as unknown as Record<string, unknown>;
@@ -1879,7 +1884,7 @@ export const useSettingsStore = defineStore("settings", () => {
       applyEditorSettingsPatch(partial);
       markEditorSettingsPatch(partial);
       try {
-        await enqueueEditorSettingsSave();
+        await persistCurrentEditorSettings();
       } catch (error) {
         const customColumnFormatters = {
           ...editorSettings.value.customColumnFormatters,
@@ -1926,7 +1931,7 @@ export const useSettingsStore = defineStore("settings", () => {
       applyEditorSettingsPatch(partial);
       markEditorSettingsPatch(partial);
       try {
-        await enqueueEditorSettingsSave();
+        await persistCurrentEditorSettings();
       } catch (error) {
         if (customColumnFormatterDeleteVersion(id) === deleteVersion) {
           if (previousDeleteVersion === 0) {

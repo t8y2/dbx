@@ -909,6 +909,65 @@ describe("settingsStore editor settings persistence", () => {
     expect(store.editorSettings).toMatchObject({ ignoredUpdateVersion: "", theme: "xcode-dark" });
     expect(saveEditorSettings.mock.calls[1][0]).toEqual(expect.objectContaining({ ignoredUpdateVersion: "", theme: "xcode-dark" }));
   });
+
+  it("serializes queued saves before a failed formatter delete", async () => {
+    let persistedSettings: Record<string, unknown> = {
+      customColumnFormatters: {
+        fmt_a: { id: "fmt_a", name: "A", template: "a:${value}" },
+      },
+      columnFormatters: {
+        first: { kind: "custom-ref", formatterId: "fmt_a" },
+      },
+      executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
+    };
+    const loadEditorSettings = vi.fn(async () => JSON.parse(JSON.stringify(persistedSettings)));
+    const saveEditorSettings = vi.fn(async (settings: Record<string, unknown>) => {
+      persistedSettings = JSON.parse(JSON.stringify(settings));
+    });
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+    saveEditorSettings.mockClear();
+
+    let resolveFirstSave!: () => void;
+    let saveCall = 0;
+    saveEditorSettings.mockImplementation(async (settings: Record<string, unknown>) => {
+      saveCall += 1;
+      if (saveCall === 1) {
+        await new Promise<void>((resolve) => {
+          resolveFirstSave = resolve;
+        });
+      }
+      if (saveCall === 3) throw new Error("delete save failed");
+      persistedSettings = JSON.parse(JSON.stringify(settings));
+    });
+
+    store.updateEditorSettings({ theme: "xcode-dark" });
+    await vi.waitFor(() => expect(saveEditorSettings).toHaveBeenCalledOnce());
+    store.updateEditorSettings({ resultRunDisplayMode: "list" });
+    const deletePromise = store.deleteCustomColumnFormatter("fmt_a");
+    const deleteRejected = expect(deletePromise).rejects.toThrow("delete save failed");
+
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(store.editorSettings.customColumnFormatters.fmt_a).toBeDefined();
+
+    resolveFirstSave();
+    await deleteRejected;
+
+    expect(saveEditorSettings).toHaveBeenCalledTimes(3);
+    expect(store.editorSettings.customColumnFormatters.fmt_a).toBeDefined();
+    expect(store.editorSettings.columnFormatters.first).toEqual({ kind: "custom-ref", formatterId: "fmt_a" });
+
+    setActivePinia(createPinia());
+    const restartedStore = useSettingsStore();
+    await restartedStore.initEditorSettings();
+
+    expect(restartedStore.editorSettings.customColumnFormatters.fmt_a).toEqual({ id: "fmt_a", name: "A", template: "a:${value}" });
+    expect(restartedStore.editorSettings.columnFormatters.first).toEqual({ kind: "custom-ref", formatterId: "fmt_a" });
+  });
 });
 
 describe("settingsStore sidebar connection sort persistence", () => {

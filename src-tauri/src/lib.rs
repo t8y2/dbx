@@ -3,6 +3,8 @@ mod data_dir;
 mod db;
 #[cfg(target_os = "macos")]
 mod macos_app_delegate;
+#[cfg(target_os = "macos")]
+mod macos_escape_guard;
 mod models;
 #[cfg(any(target_os = "windows", test))]
 mod startup_recovery;
@@ -1488,6 +1490,8 @@ pub fn run() {
             commands::ssh_prompt::install_ssh_notice_bridge(app.handle());
             #[cfg(target_os = "macos")]
             macos_app_delegate::install_dock_quit_handler(app.handle());
+            #[cfg(target_os = "macos")]
+            macos_escape_guard::install_escape_fullscreen_guard();
             #[cfg(target_os = "windows")]
             webview2_recovery::install(app.handle());
             let startup_links = commands::deep_link::connection_deep_links_from_args(std::env::args().skip(1));

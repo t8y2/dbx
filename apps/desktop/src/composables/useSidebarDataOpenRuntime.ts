@@ -347,6 +347,7 @@ export function useSidebarDataOpenRuntime() {
         columns: columns.map((column) => column.name),
         primaryKeys,
         ...tableDataLargeValuePreviewOptions(effectiveDbType, columns, primaryKeys, limit),
+        includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
         limit,
         includeRowId,
       });

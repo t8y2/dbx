@@ -5737,6 +5737,8 @@ export default withEnglishFallback({
     savedSqlOpenTargetCurrentDescription: "가능한 경우 현재 탭의 연결, 데이터베이스, 스키마 및 카탈로그를 사용하고, 그렇지 않으면 저장된 대상을 사용합니다.",
     prefillNewQueryWithSelect: "새 쿼리에 SELECT * 미리 채우기",
     prefillNewQueryWithSelectDescription: "새 쿼리를 만들 때 활성 테이블 탭이나 사이드바에서 선택한 테이블을 기반으로 편집기에 SELECT * FROM <table>을 미리 채웁니다.",
+    generateSqlIncludeDatabaseName: "생성된 SQL에 데이터베이스 이름 포함",
+    generateSqlIncludeDatabaseNameDescription: "데이터베이스가 지원하는 경우 생성된 테이블 SQL에서 테이블 이름만이 아니라 database.table을 사용합니다.",
     sqlVariableSyntax: "SQL 변수 및 자리표시자 치환",
     sqlVariableSyntaxDescription: "데이터베이스 유형별로 SQL을 실행하기 전에 DBX가 치환할 변수와 자리표시자 문법을 선택하세요. 모두 기본적으로 활성화됩니다.",
     sqlVariableSubstitutionEnabled: "치환 사용",

@@ -200,6 +200,10 @@ describe("buildSelectAllSql", () => {
     expect(buildSelectAllSql("mysql", { schema: "mydb", tableName: "users" })).toBe("SELECT * FROM `users`");
   });
 
+  it("includes the MySQL database when requested", () => {
+    expect(buildSelectAllSql("mysql", { database: "mydb", tableName: "users" }, undefined, undefined, true)).toBe("SELECT * FROM `mydb`.`users`");
+  });
+
   it("qualifies and quotes a PostgreSQL table with its schema", () => {
     expect(buildSelectAllSql("postgres", { schema: "public", tableName: "users" })).toBe('SELECT * FROM "public"."users"');
   });

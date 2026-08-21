@@ -83,7 +83,7 @@ import { formatElapsedSeconds } from "@/lib/common/elapsedTime";
 import { dataGridCellDisplayText, dataGridCellEditorText } from "@/lib/dataGrid/dataGridCellCoercion";
 import { createColumnDrafts } from "@/lib/table/tableStructureEditorState";
 import type { BuildSingleColumnAlterSqlOptions } from "@/lib/table/tableStructureEditorSql";
-import { buildTableSelectSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
+import { buildTableSelectSql, qualifyTableReferencesInSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
 import { uuid } from "@/lib/common/utils";
 import { generateCellValues, type CellValueGenerationKind } from "@/lib/dataGrid/cellValueGeneration";
 import { compactHeaderColumnType, isNumericColumnType, resolveDataGridTypeVisualKind, resolveHeaderColumnType, resolveResultColumnType } from "@/lib/dataGrid/dataGridColumnType";
@@ -4931,6 +4931,7 @@ async function fetchLargeValueRequestChunk(columnIndex: number, requests: LargeV
     tableType: tableMeta.tableType,
     catalog: tableMeta.catalog,
     columns: selectedColumns,
+    includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
     primaryKeys: tableMeta.primaryKeys,
     whereInput: predicates.map((predicate) => `(${predicate})`).join(" OR "),
     limit: requests.length,
@@ -6214,6 +6215,7 @@ async function applyOrderBySearch() {
       tableName: tableMeta.tableName,
       tableType: tableMeta.tableType,
       columns: tableMeta.columns.map((column) => column.name),
+      includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
       primaryKeys: tableMeta.primaryKeys,
       ...tableDataLargeValuePreviewOptions(resolvedDatabaseType.value, tableMeta.columns, tableMeta.primaryKeys, pageSize.value),
       orderBy: orderByClause,
@@ -6251,6 +6253,7 @@ async function applyWhereFilter() {
       tableName: tableMeta.tableName,
       tableType: tableMeta.tableType,
       columns: tableMeta.columns.map((column) => column.name),
+      includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
       primaryKeys: tableMeta.primaryKeys,
       ...tableDataLargeValuePreviewOptions(resolvedDatabaseType.value, tableMeta.columns, tableMeta.primaryKeys, pageSize.value),
       orderBy: orderByInput.value.trim() || (sortCol.value ? `${queryColumnRef(sortCol.value)} ${sortDir.value.toUpperCase()}` : undefined),
@@ -7331,11 +7334,23 @@ async function cancelActiveExport() {
 const userFacingSql = ref("");
 let userFacingSqlGeneration = 0;
 
+function sqlWithDisplayDatabaseName(sql: string): string {
+  const database = props.tableMeta?.database ?? props.database;
+  if (!settingsStore.editorSettings.generateSqlIncludeDatabaseName || !database) return sql;
+  return qualifyTableReferencesInSql(sql, {
+    databaseType: resolvedDatabaseType.value,
+    database,
+    includeDatabaseName: true,
+  });
+}
+
 async function syncUserFacingSql() {
   const generation = ++userFacingSqlGeneration;
   const executionSql = props.sql?.trim() ?? "";
-  if (props.context !== "table-data" || !executionSql.includes("__DBX_LARGE_VALUE_BYTES_") || !props.tableMeta?.tableName) {
-    userFacingSql.value = executionSql;
+  const includeDatabaseName = settingsStore.editorSettings.generateSqlIncludeDatabaseName;
+  const shouldRebuildSql = executionSql.includes("__DBX_LARGE_VALUE_BYTES_") || includeDatabaseName;
+  if (props.context !== "table-data" || !shouldRebuildSql || !props.tableMeta?.tableName) {
+    userFacingSql.value = sqlWithDisplayDatabaseName(executionSql);
     return;
   }
 
@@ -7350,19 +7365,20 @@ async function syncUserFacingSql() {
       schema: props.tableMeta.schema,
       tableName: props.tableMeta.tableName,
       tableType: props.tableMeta.tableType,
+      includeDatabaseName,
       whereInput: currentWhereInput(),
       orderBy: currentOrderBy(),
       limit: props.pageLimit ?? pageSize.value,
       offset: props.pageOffset ?? Math.max(0, currentPage.value - 1) * pageSize.value,
     });
-    if (generation === userFacingSqlGeneration) userFacingSql.value = sql;
+    if (generation === userFacingSqlGeneration) userFacingSql.value = sqlWithDisplayDatabaseName(sql);
   } catch {
-    if (generation === userFacingSqlGeneration) userFacingSql.value = executionSql;
+    if (generation === userFacingSqlGeneration) userFacingSql.value = sqlWithDisplayDatabaseName(executionSql);
   }
 }
 
 watch(
-  () => [props.sql, props.context, props.tableMeta, props.pageLimit, props.pageOffset, currentWhereInput(), currentOrderBy()],
+  () => [props.sql, props.context, props.tableMeta, props.pageLimit, props.pageOffset, currentWhereInput(), currentOrderBy(), settingsStore.editorSettings.generateSqlIncludeDatabaseName],
   () => void syncUserFacingSql(),
   { immediate: true },
 );
@@ -10380,6 +10396,7 @@ async function loadForeignKeyDisplayLabels() {
             schema,
             tableName: config.refTable,
             columns: [config.refColumn, config.displayColumn],
+            includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
             whereInput,
             limit: batch.length,
           });

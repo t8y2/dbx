@@ -6305,6 +6305,8 @@ export default withEnglishFallback({
     savedSqlOpenTargetCurrentDescription: "优先使用当前标签页的连接、数据库、Schema 和 Catalog；不可用时回退到保存时的目标。",
     prefillNewQueryWithSelect: "新建查询时预填充 SELECT 语句",
     prefillNewQueryWithSelectDescription: "新建查询时，根据当前激活的数据表标签页或侧边栏选中的表，自动在编辑器中填充 SELECT * FROM <表名>。",
+    generateSqlIncludeDatabaseName: "生成 SQL 时包含数据库名",
+    generateSqlIncludeDatabaseNameDescription: "数据库支持时，生成的表 SQL 将使用“数据库名.表名”，而不只包含表名。",
     clickTableNavigationTarget: "Ctrl+点击表名打开 DDL",
     clickTableNavigationTargetDescription: "开启后，Ctrl/Cmd+点击表名将打开表结构编辑器（DDL）；关闭则打开表数据视图。",
     sqlVariableSyntax: "SQL 变量与占位符替换",

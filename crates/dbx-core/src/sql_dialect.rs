@@ -39,7 +39,8 @@ pub use identifiers::{
 };
 pub(crate) use identifiers::{parse_sqlserver_linked_schema_ref, qualified_transfer_table, quote_transfer_identifier};
 pub use table_select::{
-    build_count_table_sql, build_table_data_select_sql, build_table_select_sql, DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX,
+    build_count_table_sql, build_table_data_select_sql, build_table_data_select_sql_with_database,
+    build_table_select_sql, DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX,
 };
 pub(crate) use table_select::{
     quote_table_data_identifier, table_data_qualified_table_name, table_data_schema, uses_connection_identifier_quote,

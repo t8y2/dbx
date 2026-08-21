@@ -5330,6 +5330,8 @@ export default withEnglishFallback({
     savedSqlOpenTargetCurrentDescription: "優先使用目前分頁的連線、資料庫、Schema 和 Catalog；無法使用時回復至儲存時的目標。",
     prefillNewQueryWithSelect: "新建查詢時預填 SELECT 語句",
     prefillNewQueryWithSelectDescription: "新建查詢時，根據目前啟用的資料表分頁或側邊欄選取的資料表，自動在編輯器中填入 SELECT * FROM <資料表名稱>。",
+    generateSqlIncludeDatabaseName: "產生 SQL 時包含資料庫名稱",
+    generateSqlIncludeDatabaseNameDescription: "資料庫支援時，產生的資料表 SQL 會使用「資料庫名稱.資料表名稱」，而非只包含資料表名稱。",
     clickTableNavigationTarget: "Ctrl+點擊表名開啟 DDL",
     clickTableNavigationTargetDescription: "開啟後，Ctrl/Cmd+點擊表名將開啟表結構編輯器（DDL）；關閉則開啟表資料檢視。",
     sqlVariableSyntax: "SQL 變數與佔位符替換",

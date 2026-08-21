@@ -180,7 +180,16 @@ pub(crate) fn table_data_schema<'a>(
     }
 }
 
+/// Builds the SQL used by the data-table grid. Database qualification is opt-in
+/// so existing callers retain their current SQL shape.
 pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String {
+    build_table_data_select_sql_with_database(options, false)
+}
+
+pub fn build_table_data_select_sql_with_database(
+    options: TableDataSelectSqlOptions,
+    include_database_name: bool,
+) -> String {
     let database_type = options.database_type;
     let schema = table_data_schema(database_type, options.driver_profile.as_deref(), options.schema.as_deref());
     let limit = options.limit.unwrap_or(100);
@@ -202,6 +211,22 @@ pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String
     // Doris / StarRocks multi-catalog: prefix the catalog for external-catalog tables.
     } else if uses_connection_identifier_quote(database_type, options.identifier_quote.as_deref()) {
         table_data_qualified_table_name(database_type, schema, &options.table_name, options.identifier_quote.as_deref())
+    } else if include_database_name {
+        database_qualified_table_name(
+            database_type,
+            options.catalog.as_deref(),
+            options.database.as_deref(),
+            &options.table_name,
+        )
+        .unwrap_or_else(|| {
+            qualified_table_name_with_catalog(
+                database_type,
+                options.catalog.as_deref(),
+                schema,
+                options.database.as_deref(),
+                &options.table_name,
+            )
+        })
     } else {
         qualified_table_name_with_catalog(
             database_type,
@@ -340,6 +365,29 @@ pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String
                 .unwrap_or_default();
             format!("SELECT {select_columns} FROM {table_alias}{where_clause}{order} LIMIT {limit}{offset};")
         }
+    }
+}
+
+/// Returns a `database.table` reference for engines whose active database is
+/// normally omitted from table-data SQL. Doris and StarRocks retain an external
+/// catalog prefix when one is selected.
+fn database_qualified_table_name(
+    database_type: Option<DatabaseType>,
+    catalog: Option<&str>,
+    database: Option<&str>,
+    table_name: &str,
+) -> Option<String> {
+    let database = database.map(str::trim).filter(|database| !database.is_empty())?;
+    match database_type {
+        Some(DatabaseType::ClickHouse) => Some(format!(
+            "{}.{}",
+            quote_table_identifier(database_type, database),
+            quote_table_identifier(database_type, table_name)
+        )),
+        Some(DatabaseType::Mysql | DatabaseType::Goldendb | DatabaseType::Doris | DatabaseType::StarRocks) => {
+            Some(qualified_table_name_with_catalog(database_type, catalog, Some(database), Some(database), table_name))
+        }
+        _ => None,
     }
 }
 
@@ -745,6 +793,13 @@ mod tests {
         let sql =
             build_table_data_select_sql(opts(DatabaseType::StarRocks, Some("hive_catalog"), Some("sales"), "orders"));
         assert!(sql.contains("FROM `hive_catalog`.`sales`.`orders`"), "sql was: {sql}");
+    }
+
+    #[test]
+    fn table_data_select_optionally_qualifies_database() {
+        let options = opts(DatabaseType::Mysql, None, Some("aaa"), "apis");
+        assert_eq!(build_table_data_select_sql(options.clone()), "SELECT * FROM `apis` LIMIT 10;");
+        assert_eq!(build_table_data_select_sql_with_database(options, true), "SELECT * FROM `aaa`.`apis` LIMIT 10;");
     }
 
     #[test]

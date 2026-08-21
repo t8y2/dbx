@@ -186,6 +186,7 @@ describe("settings search", () => {
       { titleKey: "settings.completionTriggerMode", category: "editor", targetId: "editor" },
       { titleKey: "settings.autoAliasTables", category: "editor", targetId: "editor" },
       { titleKey: "settings.clickTableNavigationTarget", category: "editor", targetId: "editor" },
+      { titleKey: "settings.generateSqlIncludeDatabaseName", category: "editor", targetId: "editor" },
       { titleKey: "settings.sqlFormatterKeywordCase", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.sqlFormatterFunctionCase", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.sqlFormatterDataTypeCase", category: "formatter", targetId: "formatter" },

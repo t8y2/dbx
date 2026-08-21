@@ -1656,6 +1656,7 @@ async function newQuery() {
           catalog: node.catalog,
           database: node.database,
           schema: node.schema,
+          includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
           tableName: node.label,
           columns: [],
         });
@@ -1738,6 +1739,7 @@ async function newSelectTemplate() {
       catalog: context.node.catalog,
       database: context.node.database,
       schema: context.tableSchema,
+      includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
       tableName: context.node.label,
       columns: context.columns,
     });
@@ -1758,6 +1760,7 @@ async function newInsertTemplate() {
       catalog: context.node.catalog,
       database: context.node.database,
       schema: context.tableSchema,
+      includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
       tableName: context.node.label,
       columns: context.columns,
       tableType: context.tableType,
@@ -1779,6 +1782,7 @@ async function newUpdateTemplate() {
       catalog: context.node.catalog,
       database: context.node.database,
       schema: context.tableSchema,
+      includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
       tableName: context.node.label,
       columns: context.columns,
     });
@@ -1799,6 +1803,7 @@ async function newDeleteTemplate() {
       catalog: context.node.catalog,
       database: context.node.database,
       schema: context.tableSchema,
+      includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
       tableName: context.node.label,
       columns: context.columns,
     });

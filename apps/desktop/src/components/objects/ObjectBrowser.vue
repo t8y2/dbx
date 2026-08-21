@@ -1313,6 +1313,7 @@ async function openNewQuery(row: ObjectBrowserRow) {
       database: props.database,
       schema,
       tableName: row.name,
+      includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
       limit: 100,
     }),
   );

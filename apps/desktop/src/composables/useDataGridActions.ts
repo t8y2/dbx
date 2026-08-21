@@ -80,6 +80,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       columns: realColumns?.map((column) => column.name),
       primaryKeys,
       ...tableDataLargeValuePreviewOptions(effectiveDbType, realColumns ?? [], primaryKeys, limit),
+      includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
       includeRowId: useRowId,
       limit,
       ...options,

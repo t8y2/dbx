@@ -8,6 +8,7 @@ export interface TableSqlTemplateOptions {
   schema?: string;
   catalog?: string;
   database?: string;
+  includeDatabaseName?: boolean;
   tableName: string;
   columns?: ColumnInfo[];
   tableType?: string;
@@ -105,6 +106,7 @@ function templateTableName(options: TableSqlTemplateOptions): string {
     identifierQuote: options.identifierQuote,
     catalog: options.catalog,
     database: options.database,
+    includeDatabaseName: options.includeDatabaseName,
     schema: options.schema,
     tableName: options.tableName,
   });

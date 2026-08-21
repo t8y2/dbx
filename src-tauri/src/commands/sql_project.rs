@@ -1215,8 +1215,8 @@ mod tests {
 
         let (first, _) = resolve_trusted_root(&state, &project.id).await.unwrap();
         let (second, _) = resolve_trusted_root(&state, &project.id).await.unwrap();
-        assert!(first.dir.try_exists("missing").is_err());
-        assert!(second.dir.try_exists("missing").is_err());
+        assert!(!first.dir.try_exists("missing").unwrap(), "handle should remain usable");
+        assert!(!second.dir.try_exists("missing").unwrap());
 
         cleanup_dirs(&[&root, &data]);
     }

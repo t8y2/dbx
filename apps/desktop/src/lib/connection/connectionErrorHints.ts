@@ -43,15 +43,19 @@ function mysqlTlsMode(config: ConnectionConfig): string {
   if (["disabled", "disable"].includes(mode)) return "disabled";
   if (["preferred", "prefer"].includes(mode)) return "preferred";
   if (["required", "require", "verify_ca", "verify_identity"].includes(mode)) return mode;
+  const isTrue = (value: string) => ["true", "1", "yes", "on"].includes(value);
+  const isFalse = (value: string) => ["false", "0", "no", "off"].includes(value);
+  const nativeRequireSsl = jdbcUrlParamValue(parsed, "require_ssl").trim().toLowerCase();
+  if (isFalse(nativeRequireSsl)) return "disabled";
+  if (isTrue(nativeRequireSsl)) return "required";
   const jdbcUseSsl = jdbcUrlParamValue(parsed, "useSSL").trim().toLowerCase();
   const jdbcRequireSsl = jdbcUrlParamValue(parsed, "requireSSL").trim().toLowerCase();
   const jdbcVerifyServerCertificate = jdbcUrlParamValue(parsed, "verifyServerCertificate").trim().toLowerCase();
-  const isTrue = (value: string) => ["true", "1", "yes", "on"].includes(value);
-  if (["false", "0", "no", "off"].includes(jdbcUseSsl)) return "disabled";
+  if (isFalse(jdbcUseSsl)) return "disabled";
   if (isTrue(jdbcVerifyServerCertificate)) return "verify_ca";
   if (isTrue(jdbcRequireSsl)) return "required";
   if (hasJdbcUrlParam(parsed, "useSSL") || hasJdbcUrlParam(parsed, "requireSSL") || hasJdbcUrlParam(parsed, "verifyServerCertificate")) return "preferred";
-  if (config.ssl || ["true", "1", "yes", "on"].includes(urlParamValue(parsed, "require_ssl").trim().toLowerCase())) return "required";
+  if (config.ssl) return "required";
   return "disabled";
 }
 

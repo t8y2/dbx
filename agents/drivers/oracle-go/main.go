@@ -4379,7 +4379,7 @@ func rewriteOracleSelectItems(items []string, columns []oracleColumnMeta, tableR
 			for _, column := range columns {
 				columnRef := oracleColumnRef(tableRef.AliasText, column.Name)
 				outputAlias := quoteIdentifier(column.Name)
-				if isOracleXMLType(column.DataType) {
+				if isOracleXMLType(column.DataType) && !deferLOBs {
 					rewritten = append(rewritten, oracleXMLSerializeExpression(columnRef, outputAlias))
 				} else if deferLOBs {
 					if expressions, ok := oracleDeferredLOBExpressions(columnRef, outputAlias, sourceIndex, column.DataType); ok {
@@ -4403,7 +4403,7 @@ func rewriteOracleSelectItems(items []string, columns []oracleColumnMeta, tableR
 					outputAlias = quoteIdentifier(meta.Name)
 				}
 				columnRef := oracleColumnRef(qualifier, meta.Name)
-				if isOracleXMLType(meta.DataType) {
+				if isOracleXMLType(meta.DataType) && !deferLOBs {
 					rewritten = append(rewritten, oracleXMLSerializeExpression(columnRef, outputAlias))
 					changed = true
 					sourceIndex++
@@ -4446,6 +4446,8 @@ func oracleDeferredLOBKind(dataType string) (kind, placeholder string, ok bool) 
 		return "L", "<BLOB>", true
 	case "BFILE":
 		return "F", "<BFILE>", true
+	case "XMLTYPE", "SYS.XMLTYPE":
+		return "C", "<XMLTYPE>", true
 	default:
 		return "", "", false
 	}

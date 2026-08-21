@@ -2288,6 +2288,24 @@ func TestRewriteOracleLOBSelectStarAsDeferredValues(t *testing.T) {
 	}
 }
 
+func TestRewriteOracleXMLTypeAsDeferredValue(t *testing.T) {
+	sqlText, err := rewriteOracleSelectSQL(
+		`SELECT t.ID, t.XML_CONTENT FROM TEST_LOBS t WHERE t.ID = 1`,
+		fakeOracleColumnLoader([]oracleColumnMeta{
+			{Name: "ID", DataType: "NUMBER"},
+			{Name: "XML_CONTENT", DataType: "SYS.XMLTYPE"},
+		}),
+		true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `SELECT t.ID, CASE WHEN t."XML_CONTENT" IS NULL THEN NULL ELSE '<XMLTYPE>' END AS "XML_CONTENT", CASE WHEN t."XML_CONTENT" IS NULL THEN NULL ELSE 'D:1' END AS "__DBX_LARGE_VALUE_BYTES_C_1" FROM TEST_LOBS t WHERE t.ID = 1`
+	if sqlText != want {
+		t.Fatalf("rewriteOracleSelectSQL() = %s, want %s", sqlText, want)
+	}
+}
+
 func TestRewriteOracleLOBExplicitColumnUsesVisibleResultIndex(t *testing.T) {
 	sqlText, err := rewriteOracleSelectSQL(
 		`SELECT t.ID, t.PAYLOAD AS body, LENGTH(t.PAYLOAD) AS payload_length FROM TEST_LOBS t`,

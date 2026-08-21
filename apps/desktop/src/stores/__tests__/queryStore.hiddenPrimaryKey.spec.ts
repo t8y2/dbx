@@ -686,11 +686,11 @@ describe("queryStore hidden primary key editing", () => {
     expect(tab.result?.hidden_column_indexes).toBeUndefined();
   });
 
-  it("enables deferred Oracle LOBs only when a base-table query has a stable key", async () => {
+  it.each(["CLOB", "XMLTYPE", "SYS.XMLTYPE"])("enables deferred Oracle %s values only when a base-table query has a stable key", async (dataType) => {
     getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", query_timeout_secs: 30 });
     getColumns.mockResolvedValue([
       { name: "ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
-      { name: "PAYLOAD", data_type: "CLOB", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+      { name: "PAYLOAD", data_type: dataType, is_nullable: true, column_default: null, is_primary_key: false, extra: null },
     ]);
     lookupLocalCompletionTables.mockReturnValue([{ name: "DOCUMENTS", type: "table", schema: "APP" }]);
     analyzeEditableQueryEditability.mockImplementation(async (sql: string) => ({

@@ -799,6 +799,38 @@ describe("settingsStore editor settings persistence", () => {
     setActivePinia(createPinia());
   });
 
+  it("initializes legacy settings before queueing formatter mutations", async () => {
+    const loadEditorSettings = vi.fn().mockResolvedValue({
+      updateDownloadSource: "atomgit",
+      customColumnFormatters: {},
+      executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
+    });
+    const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    const formatter = { id: "fmt_pre_init", name: "Pre-init", template: "legacy:${value}" };
+
+    await store.upsertCustomColumnFormatter(formatter);
+
+    expect(loadEditorSettings).toHaveBeenCalledOnce();
+    expect(saveEditorSettings).toHaveBeenCalledTimes(2);
+    expect(saveEditorSettings.mock.calls[0][0]).toEqual(
+      expect.objectContaining({
+        updateDownloadSource: "cnb",
+        customColumnFormatters: {},
+      }),
+    );
+    expect(saveEditorSettings.mock.calls[1][0]).toEqual(
+      expect.objectContaining({
+        updateDownloadSource: "cnb",
+        customColumnFormatters: { fmt_pre_init: formatter },
+      }),
+    );
+    expect(store.editorSettings.customColumnFormatters.fmt_pre_init).toEqual(formatter);
+  });
+
   it("rolls back a failed atomic update and allows retry", async () => {
     const loadEditorSettings = vi.fn().mockResolvedValue({
       ignoredUpdateVersion: "",

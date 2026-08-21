@@ -1825,7 +1825,8 @@ export const useSettingsStore = defineStore("settings", () => {
     await enqueueEditorSettingsSave();
   }
 
-  function enqueueEditorSettingsAtomicMutation<T>(mutation: () => Promise<T>): Promise<T> {
+  async function enqueueEditorSettingsAtomicMutation<T>(mutation: () => Promise<T>): Promise<T> {
+    await initEditorSettings();
     return enqueueEditorSettingsOperation(mutation);
   }
 

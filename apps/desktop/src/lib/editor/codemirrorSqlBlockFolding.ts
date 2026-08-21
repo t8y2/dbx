@@ -104,7 +104,25 @@ function isQueryParens(state: EditorState, node: SyntaxNode): boolean {
 
 interface QueryScopeTokens {
   scope: SyntaxNode;
-  tokens: Array<{ node: SyntaxNode; keyword: "SELECT" | "UNION" }>;
+  tokens: Array<{ from: number; keyword: "SELECT" | "UNION" }>;
+  hasUnion: boolean;
+}
+
+export function collectUnionBranchFoldRanges(tokens: ReadonlyArray<{ from: number; keyword: "SELECT" | "UNION" }>, scopeEnd: number): FoldRange[] {
+  const ranges: FoldRange[] = [];
+  let branchEnd = scopeEnd;
+
+  for (let index = tokens.length - 1; index >= 0; index--) {
+    const token = tokens[index];
+    if (token.keyword === "UNION") {
+      branchEnd = token.from;
+    } else {
+      ranges.push({ from: token.from, to: branchEnd });
+    }
+  }
+
+  ranges.reverse();
+  return ranges;
 }
 
 function addQueryStructureFoldRanges(state: EditorState, tree: Tree, ranges: Map<number, FoldRange>) {
@@ -120,22 +138,18 @@ function addQueryStructureFoldRanges(state: EditorState, tree: Tree, ranges: Map
       const scope = queryParent(node.node);
       if (!scope) return;
       const key = queryScopeKey(scope);
-      const group = scopes.get(key) ?? { scope, tokens: [] };
-      group.tokens.push({ node: node.node, keyword });
+      const group = scopes.get(key) ?? { scope, tokens: [], hasUnion: false };
+      group.tokens.push({ from: node.from, keyword });
+      if (keyword === "UNION") group.hasUnion = true;
       scopes.set(key, group);
     },
   });
 
-  for (const { scope, tokens } of scopes.values()) {
-    const unions = tokens.filter((token) => token.keyword === "UNION");
-    if (unions.length === 0) continue;
-    const selects = tokens.filter((token) => token.keyword === "SELECT");
-    for (const select of selects) {
-      const previousUnion = [...unions].reverse().find((union) => union.node.from < select.node.from);
-      const nextUnion = unions.find((union) => union.node.from > select.node.from);
-      if (!previousUnion && !nextUnion) continue;
-      const end = nextUnion?.node.from ?? queryScopeEnd(state, scope);
-      addMultilineFoldRange(state, ranges, select.node.from, end);
+  for (const { scope, tokens, hasUnion } of scopes.values()) {
+    if (!hasUnion) continue;
+    const branchRanges = collectUnionBranchFoldRanges(tokens, queryScopeEnd(state, scope));
+    for (const range of branchRanges) {
+      addMultilineFoldRange(state, ranges, range.from, range.to);
     }
   }
 }

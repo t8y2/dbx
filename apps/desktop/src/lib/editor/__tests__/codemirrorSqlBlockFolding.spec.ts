@@ -3,7 +3,7 @@ import { ensureSyntaxTree, foldable } from "@codemirror/language";
 import { Compartment, EditorState } from "@codemirror/state";
 import { describe, expect, it } from "vitest";
 import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
-import { sqlBlockFoldService } from "@/lib/editor/codemirrorSqlBlockFolding";
+import { collectUnionBranchFoldRanges, sqlBlockFoldService } from "@/lib/editor/codemirrorSqlBlockFolding";
 
 function stateFor(doc: string, dialectName: "mysql" | "postgres" | "sqlserver" = "mysql"): EditorState {
   const state = EditorState.create({
@@ -181,6 +181,26 @@ FROM manual_fees;`;
     expect(foldedTextAtLine(state, 5)).toBe("\n  FROM archived_fees\n");
     expect(foldedTextAtLine(state, 8)).toBe("\nFROM combined\n");
     expect(foldedTextAtLine(state, 11)).toBe("\nFROM manual_fees");
+  });
+
+  it("precomputes UNION branch boundaries with one token-position read per token", () => {
+    const branchCount = 1_000;
+    let positionReads = 0;
+    const tokens: Array<{ readonly from: number; readonly keyword: "SELECT" | "UNION" }> = Array.from({ length: branchCount * 2 - 1 }, (_, index) => ({
+      keyword: index % 2 === 0 ? "SELECT" : "UNION",
+      get from() {
+        positionReads++;
+        return index * 10;
+      },
+    }));
+    const scopeEnd = tokens.length * 10;
+
+    const ranges = collectUnionBranchFoldRanges(tokens, scopeEnd);
+
+    expect(ranges).toHaveLength(branchCount);
+    expect(ranges[0]).toEqual({ from: 0, to: 10 });
+    expect(ranges.at(-1)).toEqual({ from: (tokens.length - 1) * 10, to: scopeEnd });
+    expect(positionReads).toBe(tokens.length);
   });
 
   it("does not create query folds for keywords in strings, comments, or same-line subqueries", () => {

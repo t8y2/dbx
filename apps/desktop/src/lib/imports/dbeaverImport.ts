@@ -81,6 +81,31 @@ function getNumber(value: unknown) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 }
 
+function firstNonEmptyString(...values: unknown[]) {
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    const normalized = value.trim();
+    if (normalized) return normalized;
+  }
+  return "";
+}
+
+function sanitizeConfiguredDatabase(database: string, host: string, port: number) {
+  const normalized = database.trim();
+  if (!normalized) return "";
+
+  const normalizedHost = host.trim();
+  const normalizedPort = port > 0 ? String(port) : "";
+  const lowerDatabase = normalized.toLowerCase();
+  const lowerHost = normalizedHost.toLowerCase();
+
+  if (lowerHost && lowerDatabase === lowerHost) return "";
+  if (lowerHost && normalizedPort && lowerDatabase === `${lowerHost}:${normalizedPort}`) return "";
+  if (normalizedPort && normalized === normalizedPort) return "";
+
+  return normalized;
+}
+
 function inferProfile(entry: DbeaverConnectionEntry): ConnectionProfile {
   if (/^jdbcx:/i.test(getString(entry.configuration?.url))) return profileMap.jdbcx;
   if (normalizeKey(entry.provider) === "opentenbase") return profileMap.opentenbase;
@@ -223,8 +248,10 @@ function buildConnection(entry: DbeaverConnectionEntry, credentials: ReturnType<
   const config = entry.configuration || {};
   const url = getString(config.url);
   const parsedUrl = parseJdbcUrl(url, profile);
-  const configuredDatabase = getString(config.database || config["database-name"] || config.schema || parsedUrl.database);
-  const host = getString(config.host || config["host-name"] || parsedUrl.host || (profile.dbType === "sqlite" ? configuredDatabase : "127.0.0.1"));
+  const configuredPort = getNumber(config.port || config["host-port"] || parsedUrl.port) || profile.port;
+  const rawConfiguredDatabase = firstNonEmptyString(config.database, config["database-name"], config.schema, parsedUrl.database);
+  const host = getString(config.host || config["host-name"] || parsedUrl.host || (profile.dbType === "sqlite" ? rawConfiguredDatabase : "127.0.0.1"));
+  const configuredDatabase = sanitizeConfiguredDatabase(rawConfiguredDatabase, host, configuredPort);
   const database = profile.dbType === "sqlite" ? "" : configuredDatabase;
   const name = getString(entry.name || database || host || profile.label);
   if (!entry.id || !name) return null;
@@ -236,7 +263,7 @@ function buildConnection(entry: DbeaverConnectionEntry, credentials: ReturnType<
     driver_label: profile.label,
     url_params: getString(parsedUrl.params),
     host,
-    port: getNumber(config.port || config["host-port"] || parsedUrl.port) || profile.port,
+    port: configuredPort,
     username: credentials.username || getString(parsedUrl.username) || profile.user,
     password: credentials.password || getString(parsedUrl.password),
     database: database || undefined,

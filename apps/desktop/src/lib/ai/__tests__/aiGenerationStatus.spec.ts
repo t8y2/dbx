@@ -113,18 +113,42 @@ describe("aiGenerationStatus", () => {
       expect(status.lastEventAt).toBe(T0 + 4_000);
     });
 
-    it("agent_end / error are terminal and clear the status", () => {
+    it("agent_end is terminal: enters finished, preserves startedAt/turn, clears activeTool", () => {
       let status = createGenerationStatus(T0);
-      status = applyStatusEvent(status, { type: "tool_call_start", tool_call_id: "c1", tool_name: "execute_sql", args: {} }, T0 + 1_000);
-      status = applyStatusEvent(status, { type: "agent_end" }, T0 + 2_000);
-      expect(status.phase).toBe("preparing");
+      status = applyStatusEvent(status, { type: "turn_start", turn: 1 }, T0 + 1_000);
+      status = applyStatusEvent(status, { type: "tool_call_start", tool_call_id: "c1", tool_name: "execute_sql", args: {} }, T0 + 2_000);
+      status = applyStatusEvent(status, { type: "agent_end" }, T0 + 3_000);
+      expect(status.phase).toBe("finished");
       expect(status.activeTool).toBeUndefined();
-      expect(status.lastEventAt).toBeUndefined();
+      // lastEventAt is refreshed to the terminal event time; startedAt/turn survive
+      // so the elapsed counter never resets to 0 on completion.
+      expect(status.lastEventAt).toBe(T0 + 3_000);
+      expect(status.startedAt).toBe(T0);
+      expect(status.turn).toBe(1);
+    });
 
-      status = applyStatusEvent(createGenerationStatus(T0), { type: "text_delta", delta: "hi" }, T0 + 1_000);
+    it("error is terminal: enters finished without resetting startedAt", () => {
+      let status = createGenerationStatus(T0);
+      status = applyStatusEvent(status, { type: "text_delta", delta: "hi" }, T0 + 1_000);
       status = applyStatusEvent(status, { type: "error", message: "boom" }, T0 + 2_000);
-      expect(status.phase).toBe("preparing");
-      expect(status.lastEventAt).toBeUndefined();
+      expect(status.phase).toBe("finished");
+      expect(status.lastEventAt).toBe(T0 + 2_000);
+      expect(status.startedAt).toBe(T0);
+    });
+
+    it("once finished, later agent events do not overwrite the finished phase", () => {
+      let status = applyStatusEvent(createGenerationStatus(T0), { type: "text_delta", delta: "hi" }, T0 + 1_000);
+      status = applyStatusEvent(status, { type: "agent_end" }, T0 + 2_000);
+      status = applyStatusEvent(status, { type: "text_delta", delta: "late" }, T0 + 3_000);
+      expect(status.phase).toBe("finished");
+      status = applyStatusEvent(status, { type: "tool_call_start", tool_call_id: "c2", tool_name: "execute_sql", args: {} }, T0 + 4_000);
+      expect(status.phase).toBe("finished");
+      expect(status.activeTool).toBeUndefined();
+    });
+
+    it("markCancelling on a finished status is a no-op", () => {
+      let status = applyStatusEvent(createGenerationStatus(T0), { type: "agent_end" }, T0 + 2_000);
+      expect(markCancelling(status, T0 + 3_000).phase).toBe("finished");
     });
 
     it("once cancelling, later agent events do not overwrite the cancelling phase", () => {
@@ -188,6 +212,24 @@ describe("aiGenerationStatus", () => {
       let status = createGenerationStatus(T0);
       status = markCancelling(status, T0 + 5_000);
       expect(statusText(status, T0 + 5_000, t)).toBe("正在取消…");
+    });
+
+    it("returns an empty string for a finished status (line is hidden), never the 0s residue copy", () => {
+      let status = createGenerationStatus(T0);
+      status = applyStatusEvent(status, { type: "text_delta", delta: "hi" }, T0 + 41_000);
+      status = applyStatusEvent(status, { type: "agent_end" }, T0 + 42_000);
+      expect(statusText(status, T0 + 42_000, t)).toBe("");
+    });
+
+    it("a finished status never leaks the idle copy, even with a very old lastEventAt", () => {
+      // Regression for the "thinking…0s" residue: the finished guard must win over
+      // the idle branch (and the waitingModel fallthrough), or a completed reply
+      // could re-render "等待此步骤完成 · 最后活动 Ns 前".
+      let status = createGenerationStatus(T0);
+      status = applyStatusEvent(status, { type: "turn_start", turn: 0 }, T0 + 1_000);
+      status = applyStatusEvent(status, { type: "agent_end" }, T0 + 42_000);
+      const now = T0 + 42_000 + STATUS_IDLE_THRESHOLD_MS + 1;
+      expect(statusText(status, now, t)).toBe("");
     });
 
     it("rounds elapsed up to whole seconds", () => {
@@ -260,6 +302,13 @@ describe("aiGenerationStatus", () => {
       expect(announced).toBe("正在取消…");
       expectNoTickingSeconds(announced);
     });
+
+    it("announces nothing for a finished status (line is hidden)", () => {
+      let status = applyStatusEvent(createGenerationStatus(T0), { type: "agent_end" }, T0 + 42_000);
+      const announced = liveAnnouncementText(status, T0 + 42_000, t);
+      expect(announced).toBe("");
+      expectNoTickingSeconds(announced);
+    });
   });
 
   describe("shouldShowLongRunningHint (60s threshold)", () => {
@@ -267,6 +316,11 @@ describe("aiGenerationStatus", () => {
       const status = createGenerationStatus(T0);
       expect(shouldShowLongRunningHint(status, T0 + STATUS_LONG_RUNNING_THRESHOLD_MS)).toBe(false);
       expect(shouldShowLongRunningHint(status, T0 + STATUS_LONG_RUNNING_THRESHOLD_MS + 1)).toBe(true);
+    });
+
+    it("is never shown for a finished status, even past 60s", () => {
+      let status = applyStatusEvent(createGenerationStatus(T0), { type: "agent_end" }, T0 + STATUS_LONG_RUNNING_THRESHOLD_MS + 1);
+      expect(shouldShowLongRunningHint(status, T0 + STATUS_LONG_RUNNING_THRESHOLD_MS + 1)).toBe(false);
     });
   });
 

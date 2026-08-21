@@ -170,6 +170,29 @@ describe("AI assistant clear/switch cancels an in-flight request (issue #5941, P
     expect(block).toContain('class="sr-only"');
   });
 
+  it("the generation-status line hides once the generation is finished (agent_end) even before isGenerating clears", () => {
+    // Issue #6743 fix: agent_end/error arrive via the event callback before
+    // runAgentStream()'s promise resolves (CLI teardown / SSE close can take
+    // seconds), so the status line must ALSO be gated on phase !== 'finished' —
+    // otherwise it lingers below the completed reply showing a reset "0s".
+    const statusLineIdx = source.indexOf("data-ai-generation-status");
+    expect(statusLineIdx).toBeGreaterThanOrEqual(0);
+    const lineStart = source.lastIndexOf("\n", statusLineIdx) + 1;
+    const lineEnd = source.indexOf("\n", statusLineIdx);
+    const openingTag = source.slice(lineStart, lineEnd);
+    expect(openingTag).toContain("generationStatus.phase !== 'finished'");
+    expect(openingTag).toContain("data-ai-generation-status");
+  });
+
+  it("the >60s long-running hint is hidden once the generation is finished", () => {
+    // Fix keeps startedAt on the finished phase, so the hint must not reappear
+    // under a completed reply during the isGenerating-still-true gap.
+    const idx = source.indexOf("const statusLongRunningHintVisible");
+    expect(idx).toBeGreaterThanOrEqual(0);
+    const line = source.slice(idx, source.indexOf("\n", idx));
+    expect(line).toContain('"finished"');
+  });
+
   // The three gaps below were called out on review of PR #6332: the generation guard
   // stopped *writes* from a superseded generation, but didn't stop the generation from
   // starting a stream, leaking pending-compaction state, or from surviving unmount.

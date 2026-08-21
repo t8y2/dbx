@@ -375,32 +375,53 @@ const aiGenerationGuard = new AiGenerationGuard();
 
 // Live generation-status line (Issue #6743 feature 1). `generationStatus` is the
 // per-request state machine fed by every `ai-agent-event`; `statusNow` is bumped
-// once per second so `statusText` recomputes elapsed/idle without re-rendering on
-// every event. Both are per-request transient state and MUST be reset on both the
-// normal `finally` path and `resetPendingRequestState()` (abandon path) — see the
-// dual-path note next to `resetPendingRequestState`.
+// by an animation-frame ticker only when the displayed whole second changes, so
+// `statusText` recomputes elapsed/idle at each real second boundary instead of a
+// fixed 1s interval (a delayed interval tick used to skip values — Math.ceil of a
+// late wall-clock sample — and freeze the display in between). Both are
+// per-request transient state and MUST be reset on both the normal `finally` path
+// and `resetPendingRequestState()` (abandon path) — see the dual-path note next to
+// `resetPendingRequestState`.
 const generationStatus = ref<AiGenerationStatus>(createGenerationStatus(Date.now()));
 const statusNow = ref(Date.now());
-let statusInterval: ReturnType<typeof setInterval> | null = null;
+let statusFrame: number | null = null;
+/** Last displayed whole second (`Math.ceil((statusNow - startedAt) / 1000)`). */
+let lastStatusSecond = -1;
+
+function runStatusFrame() {
+  // A frame queued before stopStatusTimer() may still fire once after the timer
+  // was stopped — bail without rescheduling so a stopped timer stays stopped.
+  if (statusFrame === null) return;
+  statusFrame = null;
+  const now = Date.now();
+  const second = Math.ceil((now - generationStatus.value.startedAt) / 1000);
+  if (second !== lastStatusSecond) {
+    lastStatusSecond = second;
+    statusNow.value = now;
+  }
+  statusFrame = requestAnimationFrame(runStatusFrame);
+}
 
 function startStatusTimer() {
   stopStatusTimer();
   statusNow.value = Date.now();
-  statusInterval = setInterval(() => {
-    statusNow.value = Date.now();
-  }, 1000);
+  // Seed the boundary so the ticker writes only when the displayed whole second
+  // changes — the display then rolls +1s within ~a frame of each real boundary
+  // instead of skipping values when a tick is delayed.
+  lastStatusSecond = Math.ceil((statusNow.value - generationStatus.value.startedAt) / 1000);
+  statusFrame = requestAnimationFrame(runStatusFrame);
 }
 
 function stopStatusTimer() {
-  if (statusInterval !== null) {
-    clearInterval(statusInterval);
-    statusInterval = null;
+  if (statusFrame !== null) {
+    cancelAnimationFrame(statusFrame);
+    statusFrame = null;
   }
 }
 
 const generationStatusText = computed(() => statusText(generationStatus.value, statusNow.value, t));
-const statusElapsedSeconds = computed(() => Math.ceil((statusNow.value - generationStatus.value.startedAt) / 1000));
-const statusIdleSeconds = computed(() => (generationStatus.value.lastEventAt !== undefined ? Math.ceil((statusNow.value - generationStatus.value.lastEventAt) / 1000) : 0));
+const statusElapsedSeconds = computed(() => Math.max(0, Math.ceil((statusNow.value - generationStatus.value.startedAt) / 1000)));
+const statusIdleSeconds = computed(() => (generationStatus.value.lastEventAt !== undefined ? Math.max(0, Math.ceil((statusNow.value - generationStatus.value.lastEventAt) / 1000)) : 0));
 /** Idle copy branch: an event was seen, but nothing has arrived for over 20s. */
 const generationStatusIdle = computed(() => {
   const last = generationStatus.value.lastEventAt;
@@ -413,7 +434,7 @@ const statusToolLabel = computed(() => {
 });
 const statusTurnBadge = computed(() => (generationStatus.value.turn !== undefined ? t("ai.status.turnBadge", { turn: generationStatus.value.turn + 1 }) : ""));
 /** Gentle >60s hint, hidden while the user is cancelling (they already decided to stop). */
-const statusLongRunningHintVisible = computed(() => generationStatus.value.phase !== "cancelling" && shouldShowLongRunningHint(generationStatus.value, statusNow.value));
+const statusLongRunningHintVisible = computed(() => generationStatus.value.phase !== "cancelling" && generationStatus.value.phase !== "finished" && shouldShowLongRunningHint(generationStatus.value, statusNow.value));
 /**
  * Stable screen-reader announcement for the status line. Fed into a
  * `role="status"` live region; unlike `generationStatusText` it excludes the
@@ -2558,6 +2579,12 @@ async function send() {
         // #6743 feature 1). `applyStatusEvent` refreshes lastEventAt, tracks the
         // active tool / turn, and derives the phase purely from the event stream.
         generationStatus.value = applyStatusEvent(generationStatus.value, event, Date.now());
+        // Terminal event (agent_end / error) hides the status line immediately —
+        // the backend promise may still be settling (CLI teardown / SSE close), so
+        // stop the ticker now instead of letting it idle through that gap.
+        if (generationStatus.value.phase === "finished") {
+          stopStatusTimer();
+        }
         if (event.type === "text_delta" && event.delta) {
           appendAssistantDelta(assistantIdx, event.delta);
         }
@@ -2575,8 +2602,11 @@ async function send() {
           appendAssistantReasoning(assistantIdx, event.delta);
         }
         if (event.type === "agent_end") {
+          // End the card's "思考过程" spinner at the terminal event rather than
+          // waiting for send()'s finally (which can lag behind CLI teardown).
+          const msg = messages.value[assistantIdx];
+          if (msg) msg.isThinking = false;
           if (event.input_tokens || event.output_tokens) {
-            const msg = messages.value[assistantIdx];
             if (msg) msg.tokens = { input: event.input_tokens ?? 0, output: event.output_tokens ?? 0 };
           }
         }
@@ -2635,6 +2665,7 @@ async function send() {
       // resetPendingRequestState() below for the abandon-path equivalent).
       stopStatusTimer();
       generationStatus.value = createGenerationStatus(Date.now());
+      statusNow.value = Date.now();
       // Render agent tool call steps from agent events (fallback when no real-time steps)
       if (msg && agentEvents.length > 0 && !msg.agentSteps?.length) {
         const steps: AiAgentStepItem[] = [];
@@ -2744,10 +2775,12 @@ function resetPendingRequestState() {
   pendingAssistantIndex = -1;
   pendingCompaction.value = null;
   // Abandon-path generation-status cleanup: a clear/switch/new-chat/unmount must
-  // stop the 1s status timer and clear the per-request status, otherwise switching
-  // conversations leaks a stale status line into the next generation.
+  // stop the status ticker and clear the per-request status (and its `now` ref),
+  // otherwise switching conversations leaks a stale status line into the next
+  // generation.
   stopStatusTimer();
   generationStatus.value = createGenerationStatus(Date.now());
+  statusNow.value = Date.now();
 }
 
 // `alreadyCancelledSessionId`: the session id a caller (cancelStream()) has
@@ -3466,8 +3499,11 @@ async function openExternalUrl(url: string) {
 
           <!-- Live generation-status line (Issue #6743 feature 1). Replaces the old
                "Thinking..." placeholder and covers the WHOLE generation period
-               (`v-if="isGenerating"`), not just the wait for the first token. -->
-          <div v-if="isGenerating" class="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground" data-ai-generation-status>
+               (`v-if="isGenerating"`), not just the wait for the first token. The
+               `phase !== 'finished'` guard hides it the instant agent_end/error
+               arrives — before isGenerating clears — so a completed reply never
+               shows a lingering "等待模型响应 · 已运行 0s". -->
+          <div v-if="isGenerating && generationStatus.phase !== 'finished'" class="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground" data-ai-generation-status>
             <!-- Screen-reader live region: announces discrete execution-state changes
                  (phase / tool / turn / idle crossing) only, never the per-second
                  elapsed numerals — see `liveAnnouncementText`. -->

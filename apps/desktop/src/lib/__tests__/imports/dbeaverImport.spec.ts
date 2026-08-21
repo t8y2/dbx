@@ -250,7 +250,32 @@ describe("DBeaver folder import", () => {
     expect(connection?.database).toBeUndefined();
   });
 
-  it("drops address-shaped database values from host-based imports", async () => {
+  it("does not treat an opaque JDBC host and port as the database", async () => {
+    const [connection] = await parseDbeaverConnections(
+      payload({
+        connections: {
+          opaque: {
+            id: "opaque",
+            name: "Opaque JDBC",
+            provider: "generic",
+            driver: "com.example.Driver",
+            configuration: {
+              url: "jdbc:example:db.example.com:1234",
+            },
+          },
+        },
+      }),
+    );
+
+    expect(connection).toMatchObject({
+      name: "Opaque JDBC",
+      db_type: "jdbc",
+      connection_string: "jdbc:example:db.example.com:1234",
+    });
+    expect(connection?.database).toBeUndefined();
+  });
+
+  it("preserves explicit database names that resemble the host or port", async () => {
     const connections = await parseDbeaverConnections(
       payload({
         connections: {
@@ -276,8 +301,8 @@ describe("DBeaver folder import", () => {
       }),
     );
 
-    expect(connections[0]?.database).toBeUndefined();
-    expect(connections[1]?.database).toBeUndefined();
+    expect(connections[0]?.database).toBe("192.168.3.12:51345");
+    expect(connections[1]?.database).toBe("8123");
   });
 
   it("keeps parseDbeaverConnections compatible when no folders exist", async () => {

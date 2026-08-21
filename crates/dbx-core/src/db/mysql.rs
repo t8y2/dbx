@@ -7693,6 +7693,34 @@ mod tests {
     }
 
     #[test]
+    fn mysql_async_url_preserves_connector_j_tls_truth_table() {
+        assert_eq!(
+            mysql_async_url("mysql://host:3306/db?verifyServerCertificate=true").as_ref(),
+            "mysql://host:3306/db?require_ssl=true&verify_ca=true&verify_identity=false"
+        );
+        assert_eq!(
+            mysql_async_url("mysql://host:3306/db?useSSL=false&requireSSL=true&verifyServerCertificate=true").as_ref(),
+            "mysql://host:3306/db?require_ssl=false"
+        );
+        assert_eq!(
+            mysql_async_url("mysql://host:3306/db?requireSSL=false").as_ref(),
+            "mysql://host:3306/db?require_ssl=true&verify_ca=false&verify_identity=false"
+        );
+    }
+
+    #[test]
+    fn mysql_async_url_uses_last_connector_j_tls_param_value() {
+        assert_eq!(
+            mysql_async_url("mysql://host:3306/db?useSSL=false&useSSL=true").as_ref(),
+            "mysql://host:3306/db?require_ssl=true&verify_ca=false&verify_identity=false"
+        );
+        assert_eq!(
+            mysql_async_url("mysql://host:3306/db?useSSL=true&useSSL=false&verifyServerCertificate=true").as_ref(),
+            "mysql://host:3306/db?require_ssl=false"
+        );
+    }
+
+    #[test]
     fn mysql_async_url_prefers_native_tls_mode_over_connector_j_aliases() {
         let url = "mysql://host:3306/db?sslMode=REQUIRED&useSSL=false&requireSSL=false";
         assert_eq!(
@@ -7714,6 +7742,10 @@ mod tests {
             Some("mysql://host:3306/db?useSSL=true&characterEncoding=utf8&ssl-mode=disabled".to_string())
         );
         assert_eq!(ssl_fallback_url("mysql://host:3306/db?useSSL=true&requireSSL=true"), None);
+        assert_eq!(ssl_fallback_url("mysql://host:3306/db?verifyServerCertificate=true"), None);
+        let disabled = "mysql://host:3306/db?useSSL=false&requireSSL=true&verifyServerCertificate=true";
+        assert!(!mysql_url_requires_ssl(disabled));
+        assert!(!mysql_url_attempts_ssl(disabled));
     }
 
     #[test]

@@ -12,10 +12,28 @@ function normalizeUrlParamKey(key: string): string {
 
 function urlParamValue(params: URLSearchParams, key: string): string {
   const normalizedKey = normalizeUrlParamKey(key);
+  let result = "";
   for (const [paramKey, value] of params.entries()) {
-    if (normalizeUrlParamKey(paramKey) === normalizedKey) return value;
+    if (normalizeUrlParamKey(paramKey) === normalizedKey) result = value;
   }
-  return "";
+  return result;
+}
+
+function jdbcUrlParamValue(params: URLSearchParams, key: string): string {
+  const normalizedKey = key.trim().toLowerCase();
+  let result = "";
+  for (const [paramKey, value] of params.entries()) {
+    if (paramKey.trim().toLowerCase() === normalizedKey) result = value;
+  }
+  return result;
+}
+
+function hasJdbcUrlParam(params: URLSearchParams, key: string): boolean {
+  const normalizedKey = key.trim().toLowerCase();
+  for (const paramKey of params.keys()) {
+    if (paramKey.trim().toLowerCase() === normalizedKey) return true;
+  }
+  return false;
 }
 
 function mysqlTlsMode(config: ConnectionConfig): string {
@@ -25,14 +43,14 @@ function mysqlTlsMode(config: ConnectionConfig): string {
   if (["disabled", "disable"].includes(mode)) return "disabled";
   if (["preferred", "prefer"].includes(mode)) return "preferred";
   if (["required", "require", "verify_ca", "verify_identity"].includes(mode)) return mode;
-  const jdbcUseSsl = urlParamValue(parsed, "useSSL").trim().toLowerCase();
-  const jdbcRequireSsl = urlParamValue(parsed, "requireSSL").trim().toLowerCase();
-  const jdbcVerifyServerCertificate = urlParamValue(parsed, "verifyServerCertificate").trim().toLowerCase();
+  const jdbcUseSsl = jdbcUrlParamValue(parsed, "useSSL").trim().toLowerCase();
+  const jdbcRequireSsl = jdbcUrlParamValue(parsed, "requireSSL").trim().toLowerCase();
+  const jdbcVerifyServerCertificate = jdbcUrlParamValue(parsed, "verifyServerCertificate").trim().toLowerCase();
   const isTrue = (value: string) => ["true", "1", "yes", "on"].includes(value);
-  if (isTrue(jdbcVerifyServerCertificate) && (isTrue(jdbcUseSsl) || isTrue(jdbcRequireSsl))) return "verify_ca";
-  if (isTrue(jdbcRequireSsl)) return "required";
   if (["false", "0", "no", "off"].includes(jdbcUseSsl)) return "disabled";
-  if (isTrue(jdbcUseSsl)) return "preferred";
+  if (isTrue(jdbcVerifyServerCertificate)) return "verify_ca";
+  if (isTrue(jdbcRequireSsl)) return "required";
+  if (hasJdbcUrlParam(parsed, "useSSL") || hasJdbcUrlParam(parsed, "requireSSL") || hasJdbcUrlParam(parsed, "verifyServerCertificate")) return "preferred";
   if (config.ssl || ["true", "1", "yes", "on"].includes(urlParamValue(parsed, "require_ssl").trim().toLowerCase())) return "required";
   return "disabled";
 }

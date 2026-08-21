@@ -1808,6 +1808,7 @@ pub(crate) fn is_mysql_jdbc_tls_param(key: &str) -> bool {
 }
 
 pub(crate) fn mysql_jdbc_tls_mode(params: Option<&str>) -> Option<MysqlJdbcTlsMode> {
+    let mut has_jdbc_tls_param = false;
     let mut use_ssl = None;
     let mut require_ssl = None;
     let mut verify_server_certificate = None;
@@ -1820,23 +1821,32 @@ pub(crate) fn mysql_jdbc_tls_mode(params: Option<&str>) -> Option<MysqlJdbcTlsMo
         let value = percent_decode_str(raw_value).decode_utf8_lossy();
         let parsed_value = mysql_url_param_value_is_true(&value);
         match key.as_str() {
-            "usessl" => use_ssl = Some(parsed_value),
-            "requiressl" => require_ssl = Some(parsed_value),
-            "verifyservercertificate" => verify_server_certificate = Some(parsed_value),
+            "usessl" => {
+                has_jdbc_tls_param = true;
+                use_ssl = Some(parsed_value);
+            }
+            "requiressl" => {
+                has_jdbc_tls_param = true;
+                require_ssl = Some(parsed_value);
+            }
+            "verifyservercertificate" => {
+                has_jdbc_tls_param = true;
+                verify_server_certificate = Some(parsed_value);
+            }
             _ => {}
         }
     }
 
-    if verify_server_certificate == Some(true) && (use_ssl == Some(true) || require_ssl == Some(true)) {
+    if !has_jdbc_tls_param {
+        None
+    } else if use_ssl == Some(false) {
+        Some(MysqlJdbcTlsMode::Disabled)
+    } else if verify_server_certificate == Some(true) {
         Some(MysqlJdbcTlsMode::VerifyCa)
     } else if require_ssl == Some(true) {
         Some(MysqlJdbcTlsMode::Required)
-    } else if use_ssl == Some(false) {
-        Some(MysqlJdbcTlsMode::Disabled)
-    } else if use_ssl == Some(true) {
-        Some(MysqlJdbcTlsMode::Preferred)
     } else {
-        None
+        Some(MysqlJdbcTlsMode::Preferred)
     }
 }
 
@@ -3574,6 +3584,38 @@ mod tests {
         );
 
         config.url_params = Some("useSSL=false".to_string());
+        assert_eq!(config.connection_url(), "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=disabled&charset=utf8mb4");
+    }
+
+    #[test]
+    fn mysql_connector_j_tls_truth_table_preserves_legacy_precedence() {
+        let mut config = mysql_config("root", "secret", Some("test"));
+        config.url_params = Some("verifyServerCertificate=true".to_string());
+        assert_eq!(
+            config.connection_url(),
+            "mysql://root:secret@10.1.2.3:2883/test?require_ssl=true&verify_ca=true&verify_identity=false&charset=utf8mb4"
+        );
+
+        config.url_params = Some("useSSL=false&requireSSL=true&verifyServerCertificate=true".to_string());
+        assert_eq!(config.connection_url(), "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=disabled&charset=utf8mb4");
+
+        config.url_params = Some("requireSSL=false".to_string());
+        assert_eq!(
+            config.connection_url(),
+            "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=preferred&charset=utf8mb4"
+        );
+    }
+
+    #[test]
+    fn mysql_connector_j_duplicate_tls_params_use_the_last_value() {
+        let mut config = mysql_config("root", "secret", Some("test"));
+        config.url_params = Some("useSSL=false&useSSL=true".to_string());
+        assert_eq!(
+            config.connection_url(),
+            "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=preferred&charset=utf8mb4"
+        );
+
+        config.url_params = Some("useSSL=true&useSSL=false&verifyServerCertificate=true".to_string());
         assert_eq!(config.connection_url(), "mysql://root:secret@10.1.2.3:2883/test?ssl-mode=disabled&charset=utf8mb4");
     }
 

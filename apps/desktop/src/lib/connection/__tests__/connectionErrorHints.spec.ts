@@ -60,6 +60,22 @@ describe("appendConnectionErrorHints", () => {
     expect(message).toContain("Set TLS Mode to Disabled.");
   });
 
+  it("treats verifyServerCertificate as verified TLS unless useSSL is disabled", () => {
+    const verified = appendConnectionErrorHints(mysqlConfig("verifyServerCertificate=true"), "MySQL connection failed: TLS handshake failed", t);
+    const disabled = appendConnectionErrorHints(mysqlConfig("useSSL=false&requireSSL=true&verifyServerCertificate=true"), "MySQL connection failed: TLS handshake failed", t);
+
+    expect(verified).toContain("Set TLS Mode to Disabled.");
+    expect(disabled).toBe("MySQL connection failed: TLS handshake failed");
+  });
+
+  it("uses the last duplicate Connector/J TLS parameter", () => {
+    const enabled = appendConnectionErrorHints(mysqlConfig("useSSL=false&useSSL=true"), "MySQL connection failed: TLS handshake failed", t);
+    const disabled = appendConnectionErrorHints(mysqlConfig("useSSL=true&useSSL=false"), "MySQL connection failed: TLS handshake failed", t);
+
+    expect(enabled).toContain("Set TLS Mode to Disabled.");
+    expect(disabled).toBe("MySQL connection failed: TLS handshake failed");
+  });
+
   it("uses a certificate-specific hint for unsupported certificate versions", () => {
     const error = "MySQL connection failed: invalid peer certificate: Other(OtherError(UnsupportedCertVersion))";
     const message = appendConnectionErrorHints(mysqlConfig("sslMode=VERIFY_CA"), error, t);

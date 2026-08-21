@@ -5,6 +5,7 @@ const executeMulti = vi.fn();
 const executeQuery = vi.fn();
 const beginManualTransaction = vi.fn();
 const executeInManualTransaction = vi.fn();
+const cancelQuery = vi.fn();
 const analyzeEditableQueryEditability = vi.fn();
 const getColumns = vi.fn();
 const listIndexes = vi.fn();
@@ -41,6 +42,7 @@ vi.mock("@/lib/backend/api", () => ({
   closeClientConnectionSession: vi.fn().mockResolvedValue(undefined),
   closeQuerySession: vi.fn().mockResolvedValue(undefined),
   beginManualTransaction,
+  cancelQuery,
   executeInManualTransaction,
   executeMulti,
   executeQuery,
@@ -114,6 +116,7 @@ describe("queryStore hidden primary key editing", () => {
       affected_rows: 0,
       execution_time_ms: 1,
     });
+    cancelQuery.mockResolvedValue(false);
     executeMulti.mockResolvedValue([
       {
         columns: ["name", "__DBX_PK_0"],
@@ -645,6 +648,48 @@ describe("queryStore hidden primary key editing", () => {
     expect(beginManualTransaction).toHaveBeenCalledWith("oracle-1", "ORCL", undefined, undefined);
     expect(executeInManualTransaction).toHaveBeenCalledWith("txn-1", "SELECT t.* FROM APP.WIDE_TABLE t", "ORCL", undefined, expect.any(Number), true);
     expect(store.tabs.find((tab) => tab.id === tabId)?.result?.large_value_cells).toEqual([{ row_index: 0, column_index: 1, original_bytes: 81920 }]);
+  });
+
+  it("does not start an Oracle manual transaction after cancellation during metadata loading", async () => {
+    const columnsGate = deferred<Awaited<ReturnType<typeof getColumns>>>();
+    getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", query_timeout_secs: 30 });
+    getColumns.mockReturnValue(columnsGate.promise);
+    listIndexes.mockResolvedValue([{ name: "PK_WIDE_TABLE", columns: ["ID"], is_unique: true, is_primary: true }]);
+    lookupLocalCompletionTables.mockReturnValue([{ name: "WIDE_TABLE", type: "table", schema: "APP" }]);
+    analyzeEditableQueryEditability.mockImplementation(async () => ({
+      editable: true,
+      analysis: {
+        schema: "APP",
+        tableName: "WIDE_TABLE",
+        tableAlias: "t",
+        selectStar: true,
+        columns: [],
+      },
+    }));
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "ORCL", "Query");
+    const execution = store.executeTabSql(tabId, "SELECT t.* FROM APP.WIDE_TABLE t");
+
+    await vi.waitFor(() => expect(listIndexes).toHaveBeenCalled());
+    await expect(store.cancelTabExecution(tabId)).resolves.toBe(false);
+
+    columnsGate.resolve([
+      { name: "ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+      { name: "PAYLOAD", data_type: "SYS.XMLTYPE", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ]);
+    await expect(execution).resolves.toBe(false);
+
+    expect(cancelQuery).toHaveBeenCalledWith(expect.any(String));
+    expect(beginManualTransaction).not.toHaveBeenCalled();
+    expect(executeInManualTransaction).not.toHaveBeenCalled();
+    expect(store.tabs.find((tab) => tab.id === tabId)).toMatchObject({
+      isExecuting: false,
+      isCancelling: false,
+      executionId: undefined,
+    });
+    expect(store.tabs.find((tab) => tab.id === tabId)?.txnSessionId).toBeUndefined();
   });
 
   it("keeps manual non-Oracle queries out of table-data preview mode", async () => {

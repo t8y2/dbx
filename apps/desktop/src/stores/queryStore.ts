@@ -4922,6 +4922,11 @@ export const useQueryStore = defineStore("query", () => {
       const frontendTimeoutSecs = frontendQueryTimeoutSecsForSql(sqlToExecute, effectiveDbType, queryTimeoutSecs);
       const sourceLabelDatabase = targetDatabase || conn?.database;
       const executionClientSessionId = options?.pagination?.clientSessionId ?? (tab.mode === "query" || tab.mode === "data" ? tabClientSessionId(tab) : undefined);
+      const currentBeforeDispatch = findExecutionTab(id);
+      if (currentBeforeDispatch?.executionId !== executionId || currentBeforeDispatch.isCancelling) {
+        queryExecutionLog("info", "dispatch:skipped-cancelled", { traceId, elapsed: elapsed() });
+        return false;
+      }
 
       let executionPromise: Promise<QueryResult[]>;
       if (tab.autoCommit === false) {

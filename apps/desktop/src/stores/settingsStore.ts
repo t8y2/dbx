@@ -1300,7 +1300,7 @@ export const useSettingsStore = defineStore("settings", () => {
   let editorSettingsAtomicUpdateQueue: Promise<void> = Promise.resolve();
   let editorSettingsPatchRevision = 0;
   const editorSettingsFieldRevisions = new Map<keyof EditorSettings, number>();
-  const deletedCustomColumnFormatterIds = new Set<string>();
+  const customColumnFormatterDeleteVersions = new Map<string, number>();
   let pendingAiChatSelection: AiChatSelectionState | null = null;
   let aiChatSelectionSaveRunning = false;
 
@@ -1815,32 +1815,37 @@ export const useSettingsStore = defineStore("settings", () => {
     await enqueueEditorSettingsSave();
   }
 
-  function updateEditorSettingsAndPersist(partial: Partial<EditorSettings>): Promise<void> {
-    const update = editorSettingsAtomicUpdateQueue
-      .catch(() => {})
-      .then(async () => {
-        await initEditorSettings();
-        const previous = editorSettingsSnapshot(editorSettings.value);
-        applyEditorSettingsPatch(partial);
-        const revision = markEditorSettingsPatch(partial);
-        try {
-          await enqueueEditorSettingsSave();
-        } catch (error) {
-          const restored = editorSettingsSnapshot(editorSettings.value) as unknown as Record<string, unknown>;
-          const previousSettings = previous as unknown as Record<string, unknown>;
-          let changed = false;
-          for (const key of Object.keys(partial) as (keyof EditorSettings)[]) {
-            if (partial[key] === undefined || editorSettingsFieldRevisions.get(key) !== revision) continue;
-            restored[key] = previousSettings[key];
-            editorSettingsFieldRevisions.set(key, ++editorSettingsPatchRevision);
-            changed = true;
-          }
-          if (changed) editorSettings.value = normalizeEditorSettings(restored);
-          throw error;
-        }
-      });
-    editorSettingsAtomicUpdateQueue = update.catch(() => {});
+  function enqueueEditorSettingsAtomicMutation<T>(mutation: () => Promise<T>): Promise<T> {
+    const update = editorSettingsAtomicUpdateQueue.catch(() => {}).then(mutation);
+    editorSettingsAtomicUpdateQueue = update.then(
+      () => undefined,
+      () => undefined,
+    );
     return update;
+  }
+
+  function updateEditorSettingsAndPersist(partial: Partial<EditorSettings>): Promise<void> {
+    return enqueueEditorSettingsAtomicMutation(async () => {
+      await initEditorSettings();
+      const previous = editorSettingsSnapshot(editorSettings.value);
+      applyEditorSettingsPatch(partial);
+      const revision = markEditorSettingsPatch(partial);
+      try {
+        await enqueueEditorSettingsSave();
+      } catch (error) {
+        const restored = editorSettingsSnapshot(editorSettings.value) as unknown as Record<string, unknown>;
+        const previousSettings = previous as unknown as Record<string, unknown>;
+        let changed = false;
+        for (const key of Object.keys(partial) as (keyof EditorSettings)[]) {
+          if (partial[key] === undefined || editorSettingsFieldRevisions.get(key) !== revision) continue;
+          restored[key] = previousSettings[key];
+          editorSettingsFieldRevisions.set(key, ++editorSettingsPatchRevision);
+          changed = true;
+        }
+        if (changed) editorSettings.value = normalizeEditorSettings(restored);
+        throw error;
+      }
+    });
   }
 
   function updateColumnFormatter(key: string, formatter: ColumnFormatterConfig | undefined) {
@@ -1854,35 +1859,101 @@ export const useSettingsStore = defineStore("settings", () => {
     updateEditorSettings({ columnFormatters });
   }
 
-  function upsertCustomColumnFormatter(formatter: CustomColumnFormatterConfig): CustomColumnFormatterConfig | undefined {
+  function customColumnFormatterDeleteVersion(id: string): number {
+    return customColumnFormatterDeleteVersions.get(id) ?? 0;
+  }
+
+  async function upsertCustomColumnFormatter(formatter: CustomColumnFormatterConfig, expectedDeleteVersion?: number): Promise<CustomColumnFormatterConfig | undefined> {
     const normalized = normalizeCustomColumnFormatter(formatter);
-    if (!normalized || deletedCustomColumnFormatterIds.has(normalized.id)) return undefined;
-    updateEditorSettings({
-      customColumnFormatters: {
-        ...editorSettings.value.customColumnFormatters,
-        [normalized.id]: normalized,
-      },
+    if (!normalized) return undefined;
+    return enqueueEditorSettingsAtomicMutation(async () => {
+      await initEditorSettings();
+      if (expectedDeleteVersion !== undefined && customColumnFormatterDeleteVersion(normalized.id) !== expectedDeleteVersion) return undefined;
+      const previous = editorSettings.value.customColumnFormatters[normalized.id];
+      const partial = {
+        customColumnFormatters: {
+          ...editorSettings.value.customColumnFormatters,
+          [normalized.id]: normalized,
+        },
+      } satisfies Partial<EditorSettings>;
+      applyEditorSettingsPatch(partial);
+      markEditorSettingsPatch(partial);
+      try {
+        await enqueueEditorSettingsSave();
+      } catch (error) {
+        const customColumnFormatters = {
+          ...editorSettings.value.customColumnFormatters,
+        };
+        const current = customColumnFormatters[normalized.id];
+        if (current?.name === normalized.name && current.template === normalized.template) {
+          if (previous) {
+            customColumnFormatters[normalized.id] = previous;
+          } else {
+            delete customColumnFormatters[normalized.id];
+          }
+          const rollback = { customColumnFormatters } satisfies Partial<EditorSettings>;
+          applyEditorSettingsPatch(rollback);
+          markEditorSettingsPatch(rollback);
+        }
+        throw error;
+      }
+      return normalized;
     });
-    return normalized;
   }
 
   async function deleteCustomColumnFormatter(id: string): Promise<void> {
-    const customColumnFormatters = {
-      ...editorSettings.value.customColumnFormatters,
-    };
-    delete customColumnFormatters[id];
-    const columnFormatters = Object.fromEntries(
-      Object.entries(editorSettings.value.columnFormatters).filter(([, formatter]) => {
-        return formatter.kind !== "custom-ref" || formatter.formatterId !== id;
-      }),
-    );
-    deletedCustomColumnFormatterIds.add(id);
-    try {
-      await updateEditorSettingsAndPersist({ customColumnFormatters, columnFormatters });
-    } catch (error) {
-      deletedCustomColumnFormatterIds.delete(id);
-      throw error;
-    }
+    return enqueueEditorSettingsAtomicMutation(async () => {
+      await initEditorSettings();
+      const previousDeleteVersion = customColumnFormatterDeleteVersion(id);
+      const deleteVersion = previousDeleteVersion + 1;
+      customColumnFormatterDeleteVersions.set(id, deleteVersion);
+      const previousFormatter = editorSettings.value.customColumnFormatters[id];
+      const customColumnFormatters = {
+        ...editorSettings.value.customColumnFormatters,
+      };
+      delete customColumnFormatters[id];
+      const removedColumnFormatters = Object.fromEntries(
+        Object.entries(editorSettings.value.columnFormatters).filter(([, formatter]) => {
+          return formatter.kind === "custom-ref" && formatter.formatterId === id;
+        }),
+      );
+      const columnFormatters = Object.fromEntries(
+        Object.entries(editorSettings.value.columnFormatters).filter(([, formatter]) => {
+          return formatter.kind !== "custom-ref" || formatter.formatterId !== id;
+        }),
+      );
+      const partial = { customColumnFormatters, columnFormatters } satisfies Partial<EditorSettings>;
+      applyEditorSettingsPatch(partial);
+      markEditorSettingsPatch(partial);
+      try {
+        await enqueueEditorSettingsSave();
+      } catch (error) {
+        if (customColumnFormatterDeleteVersion(id) === deleteVersion) {
+          if (previousDeleteVersion === 0) {
+            customColumnFormatterDeleteVersions.delete(id);
+          } else {
+            customColumnFormatterDeleteVersions.set(id, previousDeleteVersion);
+          }
+        }
+        const restoredCustomColumnFormatters = {
+          ...editorSettings.value.customColumnFormatters,
+        };
+        if (previousFormatter && !restoredCustomColumnFormatters[id]) restoredCustomColumnFormatters[id] = previousFormatter;
+        const restoredColumnFormatters = {
+          ...editorSettings.value.columnFormatters,
+        };
+        for (const [key, formatter] of Object.entries(removedColumnFormatters)) {
+          if (!restoredColumnFormatters[key]) restoredColumnFormatters[key] = formatter;
+        }
+        const rollback = {
+          customColumnFormatters: restoredCustomColumnFormatters,
+          columnFormatters: restoredColumnFormatters,
+        } satisfies Partial<EditorSettings>;
+        applyEditorSettingsPatch(rollback);
+        markEditorSettingsPatch(rollback);
+        throw error;
+      }
+    });
   }
 
   return {
@@ -1919,6 +1990,7 @@ export const useSettingsStore = defineStore("settings", () => {
     initMcpGlobalPolicy,
     updateMcpGlobalPolicy,
     updateColumnFormatter,
+    customColumnFormatterDeleteVersion,
     upsertCustomColumnFormatter,
     deleteCustomColumnFormatter,
   };

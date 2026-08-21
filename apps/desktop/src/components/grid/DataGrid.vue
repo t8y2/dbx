@@ -1063,6 +1063,7 @@ const formatterJsonPath = ref("$.user.name");
 const formatterMaskPrefix = ref(4);
 const formatterMaskSuffix = ref(4);
 const formatterCustomId = ref(CUSTOM_FORMATTER_NEW);
+const formatterCustomCapturedDeleteVersion = ref<number>();
 const formatterCustomName = ref("");
 const formatterCustomTemplate = ref("${value}");
 const formatterCustomDeleteOpen = ref(false);
@@ -1499,10 +1500,12 @@ function loadFormatterDraft(formatter: ColumnFormatterConfig | undefined) {
   } else if (draft.kind === "custom-ref") {
     const saved = settingsStore.editorSettings.customColumnFormatters[draft.formatterId];
     formatterCustomId.value = saved ? saved.id : CUSTOM_FORMATTER_NEW;
+    formatterCustomCapturedDeleteVersion.value = saved ? settingsStore.customColumnFormatterDeleteVersion(saved.id) : undefined;
     formatterCustomName.value = saved?.name ?? "";
     formatterCustomTemplate.value = saved?.template ?? "${value}";
   } else if (draft.kind === "custom-template") {
     formatterCustomId.value = CUSTOM_FORMATTER_NEW;
+    formatterCustomCapturedDeleteVersion.value = undefined;
     formatterCustomName.value = "";
     formatterCustomTemplate.value = draft.template;
   } else if (draft.kind === "foreign-key-display") {
@@ -1576,26 +1579,33 @@ function handleColumnFormatterOpenChange(value: boolean, columnIndex: number) {
   }
 }
 
-function saveColumnFormatter(columnIndex: number) {
+async function saveColumnFormatter(columnIndex: number) {
   const column = props.result.columns[columnIndex];
   const key = column ? formatterKeyForColumn(column) : null;
   if (!key) return;
-  let formatter = currentFormatterDraft();
-  if (formatterKind.value === "custom-template" && formatterCustomName.value.trim()) {
-    const id = formatterCustomId.value === CUSTOM_FORMATTER_NEW ? createCustomFormatterId() : formatterCustomId.value;
-    const saved = settingsStore.upsertCustomColumnFormatter({
-      id,
-      name: formatterCustomName.value,
-      template: formatterCustomTemplate.value,
-    });
-    if (!saved) {
-      selectCustomFormatter(CUSTOM_FORMATTER_NEW);
-      return;
+  try {
+    let formatter = currentFormatterDraft();
+    if (formatterKind.value === "custom-template" && formatterCustomName.value.trim()) {
+      const id = formatterCustomId.value === CUSTOM_FORMATTER_NEW ? createCustomFormatterId() : formatterCustomId.value;
+      const saved = await settingsStore.upsertCustomColumnFormatter(
+        {
+          id,
+          name: formatterCustomName.value,
+          template: formatterCustomTemplate.value,
+        },
+        formatterCustomCapturedDeleteVersion.value,
+      );
+      if (!saved) {
+        selectCustomFormatter(CUSTOM_FORMATTER_NEW);
+        return;
+      }
+      formatter = { kind: "custom-ref", formatterId: saved.id };
     }
-    formatter = { kind: "custom-ref", formatterId: saved.id };
+    settingsStore.updateColumnFormatter(key, formatter);
+    closeColumnFormatter();
+  } catch (error) {
+    toast(t("grid.tableOperationFailed", { message: translateBackendError(t, error) }), 5000);
   }
-  settingsStore.updateColumnFormatter(key, formatter);
-  closeColumnFormatter();
 }
 
 function clearColumnFormatter(columnIndex: number) {
@@ -1624,12 +1634,14 @@ function selectFormatterKind(value: FormatterDraftKind, columnIndex: number) {
 function selectCustomFormatter(value: string) {
   formatterCustomId.value = value;
   if (value === CUSTOM_FORMATTER_NEW) {
+    formatterCustomCapturedDeleteVersion.value = undefined;
     formatterCustomName.value = "";
     formatterCustomTemplate.value = "${value}";
     return;
   }
   const saved = settingsStore.editorSettings.customColumnFormatters[value];
   if (!saved) return;
+  formatterCustomCapturedDeleteVersion.value = settingsStore.customColumnFormatterDeleteVersion(saved.id);
   formatterCustomName.value = saved.name;
   formatterCustomTemplate.value = saved.template;
 }

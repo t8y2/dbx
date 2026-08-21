@@ -7726,7 +7726,8 @@ mod tests {
         assert_eq!(minimal.volume, 1);
 
         // marker 序列化为 camelCase，缺省为 None 且可 round-trip。
-        let with_marker = RootIdentity { volume: 1, file_id: 2, fallback: None, marker: Some("dbx-v1:abc".to_string()) };
+        let with_marker =
+            RootIdentity { volume: 1, file_id: 2, fallback: None, marker: Some("dbx-v1:abc".to_string()) };
         let json = serde_json::to_string(&with_marker).unwrap();
         assert_eq!(json, r#"{"volume":1,"fileId":2,"marker":"dbx-v1:abc"}"#);
         let back: RootIdentity = serde_json::from_str(&json).unwrap();

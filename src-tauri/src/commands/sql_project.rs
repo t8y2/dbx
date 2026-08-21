@@ -441,7 +441,10 @@ fn read_or_create_root_identity_marker(dir: &Dir) -> Option<String> {
 /// 匹配，且标记文件 token 一致。目录被删除重建（inode 复用）或替换后标记丢失 → false。
 fn root_identity_matches(dir: &Dir, expected: &RootIdentity) -> Result<bool, String> {
     let identity = read_root_identity(dir)?;
-    if identity.volume != expected.volume || identity.file_id != expected.file_id || identity.fallback != expected.fallback {
+    if identity.volume != expected.volume
+        || identity.file_id != expected.file_id
+        || identity.fallback != expected.fallback
+    {
         return Ok(false);
     }
     match &expected.marker {
@@ -1214,7 +1217,8 @@ mod tests {
         let back: RootIdentity = serde_json::from_str(&json).unwrap();
         assert_eq!(identity, back);
 
-        let with_marker = RootIdentity { volume: 123, file_id: 456, fallback: None, marker: Some("dbx-v1:tok".to_string()) };
+        let with_marker =
+            RootIdentity { volume: 123, file_id: 456, fallback: None, marker: Some("dbx-v1:tok".to_string()) };
         let json = serde_json::to_string(&with_marker).unwrap();
         assert_eq!(json, r#"{"volume":123,"fileId":456,"marker":"dbx-v1:tok"}"#);
         let back: RootIdentity = serde_json::from_str(&json).unwrap();

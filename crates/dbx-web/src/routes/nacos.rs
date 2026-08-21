@@ -22,6 +22,8 @@ const NACOS_SEARCH_PROGRESS_BUFFER: usize = 16;
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ConnReq {
     connection_id: String,
+    #[serde(default)]
+    force_refresh: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -36,6 +38,13 @@ pub(crate) struct NamespaceCreateReq {
 pub(crate) struct NamespaceUpdateReq {
     connection_id: String,
     req: dbx_core::nacos::NacosNamespaceUpdate,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NamespaceDeleteReq {
+    connection_id: String,
+    namespace_id: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -264,9 +273,10 @@ pub async fn test_connection(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ConnReq>,
 ) -> Result<Json<dbx_core::nacos::NacosConnectionInfo>, AppError> {
-    let result = dbx_core::nacos::service::nacos_test_connection_core(&state.app, &req.connection_id)
-        .await
-        .map_err(AppError::from)?;
+    let result =
+        dbx_core::nacos::service::nacos_test_connection_core(&state.app, &req.connection_id, req.force_refresh)
+            .await
+            .map_err(AppError::from)?;
     Ok(Json(result))
 }
 
@@ -305,6 +315,16 @@ pub async fn update_namespace(
     Json(req): Json<NamespaceUpdateReq>,
 ) -> Result<Json<()>, AppError> {
     dbx_core::nacos::service::nacos_update_namespace_core(&state.app, &req.connection_id, req.req)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn delete_namespace(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<NamespaceDeleteReq>,
+) -> Result<Json<()>, AppError> {
+    dbx_core::nacos::service::nacos_delete_namespace_core(&state.app, &req.connection_id, req.namespace_id)
         .await
         .map_err(AppError::from)?;
     Ok(Json(()))

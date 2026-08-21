@@ -40,6 +40,7 @@ const DRIVER_STARTUP_FLOOR_TYPES = new Set<DatabaseType>([
   "neo4j",
   "cassandra",
   "bigquery",
+  "spanner",
   "kylin",
   "ignite",
   "ignite3",

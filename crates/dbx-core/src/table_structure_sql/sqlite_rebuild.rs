@@ -1517,6 +1517,7 @@ mod tests {
             table_comment: None,
             original_table_comment: None,
             partitioned: false,
+            is_gaussdb_m_mode: false,
         }
     }
 

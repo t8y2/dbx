@@ -47,7 +47,7 @@ redis = { version = "0.32.2", features = ["tokio-comp", "tls-rustls", "tls-rustl
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 rustls-pemfile = "2.2"
 tiberius = { version = "0.12.3", default-features = false, features = ["tds73", "chrono", "rust_decimal", "rustls", "sql-browser-tokio"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "socks"] }
+reqwest = { version = "0.12", default-features = false, features = ["cookies", "json", "stream", "rustls-tls", "socks"] }
 prometheus-parse = "=0.2.5"
 futures = "0.3"
 mongodb = { version = "3.2.5", features = ["socks5-proxy"] }

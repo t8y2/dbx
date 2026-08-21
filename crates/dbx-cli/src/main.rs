@@ -65,6 +65,7 @@ const BRIDGE_REQUIRED_TYPES: &[&str] = &[
     "neo4j",
     "cassandra",
     "bigquery",
+    "spanner",
     "kylin",
     "ignite",
     "ignite3",

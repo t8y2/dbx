@@ -73,6 +73,7 @@ const assetIcons: Record<string, string> = {
   db2: "db2",
   dremio: "dremio",
   bigquery: "bigquery",
+  spanner: "spanner",
   cassandra: "cassandra",
   doris: "doris",
   manticoresearch: "manticoresearch.png",

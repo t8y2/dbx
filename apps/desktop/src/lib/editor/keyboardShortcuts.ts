@@ -253,6 +253,18 @@ export function isSwitchToNextTabShortcut(event: ShortcutLikeEvent, shortcuts?: 
   return matchesShortcut(event, actionShortcut("switchToNextTab", shortcuts));
 }
 
+/**
+ * JetBrains-style tab switcher: exact match advances forward; adding Shift to
+ * the configured combo (Ctrl+Shift+Tab by default) moves backward. Returns
+ * null when the event is not the switcher shortcut.
+ */
+export function tabSwitcherDirectionFromShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): -1 | 1 | null {
+  const shortcut = actionShortcut("tabSwitcher", shortcuts, platform);
+  if (matchesShortcut(event, shortcut, platform)) return 1;
+  if (event.shiftKey && matchesShortcut({ ...event, shiftKey: false }, shortcut, platform)) return -1;
+  return null;
+}
+
 export function switchToTabIndexFromShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): number | null {
   const normalized = normalizeShortcutSettings(shortcuts);
   const index = SWITCH_TO_TAB_ACTIONS.findIndex((actionId) => matchesShortcut(event, normalized[actionId]));

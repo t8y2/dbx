@@ -511,13 +511,16 @@ fn validate_replayed_commands(snapshot: &NacosAccessControlSnapshot, commands: &
                     .filter(|(bound_username, _)| bound_username == username)
                     .map(|(_, role)| role.clone())
                     .collect();
+                if matches!(command, StepCommand::DeleteCreatedUser { .. }) && !roles.is_empty() {
+                    return Err(format!(
+                        "Cannot undo creation of Nacos user {username} because it now has external role bindings: {}",
+                        roles.join(", ")
+                    ));
+                }
                 for role in roles {
                     let member_count = bindings.iter().filter(|(_, bound_role)| bound_role == &role).count();
                     if role == ADMIN_ROLE && member_count <= 1 {
                         return Err("At least one ROLE_ADMIN member must remain".to_string());
-                    }
-                    if role != ADMIN_ROLE && member_count <= 1 {
-                        return Err(format!("Add another member to {role} before deleting its last member"));
                     }
                 }
                 bindings.retain(|(bound_username, _)| bound_username != username);
@@ -632,8 +635,6 @@ fn plan_operation(
                     return Err("At least one ROLE_ADMIN member must remain".to_string());
                 }
                 validate_admin_member_change(snapshot, &current_members, &desired_members, confirmation.as_deref())?;
-            } else if desired_members.is_empty() {
-                return Err("A role requires at least one member".to_string());
             }
             let desired_permissions: BTreeSet<_> = if role == ADMIN_ROLE {
                 BTreeSet::new()
@@ -677,10 +678,8 @@ fn plan_operation(
             if !snapshot.users.iter().any(|user| user.username == username) {
                 return Err(format!("Nacos user {username} does not exist"));
             }
-            if snapshot.current_username.as_deref() == Some(username.as_str())
-                && confirmation.as_deref() != Some(username.as_str())
-            {
-                return Err("Deleting the current account requires typing the current username".to_string());
+            if confirmation.as_deref() != Some(username.as_str()) {
+                return Err("Deleting a user requires typing its username".to_string());
             }
             let current: BTreeSet<_> = snapshot
                 .role_bindings
@@ -797,7 +796,7 @@ fn validate_role_removals(
 ) -> Result<(), String> {
     for role in current.difference(desired) {
         let count = snapshot.role_bindings.iter().filter(|binding| binding.role == *role).count();
-        if count <= 1 {
+        if role == ADMIN_ROLE && count <= 1 {
             return Err(format!("Add another member to {role} before removing its last member"));
         }
         if role == ADMIN_ROLE
@@ -816,9 +815,6 @@ fn validate_role_removals(
 fn validate_role_removal_count(role: &str, member_count: usize, mode: RoleRemovalMode) -> Result<(), String> {
     if role == ADMIN_ROLE && (mode == RoleRemovalMode::DeleteRole || member_count <= 1) {
         return Err("At least one ROLE_ADMIN member must remain".to_string());
-    }
-    if role != ADMIN_ROLE && mode == RoleRemovalMode::PreserveRole && member_count <= 1 {
-        return Err(format!("Add another member to {role} before removing its last member"));
     }
     Ok(())
 }
@@ -1217,19 +1213,34 @@ mod tests {
     }
 
     #[test]
-    fn deleting_current_account_requires_typed_confirmation_even_without_roles() {
-        let snapshot = snapshot_with_user("nacos");
+    fn deleting_any_user_requires_exact_typed_username_confirmation() {
+        let mut snapshot = snapshot_with_user("alice");
+        snapshot.current_username = None;
         let error = plan_operation(
             &snapshot,
-            NacosAccessOperationRequest::DeleteUser { username: "nacos".to_string(), confirmation: None },
+            NacosAccessOperationRequest::DeleteUser {
+                username: "alice".to_string(),
+                confirmation: Some("Alice".to_string()),
+            },
         )
         .unwrap_err();
-        assert!(error.contains("current account"));
+        assert!(error.contains("typing its username"));
+
+        let (commands, _, _) = plan_operation(
+            &snapshot,
+            NacosAccessOperationRequest::DeleteUser {
+                username: "alice".to_string(),
+                confirmation: Some("alice".to_string()),
+            },
+        )
+        .unwrap();
+        assert!(matches!(commands.as_slice(), [StepCommand::DeleteUser { username }] if username == "alice"));
     }
 
     #[test]
-    fn removing_the_last_regular_role_member_is_rejected() {
+    fn removing_the_last_regular_role_member_preserves_its_permissions() {
         let mut snapshot = snapshot_with_user("alice");
+        snapshot.current_username = None;
         snapshot.role_bindings.push(NacosRoleBinding { username: "alice".to_string(), role: "ops".to_string() });
         snapshot.users[0].roles.push("ops".to_string());
         snapshot.roles.push(NacosRoleSummary {
@@ -1239,7 +1250,7 @@ mod tests {
             complete: true,
             administrator: false,
         });
-        let error = plan_operation(
+        let (commands, _, _) = plan_operation(
             &snapshot,
             NacosAccessOperationRequest::UpdateUserRoles {
                 username: "alice".to_string(),
@@ -1247,8 +1258,12 @@ mod tests {
                 confirmation: None,
             },
         )
-        .unwrap_err();
-        assert!(error.contains("last member"));
+        .unwrap();
+        assert!(matches!(
+            commands.as_slice(),
+            [StepCommand::RemoveRole { username, role, mode: RoleRemovalMode::PreserveRole }]
+                if username == "alice" && role == "ops"
+        ));
     }
 
     #[test]
@@ -1338,8 +1353,7 @@ mod tests {
 
     #[test]
     fn role_removal_modes_distinguish_edits_from_role_deletion() {
-        let preserve_error = validate_role_removal_count("ops", 1, RoleRemovalMode::PreserveRole).unwrap_err();
-        assert!(preserve_error.contains("last member"));
+        assert!(validate_role_removal_count("ops", 1, RoleRemovalMode::PreserveRole).is_ok());
         assert!(validate_role_removal_count("ops", 1, RoleRemovalMode::DeleteRole).is_ok());
 
         let admin_error = validate_role_removal_count(ADMIN_ROLE, 2, RoleRemovalMode::DeleteRole).unwrap_err();

@@ -3263,9 +3263,19 @@ pub fn generate_insert_typed(
         return String::new();
     }
 
-    let template = InsertSqlTemplate::new(columns, table, schema, db_type, catalog, false);
     let value_rows = value_rows_sql(rows, column_types, db_type, false);
-    template.build(&value_rows)
+    generate_insert_typed_from_value_rows(columns, &value_rows, table, schema, db_type, catalog)
+}
+
+pub(crate) fn generate_insert_typed_from_value_rows(
+    columns: &[String],
+    value_rows: &[String],
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    catalog: Option<&str>,
+) -> String {
+    InsertSqlTemplate::new(columns, table, schema, db_type, catalog, false).build(value_rows)
 }
 
 #[derive(Debug)]
@@ -3302,7 +3312,13 @@ impl InsertSqlTemplate {
             return String::new();
         }
         if let Some(into_prefix) = self.oracle_into_prefix.as_deref().filter(|_| value_rows.len() > 1) {
-            let mut sql = String::from("INSERT ALL\n");
+            let capacity = "INSERT ALL\n".len()
+                + into_prefix.len().saturating_mul(value_rows.len())
+                + value_rows.iter().map(String::len).sum::<usize>()
+                + value_rows.len().saturating_sub(1)
+                + "\nSELECT 1 FROM dual".len();
+            let mut sql = String::with_capacity(capacity);
+            sql.push_str("INSERT ALL\n");
             for (index, values) in value_rows.iter().enumerate() {
                 if index > 0 {
                     sql.push('\n');
@@ -3314,8 +3330,17 @@ impl InsertSqlTemplate {
             return sql;
         }
 
-        let mut sql = self.standard_prefix.clone();
-        sql.push_str(&value_rows.join(",\n"));
+        let capacity = self.standard_prefix.len()
+            + value_rows.iter().map(String::len).sum::<usize>()
+            + ",\n".len().saturating_mul(value_rows.len().saturating_sub(1));
+        let mut sql = String::with_capacity(capacity);
+        sql.push_str(&self.standard_prefix);
+        for (index, values) in value_rows.iter().enumerate() {
+            if index > 0 {
+                sql.push_str(",\n");
+            }
+            sql.push_str(values);
+        }
         sql
     }
 
@@ -3350,8 +3375,12 @@ fn value_rows_sql(
 ) -> Vec<String> {
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        let mut vals = Vec::with_capacity(row.len());
+        let mut values = String::with_capacity(row.len().saturating_mul(16).saturating_add(2));
+        values.push('(');
         for (index, v) in row.iter().enumerate() {
+            if index > 0 {
+                values.push_str(", ");
+            }
             let column_type = column_types.get(index).and_then(|value| value.as_deref());
             let value = if mysql_spatial_markers {
                 crate::database_export::format_mysql_spatial_export_literal(v, Some(*db_type), column_type)
@@ -3359,9 +3388,10 @@ fn value_rows_sql(
                 None
             }
             .unwrap_or_else(|| escape_value_typed(v, db_type, column_type));
-            vals.push(value);
+            values.push_str(&value);
         }
-        out.push(format!("({})", vals.join(", ")));
+        values.push(')');
+        out.push(values);
     }
     out
 }
@@ -3714,6 +3744,7 @@ fn generate_transfer_write_sql(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn generate_insert_typed_sql_batches(
     columns: &[String],
     column_types: &[Option<String>],
@@ -3724,18 +3755,21 @@ pub(crate) fn generate_insert_typed_sql_batches(
     catalog: Option<&str>,
     limits: SqlBatchLimits,
 ) -> Result<Vec<(String, usize)>, String> {
-    generate_insert_typed_sql_batches_for_transfer(
-        columns,
-        column_types,
-        rows,
-        table,
-        schema,
-        db_type,
-        catalog,
-        limits,
-        false,
-        false,
-    )
+    let value_rows = value_rows_sql(rows, column_types, db_type, false);
+    generate_insert_typed_sql_batches_from_value_rows(columns, &value_rows, table, schema, db_type, catalog, limits)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn generate_insert_typed_sql_batches_from_value_rows(
+    columns: &[String],
+    value_rows: &[String],
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    catalog: Option<&str>,
+    limits: SqlBatchLimits,
+) -> Result<Vec<(String, usize)>, String> {
+    generate_insert_sql_batches_from_value_rows(columns, value_rows, table, schema, db_type, catalog, limits, false)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3755,6 +3789,34 @@ fn generate_insert_typed_sql_batches_for_transfer(
         return Ok(Vec::new());
     }
 
+    let value_rows = value_rows_sql(rows, column_types, db_type, mysql_spatial_markers);
+    generate_insert_sql_batches_from_value_rows(
+        columns,
+        &value_rows,
+        table,
+        schema,
+        db_type,
+        catalog,
+        limits,
+        overrides_postgres_system_values,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn generate_insert_sql_batches_from_value_rows(
+    columns: &[String],
+    value_rows: &[String],
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    catalog: Option<&str>,
+    limits: SqlBatchLimits,
+    overrides_postgres_system_values: bool,
+) -> Result<Vec<(String, usize)>, String> {
+    if value_rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
     let max_rows = limits.max_rows.max(1).min(match db_type {
         DatabaseType::SqlServer => MAX_SQLSERVER_INSERT_ROWS,
         DatabaseType::Oracle => MAX_ORACLE_INSERT_ALL_ROWS,
@@ -3763,7 +3825,6 @@ fn generate_insert_typed_sql_batches_for_transfer(
     let target_sql_bytes = limits.target_sql_bytes.max(1);
     let batch_sql_bytes = limits.hard_sql_bytes.map_or(target_sql_bytes, |hard| target_sql_bytes.min(hard));
     let template = InsertSqlTemplate::new(columns, table, schema, db_type, catalog, overrides_postgres_system_values);
-    let value_rows = value_rows_sql(rows, column_types, db_type, mysql_spatial_markers);
     let value_row_bytes = value_rows.iter().map(|row| sql_text_bytes(row, db_type)).collect::<Vec<_>>();
     let mut statements = Vec::new();
     let mut start = 0usize;

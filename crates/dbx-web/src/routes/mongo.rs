@@ -367,6 +367,34 @@ pub async fn vector_collection_detail(
     Ok(Json(result))
 }
 
+pub async fn vector_drop_database(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Json(req): Json<MongoCollectionRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    super::mcp_policy::ensure_dangerous_write(&state, &headers, &req.connection_id, &req.database, "Drop database")
+        .await?;
+    ensure_writable(&state.app, &req.connection_id, "Drop database").await?;
+    dbx_core::schema::drop_vector_database_core(&state.app, &req.connection_id, &req.database)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+pub async fn vector_drop_collection(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Json(req): Json<MongoCollectionNameRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    super::mcp_policy::ensure_dangerous_write(&state, &headers, &req.connection_id, &req.database, "Drop collection")
+        .await?;
+    ensure_writable(&state.app, &req.connection_id, "Drop collection").await?;
+    dbx_core::schema::drop_vector_collection_core(&state.app, &req.connection_id, &req.database, &req.collection)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 pub async fn create_database(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MongoCollectionRequest>,

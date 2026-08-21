@@ -1875,10 +1875,17 @@ watch(driverStoreTab, (tab) => {
                   <Button v-else type="button" variant="default" class="rounded-md" :disabled="isInstallingJdbcPlugin" @click="installJdbcPlugin">
                     {{ isInstallingJdbcPlugin ? t("common.loading") : t("settings.jdbcPluginInstall") }}
                   </Button>
-                  <Button type="button" variant="outline" class="rounded-md" :disabled="isInstallingJdbcPlugin || isUninstallingJdbcPlugin" @click="installJdbcPluginLocal">
-                    <FolderOpen class="h-3.5 w-3.5 mr-1" />
-                    {{ t("driverStore.localInstall") }}
-                  </Button>
+                  <Tooltip>
+                    <TooltipTrigger as-child>
+                      <Button type="button" variant="outline" class="rounded-md" :disabled="isInstallingJdbcPlugin || isUninstallingJdbcPlugin" @click="installJdbcPluginLocal">
+                        <FolderOpen class="h-3.5 w-3.5 mr-1" />
+                        {{ t("driverStore.localInstall") }}
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent side="bottom" class="max-w-100 break-all text-xs">
+                      {{ t("driverStore.localInstallHint") }}
+                    </TooltipContent>
+                  </Tooltip>
                 </div>
               </div>
             </div>

@@ -650,6 +650,7 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
                 appendPoolIdentity(identity, "driverPath" + index, driverPaths.get(index));
             }
         }
+        appendPoolIdentity(identity, "driverProfile", params.getDriver_profile());
         return identity.toString();
     }
 

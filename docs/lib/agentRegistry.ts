@@ -134,6 +134,7 @@ const driverLabels: Record<string, string> = {
   rocketmq: "Apache RocketMQ",
   saphana: "SAP HANA",
   snowflake: "Snowflake",
+  spanner: "Cloud Spanner",
   sundb: "SunDB",
   tdengine: "TDengine",
   teradata: "Teradata",

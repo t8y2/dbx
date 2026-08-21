@@ -851,6 +851,21 @@ func TestOpenAndPingDBPreferFallbackUsesOneTimeoutBudget(t *testing.T) {
 	}
 }
 
+func TestOpenAndPingDBPreferFallbackHandlesKingbaseV7TLSFailure(t *testing.T) {
+	state := &connectionAttemptState{pingErrors: map[string]error{
+		"require": errors.New("remote error: tls: handshake failure"),
+	}}
+	db, err := openAndPingDB(connectParams{}, time.Second, state.open)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	attempts, _ := state.snapshot()
+	if strings.Join(attempts, ",") != "require,disable" {
+		t.Fatalf("unexpected KingBase V7 attempts: %v", attempts)
+	}
+}
+
 func TestOpenAndPingDBDoesNotDowngradeUnrelatedErrors(t *testing.T) {
 	authErr := errors.New("authentication failed")
 	state := &connectionAttemptState{pingErrors: map[string]error{"require": authErr}}
@@ -867,6 +882,33 @@ func TestOpenAndPingDBDoesNotDowngradeUnrelatedErrors(t *testing.T) {
 	}
 }
 
+func TestOpenAndPingDBDoesNotDowngradeNetworkErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "timeout", err: context.DeadlineExceeded},
+		{name: "connection refused", err: errors.New("dial tcp 127.0.0.1:54321: connect: connection refused")},
+		{name: "generic handshake", err: errors.New("handshake failure")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			state := &connectionAttemptState{pingErrors: map[string]error{"require": test.err}}
+			db, err := openAndPingDB(connectParams{}, time.Second, state.open)
+			if db != nil {
+				db.Close()
+			}
+			if !errors.Is(err, test.err) {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			attempts, _ := state.snapshot()
+			if strings.Join(attempts, ",") != "require" {
+				t.Fatalf("network errors must not downgrade: %v", attempts)
+			}
+		})
+	}
+}
+
 func TestOpenAndPingDBExplicitModesNeverDowngrade(t *testing.T) {
 	for _, sslMode := range []string{"disable", "require", "verify-ca", "verify-full"} {
 		t.Run(sslMode, func(t *testing.T) {
@@ -876,6 +918,26 @@ func TestOpenAndPingDBExplicitModesNeverDowngrade(t *testing.T) {
 				db.Close()
 			}
 			if !errors.Is(err, gokb.ErrSSLNotSupported) {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			attempts, _ := state.snapshot()
+			if len(attempts) != 1 || attempts[0] != sslMode {
+				t.Fatalf("explicit mode must use one attempt: %v", attempts)
+			}
+		})
+	}
+}
+
+func TestOpenAndPingDBExplicitModesNeverDowngradeKingbaseV7TLSFailure(t *testing.T) {
+	tlsErr := errors.New("remote error: tls: handshake failure")
+	for _, sslMode := range []string{"disable", "require", "verify-ca", "verify-full"} {
+		t.Run(sslMode, func(t *testing.T) {
+			state := &connectionAttemptState{pingErrors: map[string]error{sslMode: tlsErr}}
+			db, err := openAndPingDB(connectParams{URLParams: "sslmode=" + sslMode}, time.Second, state.open)
+			if db != nil {
+				db.Close()
+			}
+			if !errors.Is(err, tlsErr) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			attempts, _ := state.snapshot()
@@ -2284,6 +2346,220 @@ func TestRoutineSourceUsesKingbaseCatalogFunction(t *testing.T) {
 	}
 	if !strings.HasPrefix(source["source"].(string), "CREATE FUNCTION public.format_name()") {
 		t.Fatalf("unexpected routine source: %#v", source)
+	}
+}
+
+func TestMaterializedViewSourceFallsBackFromEmptySysDefinition(t *testing.T) {
+	tests := []struct {
+		name        string
+		primaryRows [][]driver.Value
+	}{
+		{name: "blank definition", primaryRows: [][]driver.Value{{"  \n"}}},
+		{name: "missing definition", primaryRows: [][]driver.Value{}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			const expected = "SELECT product_id, sum(amount) FROM public.sales GROUP BY product_id"
+			state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+				switch {
+				case strings.Contains(query, "sys_get_viewdef("):
+					return &valueRows{columns: []string{"source"}, rows: test.primaryRows}, nil
+				case strings.Contains(query, "pg_get_viewdef("):
+					return &valueRows{columns: []string{"source"}, rows: [][]driver.Value{{expected}}}, nil
+				default:
+					return nil, errors.New("unexpected query: " + query)
+				}
+			}}
+			server := newServer()
+			server.db = openMetadataDB(t, state)
+
+			source, err := server.getObjectSource("public", "daily_sales", "MATERIALIZED_VIEW")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if source["source"] != expected {
+				t.Fatalf("unexpected materialized view source: %#v", source)
+			}
+			queries := state.snapshotQueries()
+			if len(queries) != 2 || !strings.Contains(queries[0], "sys_get_viewdef(") || !strings.Contains(queries[1], "pg_get_viewdef(") {
+				t.Fatalf("unexpected materialized view source fallback: %v", queries)
+			}
+			for _, query := range queries {
+				if !strings.Contains(query, "c.relkind = 'm'") {
+					t.Fatalf("materialized view query was not constrained by relation kind: %s", query)
+				}
+			}
+			if server.usePgViewDefinition {
+				t.Fatal("an empty definition for one materialized view must not change the ordinary-view function cache")
+			}
+		})
+	}
+}
+
+func TestMaterializedViewSourceRejectsEmptyDefinitionAfterFallback(t *testing.T) {
+	tests := []struct {
+		name string
+		rows [][]driver.Value
+	}{
+		{name: "blank definitions", rows: [][]driver.Value{{"\t"}}},
+		{name: "missing definitions", rows: [][]driver.Value{}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+				if strings.Contains(query, "sys_get_viewdef(") || strings.Contains(query, "pg_get_viewdef(") {
+					return &valueRows{columns: []string{"source"}, rows: test.rows}, nil
+				}
+				return nil, errors.New("unexpected query: " + query)
+			}}
+			server := newServer()
+			server.db = openMetadataDB(t, state)
+
+			_, err := server.getObjectSource("public", "daily_sales", "MATERIALIZED_VIEW")
+			if err == nil || !strings.Contains(err.Error(), "materialized view") || !strings.Contains(err.Error(), "empty source") {
+				t.Fatalf("empty materialized view definitions must fail explicitly: %v", err)
+			}
+			if queries := state.snapshotQueries(); len(queries) != 2 {
+				t.Fatalf("expected the bounded sys/pg definition probes, got %v", queries)
+			}
+			if server.usePgViewDefinition {
+				t.Fatal("empty definitions must not change the ordinary-view function cache")
+			}
+		})
+	}
+}
+
+func TestMySQLCompatViewAndMaterializedViewSourcesUseSeparateCatalogs(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		switch {
+		case strings.Contains(query, "information_schema.views") && strings.Contains(query, "table_name = 'active_orders'"):
+			return &valueRows{columns: []string{"view_definition"}, rows: [][]driver.Value{{"SELECT * FROM orders WHERE active"}}}, nil
+		case strings.Contains(query, "information_schema.views"):
+			return nil, errors.New("materialized views must not be read from information_schema.views: " + query)
+		case strings.Contains(query, "sys_get_viewdef(") && strings.Contains(query, "c.relkind = 'm'"):
+			return &valueRows{columns: []string{"source"}, rows: [][]driver.Value{{"SELECT product_id, sum(amount) FROM sales GROUP BY product_id"}}}, nil
+		default:
+			return nil, errors.New("unexpected query: " + query)
+		}
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+	server.mode.mysqlCompat = true
+
+	view, err := server.getObjectSource("app", "active_orders", "VIEW")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view["source"] != "SELECT * FROM orders WHERE active" {
+		t.Fatalf("unexpected ordinary view source: %#v", view)
+	}
+	materialized, err := server.getObjectSource("app", "daily_sales", "MATERIALIZED_VIEW")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(fmt.Sprint(materialized["source"]), "SELECT product_id") {
+		t.Fatalf("unexpected materialized view source: %#v", materialized)
+	}
+	queries := state.snapshotQueries()
+	if len(queries) != 2 || !strings.Contains(queries[0], "information_schema.views") || !strings.Contains(queries[1], "sys_get_viewdef(") {
+		t.Fatalf("view kinds used the wrong metadata paths: %v", queries)
+	}
+}
+
+func TestMaterializedViewSourceUsesPostgresCatalogDirectly(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		if !strings.Contains(query, "SELECT pg_get_viewdef(c.oid)") ||
+			!strings.Contains(query, "FROM pg_catalog.pg_class") ||
+			!strings.Contains(query, "c.relkind = 'm'") {
+			return nil, errors.New("unexpected query: " + query)
+		}
+		return &valueRows{columns: []string{"source"}, rows: [][]driver.Value{{"SELECT * FROM public.sales"}}}, nil
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+	server.mode.postgresCatalog = true
+
+	source, err := server.getObjectSource("public", "daily_sales", "MATERIALIZED_VIEW")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source["source"] != "SELECT * FROM public.sales" {
+		t.Fatalf("unexpected materialized view source: %#v", source)
+	}
+	if queries := state.snapshotQueries(); len(queries) != 1 {
+		t.Fatalf("PostgreSQL catalog mode must use one direct pg_get_viewdef query: %v", queries)
+	}
+}
+
+func TestMaterializedViewUndefinedSysFunctionKeepsPgDefinitionCache(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		switch {
+		case strings.Contains(query, "sys_get_viewdef("):
+			return nil, &gokb.Error{Code: gokb.ErrorCode("42883"), Message: "function sys_get_viewdef(oid) does not exist"}
+		case strings.Contains(query, "pg_get_viewdef("):
+			return &valueRows{columns: []string{"source"}, rows: [][]driver.Value{{"SELECT * FROM public.sales"}}}, nil
+		default:
+			return nil, errors.New("unexpected query: " + query)
+		}
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	if _, err := server.getObjectSource("public", "daily_sales", "MATERIALIZED_VIEW"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.getObjectSource("public", "active_sales", "VIEW"); err != nil {
+		t.Fatal(err)
+	}
+	queries := state.snapshotQueries()
+	if len(queries) != 3 || !strings.Contains(queries[0], "sys_get_viewdef(") ||
+		!strings.Contains(queries[1], "pg_get_viewdef(") || !strings.Contains(queries[2], "pg_get_viewdef(") ||
+		!server.usePgViewDefinition {
+		t.Fatalf("undefined sys_get_viewdef fallback cache changed: %v", queries)
+	}
+}
+
+func TestMaterializedViewSourceDoesNotFallbackOnUnrelatedErrors(t *testing.T) {
+	permissionErr := errors.New("permission denied for sys_class")
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		if strings.Contains(query, "sys_get_viewdef(") {
+			return nil, permissionErr
+		}
+		return nil, errors.New("unexpected fallback query: " + query)
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	_, err := server.getObjectSource("public", "daily_sales", "MATERIALIZED_VIEW")
+	if !errors.Is(err, permissionErr) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if queries := state.snapshotQueries(); len(queries) != 1 || !strings.Contains(queries[0], "sys_get_viewdef(") {
+		t.Fatalf("unrelated error triggered a fallback: %v", queries)
+	}
+}
+
+func TestViewSourceUsesSysDefinitionOnce(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		if !strings.Contains(query, "SELECT sys_get_viewdef(c.oid)") || !strings.Contains(query, "FROM sys_catalog.sys_class") {
+			return nil, errors.New("unexpected query: " + query)
+		}
+		return &valueRows{columns: []string{"source"}, rows: [][]driver.Value{{"SELECT * FROM public.orders WHERE active"}}}, nil
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	source, err := server.getObjectSource("public", "active_orders", "VIEW")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source["source"] != "SELECT * FROM public.orders WHERE active" {
+		t.Fatalf("unexpected view source: %#v", source)
+	}
+	if queries := state.snapshotQueries(); len(queries) != 1 {
+		t.Fatalf("ordinary view source should use one query: %v", queries)
 	}
 }
 

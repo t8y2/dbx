@@ -42,6 +42,14 @@ test("serializes unsaved query tabs with editor context", () => {
   ]);
 });
 
+test("round-trips query transaction mode", () => {
+  const saved = serializeOpenTabs([queryTab({ autoCommit: false })]);
+  const restored = restoreOpenTabsState(JSON.stringify(saved), "tab-1");
+
+  assert.equal(saved[0]?.autoCommit, false);
+  assert.equal(restored.tabs[0]?.autoCommit, false);
+});
+
 test("serializes object source query tabs with save context", () => {
   const saved = serializeOpenTabs([
     queryTab({

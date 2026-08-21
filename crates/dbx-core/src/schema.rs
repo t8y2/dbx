@@ -1089,6 +1089,35 @@ pub async fn get_vector_collection_detail_core(
     db::vector_driver::get_collection_detail(&client, database, collection).await
 }
 
+pub async fn drop_vector_database_core(state: &AppState, connection_id: &str, database: &str) -> Result<(), String> {
+    let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
+    let client = {
+        let connections = state.connections.read().await;
+        match connections.get(&pool_key) {
+            Some(PoolKind::VectorDb(client)) => client.clone(),
+            _ => return Err("Not a vector database connection".to_string()),
+        }
+    };
+    db::vector_driver::drop_database(&client, database).await
+}
+
+pub async fn drop_vector_collection_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+) -> Result<(), String> {
+    let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
+    let client = {
+        let connections = state.connections.read().await;
+        match connections.get(&pool_key) {
+            Some(PoolKind::VectorDb(client)) => client.clone(),
+            _ => return Err("Not a vector database connection".to_string()),
+        }
+    };
+    db::vector_driver::drop_collection(&client, database, collection).await
+}
+
 pub async fn get_table_comment_core(
     state: &AppState,
     connection_id: &str,
@@ -6343,6 +6372,14 @@ async fn list_indexes_core_for_session(
         {
             let connections = state.connections.read().await;
             try_sqlserver!(connections, &pool_key, list_indexes, schema, table);
+            if let Some(PoolKind::ExternalDriver { config, session, .. }) = connections.get(&pool_key) {
+                if external_driver_uses_mysql_ddl(config.as_ref()) {
+                    let config = config.clone();
+                    let session = session.clone();
+                    drop(connections);
+                    return external_driver_gaussdb_m_indexes(session, config.as_ref(), database, schema, table).await;
+                }
+            }
             if let Some(client) = extract_pool!(&connections, &pool_key, Agent) {
                 drop(connections);
                 let mut client = client.lock().await;
@@ -7241,6 +7278,165 @@ fn is_mysql_external_driver_config(config: &ConnectionConfig) -> bool {
 
 fn external_driver_uses_mysql_ddl(config: &ConnectionConfig) -> bool {
     is_mysql_external_driver_config(config) || gaussdb_uses_m_jdbc_driver(config)
+}
+
+async fn external_driver_gaussdb_m_indexes(
+    session: std::sync::Arc<crate::plugins::PluginDriverSession>,
+    config: &ConnectionConfig,
+    database: &str,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<db::IndexInfo>, String> {
+    // Query information_schema.STATISTICS row by row (one row per index column,
+    // ordered by SEQ_IN_INDEX).
+    // Docs: https://support.huaweicloud.com/intl/en-us/centralized-m-comp-devg-v8-gaussdb/gaussdb-81-0134.html
+    // The STATISTICS view has no EXPRESSION column in GaussDB M-mode. Expression
+    // indexes are not supported via this path.
+    let sql = format!(
+        "SELECT INDEX_NAME, COLUMN_NAME, SEQ_IN_INDEX, NON_UNIQUE, \
+                INDEX_TYPE, INDEX_COMMENT, SUB_PART \
+         FROM information_schema.STATISTICS \
+         WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} \
+         ORDER BY INDEX_NAME, SEQ_IN_INDEX",
+        sql_string(schema),
+        sql_string(table),
+    );
+    log::debug!("[gaussdb-m][list_indexes] sql={sql}");
+
+    let timeout = agent_metadata_timeout(Some(config));
+
+    let result: db::QueryResult = session
+        .invoke_with_timeout(
+            "executeQuery",
+            serde_json::json!({
+                "connection": config,
+                "database": database,
+                "schema": schema,
+                "sql": sql,
+                "maxRows": 1000,
+                "fetchSize": 1000,
+                "timeoutSecs": 60,
+            }),
+            timeout,
+        )
+        .await?;
+
+    log::debug!("[gaussdb-m][list_indexes] row_count={}", result.rows.len());
+
+    let col_index: std::collections::HashMap<String, usize> =
+        result.columns.iter().enumerate().map(|(i, name)| (name.to_uppercase(), i)).collect();
+    let get_str = |row: &[serde_json::Value], key: &str| -> String {
+        let upper = key.to_uppercase();
+        col_index.get(&upper).and_then(|&i| row.get(i)).and_then(|v| v.as_str()).unwrap_or("").to_string()
+    };
+    let get_i64 = |row: &[serde_json::Value], key: &str| -> Option<i64> {
+        let upper = key.to_uppercase();
+        col_index.get(&upper).and_then(|&i| row.get(i)).and_then(|v| v.as_i64())
+    };
+
+    let mut indexes: Vec<db::IndexInfo> = Vec::new();
+    let mut current_name = String::new();
+    let mut current_columns: Vec<String> = Vec::new();
+    let mut current_is_expression: Vec<bool> = Vec::new();
+    let mut current_non_unique: i64 = 1;
+    let mut current_index_type: Option<String> = None;
+    let mut current_comment: Option<String> = None;
+
+    for row in &result.rows {
+        let name = get_str(row, "INDEX_NAME");
+        if name.is_empty() {
+            log::debug!("[gaussdb-m][list_indexes] skipping row with empty INDEX_NAME: {:?}", row);
+            continue;
+        }
+
+        if name != current_name {
+            // Finalize previous index
+            if !current_name.is_empty() {
+                let is_primary =
+                    current_name.to_lowercase().ends_with("_pkey") || current_name.eq_ignore_ascii_case("primary");
+                indexes.push(db::IndexInfo {
+                    name: current_name.clone(),
+                    columns: current_columns.clone(),
+                    is_unique: current_non_unique == 0,
+                    is_primary,
+                    filter: None,
+                    index_type: current_index_type.clone(),
+                    included_columns: None,
+                    comment: current_comment.clone(),
+                    key_is_expression: current_is_expression.clone(),
+                });
+            }
+            // Start new index
+            current_name = name;
+            current_columns = Vec::new();
+            current_is_expression = Vec::new();
+            current_non_unique = get_i64(row, "NON_UNIQUE").unwrap_or(1);
+            current_index_type = {
+                let t = get_str(row, "INDEX_TYPE");
+                if t.is_empty() {
+                    None
+                } else {
+                    Some(t)
+                }
+            };
+            current_comment = {
+                let c = get_str(row, "INDEX_COMMENT");
+                if c.is_empty() {
+                    None
+                } else {
+                    Some(c)
+                }
+            };
+        }
+
+        // Build column name with prefix/sub_part suffix
+        let column_name = get_str(row, "COLUMN_NAME");
+        if column_name.is_empty() {
+            continue;
+        }
+
+        // SUB_PART is bigint in STATISTICS; JDBC plugin sends it as JSON number,
+        // but may also be null or string.
+        let sub_part: String = col_index
+            .get("SUB_PART")
+            .and_then(|&i| row.get(i))
+            .and_then(|v| {
+                if v.is_null() {
+                    None
+                } else if let Some(n) = v.as_i64() {
+                    Some(n.to_string())
+                } else {
+                    v.as_str().map(|s| s.to_string())
+                }
+            })
+            .unwrap_or_default();
+
+        if !sub_part.is_empty() && sub_part != "0" && sub_part != "NULL" {
+            // Prefix index: COLUMN_NAME(SUB_PART) like "name(10)"
+            current_columns.push(format!("{}({})", column_name, sub_part));
+        } else {
+            current_columns.push(column_name);
+        }
+        current_is_expression.push(false);
+    }
+
+    // Finalize last index
+    if !current_name.is_empty() {
+        let is_primary = current_name.to_lowercase().ends_with("_pkey") || current_name.eq_ignore_ascii_case("primary");
+        indexes.push(db::IndexInfo {
+            name: current_name,
+            columns: current_columns,
+            is_unique: current_non_unique == 0,
+            is_primary,
+            filter: None,
+            index_type: current_index_type,
+            included_columns: None,
+            comment: current_comment,
+            key_is_expression: current_is_expression,
+        });
+    }
+
+    Ok(indexes)
 }
 
 fn gaussdb_m_view_object_source_sql(

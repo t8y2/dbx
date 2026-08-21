@@ -156,7 +156,9 @@ const previewVisible = computed(() => open.value && !!props.source);
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent class="max-h-[86vh] overflow-y-auto border border-border !bg-background text-foreground shadow-2xl !backdrop-blur-none sm:max-w-[860px]">
+    <!-- 对话框整体限高：高度上限跟随 --dbx-viewport-height（兼容旧版 WebView 中 vh 不准的情况）；
+         内部采用纵向 flex 布局，header/footer 固定，只有中间预览区滚动，保证底部按钮始终可见 -->
+    <DialogContent class="flex max-h-[calc(var(--dbx-viewport-height)-2rem)] flex-col overflow-hidden border border-border !bg-background text-foreground shadow-2xl !backdrop-blur-none sm:max-w-[860px]">
       <DialogHeader>
         <DialogTitle class="flex items-center gap-2">
           <Camera class="h-5 w-5 text-primary" />
@@ -164,11 +166,14 @@ const previewVisible = computed(() => open.value && !!props.source);
         </DialogTitle>
       </DialogHeader>
 
-      <div v-if="previewVisible" class="flex flex-col gap-4 md:flex-row">
+      <!-- min-h-0 flex-1：让内容区占满剩余高度并允许收缩，超高时由预览区内部滚动而不是撑破对话框 -->
+      <div v-if="previewVisible" class="flex min-h-0 flex-1 flex-col gap-4 md:flex-row">
         <!-- Snapshot preview -->
-        <div class="min-w-0 flex-1">
-          <div ref="previewWrapRef" class="max-h-[56vh] overflow-auto rounded-md border bg-muted/30 p-3">
-            <div v-html="snapshotHtml" class="inline-block min-w-[320px]" />
+        <div class="flex min-h-0 min-w-0 flex-1 flex-col">
+          <!-- 预览容器随父级伸缩（flex-1 + min-h-0），代码/图片过长时仅此处出现滚动条 -->
+          <div ref="previewWrapRef" class="min-h-0 flex-1 overflow-auto rounded-md border bg-muted/30 p-3">
+            <!-- 截图内容按代码的固有宽度展开，不跟随外层 flex 容器收缩；外层预览容器负责横向滚动 -->
+            <div v-html="snapshotHtml" class="flex w-max min-w-[320px] flex-none" />
           </div>
         </div>
 

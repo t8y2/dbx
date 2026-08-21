@@ -1594,6 +1594,10 @@ function openSidebarContextMenu(event: MouseEvent, node: TreeNode, openContextMe
 }
 
 function openSidebarDangerDialog(request: SidebarDangerDialogRequest) {
+  if (sidebarDangerRunningExecutionId.value) {
+    toast(t("contextMenu.dangerOperationAlreadyRunning"), 4000);
+    return;
+  }
   sidebarDangerDialogRequest.value = request;
   sidebarDangerDialogConfirming.value = false;
   // Defense in depth: sidebarDangerDialogCancelling is a singleton shared
@@ -2280,7 +2284,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
           :buffer="SIDEBAR_TREE_SCROLL_BUFFER"
           :prerender="SIDEBAR_TREE_PRERENDER_COUNT"
           :skip-hover="true"
-          key-field="id"
+          key-field="renderKey"
           type-field="poolType"
           list-class="connection-tree-content"
           flow-mode

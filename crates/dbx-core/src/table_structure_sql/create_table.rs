@@ -13,6 +13,15 @@ use super::validation::{validate_columns, validate_concurrent_index_scope, valid
 use crate::models::connection::DatabaseType;
 
 pub fn build_create_table_sql(mut options: TableStructureSqlOptions) -> TableStructureSqlResult {
+    let capabilities;
+    let dialect;
+    if options.is_gaussdb_m_mode {
+        capabilities = super::dialect::gaussdb_m_capabilities();
+        dialect = StructureDialect::GaussdbM;
+    } else {
+        capabilities = capabilities_for(options.database_type);
+        dialect = capabilities.dialect;
+    }
     options.table_name = clean(&options.table_name);
     let mut warnings = Vec::new();
     // Fail closed: a concurrent-index request on a partitioned parent (or on an
@@ -31,9 +40,6 @@ pub fn build_create_table_sql(mut options: TableStructureSqlOptions) -> TableStr
     if !warnings.is_empty() {
         return TableStructureSqlResult { statements: Vec::new(), warnings };
     }
-
-    let capabilities = capabilities_for(options.database_type);
-    let dialect = capabilities.dialect;
     let table = qualified_table(dialect, options.schema.as_deref(), &options.table_name);
     if dialect == StructureDialect::Dameng {
         for column in &active_columns {
@@ -100,7 +106,7 @@ pub fn build_create_table_sql(mut options: TableStructureSqlOptions) -> TableStr
     if capabilities.comment {
         let table_comment = clean(options.table_comment.as_deref().unwrap_or(""));
         if !table_comment.is_empty() {
-            if dialect == StructureDialect::Mysql {
+            if matches!(dialect, StructureDialect::Mysql | StructureDialect::GaussdbM) {
                 if let Some(last) = statements.last_mut() {
                     *last = last.replace(");", &format!(") COMMENT = {};", quote_string(&table_comment)));
                 }

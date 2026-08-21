@@ -70,7 +70,6 @@ import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
 import type { ColumnInfo, DatabaseType, TreeNode, TreeNodeType } from "@/types/database";
 import * as api from "@/lib/backend/api";
 import { queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
-import { uuid } from "@/lib/common/utils";
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { connectionUsesVisibleSchemaFilter } from "@/lib/database/visibleDatabases";
 import { canTreeNodePin, canTreeNodeShowExpander } from "@/lib/sidebar/sidebarTreeItemLayout";
@@ -105,6 +104,7 @@ import {
   supportsPackageMemberExpansion,
   usesTreeSchemaMode,
   isSingleDatabase,
+  schemaNodeHasLoadableName,
 } from "@/lib/database/databaseCapabilities";
 import { copyDisplayPathForTreeNode, copyNameForTreeNode, isDirectNavigationTreeNode, isDocumentBrowserTreeNode, isRepeatableNavigationTreeNode, objectSourceTargetForTreeNode, shouldRunTreeNodeRowAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "@/lib/sidebar/treeNodeClick";
 import { customTypeCapabilities, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
@@ -254,6 +254,8 @@ import {
   editNacosNamespaceName,
   editNacosNamespaceDesc,
   editNacosNamespaceLoading,
+  showDeleteNacosNamespaceConfirm,
+  deleteNacosNamespaceLoading,
   createDatabaseCharsetOptions,
   createDatabaseCollationsByCharset,
   createDatabaseCharsetLoading,
@@ -447,7 +449,9 @@ const {
 
 const {
   canDropMongoDatabase,
+  canDropMilvusDatabase,
   canDropMongoCollection,
+  canDropMilvusCollection,
   canRenameMongoCollection,
   canCloneMongoCollection,
   prepareRenameMongoCollectionDialog,
@@ -495,7 +499,10 @@ const {
   confirmCreateNacosNamespace,
   openEditNacosNamespaceDialog,
   confirmEditNacosNamespace,
+  openDeleteNacosNamespaceConfirm,
+  confirmDeleteNacosNamespace,
   dropMongoCollection,
+  dropMilvusCollection,
   dropMongoIndex,
   dropAllMongoIndexes,
   flushRedisDb,
@@ -508,6 +515,8 @@ const {
   confirmFlushRedisDb,
   confirmDropMongoDatabase,
   confirmDropMongoCollection,
+  confirmDropMilvusDatabase,
+  confirmDropMilvusCollection,
   confirmDropMongoIndex,
   confirmDropAllMongoIndexes,
 } = useSidebarDatabaseSpecificMutationRuntime({ activeNode, connectionStore });
@@ -896,7 +905,7 @@ async function toggle(requestId = beginNavigationRequest()) {
       }
     } else if (node.type === "doris-catalog" && node.connectionId) {
       await connectionStore.loadDorisCatalogDatabases(node, treeLoadSearchOptions);
-    } else if (node.type === "schema" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.schema) {
+    } else if (node.type === "schema" && node.connectionId && hasTreeNodeDatabaseContext(node) && schemaNodeHasLoadableName(effectiveDatabaseTypeForConnection(connectionStore.getConfig(node.connectionId)), node.schema)) {
       await connectionStore.loadTables(node.connectionId, node.database, node.schema, treeLoadSearchOptions);
     } else if (node.type === "linked-server-root" && node.connectionId) {
       await connectionStore.loadSqlServerLinkedServers(node.connectionId, treeLoadSearchOptions);
@@ -1284,8 +1293,16 @@ function requestDeleteSelectedNode(): boolean {
     dropDatabase();
     return true;
   }
+  if (canDropMilvusDatabase.value) {
+    dropDatabase();
+    return true;
+  }
   if (canDropMongoCollection.value) {
     dropMongoCollection();
+    return true;
+  }
+  if (canDropMilvusCollection.value) {
+    dropMilvusCollection();
     return true;
   }
   if (canDropSchema.value) {
@@ -1990,6 +2007,8 @@ function dropObjectSqlOptionsForNode(node: TreeNode): DropObjectSqlOptions | nul
     schema: node.schema,
     name: node.objectName || node.label,
     signature: node.signature,
+    // Cloud Spanner's dialect decides the quote; the static per-type mapping cannot.
+    identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
   };
 }
 
@@ -2508,13 +2527,25 @@ function openRenameObjectDialog() {
 async function executeTreeNodeSqlWithProductionGuard(
   node: Pick<TreeNode, "connectionId" | "database" | "schema">,
   sql: string,
-  options: { database?: string; schema?: string; executeAsScript?: boolean; executionId?: string; isCancelledBeforeDispatch?: () => boolean; markDispatched?: () => void } = {},
+  options: {
+    database?: string;
+    schema?: string;
+    executeAsScript?: boolean;
+    executionId?: string;
+    isCancelledBeforeDispatch?: () => boolean;
+    markDispatched?: () => void;
+  } = {},
 ) {
   if (!node.connectionId) return undefined;
   const database = options.database ?? node.database ?? "";
   const config = connectionStore.getConfig(node.connectionId);
+  // Always resolve the connection's configured timeout the same way the
+  // main editor does — independent of whether this call also wires up
+  // Cancel-button UI. Gating this behind an opt-in flag previously left
+  // every non-danger-dialog caller falling back to the backend's hardcoded
+  // 30s default instead of the user's configured (or unlimited) timeout.
   const timeoutSecs = queryTimeoutSecsForConnection(config, settingsStore.editorSettings.globalQueryTimeoutSecs);
-  const executionId = options.executionId ?? uuid();
+  const executionId = options.executionId;
   return executeWithProductionSqlGuard({
     connection: config,
     database,
@@ -2871,6 +2902,8 @@ const canEditNacosNamespace = computed(() => {
   return config?.db_type === "nacos" && !config.read_only;
 });
 
+const canDeleteNacosNamespace = computed(() => canEditNacosNamespace.value);
+
 const isDuckDbConnection = computed(() => {
   const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
   return activeNode.value.type === "connection" && config?.db_type === "duckdb" && connectionNamespaceCreationTarget(config) === "attach";
@@ -2940,6 +2973,10 @@ async function refreshDropDatabasePreviewSql() {
   const node = activeNode.value;
   if (node.type === "mongo-db") {
     dropDatabasePreviewSql.value = `db.getSiblingDB(${JSON.stringify(node.label)}).dropDatabase();`;
+    return;
+  }
+  if (node.type === "vector-database") {
+    dropDatabasePreviewSql.value = `POST /v2/vectordb/databases/drop\n{"dbName":${JSON.stringify(node.database || node.label)}}`;
     return;
   }
   dropDatabasePreviewSql.value = "";
@@ -3510,6 +3547,10 @@ async function confirmDropDatabase() {
     await confirmDropMongoDatabase();
     return;
   }
+  if (node.type === "vector-database") {
+    await confirmDropMilvusDatabase();
+    return;
+  }
 
   const connectionId = node.connectionId;
   if (!connectionId || dropDatabaseLoading.value) return;
@@ -3638,6 +3679,7 @@ async function confirmDuplicateStructure() {
       sourceName: node.label,
       targetName: newName,
       tableComment: node.comment,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
     });
     await executeTreeNodeSqlWithProductionGuard(node, plan.sql, {
       database: node.database,
@@ -3688,6 +3730,7 @@ async function confirmPasteTable() {
           sourceName: entry.sourceName,
           targetName,
           tableComment: entry.tableComment,
+          identifierQuote: connectionStore.connectionIdentifierQuote?.(entry.connectionId),
         });
         sourceColumns = plan.sourceColumns;
         const structureExecuted = await executeTreeNodeSqlWithProductionGuard(entry, plan.sql, {
@@ -3716,6 +3759,7 @@ async function confirmPasteTable() {
           sourceName: entry.sourceName,
           targetName,
           normalizeNewTargetName: mode === "structure-and-data",
+          identifierQuote: connectionStore.connectionIdentifierQuote?.(entry.connectionId),
           ...dataCopyColumnOptions,
         });
         const dataExecuted = await executeTreeNodeSqlWithProductionGuard(entry, dataSql, { database: entry.database, schema: entry.schema });
@@ -4244,7 +4288,7 @@ routeDangerDialog(showDropMongoCollectionConfirm, () =>
       return dropMongoCollectionLoading.value;
     },
     closeOnConfirm: false,
-    confirm: confirmDropMongoCollection,
+    confirm: () => (activeNode.value.type === "vector-collection" ? confirmDropMilvusCollection() : confirmDropMongoCollection()),
   }),
 );
 
@@ -4412,6 +4456,9 @@ function databaseSpecificDialogCapabilities() {
     editNacosNamespaceDesc,
     editNacosNamespaceLoading,
     confirmEditNacosNamespace,
+    showDeleteNacosNamespaceConfirm,
+    deleteNacosNamespaceLoading,
+    confirmDeleteNacosNamespace,
     showRenameMongoCollectionDialog,
     renameMongoCollectionName,
     renameMongoCollectionError,
@@ -5034,7 +5081,7 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     return true;
   }
 
-  if (node.type === "redis-db" || node.type === "mongo-db") {
+  if (node.type === "redis-db" || node.type === "mongo-db" || node.type === "vector-database") {
     items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
     if (!isNodeDefaultDatabase.value) {
       items.push({ label: t("contextMenu.setDefaultDatabase"), action: setNodeAsDefaultDatabase, icon: Database });
@@ -5050,7 +5097,7 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       items.push({ label: t("redis.setDatabaseAlias"), action: openRedisDatabaseAliasDialog, icon: Pencil });
       items.push({ label: t("redis.flushDb"), action: flushRedisDb, icon: Eraser, variant: "destructive" as const });
     }
-    if (canDropMongoDatabase.value) {
+    if (canDropMongoDatabase.value || canDropMilvusDatabase.value) {
       items.push({ label: "", separator: true });
       items.push({
         label: t("contextMenu.dropDatabase"),
@@ -5076,6 +5123,16 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     });
     items.push({ label: "", separator: true });
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+    if (canDeleteNacosNamespace.value) {
+      items.push({ label: "", separator: true });
+      items.push({
+        label: t("nacos.deleteNamespace"),
+        action: openDeleteNacosNamespaceConfirm,
+        icon: Trash2,
+        shortcut: shortcutDelete,
+        variant: "destructive" as const,
+      });
+    }
     return true;
   }
 
@@ -5119,6 +5176,10 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     items.push({ label: "", separator: true });
     items.push({ label: t("contextMenu.viewData"), action: toggle, icon: TableProperties });
     items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+    if (canDropMilvusCollection.value) {
+      items.push({ label: "", separator: true });
+      items.push({ label: t("contextMenu.dropCollection"), action: dropMilvusCollection, icon: Trash2, shortcut: shortcutDelete, variant: "destructive" as const });
+    }
     return true;
   }
 

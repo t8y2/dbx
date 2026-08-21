@@ -149,6 +149,7 @@ import type {
   DataGridColumnValueFilterConditionOptions,
   DataGridColumnValuesFilterConditionOptions,
   DataGridContextFilterConditionOptions,
+  DataGridConditionalUpdateSqlOptions,
   DataGridCountSqlOptions,
   DataGridCopyInsertStatementOptions,
   DataGridCopyUpdateStatementOptions,
@@ -406,6 +407,10 @@ export async function sessionCredentialStatus(connectionId: string): Promise<boo
 
 export async function forgetSessionCredential(connectionId: string): Promise<void> {
   return post("/api/connection/forget-session-credential", { connectionId });
+}
+
+export async function replaceNacosSessionCredential(connectionId: string, username: string, password: string): Promise<void> {
+  return post("/api/connection/replace-nacos-session-credential", { connectionId, username, password });
 }
 
 export async function checkConnectionHealth(connectionId: string): Promise<void> {
@@ -1028,6 +1033,34 @@ export async function executeQuery(
   });
 }
 
+export async function executeConditionalUpdate(
+  connectionId: string,
+  database: string,
+  sql: string,
+  schema?: string,
+  executionId?: string,
+  options?: {
+    maxRows?: number;
+    catalog?: string;
+    fetchSize?: number;
+    pageSize?: number;
+    rowOffset?: number;
+    resultSessionId?: string;
+    clientSessionId?: string;
+    timeoutSecs?: number;
+    executionMode?: "simple" | "postgres_read_only_transaction";
+  },
+): Promise<QueryResult> {
+  return post("/api/query/execute-conditional-update", {
+    connectionId,
+    database,
+    sql,
+    schema,
+    executionId,
+    ...options,
+  });
+}
+
 export async function executeMulti(
   connectionId: string,
   database: string,
@@ -1198,6 +1231,15 @@ export async function rollbackManualTransaction(_txnSessionId: string): Promise<
 export async function cancelQuery(executionId: string): Promise<boolean> {
   const result = await post<boolean | { cancelled?: boolean }>("/api/query/cancel", { executionId });
   return typeof result === "boolean" ? result : result.cancelled === true;
+}
+
+export interface ConditionalUpdateCancellationResult {
+  requested: boolean;
+  terminal: boolean;
+}
+
+export async function cancelConditionalUpdate(executionId: string): Promise<ConditionalUpdateCancellationResult> {
+  return post("/api/query/cancel-conditional-update", { executionId });
 }
 
 export async function analyzeSqlReferences(sql: string, dialect?: string): Promise<SqlReferenceAnalysis> {
@@ -1429,6 +1471,11 @@ export async function buildDataGridColumnDistinctValuesSql(options: DataGridColu
 
 export async function buildDataGridCountSql(options: DataGridCountSqlOptions): Promise<string> {
   return post("/api/query/build-data-grid-count-sql", { options });
+}
+
+export async function buildDataGridConditionalUpdateSql(options: DataGridConditionalUpdateSqlOptions): Promise<string | undefined> {
+  const result = await post<string | null>("/api/query/build-data-grid-conditional-update-sql", { options });
+  return result ?? undefined;
 }
 
 export async function buildHiveTablePropertiesSql(options: HiveTablePropertiesSqlOptions): Promise<string> {
@@ -3215,8 +3262,8 @@ export async function consulMeshExportedServicesApply(connectionId: string, name
 // Nacos
 // ---------------------------------------------------------------------------
 
-export async function nacosTestConnection(connectionId: string): Promise<NacosConnectionInfo> {
-  return post("/api/nacos/test-connection", { connectionId });
+export async function nacosTestConnection(connectionId: string, forceRefresh = false): Promise<NacosConnectionInfo> {
+  return post("/api/nacos/test-connection", { connectionId, forceRefresh });
 }
 
 export async function nacosListNamespaces(connectionId: string): Promise<NacosNamespaceInfo[]> {
@@ -3233,6 +3280,10 @@ export async function nacosCreateNamespace(connectionId: string, req: NacosNames
 
 export async function nacosUpdateNamespace(connectionId: string, req: NacosNamespaceUpdate): Promise<void> {
   return post("/api/nacos/namespaces/update", { connectionId, req });
+}
+
+export async function nacosDeleteNamespace(connectionId: string, namespaceId: string): Promise<void> {
+  return post("/api/nacos/namespaces/delete", { connectionId, namespaceId });
 }
 
 export async function nacosListConfigs(connectionId: string, query: NacosConfigQuery): Promise<NacosConfigList> {
@@ -3587,6 +3638,14 @@ export async function vectorGetCollectionDetail(connectionId: string, database: 
     database,
     collection,
   });
+}
+
+export async function vectorDropDatabase(connectionId: string, database: string): Promise<void> {
+  await post("/api/vector/drop-database", { connectionId, database });
+}
+
+export async function vectorDropCollection(connectionId: string, database: string, collection: string): Promise<void> {
+  await post("/api/vector/drop-collection", { connectionId, database, collection });
 }
 
 export async function mongoFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, projection?: string, sort?: string, collation?: string, executionId?: string): Promise<MongoDocumentResult> {

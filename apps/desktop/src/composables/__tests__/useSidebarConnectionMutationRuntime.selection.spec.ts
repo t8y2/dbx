@@ -40,6 +40,18 @@ function connectionGroupNode(groupId: string): TreeNode {
   };
 }
 
+function vectorDatabaseNode(database: string): TreeNode {
+  return {
+    id: `conn-1:${database}`,
+    label: database,
+    type: "vector-database",
+    connectionId: "conn-1",
+    database,
+    isExpanded: false,
+    children: [],
+  };
+}
+
 function connectionStore(selectedTreeNodeIds: string[]) {
   const lastSelectedTreeNodeId = selectedTreeNodeIds[selectedTreeNodeIds.length - 1] ?? null;
   return {
@@ -57,6 +69,7 @@ function connectionStore(selectedTreeNodeIds: string[]) {
     disconnect: vi.fn().mockResolvedValue(undefined),
     isTreeNodeChildrenLoaded: vi.fn(() => false),
     getConfig: vi.fn(() => undefined),
+    isDefaultDatabase: vi.fn(() => false),
   };
 }
 
@@ -72,6 +85,22 @@ function runtime(activeNode: TreeNode, store: ReturnType<typeof connectionStore>
     openVisibleSchemas: vi.fn(),
   });
 }
+
+describe("sidebar default database state", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    sidebarFormTarget.value = null;
+  });
+
+  it("recognizes the configured Milvus vector database as default", () => {
+    const store = connectionStore([]);
+    store.isDefaultDatabase.mockReturnValue(true);
+    const { isNodeDefaultDatabase } = runtime(vectorDatabaseNode("analytics"), store);
+
+    expect(isNodeDefaultDatabase.value).toBe(true);
+    expect(store.isDefaultDatabase).toHaveBeenCalledWith("conn-1", "analytics");
+  });
+});
 
 describe("sidebar connection move selection", () => {
   beforeEach(() => {

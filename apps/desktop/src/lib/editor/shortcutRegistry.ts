@@ -38,6 +38,7 @@ export type ShortcutActionId =
   | "quickOpen"
   | "navigateTabHistoryBack"
   | "navigateTabHistoryForward"
+  | "tabSwitcher"
   | "switchToPreviousTab"
   | "switchToNextTab"
   | "switchToTab1"
@@ -325,6 +326,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutNavigateTabHistoryForward",
     scope: "global",
     defaultShortcut: tabNavigationHistoryDefaultShortcut("forward"),
+  },
+  {
+    id: "tabSwitcher",
+    labelKey: "settings.shortcutTabSwitcher",
+    scope: "global",
+    defaultShortcut: "Ctrl+Tab",
   },
   {
     id: "switchToPreviousTab",

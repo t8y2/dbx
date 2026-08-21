@@ -51,6 +51,16 @@ describe("nacosAdmin helpers", () => {
       contextPath: "/nacos",
       detectedVersion: "v3",
     });
+    expect(normalizeNacosEndpoint("http://127.0.0.1:8080", { implementation: "nacos", versionMode: "v3", apiPlane: "console" })).toMatchObject({
+      serverAddr: "http://127.0.0.1:8080",
+      contextPath: "",
+      detectedVersion: "v3",
+    });
+    expect(normalizeNacosEndpoint("http://127.0.0.1:18080/console", { implementation: "nacos", versionMode: "v3", apiPlane: "console" })).toMatchObject({
+      serverAddr: "http://127.0.0.1:18080",
+      contextPath: "/console",
+      detectedVersion: "v3",
+    });
     expect(normalizeNacosEndpoint("http://127.0.0.1:8848", { implementation: "nacos", versionMode: "v3", contextPath: "/" })).toMatchObject({
       serverAddr: "http://127.0.0.1:8848",
       contextPath: "/",

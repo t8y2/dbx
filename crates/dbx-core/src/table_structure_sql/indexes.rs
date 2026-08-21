@@ -5,8 +5,17 @@ use super::util::{clean, qualified_table, quote_ident, quote_string};
 use crate::models::connection::DatabaseType;
 
 pub(super) fn build_index_sql(options: &TableStructureSqlOptions, warnings: &mut Vec<String>) -> Vec<String> {
-    let capabilities = capabilities_for(options.database_type);
-    let dialect = capabilities.dialect;
+    let capabilities;
+    let dialect;
+    if options.is_gaussdb_m_mode {
+        let caps = super::dialect::gaussdb_m_capabilities();
+        capabilities = caps;
+        dialect = StructureDialect::GaussdbM;
+    } else {
+        let caps = capabilities_for(options.database_type);
+        capabilities = caps;
+        dialect = caps.dialect;
+    }
     let table = qualified_table(dialect, options.schema.as_deref(), &options.table_name);
     let database_label = database_label(options.database_type);
     let mut statements = Vec::new();
@@ -122,6 +131,29 @@ pub(super) fn mysql_index_parts(index_type: &str) -> (String, String) {
         "BTREE" | "HASH" => (String::new(), format!(" USING {}", index_type.to_ascii_uppercase())),
         _ => (String::new(), String::new()),
     }
+}
+
+fn gaussdbm_index_parts(index_type: &str) -> (String, String) {
+    match index_type.to_ascii_uppercase().as_str() {
+        "BTREE" | "UBTREE" => (String::new(), " USING UBTREE".to_string()),
+        "HASH" => (String::new(), " USING HASH".to_string()),
+        _ => (String::new(), String::new()),
+    }
+}
+
+fn gaussdbm_index_column_sql(column: &str, is_expression: bool) -> String {
+    let trimmed = column.trim();
+    if is_expression {
+        return trimmed.to_string();
+    }
+    if let Some((name, suffix)) = trimmed.rsplit_once('(') {
+        if let Some(length) = suffix.strip_suffix(')') {
+            if !name.trim().is_empty() && !length.is_empty() && length.chars().all(|ch| ch.is_ascii_digit()) {
+                return format!("{}({length})", quote_ident(StructureDialect::GaussdbM, name.trim()));
+            }
+        }
+    }
+    quote_ident(StructureDialect::GaussdbM, trimmed)
 }
 
 fn mysql_index_column_sql(column: &str) -> String {
@@ -246,6 +278,8 @@ pub(super) fn build_create_index_statements(
         .map(|(i, column)| {
             if dialect == StructureDialect::Mysql {
                 mysql_index_column_sql(column)
+            } else if dialect == StructureDialect::GaussdbM {
+                gaussdbm_index_column_sql(column, key_is_expression[i])
             } else if dialect == StructureDialect::Postgres {
                 postgres_index_column_sql(column, key_is_expression[i])
             } else {
@@ -270,6 +304,11 @@ pub(super) fn build_create_index_statements(
             StructureDialect::Oracle | StructureDialect::Dameng if idx_type == "BITMAP" => {
                 type_prefix = "BITMAP ".to_string()
             }
+            StructureDialect::GaussdbM => {
+                let (prefix, using) = gaussdbm_index_parts(&idx_type);
+                type_prefix = prefix;
+                using_clause = using;
+            }
             _ => {}
         }
     }
@@ -288,7 +327,10 @@ pub(super) fn build_create_index_statements(
         String::new()
     };
     let comment = clean(&index.comment);
-    let comment_clause = if !comment.is_empty() && capabilities.index_comment && dialect == StructureDialect::Mysql {
+    let comment_clause = if !comment.is_empty()
+        && capabilities.index_comment
+        && matches!(dialect, StructureDialect::Mysql | StructureDialect::GaussdbM)
+    {
         format!(" COMMENT {}", quote_string(&comment))
     } else {
         String::new()
@@ -322,8 +364,11 @@ pub(super) fn build_create_index_statements(
         statements.push(format!("COMMENT ON INDEX {} IS {};", quote_ident(dialect, &name), quote_string(&comment)));
     } else if !comment.is_empty() && capabilities.index_comment && dialect == StructureDialect::SqlServer {
         statements.extend(build_sqlserver_index_comment_sql(table, schema, table_name, &name, &comment));
-    } else if !comment.is_empty() && capabilities.index_comment && dialect == StructureDialect::Mysql {
-        // MySQL comment is embedded inline in the CREATE INDEX statement above
+    } else if !comment.is_empty()
+        && capabilities.index_comment
+        && matches!(dialect, StructureDialect::Mysql | StructureDialect::GaussdbM)
+    {
+        // Comment is embedded inline in the CREATE INDEX statement above
     } else if !comment.is_empty() && capabilities.index_comment {
         warnings.push(format!("Index comments are not supported for {} from this editor.", dialect_label(dialect)));
     }

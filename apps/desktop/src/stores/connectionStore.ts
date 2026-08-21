@@ -68,9 +68,19 @@ import { mergeSqlObjectNavigationType, sqlObjectNavigationTypeFromTableType } fr
 import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
-import { connectionIsDorisFamilyCatalogCapable, isInternalDorisCatalog, isSchemaAware, normalizeSidebarObjectKind, sidebarObjectKindsForDatabase, supportsPackageMemberExpansion, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
-import { connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionShouldDiscoverJdbcSchemas, connectionShouldLoadIdentifierQuote, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, gaussdbIdentifierQuoteOverride } from "@/lib/database/jdbcDialect";
+import { connectionIsDorisFamilyCatalogCapable, isInternalDorisCatalog, isSchemaAware, normalizeSidebarObjectKind, schemaNodeHasLoadableName, sidebarObjectKindsForDatabase, supportsPackageMemberExpansion, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
+import {
+  connectionDatabaseMetadataSchema,
+  connectionObjectTreeNodeSchema,
+  connectionObjectTreeQuerySchema,
+  connectionShouldDiscoverJdbcSchemas,
+  connectionShouldLoadIdentifierQuote,
+  connectionUsesDatabaseObjectTreeMode,
+  effectiveDatabaseTypeForConnection,
+  gaussdbIdentifierQuoteOverride,
+} from "@/lib/database/jdbcDialect";
 import { buildDatabaseTreeNodes, buildDuckDbConnectionTreeNodes, compareSidebarNames, sortSidebarDatabases, sortSidebarNames, shouldIncludeDefaultDatabaseNode } from "@/lib/database/databaseTree";
+import { spannerDisplayDatabase, spannerSchemaDisplayName } from "@/lib/connection/spannerResourcePath";
 import { buildSqlServerDatabaseTreeNodes } from "@/lib/database/sqlServerTree";
 import { collapseExpandedTreeNodes } from "@/lib/sidebar/sidebarTreeCollapse";
 import { findNodePathByIdentity, nodeMatchesRegexScopeIdentity, type SidebarRegexScopeIdentity } from "@/lib/sidebar/sidebarSearchTree";
@@ -361,7 +371,19 @@ export const useConnectionStore = defineStore("connection", () => {
   let savedSqlFilesByDatabase = indexSavedSqlFilesByDatabase(savedSqlStore.allFiles);
   const connections = ref<ConnectionConfig[]>([]);
   const isDesktop = isTauriRuntime();
-  const activeConnectionId = ref<string | null>(localStorage.getItem(ACTIVE_CONNECTION_STORAGE_KEY));
+  // Prefer a safe read so Node/vitest (missing or partial storage mocks) do not
+  // throw when query tabs resolve connection db_type defaults via this store.
+  const activeConnectionId = ref<string | null>(
+    (() => {
+      try {
+        const storage = globalThis.localStorage;
+        if (!storage || typeof storage.getItem !== "function") return null;
+        return storage.getItem(ACTIVE_CONNECTION_STORAGE_KEY);
+      } catch {
+        return null;
+      }
+    })(),
+  );
   const selectedTreeNodeId = ref<string | null>(null);
   const selectedTreeNodeIds = ref<string[]>([]);
   // O(1) membership set — rebuilds only when selectedTreeNodeIds changes.
@@ -376,8 +398,14 @@ export const useConnectionStore = defineStore("connection", () => {
   const treeClipboard = ref<TreeClipboard | null>(null);
 
   watch(activeConnectionId, (id) => {
-    if (id) localStorage.setItem(ACTIVE_CONNECTION_STORAGE_KEY, id);
-    else localStorage.removeItem(ACTIVE_CONNECTION_STORAGE_KEY);
+    try {
+      const storage = globalThis.localStorage;
+      if (!storage || typeof storage.setItem !== "function" || typeof storage.removeItem !== "function") return;
+      if (id) storage.setItem(ACTIVE_CONNECTION_STORAGE_KEY, id);
+      else storage.removeItem(ACTIVE_CONNECTION_STORAGE_KEY);
+    } catch {
+      // Ignore storage failures in non-browser / partial mock environments.
+    }
   });
   const treeNodes = ref<TreeNode[]>([]);
   const sidebarDatabaseStorageCache = new Map<string, { expiresAt: number; value: DatabaseStorageInfo[] }>();
@@ -1149,6 +1177,7 @@ export const useConnectionStore = defineStore("connection", () => {
       neo4j: "Neo4j",
       cassandra: "Cassandra",
       bigquery: "BigQuery",
+      spanner: "Cloud Spanner",
       kylin: "Kylin",
       ignite: "Apache Ignite",
       ignite3: "Apache Ignite 3",
@@ -1602,11 +1631,17 @@ export const useConnectionStore = defineStore("connection", () => {
     return ownerAwareMetadataCacheVersion(config, scopedVersion);
   }
 
-  function sortSidebarSchemaInfos(schemas: readonly SchemaInfo[]): SchemaInfo[] {
+  /**
+   * The blank guard drops junk entries reported by drivers that pad their schema list. Cloud Spanner
+   * is the exception: in GoogleSQL the empty string *is* the name of the user schema, so dropping it
+   * hides every table that is not in a named schema. `keepBlankSchema` is therefore opt-in per
+   * database type rather than a global relaxation.
+   */
+  function sortSidebarSchemaInfos(schemas: readonly SchemaInfo[], keepBlankSchema = false): SchemaInfo[] {
     const byName = new Map<string, SchemaInfo>();
     for (const schema of schemas) {
       const name = schema.name.trim();
-      if (!name) continue;
+      if (!name && !keepBlankSchema) continue;
       byName.set(name, { name, comment: schema.comment ?? null });
     }
     return sortXuguSchemaInfos([...byName.values()], compareSidebarNames);
@@ -3880,6 +3915,9 @@ export const useConnectionStore = defineStore("connection", () => {
               const effectiveDbType = effectiveDatabaseTypeForConnection(config);
               const databaseNodes = buildDatabaseTreeNodes(connectionId, visibleDatabases, {
                 includeDefaultWhenEmpty: usesTreeSchemaMode(effectiveDbType) || shouldIncludeDefaultDatabaseNode(config, visibleDatabases),
+                // Cloud Spanner reports the full resource path as the database
+                // name; show only the database id so the sidebar stays readable.
+                displayLabel: effectiveDbType === "spanner" ? spannerDisplayDatabase : undefined,
               });
               if (config?.db_type === "sqlserver") {
                 const linkedServers = await withMetadataLoadTimeout(connectionId, api.listSqlServerLinkedServers(connectionId), "linked servers").catch(() => []);
@@ -4588,7 +4626,7 @@ export const useConnectionStore = defineStore("connection", () => {
             }
           }
 
-          const schemas = sortSidebarSchemaInfos(await withMetadataLoadTimeout(connectionId, api.listSchemaInfos(connectionId, database), "schemas"));
+          const schemas = sortSidebarSchemaInfos(await withMetadataLoadTimeout(connectionId, api.listSchemaInfos(connectionId, database), "schemas"), effectiveDatabaseTypeForConnection(config) === "spanner");
           const visibleSchemaNames = new Set(
             filterSchemaNamesForConnection(
               schemas.map((schema) => schema.name),
@@ -4609,7 +4647,7 @@ export const useConnectionStore = defineStore("connection", () => {
               const s = schema.name;
               return {
                 id: `${connectionId}:${database}:${s}`,
-                label: config?.db_type === "xugu" ? xuguSchemaDisplayName(s) : s,
+                label: config?.db_type === "xugu" ? xuguSchemaDisplayName(s) : config?.db_type === "spanner" ? spannerSchemaDisplayName(s) : s,
                 type: "schema" as const,
                 connectionId,
                 database,
@@ -4961,7 +4999,11 @@ export const useConnectionStore = defineStore("connection", () => {
       nodeKind: simpleObjectDisplayForScope ? "simple-tables" : "group-tables",
     });
     if (!options?.force && simpleObjectDisplayForScope && !searchFilter && !options?.sidebarTableSearchParentId && !tableNameFilterForScope) {
-      const nodeId = schema ? `${connectionId}:${database}:${schema}` : `${connectionId}:${database}`;
+      // `schema != null`, not truthiness: Cloud Spanner's GoogleSQL default schema is the empty
+      // string, and its node id carries the trailing separator (`conn:db:`). A truthiness test
+      // collapses that to the database node id, so the loaded tables were attached to the
+      // database node instead of the schema node, leaving `(default)` permanently empty.
+      const nodeId = schema != null ? `${connectionId}:${database}:${schema}` : `${connectionId}:${database}`;
       const cacheKey = schemaCacheKey(connectionId, database, schema || "", objectTreeCacheVersion(configForScope, schema, "objects-simple-v8"));
       if (await hydrateTreeNodeFromCache(findNode(treeNodes.value, nodeId), cacheKey)) {
         void loadTables(connectionId, database, schema, { ...options, force: true }).catch(() => undefined);
@@ -4974,7 +5016,7 @@ export const useConnectionStore = defineStore("connection", () => {
         connectionId,
         database,
         schema,
-        nodeKind: schema ? "schema" : "database",
+        nodeKind: schema != null ? "schema" : "database",
         objectTypes: objectTypesForScope,
         searchFilter: activeTreeLoadSearchFilter(options),
         limit: simpleObjectDisplayForScope ? sidebarObjectGroupPageSize() + 1 : undefined,
@@ -4984,7 +5026,11 @@ export const useConnectionStore = defineStore("connection", () => {
         extra: options?.sidebarTableSearchParentId ? { sidebarTableSearchParentId: options.sidebarTableSearchParentId } : undefined,
       },
       async () => {
-        const nodeId = schema ? `${connectionId}:${database}:${schema}` : `${connectionId}:${database}`;
+        // `schema != null`, not truthiness: Cloud Spanner's GoogleSQL default schema is the empty
+        // string, and its node id carries the trailing separator (`conn:db:`). A truthiness test
+        // collapses that to the database node id, so the loaded tables were attached to the
+        // database node instead of the schema node, leaving `(default)` permanently empty.
+        const nodeId = schema != null ? `${connectionId}:${database}:${schema}` : `${connectionId}:${database}`;
         const node = findNode(treeNodes.value, nodeId);
         if (!node) return;
         let load = beginTreeNodeLoad(node);
@@ -6107,7 +6153,7 @@ export const useConnectionStore = defineStore("connection", () => {
           await loadTables(node.connectionId, node.database, undefined, options);
         }
       }
-    } else if (node.type === "schema" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.schema) {
+    } else if (node.type === "schema" && node.connectionId && hasTreeNodeDatabaseContext(node) && schemaNodeHasLoadableName(effectiveDatabaseTypeForConnection(getConfig(node.connectionId)), node.schema)) {
       await loadTables(node.connectionId, node.database, node.schema, options);
     } else if (node.type === "linked-server-root" && node.connectionId) {
       await loadSqlServerLinkedServers(node.connectionId, options);
@@ -7135,7 +7181,7 @@ export const useConnectionStore = defineStore("connection", () => {
           return completionTablesCache.value[cacheKey];
         }
 
-        const querySchema = catalog ? "" : database;
+        const querySchema = catalog ? "" : connectionDatabaseMetadataSchema(getConfig(connectionId), database);
         let tables = await listCompletionTableMetadata(connectionId, database, querySchema, trimmedFilter, limit, catalog);
         if (tables.length === 0 && relaxedFilter) {
           tables = await listCompletionTableMetadata(connectionId, database, querySchema, relaxedFilter, expandedCompletionLimit(limit), catalog);
@@ -7214,12 +7260,12 @@ export const useConnectionStore = defineStore("connection", () => {
               if (objectKinds.length === 1 && objectKinds[0] === "sequence") {
                 completionObjectsCache.value[cacheKey] = [];
               } else {
-                const objects = isSchemaAwareDatabase(connectionId) ? await listSchemaAwareCompletionObjects(connectionId, database, schema) : await api.listCompletionObjects(connectionId, database, schema || database);
+                const objects = isSchemaAwareDatabase(connectionId) ? await listSchemaAwareCompletionObjects(connectionId, database, schema) : await api.listCompletionObjects(connectionId, database, connectionDatabaseMetadataSchema(getConfig(connectionId), database, schema));
                 completionObjectsCache.value[cacheKey] = dedupeCompletionObjects(objects.map(toSqlCompletionObject).filter((object): object is SqlCompletionObject => object != null));
               }
             }
           } else {
-            const objects = isSchemaAwareDatabase(connectionId) ? await listSchemaAwareCompletionObjects(connectionId, database, schema) : await api.listCompletionObjects(connectionId, database, schema || database);
+            const objects = isSchemaAwareDatabase(connectionId) ? await listSchemaAwareCompletionObjects(connectionId, database, schema) : await api.listCompletionObjects(connectionId, database, connectionDatabaseMetadataSchema(getConfig(connectionId), database, schema));
             completionObjectsCache.value[cacheKey] = dedupeCompletionObjects(objects.map(toSqlCompletionObject).filter((object): object is SqlCompletionObject => object != null));
           }
           indexCompletionObjects(connectionId, database, schema, completionObjectsCache.value[cacheKey]);

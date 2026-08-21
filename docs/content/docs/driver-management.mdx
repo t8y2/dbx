@@ -93,6 +93,12 @@ Download `dbx-agent-kingbase-<version>-windows-x64.zip` for Windows x64 or `dbx-
 
 The ZIP contains the version metadata and native agent for that platform. DBX installs it as `%USERPROFILE%\.dbx\agents\drivers\kingbase\agent.exe`, without requiring users to unblock or manually copy the executable.
 
+### Importing the JDBC plugin offline
+
+Generic JDBC connections (custom JDBC URL + imported driver JAR) run through a separate **DBX JDBC plugin**, released as its own `dbx-jdbc-plugin-*.zip` asset — not bundled into any per-database Agent ZIP. Install it with **Local install** in the **JDBC Drivers** tab (not **Import offline package** in Built-in Drivers, which is for Agent ZIPs).
+
+Importing the actual driver JAR (e.g. an Oracle `ojdbc*.jar`) is always local and does not require this plugin package or any network access — use **Import JAR** in the same tab, regardless of whether the JDBC plugin itself is installed.
+
 ## Plugin Updates
 
 For databases supported by the [JDBC Plugin](/en/docs/plugins), DBX shows update notices when a new plugin version is available. Plugin updates follow the same install flow as built-in agent drivers.

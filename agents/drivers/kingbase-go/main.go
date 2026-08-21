@@ -511,12 +511,25 @@ func openAndPingDB(cp connectParams, timeout time.Duration, opener kingbaseDBOpe
 		if db != nil {
 			_ = db.Close()
 		}
-		if index == 0 && len(attempts) == 2 && errors.Is(err, gokb.ErrSSLNotSupported) {
+		if index == 0 && len(attempts) == 2 && shouldRetryKingbaseWithoutSSL(err) {
 			continue
 		}
 		return nil, err
 	}
 	return nil, errors.New("kingbase connection failed")
+}
+
+func shouldRetryKingbaseWithoutSSL(err error) bool {
+	if errors.Is(err, gokb.ErrSSLNotSupported) {
+		return true
+	}
+	if err == nil {
+		return false
+	}
+
+	// KingBase V7 can accept the SSLRequest and then reject the TLS handshake,
+	// so gokb returns the TLS alert instead of ErrSSLNotSupported.
+	return strings.Contains(strings.ToLower(err.Error()), "remote error: tls: handshake failure")
 }
 
 func openDBWithSSLMode(cp connectParams, sslMode string) (*sql.DB, error) {

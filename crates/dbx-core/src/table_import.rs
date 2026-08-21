@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read as IoRead, Seek, SeekFrom, Write as IoWrite};
@@ -19,8 +20,9 @@ use sha2::{Digest, Sha256};
 use crate::connection::{task_client_session_id, AppState, PoolKind};
 use crate::models::connection::DatabaseType;
 use crate::transfer::{
-    execute_on_pool, generate_insert_typed, generate_insert_typed_sql_batches, get_columns_for_transfer,
-    normalize_integer_literal, normalize_thousands_numeric_literal, qualified_table, quote_identifier, SqlBatchLimits,
+    escape_value_typed, execute_on_pool, generate_insert_typed_from_value_rows,
+    generate_insert_typed_sql_batches_from_value_rows, get_columns_for_transfer, normalize_integer_literal,
+    normalize_thousands_numeric_literal, qualified_table, quote_identifier, SqlBatchLimits,
 };
 
 pub const DEFAULT_PREVIEW_LIMIT: usize = 50;
@@ -3142,9 +3144,8 @@ fn build_import_insert_batch_with_plan(
     if rows.is_empty() {
         return Ok(None);
     }
-    let mapped_rows = map_import_rows_with_plan(rows, plan, db_type, kingbase_oracle_mode, date_time_format);
-    let sql =
-        generate_insert_typed(&plan.target_columns, &plan.column_types, &mapped_rows, table, schema, db_type, None);
+    let value_rows = import_value_rows_sql(rows, plan, db_type, kingbase_oracle_mode, date_time_format);
+    let sql = generate_insert_typed_from_value_rows(&plan.target_columns, &value_rows, table, schema, db_type, None);
     Ok((!sql.trim().is_empty()).then_some(ImportSqlBatch { sql, row_count: rows.len() }))
 }
 
@@ -3161,11 +3162,10 @@ fn build_import_insert_batches_with_plan(
     if rows.is_empty() {
         return Ok(Vec::new());
     }
-    let mapped_rows = map_import_rows_with_plan(rows, plan, db_type, kingbase_oracle_mode, date_time_format);
-    let batches = generate_insert_typed_sql_batches(
+    let value_rows = import_value_rows_sql(rows, plan, db_type, kingbase_oracle_mode, date_time_format);
+    let batches = generate_insert_typed_sql_batches_from_value_rows(
         &plan.target_columns,
-        &plan.column_types,
-        &mapped_rows,
+        &value_rows,
         table,
         schema,
         db_type,
@@ -3175,16 +3175,31 @@ fn build_import_insert_batches_with_plan(
     Ok(batches.into_iter().map(|(sql, row_count)| ImportSqlBatch { sql, row_count }).collect())
 }
 
-fn map_import_rows_with_plan(
+fn import_value_rows_sql(
     rows: &[Vec<serde_json::Value>],
     plan: &CompiledImportPlan,
     db_type: &DatabaseType,
     kingbase_oracle_mode: bool,
     date_time_format: Option<&str>,
-) -> Vec<Vec<serde_json::Value>> {
-    rows.iter()
-        .map(|row| map_import_row_with_plan(row, plan, db_type, kingbase_oracle_mode, date_time_format))
-        .collect()
+) -> Vec<String> {
+    let mut value_rows = Vec::with_capacity(rows.len());
+    for row in rows {
+        let mut values = String::with_capacity(plan.mapped_source_indexes.len().saturating_mul(16).saturating_add(2));
+        values.push('(');
+        for (target_index, source_index) in plan.mapped_source_indexes.iter().enumerate() {
+            if target_index > 0 {
+                values.push_str(", ");
+            }
+            let source_value = row.get(*source_index).unwrap_or(&serde_json::Value::Null);
+            let data_type = plan.column_types.get(target_index).and_then(|data_type| data_type.as_deref());
+            let normalized =
+                normalize_import_value_cow(source_value, data_type, db_type, kingbase_oracle_mode, date_time_format);
+            values.push_str(&escape_value_typed(normalized.as_ref(), db_type, data_type));
+        }
+        values.push(')');
+        value_rows.push(values);
+    }
+    value_rows
 }
 
 fn map_import_row_with_plan(
@@ -3274,17 +3289,17 @@ fn effective_import_batch_size(db_type: &DatabaseType, requested: usize) -> usiz
     requested.max(1).min(max_rows)
 }
 
-fn normalize_import_temporal_value(
-    value: &serde_json::Value,
+fn normalize_import_temporal_value_cow<'a>(
+    value: &'a serde_json::Value,
     data_type: Option<&str>,
     db_type: &DatabaseType,
     kingbase_oracle_mode: bool,
     date_time_format: Option<&str>,
-) -> serde_json::Value {
+) -> Cow<'a, serde_json::Value> {
     let date_type_preserves_time = (matches!(db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle)
         || (*db_type == DatabaseType::Kingbase && kingbase_oracle_mode))
         && data_type.is_some_and(|data_type| data_type.trim().eq_ignore_ascii_case("date"));
-    crate::temporal_format::normalize_temporal_import_value(
+    crate::temporal_format::normalize_temporal_import_value_cow(
         value,
         if date_type_preserves_time { Some("datetime") } else { data_type },
         date_time_format,
@@ -3352,6 +3367,41 @@ fn textual_source_columns_for_import(
         .collect()
 }
 
+fn normalize_import_value_cow<'a>(
+    value: &'a serde_json::Value,
+    data_type: Option<&str>,
+    db_type: &DatabaseType,
+    kingbase_oracle_mode: bool,
+    date_time_format: Option<&str>,
+) -> Cow<'a, serde_json::Value> {
+    let normalized =
+        normalize_import_temporal_value_cow(value, data_type, db_type, kingbase_oracle_mode, date_time_format);
+    // Strip validated thousands separators before integer canonicalization so "1,234.00"
+    // still collapses to a plain integer literal for integer targets.
+    let thousands_canonical =
+        normalized.as_str().and_then(|value| normalize_thousands_numeric_literal(value, db_type, data_type));
+    if let Some(integer_text) = thousands_canonical
+        .as_deref()
+        .or_else(|| normalized.as_str())
+        .and_then(|value| normalize_integer_literal(value, db_type, data_type))
+        .and_then(|value| value.parse::<i64>().ok())
+    {
+        // Normalize before both INSERT and COPY paths; COPY does not pass through SQL literal escaping.
+        return Cow::Owned(serde_json::Value::Number(integer_text.into()));
+    }
+    if let Some(number) = normalized.as_number() {
+        if let Some(integer_text) = normalize_integer_literal(&number.to_string(), db_type, data_type)
+            .and_then(|value| value.parse::<i64>().ok())
+        {
+            return Cow::Owned(serde_json::Value::Number(integer_text.into()));
+        }
+    }
+    if let Some(canonical) = thousands_canonical {
+        return Cow::Owned(serde_json::Value::String(canonical));
+    }
+    normalized
+}
+
 fn normalize_import_value(
     value: &serde_json::Value,
     data_type: Option<&str>,
@@ -3359,28 +3409,7 @@ fn normalize_import_value(
     kingbase_oracle_mode: bool,
     date_time_format: Option<&str>,
 ) -> serde_json::Value {
-    let normalized = normalize_import_temporal_value(value, data_type, db_type, kingbase_oracle_mode, date_time_format);
-    // Strip validated thousands separators before integer canonicalization so "1,234.00"
-    // still collapses to a plain integer literal for integer targets.
-    let thousands_canonical =
-        normalized.as_str().and_then(|value| normalize_thousands_numeric_literal(value, db_type, data_type));
-    let integer_text = thousands_canonical
-        .as_deref()
-        .or_else(|| normalized.as_str())
-        .map(str::to_owned)
-        .or_else(|| normalized.as_number().map(ToString::to_string));
-    if let Some(integer_text) = integer_text
-        .as_deref()
-        .and_then(|value| normalize_integer_literal(value, db_type, data_type))
-        .and_then(|value| value.parse::<i64>().ok())
-    {
-        // Normalize before both INSERT and COPY paths; COPY does not pass through SQL literal escaping.
-        return serde_json::Value::Number(integer_text.into());
-    }
-    if let Some(canonical) = thousands_canonical {
-        return serde_json::Value::String(canonical);
-    }
-    normalized
+    normalize_import_value_cow(value, data_type, db_type, kingbase_oracle_mode, date_time_format).into_owned()
 }
 
 pub fn build_import_insert_batches(

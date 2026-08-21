@@ -402,6 +402,39 @@ describe("queryStore multi-source result column comments", () => {
     expect(tab.queryEditabilityReason).toBeUndefined();
   });
 
+  it("resolves unqualified PostgreSQL metadata through search_path when no schema is selected", async () => {
+    getConnectionConfig.mockReturnValue({ id: "pg-1", name: "PostgreSQL", db_type: "postgres", database: "app", query_timeout_secs: 30 });
+    analyzeEditableQueryEditability.mockResolvedValue({
+      editable: true,
+      analysis: {
+        schema: undefined,
+        tableName: "people",
+        selectStar: true,
+        columns: [],
+      },
+    });
+    getColumns.mockResolvedValue([column("name", "姓名"), column("email", "邮箱")]);
+    executeMulti.mockResolvedValue([
+      {
+        columns: ["name", "email"],
+        rows: [["Alice", "alice@example.com"]],
+        affected_rows: 0,
+        execution_time_ms: 1,
+      },
+    ]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "Query");
+
+    await store.executeTabSql(tabId, "SELECT * FROM people");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.resultColumnComments).toEqual(["姓名", "邮箱"]));
+    expect(getColumns).toHaveBeenCalledWith("pg-1", "app", "", "people", undefined);
+    expect(listIndexes).toHaveBeenCalledWith("pg-1", "app", "", "people", undefined);
+  });
+
   it("does not add explicit result comments to an adjacent keyed PostgreSQL query", async () => {
     getConnectionConfig.mockReturnValue({ id: "pg-1", name: "PostgreSQL", db_type: "postgres", database: "app", query_timeout_secs: 30 });
     analyzeEditableQueryEditability.mockResolvedValue({

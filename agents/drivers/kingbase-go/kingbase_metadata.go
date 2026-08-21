@@ -1791,7 +1791,7 @@ func (s *server) getObjectSourceForRelation(schema, name, objectType, relationNa
 	}
 	source := ""
 	kind := strings.ToUpper(objectType)
-	if kind == "VIEW" || kind == "MATERIALIZED_VIEW" {
+	if kind == "VIEW" {
 		if s.mode.mysqlCompat {
 			err = s.requireDBQueryRow("SELECT view_definition FROM information_schema.views WHERE table_schema = "+quoteLiteral(effective)+" AND table_name = "+quoteLiteral(name), &source)
 		} else {
@@ -1811,6 +1811,8 @@ func (s *server) getObjectSourceForRelation(schema, name, objectType, relationNa
 				err = querySource("pg_get_viewdef")
 			}
 		}
+	} else if kind == "MATERIALIZED_VIEW" {
+		source, err = s.getMaterializedViewSource(effective, name)
 	} else if kind == "FUNCTION" || kind == "PROCEDURE" {
 		catalog, prefix, function := "sys_catalog", "sys", "sys_get_functiondef"
 		if s.mode.postgresCatalog {
@@ -1864,6 +1866,46 @@ func (s *server) getObjectSourceForRelation(schema, name, objectType, relationNa
 		result["editable"] = false
 	}
 	return result, nil
+}
+
+func (s *server) getMaterializedViewSource(schema, name string) (string, error) {
+	catalog, prefix, function := "sys_catalog", "sys", "sys_get_viewdef"
+	if s.mode.postgresCatalog {
+		catalog, prefix, function = "pg_catalog", "pg", "pg_get_viewdef"
+	} else if s.usePgViewDefinition {
+		function = "pg_get_viewdef"
+	}
+	querySource := func(definitionFunction string) (string, error) {
+		query := fmt.Sprintf("SELECT %s(c.oid) FROM %s.%s_class c JOIN %s.%s_namespace n ON n.oid=c.relnamespace WHERE n.nspname=%s AND c.relname=%s AND c.relkind = 'm' LIMIT 1", definitionFunction, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(name))
+		var source sql.NullString
+		if err := s.requireDBQueryRow(query, &source); err != nil {
+			return "", err
+		}
+		if !source.Valid || strings.TrimSpace(source.String) == "" {
+			return "", sql.ErrNoRows
+		}
+		return source.String, nil
+	}
+
+	source, err := querySource(function)
+	if err == nil {
+		return source, nil
+	}
+	if function == "sys_get_viewdef" {
+		if isUndefinedFunction(err, function) {
+			s.usePgViewDefinition = true
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return "", err
+		}
+		source, err = querySource("pg_get_viewdef")
+		if err == nil {
+			return source, nil
+		}
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("materialized view %q.%q returned an empty source definition", schema, name)
+	}
+	return "", err
 }
 
 func (s *server) getTableDDL(schema, table string) (string, error) {

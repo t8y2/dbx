@@ -9,6 +9,10 @@ export interface DropObjectSqlOptions {
   schema?: string | null;
   name: string;
   signature?: string | null;
+  /** Quote character reported by the connected server, for types whose quote is not fixed by the
+   * database type alone (Cloud Spanner's two dialects differ). Mirrors `identifierQuote` on the
+   * table-data SQL options. */
+  identifierQuote?: string;
 }
 
 export interface TableAdminSqlOptions {
@@ -16,6 +20,10 @@ export interface TableAdminSqlOptions {
   schema?: string | null;
   tableName: string;
   cascade?: boolean;
+  /** Quote character reported by the connected server, for types whose quote is not fixed by the
+   * database type alone (Cloud Spanner's two dialects differ). Mirrors `identifierQuote` on the
+   * table-data SQL options. */
+  identifierQuote?: string;
 }
 
 export interface VacuumTableSqlOptions {
@@ -75,6 +83,10 @@ export interface DuplicateTableStructureSqlOptions {
   targetName: string;
   tableComment?: string | null;
   columnComments?: Array<{ name: string; comment: string }>;
+  /** Quote character reported by the connected server, for types whose quote is not fixed by the
+   * database type alone (Cloud Spanner's two dialects differ). Mirrors `identifierQuote` on the
+   * table-data SQL options. */
+  identifierQuote?: string;
 }
 
 export interface DuplicateTableStructurePlanOptions extends DuplicateTableStructureSqlOptions {
@@ -259,6 +271,7 @@ export async function buildDuplicateTableStructurePlan(options: DuplicateTableSt
     targetName: options.targetName,
     tableComment: options.tableComment,
     columnComments: [],
+    identifierQuote: options.identifierQuote,
   });
   return { sql, sourceColumns: options.sourceColumns, executeAsScript: duplicateTableStructureRequiresScript(sql) };
 }
@@ -272,6 +285,10 @@ export interface CopyTableDataSqlOptions {
   postgresOverridingSystemValue?: boolean;
   sqlserverIdentityInsert?: boolean;
   normalizeNewTargetName?: boolean;
+  /** Quote character reported by the connected server, for types whose quote is not fixed by the
+   * database type alone (Cloud Spanner's two dialects differ). Mirrors `identifierQuote` on the
+   * table-data SQL options. */
+  identifierQuote?: string;
 }
 
 export function buildDropObjectSql(options: DropObjectSqlOptions): Promise<string> {

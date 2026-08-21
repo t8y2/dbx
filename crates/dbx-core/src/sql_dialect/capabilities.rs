@@ -63,6 +63,11 @@ pub fn is_schema_aware(database_type: DatabaseType) -> bool {
             | DatabaseType::Sqlite
             | DatabaseType::DuckDb
             | DatabaseType::Iris
+            // Spanner supports named schemas; the PostgreSQL dialect defaults to `public`.
+            // GoogleSQL's default schema is the empty string, which the blank-schema filters
+            // in `qualified_table_name` / `table_data_qualified_table_name` drop along with
+            // the dot separator (`` `s`.`t` `` with an empty `s` is a Spanner syntax error).
+            | DatabaseType::Spanner
     )
 }
 

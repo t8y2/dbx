@@ -25,13 +25,26 @@ impl AgentSessionRole {
 
 fn agent_jdbc_driver_class(config: &ConnectionConfig) -> &str {
     let driver_class = config.jdbc_driver_class.as_deref().unwrap_or("");
-    if config.db_type == DatabaseType::H2
+    if (config.db_type == DatabaseType::H2 && !h2_uses_custom_driver(config))
         || (config.db_type == DatabaseType::SapHana && matches!(driver_class, "sap_hana" | "saphana"))
     {
         ""
     } else {
         driver_class
     }
+}
+
+fn agent_jdbc_driver_paths(config: &ConnectionConfig) -> &[String] {
+    if config.db_type == DatabaseType::H2 && !h2_uses_custom_driver(config) {
+        &[]
+    } else {
+        &config.jdbc_driver_paths
+    }
+}
+
+fn h2_uses_custom_driver(config: &ConnectionConfig) -> bool {
+    config.db_type == DatabaseType::H2
+        && config.driver_profile.as_deref().is_some_and(|profile| profile.eq_ignore_ascii_case("h2-custom"))
 }
 
 pub fn agent_connect_params(
@@ -113,7 +126,8 @@ pub fn agent_connect_params_with_role(
         "gbase_server": config.gbase_server,
         "informix_server": config.informix_server,
         "jdbc_driver_class": agent_jdbc_driver_class(config),
-        "jdbc_driver_paths": &config.jdbc_driver_paths,
+        "jdbc_driver_paths": agent_jdbc_driver_paths(config),
+        "driver_profile": config.driver_profile.as_deref().unwrap_or(""),
         "sessionRole": session_role.as_str(),
         "database_type": config.db_type,
     });
@@ -855,16 +869,34 @@ mod tests {
     }
 
     #[test]
-    fn h2_agent_connect_params_ignore_stale_driver_class() {
-        for driver_profile in [None, Some("h2-legacy")] {
+    fn h2_bundled_agent_connect_params_ignore_stale_custom_driver_config() {
+        for driver_profile in
+            [None, Some("h2"), Some("h2-auto"), Some("h2-legacy"), Some("h2-v1"), Some("h2-v2"), Some("h2-v3")]
+        {
             let mut cfg = config(DatabaseType::H2, Some("test"));
             cfg.driver_profile = driver_profile.map(str::to_string);
             cfg.jdbc_driver_class = Some("h2_embedded".to_string());
+            cfg.jdbc_driver_paths = vec!["/tmp/stale-h2.jar".to_string()];
 
             let params = agent_connect_params(&cfg, "127.0.0.1", 9092, "test").unwrap();
 
             assert_eq!(params["jdbc_driver_class"], "");
+            assert_eq!(params["jdbc_driver_paths"], serde_json::json!([]));
         }
+    }
+
+    #[test]
+    fn h2_custom_agent_connect_params_preserve_external_driver_config() {
+        let mut cfg = config(DatabaseType::H2, Some("test"));
+        cfg.driver_profile = Some("h2-custom".to_string());
+        cfg.jdbc_driver_class = Some("org.h2.Driver".to_string());
+        cfg.jdbc_driver_paths = vec!["/tmp/h2-custom.jar".to_string(), "/tmp/h2-helper.jar".to_string()];
+
+        let params = agent_connect_params(&cfg, "127.0.0.1", 9092, "test").unwrap();
+
+        assert_eq!(params["driver_profile"], "h2-custom");
+        assert_eq!(params["jdbc_driver_class"], "org.h2.Driver");
+        assert_eq!(params["jdbc_driver_paths"], serde_json::json!(["/tmp/h2-custom.jar", "/tmp/h2-helper.jar"]));
     }
 
     #[test]

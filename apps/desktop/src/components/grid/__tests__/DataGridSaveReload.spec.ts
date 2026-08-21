@@ -18,6 +18,8 @@ describe("DataGrid save reload integration", () => {
 
     expect(dataGridSource).toContain("prepareFullReload,\n  emit,");
     expect(toolbarSource).toContain("prepareFullReload();");
+    expect(toolbarSource).toContain("const resetToFirstPage = hasPendingConditionInputs();");
+    expect(toolbarSource).toContain("resetToFirstPage ? 0 : (currentPage.value - 1) * pageSize.value");
     expect(prepareSource).toContain("resetInfiniteScrollState();");
     expect(prepareSource).toContain("captureCurrentSelectionForRefresh();");
     expect(prepareSource).toContain("preservedSelectionOnNextResult = selection ? { selection, sourceResult: props.result } : null;");

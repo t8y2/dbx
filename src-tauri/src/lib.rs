@@ -9,6 +9,8 @@ mod startup_recovery;
 #[cfg(all(not(target_os = "windows"), not(test)))]
 #[path = "startup_recovery_noop.rs"]
 mod startup_recovery;
+#[cfg(any(target_os = "windows", test))]
+mod webview2_recovery;
 mod window_state_guard;
 
 use commands::connection::AppState;
@@ -1485,6 +1487,8 @@ pub fn run() {
             commands::ssh_prompt::install_ssh_notice_bridge(app.handle());
             #[cfg(target_os = "macos")]
             macos_app_delegate::install_dock_quit_handler(app.handle());
+            #[cfg(target_os = "windows")]
+            webview2_recovery::install(app.handle());
             let startup_links = commands::deep_link::connection_deep_links_from_args(std::env::args().skip(1));
             open_connection_deep_links(app.handle(), startup_links);
 
@@ -1618,6 +1622,7 @@ pub fn run() {
             commands::connection::close_database_connection,
             commands::connection::session_credential_status,
             commands::connection::forget_session_credential,
+            commands::connection::replace_nacos_session_credential,
             commands::connection::clear_all_session_credentials,
             commands::connection::refresh_connections,
             commands::connection::check_connection_health,
@@ -1694,8 +1699,10 @@ pub fn run() {
             commands::tab_runtime_cache::delete_tab_runtime_cache_owner,
             commands::tab_runtime_cache::delete_tab_runtime_cache,
             commands::query::execute_query,
+            commands::query::execute_conditional_update,
             commands::query::execute_multi,
             commands::query::cancel_query,
+            commands::query::cancel_conditional_update,
             commands::query::close_query_session,
             commands::query::close_client_connection_session,
             commands::query::execute_batch,
@@ -1755,6 +1762,7 @@ pub fn run() {
             commands::query::build_data_grid_column_values_filter_condition,
             commands::query::build_data_grid_column_distinct_values_sql,
             commands::query::build_data_grid_count_sql,
+            commands::query::build_data_grid_conditional_update_sql,
             commands::query::build_hive_table_properties_sql,
             commands::query::build_export_insert_statements,
             commands::query::build_export_sql_insert,
@@ -1947,6 +1955,7 @@ pub fn run() {
             commands::nacos_cmd::nacos_sidebar_snapshot,
             commands::nacos_cmd::nacos_create_namespace,
             commands::nacos_cmd::nacos_update_namespace,
+            commands::nacos_cmd::nacos_delete_namespace,
             commands::nacos_cmd::nacos_list_configs,
             commands::nacos_cmd::nacos_get_config,
             commands::nacos_cmd::nacos_publish_config,
@@ -2006,6 +2015,8 @@ pub fn run() {
             commands::mongo_cmd::mongo_create_database,
             commands::mongo_cmd::mongo_drop_database,
             commands::mongo_cmd::mongo_drop_collection,
+            commands::mongo_cmd::vector_drop_database,
+            commands::mongo_cmd::vector_drop_collection,
             commands::mongo_cmd::mongo_rename_collection,
             commands::mongo_cmd::mongo_clone_collection,
             commands::docs::docs_collect_snapshot,

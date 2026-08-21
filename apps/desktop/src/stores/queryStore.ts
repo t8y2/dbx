@@ -35,7 +35,7 @@ import { redisCommandResultToQueryResult } from "@/lib/redis/redisQueryResult";
 import { nextRedisCommandDb } from "@/lib/redis/redisCommandSession";
 import { isRedisMutatingCommand } from "@/lib/redis/redisCommandTable";
 import { usesAgentCursorForQuery } from "@/lib/database/databaseDriverManifest";
-import { supportsClearableQuerySchema } from "@/lib/database/databaseFeatureSupport";
+import { defaultAutoCommitForDbType, supportsClearableQuerySchema } from "@/lib/database/databaseFeatureSupport";
 import { canInsertTableRows, canUseKeylessRowPredicate, DBX_ROWID_COLUMN, editablePrimaryKeys, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { TABLE_DATA_EXPORT_PAGE_SIZE } from "@/lib/table/tableDataExport";
 import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
@@ -705,6 +705,9 @@ export const useQueryStore = defineStore("query", () => {
   const activeTabId = ref<string | null>(null);
   const isOpenTabsLoaded = ref(false);
   const activeTabHistory = ref<string[]>([]);
+  // Most-recently-activated tab ids, oldest first. Read-only view for the
+  // Ctrl+Tab switcher, which renders them in reverse.
+  const recentTabIds = computed(() => activeTabHistory.value);
   const showCloseConfirm = ref(false);
   const pendingCloseTabId = ref<string | null>(null);
   const pendingBatchCloseTabIds = ref<string[] | null>(null);
@@ -1506,9 +1509,12 @@ export const useQueryStore = defineStore("query", () => {
   function applyRestoredOpenTabs(restored: { tabs: QueryTab[]; activeTabId: string | null }) {
     const connectionStore = useConnectionStore();
     for (const tab of restored.tabs) {
-      if (tab.mode !== "data") continue;
       const connection = connectionStore.getConfig(tab.connectionId);
-      if (connection) tab.schema = connectionObjectTreeNodeSchema(connection, tab.database, tab.schema);
+      if (tab.mode === "query" && tab.autoCommit === undefined) {
+        tab.autoCommit = defaultAutoCommitForDbType(connection?.db_type);
+      } else if (tab.mode === "data" && connection) {
+        tab.schema = connectionObjectTreeNodeSchema(connection, tab.database, tab.schema);
+      }
     }
     tabs.value = restored.tabs;
     activeTabId.value = restored.activeTabId;
@@ -1654,6 +1660,7 @@ export const useQueryStore = defineStore("query", () => {
     }
 
     const id = uuid();
+    const dbType = useConnectionStore().getConfig(connectionId)?.db_type;
     const tab: QueryTab = {
       id,
       title: title || `query_${tabs.value.length + 1}`,
@@ -1668,6 +1675,7 @@ export const useQueryStore = defineStore("query", () => {
       isCancelling: false,
       isExplaining: false,
       mode,
+      ...(mode === "query" ? { autoCommit: defaultAutoCommitForDbType(dbType) } : {}),
     };
     if (mode === "query") tab.originalSql = initialSql ?? "";
     const activeIndex = options.insertAfterActive ? tabs.value.findIndex((item) => item.id === activeTabId.value) : -1;
@@ -1745,6 +1753,7 @@ export const useQueryStore = defineStore("query", () => {
     // File-backed tabs are identified by their full path, not their basename.
     // Bypassing createTab avoids overwriting another file with the same name.
     const id = uuid();
+    const dbType = useConnectionStore().getConfig(connectionId)?.db_type;
     const tab: QueryTab = {
       id,
       title: "",
@@ -1760,6 +1769,7 @@ export const useQueryStore = defineStore("query", () => {
       isCancelling: false,
       isExplaining: false,
       mode: "query",
+      autoCommit: defaultAutoCommitForDbType(dbType),
     };
     tabs.value.push(tab);
     activeTabId.value = id;
@@ -2244,7 +2254,7 @@ export const useQueryStore = defineStore("query", () => {
   function openTableStructure(connectionId: string, database: string, schema?: string, tableName?: string, initialTab?: TableInfoTab, initialTarget?: TableStructureEditorTarget, catalog?: string) {
     const resolvedTableName = tableName || "";
     if (resolvedTableName) {
-      const existing = tabs.value.find((tab) => tab.mode === "structure" && tab.connectionId === connectionId && tab.database === database && (tab.catalog || "") === (catalog || "") && (tab.structureTableName || "") === resolvedTableName);
+      const existing = tabs.value.find((tab) => tab.mode === "structure" && tab.connectionId === connectionId && tab.database === database && (tab.catalog || "") === (catalog || "") && (tab.schema || "") === (schema || "") && (tab.structureTableName || "") === resolvedTableName);
       if (existing) {
         applyTableStructureInitialTab(existing, initialTab, initialTarget);
         switchTab(existing.id);
@@ -3019,7 +3029,10 @@ export const useQueryStore = defineStore("query", () => {
 
   function rollbackTabTransaction(tab: QueryTab, options?: { resetAutoCommit?: boolean }) {
     if (tab.txnSessionId) void rollbackTransaction(tab.id);
-    if (options?.resetAutoCommit) tab.autoCommit = true;
+    if (options?.resetAutoCommit) {
+      const dbType = useConnectionStore().getConfig(tab.connectionId)?.db_type;
+      tab.autoCommit = defaultAutoCommitForDbType(dbType);
+    }
     tab.txnAutoRolledBack = false;
   }
 
@@ -3158,6 +3171,7 @@ export const useQueryStore = defineStore("query", () => {
 
     const id = uuid();
     const restoredPosition = restoreSavedSqlEditorPosition(file.id, file.sql);
+    const dbType = useConnectionStore().getConfig(target.connectionId)?.db_type;
     const tab: QueryTab = {
       id,
       title: file.name,
@@ -3173,6 +3187,7 @@ export const useQueryStore = defineStore("query", () => {
       isCancelling: false,
       isExplaining: false,
       mode: "query",
+      autoCommit: defaultAutoCommitForDbType(dbType),
       editorSelection: restoredPosition.selection,
       editorViewport: restoredPosition.viewport,
     };
@@ -3582,11 +3597,7 @@ export const useQueryStore = defineStore("query", () => {
     // unqualified object reference. Resolve metadata through the login's
     // default schema (with the driver's dbo fallback) so metadata and writes
     // target the same object as the original SELECT.
-    let schema = source.schema || (dbType === "sqlserver" ? "" : tab.schema);
-    if (!schema) {
-      if (dbType === "postgres" || dbType === "kwdb") schema = "public";
-      else schema = "";
-    }
+    const schema = source.schema || (dbType === "sqlserver" ? "" : tab.schema) || "";
     // Oracle-family connection databases are service names, not schemas. When
     // the query does not qualify a schema, let the driver resolve the current
     // login user's schema instead of looking up metadata under the service name.
@@ -3594,7 +3605,11 @@ export const useQueryStore = defineStore("query", () => {
     // search_path. Do not reinterpret the selected database as a schema; the
     // agent resolves the visible relation's actual namespace with the columns.
     const useCurrentVastbaseSchema = dbType === "vastbase" && !source.schema && !tab.schema;
-    const resolvedSchema = (dbType === "sqlserver" && !source.schema) || (ORACLE_LIKE_METADATA_TYPES.has(dbType) && !schema) || useCurrentVastbaseSchema ? "" : metadataSchemaForConnection(conn, metadataDatabase, schema || undefined);
+    // PostgreSQL-compatible unqualified names also resolve through the
+    // connection's search_path. Keep the metadata request unqualified when no
+    // schema was selected instead of assuming public (or the database name).
+    const useCurrentPostgresSchema = (dbType === "postgres" || dbType === "kwdb") && !source.schema && !tab.schema;
+    const resolvedSchema = (dbType === "sqlserver" && !source.schema) || (ORACLE_LIKE_METADATA_TYPES.has(dbType) && !schema) || useCurrentVastbaseSchema || useCurrentPostgresSchema ? "" : metadataSchemaForConnection(conn, metadataDatabase, schema || undefined);
     const metadataSchema = normalizeUppercaseFoldedMetadataIdentifier(dbType, resolvedSchema || undefined, source.schema ? source.schemaQuoted : false) || "";
     const metadataTableName = normalizeUppercaseFoldedMetadataIdentifier(dbType, source.tableName, source.tableNameQuoted)!;
     const metadataCatalog = normalizeUppercaseFoldedMetadataIdentifier(dbType, source.catalog, source.catalogQuoted);
@@ -4112,7 +4127,6 @@ export const useQueryStore = defineStore("query", () => {
     traceId: string;
     elapsed: () => string;
     timeoutSecs: number;
-    maxRows?: number;
   }) {
     const resultRowCount = options.result.rows.length;
     if (resultRowCount <= 0) {
@@ -4155,11 +4169,12 @@ export const useQueryStore = defineStore("query", () => {
           setQueryTotalRowCountIfCurrent(options.tabId, options.executionId, options.result, undefined);
           return;
         }
-        const cappedTotal = capQueryResultTotal(total, options.maxRows);
-        setQueryTotalRowCountIfCurrent(options.tabId, options.executionId, options.result, cappedTotal);
+        // COUNT describes all matching rows; the configured result limit only
+        // constrains how many of them pagination may load and retain.
+        setQueryTotalRowCountIfCurrent(options.tabId, options.executionId, options.result, total);
         queryExecutionLog("info", "count:done", {
           traceId: options.traceId,
-          total: cappedTotal,
+          total,
           elapsed: options.elapsed(),
         });
       } catch (error) {
@@ -5148,7 +5163,6 @@ export const useQueryStore = defineStore("query", () => {
             traceId,
             elapsed,
             timeoutSecs: queryTimeoutSecs,
-            maxRows: queryResultMaxRows,
           });
         }
         queryExecutionLog("info", "result:assigned", {
@@ -5173,13 +5187,17 @@ export const useQueryStore = defineStore("query", () => {
       queryExecutionLog("error", "error", { traceId, elapsed: elapsed(), error: e });
       // Sync connection state if the error indicates a lost connection
       useConnectionStore().recordConnectionLostError(executionConnectionId ?? tab.connectionId, e);
-      // Handle manual transaction auto-rollback (e.g. deadlock detected by server,
-      // statement error inside a manual transaction, or idle timeout).
+      // Handle manual transaction auto-rollback (idle timeout only for the banner;
+      // other statement failures still clear the session without the 5-minute notice).
       if (tab.autoCommit === false) {
         const errMsg: string = e?.message ?? String(e);
-        if (/rolled.?back/i.test(errMsg) || errMsg.includes("已自动回滚")) {
+        const idleTimeout = /5 minutes of inactivity/i.test(errMsg) || errMsg.includes("5 分钟无操作") || errMsg.includes("已自动回滚");
+        if (idleTimeout) {
           tab.txnSessionId = undefined;
           tab.txnAutoRolledBack = true;
+        } else if (/rolled.?back/i.test(errMsg) || /transaction session not found/i.test(errMsg) || /agent runtime terminated/i.test(errMsg)) {
+          tab.txnSessionId = undefined;
+          tab.txnAutoRolledBack = false;
         }
       }
       const current = findExecutionTab(id);
@@ -5879,6 +5897,7 @@ export const useQueryStore = defineStore("query", () => {
   function openResultArchiveTab(archive: DecodedQueryResultArchive): string | undefined {
     const id = uuid();
     const title = archive.tab.title.trim() || t("tabs.importedResultArchive");
+    const dbType = useConnectionStore().getConfig(archive.tab.connectionId)?.db_type;
     const tab: QueryTab = {
       id,
       title,
@@ -5895,6 +5914,7 @@ export const useQueryStore = defineStore("query", () => {
       isCancelling: false,
       isExplaining: false,
       mode: "query",
+      autoCommit: defaultAutoCommitForDbType(dbType),
     };
     if (!restoreCachedResultPayload(tab, archive.snapshot)) return undefined;
     const activeRun = tab.resultRuns?.find((run) => run.id === tab.activeResultRunId) ?? tab.resultRuns?.[0];
@@ -6263,6 +6283,7 @@ export const useQueryStore = defineStore("query", () => {
     tabs,
     activeTabId,
     isOpenTabsLoaded,
+    recentTabIds,
     initOpenTabs,
     showCloseConfirm,
     pendingCloseTabId,

@@ -1044,7 +1044,9 @@ async fn build_sensitive_payload(
             push_secret(&mut connection_secrets, &config.id, "connection_string", connection_string);
         }
         push_mq_external_config_secrets(&mut connection_secrets, config);
-        push_nacos_external_config_secrets(&mut connection_secrets, config);
+        if config.save_password {
+            push_nacos_external_config_secrets(&mut connection_secrets, config);
+        }
     }
 
     Ok(SensitiveSyncPayload {
@@ -1191,7 +1193,7 @@ async fn apply_sensitive_payload(
         }
         // Metadata is applied before secrets. Never let an older encrypted snapshot
         // restore a password after the user chose not to retain it locally.
-        if secret.key == "password"
+        if matches!(secret.key.as_str(), "password" | NACOS_AUTH_PASSWORD_KEY | NACOS_RNACOS_CONSOLE_PASSWORD_KEY)
             && connections.iter().any(|config| config.id == secret.connection_id && !config.save_password)
         {
             continue;
@@ -1601,10 +1603,11 @@ fn parent_collection_paths(remote_path: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_sensitive_payload, apply_sync_snapshot, build_sync_snapshot, build_sync_snapshot_with_saved_secrets,
-        decrypt_sensitive_payload, encrypt_sensitive_payload, encrypt_snippet_snapshot, finalize_snippet_migration,
-        forget_webdav_sync_secrets_passphrase, gitee_snippet_payload, is_legacy_dbx_snapshot, normalized_remote_path,
-        parent_collection_paths, parse_legacy_dbx_snapshot, parse_snippet_snapshot, prepare_legacy_snippet_snapshot,
+        apply_sensitive_payload, apply_sync_snapshot, build_sensitive_payload, build_sync_snapshot,
+        build_sync_snapshot_with_saved_secrets, decrypt_sensitive_payload, encrypt_sensitive_payload,
+        encrypt_snippet_snapshot, finalize_snippet_migration, forget_webdav_sync_secrets_passphrase,
+        gitee_snippet_payload, is_legacy_dbx_snapshot, normalized_remote_path, parent_collection_paths,
+        parse_legacy_dbx_snapshot, parse_snippet_snapshot, prepare_legacy_snippet_snapshot,
         resolve_webdav_sync_secrets_passphrase, retry_pending_snippet_cleanup, save_snippet_sync_id,
         save_webdav_sync_secrets_preference, scrub_connection_secrets, snapshot_for_snippet_upload,
         snippet_file_content, snippet_response_id, snippet_sync_settings, webdav_endpoint_uses_direct_connection,
@@ -1612,7 +1615,7 @@ mod tests {
         SnippetProvider, SnippetSyncClient, SnippetSyncConfig, WebDavClient, WebDavConfig, DEFAULT_SNIPPET_FILE_NAME,
     };
     use crate::ai::{AiApiStyle, AiAuthMethod, AiConfig, AiConfigItem};
-    use crate::connection_secrets::NACOS_AUTH_PASSWORD_KEY;
+    use crate::connection_secrets::{NACOS_AUTH_PASSWORD_KEY, NACOS_RNACOS_CONSOLE_PASSWORD_KEY};
     use crate::models::connection::{
         default_redis_key_separator, ConnectionConfig, DatabaseType, SshTunnelConfig, TransportLayerConfig,
     };
@@ -2607,6 +2610,39 @@ mod tests {
         assert!(decrypted.connection_secrets.iter().any(|secret| {
             secret.connection_id == "nacos" && secret.key == NACOS_AUTH_PASSWORD_KEY && secret.secret == "nacos-secret"
         }));
+    }
+
+    #[tokio::test]
+    async fn sync_never_snapshots_or_restores_nacos_passwords_when_saving_is_disabled() {
+        let source = Storage::open(&temp_db_path("sync-no-save-nacos-source")).await.unwrap();
+        let mut config = nacos_connection("nacos", "transient-secret");
+        config.save_password = false;
+        let payload = build_sensitive_payload(&source, std::slice::from_ref(&config), &[]).await.unwrap();
+        assert!(!payload.connection_secrets.iter().any(|secret| {
+            secret.connection_id == "nacos"
+                && matches!(secret.key.as_str(), NACOS_AUTH_PASSWORD_KEY | NACOS_RNACOS_CONSOLE_PASSWORD_KEY)
+        }));
+
+        let legacy_payload = SensitiveSyncPayload {
+            connection_secrets: vec![
+                ConnectionSecretSnapshot {
+                    connection_id: "nacos".to_string(),
+                    key: NACOS_AUTH_PASSWORD_KEY.to_string(),
+                    secret: "legacy-primary-secret".to_string(),
+                },
+                ConnectionSecretSnapshot {
+                    connection_id: "nacos".to_string(),
+                    key: NACOS_RNACOS_CONSOLE_PASSWORD_KEY.to_string(),
+                    secret: "legacy-console-secret".to_string(),
+                },
+            ],
+            ai_configs: None,
+            ai_config: None,
+            tunnel_profiles: None,
+        };
+        apply_sensitive_payload(&source, &legacy_payload, &[config]).await.unwrap();
+        assert_eq!(source.get_secret("nacos", NACOS_AUTH_PASSWORD_KEY).await.unwrap(), None);
+        assert_eq!(source.get_secret("nacos", NACOS_RNACOS_CONSOLE_PASSWORD_KEY).await.unwrap(), None);
     }
 
     #[tokio::test]

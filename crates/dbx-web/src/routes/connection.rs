@@ -4,11 +4,17 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::Json;
-use dbx_core::connection::{connection_configs_pool_equivalent, AppState, PoolKind};
+use dbx_core::connection::{
+    connection_configs_pool_equivalent, connection_configs_session_credentials_compatible, AppState, PoolKind,
+};
 use dbx_core::models::connection::{ConnectionConfig, ConnectionTestResult, DatabaseConnectionInfo, DatabaseType};
+use dbx_core::nacos::config::{
+    take_transient_passwords, NACOS_CONSOLE_SESSION_PASSWORD, NACOS_PRIMARY_SESSION_PASSWORD,
+};
 use dbx_core::runtime_config::{
     release_runtime_config_on_disconnect, should_retain_runtime_config, TEST_PROBE_ID_PREFIX,
 };
+use dbx_core::session_credentials::{PurposeSessionCredentialWriteToken, SessionCredentialWriteToken};
 use serde::Deserialize;
 
 use crate::auth::session_token_from_headers;
@@ -17,6 +23,74 @@ use crate::state::WebState;
 
 const MONGO_LEGACY_DRIVER_PROFILE: &str = "mongodb-legacy";
 const MONGO_LEGACY_DRIVER_LABEL: &str = "MongoDB (Legacy)";
+
+#[derive(Default)]
+struct NoSaveRuntimeSecrets {
+    primary: Option<String>,
+    console: Option<String>,
+}
+
+#[derive(Default)]
+struct SessionCredentialWrites {
+    primary: Option<SessionCredentialWriteToken>,
+    purposes: Vec<PurposeSessionCredentialWriteToken>,
+}
+
+fn prepare_runtime_config(mut config: ConnectionConfig) -> (ConnectionConfig, NoSaveRuntimeSecrets) {
+    if config.save_password {
+        return (config, NoSaveRuntimeSecrets::default());
+    }
+    if config.db_type == DatabaseType::Nacos {
+        let passwords = take_transient_passwords(&mut config);
+        return (config, NoSaveRuntimeSecrets { primary: passwords.primary, console: passwords.console });
+    }
+    let primary = std::mem::take(&mut config.password);
+    (config, NoSaveRuntimeSecrets { primary: (!primary.is_empty()).then_some(primary), console: None })
+}
+
+fn record_session_credentials(
+    app: &AppState,
+    owner: &str,
+    connection_id: &str,
+    secrets: &NoSaveRuntimeSecrets,
+    nacos: bool,
+) -> SessionCredentialWrites {
+    let primary =
+        secrets.primary.as_deref().and_then(|password| app.session_credentials.set(owner, connection_id, password));
+    let mut purposes = Vec::new();
+    if nacos {
+        if let Some(token) = secrets.primary.as_deref().and_then(|password| {
+            app.session_credentials.set_for_purpose_with_token(
+                owner,
+                connection_id,
+                NACOS_PRIMARY_SESSION_PASSWORD,
+                password,
+            )
+        }) {
+            purposes.push(token);
+        }
+        if let Some(token) = secrets.console.as_deref().and_then(|password| {
+            app.session_credentials.set_for_purpose_with_token(
+                owner,
+                connection_id,
+                NACOS_CONSOLE_SESSION_PASSWORD,
+                password,
+            )
+        }) {
+            purposes.push(token);
+        }
+    }
+    SessionCredentialWrites { primary, purposes }
+}
+
+fn rollback_session_credential_writes(app: &AppState, writes: &SessionCredentialWrites) {
+    for token in &writes.purposes {
+        app.session_credentials.remove_purpose_if_current(token);
+    }
+    if let Some(token) = writes.primary.as_ref() {
+        app.session_credentials.remove_if_current(token);
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -43,6 +117,14 @@ pub struct CloseDatabaseConnectionRequest {
 #[serde(rename_all = "camelCase")]
 pub struct SessionCredentialStatusRequest {
     pub connection_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaceNacosSessionCredentialRequest {
+    pub connection_id: String,
+    pub username: String,
+    pub password: String,
 }
 
 #[derive(Deserialize)]
@@ -299,14 +381,14 @@ pub async fn connect_db(
     // 只有本次请求确实写入/替换了会话凭据（输入了非空密码）时，才需要在连接
     // 失败时回滚它；无密码重连复用的是既有有效凭据，失败不应清掉它，否则瞬时的
     // 数据库/网络抖动就会让"本次会话内记住密码"失效、下次又弹窗。
-    let session_credential_write = (!config.save_password)
-        .then(|| app.session_credentials.set(&owner, &connection_id, &config.password))
-        .flatten();
-    let no_save_password = !config.save_password;
-    let mut runtime_config = config.clone();
-    if no_save_password {
-        runtime_config.password.clear();
-    }
+    let (runtime_config, runtime_secrets) = prepare_runtime_config(config.clone());
+    let session_credential_writes = record_session_credentials(
+        app,
+        &owner,
+        &connection_id,
+        &runtime_secrets,
+        config.db_type == DatabaseType::Nacos,
+    );
 
     app.remove_connection_pools_detached(&connection_id).await;
     app.nacos_registry.drop_connection(&connection_id).await;
@@ -316,17 +398,13 @@ pub async fn connect_db(
     if let Err(error) = app.get_or_create_pool_for_connection_attempt(&connection_id, None, attempt).await {
         // 连接失败：仅回滚本次请求刚写入的会话凭据，避免前端误判"已记住密码"而用
         // 失败密码免弹窗重试；无密码重连复用的既有凭据不受瞬时失败影响。
-        if let Some(token) = session_credential_write.as_ref() {
-            app.session_credentials.remove_if_current(token);
-        }
+        rollback_session_credential_writes(app, &session_credential_writes);
         return Err(AppError::from(error));
     }
     if let Err(error) = sync_mongo_legacy_driver_fallback(&state, &config).await {
         app.remove_connection_pools_detached(&connection_id).await;
         app.reset_connection_transport_for_config(&connection_id, &config).await;
-        if let Some(token) = session_credential_write.as_ref() {
-            app.session_credentials.remove_if_current(token);
-        }
+        rollback_session_credential_writes(app, &session_credential_writes);
         return Err(error);
     }
 
@@ -380,17 +458,18 @@ pub async fn connection_final_proxy_port(
     let db_config = dbx_core::connection::metadata_connection_config(&runtime_config);
     // Tunnel resolution needs a runtime config lookup, but a no-save password
     // must never enter the shared Web config cache and bypass owner isolation.
-    let mut stored_config = runtime_config.clone();
-    if !stored_config.save_password {
-        stored_config.password.clear();
-    }
+    let (stored_config, runtime_secrets) = prepare_runtime_config(runtime_config.clone());
     app.configs.write().await.insert(connection_id.clone(), stored_config);
 
     let (_, port) = app.connection_host_port(&connection_id, &db_config).await.map_err(AppError::from)?;
-    if !runtime_config.save_password && !runtime_config.password.is_empty() {
-        let owner = session_token_from_headers(&headers).unwrap_or_default();
-        let _ = app.session_credentials.set(&owner, &connection_id, &runtime_config.password);
-    }
+    let owner = session_token_from_headers(&headers).unwrap_or_default();
+    record_session_credentials(
+        app,
+        &owner,
+        &connection_id,
+        &runtime_secrets,
+        runtime_config.db_type == DatabaseType::Nacos,
+    );
     Ok(Json(port))
 }
 
@@ -458,6 +537,20 @@ pub async fn forget_session_credential(
     Ok(Json(()))
 }
 
+pub async fn replace_nacos_session_credential(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Json(body): Json<ReplaceNacosSessionCredentialRequest>,
+) -> Result<Json<()>, AppError> {
+    let owner = session_token_from_headers(&headers).unwrap_or_default();
+    state
+        .app
+        .replace_nacos_session_credential(&owner, &body.connection_id, &body.username, &body.password)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
 pub async fn connection_identifier_quote(
     State(state): State<Arc<WebState>>,
     Json(body): Json<ConnectionIdentifierQuoteRequest>,
@@ -481,7 +574,7 @@ pub async fn close_database_connection(
 
 pub async fn save_connections(
     State(state): State<Arc<WebState>>,
-    _headers: HeaderMap,
+    headers: HeaderMap,
     Json(body): Json<SaveConnectionsRequest>,
 ) -> Result<Json<()>, AppError> {
     for config in &body.configs {
@@ -495,7 +588,13 @@ pub async fn save_connections(
         }
     }
     state.app.storage.save_connections(&body.configs).await.map_err(AppError::from)?;
-    let sync = sync_connection_configs(&state, &body.configs).await;
+    let owner = session_token_from_headers(&headers).unwrap_or_default();
+    let runtime_configs = body.configs.iter().cloned().map(prepare_runtime_config).collect::<Vec<_>>();
+    let sanitized_configs = runtime_configs.iter().map(|(config, _)| config.clone()).collect::<Vec<_>>();
+    let sync = sync_connection_configs(&state, &sanitized_configs).await;
+    for (config, secrets) in &runtime_configs {
+        record_session_credentials(&state.app, &owner, &config.id, secrets, config.db_type == DatabaseType::Nacos);
+    }
     remove_connection_pools_for_connection_ids(&state, &sync.connection_pool_ids_to_drop).await;
     drop_nacos_adapters_for_connection_ids(&state, &sync.nacos_adapter_ids_to_drop).await;
     drop_mq_adapters_for_connection_ids(&state, &sync.mq_adapter_ids_to_drop).await;
@@ -601,12 +700,14 @@ async fn sync_connection_configs(state: &WebState, configs: &[ConnectionConfig])
             if previous.db_type == dbx_core::models::connection::DatabaseType::MessageQueue {
                 mq_adapter_ids_to_drop.insert(config.id.clone());
             }
+            if !connection_configs_session_credentials_compatible(&previous, config) {
+                // 全局端点或认证身份变化时清除所有 owner 的旧凭据；显示范围等
+                // 本地设置不改变凭据归属，必须保留各 owner 的 no-save 密码。
+                state.app.session_credentials.clear_connection(&config.id);
+            }
             // 仅在真实连接参数变化时销毁池；save_password=false 连接因持久化
             // 空密码与运行态密码产生的差异被忽略（见 connection_configs_pool_equivalent）。
             if !connection_configs_pool_equivalent(&previous, config) {
-                // 连接端点/认证参数已全局变化：清除所有 owner 的旧凭据与池 owner，
-                // 避免其他登录会话把旧密码或旧池复用到新的连接定义。
-                state.app.session_credentials.clear_connection(&config.id);
                 connection_pool_ids_to_drop.insert(config.id.clone());
             }
         }
@@ -658,6 +759,9 @@ mod tests {
     use dbx_core::models::connection::{
         AttachedDatabaseConfig, ConnectionConfig, DatabaseConnectionInfo, DatabaseType, ProxyTunnelConfig, ProxyType,
         TransportLayerConfig,
+    };
+    use dbx_core::nacos::config::{
+        NacosAuthConfig, NacosRNacosConsoleAuth, NACOS_CONSOLE_SESSION_PASSWORD, NACOS_PRIMARY_SESSION_PASSWORD,
     };
     use dbx_core::storage::{McpGlobalPolicy, Storage};
     use std::sync::Arc;
@@ -733,6 +837,36 @@ mod tests {
             "adminUrl": admin_url,
             "auth": { "kind": "none" },
             "pinnedVersion": "3.1"
+        }));
+        config
+    }
+
+    fn nacos_config(id: &str) -> ConnectionConfig {
+        let mut config = sqlite_config(id, "");
+        config.name = "Nacos".to_string();
+        config.db_type = DatabaseType::Nacos;
+        config.host = "127.0.0.1".to_string();
+        config.port = 8848;
+        config.username = "ordinary-user".to_string();
+        config.save_password = false;
+        config.visible_databases = Some(vec!["namespace-a".to_string()]);
+        config.external_config = Some(serde_json::json!({
+            "implementation": "nacos",
+            "versionMode": "v3",
+            "apiPlane": "admin",
+            "serverAddr": "http://127.0.0.1:8848",
+            "managedNamespaces": ["namespace-a"],
+            "rnacosConsoleAddr": "http://127.0.0.1:10848",
+            "rnacosConsoleAuth": {
+                "kind": "usernamePassword",
+                "username": "console-user",
+                "password": "console-password"
+            },
+            "auth": {
+                "kind": "usernamePassword",
+                "username": "ordinary-user",
+                "password": "old-password"
+            }
         }));
         config
     }
@@ -1313,6 +1447,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn save_connections_scopes_all_nacos_no_save_passwords_to_the_request_owner() {
+        let (state, dir) = test_web_state().await;
+        let config = nacos_config("nacos-a");
+        let headers_a = cookie_headers("token-a");
+
+        let _ =
+            save_connections(State(state.clone()), headers_a, Json(SaveConnectionsRequest { configs: vec![config] }))
+                .await
+                .unwrap();
+
+        let runtime = state.app.configs.read().await.get("nacos-a").cloned().unwrap();
+        assert!(runtime.password.is_empty());
+        let external = runtime.external_config.as_ref().unwrap();
+        assert_eq!(external["auth"]["password"], "");
+        assert_eq!(external["rnacosConsoleAuth"]["password"], "");
+        assert_eq!(
+            state
+                .app
+                .session_credentials
+                .get_for_purpose("token-a", "nacos-a", NACOS_PRIMARY_SESSION_PASSWORD)
+                .as_deref(),
+            Some("old-password")
+        );
+        assert_eq!(
+            state
+                .app
+                .session_credentials
+                .get_for_purpose("token-a", "nacos-a", NACOS_CONSOLE_SESSION_PASSWORD)
+                .as_deref(),
+            Some("console-password")
+        );
+        assert_eq!(
+            state.app.session_credentials.get_for_purpose("token-b", "nacos-a", NACOS_PRIMARY_SESSION_PASSWORD),
+            None
+        );
+        assert_eq!(
+            state.app.session_credentials.get_for_purpose("token-b", "nacos-a", NACOS_CONSOLE_SESSION_PASSWORD),
+            None
+        );
+
+        dbx_core::session_credentials::with_credential_owner(Some("token-a".to_string()), async {
+            let parsed = state.app.nacos_admin_config_for_connection("nacos-a", &runtime).await.unwrap();
+            assert!(matches!(
+                parsed.auth,
+                NacosAuthConfig::UsernamePassword { ref password, .. } if password == "old-password"
+            ));
+            assert!(matches!(
+                parsed.rnacos_console_auth,
+                NacosRNacosConsoleAuth::UsernamePassword { ref password, .. } if password == "console-password"
+            ));
+        })
+        .await;
+        dbx_core::session_credentials::with_credential_owner(Some("token-b".to_string()), async {
+            let parsed = state.app.nacos_admin_config_for_connection("nacos-a", &runtime).await.unwrap();
+            assert!(matches!(
+                parsed.auth,
+                NacosAuthConfig::UsernamePassword { ref password, .. } if password.is_empty()
+            ));
+            assert!(matches!(
+                parsed.rnacos_console_auth,
+                NacosRNacosConsoleAuth::UsernamePassword { ref password, .. } if password.is_empty()
+            ));
+        })
+        .await;
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
     async fn connection_final_proxy_port_sanitizes_no_save_passwords() {
         let (state, dir) = test_web_state().await;
         let mut config = sqlite_config("conn-a", "127.0.0.1");
@@ -1451,6 +1654,47 @@ mod tests {
         assert!(!state.app.session_credentials.has("token-b", "conn-a"));
         assert!(!state.app.session_credentials.has_pool_owner("conn-a"));
         assert!(state.app.session_credentials.pool_owner_mismatch("conn-a", "token-b"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn sync_connection_configs_preserves_all_nacos_owner_passwords_for_scope_updates() {
+        let (state, dir) = test_web_state().await;
+        let initial = nacos_config("nacos-a");
+        state.app.configs.write().await.insert(initial.id.clone(), initial.clone());
+        for (owner, password) in [("token-a", "owner-a-secret"), ("token-b", "owner-b-secret")] {
+            let _ = state.app.session_credentials.set(owner, &initial.id, password);
+            state.app.session_credentials.set_for_purpose(owner, &initial.id, "nacos-primary-password", password);
+        }
+
+        let mut scope_updated = initial.clone();
+        scope_updated.visible_databases = Some(vec!["namespace-a".to_string(), "namespace-b".to_string()]);
+        scope_updated.external_config.as_mut().unwrap()["managedNamespaces"] =
+            serde_json::json!(["namespace-a", "namespace-b"]);
+        let sync = sync_connection_configs(&state, std::slice::from_ref(&scope_updated)).await;
+
+        assert_eq!(sync.connection_pool_ids_to_drop.as_slice(), std::slice::from_ref(&initial.id));
+        for (owner, password) in [("token-a", "owner-a-secret"), ("token-b", "owner-b-secret")] {
+            assert_eq!(state.app.session_credentials.get(owner, &initial.id).as_deref(), Some(password));
+            assert_eq!(
+                state.app.session_credentials.get_for_purpose(owner, &initial.id, "nacos-primary-password").as_deref(),
+                Some(password)
+            );
+        }
+
+        let mut endpoint_updated = scope_updated;
+        endpoint_updated.host = "nacos.internal".to_string();
+        endpoint_updated.external_config.as_mut().unwrap()["serverAddr"] =
+            serde_json::json!("http://nacos.internal:8848");
+        sync_connection_configs(&state, std::slice::from_ref(&endpoint_updated)).await;
+        for owner in ["token-a", "token-b"] {
+            assert!(!state.app.session_credentials.has(owner, &initial.id));
+            assert_eq!(
+                state.app.session_credentials.get_for_purpose(owner, &initial.id, "nacos-primary-password"),
+                None
+            );
+        }
 
         let _ = std::fs::remove_dir_all(dir);
     }

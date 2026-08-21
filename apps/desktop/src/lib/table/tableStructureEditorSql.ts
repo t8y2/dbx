@@ -87,6 +87,9 @@ export interface BuildTableStructureChangeSqlOptions {
    * the backend rejects `CREATE INDEX CONCURRENTLY` on such tables (fail
    * closed) instead of downgrading to a blocking `CREATE INDEX`. */
   partitioned?: boolean;
+  /** When true, the connection is GaussDB M-mode which uses MySQL-compatible
+   * SQL dialect with backtick quoting. */
+  isGaussdbMMode?: boolean;
 }
 
 export interface TableStructureChangeSql {

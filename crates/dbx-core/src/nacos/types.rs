@@ -161,6 +161,8 @@ pub struct NacosServiceCapabilities {
     pub delete_service: NacosOperationCapability,
     pub list_instances: NacosOperationCapability,
     pub update_instance: NacosOperationCapability,
+    #[serde(default)]
+    pub update_instance_health: NacosOperationCapability,
     pub register_instance: NacosOperationCapability,
     pub deregister_instance: NacosOperationCapability,
 }
@@ -175,6 +177,7 @@ impl NacosServiceCapabilities {
             delete_service: NacosOperationCapability::unsupported(reason),
             list_instances: NacosOperationCapability::supported(),
             update_instance: NacosOperationCapability::unsupported(reason),
+            update_instance_health: NacosOperationCapability::unsupported(reason),
             register_instance: NacosOperationCapability::unsupported(reason),
             deregister_instance: NacosOperationCapability::unsupported(reason),
         }

@@ -290,7 +290,11 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
 
   const isPinned = computed(() => activeNode.value.pinned || connectionStore.isTreeNodePinned(activeNode.value));
   const isNodeDefaultDatabase = computed(
-    () => (activeNode.value.type === "database" || activeNode.value.type === "redis-db" || activeNode.value.type === "mongo-db") && !!activeNode.value.connectionId && !!activeNode.value.database && connectionStore.isDefaultDatabase(activeNode.value.connectionId, activeNode.value.database),
+    () =>
+      (activeNode.value.type === "database" || activeNode.value.type === "redis-db" || activeNode.value.type === "mongo-db" || activeNode.value.type === "vector-database") &&
+      !!activeNode.value.connectionId &&
+      !!activeNode.value.database &&
+      connectionStore.isDefaultDatabase(activeNode.value.connectionId, activeNode.value.database),
   );
   const isNodeDefaultSchema = computed(() => activeNode.value.type === "schema" && !!activeNode.value.connectionId && !!activeNode.value.schema && connectionStore.isDefaultSchema(activeNode.value.connectionId, activeNode.value.schema));
   const isConnected = computed(() => activeNode.value.type === "connection" && !!activeNode.value.connectionId && connectionStore.connectedIds.has(activeNode.value.connectionId));

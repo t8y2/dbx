@@ -116,6 +116,7 @@ fn maps_agent_database_types_to_driver_keys() {
     assert_eq!(agent_key(&DatabaseType::InfluxDb, None), Some("influxdb"));
     assert_eq!(agent_key(&DatabaseType::Uxdb, None), Some("uxdb"));
     assert_eq!(agent_key(&DatabaseType::ZooKeeper, None), Some("zookeeper"));
+    assert_eq!(agent_key(&DatabaseType::Spanner, None), Some("spanner"));
     assert_eq!(agent_key(&DatabaseType::Oracle, Some("oracle-legacy")), Some("oracle"));
     assert_eq!(agent_key(&DatabaseType::Oracle, Some("oracle-10g")), Some("oracle"));
     assert_eq!(agent_key(&DatabaseType::SqlServer, Some("sqlserver-legacy")), Some("sqlserver-legacy"));
@@ -158,6 +159,7 @@ fn classifies_agent_database_types() {
     assert!(is_agent_type(&DatabaseType::Databend));
     assert!(is_agent_type(&DatabaseType::InfluxDb));
     assert!(is_agent_type(&DatabaseType::ZooKeeper));
+    assert!(is_agent_type(&DatabaseType::Spanner));
     assert!(!is_agent_type(&DatabaseType::Mysql));
     assert!(!is_agent_type(&DatabaseType::Jdbc));
     assert!(!is_agent_type(&DatabaseType::Gaussdb));
@@ -180,6 +182,8 @@ fn identifies_single_connection_pool_types() {
     assert!(is_single_connection_pool(&DatabaseType::Jdbc));
     assert!(is_single_connection_pool(&DatabaseType::VictoriaMetrics));
     assert!(!is_single_connection_pool(&DatabaseType::Trino));
+    // Spanner is HikariCP-pooled in the agent; a single connection would be a regression.
+    assert!(!is_single_connection_pool(&DatabaseType::Spanner));
     assert!(!is_single_connection_pool(&DatabaseType::Postgres));
     assert!(!is_single_connection_pool(&DatabaseType::Kwdb));
 }
@@ -215,6 +219,8 @@ fn skips_tcp_probe_for_local_file_plugin_and_agent_types() {
     assert!(skips_tcp_probe(&DatabaseType::VictoriaMetrics));
     assert!(skips_tcp_probe(&DatabaseType::MessageQueue));
     assert!(skips_tcp_probe(&DatabaseType::ZooKeeper));
+    // Real Cloud Spanner connections have no host to probe.
+    assert!(skips_tcp_probe(&DatabaseType::Spanner));
     assert!(!skips_tcp_probe(&DatabaseType::Postgres));
     assert!(!skips_tcp_probe(&DatabaseType::Mysql));
     assert!(!skips_tcp_probe(&DatabaseType::Gaussdb));
@@ -353,6 +359,30 @@ fn driver_manifest_declares_expected_product_capabilities() {
     assert!(uxdb.capabilities.table_structure_edit);
     assert!(!uxdb.capabilities.data_transfer);
     assert!(!uxdb.capabilities.user_admin);
+
+    let spanner = find_driver(DatabaseType::Spanner);
+    assert_eq!(spanner.label, "Google Cloud Spanner");
+    assert_eq!(spanner.runtime_mode, "agent");
+    assert_eq!(spanner.agent_key.as_deref(), Some("spanner"));
+    assert_eq!(spanner.support_level, "operate");
+    assert!(spanner.capabilities.query_execution);
+    assert!(spanner.capabilities.metadata_browse);
+    assert!(spanner.capabilities.object_browser);
+    assert!(spanner.capabilities.schema_search);
+    assert!(spanner.capabilities.sql_file_execution);
+    assert!(spanner.capabilities.driver_management);
+    // Every table in Spanner has a primary key, so grid edits can locate rows reliably.
+    assert!(spanner.capabilities.table_data_edit);
+    // Structure edits need per-dialect DDL descriptors; database creation needs the
+    // Admin API (`CreateDatabase` gRPC), which the JDBC driver cannot reach.
+    assert!(!spanner.capabilities.table_structure_edit);
+    assert!(!spanner.capabilities.database_create);
+    assert!(!spanner.capabilities.table_import);
+    assert!(!spanner.capabilities.data_transfer);
+    assert!(!spanner.capabilities.object_source);
+    assert!(!spanner.capabilities.diagram);
+    assert!(!spanner.capabilities.sql_explain);
+    assert!(!spanner.capabilities.user_admin);
 
     let starrocks = find_driver(DatabaseType::StarRocks);
     assert!(starrocks.capabilities.user_admin);

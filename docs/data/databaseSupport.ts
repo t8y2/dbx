@@ -53,6 +53,7 @@ export const databaseSupport: DatabaseSupportItem[] = [
   { id: "databricks", name: "Databricks", icon: "/icons/database/databricks.svg", tone: "#ff5a1f" },
   { id: "snowflake", name: "Snowflake", icon: "/icons/database/snowflake.svg", tone: "#29b5e8" },
   { id: "bigquery", name: "BigQuery", icon: "/icons/database/bigquery.svg", tone: "#4285f4" },
+  { id: "spanner", name: "Cloud Spanner", icon: "/icons/database/spanner.svg", tone: "#4285f4" },
   { id: "trino", name: "Trino", icon: "/icons/database/trino.svg", tone: "#dd00a1" },
   { id: "prestosql", name: "PrestoSQL", icon: "/icons/database/presto.svg", tone: "#5890ff" },
   { id: "hive", name: "Hive", icon: "/icons/database/hive.svg", tone: "#fdcb00" },

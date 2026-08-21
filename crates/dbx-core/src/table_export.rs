@@ -9,7 +9,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::connection::MysqlMode;
 use crate::connection::{config_for_pool_key, task_client_session_id, AppState, PoolKind};
-use crate::csv_export::{format_csv, format_tsv, format_tsv_rows, push_csv_text_value};
+#[cfg(test)]
+use crate::csv_export::format_tsv_rows;
+use crate::csv_export::{format_csv, format_tsv, push_table_csv_row, push_tsv_row};
 pub use crate::database_export::ExportStatus;
 use crate::database_export::{
     build_export_insert_statements, is_export_cancelled, is_internal_export_column, BuildExportInsertStatementsOptions,
@@ -82,6 +84,7 @@ pub struct TableExportProgress {
 
 /// Format rows as CSV text without a header row.
 /// Used for streaming subsequent pagination batches.
+#[cfg_attr(not(test), allow(dead_code))]
 fn format_csv_rows(rows: &[Vec<Value>]) -> String {
     // 注意：该无表头批次路径的 Null 输出为 ""（带引号空串），与查询结果导出
     // 及首批 format_csv 的裸空单元格语义不同，直写化必须保留该差异
@@ -90,14 +93,38 @@ fn format_csv_rows(rows: &[Vec<Value>]) -> String {
         if row_index > 0 {
             out.push('\n');
         }
-        for (cell_index, cell) in row.iter().enumerate() {
-            if cell_index > 0 {
-                out.push(',');
-            }
-            push_csv_text_value(&mut out, cell);
-        }
+        push_table_csv_row(&mut out, row);
     }
     out
+}
+
+fn write_table_text_row<W: Write>(file: &mut W, csv: bool, row: &[Value], buffer: &mut String) -> Result<(), String> {
+    buffer.clear();
+    buffer.push('\n');
+    if csv {
+        push_table_csv_row(buffer, row);
+    } else {
+        push_tsv_row(buffer, row);
+    }
+    file.write_all(buffer.as_bytes()).map_err(|error| format!("Failed to write export rows: {error}"))
+}
+
+fn write_table_text_rows<W: Write>(
+    file: &mut W,
+    csv: bool,
+    rows: &[Vec<Value>],
+    buffer: &mut String,
+) -> Result<(), String> {
+    buffer.clear();
+    for row in rows {
+        buffer.push('\n');
+        if csv {
+            push_table_csv_row(buffer, row);
+        } else {
+            push_tsv_row(buffer, row);
+        }
+    }
+    file.write_all(buffer.as_bytes()).map_err(|error| format!("Failed to write export rows: {error}"))
 }
 
 fn export_column_types(request: &TableExportRequest) -> Vec<String> {
@@ -928,6 +955,7 @@ async fn try_export_native_table_stream(
             let header = format_csv(col_names, &[]);
             let header = header.strip_suffix('\n').unwrap_or(&header);
             file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write CSV: {e}"))?;
+            let mut row_buffer = String::new();
 
             let result = stream_native_table_rows(
                 state,
@@ -938,13 +966,12 @@ async fn try_export_native_table_stream(
                 &cancelled,
                 cancel_token.clone(),
                 |row| {
-                    let formatted = crate::temporal_format::format_temporal_export_row(
+                    let formatted = crate::temporal_format::format_temporal_export_row_cow(
                         row,
                         column_types,
                         request.date_time_format.as_deref(),
                     );
-                    let row_csv = format_csv_rows(&[formatted]);
-                    write!(file, "\n{row_csv}").map_err(|e| format!("Failed to write CSV rows: {e}"))?;
+                    write_table_text_row(&mut file, true, formatted.as_ref(), &mut row_buffer)?;
                     rows_exported += 1;
                     if rows_exported.is_multiple_of(progress_interval) {
                         on_progress(TableExportProgress {
@@ -972,6 +999,7 @@ async fn try_export_native_table_stream(
             let header = format_tsv(col_names, &[]);
             let header = header.strip_suffix('\n').unwrap_or(&header);
             file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write TXT: {e}"))?;
+            let mut row_buffer = String::new();
 
             let result = stream_native_table_rows(
                 state,
@@ -982,13 +1010,12 @@ async fn try_export_native_table_stream(
                 &cancelled,
                 cancel_token.clone(),
                 |row| {
-                    let formatted = crate::temporal_format::format_temporal_export_row(
+                    let formatted = crate::temporal_format::format_temporal_export_row_cow(
                         row,
                         column_types,
                         request.date_time_format.as_deref(),
                     );
-                    let row_tsv = format_tsv_rows(&[formatted]);
-                    write!(file, "\n{row_tsv}").map_err(|e| format!("Failed to write TXT rows: {e}"))?;
+                    write_table_text_row(&mut file, false, formatted.as_ref(), &mut row_buffer)?;
                     rows_exported += 1;
                     if rows_exported.is_multiple_of(progress_interval) {
                         on_progress(TableExportProgress {
@@ -1033,12 +1060,12 @@ async fn try_export_native_table_stream(
                 &cancelled,
                 cancel_token.clone(),
                 |row| {
-                    let formatted = crate::temporal_format::format_temporal_export_row(
+                    let formatted = crate::temporal_format::format_temporal_export_row_cow(
                         row,
                         column_types,
                         request.date_time_format.as_deref(),
                     );
-                    writer.write_row(&formatted).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
+                    writer.write_row(formatted.as_ref()).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
                     rows_exported += 1;
                     if rows_exported.is_multiple_of(progress_interval) {
                         on_progress(TableExportProgress {
@@ -1087,12 +1114,12 @@ async fn try_export_native_table_stream(
                     if !is_first_row {
                         file.write_all(b",\n").map_err(|e| format!("Failed to write JSON: {e}"))?;
                     }
-                    let formatted = crate::temporal_format::format_temporal_export_row(
+                    let formatted = crate::temporal_format::format_temporal_export_row_cow(
                         row,
                         column_types,
                         request.date_time_format.as_deref(),
                     );
-                    write_json_row_object(&mut file, col_names, &formatted)?;
+                    write_json_row_object(&mut file, col_names, formatted.as_ref())?;
                     is_first_row = false;
                     rows_exported += 1;
                     if rows_exported.is_multiple_of(progress_interval) {
@@ -1473,6 +1500,7 @@ async fn export_table_data_core_inner(
     // 8. Create output file
     let file = std::fs::File::create(&request.file_path).map_err(|e| format!("Failed to create file: {e}"))?;
     let mut file = BufWriter::new(file);
+    let mut text_buffer = String::new();
 
     let mut rows_exported: u64 = 0;
     let batch_size = request.batch_size.unwrap_or(DEFAULT_BATCH_SIZE).max(1);
@@ -1533,7 +1561,7 @@ async fn export_table_data_core_inner(
                 if row_count == 0 {
                     break;
                 }
-                let formatted_rows = crate::temporal_format::format_temporal_export_rows(
+                let formatted_rows = crate::temporal_format::format_temporal_export_rows_cow(
                     &result.rows,
                     &column_types,
                     request.date_time_format.as_deref(),
@@ -1541,15 +1569,12 @@ async fn export_table_data_core_inner(
 
                 if is_first_batch {
                     // First batch: write header + rows via format_csv
-                    let csv_content = format_csv(&col_names, &formatted_rows);
+                    let csv_content = format_csv(&col_names, formatted_rows.as_ref());
                     file.write_all(csv_content.as_bytes()).map_err(|e| format!("Failed to write CSV: {e}"))?;
                     is_first_batch = false;
                 } else {
                     // Subsequent batches: write rows only (prepend newline for separation)
-                    let rows_csv = format_csv_rows(&formatted_rows);
-                    if !rows_csv.is_empty() {
-                        write!(file, "\n{rows_csv}").map_err(|e| format!("Failed to write CSV rows: {e}"))?;
-                    }
+                    write_table_text_rows(&mut file, true, formatted_rows.as_ref(), &mut text_buffer)?;
                 }
 
                 rows_exported += row_count as u64;
@@ -1624,21 +1649,17 @@ async fn export_table_data_core_inner(
                 if row_count == 0 {
                     break;
                 }
-                let formatted_rows = crate::temporal_format::format_temporal_export_rows(
+                let formatted_rows = crate::temporal_format::format_temporal_export_rows_cow(
                     &result.rows,
                     &column_types,
                     request.date_time_format.as_deref(),
                 );
 
                 if is_first_batch {
-                    let rows_tsv = format_tsv_rows(&formatted_rows);
-                    write!(file, "\n{rows_tsv}").map_err(|e| format!("Failed to write TXT rows: {e}"))?;
+                    write_table_text_rows(&mut file, false, formatted_rows.as_ref(), &mut text_buffer)?;
                     is_first_batch = false;
                 } else {
-                    let rows_tsv = format_tsv_rows(&formatted_rows);
-                    if !rows_tsv.is_empty() {
-                        write!(file, "\n{rows_tsv}").map_err(|e| format!("Failed to write TXT rows: {e}"))?;
-                    }
+                    write_table_text_rows(&mut file, false, formatted_rows.as_ref(), &mut text_buffer)?;
                 }
 
                 rows_exported += row_count as u64;
@@ -1728,12 +1749,12 @@ async fn export_table_data_core_inner(
                 }
 
                 for row in &result.rows {
-                    let formatted = crate::temporal_format::format_temporal_export_row(
+                    let formatted = crate::temporal_format::format_temporal_export_row_cow(
                         row,
                         &column_types,
                         request.date_time_format.as_deref(),
                     );
-                    writer.write_row(&formatted).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
+                    writer.write_row(formatted.as_ref()).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
                 }
                 rows_exported += row_count as u64;
 
@@ -1827,12 +1848,12 @@ async fn export_table_data_core_inner(
                     if !is_first_row {
                         file.write_all(b",\n").map_err(|e| format!("Failed to write JSON: {e}"))?;
                     }
-                    let formatted = crate::temporal_format::format_temporal_export_row(
+                    let formatted = crate::temporal_format::format_temporal_export_row_cow(
                         row,
                         &column_types,
                         request.date_time_format.as_deref(),
                     );
-                    write_json_row_object(&mut file, &col_names, &formatted)?;
+                    write_json_row_object(&mut file, &col_names, formatted.as_ref())?;
                     is_first_row = false;
                 }
 
@@ -1908,12 +1929,12 @@ async fn export_table_data_core_inner(
                     break;
                 }
 
-                let formatted_rows = crate::temporal_format::format_temporal_export_rows(
+                let formatted_rows = crate::temporal_format::format_temporal_export_rows_cow(
                     &result.rows,
                     &column_types,
                     request.date_time_format.as_deref(),
                 );
-                let rows_markdown = format_markdown_rows(&formatted_rows);
+                let rows_markdown = format_markdown_rows(formatted_rows.as_ref());
                 if !rows_markdown.is_empty() {
                     if wrote_rows {
                         file.write_all(b"\n").map_err(|e| format!("Failed to write Markdown: {e}"))?;
@@ -2268,6 +2289,16 @@ mod tests {
         let rows = vec![vec![json!("just"), json!("one")]];
         let out = format_csv_rows(&rows);
         assert_eq!(out, "\"just\",\"one\"");
+    }
+
+    #[test]
+    fn reusable_text_row_buffer_preserves_table_null_semantics() {
+        let row = vec![Value::Null, json!(""), json!("line\n\"two\"")];
+        let mut output = Vec::new();
+        let mut buffer = String::new();
+
+        write_table_text_row(&mut output, true, &row, &mut buffer).expect("write csv row");
+        assert_eq!(String::from_utf8(output).expect("utf8 csv"), "\n\"\",\"\",\"line\n\"\"two\"\"\"");
     }
 
     // -----------------------------------------------------------------------

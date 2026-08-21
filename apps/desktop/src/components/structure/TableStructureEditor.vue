@@ -680,8 +680,15 @@ const indexTypesByDb: Record<string, string[]> = {
   sqlserver: ["CLUSTERED", "NONCLUSTERED", "COLUMNSTORE", "NONCLUSTERED COLUMNSTORE", "XML", "SPATIAL"],
   oracle: ["NORMAL", "BITMAP", "FUNCTION-BASED NORMAL", "FUNCTION-BASED DOMAIN", "DOMAIN", "CLUSTER"],
   sqlite: ["BTREE"],
+  "gaussdb-m": ["UBTREE"],
 };
-const indexTypeOptions = computed(() => (structureCapabilities.value.indexType ? (indexTypesByDb[structureDialect.value] ?? []) : []));
+const indexTypeOptions = computed(() => {
+  if (!structureCapabilities.value.indexType) return [];
+  if (connection.value?.driver_profile?.toLowerCase() === "gaussdb-m") {
+    return indexTypesByDb["gaussdb-m"];
+  }
+  return indexTypesByDb[structureDialect.value] ?? [];
+});
 
 interface DefaultValuePreset {
   label: string;
@@ -1342,6 +1349,7 @@ function structureChangeOptions(): BuildTableStructureChangeSqlOptions {
     tableComment: tableComment.value,
     originalTableComment: isCreateMode.value ? undefined : originalTableComment.value,
     partitioned: isPartitionedParent.value,
+    isGaussdbMMode: connection.value?.driver_profile?.toLowerCase() === "gaussdb-m",
   };
 }
 
@@ -2457,15 +2465,24 @@ function existingIndexNamesForDraft(index: EditableStructureIndex): string[] {
 }
 
 function generatedIndexNameForDraft(index: EditableStructureIndex, columnsForName = index.columns): string {
-  return generateUniqueIndexName(structureIndexTableName(), columnsForName, existingIndexNamesForDraft(index));
+  const name = generateUniqueIndexName(structureIndexTableName(), columnsForName, existingIndexNamesForDraft(index));
+  // GaussDB M-mode expects lowercase index names (MySQL-compatible).
+  return connection.value?.driver_profile?.toLowerCase() === "gaussdb-m" ? name.toLowerCase() : name;
 }
 
 function refreshAutoIndexName(index: EditableStructureIndex, previousColumns = index.columns) {
   if (index.original || index.nameEdited) return;
+  const isGaussdbM = connection.value?.driver_profile?.toLowerCase() === "gaussdb-m";
   const previousName = generateIndexName(structureIndexTableName(), previousColumns);
   const previousUniqueName = generateUniqueIndexName(structureIndexTableName(), previousColumns, existingIndexNamesForDraft(index));
   const currentName = index.name.trim();
-  if (currentName && currentName !== previousName && currentName !== previousUniqueName) return;
+  if (currentName) {
+    if (isGaussdbM) {
+      if (currentName.toLowerCase() !== previousName.toLowerCase() && currentName.toLowerCase() !== previousUniqueName.toLowerCase()) return;
+    } else if (currentName !== previousName && currentName !== previousUniqueName) {
+      return;
+    }
+  }
   index.name = generatedIndexNameForDraft(index);
 }
 

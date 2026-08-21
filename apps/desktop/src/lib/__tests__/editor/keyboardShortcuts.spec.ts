@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { eventToModifierOnlyShortcut, eventToShortcut, isExecuteSqlInNewResultTabShortcut, matchesModifierOnlyShortcut, matchesShortcut } from "@/lib/editor/keyboardShortcuts";
+import { eventToModifierOnlyShortcut, eventToShortcut, isExecuteSqlInNewResultTabShortcut, matchesModifierOnlyShortcut, matchesShortcut, tabSwitcherDirectionFromShortcut } from "@/lib/editor/keyboardShortcuts";
 import { formatShortcutDisplay, isMacShortcutPlatform } from "@/lib/editor/shortcutDisplay";
 
 describe("keyboard shortcut matching", () => {
@@ -81,5 +81,26 @@ describe("keyboard shortcut matching", () => {
   it("matches legacy plus-key shortcuts saved with plus as a separator", () => {
     expect(matchesShortcut({ key: "+", ctrlKey: true }, "Mod++", "Win32")).toBe(true);
     expect(matchesShortcut({ key: "+", ctrlKey: true, shiftKey: true }, "Shift+Mod++", "Win32")).toBe(true);
+  });
+});
+
+describe("tabSwitcherDirectionFromShortcut", () => {
+  it("advances forward on the default Ctrl+Tab", () => {
+    expect(tabSwitcherDirectionFromShortcut({ key: "Tab", ctrlKey: true }, { tabSwitcher: "Ctrl+Tab" })).toBe(1);
+  });
+
+  it("moves backward when Shift is added to the configured shortcut", () => {
+    expect(tabSwitcherDirectionFromShortcut({ key: "Tab", ctrlKey: true, shiftKey: true }, { tabSwitcher: "Ctrl+Tab" })).toBe(-1);
+  });
+
+  it("ignores unrelated keys and modifiers", () => {
+    expect(tabSwitcherDirectionFromShortcut({ key: "Tab" }, { tabSwitcher: "Ctrl+Tab" })).toBeNull();
+    expect(tabSwitcherDirectionFromShortcut({ key: "Tab", ctrlKey: true, altKey: true }, { tabSwitcher: "Ctrl+Tab" })).toBeNull();
+    expect(tabSwitcherDirectionFromShortcut({ key: "w", ctrlKey: true }, { tabSwitcher: "Ctrl+Tab" })).toBeNull();
+  });
+
+  it("honors a remapped shortcut and does not reverse when it already uses Shift", () => {
+    expect(tabSwitcherDirectionFromShortcut({ key: "Tab", ctrlKey: true, shiftKey: true }, { tabSwitcher: "Shift+Ctrl+Tab" })).toBe(1);
+    expect(tabSwitcherDirectionFromShortcut({ key: "Tab", ctrlKey: true }, { tabSwitcher: "Shift+Ctrl+Tab" })).toBeNull();
   });
 });

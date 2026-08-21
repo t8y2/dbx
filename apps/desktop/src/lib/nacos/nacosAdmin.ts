@@ -1,4 +1,4 @@
-import type { NacosConfigHistoryItem, NacosConfigItem, NacosConfigKey, NacosContentMatch, NacosImplementation, NacosInstanceInfo, NacosPermissionInfo, NacosRawRequest, NacosServiceInfo, NacosVersionMode } from "@/types/nacos";
+import type { NacosApiPlane, NacosConfigHistoryItem, NacosConfigItem, NacosConfigKey, NacosContentMatch, NacosImplementation, NacosInstanceInfo, NacosPermissionInfo, NacosRawRequest, NacosServiceInfo, NacosVersionMode } from "@/types/nacos";
 import { diffArrays, diffChars } from "diff";
 
 export type NacosRawTemplateKey = "serverState" | "namespaceList" | "configDetail" | "serviceList" | "instanceList";
@@ -58,6 +58,7 @@ export interface NacosEndpointNormalization {
 export interface NacosEndpointNormalizationOptions {
   implementation?: NacosImplementation;
   versionMode?: NacosVersionMode;
+  apiPlane?: NacosApiPlane;
   contextPath?: string;
 }
 
@@ -78,6 +79,7 @@ export function normalizeNacosEndpoint(input: string, options: NacosEndpointNorm
   const rawPath = url.pathname.replace(/\/+$/, "");
   const implementation = options.implementation;
   const versionMode = options.versionMode || "auto";
+  const apiPlane = options.apiPlane || "admin";
   const warnings: string[] = [];
   const hasRNacosSuffix = /\/rnacos$/i.test(rawPath);
   const hasNacosSuffix = /\/nacos$/i.test(rawPath);
@@ -91,7 +93,7 @@ export function normalizeNacosEndpoint(input: string, options: NacosEndpointNorm
     contextPath = hasNacosSuffix ? rawPath : options.contextPath?.trim() || "/nacos";
   } else if (detectedVersion === "v3" || hasNacos3UiSuffix) {
     contextPath = rawPath.replace(/\/(?:next(?:\/index\.html)?|index\.html)$/i, "");
-    if (!contextPath) contextPath = options.contextPath?.trim() || "/nacos";
+    if (!contextPath) contextPath = options.contextPath?.trim() || (apiPlane === "console" ? "" : "/nacos");
     if (hasNacos3UiSuffix) warnings.push("The Nacos 3 console route was removed from the API context.");
   } else if (!contextPath) {
     contextPath = options.contextPath?.trim() || (versionMode === "v2" ? "/nacos" : "");

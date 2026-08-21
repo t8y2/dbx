@@ -19,6 +19,7 @@ import com.dbx.agent.TriggerInfo;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -30,6 +31,9 @@ import java.util.Set;
 
 public class H2Agent extends AbstractJdbcAgent {
     private String databaseName = "";
+    private H2DriverLoader.LoadedDriver loadedDriver;
+    private H2DriverVersion driverVersion = H2DriverVersion.V3;
+    private int databaseMajorVersion = 2;
 
     @Override
     protected String driverClass() {
@@ -42,8 +46,61 @@ public class H2Agent extends AbstractJdbcAgent {
     }
 
     @Override
+    protected void loadDriver(ConnectParams params) throws Exception {
+        H2DriverVersion selected = H2DriverVersion.select(params);
+        if (selected == H2DriverVersion.CUSTOM) {
+            H2DriverLoader.LoadedDriver external = H2DriverLoader.loadExternal(
+                params.getJdbc_driver_paths(),
+                params.getJdbc_driver_class()
+            );
+            if (loadedDriver == null || !loadedDriver.identity().equals(external.identity())) {
+                replaceLoadedDriver(external);
+            } else {
+                external.classLoader().close();
+            }
+        } else if (loadedDriver == null || loadedDriver.version() != selected) {
+            replaceLoadedDriver(H2DriverLoader.load(selected));
+        }
+        driverVersion = selected;
+    }
+
+    private void replaceLoadedDriver(H2DriverLoader.LoadedDriver replacement) throws Exception {
+        H2DriverLoader.LoadedDriver previous = loadedDriver;
+        if (previous != null) {
+            try {
+                previous.classLoader().close();
+            } catch (Exception error) {
+                replacement.classLoader().close();
+                throw error;
+            }
+        }
+        loadedDriver = replacement;
+    }
+
+    @Override
+    protected Connection openConnection(ConnectParams params) throws Exception {
+        if (loadedDriver == null) {
+            throw new IllegalStateException("H2 JDBC driver was not loaded");
+        }
+        Connection opened = loadedDriver.driver().connect(buildJdbcUrl(params), buildConnectionProperties(params));
+        if (opened == null) {
+            throw new SQLException("H2 JDBC driver rejected URL: " + buildJdbcUrl(params));
+        }
+        return opened;
+    }
+
+    @Override
     protected void afterConnect(ConnectParams params, Connection connection) {
         databaseName = params.getDatabase();
+        databaseMajorVersion = unchecked(() -> connection.getMetaData().getDatabaseMajorVersion());
+    }
+
+    H2DriverVersion driverVersion() {
+        return driverVersion;
+    }
+
+    boolean isVersion2OrLater() {
+        return databaseMajorVersion >= 2;
     }
 
     @Override
@@ -118,7 +175,7 @@ public class H2Agent extends AbstractJdbcAgent {
             List<Object> args = new ArrayList<>();
             StringBuilder sql = new StringBuilder("SELECT TABLE_NAME, TABLE_TYPE FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?");
             args.add(effectiveSchema);
-            appendH2TableTypePredicate(sql, args, constraints);
+            appendH2TableTypePredicate(sql, args, constraints, isVersion2OrLater());
             MetadataSqlSupport.appendNameFilter(sql, args, "TABLE_NAME", constraints);
             sql.append(" ORDER BY TABLE_NAME");
             MetadataSqlSupport.appendLiteralLimitOffset(sql, constraints);
@@ -143,9 +200,10 @@ public class H2Agent extends AbstractJdbcAgent {
                 result.add(new ObjectInfo(table.getName(), table.getTable_type(), schema, table.getComment()));
             }
 
-            try (var stmt = requireConnected().prepareStatement(
-                "SELECT ROUTINE_NAME, ROUTINE_TYPE FROM INFORMATION_SCHEMA.ROUTINES WHERE ROUTINE_SCHEMA = ? ORDER BY ROUTINE_NAME"
-            )) {
+            String sql = isVersion2OrLater()
+                ? "SELECT ROUTINE_NAME, ROUTINE_TYPE FROM INFORMATION_SCHEMA.ROUTINES WHERE ROUTINE_SCHEMA = ? ORDER BY ROUTINE_NAME"
+                : "SELECT ALIAS_NAME, CASE WHEN RETURNS_RESULT = 2 THEN 'FUNCTION' ELSE 'PROCEDURE' END FROM INFORMATION_SCHEMA.FUNCTION_ALIASES WHERE ALIAS_SCHEMA = ? ORDER BY ALIAS_NAME";
+            try (var stmt = requireConnected().prepareStatement(sql)) {
                 stmt.setString(1, effectiveSchema);
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
@@ -174,6 +232,9 @@ public class H2Agent extends AbstractJdbcAgent {
     }
 
     private List<ObjectInfo> queryConstrainedObjects(String schema, MetadataListConstraints constraints) {
+        if (!isVersion2OrLater()) {
+            return constraints.filterObjects(listObjects(schema));
+        }
         return unchecked(() -> {
             String effectiveSchema = resolveSchema(schema);
             List<ObjectInfo> result = new ArrayList<>();
@@ -182,7 +243,7 @@ public class H2Agent extends AbstractJdbcAgent {
             if (constraints.includesTableLikeTypes()) {
                 StringBuilder tableSql = new StringBuilder("SELECT TABLE_NAME AS OBJECT_NAME, TABLE_TYPE AS OBJECT_TYPE FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?");
                 args.add(effectiveSchema);
-                appendH2TableTypePredicate(tableSql, args, constraints);
+                appendH2TableTypePredicate(tableSql, args, constraints, true);
                 MetadataSqlSupport.appendNameFilter(tableSql, args, "TABLE_NAME", constraints);
                 branches.add(tableSql.toString());
             }
@@ -218,7 +279,9 @@ public class H2Agent extends AbstractJdbcAgent {
             String effectiveSchema = resolveSchema(schema);
             String sql = switch (objectType.toUpperCase(Locale.ROOT)) {
                 case "VIEW" -> "SELECT VIEW_DEFINITION FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?";
-                case "FUNCTION", "PROCEDURE" -> "SELECT ROUTINE_DEFINITION FROM INFORMATION_SCHEMA.ROUTINES WHERE ROUTINE_SCHEMA = ? AND ROUTINE_NAME = ?";
+                case "FUNCTION", "PROCEDURE" -> isVersion2OrLater()
+                    ? "SELECT ROUTINE_DEFINITION FROM INFORMATION_SCHEMA.ROUTINES WHERE ROUTINE_SCHEMA = ? AND ROUTINE_NAME = ?"
+                    : "SELECT SOURCE FROM INFORMATION_SCHEMA.FUNCTION_ALIASES WHERE ALIAS_SCHEMA = ? AND ALIAS_NAME = ?";
                 default -> throw new IllegalArgumentException("Unsupported object type: " + objectType);
             };
 
@@ -242,16 +305,17 @@ public class H2Agent extends AbstractJdbcAgent {
         return unchecked(() -> {
             String effectiveSchema = resolveSchema(schema);
             Set<String> primaryKeys = new HashSet<>();
-            try (var stmt = requireConnected().prepareStatement(
-                """
-                SELECT ic.COLUMN_NAME
-                FROM INFORMATION_SCHEMA.INDEX_COLUMNS ic
-                JOIN INFORMATION_SCHEMA.INDEXES i
-                  ON ic.INDEX_SCHEMA = i.INDEX_SCHEMA AND ic.INDEX_NAME = i.INDEX_NAME
-                WHERE ic.TABLE_SCHEMA = ? AND ic.TABLE_NAME = ?
-                  AND i.INDEX_TYPE_NAME = 'PRIMARY KEY'
-                """
-            )) {
+            String primaryKeySql = isVersion2OrLater()
+                ? """
+                    SELECT ic.COLUMN_NAME
+                    FROM INFORMATION_SCHEMA.INDEX_COLUMNS ic
+                    JOIN INFORMATION_SCHEMA.INDEXES i
+                      ON ic.INDEX_SCHEMA = i.INDEX_SCHEMA AND ic.INDEX_NAME = i.INDEX_NAME
+                    WHERE ic.TABLE_SCHEMA = ? AND ic.TABLE_NAME = ?
+                      AND i.INDEX_TYPE_NAME = 'PRIMARY KEY'
+                    """
+                : "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.INDEXES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND PRIMARY_KEY = TRUE";
+            try (var stmt = requireConnected().prepareStatement(primaryKeySql)) {
                 stmt.setString(1, effectiveSchema);
                 stmt.setString(2, table);
                 try (ResultSet rs = stmt.executeQuery()) {
@@ -262,15 +326,11 @@ public class H2Agent extends AbstractJdbcAgent {
             }
 
             List<ColumnInfo> result = new ArrayList<>();
-            try (var stmt = requireConnected().prepareStatement(
-                """
-                SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT,
-                       NUMERIC_PRECISION, NUMERIC_SCALE, CHARACTER_MAXIMUM_LENGTH
-                FROM INFORMATION_SCHEMA.COLUMNS
-                WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
-                ORDER BY ORDINAL_POSITION
-                """
-            )) {
+            String typeColumn = isVersion2OrLater() ? "DATA_TYPE" : "TYPE_NAME";
+            String columnSql = "SELECT COLUMN_NAME, " + typeColumn + " AS DBX_DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT, "
+                + "NUMERIC_PRECISION, NUMERIC_SCALE, CHARACTER_MAXIMUM_LENGTH, REMARKS "
+                + "FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION";
+            try (var stmt = requireConnected().prepareStatement(columnSql)) {
                 stmt.setString(1, effectiveSchema);
                 stmt.setString(2, table);
                 try (ResultSet rs = stmt.executeQuery()) {
@@ -278,11 +338,11 @@ public class H2Agent extends AbstractJdbcAgent {
                         String columnName = rs.getString("COLUMN_NAME");
                         result.add(new ColumnInfo(
                             columnName,
-                            rs.getString("DATA_TYPE"),
+                            rs.getString("DBX_DATA_TYPE"),
                             "YES".equals(rs.getString("IS_NULLABLE")),
                             rs.getString("COLUMN_DEFAULT"),
                             primaryKeys.contains(columnName),
-                            null,
+                            rs.getString("REMARKS"),
                             null,
                             intOrNull(rs, "NUMERIC_PRECISION"),
                             intOrNull(rs, "NUMERIC_SCALE"),
@@ -304,16 +364,24 @@ public class H2Agent extends AbstractJdbcAgent {
             Map<String, Boolean> primaryMap = new HashMap<>();
             Map<String, String> typeMap = new HashMap<>();
 
-            try (var stmt = requireConnected().prepareStatement(
-                """
-                SELECT i.INDEX_NAME, ic.COLUMN_NAME, ic.IS_UNIQUE, i.INDEX_TYPE_NAME
-                FROM INFORMATION_SCHEMA.INDEX_COLUMNS ic
-                JOIN INFORMATION_SCHEMA.INDEXES i
-                  ON ic.INDEX_SCHEMA = i.INDEX_SCHEMA AND ic.INDEX_NAME = i.INDEX_NAME
-                WHERE ic.TABLE_SCHEMA = ? AND ic.TABLE_NAME = ?
-                ORDER BY i.INDEX_NAME, ic.ORDINAL_POSITION
-                """
-            )) {
+            String indexSql = isVersion2OrLater()
+                ? """
+                    SELECT i.INDEX_NAME, ic.COLUMN_NAME, ic.IS_UNIQUE, i.INDEX_TYPE_NAME,
+                           CASE WHEN i.INDEX_TYPE_NAME = 'PRIMARY KEY' THEN TRUE ELSE FALSE END AS IS_PRIMARY
+                    FROM INFORMATION_SCHEMA.INDEX_COLUMNS ic
+                    JOIN INFORMATION_SCHEMA.INDEXES i
+                      ON ic.INDEX_SCHEMA = i.INDEX_SCHEMA AND ic.INDEX_NAME = i.INDEX_NAME
+                    WHERE ic.TABLE_SCHEMA = ? AND ic.TABLE_NAME = ?
+                    ORDER BY i.INDEX_NAME, ic.ORDINAL_POSITION
+                    """
+                : """
+                    SELECT INDEX_NAME, COLUMN_NAME, CASE WHEN NON_UNIQUE THEN FALSE ELSE TRUE END AS IS_UNIQUE,
+                           INDEX_TYPE_NAME, PRIMARY_KEY AS IS_PRIMARY
+                    FROM INFORMATION_SCHEMA.INDEXES
+                    WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+                    ORDER BY INDEX_NAME, ORDINAL_POSITION
+                    """;
+            try (var stmt = requireConnected().prepareStatement(indexSql)) {
                 stmt.setString(1, effectiveSchema);
                 stmt.setString(2, table);
                 try (ResultSet rs = stmt.executeQuery()) {
@@ -324,7 +392,7 @@ public class H2Agent extends AbstractJdbcAgent {
 
                         indexMap.computeIfAbsent(indexName, ignored -> new ArrayList<>()).add(columnName);
                         uniqueMap.put(indexName, rs.getBoolean("IS_UNIQUE"));
-                        primaryMap.put(indexName, "PRIMARY KEY".equals(indexType));
+                        primaryMap.put(indexName, rs.getBoolean("IS_PRIMARY"));
                         typeMap.put(indexName, indexType == null ? "" : indexType);
                     }
                 }
@@ -353,27 +421,17 @@ public class H2Agent extends AbstractJdbcAgent {
         return unchecked(() -> {
             String effectiveSchema = resolveSchema(schema);
             List<ForeignKeyInfo> result = new ArrayList<>();
-            try (var stmt = requireConnected().prepareStatement(
-                """
-                SELECT FK_NAME, FKCOLUMN_NAME, PKTABLE_NAME, PKCOLUMN_NAME
-                FROM INFORMATION_SCHEMA.CROSS_REFERENCES
-                WHERE FKTABLE_SCHEMA = ? AND FKTABLE_NAME = ?
-                ORDER BY FK_NAME
-                """
-            )) {
-                stmt.setString(1, effectiveSchema);
-                stmt.setString(2, table);
-                try (ResultSet rs = stmt.executeQuery()) {
-                    while (rs.next()) {
-                        result.add(new ForeignKeyInfo(
-                            rs.getString("FK_NAME"),
-                            rs.getString("FKCOLUMN_NAME"),
-                            rs.getString("PKTABLE_NAME"),
-                            rs.getString("PKCOLUMN_NAME")
-                        ));
-                    }
+            try (ResultSet rs = requireConnected().getMetaData().getImportedKeys(null, effectiveSchema, table)) {
+                while (rs.next()) {
+                    result.add(new ForeignKeyInfo(
+                        rs.getString("FK_NAME"),
+                        rs.getString("FKCOLUMN_NAME"),
+                        rs.getString("PKTABLE_NAME"),
+                        rs.getString("PKCOLUMN_NAME")
+                    ));
                 }
             }
+            result.sort(java.util.Comparator.comparing(ForeignKeyInfo::getName, java.util.Comparator.nullsLast(String::compareTo)));
             return result;
         });
     }
@@ -383,14 +441,21 @@ public class H2Agent extends AbstractJdbcAgent {
         return unchecked(() -> {
             String effectiveSchema = resolveSchema(schema);
             List<TriggerInfo> result = new ArrayList<>();
-            try (var stmt = requireConnected().prepareStatement(
-                """
-                SELECT TRIGGER_NAME, EVENT_MANIPULATION, ACTION_TIMING
-                FROM INFORMATION_SCHEMA.TRIGGERS
-                WHERE TRIGGER_SCHEMA = ? AND EVENT_OBJECT_TABLE = ?
-                ORDER BY TRIGGER_NAME
-                """
-            )) {
+            String triggerSql = isVersion2OrLater()
+                ? """
+                    SELECT TRIGGER_NAME, EVENT_MANIPULATION, ACTION_TIMING
+                    FROM INFORMATION_SCHEMA.TRIGGERS
+                    WHERE TRIGGER_SCHEMA = ? AND EVENT_OBJECT_TABLE = ?
+                    ORDER BY TRIGGER_NAME
+                    """
+                : """
+                    SELECT TRIGGER_NAME, TRIGGER_TYPE AS EVENT_MANIPULATION,
+                           CASE WHEN BEFORE THEN 'BEFORE' ELSE 'AFTER' END AS ACTION_TIMING
+                    FROM INFORMATION_SCHEMA.TRIGGERS
+                    WHERE TRIGGER_SCHEMA = ? AND TABLE_NAME = ?
+                    ORDER BY TRIGGER_NAME
+                    """;
+            try (var stmt = requireConnected().prepareStatement(triggerSql)) {
                 stmt.setString(1, effectiveSchema);
                 stmt.setString(2, table);
                 try (ResultSet rs = stmt.executeQuery()) {
@@ -452,13 +517,18 @@ public class H2Agent extends AbstractJdbcAgent {
             || constraints.objectTypeAllowed("FUNCTION");
     }
 
-    private static void appendH2TableTypePredicate(StringBuilder sql, List<Object> args, MetadataListConstraints constraints) {
+    private static void appendH2TableTypePredicate(
+        StringBuilder sql,
+        List<Object> args,
+        MetadataListConstraints constraints,
+        boolean version2OrLater
+    ) {
         if (!constraints.hasObjectTypes()) {
             return;
         }
         List<String> types = new ArrayList<>();
         if (constraints.tableTypeAllowed("TABLE")) {
-            types.add("BASE TABLE");
+            types.add(version2OrLater ? "BASE TABLE" : "TABLE");
         }
         if (constraints.tableTypeAllowed("VIEW")) {
             types.add("VIEW");

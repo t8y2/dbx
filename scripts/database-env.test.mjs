@@ -209,6 +209,16 @@ test('initializes both Nacos versions with the shared administrator credentials'
   }
 });
 
+test('verifies Nacos 2.5 rejects unauthenticated configuration reads', () => {
+  const recipe = discoverRecipes().find((item) => recipeSelector(item) === 'nacos@2.5');
+  const authenticationStep = recipe.smoke.steps.find((step) => step.name === 'reject unauthenticated configuration reads');
+
+  assert.ok(authenticationStep);
+  assert.match(authenticationStep.command.join(' '), /nacos\/v1\/cs\/configs/);
+  assert.match(authenticationStep.command.join(' '), /403/);
+  assert.equal(authenticationStep.expect, 'unauthenticated access rejected');
+});
+
 test('configures r-nacos with its admin account and console port', () => {
   const recipe = discoverRecipes().find((item) => recipeSelector(item) === 'rnacos@0.8');
   assert.equal(recipe.connection.username, 'admin');

@@ -197,6 +197,12 @@ describe("NacosAdminConsole config workbench layout", () => {
     expect(source).toContain("border-destructive/50 text-destructive hover:bg-destructive/10");
   });
 
+  it("hides instance operations that the selected API plane does not support", () => {
+    expect(source).toContain('v-if="registerInstanceCapability.supported"');
+    expect(source).toContain('v-if="updateInstanceHealthCapability.supported"');
+    expect(source).toContain('v-if="deregisterInstanceCapability.supported"');
+  });
+
   it("separates the service header, filtering controls, and management actions", () => {
     expect(source).toContain('<header class="shrink-0 border-b bg-background">');
     expect(source).toContain('class="flex flex-wrap items-center gap-x-4 gap-y-2 border-t bg-muted/30 px-4 py-2"');

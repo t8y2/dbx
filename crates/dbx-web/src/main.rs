@@ -336,6 +336,10 @@ async fn main() {
         .route("/connection/check-health", post(routes::connection::check_connection_health))
         .route("/connection/session-credential-status", post(routes::connection::session_credential_status))
         .route("/connection/forget-session-credential", post(routes::connection::forget_session_credential))
+        .route(
+            "/connection/replace-nacos-session-credential",
+            post(routes::connection::replace_nacos_session_credential),
+        )
         .route("/connection/identifier-quote", post(routes::connection::connection_identifier_quote))
         .route("/connection/close-database", post(routes::connection::close_database_connection))
         .route("/connection/save", post(routes::connection::save_connections))
@@ -457,6 +461,7 @@ async fn main() {
         .route("/tab-runtime-cache/owner", delete(routes::tab_runtime_cache::delete_tab_runtime_cache_owner))
         // Query
         .route("/query/execute", post(routes::query::execute_query))
+        .route("/query/execute-conditional-update", post(routes::query::execute_conditional_update))
         .route("/query/execute-multi", post(routes::query::execute_multi))
         .route("/query/execute-batch", post(routes::query::execute_batch))
         .route("/query/execute-script", post(routes::query::execute_script))
@@ -541,6 +546,10 @@ async fn main() {
             post(routes::query::build_data_grid_column_distinct_values_sql),
         )
         .route("/query/build-data-grid-count-sql", post(routes::query::build_data_grid_count_sql))
+        .route(
+            "/query/build-data-grid-conditional-update-sql",
+            post(routes::query::build_data_grid_conditional_update_sql),
+        )
         .route("/query/build-hive-table-properties-sql", post(routes::query::build_hive_table_properties_sql))
         .route("/query/build-export-insert-statements", post(routes::query::build_export_insert_statements))
         .route("/query/build-export-sql-insert", post(routes::query::build_export_sql_insert))
@@ -550,6 +559,7 @@ async fn main() {
         .route("/data-compare/prepare-missing-target", post(routes::data_compare::prepare_data_compare_missing_target))
         .route("/data-compare/build-sync-plan", post(routes::data_compare::build_data_compare_sync_plan))
         .route("/query/cancel", post(routes::query::cancel_query))
+        .route("/query/cancel-conditional-update", post(routes::query::cancel_conditional_update))
         .route("/query/close-session", post(routes::query::close_query_session))
         .route("/query/close-client-session", post(routes::query::close_client_connection_session))
         .route("/export/query-result-json", post(routes::text_export::export_query_result_json))
@@ -733,6 +743,7 @@ async fn main() {
         .route("/nacos/sidebar/snapshot", post(routes::nacos::sidebar_snapshot))
         .route("/nacos/namespaces/create", post(routes::nacos::create_namespace))
         .route("/nacos/namespaces/update", post(routes::nacos::update_namespace))
+        .route("/nacos/namespaces/delete", post(routes::nacos::delete_namespace))
         .route("/nacos/configs/list", post(routes::nacos::list_configs))
         .route("/nacos/configs/get", post(routes::nacos::get_config))
         .route("/nacos/configs/publish", post(routes::nacos::publish_config))
@@ -776,6 +787,8 @@ async fn main() {
         .route("/mongo/list-databases", post(routes::mongo::list_databases))
         .route("/mongo/list-collections", post(routes::mongo::list_collections))
         .route("/mongo/vector-collection-detail", post(routes::mongo::vector_collection_detail))
+        .route("/vector/drop-database", post(routes::mongo::vector_drop_database))
+        .route("/vector/drop-collection", post(routes::mongo::vector_drop_collection))
         .route("/mongo/create-database", post(routes::mongo::create_database))
         .route("/mongo/drop-database", post(routes::mongo::drop_database))
         .route("/mongo/drop-collection", post(routes::mongo::drop_collection))

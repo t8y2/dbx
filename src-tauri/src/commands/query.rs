@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, State};
 
 use crate::commands::connection::AppState;
@@ -74,17 +74,91 @@ pub async fn execute_query(
     )
     .await;
 
-    if matches!(result, Err(dbx_core::query::QueryExecutionError::Timeout(_))) {
-        // We're giving up on waiting, not cancelling: the statement may
-        // still be executing server-side. Keep the registration (and any
-        // KILL-QUERY-style interrupt registered against it) reachable so a
-        // later explicit cancel_query call can still reach it, instead of
-        // losing that capability the instant this command returns.
-        if let Some(registered_query) = registered_query {
-            registered_query.detach();
-        }
+    if let Some(registered_query) = registered_query {
+        registered_query.finish(&result);
     }
 
+    result.map_err(dbx_core::query::QueryExecutionError::into_backend_error)
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_conditional_update(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    sql: String,
+    schema: Option<String>,
+    catalog: Option<String>,
+    execution_id: Option<String>,
+    max_rows: Option<usize>,
+    fetch_size: Option<usize>,
+    page_size: Option<usize>,
+    row_offset: Option<usize>,
+    result_session_id: Option<String>,
+    client_session_id: Option<String>,
+    timeout_secs: Option<u64>,
+    execution_mode: Option<dbx_core::query::QueryExecutionMode>,
+) -> Result<db::QueryResult, BackendError> {
+    let execution_id =
+        execution_id.filter(|id| !id.trim().is_empty()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let registered = state.running_queries.register_task_for_terminal_confirmation(
+        execution_id.clone(),
+        RunningTaskMetadata::query(connection_id.clone(), database.clone(), client_session_id.clone()),
+    );
+    let cancel_token = registered.token();
+    let response_timeout = dbx_core::query::query_timeout_duration(timeout_secs);
+    let app_state = state.inner().clone();
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+
+    tokio::spawn(async move {
+        let result = dbx_core::query::execute_sql_statement_with_options_typed(
+            &app_state,
+            &connection_id,
+            &database,
+            &sql,
+            schema.as_deref(),
+            Some(cancel_token),
+            dbx_core::query::QueryExecutionOptions {
+                max_rows,
+                fetch_size,
+                page_size,
+                row_offset,
+                catalog,
+                result_session_id,
+                client_session_id,
+                timeout_secs: Some(0),
+                await_cancel_completion: true,
+                execution_id: Some(execution_id),
+                execution_mode: execution_mode.unwrap_or_default(),
+                ..Default::default()
+            },
+        )
+        .await;
+        let _ = result_tx.send(result);
+        drop(registered);
+    });
+
+    let result = match response_timeout {
+        Some(timeout) => match tokio::time::timeout(timeout, result_rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => {
+                return Err(BackendError::from_sql_detail("Conditional update execution task stopped unexpectedly"));
+            }
+            Err(_) => {
+                return Err(BackendError::from_timeout_detail(&format!(
+                    "Query timed out after {} seconds",
+                    timeout.as_secs().max(1)
+                )));
+            }
+        },
+        None => match result_rx.await {
+            Ok(result) => result,
+            Err(_) => {
+                return Err(BackendError::from_sql_detail("Conditional update execution task stopped unexpectedly"));
+            }
+        },
+    };
     result.map_err(dbx_core::query::QueryExecutionError::into_backend_error)
 }
 
@@ -170,6 +244,7 @@ pub async fn execute_multi(
             result_session_id,
             client_session_id,
             timeout_secs,
+            await_cancel_completion: false,
             execution_id,
             use_transaction,
             continue_on_error: continue_on_error.unwrap_or(false),
@@ -194,12 +269,25 @@ pub async fn execute_multi(
             error
         ),
     }
+
+    if let Some(registered_query) = registered_query {
+        registered_query.finish(&result);
+    }
+
     result.map_err(dbx_core::query::QueryExecutionError::into_backend_error)
 }
 
 #[tauri::command]
 pub async fn cancel_query(state: State<'_, Arc<AppState>>, execution_id: String) -> Result<bool, String> {
     Ok(state.running_queries.cancel(&execution_id))
+}
+
+#[tauri::command]
+pub async fn cancel_conditional_update(
+    state: State<'_, Arc<AppState>>,
+    execution_id: String,
+) -> Result<dbx_core::query_cancel::CancellationWaitResult, String> {
+    Ok(state.running_queries.cancel_and_wait(&execution_id, Duration::from_secs(10)).await)
 }
 
 #[tauri::command]
@@ -715,6 +803,13 @@ pub fn build_data_grid_column_distinct_values_sql(
 #[tauri::command]
 pub fn build_data_grid_count_sql(options: dbx_core::data_grid_sql::DataGridCountSqlOptions) -> Result<String, String> {
     Ok(dbx_core::data_grid_sql::build_data_grid_count_sql(options))
+}
+
+#[tauri::command]
+pub fn build_data_grid_conditional_update_sql(
+    options: dbx_core::data_grid_sql::DataGridConditionalUpdateSqlOptions,
+) -> Result<Option<String>, String> {
+    Ok(dbx_core::data_grid_sql::build_data_grid_conditional_update_sql(options))
 }
 
 #[tauri::command]

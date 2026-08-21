@@ -4458,6 +4458,7 @@ export default withEnglishFallback({
     loadedGroupKeysPartial: "目前已加载 {count} 个 key —— 该文件夹下可能还有更多",
     fuzzyTreeLimit: "已加载 {count} 个模糊匹配 key。为保持浏览器响应，当前以扁平列表展示；请缩小搜索范围以查看层级。",
     deleteGroup: "删除分组",
+    deleteKey: "删除 key",
     deleteGroupDetails: "{target}\n{count} 个 key",
     deleteLoadedSearchKeysDetails: "{target}\n已加载的 {count} 个匹配 key",
     flushDb: "清空当前 DB",

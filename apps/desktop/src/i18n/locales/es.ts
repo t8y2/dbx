@@ -4303,6 +4303,7 @@ export default withEnglishFallback({
     loadedGroupKeysPartial: "{count} claves cargadas hasta ahora — esta carpeta puede contener más",
     fuzzyTreeLimit: "Se muestran {count} coincidencias difusas como lista plana para mantener el navegador responsivo. Refina la búsqueda para ver la jerarquía.",
     deleteGroup: "Eliminar grupo",
+    deleteKey: "Eliminar clave",
     deleteGroupDetails: "{target}\n{count} claves",
     deleteLoadedSearchKeysDetails: "{target}\n{count} claves coincidentes cargadas",
     flushDb: "Limpiar DB actual",

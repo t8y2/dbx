@@ -4331,6 +4331,7 @@ export default withEnglishFallback({
     loadedGroupKeysPartial: "これまでに読み込まれたキー {count} 件 — このフォルダーにはさらにキーが存在する可能性があります",
     fuzzyTreeLimit: "ブラウザーの応答性を保つため、あいまい一致 {count} 件をフラットな一覧で表示しています。階層を表示するには検索条件を絞り込んでください。",
     deleteGroup: "グループを削除",
+    deleteKey: "キーを削除",
     deleteGroupDetails: "{target}\n{count}個のキー",
     deleteLoadedSearchKeysDetails: "{target}\n読み込み済みの一致キー {count} 件",
     flushDb: "現在のDBをクリア",

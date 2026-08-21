@@ -4471,6 +4471,7 @@ export default {
     loadedGroupKeysPartial: "{count} keys loaded so far — this folder may contain more",
     fuzzyTreeLimit: "{count} fuzzy matches are shown as a flat list to keep the browser responsive. Refine the search to view the hierarchy.",
     deleteGroup: "Delete group",
+    deleteKey: "Delete key",
     deleteGroupDetails: "{target}\n{count} keys",
     deleteLoadedSearchKeysDetails: "{target}\n{count} loaded matching keys",
     flushDb: "Clear current DB",

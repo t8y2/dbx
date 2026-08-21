@@ -400,11 +400,12 @@ function resetApiMocks() {
   mocks.canBuildRedisFuzzyTree.mockImplementation((loadedKeyCount: number) => loadedKeyCount <= 200_000);
 }
 
-function mountBrowser() {
+function mountBrowser(withDeleteDetails = false) {
   const host = document.createElement("div");
   document.body.append(host);
   const app = createApp(RedisKeyBrowser, { connectionId: "connection", db: 0, blockDangerousRedisCommands: false });
-  app.use(createI18n({ legacy: false, locale: "en", messages: { en: {} }, missingWarn: false, fallbackWarn: false }));
+  const messages = { en: { redis: { deleteGroupDetails: withDeleteDetails ? "{target}\n{count} keys" : "redis.deleteGroupDetails" } } };
+  app.use(createI18n({ legacy: false, locale: "en", messages, missingWarn: false, fallbackWarn: false }));
   app.mount(host);
   mountedApps.push({ unmount: () => app.unmount(), host });
   return host;
@@ -1126,6 +1127,29 @@ describe("RedisKeyBrowser expiry creation", () => {
 });
 
 describe("RedisKeyBrowser fuzzy key hierarchy", () => {
+  it("deletes a leaf directly from the key list after confirmation", async () => {
+    const key = { key_display: "session:current", key_raw: "c2Vzc2lvbjpjdXJyZW50", key_type: "string", ttl: -1 };
+    mocks.redisScanKeysBatch.mockResolvedValue({ cursor: 0, keys: [key], total_keys: 1 });
+    mocks.redisDeleteKeys.mockResolvedValue(1);
+    mountBrowser(true);
+    await settle();
+
+    groupRow("session").dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    await settle();
+
+    const deleteButton = requiredElement<HTMLButtonElement>('button[title="redis.deleteKey"]');
+    deleteButton.click();
+    await settle();
+
+    expect(mocks.redisDeleteKeys).not.toHaveBeenCalled();
+    expect(requiredElement<HTMLElement>("[data-test-danger-details]").textContent).toContain("session:current");
+    requiredElement<HTMLButtonElement>("[data-test-danger-confirm]").click();
+    await settle();
+
+    expect(mocks.redisDeleteKeys).toHaveBeenCalledWith("connection", 0, [key.key_raw]);
+    expect(document.body.textContent).not.toContain("session:current");
+  });
+
   it("preserves the cursor and finds a sparse fuzzy match after a bounded continuation", async () => {
     mocks.redisScanPageSize = 1_000;
     mountBrowser();

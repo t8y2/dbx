@@ -3941,6 +3941,7 @@ export default withEnglishFallback({
     loadedGroupKeysPartial: "지금까지 로드된 {count}개 키 — 이 폴더에 더 많은 키가 있을 수 있습니다",
     fuzzyTreeLimit: "{count}개의 퍼지 일치가 브라우저 응답성을 유지하기 위해 평면 목록으로 표시됩니다. 계층 구조를 보려면 검색을 좁히세요.",
     deleteGroup: "그룹 삭제",
+    deleteKey: "키 삭제",
     deleteGroupDetails: "{target}\n키 {count}개",
     deleteLoadedSearchKeysDetails: "{target}\n로드된 일치 키 {count}개",
     flushDb: "현재 DB 비우기",

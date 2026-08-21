@@ -4301,6 +4301,7 @@ export default withEnglishFallback({
     loadedGroupKeysPartial: "{count} chiavi caricate finora — questa cartella potrebbe contenerne altre",
     fuzzyTreeLimit: "{count} corrispondenze fuzzy sono mostrate come elenco piatto per mantenere il browser reattivo. Restringi la ricerca per vedere la gerarchia.",
     deleteGroup: "Elimina gruppo",
+    deleteKey: "Elimina chiave",
     deleteGroupDetails: "{target}\n{count} chiavi",
     deleteLoadedSearchKeysDetails: "{target}\n{count} chiavi corrispondenti caricate",
     flushDb: "Pulisci DB corrente",

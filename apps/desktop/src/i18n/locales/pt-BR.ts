@@ -4303,6 +4303,7 @@ export default withEnglishFallback({
     loadedGroupKeysPartial: "{count} chaves carregadas até agora — esta pasta pode conter mais",
     fuzzyTreeLimit: "{count} correspondências difusas são mostradas como uma lista plana para manter o navegador responsivo. Refine a busca para ver a hierarquia.",
     deleteGroup: "Excluir grupo",
+    deleteKey: "Excluir chave",
     deleteGroupDetails: "{target}\n{count} chaves",
     deleteLoadedSearchKeysDetails: "{target}\n{count} chaves correspondentes carregadas",
     flushDb: "Limpar DB atual",

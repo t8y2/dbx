@@ -1046,6 +1046,18 @@ function requestGroupDelete(node: RedisKeyTreeNode, event: Event) {
   showDangerConfirm.value = true;
 }
 
+function requestKeyDelete(node: RedisKeyTreeNode, event: Event) {
+  event.stopPropagation();
+  if (node.kind !== "leaf" || selectionBusy.value) return;
+  pendingDanger.value = {
+    kind: "delete-keys",
+    title: node.fullKeyDisplay,
+    keyRaws: [node.keyRaw],
+    loadedSearchResults: false,
+  };
+  showDangerConfirm.value = true;
+}
+
 async function copyRedisKeyName(keyName: string) {
   try {
     await copyToClipboard(keyName);
@@ -2190,6 +2202,18 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
                       >{{ redisTtlBadgeText(row.node.ttl, redisRowDisplayTtl(row.node.ttl, row.node.keyRaw)) }}</span
                     >
                     <Button v-if="row.node.kind === 'group' && !isFuzzyHierarchyView" variant="ghost" size="icon" class="h-5 w-5 shrink-0 text-destructive opacity-0 group-hover:opacity-100" :title="t('redis.deleteGroup')" :disabled="selectionBusy" @click="requestGroupDelete(row.node, $event)">
+                      <Trash2 class="h-3 w-3" />
+                    </Button>
+                    <Button
+                      v-else-if="row.node.kind === 'leaf'"
+                      variant="ghost"
+                      size="icon"
+                      class="h-5 w-5 shrink-0 text-destructive opacity-0 group-hover:opacity-100"
+                      :title="t('redis.deleteKey')"
+                      :aria-label="t('redis.deleteKey')"
+                      :disabled="selectionBusy"
+                      @click="requestKeyDelete(row.node, $event)"
+                    >
                       <Trash2 class="h-3 w-3" />
                     </Button>
                   </div>

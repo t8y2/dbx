@@ -543,6 +543,40 @@ END`;
   );
 });
 
+test("skips complete SQL Server procedure batches without BEGIN", () => {
+  const sql = `CREATE OR ALTER PROCEDURE dbo.refresh_users AS
+SELECT missing_one FROM dbo.first_table;
+;WITH recent AS (SELECT missing_two FROM dbo.second_table)
+SELECT missing_three FROM recent;
+SELECT missing_four FROM dbo.third_table;
+GO
+SELECT outside_missing FROM dbo.visible_table;`;
+
+  const ranges = sqlSemanticDiagnosticRangesForViewport(sql, [{ from: 0, to: sql.length }], "sqlserver");
+
+  assert.deepEqual(
+    ranges.map((range) => range.sql),
+    ["SELECT outside_missing FROM dbo.visible_table"],
+  );
+});
+
+test.each(["GO -- separator", "GO 2 /* outer /* nested */ comment */"])("keeps SQL Server queries after commented batch separator %s", (separator) => {
+  const sql = "CREATE PROCEDURE dbo.refresh_users AS\nSELECT missing_inside FROM dbo.internal_table;\n" + separator + "\nSELECT outside_missing FROM dbo.visible_table;";
+
+  const ranges = sqlSemanticDiagnosticRangesForViewport(sql, [{ from: 0, to: sql.length }], "sqlserver");
+
+  assert.deepEqual(
+    ranges.map((range) => range.sql),
+    ["SELECT outside_missing FROM dbo.visible_table"],
+  );
+});
+
+test("skips SQL Server routine batches after nested leading comments", () => {
+  const sql = "/* outer\r\n  /* nested */\r\n  still outer\r\n*/\r\n-- leading comment\rCREATE OR ALTER FUNCTION dbo.answer()\r\nRETURNS int\r\nAS\r\nBEGIN\r\n  RETURN 42;\r\nEND";
+
+  assert.deepEqual(sqlSemanticDiagnosticRangesForViewport(sql, [{ from: 0, to: sql.length }], "sqlserver"), []);
+});
+
 test("skips Oracle PL/SQL blocks when selecting semantic diagnostic ranges", () => {
   const sql = `DECLARE
   v_order_count NUMBER;

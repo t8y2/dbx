@@ -1,5 +1,5 @@
 import { displayCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
-import type { ColumnFormatterConfig } from "@/lib/dataGrid/columnFormatter";
+import type { ColumnFormatterConfig, ForeignKeyDisplayFilterConfig } from "@/lib/dataGrid/columnFormatter";
 import type { ForeignKeyAssociation } from "@/lib/dataGrid/dataGridForeignKeyNavigation";
 import type { ForeignKeyInfo, QueryResult } from "@/types/database";
 
@@ -160,14 +160,19 @@ export function foreignKeyDisplayConfigMatches(config: ForeignKeyDisplayConfig, 
   return config.refTable.toLowerCase() === foreignKey.ref_table.toLowerCase() && config.refColumn.toLowerCase() === foreignKey.ref_column.toLowerCase() && expectedSchema.toLowerCase() === actualSchema.toLowerCase();
 }
 
+export function foreignKeyDisplayConfigIsUsable(config: ForeignKeyDisplayConfig, foreignKey: ForeignKeyInfo | undefined, currentSchema?: string): boolean {
+  if (config.referenceMode === "manual") return true;
+  return !!foreignKey && foreignKeyDisplayConfigMatches(config, foreignKey, currentSchema);
+}
+
 export function foreignKeyDisplayValueKey(value: CellValue | undefined): string | undefined {
   if (value === null || value === undefined || typeof value === "object") return undefined;
   return `${typeof value}\u0000${String(value)}`;
 }
 
-export function foreignKeyDisplayLookupRequestKey(options: { connectionId: string; database?: string; catalog?: string; schema?: string; table: string; refColumn: string; displayColumn: string; values: readonly CellValue[] }): string {
+export function foreignKeyDisplayLookupRequestKey(options: { connectionId: string; database?: string; catalog?: string; schema?: string; table: string; refColumn: string; displayColumn: string; filter?: ForeignKeyDisplayFilterConfig; values: readonly CellValue[] }): string {
   const valueKeys = options.values.map((value) => foreignKeyDisplayValueKey(value) ?? "").sort();
-  return JSON.stringify(["lookup", options.connectionId, options.database ?? "", options.catalog ?? "", options.schema ?? "", options.table, options.refColumn, options.displayColumn, valueKeys]);
+  return JSON.stringify(["lookup", options.connectionId, options.database ?? "", options.catalog ?? "", options.schema ?? "", options.table, options.refColumn, options.displayColumn, options.filter ?? null, valueKeys]);
 }
 
 export function collectForeignKeyDisplayValues(rows: QueryResult["rows"], columnIndex: number, maxValues = FOREIGN_KEY_DISPLAY_MAX_VALUES): CellValue[] {

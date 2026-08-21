@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   collectForeignKeyDisplayValues,
   createForeignKeyDisplayRequestCoordinator,
+  foreignKeyDisplayConfigIsUsable,
   foreignKeyDisplayConfigMatches,
   foreignKeyDisplayLookupRequestKey,
   foreignKeyDisplayMapFromResult,
@@ -39,6 +40,21 @@ describe("dataGridForeignKeyDisplay", () => {
     expect(foreignKeyDisplayConfigMatches(config, { name: "fk_user", column: "user_id", ref_schema: "PUBLIC", ref_table: "USERS", ref_column: "ID" })).toBe(true);
     expect(foreignKeyDisplayConfigMatches(config, { name: "fk_user", column: "user_id", ref_schema: "public", ref_table: "accounts", ref_column: "id" })).toBe(false);
     expect(foreignKeyDisplayConfigMatches(config, { name: "fk_user", column: "user_id", ref_schema: "archive", ref_table: "users", ref_column: "id" })).toBe(false);
+  });
+
+  it("allows explicit manual references without foreign-key metadata", () => {
+    const manual = {
+      kind: "foreign-key-display" as const,
+      referenceMode: "manual" as const,
+      refTable: "dictionary",
+      refColumn: "dict_key",
+      displayColumn: "dict_value",
+    };
+    const automatic = { ...manual, referenceMode: "foreign-key" as const };
+
+    expect(foreignKeyDisplayConfigIsUsable(manual, undefined)).toBe(true);
+    expect(foreignKeyDisplayConfigIsUsable(automatic, undefined)).toBe(false);
+    expect(foreignKeyDisplayConfigIsUsable(automatic, { name: "fk_dict", column: "status", ref_table: "dictionary", ref_column: "dict_key" })).toBe(true);
   });
 
   it("deduplicates current-page keys with type-safe identities and bounded batches", () => {
@@ -94,6 +110,13 @@ describe("dataGridForeignKeyDisplay", () => {
     const firstKey = foreignKeyDisplayLookupRequestKey({ ...requestScope, values: [100, "100"] });
     const reorderedKey = foreignKeyDisplayLookupRequestKey({ ...requestScope, values: ["100", 100] });
     expect(reorderedKey).toBe(firstKey);
+    expect(
+      foreignKeyDisplayLookupRequestKey({
+        ...requestScope,
+        filter: { column: "dict_type", mode: "equals", value: "order_status" },
+        values: [100, "100"],
+      }),
+    ).not.toBe(firstKey);
 
     const first = coordinator.request(generation, firstKey, task);
     const duplicate = coordinator.request(generation, reorderedKey, task);

@@ -1,4 +1,5 @@
 import { displayCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
+import type { DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
 import dayjs, { Dayjs } from "dayjs";
 import customParseFormat from "dayjs/plugin/customParseFormat";
 import utc from "dayjs/plugin/utc";
@@ -60,6 +61,13 @@ export interface CustomColumnFormatterConfig {
   template: string;
 }
 
+export interface ForeignKeyDisplayFilterConfig {
+  column: string;
+  mode: DataGridContextFilterMode;
+  value?: string;
+  endValue?: string;
+}
+
 interface IntlTimeZoneSupport {
   supportedValuesOf?: (key: "timeZone") => string[];
 }
@@ -105,7 +113,15 @@ export type ColumnFormatterConfig =
   | { kind: "iotdb-timestamp"; precision: IoTDBTimestampPrecision; timezone: string }
   | { kind: "json-path"; path: string }
   | { kind: "mask"; prefix: number; suffix: number }
-  | { kind: "foreign-key-display"; refSchema?: string; refTable: string; refColumn: string; displayColumn: string }
+  | {
+      kind: "foreign-key-display";
+      referenceMode?: "foreign-key" | "manual";
+      refSchema?: string;
+      refTable: string;
+      refColumn: string;
+      displayColumn: string;
+      filter?: ForeignKeyDisplayFilterConfig;
+    }
   | { kind: "custom-template"; template: string }
   | { kind: "custom-ref"; formatterId: string };
 
@@ -150,12 +166,16 @@ export function normalizeColumnFormatter(value: unknown): ColumnFormatterConfig 
     if (typeof config.refTable !== "string" || !config.refTable.trim()) return undefined;
     if (typeof config.refColumn !== "string" || !config.refColumn.trim()) return undefined;
     if (typeof config.displayColumn !== "string" || !config.displayColumn.trim()) return undefined;
+    const filter = normalizeForeignKeyDisplayFilter(config.filter);
+    if (config.filter !== undefined && !filter) return undefined;
     return {
       kind: "foreign-key-display",
+      ...(config.referenceMode === "manual" || config.referenceMode === "foreign-key" ? { referenceMode: config.referenceMode } : {}),
       refSchema: typeof config.refSchema === "string" && config.refSchema.trim() ? config.refSchema.trim() : undefined,
       refTable: config.refTable.trim(),
       refColumn: config.refColumn.trim(),
       displayColumn: config.displayColumn.trim(),
+      ...(filter ? { filter } : {}),
     };
   }
 
@@ -168,6 +188,26 @@ export function normalizeColumnFormatter(value: unknown): ColumnFormatterConfig 
   }
 
   return undefined;
+}
+
+const FOREIGN_KEY_DISPLAY_FILTER_MODES = new Set<DataGridContextFilterMode>(["equals", "not-equals", "is-null", "is-not-null", "like", "not-like", "less-than", "less-than-or-equal", "greater-than", "greater-than-or-equal", "in", "not-in", "between", "not-between"]);
+
+function normalizeForeignKeyDisplayFilter(value: unknown): ForeignKeyDisplayFilterConfig | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const filter = value as Record<string, unknown>;
+  if (typeof filter.column !== "string" || !filter.column.trim()) return undefined;
+  if (typeof filter.mode !== "string" || !FOREIGN_KEY_DISPLAY_FILTER_MODES.has(filter.mode as DataGridContextFilterMode)) return undefined;
+  const mode = filter.mode as DataGridContextFilterMode;
+  const rawValue = typeof filter.value === "string" ? filter.value.trim() : "";
+  const rawEndValue = typeof filter.endValue === "string" ? filter.endValue.trim() : "";
+  if (mode !== "is-null" && mode !== "is-not-null" && !rawValue) return undefined;
+  if ((mode === "between" || mode === "not-between") && !rawEndValue) return undefined;
+  return {
+    column: filter.column.trim(),
+    mode,
+    value: rawValue || undefined,
+    endValue: rawEndValue || undefined,
+  };
 }
 
 export function normalizeCustomColumnFormatter(value: unknown): CustomColumnFormatterConfig | undefined {

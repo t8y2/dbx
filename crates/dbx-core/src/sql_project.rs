@@ -4,7 +4,13 @@ use serde::{Deserialize, Serialize};
 /// 替换成指向项目外的 symlink/junction。Unix 取 (dev, ino)；Windows 取
 /// (volume_serial, file_index)，file_index 为 0（FAT/网络盘）时以 fallback
 /// (last_write_time, file_size) 兜底。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// 仅靠 (dev, ino) 无法检测「同路径删除后重建」：Linux ext4 上删除目录后立刻
+/// 在同一路径重建会复用 inode，identity 会误判一致。因此信任时在根目录内写入
+/// 隐藏标记文件（内容为随机 token），目录对象被更换后标记丢失，即使 inode 复用
+/// 也能检测出替换。`marker` 即该标记文件的 token 内容（旧记录缺省为 None，
+/// 表示未绑定标记，仅保留 (dev, ino) 校验）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RootIdentity {
     pub volume: u64,
@@ -12,6 +18,9 @@ pub struct RootIdentity {
     /// Windows file_index 为 0 时的兜底标识（last_write_time, file_size）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback: Option<(u64, u64)>,
+    /// 根目录内隐藏标记文件的随机 token（内容形如 `dbx-v1:<uuid>`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marker: Option<String>,
 }
 
 /// 一个 SQL 文件项目：本地文件夹 + 绑定的数据库连接等元数据。

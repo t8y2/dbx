@@ -884,7 +884,7 @@ export interface SqlProject {
   connectionId: string | null;
   defaultSchema: string | null;
   trusted: boolean;
-  rootIdentity: { volume: number; fileId: number; fallback?: [number, number] } | null;
+  rootIdentity: { volume: number; fileId: number; fallback?: [number, number]; marker?: string } | null;
   createdAt: string;
   lastOpenedAt: string;
 }

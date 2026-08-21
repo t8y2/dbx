@@ -17,6 +17,11 @@ use super::external_sql::is_sql_file_path;
 
 const MAX_SNAPSHOT_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
+/// 根目录身份标记文件名（隐藏文件，位于项目根目录内）。
+const ROOT_IDENTITY_MARKER_NAME: &str = ".dbx-root-identity";
+/// 标记文件内容前缀，用于识别 DBX 写入的标记，避免误用用户同名文件的内容。
+const ROOT_IDENTITY_MARKER_PREFIX: &str = "dbx-v1:";
+
 // ---------- OS 级打开项目入口（拖文件夹到图标/命令行参数） ----------
 
 #[derive(Default)]
@@ -136,11 +141,16 @@ pub async fn open_sql_project_by_path(
 }
 
 /// 打开根目录句柄并读取其稳定身份（blocking 文件 IO）。
+/// 同时建立/复用根目录内的身份标记文件，使 identity 能检测「删除后重建」场景。
 async fn read_project_root_identity(canonical: &Path) -> Result<RootIdentity, String> {
     let canonical = canonical.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let root = ProjectRoot::open(&canonical)?;
-        read_root_identity(&root.dir)
+        let mut identity = read_root_identity(&root.dir)?;
+        // 建立持久化标记：目录被删除/重建后标记丢失，即使 inode 复用也能检测替换。
+        // 根目录只读导致标记写入失败时降级为无标记（保留原有 (dev, ino) 校验）。
+        identity.marker = read_or_create_root_identity_marker(&root.dir);
+        Ok(identity)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -402,7 +412,46 @@ fn read_root_identity(dir: &Dir) -> Result<RootIdentity, String> {
     };
     #[cfg(not(windows))]
     let fallback = None;
-    Ok(RootIdentity { volume, file_id, fallback })
+    // marker 由 read_project_root_identity 建立（根目录内标记文件 token），
+    // 纯身份读取不附带标记，避免与记录值直接比较时因 marker 字段不一致而误判。
+    Ok(RootIdentity { volume, file_id, fallback, marker: None })
+}
+
+/// 建立/复用根目录内的身份标记文件，返回其 token 内容。
+/// - 已存在 DBX 标记（内容以 `dbx-v1:` 开头）→ 沿用，跨信任刷新保持稳定；
+/// - 不存在或被外部篡改 → 写入新的随机 token；
+/// - 根目录只读等写入失败 → 返回 None（降级为无标记，仅保留 (dev, ino) 校验）。
+fn read_or_create_root_identity_marker(dir: &Dir) -> Option<String> {
+    if let Ok(existing) = dir.read(Path::new(ROOT_IDENTITY_MARKER_NAME)) {
+        if let Ok(content) = String::from_utf8(existing) {
+            if content.starts_with(ROOT_IDENTITY_MARKER_PREFIX) {
+                return Some(content);
+            }
+        }
+    }
+    let token = format!("{ROOT_IDENTITY_MARKER_PREFIX}{}", uuid::Uuid::new_v4());
+    let mut file = dir
+        .open_with(Path::new(ROOT_IDENTITY_MARKER_NAME), OpenOptions::new().create(true).write(true).truncate(true))
+        .ok()?;
+    file.write_all(token.as_bytes()).ok()?;
+    Some(token)
+}
+
+/// 校验已打开根目录句柄的身份与信任时记录一致：(dev, ino)（含 Windows fallback）
+/// 匹配，且标记文件 token 一致。目录被删除重建（inode 复用）或替换后标记丢失 → false。
+fn root_identity_matches(dir: &Dir, expected: &RootIdentity) -> Result<bool, String> {
+    let identity = read_root_identity(dir)?;
+    if identity.volume != expected.volume || identity.file_id != expected.file_id || identity.fallback != expected.fallback {
+        return Ok(false);
+    }
+    match &expected.marker {
+        // 旧记录未绑定标记：仅校验 (dev, ino)。
+        None => Ok(true),
+        Some(token) => match dir.read(Path::new(ROOT_IDENTITY_MARKER_NAME)) {
+            Ok(bytes) => Ok(bytes == token.as_bytes()),
+            Err(_) => Ok(false),
+        },
+    }
 }
 
 /// 项目根目录句柄缓存（按 project_id）。信任时打开一次并绑定，之后复用，
@@ -447,24 +496,25 @@ async fn resolve_trusted_root(
     let mut cache = project_root_cache().lock().map_err(|_| "Project root cache poisoned".to_string())?;
     if let Some(root) = cache.get(project_id) {
         // 缓存命中：验证句柄身份与信任时记录一致，检测根目录被替换。
-        if let Some(expected) = project.root_identity {
-            let identity = read_root_identity(&root.dir)?;
-            if expected != identity {
-                cache.remove(project_id);
-                return Err("Project root identity mismatch (directory was replaced)".to_string());
-            }
+        let matches = match &project.root_identity {
+            Some(expected) => root_identity_matches(&root.dir, expected)?,
+            None => true,
+        };
+        if !matches {
+            cache.remove(project_id);
+            return Err("Project root identity mismatch (directory was replaced)".to_string());
         }
         return Ok((root.clone_handle()?, project));
     }
 
-    // 首次使用：打开句柄并校验/建立 identity 基线。
+    // 首次使用：打开句柄并校验 identity 基线。
     let canonical = canonical_root(&project.root_path)?;
     let root = ProjectRoot::open(&canonical)?;
-    let identity = read_root_identity(&root.dir)?;
-    if let Some(expected) = project.root_identity {
-        if expected != identity {
+    match &project.root_identity {
+        Some(expected) if !root_identity_matches(&root.dir, expected)? => {
             return Err("Project root identity mismatch (directory was replaced)".to_string());
         }
+        _ => {}
     }
     cache.insert(project_id.to_string(), root);
     let root = cache.get(project_id).unwrap().clone_handle()?;
@@ -1155,14 +1205,20 @@ mod tests {
         cleanup_dirs(&[&a, &b]);
     }
 
-    /// RootIdentity 序列化为 camelCase 且可无损反序列化。
+    /// RootIdentity 序列化为 camelCase 且可无损反序列化（含 marker）。
     #[test]
     fn root_identity_serde_round_trips_as_camel_case() {
-        let identity = RootIdentity { volume: 123, file_id: 456, fallback: Some((789, 1011)) };
+        let identity = RootIdentity { volume: 123, file_id: 456, fallback: Some((789, 1011)), marker: None };
         let json = serde_json::to_string(&identity).unwrap();
         assert!(json.contains("fileId"));
         let back: RootIdentity = serde_json::from_str(&json).unwrap();
         assert_eq!(identity, back);
+
+        let with_marker = RootIdentity { volume: 123, file_id: 456, fallback: None, marker: Some("dbx-v1:tok".to_string()) };
+        let json = serde_json::to_string(&with_marker).unwrap();
+        assert_eq!(json, r#"{"volume":123,"fileId":456,"marker":"dbx-v1:tok"}"#);
+        let back: RootIdentity = serde_json::from_str(&json).unwrap();
+        assert_eq!(with_marker, back);
     }
 
     /// 根目录被替换成指向项目外的 symlink/junction：即使 canonicalize 跟随了
@@ -1191,7 +1247,8 @@ mod tests {
         cleanup_dirs(&[&replaced, &data]);
     }
 
-    /// 根目录被删除后重建同名目录：identity 变化被拒绝，不误用新目录。
+    /// 根目录被删除后重建同名目录：inode 可能被复用，但标记文件已随原目录丢失，
+    /// identity 校验仍拒绝，不误用新目录（确定性通过，不依赖 inode 是否复用）。
     #[tokio::test]
     async fn resolve_trusted_root_rejects_deleted_and_recreated_root() {
         clear_project_root_cache();
@@ -1200,6 +1257,21 @@ mod tests {
 
         std::fs::remove_dir_all(&root).unwrap();
         std::fs::create_dir_all(&root).unwrap();
+
+        let err = resolve_trusted_root(&state, &project.id).await.unwrap_err();
+        assert!(err.contains("identity mismatch"), "unexpected error: {err}");
+        cleanup_dirs(&[&root, &data]);
+    }
+
+    /// 标记文件被删除（目录对象已换过）→ 即使 (dev, ino) 与记录一致也拒绝。
+    #[tokio::test]
+    async fn resolve_trusted_root_rejects_deleted_marker() {
+        clear_project_root_cache();
+        let (state, root, data) = setup_project_state().await;
+        let project = insert_project_with_identity(&state, &root, true).await;
+        assert!(project.root_identity.as_ref().unwrap().marker.is_some(), "identity should carry a marker");
+
+        std::fs::remove_file(root.join(ROOT_IDENTITY_MARKER_NAME)).unwrap();
 
         let err = resolve_trusted_root(&state, &project.id).await.unwrap_err();
         assert!(err.contains("identity mismatch"), "unexpected error: {err}");

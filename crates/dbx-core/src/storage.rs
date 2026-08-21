@@ -7700,7 +7700,7 @@ mod tests {
         storage.insert_sql_project(&project).await.unwrap();
         assert_eq!(storage.find_sql_project_by_id("proj-rid-1").await.unwrap().unwrap().root_identity, None);
 
-        let identity = RootIdentity { volume: 0x1122, file_id: 0x3344, fallback: Some((5, 6)) };
+        let identity = RootIdentity { volume: 0x1122, file_id: 0x3344, fallback: Some((5, 6)), marker: None };
         storage.set_sql_project_root_identity("proj-rid-1", Some(&identity)).await.unwrap();
         assert_eq!(storage.find_sql_project_by_id("proj-rid-1").await.unwrap().unwrap().root_identity, Some(identity));
 
@@ -7714,7 +7714,7 @@ mod tests {
     fn root_identity_serde_round_trips_as_camel_case() {
         use crate::sql_project::RootIdentity;
 
-        let identity = RootIdentity { volume: 0x1122, file_id: 0x3344, fallback: Some((5, 6)) };
+        let identity = RootIdentity { volume: 0x1122, file_id: 0x3344, fallback: Some((5, 6)), marker: None };
         let json = serde_json::to_string(&identity).unwrap();
         assert_eq!(json, r#"{"volume":4386,"fileId":13124,"fallback":[5,6]}"#);
         let back: RootIdentity = serde_json::from_str(&json).unwrap();
@@ -7724,5 +7724,13 @@ mod tests {
         let minimal: RootIdentity = serde_json::from_str(r#"{"volume":1,"fileId":2}"#).unwrap();
         assert_eq!(minimal.fallback, None);
         assert_eq!(minimal.volume, 1);
+
+        // marker 序列化为 camelCase，缺省为 None 且可 round-trip。
+        let with_marker = RootIdentity { volume: 1, file_id: 2, fallback: None, marker: Some("dbx-v1:abc".to_string()) };
+        let json = serde_json::to_string(&with_marker).unwrap();
+        assert_eq!(json, r#"{"volume":1,"fileId":2,"marker":"dbx-v1:abc"}"#);
+        let back: RootIdentity = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, with_marker);
+        assert_eq!(back.marker.as_deref(), Some("dbx-v1:abc"));
     }
 }

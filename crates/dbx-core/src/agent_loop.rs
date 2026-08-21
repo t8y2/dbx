@@ -248,8 +248,9 @@ pub async fn run_agent_loop(
         )
         .await;
     }
+    let mut sql_permissions = agent_ctx.sql_permissions.clone();
     let tools = if is_agent_mode {
-        agent_tools::all_tools(agent_ctx.db_type, agent_ctx.sql_permissions.clone())
+        agent_tools::all_tools(agent_ctx.db_type, sql_permissions.clone())
     } else {
         agent_tools::read_only_tools(agent_ctx.db_type)
     };
@@ -473,7 +474,7 @@ pub async fn run_agent_loop(
         // a proposal first. Stop before dispatch so DBX can return an exact SQL
         // proposal for non-production targets, or a non-confirmable production
         // block rather than an impossible confirmation loop.
-        if let Some(sql) = unconfirmed_write_sql(&collected_tool_calls, agent_ctx.db_type, &agent_ctx.sql_permissions) {
+        if let Some(sql) = unconfirmed_write_sql(&collected_tool_calls, agent_ctx.db_type, &sql_permissions) {
             let targets_production = {
                 let configs = agent_ctx.state.configs.read().await;
                 configs.get(&agent_ctx.connection_id).is_some_and(|config| {
@@ -512,7 +513,7 @@ pub async fn run_agent_loop(
         let db2 = agent_ctx.database.clone();
         let schema2 = agent_ctx.schema.clone();
         let db_type = agent_ctx.db_type;
-        let sql_permissions = agent_ctx.sql_permissions.clone();
+        let parallel_sql_permissions = sql_permissions.clone();
 
         // Split by index into parallel and sequential groups using tool metadata
         let tool_parallel_map: std::collections::HashMap<&str, bool> =
@@ -537,7 +538,7 @@ pub async fn run_agent_loop(
                     let conn = conn2.clone();
                     let db = db2.clone();
                     let schema = schema2.clone();
-                    let perms = sql_permissions.clone();
+                    let perms = parallel_sql_permissions.clone();
                     async move {
                         agent_tools::execute_tool(&tc, &state, &conn, &db, schema.as_deref(), &db_type, perms).await
                     }
@@ -549,6 +550,7 @@ pub async fn run_agent_loop(
         let mut sequential_results = Vec::with_capacity(sequential_indices.len());
         for &i in &sequential_indices {
             let tc = make_tc(&collected_tool_calls[i]);
+            let execution_permissions = sequential_tool_permissions(&tc, db_type, &mut sql_permissions);
             sequential_results.push(
                 agent_tools::execute_tool(
                     &tc,
@@ -557,7 +559,7 @@ pub async fn run_agent_loop(
                     &db2,
                     schema2.as_deref(),
                     &db_type,
-                    sql_permissions.clone(),
+                    execution_permissions,
                 )
                 .await,
             );
@@ -1235,6 +1237,19 @@ fn write_attempt_response(sql: &str, targets_production: bool) -> WriteAttemptRe
     }
 }
 
+fn sequential_tool_permissions(
+    tool_call: &ToolCall,
+    db_type: DatabaseType,
+    permissions: &mut agent_tools::AgentSqlPermissions,
+) -> agent_tools::AgentSqlPermissions {
+    if tool_call.name == "execute_query" {
+        if let Some(sql) = tool_call.arguments.get("sql").and_then(|value| value.as_str()) {
+            return agent_tools::take_sql_permissions_for_execution(sql, db_type, permissions);
+        }
+    }
+    permissions.clone()
+}
+
 /// Returns a deterministic confirmation proposal when the current turn contains
 /// an unconfirmed write/DDL tool call. The caller must stop before dispatching
 /// any tools so the database never sees the attempted SQL.
@@ -1576,6 +1591,70 @@ mod tests {
         assert!(unconfirmed_write_sql(&[create], DatabaseType::Postgres, &confirmed).is_none());
         assert!(unconfirmed_write_sql(&[select], DatabaseType::Postgres, &agent_tools::AgentSqlPermissions::default())
             .is_none());
+    }
+
+    #[test]
+    fn duplicate_confirmed_writes_in_one_batch_receive_one_grant() {
+        let sql = "DELETE FROM users WHERE id = 7;";
+        let call = ToolCall {
+            id: "delete-user".to_string(),
+            name: "execute_query".to_string(),
+            arguments: json!({ "sql": sql }),
+            provider_payload: None,
+        };
+        let mut permissions = agent_tools::confirmed_write_sql_permissions(false, true, Some(sql.to_string()));
+
+        let first = sequential_tool_permissions(&call, DatabaseType::Postgres, &mut permissions);
+        let second = sequential_tool_permissions(&call, DatabaseType::Postgres, &mut permissions);
+
+        assert!(first.allow_writes);
+        assert_eq!(first.confirmed_write_sql.as_deref(), Some(sql));
+        assert!(!second.allow_writes);
+        assert_eq!(second.confirmed_write_sql, None);
+        assert_eq!(permissions, agent_tools::AgentSqlPermissions::default());
+    }
+
+    #[test]
+    fn confirmed_write_grant_stays_consumed_across_turns() {
+        let sql = "DELETE FROM users WHERE id = 7;";
+        let call = ToolCall {
+            id: "delete-user".to_string(),
+            name: "execute_query".to_string(),
+            arguments: json!({ "sql": sql }),
+            provider_payload: None,
+        };
+        let mut permissions = agent_tools::confirmed_write_sql_permissions(false, true, Some(sql.to_string()));
+
+        let _ = sequential_tool_permissions(&call, DatabaseType::Postgres, &mut permissions);
+
+        assert_eq!(unconfirmed_write_sql(std::slice::from_ref(&call), DatabaseType::Postgres, &permissions), Some(sql));
+    }
+
+    #[test]
+    fn read_before_confirmed_write_does_not_consume_the_grant() {
+        let confirmed_sql = "DELETE FROM users WHERE id = 7;";
+        let read = ToolCall {
+            id: "read-user".to_string(),
+            name: "execute_query".to_string(),
+            arguments: json!({ "sql": "SELECT * FROM users WHERE id = 7" }),
+            provider_payload: None,
+        };
+        let write = ToolCall {
+            id: "delete-user".to_string(),
+            name: "execute_query".to_string(),
+            arguments: json!({ "sql": confirmed_sql }),
+            provider_payload: None,
+        };
+        let mut permissions =
+            agent_tools::confirmed_write_sql_permissions(false, true, Some(confirmed_sql.to_string()));
+
+        let read_permissions = sequential_tool_permissions(&read, DatabaseType::Postgres, &mut permissions);
+        let write_permissions = sequential_tool_permissions(&write, DatabaseType::Postgres, &mut permissions);
+
+        assert!(read_permissions.allow_writes);
+        assert!(write_permissions.allow_writes);
+        assert_eq!(write_permissions.confirmed_write_sql.as_deref(), Some(confirmed_sql));
+        assert_eq!(permissions, agent_tools::AgentSqlPermissions::default());
     }
 
     #[test]

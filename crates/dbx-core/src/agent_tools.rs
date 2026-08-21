@@ -167,6 +167,29 @@ pub fn write_requires_confirmation(
     Ok(matches!(risk, SqlRisk::Write | SqlRisk::Ddl))
 }
 
+/// Snapshot the permissions for one execute_query call and consume an exact
+/// confirmed write/DDL grant before dispatch. Later calls in the same agent run
+/// receive the cleared permissions and must request a new confirmation.
+pub(crate) fn take_sql_permissions_for_execution(
+    sql: &str,
+    db_type: DatabaseType,
+    permissions: &mut AgentSqlPermissions,
+) -> AgentSqlPermissions {
+    let execution_permissions = permissions.clone();
+    let consumes_confirmation = match crate::sql_risk::classify_sql_risk_for_database(sql, db_type) {
+        Ok(risk @ (SqlRisk::Write | SqlRisk::Ddl)) => {
+            sql_risk_allowed(risk, execution_permissions.clone())
+                && sql_matches_confirmed_write(sql, &execution_permissions.confirmed_write_sql)
+                && execution_permissions.confirmed_write_sql.is_some()
+        }
+        _ => false,
+    };
+    if consumes_confirmation {
+        *permissions = AgentSqlPermissions::default();
+    }
+    execution_permissions
+}
+
 /// Returns true for vector database types (Qdrant, Milvus, Weaviate, ChromaDb).
 /// If modifying this, also update VECTOR_DB_TYPES in apps/desktop/src/lib/ai.ts.
 pub fn is_vector_db(db_type: DatabaseType) -> bool {

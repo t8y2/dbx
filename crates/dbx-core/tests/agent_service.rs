@@ -814,6 +814,20 @@ fn offline_zip_import_rejects_unknown_driver_type() {
     assert!(err.contains("unknown driver type"));
 }
 
+#[tokio::test]
+async fn offline_zip_import_accepts_hidden_legacy_h2_driver() {
+    let manager = test_manager("offline-h2-legacy-driver");
+    let zip_path = test_path("offline-h2-legacy-driver").join("agents.zip");
+    std::fs::create_dir_all(zip_path.parent().unwrap()).unwrap();
+    write_offline_driver_zip_with_jar(&zip_path, "h2-legacy", "0.1.18", test_agent_jar_bytes());
+
+    let result = import_agents_from_zip(&manager, &zip_path, |_| {}).await.unwrap();
+
+    assert_eq!(result.drivers_installed, vec!["h2-legacy"]);
+    assert!(manager.is_driver_installed("h2-legacy"));
+    assert_eq!(manager.load_state().installed_drivers["h2-legacy"].version, "0.1.18");
+}
+
 #[test]
 fn offline_zip_import_rejects_unsafe_entry_path() {
     let zip_path = test_path("offline-unsafe-entry").join("agents.zip");

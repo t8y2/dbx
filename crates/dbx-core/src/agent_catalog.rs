@@ -46,6 +46,7 @@ const H2_PROFILES: &[AgentDriverProfile] = &[
 
 const EXTRA_AGENT_LABELS: &[(&str, &str)] = &[
     ("duckdb", "DuckDB"),
+    ("h2-legacy", "H2 2.1 Legacy"),
     ("kafka", "Apache Kafka"),
     ("rocketmq", "Apache RocketMQ"),
     ("rabbitmq", "RabbitMQ"),
@@ -432,6 +433,7 @@ mod tests {
         assert_eq!(agent_key(&DatabaseType::H2, Some("h2-v2")), Some("h2"));
         assert_eq!(agent_key(&DatabaseType::H2, Some("h2-v3")), Some("h2"));
         assert_eq!(agent_key(&DatabaseType::H2, Some("h2-custom")), Some("h2"));
+        assert_eq!(label_for_key("h2-legacy"), Some("H2 2.1 Legacy"));
         assert!(!driver_store_entries().any(|(key, _)| key == "h2-legacy"));
     }
 

@@ -24,6 +24,13 @@ export interface AiGenerationStatus {
   turn?: number;
   /** Active tool between `tool_call_start` and the matching `tool_call_end`. */
   activeTool?: { name: string; startedAt: number };
+  /**
+   * All outstanding tools for the current turn. The backend emits every start
+   * before running read-only tools in parallel, so `activeTool` alone cannot
+   * tell whether an earlier completion leaves a later tool still running.
+   * `activeTool` remains the newest entry for the compact single-tool UI.
+   */
+  activeTools?: Array<{ toolCallId: string; name: string; startedAt: number }>;
   /** Terminal state entered on `agent_end`/`error` — the component hides the line. */
   phase: "preparing" | "waiting_model" | "generating" | "running_tool" | "cancelling" | "finished";
   /** When the user explicitly requested cancellation (Stop button). */
@@ -65,9 +72,9 @@ export function createGenerationStatus(now: number): AiGenerationStatus {
  *
  * - Any event refreshes `lastEventAt`.
  * - `turn_start` records the 0-based turn.
- * - `tool_call_start` enters `running_tool` and sets `activeTool`.
- * - `tool_call_end` MUST clear `activeTool`; the phase falls back to `generating`
- *   (waiting for the next model response).
+ * - `tool_call_start` enters `running_tool` and tracks the tool by call ID.
+ * - `tool_call_end` removes only its matching tool. The phase falls back to
+ *   `generating` only after the last outstanding tool has completed.
  * - `text_delta` / `reasoning_delta` with no active tool enter `generating`.
  * - `write_sql_confirmation_required` / `production_write_blocked` /
  *   `context_compacted` only refresh `lastEventAt`, they never change the phase.
@@ -89,13 +96,35 @@ export function applyStatusEvent(status: AiGenerationStatus, event: AgentEvent, 
       next.turn = event.turn;
       break;
     case "tool_call_start":
+      // `agent_loop` emits all starts before concurrently executing read-only
+      // tools. Keep the latest tool as the displayed one, while retaining the
+      // earlier calls so their completion cannot clear this status prematurely.
+      next.activeTools = (next.activeTools ?? []).filter((tool) => tool.toolCallId !== event.tool_call_id);
+      next.activeTools.push({ toolCallId: event.tool_call_id, name: event.tool_name, startedAt: now });
       next.phase = "running_tool";
       next.activeTool = { name: event.tool_name, startedAt: now };
       break;
-    case "tool_call_end":
-      next.activeTool = undefined;
-      next.phase = "generating";
+    case "tool_call_end": {
+      const activeTools = next.activeTools;
+      if (!activeTools) {
+        // Preserve the safe fallback for streams that deliver an end without a
+        // corresponding start (older or incomplete provider event streams).
+        next.activeTool = undefined;
+        next.phase = "generating";
+        break;
+      }
+      const remainingTools = activeTools.filter((tool) => tool.toolCallId !== event.tool_call_id);
+      next.activeTools = remainingTools.length ? remainingTools : undefined;
+      const newestActiveTool = remainingTools[remainingTools.length - 1];
+      if (newestActiveTool) {
+        next.activeTool = { name: newestActiveTool.name, startedAt: newestActiveTool.startedAt };
+        next.phase = "running_tool";
+      } else {
+        next.activeTool = undefined;
+        next.phase = "generating";
+      }
       break;
+    }
     case "text_delta":
     case "reasoning_delta":
       if (!next.activeTool) next.phase = "generating";
@@ -111,6 +140,7 @@ export function applyStatusEvent(status: AiGenerationStatus, event: AgentEvent, 
       // clear the active tool, and let the component hide the line via `finished`.
       next.phase = "finished";
       next.activeTool = undefined;
+      next.activeTools = undefined;
       break;
     default:
       break;

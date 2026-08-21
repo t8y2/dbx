@@ -86,6 +86,23 @@ describe("aiGenerationStatus", () => {
       expect(status.activeTool).toEqual({ name: "list_tables", startedAt: T0 + 2_000 });
     });
 
+    it("keeps the newest running tool visible when an earlier parallel tool completes", () => {
+      // `agent_loop` emits every ToolCallStart before executing read-only tools
+      // in parallel. Results can complete in a different order, so ending c1
+      // must not erase the still-running c2 status.
+      let status = createGenerationStatus(T0);
+      status = applyStatusEvent(status, { type: "tool_call_start", tool_call_id: "c1", tool_name: "list_tables", args: {} }, T0 + 1_000);
+      status = applyStatusEvent(status, { type: "tool_call_start", tool_call_id: "c2", tool_name: "get_columns", args: {} }, T0 + 2_000);
+      status = applyStatusEvent(status, { type: "tool_call_end", tool_call_id: "c1", tool_name: "list_tables", result: {}, is_error: false }, T0 + 3_000);
+
+      expect(status.phase).toBe("running_tool");
+      expect(status.activeTool).toEqual({ name: "get_columns", startedAt: T0 + 2_000 });
+
+      status = applyStatusEvent(status, { type: "tool_call_end", tool_call_id: "c2", tool_name: "get_columns", result: {}, is_error: false }, T0 + 4_000);
+      expect(status.phase).toBe("generating");
+      expect(status.activeTool).toBeUndefined();
+    });
+
     it("reasoning_delta without an active tool enters generating", () => {
       let status = createGenerationStatus(T0);
       status = applyStatusEvent(status, { type: "reasoning_delta", delta: "think" }, T0 + 1_000);

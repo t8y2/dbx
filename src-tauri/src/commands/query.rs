@@ -714,6 +714,13 @@ pub fn build_table_structure_change_sql(
 }
 
 #[tauri::command]
+pub fn build_table_owner_change_sql(
+    options: dbx_core::table_structure_sql::TableOwnerChangeSqlOptions,
+) -> Result<dbx_core::table_structure_sql::TableStructureSqlResult, String> {
+    Ok(dbx_core::table_structure_sql::build_table_owner_change_sql(options))
+}
+
+#[tauri::command]
 pub async fn preview_sqlite_table_structure_change(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

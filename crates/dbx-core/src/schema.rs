@@ -6956,6 +6956,25 @@ pub async fn list_owners_core(
     .await
 }
 
+pub async fn get_table_owner_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+) -> Result<Option<String>, String> {
+    retry_metadata_connection(state, connection_id, Some(database), || async {
+        let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
+        let pool = clone_metadata_pool(state, &pool_key).await.ok_or("Pool not found")?;
+
+        match &pool {
+            PoolKind::Postgres(p) => db::postgres::get_table_owner(p, schema, table).await,
+            _ => Ok(None),
+        }
+    })
+    .await
+}
+
 /// Whether to widen or normalize a single-table DDL fetch for its caller.
 ///
 /// Database export and table transfer render one relation at a time because

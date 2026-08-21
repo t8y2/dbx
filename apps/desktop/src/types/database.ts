@@ -1070,6 +1070,8 @@ export interface TableStructureEditorDraft {
   newTableName: string;
   tableComment: string;
   originalTableComment: string;
+  tableOwner?: string;
+  originalTableOwner?: string;
   columns: import("@/lib/table/tableStructureEditorSql").EditableStructureColumn[];
   indexes: import("@/lib/table/tableStructureEditorSql").EditableStructureIndex[];
   foreignKeys: import("@/lib/table/tableStructureEditorSql").EditableStructureForeignKey[];

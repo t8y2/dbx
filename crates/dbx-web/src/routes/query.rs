@@ -269,6 +269,12 @@ pub struct BuildTableStructureSqlRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct BuildTableOwnerChangeSqlRequest {
+    pub options: dbx_core::table_structure_sql::TableOwnerChangeSqlOptions,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PreviewSqliteTableStructureChangeRequest {
     pub connection_id: String,
     pub database: String,
@@ -945,6 +951,12 @@ pub async fn build_table_structure_change_sql(
     Json(req): Json<BuildTableStructureSqlRequest>,
 ) -> Json<dbx_core::table_structure_sql::TableStructureSqlResult> {
     Json(dbx_core::table_structure_sql::build_table_structure_change_sql(req.options))
+}
+
+pub async fn build_table_owner_change_sql(
+    Json(req): Json<BuildTableOwnerChangeSqlRequest>,
+) -> Json<dbx_core::table_structure_sql::TableStructureSqlResult> {
+    Json(dbx_core::table_structure_sql::build_table_owner_change_sql(req.options))
 }
 
 pub async fn preview_sqlite_table_structure_change(

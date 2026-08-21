@@ -38,6 +38,7 @@ import {
   PanelBottom,
   PanelRight,
   TableProperties,
+  UserRound,
   Database,
   Eraser,
   Columns3,
@@ -78,6 +79,7 @@ import { tableObjectSourceKind } from "@/lib/table/tableObjectSourceKind";
 import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPresentation";
 import { shouldNavigateFromTableInfoColumnClick } from "@/lib/table/tableInfoColumnNavigation";
 import { tableInfoTabForDrawerToggle } from "@/lib/table/tableInfoTabPreference";
+import { loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
 import * as api from "@/lib/backend/api";
 import { formatElapsedSeconds } from "@/lib/common/elapsedTime";
 import { dataGridCellDisplayText, dataGridCellEditorText } from "@/lib/dataGrid/dataGridCellCoercion";
@@ -9877,6 +9879,37 @@ const ddlContent = ref("");
 const ddlPreRef = ref<HTMLPreElement | null>(null);
 const ddlSearchMatchCount = ref(0);
 const ddlSearchMatchIndex = ref(0);
+const tableOwner = ref<string | null>(null);
+const tableOwnerLoading = ref(false);
+const tableOwnerError = ref("");
+let tableOwnerRequestGeneration = 0;
+const canShowTableOwner = computed(() => resolvedDatabaseType.value === "postgres" && !!props.connectionId && !!props.database && !!props.tableMeta?.schema && !!props.tableMeta?.tableName);
+
+async function fetchTableOwner(force = false) {
+  if (!canShowTableOwner.value || !props.connectionId || !props.database || !props.tableMeta?.schema || !props.tableMeta.tableName) return;
+  const requestGeneration = ++tableOwnerRequestGeneration;
+  const request = {
+    connectionId: props.connectionId,
+    database: props.database,
+    schema: props.tableMeta.schema,
+    tableName: props.tableMeta.tableName,
+    catalog: props.tableMeta.catalog,
+    objectType: tableObjectSourceKind(props.tableMeta.tableType),
+  };
+  tableOwnerLoading.value = true;
+  tableOwnerError.value = "";
+  try {
+    const result = await loadObjectMetadataFacet(request, "owner", () => api.getTableOwner(request.connectionId, request.database, request.schema, request.tableName), { force });
+    if (requestGeneration !== tableOwnerRequestGeneration) return;
+    tableOwner.value = result.value;
+  } catch (error: any) {
+    if (requestGeneration !== tableOwnerRequestGeneration) return;
+    tableOwner.value = null;
+    tableOwnerError.value = error?.message || String(error);
+  } finally {
+    if (requestGeneration === tableOwnerRequestGeneration) tableOwnerLoading.value = false;
+  }
+}
 
 function scrollDdlSearchMatchIntoView(match: HTMLElement) {
   const pre = ddlPreRef.value;
@@ -10302,6 +10335,10 @@ async function fetchTriggers() {
 watch(
   () => [props.connectionId, props.database, props.tableMeta?.catalog, props.tableMeta?.schema, props.tableMeta?.tableName],
   () => {
+    tableOwner.value = null;
+    tableOwnerLoading.value = false;
+    tableOwnerError.value = "";
+    tableOwnerRequestGeneration += 1;
     ddlContent.value = "";
     indexes.value = [];
     indexesLoaded.value = false;
@@ -10321,8 +10358,13 @@ watch(
       void fetchIndexes();
     }
     if (showTableInfo.value) selectTableInfoTab(activeTableInfoTab.value);
+    if (showTableInfo.value) void fetchTableOwner();
   },
 );
+
+watch([showTableInfo, canShowTableOwner], ([shown, supported]) => {
+  if (shown && supported && !tableOwnerLoading.value && tableOwner.value === null && !tableOwnerError.value) void fetchTableOwner();
+});
 
 watch(
   () => [showIndexIndicatorsInHeader.value, canShowTableIndexes.value, currentIndexTableIdentity.value] as const,
@@ -12662,6 +12704,14 @@ function currentGridContextMenuItems(): ContextMenuItem[] {
               <Button variant="ghost" size="icon" class="h-5 w-5" @click="showTableInfo = false">
                 <X class="w-3 h-3" />
               </Button>
+            </div>
+            <div v-if="canShowTableOwner" class="flex h-7 min-w-0 shrink-0 items-center gap-1.5 border-b bg-background px-3 text-[11px] text-muted-foreground">
+              <Loader2 v-if="tableOwnerLoading" class="h-3 w-3 shrink-0 animate-spin" />
+              <UserRound v-else class="h-3 w-3 shrink-0" />
+              <span class="shrink-0">{{ t("grid.tableOwner") }}</span>
+              <span v-if="tableOwner" class="min-w-0 truncate font-mono text-foreground" :title="tableOwner">{{ tableOwner }}</span>
+              <span v-else-if="tableOwnerError" class="min-w-0 truncate text-destructive" :title="tableOwnerError">{{ t("grid.tableOwnerUnavailable") }}</span>
+              <span v-else class="text-muted-foreground">-</span>
             </div>
             <div class="grid border-b bg-background shrink-0" :style="tableInfoTabListStyle">
               <button

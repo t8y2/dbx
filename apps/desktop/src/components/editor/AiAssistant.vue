@@ -103,7 +103,7 @@ import {
 import { isAiConfigModelCandidate } from "@/lib/ai/aiConfigCandidates";
 import { deleteConversationWithCancellation, stopAiGenerationWithFallback } from "@/lib/ai/aiConversationLifecycle";
 import { AiGenerationGuard } from "@/lib/ai/aiGenerationGuard";
-import { applyStatusEvent, createGenerationStatus, markCancelling, shouldShowLongRunningHint, statusText, toolLabel, STATUS_IDLE_THRESHOLD_MS, type AiGenerationStatus } from "@/lib/ai/aiGenerationStatus";
+import { applyStatusEvent, createGenerationStatus, liveAnnouncementText, markCancelling, shouldShowLongRunningHint, statusText, toolLabel, STATUS_IDLE_THRESHOLD_MS, type AiGenerationStatus } from "@/lib/ai/aiGenerationStatus";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { addConfiguredAiModel, aiModelOptions } from "@/lib/ai/aiConfigList";
 import { orderAiConfigsForDisplay } from "@/lib/ai/aiConfigOrdering";
@@ -414,6 +414,13 @@ const statusToolLabel = computed(() => {
 const statusTurnBadge = computed(() => (generationStatus.value.turn !== undefined ? t("ai.status.turnBadge", { turn: generationStatus.value.turn + 1 }) : ""));
 /** Gentle >60s hint, hidden while the user is cancelling (they already decided to stop). */
 const statusLongRunningHintVisible = computed(() => generationStatus.value.phase !== "cancelling" && shouldShowLongRunningHint(generationStatus.value, statusNow.value));
+/**
+ * Stable screen-reader announcement for the status line. Fed into a
+ * `role="status"` live region; unlike `generationStatusText` it excludes the
+ * per-second elapsed/idle numerals so screen readers hear discrete state
+ * changes (phase / tool / turn / idle crossing), not a new number every tick.
+ */
+const statusLiveAnnouncement = computed(() => liveAnnouncementText(generationStatus.value, statusNow.value, t));
 
 function startEditMessage(visibleIndex: number) {
   if (isGenerating.value) return;
@@ -3461,8 +3468,12 @@ async function openExternalUrl(url: string) {
                "Thinking..." placeholder and covers the WHOLE generation period
                (`v-if="isGenerating"`), not just the wait for the first token. -->
           <div v-if="isGenerating" class="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground" data-ai-generation-status>
-            <Loader2 v-if="!generationStatusIdle" class="h-3.5 w-3.5 shrink-0 animate-spin" />
-            <Clock v-else class="h-3.5 w-3.5 shrink-0" />
+            <!-- Screen-reader live region: announces discrete execution-state changes
+                 (phase / tool / turn / idle crossing) only, never the per-second
+                 elapsed numerals — see `liveAnnouncementText`. -->
+            <span class="sr-only" role="status" aria-live="polite" aria-atomic="true">{{ statusLiveAnnouncement }}</span>
+            <Loader2 v-if="!generationStatusIdle" class="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden="true" />
+            <Clock v-else class="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
             <!-- Idle-with-tool copy MUST win over the running-tool layout: PRD copy
                  priority 1 (idle >20s, "等待此步骤完成 · 最后活动 Ns 前 · 正在执行 {tool}")
                  outranks priority 2 ("第 N 轮 · 正在执行 {tool} · 已运行 Ns"), matching

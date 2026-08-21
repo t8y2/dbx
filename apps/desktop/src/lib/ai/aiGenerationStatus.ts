@@ -169,6 +169,36 @@ export function statusText(status: AiGenerationStatus, now: number, t: AiStatusT
   return t("ai.status.waitingModel", { elapsed });
 }
 
+/**
+ * Screen-reader announcement for the status line (Issue #6743 feature 1, a11y).
+ *
+ * Rendered inside a `role="status"` (`aria-live="polite"` + `aria-atomic`) live
+ * region. Deliberately EXCLUDES the ticking elapsed/idle numerals that
+ * `statusText` embeds — a live region whose content changed once per second
+ * would re-announce the running timer on every tick and spam screen-reader
+ * users. Only discrete state changes are announced: phase transitions, tool
+ * start/end, turn, and crossing the 20s idle threshold (the idle cross happens
+ * once and the announced string stays stable until the next event).
+ */
+export function liveAnnouncementText(status: AiGenerationStatus, now: number, t: AiStatusTranslate): string {
+  if (status.phase === "cancelling") return t("ai.status.cancelling");
+
+  const idle = status.lastEventAt !== undefined && now - status.lastEventAt > STATUS_IDLE_THRESHOLD_MS;
+  if (idle) {
+    return status.activeTool ? `${t("ai.status.idleLive")} ${t("ai.status.runningToolAction")} ${toolLabel(status.activeTool.name, t)}` : t("ai.status.idleLive");
+  }
+
+  if (status.phase === "running_tool" && status.activeTool) {
+    const turn = status.turn;
+    const badge = turn !== undefined ? t("ai.status.turnBadge", { turn: turn + 1 }) : "";
+    return [badge, t("ai.status.runningToolAction"), toolLabel(status.activeTool.name, t)].filter(Boolean).join(" ");
+  }
+
+  if (status.phase === "generating") return t("ai.status.generatingLive");
+
+  return t("ai.status.waitingModelLive");
+}
+
 /** Whether the gentle "响应时间较长，可继续等待或停止" hint should appear next to Stop. */
 export function shouldShowLongRunningHint(status: AiGenerationStatus, now: number): boolean {
   return now - status.startedAt > STATUS_LONG_RUNNING_THRESHOLD_MS;

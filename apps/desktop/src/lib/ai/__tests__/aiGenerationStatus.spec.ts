@@ -1,17 +1,27 @@
 import { describe, expect, it } from "vitest";
-import { applyStatusEvent, createGenerationStatus, markCancelling, shouldShowLongRunningHint, statusText, toolLabel, STATUS_IDLE_THRESHOLD_MS, STATUS_LONG_RUNNING_THRESHOLD_MS, type AiStatusTranslate } from "@/lib/ai/aiGenerationStatus";
+import { applyStatusEvent, createGenerationStatus, liveAnnouncementText, markCancelling, shouldShowLongRunningHint, statusText, toolLabel, STATUS_IDLE_THRESHOLD_MS, STATUS_LONG_RUNNING_THRESHOLD_MS, type AiStatusTranslate } from "@/lib/ai/aiGenerationStatus";
 
 // Mock vue-i18n `t` mirroring the zh-CN copy matrix (Issue #6743 feature 1).
 const t: AiStatusTranslate = (key: string, named?: Record<string, unknown>) => {
   switch (key) {
     case "ai.status.waitingModel":
       return `等待模型响应 · 已运行 ${named?.elapsed}s`;
+    case "ai.status.waitingModelLive":
+      return "等待模型响应";
     case "ai.status.generating":
       return `正在生成回复 · 已运行 ${named?.elapsed}s`;
+    case "ai.status.generatingLive":
+      return "正在生成回复";
     case "ai.status.runningTool":
       return `第 ${named?.turn} 轮 · 正在执行 ${named?.tool} · 已运行 ${named?.elapsed}s`;
+    case "ai.status.runningToolAction":
+      return "· 正在执行";
+    case "ai.status.turnBadge":
+      return `第 ${named?.turn} 轮`;
     case "ai.status.idle":
       return `等待此步骤完成 · 最后活动 ${named?.idle}s 前`;
+    case "ai.status.idleLive":
+      return "等待此步骤完成";
     case "ai.status.idleWithTool":
       return `等待此步骤完成 · 最后活动 ${named?.idle}s 前 · 正在执行 ${named?.tool}`;
     case "ai.status.cancelling":
@@ -192,6 +202,63 @@ describe("aiGenerationStatus", () => {
       status = applyStatusEvent(status, { type: "turn_start", turn: 0 }, T0 + 1_000);
       const now = T0 + 1_000 + STATUS_IDLE_THRESHOLD_MS + 1;
       expect(statusText(status, now, t)).toContain("最后活动 21s 前");
+    });
+  });
+
+  describe("liveAnnouncementText (screen-reader live region)", () => {
+    // The live region MUST NOT contain the ticking elapsed/idle numerals — a
+    // per-second re-announcement would spam screen-reader users. Assert the
+    // announced string never embeds a "\d+s" countdown.
+    const expectNoTickingSeconds = (announced: string) => {
+      expect(announced).not.toMatch(/\d+s/);
+    };
+
+    it("announces stable state without elapsed numerals (waiting model)", () => {
+      const status = createGenerationStatus(T0);
+      const announced = liveAnnouncementText(status, T0 + 42_000, t);
+      expect(announced).toBe("等待模型响应");
+      expectNoTickingSeconds(announced);
+    });
+
+    it("announces generating without elapsed numerals", () => {
+      let status = applyStatusEvent(createGenerationStatus(T0), { type: "text_delta", delta: "hi" }, T0 + 41_000);
+      const announced = liveAnnouncementText(status, T0 + 42_000, t);
+      expect(announced).toBe("正在生成回复");
+      expectNoTickingSeconds(announced);
+    });
+
+    it("announces the running tool with turn + 1, no elapsed numerals", () => {
+      let status = createGenerationStatus(T0);
+      status = applyStatusEvent(status, { type: "turn_start", turn: 1 }, T0 + 1_000);
+      status = applyStatusEvent(status, { type: "tool_call_start", tool_call_id: "c1", tool_name: "execute_sql", args: {} }, T0 + 41_000);
+      const announced = liveAnnouncementText(status, T0 + 42_000, t);
+      expect(announced).toBe("第 2 轮 · 正在执行 执行 SQL");
+      expectNoTickingSeconds(announced);
+    });
+
+    it("announces the idle cross once (waiting for step), still no idle seconds", () => {
+      let status = createGenerationStatus(T0);
+      status = applyStatusEvent(status, { type: "turn_start", turn: 0 }, T0 + 1_000);
+      const now = T0 + 1_000 + STATUS_IDLE_THRESHOLD_MS + 1;
+      const announced = liveAnnouncementText(status, now, t);
+      expect(announced).toBe("等待此步骤完成");
+      expectNoTickingSeconds(announced);
+    });
+
+    it("idle-with-tool announces the tool, no idle seconds", () => {
+      let status = createGenerationStatus(T0);
+      status = applyStatusEvent(status, { type: "tool_call_start", tool_call_id: "c1", tool_name: "execute_sql", args: {} }, T0 + 1_000);
+      const now = T0 + 1_000 + STATUS_IDLE_THRESHOLD_MS + 1;
+      const announced = liveAnnouncementText(status, now, t);
+      expect(announced).toBe("等待此步骤完成 · 正在执行 执行 SQL");
+      expectNoTickingSeconds(announced);
+    });
+
+    it("announces cancelling when the user requested stop", () => {
+      let status = markCancelling(createGenerationStatus(T0), T0 + 5_000);
+      const announced = liveAnnouncementText(status, T0 + 5_000, t);
+      expect(announced).toBe("正在取消…");
+      expectNoTickingSeconds(announced);
     });
   });
 

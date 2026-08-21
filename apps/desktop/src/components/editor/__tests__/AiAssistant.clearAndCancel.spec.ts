@@ -154,6 +154,22 @@ describe("AI assistant clear/switch cancels an in-flight request (issue #5941, P
     expect(finallyBody.indexOf("generationStatus.value = createGenerationStatus(Date.now());")).toBeGreaterThan(guardIdx);
   });
 
+  it("the generation-status line exposes a screen-reader live region (role=status) that excludes ticking numerals", () => {
+    // Issue #6743 feature 1 a11y: async execution-state updates must be
+    // announced. The status block (data-ai-generation-status) must contain a
+    // role="status" live region fed by `statusLiveAnnouncement` — which, unlike
+    // the visible `statusText`, omits the per-second elapsed/idle numerals so a
+    // screen reader hears discrete state changes, not a timer ticking every 1s.
+    const statusBlockStart = source.indexOf("data-ai-generation-status");
+    expect(statusBlockStart).toBeGreaterThanOrEqual(0);
+    const block = source.slice(statusBlockStart);
+    expect(block).toContain('role="status"');
+    expect(block).toContain('aria-live="polite"');
+    expect(block).toContain('aria-atomic="true"');
+    expect(block).toContain("statusLiveAnnouncement");
+    expect(block).toContain('class="sr-only"');
+  });
+
   // The three gaps below were called out on review of PR #6332: the generation guard
   // stopped *writes* from a superseded generation, but didn't stop the generation from
   // starting a stream, leaking pending-compaction state, or from surviving unmount.

@@ -7,11 +7,13 @@ import {
   foreignKeyDisplayLookupRequestKey,
   foreignKeyDisplayMapFromResult,
   formatForeignKeyDisplayValue,
+  manualReferenceKeyColumnIsUnique,
+  manualReferenceKeyColumns,
   singleColumnForeignKey,
   splitForeignKeyDisplayValues,
 } from "@/lib/dataGrid/dataGridForeignKeyDisplay";
 import { buildColumnForeignKeyMap } from "@/lib/dataGrid/dataGridForeignKeyNavigation";
-import type { QueryResult } from "@/types/database";
+import type { ColumnInfo, IndexInfo, QueryResult } from "@/types/database";
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -57,11 +59,40 @@ describe("dataGridForeignKeyDisplay", () => {
     expect(foreignKeyDisplayConfigIsUsable(automatic, { name: "fk_dict", column: "status", ref_table: "dictionary", ref_column: "dict_key" })).toBe(true);
   });
 
+  it("only allows deterministic single-column keys for manual references", () => {
+    const columns = [
+      { name: "tenant_id", is_primary_key: true },
+      { name: "record_id", is_primary_key: true },
+      { name: "code", is_primary_key: false },
+      { name: "active_slug", is_primary_key: false },
+      { name: "email", is_primary_key: false },
+    ].map((column) => ({ data_type: "varchar", is_nullable: false, column_default: null, extra: null, ...column })) as ColumnInfo[];
+    const indexes = [
+      { name: "uq_code", columns: ["code"], is_unique: true, is_primary: false },
+      { name: "uq_tenant_record", columns: ["tenant_id", "record_id"], is_unique: true, is_primary: false },
+      { name: "uq_active_slug", columns: ["active_slug"], is_unique: true, is_primary: false, filter: "active = true" },
+      { name: "idx_email", columns: ["email"], is_unique: false, is_primary: false },
+    ] as IndexInfo[];
+
+    expect(manualReferenceKeyColumns(columns, indexes).map((column) => column.name)).toEqual(["code"]);
+    expect(manualReferenceKeyColumnIsUnique(columns, indexes, "CODE")).toBe(true);
+    expect(manualReferenceKeyColumnIsUnique(columns, indexes, "tenant_id")).toBe(false);
+    expect(manualReferenceKeyColumnIsUnique(columns, indexes, "active_slug")).toBe(false);
+    expect(manualReferenceKeyColumnIsUnique([{ ...columns[0], name: "id" }], [], "id")).toBe(true);
+  });
+
   it("deduplicates current-page keys with type-safe identities and bounded batches", () => {
     const rows = [[100], [100], ["100"], [null], [101], [{ id: 1 }]] as QueryResult["rows"];
     const values = collectForeignKeyDisplayValues(rows, 0);
     expect(values).toEqual([100, "100", 101]);
     expect(splitForeignKeyDisplayValues(values, 2)).toEqual([[100, "100"], [101]]);
+  });
+
+  it("deduplicates SQL-equivalent numeric values without collapsing text keys", () => {
+    const rows = [[100], ["100.0"], ["1e2"], ["0100"], [101]] as QueryResult["rows"];
+
+    expect(collectForeignKeyDisplayValues(rows, 0, "decimal(20, 4)")).toEqual([100, 101]);
+    expect(collectForeignKeyDisplayValues(rows, 0, "varchar")).toEqual([100, "100.0", "1e2", "0100", 101]);
   });
 
   it("caps a large page at 2000 unique values and four 500-value batches", () => {
@@ -95,6 +126,34 @@ describe("dataGridForeignKeyDisplay", () => {
     expect(formatForeignKeyDisplayValue("same", new Map([["string\u0000same", "same"]]))).toBe("same");
     expect(formatForeignKeyDisplayValue(100, codeLabels)).toBe("100 (U100)");
     expect(foreignKeyDisplayMapFromResult(result, "missing", "code")).toEqual(new Map());
+  });
+
+  it("matches numeric driver strings while preserving distinct text values", () => {
+    const numericResult = { columns: ["id", "name"], rows: [["100.00", "numeric label"]] } as QueryResult;
+    const numericLabels = foreignKeyDisplayMapFromResult(numericResult, "id", "name", "decimal(20, 2)");
+    expect(formatForeignKeyDisplayValue(100, numericLabels, "decimal(20, 2)")).toBe("100 (numeric label)");
+
+    const textResult = {
+      columns: ["id", "name"],
+      rows: [
+        ["01", "leading zero"],
+        ["1", "plain"],
+      ],
+    } as QueryResult;
+    const textLabels = foreignKeyDisplayMapFromResult(textResult, "id", "name", "varchar");
+    expect(formatForeignKeyDisplayValue("01", textLabels, "varchar")).toBe("01 (leading zero)");
+    expect(formatForeignKeyDisplayValue("1", textLabels, "varchar")).toBe("1 (plain)");
+
+    const largeNumericResult = {
+      columns: ["id", "name"],
+      rows: [
+        ["9007199254740992", "even"],
+        ["9007199254740993", "odd"],
+      ],
+    } as QueryResult;
+    const largeNumericLabels = foreignKeyDisplayMapFromResult(largeNumericResult, "id", "name", "decimal(20, 0)");
+    expect(formatForeignKeyDisplayValue("9007199254740992", largeNumericLabels, "decimal(20, 0)")).toBe("9007199254740992 (even)");
+    expect(formatForeignKeyDisplayValue("9007199254740993", largeNumericLabels, "decimal(20, 0)")).toBe("9007199254740993 (odd)");
   });
 
   it("deduplicates in-flight requests and reuses the bounded cache across generations", async () => {

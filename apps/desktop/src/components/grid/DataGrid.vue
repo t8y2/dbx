@@ -187,9 +187,11 @@ import {
   isTableDataVisiblePreviewColumn,
   largeValueCellKey,
   largeValueCellMap,
+  TABLE_DATA_VISIBLE_PREVIEW_CACHE_CONTENT_MAX_BYTES,
   TABLE_DATA_VISIBLE_PREVIEW_CACHE_ROWS,
   TABLE_DATA_VISIBLE_PREVIEW_SIZE,
   tableDataLargeValuePreviewOptions,
+  tableDataVisiblePreviewContentBytes,
   tableDataVisiblePreviewRowRange,
   type ResultScopedRowCache,
 } from "@/lib/dataGrid/dataGridLargeValues";
@@ -3595,6 +3597,7 @@ const editor = useDataGridEditor({
   currentPage,
   cacheKey: computed(() => props.pendingStateKey ?? props.cacheKey),
   onResultPayloadMutated: () => queryStore.invalidateResultEstimateForPayload(props.result),
+  onCellValueChanged: invalidateVisibleLargeValuePreviewCell,
   prepareFullReload,
   emit,
 });
@@ -4343,7 +4346,7 @@ const displayRowIndexByIdLookup = computed(() => {
 });
 
 function rowItemFromDisplayRef(ref: DisplayRowRef): RowItem {
-  largeValueResolutionVersion.value;
+  void largeValueResolutionVersion.value;
   if (ref.isNew) {
     return {
       ...ref,
@@ -4542,9 +4545,8 @@ const failedVisibleLargeValuePreviewResults = new WeakSet<QueryResult>();
 const visibleLargeValuePreviewVersion = ref(0);
 let visibleLargeValuePreviewTimer = 0;
 let visibleLargeValuePreviewRequestedGeneration = 0;
-let visibleLargeValuePreviewCompletedGeneration = 0;
-let visibleLargeValuePreviewRunning = false;
 let visibleLargeValuePreviewActive = true;
+const visibleLargeValuePreviewExecutionIds = new Map<number, string>();
 
 function isLargeValuePreview(item: RowItem | undefined, columnIndex: number): boolean {
   if (!item || item.isNew || item.isDraft || item.sourceIndex === undefined || item.isDirtyCol[columnIndex]) return false;
@@ -4557,7 +4559,7 @@ function largeValueOriginalBytes(item: Pick<RowItem, "sourceIndex" | "isNew" | "
 }
 
 function formatGridItemCell(item: RowItem, columnIndex: number): string {
-  visibleLargeValuePreviewVersion.value;
+  void visibleLargeValuePreviewVersion.value;
   return formatCellCached(visibleLargeValuePreviewValue(item, columnIndex, item.data[columnIndex] ?? null), columnIndex, largeValueOriginalBytes(item, columnIndex));
 }
 
@@ -4582,10 +4584,23 @@ function largeValueSourceColumnIndex(columnName: string): number {
 function visibleLargeValuePreviewCache(result: QueryResult): ResultScopedRowCache<CellValue> {
   let cache = visibleLargeValuePreviewCaches.get(result);
   if (!cache) {
-    cache = createResultScopedRowCache(TABLE_DATA_VISIBLE_PREVIEW_CACHE_ROWS);
+    cache = createResultScopedRowCache(TABLE_DATA_VISIBLE_PREVIEW_CACHE_ROWS, {
+      maxBytes: TABLE_DATA_VISIBLE_PREVIEW_CACHE_CONTENT_MAX_BYTES,
+      sizeOf: tableDataVisiblePreviewContentBytes,
+    });
     visibleLargeValuePreviewCaches.set(result, cache);
   }
   return cache;
+}
+
+function invalidateVisibleLargeValuePreviewCell(rowId: number, columnIndex: number) {
+  const item = getRowItem(rowId);
+  if (item?.sourceIndex === undefined) return;
+  const cache = visibleLargeValuePreviewCaches.get(props.result);
+  if (!cache?.has(item.sourceIndex, columnIndex)) return;
+  cache.forget(item.sourceIndex, columnIndex);
+  visibleLargeValuePreviewVersion.value += 1;
+  scheduleCanvasDraw();
 }
 
 function visibleLargeValuePreviewValue(item: Pick<RowItem, "sourceIndex"> | undefined, columnIndex: number, fallback: CellValue): CellValue {
@@ -4678,13 +4693,20 @@ async function hydrateVisibleLargeValuePreviews(generation: number) {
     offset: 0,
   });
   const connection = connectionStore.getConfig(props.connectionId);
-  const results = await api.executeMulti(props.connectionId, props.executionDatabase ?? props.database ?? "", sql, undefined, uuid(), {
-    maxRows: requests.size,
-    fetchSize: requests.size,
-    resultKeyColumns: tableMeta.primaryKeys,
-    tableDataPreview: true,
-    timeoutSecs: queryTimeoutSecsForConnection(connection, settingsStore.editorSettings.globalQueryTimeoutSecs),
-  });
+  const executionId = uuid();
+  visibleLargeValuePreviewExecutionIds.set(generation, executionId);
+  let results: QueryResult[];
+  try {
+    results = await api.executeMulti(props.connectionId, props.executionDatabase ?? props.database ?? "", sql, undefined, executionId, {
+      maxRows: requests.size,
+      fetchSize: requests.size,
+      resultKeyColumns: tableMeta.primaryKeys,
+      tableDataPreview: true,
+      timeoutSecs: queryTimeoutSecsForConnection(connection, settingsStore.editorSettings.globalQueryTimeoutSecs),
+    });
+  } finally {
+    if (visibleLargeValuePreviewExecutionIds.get(generation) === executionId) visibleLargeValuePreviewExecutionIds.delete(generation);
+  }
   if (!visibleLargeValuePreviewActive || generation !== visibleLargeValuePreviewRequestedGeneration || props.result !== sourceResult) return;
   const result = results[0];
   if (!result || result.execution_error) {
@@ -4722,41 +4744,41 @@ async function hydrateVisibleLargeValuePreviews(generation: number) {
   scheduleCanvasDraw();
 }
 
-async function runVisibleLargeValuePreviewHydration() {
-  if (visibleLargeValuePreviewRunning || !visibleLargeValuePreviewActive) return;
-  visibleLargeValuePreviewRunning = true;
+async function runVisibleLargeValuePreviewHydration(generation: number) {
+  if (!visibleLargeValuePreviewActive || generation !== visibleLargeValuePreviewRequestedGeneration) return;
+  const sourceResult = props.result;
   try {
-    while (visibleLargeValuePreviewActive && visibleLargeValuePreviewCompletedGeneration < visibleLargeValuePreviewRequestedGeneration) {
-      const generation = visibleLargeValuePreviewRequestedGeneration;
-      const sourceResult = props.result;
-      try {
-        await hydrateVisibleLargeValuePreviews(generation);
-      } catch (error) {
-        if (props.result === sourceResult && generation === visibleLargeValuePreviewRequestedGeneration && !failedVisibleLargeValuePreviewResults.has(sourceResult)) {
-          failedVisibleLargeValuePreviewResults.add(sourceResult);
-          appendDebugLog("warn", "[DBX][DataGrid:visible-large-value-preview] disabled for result", error);
-        }
-      }
-      visibleLargeValuePreviewCompletedGeneration = generation;
+    await hydrateVisibleLargeValuePreviews(generation);
+  } catch (error) {
+    if (props.result === sourceResult && generation === visibleLargeValuePreviewRequestedGeneration && !failedVisibleLargeValuePreviewResults.has(sourceResult)) {
+      failedVisibleLargeValuePreviewResults.add(sourceResult);
+      appendDebugLog("warn", "[DBX][DataGrid:visible-large-value-preview] disabled for result", error);
     }
-  } finally {
-    visibleLargeValuePreviewRunning = false;
+  }
+}
+
+function cancelVisibleLargeValuePreviewHydrations() {
+  for (const [generation, executionId] of visibleLargeValuePreviewExecutionIds) {
+    visibleLargeValuePreviewExecutionIds.delete(generation);
+    void api.cancelQuery(executionId).catch((error) => appendDebugLog("warn", "[DBX][DataGrid:visible-large-value-preview] cancel failed", error));
   }
 }
 
 function scheduleVisibleLargeValuePreviewHydration(delay = 150) {
   if (!visibleLargeValuePreviewActive) return;
-  visibleLargeValuePreviewRequestedGeneration += 1;
+  const generation = ++visibleLargeValuePreviewRequestedGeneration;
+  cancelVisibleLargeValuePreviewHydrations();
   window.clearTimeout(visibleLargeValuePreviewTimer);
   visibleLargeValuePreviewTimer = window.setTimeout(() => {
     visibleLargeValuePreviewTimer = 0;
-    void runVisibleLargeValuePreviewHydration();
+    void runVisibleLargeValuePreviewHydration(generation);
   }, delay);
 }
 
 function pauseVisibleLargeValuePreviewHydration() {
   visibleLargeValuePreviewActive = false;
   visibleLargeValuePreviewRequestedGeneration += 1;
+  cancelVisibleLargeValuePreviewHydrations();
   window.clearTimeout(visibleLargeValuePreviewTimer);
   visibleLargeValuePreviewTimer = 0;
 }

@@ -1,4 +1,5 @@
 import type { ColumnInfo, DatabaseType, QueryResult } from "@/types/database";
+import type { CellValue } from "@/lib/dataGrid/cellValue";
 
 export const TABLE_DATA_RESULT_MAX_BYTES = 32 * 1024 * 1024;
 export const TABLE_DATA_CELL_PREVIEW_MIN_SIZE = 1;
@@ -8,6 +9,7 @@ export const TABLE_DATA_TEXT_SERIALIZED_BYTES_PER_CHARACTER = 6;
 export const TABLE_DATA_VISIBLE_PREVIEW_SIZE = 512;
 export const TABLE_DATA_VISIBLE_PREVIEW_MAX_ROWS = 100;
 export const TABLE_DATA_VISIBLE_PREVIEW_CACHE_ROWS = 2_000;
+export const TABLE_DATA_VISIBLE_PREVIEW_CACHE_CONTENT_MAX_BYTES = 16 * 1024 * 1024;
 const TABLE_DATA_LARGE_VALUE_MARKER_PREFIX = "__DBX_LARGE_VALUE_BYTES_";
 
 export interface TableDataVisiblePreviewRowRange {
@@ -36,12 +38,35 @@ export function tableDataVisiblePreviewRowRange(scrollTop: number, viewportHeigh
   return { start, end };
 }
 
-export function createResultScopedRowCache<T>(maxRows: number): ResultScopedRowCache<T> {
+export function tableDataVisiblePreviewContentBytes(value: CellValue): number {
+  if (typeof value === "string") return value.length * 2;
+  if (typeof value === "number") return 8;
+  if (typeof value === "boolean") return 4;
+  return 0;
+}
+
+export function createResultScopedRowCache<T>(maxRows: number, options: { maxBytes?: number; sizeOf?: (value: T) => number } = {}): ResultScopedRowCache<T> {
   const rows = new Map<number, Map<number, T>>();
+  const rowBytes = new Map<number, number>();
+  const maxCachedRows = Math.max(0, maxRows);
+  const maxCachedBytes = Math.max(0, options.maxBytes ?? Number.POSITIVE_INFINITY);
+  const sizeOf = options.sizeOf ?? (() => 0);
+  let cachedBytes = 0;
 
   function touch(rowIndex: number, values: Map<number, T>) {
     rows.delete(rowIndex);
     rows.set(rowIndex, values);
+  }
+
+  function removeRow(rowIndex: number, values: Map<number, T>, evicted: Array<{ rowIndex: number; columnIndex: number; value: T }>) {
+    rows.delete(rowIndex);
+    cachedBytes = Math.max(0, cachedBytes - (rowBytes.get(rowIndex) ?? 0));
+    rowBytes.delete(rowIndex);
+    for (const [columnIndex, value] of values) evicted.push({ rowIndex, columnIndex, value });
+  }
+
+  function exceedsLimit(): boolean {
+    return rows.size > maxCachedRows || cachedBytes > maxCachedBytes;
   }
 
   return {
@@ -57,22 +82,40 @@ export function createResultScopedRowCache<T>(maxRows: number): ResultScopedRowC
     },
     remember(rowIndex, columnIndex, value) {
       const values = rows.get(rowIndex) ?? new Map<number, T>();
-      if (!values.has(columnIndex)) values.set(columnIndex, value);
+      if (!values.has(columnIndex)) {
+        values.set(columnIndex, value);
+        const valueBytes = Math.max(0, sizeOf(value));
+        cachedBytes += valueBytes;
+        rowBytes.set(rowIndex, (rowBytes.get(rowIndex) ?? 0) + valueBytes);
+      }
       touch(rowIndex, values);
     },
     forget(rowIndex, columnIndex) {
       const values = rows.get(rowIndex);
       if (!values) return;
+      const value = values.get(columnIndex);
+      if (value === undefined && !values.has(columnIndex)) return;
       values.delete(columnIndex);
-      if (values.size === 0) rows.delete(rowIndex);
+      const valueBytes = Math.max(0, sizeOf(value as T));
+      cachedBytes = Math.max(0, cachedBytes - valueBytes);
+      const remainingRowBytes = Math.max(0, (rowBytes.get(rowIndex) ?? 0) - valueBytes);
+      if (values.size === 0) {
+        rows.delete(rowIndex);
+        rowBytes.delete(rowIndex);
+      } else {
+        rowBytes.set(rowIndex, remainingRowBytes);
+      }
     },
     evict(protectedRows = new Set<number>()) {
       const evicted: Array<{ rowIndex: number; columnIndex: number; value: T }> = [];
       for (const [rowIndex, values] of rows) {
-        if (rows.size <= Math.max(0, maxRows)) break;
+        if (!exceedsLimit()) break;
         if (protectedRows.has(rowIndex)) continue;
-        rows.delete(rowIndex);
-        for (const [columnIndex, value] of values) evicted.push({ rowIndex, columnIndex, value });
+        removeRow(rowIndex, values, evicted);
+      }
+      for (const [rowIndex, values] of rows) {
+        if (!exceedsLimit()) break;
+        removeRow(rowIndex, values, evicted);
       }
       return evicted;
     },

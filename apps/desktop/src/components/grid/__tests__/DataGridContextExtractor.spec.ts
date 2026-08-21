@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   buildDataGridContextFilterCondition: vi.fn(async ({ columnName, value }: { columnName: string; value: unknown }) => `\`${columnName}\` = '${String(value)}'`),
   buildTableSelectSql: vi.fn(async ({ whereInput }: { whereInput?: string }) => `SELECT payload FROM events${whereInput ? ` WHERE ${whereInput}` : ""}`),
   executeMulti: vi.fn(),
+  cancelQuery: vi.fn(),
   toast: vi.fn(),
 }));
 
@@ -18,6 +19,7 @@ vi.mock("@/lib/backend/api", () => ({
   buildDataGridContextFilterCondition: mocks.buildDataGridContextFilterCondition,
   buildTableSelectSql: mocks.buildTableSelectSql,
   executeMulti: mocks.executeMulti,
+  cancelQuery: mocks.cancelQuery,
 }));
 
 vi.mock("@/composables/useToast", () => ({
@@ -84,10 +86,12 @@ function hydratedResult(id: number, value: string): QueryResult {
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
+    reject = rejectPromise;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 function mockDeferredFullHydration(hydration: Promise<QueryResult[]>) {
@@ -99,6 +103,16 @@ function mockDeferredFullHydration(hydration: Promise<QueryResult[]>) {
 
 function fullHydrationCallCount() {
   return mocks.executeMulti.mock.calls.filter((call) => !(call[5] as { tableDataPreview?: boolean } | undefined)?.tableDataPreview).length;
+}
+
+function visibleHydrationCalls() {
+  return mocks.executeMulti.mock.calls.filter((call) => (call[5] as { tableDataPreview?: boolean } | undefined)?.tableDataPreview);
+}
+
+function gridCell(host: HTMLElement): HTMLElement {
+  const cell = host.querySelector<HTMLElement>('[data-row-index="0"] [data-visible-col-index="1"]');
+  if (!cell) throw new Error("Large-value grid cell not found");
+  return cell;
 }
 
 function mountGrid(initialResult = largeValueResult()) {
@@ -177,6 +191,7 @@ async function startEqualsFilter(host: HTMLElement) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.cancelQuery.mockResolvedValue(true);
 });
 
 afterEach(() => {
@@ -233,5 +248,52 @@ describe("DataGrid context filter lifecycle", () => {
     await settle();
 
     expect(onExecuteSql).not.toHaveBeenCalled();
+  });
+});
+
+describe("DataGrid visible large-value preview lifecycle", () => {
+  it("invalidates a hydrated preview when paste edits the selected cell", async () => {
+    mocks.executeMulti.mockImplementation((...args: unknown[]) => {
+      const options = args[5] as { tableDataPreview?: boolean } | undefined;
+      return Promise.resolve([hydratedResult(1, options?.tableDataPreview ? "visible preview" : "full value")]);
+    });
+    const { host } = mountGrid();
+
+    await vi.waitFor(() => expect(gridCell(host).textContent).toContain("visible preview"));
+    const cell = gridCell(host);
+    cell.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0 }));
+    window.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, button: 0 }));
+    const paste = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, "clipboardData", { value: { getData: () => "edited value" } });
+    host.querySelector<HTMLElement>("[data-grid-root]")?.dispatchEvent(paste);
+
+    await vi.waitFor(() => expect(gridCell(host).textContent).toContain("edited value"));
+  });
+
+  it("cancels a stale viewport request and starts the newest generation", async () => {
+    const firstHydration = deferred<QueryResult[]>();
+    let visibleRequestCount = 0;
+    mocks.executeMulti.mockImplementation((...args: unknown[]) => {
+      const options = args[5] as { tableDataPreview?: boolean } | undefined;
+      if (!options?.tableDataPreview) return Promise.resolve([hydratedResult(1, "full value")]);
+      visibleRequestCount += 1;
+      return visibleRequestCount === 1 ? firstHydration.promise : Promise.resolve([hydratedResult(1, "latest preview")]);
+    });
+    mocks.cancelQuery.mockImplementation(async () => {
+      firstHydration.reject(new Error("cancelled"));
+      return true;
+    });
+    const { host } = mountGrid();
+
+    await vi.waitFor(() => expect(visibleHydrationCalls()).toHaveLength(1));
+    const firstExecutionId = visibleHydrationCalls()[0]?.[4];
+    const scroller = host.querySelector<HTMLElement>(".data-grid-scroller");
+    if (!scroller) throw new Error("Data grid scroller not found");
+    scroller.scrollTop = 26;
+    scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+
+    await vi.waitFor(() => expect(mocks.cancelQuery).toHaveBeenCalledWith(firstExecutionId));
+    await vi.waitFor(() => expect(visibleHydrationCalls()).toHaveLength(2));
+    expect(visibleHydrationCalls()[1]?.[4]).not.toBe(firstExecutionId);
   });
 });

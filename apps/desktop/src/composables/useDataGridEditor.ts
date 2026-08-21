@@ -117,6 +117,7 @@ export interface UseDataGridEditorOptions {
   cacheKey?: ComputedRef<string | undefined>;
   /** 保存成功后结果负载被原地修改时通知宿主，使缓存的字节估算失效。 */
   onResultPayloadMutated?: () => void;
+  onCellValueChanged?: (rowId: number, columnIndex: number) => void;
   prepareFullReload?: () => void;
   emit: {
     (event: "reload", sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number): void;
@@ -229,6 +230,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     pageSize,
     currentPage,
     cacheKey,
+    onCellValueChanged,
   } = options;
 
   const editingCell = ref<{ rowId: number; col: number } | null>(null);
@@ -838,6 +840,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     if (dataGridQuickEntryEnabled.value && isSaving.value && changed) {
       rememberQueuedAutoSaveChange(item.sourceIndex, col, newVal);
     }
+    if (changed) onCellValueChanged?.(rowId, col);
     return changed ? { changed: true, rowKind: "existing" } : { changed: false, rowKind: "existing" };
   }
 
@@ -956,6 +959,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       dirtyRows.value = new Map(dirtyRows.value);
       touchPendingChanges();
     }
+    onCellValueChanged?.(rowId, col);
   }
 
   function restoreCellValue(rowId: number, col: number) {
@@ -996,6 +1000,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     if (rowChanges.size === 0) dirtyRows.value.delete(item.sourceIndex);
     dirtyRows.value = new Map(dirtyRows.value);
     touchPendingChanges();
+    onCellValueChanged?.(rowId, col);
   }
 
   function cancelEdit() {

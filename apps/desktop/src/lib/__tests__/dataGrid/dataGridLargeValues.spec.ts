@@ -10,6 +10,7 @@ import {
   TABLE_DATA_CELL_PREVIEW_SIZE,
   TABLE_DATA_PREVIEW_CONTENT_MAX_BYTES,
   tableDataLargeValuePreviewOptions,
+  tableDataVisiblePreviewContentBytes,
   tableDataVisiblePreviewRowRange,
 } from "@/lib/dataGrid/dataGridLargeValues";
 import { buildDataGridCellDetail } from "@/lib/dataGrid/dataGridDetail";
@@ -110,6 +111,25 @@ describe("data grid large-value metadata", () => {
 
     cache.forget(1, 2);
     expect(cache.has(1, 2)).toBe(false);
+  });
+
+  it("bounds cached preview content while preserving the newest active rows", () => {
+    const cache = createResultScopedRowCache<string>(10, { maxBytes: 6, sizeOf: (value) => value.length });
+    cache.remember(1, 1, "one");
+    cache.remember(2, 1, "two");
+    cache.remember(3, 1, "four");
+
+    expect(cache.evict(new Set([3]))).toEqual([
+      { rowIndex: 1, columnIndex: 1, value: "one" },
+      { rowIndex: 2, columnIndex: 1, value: "two" },
+    ]);
+    expect(cache.has(3, 1)).toBe(true);
+
+    const oversizedActive = createResultScopedRowCache<string>(10, { maxBytes: 3, sizeOf: (value) => value.length });
+    oversizedActive.remember(1, 1, "four");
+    expect(oversizedActive.evict(new Set([1]))).toEqual([{ rowIndex: 1, columnIndex: 1, value: "four" }]);
+    expect(oversizedActive.has(1, 1)).toBe(false);
+    expect(tableDataVisiblePreviewContentBytes("🙂")).toBe(4);
   });
 
   it("uses the active MySQL page budget to select bounded preview columns", () => {

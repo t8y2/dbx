@@ -178,8 +178,9 @@ fn classify_candidate(
                     jre_validity
                         .entry(jre_key.to_string())
                         .or_insert_with(|| classify_managed_jre(am, jre_key))
-                        .clone()
+                        .as_ref()
                         .err()
+                        .copied()
                 } else {
                     Some(AgentOfflineExportUnavailableReason::MissingManagedJre)
                 }

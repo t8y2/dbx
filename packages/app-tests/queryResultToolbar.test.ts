@@ -80,6 +80,22 @@ test("ContentArea exposes retained result runs as switchable tabs or a compact l
   assert.equal((contentArea.match(/<QueryResultToolbarActions\b/g) ?? []).length, 2);
 });
 
+test("appending a result run preserves the tab-strip scroll position", () => {
+  const contentArea = source(contentAreaPath);
+  const resultRunWatcherStart = contentArea.indexOf("function resultRunIdsWereAppended");
+  const resultRunWatcherEnd = contentArea.indexOf("const summaryItems", resultRunWatcherStart);
+  const resultRunWatcher = contentArea.slice(resultRunWatcherStart, resultRunWatcherEnd);
+
+  assert.ok(resultRunWatcherStart >= 0);
+  assert.match(resultRunWatcher, /current\.length > previous\.length/);
+  assert.match(resultRunWatcher, /activeRunId: props\.activeTab\.activeResultRunId/);
+  assert.match(resultRunWatcher, /activeRunChanged && !resultRunIdsWereAppended\(previous\.runIds, current\.runIds\)/);
+  assert.match(resultRunWatcher, /updateResultTabsAfterRender/);
+  assert.match(resultRunWatcher, /revealActiveResultRunAfterRender/);
+  assert.match(contentArea, /function focusResultRunByIndex[\s\S]*scrollIntoView/);
+  assert.match(contentArea, /async function removeResultRun[\s\S]*scrollIntoView/);
+});
+
 test("the close-tab shortcut clears query results before closing the tab", () => {
   const app = source(appPath);
   const closeShortcutStart = app.indexOf("if (isCloseTabShortcut(e, shortcuts))");

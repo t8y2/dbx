@@ -793,6 +793,8 @@ export interface QueryResultRun {
   sequence: number;
   sql: string;
   createdAt: number;
+  /** Keeps this result from being replaced by an ordinary query execution. */
+  pinned?: boolean;
   /** Distinguishes successive result payloads that reuse the same run slot. */
   resultGridRevision?: string;
   result?: QueryResult;

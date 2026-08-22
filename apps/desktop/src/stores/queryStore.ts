@@ -1119,11 +1119,14 @@ export const useQueryStore = defineStore("query", () => {
 
     const restoredRun = markQueryResultRunsRowsRaw([
       {
-        ...run,
         ...snapshotRun,
+        // The open-tab metadata may have changed after this payload was evicted
+        // (for example, pinning or unpinning a result). Keep it authoritative.
+        ...run,
         result: snapshotRun.result ? markQueryResultRowsRaw(snapshotRun.result) : undefined,
         results: snapshotRun.results ? markQueryResultsRowsRaw(snapshotRun.results) : undefined,
         resultCacheState: "memory" as const,
+        resultEvicted: undefined,
         // 快照编解码会重建负载（如省略 session_id），落盘前的估算值不再对应
         // 恢复后的对象，置空以便 projectResultRun 按当前负载重算
         resultEstimatedBytes: undefined,
@@ -1133,14 +1136,79 @@ export const useQueryStore = defineStore("query", () => {
     return restoredRun;
   }
 
-  async function setActiveResultRun(id: string, runId: string) {
+  async function setActiveResultRun(id: string, runId: string, options: { evictInactive?: boolean } = {}) {
     const tab = findExecutionTab(id);
     if (!tab) return false;
     const existingRun = tab.resultRuns?.find((item) => item.id === runId);
     const run = existingRun && resultRunHasPayload(existingRun) ? existingRun : await restoreResultRunPayload(tab, runId);
     if (!run?.result && !run?.results?.length) return false;
     projectResultRun(tab, run);
-    evictInactiveResultRunPayloads(tab);
+    if (options.evictInactive !== false) evictInactiveResultRunPayloads(tab);
+    return true;
+  }
+
+  function toggleResultRunPinned(id: string, runId: string): boolean | undefined {
+    const tab = tabs.value.find((item) => item.id === id);
+    const runIndex = tab?.resultRuns?.findIndex((run) => run.id === runId) ?? -1;
+    if (!tab?.resultRuns || runIndex < 0) return undefined;
+
+    const run = { ...tab.resultRuns[runIndex]!, pinned: tab.resultRuns[runIndex]!.pinned ? undefined : true };
+    tab.resultRuns[runIndex] = run;
+    void persistResultRun(tab, run);
+    return run.pinned === true;
+  }
+
+  function unpinAllResultRuns(id: string): number {
+    const tab = tabs.value.find((item) => item.id === id);
+    if (!tab?.resultRuns?.length) return 0;
+
+    let changed = 0;
+    tab.resultRuns = tab.resultRuns.map((run) => {
+      if (!run.pinned) return run;
+      changed += 1;
+      const updated = { ...run, pinned: undefined };
+      void persistResultRun(tab, updated);
+      return updated;
+    });
+    return changed;
+  }
+
+  async function closeOtherResultRuns(id: string, keepRunId: string): Promise<boolean> {
+    const tab = tabs.value.find((item) => item.id === id);
+    if (!tab?.resultRuns?.some((run) => run.id === keepRunId)) return false;
+
+    const runIds = tab.resultRuns.filter((run) => run.id !== keepRunId).map((run) => run.id);
+    if (runIds.length === 0) return false;
+    // Do not delete otherwise usable runs until the run the user chose to keep
+    // has been restored successfully. Disk-backed snapshots can be unavailable.
+    if (!(await setActiveResultRun(id, keepRunId, { evictInactive: false }))) return false;
+    for (const runId of runIds) {
+      await removeResultRun(id, runId);
+    }
+    return true;
+  }
+
+  async function closeResultRunsToLeft(id: string, runId: string): Promise<boolean> {
+    const tab = tabs.value.find((item) => item.id === id);
+    const runIndex = tab?.resultRuns?.findIndex((run) => run.id === runId) ?? -1;
+    if (!tab?.resultRuns || runIndex <= 0) return false;
+
+    if (!(await setActiveResultRun(id, runId, { evictInactive: false }))) return false;
+    for (const run of tab.resultRuns.slice(0, runIndex)) {
+      await removeResultRun(id, run.id);
+    }
+    return true;
+  }
+
+  async function closeResultRunsToRight(id: string, runId: string): Promise<boolean> {
+    const tab = tabs.value.find((item) => item.id === id);
+    const runIndex = tab?.resultRuns?.findIndex((run) => run.id === runId) ?? -1;
+    if (!tab?.resultRuns || runIndex < 0 || runIndex >= tab.resultRuns.length - 1) return false;
+
+    if (!(await setActiveResultRun(id, runId, { evictInactive: false }))) return false;
+    for (const run of tab.resultRuns.slice(runIndex + 1)) {
+      await removeResultRun(id, run.id);
+    }
     return true;
   }
 
@@ -1234,6 +1302,9 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   function persistResultRun(tab: QueryTab, run: NonNullable<QueryTab["resultRuns"]>[number]): Promise<boolean> {
+    // An evicted run only has metadata in memory. Writing it back here would
+    // replace its valid disk snapshot with an empty payload.
+    if (!resultRunHasPayload(run)) return Promise.resolve(false);
     const key = run.resultCacheKey ?? resultRunCacheKey(tab.id, run.id);
     run.resultCacheKey = key;
     run.resultCacheState = "memory";
@@ -1620,6 +1691,20 @@ export const useQueryStore = defineStore("query", () => {
       mongoEditTarget: t.mongoEditTarget,
       resultEvicted: t.resultEvicted,
       resultCacheKey: t.resultCacheKey,
+      // Keep the watch dependency limited to the metadata that is serialized
+      // for each result run, without tracking the potentially large payload.
+      resultRuns: t.resultRuns?.map((run) => ({
+        id: run.id,
+        title: run.title,
+        sequence: run.sequence,
+        sql: run.sql,
+        createdAt: run.createdAt,
+        pinned: run.pinned,
+        activeResultIndex: run.activeResultIndex,
+        resultCacheKey: run.resultCacheKey,
+        resultEvicted: run.resultEvicted,
+      })),
+      activeResultRunId: t.activeResultRunId,
     })),
   );
 
@@ -4242,7 +4327,20 @@ export const useQueryStore = defineStore("query", () => {
     if (!tab || !sql.trim()) return;
 
     const openInNewResultTab = tab.mode === "query" && options?.openInNewResultTab === true;
-    const captureResultRun = openInNewResultTab;
+    let captureResultRun = openInNewResultTab;
+    if (!captureResultRun && tab.mode === "query" && !tab.resultAutoSave && tab.activeResultRunId) {
+      const activeRun = tab.resultRuns?.find((run) => run.id === tab.activeResultRunId);
+      if (activeRun?.pinned) {
+        const reusableRun = tab.resultRuns?.find((run) => !run.pinned);
+        if (reusableRun) {
+          // A stale disk snapshot must not make us fall back to overwriting
+          // the pinned active run. Capture a fresh run instead.
+          captureResultRun = !(await setActiveResultRun(id, reusableRun.id));
+        } else {
+          captureResultRun = true;
+        }
+      }
+    }
     if (captureResultRun && tab.activeResultRunId && !tab.result) {
       await setActiveResultRun(id, tab.activeResultRunId);
       if (findExecutionTab(id) !== tab) return false;
@@ -5298,7 +5396,9 @@ export const useQueryStore = defineStore("query", () => {
         current.resultTotalRowCountLoading = false;
         touchResult(current);
         producedResult = true;
-        syncDisplayedResultRun(current, queryBaseSql, openInNewResultTab);
+        // When a pinned result requires a new run, errors must use that same
+        // run instead of being replaced by the retained pinned result below.
+        syncDisplayedResultRun(current, queryBaseSql, captureResultRun);
       }
     } finally {
       if (tableDataNativeSelectionBlockOwner) finishDataGridNativeSelectionBlock(tableDataNativeSelectionBlockOwner);
@@ -6468,6 +6568,11 @@ export const useQueryStore = defineStore("query", () => {
     invalidateResultEstimateForPayload,
     toggleResultAutoSave,
     setActiveResultRun,
+    toggleResultRunPinned,
+    unpinAllResultRuns,
+    closeOtherResultRuns,
+    closeResultRunsToLeft,
+    closeResultRunsToRight,
     removeResultRun,
     closeQueryResult,
     clearQueryResults,

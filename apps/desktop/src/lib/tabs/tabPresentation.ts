@@ -344,12 +344,13 @@ export function activeResultRun(tab: Pick<QueryTab, "resultRuns" | "activeResult
   return tab.resultRuns?.find((run) => run.id === tab.activeResultRunId);
 }
 
-export function resultRunItems(tab: Pick<QueryTab, "resultRuns" | "activeResultRunId">): { id: string; title: string; sequence: number; active: boolean }[] {
+export function resultRunItems(tab: Pick<QueryTab, "resultRuns" | "activeResultRunId">): { id: string; title: string; sequence: number; active: boolean; pinned: boolean }[] {
   return (tab.resultRuns ?? []).map((run) => ({
     id: run.id,
     title: run.title,
     sequence: run.sequence,
     active: run.id === tab.activeResultRunId,
+    pinned: run.pinned === true,
   }));
 }
 

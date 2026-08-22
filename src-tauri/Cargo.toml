@@ -75,7 +75,7 @@ tauri = { version = "2.10.3", features = ["test"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { version = "0.6.4", default-features = false, features = ["std"] }
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSApplication", "NSButton", "NSControl", "NSDockTile", "NSImage", "NSResponder", "NSView", "NSWindow"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSApplication", "NSButton", "NSControl", "NSDockTile", "NSEvent", "NSImage", "NSResponder", "NSView", "NSWindow"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSData", "NSString"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

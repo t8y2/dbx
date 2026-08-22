@@ -2872,22 +2872,53 @@ mod tests {
         oracle_object_statistics_rows_only_sql, oracle_object_statistics_sql,
         oracle_object_statistics_user_segments_sql, oracle_table_comment_from_query_result, oracle_table_comment_sql,
         oracle_table_comments_sql, presto_like_columns_from_query_result, presto_like_information_schema_columns_sql,
-        presto_like_information_schema_tables_sql, presto_like_tables_from_query_result, replace_metadata_runtime,
-        should_query_oracle_columns_via_sql_first, table_comments_from_query_result, table_name_filter_matches,
-        tdengine_table_comment_like_pattern, tdengine_table_comment_sql, tdengine_table_comments_sql,
-        uses_mongodb_agent_collection_listing, visible_schema_filter, MetadataErrorAction, MysqlTableListSource,
-        TableNameFilter, ORACLE_CURRENT_SCHEMA_SQL, TDENGINE_COMMENT_SEARCH_TIMEOUT, TDENGINE_LIKE_PATTERN_MAX_BYTES,
+        presto_like_information_schema_tables_sql, presto_like_tables_from_query_result,
+        reference_key_columns_from_indexes, replace_metadata_runtime, should_query_oracle_columns_via_sql_first,
+        table_comments_from_query_result, table_name_filter_matches, tdengine_table_comment_like_pattern,
+        tdengine_table_comment_sql, tdengine_table_comments_sql, uses_mongodb_agent_collection_listing,
+        visible_schema_filter, MetadataErrorAction, MysqlTableListSource, TableNameFilter, ORACLE_CURRENT_SCHEMA_SQL,
+        TDENGINE_COMMENT_SEARCH_TIMEOUT, TDENGINE_LIKE_PATTERN_MAX_BYTES,
     };
     use super::{list_databases_core, list_tables_core};
     use super::{
         object_types_include_custom_types, object_types_include_relations, object_types_include_routines,
         object_types_only_custom_types, supports_custom_type_details, supports_pg_custom_type_objects,
     };
+
     use crate::connection::{AppState, PoolKind};
     use crate::models::connection::{ConnectionConfig, DatabaseConnectionInfo, DatabaseType};
     use crate::storage::Storage;
     use std::collections::HashMap;
     use std::time::Duration;
+
+    #[test]
+    fn reference_key_columns_require_effective_unfiltered_single_column_uniqueness() {
+        let index = |name: &str, columns: &[&str], is_unique: bool, is_primary: bool| db::IndexInfo {
+            name: name.to_string(),
+            columns: columns.iter().map(|column| (*column).to_string()).collect(),
+            is_unique,
+            is_primary,
+            filter: None,
+            index_type: None,
+            included_columns: None,
+            comment: None,
+            key_is_expression: Vec::new(),
+        };
+        let mut filtered = index("uq_active_code", &["active_code"], true, false);
+        filtered.filter = Some("active = true".to_string());
+        let mut expression = index("uq_lower_email", &["lower(email)"], true, false);
+        expression.key_is_expression = vec![true];
+        let indexes = vec![
+            index("clickhouse_primary", &["event_id"], false, true),
+            index("uq_code", &["code"], true, false),
+            index("uq_Code", &["Code"], true, false),
+            index("uq_tenant_code", &["tenant_id", "code"], true, false),
+            filtered,
+            expression,
+        ];
+
+        assert_eq!(reference_key_columns_from_indexes(&indexes), vec!["code", "Code"]);
+    }
 
     fn oracle_current_schema_result(columns: &[&str], rows: Vec<Vec<serde_json::Value>>) -> db::QueryResult {
         db::QueryResult {
@@ -6477,6 +6508,35 @@ pub async fn list_indexes_core(
     .await;
     metadata_session.finish(state, connection_id, Some(database)).await;
     result
+}
+
+pub fn reference_key_columns_from_indexes(indexes: &[db::IndexInfo]) -> Vec<String> {
+    let mut columns = Vec::new();
+    for index in indexes {
+        if !index.is_unique
+            || index.filter.as_deref().is_some_and(|filter| !filter.trim().is_empty())
+            || index.columns.len() != 1
+            || index.key_is_expression.first().copied().unwrap_or(false)
+        {
+            continue;
+        }
+        let column = index.columns[0].trim();
+        if !column.is_empty() && !columns.iter().any(|existing| existing == column) {
+            columns.push(column.to_string());
+        }
+    }
+    columns
+}
+
+pub async fn list_reference_key_columns_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<String>, String> {
+    let indexes = list_indexes_core(state, connection_id, database, schema, table).await?;
+    Ok(reference_key_columns_from_indexes(&indexes))
 }
 
 async fn list_indexes_core_for_session(

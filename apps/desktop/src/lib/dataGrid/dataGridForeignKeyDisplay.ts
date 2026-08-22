@@ -2,7 +2,7 @@ import { displayCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
 import type { ColumnFormatterConfig, ForeignKeyDisplayFilterConfig } from "@/lib/dataGrid/columnFormatter";
 import { isNumericColumnType } from "@/lib/dataGrid/dataGridColumnType";
 import type { ForeignKeyAssociation } from "@/lib/dataGrid/dataGridForeignKeyNavigation";
-import type { ColumnInfo, ForeignKeyInfo, IndexInfo, QueryResult } from "@/types/database";
+import type { ColumnInfo, ForeignKeyInfo, QueryResult } from "@/types/database";
 
 export type ForeignKeyDisplayConfig = Extract<ColumnFormatterConfig, { kind: "foreign-key-display" }>;
 
@@ -166,21 +166,27 @@ export function foreignKeyDisplayConfigIsUsable(config: ForeignKeyDisplayConfig,
   return !!foreignKey && foreignKeyDisplayConfigMatches(config, foreignKey, currentSchema);
 }
 
-export function manualReferenceKeyColumns(columns: readonly ColumnInfo[], indexes: readonly IndexInfo[]): ColumnInfo[] {
-  const uniqueColumnNames = new Set<string>();
-  for (const index of indexes) {
-    if ((!index.is_primary && !index.is_unique) || index.filter?.trim() || index.columns.length !== 1 || index.key_is_expression?.[0]) continue;
-    const columnName = index.columns[0]?.trim().toLowerCase();
-    if (columnName) uniqueColumnNames.add(columnName);
-  }
-  const primaryKeyColumns = columns.filter((column) => column.is_primary_key);
-  if (primaryKeyColumns.length === 1) uniqueColumnNames.add(primaryKeyColumns[0].name.toLowerCase());
-  return columns.filter((column) => uniqueColumnNames.has(column.name.toLowerCase()));
+export type ManualReferenceMetadataStatus = "loading" | "available" | "unavailable";
+export type ManualReferenceColumnValidation = "pending" | "valid" | "invalid" | "unavailable";
+
+export function manualReferenceKeyColumns(columns: readonly ColumnInfo[], referenceKeyColumnNames: readonly string[]): ColumnInfo[] {
+  const uniqueColumnNames = new Set(referenceKeyColumnNames);
+  return columns.filter((column) => uniqueColumnNames.has(column.name));
 }
 
-export function manualReferenceKeyColumnIsUnique(columns: readonly ColumnInfo[], indexes: readonly IndexInfo[], columnName: string): boolean {
-  const normalizedColumnName = columnName.trim().toLowerCase();
-  return !!normalizedColumnName && manualReferenceKeyColumns(columns, indexes).some((column) => column.name.toLowerCase() === normalizedColumnName);
+export function manualReferenceKeyColumnIsUnique(columns: readonly ColumnInfo[], referenceKeyColumnNames: readonly string[], columnName: string): boolean {
+  return !!columnName && manualReferenceKeyColumns(columns, referenceKeyColumnNames).some((column) => column.name === columnName);
+}
+
+export function manualReferenceColumnValidation(columns: readonly ColumnInfo[], referenceKeyColumnNames: readonly string[], columnName: string, metadataStatus: ManualReferenceMetadataStatus): ManualReferenceColumnValidation {
+  if (metadataStatus === "loading") return "pending";
+  if (metadataStatus === "unavailable") return "unavailable";
+  return manualReferenceKeyColumnIsUnique(columns, referenceKeyColumnNames, columnName) ? "valid" : "invalid";
+}
+
+export function reconcileManualReferenceColumn(currentColumn: string, referenceColumns: readonly ColumnInfo[], metadataStatus: ManualReferenceMetadataStatus): string {
+  if (currentColumn || metadataStatus !== "available") return currentColumn;
+  return referenceColumns[0]?.name ?? "";
 }
 
 function canonicalNumericReferenceValue(value: string | number): string | undefined {
@@ -237,8 +243,8 @@ export function splitForeignKeyDisplayValues(values: readonly CellValue[], batch
 
 export function foreignKeyDisplayMapFromResult(result: QueryResult, keyColumn = result.columns[0], displayColumn = result.columns[1], keyDataType?: string): Map<string, string> {
   const map = new Map<string, string>();
-  const keyIndex = result.columns.findIndex((column) => column.toLowerCase() === keyColumn?.toLowerCase());
-  const displayIndex = result.columns.findIndex((column) => column.toLowerCase() === displayColumn?.toLowerCase());
+  const keyIndex = result.columns.findIndex((column) => column === keyColumn);
+  const displayIndex = result.columns.findIndex((column) => column === displayColumn);
   if (keyIndex < 0 || displayIndex < 0) return map;
   for (const row of result.rows) {
     const key = foreignKeyDisplayValueKey(row[keyIndex] as CellValue | undefined, keyDataType);

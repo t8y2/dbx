@@ -2688,6 +2688,7 @@ fn sqlserver_indexes_sql_with_filter_definition(schema: &str, table: &str, inclu
     } else {
         "CAST(NULL AS NVARCHAR(MAX)) AS filter_definition"
     };
+    let unfiltered_predicate = if include_filter_definition { " AND i.has_filter = 0" } else { "" };
     let object_id = sqlserver_object_id_expression(schema, table);
     format!(
         "SELECT i.name, \
@@ -2697,7 +2698,7 @@ fn sqlserver_indexes_sql_with_filter_definition(schema: &str, table: &str, inclu
                 WHERE ic2.object_id = i.object_id AND ic2.index_id = i.index_id AND ic2.is_included_column = 0 \
                 ORDER BY ic2.key_ordinal \
                 FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 1, '') AS columns, \
-         i.is_unique, i.is_primary_key, i.type_desc, \
+         CAST(CASE WHEN i.is_unique = 1 AND i.is_disabled = 0 AND i.is_hypothetical = 0{unfiltered_predicate} THEN 1 ELSE 0 END AS bit) AS is_unique, i.is_primary_key, i.type_desc, \
          STUFF((SELECT ',' + c3.name \
                 FROM sys.index_columns ic3 \
                 JOIN sys.columns c3 ON ic3.object_id = c3.object_id AND ic3.column_id = c3.column_id \
@@ -3974,10 +3975,22 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_index_metadata_only_reports_usable_unique_indexes() {
+        let sql = sqlserver_indexes_sql("dbo", "orders");
+        assert!(sql.contains("i.has_filter = 0"));
+        for sql in [sql, sqlserver_legacy_indexes_sql("dbo", "orders")] {
+            assert!(sql.contains("i.is_unique = 1"));
+            assert!(sql.contains("i.is_disabled = 0"));
+            assert!(sql.contains("i.is_hypothetical = 0"));
+        }
+    }
+
+    #[test]
     fn sqlserver_legacy_indexes_sql_omits_filtered_index_metadata() {
         let sql = sqlserver_legacy_indexes_sql("dbo", "orders");
 
         assert!(!sql.contains("i.filter_definition"));
+        assert!(!sql.contains("i.has_filter"));
         assert!(sql.contains("CAST(NULL AS NVARCHAR(MAX)) AS filter_definition"));
         assert!(sql.contains("ep.value AS index_comment"));
     }

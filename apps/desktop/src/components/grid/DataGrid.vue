@@ -234,11 +234,14 @@ import {
   foreignKeyDisplayLookupRequestKey,
   foreignKeyDisplayMapFromResult,
   formatForeignKeyDisplayValue,
+  manualReferenceColumnValidation,
   manualReferenceKeyColumnIsUnique,
   manualReferenceKeyColumns,
+  reconcileManualReferenceColumn,
   singleColumnForeignKey,
   splitForeignKeyDisplayValues,
   type ForeignKeyDisplayConfig,
+  type ManualReferenceMetadataStatus,
 } from "@/lib/dataGrid/dataGridForeignKeyDisplay";
 
 import { useToast } from "@/composables/useToast";
@@ -1076,12 +1079,14 @@ const formatterForeignKeyManual = ref(false);
 const formatterForeignKeySchemas = ref<string[]>([]);
 const formatterForeignKeyTables = ref<string[]>([]);
 const formatterForeignKeyColumns = ref<ColumnInfo[]>([]);
-const formatterForeignKeyIndexes = ref<IndexInfo[]>([]);
+const formatterForeignKeyReferenceKeyColumns = ref<string[]>([]);
+const formatterForeignKeyReferenceMetadataStatus = ref<ManualReferenceMetadataStatus>("loading");
 const formatterForeignKeySchemasLoading = ref(false);
 const formatterForeignKeyTablesLoading = ref(false);
 const formatterForeignKeyColumnsLoading = ref(false);
 const formatterForeignKeyTargetError = ref("");
 const formatterForeignKeyColumnsError = ref("");
+const formatterForeignKeyReferenceMetadataError = ref("");
 const formatterForeignKeyFilterEnabled = ref(false);
 const formatterForeignKeyFilterColumn = ref("");
 const formatterForeignKeyFilterMode = ref<DataGridContextFilterMode>("equals");
@@ -1094,7 +1099,8 @@ interface ForeignKeyDisplayLabelState {
   labels: Map<string, string>;
 }
 
-const formatterForeignKeyReferenceColumns = computed(() => (formatterForeignKeyManual.value ? manualReferenceKeyColumns(formatterForeignKeyColumns.value, formatterForeignKeyIndexes.value) : formatterForeignKeyColumns.value));
+const formatterForeignKeyReferenceColumns = computed(() => (formatterForeignKeyManual.value ? manualReferenceKeyColumns(formatterForeignKeyColumns.value, formatterForeignKeyReferenceKeyColumns.value) : formatterForeignKeyColumns.value));
+const formatterForeignKeyReferenceValidation = computed(() => manualReferenceColumnValidation(formatterForeignKeyColumns.value, formatterForeignKeyReferenceKeyColumns.value, formatterForeignKeyRefColumn.value, formatterForeignKeyReferenceMetadataStatus.value));
 const foreignKeyDisplayLabels = shallowRef(new Map<number, ForeignKeyDisplayLabelState>());
 const foreignKeyDisplayRequests = createForeignKeyDisplayRequestCoordinator();
 
@@ -1516,9 +1522,11 @@ function loadFormatterDraft(formatter: ColumnFormatterConfig | undefined) {
   formatterForeignKeySchemas.value = [];
   formatterForeignKeyTables.value = [];
   formatterForeignKeyColumns.value = [];
-  formatterForeignKeyIndexes.value = [];
+  formatterForeignKeyReferenceKeyColumns.value = [];
+  formatterForeignKeyReferenceMetadataStatus.value = "loading";
   formatterForeignKeyTargetError.value = "";
   formatterForeignKeyColumnsError.value = "";
+  formatterForeignKeyReferenceMetadataError.value = "";
   formatterForeignKeyFilterEnabled.value = false;
   formatterForeignKeyFilterColumn.value = "";
   formatterForeignKeyFilterMode.value = "equals";
@@ -1574,29 +1582,39 @@ function formatterForeignKeyForColumn(columnIndex: number): ForeignKeyInfo | und
 async function loadFormatterForeignKeyColumns(columnIndex: number) {
   const request = ++formatterForeignKeyColumnsRequest;
   formatterForeignKeyColumns.value = [];
-  formatterForeignKeyIndexes.value = [];
+  formatterForeignKeyReferenceKeyColumns.value = [];
+  formatterForeignKeyReferenceMetadataStatus.value = "loading";
   formatterForeignKeyColumnsError.value = "";
+  formatterForeignKeyReferenceMetadataError.value = "";
   if (!props.connectionId || !formatterForeignKeyRefTable.value) return;
   formatterForeignKeyColumnsLoading.value = true;
   try {
     const schema = formatterForeignKeyRefSchema.value || props.tableMeta?.schema || props.schema || props.database || "";
     const manual = formatterForeignKeyManual.value;
-    const [columns, indexes] = await Promise.all([
+    const [columnsResult, referenceKeysResult] = await Promise.allSettled([
       api.getColumns(props.connectionId, props.database || "", schema, formatterForeignKeyRefTable.value, props.tableMeta?.catalog),
-      manual ? api.listIndexes(props.connectionId, props.database || "", schema, formatterForeignKeyRefTable.value, props.tableMeta?.catalog).catch(() => [] as IndexInfo[]) : Promise.resolve([] as IndexInfo[]),
+      manual ? api.listReferenceKeyColumns(props.connectionId, props.database || "", schema, formatterForeignKeyRefTable.value, props.tableMeta?.catalog) : Promise.resolve([] as string[]),
     ]);
     if (request !== formatterForeignKeyColumnsRequest || formatterOpenColumn.value !== columnIndex) return;
+    if (columnsResult.status === "rejected") throw columnsResult.reason;
+    const columns = columnsResult.value;
     formatterForeignKeyColumns.value = columns;
-    formatterForeignKeyIndexes.value = indexes;
-    const referenceColumns = manualReferenceKeyColumns(columns, indexes);
+    if (manual && referenceKeysResult.status === "rejected") {
+      formatterForeignKeyReferenceMetadataStatus.value = "unavailable";
+      formatterForeignKeyReferenceMetadataError.value = String(referenceKeysResult.reason?.message || referenceKeysResult.reason);
+    } else {
+      formatterForeignKeyReferenceKeyColumns.value = referenceKeysResult.status === "fulfilled" ? referenceKeysResult.value : [];
+      formatterForeignKeyReferenceMetadataStatus.value = "available";
+    }
+    const referenceColumns = manualReferenceKeyColumns(columns, formatterForeignKeyReferenceKeyColumns.value);
     const foreignKey = formatterForeignKeyForColumn(columnIndex);
-    if (!formatterForeignKeyRefColumn.value || !columns.some((column) => column.name === formatterForeignKeyRefColumn.value)) {
-      formatterForeignKeyRefColumn.value = !manual && foreignKey ? foreignKey.ref_column : (referenceColumns[0]?.name ?? "");
-    } else if (manual && !manualReferenceKeyColumnIsUnique(columns, indexes, formatterForeignKeyRefColumn.value)) {
-      formatterForeignKeyRefColumn.value = referenceColumns[0]?.name ?? "";
+    if (manual) {
+      formatterForeignKeyRefColumn.value = reconcileManualReferenceColumn(formatterForeignKeyRefColumn.value, referenceColumns, formatterForeignKeyReferenceMetadataStatus.value);
+    } else if (!formatterForeignKeyRefColumn.value || !columns.some((column) => column.name === formatterForeignKeyRefColumn.value)) {
+      formatterForeignKeyRefColumn.value = foreignKey?.ref_column ?? "";
     }
     if (!formatterForeignKeyDisplayColumn.value || !columns.some((column) => column.name === formatterForeignKeyDisplayColumn.value)) {
-      formatterForeignKeyDisplayColumn.value = columns.find((column) => column.name.toLowerCase() !== formatterForeignKeyRefColumn.value.toLowerCase())?.name ?? columns[0]?.name ?? "";
+      formatterForeignKeyDisplayColumn.value = columns.find((column) => column.name !== formatterForeignKeyRefColumn.value)?.name ?? columns[0]?.name ?? "";
     }
     if (formatterForeignKeyFilterEnabled.value && !columns.some((column) => column.name === formatterForeignKeyFilterColumn.value)) formatterForeignKeyFilterColumn.value = "";
   } catch (error: any) {
@@ -1659,7 +1677,9 @@ function selectFormatterForeignKeySchema(value: string, columnIndex: number) {
   formatterForeignKeyDisplayColumn.value = "";
   formatterForeignKeyFilterColumn.value = "";
   formatterForeignKeyColumns.value = [];
-  formatterForeignKeyIndexes.value = [];
+  formatterForeignKeyReferenceKeyColumns.value = [];
+  formatterForeignKeyReferenceMetadataStatus.value = "loading";
+  formatterForeignKeyReferenceMetadataError.value = "";
   void loadFormatterManualReferenceTables(columnIndex);
 }
 
@@ -1669,7 +1689,9 @@ function selectFormatterForeignKeyTable(value: string, columnIndex: number) {
   formatterForeignKeyRefColumn.value = "";
   formatterForeignKeyDisplayColumn.value = "";
   formatterForeignKeyFilterColumn.value = "";
-  formatterForeignKeyIndexes.value = [];
+  formatterForeignKeyReferenceKeyColumns.value = [];
+  formatterForeignKeyReferenceMetadataStatus.value = "loading";
+  formatterForeignKeyReferenceMetadataError.value = "";
   void loadFormatterForeignKeyColumns(columnIndex);
 }
 
@@ -1751,7 +1773,7 @@ function clearColumnFormatter(columnIndex: number) {
 function formatterDraftIsSavable(): boolean {
   const formatter = normalizeColumnFormatter(currentFormatterDraft());
   if (!formatter || formatter.kind !== "foreign-key-display" || formatter.referenceMode !== "manual") return !!formatter;
-  return manualReferenceKeyColumnIsUnique(formatterForeignKeyColumns.value, formatterForeignKeyIndexes.value, formatter.refColumn);
+  return formatterForeignKeyReferenceValidation.value === "valid";
 }
 
 function selectFormatterKind(value: FormatterDraftKind, columnIndex: number) {
@@ -10204,14 +10226,14 @@ async function loadForeignKeyDisplayLabels() {
           api.getColumns(props.connectionId!, props.database || "", schema, config.refTable, props.tableMeta?.catalog),
         );
         if (!columns || !foreignKeyDisplayRequests.isCurrent(requestGeneration)) return;
-        const refColumnInfo = columns.find((column) => column.name.toLowerCase() === config.refColumn.toLowerCase());
+        const refColumnInfo = columns.find((column) => column.name === config.refColumn);
         if (!refColumnInfo) return;
         if (config.referenceMode === "manual") {
-          const indexes = await foreignKeyDisplayRequests.request(requestGeneration, JSON.stringify(["indexes", props.connectionId, props.database || "", props.tableMeta?.catalog || "", schema, config.refTable]), () =>
-            api.listIndexes(props.connectionId!, props.database || "", schema, config.refTable, props.tableMeta?.catalog).catch(() => [] as IndexInfo[]),
+          const referenceKeyColumns = await foreignKeyDisplayRequests.request(requestGeneration, JSON.stringify(["reference-key-columns", props.connectionId, props.database || "", props.tableMeta?.catalog || "", schema, config.refTable]), () =>
+            api.listReferenceKeyColumns(props.connectionId!, props.database || "", schema, config.refTable, props.tableMeta?.catalog),
           );
-          if (!indexes || !foreignKeyDisplayRequests.isCurrent(requestGeneration)) return;
-          if (!manualReferenceKeyColumnIsUnique(columns, indexes, config.refColumn)) {
+          if (!referenceKeyColumns || !foreignKeyDisplayRequests.isCurrent(requestGeneration)) return;
+          if (!manualReferenceKeyColumnIsUnique(columns, referenceKeyColumns, config.refColumn)) {
             appendDebugLog("warn", "[DBX][DataGrid:foreign-key-display:non-unique-manual-reference]", {
               column: props.result.columns[columnIndex],
               reference: `${schema}.${config.refTable}.${config.refColumn}`,
@@ -10236,7 +10258,7 @@ async function loadForeignKeyDisplayLabels() {
           let lookupWhereInput = whereInput;
           if (config.filter) {
             const filter = config.filter;
-            const filterColumnInfo = columns.find((column) => column.name.toLowerCase() === filter.column.toLowerCase());
+            const filterColumnInfo = columns.find((column) => column.name === filter.column);
             const filterCondition = await buildDataGridContextFilterCondition({
               databaseType: resolvedDatabaseType.value,
               identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
@@ -11964,6 +11986,15 @@ function currentGridContextMenuItems(): ContextMenuItem[] {
                                         item-class="h-auto min-h-8 px-2 py-1.5 text-xs"
                                         @update:model-value="(value: any) => (formatterForeignKeyRefColumn = String(value))"
                                       />
+                                      <div v-if="formatterForeignKeyReferenceValidation === 'unavailable'" class="text-[11px] leading-4 text-destructive">
+                                        {{ t("grid.formatterForeignKeyReferenceMetadataUnavailable", { error: formatterForeignKeyReferenceMetadataError }) }}
+                                      </div>
+                                      <div v-else-if="formatterForeignKeyReferenceValidation === 'invalid' && formatterForeignKeyRefColumn" class="text-[11px] leading-4 text-destructive">
+                                        {{ t("grid.formatterForeignKeyReferenceInvalid") }}
+                                      </div>
+                                      <div v-else-if="formatterForeignKeyReferenceMetadataStatus === 'available' && formatterForeignKeyRefTable && !formatterForeignKeyReferenceColumns.length" class="text-[11px] leading-4 text-destructive">
+                                        {{ t("grid.formatterForeignKeyReferenceUnavailable") }}
+                                      </div>
                                     </div>
                                     <div class="min-w-0 space-y-1.5">
                                       <div class="text-xs font-medium text-muted-foreground">{{ t("grid.formatterForeignKeyDisplayColumn") }}</div>

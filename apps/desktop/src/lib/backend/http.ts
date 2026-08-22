@@ -880,6 +880,10 @@ export async function listIndexes(connectionId: string, database: string, schema
   return get(`/api/schema/indexes?${qs({ connection_id: connectionId, database, schema, table, catalog })}`);
 }
 
+export async function listReferenceKeyColumns(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<string[]> {
+  return get(`/api/schema/reference-key-columns?${qs({ connection_id: connectionId, database, schema, table, catalog })}`);
+}
+
 export async function listForeignKeys(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<ForeignKeyInfo[]> {
   return get(`/api/schema/foreign-keys?${qs({ connection_id: connectionId, database, schema, table, catalog })}`);
 }

@@ -7,13 +7,15 @@ import {
   foreignKeyDisplayLookupRequestKey,
   foreignKeyDisplayMapFromResult,
   formatForeignKeyDisplayValue,
+  manualReferenceColumnValidation,
   manualReferenceKeyColumnIsUnique,
   manualReferenceKeyColumns,
+  reconcileManualReferenceColumn,
   singleColumnForeignKey,
   splitForeignKeyDisplayValues,
 } from "@/lib/dataGrid/dataGridForeignKeyDisplay";
 import { buildColumnForeignKeyMap } from "@/lib/dataGrid/dataGridForeignKeyNavigation";
-import type { ColumnInfo, IndexInfo, QueryResult } from "@/types/database";
+import type { ColumnInfo, QueryResult } from "@/types/database";
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -59,26 +61,29 @@ describe("dataGridForeignKeyDisplay", () => {
     expect(foreignKeyDisplayConfigIsUsable(automatic, { name: "fk_dict", column: "status", ref_table: "dictionary", ref_column: "dict_key" })).toBe(true);
   });
 
-  it("only allows deterministic single-column keys for manual references", () => {
+  it("uses backend-approved reference keys with exact metadata identity", () => {
     const columns = [
       { name: "tenant_id", is_primary_key: true },
       { name: "record_id", is_primary_key: true },
       { name: "code", is_primary_key: false },
-      { name: "active_slug", is_primary_key: false },
-      { name: "email", is_primary_key: false },
+      { name: "Code", is_primary_key: false },
     ].map((column) => ({ data_type: "varchar", is_nullable: false, column_default: null, extra: null, ...column })) as ColumnInfo[];
-    const indexes = [
-      { name: "uq_code", columns: ["code"], is_unique: true, is_primary: false },
-      { name: "uq_tenant_record", columns: ["tenant_id", "record_id"], is_unique: true, is_primary: false },
-      { name: "uq_active_slug", columns: ["active_slug"], is_unique: true, is_primary: false, filter: "active = true" },
-      { name: "idx_email", columns: ["email"], is_unique: false, is_primary: false },
-    ] as IndexInfo[];
 
-    expect(manualReferenceKeyColumns(columns, indexes).map((column) => column.name)).toEqual(["code"]);
-    expect(manualReferenceKeyColumnIsUnique(columns, indexes, "CODE")).toBe(true);
-    expect(manualReferenceKeyColumnIsUnique(columns, indexes, "tenant_id")).toBe(false);
-    expect(manualReferenceKeyColumnIsUnique(columns, indexes, "active_slug")).toBe(false);
-    expect(manualReferenceKeyColumnIsUnique([{ ...columns[0], name: "id" }], [], "id")).toBe(true);
+    expect(manualReferenceKeyColumns(columns, ["code"]).map((column) => column.name)).toEqual(["code"]);
+    expect(manualReferenceKeyColumnIsUnique(columns, ["code"], "code")).toBe(true);
+    expect(manualReferenceKeyColumnIsUnique(columns, ["code"], "Code")).toBe(false);
+    expect(manualReferenceKeyColumnIsUnique(columns, [], "tenant_id")).toBe(false);
+  });
+
+  it("preserves saved reference columns when metadata is invalid or unavailable", () => {
+    const columns = [{ name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null }] as ColumnInfo[];
+
+    expect(reconcileManualReferenceColumn("legacy_code", columns, "available")).toBe("legacy_code");
+    expect(reconcileManualReferenceColumn("legacy_code", [], "unavailable")).toBe("legacy_code");
+    expect(reconcileManualReferenceColumn("", columns, "available")).toBe("id");
+    expect(reconcileManualReferenceColumn("", columns, "unavailable")).toBe("");
+    expect(manualReferenceColumnValidation(columns, [], "legacy_code", "available")).toBe("invalid");
+    expect(manualReferenceColumnValidation(columns, [], "legacy_code", "unavailable")).toBe("unavailable");
   });
 
   it("deduplicates current-page keys with type-safe identities and bounded batches", () => {
@@ -117,12 +122,14 @@ describe("dataGridForeignKeyDisplay", () => {
       ],
     } as QueryResult;
     const labels = foreignKeyDisplayMapFromResult(result);
-    const codeLabels = foreignKeyDisplayMapFromResult(result, "ID", "CODE");
+    const codeLabels = foreignKeyDisplayMapFromResult(result, "id", "code");
+    const mismatchedCaseLabels = foreignKeyDisplayMapFromResult(result, "ID", "CODE");
 
     expect(formatForeignKeyDisplayValue(100, labels)).toBe("100 (张三)");
     expect(formatForeignKeyDisplayValue(102, labels)).toBe("102");
     expect(formatForeignKeyDisplayValue(103, labels)).toBe("103");
     expect(formatForeignKeyDisplayValue(null, labels)).toBe("NULL");
+    expect(mismatchedCaseLabels.size).toBe(0);
     expect(formatForeignKeyDisplayValue("same", new Map([["string\u0000same", "same"]]))).toBe("same");
     expect(formatForeignKeyDisplayValue(100, codeLabels)).toBe("100 (U100)");
     expect(foreignKeyDisplayMapFromResult(result, "missing", "code")).toEqual(new Map());

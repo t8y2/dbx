@@ -1350,6 +1350,7 @@ export interface SqlCompletionContext {
   statementKind: SqlStatementKind;
   tableTriggerWord?: string;
   isGroupBy: boolean;
+  isEmptyGroupBy: boolean;
   nonAggregatedSelectColumns: string[];
   comparisonLeftColumn?: string;
   onStar: boolean;
@@ -1518,7 +1519,12 @@ class SqlCompletionProvider {
     }
 
     if (!context.exclusiveTableSuggestions && !context.exclusiveColumnSuggestions && !context.exclusiveRoutineSuggestions && context.prioritizeSelectAliases) {
-      this.items.push(...buildSelectAliasItems(context));
+      const selectAliasItems = buildSelectAliasItems(context);
+      this.items.push(...selectAliasItems);
+      if (context.isEmptyGroupBy && !context.prefix) {
+        const allSelectAliasesItem = buildGroupByAllSelectAliasItem(context, selectAliasItems, this.input.columnsByTable, this.dialect);
+        if (allSelectAliasesItem) this.items.push(allSelectAliasesItem);
+      }
     }
 
     if (!context.exclusiveTableSuggestions && !context.exclusiveColumnSuggestions && !context.exclusiveRoutineSuggestions && context.isGroupBy && context.nonAggregatedSelectColumns.length > 0) {
@@ -2266,6 +2272,7 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
     statementKind,
     tableTriggerWord: lastWord || undefined,
     isGroupBy: isInGroupByContext(beforeCursor),
+    isEmptyGroupBy: isEmptyGroupByContext(beforeCursor),
     nonAggregatedSelectColumns: extractNonAggregatedSelectColumns(fullStatement),
     comparisonLeftColumn: detectComparisonLeftColumn(beforeCursor),
     onStar: detectOnStar(beforeCursor),
@@ -2577,6 +2584,16 @@ function isInGroupByContext(beforeCursor: string): boolean {
   if (lastOrderBy > lastGroupBy) return false;
   const segment = cleaned.slice(lastGroupBy);
   return !/\b(?:where|having|limit|offset|union|intersect|except|join|from)\b/.test(segment);
+}
+
+function isEmptyGroupByContext(beforeCursor: string): boolean {
+  if (!isInGroupByContext(beforeCursor)) return false;
+  const cleaned = beforeCursor
+    .replace(/'[^']*'/g, "''")
+    .replace(/"[^"]*"/g, '""')
+    .toLowerCase();
+  const lastGroupBy = cleaned.lastIndexOf("group by");
+  return lastGroupBy >= 0 && cleaned.slice(lastGroupBy + "group by".length).trim().length === 0;
 }
 
 const AGGREGATE_FUNCTION_PATTERN = /^(COUNT|SUM|AVG|MIN|MAX|GROUP_CONCAT|STRING_AGG|ARRAY_AGG|JSON_ARRAYAGG|JSON_OBJECTAGG)\s*\(/i;
@@ -4739,6 +4756,28 @@ function buildSelectAliasItems(context: SqlCompletionContext): SqlCompletionItem
       detail: "SELECT alias",
       boost: computeBoost(alias, context.prefix) + 3500 - index,
     }));
+}
+
+function buildGroupByAllSelectAliasItem(context: SqlCompletionContext, selectAliasItems: SqlCompletionItem[], columnsByTable: Map<string, SqlCompletionColumn[]>, dialect?: SqlCompletionApplyDialect): SqlCompletionItem | null {
+  const nonAggregatedAliases = new Set(context.nonAggregatedSelectColumns.map((column) => column.toLowerCase()));
+  const columnApplyByName = new Map(buildNonAggregatedColumnItems(context, columnsByTable, dialect).map((item) => [item.label.toLowerCase(), item.apply ?? item.label]));
+  const seen = new Set<string>();
+  const safeAliasItems = selectAliasItems.filter((item) => {
+    const key = item.label.toLowerCase();
+    if (!nonAggregatedAliases.has(key) || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  if (safeAliasItems.length < 2) return null;
+
+  return {
+    label: safeAliasItems.map((item) => item.label).join(", "),
+    type: "snippet",
+    detail: "All non-aggregated SELECT aliases",
+    apply: safeAliasItems.map((item) => columnApplyByName.get(item.label.toLowerCase()) ?? item.apply ?? item.label).join(", "),
+    boost: 3650,
+    dedupeKey: "group-by-all-select-aliases",
+  };
 }
 
 function buildNonAggregatedColumnItems(context: SqlCompletionContext, columnsByTable: Map<string, SqlCompletionColumn[]>, dialect?: SqlCompletionApplyDialect): SqlCompletionItem[] {

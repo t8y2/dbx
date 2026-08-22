@@ -34,7 +34,17 @@ import { pruneTreeSelectionToVisibleNodeIds } from "@/lib/sidebar/sidebarTreeSel
 import { isEditableSidebarTypeSearchTarget, sidebarTypeSearchNextQuery } from "@/lib/sidebar/sidebarTypeSearch";
 import { isInternalDorisCatalog, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
 import { connectionObjectTreeNodeSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
-import { activeTabSidebarTarget, findSidebarNodeForActiveTab, findSidebarNodeForTarget, findNodePathForTarget, scrollTopForSidebarNode, shouldScrollActiveSidebarSelection, type ActiveTabSidebarTarget, type SidebarNodeScrollAlign } from "@/lib/sidebar/sidebarActiveTabTarget";
+import {
+  activeTabSidebarTarget,
+  findSidebarConnectionNode,
+  findSidebarNodeForActiveTab,
+  findSidebarNodeForTarget,
+  findNodePathForTarget,
+  scrollTopForSidebarNode,
+  shouldScrollActiveSidebarSelection,
+  type ActiveTabSidebarTarget,
+  type SidebarNodeScrollAlign,
+} from "@/lib/sidebar/sidebarActiveTabTarget";
 import { findLoadedTableTargetForCandidate, queryContextTargetFromCandidate, queryCursorTableCandidate, type QueryCursorTableCandidate } from "@/lib/sql/queryCursorTableTarget";
 import { createFlatTreeIndex, SIDEBAR_TREE_ROW_HEIGHT, SIDEBAR_TREE_PRERENDER_COUNT, SIDEBAR_TREE_SCROLL_BUFFER, flattenTree, shouldVirtualizeFlatTree, type FlatTreeNode } from "@/composables/useFlatTree";
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
@@ -1414,7 +1424,7 @@ async function ensureTreeLoadedForTarget(target: ActiveTabSidebarTarget, opts?: 
   const loadOptions = force ? { force: true } : undefined;
 
   // Ensure databases are loaded under the connection
-  const connNode = store.treeNodes.find((n) => n.id === connId);
+  const connNode = findSidebarConnectionNode(store.treeNodes, connId);
   if (connNode && (force || !connNode.children || connNode.children.length === 0)) {
     try {
       if (config.db_type === "redis") {

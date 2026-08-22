@@ -86,6 +86,22 @@ export type ActiveTabSidebarTarget =
       savedSqlId: string;
     };
 
+/**
+ * Resolve a connection root without walking its potentially large object tree.
+ * Grouped connections live below connection-group nodes, while a connection
+ * id can also appear on descendants, so only group children are traversed.
+ */
+export function findSidebarConnectionNode(nodes: readonly TreeNode[], connectionId: string): TreeNode | null {
+  for (const node of nodes) {
+    if (node.type === "connection" && node.id === connectionId) return node;
+    if (node.type === "connection-group" && node.children) {
+      const found = findSidebarConnectionNode(node.children, connectionId);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
 export function activeTabSidebarTarget(tab: QueryTab | undefined | null): ActiveTabSidebarTarget | null {
   if (!tab) return null;
 

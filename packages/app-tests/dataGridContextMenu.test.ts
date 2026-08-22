@@ -35,6 +35,30 @@ test("column-header context menus defer copy statement generation", () => {
   assert.doesNotMatch(handler, /prefetchCopyStatements/);
 });
 
+test("context-menu invalidation clears cell and header targets together", () => {
+  const handler = dataGridSource.match(/function invalidateContextMenuTarget\(\) \{[^]*?\n\}/)?.[0] ?? "";
+
+  assert.match(handler, /contextSelectionIsSynthetic\.value = false;/);
+  assert.match(handler, /contextCell\.value = null;/);
+  assert.match(handler, /contextHeaderColumn\.value = null;/);
+  assert.match(handler, /contextHeaderColumnIndex\.value = null;/);
+  assert.match(handler, /contextHeaderVisibleColIdx\.value = null;/);
+});
+
+test("select-all context menus invalidate a stale specialized target", () => {
+  const header = dataGridSource.match(/<div\s+class="data-grid-header-cell shrink-0 px-2 py-1\.5[^]*?@click="selectAllCells"[^]*?>/u)?.[0] ?? "";
+
+  assert.match(header, /@contextmenu="invalidateContextMenuTarget"/);
+});
+
+test("menu-close invalidation is deferred and guarded from a newer open", () => {
+  const handler = dataGridSource.match(/function onGridContextMenuClose\(\) \{[^]*?\n\}/)?.[0] ?? "";
+
+  assert.match(handler, /queueMicrotask\(\(\) => \{/);
+  assert.match(handler, /if \(lifecycle !== contextMenuLifecycle\) return;/);
+  assert.match(handler, /invalidateContextMenuTarget\(\);/);
+});
+
 test("editable cell selections expose generation after bulk edit", () => {
   const icon = {};
   const action = () => {};

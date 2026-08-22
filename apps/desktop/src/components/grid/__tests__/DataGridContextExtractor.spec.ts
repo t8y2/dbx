@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   buildTableSelectSql: vi.fn(async ({ whereInput }: { whereInput?: string }) => `SELECT payload FROM events${whereInput ? ` WHERE ${whereInput}` : ""}`),
   executeMulti: vi.fn(),
   cancelQuery: vi.fn(),
+  copyToClipboard: vi.fn(),
   toast: vi.fn(),
 }));
 
@@ -25,6 +26,14 @@ vi.mock("@/lib/backend/api", () => ({
 vi.mock("@/composables/useToast", () => ({
   useToast: () => ({ toast: mocks.toast }),
 }));
+
+vi.mock("@/lib/common/clipboard", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/common/clipboard")>();
+  return {
+    ...actual,
+    copyToClipboard: mocks.copyToClipboard,
+  };
+});
 
 vi.mock("@/composables/useDataGridColumnResize", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/composables/useDataGridColumnResize")>();
@@ -200,6 +209,26 @@ function contextMenuButton(label: string): HTMLButtonElement {
   return button;
 }
 
+function contextMenuLabels(): string[] {
+  return [...document.querySelectorAll<HTMLButtonElement>("[data-dbx-context-menu] button")].map((button) => button.textContent?.trim() ?? "");
+}
+
+function columnHeader(host: HTMLElement, index: number): HTMLElement {
+  const header = host.querySelector<HTMLElement>(`[data-grid-column-index="${index}"]`);
+  if (!header) throw new Error(`Column header not found: ${index}`);
+  return header;
+}
+
+function selectAllHeader(host: HTMLElement): HTMLElement {
+  const header = host.querySelector<HTMLElement>(".data-grid-header-cell:not([data-grid-column-index])");
+  if (!header) throw new Error("Select-all header not found");
+  return header;
+}
+
+function openContextMenu(target: HTMLElement) {
+  target.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 12, clientY: 12 }));
+}
+
 async function startEqualsFilter(host: HTMLElement) {
   await settle();
   const cell = host.querySelector<HTMLElement>('[data-row-index="0"] [data-visible-col-index="1"]');
@@ -222,6 +251,73 @@ afterEach(() => {
     host.remove();
   }
   document.querySelectorAll("[data-dbx-context-menu]").forEach((menu) => menu.remove());
+});
+
+describe("DataGrid context menu target lifecycle", () => {
+  it("does not reuse a closed header target for a later select-all menu", async () => {
+    const { host } = mountGrid(hydratedResult(1, "value"));
+    await settle();
+
+    openContextMenu(columnHeader(host, 0));
+    await settle();
+    expect(contextMenuLabels()).toContain("Copy Column Name");
+
+    const cell = gridCell(host);
+    cell.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true, button: 0 }));
+    cell.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0 }));
+    window.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, button: 0 }));
+    await settle();
+
+    selectAllHeader(host).click();
+    openContextMenu(selectAllHeader(host));
+    await settle();
+
+    expect(contextMenuLabels()).toContain("Copy");
+    expect(contextMenuLabels()).not.toContain("Copy Column Name");
+    expect(contextMenuLabels()).not.toContain("Freeze to This Column");
+  });
+
+  it("keeps single- and multi-column header menus targeted", async () => {
+    const { host } = mountGrid(hydratedResult(1, "value"));
+    await settle();
+
+    openContextMenu(columnHeader(host, 0));
+    await settle();
+    expect(contextMenuLabels()).toContain("Copy Column Name");
+
+    document.body.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true, button: 0 }));
+    await settle();
+    columnHeader(host, 1).dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, shiftKey: true }));
+    openContextMenu(columnHeader(host, 1));
+    await settle();
+
+    expect(contextMenuLabels()).toContain("Copy Selected Column Names (2)");
+    expect(contextMenuLabels()).toContain("Freeze Selected Columns");
+  });
+
+  it("preserves a newly opened header target and same-turn menu actions", async () => {
+    const { host } = mountGrid(hydratedResult(1, "value"));
+    await settle();
+
+    openContextMenu(columnHeader(host, 0));
+    openContextMenu(columnHeader(host, 1));
+    await settle();
+    contextMenuButton("Copy Column Name").click();
+
+    await vi.waitFor(() => expect(mocks.copyToClipboard).toHaveBeenCalledWith("payload"));
+  });
+
+  it("keeps the initial select-all menu on the data selection target", async () => {
+    const { host } = mountGrid(hydratedResult(1, "value"));
+    await settle();
+
+    selectAllHeader(host).click();
+    openContextMenu(selectAllHeader(host));
+    await settle();
+
+    expect(contextMenuLabels()).toContain("Copy");
+    expect(contextMenuLabels()).not.toContain("Copy Column Name");
+  });
 });
 
 describe("DataGrid context filter lifecycle", () => {

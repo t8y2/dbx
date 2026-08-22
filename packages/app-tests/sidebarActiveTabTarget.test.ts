@@ -1,12 +1,71 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { activeTabSidebarTarget, findNodePathForTarget, findSidebarNodeForActiveTab, scrollTopForSidebarNode, shouldScrollActiveSidebarSelection } from "../../apps/desktop/src/lib/sidebar/sidebarActiveTabTarget.ts";
+import { activeTabSidebarTarget, findNodePathForTarget, findSidebarConnectionNode, findSidebarNodeForActiveTab, scrollTopForSidebarNode, shouldScrollActiveSidebarSelection } from "../../apps/desktop/src/lib/sidebar/sidebarActiveTabTarget.ts";
 import type { FlatTreeNode } from "../../apps/desktop/src/composables/useFlatTree.ts";
 import type { QueryTab, TreeNode } from "../../apps/desktop/src/types/database.ts";
 
 function flat(node: TreeNode, depth = 0): FlatTreeNode {
   return { id: node.id, node, depth, type: node.type };
 }
+
+test("findSidebarConnectionNode resolves grouped roots without scanning descendants", () => {
+  const groupedConnection: TreeNode = {
+    id: "conn-grouped",
+    label: "Grouped",
+    type: "connection",
+    connectionId: "conn-grouped",
+    children: [
+      {
+        id: "conn-grouped:app",
+        label: "app",
+        type: "database",
+        connectionId: "conn-grouped",
+        database: "app",
+      },
+    ],
+  };
+  const nestedGroups: TreeNode[] = [
+    {
+      id: "group-outer",
+      label: "Outer",
+      type: "connection-group",
+      children: [
+        {
+          id: "group-inner",
+          label: "Inner",
+          type: "connection-group",
+          children: [groupedConnection],
+        },
+      ],
+    },
+  ];
+
+  assert.equal(findSidebarConnectionNode(nestedGroups, "conn-grouped"), groupedConnection);
+  assert.equal(findSidebarConnectionNode(nestedGroups, "missing"), null);
+  assert.equal(
+    findSidebarConnectionNode(
+      [
+        {
+          id: "conn-root",
+          label: "Root",
+          type: "connection",
+          connectionId: "conn-root",
+          children: [
+            {
+              id: "conn-nested-decoy",
+              label: "Decoy",
+              type: "connection",
+              connectionId: "conn-grouped",
+            },
+          ],
+        },
+        ...nestedGroups,
+      ],
+      "conn-grouped",
+    ),
+    groupedConnection,
+  );
+});
 
 test("findNodePathForTarget handles loaded, unloaded, and MySQL schema fallback trees", () => {
   const cases = [

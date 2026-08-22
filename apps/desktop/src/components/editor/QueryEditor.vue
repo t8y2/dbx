@@ -4780,34 +4780,86 @@ onMounted(async () => {
     // The SQL grammar does not tokenize `//`, so those comments are highlighted by hand.
     queryEditorLineCommentToken(props.databaseType) === "//" ? shellLineCommentHighlightPlugin : [],
   ];
+  const MAX_SQL_SEMANTIC_HIGHLIGHT_WINDOWS = 32;
   buildSqlSemanticHighlightExtension = () => [
     ViewPlugin.fromClass(
       class {
         decorations: import("@codemirror/view").DecorationSet;
+        private cachedDoc: import("@codemirror/state").Text | null = null;
+        private cachedSql = "";
+        private cachedDialectId = "";
+        private cachedDatabaseType: DatabaseType | undefined;
+        private cachedWindows: Array<{
+          from: number;
+          to: number;
+          spans: Array<{ start: number; end: number }>;
+        }> = [];
+
         constructor(currentView: import("@codemirror/view").EditorView) {
           this.decorations = this.buildDecorations(currentView);
         }
+
         update(update: import("@codemirror/view").ViewUpdate) {
           if (update.docChanged || update.viewportChanged) this.decorations = this.buildDecorations(update.view);
         }
+
         buildDecorations(currentView: import("@codemirror/view").EditorView) {
-          const sql = currentView.state.doc.toString();
           const dialectId = resolveSqlDialectId({ databaseType: props.databaseType, dialect: sqlBehaviorDialect() });
-          const windows: Array<{ from: number; to: number }> = [];
-          for (const visibleRange of currentView.visibleRanges) {
-            const next = expandToSqlStatementWindow(sql, visibleRange.from, visibleRange.to, dialectId);
-            const previous = windows[windows.length - 1];
-            if (previous && next.from <= previous.to) previous.to = Math.max(previous.to, next.to);
-            else windows.push(next);
+          const doc = currentView.state.doc;
+          if (this.cachedDoc !== doc || this.cachedDialectId !== dialectId || this.cachedDatabaseType !== props.databaseType) {
+            this.cachedDoc = doc;
+            this.cachedSql = doc.toString();
+            this.cachedDialectId = dialectId;
+            this.cachedDatabaseType = props.databaseType;
+            this.cachedWindows = [];
           }
-          const tree = ensureSyntaxTree(currentView.state, windows[windows.length - 1]?.to ?? 0, 25);
-          if (!tree) return Decoration.set([]);
-          const ranges = windows.flatMap((window) =>
-            sqlSemanticTableNameSpansForSyntaxTree(sql, window, tree, {
-              databaseType: props.databaseType,
-              dialect: sqlBehaviorDialect(),
-            }),
-          );
+
+          const sql = this.cachedSql;
+          const windows: Array<{
+            from: number;
+            to: number;
+            spans: Array<{ start: number; end: number }>;
+          }> = [];
+          const pendingWindows: Array<{ from: number; to: number }> = [];
+          for (const visibleRange of currentView.visibleRanges) {
+            const cached = this.cachedWindows.find((candidate) => candidate.from <= visibleRange.from && candidate.to >= visibleRange.to);
+            if (cached) {
+              if (!windows.includes(cached)) windows.push(cached);
+              continue;
+            }
+
+            const next = expandToSqlStatementWindow(sql, visibleRange.from, visibleRange.to, dialectId);
+            const cachedWindow = this.cachedWindows.find((candidate) => candidate.from <= next.from && candidate.to >= next.to);
+            if (cachedWindow) {
+              if (!windows.includes(cachedWindow)) windows.push(cachedWindow);
+              continue;
+            }
+
+            const previous = pendingWindows[pendingWindows.length - 1];
+            if (previous && next.from <= previous.to) previous.to = Math.max(previous.to, next.to);
+            else pendingWindows.push({ ...next });
+          }
+
+          if (pendingWindows.length > 0) {
+            const tree = ensureSyntaxTree(currentView.state, Math.max(...pendingWindows.map((window) => window.to)), 25);
+            if (!tree) return Decoration.set([]);
+            for (const window of pendingWindows) {
+              const entry = {
+                ...window,
+                spans: sqlSemanticTableNameSpansForSyntaxTree(sql, window, tree, {
+                  databaseType: props.databaseType,
+                  dialect: sqlBehaviorDialect(),
+                }),
+              };
+              this.cachedWindows.push(entry);
+              windows.push(entry);
+            }
+            if (this.cachedWindows.length > MAX_SQL_SEMANTIC_HIGHLIGHT_WINDOWS) {
+              this.cachedWindows.splice(0, this.cachedWindows.length - MAX_SQL_SEMANTIC_HIGHLIGHT_WINDOWS);
+            }
+          }
+
+          const ranges = windows.flatMap((window) => window.spans);
           return Decoration.set(
             ranges.map((range) =>
               Decoration.mark({

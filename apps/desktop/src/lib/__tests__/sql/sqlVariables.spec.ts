@@ -60,6 +60,22 @@ describe("expandSqlVariables", () => {
     expect(expandSqlVariables(sql)).toEqual({ sql, expanded: false });
   });
 
+  it("keeps PostgreSQL ARRAY literals from corrupting later variable references", () => {
+    const sql = ["@set selected = 7;", "select ARRAY[']']::varchar[], @selected, ${missing}"].join("\n");
+    expect(expandSqlVariables(sql, { databaseType: "postgres" }).sql).toBe("select ARRAY[']']::varchar[], 7, ${missing}");
+  });
+
+  it("keeps multiline PostgreSQL ARRAY values in @set declarations", () => {
+    const sql = ["@set values = ARRAY[", "  'first',", "  'second'", "];", "select @values;"].join("\n");
+
+    expect(expandSqlVariables(sql, { databaseType: "postgres" }).sql).toBe("select ARRAY[\n  'first',\n  'second'\n];");
+  });
+
+  it.each(["sqlserver", "sqlite", "jdbc"] as const)("preserves %s bracket identifiers during variable expansion", (databaseType) => {
+    const sql = ["@set selected = 7;", "select [column:@ignored], @selected"].join("\n");
+    expect(expandSqlVariables(sql, { databaseType }).sql).toBe("select [column:@ignored], 7");
+  });
+
   it("keeps a value's own quotes and parentheses intact", () => {
     const sql = ["@set filter = (status = 'drafted' and deleted_at is null);", "select * from t where @filter"].join("\n");
     expect(expandSqlVariables(sql).sql).toBe("select * from t where (status = 'drafted' and deleted_at is null)");

@@ -83,7 +83,7 @@ import { formatElapsedSeconds } from "@/lib/common/elapsedTime";
 import { dataGridCellDisplayText, dataGridCellEditorText } from "@/lib/dataGrid/dataGridCellCoercion";
 import { createColumnDrafts } from "@/lib/table/tableStructureEditorState";
 import type { BuildSingleColumnAlterSqlOptions } from "@/lib/table/tableStructureEditorSql";
-import { buildTableSelectSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
+import { buildTableSelectSql, qualifyTableReferencesInSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
 import { uuid } from "@/lib/common/utils";
 import { generateCellValues, type CellValueGenerationKind } from "@/lib/dataGrid/cellValueGeneration";
 import { compactHeaderColumnType, isNumericColumnType, resolveDataGridTypeVisualKind, resolveHeaderColumnType, resolveResultColumnType } from "@/lib/dataGrid/dataGridColumnType";
@@ -802,9 +802,12 @@ const contextHeaderColumnIndex = ref<number | null>(null);
 const contextHeaderVisibleColIdx = ref<number | null>(null);
 let contextMenuLifecycle = 0;
 
-function invalidateSyntheticContextSelection() {
+function invalidateContextMenuTarget() {
   contextSelectionIsSynthetic.value = false;
   contextCell.value = null;
+  contextHeaderColumn.value = null;
+  contextHeaderColumnIndex.value = null;
+  contextHeaderVisibleColIdx.value = null;
 }
 
 function onGridContextMenuOpen() {
@@ -842,7 +845,7 @@ function onGridContextMenuClose() {
   const targetId = target?.id;
   queueMicrotask(() => {
     if (lifecycle !== contextMenuLifecycle) return;
-    invalidateSyntheticContextSelection();
+    invalidateContextMenuTarget();
     // CustomContextMenu closes before starting an item action. Its action runs
     // in this turn, so only a menu dismissal leaves this target unclaimed.
     if (targetId !== undefined && contextFilterTarget.value?.id === targetId && !activeContextFilterActions.has(targetId)) contextFilterTarget.value = null;
@@ -4928,6 +4931,7 @@ async function fetchLargeValueRequestChunk(columnIndex: number, requests: LargeV
     tableType: tableMeta.tableType,
     catalog: tableMeta.catalog,
     columns: selectedColumns,
+    includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
     primaryKeys: tableMeta.primaryKeys,
     whereInput: predicates.map((predicate) => `(${predicate})`).join(" OR "),
     limit: requests.length,
@@ -5091,7 +5095,7 @@ const selection = useDataGridSelection({
   getScrollElement: dataGridSelectionScroller,
   cellFromClientPoint: dataGridCellFromClientPoint,
   rowFromClientPoint: dataGridRowFromClientPoint,
-  onUserCellSelection: invalidateSyntheticContextSelection,
+  onUserCellSelection: invalidateContextMenuTarget,
   // Canvas schedules its draw before the document-level mousemove handler runs,
   // so its row state must be current before that frame is painted.
   shouldUpdateDraggedRowsImmediately: () => useCanvasGridRows.value,
@@ -6211,6 +6215,7 @@ async function applyOrderBySearch() {
       tableName: tableMeta.tableName,
       tableType: tableMeta.tableType,
       columns: tableMeta.columns.map((column) => column.name),
+      includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
       primaryKeys: tableMeta.primaryKeys,
       ...tableDataLargeValuePreviewOptions(resolvedDatabaseType.value, tableMeta.columns, tableMeta.primaryKeys, pageSize.value),
       orderBy: orderByClause,
@@ -6248,6 +6253,7 @@ async function applyWhereFilter() {
       tableName: tableMeta.tableName,
       tableType: tableMeta.tableType,
       columns: tableMeta.columns.map((column) => column.name),
+      includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
       primaryKeys: tableMeta.primaryKeys,
       ...tableDataLargeValuePreviewOptions(resolvedDatabaseType.value, tableMeta.columns, tableMeta.primaryKeys, pageSize.value),
       orderBy: orderByInput.value.trim() || (sortCol.value ? `${queryColumnRef(sortCol.value)} ${sortDir.value.toUpperCase()}` : undefined),
@@ -7328,11 +7334,23 @@ async function cancelActiveExport() {
 const userFacingSql = ref("");
 let userFacingSqlGeneration = 0;
 
+function sqlWithDisplayDatabaseName(sql: string): string {
+  const database = props.tableMeta?.database ?? props.database;
+  if (!settingsStore.editorSettings.generateSqlIncludeDatabaseName || !database) return sql;
+  return qualifyTableReferencesInSql(sql, {
+    databaseType: resolvedDatabaseType.value,
+    database,
+    includeDatabaseName: true,
+  });
+}
+
 async function syncUserFacingSql() {
   const generation = ++userFacingSqlGeneration;
   const executionSql = props.sql?.trim() ?? "";
-  if (props.context !== "table-data" || !executionSql.includes("__DBX_LARGE_VALUE_BYTES_") || !props.tableMeta?.tableName) {
-    userFacingSql.value = executionSql;
+  const includeDatabaseName = settingsStore.editorSettings.generateSqlIncludeDatabaseName;
+  const shouldRebuildSql = executionSql.includes("__DBX_LARGE_VALUE_BYTES_") || includeDatabaseName;
+  if (props.context !== "table-data" || !shouldRebuildSql || !props.tableMeta?.tableName) {
+    userFacingSql.value = sqlWithDisplayDatabaseName(executionSql);
     return;
   }
 
@@ -7347,19 +7365,20 @@ async function syncUserFacingSql() {
       schema: props.tableMeta.schema,
       tableName: props.tableMeta.tableName,
       tableType: props.tableMeta.tableType,
+      includeDatabaseName,
       whereInput: currentWhereInput(),
       orderBy: currentOrderBy(),
       limit: props.pageLimit ?? pageSize.value,
       offset: props.pageOffset ?? Math.max(0, currentPage.value - 1) * pageSize.value,
     });
-    if (generation === userFacingSqlGeneration) userFacingSql.value = sql;
+    if (generation === userFacingSqlGeneration) userFacingSql.value = sqlWithDisplayDatabaseName(sql);
   } catch {
-    if (generation === userFacingSqlGeneration) userFacingSql.value = executionSql;
+    if (generation === userFacingSqlGeneration) userFacingSql.value = sqlWithDisplayDatabaseName(executionSql);
   }
 }
 
 watch(
-  () => [props.sql, props.context, props.tableMeta, props.pageLimit, props.pageOffset, currentWhereInput(), currentOrderBy()],
+  () => [props.sql, props.context, props.tableMeta, props.pageLimit, props.pageOffset, currentWhereInput(), currentOrderBy(), settingsStore.editorSettings.generateSqlIncludeDatabaseName],
   () => void syncUserFacingSql(),
   { immediate: true },
 );
@@ -7669,7 +7688,7 @@ function showCellDetails(rowIndex: number, colIndex: number) {
 
 function showCellDetailsForVisibleCell(rowIndex: number, visibleColIdx: number, actualColIdx: number) {
   clearRowSelection();
-  invalidateSyntheticContextSelection();
+  invalidateContextMenuTarget();
   selectSingleCell(rowIndex, visibleColIdx);
   showCellDetails(rowIndex, actualColIdx);
 }
@@ -7754,11 +7773,8 @@ function onTransposeCellMouseenter(rowIndex: number, actualColIdx: number) {
 function selectTransposeCell(rowIndex: number, actualColIdx: number, event: MouseEvent) {
   const visibleColIdx = visibleColumnIndexes.value.indexOf(actualColIdx);
   if (visibleColIdx < 0) return;
-  contextHeaderColumn.value = null;
-  contextHeaderColumnIndex.value = null;
-  contextHeaderVisibleColIdx.value = null;
   clearRowSelection();
-  invalidateSyntheticContextSelection();
+  invalidateContextMenuTarget();
   if (event.shiftKey || event.metaKey || event.ctrlKey) {
     extendCellSelectionTo(rowIndex, visibleColIdx);
   } else {
@@ -7771,11 +7787,8 @@ function selectTransposeCell(rowIndex: number, actualColIdx: number, event: Mous
 function showTransposeCellDetails(rowIndex: number, actualColIdx: number) {
   const visibleColIdx = visibleColumnIndexes.value.indexOf(actualColIdx);
   if (visibleColIdx < 0) return;
-  contextHeaderColumn.value = null;
-  contextHeaderColumnIndex.value = null;
-  contextHeaderVisibleColIdx.value = null;
   clearRowSelection();
-  invalidateSyntheticContextSelection();
+  invalidateContextMenuTarget();
   selectSingleCell(rowIndex, visibleColIdx);
   transposeRowIndex.value = rowIndex;
   showCellDetails(rowIndex, actualColIdx);
@@ -8502,7 +8515,7 @@ function toggleKeyboardTranspose(): boolean {
 // Shared path that selects or extends to nextPosition and scrolls it into view.
 // Used by both moveSelectedCell (relative steps) and navigateSelectedCell (absolute/page jumps).
 function applyCellNavigation(nextPosition: CellPosition, extend = false, block: DataGridScrollAlignment = "nearest", previousPageRowIndex?: number): boolean {
-  invalidateSyntheticContextSelection();
+  invalidateContextMenuTarget();
   if (extend) extendCellSelectionTo(nextPosition.rowIndex, nextPosition.colIndex);
   else selectSingleCell(nextPosition.rowIndex, nextPosition.colIndex);
   clearRowSelection();
@@ -9560,7 +9573,7 @@ watch(
     closeReadonlyCellTextSelection();
     clearCellSelection();
     clearRowSelection();
-    invalidateSyntheticContextSelection();
+    invalidateContextMenuTarget();
     closeCellDetails();
     closeDetailDialogs();
     if (shouldPreserveTranspose) {
@@ -9576,7 +9589,7 @@ watch(
 
 // --- Context menu handlers ---
 function onHeaderContext(col: string, columnIndex: number) {
-  contextCell.value = null;
+  invalidateContextMenuTarget();
   const visibleColIdx = visibleColumnIndexes.value.indexOf(columnIndex);
   if (visibleColIdx >= 0 && !columnIsSelected(visibleColIdx)) {
     selectColumn(visibleColIdx);
@@ -9671,9 +9684,7 @@ function clearNativeTextSelection() {
 function onCellContext(rowId: number, rowIndex: number, colIdx: number, visibleColIdx: number, event?: MouseEvent) {
   event?.preventDefault();
   clearNativeTextSelection();
-  contextHeaderColumn.value = null;
-  contextHeaderColumnIndex.value = null;
-  contextHeaderVisibleColIdx.value = null;
+  invalidateContextMenuTarget();
   contextCell.value = { rowId, rowIndex, col: colIdx };
   if (hasRowSelection.value && isRowSelected(rowId)) {
     contextSelectionIsSynthetic.value = false;
@@ -9821,9 +9832,7 @@ watch(editValue, scheduleActiveCellEditTextareaResize);
 
 function onRowContext(rowId: number, rowIndex: number) {
   batchAppendPasteRowId.value = null;
-  contextHeaderColumn.value = null;
-  contextHeaderColumnIndex.value = null;
-  contextHeaderVisibleColIdx.value = null;
+  invalidateContextMenuTarget();
   contextCell.value = { rowId, rowIndex, col: -1 };
   if (!isRowSelected(rowId)) {
     clearCellSelection();
@@ -10387,6 +10396,7 @@ async function loadForeignKeyDisplayLabels() {
             schema,
             tableName: config.refTable,
             columns: [config.refColumn, config.displayColumn],
+            includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
             whereInput,
             limit: batch.length,
           });
@@ -11778,6 +11788,7 @@ function currentGridContextMenuItems(): ContextMenuItem[] {
                       'data-grid-header-cell--selected': isSelectingAll,
                     }"
                     @click="selectAllCells"
+                    @contextmenu="invalidateContextMenuTarget"
                   >
                     #
                   </div>

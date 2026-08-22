@@ -1331,7 +1331,8 @@ function profileForConfig(config: ConnectionConfig) {
 }
 
 function selectedProfile() {
-  return driverProfiles[selectedType.value] ?? driverProfiles.mysql;
+  const profile = selectedType.value === "gbase" && (form.value.driver_profile === "gbase8a" || form.value.driver_profile === "gbase8s") ? form.value.driver_profile : selectedType.value;
+  return driverProfiles[profile] ?? driverProfiles.mysql;
 }
 
 function mqExtraRecord(config?: Partial<MqAdminConfig>): Record<string, unknown> {

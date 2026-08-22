@@ -1452,7 +1452,7 @@ export async function buildDroppedFilePreviewSql(options: DroppedFilePreviewSqlO
 }
 
 export async function buildTableSelectSql(options: BuildTableSelectSqlOptions): Promise<string> {
-  return invoke("build_table_select_sql", { options });
+  return invoke("build_table_select_sql", { options, includeDatabaseName: options.includeDatabaseName === true });
 }
 
 export async function buildDatabaseSearchSql(options: DatabaseSearchSqlOptions): Promise<DatabaseSearchSql | null> {

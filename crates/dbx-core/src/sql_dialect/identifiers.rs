@@ -132,6 +132,7 @@ pub fn quote_table_identifier(database_type: Option<DatabaseType>, name: &str) -
             | DatabaseType::Kyuubi
             | DatabaseType::Impala
             | DatabaseType::Spark
+            | DatabaseType::Databricks
             | DatabaseType::Databend
             | DatabaseType::Tdengine
             | DatabaseType::Access

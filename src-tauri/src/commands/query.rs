@@ -533,8 +533,14 @@ pub fn build_dropped_file_preview_sql(
 }
 
 #[tauri::command]
-pub fn build_table_select_sql(options: dbx_core::sql_dialect::TableDataSelectSqlOptions) -> Result<String, String> {
-    Ok(dbx_core::sql_dialect::build_table_data_select_sql(options))
+pub fn build_table_select_sql(
+    options: dbx_core::sql_dialect::TableDataSelectSqlOptions,
+    include_database_name: Option<bool>,
+) -> Result<String, String> {
+    Ok(dbx_core::sql_dialect::build_table_data_select_sql_with_database(
+        options,
+        include_database_name.unwrap_or(false),
+    ))
 }
 
 #[tauri::command]

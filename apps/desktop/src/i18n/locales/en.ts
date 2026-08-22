@@ -6347,6 +6347,8 @@ export default {
     savedSqlOpenTargetCurrentDescription: "Use the active tab’s connection, database, schema, and catalog when available; otherwise use the saved target.",
     prefillNewQueryWithSelect: "Prefill new query with SELECT *",
     prefillNewQueryWithSelectDescription: "When creating a new query, prefill the editor with SELECT * FROM <table> based on the active table tab or the table selected in the sidebar.",
+    generateSqlIncludeDatabaseName: "Include database name in generated SQL",
+    generateSqlIncludeDatabaseNameDescription: "When supported by the database, generated table SQL uses database.table instead of only the table name.",
     clickTableNavigationTarget: "Ctrl+Click Table Opens DDL",
     clickTableNavigationTargetDescription: "When enabled, Ctrl/Cmd+clicking a table name opens the table structure editor (DDL). When disabled, it opens the table data view.",
     sqlVariableSyntax: "SQL variable & placeholder substitution",

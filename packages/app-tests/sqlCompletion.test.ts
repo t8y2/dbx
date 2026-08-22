@@ -47,6 +47,18 @@ const columnsByTable = new Map<string, SqlCompletionColumn[]>([
   ],
 ]);
 
+function buildSemanticSqlCompletionItems(sql: string, options: { columns?: Map<string, SqlCompletionColumn[]>; databaseType?: DatabaseType } = {}) {
+  const databaseType = options.databaseType ?? "mysql";
+  const dialect = databaseType === "sqlserver" ? "sqlserver" : databaseType === "postgres" ? "postgres" : "mysql";
+  const semanticOptions = { databaseType, dialect } as const;
+  const context = sqlCompletionContextFromSemantic(buildSqlSemanticModel(sql, sql.length, semanticOptions), getSqlCompletionContext(sql, sql.length, semanticOptions));
+  return buildSqlCompletionItemsFromContext(context, {
+    tables,
+    columnsByTable: options.columns ?? columnsByTable,
+    ...semanticOptions,
+  });
+}
+
 const mysqlCrossDatabaseColumnsByTable = new Map<string, SqlCompletionColumn[]>([
   [
     "other_db.orders",
@@ -2572,6 +2584,94 @@ test("prioritizes select aliases in GROUP BY completion", () => {
 
   assert.equal(items[0]?.label, "display_name");
   assert.equal(items[0]?.detail, "SELECT alias");
+});
+
+test("offers all safe SELECT aliases as one completion for an empty GROUP BY", () => {
+  const sql = "select voucher_date, member_id, min(voucher_date) from dwq_orders_actual_sale_amount_df group by ";
+  const items = buildSemanticSqlCompletionItems(sql);
+  const combined = items.find((item) => item.detail === "All non-aggregated SELECT aliases");
+
+  assert.deepEqual(combined, {
+    label: "voucher_date, member_id",
+    type: "snippet",
+    detail: "All non-aggregated SELECT aliases",
+    apply: "voucher_date, member_id",
+    boost: 3650,
+    dedupeKey: "group-by-all-select-aliases",
+  });
+  assert.ok(items.indexOf(combined!) < items.findIndex((item) => item.label === "voucher_date" && item.detail === "SELECT alias"));
+  assert.deepEqual(
+    items.filter((item) => item.detail === "SELECT alias").map((item) => item.label),
+    ["voucher_date", "member_id"],
+  );
+});
+
+test("preserves SELECT order and deduplicates combined GROUP BY aliases case-insensitively", () => {
+  const sql = "select region as region_key, status as REGION_KEY, email as state, sum(id) as total from public.users group by ";
+  const items = buildSemanticSqlCompletionItems(sql);
+  const combined = items.find((item) => item.detail === "All non-aggregated SELECT aliases");
+
+  assert.equal(combined?.label, "region_key, state");
+  assert.equal(combined?.apply, "region_key, state");
+});
+
+test("uses stable expression aliases and existing quoted column apply text in combined GROUP BY completion", () => {
+  const sql = "select date(created_at) as day, u.order, sum(u.id) as total from public.users u group by ";
+  const items = buildSemanticSqlCompletionItems(sql, {
+    columns: new Map([
+      [
+        "public.users",
+        [
+          { name: "order", table: "users", schema: "public" },
+          { name: "created_at", table: "users", schema: "public" },
+          { name: "id", table: "users", schema: "public" },
+        ],
+      ],
+    ]),
+  });
+  const combined = items.find((item) => item.detail === "All non-aggregated SELECT aliases");
+
+  assert.equal(combined?.label, "day, order");
+  assert.equal(combined?.apply, "day, `order`");
+});
+
+test("hides combined GROUP BY completion for unsafe or incomplete candidate sets", () => {
+  for (const sql of ["select name, count(id) as total from public.users group by ", "select lower(name), email, count(id) as total from public.users group by ", "select count(id) as total, sum(id) as sum_id from public.users group by "]) {
+    const items = buildSemanticSqlCompletionItems(sql);
+    assert.equal(
+      items.some((item) => item.detail === "All non-aggregated SELECT aliases"),
+      false,
+      sql,
+    );
+  }
+});
+
+test("hides combined GROUP BY completion after existing expressions or a non-empty prefix", () => {
+  for (const sql of ["select name, email from public.users group by name, ", "select name, email from public.users group by na"]) {
+    const items = buildSemanticSqlCompletionItems(sql);
+    assert.equal(
+      items.some((item) => item.detail === "All non-aggregated SELECT aliases"),
+      false,
+      sql,
+    );
+  }
+});
+
+test("does not add combined SELECT alias completion to ORDER BY", () => {
+  const sql = "select name as display_name, email as display_email from public.users order by ";
+  const items = buildSemanticSqlCompletionItems(sql);
+
+  assert.equal(
+    items.some((item) => item.detail === "All non-aggregated SELECT aliases"),
+    false,
+  );
+  assert.deepEqual(
+    items.slice(0, 2).map((item) => [item.label, item.detail]),
+    [
+      ["display_name", "SELECT alias"],
+      ["display_email", "SELECT alias"],
+    ],
+  );
 });
 
 test("suggests likely join condition snippets after ON", () => {

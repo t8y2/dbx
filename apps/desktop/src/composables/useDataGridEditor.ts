@@ -358,7 +358,9 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       if (input) focusDataGridEditorWithoutScrolling(input, scroller);
       if (select && input) {
         if (input instanceof HTMLTextAreaElement && input.dataset.expandedCellEditor === "true") {
-          input.setSelectionRange?.(0, 0);
+          // Expanded editors must match single-line editors: a double-click selects the whole value.
+          input.select();
+          input.setSelectionRange?.(0, input.value.length);
           input.scrollTop = 0;
         } else {
           input.select();

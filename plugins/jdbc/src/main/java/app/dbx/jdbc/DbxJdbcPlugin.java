@@ -50,6 +50,7 @@ import java.util.ServiceLoader;
 import java.util.Set;
 import java.util.UUID;
 import java.util.logging.Logger;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 public final class DbxJdbcPlugin {
@@ -59,6 +60,12 @@ public final class DbxJdbcPlugin {
     private static final String JDBCX_EXTENSION_WHITELIST_PROPERTY = "jdbcx.extension.whitelist";
     private static final String JDBCX_HIGH_PRIVILEGE_EXTENSIONS_OPT_IN = "-Ddbx.jdbcx.allowHighPrivilegeExtensions=";
     private static final String JDBCX_SAFE_EXTENSION_WHITELIST = "help,var,version";
+    private static final int PHOENIX_VARBINARY_ENCODED_TYPE = 9000;
+    private static final String PHOENIX_VARBINARY_ENCODED_TYPE_NAME = "VARBINARY_ENCODED";
+    private static final Pattern PHOENIX_SYSTEM_CATALOG_WILDCARD = Pattern.compile(
+        "^SELECT\\s+\\*\\s+FROM\\s+(?:SYSTEM|\\\"SYSTEM\\\")\\s*\\.\\s*(?:CATALOG|\\\"CATALOG\\\")$",
+        Pattern.CASE_INSENSITIVE
+    );
     private static final String[] DEFAULT_TABLE_TYPES = new String[] {
         "TABLE",
         "VIEW",
@@ -743,7 +750,8 @@ public final class DbxJdbcPlugin {
         try (Statement statement = conn.createStatement()) {
             applyStatementOptions(statement, maxRows, fetchSize, timeoutSecs, quirks);
             String trimmedSql = trimStatementSql(sql);
-            ExecutedStatement executed = executeStatementForResult(statement, trimmedSql, quirks);
+            String effectiveSql = rewritePhoenixSystemCatalogQuery(connection, conn, trimmedSql);
+            ExecutedStatement executed = executeStatementForResult(statement, effectiveSql, quirks);
             ObjectNode result = MAPPER.createObjectNode();
             ArrayNode columns = MAPPER.createArrayNode();
             ArrayNode rows = MAPPER.createArrayNode();
@@ -852,7 +860,8 @@ public final class DbxJdbcPlugin {
         try {
             applyStatementOptions(statement, maxRows, fetchSize, timeoutSecs, quirks);
             String trimmedSql = trimStatementSql(sql);
-            ExecutedStatement executed = executeStatementForResult(statement, trimmedSql, quirks);
+            String effectiveSql = rewritePhoenixSystemCatalogQuery(connection, conn, trimmedSql);
+            ExecutedStatement executed = executeStatementForResult(statement, effectiveSql, quirks);
             ResultSet rs = executed.resultSet();
             if (rs == null) {
                 ObjectNode result = MAPPER.createObjectNode();
@@ -3263,6 +3272,14 @@ public final class DbxJdbcPlugin {
             return null;
         }
 
+        // Phoenix exposes VARBINARY_ENCODED as a private type id (9000). Read it through the
+        // binary JDBC accessor before a generic getObject() path can ask the driver for an
+        // unsupported Java representation.
+        if (isPhoenixEncodedBinaryColumn(meta, index, columnType)) {
+            byte[] bytes = rs.getBytes(index);
+            return bytes == null ? null : binaryToHex(bytes);
+        }
+
         Object value = rs.getObject(index);
         if (value == null) {
             return null;
@@ -3345,6 +3362,69 @@ public final class DbxJdbcPlugin {
                  Types.BLOB -> true;
             default -> false;
         };
+    }
+
+    private static boolean isPhoenixEncodedBinaryColumn(
+        ResultSetMetaData meta,
+        int index,
+        int columnType
+    ) throws SQLException {
+        return columnType == PHOENIX_VARBINARY_ENCODED_TYPE
+            && PHOENIX_VARBINARY_ENCODED_TYPE_NAME.equalsIgnoreCase(meta.getColumnTypeName(index));
+    }
+
+    private static boolean isPhoenixEncodedBinaryType(int sqlType, String typeName) {
+        return sqlType == PHOENIX_VARBINARY_ENCODED_TYPE
+            || PHOENIX_VARBINARY_ENCODED_TYPE_NAME.equalsIgnoreCase(typeName);
+    }
+
+    static String rewritePhoenixSystemCatalogQuery(
+        JsonNode connection,
+        Connection jdbcConnection,
+        String sql
+    ) {
+        String url = jdbcUrl(connection);
+        String normalizedSql = stripLeadingSqlComments(trimStatementSql(sql));
+        if (
+            !isPhoenixConnection(connection, url)
+                || !PHOENIX_SYSTEM_CATALOG_WILDCARD.matcher(normalizedSql).matches()
+        ) {
+            return sql;
+        }
+
+        List<String> projections = new ArrayList<>();
+        boolean hasEncodedColumn = false;
+        try (ResultSet columns = jdbcConnection.getMetaData().getColumns(null, "SYSTEM", "CATALOG", "%")) {
+            while (columns.next()) {
+                String columnName = columns.getString("COLUMN_NAME");
+                if (columnName == null || columnName.isBlank()) {
+                    continue;
+                }
+                int sqlType = columns.getInt("DATA_TYPE");
+                String typeName = columns.getString("TYPE_NAME");
+                String quotedColumn = quotePhoenixIdentifier(columnName);
+                if (isPhoenixEncodedBinaryType(sqlType, typeName)) {
+                    projections.add("CAST(" + quotedColumn + " AS VARBINARY) AS " + quotedColumn);
+                    hasEncodedColumn = true;
+                } else {
+                    projections.add(quotedColumn);
+                }
+            }
+        } catch (SQLException | RuntimeException ignored) {
+            // Keep the original SQL when a driver cannot expose its column metadata. The
+            // compatibility path must not turn an optional workaround into a new failure.
+            return sql;
+        }
+
+        if (!hasEncodedColumn || projections.isEmpty()) {
+            return sql;
+        }
+        return "SELECT " + String.join(", ", projections)
+            + " FROM " + quotePhoenixIdentifier("SYSTEM") + "." + quotePhoenixIdentifier("CATALOG");
+    }
+
+    private static String quotePhoenixIdentifier(String identifier) {
+        return "\"" + identifier.replace("\"", "\"\"") + "\"";
     }
 
     private static String binaryToHex(byte[] bytes) {

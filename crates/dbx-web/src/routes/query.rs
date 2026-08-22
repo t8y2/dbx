@@ -126,6 +126,8 @@ pub struct BuildDroppedFilePreviewSqlRequest {
 #[serde(rename_all = "camelCase")]
 pub struct BuildTableSelectSqlRequest {
     pub options: dbx_core::sql_dialect::TableDataSelectSqlOptions,
+    #[serde(default)]
+    pub include_database_name: bool,
 }
 
 #[derive(Deserialize)]
@@ -782,7 +784,7 @@ pub async fn build_dropped_file_preview_sql(
 }
 
 pub async fn build_table_select_sql(Json(req): Json<BuildTableSelectSqlRequest>) -> Json<String> {
-    Json(dbx_core::sql_dialect::build_table_data_select_sql(req.options))
+    Json(dbx_core::sql_dialect::build_table_data_select_sql_with_database(req.options, req.include_database_name))
 }
 
 pub async fn build_database_search_sql(

@@ -168,6 +168,7 @@ vi.mock("@/components/ui/searchable-select", async () => {
         modelValue: { type: String, default: "" },
         options: { type: Array, default: () => [] },
         allowCustom: { type: Boolean, default: false },
+        trimCustom: { type: Boolean, default: true },
       },
       emits: ["update:modelValue"],
       setup:
@@ -180,6 +181,7 @@ vi.mock("@/components/ui/searchable-select", async () => {
             "data-model-value": props.modelValue,
             "data-options": JSON.stringify(props.options),
             "data-allow-custom": String(props.allowCustom),
+            "data-trim-custom": String(props.trimCustom),
             onClick: () => emit("update:modelValue", "custom_domain"),
           }),
     }),
@@ -296,7 +298,7 @@ async function mountEditor(databaseType: "sqlserver" | "postgres" | "sqlite" | "
   return root;
 }
 
-async function mountLoadingEditor(initialTab: "columns" | "indexes" | "foreignKeys" | "triggers" | "ddl") {
+async function mountLoadingEditor(initialTab: "columns" | "indexes" | "foreignKeys" | "triggers" | "ddl", owner = "app_user") {
   mocks.connection.db_type = "postgres";
   mocks.connection.name = "postgres";
   mocks.connection.driver_label = "postgres";
@@ -304,7 +306,7 @@ async function mountLoadingEditor(initialTab: "columns" | "indexes" | "foreignKe
   mocks.listDataTypes.mockResolvedValue([]);
   mocks.buildTableStructureChangeSql.mockResolvedValue({ statements: [], warnings: [] });
   mocks.loadObjectDdl.mockResolvedValue({ ddl: "CREATE TABLE users (id bigint)", cacheStatus: "remote" });
-  mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet: string) => ({ value: facet === "comment" ? "" : facet === "owner" ? "app_user" : [], cacheStatus: "remote" }));
+  mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet: string) => ({ value: facet === "comment" ? "" : facet === "owner" ? owner : [], cacheStatus: "remote" }));
 
   const root = document.createElement("div");
   document.body.append(root);
@@ -693,23 +695,32 @@ describe("TableStructureEditor metadata loading", () => {
     expect(mocks.loadObjectDdl).not.toHaveBeenCalled();
   });
 
-  it("loads the PostgreSQL owner and includes an owner change in the SQL preview", async () => {
+  it("preserves exact PostgreSQL owner names and includes an owner change in the SQL preview", async () => {
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet: string) => ({ value: facet === "owner" ? " app_user " : [], cacheStatus: "remote" }));
+    mocks.executeQuery.mockResolvedValue({
+      columns: ["user", "host", "plugin"],
+      rows: [
+        [" app_user ", "LOGIN", ""],
+        ["reporting_role", "ROLE", ""],
+      ],
+    });
     mocks.buildTableOwnerChangeSql.mockImplementation(async (options: { owner: string; originalOwner: string }) => ({
       statements: options.owner === options.originalOwner ? [] : [`ALTER TABLE "public"."users" OWNER TO "${options.owner}";`],
       warnings: [],
     }));
-    const root = await mountLoadingEditor("columns");
+    const root = await mountLoadingEditor("columns", " app_user ");
 
     const ownerSelect = await vi.waitFor(() => {
       const select = root.querySelector<HTMLButtonElement>("[data-owner-select]");
-      expect(select?.dataset.modelValue).toBe("app_user");
-      expect(JSON.parse(select?.dataset.options ?? "[]")).toEqual(["app_user", "reporting_role"]);
+      expect(select?.dataset.modelValue).toBe(" app_user ");
+      expect(JSON.parse(select?.dataset.options ?? "[]")).toEqual([" app_user ", "reporting_role"]);
       expect(select?.dataset.allowCustom).toBe("true");
+      expect(select?.dataset.trimCustom).toBe("false");
       return select!;
     });
     ownerSelect.click();
 
-    await vi.waitFor(() => expect(mocks.buildTableOwnerChangeSql).toHaveBeenLastCalledWith(expect.objectContaining({ owner: "custom_domain", originalOwner: "app_user", schema: "public", tableName: "users" })));
+    await vi.waitFor(() => expect(mocks.buildTableOwnerChangeSql).toHaveBeenLastCalledWith(expect.objectContaining({ owner: "custom_domain", originalOwner: " app_user ", schema: "public", tableName: "users" })));
   });
 
   it("loads the PostgreSQL primary index name before showing a missing-name warning", async () => {

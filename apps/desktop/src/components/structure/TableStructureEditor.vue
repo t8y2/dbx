@@ -904,7 +904,7 @@ const tableOwnerRolesLoading = ref(false);
 const tableOwnerRolesLoadError = ref("");
 const supportsTableOwner = computed(() => !isCreateMode.value && databaseType.value === "postgres");
 const tableOwnerOptions = computed(() => {
-  const owner = tableOwner.value.trim();
+  const owner = tableOwner.value;
   if (!owner || tableOwnerRoles.value.includes(owner)) return tableOwnerRoles.value;
   return [owner, ...tableOwnerRoles.value];
 });
@@ -3304,6 +3304,7 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
         :loading-text="t('common.loading')"
         :loading="tableOwnerRolesLoading"
         :allow-custom="true"
+        :trim-custom="false"
         :disabled="tableOwnerLoading || !!tableOwnerLoadError"
         :trigger-class="[structureMonoControlClass, 'w-[220px] max-w-[220px]']"
         data-owner-select

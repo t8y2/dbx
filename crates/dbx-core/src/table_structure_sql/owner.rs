@@ -1,12 +1,11 @@
 use super::dialect::StructureDialect;
 use super::types::{TableOwnerChangeSqlOptions, TableStructureSqlResult};
-use super::util::{clean, qualified_table, quote_ident};
+use super::util::{qualified_table, quote_ident};
 use crate::models::connection::DatabaseType;
 
 pub fn build_table_owner_change_sql(options: TableOwnerChangeSqlOptions) -> TableStructureSqlResult {
-    let owner = clean(&options.owner);
-    let original_owner = clean(&options.original_owner);
-    if owner == original_owner {
+    let owner = &options.owner;
+    if owner == &options.original_owner {
         return TableStructureSqlResult { statements: Vec::new(), warnings: Vec::new() };
     }
     if owner.is_empty() {
@@ -23,7 +22,7 @@ pub fn build_table_owner_change_sql(options: TableOwnerChangeSqlOptions) -> Tabl
     }
 
     let table = qualified_table(StructureDialect::Postgres, options.schema.as_deref(), &options.table_name);
-    let owner = quote_ident(StructureDialect::Postgres, &owner);
+    let owner = quote_ident(StructureDialect::Postgres, owner);
     TableStructureSqlResult { statements: vec![format!("ALTER TABLE {table} OWNER TO {owner};")], warnings: Vec::new() }
 }
 
@@ -52,15 +51,22 @@ mod tests {
     }
 
     #[test]
-    fn ignores_unchanged_owner_after_trimming() {
-        let result = build_table_owner_change_sql(options(" app_user ", "app_user"));
-        assert!(result.statements.is_empty());
-        assert!(result.warnings.is_empty());
+    fn preserves_whitespace_in_postgres_role_names() {
+        let changed = build_table_owner_change_sql(options(" app_user ", "app_user"));
+        assert!(changed.warnings.is_empty());
+        assert_eq!(
+            changed.statements,
+            vec!["ALTER TABLE \"app schema\".\"order\"\"items\" OWNER TO \" app_user \";".to_string()]
+        );
+
+        let unchanged = build_table_owner_change_sql(options(" app_user ", " app_user "));
+        assert!(unchanged.statements.is_empty());
+        assert!(unchanged.warnings.is_empty());
     }
 
     #[test]
     fn rejects_empty_or_unsupported_owner_changes() {
-        let empty = build_table_owner_change_sql(options(" ", "app_user"));
+        let empty = build_table_owner_change_sql(options("", "app_user"));
         assert!(empty.statements.is_empty());
         assert_eq!(empty.warnings, vec!["Table owner cannot be empty."]);
 

@@ -111,9 +111,9 @@ test("DataGrid exposes persistent result toolbar slots", () => {
 test("table-data toolbar refresh keeps page size independent from SQL editor settings", () => {
   const dataGrid = source(dataGridPath);
 
-  assert.match(dataGrid, /props\.context === "table-data" \? \(props\.pageLimit \?\? tableOpenPageLimit\(settingsStore\.editorSettings\.tableOpenPageSize\)\) : settingsStore\.editorSettings\.pageSize/);
-  assert.match(dataGrid, /if \(props\.context === "table-data"\) return;[\s\S]*pageSize\.value = normalizeResultPageSize\(value, pageSize\.value\)/);
-  assert.match(dataGrid, /props\.context === "table-data" \? \{ tableOpenPageSize: normalizedSize \} : \{ pageSize: normalizedSize \}/);
+  assert.match(dataGrid, /preferredDataGridPageSize\(settingsStore\.editorSettings, pageSizePreference\.value, props\.pageLimit\)/);
+  assert.match(dataGrid, /if \(pageSizePreference\.value !== "results"\) return;[\s\S]*pageSize\.value = normalizeResultPageSize\(value, pageSize\.value\)/);
+  assert.match(dataGrid, /dataGridPageSizeSettingsPatch\(pageSizePreference\.value, normalizedSize\)/);
   assert.match(dataGrid, /const resetToFirstPage = hasPendingConditionInputs\(\);/);
   assert.match(dataGrid, /emit\("reload", props\.sql, searchText\.value, currentWhereInput\(\), currentOrderBy\(\), pageSize\.value, resetToFirstPage \? 0 : \(currentPage\.value - 1\) \* pageSize\.value, "refresh"\)/);
 });

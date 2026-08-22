@@ -32,6 +32,7 @@ function deferred<T>(): Deferred<T> {
 function makeStatus(update_available: boolean, overrides: Partial<McpServerStatus> = {}): McpServerStatus {
   return {
     installed: true,
+    runtime_available: true,
     npm_available: true,
     node_path: null,
     node_version: null,

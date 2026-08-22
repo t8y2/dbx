@@ -2002,7 +2002,7 @@ async function installMcp() {
     // 安装成功后刷新状态
     await refreshMcpStatus();
   } catch (e: any) {
-    mcpInstallMessage.value = e?.message || String(e);
+    mcpInstallMessage.value = translateBackendError(t, e);
     mcpInstallError.value = true;
   } finally {
     mcpInstalling.value = false;
@@ -2024,7 +2024,7 @@ async function uninstallMcp() {
     mcpInstallMessage.value = await uninstallMcpServer();
     await refreshMcpStatus();
   } catch (e: any) {
-    mcpInstallMessage.value = t("settings.mcpUninstallFailed", { error: e?.message || String(e) });
+    mcpInstallMessage.value = t("settings.mcpUninstallFailed", { error: translateBackendError(t, e) });
     mcpInstallError.value = true;
   } finally {
     mcpUninstalling.value = false;
@@ -2998,7 +2998,7 @@ const aiSupportsAnthropicApiStyle = computed(() => aiEditProvider.value === "cus
 const aiCliMcpNeedsInstall = computed(() => aiIsCliProvider.value && (!mcpStatus.value || !mcpStatus.value.installed));
 const aiCliMcpCanInstall = computed(() => {
   const status = mcpStatus.value;
-  return !mcpInstalling.value && !mcpUninstalling.value && !!status?.npm_available && (!status.installed || status.update_available);
+  return !mcpInstalling.value && !mcpUninstalling.value && !!status?.runtime_available && (!status.installed || status.update_available);
 });
 const aiCliMcpActionLabel = computed(() => {
   if (!mcpStatus.value?.installed) return t("settings.mcpInstallButton");
@@ -6487,7 +6487,10 @@ onUnmounted(() => {
 
               <div v-if="!isWeb" class="space-y-2">
                 <Label>{{ mcpStatus?.installed ? t("settings.mcpUpdateCommand") : t("settings.mcpInstallCommand") }}</Label>
-                <div class="flex min-w-0 items-center gap-2">
+                <div v-if="mcpStatus?.installed && mcpStatus?.managed_automatically === false" class="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                  {{ t("settings.mcpManualManagementHint") }}
+                </div>
+                <div v-else class="flex min-w-0 items-center gap-2">
                   <div class="min-w-0 flex-1 overflow-x-auto rounded-md border bg-background px-3 py-2 font-mono text-xs whitespace-nowrap">
                     {{ mcpCommand }}
                   </div>
@@ -6495,7 +6498,7 @@ onUnmounted(() => {
                     <CheckCircle2 v-if="mcpCopied === 'install'" class="h-4 w-4 text-green-500" />
                     <Copy v-else class="h-4 w-4" />
                   </Button>
-                  <Button type="button" variant="default" :disabled="mcpInstalling || mcpUninstalling || !mcpStatus?.npm_available || (mcpStatus?.installed && !mcpStatus?.update_available)" @click="installMcp">
+                  <Button type="button" variant="default" :disabled="mcpInstalling || mcpUninstalling || !mcpStatus?.runtime_available || mcpStatus?.managed_automatically === false || (mcpStatus?.installed && !mcpStatus?.update_available)" @click="installMcp">
                     <Loader2 v-if="mcpInstalling" class="mr-2 h-4 w-4 animate-spin" />
                     <CheckCircle2 v-if="!mcpInstalling && mcpStatus?.installed && !mcpStatus?.update_available" class="mr-2 h-4 w-4" />
                     {{ mcpInstalling ? t("settings.mcpInstalling") : !mcpStatus?.installed ? t("settings.mcpInstallButton") : mcpStatus?.update_available ? t("settings.mcpUpdateButton") : t("settings.mcpUpToDate") }}
@@ -6511,7 +6514,10 @@ onUnmounted(() => {
 
               <div v-if="!isWeb && mcpStatus?.installed" class="space-y-2">
                 <Label>{{ t("settings.mcpUninstallCommand") }}</Label>
-                <div class="flex min-w-0 items-center gap-2">
+                <div v-if="mcpStatus?.managed_automatically === false" class="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                  {{ t("settings.mcpManualManagementHint") }}
+                </div>
+                <div v-else class="flex min-w-0 items-center gap-2">
                   <div class="min-w-0 flex-1 overflow-x-auto rounded-md border bg-background px-3 py-2 font-mono text-xs whitespace-nowrap">
                     {{ mcpUninstallCommand }}
                   </div>
@@ -6519,7 +6525,7 @@ onUnmounted(() => {
                     <CheckCircle2 v-if="mcpCopied === 'uninstall'" class="h-4 w-4 text-green-500" />
                     <Copy v-else class="h-4 w-4" />
                   </Button>
-                  <Button type="button" variant="outline" class="text-destructive hover:text-destructive" :disabled="mcpInstalling || mcpUninstalling || !mcpStatus.npm_available" @click="uninstallMcp">
+                  <Button type="button" variant="outline" class="text-destructive hover:text-destructive" :disabled="mcpInstalling || mcpUninstalling || !mcpStatus.runtime_available || mcpStatus.managed_automatically === false" @click="uninstallMcp">
                     <Loader2 v-if="mcpUninstalling" class="mr-2 h-4 w-4 animate-spin" />
                     <Trash2 v-else class="mr-2 h-4 w-4" />
                     {{ mcpUninstalling ? t("settings.mcpUninstalling") : t("settings.mcpUninstallButton") }}

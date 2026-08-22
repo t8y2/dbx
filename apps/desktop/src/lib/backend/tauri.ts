@@ -2134,6 +2134,7 @@ export interface UpdateDownloadProgress {
 
 export interface McpServerStatus {
   installed: boolean;
+  runtime_available: boolean;
   npm_available: boolean;
   node_path: string | null;
   node_version: string | null;
@@ -2143,6 +2144,7 @@ export interface McpServerStatus {
   bin_path: string | null;
   native_bin_path: string | null;
   script_path: string | null;
+  managed_automatically: boolean;
   data_dir: string | null;
   install_command: string;
   update_command: string;

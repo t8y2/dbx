@@ -143,6 +143,10 @@ const patterns: [RegExp, string][] = [
   // Message queues (crates/dbx-core/src/mq/adapters/kafka.rs)
   [/^Kafka does not support unloading topics$/, "mqClients.unloadTopicUnsupportedKafka"],
 
+  // MCP server management (src-tauri/src/commands/mcp.rs)
+  [/^DBX MCP is installed but its package manager could not be confirmed[\s\S]*$/, "settings.mcpUnknownPackageManager"],
+  [/^npm CLI is not available in this environment$/, "settings.mcpNpmCliUnavailable"],
+
   // Filesystem (src-tauri/src/commands/fs_open.rs)
   [/^file does not exist: (.+)$/, "common.fileNotFound"],
 

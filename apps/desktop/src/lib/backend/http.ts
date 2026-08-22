@@ -4141,6 +4141,7 @@ export async function fetchChangelog(lang?: string): Promise<import("@/lib/app/c
 export async function checkMcpServerStatus(): Promise<import("@/lib/backend/tauri").McpServerStatus> {
   return {
     installed: false,
+    runtime_available: false,
     npm_available: false,
     node_path: null,
     node_version: null,

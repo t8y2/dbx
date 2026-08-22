@@ -4,6 +4,10 @@ import { jdbcDriverProfileUsesSchemaQualification } from "@/lib/database/jdbcDia
 import * as api from "@/lib/backend/api.ts";
 import { parseSqlServerLinkedSchema, sqlServerLinkedTableName } from "@/lib/database/sqlServerLinkedServers.ts";
 import { isExplicitlyQuotedSqlIdentifier, quoteGaussDbJdbcIdentifier } from "@/lib/sql/sqlIdentifier.ts";
+import { sqlSemanticDialectFor } from "@/lib/sql/semantic/dialect";
+import { sqlSemanticTableNameSpans } from "@/lib/sql/semantic/model";
+import { tokenIsIdentifier, tokenizeSqlSemantic, unquoteSqlSemanticIdentifier } from "@/lib/sql/semantic/tokens";
+import type { SqlSemanticToken } from "@/lib/sql/semantic/types";
 
 export interface BuildTableSelectSqlOptions {
   databaseType?: DatabaseType;
@@ -25,6 +29,30 @@ export interface BuildTableSelectSqlOptions {
   includeRowId?: boolean;
   catalog?: string;
   database?: string;
+  /** Include the active database when this dialect supports `database.table` references. */
+  includeDatabaseName?: boolean;
+}
+
+const DATABASE_QUALIFIED_TABLE_TYPES = new Set<DatabaseType>(["mysql", "clickhouse", "doris", "starrocks", "goldendb"]);
+
+function sqlStatementSpans(sql: string, dialectId: string): Array<{ start: number; end: number }> {
+  const spans: Array<{ start: number; end: number }> = [];
+  let start = 0;
+  const appendSpan = (end: number) => {
+    let trimmedStart = start;
+    let trimmedEnd = end;
+    while (trimmedStart < trimmedEnd && /\s/.test(sql[trimmedStart] ?? "")) trimmedStart += 1;
+    while (trimmedEnd > trimmedStart && /\s/.test(sql[trimmedEnd - 1] ?? "")) trimmedEnd -= 1;
+    if (trimmedStart < trimmedEnd) spans.push({ start: trimmedStart, end: trimmedEnd });
+  };
+
+  for (const token of tokenizeSqlSemantic(sql, dialectId)) {
+    if (token.kind !== "punctuation" || token.text !== ";" || token.depth !== 0) continue;
+    appendSpan(token.span.start);
+    start = token.span.end;
+  }
+  appendSpan(sql.length);
+  return spans;
 }
 
 export function quoteTableIdentifier(databaseType: DatabaseType | undefined, name: string): string {
@@ -44,11 +72,13 @@ export function quoteTableIdentifier(databaseType: DatabaseType | undefined, nam
     databaseType === "kyuubi" ||
     databaseType === "impala" ||
     databaseType === "spark" ||
+    databaseType === "databricks" ||
     databaseType === "databend" ||
     databaseType === "tdengine" ||
     databaseType === "access" ||
     databaseType === "doris" ||
-    databaseType === "starrocks"
+    databaseType === "starrocks" ||
+    databaseType === "goldendb"
   )
     return `\`${name.replace(/`/g, "``")}\``;
   if (databaseType === "informix" && /^[A-Za-z_][A-Za-z0-9_$]*$/.test(name)) return name;
@@ -74,8 +104,8 @@ function quoteCypherIdentifier(name: string): string {
   return `\`${name.replace(/`/g, "``")}\``;
 }
 
-export function qualifiedTableName(options: Pick<BuildTableSelectSqlOptions, "databaseType" | "driverProfile" | "identifierQuote" | "schema" | "tableName" | "catalog" | "database">): string {
-  const { databaseType, driverProfile, identifierQuote, schema, tableName, catalog, database } = options;
+export function qualifiedTableName(options: Pick<BuildTableSelectSqlOptions, "databaseType" | "driverProfile" | "identifierQuote" | "schema" | "tableName" | "catalog" | "database" | "includeDatabaseName">): string {
+  const { databaseType, driverProfile, identifierQuote, schema, tableName, catalog, database, includeDatabaseName } = options;
   if (databaseType === "informix" && driverProfile?.trim().toLowerCase() === "gbase8s") {
     return quoteTableDataIdentifier(databaseType, tableName, identifierQuote);
   }
@@ -142,7 +172,109 @@ export function qualifiedTableName(options: Pick<BuildTableSelectSqlOptions, "da
     }
     return `${quoteTableIdentifier(databaseType, schema)}.${quoteTableIdentifier(databaseType, tableName)}`;
   }
+  // MySQL-style engines use the selected database as their table namespace.
+  // Keep this opt-in so existing generated SQL remains unchanged by default.
+  const trimmedDatabase = database?.trim();
+  if (includeDatabaseName && trimmedDatabase && databaseType && DATABASE_QUALIFIED_TABLE_TYPES.has(databaseType)) {
+    return `${quoteTableIdentifier(databaseType, trimmedDatabase)}.${quoteTableIdentifier(databaseType, tableName)}`;
+  }
   return quoteTableIdentifier(databaseType, tableName);
+}
+
+interface SqlCteVisibility {
+  name: string;
+  visibleFrom: number;
+  visibleUntil: number;
+}
+
+function matchingSqlParenthesisToken(tokens: readonly SqlSemanticToken[], openIndex: number): number {
+  const open = tokens[openIndex];
+  if (open?.text !== "(") return -1;
+  for (let index = openIndex + 1; index < tokens.length; index += 1) {
+    if (tokens[index]?.text === ")" && tokens[index]?.depth === open.depth) return index;
+  }
+  return -1;
+}
+
+function sqlCteVisibilities(tokens: readonly SqlSemanticToken[], sqlLength: number): SqlCteVisibility[] {
+  const visibilities: SqlCteVisibility[] = [];
+  for (let withIndex = 0; withIndex < tokens.length; withIndex += 1) {
+    const withToken = tokens[withIndex];
+    if (withToken?.kind !== "word" || withToken.normalized !== "with") continue;
+    const depth = withToken.depth;
+    const scopeEnd = tokens.find((token, index) => index > withIndex && token.depth < depth)?.span.start ?? sqlLength;
+    let index = withIndex + 1;
+    if (tokens[index]?.depth === depth && tokens[index]?.normalized === "recursive") index += 1;
+
+    while (index < tokens.length) {
+      while (tokens[index]?.depth === depth && tokens[index]?.text === ",") index += 1;
+      const nameToken = tokens[index];
+      if (!nameToken || nameToken.depth !== depth || !tokenIsIdentifier(nameToken)) break;
+      index += 1;
+
+      if (tokens[index]?.depth === depth && tokens[index]?.text === "(") {
+        const columnsClose = matchingSqlParenthesisToken(tokens, index);
+        if (columnsClose < 0) break;
+        index = columnsClose + 1;
+      }
+      if (tokens[index]?.depth === depth && tokens[index]?.normalized === "as") index += 1;
+      if (tokens[index]?.depth !== depth || tokens[index]?.text !== "(") break;
+      const bodyOpen = index;
+      const bodyClose = matchingSqlParenthesisToken(tokens, bodyOpen);
+      if (bodyClose < 0) break;
+      visibilities.push({
+        name: unquoteSqlSemanticIdentifier(nameToken),
+        visibleFrom: tokens[bodyOpen]!.span.end,
+        visibleUntil: scopeEnd,
+      });
+      index = bodyClose + 1;
+      if (tokens[index]?.depth !== depth || tokens[index]?.text !== ",") break;
+    }
+  }
+  return visibilities;
+}
+
+/**
+ * Qualifies physical table sources shown in a result footer without changing
+ * the SQL that was actually executed. The semantic model deliberately skips
+ * CTE names, strings, and comments that can happen to contain FROM/JOIN text.
+ */
+export function qualifyTableReferencesInSql(sql: string, options: Pick<BuildTableSelectSqlOptions, "databaseType" | "database" | "includeDatabaseName">): string {
+  if (!options.includeDatabaseName || !options.databaseType || !DATABASE_QUALIFIED_TABLE_TYPES.has(options.databaseType) || !options.database?.trim()) return sql;
+  const database = quoteTableIdentifier(options.databaseType, options.database.trim());
+  // Build replacements from right to left so that every semantic span still
+  // points at the original source text. Only one-part physical table names
+  // need the active database prefix; CTEs and already-qualified tables do not.
+  const semanticOptions = {
+    databaseType: options.databaseType,
+    dialect: options.databaseType === "goldendb" ? "mysql" : undefined,
+  } as const;
+  const dialectId = sqlSemanticDialectFor(semanticOptions).id;
+  const replacements = sqlStatementSpans(sql, dialectId)
+    .flatMap(({ start, end }) => {
+      const statementSql = sql.slice(start, end);
+      const tokens = tokenizeSqlSemantic(statementSql, dialectId);
+      const cteVisibilities = sqlCteVisibilities(tokens, statementSql.length);
+      const isCteReference = (name: string, span: { start: number; end: number }): boolean => cteVisibilities.some((cte) => cte.name.toLowerCase() === name.toLowerCase() && span.start >= cte.visibleFrom && span.end <= cte.visibleUntil);
+      const tokensBySpan = new Map(tokens.map((token) => [`${token.span.start}:${token.span.end}`, token]));
+
+      return sqlSemanticTableNameSpans(statementSql, semanticOptions)
+        .map((span) => ({ span, token: tokensBySpan.get(`${span.start}:${span.end}`) }))
+        .filter(({ span, token }) => {
+          if (!token || isCteReference(unquoteSqlSemanticIdentifier(token), span)) return false;
+          // sqlSemanticTableNameSpans returns the final segment in a qualified
+          // name, so a preceding dot identifies a database-qualified source.
+          return !statementSql.slice(0, span.start).trimEnd().endsWith(".");
+        })
+        .map(({ span, token }) => ({
+          span: { start: start + span.start, end: start + span.end },
+          tableName: unquoteSqlSemanticIdentifier(token!),
+        }));
+    })
+    .filter(({ span }, index, all) => all.findIndex((candidate) => candidate.span.start === span.start && candidate.span.end === span.end) === index)
+    .sort((left, right) => right.span.start - left.span.start);
+
+  return replacements.reduce((qualifiedSql, { span, tableName }) => `${qualifiedSql.slice(0, span.start)}${database}.${quoteTableIdentifier(options.databaseType, tableName)}${qualifiedSql.slice(span.end)}`, sql);
 }
 
 export function metricSelector(metricName: string): string {

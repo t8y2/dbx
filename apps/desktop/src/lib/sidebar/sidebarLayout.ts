@@ -337,6 +337,36 @@ export function buildConnectionGroupPathMap(layout: SidebarLayout): Map<string, 
   return paths;
 }
 
+export interface ConnectionGroupDestinationRow {
+  id: string;
+  name: string;
+  depth: number;
+  path: string[];
+}
+
+/** Build selectable connection-group destinations in the same tree order as the sidebar. */
+export function connectionGroupDestinationRows(layout: SidebarLayout): ConnectionGroupDestinationRow[] {
+  const groupMap = new Map(layout.groups.map((group) => [group.id, group]));
+  const rows: ConnectionGroupDestinationRow[] = [];
+  const seen = new Set<string>();
+
+  const visit = (entries: SidebarOrderEntry[], parentPath: string[]) => {
+    for (const entry of entries) {
+      if (entry.type !== "group" || seen.has(entry.id)) continue;
+      const group = groupMap.get(entry.id);
+      if (!group) continue;
+
+      seen.add(entry.id);
+      const path = [...parentPath, group.name];
+      rows.push({ id: group.id, name: group.name, depth: parentPath.length, path });
+      visit(entryChildren(entry), path);
+    }
+  };
+
+  visit(layout.order, []);
+  return rows;
+}
+
 function findGroupEntry(entries: SidebarOrderEntry[], groupId: string): Extract<SidebarOrderEntry, { type: "group" }> | null {
   for (const entry of entries) {
     if (entry.type !== "group") continue;

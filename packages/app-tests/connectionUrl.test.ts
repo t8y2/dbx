@@ -162,6 +162,15 @@ test("removes only the connection name from URL params", () => {
 test("parses mysql TLS URL params into the SSL switch state", () => {
   assert.equal(parseConnectionUrl("mysql://root@tidb.example.com:4000/test?ssl-mode=required").ssl, true);
   assert.equal(parseConnectionUrl("mysql://root@tidb.example.com:4000/test?require_ssl=true").ssl, true);
+  assert.equal(parseConnectionUrl("jdbc:mysql://db.example.com/test?useSSL=true&requireSSL=true&verifyServerCertificate=true").ssl, true);
+  assert.equal(parseConnectionUrl("jdbc:mysql://db.example.com/test?verifyServerCertificate=true").ssl, true);
+  assert.equal(parseConnectionUrl("jdbc:mysql://db.example.com/test?useSSL=false").ssl, false);
+  assert.equal(parseConnectionUrl("jdbc:mysql://db.example.com/test?useSSL=false&requireSSL=true&verifyServerCertificate=true").ssl, false);
+});
+
+test("uses the last duplicate MySQL JDBC TLS parameter", () => {
+  assert.equal(parseConnectionUrl("jdbc:mysql://db.example.com/test?useSSL=false&useSSL=true&requireSSL=true").ssl, true);
+  assert.equal(parseConnectionUrl("jdbc:mysql://db.example.com/test?useSSL=true&useSSL=false&requireSSL=true").ssl, false);
 });
 
 test("parses TiDB Cloud MySQL URLs as TLS connections", () => {
@@ -181,6 +190,71 @@ test("parses MySQL JDBC user and password URL params as credentials", () => {
   assert.equal(parsed.password, "pwd");
   assert.equal(parsed.database, "example");
   assert.equal(parsed.urlParams, "useUnicode=true&characterEncoding=UTF8&useSSL=false");
+});
+
+test("parses OceanBase native JDBC URLs", () => {
+  const parsed = parseConnectionUrl("jdbc:oceanbase://127.0.0.1:2881/test");
+
+  assert.equal(parsed.dbType, "mysql");
+  assert.equal(parsed.driverProfile, "oceanbase");
+  assert.equal(parsed.driverLabel, "OceanBase");
+  assert.equal(parsed.host, "127.0.0.1");
+  assert.equal(parsed.port, 2881);
+  assert.equal(parsed.database, "test");
+  assert.equal(parsed.urlParams, "");
+});
+
+test("uses the OceanBase profile default port for non-JDBC URLs without an explicit port", () => {
+  assert.equal(parseConnectionUrl("oceanbase://127.0.0.1/test").port, 2883);
+});
+
+test("uses the OceanBase JDBC driver default port when the URL omits it", () => {
+  assert.equal(parseConnectionUrl("jdbc:oceanbase://127.0.0.1/test").port, 3306);
+});
+
+test("parses OceanBase JDBC user and password URL params as credentials", () => {
+  const parsed = parseConnectionUrl("jdbc:oceanbase://127.0.0.1:2881/test?user=root%40tenant&password=p%40ss&useUnicode=true");
+
+  assert.equal(parsed.username, "root@tenant");
+  assert.equal(parsed.password, "p@ss");
+  assert.equal(parsed.urlParams, "useUnicode=true");
+});
+
+test("preserves the selected OceanBase MySQL profile for native JDBC URLs", () => {
+  const parsed = parseConnectionUrl("jdbc:oceanbase://127.0.0.1:2881/test", "oceanbase");
+
+  assert.equal(parsed.dbType, "mysql");
+  assert.equal(parsed.driverProfile, "oceanbase");
+  assert.equal(parsed.driverLabel, "OceanBase");
+});
+
+test("preserves the selected OceanBase Oracle profile for native JDBC URLs", () => {
+  const parsed = parseConnectionUrl("jdbc:oceanbase://127.0.0.1:2881/sys?user=SYS&password=secret&useSSL=false", "oceanbase-oracle");
+
+  assert.equal(parsed.dbType, "oceanbase-oracle");
+  assert.equal(parsed.driverProfile, "oceanbase-oracle");
+  assert.equal(parsed.driverLabel, "OceanBase Oracle Mode");
+  assert.equal(parsed.username, "SYS");
+  assert.equal(parsed.password, "secret");
+  assert.equal(parsed.urlParams, "useSSL=false");
+});
+
+test("parses explicit OceanBase Oracle-mode JDBC URLs", () => {
+  const parsed = parseConnectionUrl("jdbc:oceanbase:oracle://ob.example.com/sys?user=SYS&password=secret&useSSL=false");
+
+  assert.equal(parsed.dbType, "oceanbase-oracle");
+  assert.equal(parsed.driverProfile, "oceanbase-oracle");
+  assert.equal(parsed.host, "ob.example.com");
+  assert.equal(parsed.port, 3306);
+  assert.equal(parsed.database, "sys");
+  assert.equal(parsed.username, "SYS");
+  assert.equal(parsed.password, "secret");
+  assert.equal(parsed.urlParams, "useSSL=false");
+});
+
+test("does not parse OceanBase load-balance JDBC URLs as single-host connections", () => {
+  assert.throws(() => parseConnectionUrl("jdbc:oceanbase:loadbalance://host1:2881,host2:2881/test"), /loadbalance/);
+  assert.throws(() => parseConnectionUrl("jdbc:oceanbase:oracle:loadbalance://host1:2881,host2:2881/sys"), /loadbalance/);
 });
 
 test("parses MySQL JDBC URL params with ProxySQL multi-at usernames", () => {

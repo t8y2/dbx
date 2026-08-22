@@ -118,6 +118,8 @@ export async function importAgentsFromZip(fileOrPath: string | File, operationId
   const backend = await getBackend();
   return backend.importAgentsFromZip(fileOrPath, operationId);
 }
+export const previewAgentOfflineExport = forward("previewAgentOfflineExport");
+export const exportAgentsOffline = forward("exportAgentsOffline");
 export const importAgentDriver = forward("importAgentDriver");
 export const importAgentJar = importAgentDriver;
 export async function reinstallJre(jreKey?: string, operationId?: string) {
@@ -226,6 +228,8 @@ export const buildTableSelectSql = forward("buildTableSelectSql");
 export const buildDatabaseSearchSql = forward("buildDatabaseSearchSql");
 export const buildSearchResultWhere = forward("buildSearchResultWhere");
 export const buildRenameObjectSql = forward("buildRenameObjectSql");
+export const buildRenameDatabaseSql = forward("buildRenameDatabaseSql");
+export const buildRenameDatabasePreflightSql = forward("buildRenameDatabasePreflightSql");
 export const buildCreateDatabaseSql = forward("buildCreateDatabaseSql");
 export const buildDuckDbAttachDatabaseSql = forward("buildDuckDbAttachDatabaseSql");
 export const buildSqliteAttachDatabaseSql = forward("buildSqliteAttachDatabaseSql");
@@ -708,6 +712,7 @@ export const documentDeleteGridFsFile = forward("documentDeleteGridFsFile");
 export const vectorGetCollectionDetail = forward("vectorGetCollectionDetail");
 export const vectorDropDatabase = forward("vectorDropDatabase");
 export const vectorDropCollection = forward("vectorDropCollection");
+export const vectorRenameCollection = forward("vectorRenameCollection");
 export const mongoCreateDatabase = forward("mongoCreateDatabase");
 export const mongoDropDatabase = forward("mongoDropDatabase");
 export const mongoDropCollection = forward("mongoDropCollection");
@@ -801,6 +806,11 @@ export type {
   AiConversation,
   PromptTemplate,
   AgentDriverInfo,
+  AgentOfflineArtifactKind,
+  AgentOfflineExportUnavailableReason,
+  AgentOfflineExportCandidate,
+  AgentOfflineExportPreview,
+  AgentOfflineExportResult,
   DriverStoreUsage,
   DriverStoreUsageItem,
   DriverRuntimeHealth,

@@ -1,12 +1,71 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { activeTabSidebarTarget, findNodePathForTarget, findSidebarNodeForActiveTab, scrollTopForSidebarNode, shouldScrollActiveSidebarSelection } from "../../apps/desktop/src/lib/sidebar/sidebarActiveTabTarget.ts";
+import { activeTabSidebarTarget, findNodePathForTarget, findSidebarConnectionNode, findSidebarNodeForActiveTab, scrollTopForSidebarNode, shouldScrollActiveSidebarSelection } from "../../apps/desktop/src/lib/sidebar/sidebarActiveTabTarget.ts";
 import type { FlatTreeNode } from "../../apps/desktop/src/composables/useFlatTree.ts";
 import type { QueryTab, TreeNode } from "../../apps/desktop/src/types/database.ts";
 
 function flat(node: TreeNode, depth = 0): FlatTreeNode {
   return { id: node.id, node, depth, type: node.type };
 }
+
+test("findSidebarConnectionNode resolves grouped roots without scanning descendants", () => {
+  const groupedConnection: TreeNode = {
+    id: "conn-grouped",
+    label: "Grouped",
+    type: "connection",
+    connectionId: "conn-grouped",
+    children: [
+      {
+        id: "conn-grouped:app",
+        label: "app",
+        type: "database",
+        connectionId: "conn-grouped",
+        database: "app",
+      },
+    ],
+  };
+  const nestedGroups: TreeNode[] = [
+    {
+      id: "group-outer",
+      label: "Outer",
+      type: "connection-group",
+      children: [
+        {
+          id: "group-inner",
+          label: "Inner",
+          type: "connection-group",
+          children: [groupedConnection],
+        },
+      ],
+    },
+  ];
+
+  assert.equal(findSidebarConnectionNode(nestedGroups, "conn-grouped"), groupedConnection);
+  assert.equal(findSidebarConnectionNode(nestedGroups, "missing"), null);
+  assert.equal(
+    findSidebarConnectionNode(
+      [
+        {
+          id: "conn-root",
+          label: "Root",
+          type: "connection",
+          connectionId: "conn-root",
+          children: [
+            {
+              id: "conn-nested-decoy",
+              label: "Decoy",
+              type: "connection",
+              connectionId: "conn-grouped",
+            },
+          ],
+        },
+        ...nestedGroups,
+      ],
+      "conn-grouped",
+    ),
+    groupedConnection,
+  );
+});
 
 test("findNodePathForTarget handles loaded, unloaded, and MySQL schema fallback trees", () => {
   const cases = [
@@ -481,6 +540,13 @@ test("sidebar node scrolling supports top and smart locate alignment", () => {
   assert.equal(scrollTopForSidebarNode({ index: 20, currentScrollTop: 0, viewportHeight: 140, align: "smart" }), 523);
   assert.equal(scrollTopForSidebarNode({ index: 11, currentScrollTop: 300, viewportHeight: 140, topOcclusionHeight: 28, align: "smart" }), 252);
   assert.equal(scrollTopForSidebarNode({ index: 0, currentScrollTop: 300, viewportHeight: 140, topOcclusionHeight: 28, align: "smart" }), 0);
+});
+
+test("sidebar node scrolling centers explicit tab locate with sticky and boundary clamping", () => {
+  assert.equal(scrollTopForSidebarNode({ index: 20, currentScrollTop: 0, viewportHeight: 140, align: "center" }), 504);
+  assert.equal(scrollTopForSidebarNode({ index: 11, currentScrollTop: 0, viewportHeight: 140, topOcclusionHeight: 28, align: "center" }), 238);
+  assert.equal(scrollTopForSidebarNode({ index: 0, currentScrollTop: 300, viewportHeight: 140, topOcclusionHeight: 28, align: "center" }), 0);
+  assert.equal(scrollTopForSidebarNode({ index: 20, currentScrollTop: 0, viewportHeight: 140, scrollHeight: 588, align: "center" }), 448);
 });
 
 test("active sidebar selection only scrolls on tab or setting changes", () => {

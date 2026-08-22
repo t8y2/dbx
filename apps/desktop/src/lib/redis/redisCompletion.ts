@@ -141,11 +141,52 @@ function buildSpecDetail(entry: CompletionCommandEntry): string {
   return entry.group;
 }
 
+function argumentPlaceholder(argument: RedisCommandArgument): string {
+  const name = argument.name.trim().replaceAll(/[^a-zA-Z0-9_-]+/g, "_");
+  return name || "value";
+}
+
+function exampleArguments(arguments_: readonly RedisCommandArgument[]): string[] {
+  const result: string[] = [];
+  for (const argument of arguments_) {
+    if (argument.optional) continue;
+    if (argument.type === "oneof") {
+      const first = argument.arguments?.find((candidate) => !candidate.optional);
+      if (first) result.push(...exampleArgument(first));
+      continue;
+    }
+    result.push(...exampleArgument(argument));
+  }
+  return result;
+}
+
+function exampleArgument(argument: RedisCommandArgument): string[] {
+  if (argument.enum?.length) return [argument.enum[0]!];
+  const nested = argument.arguments?.length ? exampleArguments(argument.arguments) : [];
+  const token = argument.token?.trim().toUpperCase();
+  if (argument.type === "pure-token") return token ? [token] : [];
+  if (token && nested.length) return [token, ...nested];
+  if (nested.length) return nested;
+  if (token) return [token, argumentPlaceholder(argument)];
+  return [argumentPlaceholder(argument)];
+}
+
+function commandExample(entry: CompletionCommandEntry): string {
+  let arguments_ = entry.arguments.length ? exampleArguments(entry.arguments) : [];
+  if (arguments_.length === 0 && entry.arity) {
+    const count = entry.arity > 0 ? entry.arity - 1 : -entry.arity - 1;
+    arguments_ = Array.from({ length: Math.min(Math.max(count, 0), 8) }, (_, index) => `arg${index + 1}`);
+  }
+  return [entry.name, ...arguments_].join(" ");
+}
+
 function buildSpecInfo(entry: CompletionCommandEntry, label: string): string {
   const info = [];
   if (entry.summary) info.push(entry.summary);
   info.push(`Command: ${label}`, `Group: ${entry.group}`, `Arity: ${describeArity(entry.arity)}`);
   if (entry.since) info.push(`Since: ${entry.since}`);
+  const example = commandExample(entry);
+  if (example !== entry.name) info.push(`Example: ${example}`);
   return info.join("\n");
 }
 
@@ -216,6 +257,7 @@ function commandItems(index: CompletionIndex, prefix: string): RedisCompletionIt
       info: buildSpecInfo(entry, entry.name),
       summary: entry.summary,
       since: entry.since,
+      apply: commandExample(entry),
       boost: boostFor(entry),
     }));
   return items.sort((a, b) => b.boost - a.boost);
@@ -231,6 +273,7 @@ function subcommandItems(index: CompletionIndex, commandPrefix: string, prefix: 
       info: buildSpecInfo(entry, entry.name),
       summary: entry.summary,
       since: entry.since,
+      apply: commandExample(entry).slice(commandPrefix.length + 1),
       boost: boostFor(entry),
     }));
   return items.sort((a, b) => b.boost - a.boost);

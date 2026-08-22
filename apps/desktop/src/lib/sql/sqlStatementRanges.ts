@@ -1782,7 +1782,7 @@ function oraclePlSqlBlockEnd(sql: string): number | null {
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
     if (token.kind === "semicolon") {
-      const complete = objectKind === "spec" ? stack.length === 0 : sawBegin && stack.length === 0;
+      const complete = objectKind !== null ? stack.length === 0 : sawBegin && stack.length === 0;
       if (complete) return token.to;
       continue;
     }

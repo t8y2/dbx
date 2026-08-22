@@ -30,11 +30,11 @@ vi.mock("@/stores/productionSafetyStore", () => ({
   useProductionSafetyStore: () => ({}),
 }));
 
-function createEditor(sourceColumns?: Array<string | undefined>, confirmDangerousRowDeletion = true, cacheKey?: string, readonlyColumnIndexes?: number[]) {
+function createEditor(sourceColumns?: Array<string | undefined>, confirmDangerousRowDeletion = true, cacheKey?: string, readonlyColumnIndexes?: number[], existingRows: CellValue[][] = [], onCellValueChanged?: (rowId: number, columnIndex: number) => void) {
   let editor: ReturnType<typeof useDataGridEditor>;
   const result = ref<{ columns: string[]; rows: CellValue[][] }>({
     columns: ["first", "hidden", "last"],
-    rows: [],
+    rows: existingRows,
   });
 
   editor = useDataGridEditor({
@@ -65,6 +65,7 @@ function createEditor(sourceColumns?: Array<string | undefined>, confirmDangerou
     pageSize: ref(100),
     currentPage: ref(1),
     cacheKey: computed(() => cacheKey),
+    onCellValueChanged,
     getRowItem: (rowId) => {
       if (rowId === DATA_GRID_QUICK_ENTRY_DRAFT_ROW_ID) {
         return {
@@ -75,6 +76,20 @@ function createEditor(sourceColumns?: Array<string | undefined>, confirmDangerou
           isDeleted: false,
           isDirtyCol: [false, false, false],
           status: "draft",
+        };
+      }
+      if (rowId >= 0) {
+        const row = result.value.rows[rowId];
+        if (!row) return undefined;
+        const changes = editor.dirtyRows.value.get(rowId);
+        return {
+          id: rowId,
+          sourceIndex: rowId,
+          data: row.map((value, columnIndex) => (changes?.has(columnIndex) ? (changes.get(columnIndex) ?? null) : value)),
+          isNew: false,
+          isDeleted: false,
+          isDirtyCol: row.map((_, columnIndex) => changes?.has(columnIndex) ?? false),
+          status: changes?.size ? "edited" : "normal",
         };
       }
       const newIndex = -rowId - 1;
@@ -207,6 +222,40 @@ describe("useDataGridEditor row deletion confirmation", () => {
     expect(editor.newRows.value).toHaveLength(0); // the row must actually be deleted
     expect(editor.showDeleteRowConfirm.value).toBe(false); // and the dialog closes on its own
     expect(editor.pendingDeleteRowIds.value).toEqual([]);
+  });
+});
+
+describe("useDataGridEditor cell mutation notifications", () => {
+  it("notifies cache owners for batched paste, NULL, and restore changes", () => {
+    const onCellValueChanged = vi.fn();
+    const editor = createEditor(undefined, true, undefined, undefined, [["Ada", "original", "Lovelace"]], onCellValueChanged);
+
+    editor.beginBatch();
+    editor.applyCellValue(0, 1, "pasted");
+    editor.applyCellValue(0, 1, null);
+    editor.commitBatch();
+    editor.restoreCellValue(0, 1);
+
+    expect(onCellValueChanged.mock.calls).toEqual([
+      [0, 1],
+      [0, 1],
+      [0, 1],
+    ]);
+  });
+
+  it("notifies cache owners when undo and redo replace dirty cells", () => {
+    const onCellValueChanged = vi.fn();
+    const editor = createEditor(undefined, true, undefined, undefined, [["Ada", "original", "Lovelace"]], onCellValueChanged);
+
+    editor.applyCellValue(0, 1, "edited");
+    onCellValueChanged.mockClear();
+    editor.undoPendingChange();
+    editor.redoPendingChange();
+
+    expect(onCellValueChanged.mock.calls).toEqual([
+      [0, 1],
+      [0, 1],
+    ]);
   });
 });
 

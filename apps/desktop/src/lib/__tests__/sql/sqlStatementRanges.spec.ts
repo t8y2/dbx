@@ -531,6 +531,15 @@ END pkg_utils_without_replace;`;
     expect(rangeSqlTexts(splitSqlStatementRanges(`${packageSpecWithoutReplace}\nSELECT 1;`, "xugu"))).toEqual([packageSpecWithoutReplace, "SELECT 1"]);
   });
 
+  it("splits a declaration-only Oracle package body before following DML", () => {
+    const packageBody = `CREATE OR REPLACE PACKAGE BODY packageName IS
+null;
+END packageName;`;
+
+    expect(rangeSqlTexts(splitSqlStatementRanges(`${packageBody}\nSELECT * FROM goods;`, "oracle"))).toEqual([packageBody, "SELECT * FROM goods"]);
+    expect(rangeSqlTexts(splitSqlStatementRanges(`${packageBody}\n/\nSELECT * FROM goods;`, "oracle"))).toEqual([packageBody, "SELECT * FROM goods"]);
+  });
+
   it("splits plain CREATE TYPE AS OBJECT on semicolon without waiting for END", () => {
     const sql = "CREATE OR REPLACE TYPE address_t AS OBJECT (id INT);\nSELECT 1;";
     expect(rangeSqlTexts(splitSqlStatementRanges(sql, "xugu"))).toEqual(["CREATE OR REPLACE TYPE address_t AS OBJECT (id INT)", "SELECT 1"]);

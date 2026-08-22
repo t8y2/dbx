@@ -37,6 +37,16 @@ test("parseBinaryCellBytes accepts common driver binary shapes", () => {
   assert.deepEqual(Array.from(parseBinaryCellBytes({ type: "Buffer", data: [222, 173, 190, 239] }) ?? []), [222, 173, 190, 239]);
 });
 
+test("TDengine BINARY text is not treated as unprefixed hex", () => {
+  for (const value of ["66", "67", "81", "97"]) {
+    assert.equal(parseBinaryCellBytes(value, "BINARY(16)", "tdengine"), null);
+    assert.equal(binaryCellDisplayText(value, "BINARY(16)", undefined, "tdengine"), null);
+    assert.equal(canDownloadBinaryCellValue(value, "BINARY(16)", "tdengine"), false);
+  }
+  assert.deepEqual(Array.from(parseBinaryCellBytes("0x3636", "BINARY(16)", "tdengine") ?? []), [54, 54]);
+  assert.equal(binaryCellDisplayText("0x3636", "BINARY(16)", undefined, "tdengine"), "66");
+});
+
 test("binary cell download detects common blob column types", () => {
   assert.equal(isBinaryCellColumnType("BLOB"), true);
   assert.equal(isBinaryCellColumnType("RAW(2000)"), true);
@@ -104,7 +114,7 @@ test("DataGrid binary preview prefers ResultSet column types when table metadata
   const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
   const formatter = source.match(/function formatCell\([^]*?\n\}/)?.[0] ?? "";
 
-  assert.match(formatter, /binaryCellDisplayText\(value, columnIndex === undefined \? undefined : allColumnTypes\.value\[columnIndex\], originalBytes\)/);
+  assert.match(formatter, /binaryCellDisplayText\(value, columnIndex === undefined \? undefined : allColumnTypes\.value\[columnIndex\], originalBytes, resolvedDatabaseType\.value\)/);
 });
 
 test("binaryCellDownloadPayload decodes GBK text bytes", () => {

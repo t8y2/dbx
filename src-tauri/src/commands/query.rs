@@ -455,14 +455,16 @@ pub async fn execute_in_manual_transaction(
     database: String,
     schema: Option<String>,
     max_rows: Option<usize>,
-) -> Result<Vec<db::QueryResult>, String> {
-    dbx_core::query::execute_in_manual_transaction(
+    table_data_preview: Option<bool>,
+) -> Result<Vec<dbx_core::query::ExecuteMultiResult>, String> {
+    dbx_core::query::execute_in_manual_transaction_with_options(
         &state,
         &txn_session_id,
         &sql,
         &database,
         schema.as_deref(),
         max_rows,
+        table_data_preview.unwrap_or(false),
     )
     .await
 }
@@ -531,8 +533,14 @@ pub fn build_dropped_file_preview_sql(
 }
 
 #[tauri::command]
-pub fn build_table_select_sql(options: dbx_core::sql_dialect::TableDataSelectSqlOptions) -> Result<String, String> {
-    Ok(dbx_core::sql_dialect::build_table_data_select_sql(options))
+pub fn build_table_select_sql(
+    options: dbx_core::sql_dialect::TableDataSelectSqlOptions,
+    include_database_name: Option<bool>,
+) -> Result<String, String> {
+    Ok(dbx_core::sql_dialect::build_table_data_select_sql_with_database(
+        options,
+        include_database_name.unwrap_or(false),
+    ))
 }
 
 #[tauri::command]
@@ -552,6 +560,24 @@ pub fn build_search_result_where(
 #[tauri::command]
 pub fn build_rename_object_sql(options: dbx_core::db_admin_sql::RenameObjectSqlOptions) -> Result<String, String> {
     dbx_core::db_admin_sql::build_rename_object_sql(options)
+}
+
+#[tauri::command]
+pub fn build_rename_database_sql(
+    database_type: Option<dbx_core::models::connection::DatabaseType>,
+    old_name: String,
+    new_name: String,
+    terminate_connections: bool,
+) -> Result<String, String> {
+    dbx_core::db_admin_sql::build_rename_database_sql(database_type, &old_name, &new_name, terminate_connections)
+}
+
+#[tauri::command]
+pub fn build_rename_database_preflight_sql(
+    database_type: Option<dbx_core::models::connection::DatabaseType>,
+    database_name: String,
+) -> Result<String, String> {
+    dbx_core::db_admin_sql::build_rename_database_preflight_sql(database_type, &database_name)
 }
 
 #[tauri::command]

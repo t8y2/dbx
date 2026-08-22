@@ -42,6 +42,10 @@ export function selectedConnectionDisconnectTargets(currentNode: TreeNode, selec
   return selectedConnectionActionTargets(currentNode, selectedNodes);
 }
 
+export function selectedConnectionMoveTargets(currentNode: TreeNode, selectedNodes: TreeNode[]): ConnectionTreeNode[] {
+  return selectedConnectionActionTargets(currentNode, selectedNodes);
+}
+
 export function selectedConnectionClipboardTargets(currentNode: TreeNode, selectedNodes: TreeNode[]): ConnectionTreeNode[] {
   return selectedConnectionActionTargets(currentNode, selectedNodes);
 }

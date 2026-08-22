@@ -117,6 +117,7 @@ export interface UseDataGridEditorOptions {
   cacheKey?: ComputedRef<string | undefined>;
   /** 保存成功后结果负载被原地修改时通知宿主，使缓存的字节估算失效。 */
   onResultPayloadMutated?: () => void;
+  onCellValueChanged?: (rowId: number, columnIndex: number) => void;
   prepareFullReload?: () => void;
   emit: {
     (event: "reload", sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number): void;
@@ -229,6 +230,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     pageSize,
     currentPage,
     cacheKey,
+    onCellValueChanged,
   } = options;
 
   const editingCell = ref<{ rowId: number; col: number } | null>(null);
@@ -356,7 +358,9 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       if (input) focusDataGridEditorWithoutScrolling(input, scroller);
       if (select && input) {
         if (input instanceof HTMLTextAreaElement && input.dataset.expandedCellEditor === "true") {
-          input.setSelectionRange?.(0, 0);
+          // Expanded editors must match single-line editors: a double-click selects the whole value.
+          input.select();
+          input.setSelectionRange?.(0, input.value.length);
           input.scrollTop = 0;
         } else {
           input.select();
@@ -405,14 +409,27 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   function restorePendingChangesSnapshot(snapshot: PendingChangesHistorySnapshot) {
+    const previousDirtyRows = dirtyRows.value;
+    const restoredDirtyRows = new Map([...snapshot.dirtyRows].map(([rowIndex, changes]) => [rowIndex, new Map(changes)]));
     newRows.value = snapshot.newRows.map((row) => [...row]);
     restoreNewRowMeta(snapshot.newRowMeta ?? []);
     quickEntryDraftRow.value = snapshot.quickEntryDraftRow ? [...snapshot.quickEntryDraftRow] : emptyDraftRow();
-    dirtyRows.value = new Map([...snapshot.dirtyRows].map(([rowIndex, changes]) => [rowIndex, new Map(changes)]));
+    dirtyRows.value = restoredDirtyRows;
     deletedRows.value = new Set(snapshot.deletedRows);
     transactionActive.value = snapshot.transactionActive === true && useTransaction.value === true;
     queuedAutoSaveChanges.clear();
     editingCell.value = null;
+    for (const rowIndex of new Set([...previousDirtyRows.keys(), ...restoredDirtyRows.keys()])) {
+      const previousChanges = previousDirtyRows.get(rowIndex);
+      const restoredChanges = restoredDirtyRows.get(rowIndex);
+      for (const columnIndex of new Set([...(previousChanges?.keys() ?? []), ...(restoredChanges?.keys() ?? [])])) {
+        const previousHasValue = previousChanges?.has(columnIndex) ?? false;
+        const restoredHasValue = restoredChanges?.has(columnIndex) ?? false;
+        if (previousHasValue !== restoredHasValue || previousChanges?.get(columnIndex) !== restoredChanges?.get(columnIndex)) {
+          onCellValueChanged?.(rowIndex, columnIndex);
+        }
+      }
+    }
     touchPendingChanges();
   }
 
@@ -838,6 +855,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     if (dataGridQuickEntryEnabled.value && isSaving.value && changed) {
       rememberQueuedAutoSaveChange(item.sourceIndex, col, newVal);
     }
+    if (changed) onCellValueChanged?.(rowId, col);
     return changed ? { changed: true, rowKind: "existing" } : { changed: false, rowKind: "existing" };
   }
 
@@ -956,6 +974,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       dirtyRows.value = new Map(dirtyRows.value);
       touchPendingChanges();
     }
+    onCellValueChanged?.(rowId, col);
   }
 
   function restoreCellValue(rowId: number, col: number) {
@@ -996,6 +1015,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     if (rowChanges.size === 0) dirtyRows.value.delete(item.sourceIndex);
     dirtyRows.value = new Map(dirtyRows.value);
     touchPendingChanges();
+    onCellValueChanged?.(rowId, col);
   }
 
   function cancelEdit() {

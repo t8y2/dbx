@@ -1,6 +1,6 @@
 import type { BackendError } from "@/lib/backend/errorUtils";
 import type { TransferContent, TransferMode, TransferObjectKind, TransferTableNameCase } from "@/lib/backend/tauri";
-import type { MultiDbResultRunExecution } from "@/types/sqlExecution";
+import type { MultiDbExecutionTarget, MultiDbResultRunExecution } from "@/types/sqlExecution";
 
 export type DatabaseType =
   | "mysql"
@@ -771,7 +771,9 @@ export interface BatchSqlExecution {
   completed: number;
   total: number;
   startedAt: number;
+  executionTarget?: MultiDbExecutionTarget;
   finishedAt?: number;
+  recoveryDismissed?: boolean;
   items: BatchStatementExecutionItem[];
 }
 

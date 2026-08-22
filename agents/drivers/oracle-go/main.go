@@ -167,7 +167,7 @@ SELECT o.OBJECT_NAME,
        CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
 FROM ALL_OBJECTS o
 WHERE o.OWNER = :2
-  AND o.OBJECT_TYPE IN ('VIEW', 'MATERIALIZED VIEW', 'PROCEDURE', 'FUNCTION', 'PACKAGE', 'PACKAGE BODY')
+  AND o.OBJECT_TYPE IN ('VIEW', 'MATERIALIZED VIEW', 'PROCEDURE', 'FUNCTION', 'SEQUENCE', 'PACKAGE', 'PACKAGE BODY')
 UNION ALL
 SELECT s.SYNONYM_NAME AS OBJECT_NAME,
        'SYNONYM' AS OBJECT_TYPE,
@@ -198,7 +198,7 @@ SELECT o.OBJECT_NAME,
        END AS OBJECT_TYPE,
        CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
 FROM USER_OBJECTS o
-WHERE o.OBJECT_TYPE IN ('VIEW', 'MATERIALIZED VIEW', 'PROCEDURE', 'FUNCTION', 'PACKAGE', 'PACKAGE BODY')
+WHERE o.OBJECT_TYPE IN ('VIEW', 'MATERIALIZED VIEW', 'PROCEDURE', 'FUNCTION', 'SEQUENCE', 'PACKAGE', 'PACKAGE BODY')
 UNION ALL
 SELECT s.SYNONYM_NAME AS OBJECT_NAME,
        'SYNONYM' AS OBJECT_TYPE,
@@ -211,9 +211,10 @@ const oracleListObjectsOrderSQL = `ORDER BY CASE OBJECT_TYPE
   WHEN 'MATERIALIZED_VIEW' THEN 2
   WHEN 'PROCEDURE' THEN 3
   WHEN 'FUNCTION' THEN 4
-  WHEN 'SYNONYM' THEN 5
-  WHEN 'PACKAGE' THEN 6
-  ELSE 7
+  WHEN 'SEQUENCE' THEN 5
+  WHEN 'SYNONYM' THEN 6
+  WHEN 'PACKAGE' THEN 7
+  ELSE 8
 END, OBJECT_NAME`
 const oracleListObjectsSQL = oracleListObjectsBaseSQL + "\n" + oracleListObjectsOrderSQL
 const oracleListTriggersSQL = `
@@ -2914,7 +2915,7 @@ func (s *server) getObjectSource(schema, name, objectType string) (map[string]an
 		}
 		return map[string]any{"name": name, "object_type": objectType, "schema": schema, "source": source}, nil
 	}
-	if upperType == "SYNONYM" {
+	if upperType == "SEQUENCE" || upperType == "SYNONYM" {
 		return s.getMetadataObjectSource(schema, name, upperType)
 	}
 
@@ -4379,7 +4380,7 @@ func rewriteOracleSelectItems(items []string, columns []oracleColumnMeta, tableR
 			for _, column := range columns {
 				columnRef := oracleColumnRef(tableRef.AliasText, column.Name)
 				outputAlias := quoteIdentifier(column.Name)
-				if isOracleXMLType(column.DataType) {
+				if isOracleXMLType(column.DataType) && !deferLOBs {
 					rewritten = append(rewritten, oracleXMLSerializeExpression(columnRef, outputAlias))
 				} else if deferLOBs {
 					if expressions, ok := oracleDeferredLOBExpressions(columnRef, outputAlias, sourceIndex, column.DataType); ok {
@@ -4403,7 +4404,7 @@ func rewriteOracleSelectItems(items []string, columns []oracleColumnMeta, tableR
 					outputAlias = quoteIdentifier(meta.Name)
 				}
 				columnRef := oracleColumnRef(qualifier, meta.Name)
-				if isOracleXMLType(meta.DataType) {
+				if isOracleXMLType(meta.DataType) && !deferLOBs {
 					rewritten = append(rewritten, oracleXMLSerializeExpression(columnRef, outputAlias))
 					changed = true
 					sourceIndex++
@@ -4446,6 +4447,8 @@ func oracleDeferredLOBKind(dataType string) (kind, placeholder string, ok bool) 
 		return "L", "<BLOB>", true
 	case "BFILE":
 		return "F", "<BFILE>", true
+	case "XMLTYPE", "SYS.XMLTYPE":
+		return "C", "<XMLTYPE>", true
 	default:
 		return "", "", false
 	}

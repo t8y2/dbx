@@ -7,6 +7,7 @@ pub mod agent_explain;
 pub mod agent_kv;
 pub mod agent_loop;
 pub mod agent_manager;
+pub mod agent_offline_export;
 pub mod agent_recovery;
 pub mod agent_runtime;
 pub mod agent_service;

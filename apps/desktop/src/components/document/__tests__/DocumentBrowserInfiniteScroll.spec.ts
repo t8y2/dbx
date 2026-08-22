@@ -1,7 +1,8 @@
 // @vitest-environment happy-dom
 
-import { createApp, nextTick, type App } from "vue";
+import { createApp, defineComponent, h, nextTick, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { isDataGridPrefixAppend } from "@/lib/dataGrid/dataGridInfiniteScroll";
 
 const backend = vi.hoisted(() => ({
   documentFindDocuments: vi.fn(),
@@ -25,6 +26,7 @@ const dataGrid = vi.hoisted(() => ({
   appendedFromRowCount: undefined as number | undefined,
   pageOffset: undefined as number | undefined,
   pageLimit: undefined as number | undefined,
+  pageSizePreference: undefined as string | undefined,
   selectionActive: false,
   editActive: false,
   fullReplaceCount: 0,
@@ -33,6 +35,7 @@ const dataGrid = vi.hoisted(() => ({
 const settings = vi.hoisted(() => ({
   editorSettings: {
     pageSize: 2,
+    tableOpenPageSize: 5,
     infiniteScroll: true,
     mongoViewMode: "table" as "document" | "table",
     columnWidthDensity: "standard" as "compact" | "standard" | "comfortable",
@@ -75,9 +78,7 @@ vi.mock("@/stores/settingsStore", () => ({
   useSettingsStore: () => settings,
 }));
 
-vi.mock("@/components/grid/DataGrid.vue", async () => {
-  const { defineComponent, h } = await import("vue");
-  const { isDataGridPrefixAppend } = await import("@/lib/dataGrid/dataGridInfiniteScroll");
+vi.mock("@/components/grid/DataGrid.vue", () => {
   return {
     default: defineComponent({
       name: "DataGridStub",
@@ -87,6 +88,7 @@ vi.mock("@/components/grid/DataGrid.vue", async () => {
         customSaveHandler: { type: Object, required: false },
         pageOffset: { type: Number, required: false },
         pageLimit: { type: Number, required: false },
+        pageSizePreference: { type: String, required: false },
       },
       setup(props, { attrs, expose }) {
         dataGrid.paginate = attrs.onPaginate as typeof dataGrid.paginate;
@@ -127,6 +129,7 @@ vi.mock("@/components/grid/DataGrid.vue", async () => {
           dataGrid.appendedFromRowCount = result.appended_from_row_count;
           dataGrid.pageOffset = props.pageOffset;
           dataGrid.pageLimit = props.pageLimit;
+          dataGrid.pageSizePreference = props.pageSizePreference;
           return h("div", { "data-testid": "data-grid" });
         };
       },
@@ -182,12 +185,12 @@ async function flushUi() {
   }
 }
 
-async function mountBrowser() {
+async function mountBrowser(databaseType: "mongodb" | "elasticsearch" = "mongodb") {
   app = createApp(DocumentBrowser, {
     connectionId: "mongo-1",
     database: "test",
     collection: "docs",
-    databaseType: "mongodb",
+    databaseType,
   });
   app.mount(root!);
   await flushUi();
@@ -230,10 +233,12 @@ beforeEach(async () => {
   dataGrid.appendedFromRowCount = undefined;
   dataGrid.pageOffset = undefined;
   dataGrid.pageLimit = undefined;
+  dataGrid.pageSizePreference = undefined;
   dataGrid.selectionActive = false;
   dataGrid.editActive = false;
   dataGrid.fullReplaceCount = 0;
   settings.editorSettings.pageSize = 2;
+  settings.editorSettings.tableOpenPageSize = 5;
   settings.editorSettings.infiniteScroll = true;
 
   root = document.createElement("div");
@@ -249,6 +254,16 @@ afterEach(() => {
 });
 
 describe("DocumentBrowser infinite scroll (issue #6455)", () => {
+  it.each(["mongodb", "elasticsearch"] as const)("uses the table-open page-size preference for %s", async (databaseType) => {
+    backend.documentFindDocuments.mockResolvedValueOnce(documentResult(1, 5, 5));
+
+    await mountBrowser(databaseType);
+
+    expect(backend.documentFindDocuments.mock.calls[0]!.slice(0, 5)).toEqual(["mongo-1", "test", "docs", 0, 5]);
+    expect(dataGrid.pageLimit).toBe(5);
+    expect(dataGrid.pageSizePreference).toBe("table-open");
+  });
+
   it("preserves existing row identity and DataGrid selection/edit state for same-column appends", async () => {
     backend.documentFindDocuments.mockResolvedValueOnce(documentResult(1, 2, 4)).mockResolvedValueOnce(documentResult(3, 2, 4));
 
@@ -310,11 +325,11 @@ describe("DocumentBrowser infinite scroll (issue #6455)", () => {
     await dataGrid.reload!();
     await flushUi();
 
-    expect(backend.documentFindDocuments.mock.calls[3]!.slice(0, 5)).toEqual(["mongo-1", "test", "docs", 0, 2]);
+    expect(backend.documentFindDocuments.mock.calls[3]!.slice(0, 5)).toEqual(["mongo-1", "test", "docs", 0, 5]);
     expect(dataGrid.rows).toHaveLength(2);
     expect(dataGrid.appendedFromRowCount).toBeUndefined();
     expect(dataGrid.pageOffset).toBe(0);
-    expect(dataGrid.pageLimit).toBe(2);
+    expect(dataGrid.pageLimit).toBe(5);
     expect(dataGrid.resetInfiniteScrollState).toHaveBeenCalledTimes(1);
   });
 
@@ -341,16 +356,16 @@ describe("DocumentBrowser infinite scroll (issue #6455)", () => {
     await flushUi();
 
     expect(backend.documentUpdateDocument).toHaveBeenCalledTimes(1);
-    expect(backend.documentFindDocuments.mock.calls[3]!.slice(0, 5)).toEqual(["mongo-1", "test", "docs", 0, 2]);
+    expect(backend.documentFindDocuments.mock.calls[3]!.slice(0, 5)).toEqual(["mongo-1", "test", "docs", 0, 5]);
     expect(dataGrid.rows).toHaveLength(2);
     expect(dataGrid.appendedFromRowCount).toBeUndefined();
     expect(dataGrid.pageOffset).toBe(0);
-    expect(dataGrid.pageLimit).toBe(2);
+    expect(dataGrid.pageLimit).toBe(5);
     expect(dataGrid.resetInfiniteScrollState).toHaveBeenCalledTimes(1);
   });
 
   it("keeps the configured page size when the final capped segment has a smaller limit", async () => {
-    settings.editorSettings.pageSize = 3;
+    settings.editorSettings.tableOpenPageSize = 3;
     backend.documentFindDocuments
       .mockResolvedValueOnce(documentResult(1, 3, 11))
       .mockResolvedValueOnce(documentResult(4, 3, 11))

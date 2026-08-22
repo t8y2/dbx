@@ -7,7 +7,7 @@ import { useQueryStore } from "@/stores/queryStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
-import type { ObjectSourceKind, TableInfo, TableNameFilter, TreeNode, TreeNodeType } from "@/types/database";
+import type { ObjectSourceKind, QueryTab, TableInfo, TableNameFilter, TreeNode, TreeNodeType } from "@/types/database";
 import {
   createSidebarSearchSubtreePreserver,
   filterSidebarSearchRootsByConnectionState,
@@ -34,7 +34,17 @@ import { pruneTreeSelectionToVisibleNodeIds } from "@/lib/sidebar/sidebarTreeSel
 import { isEditableSidebarTypeSearchTarget, sidebarTypeSearchNextQuery } from "@/lib/sidebar/sidebarTypeSearch";
 import { isInternalDorisCatalog, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
 import { connectionObjectTreeNodeSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
-import { activeTabSidebarTarget, findSidebarNodeForActiveTab, findSidebarNodeForTarget, findNodePathForTarget, scrollTopForSidebarNode, shouldScrollActiveSidebarSelection, type ActiveTabSidebarTarget, type SidebarNodeScrollAlign } from "@/lib/sidebar/sidebarActiveTabTarget";
+import {
+  activeTabSidebarTarget,
+  findSidebarConnectionNode,
+  findSidebarNodeForActiveTab,
+  findSidebarNodeForTarget,
+  findNodePathForTarget,
+  scrollTopForSidebarNode,
+  shouldScrollActiveSidebarSelection,
+  type ActiveTabSidebarTarget,
+  type SidebarNodeScrollAlign,
+} from "@/lib/sidebar/sidebarActiveTabTarget";
 import { findLoadedTableTargetForCandidate, queryContextTargetFromCandidate, queryCursorTableCandidate, type QueryCursorTableCandidate } from "@/lib/sql/queryCursorTableTarget";
 import { createFlatTreeIndex, SIDEBAR_TREE_ROW_HEIGHT, SIDEBAR_TREE_PRERENDER_COUNT, SIDEBAR_TREE_SCROLL_BUFFER, flattenTree, shouldVirtualizeFlatTree, type FlatTreeNode } from "@/composables/useFlatTree";
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
@@ -1240,6 +1250,7 @@ async function scrollToSidebarNode(nodeId: string, options?: { align?: SidebarNo
     index,
     currentScrollTop: scroller.scrollTop,
     viewportHeight: scroller.clientHeight,
+    scrollHeight: scroller.scrollHeight,
     topOcclusionHeight: topOcclusionHeightForSidebarNode(nodeId),
     ...(options?.align ? { align: options.align } : {}),
   });
@@ -1285,8 +1296,19 @@ async function startRenamingSavedSqlNode(nodeId: string) {
   store.selectedTreeNodeId = nodeId;
 }
 
+async function startRenamingConnectionNode(connectionId: string) {
+  pendingRenameNodeId.value = connectionId;
+  store.selectedTreeNodeId = connectionId;
+  store.selectedTreeNodeIds = [connectionId];
+  await scrollToSidebarNode(connectionId);
+  store.selectedTreeNodeId = connectionId;
+}
+
 async function locateActiveTabInSidebar() {
-  const tab = activeTab.value;
+  await locateTabInSidebar(activeTab.value, "smart");
+}
+
+async function locateTabInSidebar(tab: QueryTab | undefined | null, align: SidebarNodeScrollAlign = "center") {
   if (!tab) return;
 
   const tabTarget = activeTabSidebarTarget(tab);
@@ -1379,7 +1401,7 @@ async function locateActiveTabInSidebar() {
   store.treeSelectionAnchorId = match.id;
   await nextTick();
 
-  await scrollToSidebarNode(match.id, { align: "smart" });
+  await scrollToSidebarNode(match.id, { align });
   await flashSidebarNode(match.id);
 }
 
@@ -1414,7 +1436,7 @@ async function ensureTreeLoadedForTarget(target: ActiveTabSidebarTarget, opts?: 
   const loadOptions = force ? { force: true } : undefined;
 
   // Ensure databases are loaded under the connection
-  const connNode = store.treeNodes.find((n) => n.id === connId);
+  const connNode = findSidebarConnectionNode(store.treeNodes, connId);
   if (connNode && (force || !connNode.children || connNode.children.length === 0)) {
     try {
       if (config.db_type === "redis") {
@@ -1937,6 +1959,7 @@ async function selectActiveTabSidebarNode(options: { scroll: boolean }) {
     index,
     currentScrollTop: scroller.scrollTop,
     viewportHeight: scroller.clientHeight,
+    scrollHeight: scroller.scrollHeight,
     topOcclusionHeight: topOcclusionHeightForSidebarNode(match.id),
   });
   if (nextScrollTop !== scroller.scrollTop) {
@@ -2145,7 +2168,7 @@ onUnmounted(() => {
   if (sidebarTreeContentMeasureFrame) window.cancelAnimationFrame(sidebarTreeContentMeasureFrame);
 });
 
-defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
+defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSidebar });
 </script>
 
 <template>
@@ -2166,6 +2189,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
       @open-visible-nacos-namespaces="openSidebarVisibleNacosNamespaces"
       @open-table-name-filters="openSidebarTableNameFilters"
       @add-to-ai="(node) => emit('add-to-ai', node)"
+      @request-connection-rename="startRenamingConnectionNode"
       @request-group-rename="startRenamingCreatedGroup"
       @request-saved-sql-rename="startRenamingSavedSqlNode"
       @open-danger-dialog="openSidebarDangerDialog"

@@ -40,6 +40,7 @@ import { useWebDavAutoUpload } from "@/composables/useWebDavAutoUpload";
 import { useScheduledDatabaseBackups } from "@/composables/useScheduledDatabaseBackups";
 import { shouldDrawDesktopWindowFrame } from "@/composables/useWindowControls";
 import { createOpenTabsRestorationBarrier, initializeDesktopOpenTabs, initializeOpenTabs, type OpenTabsRestorationBarrier } from "@/lib/app/openTabsStartup";
+import { finishAppCloseWithRequiredPersist } from "@/lib/app/appClosePersistence";
 import { useSaveSqlFolderSelection } from "@/composables/useSaveSqlFolderSelection";
 import "@/i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -1069,7 +1070,23 @@ async function finishPendingAppClose(action: AppCloseAction) {
   }
   pendingAppCloseAction.value = null;
   pendingSaveShouldCloseTab.value = true;
-  if (action === "quit") await disposeAllSqlServerActivityTraces().catch(() => undefined);
+  const disposeRuntimeBeforeClose = () => (action === "quit" ? disposeAllSqlServerActivityTraces().catch(() => undefined) : Promise.resolve());
+  if (queryStore.requiresAppCloseDraftPersist) {
+    await finishAppCloseWithRequiredPersist({
+      persist: () => queryStore.flushPendingPersist(),
+      beforeClose: disposeRuntimeBeforeClose,
+      close: () => performCloseAction(action),
+      onPersistError: (error) =>
+        toast(
+          t("settings.appCloseDraftPersistFailed", {
+            message: error instanceof Error ? error.message : String(error),
+          }),
+          8000,
+        ),
+    });
+    return;
+  }
+  await disposeRuntimeBeforeClose();
   await queryStore.flushPendingPersist().catch(() => undefined);
   await performCloseAction(action);
 }
@@ -1688,6 +1705,7 @@ async function newQuery() {
     databaseType: effectiveDatabaseTypeForConnection(conn),
     driverProfile: conn.driver_profile,
     identifierQuote: connectionStore.connectionIdentifierQuote?.(target.connectionId),
+    includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
   });
   const tabId = queryStore.createTab(conn.id, target.database, undefined, "query", target.schema, initialSql, target.catalog);
   if (initialSql) {
@@ -2021,6 +2039,12 @@ function openMcpGuide() {
 function setSidebarOpen(open: boolean) {
   sidebarOpen.value = open;
   safeLocalStorageSet("dbx-sidebar-open", open ? "true" : "false");
+}
+
+async function locateTabInSidebar(tab: QueryTab) {
+  setSidebarOpen(true);
+  await nextTick();
+  await appSidebarRef.value?.locateTabInSidebar(tab);
 }
 
 function ensureQueryTab(): string {
@@ -2829,6 +2853,7 @@ onUnmounted(() => {
                 :agent-driver-update-count="toolbarAgentDriverUpdateCount"
                 @activate-driver-store="openDriverStorePage"
                 @activate-settings-page="activateSettingsPage"
+                @locate-tab="locateTabInSidebar"
                 @activate-tab="
                   driverStoreActive = false;
                   settingsStore.settingsPageActive = false;

@@ -81,6 +81,15 @@ function getNumber(value: unknown) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 }
 
+function firstNonEmptyString(...values: unknown[]) {
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    const normalized = value.trim();
+    if (normalized) return normalized;
+  }
+  return "";
+}
+
 function inferProfile(entry: DbeaverConnectionEntry): ConnectionProfile {
   if (/^jdbcx:/i.test(getString(entry.configuration?.url))) return profileMap.jdbcx;
   if (normalizeKey(entry.provider) === "opentenbase") return profileMap.opentenbase;
@@ -179,6 +188,7 @@ function parseJdbcUrl(url: string, profile: ConnectionProfile) {
 
   try {
     const parsed = new URL(withoutJdbc);
+    if (!parsed.hostname) return result;
     result.host = parsed.hostname;
     result.port = parsed.port ? Number(parsed.port) : profile.port;
     result.database = parsed.pathname.replace(/^\/+/, "").split("/")[0] || undefined;
@@ -223,7 +233,8 @@ function buildConnection(entry: DbeaverConnectionEntry, credentials: ReturnType<
   const config = entry.configuration || {};
   const url = getString(config.url);
   const parsedUrl = parseJdbcUrl(url, profile);
-  const configuredDatabase = getString(config.database || config["database-name"] || config.schema || parsedUrl.database);
+  const configuredPort = getNumber(config.port || config["host-port"] || parsedUrl.port) || profile.port;
+  const configuredDatabase = firstNonEmptyString(config.database, config["database-name"], config.schema, parsedUrl.database);
   const host = getString(config.host || config["host-name"] || parsedUrl.host || (profile.dbType === "sqlite" ? configuredDatabase : "127.0.0.1"));
   const database = profile.dbType === "sqlite" ? "" : configuredDatabase;
   const name = getString(entry.name || database || host || profile.label);
@@ -236,7 +247,7 @@ function buildConnection(entry: DbeaverConnectionEntry, credentials: ReturnType<
     driver_label: profile.label,
     url_params: getString(parsedUrl.params),
     host,
-    port: getNumber(config.port || config["host-port"] || parsedUrl.port) || profile.port,
+    port: configuredPort,
     username: credentials.username || getString(parsedUrl.username) || profile.user,
     password: credentials.password || getString(parsedUrl.password),
     database: database || undefined,

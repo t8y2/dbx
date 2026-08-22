@@ -237,6 +237,7 @@ impl ExecuteMultiResult {
         }
     }
 
+    #[cfg(test)]
     fn execution_error_with_index(result: db::QueryResult, statement_index: usize) -> Self {
         let error = error_from_query_result(&result);
         Self {
@@ -2881,6 +2882,14 @@ fn mysql_batch_pool_error_action(db_type: Option<DatabaseType>, error: &str) -> 
     }
 }
 
+fn mysql_batch_backend_error(action: PoolErrorAction, error: &str) -> crate::backend_error::BackendError {
+    if action == PoolErrorAction::Keep {
+        crate::backend_error::BackendError::from_sql_detail(error)
+    } else {
+        crate::backend_error::BackendError::from_legacy_backend(error)
+    }
+}
+
 fn mysql_non_result_batch_end(
     statements: &[String],
     start: usize,
@@ -2964,7 +2973,7 @@ where
                 }
                 let failed_index = statement_index + completed;
                 let result = error_query_result(error.clone());
-                let backend_error = crate::backend_error::BackendError::from_legacy_backend(&error);
+                let backend_error = mysql_batch_backend_error(action, &error);
                 report_execute_multi_progress(
                     progress,
                     failed_index,
@@ -3010,15 +3019,20 @@ where
             Err(err) => {
                 let action = mysql_batch_pool_error_action(db_type, &err);
                 let result = error_query_result(err.clone());
+                let backend_error = mysql_batch_backend_error(action, &err);
                 report_execute_multi_progress(
                     progress,
                     statement_index,
                     statements.len(),
                     &result,
                     false,
-                    Some(crate::backend_error::BackendError::from_legacy_backend(&err)),
+                    Some(backend_error.clone()),
                 );
-                results.push(ExecuteMultiResult::execution_error_with_index(result, statement_index));
+                results.push(ExecuteMultiResult::execution_error_with_backend(
+                    result,
+                    Some(statement_index),
+                    backend_error,
+                ));
                 // Statement errors are safe to collect, but connection-level failures leave
                 // the protocol state unusable and must still trigger pool cleanup.
                 if !should_continue_batch_after_error(continue_on_error, action) {
@@ -4502,10 +4516,24 @@ pub async fn execute_in_manual_transaction(
     state: &AppState,
     txn_session_id: &str,
     sql: &str,
-    _database: &str,
-    _schema: Option<&str>,
+    database: &str,
+    schema: Option<&str>,
     max_rows: Option<usize>,
 ) -> Result<Vec<db::QueryResult>, String> {
+    execute_in_manual_transaction_with_options(state, txn_session_id, sql, database, schema, max_rows, false)
+        .await
+        .map(|results| results.into_iter().map(ExecuteMultiResult::into_query_result).collect())
+}
+
+pub async fn execute_in_manual_transaction_with_options(
+    state: &AppState,
+    txn_session_id: &str,
+    sql: &str,
+    database: &str,
+    schema: Option<&str>,
+    max_rows: Option<usize>,
+    table_data_preview: bool,
+) -> Result<Vec<ExecuteMultiResult>, String> {
     const TXN_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
     // Resolve statements and validate before taking the per-session connection
@@ -4525,7 +4553,10 @@ pub async fn execute_in_manual_transaction(
         |db_type| crate::sql::split_sql_statements_for_database(sql, db_type),
     );
     if statements.is_empty() {
-        return Ok(vec![empty_query_result(0)]);
+        return Ok(vec![ExecuteMultiResult::success_with_optional_server_large_values(
+            empty_query_result(0),
+            table_data_preview,
+        )]);
     }
 
     // Read-only check while the session is still in the map. If this fails the
@@ -4577,11 +4608,25 @@ pub async fn execute_in_manual_transaction(
             }
             TxnConnection::Mysql(conn) => execute_manual_txn_mysql_statement(conn, statement, row_limit).await,
             TxnConnection::Agent { client, .. } => {
-                execute_manual_txn_agent_statement(client, db_type, statement, _database, _schema, row_limit).await
+                execute_manual_txn_agent_statement(
+                    client,
+                    db_type,
+                    statement,
+                    database,
+                    schema,
+                    row_limit,
+                    table_data_preview,
+                )
+                .await
             }
         };
         match result {
-            Ok(query_result) => results.push(query_result),
+            Ok(query_result) => {
+                results.push(ExecuteMultiResult::success_with_optional_server_large_values(
+                    query_result,
+                    table_data_preview,
+                ));
+            }
             Err(e) => {
                 // Statement failure ends the transaction. If another cleanup path
                 // already removed the session, it owns the final rollback.
@@ -4792,6 +4837,10 @@ async fn release_manual_txn_agent_pool(state: &AppState, connection_id: &str, co
     }
 }
 
+fn manual_txn_agent_query_options(row_limit: usize, table_data_preview: bool) -> QueryExecutionOptions {
+    QueryExecutionOptions { max_rows: Some(row_limit.max(1)), table_data_preview, ..QueryExecutionOptions::default() }
+}
+
 async fn execute_manual_txn_agent_statement(
     client: &Arc<crate::db::agent_driver::PooledAgentClient>,
     db_type: Option<DatabaseType>,
@@ -4799,10 +4848,11 @@ async fn execute_manual_txn_agent_statement(
     database: &str,
     schema: Option<&str>,
     row_limit: usize,
+    table_data_preview: bool,
 ) -> Result<db::QueryResult, String> {
     let sql = sql_for_execution_context(db_type, statement, schema);
     let execution_schema = schema_for_execution_context(db_type, schema);
-    let options = QueryExecutionOptions { max_rows: Some(row_limit.max(1)), ..QueryExecutionOptions::default() };
+    let options = manual_txn_agent_query_options(row_limit, table_data_preview);
     let params =
         agent_execute_query_params(&sql, Some(database).filter(|value| !value.is_empty()), execution_schema, options);
     let mut locked = client.lock().await;
@@ -5889,7 +5939,7 @@ for line in sys.stdin:
                     success: false,
                     execution_time_ms: 0,
                     affected_rows: 0,
-                    error: Some(crate::backend_error::BackendError::from_legacy_backend("Duplicate entry")),
+                    error: Some(crate::backend_error::BackendError::from_sql_detail("Duplicate entry")),
                 },
             ]
         );
@@ -6002,6 +6052,7 @@ for line in sys.stdin:
         assert_eq!(results[0].statement_index, Some(0));
         assert_eq!(results[1].statement_index, Some(1));
         assert!(results[1].execution_error);
+        assert_eq!(results[1].error.as_ref().map(|error| error.code()), Some("DBX-JDBC-4001"));
         assert_eq!(
             progress_events
                 .lock()
@@ -6356,6 +6407,7 @@ for line in sys.stdin:
         assert_eq!(results.len(), 2);
         assert_eq!(results.iter().map(|result| result.statement_index).collect::<Vec<_>>(), vec![Some(0), Some(1)]);
         assert!(results[1].execution_error);
+        assert_eq!(results[1].error.as_ref().map(|error| error.code()), Some("DBX-LEGACY-0001"));
         assert_eq!(error_action, Some(PoolErrorAction::ReconnectAndRetry));
     }
 
@@ -7311,6 +7363,19 @@ for line in sys.stdin:
         assert_eq!(params["fetchSize"], 250);
         assert_eq!(params["rowOffset"], 100);
         assert_eq!(params["timeoutSecs"], 600);
+        assert_eq!(params["deferLobs"], true);
+    }
+
+    #[test]
+    fn manual_transaction_agent_query_options_preserve_preview_mode() {
+        let params = agent_execute_query_params(
+            "SELECT * FROM documents",
+            Some("ORCL"),
+            Some("APP"),
+            manual_txn_agent_query_options(250, true),
+        );
+
+        assert_eq!(params["maxRows"], 250);
         assert_eq!(params["deferLobs"], true);
     }
 

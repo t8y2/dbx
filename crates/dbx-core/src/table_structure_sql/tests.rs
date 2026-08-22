@@ -2834,6 +2834,212 @@ fn dameng_unchanged_identity_extra_does_not_mark_existing_column_changed() {
 }
 
 #[test]
+fn dameng_enables_identity_on_existing_not_null_column() {
+    let mut id = existing_pk_column("ID", "INT", false, false);
+    id.extra = Some(ColumnExtra {
+        auto_increment: Some(true),
+        identity: Some(ColumnIdentity { generation: None, seed: Some(10), increment: Some(2) }),
+        ..Default::default()
+    });
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Dameng,
+        Some("SYSDBA"),
+        "TEST",
+        vec![id],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE \"SYSDBA\".\"TEST\" ADD COLUMN \"ID\" IDENTITY(10, 2);"]);
+}
+
+#[test]
+fn dameng_makes_existing_column_not_null_before_enabling_identity() {
+    let mut id = column("ID");
+    id.data_type = "INT".to_string();
+    id.is_nullable = false;
+    id.extra = Some(ColumnExtra {
+        auto_increment: Some(true),
+        identity: Some(ColumnIdentity { generation: None, seed: Some(1), increment: Some(1) }),
+        ..Default::default()
+    });
+    id.original = Some(ColumnInfo {
+        name: "ID".to_string(),
+        data_type: "INT".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+        ..Default::default()
+    });
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Dameng,
+        Some("SYSDBA"),
+        "TEST",
+        vec![id],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE \"SYSDBA\".\"TEST\" MODIFY (\"ID\" INT NOT NULL);",
+            "ALTER TABLE \"SYSDBA\".\"TEST\" ADD COLUMN \"ID\" IDENTITY(1, 1);",
+        ]
+    );
+}
+
+#[test]
+fn dameng_disables_identity_on_existing_column() {
+    let mut id = existing_pk_column("ID", "INT", false, false);
+    id.extra = Some(ColumnExtra::default());
+    id.original.as_mut().unwrap().extra = Some("IDENTITY(10, 2)".to_string());
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Dameng,
+        Some("SYSDBA"),
+        "TEST",
+        vec![id],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE \"SYSDBA\".\"TEST\" DROP IDENTITY;"]);
+}
+
+#[test]
+fn dameng_moves_identity_with_drop_before_add_regardless_of_column_order() {
+    let mut target = existing_pk_column("TARGET_ID", "BIGINT", false, false);
+    target.extra = Some(ColumnExtra {
+        auto_increment: Some(true),
+        identity: Some(ColumnIdentity { generation: None, seed: Some(100), increment: Some(5) }),
+        ..Default::default()
+    });
+
+    let mut source = existing_pk_column("SOURCE_ID", "INT", false, false);
+    source.extra = Some(ColumnExtra::default());
+    source.original.as_mut().unwrap().extra = Some("IDENTITY(1, 1)".to_string());
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Dameng,
+        Some("SYSDBA"),
+        "TEST",
+        vec![target, source],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE \"SYSDBA\".\"TEST\" DROP IDENTITY;",
+            "ALTER TABLE \"SYSDBA\".\"TEST\" ADD COLUMN \"TARGET_ID\" IDENTITY(100, 5);",
+        ]
+    );
+}
+
+#[test]
+fn dameng_rejects_identity_on_incompatible_existing_column() {
+    let mut code = column("CODE");
+    code.data_type = "VARCHAR(255)".to_string();
+    code.is_nullable = false;
+    code.extra = Some(ColumnExtra {
+        auto_increment: Some(true),
+        identity: Some(ColumnIdentity { generation: None, seed: Some(1), increment: Some(1) }),
+        ..Default::default()
+    });
+    code.original = Some(ColumnInfo {
+        name: "CODE".to_string(),
+        data_type: "VARCHAR(255)".to_string(),
+        is_nullable: false,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+        ..Default::default()
+    });
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Dameng,
+        Some("SYSDBA"),
+        "TEST",
+        vec![code],
+    ));
+
+    assert!(result.statements.is_empty());
+    assert_eq!(
+        result.warnings,
+        vec!["Dameng identity column \"CODE\" must use tinyint, smallint, int, integer, bigint, number, numeric, or decimal/dec with scale 0."]
+    );
+}
+
+#[test]
+fn dameng_rejects_zero_increment_when_enabling_existing_identity() {
+    let mut id = existing_pk_column("ID", "INT", false, false);
+    id.extra = Some(ColumnExtra {
+        auto_increment: Some(true),
+        identity: Some(ColumnIdentity { generation: None, seed: Some(1), increment: Some(0) }),
+        ..Default::default()
+    });
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Dameng,
+        Some("SYSDBA"),
+        "TEST",
+        vec![id],
+    ));
+
+    assert!(result.statements.is_empty());
+    assert_eq!(result.warnings, vec!["Dameng identity column \"ID\" increment cannot be 0."]);
+}
+
+#[test]
+fn dameng_rejects_changing_existing_identity_parameters() {
+    let mut id = existing_pk_column("ID", "INT", false, false);
+    id.extra = Some(ColumnExtra {
+        auto_increment: Some(true),
+        identity: Some(ColumnIdentity { generation: None, seed: Some(10), increment: Some(3) }),
+        ..Default::default()
+    });
+    id.original.as_mut().unwrap().extra = Some("IDENTITY(10, 2)".to_string());
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Dameng,
+        Some("SYSDBA"),
+        "TEST",
+        vec![id],
+    ));
+
+    assert!(result.statements.is_empty());
+    assert_eq!(
+        result.warnings,
+        vec![
+            "Changing Dameng IDENTITY seed or increment for existing column \"ID\" is not supported from this editor."
+        ]
+    );
+}
+
+#[test]
+fn oracle_does_not_adopt_dameng_existing_identity_ddl() {
+    let mut id = existing_pk_column("ID", "NUMBER(10)", false, false);
+    id.extra = Some(ColumnExtra {
+        auto_increment: Some(true),
+        identity: Some(ColumnIdentity { generation: None, seed: Some(1), increment: Some(1) }),
+        ..Default::default()
+    });
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Oracle,
+        Some("APP"),
+        "USERS",
+        vec![id],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, Vec::<String>::new());
+}
+
+#[test]
 fn dameng_rejects_adding_second_identity_column() {
     let mut existing = column("ID");
     existing.data_type = "INT".to_string();
@@ -2876,6 +3082,7 @@ fn dameng_rejects_adding_second_identity_column() {
         is_gaussdb_m_mode: false,
     });
 
+    assert_eq!(result.statements, Vec::<String>::new());
     assert_eq!(result.warnings, vec!["Dameng tables can have only one identity column."]);
 }
 
@@ -3316,6 +3523,115 @@ fn dameng_blocks_dropping_former_primary_key_column() {
 }
 
 #[test]
+fn oracle_sets_not_null_before_adding_primary_key() {
+    let mut id = existing_pk_column("id", "NUMBER", false, true);
+    id.original.as_mut().unwrap().is_nullable = true;
+
+    let result =
+        build_table_structure_change_sql(structure_change_options(DatabaseType::Oracle, Some("HR"), "users", vec![id]));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE \"HR\".\"users\" MODIFY (\"id\" NUMBER NOT NULL);",
+            "ALTER TABLE \"HR\".\"users\" ADD PRIMARY KEY (\"id\");",
+        ]
+    );
+}
+
+#[test]
+fn oracle_adds_composite_primary_key_in_draft_order() {
+    let mut tenant_id = existing_pk_column("tenant_id", "NUMBER", false, true);
+    tenant_id.id = "tenant_id".to_string();
+    let mut code = existing_pk_column("code", "VARCHAR2(50)", false, true);
+    code.id = "code".to_string();
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Oracle,
+        Some("HR"),
+        "users",
+        vec![code, tenant_id],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE \"HR\".\"users\" ADD PRIMARY KEY (\"code\", \"tenant_id\");"]);
+}
+
+#[test]
+fn oracle_adds_new_primary_key_column_before_adding_constraint() {
+    let mut code = column("code");
+    code.data_type = "VARCHAR2(50)".to_string();
+    code.is_nullable = false;
+    code.is_primary_key = true;
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Oracle,
+        Some("HR"),
+        "users",
+        vec![code],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE \"HR\".\"users\" ADD (\"code\" VARCHAR2(50));",
+            "ALTER TABLE \"HR\".\"users\" ADD PRIMARY KEY (\"code\");",
+        ]
+    );
+}
+
+#[test]
+fn oracle_rejects_existing_primary_key_changes_without_partial_sql() {
+    let uncheck =
+        vec![existing_pk_column("id", "NUMBER", true, false), existing_pk_column("name", "VARCHAR2(50)", false, false)];
+    let replacement = vec![
+        existing_pk_column("id", "NUMBER", true, false),
+        existing_pk_column("code", "VARCHAR2(50)", false, true),
+        existing_pk_column("name", "VARCHAR2(50)", false, false),
+    ];
+    let second_key = vec![
+        existing_pk_column("id", "NUMBER", true, true),
+        existing_pk_column("code", "VARCHAR2(50)", false, true),
+        existing_pk_column("name", "VARCHAR2(50)", false, false),
+    ];
+
+    for (case, columns) in [("uncheck", uncheck), ("replacement", replacement), ("second key", second_key)] {
+        let mut options = structure_change_options(DatabaseType::Oracle, Some("HR"), "users", columns);
+        options.indexes = vec![index("idx_users_name", &["name"])];
+
+        let result = build_table_structure_change_sql(options);
+
+        assert!(result.statements.is_empty(), "{case} must not emit partial SQL: {:?}", result.statements);
+        assert_eq!(result.warnings.len(), 1, "unexpected {case} warnings: {:?}", result.warnings);
+        assert!(
+            result.warnings[0].contains("Changing primary keys"),
+            "unexpected {case} warning: {:?}",
+            result.warnings
+        );
+    }
+}
+
+#[test]
+fn oracle_compatible_engines_do_not_inherit_oracle_primary_key_add() {
+    for database_type in [DatabaseType::OceanbaseOracle, DatabaseType::Iris] {
+        let columns = vec![
+            existing_pk_column("id", "NUMBER", false, true),
+            existing_pk_column("name", "VARCHAR2(50)", false, false),
+        ];
+        let mut options = structure_change_options(database_type, Some("APP"), "users", columns);
+        options.indexes = vec![index("idx_users_name", &["name"])];
+
+        let result = build_table_structure_change_sql(options);
+
+        assert!(result.statements.is_empty(), "{database_type:?} must not emit partial SQL: {:?}", result.statements);
+        assert_eq!(result.warnings.len(), 1, "unexpected {database_type:?} warnings: {:?}", result.warnings);
+        assert!(result.warnings[0].contains("Adding primary keys"));
+    }
+}
+
+#[test]
 fn oracle_uncheck_primary_key_and_drop_column_does_not_emit_drop_column() {
     // alter_primary_key is false for Oracle: unchecking PK must not unlock DROP COLUMN without a PK drop.
     let mut id = existing_pk_column("id", "NUMBER", true, false);
@@ -3461,6 +3777,209 @@ fn builds_mysql_alter_table_change_primary_key() {
     assert_eq!(
         result.statements,
         vec!["ALTER TABLE `users` DROP PRIMARY KEY;", "ALTER TABLE `users` ADD PRIMARY KEY (`uuid`);",]
+    );
+}
+
+#[test]
+fn mysql_coalesces_auto_increment_primary_key_migration() {
+    let mut old_pk = existing_pk_column("campaign_rel_id", "bigint(20)", true, false);
+    old_pk.id = "old_campaign_rel_id".to_string();
+
+    let mut id = existing_pk_column("id", "bigint(20)", false, true);
+    id.id = "new_id".to_string();
+    id.comment = "自增主键".to_string();
+    id.extra = Some(ColumnExtra { auto_increment: Some(true), ..Default::default() });
+
+    let mut options = structure_change_options(DatabaseType::Mysql, None, "tbl_gy_campaign_rel", vec![old_pk, id]);
+    options.indexes = vec![existing_index("campaign_rel_id_UNIQUE", &["campaign_rel_id"], true)];
+
+    let result = build_table_structure_change_sql(options);
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE `tbl_gy_campaign_rel` DROP PRIMARY KEY, MODIFY COLUMN `id` bigint(20) NOT NULL AUTO_INCREMENT COMMENT '自增主键', ADD PRIMARY KEY (`id`);"
+        ]
+    );
+}
+
+#[test]
+fn mysql_coalesces_new_auto_increment_primary_key_column() {
+    let mut old_pk = existing_pk_column("legacy_id", "bigint", true, false);
+    old_pk.id = "old_legacy_id".to_string();
+
+    let mut id = column("id");
+    id.data_type = "bigint".to_string();
+    id.is_nullable = false;
+    id.is_primary_key = true;
+    id.extra = Some(ColumnExtra { auto_increment: Some(true), ..Default::default() });
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Mysql,
+        None,
+        "users",
+        vec![old_pk, id],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE `users` DROP PRIMARY KEY, ADD COLUMN `id` bigint NOT NULL AUTO_INCREMENT, ADD PRIMARY KEY (`id`);"
+        ]
+    );
+}
+
+#[test]
+fn mysql_stable_primary_key_auto_increment_changes_keep_column_only_alter() {
+    let mut enable = existing_pk_column("id", "bigint", true, true);
+    enable.extra = Some(ColumnExtra { auto_increment: Some(true), ..Default::default() });
+
+    let enabled =
+        build_table_structure_change_sql(structure_change_options(DatabaseType::Mysql, None, "users", vec![enable]));
+    assert_eq!(enabled.warnings, Vec::<String>::new());
+    assert_eq!(enabled.statements, vec!["ALTER TABLE `users` MODIFY COLUMN `id` bigint NOT NULL AUTO_INCREMENT;"]);
+
+    let mut disable = existing_pk_column("id", "bigint", true, true);
+    disable.extra = Some(ColumnExtra::default());
+    disable.original.as_mut().unwrap().extra = Some("auto_increment".to_string());
+
+    let disabled =
+        build_table_structure_change_sql(structure_change_options(DatabaseType::Mysql, None, "users", vec![disable]));
+    assert_eq!(disabled.warnings, Vec::<String>::new());
+    assert_eq!(disabled.statements, vec!["ALTER TABLE `users` MODIFY COLUMN `id` bigint NOT NULL;"]);
+}
+
+#[test]
+fn mysql_coalesces_migration_away_from_existing_auto_increment_primary_key() {
+    let mut old_pk = existing_pk_column("id", "bigint", true, false);
+    old_pk.id = "old_id".to_string();
+    old_pk.extra = Some(ColumnExtra { auto_increment: Some(true), ..Default::default() });
+    old_pk.original.as_mut().unwrap().extra = Some("auto_increment".to_string());
+
+    let mut new_pk = existing_pk_column("external_id", "varchar(64)", false, true);
+    new_pk.id = "new_external_id".to_string();
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Mysql,
+        None,
+        "users",
+        vec![old_pk, new_pk],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE `users` DROP PRIMARY KEY, ADD PRIMARY KEY (`external_id`);"]);
+}
+
+#[test]
+fn mysql_coalesces_renamed_auto_increment_primary_key_column() {
+    let mut old_pk = existing_pk_column("campaign_rel_id", "bigint", true, false);
+    old_pk.id = "old_campaign_rel_id".to_string();
+
+    let mut id = existing_pk_column("id", "bigint", false, true);
+    id.id = "new_id".to_string();
+    id.original.as_mut().unwrap().name = "legacy_id".to_string();
+    id.extra = Some(ColumnExtra { auto_increment: Some(true), ..Default::default() });
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Mysql,
+        None,
+        "users",
+        vec![old_pk, id],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE `users` DROP PRIMARY KEY, CHANGE COLUMN `legacy_id` `id` bigint NOT NULL AUTO_INCREMENT, ADD PRIMARY KEY (`id`);"
+        ]
+    );
+}
+
+#[test]
+fn mysql_coalesces_composite_primary_key_around_auto_increment_column() {
+    for (auto_first, has_supporting_index, expected_primary_key) in
+        [(true, false, "`id`, `tenant_id`"), (false, false, "`tenant_id`, `id`"), (false, true, "`tenant_id`, `id`")]
+    {
+        let mut old_pk = existing_pk_column("legacy_id", "bigint", true, false);
+        old_pk.id = "old_legacy_id".to_string();
+
+        let mut id = existing_pk_column("id", "bigint", false, true);
+        id.id = "new_id".to_string();
+        id.extra = Some(ColumnExtra { auto_increment: Some(true), ..Default::default() });
+
+        let mut tenant_id = existing_pk_column("tenant_id", "bigint", false, true);
+        tenant_id.id = "new_tenant_id".to_string();
+
+        let columns = if auto_first { vec![old_pk, id, tenant_id] } else { vec![old_pk, tenant_id, id] };
+        let mut options = structure_change_options(DatabaseType::Mysql, None, "users", columns);
+        if has_supporting_index {
+            options.indexes = vec![existing_index("uniq_users_id", &["id"], true)];
+        }
+
+        let result = build_table_structure_change_sql(options);
+
+        assert_eq!(result.warnings, Vec::<String>::new());
+        assert_eq!(result.statements.len(), 1);
+        assert_eq!(
+            result.statements[0],
+            format!(
+                "ALTER TABLE `users` DROP PRIMARY KEY, MODIFY COLUMN `id` bigint NOT NULL AUTO_INCREMENT, ADD PRIMARY KEY ({expected_primary_key});"
+            )
+        );
+    }
+}
+
+#[test]
+fn mysql_compatible_database_keeps_existing_primary_key_statement_sequence() {
+    let mut old_pk = existing_pk_column("legacy_id", "bigint", true, false);
+    old_pk.id = "old_legacy_id".to_string();
+
+    let mut id = existing_pk_column("id", "bigint", false, true);
+    id.id = "new_id".to_string();
+    id.extra = Some(ColumnExtra { auto_increment: Some(true), ..Default::default() });
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::StarRocks,
+        None,
+        "users",
+        vec![old_pk, id],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE `users` MODIFY COLUMN `id` bigint NOT NULL AUTO_INCREMENT;",
+            "ALTER TABLE `users` DROP PRIMARY KEY;",
+            "ALTER TABLE `users` ADD PRIMARY KEY (`id`);",
+        ]
+    );
+}
+
+#[test]
+fn gaussdb_m_mode_keeps_existing_primary_key_statement_sequence() {
+    let mut old_pk = existing_pk_column("legacy_id", "bigint", true, false);
+    old_pk.id = "old_legacy_id".to_string();
+
+    let mut id = existing_pk_column("id", "bigint", false, true);
+    id.id = "new_id".to_string();
+    id.extra = Some(ColumnExtra { auto_increment: Some(true), ..Default::default() });
+
+    let mut options = structure_change_options(DatabaseType::Gaussdb, None, "users", vec![old_pk, id]);
+    options.is_gaussdb_m_mode = true;
+    let result = build_table_structure_change_sql(options);
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE `users` MODIFY COLUMN `id` bigint NOT NULL AUTO_INCREMENT;",
+            "ALTER TABLE `users` DROP PRIMARY KEY;",
+            "ALTER TABLE `users` ADD PRIMARY KEY (`id`);",
+        ]
     );
 }
 

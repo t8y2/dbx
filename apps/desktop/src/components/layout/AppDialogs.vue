@@ -290,9 +290,23 @@ watch(
     :open="dialogs.showConfigPassphraseDialog.value"
     :mode="dialogs.configPassphraseMode.value"
     :external-error="dialogs.configPassphraseError.value"
+    :busy="dialogs.configExportBusy.value"
     @update:open="dialogs.onConfigPassphraseOpenChange"
+    @request-unencrypted="dialogs.onRequestUnencryptedExport"
     @confirm="dialogs.configPassphraseMode.value === 'export' ? dialogs.onExportConfirm($event) : dialogs.onImportConfirm($event)"
   />
+  <Dialog v-if="dialogs.showConfigUnencryptedExportConfirm.value" :open="dialogs.showConfigUnencryptedExportConfirm.value" @update:open="dialogs.onConfigUnencryptedExportOpenChange">
+    <DialogContent class="sm:max-w-[440px]">
+      <DialogHeader>
+        <DialogTitle>{{ t("configExport.unencryptedWarningTitle") }}</DialogTitle>
+      </DialogHeader>
+      <p class="text-sm text-muted-foreground">{{ t("configExport.unencryptedWarningDescription") }}</p>
+      <DialogFooter>
+        <Button type="button" variant="outline" :disabled="dialogs.configExportBusy.value" @click="dialogs.onConfigUnencryptedExportCancel()">{{ t("dangerDialog.cancel") }}</Button>
+        <Button type="button" variant="destructive" :disabled="dialogs.configExportBusy.value" @click="dialogs.onConfigUnencryptedExportConfirm()">{{ t("configExport.confirmUnencryptedExport") }}</Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
   <Dialog v-model:open="dialogs.showImportLayoutConfirm.value">
     <DialogContent class="sm:max-w-[400px]">
       <DialogHeader>

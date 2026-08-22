@@ -1,6 +1,7 @@
 use super::column_format::{
-    clickhouse_column_type, column_data_type, column_definition, is_mysql_character_data_type,
-    original_is_mysql_generated_column, original_mysql_generated_clause,
+    clickhouse_column_type, column_data_type, column_definition, has_dameng_identity,
+    is_dameng_identity_compatible_type, is_mysql_character_data_type, original_is_mysql_generated_column,
+    original_mysql_generated_clause,
 };
 use super::columns::build_drop_column_sql;
 use super::comments::build_sqlserver_column_comment_sql;
@@ -100,7 +101,7 @@ pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> Ta
         StructureDialect::Mysql => statements.extend(build_mysql_existing_column_sql(&table, &options.column, "")),
         StructureDialect::Doris => statements.extend(build_doris_existing_column_sql(&table, &options.column, "")),
         StructureDialect::Postgres => statements.extend(build_postgres_existing_column_sql(&table, &options.column)),
-        StructureDialect::Oracle | StructureDialect::Dameng => {
+        StructureDialect::Oracle => {
             if options.database_type == Some(crate::models::connection::DatabaseType::Iris) {
                 statements.extend(build_iris_existing_column_sql(&table, &options.column));
             } else if options.database_type == Some(crate::models::connection::DatabaseType::Xugu) {
@@ -108,6 +109,9 @@ pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> Ta
             } else {
                 statements.extend(build_oracle_like_existing_column_sql(dialect, &table, &options.column))
             }
+        }
+        StructureDialect::Dameng => {
+            statements.extend(build_dameng_existing_column_sql(&table, &options.column, true, &mut warnings))
         }
         StructureDialect::Oscar => statements.extend(build_oscar_existing_column_sql(dialect, &table, &options.column)),
         StructureDialect::H2 => statements.extend(build_h2_existing_column_sql(&table, &options.column)),
@@ -221,6 +225,78 @@ fn identity_matches_original(identity: &super::types::ColumnIdentity, original_e
     sqlserver_identity_matches_original(identity, original_extra)
 }
 
+#[derive(Clone, Copy)]
+enum DamengIdentityTransition {
+    None,
+    Add { seed: i64, increment: i64 },
+    Drop,
+    ParametersChanged,
+}
+
+fn dameng_identity_transition(column: &EditableStructureColumn) -> DamengIdentityTransition {
+    let Some(original) = &column.original else {
+        return DamengIdentityTransition::None;
+    };
+    let original_extra = original.extra.as_deref().unwrap_or("");
+    let original_identity = original_has_identity(original_extra);
+    let current_identity = has_dameng_identity(column);
+    match (original_identity, current_identity) {
+        (false, false) => DamengIdentityTransition::None,
+        (false, true) => {
+            let identity = column.extra.as_ref().and_then(|extra| extra.identity.as_ref());
+            DamengIdentityTransition::Add {
+                seed: identity.and_then(|identity| identity.seed).unwrap_or(1),
+                increment: identity.and_then(|identity| identity.increment).unwrap_or(1),
+            }
+        }
+        (true, false) => DamengIdentityTransition::Drop,
+        (true, true) => match column.extra.as_ref().and_then(|extra| extra.identity.as_ref()) {
+            Some(identity) if !identity_matches_original(identity, original_extra) => {
+                DamengIdentityTransition::ParametersChanged
+            }
+            _ => DamengIdentityTransition::None,
+        },
+    }
+}
+
+pub(super) fn dameng_drops_identity(column: &EditableStructureColumn) -> bool {
+    matches!(dameng_identity_transition(column), DamengIdentityTransition::Drop)
+}
+
+pub(super) fn validate_dameng_existing_identity_change(
+    column: &EditableStructureColumn,
+    warnings: &mut Vec<String>,
+) -> bool {
+    match dameng_identity_transition(column) {
+        DamengIdentityTransition::Add { increment, .. } => {
+            if !is_dameng_identity_compatible_type(&column.data_type) {
+                warnings.push(format!(
+                    "Dameng identity column \"{}\" must use tinyint, smallint, int, integer, bigint, number, numeric, or decimal/dec with scale 0.",
+                    column.name
+                ));
+            } else if column.is_nullable {
+                warnings.push(format!(
+                    "Dameng identity column \"{}\" must be NOT NULL before identity can be enabled.",
+                    column.name
+                ));
+            } else if increment == 0 {
+                warnings.push(format!("Dameng identity column \"{}\" increment cannot be 0.", column.name));
+            } else {
+                return true;
+            }
+            false
+        }
+        DamengIdentityTransition::ParametersChanged => {
+            warnings.push(format!(
+                "Changing Dameng IDENTITY seed or increment for existing column \"{}\" is not supported from this editor.",
+                column.name
+            ));
+            false
+        }
+        DamengIdentityTransition::None | DamengIdentityTransition::Drop => true,
+    }
+}
+
 pub(super) fn has_column_extra_change(column: &EditableStructureColumn) -> bool {
     let Some(original) = &column.original else { return false };
     let current_extra = column.extra.as_ref();
@@ -277,6 +353,11 @@ pub(super) fn build_mysql_existing_column_sql(
     column: &EditableStructureColumn,
     position_clause: &str,
 ) -> Vec<String> {
+    let operation = build_mysql_existing_column_clause(column, position_clause);
+    vec![format!("ALTER TABLE {table} {operation};")]
+}
+
+pub(super) fn build_mysql_existing_column_clause(column: &EditableStructureColumn, position_clause: &str) -> String {
     let original_name = column.original.as_ref().map(|original| original.name.as_str()).unwrap_or(&column.name);
     let operation = if column.name == original_name {
         format!("MODIFY COLUMN {}", column_definition(StructureDialect::Mysql, column))
@@ -287,7 +368,7 @@ pub(super) fn build_mysql_existing_column_sql(
             column_definition(StructureDialect::Mysql, column)
         )
     };
-    vec![format!("ALTER TABLE {table} {operation}{position_clause};")]
+    format!("{operation}{position_clause}")
 }
 
 pub(super) fn build_doris_existing_column_sql(
@@ -493,6 +574,32 @@ pub(super) fn build_oracle_like_existing_column_sql(
             if clean(&column.comment).is_empty() { "NULL".to_string() } else { quote_string(&clean(&column.comment)) };
         statements
             .push(format!("COMMENT ON COLUMN {table}.{} IS {comment_value};", quote_ident(dialect, &current_name)));
+    }
+    statements
+}
+
+pub(super) fn build_dameng_existing_column_sql(
+    table: &str,
+    column: &EditableStructureColumn,
+    emit_identity_drop: bool,
+    warnings: &mut Vec<String>,
+) -> Vec<String> {
+    let transition = dameng_identity_transition(column);
+    if !validate_dameng_existing_identity_change(column, warnings) {
+        return Vec::new();
+    }
+    let mut statements = Vec::new();
+    if emit_identity_drop && matches!(transition, DamengIdentityTransition::Drop) {
+        statements.push(format!("ALTER TABLE {table} DROP IDENTITY;"));
+    }
+
+    statements.extend(build_oracle_like_existing_column_sql(StructureDialect::Dameng, table, column));
+
+    if let DamengIdentityTransition::Add { seed, increment } = transition {
+        statements.push(format!(
+            "ALTER TABLE {table} ADD COLUMN {} IDENTITY({seed}, {increment});",
+            quote_ident(StructureDialect::Dameng, &column.name)
+        ));
     }
     statements
 }

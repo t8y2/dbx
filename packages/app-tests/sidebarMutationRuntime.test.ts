@@ -98,3 +98,24 @@ test("all locales define the object drop refresh warning with its message placeh
     assert.match(source, /objectDropRefreshFailed\s*:\s*["'][^\n]*\{message\}/, `${locale} must preserve the message placeholder`);
   }
 });
+
+test("database rename uses a maintenance connection and mutates state only after guarded script execution", () => {
+  const rename = functionBody("confirmRenameObject");
+  assert.ok(rename.includes("databaseRenameMaintenanceDatabase(connectionStore.getConfig(node.connectionId)?.database, node.label)"));
+  assert.ok(rename.includes("api.executeQuery(node.connectionId, maintenanceDatabase, preflightSql)"));
+  assert.ok(rename.includes("database: maintenanceDatabase"));
+  assert.ok(rename.includes("executeAsScript: true"));
+  assert.ok(rename.includes("beforeExecute: () => connectionStore.closeDatabaseConnection(node.connectionId!, node.label)"));
+  assert.ok(rename.includes("if (executed === undefined) return"));
+
+  const executionIndex = rename.indexOf("const executed = await executeTreeNodeSqlWithProductionGuard");
+  const cancellationIndex = rename.indexOf("if (executed === undefined) return");
+  const mutationIndex = rename.indexOf("renameApplied = true");
+  assert.ok(executionIndex >= 0 && cancellationIndex > executionIndex && mutationIndex > cancellationIndex);
+
+  assert.ok(runtimeHost.includes("beforeExecute?: () => Promise<void>"));
+  const guardedExecuteIndex = runtimeHost.indexOf("execute: async () => {");
+  const beforeExecuteIndex = runtimeHost.indexOf("await options.beforeExecute?.()", guardedExecuteIndex);
+  const markDispatchedIndex = runtimeHost.indexOf("options.markDispatched?.()", guardedExecuteIndex);
+  assert.ok(guardedExecuteIndex >= 0 && beforeExecuteIndex > guardedExecuteIndex && markDispatchedIndex > beforeExecuteIndex);
+});

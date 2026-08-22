@@ -63,6 +63,8 @@ import type {
   DriverRuntimeSummary,
   UpgradeAllAgentDriversResult,
   AgentUpdateBlocker,
+  AgentOfflineExportPreview,
+  AgentOfflineExportResult,
   DesktopSettings,
   McpGlobalPolicy,
   SavedSqlSyncRequest,
@@ -645,6 +647,14 @@ export async function importAgentsFromZip(fileOrPath: string | File, operationId
   return result.count;
 }
 
+export async function previewAgentOfflineExport(): Promise<AgentOfflineExportPreview> {
+  throw new Error("Offline Agent package export is only available in the desktop app.");
+}
+
+export async function exportAgentsOffline(_path: string, _driverKeys: string[]): Promise<AgentOfflineExportResult> {
+  throw new Error("Offline Agent package export is only available in the desktop app.");
+}
+
 export async function importAgentDriver(dbType: string, pathOrFile: string | File): Promise<void> {
   let blob: Blob;
   let fileName: string;
@@ -1220,7 +1230,7 @@ export async function beginManualTransaction(_connectionId: string, _database: s
   throw new Error("Manual transaction management is only available in the desktop app.");
 }
 
-export async function executeInManualTransaction(_txnSessionId: string, _sql: string, _database: string, _schema?: string, _maxRows?: number): Promise<QueryResult[]> {
+export async function executeInManualTransaction(_txnSessionId: string, _sql: string, _database: string, _schema?: string, _maxRows?: number, _tableDataPreview?: boolean): Promise<QueryResult[]> {
   throw new Error("Manual transaction management is only available in the desktop app.");
 }
 
@@ -1295,7 +1305,7 @@ export async function buildDroppedFilePreviewSql(options: DroppedFilePreviewSqlO
 }
 
 export async function buildTableSelectSql(options: BuildTableSelectSqlOptions): Promise<string> {
-  return post("/api/query/build-table-select-sql", { options });
+  return post("/api/query/build-table-select-sql", { options, includeDatabaseName: options.includeDatabaseName === true });
 }
 
 export async function buildDatabaseSearchSql(options: DatabaseSearchSqlOptions): Promise<DatabaseSearchSql | null> {
@@ -1308,6 +1318,14 @@ export async function buildSearchResultWhere(options: SearchResultWhereOptions):
 
 export async function buildRenameObjectSql(options: BuildRenameObjectSqlOptions): Promise<string> {
   return post("/api/query/build-rename-object-sql", { options });
+}
+
+export async function buildRenameDatabaseSql(options: { databaseType?: DatabaseType; oldName: string; newName: string; terminateConnections: boolean }): Promise<string> {
+  return post("/api/query/build-rename-database-sql", options);
+}
+
+export async function buildRenameDatabasePreflightSql(options: { databaseType?: DatabaseType; databaseName: string }): Promise<string> {
+  return post("/api/query/build-rename-database-preflight-sql", options);
 }
 
 export async function buildCreateDatabaseSql(options: CreateDatabaseSqlOptions): Promise<string> {
@@ -3637,7 +3655,7 @@ export async function vectorListCollections(connectionId: string, database?: str
 }
 
 export async function vectorGetCollectionDetail(connectionId: string, database: string, collection: string): Promise<CollectionInfo> {
-  return post("/api/mongo/vector-collection-detail", {
+  return post("/api/vector/collection-detail", {
     connectionId,
     database,
     collection,
@@ -3650,6 +3668,10 @@ export async function vectorDropDatabase(connectionId: string, database: string)
 
 export async function vectorDropCollection(connectionId: string, database: string, collection: string): Promise<void> {
   await post("/api/vector/drop-collection", { connectionId, database, collection });
+}
+
+export async function vectorRenameCollection(connectionId: string, database: string, collection: string, newName: string): Promise<void> {
+  await post("/api/vector/rename-collection", { connectionId, database, collection, newName });
 }
 
 export async function mongoFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, projection?: string, sort?: string, collation?: string, executionId?: string): Promise<MongoDocumentResult> {

@@ -1792,7 +1792,9 @@ function commandCompletionInsertion(index = commandCompletionSelectedIndex.value
   const insert = item.apply ?? item.label;
   const commandHead = context.mode === "command" || context.mode === "subcommand";
   const appendSpace = (commandHead || item.appendSpace === true) && !/^\s/.test(text.slice(to));
-  return { text, from, to, insert, replacement: `${insert}${appendSpace ? " " : ""}`, appendSpace, commandHead };
+  const hasCommandExample = commandHead && item.apply !== undefined && item.apply !== item.label;
+  const replacement = `${insert}${appendSpace && !hasCommandExample ? " " : ""}`;
+  return { text, from, to, insert, replacement, appendSpace: appendSpace && !hasCommandExample, commandHead };
 }
 
 function selectedCompletionMatchesInput(): boolean {
@@ -2332,6 +2334,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
                           <span class="min-w-0 flex-1">
                             <span class="block truncate font-mono">{{ item.label }}</span>
                             <span v-if="item.summary" class="block truncate text-[11px] text-slate-400">{{ item.summary }}</span>
+                            <span v-if="item.apply && item.apply !== item.label" class="block truncate text-[11px] text-slate-500">{{ item.apply }}</span>
                           </span>
                           <span v-if="item.detail" class="shrink-0 text-slate-400">{{ item.detail }}</span>
                         </button>

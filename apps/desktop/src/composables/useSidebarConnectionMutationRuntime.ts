@@ -14,7 +14,7 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { revealPathInFileManager } from "@/lib/backend/tauri";
 import { canConfigureVisibleSchemasForTreeNode } from "@/lib/database/databaseFeatureSupport";
 import { canCloseSidebarDatabaseConnection } from "@/lib/sidebar/sidebarDatabaseOpenState";
-import { selectedConnectionDeleteTargets, selectedConnectionDisconnectTargets, selectedConnectionDuplicateTargets, selectedConnectionGroupDeleteTargets } from "@/lib/sidebar/sidebarConnectionSelection";
+import { selectedConnectionDeleteTargets, selectedConnectionDisconnectTargets, selectedConnectionDuplicateTargets, selectedConnectionGroupDeleteTargets, selectedConnectionMoveTargets } from "@/lib/sidebar/sidebarConnectionSelection";
 import { releaseConnectionFromMultiSelection } from "@/lib/sidebar/sidebarConnectionMultiSelect";
 import { connectionDeleteTargetSnapshot, connectionGroupDeleteTargetSnapshot, deleteConnectionsWithGroup, showDeleteConfirm, showDeleteGroupConfirm, sidebarFormTarget } from "@/components/sidebar/sidebarTreeDialogState";
 import { connectionCanConfigureSidebarVisibleDatabases } from "@/lib/sidebar/sidebarVisibleFilterMenu";
@@ -386,19 +386,20 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
   }
 
   function moveToGroup(groupId: string | null) {
-    const connectionId = activeNode.value.connectionId;
-    if (!connectionId) return;
-    connectionStore.moveConnectionToGroup(connectionId, groupId);
-    releaseConnectionFromMultiSelection(connectionStore, connectionId);
+    const targets = selectedConnectionMoveTargets(activeNode.value, selectedTreeNodesInVisibleOrder());
+    if (!targets.length) return;
+    for (const target of targets) connectionStore.moveConnectionToGroup(target.connectionId, groupId);
+    for (const target of targets) releaseConnectionFromMultiSelection(connectionStore, target.connectionId);
   }
 
   function createGroupAndMoveConnection(name: string): boolean {
     const node = sidebarFormTarget.value ?? activeNode.value;
     const normalizedName = name.trim();
-    if (!normalizedName || !node.connectionId) return false;
+    const targets = selectedConnectionMoveTargets(node, selectedTreeNodesInVisibleOrder());
+    if (!normalizedName || !targets.length) return false;
     const groupId = connectionStore.createConnectionGroup(normalizedName);
-    connectionStore.moveConnectionToGroup(node.connectionId, groupId);
-    releaseConnectionFromMultiSelection(connectionStore, node.connectionId);
+    for (const target of targets) connectionStore.moveConnectionToGroup(target.connectionId, groupId);
+    for (const target of targets) releaseConnectionFromMultiSelection(connectionStore, target.connectionId);
     return true;
   }
 

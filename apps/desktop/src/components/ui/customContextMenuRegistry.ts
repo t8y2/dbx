@@ -7,6 +7,8 @@ export interface ContextMenuItem {
   separator?: boolean;
   icon?: Component;
   iconClass?: string;
+  title?: string;
+  indentLevel?: number;
   checked?: boolean;
   // Raw shortcut syntax such as `Mod+C` or `Shift+Alt+U`; display formatting stays in this component.
   shortcut?: string;

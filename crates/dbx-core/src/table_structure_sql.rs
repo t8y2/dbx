@@ -22,7 +22,7 @@ pub use types::*;
 
 use crate::models::connection::DatabaseType;
 
-use columns::build_column_sql;
+use columns::{build_column_sql, validate_primary_key_change_scope};
 use comments::build_table_comment_sql;
 use foreign_keys::build_foreign_key_sql;
 use indexes::build_index_sql;
@@ -34,6 +34,10 @@ pub fn build_table_structure_change_sql(mut options: TableStructureSqlOptions) -
     // Map to StructureDialect::Mysql so DDL is generated correctly.
     if options.is_gaussdb_m_mode {
         options.database_type = Some(DatabaseType::Mysql);
+    }
+    let primary_key_errors = validate_primary_key_change_scope(&options);
+    if !primary_key_errors.is_empty() {
+        return TableStructureSqlResult { statements: Vec::new(), warnings: primary_key_errors };
     }
     // Fail closed: an unsupported concurrent-index request (existing index, or
     // partitioned parent table) must never degrade into blocking index DDL

@@ -388,7 +388,7 @@ async fn live_mysql_single_call_public_route_preserves_all_result_sets() {
     assert!(sql_error[0].execution_error);
     let sql_error_message = sql_error[0].result.rows[0][0].as_str().expect("missing procedure error message");
     assert!(sql_error_message.contains("does not exist"), "unexpected SQL error: {sql_error_message}");
-    assert_eq!(sql_error[0].error.as_ref().map(|error| error.code()), Some("DBX-LEGACY-0001"));
+    assert_eq!(sql_error[0].error.as_ref().map(|error| error.code()), Some("DBX-JDBC-4001"));
     assert!(read_only_error.into_legacy_string().to_ascii_lowercase().contains("read-only"));
     assert_eq!(timeout_results.len(), 1);
     assert!(timeout_results[0].execution_error);

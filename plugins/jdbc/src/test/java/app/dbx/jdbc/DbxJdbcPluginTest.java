@@ -27,6 +27,8 @@ import java.sql.Statement;
 import java.sql.Time;
 import java.sql.Timestamp;
 import java.sql.Types;
+import java.time.Instant;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
@@ -53,6 +55,20 @@ final class DbxJdbcPluginTest {
         request("close", """
             { "connection": %s }
             """.formatted(CONNECTION));
+    }
+
+    @Test
+    void parsesTdengineTimezoneDescription() {
+        assertEquals(ZoneId.of("Asia/Shanghai"), DbxJdbcPlugin.parseTdengineTimezone("Asia/Shanghai (CST, +0800)"));
+        assertEquals(ZoneId.of("Etc/UTC"), DbxJdbcPlugin.parseTdengineTimezone("Etc/UTC (UTC, +0000)"));
+        assertEquals(null, DbxJdbcPlugin.parseTdengineTimezone("unknown (+0800)"));
+    }
+
+    @Test
+    void formatsTimestampInTdengineSessionTimezone() {
+        Timestamp timestamp = Timestamp.from(Instant.parse("2025-03-06T01:19:49.433Z"));
+
+        assertEquals("2025-03-06 09:19:49.433", DbxJdbcPlugin.formatTimestamp(timestamp, ZoneId.of("Asia/Shanghai")));
     }
 
     @Test
@@ -224,6 +240,72 @@ final class DbxJdbcPluginTest {
 
         assertFalse(response.has("error"), response.toString());
         assertEquals("0x0001abff", response.path("result").path("rows").path(0).path(0).asText());
+    }
+
+    @Test
+    void phoenixSystemCatalogWildcardCastsEncodedColumnsToStandardBinary() throws Exception {
+        JsonNode connection = MAPPER.readTree("""
+            {
+              "connection_string": "jdbc:phoenix:localhost"
+            }
+            """);
+        ResultSet columns = rowsResultSet(
+            new String[] { "COLUMN_NAME", "DATA_TYPE", "TYPE_NAME" },
+            new Object[][] {
+                { "TENANT_ID", Types.VARCHAR, "VARCHAR" },
+                { "ROW_KEY_MATCHER", 9000, "VARBINARY_ENCODED" },
+                { "TABLE_NAME", Types.VARCHAR, "VARCHAR" }
+            }
+        );
+
+        String rewritten = DbxJdbcPlugin.rewritePhoenixSystemCatalogQuery(
+            connection,
+            metadataConnection(columns),
+            "/* generated table query */ SELECT * FROM SYSTEM.CATALOG;"
+        );
+
+        assertEquals(
+            "SELECT \"TENANT_ID\", CAST(\"ROW_KEY_MATCHER\" AS VARBINARY) AS \"ROW_KEY_MATCHER\", \"TABLE_NAME\" FROM \"SYSTEM\".\"CATALOG\"",
+            rewritten
+        );
+    }
+
+    @Test
+    void nonPhoenixWildcardQueryIsNotRewrittenForEncodedMetadata() throws Exception {
+        JsonNode connection = MAPPER.readTree("""
+            {
+              "connection_string": "jdbc:h2:mem:dbx"
+            }
+            """);
+        String sql = "SELECT * FROM SYSTEM.CATALOG";
+
+        assertEquals(sql, DbxJdbcPlugin.rewritePhoenixSystemCatalogQuery(connection, null, sql));
+    }
+
+    @Test
+    void readValueReadsPhoenixEncodedBinaryThroughBytesAccessor() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "readValue",
+            ResultSet.class,
+            ResultSetMetaData.class,
+            int.class,
+            boolean.class
+        );
+        method.setAccessible(true);
+        ResultSet rs = (ResultSet) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { ResultSet.class },
+            (proxy, invokedMethod, args) -> switch (invokedMethod.getName()) {
+                case "getBytes" -> new byte[] { 0x00, 0x01, (byte) 0xab, (byte) 0xff };
+                case "getObject" -> throw new AssertionError("VARBINARY_ENCODED must use getBytes");
+                default -> defaultValue(invokedMethod.getReturnType());
+            }
+        );
+
+        assertEquals(
+            "0x0001abff",
+            method.invoke(null, rs, columnMeta(9000, "VARBINARY_ENCODED"), 1, false)
+        );
     }
 
     @Test
@@ -624,7 +706,7 @@ final class DbxJdbcPluginTest {
 
             assertFalse(response.has("error"), response.toString());
             assertEquals("row-value", response.path("result").path("rows").path(0).path(0).asText());
-            assertEquals(List.of("createStatement", "executeQuery"), calls);
+            assertEquals(List.of("createStatement", "executeQuery", "createStatement", "executeQuery"), calls);
         } finally {
             DriverManager.deregisterDriver(driver);
         }
@@ -661,6 +743,8 @@ final class DbxJdbcPluginTest {
                     List.of(
                         "setCatalog:bopu_light",
                         "setClientInfo:dbname:bopu_light",
+                        "createStatement",
+                        "executeQuery",
                         "createStatement",
                         "executeQuery"
                     ),
@@ -721,7 +805,7 @@ final class DbxJdbcPluginTest {
                 """.formatted(connection));
 
             assertFalse(response.has("error"), response.toString());
-            assertEquals(List.of("createStatement", "executeQuery"), calls);
+            assertEquals(List.of("createStatement", "executeQuery", "createStatement", "executeQuery"), calls);
         } finally {
             closeAndDeregister(connection, driver);
         }
@@ -2541,6 +2625,10 @@ final class DbxJdbcPluginTest {
     }
 
     private static ResultSetMetaData columnMeta(int columnType) {
+        return columnMeta(columnType, "");
+    }
+
+    private static ResultSetMetaData columnMeta(int columnType, String typeName) {
         return (ResultSetMetaData) Proxy.newProxyInstance(
             DbxJdbcPluginTest.class.getClassLoader(),
             new Class<?>[] { ResultSetMetaData.class },
@@ -2549,8 +2637,28 @@ final class DbxJdbcPluginTest {
                     case "getColumnCount" -> 1;
                     case "getColumnLabel", "getColumnName" -> "CREATED_AT";
                     case "getColumnType" -> columnType;
+                    case "getColumnTypeName" -> typeName;
                     default -> defaultValue(method.getReturnType());
                 };
+            }
+        );
+    }
+
+    private static Connection metadataConnection(ResultSet columns) {
+        DatabaseMetaData metadata = (DatabaseMetaData) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { DatabaseMetaData.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getColumns" -> columns;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+        return (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getMetaData" -> metadata;
+                default -> defaultValue(method.getReturnType());
             }
         );
     }
@@ -2807,6 +2915,7 @@ final class DbxJdbcPluginTest {
                     return switch (method.getName()) {
                         case "next" -> ++index < rows.length;
                         case "getString" -> stringValue(columns, rows[index], args[0]);
+                        case "getInt" -> ((Number) columnValue(columns, rows[index], args[0])).intValue();
                         case "getBoolean" -> booleanValue(columns, rows[index], args[0]);
                         case "getObject" -> columnValue(columns, rows[index], args[0]);
                         case "close" -> null;

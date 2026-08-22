@@ -1331,7 +1331,8 @@ function profileForConfig(config: ConnectionConfig) {
 }
 
 function selectedProfile() {
-  return driverProfiles[selectedType.value] ?? driverProfiles.mysql;
+  const profile = selectedType.value === "gbase" && (form.value.driver_profile === "gbase8a" || form.value.driver_profile === "gbase8s") ? form.value.driver_profile : selectedType.value;
+  return driverProfiles[profile] ?? driverProfiles.mysql;
 }
 
 function mqExtraRecord(config?: Partial<MqAdminConfig>): Record<string, unknown> {
@@ -2478,6 +2479,13 @@ function syncJdbcProfileModeFromUrl() {
 
 function isCustomCompatibleProfile() {
   return selectedType.value === "custom_mysql" || selectedType.value === "custom_postgres";
+}
+
+function connectionUrlPreferredProfile() {
+  if (selectedType.value === "oceanbase" && form.value.driver_profile === "oceanbase-oracle") {
+    return "oceanbase-oracle";
+  }
+  return selectedType.value;
 }
 
 function applyProfile(val: string, preserveConnectionFields = false) {
@@ -3869,7 +3877,7 @@ function applyConnectionUrlToForm(input: string): boolean {
       return true;
     }
 
-    const parsed = parseConnectionUrl(input, selectedType.value);
+    const parsed = parseConnectionUrl(input, connectionUrlPreferredProfile());
     form.value = applyParsedConnectionUrl(form.value, parsed);
     if (form.value.db_type === "victoriametrics") {
       hydrateVictoriaMetricsFields(form.value.external_config);
@@ -3880,7 +3888,12 @@ function applyConnectionUrlToForm(input: string): boolean {
       resetMeilisearchHostInput();
     }
     oracleTnsAdminPath.value = parseOracleTnsConnectionString(parsed.connectionString)?.tnsAdmin || "";
-    selectedType.value = parsed.driverProfile;
+    if (parsed.driverProfile === "oceanbase-oracle") {
+      oceanbaseSubMode.value = "oracle";
+      selectedType.value = "oceanbase";
+    } else {
+      selectedType.value = parsed.driverProfile;
+    }
     customDriverName.value = isCustomCompatibleProfile() ? parsed.driverLabel : "";
     mongoUseUrl.value = !!parsed.useMongoUrl;
     if (form.value.db_type === "h2") {
@@ -3935,7 +3948,7 @@ function formValueForSubmit(): Omit<ConnectionConfig, "id"> {
       return applyConnectionDraftToConfig(form.value, { ...draft, oneTime: undefined });
     }
 
-    return applyParsedConnectionUrl(form.value, parseConnectionUrl(url, selectedType.value));
+    return applyParsedConnectionUrl(form.value, parseConnectionUrl(url, connectionUrlPreferredProfile()));
   }
 
   if (form.value.db_type === "meilisearch" && hasPendingMeilisearchHostInput()) {
@@ -4529,6 +4542,15 @@ function mysqlTlsModeFromParams(params: string | undefined, ssl: boolean | undef
       return "verify_identity";
   }
 
+  const jdbcUseSsl = getUrlParam(params, "useSSL").trim().toLowerCase();
+  const jdbcRequireSsl = getUrlParam(params, "requireSSL").trim().toLowerCase();
+  const jdbcVerifyServerCertificate = getUrlParam(params, "verifyServerCertificate").trim().toLowerCase();
+  const isTrue = (value: string) => ["true", "1", "yes", "on"].includes(value);
+  if (isTrue(jdbcVerifyServerCertificate) && (isTrue(jdbcUseSsl) || isTrue(jdbcRequireSsl))) return "verify_ca";
+  if (isTrue(jdbcRequireSsl)) return "required";
+  if (["false", "0", "no", "off"].includes(jdbcUseSsl)) return "disabled";
+  if (isTrue(jdbcUseSsl)) return "preferred";
+
   if (!ssl && getUrlParam(params, "require_ssl").toLowerCase() !== "true") return "disabled";
   if (getUrlParam(params, "verify_identity").toLowerCase() === "true") return "verify_identity";
   if (getUrlParam(params, "verify_ca").toLowerCase() === "true") return "verify_ca";
@@ -4536,7 +4558,7 @@ function mysqlTlsModeFromParams(params: string | undefined, ssl: boolean | undef
 }
 
 function applyMysqlTlsMode(params: string | undefined, mode: string): string {
-  let next = deleteUrlParams(params, ["ssl-mode", "sslmode", "require_ssl", "verify_ca", "verify_identity"]);
+  let next = deleteUrlParams(params, ["ssl-mode", "sslmode", "sslMode", "require_ssl", "verify_ca", "verify_identity", "useSSL", "requireSSL", "verifyServerCertificate"]);
   if (mode === "disabled") {
     return setUrlParam(next, "ssl-mode", "disabled");
   }

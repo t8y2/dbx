@@ -126,6 +126,8 @@ pub struct BuildDroppedFilePreviewSqlRequest {
 #[serde(rename_all = "camelCase")]
 pub struct BuildTableSelectSqlRequest {
     pub options: dbx_core::sql_dialect::TableDataSelectSqlOptions,
+    #[serde(default)]
+    pub include_database_name: bool,
 }
 
 #[derive(Deserialize)]
@@ -144,6 +146,22 @@ pub struct BuildSearchResultWhereRequest {
 #[serde(rename_all = "camelCase")]
 pub struct BuildRenameObjectSqlRequest {
     pub options: dbx_core::db_admin_sql::RenameObjectSqlOptions,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildRenameDatabaseSqlRequest {
+    pub database_type: Option<dbx_core::models::connection::DatabaseType>,
+    pub old_name: String,
+    pub new_name: String,
+    pub terminate_connections: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildRenameDatabasePreflightSqlRequest {
+    pub database_type: Option<dbx_core::models::connection::DatabaseType>,
+    pub database_name: String,
 }
 
 #[derive(Deserialize)]
@@ -782,7 +800,7 @@ pub async fn build_dropped_file_preview_sql(
 }
 
 pub async fn build_table_select_sql(Json(req): Json<BuildTableSelectSqlRequest>) -> Json<String> {
-    Json(dbx_core::sql_dialect::build_table_data_select_sql(req.options))
+    Json(dbx_core::sql_dialect::build_table_data_select_sql_with_database(req.options, req.include_database_name))
 }
 
 pub async fn build_database_search_sql(
@@ -797,6 +815,27 @@ pub async fn build_search_result_where(Json(req): Json<BuildSearchResultWhereReq
 
 pub async fn build_rename_object_sql(Json(req): Json<BuildRenameObjectSqlRequest>) -> Result<Json<String>, AppError> {
     dbx_core::db_admin_sql::build_rename_object_sql(req.options).map(Json).map_err(AppError::from)
+}
+
+pub async fn build_rename_database_sql(
+    Json(req): Json<BuildRenameDatabaseSqlRequest>,
+) -> Result<Json<String>, AppError> {
+    dbx_core::db_admin_sql::build_rename_database_sql(
+        req.database_type,
+        &req.old_name,
+        &req.new_name,
+        req.terminate_connections,
+    )
+    .map(Json)
+    .map_err(AppError::from)
+}
+
+pub async fn build_rename_database_preflight_sql(
+    Json(req): Json<BuildRenameDatabasePreflightSqlRequest>,
+) -> Result<Json<String>, AppError> {
+    dbx_core::db_admin_sql::build_rename_database_preflight_sql(req.database_type, &req.database_name)
+        .map(Json)
+        .map_err(AppError::from)
 }
 
 pub async fn build_create_database_sql(

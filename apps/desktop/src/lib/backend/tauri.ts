@@ -141,6 +141,33 @@ export interface AgentUpdateBlocker {
   label: string;
 }
 
+export type AgentOfflineArtifactKind = "jar" | "native";
+
+export type AgentOfflineExportUnavailableReason = "unmanagedInstall" | "localInstall" | "launchConfig" | "missingArtifact" | "invalidArtifact" | "unsafeSource" | "externalDriverRequired" | "missingManagedJre" | "invalidManagedJre";
+
+export interface AgentOfflineExportCandidate {
+  dbType: string;
+  label: string;
+  version: string;
+  size: number;
+  artifactKind: AgentOfflineArtifactKind | null;
+  requiredJre: string | null;
+  eligible: boolean;
+  unavailableReason: AgentOfflineExportUnavailableReason | null;
+}
+
+export interface AgentOfflineExportPreview {
+  platform: string;
+  candidates: AgentOfflineExportCandidate[];
+}
+
+export interface AgentOfflineExportResult {
+  platform: string;
+  driverCount: number;
+  jreCount: number;
+  bytes: number;
+}
+
 export type JavaRuntimeMode = "managed" | "system" | "custom";
 
 export interface JavaRuntimeConfig {
@@ -1390,13 +1417,14 @@ export async function beginManualTransaction(connectionId: string, database: str
   return invoke("begin_manual_transaction", { connectionId, database, schema, catalog });
 }
 
-export async function executeInManualTransaction(txnSessionId: string, sql: string, database: string, schema?: string, maxRows?: number): Promise<QueryResult[]> {
+export async function executeInManualTransaction(txnSessionId: string, sql: string, database: string, schema?: string, maxRows?: number, tableDataPreview?: boolean): Promise<QueryResult[]> {
   return invoke("execute_in_manual_transaction", {
     txnSessionId,
     sql,
     database,
     schema,
     maxRows,
+    tableDataPreview,
   });
 }
 
@@ -1451,7 +1479,7 @@ export async function buildDroppedFilePreviewSql(options: DroppedFilePreviewSqlO
 }
 
 export async function buildTableSelectSql(options: BuildTableSelectSqlOptions): Promise<string> {
-  return invoke("build_table_select_sql", { options });
+  return invoke("build_table_select_sql", { options, includeDatabaseName: options.includeDatabaseName === true });
 }
 
 export async function buildDatabaseSearchSql(options: DatabaseSearchSqlOptions): Promise<DatabaseSearchSql | null> {
@@ -1464,6 +1492,22 @@ export async function buildSearchResultWhere(options: SearchResultWhereOptions):
 
 export async function buildRenameObjectSql(options: BuildRenameObjectSqlOptions): Promise<string> {
   return invoke("build_rename_object_sql", { options });
+}
+
+export async function buildRenameDatabaseSql(options: { databaseType?: DatabaseType; oldName: string; newName: string; terminateConnections: boolean }): Promise<string> {
+  return invoke("build_rename_database_sql", {
+    databaseType: options.databaseType,
+    oldName: options.oldName,
+    newName: options.newName,
+    terminateConnections: options.terminateConnections,
+  });
+}
+
+export async function buildRenameDatabasePreflightSql(options: { databaseType?: DatabaseType; databaseName: string }): Promise<string> {
+  return invoke("build_rename_database_preflight_sql", {
+    databaseType: options.databaseType,
+    databaseName: options.databaseName,
+  });
 }
 
 export async function buildCreateDatabaseSql(options: CreateDatabaseSqlOptions): Promise<string> {
@@ -2035,6 +2079,14 @@ export async function importAgentsFromZip(path: string | File, operationId?: str
     throw new Error("Desktop offline package import requires a local file path");
   }
   return invoke("import_agents_from_zip", { path, operationId });
+}
+
+export async function previewAgentOfflineExport(): Promise<AgentOfflineExportPreview> {
+  return invoke("preview_agent_offline_export");
+}
+
+export async function exportAgentsOffline(path: string, driverKeys: string[]): Promise<AgentOfflineExportResult> {
+  return invoke("export_agents_offline", { path, driverKeys });
 }
 
 export async function importAgentDriver(dbType: string, path: string | File): Promise<void> {
@@ -3573,6 +3625,10 @@ export async function vectorDropDatabase(connectionId: string, database: string)
 
 export async function vectorDropCollection(connectionId: string, database: string, collection: string): Promise<void> {
   return invoke("vector_drop_collection", { connectionId, database, collection });
+}
+
+export async function vectorRenameCollection(connectionId: string, database: string, collection: string, newName: string): Promise<void> {
+  return invoke("vector_rename_collection", { connectionId, database, collection, newName });
 }
 
 export async function elasticsearchListIndices(connectionId: string): Promise<string[]> {

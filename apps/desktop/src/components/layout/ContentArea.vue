@@ -5,6 +5,7 @@ import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { canReloadUnavailableDataTab } from "@/lib/table/tableDataRefresh";
 import { defaultViewForResult } from "@/lib/query/queryResultDefaultView";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
+import { batchSqlRecoveryState, type BatchSqlRecoveryAction } from "@/lib/query/batchSqlRecovery";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
 import {
@@ -36,6 +37,11 @@ import {
   AlignRight,
   PanelsTopLeft,
   Palette,
+  CircleAlert,
+  CircleStop,
+  RotateCcw,
+  SkipForward,
+  ListX,
 } from "@lucide/vue";
 import { Splitpanes, Pane } from "splitpanes";
 import { DynamicScroller, DynamicScrollerItem } from "vue-virtual-scroller";
@@ -480,6 +486,7 @@ watch(
 const summaryItems = computed(() => executionSummaryItems(props.activeTab));
 const hasExecutionSummary = computed(() => summaryItems.value.length > 0 || props.activeTab.isExecuting);
 const batchExecutionProgress = computed(() => props.activeTab.batchSqlExecution);
+const batchRecovery = computed(() => batchSqlRecoveryState(props.activeTab));
 const batchExecutionPercent = computed(() => {
   const progress = batchExecutionProgress.value;
   return progress?.total ? Math.round((progress.completed / progress.total) * 100) : 0;
@@ -976,6 +983,14 @@ async function copyExecutionSummaryError(error: string) {
   } catch (copyError: any) {
     toast(t("grid.copyFailed", { message: copyError?.message || String(copyError) }), 5000);
   }
+}
+
+function dismissBatchRecovery() {
+  queryStore.dismissBatchSqlRecovery(props.activeTab.id);
+}
+
+function resumeBatchExecution(action: BatchSqlRecoveryAction) {
+  void queryStore.resumeBatchSql(props.activeTab.id, action);
 }
 
 function handleModRTarget(target: Element): boolean {
@@ -1509,6 +1524,32 @@ defineExpose({
                   </div>
                   <div class="h-1.5 overflow-hidden rounded-full bg-muted">
                     <div class="h-full rounded-full bg-primary transition-[width] duration-200" :style="{ width: `${batchExecutionPercent}%` }" />
+                  </div>
+                </div>
+                <div v-if="batchRecovery" class="flex shrink-0 items-center gap-3 border-b border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                  <CircleAlert class="h-4 w-4 shrink-0" />
+                  <span class="min-w-0 flex-1 truncate">
+                    {{ t("executionSummary.recoveryPrompt", { statement: batchRecovery.failedStatementIndex + 1, count: batchRecovery.remainingStatementCount }) }}
+                  </span>
+                  <div class="flex shrink-0 items-center gap-1">
+                    <Button variant="ghost" size="sm" class="h-6 gap-1 px-2 text-xs text-foreground hover:bg-background/70" @click="dismissBatchRecovery">
+                      <CircleStop class="h-3.5 w-3.5" />
+                      {{ t("executionSummary.stop") }}
+                    </Button>
+                    <Button variant="ghost" size="sm" class="h-6 gap-1 px-2 text-xs text-foreground hover:bg-background/70" @click="resumeBatchExecution('retry')">
+                      <RotateCcw class="h-3.5 w-3.5" />
+                      {{ t("executionSummary.retry") }}
+                    </Button>
+                    <Button variant="ghost" size="sm" class="h-6 gap-1 px-2 text-xs text-foreground hover:bg-background/70" @click="resumeBatchExecution('skip')">
+                      <SkipForward class="h-3.5 w-3.5" />
+                      {{ t("executionSummary.skipAndContinue") }}
+                    </Button>
+                    <LightTooltip :text="t('executionSummary.skipAllHint')" side="bottom" :delay="0" :close-delay="0" nowrap>
+                      <Button variant="ghost" size="sm" class="h-6 gap-1 px-2 text-xs text-foreground hover:bg-background/70" @click="resumeBatchExecution('skip-all')">
+                        <ListX class="h-3.5 w-3.5" />
+                        {{ t("executionSummary.skipAll") }}
+                      </Button>
+                    </LightTooltip>
                   </div>
                 </div>
                 <div class="grid shrink-0 grid-cols-[4rem_minmax(14rem,1fr)_7rem_7rem_6rem] border-b bg-muted/30 px-3 py-2 text-xs font-medium text-muted-foreground">

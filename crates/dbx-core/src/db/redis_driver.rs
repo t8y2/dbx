@@ -1057,6 +1057,33 @@ where
     redis::cmd("SELECT").arg(db).query_async(con).await.map_err(|e| e.to_string())
 }
 
+pub async fn execute_console_command<C>(
+    con: &mut C,
+    db: u32,
+    command_text: &str,
+    skip_safety_check: bool,
+) -> Result<RedisCommandResult, String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    let selection: redis::RedisResult<()> = redis::cmd("SELECT").arg(db).query_async(con).await;
+    if let Err(error) = selection {
+        if !is_unavailable_db_zero_select(&error, db) {
+            return Err(error.to_string());
+        }
+    }
+    execute_command(con, command_text, skip_safety_check).await
+}
+
+fn is_unavailable_db_zero_select(error: &redis::RedisError, db: u32) -> bool {
+    if db != 0 || error.kind() != redis::ErrorKind::ResponseError {
+        return false;
+    }
+    let detail = error.detail().unwrap_or_default().trim_start();
+    let prefix_len = "unknown command".len();
+    detail.get(..prefix_len).is_some_and(|prefix| prefix.eq_ignore_ascii_case("unknown command"))
+}
+
 pub fn ensure_cluster_db(db: u32) -> Result<(), String> {
     if db == 0 {
         Ok(())
@@ -3690,6 +3717,85 @@ mod tests {
                 scan_cursor: None,
             },
         )
+    }
+
+    #[tokio::test]
+    async fn db0_console_command_continues_when_select_is_unavailable() {
+        let select_error = redis::RedisError::from((
+            redis::ErrorKind::ResponseError,
+            "An error was signalled by the server",
+            "unknown command 'select', with args beginning with: '0'".to_string(),
+        ));
+        let mut con = FakeRedisConnection::with_results(vec![Err(select_error), Ok(bulk("Ada"))]);
+
+        let result = super::execute_console_command(&mut con, 0, "GET name", false).await.unwrap();
+
+        assert_eq!(result.command, "GET");
+        assert_eq!(result.value, serde_json::json!("Ada"));
+        assert_eq!(con.command_count("SELECT"), 1);
+        assert_eq!(con.command_count("GET"), 1);
+    }
+
+    #[tokio::test]
+    async fn console_command_keeps_supported_db_zero_selection() {
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Okay, bulk("Ada")]);
+
+        let result = super::execute_console_command(&mut con, 0, "GET name", false).await.unwrap();
+
+        assert_eq!(result.value, serde_json::json!("Ada"));
+        assert_eq!(con.command_count("SELECT"), 1);
+        assert_eq!(con.command_count("GET"), 1);
+    }
+
+    #[tokio::test]
+    async fn console_command_does_not_ignore_unavailable_select_for_nonzero_db() {
+        let select_error = redis::RedisError::from((
+            redis::ErrorKind::ResponseError,
+            "An error was signalled by the server",
+            "unknown command 'select', with args beginning with: '1'".to_string(),
+        ));
+        let mut con = FakeRedisConnection::with_results(vec![Err(select_error), Ok(bulk("wrong db"))]);
+
+        let error = super::execute_console_command(&mut con, 1, "GET name", false).await.unwrap_err();
+
+        assert!(error.contains("unknown command"));
+        assert_eq!(con.command_count("SELECT"), 1);
+        assert_eq!(con.command_count("GET"), 0);
+    }
+
+    #[tokio::test]
+    async fn console_command_propagates_non_compatibility_select_errors() {
+        let errors = vec![
+            redis::RedisError::from((
+                redis::ErrorKind::ResponseError,
+                "An error was signalled by the server",
+                "invalid DB index".to_string(),
+            )),
+            noperm("SELECT"),
+            redis::RedisError::from((redis::ErrorKind::AuthenticationFailed, "Authentication failed")),
+            redis::RedisError::from((redis::ErrorKind::ParseError, "Invalid response")),
+            redis::RedisError::from(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "connection reset")),
+        ];
+
+        for select_error in errors {
+            let mut con = FakeRedisConnection::with_results(vec![Err(select_error), Ok(bulk("must not run"))]);
+
+            assert!(super::execute_console_command(&mut con, 0, "GET name", false).await.is_err());
+            assert_eq!(con.command_count("SELECT"), 1);
+            assert_eq!(con.command_count("GET"), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn strict_database_selection_keeps_unavailable_select_error() {
+        let select_error = redis::RedisError::from((
+            redis::ErrorKind::ResponseError,
+            "An error was signalled by the server",
+            "unknown command 'select'".to_string(),
+        ));
+        let mut con = FakeRedisConnection::with_results(vec![Err(select_error)]);
+
+        assert!(super::select_db(&mut con, 0).await.is_err());
     }
 
     #[test]

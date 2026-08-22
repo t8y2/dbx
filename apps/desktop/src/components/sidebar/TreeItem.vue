@@ -935,6 +935,8 @@ const isRenamingGroup = ref(false);
 
 const isRenamingSavedSql = ref(false);
 
+const isRenamingConnection = ref(false);
+
 const renameInput = ref("");
 
 const renameInputRef = ref<HTMLInputElement>();
@@ -954,12 +956,21 @@ function startRenameSavedSql() {
   focusSidebarRenameInput(() => (isRenamingSavedSql.value ? renameInputRef.value : undefined));
 }
 
+function startRenameConnection() {
+  if (activeNode.value.type !== "connection" || !activeNode.value.connectionId) return;
+  renameInput.value = activeNode.value.label;
+  isRenamingConnection.value = true;
+  emit("rename-started");
+  focusSidebarRenameInput(() => (isRenamingConnection.value ? renameInputRef.value : undefined));
+}
+
 watch(
   () => props.pendingRename,
   (pending) => {
     if (!pending) return;
     if (activeNode.value.type === "connection-group") startRenameGroup();
     else if (activeNode.value.type === "saved-sql-file") startRenameSavedSql();
+    else if (activeNode.value.type === "connection") startRenameConnection();
   },
   { immediate: true },
 );
@@ -967,7 +978,7 @@ watch(
 function shouldMeasureLabelOverflow(): boolean {
   return shouldMeasureSidebarLabelOverflow({
     hasDetailTooltip: !!detailTooltip.value?.rows.length,
-    isRenaming: isRenamingGroup.value || isRenamingSavedSql.value,
+    isRenaming: isRenamingGroup.value || isRenamingSavedSql.value || isRenamingConnection.value,
     usesFullWidthLabel: usesFullWidthLabel.value,
   });
 }
@@ -1001,14 +1012,29 @@ async function finishRenameSavedSql() {
   }
 }
 
+async function finishRenameConnection() {
+  if (!isRenamingConnection.value) return;
+  isRenamingConnection.value = false;
+  const connectionId = activeNode.value.connectionId;
+  const trimmed = renameInput.value.trim();
+  if (!connectionId || !trimmed || trimmed === activeNode.value.label) return;
+  try {
+    await connectionStore.renameConnection(connectionId, trimmed);
+  } catch (e: any) {
+    toast(t("connection.saveFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
 function finishRename() {
-  if (isRenamingSavedSql.value) void finishRenameSavedSql();
+  if (isRenamingConnection.value) void finishRenameConnection();
+  else if (isRenamingSavedSql.value) void finishRenameSavedSql();
   else finishRenameGroup();
 }
 
 function cancelRename() {
   isRenamingGroup.value = false;
   isRenamingSavedSql.value = false;
+  isRenamingConnection.value = false;
 }
 
 const PINNED_TREE_NODE_DRAG_TYPE = "__pinned-tree-node__";
@@ -1232,6 +1258,7 @@ watch(
     // from the previously rendered node into the new row.
     isRenamingGroup.value = false;
     isRenamingSavedSql.value = false;
+    isRenamingConnection.value = false;
     renameInput.value = "";
     labelOverflowing.value = false;
     suppressNextTableReferenceClick = false;
@@ -1399,7 +1426,7 @@ function onKeydown(event: KeyboardEvent) {
         <div ref="trailingCommentLayoutRef" :class="hasTrailingMetadata() ? 'flex flex-1 min-w-0 items-center' : 'contents'">
           <div ref="trailingCommentLeadingRef" :class="trailingComment ? 'flex max-w-full min-w-0 shrink-0 items-center gap-2' : formattedObjectStorage() ? 'flex min-w-0 flex-1 items-center gap-2' : 'contents'" :style="alignedCommentLeadingStyle()">
             <input
-              v-if="isRenamingGroup || isRenamingSavedSql"
+              v-if="isRenamingGroup || isRenamingSavedSql || isRenamingConnection"
               ref="renameInputRef"
               v-model="renameInput"
               class="min-w-0 flex-1 truncate bg-transparent border border-primary/50 rounded px-1 outline-none"

@@ -133,7 +133,7 @@ import { copyToClipboard } from "@/lib/common/clipboard";
 import { AI_TABLE_MENTION_CANDIDATE_LIMIT, AI_TABLE_MENTION_SCHEMA_LIMIT, filterAiTableMentionCandidates, formatAiTableMention, parseAiTableMentions, type AiTableMention } from "@/lib/ai/aiTableMentions";
 import { handleAiTableReferenceDropEvent } from "@/lib/ai/aiTableReferenceDrop";
 import { DBX_TABLE_REFERENCE_DROP_EVENT, clearActiveTableReferencePayload } from "@/lib/editor/queryEditorTableDrop";
-import { isAiPromptImeCompositionEvent, shouldSubmitAiPromptOnKeydown } from "@/lib/ai/aiPromptKeyboard";
+import { canSubmitAiPrompt, isAiPromptImeCompositionEvent, shouldSubmitAiPromptOnKeydown } from "@/lib/ai/aiPromptKeyboard";
 import { isActionableWriteProposalMessage, isActionableWriteSqlProposal, looksLikeActionProposal, looksLikeWriteSqlProposal, shouldGrantWriteSqlOnShortAffirmative } from "@/lib/ai/aiProposalDetect";
 import { visibleToActualIndex } from "@/lib/ai/aiMessageEdit";
 import { shouldShowReasoningCharCount, reasoningCharCountClass } from "@/lib/ai/aiReasoningPresentation";
@@ -728,6 +728,15 @@ const previewImageAttachment = ref<AiImageAttachment | null>(null);
 const isAttachmentDragging = ref(false);
 const pendingAttachmentReads = ref(0);
 const isAttachmentProcessing = computed(() => pendingAttachmentReads.value > 0);
+const canSubmitPrompt = computed(() =>
+  canSubmitAiPrompt({
+    prompt: prompt.value,
+    contextItemCount: selectedMentions.value.length + selectedSqlFileMentions.value.length + selectedCsvAttachments.value.length + selectedImageAttachments.value.length,
+    isAttachmentProcessing: isAttachmentProcessing.value,
+    hasTab: !!props.tab,
+    hasConnection: !!props.connection,
+  }),
+);
 let browserAttachmentDragDepth = 0;
 let attachmentDraftEpoch = 0;
 let attachmentReadQueue: Promise<void> = Promise.resolve();
@@ -3871,12 +3880,7 @@ async function openExternalUrl(url: string) {
             <button v-if="isGenerating" class="h-7 w-7 shrink-0 rounded-full bg-destructive text-destructive-foreground flex items-center justify-center" :title="t('ai.stopGenerating')" @click="cancelStream">
               <Square class="h-3.5 w-3.5" />
             </button>
-            <button
-              v-else
-              class="h-7 w-7 shrink-0 rounded-full bg-foreground text-background flex items-center justify-center disabled:opacity-30"
-              :disabled="isAttachmentProcessing || (!prompt.trim() && !selectedMentions.length && !selectedSqlFileMentions.length && !selectedCsvAttachments.length && !selectedImageAttachments.length) || !props.tab?.database"
-              @click="send"
-            >
+            <button v-else class="h-7 w-7 shrink-0 rounded-full bg-foreground text-background flex items-center justify-center disabled:opacity-30" :disabled="!canSubmitPrompt" @click="send">
               <ArrowUp class="h-4 w-4" />
             </button>
           </div>

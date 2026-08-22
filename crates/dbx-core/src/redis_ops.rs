@@ -1020,8 +1020,7 @@ pub async fn redis_execute_command_core(
         PoolKind::Redis(redis) => match redis {
             RedisConnection::Direct(con) => {
                 let mut con = con.lock().await;
-                redis_driver::select_db(&mut *con, db).await?;
-                redis_driver::execute_command(&mut *con, command, skip_safety_check).await
+                redis_driver::execute_console_command(&mut *con, db, command, skip_safety_check).await
             }
             RedisConnection::Cluster(cluster) => {
                 redis_driver::ensure_cluster_db(db)?;

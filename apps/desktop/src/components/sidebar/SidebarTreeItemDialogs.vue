@@ -30,6 +30,7 @@ const {
   confirmDeleteGroup,
   showRenameObjectDialog,
   renameObjectName,
+  renameObjectDialogTitle,
   renameObjectPreviewSql,
   renameObjectError,
   confirmRenameObject,
@@ -274,7 +275,7 @@ watch(
   <Dialog v-model:open="showRenameObjectDialog">
     <DialogContent class="sm:max-w-[420px]">
       <DialogHeader>
-        <DialogTitle>{{ t("contextMenu.renameObjectTitle") }}</DialogTitle>
+        <DialogTitle>{{ renameObjectDialogTitle }}</DialogTitle>
       </DialogHeader>
       <div class="grid gap-3">
         <Input v-model="renameObjectName" :placeholder="t('contextMenu.renameObjectNamePlaceholder')" @keydown.enter.prevent="confirmRenameObject" />

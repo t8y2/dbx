@@ -5,7 +5,7 @@ const dataGridSource = readFileSync(new URL("../../../components/grid/DataGrid.v
 
 describe("DataGrid context menu state", () => {
   it("clears the context target whenever the result is replaced", () => {
-    expect(dataGridSource).toMatch(/watch\(\s*\(\) => props\.result,[\s\S]*?clearRowSelection\(\);\s*invalidateSyntheticContextSelection\(\);[\s\S]*?exitTransaction\(\);/);
+    expect(dataGridSource).toMatch(/watch\(\s*\(\) => props\.result,[\s\S]*?clearRowSelection\(\);\s*invalidateContextMenuTarget\(\);[\s\S]*?exitTransaction\(\);/);
   });
 
   it("uses the actual copyable row count in the copy menu", () => {

@@ -159,7 +159,7 @@ function bytesFromBufferLikeObject(value: unknown): Uint8Array | null {
   return bytesFromByteArray(data);
 }
 
-export function parseBinaryCellBytes(value: unknown, columnType?: string): Uint8Array | null {
+export function parseBinaryCellBytes(value: unknown, columnType?: string, databaseType?: DatabaseType): Uint8Array | null {
   if (typeof value === "string") {
     const prefixed = parseBinaryCellHexValue(value);
     if (prefixed) return prefixed;
@@ -169,7 +169,7 @@ export function parseBinaryCellBytes(value: unknown, columnType?: string): Uint8
       return bytesFromHex(trimmed.replace(/\\x/gi, ""));
     }
 
-    if (isBinaryCellColumnType(columnType) && BARE_HEX_RE.test(trimmed)) {
+    if (databaseType !== "tdengine" && isBinaryCellColumnType(columnType) && BARE_HEX_RE.test(trimmed)) {
       return bytesFromHex(trimmed);
     }
   }
@@ -189,16 +189,16 @@ export function canImportBinaryCellFile(databaseType?: DatabaseType, columnType?
   return false;
 }
 
-export function canDownloadBinaryCellValue(value: unknown, columnType?: string): boolean {
-  return !!parseBinaryCellBytes(value, columnType);
+export function canDownloadBinaryCellValue(value: unknown, columnType?: string, databaseType?: DatabaseType): boolean {
+  return !!parseBinaryCellBytes(value, columnType, databaseType);
 }
 
-export function binaryCellDisplayText(value: unknown, columnType?: string, originalBytes?: number): string | null {
+export function binaryCellDisplayText(value: unknown, columnType?: string, originalBytes?: number, databaseType?: DatabaseType): string | null {
   if (typeof value === "string" && isBinaryCellColumnType(columnType) && TRUNCATED_HEX_VALUE_RE.test(value.trim())) {
     const size = originalBytes === undefined ? "..." : formatBinaryCellByteSize(originalBytes);
     return `${binaryCellDisplayLabel(columnType)} [${size}]`;
   }
-  const bytes = parseBinaryCellBytes(value, columnType);
+  const bytes = parseBinaryCellBytes(value, columnType, databaseType);
   if (!bytes || !isBinaryCellColumnType(columnType)) return null;
   if (BINARY_STRING_TYPE_RE.test((columnType ?? "").trim())) {
     const previewBytes = FIXED_BINARY_TYPE_RE.test((columnType ?? "").trim()) ? trimTrailingNullBytes(bytes) : bytes;
@@ -245,8 +245,8 @@ export function formatBinaryCellByteSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)} MB`;
 }
 
-export function binaryCellDownloadPayload(value: unknown, mode: BinaryCellDownloadMode, columnType?: string): BinaryCellDownloadPayload {
-  const bytes = parseBinaryCellBytes(value, columnType);
+export function binaryCellDownloadPayload(value: unknown, mode: BinaryCellDownloadMode, columnType?: string, databaseType?: DatabaseType): BinaryCellDownloadPayload {
+  const bytes = parseBinaryCellBytes(value, columnType, databaseType);
   if (!bytes) {
     throw new Error("Cell value is not a downloadable binary value.");
   }

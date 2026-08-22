@@ -5705,7 +5705,7 @@ const activeCellDetailTabs = computed(() => {
 const activeBinaryHexBytes = computed(() => {
   if (activeCellDetailTab.value !== "hexViewer") return null;
   const detail = activeCellDetail.value;
-  return detail ? parseBinaryCellBytes(detail.value, detail.type) : null;
+  return detail ? parseBinaryCellBytes(detail.value, detail.type, resolvedDatabaseType.value) : null;
 });
 
 const activeBinaryHexRows = computed(() => (activeBinaryHexBytes.value ? buildBinaryHexViewRows(activeBinaryHexBytes.value) : []));
@@ -6325,7 +6325,7 @@ function formatCell(value: CellValue, columnIndex?: number, originalBytes?: numb
         columnInfo: displayColumnInfo,
       });
   if (arrayDisplay !== undefined) return arrayDisplay;
-  const binaryDisplay = formatter ? null : binaryCellDisplayText(value, columnIndex === undefined ? undefined : allColumnTypes.value[columnIndex], originalBytes);
+  const binaryDisplay = formatter ? null : binaryCellDisplayText(value, columnIndex === undefined ? undefined : allColumnTypes.value[columnIndex], originalBytes, resolvedDatabaseType.value);
   if (binaryDisplay !== null) return binaryDisplay;
   const s = applyColumnFormatter(value, formatter);
   return limitDisplay ? limitDataGridCellDisplay(s, resolvedDatabaseType.value === "sqlserver" ? SQLSERVER_DATA_GRID_CELL_DISPLAY_MAX_LENGTH : undefined) : s;
@@ -8923,7 +8923,7 @@ function copyDetailColumnName() {
 function canDownloadDetailBinaryValue(detail: DataGridCellDetail | null): boolean {
   if (!detail) return false;
   const item = getRowItem(detail.rowId);
-  return (isLargeValuePreview(item, detail.colIndex) && isBinaryCellColumnType(detail.type)) || canDownloadBinaryCellValue(detail.value, detail.type);
+  return (resolvedDatabaseType.value !== "tdengine" && isLargeValuePreview(item, detail.colIndex) && isBinaryCellColumnType(detail.type)) || canDownloadBinaryCellValue(detail.value, detail.type, resolvedDatabaseType.value);
 }
 
 function canImportDetailBinaryValue(detail: DataGridCellDetail | null): boolean {
@@ -8973,7 +8973,7 @@ async function downloadDetailBinaryValue(detail: DataGridCellDetail | null, mode
     if (!(await hydrateLargeValueCell(detail.rowId, detail.colIndex))) return;
     const resolvedDetail = cellDetailFor(detail.rowNumber - 1, detail.colIndex);
     if (!resolvedDetail) return;
-    const payload = binaryCellDownloadPayload(resolvedDetail.value, mode, resolvedDetail.type);
+    const payload = binaryCellDownloadPayload(resolvedDetail.value, mode, resolvedDetail.type, resolvedDatabaseType.value);
     const fileName = binaryCellDownloadFileName({
       column: resolvedDetail.column,
       rowNumber: resolvedDetail.rowNumber,

@@ -37,6 +37,8 @@ import java.sql.Statement;
 import java.sql.Time;
 import java.sql.Timestamp;
 import java.sql.Types;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.time.temporal.TemporalAccessor;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -732,6 +734,37 @@ public final class DbxJdbcPlugin {
         }
     }
 
+    private static ZoneId tdengineTimestampZone(JsonNode connection, Connection jdbcConnection) {
+        String url = jdbcUrl(connection);
+        if (
+            !urlMatchesPrefix(url, "jdbc:taos:") &&
+            !urlMatchesPrefix(url, "jdbc:taos-ws:") &&
+            !urlMatchesPrefix(url, "jdbc:taos-rs:")
+        ) {
+            return null;
+        }
+        try (
+            Statement statement = jdbcConnection.createStatement();
+            ResultSet result = statement.executeQuery("SELECT timezone()")
+        ) {
+            return result.next() ? parseTdengineTimezone(result.getString(1)) : null;
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+            return null;
+        }
+    }
+
+    static ZoneId parseTdengineTimezone(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        String name = value.trim().split("\\s+", 2)[0];
+        try {
+            return ZoneId.of(name);
+        } catch (RuntimeException ignored) {
+            return null;
+        }
+    }
+
     private static JsonNode executeQuery(
         JsonNode connection,
         String sql,
@@ -747,6 +780,7 @@ public final class DbxJdbcPlugin {
         applyExecutionContext(connection, conn, database, schema);
         JdbcDriverQuirks quirks = driverQuirks(connection);
         boolean preserveOracleDateTime = isOracleUrl(jdbcUrl(connection));
+        ZoneId timestampZone = tdengineTimestampZone(connection, conn);
         try (Statement statement = conn.createStatement()) {
             applyStatementOptions(statement, maxRows, fetchSize, timeoutSecs, quirks);
             String trimmedSql = trimStatementSql(sql);
@@ -776,7 +810,7 @@ public final class DbxJdbcPlugin {
                         }
                         ArrayNode row = MAPPER.createArrayNode();
                         for (int i = 1; i <= columnCount; i++) {
-                            row.add(MAPPER.valueToTree(readValue(rs, meta, i, preserveOracleDateTime)));
+                            row.add(MAPPER.valueToTree(readValue(rs, meta, i, preserveOracleDateTime, timestampZone)));
                         }
                         rows.add(row);
                     }
@@ -806,6 +840,7 @@ public final class DbxJdbcPlugin {
         private final Connection connection;
         private final boolean restoreAutoCommit;
         private final boolean preserveOracleDateTime;
+        private final ZoneId timestampZone;
         private int rowsReturned;
         private ArrayNode pendingRow;
 
@@ -819,7 +854,8 @@ public final class DbxJdbcPlugin {
             long startNanos,
             Connection connection,
             boolean restoreAutoCommit,
-            boolean preserveOracleDateTime
+            boolean preserveOracleDateTime,
+            ZoneId timestampZone
         ) {
             this.id = id;
             this.statement = statement;
@@ -831,6 +867,7 @@ public final class DbxJdbcPlugin {
             this.connection = connection;
             this.restoreAutoCommit = restoreAutoCommit;
             this.preserveOracleDateTime = preserveOracleDateTime;
+            this.timestampZone = timestampZone;
         }
     }
 
@@ -849,6 +886,7 @@ public final class DbxJdbcPlugin {
         applyExecutionContext(connection, conn, database, schema);
         JdbcDriverQuirks quirks = driverQuirks(connection);
         boolean preserveOracleDateTime = isOracleUrl(jdbcUrl(connection));
+        ZoneId timestampZone = tdengineTimestampZone(connection, conn);
         boolean restoreAutoCommit = beginPagedQueryTransaction(connection, conn);
         Statement statement;
         try {
@@ -895,7 +933,8 @@ public final class DbxJdbcPlugin {
                 start,
                 conn,
                 restoreAutoCommit,
-                preserveOracleDateTime
+                preserveOracleDateTime,
+                timestampZone
             );
             QUERY_SESSIONS.put(sessionId, session);
             try {
@@ -968,7 +1007,7 @@ public final class DbxJdbcPlugin {
                     closeQuerySession(session.id);
                     return queryPageResult(session, rows, false, false);
                 }
-                row = readRow(session.resultSet, session.meta, session.preserveOracleDateTime);
+                row = readRow(session.resultSet, session.meta, session.preserveOracleDateTime, session.timestampZone);
             }
             rows.add(row);
             session.rowsReturned++;
@@ -986,7 +1025,7 @@ public final class DbxJdbcPlugin {
             return queryPageResult(session, rows, false, false);
         }
 
-        session.pendingRow = readRow(session.resultSet, session.meta, session.preserveOracleDateTime);
+        session.pendingRow = readRow(session.resultSet, session.meta, session.preserveOracleDateTime, session.timestampZone);
         return queryPageResult(session, rows, false, true);
     }
 
@@ -1039,11 +1078,12 @@ public final class DbxJdbcPlugin {
     private static ArrayNode readRow(
         ResultSet rs,
         ResultSetMetaData meta,
-        boolean preserveOracleDateTime
+        boolean preserveOracleDateTime,
+        ZoneId timestampZone
     ) throws SQLException {
         ArrayNode row = MAPPER.createArrayNode();
         for (int i = 1; i <= meta.getColumnCount(); i++) {
-            row.add(MAPPER.valueToTree(readValue(rs, meta, i, preserveOracleDateTime)));
+            row.add(MAPPER.valueToTree(readValue(rs, meta, i, preserveOracleDateTime, timestampZone)));
         }
         return row;
     }
@@ -3262,6 +3302,16 @@ public final class DbxJdbcPlugin {
         int index,
         boolean preserveOracleDateTime
     ) throws SQLException {
+        return readValue(rs, meta, index, preserveOracleDateTime, null);
+    }
+
+    private static Object readValue(
+        ResultSet rs,
+        ResultSetMetaData meta,
+        int index,
+        boolean preserveOracleDateTime,
+        ZoneId timestampZone
+    ) throws SQLException {
         int columnType = meta.getColumnType(index);
 
         if (columnType == Types.BOOLEAN) {
@@ -3297,11 +3347,14 @@ public final class DbxJdbcPlugin {
             byte[] bytes = rs.getBytes(index);
             return bytes == null ? null : binaryToHex(bytes);
         }
-        Object temporalValue = readTemporalValue(rs, meta, index, preserveOracleDateTime);
+        Object temporalValue = readTemporalValue(rs, meta, index, preserveOracleDateTime, timestampZone);
         if (temporalValue != null) {
             return temporalValue;
         }
-        if (value instanceof Date || value instanceof Time || value instanceof Timestamp || value instanceof TemporalAccessor) {
+        if (value instanceof Timestamp timestamp) {
+            return formatTimestamp(timestamp, timestampZone);
+        }
+        if (value instanceof Date || value instanceof Time || value instanceof TemporalAccessor) {
             return value.toString();
         }
         if (value instanceof BigDecimal decimal) {
@@ -3331,7 +3384,8 @@ public final class DbxJdbcPlugin {
         ResultSet rs,
         ResultSetMetaData meta,
         int index,
-        boolean preserveOracleDateTime
+        boolean preserveOracleDateTime,
+        ZoneId timestampZone
     ) throws SQLException {
         return switch (meta.getColumnType(index)) {
             case Types.DATE -> {
@@ -3348,10 +3402,18 @@ public final class DbxJdbcPlugin {
             }
             case Types.TIMESTAMP -> {
                 Timestamp timestamp = rs.getTimestamp(index);
-                yield timestamp == null ? null : timestamp.toString();
+                yield timestamp == null ? null : formatTimestamp(timestamp, timestampZone);
             }
             default -> null;
         };
+    }
+
+    static String formatTimestamp(Timestamp timestamp, ZoneId timestampZone) {
+        if (timestampZone == null) {
+            return timestamp.toString();
+        }
+        LocalDateTime local = LocalDateTime.ofInstant(timestamp.toInstant(), timestampZone);
+        return Timestamp.valueOf(local).toString();
     }
 
     private static boolean isBinaryColumn(ResultSetMetaData meta, int index) throws SQLException {

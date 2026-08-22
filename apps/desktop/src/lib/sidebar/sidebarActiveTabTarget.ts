@@ -65,6 +65,10 @@ export type ActiveTabSidebarTarget =
       connectionId: string;
     }
   | {
+      type: "meilisearch-system";
+      connectionId: string;
+    }
+  | {
       type: "mq-tenant";
       connectionId: string;
       tenant: string;
@@ -141,6 +145,10 @@ export function activeTabSidebarTarget(tab: QueryTab | undefined | null): Active
       database: tab.database,
       collectionName,
     };
+  }
+
+  if (tab.mode === "meilisearch-system") {
+    return { type: "meilisearch-system", connectionId: tab.connectionId };
   }
 
   if (tab.mode === "mongo-bucket") {
@@ -253,6 +261,10 @@ export function matchesTarget(node: TreeNode, target: ActiveTabSidebarTarget): b
       return node.connectionId === target.connectionId && node.label === target.collectionName;
     }
     return node.type === "mongo-collection" && node.connectionId === target.connectionId && node.database === target.database && node.label === target.collectionName;
+  }
+
+  if (target.type === "meilisearch-system") {
+    return node.type === "meilisearch-system" && node.connectionId === target.connectionId;
   }
 
   if (target.type === "mongo-gridfs") {

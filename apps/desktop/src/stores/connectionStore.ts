@@ -4464,26 +4464,64 @@ export const useConnectionStore = defineStore("connection", () => {
     try {
       await ensureConnected(connectionId);
       load = reclaimTreeNodeLoad(load, node);
-      const indices = await withMetadataLoadTimeout(connectionId, api.elasticsearchListIndices(connectionId), "Elasticsearch indices");
+      const isMeilisearch = getConfig(connectionId)?.db_type === "meilisearch";
+      const indices = await withMetadataLoadTimeout(connectionId, isMeilisearch ? api.meilisearchListIndexes(connectionId) : api.elasticsearchListIndices(connectionId), isMeilisearch ? "Meilisearch indexes" : "Elasticsearch indices");
       const targetNode = treeNodeLoadTarget(load);
       if (!targetNode) return;
       setChildren(
         targetNode,
         withSavedSqlRoot(
           connectionId,
-          sortSidebarNames(indices).map((index) => ({
-            id: `${connectionId}:__collection:${index}`,
-            label: index,
-            type: "elasticsearch-index" as const,
-            connectionId,
-            database: "default",
-            isExpanded: false,
-          })),
+          [
+            ...sortSidebarNames(indices).map((index) => ({
+              id: `${connectionId}:__collection:${index}`,
+              label: index,
+              type: "elasticsearch-index" as const,
+              connectionId,
+              database: "default",
+              isExpanded: false,
+            })),
+            ...(isMeilisearch
+              ? [
+                  {
+                    id: `${connectionId}:__meilisearch_system`,
+                    label: "meilisearch.systemManagement",
+                    type: "meilisearch-system" as const,
+                    connectionId,
+                    database: "default",
+                    isExpanded: false,
+                  },
+                ]
+              : []),
+          ],
           targetNode,
         ),
       );
       targetNode.isExpanded = true;
     } catch (e) {
+      const targetNode = treeNodeLoadTarget(load);
+      if (targetNode && getConfig(connectionId)?.db_type === "meilisearch") {
+        const existingChildren = (targetNode.children || []).filter((child) => child.type !== "meilisearch-system");
+        setChildren(
+          targetNode,
+          withSavedSqlRoot(
+            connectionId,
+            [
+              ...existingChildren,
+              {
+                id: `${connectionId}:__meilisearch_system`,
+                label: "meilisearch.systemManagement",
+                type: "meilisearch-system",
+                connectionId,
+                database: "default",
+                isExpanded: false,
+              },
+            ],
+            targetNode,
+          ),
+        );
+        targetNode.isExpanded = true;
+      }
       recordMetadataLoadError(connectionId, e, load);
       throw e;
     } finally {

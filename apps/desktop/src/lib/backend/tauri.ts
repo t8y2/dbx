@@ -5,6 +5,7 @@ import { normalizeRustMongoCommand, type MongoCommand } from "@/lib/mongo/mongoS
 import { ExternalSqlFileTooLargeError } from "@/lib/sql/sqlFileOpen";
 import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { decodeMeilisearchDocumentPage, decodeMeilisearchSearchResult, type MeilisearchDocumentPage, type MeilisearchDocumentPageWire, type MeilisearchSearchResult, type MeilisearchSearchWireResult } from "@/lib/backend/meilisearchTransport";
+import type { CreatedKey, EnqueuedTaskSummary, KeyCreateInput, KeyListItem, KeyPage, KeyUpdateInput, MeilisearchSystemOverview, MeilisearchTask, TaskListInput, TaskPage, TaskSelector } from "@/types/meilisearchManagement";
 
 /** Normalize Tauri rejections once at the public backend boundary. */
 async function invokeBackend<T>(command: string, args?: Record<string, unknown>): Promise<T> {
@@ -3575,6 +3576,12 @@ export async function elasticsearchListIndices(connectionId: string): Promise<st
   return collections.map((c) => c.name);
 }
 
+/** Lists every Meilisearch index visible to the current connection credentials. */
+export async function meilisearchListIndexes(connectionId: string): Promise<string[]> {
+  const collections = await documentListCollections(connectionId, "default");
+  return collections.map((collection) => collection.name);
+}
+
 export async function vectorListCollections(connectionId: string, database?: string): Promise<CollectionInfo[]> {
   return documentListCollections(connectionId, database || "default");
 }
@@ -3971,6 +3978,46 @@ export async function meilisearchDeleteAllDocuments(connectionId: string, index:
     connectionId,
     index,
   });
+}
+
+export async function meilisearchGetSystemOverview(connectionId: string): Promise<MeilisearchSystemOverview> {
+  return invokeBackend("meilisearch_get_system_overview", { connectionId });
+}
+
+export async function meilisearchListKeys(connectionId: string, offset = 0, limit = 20): Promise<KeyPage> {
+  return invokeBackend("meilisearch_list_keys", { connectionId, offset, limit });
+}
+
+export async function meilisearchGetKey(connectionId: string, uid: string): Promise<KeyListItem> {
+  return invokeBackend("meilisearch_get_key", { connectionId, uid });
+}
+
+export async function meilisearchCreateKey(connectionId: string, input: KeyCreateInput): Promise<CreatedKey> {
+  return invokeBackend("meilisearch_create_key", { connectionId, input });
+}
+
+export async function meilisearchUpdateKey(connectionId: string, uid: string, input: KeyUpdateInput): Promise<KeyListItem> {
+  return invokeBackend("meilisearch_update_key", { connectionId, uid, input });
+}
+
+export async function meilisearchDeleteKey(connectionId: string, uid: string): Promise<void> {
+  return invokeBackend("meilisearch_delete_key", { connectionId, uid });
+}
+
+export async function meilisearchGetTasks(connectionId: string, input: TaskListInput): Promise<TaskPage> {
+  return invokeBackend("meilisearch_get_tasks", { connectionId, input });
+}
+
+export async function meilisearchGetTask(connectionId: string, uid: number, expectedIndexUid?: string): Promise<MeilisearchTask> {
+  return invokeBackend("meilisearch_get_task", { connectionId, uid, expectedIndexUid: expectedIndexUid ?? null });
+}
+
+export async function meilisearchCancelTasks(connectionId: string, selector: TaskSelector): Promise<EnqueuedTaskSummary> {
+  return invokeBackend("meilisearch_cancel_tasks", { connectionId, selector });
+}
+
+export async function meilisearchDeleteTasks(connectionId: string, selector: TaskSelector): Promise<EnqueuedTaskSummary> {
+  return invokeBackend("meilisearch_delete_tasks", { connectionId, selector });
 }
 
 export async function mongoDeleteDocuments(connectionId: string, database: string, collection: string, filterJson: string, many: boolean): Promise<{ affected_rows: number }> {

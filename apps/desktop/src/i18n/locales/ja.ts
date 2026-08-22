@@ -3,6 +3,7 @@ import docs from "./docs/ja";
 import { consulUiMessages } from "./consulUi";
 import { nacosAccessControlMessages, nacosAccessControlTabs } from "./nacosAccessControl";
 import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessages";
+import { meilisearchManagementJa } from "./meilisearchManagement";
 
 const consul = {
   ...consulUiMessages,
@@ -4540,6 +4541,7 @@ export default withEnglishFallback({
     indexPropertiesUnavailable: "MongoDB Legacy ドライバーはスパース、有効期限、バックグラウンド、バケットサイズを報告できません。ネイティブドライバーで接続して確認してください。",
   },
   meilisearch: {
+    ...meilisearchManagementJa,
     documents: "ドキュメント",
     settings: "設定",
     search: "検索",

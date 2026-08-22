@@ -41,7 +41,9 @@ export function sortSidebarTreeChildrenForParent(parent: Pick<TreeNode, "type">,
     const withConnectionUtilityOrder = (children: TreeNode[]) => [...savedSqlNodes, ...children, ...userAdminNodes];
 
     if (databaseType === "mongodb" || databaseType === "elasticsearch" || databaseType === "easysearch" || databaseType === "meilisearch" || databaseType === "qdrant" || databaseType === "milvus" || databaseType === "weaviate" || databaseType === "chromadb") {
-      return withConnectionUtilityOrder(sortByLabel(regularChildren));
+      const meilisearchSystem = regularChildren.filter((child) => child.type === "meilisearch-system");
+      const databaseObjects = regularChildren.filter((child) => child.type !== "meilisearch-system");
+      return withConnectionUtilityOrder([...sortByLabel(databaseObjects), ...meilisearchSystem]);
     }
 
     if (databaseType === "duckdb") {

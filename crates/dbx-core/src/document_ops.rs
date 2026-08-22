@@ -940,6 +940,110 @@ pub async fn meilisearch_delete_all_documents_core(
     }
 }
 
+async fn meilisearch_client_core(
+    state: &AppState,
+    connection_id: &str,
+) -> Result<crate::db::meilisearch_driver::MeilisearchClient, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::Meilisearch(client) => Ok(client.clone()),
+        _ => Err("Not a Meilisearch connection".to_string()),
+    }
+}
+
+pub async fn meilisearch_get_system_overview_core(
+    state: &AppState,
+    connection_id: &str,
+) -> Result<crate::db::meilisearch_driver::MeilisearchSystemOverview, String> {
+    let client = meilisearch_client_core(state, connection_id).await?;
+    Ok(crate::db::meilisearch_driver::get_system_overview(&client).await)
+}
+
+pub async fn meilisearch_list_keys_core(
+    state: &AppState,
+    connection_id: &str,
+    offset: u64,
+    limit: u64,
+) -> Result<crate::db::meilisearch_driver::MeilisearchKeyPage, String> {
+    let client = meilisearch_client_core(state, connection_id).await?;
+    crate::db::meilisearch_driver::list_keys(&client, offset, limit).await
+}
+
+pub async fn meilisearch_get_key_core(
+    state: &AppState,
+    connection_id: &str,
+    uid: &str,
+) -> Result<crate::db::meilisearch_driver::MeilisearchKeyListItem, String> {
+    let client = meilisearch_client_core(state, connection_id).await?;
+    crate::db::meilisearch_driver::get_key(&client, uid).await
+}
+
+pub async fn meilisearch_create_key_core(
+    state: &AppState,
+    connection_id: &str,
+    input: &crate::db::meilisearch_driver::MeilisearchKeyCreateInput,
+) -> Result<crate::db::meilisearch_driver::MeilisearchCreatedKey, String> {
+    let client = meilisearch_client_core(state, connection_id).await?;
+    crate::db::meilisearch_driver::create_key(&client, input).await
+}
+
+pub async fn meilisearch_update_key_core(
+    state: &AppState,
+    connection_id: &str,
+    uid: &str,
+    input: &crate::db::meilisearch_driver::MeilisearchKeyUpdateInput,
+) -> Result<crate::db::meilisearch_driver::MeilisearchKeyListItem, String> {
+    let client = meilisearch_client_core(state, connection_id).await?;
+    crate::db::meilisearch_driver::update_key(&client, uid, input).await
+}
+
+pub async fn meilisearch_delete_key_core(state: &AppState, connection_id: &str, uid: &str) -> Result<(), String> {
+    let client = meilisearch_client_core(state, connection_id).await?;
+    crate::db::meilisearch_driver::delete_key(&client, uid).await
+}
+
+pub async fn meilisearch_get_tasks_core(
+    state: &AppState,
+    connection_id: &str,
+    selector: &crate::db::meilisearch_driver::MeilisearchTaskSelector,
+    from: Option<u64>,
+    limit: u64,
+) -> Result<crate::db::meilisearch_driver::MeilisearchTaskPage, String> {
+    let client = meilisearch_client_core(state, connection_id).await?;
+    crate::db::meilisearch_driver::get_tasks(&client, selector, from, limit).await
+}
+
+pub async fn meilisearch_get_task_core(
+    state: &AppState,
+    connection_id: &str,
+    uid: u64,
+    expected_index_uid: Option<&str>,
+) -> Result<crate::db::meilisearch_driver::MeilisearchTask, String> {
+    let client = meilisearch_client_core(state, connection_id).await?;
+    let task = crate::db::meilisearch_driver::get_task(&client, uid).await?;
+    crate::db::meilisearch_driver::ensure_task_index(&task, expected_index_uid)?;
+    Ok(task)
+}
+
+pub async fn meilisearch_cancel_tasks_core(
+    state: &AppState,
+    connection_id: &str,
+    selector: &crate::db::meilisearch_driver::MeilisearchTaskSelector,
+) -> Result<crate::db::meilisearch_driver::MeilisearchEnqueuedTaskSummary, String> {
+    let client = meilisearch_client_core(state, connection_id).await?;
+    crate::db::meilisearch_driver::cancel_tasks(&client, selector).await
+}
+
+pub async fn meilisearch_delete_tasks_core(
+    state: &AppState,
+    connection_id: &str,
+    selector: &crate::db::meilisearch_driver::MeilisearchTaskSelector,
+) -> Result<crate::db::meilisearch_driver::MeilisearchEnqueuedTaskSummary, String> {
+    let client = meilisearch_client_core(state, connection_id).await?;
+    crate::db::meilisearch_driver::delete_tasks(&client, selector).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

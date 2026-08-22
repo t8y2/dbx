@@ -1,4 +1,5 @@
 import { withEnglishFallback } from "./fallback";
+import { meilisearchManagementEs } from "./meilisearchManagement";
 import docs from "./docs/es";
 import { consulUiMessages } from "./consulUi";
 import { nacosAccessControlMessages, nacosAccessControlTabs } from "./nacosAccessControl";
@@ -4512,6 +4513,7 @@ export default withEnglishFallback({
     indexPropertiesUnavailable: "El controlador Legacy de MongoDB no puede informar disperso, expiración, background o tamaño de bucket. Conéctese con el controlador nativo para verlos.",
   },
   meilisearch: {
+    ...meilisearchManagementEs,
     documents: "Documentos",
     settings: "Ajustes",
     search: "Buscar",

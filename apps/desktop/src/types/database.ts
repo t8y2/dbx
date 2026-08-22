@@ -971,6 +971,7 @@ export type TreeNodeType =
   | "vector-database"
   | "vector-collection"
   | "elasticsearch-index"
+  | "meilisearch-system"
   | "mqtt-topic";
 
 export interface ConnectionGroup {
@@ -1189,6 +1190,7 @@ export interface QueryTab {
     | "redis-dashboard"
     | "mongo"
     | "meilisearch"
+    | "meilisearch-system"
     | "mongo-gridfs"
     | "mongo-bucket"
     | "vector"

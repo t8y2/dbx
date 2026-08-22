@@ -1,4 +1,5 @@
 import { withEnglishFallback } from "./fallback";
+import { meilisearchManagementPtBR } from "./meilisearchManagement";
 import docs from "./docs/pt-BR";
 import { consulUiMessages } from "./consulUi";
 import { nacosAccessControlMessages, nacosAccessControlTabs } from "./nacosAccessControl";
@@ -4512,6 +4513,7 @@ export default withEnglishFallback({
     indexPropertiesUnavailable: "O driver Legacy do MongoDB não pode informar esparso, expiração, background ou tamanho do bucket. Conecte-se com o driver nativo para vê-los.",
   },
   meilisearch: {
+    ...meilisearchManagementPtBR,
     documents: "Documentos",
     settings: "Configurações",
     search: "Buscar",

@@ -324,6 +324,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: TableProperties, colorClass: "text-cyan-400" };
     case "elasticsearch-index":
       return { icon: Table, colorClass: "text-emerald-400" };
+    case "meilisearch-system":
+      return { icon: Gauge, colorClass: "text-emerald-500" };
     case "procedure":
       return { icon: ScrollText, colorClass: "text-blue-500" };
     case "function":
@@ -385,7 +387,7 @@ function displayLabel(node: TreeNode): string {
   // Use the canonical key for persisted trees created before this label was
   // internationalized; those nodes may still contain the old Chinese text.
   if (node.type === "nacos-access-control") return t("nacos.accessControlSidebarLabel");
-  if (node.type === "user-admin" || node.type === "dameng-users" || node.type === "dameng-roles" || node.type === "dameng-job-admin") return t(node.label);
+  if (node.type === "user-admin" || node.type === "dameng-users" || node.type === "dameng-roles" || node.type === "dameng-job-admin" || node.type === "meilisearch-system") return t(node.label);
   if (node.type === "linked-server-root") return t(node.label);
   if (node.type === "saved-sql-root") return t(node.label);
   if (node.type === "mqtt-topic" && node.id.endsWith(":mqtt-topic:__console__")) return t(node.label);

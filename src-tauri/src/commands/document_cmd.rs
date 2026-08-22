@@ -356,6 +356,110 @@ pub async fn meilisearch_delete_all_documents(
 }
 
 #[tauri::command]
+pub async fn meilisearch_get_system_overview(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+) -> Result<dbx_core::db::meilisearch_driver::MeilisearchSystemOverview, String> {
+    dbx_core::document_ops::meilisearch_get_system_overview_core(&state, &connection_id).await
+}
+
+#[tauri::command]
+pub async fn meilisearch_list_keys(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    offset: u64,
+    limit: u64,
+) -> Result<dbx_core::db::meilisearch_driver::MeilisearchKeyPage, String> {
+    dbx_core::document_ops::meilisearch_list_keys_core(&state, &connection_id, offset, limit).await
+}
+
+#[tauri::command]
+pub async fn meilisearch_get_key(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    uid: String,
+) -> Result<dbx_core::db::meilisearch_driver::MeilisearchKeyListItem, String> {
+    dbx_core::document_ops::meilisearch_get_key_core(&state, &connection_id, &uid).await
+}
+
+#[tauri::command]
+pub async fn meilisearch_create_key(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    input: dbx_core::db::meilisearch_driver::MeilisearchKeyCreateInput,
+) -> Result<dbx_core::db::meilisearch_driver::MeilisearchCreatedKey, String> {
+    ensure_connection_writable(&state, &connection_id, "Create API key").await?;
+    dbx_core::document_ops::meilisearch_create_key_core(&state, &connection_id, &input).await
+}
+
+#[tauri::command]
+pub async fn meilisearch_update_key(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    uid: String,
+    input: dbx_core::db::meilisearch_driver::MeilisearchKeyUpdateInput,
+) -> Result<dbx_core::db::meilisearch_driver::MeilisearchKeyListItem, String> {
+    ensure_connection_writable(&state, &connection_id, "Update API key").await?;
+    dbx_core::document_ops::meilisearch_update_key_core(&state, &connection_id, &uid, &input).await
+}
+
+#[tauri::command]
+pub async fn meilisearch_delete_key(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    uid: String,
+) -> Result<(), String> {
+    ensure_connection_writable(&state, &connection_id, "Delete API key").await?;
+    dbx_core::document_ops::meilisearch_delete_key_core(&state, &connection_id, &uid).await
+}
+
+#[tauri::command]
+pub async fn meilisearch_get_tasks(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    input: dbx_core::db::meilisearch_driver::MeilisearchTaskListInput,
+) -> Result<dbx_core::db::meilisearch_driver::MeilisearchTaskPage, String> {
+    dbx_core::document_ops::meilisearch_get_tasks_core(
+        &state,
+        &connection_id,
+        &input.selector,
+        input.from,
+        input.limit.unwrap_or(20),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn meilisearch_get_task(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    uid: u64,
+    expected_index_uid: Option<String>,
+) -> Result<dbx_core::db::meilisearch_driver::MeilisearchTask, String> {
+    dbx_core::document_ops::meilisearch_get_task_core(&state, &connection_id, uid, expected_index_uid.as_deref()).await
+}
+
+#[tauri::command]
+pub async fn meilisearch_cancel_tasks(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    selector: dbx_core::db::meilisearch_driver::MeilisearchTaskSelector,
+) -> Result<dbx_core::db::meilisearch_driver::MeilisearchEnqueuedTaskSummary, String> {
+    ensure_connection_writable(&state, &connection_id, "Cancel tasks").await?;
+    dbx_core::document_ops::meilisearch_cancel_tasks_core(&state, &connection_id, &selector).await
+}
+
+#[tauri::command]
+pub async fn meilisearch_delete_tasks(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    selector: dbx_core::db::meilisearch_driver::MeilisearchTaskSelector,
+) -> Result<dbx_core::db::meilisearch_driver::MeilisearchEnqueuedTaskSummary, String> {
+    ensure_connection_writable(&state, &connection_id, "Delete tasks").await?;
+    dbx_core::document_ops::meilisearch_delete_tasks_core(&state, &connection_id, &selector).await
+}
+
+#[tauri::command]
 pub async fn document_list_gridfs_buckets(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

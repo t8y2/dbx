@@ -1647,6 +1647,9 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   function findTabByIdentity(connectionId: string, database: string, title: string, mode: QueryTab["mode"], schema?: string, catalog?: string) {
+    if (mode === "meilisearch-system") {
+      return tabs.value.find((tab) => tab.connectionId === connectionId && tab.mode === mode);
+    }
     return tabs.value.find((tab) => tab.connectionId === connectionId && tab.database === database && tab.title === title && tab.mode === mode && (tab.schema || "") === (schema || "") && (tab.catalog || "") === (catalog || ""));
   }
 

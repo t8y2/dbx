@@ -167,4 +167,39 @@ describe("connectionStore Elasticsearch open/expand", () => {
         .sort(),
     ).toEqual(["orders", "users"]);
   });
+
+  it("uses the shared Meilisearch index-list method for the Meilisearch tree", async () => {
+    const elasticsearchListIndices = vi.fn().mockResolvedValue(["wrong-index"]);
+    const meilisearchListIndexes = vi.fn().mockResolvedValue(["movies", "books"]);
+    const checkConnectionHealth = vi.fn().mockResolvedValue(undefined);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth,
+      elasticsearchListIndices,
+      meilisearchListIndexes,
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.addEphemeralConnection({ ...esConnection(), id: "meili-1", name: "Meilisearch", db_type: "meilisearch", port: 7700 });
+    seedConnectionNode(store, "meili-1", "Meilisearch");
+
+    await store.loadElasticsearchIndices("meili-1");
+
+    expect(meilisearchListIndexes).toHaveBeenCalledWith("meili-1");
+    expect(elasticsearchListIndices).not.toHaveBeenCalled();
+    expect(
+      store.treeNodes
+        .find((node) => node.id === "meili-1")
+        ?.children?.filter((node) => node.type === "elasticsearch-index")
+        .map((node) => node.label)
+        .sort(),
+    ).toEqual(["books", "movies"]);
+  });
 });

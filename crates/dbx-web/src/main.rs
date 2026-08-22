@@ -825,6 +825,19 @@ async fn main() {
         .route("/document-store/meilisearch/overview", post(routes::document_store::meilisearch_get_overview))
         .route("/document-store/meilisearch/index/delete", post(routes::document_store::meilisearch_delete_index))
         .route(
+            "/document-store/meilisearch/system/overview",
+            post(routes::document_store::meilisearch_get_system_overview),
+        )
+        .route("/document-store/meilisearch/keys/list", post(routes::document_store::meilisearch_list_keys))
+        .route("/document-store/meilisearch/keys/get", post(routes::document_store::meilisearch_get_key))
+        .route("/document-store/meilisearch/keys/create", post(routes::document_store::meilisearch_create_key))
+        .route("/document-store/meilisearch/keys/update", post(routes::document_store::meilisearch_update_key))
+        .route("/document-store/meilisearch/keys/delete", post(routes::document_store::meilisearch_delete_key))
+        .route("/document-store/meilisearch/tasks/list", post(routes::document_store::meilisearch_get_tasks))
+        .route("/document-store/meilisearch/tasks/get", post(routes::document_store::meilisearch_get_task))
+        .route("/document-store/meilisearch/tasks/cancel", post(routes::document_store::meilisearch_cancel_tasks))
+        .route("/document-store/meilisearch/tasks/delete", post(routes::document_store::meilisearch_delete_tasks))
+        .route(
             "/document-store/meilisearch/documents/delete-all",
             post(routes::document_store::meilisearch_delete_all_documents),
         )

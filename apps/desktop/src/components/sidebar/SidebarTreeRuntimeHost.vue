@@ -653,6 +653,8 @@ async function openDirectNavigationNode(node: TreeNode, requestId: number) {
     queryStore.openNacosAdmin(node.connectionId, { namespace: node.nacosNamespace || "", namespaceName: node.nacosNamespaceName || node.label });
   } else if (node.type === "nacos-access-control") {
     queryStore.createTab(node.connectionId, "", `${connectionName}:access-control`, "nacos-access-control");
+  } else if (node.type === "meilisearch-system") {
+    queryStore.createTab(node.connectionId, "default", t("meilisearch.systemManagement"), "meilisearch-system");
   }
 }
 

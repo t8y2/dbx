@@ -1,4 +1,5 @@
 import { withEnglishFallback } from "./fallback";
+import { meilisearchManagementZhTW } from "./meilisearchManagement";
 import docs from "./docs/zh-TW";
 import { consulUiMessages } from "./consulUi";
 import { nacosAccessControlMessages, nacosAccessControlTabs } from "./nacosAccessControl";
@@ -3839,6 +3840,7 @@ export default withEnglishFallback({
     nativeDocumentRequired: "原生 JSON 的最上層必須是文件物件。",
   },
   meilisearch: {
+    ...meilisearchManagementZhTW,
     documents: "文件",
     settings: "設定",
     search: "搜尋",

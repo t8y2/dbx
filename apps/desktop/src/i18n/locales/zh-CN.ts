@@ -1,6 +1,7 @@
 import { withEnglishFallback } from "./fallback";
 import docs from "./docs/zh-CN";
 import { consul } from "./consulZhCN";
+import { meilisearchManagementZhCN } from "./meilisearchManagement";
 
 export default withEnglishFallback({
   customType: {
@@ -4671,6 +4672,7 @@ export default withEnglishFallback({
     sortPlaceholder: "排序条件...",
   },
   meilisearch: {
+    ...meilisearchManagementZhCN,
     documents: "文档",
     settings: "设置",
     search: "搜索",

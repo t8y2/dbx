@@ -1,4 +1,5 @@
 import { withEnglishFallback } from "./fallback";
+import { meilisearchManagementKo } from "./meilisearchManagement";
 import docs from "./docs/ko";
 import { consulUiMessages } from "./consulUi";
 import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessages";
@@ -4152,6 +4153,7 @@ export default withEnglishFallback({
     indexPropertiesUnavailable: "MongoDB Legacy 드라이버는 희소, 만료, 백그라운드 또는 버킷 크기를 보고할 수 없습니다. 네이티브 드라이버로 연결하여 확인하세요.",
   },
   meilisearch: {
+    ...meilisearchManagementKo,
     documents: "문서",
     settings: "설정",
     search: "검색",

@@ -30,6 +30,7 @@ const leafTypes: Set<TreeNodeType> = new Set([
   "dynamodb-table",
   "vector-collection",
   "elasticsearch-index",
+  "meilisearch-system",
   "user-admin",
   "dameng-users",
   "dameng-roles",

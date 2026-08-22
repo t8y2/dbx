@@ -1,6 +1,7 @@
 import docs from "./docs/en";
 import { consulUiMessages } from "./consulUi";
 import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessages";
+import { meilisearchManagementEn } from "./meilisearchManagement";
 
 const consul = {
   ...consulUiMessages,
@@ -4684,6 +4685,7 @@ export default {
     sortPlaceholder: "Sort...",
   },
   meilisearch: {
+    ...meilisearchManagementEn,
     documents: "Documents",
     settings: "Settings",
     search: "Search",

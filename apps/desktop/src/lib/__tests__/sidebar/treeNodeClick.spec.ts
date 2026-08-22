@@ -59,6 +59,12 @@ describe("treeNodeClick", () => {
     expect(treeNodeRowAction("consul-overview", false, "double")).toBe("toggle");
   });
 
+  it("opens Meilisearch system management as a direct leaf navigation entry", () => {
+    expect(isDirectNavigationTreeNode("meilisearch-system")).toBe(true);
+    expect(shouldActivateTreeNodeOnSingleClick("meilisearch-system", "double")).toBe(true);
+    expect(treeNodeRowAction("meilisearch-system", false, "double")).toBe("toggle");
+  });
+
   it("keeps Nacos namespace and access-control navigation responsive during rapid row switching", () => {
     for (const type of ["nacos-namespace", "nacos-access-control"] as const) {
       expect(isDirectNavigationTreeNode(type), type).toBe(true);

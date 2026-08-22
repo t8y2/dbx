@@ -5,8 +5,9 @@ import * as api from "@/lib/backend/api.ts";
 import { parseSqlServerLinkedSchema, sqlServerLinkedTableName } from "@/lib/database/sqlServerLinkedServers.ts";
 import { isExplicitlyQuotedSqlIdentifier, quoteGaussDbJdbcIdentifier } from "@/lib/sql/sqlIdentifier.ts";
 import { sqlSemanticDialectFor } from "@/lib/sql/semantic/dialect";
-import { buildSqlSemanticModel, sqlSemanticTableNameSpans } from "@/lib/sql/semantic/model";
-import { tokenizeSqlSemantic, unquoteSqlSemanticIdentifier } from "@/lib/sql/semantic/tokens";
+import { sqlSemanticTableNameSpans } from "@/lib/sql/semantic/model";
+import { tokenIsIdentifier, tokenizeSqlSemantic, unquoteSqlSemanticIdentifier } from "@/lib/sql/semantic/tokens";
+import type { SqlSemanticToken } from "@/lib/sql/semantic/types";
 
 export interface BuildTableSelectSqlOptions {
   databaseType?: DatabaseType;
@@ -180,6 +181,59 @@ export function qualifiedTableName(options: Pick<BuildTableSelectSqlOptions, "da
   return quoteTableIdentifier(databaseType, tableName);
 }
 
+interface SqlCteVisibility {
+  name: string;
+  visibleFrom: number;
+  visibleUntil: number;
+}
+
+function matchingSqlParenthesisToken(tokens: readonly SqlSemanticToken[], openIndex: number): number {
+  const open = tokens[openIndex];
+  if (open?.text !== "(") return -1;
+  for (let index = openIndex + 1; index < tokens.length; index += 1) {
+    if (tokens[index]?.text === ")" && tokens[index]?.depth === open.depth) return index;
+  }
+  return -1;
+}
+
+function sqlCteVisibilities(tokens: readonly SqlSemanticToken[], sqlLength: number): SqlCteVisibility[] {
+  const visibilities: SqlCteVisibility[] = [];
+  for (let withIndex = 0; withIndex < tokens.length; withIndex += 1) {
+    const withToken = tokens[withIndex];
+    if (withToken?.kind !== "word" || withToken.normalized !== "with") continue;
+    const depth = withToken.depth;
+    const scopeEnd = tokens.find((token, index) => index > withIndex && token.depth < depth)?.span.start ?? sqlLength;
+    let index = withIndex + 1;
+    if (tokens[index]?.depth === depth && tokens[index]?.normalized === "recursive") index += 1;
+
+    while (index < tokens.length) {
+      while (tokens[index]?.depth === depth && tokens[index]?.text === ",") index += 1;
+      const nameToken = tokens[index];
+      if (!nameToken || nameToken.depth !== depth || !tokenIsIdentifier(nameToken)) break;
+      index += 1;
+
+      if (tokens[index]?.depth === depth && tokens[index]?.text === "(") {
+        const columnsClose = matchingSqlParenthesisToken(tokens, index);
+        if (columnsClose < 0) break;
+        index = columnsClose + 1;
+      }
+      if (tokens[index]?.depth === depth && tokens[index]?.normalized === "as") index += 1;
+      if (tokens[index]?.depth !== depth || tokens[index]?.text !== "(") break;
+      const bodyOpen = index;
+      const bodyClose = matchingSqlParenthesisToken(tokens, bodyOpen);
+      if (bodyClose < 0) break;
+      visibilities.push({
+        name: unquoteSqlSemanticIdentifier(nameToken),
+        visibleFrom: tokens[bodyOpen]!.span.end,
+        visibleUntil: scopeEnd,
+      });
+      index = bodyClose + 1;
+      if (tokens[index]?.depth !== depth || tokens[index]?.text !== ",") break;
+    }
+  }
+  return visibilities;
+}
+
 /**
  * Qualifies physical table sources shown in a result footer without changing
  * the SQL that was actually executed. The semantic model deliberately skips
@@ -199,20 +253,10 @@ export function qualifyTableReferencesInSql(sql: string, options: Pick<BuildTabl
   const replacements = sqlStatementSpans(sql, dialectId)
     .flatMap(({ start, end }) => {
       const statementSql = sql.slice(start, end);
-      const model = buildSqlSemanticModel(statementSql, statementSql.length, semanticOptions);
-      const cteSources = model.rowSources.filter((source) => source.kind === "cte");
-      const isCteReference = (name: string, span: { start: number; end: number }): boolean => {
-        // A CTE body may refer to itself or a preceding CTE, but not a later CTE.
-        // Outside CTE definitions (the main statement), every declared CTE is visible.
-        let containingCteIndex = -1;
-        for (let index = 0; index < cteSources.length; index += 1) {
-          const cteSpan = cteSources[index]!.sourceSpan;
-          if (span.start >= cteSpan.start && span.end <= cteSpan.end) containingCteIndex = index;
-        }
-        const visibleCteCount = containingCteIndex >= 0 ? containingCteIndex + 1 : cteSources.length;
-        return cteSources.slice(0, visibleCteCount).some((source) => source.name.toLowerCase() === name.toLowerCase());
-      };
-      const tokensBySpan = new Map(tokenizeSqlSemantic(statementSql, model.dialectId).map((token) => [`${token.span.start}:${token.span.end}`, token]));
+      const tokens = tokenizeSqlSemantic(statementSql, dialectId);
+      const cteVisibilities = sqlCteVisibilities(tokens, statementSql.length);
+      const isCteReference = (name: string, span: { start: number; end: number }): boolean => cteVisibilities.some((cte) => cte.name.toLowerCase() === name.toLowerCase() && span.start >= cte.visibleFrom && span.end <= cte.visibleUntil);
+      const tokensBySpan = new Map(tokens.map((token) => [`${token.span.start}:${token.span.end}`, token]));
 
       return sqlSemanticTableNameSpans(statementSql, semanticOptions)
         .map((span) => ({ span, token: tokensBySpan.get(`${span.start}:${span.end}`) }))

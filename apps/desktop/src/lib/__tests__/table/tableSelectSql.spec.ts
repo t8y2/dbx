@@ -88,6 +88,21 @@ describe("qualifyTableReferencesInSql", () => {
     expect(qualifyTableReferencesInSql(sql, { databaseType: "mysql", database: "aaa", includeDatabaseName: true })).toBe("WITH first AS (SELECT * FROM `aaa`.`second`), second AS (SELECT * FROM `aaa`.`archived_users`) SELECT * FROM first");
   });
 
+  it("does not leak a nested CTE name into the outer query", () => {
+    const sql = "SELECT * FROM (WITH users AS (SELECT * FROM archived_users) SELECT * FROM users) nested JOIN users ON 1 = 1";
+    expect(qualifyTableReferencesInSql(sql, { databaseType: "mysql", database: "aaa", includeDatabaseName: true })).toBe("SELECT * FROM (WITH users AS (SELECT * FROM `aaa`.`archived_users`) SELECT * FROM users) nested JOIN `aaa`.`users` ON 1 = 1");
+  });
+
+  it("keeps outer CTEs visible inside nested WITH queries", () => {
+    const sql = "WITH users AS (SELECT * FROM archived_users) SELECT * FROM (WITH roles AS (SELECT * FROM users) SELECT * FROM roles) nested";
+    expect(qualifyTableReferencesInSql(sql, { databaseType: "mysql", database: "aaa", includeDatabaseName: true })).toBe("WITH users AS (SELECT * FROM `aaa`.`archived_users`) SELECT * FROM (WITH roles AS (SELECT * FROM users) SELECT * FROM roles) nested");
+  });
+
+  it("does not let a nested CTE suppress an earlier outer physical table", () => {
+    const sql = "SELECT * FROM users WHERE EXISTS (WITH users AS (SELECT * FROM archived_users) SELECT * FROM users)";
+    expect(qualifyTableReferencesInSql(sql, { databaseType: "mysql", database: "aaa", includeDatabaseName: true })).toBe("SELECT * FROM `aaa`.`users` WHERE EXISTS (WITH users AS (SELECT * FROM `aaa`.`archived_users`) SELECT * FROM users)");
+  });
+
   it("does not rewrite FROM and JOIN text inside literals or comments", () => {
     const sql = "SELECT 'FROM users JOIN groups' AS note\nFROM users -- JOIN groups";
     expect(qualifyTableReferencesInSql(sql, { databaseType: "mysql", database: "aaa", includeDatabaseName: true })).toBe("SELECT 'FROM users JOIN groups' AS note\nFROM `aaa`.`users` -- JOIN groups");

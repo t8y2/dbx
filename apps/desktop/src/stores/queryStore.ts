@@ -1119,10 +1119,16 @@ export const useQueryStore = defineStore("query", () => {
 
     const restoredRun = markQueryResultRunsRowsRaw([
       {
-        ...snapshotRun,
-        // The open-tab metadata may have changed after this payload was evicted
-        // (for example, pinning or unpinning a result). Keep it authoritative.
         ...run,
+        ...snapshotRun,
+        id: run.id,
+        title: run.title,
+        sequence: run.sequence,
+        sql: run.sql,
+        createdAt: run.createdAt,
+        pinned: run.pinned,
+        activeResultIndex: run.activeResultIndex,
+        resultCacheKey: run.resultCacheKey ?? snapshotRun.resultCacheKey,
         result: snapshotRun.result ? markQueryResultRowsRaw(snapshotRun.result) : undefined,
         results: snapshotRun.results ? markQueryResultsRowsRaw(snapshotRun.results) : undefined,
         resultCacheState: "memory" as const,

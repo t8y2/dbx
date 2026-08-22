@@ -110,10 +110,18 @@ test("DataGrid exposes persistent result toolbar slots", () => {
 
 test("table-data toolbar refresh keeps page size independent from SQL editor settings", () => {
   const dataGrid = source(dataGridPath);
-
-  assert.match(dataGrid, /props\.context === "table-data" \? \(props\.pageLimit \?\? tableOpenPageLimit\(settingsStore\.editorSettings\.tableOpenPageSize\)\) : settingsStore\.editorSettings\.pageSize/);
-  assert.match(dataGrid, /if \(props\.context === "table-data"\) return;[\s\S]*pageSize\.value = normalizeResultPageSize\(value, pageSize\.value\)/);
-  assert.match(dataGrid, /props\.context === "table-data" \? \{ tableOpenPageSize: normalizedSize \} : \{ pageSize: normalizedSize \}/);
+  const legacyPageSizeContract = [
+    /props\.context === "table-data"\s*\?\s*\(props\.pageLimit \?\? tableOpenPageLimit\(settingsStore\.editorSettings\.tableOpenPageSize\)\)\s*:\s*settingsStore\.editorSettings\.pageSize/,
+    /if \(props\.context === "table-data"\) return;[\s\S]*pageSize\.value = normalizeResultPageSize\(value, pageSize\.value\)/,
+    /props\.context === "table-data" \? \{ tableOpenPageSize: normalizedSize \} : \{ pageSize: normalizedSize \}/,
+  ];
+  const preferencePageSizeContract = [
+    /const pageSizePreference = computed\(\(\) => resolveDataGridPageSizePreference\(props\.context, props\.pageSizePreference\)\)/,
+    /const pageSize = ref\(preferredDataGridPageSize\(settingsStore\.editorSettings, pageSizePreference\.value, props\.pageLimit\)\)/,
+    /if \(pageSizePreference\.value !== "results"\) return;[\s\S]*pageSize\.value = normalizeResultPageSize\(value, pageSize\.value\)/,
+    /settingsStore\.updateEditorSettings\(dataGridPageSizeSettingsPatch\(pageSizePreference\.value, normalizedSize\)\)/,
+  ];
+  assert.ok(legacyPageSizeContract.every((pattern) => pattern.test(dataGrid)) || preferencePageSizeContract.every((pattern) => pattern.test(dataGrid)));
   assert.match(dataGrid, /const resetToFirstPage = hasPendingConditionInputs\(\);/);
   assert.match(dataGrid, /emit\("reload", props\.sql, searchText\.value, currentWhereInput\(\), currentOrderBy\(\), pageSize\.value, resetToFirstPage \? 0 : \(currentPage\.value - 1\) \* pageSize\.value, "refresh"\)/);
 });

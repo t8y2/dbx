@@ -1894,6 +1894,205 @@ test("completed query executions append result runs and select the latest run", 
   }
 });
 
+test("auto-saved result stays visible until the next run is ready", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  let executeCount = 0;
+  let resolveSecondExecution: ((response: Response) => void) | undefined;
+  let secondExecutionStarted: (() => void) | undefined;
+  const secondExecutionStartedPromise = new Promise<void>((resolve) => {
+    secondExecutionStarted = resolve;
+  });
+
+  connectionStore.addEphemeralConnection(conn("conn-1"));
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/query/prepare-pagination-plan") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      return new Response(JSON.stringify({ sqlToExecute: body.options.sql, useAgentResultSession: false }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url === "/api/query/execute-multi") {
+      executeCount++;
+      if (executeCount === 2) {
+        secondExecutionStarted?.();
+        return await new Promise<Response>((resolve) => {
+          resolveSecondExecution = resolve;
+        });
+      }
+      return new Response(JSON.stringify([{ columns: ["run_1"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url === "/api/query/analyze-editability") {
+      return new Response(JSON.stringify({ editable: false, reason: "complex-source" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    const tabId = store.createTab("conn-1", "db", "Query");
+    store.toggleResultAutoSave(tabId);
+    await store.executeTabSql(tabId, "select 1");
+
+    const tab = store.tabs.find((item) => item.id === tabId);
+    assert.ok(tab?.resultRuns?.[0]);
+    const firstRunId = tab.resultRuns[0].id;
+    const execution = store.executeTabSql(tabId, "select 2");
+    await secondExecutionStartedPromise;
+
+    assert.equal(tab.activeResultRunId, firstRunId);
+    assert.equal(tab.resultRuns?.length, 1);
+    assert.deepEqual(tab.result?.columns, ["run_1"]);
+    assert.deepEqual(tab.resultRuns?.[0]?.result?.rows, [[1]]);
+
+    resolveSecondExecution?.(new Response(JSON.stringify([{ columns: ["run_2"], rows: [[2]], affected_rows: 0, execution_time_ms: 1 }]), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    await execution;
+
+    assert.equal(tab.resultRuns?.length, 2);
+    assert.deepEqual(tab.resultRuns?.[0]?.result?.columns, ["run_1"]);
+    assert.deepEqual(tab.result?.columns, ["run_2"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("canceling an auto-saved execution restores the displayed run", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  let executeCount = 0;
+  let rejectSecondExecution: ((error: Error) => void) | undefined;
+  let secondExecutionStarted: (() => void) | undefined;
+  const secondExecutionStartedPromise = new Promise<void>((resolve) => {
+    secondExecutionStarted = resolve;
+  });
+
+  connectionStore.addEphemeralConnection(conn("conn-1"));
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/query/prepare-pagination-plan") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      return new Response(JSON.stringify({ sqlToExecute: body.options.sql, useAgentResultSession: false }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url === "/api/query/execute-multi") {
+      executeCount++;
+      if (executeCount === 2) {
+        secondExecutionStarted?.();
+        return await new Promise<Response>((_resolve, reject) => {
+          rejectSecondExecution = reject;
+        });
+      }
+      return new Response(JSON.stringify([{ columns: ["run_1"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url === "/api/query/cancel") {
+      rejectSecondExecution?.(new Error("Query canceled"));
+      return new Response(JSON.stringify(true), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (url === "/api/query/analyze-editability") {
+      return new Response(JSON.stringify({ editable: false, reason: "complex-source" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    const tabId = store.createTab("conn-1", "db", "Query");
+    store.toggleResultAutoSave(tabId);
+    await store.executeTabSql(tabId, "select 1");
+
+    const tab = store.tabs.find((item) => item.id === tabId);
+    assert.ok(tab?.resultRuns?.[0]);
+    const firstRunId = tab.resultRuns[0].id;
+    const execution = store.executeTabSql(tabId, "select 2");
+    await secondExecutionStartedPromise;
+    assert.equal(await store.cancelTabExecution(tabId), true);
+    await execution;
+
+    assert.equal(tab.activeResultRunId, firstRunId);
+    assert.equal(tab.resultRuns?.length, 1);
+    assert.deepEqual(tab.result?.columns, ["run_1"]);
+    assert.deepEqual(tab.resultRuns?.[0]?.result?.rows, [[1]]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("a failed auto-saved execution keeps the prior run and adds an error run", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  let executeCount = 0;
+
+  connectionStore.addEphemeralConnection(conn("conn-1"));
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/query/prepare-pagination-plan") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      return new Response(JSON.stringify({ sqlToExecute: body.options.sql, useAgentResultSession: false }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url === "/api/query/execute-multi") {
+      executeCount++;
+      if (executeCount === 2) return new Response("backend exploded", { status: 500 });
+      return new Response(JSON.stringify([{ columns: ["run_1"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url === "/api/query/analyze-editability") {
+      return new Response(JSON.stringify({ editable: false, reason: "complex-source" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    const tabId = store.createTab("conn-1", "db", "Query");
+    store.toggleResultAutoSave(tabId);
+    await store.executeTabSql(tabId, "select 1");
+    await store.executeTabSql(tabId, "select broken");
+
+    const tab = store.tabs.find((item) => item.id === tabId);
+    assert.equal(tab?.resultRuns?.length, 2);
+    assert.deepEqual(tab?.resultRuns?.[0]?.result?.columns, ["run_1"]);
+    assert.deepEqual(tab?.result?.columns, ["Error"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
 test("an unavailable reusable result run does not overwrite the pinned active result", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());

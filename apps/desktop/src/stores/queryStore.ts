@@ -4327,7 +4327,13 @@ export const useQueryStore = defineStore("query", () => {
     if (!tab || !sql.trim()) return;
 
     const openInNewResultTab = tab.mode === "query" && options?.openInNewResultTab === true;
-    let captureResultRun = openInNewResultTab;
+    // Auto-saved results need two independent decisions: keep the currently
+    // displayed run visible while the request is pending, then capture the new
+    // response as another run. Previously `resultAutoSave` only made the latter
+    // decision after clearing the displayed payload, which caused the result
+    // toolbar and grid to briefly disappear before the next Run was added.
+    const captureAutoSavedResultRun = tab.mode === "query" && tab.resultAutoSave === true && !!tab.activeResultRunId && !!tab.result;
+    let captureResultRun = openInNewResultTab || captureAutoSavedResultRun;
     if (!captureResultRun && tab.mode === "query" && !tab.resultAutoSave && tab.activeResultRunId) {
       const activeRun = tab.resultRuns?.find((run) => run.id === tab.activeResultRunId);
       if (activeRun?.pinned) {
@@ -4380,7 +4386,7 @@ export const useQueryStore = defineStore("query", () => {
       tab.batchSqlExecution = undefined;
       liveBatchSqlExecutions.delete(tab);
     }
-    const preserveResultDuringExecution = batchResume !== undefined || options?.preserveResultDuringExecution === true || (tab.mode === "query" && !!tab.activeResultRunId && !tab.resultAutoSave && !captureResultRun);
+    const preserveResultDuringExecution = batchResume !== undefined || options?.preserveResultDuringExecution === true || captureAutoSavedResultRun || (tab.mode === "query" && !!tab.activeResultRunId && !tab.resultAutoSave && !captureResultRun);
     const updateActiveResultRun = !!tab.activeResultRunId && preserveResultDuringExecution;
     if (!updateActiveResultRun) {
       tab.activeResultRunId = undefined;

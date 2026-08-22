@@ -281,7 +281,7 @@ const NON_STREAMING_BATCH_DATABASE_TYPES = new Set<DatabaseType>(["sqlserver", "
 const liveBatchSqlExecutions = new WeakMap<QueryTab, BatchSqlExecution>();
 
 function cloneBatchSqlExecution(batch: BatchSqlExecution | undefined): BatchSqlExecution | undefined {
-  return batch ? { ...batch, items: batch.items.map((item) => ({ ...item })) } : undefined;
+  return batch ? { ...batch, executionTarget: batch.executionTarget ? { ...batch.executionTarget } : undefined, items: batch.items.map((item) => ({ ...item })) } : undefined;
 }
 
 function batchSqlExecutionFor(tab: QueryTab, executionId: string): BatchSqlExecution | undefined {
@@ -294,7 +294,7 @@ function clearLiveBatchSqlExecution(tab: QueryTab, executionId: string) {
   if (liveBatchSqlExecutions.get(tab)?.executionId === executionId) liveBatchSqlExecutions.delete(tab);
 }
 
-function createBatchSqlExecution(executionId: string, editorSql: string, submittedSql: string, databaseType: DatabaseType | undefined, sourceOffset: number | undefined): BatchSqlExecution | undefined {
+function createBatchSqlExecution(executionId: string, editorSql: string, submittedSql: string, databaseType: DatabaseType | undefined, sourceOffset: number | undefined, executionTarget: MultiDbExecutionTarget): BatchSqlExecution | undefined {
   const statements = databaseType === "mongodb" ? splitMongoCommandRanges(submittedSql).map(({ from, to, text }) => ({ from, to, sql: text })) : splitSqlStatementRanges(submittedSql, databaseType);
   if (statements.length === 0) return undefined;
   if (statements.length > 1 && databaseType && NON_STREAMING_BATCH_DATABASE_TYPES.has(databaseType)) return undefined;
@@ -307,6 +307,7 @@ function createBatchSqlExecution(executionId: string, editorSql: string, submitt
     completed: 0,
     total: statements.length,
     startedAt: Date.now(),
+    executionTarget: { ...executionTarget },
     items: statements.map((statement, statementIndex) => ({
       statementIndex,
       sql: statement.sql,
@@ -4308,11 +4309,12 @@ export const useQueryStore = defineStore("query", () => {
     let useAgentResultSession = false;
     let executionDispatched = false;
     let producedResult = false;
-    const executionConnectionId = options?.executionTarget?.connectionId ?? tab.connectionId;
+    const resumedExecutionTarget = batchResume?.batch.executionTarget;
+    const executionConnectionId = resumedExecutionTarget?.connectionId ?? options?.executionTarget?.connectionId ?? tab.connectionId;
     try {
       await waitForTabSessionReset(id);
       const connStore = useConnectionStore();
-      const executionTarget = options?.executionTarget;
+      const executionTarget = resumedExecutionTarget ?? options?.executionTarget;
       const usesExternalExecutionTarget = !!executionTarget;
       let conn = connStore.getConfig(executionConnectionId);
       const parsedMongoCommands = conn?.db_type === "mongodb" ? splitMongoCommandRanges(sql) : undefined;
@@ -4338,14 +4340,23 @@ export const useQueryStore = defineStore("query", () => {
         throw new Error("Namespace execution targets require a registered execution adapter.");
       }
       const databaseTargetContext = targetContext?.scope === "catalog" || targetContext?.scope === "database" ? targetContext : undefined;
-      const executionCatalog = targetContext ? (targetContext.scope === "catalog" ? targetContext.catalog : undefined) : (executionTarget?.catalog ?? (tab.mode === "data" ? tab.tableMeta?.catalog : tab.catalog));
+      const executionCatalog = resumedExecutionTarget ? resumedExecutionTarget.catalog : targetContext ? (targetContext.scope === "catalog" ? targetContext.catalog : undefined) : (executionTarget?.catalog ?? (tab.mode === "data" ? tab.tableMeta?.catalog : tab.catalog));
       const contextDatabase = databaseTargetContext?.database;
-      const targetDatabase = targetContext?.scope === "connection" ? "" : (contextDatabase ?? executionTarget?.database ?? tab.database);
+      const targetDatabase = resumedExecutionTarget ? resumedExecutionTarget.database : targetContext?.scope === "connection" ? "" : (contextDatabase ?? executionTarget?.database ?? tab.database);
+      const targetSchema = resumedExecutionTarget ? resumedExecutionTarget.schema : targetContext?.scope === "connection" ? undefined : (databaseTargetContext?.schema ?? executionTarget?.schema ?? tab.schema);
       const executionDatabase = dataTabExecutionDatabase(conn, targetDatabase, executionCatalog);
       const useAgentCursor = usesAgentCursorForQuery(conn?.db_type);
       const queryTimeoutSecs = queryTimeoutSecsForConnection(conn, settingsStore.editorSettings.globalQueryTimeoutSecs);
       if (!batchResume) {
-        const statementExecution = tab.mode === "query" ? createBatchSqlExecution(executionId, tab.sql, sql, effectiveDbType, options?.sourceOffset) : undefined;
+        const statementExecution =
+          tab.mode === "query"
+            ? createBatchSqlExecution(executionId, tab.sql, sql, effectiveDbType, options?.sourceOffset, {
+                connectionId: executionConnectionId,
+                catalog: executionCatalog,
+                database: targetDatabase,
+                schema: targetSchema,
+              })
+            : undefined;
         tab.batchSqlExecution = statementExecution && (tab.autoCommit !== false || statementExecution.total === 1) ? statementExecution : undefined;
         if (tab.batchSqlExecution) liveBatchSqlExecutions.set(tab, tab.batchSqlExecution);
       }
@@ -4937,7 +4948,7 @@ export const useQueryStore = defineStore("query", () => {
         pageOffset = pagination.offset;
       }
 
-      const executionSchema = targetContext?.scope === "connection" ? undefined : connectionQueryExecutionSchema(conn, databaseTargetContext?.database ?? executionTarget?.database ?? tab.database, databaseTargetContext?.schema ?? executionTarget?.schema ?? tab.schema, tab.mode === "data");
+      const executionSchema = connectionQueryExecutionSchema(conn, targetDatabase, targetSchema, tab.mode === "data");
       const frontendTimeoutSecs = frontendQueryTimeoutSecsForSql(sqlToExecute, effectiveDbType, queryTimeoutSecs);
       const sourceLabelDatabase = targetDatabase || conn?.database;
       const executionClientSessionId = options?.pagination?.clientSessionId ?? (tab.mode === "query" || tab.mode === "data" ? tabClientSessionId(tab) : undefined);

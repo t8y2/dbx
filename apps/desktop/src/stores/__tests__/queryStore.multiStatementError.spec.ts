@@ -276,6 +276,37 @@ describe("queryStore multi-statement errors", () => {
     ]);
   });
 
+  it("retries against the original execution target after the tab target changes", async () => {
+    const sqlError = structuredSqlError();
+    const sql = "INSERT INTO t VALUES (1);\nINSERT INTO t VALUES (2)";
+    mocks.executeMultiWithProgress.mockResolvedValueOnce([{ columns: ["Error"], rows: [["duplicate key"]], affected_rows: 0, execution_time_ms: 1, statement_index: 0, execution_error: true, error: sqlError }]).mockResolvedValueOnce([
+      { columns: [], rows: [], affected_rows: 1, execution_time_ms: 2, statement_index: 0 },
+      { columns: [], rows: [], affected_rows: 1, execution_time_ms: 2, statement_index: 1 },
+    ]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query", "query", undefined, sql);
+
+    await store.executeTabSql(tabId, sql, {
+      executionTarget: {
+        connectionId: "mysql-original",
+        catalog: "catalog-original",
+        database: "database-original",
+        schema: "schema-original",
+      },
+    });
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    tab.connectionId = "mysql-current";
+    tab.catalog = "catalog-current";
+    tab.database = "database-current";
+    tab.schema = "schema-current";
+
+    await expect(store.resumeBatchSql(tabId, "retry")).resolves.toBe(true);
+
+    expect(mocks.executeMultiWithProgress.mock.calls[1]?.slice(0, 5)).toEqual(["mysql-original", "database-original", sql, expect.any(Function), "schema-original"]);
+    expect(mocks.executeMultiWithProgress.mock.calls[1]?.[5]).toMatchObject({ catalog: "catalog-original" });
+  });
+
   it("continues past all later SQL errors only for the resumed batch", async () => {
     const sqlError = structuredSqlError();
     const sql = "INSERT INTO t VALUES (1);\nINSERT INTO t VALUES (2);\nINSERT INTO t VALUES (3)";

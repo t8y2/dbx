@@ -192,7 +192,7 @@ export function formatMeilisearchTaskDetails(details: Record<string, unknown> | 
 }
 
 export function hasExplicitTaskSelector(selector: TaskSelector): boolean {
-  return Object.entries(selector).some(([key, value]) => {
+  return Object.entries(selector).some(([, value]) => {
     if (Array.isArray(value)) return value.length > 0;
     return typeof value === "string" ? value.trim().length > 0 : value !== null && value !== undefined;
   });

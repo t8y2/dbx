@@ -43,10 +43,10 @@ vi.mock("@/components/ui/ErrorBanner.vue", async () => {
   const { defineComponent, h } = await import("vue");
   return { default: defineComponent({ setup: () => () => h("div") }) };
 });
-vi.mock("@/components/grid/DataGrid.vue", async () => {
-  const { defineComponent, h } = await import("vue");
-  return { __esModule: true, default: defineComponent({ setup: () => () => h("div") }) };
-});
+vi.mock("@/components/grid/DataGrid.vue", () => ({
+  __esModule: true,
+  default: { render: () => null },
+}));
 
 import VectorBrowser from "@/components/vector/VectorBrowser.vue";
 

@@ -1559,6 +1559,7 @@ export default withEnglishFallback({
     xlsxHeaderPrompt: "请选择导出 Excel 时使用的表头格式：",
     xlsxHeaderOriginal: "表头使用字段名称",
     xlsxHeaderComment: "表头使用注释",
+    xlsxHeaderNameAndComment: "表头使用字段名称 + 注释",
     copied: "已复制",
     cut: "已剪切",
     copyFailed: "复制失败：{message}",

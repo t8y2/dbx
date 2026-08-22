@@ -1635,6 +1635,7 @@ export default {
     xlsxHeaderPrompt: "Choose the header format for the exported Excel file:",
     xlsxHeaderOriginal: "Use column names as headers",
     xlsxHeaderComment: "Use column comments as headers",
+    xlsxHeaderNameAndComment: "Use column names and comments as headers",
     copied: "Copied",
     copyFailed: "Copy failed: {message}",
     previewSqlEmpty: "No pending SQL changes to preview",

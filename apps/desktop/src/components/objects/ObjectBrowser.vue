@@ -84,6 +84,7 @@ import { buildExecutableObjectSourceStatements, buildRoutineRenameObjectSourceSt
 import { buildRenameObjectSql, supportsObjectRename } from "@/lib/table/objectRenameSql";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { generateDatabaseExportId } from "@/lib/export/databaseExport";
+import { buildXlsxHeaderOverrides, hasXlsxHeaderComments, type XlsxHeaderMode } from "@/lib/export/xlsxHeader";
 import { copyToClipboard, eventTargetAllowsAppClipboardShortcut } from "@/lib/common/clipboard";
 import { defaultPasteTableMode, pasteTableModeCopiesData, supportsWholeRowTableDataCopy, tableClipboardMatchesTarget, tableClipboardMenuState, tableClipboardSourceContext, tableDataCopyColumnOptions, type PasteTableMode, type TableClipboardContext } from "@/lib/table/tableClipboard";
 import { buildSingleDdlExportFileContent } from "@/lib/export/ddlExport";
@@ -1923,16 +1924,16 @@ async function exportData(row: ObjectBrowserRow, format: "csv" | "json" | "sql")
   else await exportTableData(row, format);
 }
 
-function showObjectBrowserXlsxHeaderDialog(hasComments: boolean): Promise<boolean | null> {
-  if (!hasComments) return Promise.resolve(false);
+function showObjectBrowserXlsxHeaderDialog(hasComments: boolean): Promise<XlsxHeaderMode | null> {
+  if (!hasComments) return Promise.resolve("name");
 
   return new Promise((resolve) => {
     const container = document.createElement("div");
     document.body.appendChild(container);
     const app = createApp(XlsxHeaderDialog, {
       open: true,
-      onConfirm: (useCommentHeader: boolean) => {
-        resolve(useCommentHeader);
+      onConfirm: (mode: XlsxHeaderMode) => {
+        resolve(mode);
         app.unmount();
         document.body.removeChild(container);
       },
@@ -1949,24 +1950,24 @@ function showObjectBrowserXlsxHeaderDialog(hasComments: boolean): Promise<boolea
 
 async function exportDataXlsx(row: ObjectBrowserRow) {
   const schema = row.schema || selectedSchema.value;
-  let useCommentHeader = false;
+  let headerMode: XlsxHeaderMode = "name";
   let columnInfos: ColumnInfo[] | undefined;
 
   try {
     columnInfos = await api.getColumns(props.connection.id, props.database, schema || props.database, row.name, props.catalog);
-    const hasComments = columnInfos.some((col) => col.comment && col.comment.trim().length > 0);
+    const hasComments = hasXlsxHeaderComments(columnInfos.map((column) => column.comment));
     const result = await showObjectBrowserXlsxHeaderDialog(hasComments);
     if (result === null) return;
-    useCommentHeader = result;
+    headerMode = result;
   } catch {
     // Column fetch failed, fallback to export without comments
     columnInfos = undefined;
   }
 
-  await exportTableData(row, "xlsx", columnInfos, useCommentHeader);
+  await exportTableData(row, "xlsx", columnInfos, headerMode);
 }
 
-async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx" | "sql", columnInfos?: ColumnInfo[], useCommentHeader = false) {
+async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx" | "sql", columnInfos?: ColumnInfo[], headerMode: XlsxHeaderMode = "name") {
   const schema = row.schema || selectedSchema.value;
 
   // Save dialog first
@@ -2004,8 +2005,9 @@ async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx" | "
       if (format === "csv") {
         await api.exportQueryResultCsv(filePath, result.columns, result.rows);
       } else {
-        const comments = useCommentHeader ? result.columns.map((name) => columnInfos?.find((column) => column.name.toLocaleLowerCase() === name.toLocaleLowerCase())?.comment ?? null) : undefined;
-        await api.exportQueryResultXlsx(filePath, row.name, result.columns, result.column_types ?? result.columns.map(() => ""), comments, result.rows);
+        const comments = result.columns.map((name) => columnInfos?.find((column) => column.name.toLocaleLowerCase() === name.toLocaleLowerCase())?.comment);
+        const headerOverrides = buildXlsxHeaderOverrides(result.columns, comments, headerMode);
+        await api.exportQueryResultXlsx(filePath, row.name, result.columns, result.column_types ?? result.columns.map(() => ""), headerOverrides, result.rows);
       }
       toast(t("grid.exported"));
       return;
@@ -2015,8 +2017,12 @@ async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx" | "
 
     if (columnInfos) {
       columns = columnInfos.map((c) => c.name);
-      if (format === "xlsx" && useCommentHeader) {
-        columnComments = columnInfos.map((c) => c.comment ?? null);
+      if (format === "xlsx") {
+        columnComments = buildXlsxHeaderOverrides(
+          columns,
+          columnInfos.map((column) => column.comment),
+          headerMode,
+        );
       }
     } else if (props.connection.db_type === "neo4j") {
       const infos = await api.getColumns(props.connection.id, props.database, schema || props.database, row.name, props.catalog);

@@ -1996,6 +1996,7 @@ export default withEnglishFallback({
     xlsxHeaderPrompt: "Seleccione el formato de encabezado al exportar a Excel:",
     xlsxHeaderOriginal: "Encabezado usando nombres de campos",
     xlsxHeaderComment: "Encabezado usando comentarios",
+    xlsxHeaderNameAndComment: "Encabezado usando nombres de campos y comentarios",
     jumpToPage: "Ir a la página",
     importBinaryValue: "Importar desde archivo",
     binaryImportApplied: "Se importaron {count} bytes, que se escribirán en la base de datos al guardar los cambios.",

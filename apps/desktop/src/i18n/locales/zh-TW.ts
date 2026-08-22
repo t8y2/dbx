@@ -2000,6 +2000,7 @@ export default withEnglishFallback({
     xlsxHeaderPrompt: "請選擇匯出 Excel 時使用的表頭格式：",
     xlsxHeaderOriginal: "表頭使用欄位名稱",
     xlsxHeaderComment: "表頭使用註解",
+    xlsxHeaderNameAndComment: "表頭使用欄位名稱 + 註解",
     cut: "已剪下",
   },
   exportProgress: {

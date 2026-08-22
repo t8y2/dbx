@@ -2016,6 +2016,7 @@ export default withEnglishFallback({
     xlsxHeaderPrompt: "Excel エクスポート時に使用するヘッダー形式を選択してください：",
     xlsxHeaderOriginal: "ヘッダーにフィールド名を使用",
     xlsxHeaderComment: "ヘッダーにコメントを使用",
+    xlsxHeaderNameAndComment: "ヘッダーにフィールド名とコメントを使用",
     searchMode: "検索モード",
     searchModeHint: "Ctrl+F 検索時に一致する行をフィルタリングするか、全行を表示したまま一致箇所をハイライトするかを選択します。",
     searchModeFilter: "フィルター",

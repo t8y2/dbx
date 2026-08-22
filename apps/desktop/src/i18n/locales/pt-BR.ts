@@ -1996,6 +1996,7 @@ export default withEnglishFallback({
     xlsxHeaderPrompt: "Selecione o formato do cabeçalho a ser usado ao exportar Excel:",
     xlsxHeaderOriginal: "Cabeçalho usa nome do campo",
     xlsxHeaderComment: "Cabeçalho usa comentário",
+    xlsxHeaderNameAndComment: "Cabeçalho usa nome do campo e comentário",
     jumpToPage: "Ir para a página",
     importBinaryValue: "Importar do arquivo",
     binaryImportApplied: "{count} bytes importados, gravados no banco de dados após salvar as alterações.",

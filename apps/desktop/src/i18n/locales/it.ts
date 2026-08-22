@@ -1994,6 +1994,7 @@ export default withEnglishFallback({
     xlsxHeaderPrompt: "Seleziona il formato dell'intestazione da utilizzare per l'esportazione in Excel:",
     xlsxHeaderOriginal: "Intestazione con nome campo",
     xlsxHeaderComment: "Intestazione con commento",
+    xlsxHeaderNameAndComment: "Intestazione con nome campo e commento",
     jumpToPage: "Vai alla pagina",
     importBinaryValue: "Importa da file",
     binaryImportApplied: "Importati {count} byte, scritti nel database dopo il salvataggio delle modifiche.",

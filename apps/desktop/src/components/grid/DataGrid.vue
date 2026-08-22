@@ -2390,13 +2390,8 @@ const allColumnTypes = computed(() =>
 const visibleColumnTypes = computed(() => visibleColumnIndexes.value.map((index) => allColumnTypes.value[index]));
 const allColumnTypeVisualKinds = computed(() => allColumnTypes.value.map((type) => resolveDataGridTypeVisualKind(type, resolvedDatabaseType.value)));
 const visibleColumnTypeVisualKinds = computed(() => visibleColumnIndexes.value.map((index) => allColumnTypeVisualKinds.value[index] ?? "unknown"));
-const visibleColumnComments = computed(() =>
-  visibleColumnIndexes.value.map((index) => {
-    const ordinalComments = props.resultColumnComments;
-    if (ordinalComments) return ordinalComments[index];
-    return dataGridColumnCommentFor(columnCommentMap.value, props.result.columns[index] ?? "", props.sourceColumns?.[index]);
-  }),
-);
+const allColumnComments = computed(() => props.result.columns.map((column, index) => resolvedColumnComment(column, index)));
+const visibleColumnComments = computed(() => visibleColumnIndexes.value.map((index) => allColumnComments.value[index]));
 const visibleColumnCount = computed(() => visibleColumnIndexes.value.length);
 
 const numericColumnRightAlign = computed(() => (settingsStore.editorSettings.numericColumnRightAlign ?? true) && !showTranspose.value);
@@ -7430,6 +7425,8 @@ const {
   database: computed(() => props.executionDatabase ?? props.database),
   context: computed(() => props.context),
   sourceColumns: visibleSourceColumns,
+  columnComments: visibleColumnComments,
+  allColumnComments,
   mongoDocuments: computed(() => props.result.mongo_copy_documents ?? props.result.mongo_documents),
   columnTypes: visibleColumnTypes,
   allColumnTypes,

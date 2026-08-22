@@ -30,4 +30,27 @@ describe("XlsxHeaderDialog", () => {
     expect(cancelCount).toBe(1);
     app.unmount();
   });
+
+  it("emits the combined name and comment mode", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    let selectedMode = "";
+    const app = createApp(XlsxHeaderDialog, {
+      open: true,
+      onConfirm: (mode: string) => {
+        selectedMode = mode;
+      },
+    });
+    app.use(i18n);
+    app.mount(container);
+    await nextTick();
+
+    document.querySelector<HTMLInputElement>('input[value="name-comment"]')!.click();
+    await nextTick();
+    document.querySelector<HTMLButtonElement>("[data-xlsx-header-confirm]")!.click();
+    await nextTick();
+
+    expect(selectedMode).toBe("name-comment");
+    app.unmount();
+  });
 });

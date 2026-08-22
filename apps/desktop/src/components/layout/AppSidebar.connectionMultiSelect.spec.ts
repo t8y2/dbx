@@ -135,7 +135,10 @@ const mountedApps: Array<{ unmount: () => void; host: HTMLElement }> = [];
 function createStore() {
   return reactive({
     connections: [{ id: "conn-visible" }, { id: "conn-hidden" }, { id: "conn-next" }],
-    sidebarLayout: { groups: [{ id: "group-a", name: "Group A" }] },
+    sidebarLayout: {
+      groups: [{ id: "group-a", name: "Group A" }],
+      order: [{ type: "group", id: "group-a", children: [] }],
+    },
     selectedTreeNodeIds: [] as string[],
     selectedTreeNodeId: null as string | null,
     treeSelectionAnchorId: null as string | null,

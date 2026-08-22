@@ -16,6 +16,7 @@ import {
   filterSidebarLayoutByConnectionIds,
   collapseAllGroups,
   buildConnectionGroupPathMap,
+  connectionGroupDestinationRows,
 } from "../../apps/desktop/src/lib/sidebar/sidebarLayout.ts";
 import type { ConnectionConfig, SidebarLayout } from "../../apps/desktop/src/types/database.ts";
 
@@ -59,6 +60,30 @@ test("builds all connection group paths in one layout traversal", () => {
   assert.deepEqual(paths.get("project-db"), ["Project"]);
   assert.deepEqual(paths.get("staging-db"), ["Project", "Staging"]);
   assert.equal(paths.has("missing"), false);
+});
+
+test("builds connection group destinations in sidebar hierarchy order", () => {
+  const rows = connectionGroupDestinationRows({
+    groups: [
+      { id: "project", name: "Project", collapsed: false },
+      { id: "staging", name: "Staging", collapsed: false },
+      { id: "archive", name: "Archive", collapsed: false },
+    ],
+    order: [
+      {
+        type: "group",
+        id: "project",
+        children: [{ type: "group", id: "staging", children: [] }],
+      },
+      { type: "group", id: "archive", children: [] },
+    ],
+  });
+
+  assert.deepEqual(rows, [
+    { id: "project", name: "Project", depth: 0, path: ["Project"] },
+    { id: "staging", name: "Staging", depth: 1, path: ["Project", "Staging"] },
+    { id: "archive", name: "Archive", depth: 0, path: ["Archive"] },
+  ]);
 });
 
 // --- reconcileLayout ---

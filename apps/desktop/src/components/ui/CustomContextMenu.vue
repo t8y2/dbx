@@ -282,7 +282,7 @@ onBeforeUnmount(() => {
           <div v-if="item.separator" class="-mx-1 my-1 flex items-center px-1">
             <div class="h-px flex-1 bg-border/70" />
           </div>
-          <button v-else :disabled="itemIsDisabled(item)" :class="[...itemButtonClass(item.variant), activeSubmenuTriggerClass(item, index)]" @click="handleItemClick(item)" @mouseenter="(e) => onItemMouseEnter(index, e)" @mouseleave="onItemMouseLeave">
+          <button v-else :disabled="itemIsDisabled(item)" :title="item.title" :class="[...itemButtonClass(item.variant), activeSubmenuTriggerClass(item, index)]" @click="handleItemClick(item)" @mouseenter="(e) => onItemMouseEnter(index, e)" @mouseleave="onItemMouseLeave">
             <span class="flex size-4 shrink-0 items-center justify-center">
               <Check v-if="item.checked" class="size-4 text-primary" />
               <component :is="item.icon" v-else-if="item.icon" :class="['size-4', item.iconClass]" />
@@ -313,7 +313,7 @@ onBeforeUnmount(() => {
           <div v-if="child.separator" class="-mx-1 my-1 flex items-center px-1">
             <div class="h-px flex-1 bg-border/70" />
           </div>
-          <button v-else :disabled="itemIsDisabled(child)" :class="itemButtonClass(child.variant)" @click="handleSubItemClick(child)">
+          <button v-else :disabled="itemIsDisabled(child)" :title="child.title" :class="itemButtonClass(child.variant)" :style="{ paddingInlineStart: `${0.5 + (child.indentLevel ?? 0) * 0.75}rem` }" @click="handleSubItemClick(child)">
             <span class="flex size-4 shrink-0 items-center justify-center">
               <Check v-if="child.checked" class="size-4 text-primary" />
               <component :is="child.icon" v-else-if="child.icon" :class="['size-4', child.iconClass]" />

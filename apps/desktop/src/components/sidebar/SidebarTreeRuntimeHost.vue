@@ -74,6 +74,7 @@ import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { connectionUsesVisibleSchemaFilter } from "@/lib/database/visibleDatabases";
 import { canTreeNodePin, canTreeNodeShowExpander } from "@/lib/sidebar/sidebarTreeItemLayout";
 import { sidebarConnectionVisibleFilterMenu } from "@/lib/sidebar/sidebarVisibleFilterMenu";
+import { connectionGroupDestinationRows } from "@/lib/sidebar/sidebarLayout";
 import { objectTypesForGroupNode } from "@/lib/table/tableTree";
 import { loadSidebarObjectGroup } from "@/lib/sidebar/sidebarObjectGroupRouting";
 import { isXuguTypeMemberContainer } from "@/lib/sidebar/xuguTypeMembers";
@@ -148,7 +149,7 @@ import { connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connec
 import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
 import { defaultPasteTableMode, pasteTableModeCopiesData, supportsWholeRowTableDataCopy, tableClipboardMatchesTarget, tableClipboardMenuState, tableClipboardSourceContext, tableDataCopyColumnOptions, type TableClipboardContext, type TableClipboardTableContext } from "@/lib/table/tableClipboard";
 import { selectedSidebarBatchTargets, selectedTreeNodesInVisibleOrder as orderSelectedTreeNodes } from "@/lib/sidebar/sidebarTreeSelection";
-import { connectionPasteTargetGroupId, selectedConnectionClipboardTargets, selectedConnectionEditTarget } from "@/lib/sidebar/sidebarConnectionSelection";
+import { connectionPasteTargetGroupId, selectedConnectionClipboardTargets, selectedConnectionEditTarget, selectedConnectionMoveTargets } from "@/lib/sidebar/sidebarConnectionSelection";
 import { connectionSupportsDatabaseUserAdmin, resolveDatabaseUserAdminProviderForConnection, type DatabaseUserIdentity } from "@/lib/database/databaseUserAdmin";
 import { authorizationPlanSql, authorizationPlanStatus, buildCreateDatabaseAuthorizationPlan, executeAuthorizationPlan, type AuthorizationPlan, type AuthorizationStepResult } from "@/lib/database/databaseAuthorizationPlan";
 import { connectionSupportsProcessList } from "@/lib/database/processListDrivers";
@@ -4533,23 +4534,7 @@ function getTreeItemDialogController(): Record<string, any> {
   return treeItemDialogController;
 }
 
-const availableGroups = computed(() => connectionStore.sidebarLayout.groups);
-
-const currentGroupId = computed(() => {
-  if (activeNode.value.type !== "connection" || !activeNode.value.connectionId) return null;
-  const find = (entries: typeof connectionStore.sidebarLayout.order): string | null => {
-    for (const entry of entries) {
-      if (entry.type !== "group") continue;
-      if ((entry.children ?? entry.connectionIds?.map((id) => ({ type: "connection" as const, id })) ?? []).some((child) => child.type === "connection" && child.id === activeNode.value.connectionId)) {
-        return entry.id;
-      }
-      const found = find(entry.children ?? []);
-      if (found) return found;
-    }
-    return null;
-  };
-  return find(connectionStore.sidebarLayout.order);
-});
+const availableGroups = computed(() => connectionGroupDestinationRows(connectionStore.sidebarLayout));
 
 onBeforeUnmount(() => {
   stopDangerDialogRouting?.();
@@ -4760,14 +4745,18 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
       });
     }
     items.push({ label: "", separator: true });
-    if (availableGroups.value.length > 0 || currentGroupId.value) {
-      const groupChildren: ContextMenuItem[] = availableGroups.value.map((group: { id: string; name: string }) => ({
+    const moveTargets = selectedConnectionMoveTargets(node, selectedTreeNodesInVisibleOrder());
+    const allMoveTargetsInGroup = (groupId: string | null) => moveTargets.length > 0 && moveTargets.every((target) => connectionStore.groupIdForConnection(target.connectionId) === groupId);
+    if (availableGroups.value.length > 0 || !allMoveTargetsInGroup(null)) {
+      const groupChildren: ContextMenuItem[] = availableGroups.value.map((group) => ({
         label: group.name,
+        title: group.path.join(" / "),
         action: () => moveToGroup(group.id),
         icon: FolderOpen,
-        disabled: group.id === currentGroupId.value,
+        indentLevel: group.depth,
+        disabled: allMoveTargetsInGroup(group.id),
       }));
-      if (currentGroupId.value) {
+      if (!allMoveTargetsInGroup(null)) {
         groupChildren.push({ label: "", separator: true });
         groupChildren.push({ label: t("connectionGroup.ungrouped"), action: () => moveToGroup(null) });
       }

@@ -142,6 +142,8 @@ fn tdengine_websocket_live_compatibility() {
     assert_eq!(query["rows"].as_array().unwrap().len(), 2);
     assert_eq!(query["truncated"], true);
     assert_eq!(query["rows"][0][0], "2026-08-04 10:00:00.001");
+    assert_eq!(query["column_types"][1], "FLOAT");
+    assert_eq!(query["rows"][0][1], 10.1);
     let connection_info = agent.call("connection_info", json!({"agentSessionId": session_id}));
     assert_eq!(connection_info["databaseInfo"]["currentDatabase"], database);
 
@@ -158,6 +160,7 @@ fn tdengine_websocket_live_compatibility() {
     );
     assert_eq!(first_page["has_more"], true);
     assert_eq!(first_page["truncated"], false);
+    assert_eq!(first_page["rows"][0][1], 10.1);
     let query_session_id = first_page["session_id"].as_str().expect("paged query session");
     let final_page = agent.call(
         "fetch_query_page",
@@ -169,6 +172,7 @@ fn tdengine_websocket_live_compatibility() {
         }),
     );
     assert_eq!(final_page["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(final_page["rows"][0][1], 10.2);
     assert_eq!(final_page["has_more"], false);
     assert_eq!(final_page["truncated"], true);
 

@@ -62,7 +62,7 @@ public final class IrisAgent extends ConfiguredJdbcAgent {
                             stringOrNull(rs, "COLUMN_DEFAULT"),
                             "YES".equalsIgnoreCase(stringOrNull(rs, "PRIMARY_KEY")),
                             null,
-                            null,
+                            stringOrNull(rs, "DESCRIPTION"),
                             intOrNull(rs, "NUMERIC_PRECISION"),
                             intOrNull(rs, "NUMERIC_SCALE"),
                             intOrNull(rs, "CHARACTER_MAXIMUM_LENGTH")
@@ -126,7 +126,7 @@ public final class IrisAgent extends ConfiguredJdbcAgent {
     private static String columnSql(String schema) {
         StringBuilder sql = new StringBuilder(
             "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT, "
-                + "PRIMARY_KEY, NUMERIC_PRECISION, NUMERIC_SCALE, CHARACTER_MAXIMUM_LENGTH "
+                + "PRIMARY_KEY, DESCRIPTION, NUMERIC_PRECISION, NUMERIC_SCALE, CHARACTER_MAXIMUM_LENGTH "
                 + "FROM INFORMATION_SCHEMA.COLUMNS WHERE "
         );
         if (!isBlank(schema)) {

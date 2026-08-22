@@ -273,6 +273,47 @@ func (a *rocketMQAgent) getConsumerLag(params map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	consumerClients := resolveConsumerClients(ctx, client, groupID, topic)
+	return buildConsumerLagResult(stats, consumerClients), nil
+}
+
+type consumeStatusReader interface {
+	GetConsumeStatus(context.Context, string, string, string) (map[string]map[string]int64, error)
+}
+
+func resolveConsumerClients(
+	ctx context.Context,
+	reader consumeStatusReader,
+	groupID string,
+	topic string,
+) map[parsedMessageQueue]string {
+	clients := make(map[parsedMessageQueue]string)
+	status, err := reader.GetConsumeStatus(ctx, topic, groupID, "")
+	if err != nil {
+		return clients
+	}
+	clientIDs := sortedKeys(status)
+	for _, clientID := range clientIDs {
+		if clientID == "" {
+			continue
+		}
+		for _, key := range sortedKeys(status[clientID]) {
+			queue := parseMessageQueueKey(key)
+			if queue.Topic == "" || queue.BrokerName == "" || queue.QueueID < 0 {
+				continue
+			}
+			if _, exists := clients[queue]; !exists {
+				clients[queue] = clientID
+			}
+		}
+	}
+	return clients
+}
+
+func buildConsumerLagResult(
+	stats *admin.ConsumeStats,
+	consumerClients map[parsedMessageQueue]string,
+) map[string]any {
 	partitions := make([]map[string]any, 0, len(stats.OffsetTable))
 	var totalLag int64
 	for key, offset := range stats.OffsetTable {
@@ -282,7 +323,7 @@ func (a *rocketMQAgent) getConsumerLag(params map[string]any) (any, error) {
 		partitions = append(partitions, map[string]any{
 			"partition": queue.QueueID, "currentOffset": offset.ConsumerOffset,
 			"endOffset": offset.BrokerOffset, "lag": lag, "brokerName": queue.BrokerName,
-			"lastTimestamp": offset.LastTimestamp, "consumerClient": "",
+			"lastTimestamp": offset.LastTimestamp, "consumerClient": consumerClients[queue],
 		})
 	}
 	sort.Slice(partitions, func(i, j int) bool {
@@ -292,7 +333,7 @@ func (a *rocketMQAgent) getConsumerLag(params map[string]any) (any, error) {
 		}
 		return left["partition"].(int) < right["partition"].(int)
 	})
-	return map[string]any{"partitions": partitions, "totalLag": totalLag}, nil
+	return map[string]any{"partitions": partitions, "totalLag": totalLag}
 }
 
 func (a *rocketMQAgent) examineConsumeStatsByTopic(

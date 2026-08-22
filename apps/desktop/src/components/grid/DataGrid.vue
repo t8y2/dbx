@@ -5576,6 +5576,7 @@ function cellDetailFor(rowIndex: number, columnIndex: number): DataGridCellDetai
       canEditCell: canEditCellItem(item, columnIndex),
       isDraft: !!item.isDraft,
     }),
+    databaseType: resolvedDatabaseType.value,
     isValuePreviewTruncated: isLargeValuePreview(item, columnIndex),
   });
 }

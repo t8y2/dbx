@@ -1,6 +1,7 @@
 import { cellImagePreviewUrl } from "@/lib/dataGrid/cellImageUrl";
 import { displayCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
 import { formatJsonText } from "@/lib/dataGrid/cellDetailPresentation";
+import type { DatabaseType } from "@/types/database";
 
 export const CELL_DETAIL_VALUE_PREVIEW_MAX_LENGTH = 12_000;
 
@@ -48,6 +49,7 @@ export interface BuildDataGridCellDetailOptions {
   commentByColumn?: ReadonlyMap<string, string>;
   displayValue: (value: CellValue, columnIndex: number) => string;
   isEditable: boolean;
+  databaseType?: DatabaseType;
   includeBinaryImagePreview?: boolean;
   isValuePreviewTruncated?: boolean;
 }
@@ -109,7 +111,10 @@ export function buildDataGridCellDetail(options: BuildDataGridCellDetailOptions)
     displayValue,
     displayValuePreview,
     isValuePreviewTruncated: options.isValuePreviewTruncated === true || rawValuePreview.length < rawValue.length || displayValuePreview.length < displayValue.length,
-    imagePreviewUrl: cellImagePreviewUrl(value, type, { binary: options.includeBinaryImagePreview !== false }),
+    imagePreviewUrl: cellImagePreviewUrl(value, type, {
+      binary: options.includeBinaryImagePreview !== false,
+      databaseType: options.databaseType,
+    }),
     length: value === null ? 0 : String(value).length,
     formattedJson,
     isEditable: options.isEditable,

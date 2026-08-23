@@ -2518,6 +2518,8 @@ export default withEnglishFallback({
     append: "Anexar ao Editor",
     apply: "Aplicar ao Editor",
     clear: "Limpar Conversa",
+    maximize: "Maximizar",
+    restore: "Restaurar",
     welcome: "Diga o que você gostaria de consultar e eu escreverei o SQL",
     requestFailed: "Falha na solicitação de AI",
     requestCancelled: "Solicitação de AI cancelada",

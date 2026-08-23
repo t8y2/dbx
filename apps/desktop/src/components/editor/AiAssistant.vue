@@ -23,7 +23,9 @@ import {
   HelpCircle,
   History,
   Loader2,
+  Maximize2,
   MessageSquarePlus,
+  Minimize2,
   Pencil,
   Plus,
   Replace,
@@ -213,6 +215,7 @@ interface ChatMessage {
 const props = defineProps<{
   tab?: QueryTab;
   connection?: ConnectionConfig;
+  maximized?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -223,6 +226,7 @@ const emit = defineEmits<{
   insertRedisCommand: [command: string];
   executeRedisCommand: [command: string];
   openExplainPlan: [sql: string];
+  toggleMaximize: [];
   close: [];
 }>();
 
@@ -3127,7 +3131,11 @@ async function openExternalUrl(url: string) {
       <Button variant="ghost" size="icon" class="h-6 w-6" @click="clearMessages" :title="t('ai.clear')">
         <Trash2 class="h-3.5 w-3.5" />
       </Button>
-      <Button variant="ghost" size="icon" class="h-6 w-6" @click="emit('close')">
+      <Button variant="ghost" size="icon" class="h-6 w-6" :title="props.maximized ? t('ai.restore') : t('ai.maximize')" :aria-label="props.maximized ? t('ai.restore') : t('ai.maximize')" :aria-pressed="props.maximized" @click="emit('toggleMaximize')">
+        <Minimize2 v-if="props.maximized" class="h-3.5 w-3.5" />
+        <Maximize2 v-else class="h-3.5 w-3.5" />
+      </Button>
+      <Button variant="ghost" size="icon" class="h-6 w-6" :title="t('common.close')" :aria-label="t('common.close')" @click="emit('close')">
         <X class="h-3.5 w-3.5" />
       </Button>
     </div>

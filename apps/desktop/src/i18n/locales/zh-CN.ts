@@ -2400,6 +2400,8 @@ export default withEnglishFallback({
     append: "追加到编辑器",
     apply: "应用到编辑器",
     clear: "清空对话",
+    maximize: "最大化",
+    restore: "还原",
     welcome: "聊聊你想查什么，我来写 SQL",
     requestFailed: "AI 请求失败",
     requestCancelled: "请求已取消",

@@ -2410,6 +2410,8 @@ export default withEnglishFallback({
     append: "追加到編輯器",
     apply: "套用到編輯器",
     clear: "清空對話",
+    maximize: "最大化",
+    restore: "還原",
     welcome: "告訴我你想查詢什麼，我會寫出 SQL",
     requestFailed: "AI 請求失敗",
     requestCancelled: "AI 請求已取消",

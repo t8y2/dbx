@@ -2476,6 +2476,8 @@ export default {
     append: "Append to Editor",
     apply: "Apply to Editor",
     clear: "Clear Chat",
+    maximize: "Maximize",
+    restore: "Restore",
     welcome: "Tell me what you'd like to query, and I'll write the SQL",
     requestFailed: "AI request failed",
     requestCancelled: "Request cancelled",

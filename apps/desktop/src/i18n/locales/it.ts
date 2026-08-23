@@ -2410,6 +2410,8 @@ export default withEnglishFallback({
     append: "Accoda all'Editor",
     apply: "Applica all'Editor",
     clear: "Cancella Chat",
+    maximize: "Massimizza",
+    restore: "Ripristina",
     welcome: "Dimmi cosa vorresti interrogare e io scriverò il codice SQL",
     requestFailed: "Richiesta AI non riuscita",
     requestCancelled: "Richiesta AI annullata",

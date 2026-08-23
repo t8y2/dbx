@@ -2549,6 +2549,8 @@ export default withEnglishFallback({
     append: "エディタに追加",
     apply: "エディタに適用",
     clear: "チャットをクリア",
+    maximize: "最大化",
+    restore: "元に戻す",
     welcome: "クエリしたい内容を教えてください。SQLを作成します",
     requestFailed: "AIリクエストに失敗しました",
     requestCancelled: "AIリクエストがキャンセルされました",

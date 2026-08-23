@@ -49,4 +49,13 @@ describe("right sidebar panel entry points", () => {
     }
     expect(appSource).not.toMatch(/watch\([\s\S]{0,180}toolbarItems\.(ai|history|sqlLibrary|sqlFileTree)[\s\S]{0,180}closeRightSidebarPanel/);
   });
+
+  it("keeps the maximized AI surface in the parent layout", () => {
+    expect(appSource).toContain("const isAiPanelMaximized = ref(false);");
+    expect(appSource).toContain(':maximized="isAiPanelMaximized"');
+    expect(appSource).toContain('@toggle-maximize="toggleAiPanelMaximized"');
+    expect(appSource).toContain("isAiPanelMaximized ? 'min-w-0 flex-1' : 'shrink-0'");
+    expect(appSource).toContain('v-show="!isAiPanelMaximized"');
+    expect(functionSource("setRightSidebarPanelOpen", "toggleRightSidebarPanel")).toContain("isAiPanelMaximized.value = false;");
+  });
 });

@@ -2307,6 +2307,8 @@ export default withEnglishFallback({
     append: "편집기에 추가",
     apply: "편집기에 적용",
     clear: "채팅 지우기",
+    maximize: "최대화",
+    restore: "복원",
     welcome: "쿼리할 내용을 말씀해 주세요. SQL을 작성해 드릴게요",
     requestFailed: "AI 요청 실패",
     requestCancelled: "AI 요청이 취소되었습니다",

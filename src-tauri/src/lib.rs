@@ -507,7 +507,7 @@ fn linux_uses_native_wayland(
     }
 
     let automatic_backend = linux_appimage_wayland_backend_override(appimage, wayland_display, gdk_backend);
-    gdk_backend.or_else(|| automatic_backend.map(std::ffi::OsStr::new)).map_or(true, |backends| {
+    gdk_backend.or_else(|| automatic_backend.map(std::ffi::OsStr::new)).is_none_or(|backends| {
         backends
             .to_string_lossy()
             .split(',')

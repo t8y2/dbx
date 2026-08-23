@@ -85,7 +85,7 @@ impl DialectRegistry {
         let kind = DialectKind::from_database_type(db_type);
         let label = kind.label();
         let db_name = db_type.as_str();
-        self.get(&db_name).or_else(|| self.get(label)).map(|ld| ld.descriptor)
+        self.get(db_name).or_else(|| self.get(label)).map(|ld| ld.descriptor)
     }
 
     pub fn get_yaml(&self, name: &str) -> Option<DialectYaml> {

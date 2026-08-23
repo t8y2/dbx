@@ -91,6 +91,7 @@ describe("supportsTransaction", () => {
     expect(supportsTransaction("postgres")).toBe(true);
     expect(supportsTransaction("mysql")).toBe(true);
     expect(supportsTransaction("oracle")).toBe(true);
+    expect(supportsTransaction("jdbc")).toBe(true);
   });
 
   it("returns false for unsupported database types", () => {

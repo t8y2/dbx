@@ -238,7 +238,7 @@ export function usesPostgresLikeStructureCopy(dbType?: DatabaseType): boolean {
   return !!dbType && PG_LIKE_STRUCTURE_TYPES.has(dbType);
 }
 
-const TRANSACTION_SUPPORTED_TYPES: readonly string[] = ["postgres", "mysql", "oracle"];
+const TRANSACTION_SUPPORTED_TYPES: readonly string[] = ["postgres", "mysql", "oracle", "jdbc"];
 
 /**
  * Returns true if the given database type supports explicit transaction control

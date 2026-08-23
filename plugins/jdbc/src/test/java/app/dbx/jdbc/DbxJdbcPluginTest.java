@@ -214,6 +214,66 @@ final class DbxJdbcPluginTest {
         assertFalse(info.path("driverName").asText().isEmpty());
         assertFalse(info.path("driverVersion").asText().isEmpty());
         assertFalse(info.path("jdbcVersion").asText().isEmpty());
+        assertEquals(true, info.path("supportsTransactions").asBoolean());
+    }
+
+    @Test
+    void manualTransactionsCommitAndRollbackOnTheDedicatedConnection() throws Exception {
+        request("executeQuery", """
+            {
+              "connection": %s,
+              "sql": "CREATE TABLE IF NOT EXISTS manual_tx_rows(id INT PRIMARY KEY)"
+            }
+            """.formatted(CONNECTION));
+        request("executeQuery", """
+            {
+              "connection": %s,
+              "sql": "DELETE FROM manual_tx_rows"
+            }
+            """.formatted(CONNECTION));
+
+        JsonNode begun = request("beginManualTransaction", """
+            { "connection": %s }
+            """.formatted(CONNECTION));
+        assertFalse(begun.has("error"), begun.toString());
+        JsonNode insertedThenRolledBack = request("executeInManualTransaction", """
+            {
+              "connection": %s,
+              "sql": "INSERT INTO manual_tx_rows VALUES (1)"
+            }
+            """.formatted(CONNECTION));
+        assertFalse(insertedThenRolledBack.has("error"), insertedThenRolledBack.toString());
+        JsonNode rolledBack = request("rollbackManualTransaction", """
+            { "connection": %s }
+            """.formatted(CONNECTION));
+        assertFalse(rolledBack.has("error"), rolledBack.toString());
+        assertEquals(0, manualTransactionRowCount());
+
+        request("begin_manual_transaction", """
+            { "connection": %s }
+            """.formatted(CONNECTION));
+        request("execute_in_manual_transaction", """
+            {
+              "connection": %s,
+              "sql": "INSERT INTO manual_tx_rows VALUES (2)"
+            }
+            """.formatted(CONNECTION));
+        JsonNode committed = request("commit_manual_transaction", """
+            { "connection": %s }
+            """.formatted(CONNECTION));
+        assertFalse(committed.has("error"), committed.toString());
+        assertEquals(1, manualTransactionRowCount());
+    }
+
+    private static int manualTransactionRowCount() throws Exception {
+        JsonNode result = request("executeQuery", """
+            {
+              "connection": %s,
+              "sql": "SELECT COUNT(*) FROM manual_tx_rows"
+            }
+            """.formatted(CONNECTION));
+        assertFalse(result.has("error"), result.toString());
+        return result.path("result").path("rows").path(0).path(0).asInt();
     }
 
     @Test
@@ -1017,22 +1077,15 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
-    void phoenixConnectionsEnableAutoCommitWhenDriverDefaultsToManualTransactions() throws Exception {
+    void ordinaryConnectionsEnableAutoCommitWhenDriverDefaultsToManualTransactions() throws Exception {
         Method method = DbxJdbcPlugin.class.getDeclaredMethod(
-            "configurePhoenixAutoCommit",
-            JsonNode.class,
-            String.class,
+            "configureOrdinaryAutoCommit",
             Connection.class
         );
         method.setAccessible(true);
         List<String> calls = new ArrayList<>();
-        JsonNode connection = MAPPER.readTree("""
-            {
-              "connection_string": "jdbc:phoenix:localhost"
-            }
-            """);
 
-        method.invoke(null, connection, "jdbc:phoenix:localhost", pagedQueryConnection(calls, false));
+        method.invoke(null, pagedQueryConnection(calls, false));
 
         assertEquals(List.of("getAutoCommit", "setAutoCommit:true"), calls);
     }
@@ -1149,43 +1202,15 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
-    void phoenixAutoCommitConfigurationSkipsNonPhoenixConnections() throws Exception {
+    void ordinaryAutoCommitConfigurationDoesNotResetExistingAutoCommit() throws Exception {
         Method method = DbxJdbcPlugin.class.getDeclaredMethod(
-            "configurePhoenixAutoCommit",
-            JsonNode.class,
-            String.class,
+            "configureOrdinaryAutoCommit",
             Connection.class
         );
         method.setAccessible(true);
         List<String> calls = new ArrayList<>();
-        JsonNode connection = MAPPER.readTree("""
-            {
-              "connection_string": "jdbc:h2:mem:dbx"
-            }
-            """);
 
-        method.invoke(null, connection, "jdbc:h2:mem:dbx", pagedQueryConnection(calls, false));
-
-        assertEquals(List.of(), calls);
-    }
-
-    @Test
-    void phoenixAutoCommitConfigurationDoesNotResetExistingAutoCommit() throws Exception {
-        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
-            "configurePhoenixAutoCommit",
-            JsonNode.class,
-            String.class,
-            Connection.class
-        );
-        method.setAccessible(true);
-        List<String> calls = new ArrayList<>();
-        JsonNode connection = MAPPER.readTree("""
-            {
-              "jdbc_driver_class": "org.apache.phoenix.jdbc.PhoenixDriver"
-            }
-            """);
-
-        method.invoke(null, connection, "jdbc:custom:phoenix", pagedQueryConnection(calls, true));
+        method.invoke(null, pagedQueryConnection(calls, true));
 
         assertEquals(List.of("getAutoCommit"), calls);
     }

@@ -190,6 +190,14 @@ pub enum TxnConnection {
         database: Option<String>,
         cleanup_guard: ClientSessionPoolCleanupGuard,
     },
+    /// Dedicated external-driver process whose shared JDBC connection owns the TX.
+    ExternalDriver {
+        session: Arc<PluginDriverSession>,
+        config: Arc<ConnectionConfig>,
+        client_session_id: String,
+        database: Option<String>,
+        cleanup_guard: ClientSessionPoolCleanupGuard,
+    },
 }
 
 pub struct TransactionSession {

@@ -163,6 +163,57 @@ describe("aiGenerationStatus", () => {
       expect(status.activeTool).toBeUndefined();
     });
 
+    it("response_complete enters finalizing: clears activeTool, preserves startedAt/turn, refreshes lastEventAt", () => {
+      let status = createGenerationStatus(T0);
+      status = applyStatusEvent(status, { type: "turn_start", turn: 2 }, T0 + 1_000);
+      status = applyStatusEvent(status, { type: "tool_call_start", tool_call_id: "c1", tool_name: "execute_sql", args: {} }, T0 + 2_000);
+      status = applyStatusEvent(status, { type: "response_complete" }, T0 + 3_000);
+      expect(status.phase).toBe("finalizing");
+      expect(status.activeTool).toBeUndefined();
+      expect(status.lastEventAt).toBe(T0 + 3_000);
+      expect(status.startedAt).toBe(T0);
+      expect(status.turn).toBe(2);
+    });
+
+    it("once finalizing, non-terminal events (text_delta / tool_call_start) do not flip the phase back", () => {
+      let status = applyStatusEvent(createGenerationStatus(T0), { type: "text_delta", delta: "hi" }, T0 + 1_000);
+      status = applyStatusEvent(status, { type: "response_complete" }, T0 + 2_000);
+      status = applyStatusEvent(status, { type: "text_delta", delta: "late" }, T0 + 3_000);
+      expect(status.phase).toBe("finalizing");
+      status = applyStatusEvent(status, { type: "tool_call_start", tool_call_id: "c2", tool_name: "execute_sql", args: {} }, T0 + 4_000);
+      expect(status.phase).toBe("finalizing");
+      expect(status.activeTool).toBeUndefined();
+      status = applyStatusEvent(status, { type: "response_complete" }, T0 + 5_000);
+      expect(status.phase).toBe("finalizing");
+    });
+
+    it("agent_end / error advance from finalizing to the terminal finished phase", () => {
+      let status = applyStatusEvent(createGenerationStatus(T0), { type: "response_complete" }, T0 + 1_000);
+      status = applyStatusEvent(status, { type: "agent_end" }, T0 + 2_000);
+      expect(status.phase).toBe("finished");
+      expect(status.startedAt).toBe(T0);
+
+      let failed = applyStatusEvent(createGenerationStatus(T0), { type: "response_complete" }, T0 + 1_000);
+      failed = applyStatusEvent(failed, { type: "error", message: "exit 1" }, T0 + 2_000);
+      expect(failed.phase).toBe("finished");
+    });
+
+    it("markCancelling on a finalizing status is a no-op", () => {
+      let status = applyStatusEvent(createGenerationStatus(T0), { type: "response_complete" }, T0 + 2_000);
+      expect(markCancelling(status, T0 + 3_000).phase).toBe("finalizing");
+    });
+
+    it("statusText / liveAnnouncementText return an empty string for finalizing", () => {
+      let status = applyStatusEvent(createGenerationStatus(T0), { type: "response_complete" }, T0 + 1_000);
+      expect(statusText(status, T0 + 42_000, t)).toBe("");
+      expect(liveAnnouncementText(status, T0 + 42_000, t)).toBe("");
+    });
+
+    it("shouldShowLongRunningHint is false for finalizing", () => {
+      let status = applyStatusEvent(createGenerationStatus(T0), { type: "response_complete" }, T0 + 1_000);
+      expect(shouldShowLongRunningHint(status, T0 + STATUS_LONG_RUNNING_THRESHOLD_MS + 1)).toBe(false);
+    });
+
     it("markCancelling on a finished status is a no-op", () => {
       let status = applyStatusEvent(createGenerationStatus(T0), { type: "agent_end" }, T0 + 2_000);
       expect(markCancelling(status, T0 + 3_000).phase).toBe("finished");

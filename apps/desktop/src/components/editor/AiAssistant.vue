@@ -435,7 +435,7 @@ const statusToolLabel = computed(() => {
 });
 const statusTurnBadge = computed(() => (generationStatus.value.turn !== undefined ? t("ai.status.turnBadge", { turn: generationStatus.value.turn + 1 }) : ""));
 /** Gentle >60s hint, hidden while the user is cancelling (they already decided to stop). */
-const statusLongRunningHintVisible = computed(() => generationStatus.value.phase !== "cancelling" && generationStatus.value.phase !== "finished" && shouldShowLongRunningHint(generationStatus.value, statusNow.value));
+const statusLongRunningHintVisible = computed(() => generationStatus.value.phase !== "cancelling" && generationStatus.value.phase !== "finalizing" && generationStatus.value.phase !== "finished" && shouldShowLongRunningHint(generationStatus.value, statusNow.value));
 /**
  * Stable screen-reader announcement for the status line. Fed into a
  * `role="status"` live region; unlike `generationStatusText` it excludes the
@@ -2590,8 +2590,10 @@ async function send() {
         generationStatus.value = applyStatusEvent(generationStatus.value, event, Date.now());
         // Terminal event (agent_end / error) hides the status line immediately —
         // the backend promise may still be settling (CLI teardown / SSE close), so
-        // stop the ticker now instead of letting it idle through that gap.
-        if (generationStatus.value.phase === "finished") {
+        // stop the ticker now instead of letting it idle through that gap. The
+        // non-terminal `response_complete` (phase=finalizing) hides the line the
+        // same way, but the listener stays alive for the real agent_end/error.
+        if (generationStatus.value.phase === "finished" || generationStatus.value.phase === "finalizing") {
           stopStatusTimer();
         }
         if (event.type === "text_delta" && event.delta) {
@@ -3519,8 +3521,10 @@ async function openExternalUrl(url: string) {
                (`v-if="isGenerating"`), not just the wait for the first token. The
                `phase !== 'finished'` guard hides it the instant agent_end/error
                arrives — before isGenerating clears — so a completed reply never
-               shows a lingering "等待模型响应 · 已运行 0s". -->
-          <div v-if="isGenerating && generationStatus.phase !== 'finished'" class="flex min-w-0 items-center gap-[7px] text-xs text-muted-foreground" data-ai-generation-status>
+               shows a lingering "等待模型响应 · 已运行 0s". `finalizing` (the
+               non-terminal `response_complete`) hides the line the same way, while
+               the listener stays alive for the real agent_end/error. -->
+          <div v-if="isGenerating && generationStatus.phase !== 'finished' && generationStatus.phase !== 'finalizing'" class="flex min-w-0 items-center gap-[7px] text-xs text-muted-foreground" data-ai-generation-status>
             <!-- Screen-reader live region: announces discrete execution-state changes
                  (phase / tool / turn / idle crossing) only, never the per-second
                  elapsed numerals — see `liveAnnouncementText`. -->

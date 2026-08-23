@@ -31,8 +31,13 @@ export interface AiGenerationStatus {
    * `activeTool` remains the newest entry for the compact single-tool UI.
    */
   activeTools?: Array<{ toolCallId: string; name: string; startedAt: number }>;
-  /** Terminal state entered on `agent_end`/`error` — the component hides the line. */
-  phase: "preparing" | "waiting_model" | "generating" | "running_tool" | "cancelling" | "finished";
+  /**
+   * The reply stream is fully consumed but the run is not yet confirmed
+   * successful (entered on `response_complete`). The component hides the line
+   * just like `finished`, but keeps listening for the real terminal `agent_end`
+   * (success) / `error` (failure).
+   */
+  phase: "preparing" | "waiting_model" | "generating" | "running_tool" | "cancelling" | "finalizing" | "finished";
   /** When the user explicitly requested cancellation (Stop button). */
   cancelledAt?: number;
 }
@@ -81,13 +86,22 @@ export function createGenerationStatus(now: number): AiGenerationStatus {
  * - `agent_end` / `error` are terminal: they enter `finished` (preserving
  *   `startedAt`/`turn`, clearing `activeTool`) so the component can hide the line
  *   the instant the reply completes instead of resetting the counter to 0.
+ * - `response_complete` (non-terminal) enters `finalizing`: the reply stream is
+ *   fully consumed but the process is not yet confirmed successful. It hides the
+ *   line like `finished`, but only `agent_end` / `error` may advance the phase
+ *   from `finalizing` — a late `text_delta` must not flip it back to `generating`.
  * - Once the user requested cancellation (`cancelling`) OR the generation has
- *   terminated (`finished`), later agent events must not overwrite the phase —
- *   only the component ticker keeps running until `send()`'s `finally`/abandon
- *   path resets the per-request status.
+ *   terminated (`finished`) OR the stream is `finalizing`, later non-terminal
+ *   agent events must not overwrite the phase — only the component ticker keeps
+ *   running until `send()`'s `finally`/abandon path resets the per-request status.
  */
 export function applyStatusEvent(status: AiGenerationStatus, event: AgentEvent, now: number): AiGenerationStatus {
-  if (status.phase === "cancelling" || status.phase === "finished") {
+  if (
+    status.phase === "cancelling" ||
+    status.phase === "finished" ||
+    // `finalizing` blocks everything except the real terminal events.
+    (status.phase === "finalizing" && event.type !== "agent_end" && event.type !== "error")
+  ) {
     return { ...status, lastEventAt: now };
   }
   const next: AiGenerationStatus = { ...status, lastEventAt: now };
@@ -142,6 +156,15 @@ export function applyStatusEvent(status: AiGenerationStatus, event: AgentEvent, 
       next.activeTool = undefined;
       next.activeTools = undefined;
       break;
+    case "response_complete":
+      // Non-terminal stream-complete marker: the reply is fully consumed but the
+      // run is not yet confirmed successful (the CLI may still exit non-zero or
+      // hang after closing stdout). Hide the line like `finished`, but keep the
+      // listener alive for the real `agent_end` / `error`.
+      next.phase = "finalizing";
+      next.activeTool = undefined;
+      next.activeTools = undefined;
+      break;
     default:
       break;
   }
@@ -151,9 +174,10 @@ export function applyStatusEvent(status: AiGenerationStatus, event: AgentEvent, 
 /** User explicitly requested stop — show the cancelling phase until the generation ends. */
 export function markCancelling(status: AiGenerationStatus, now: number): AiGenerationStatus {
   // A generation that already reached the terminal `finished` state (reply
-  // complete, send()'s finally still settling) must not be flipped back into
+  // complete, send()'s finally still settling) or the `finalizing` state (reply
+  // stream fully consumed, process exit pending) must not be flipped back into
   // "正在取消…" — the reply is already done, the line stays hidden.
-  if (status.phase === "finished") return status;
+  if (status.phase === "finished" || status.phase === "finalizing") return status;
   return { ...status, phase: "cancelling", cancelledAt: now, lastEventAt: now };
 }
 
@@ -181,13 +205,17 @@ function secondsUp(milliseconds: number): number {
  * Cancelling is handled first — once the user clicks Stop the line reads "正在取消…".
  * `finished` is terminal and the component hides the line, so it returns an empty
  * string here (never the waitingModel/idle copy) to keep the pure function total.
+ * `finalizing` (reply stream consumed, process exit pending) also returns an
+ * empty string — the line is hidden while the real `agent_end`/`error` is still
+ * pending.
  * The >60s gentle hint is NOT part of this string; it renders next to the Stop
  * button via `shouldShowLongRunningHint`.
  */
 export function statusText(status: AiGenerationStatus, now: number, t: AiStatusTranslate): string {
-  // `finished` must win over BOTH the idle branch and the waitingModel fallthrough,
-  // or a completed reply could re-render "等待此步骤完成 · 最后活动 Ns 前"/"0s".
-  if (status.phase === "finished") return "";
+  // `finished`/`finalizing` must win over BOTH the idle branch and the
+  // waitingModel fallthrough, or a completed reply could re-render
+  // "等待此步骤完成 · 最后活动 Ns 前"/"0s".
+  if (status.phase === "finished" || status.phase === "finalizing") return "";
   const elapsed = secondsUp(now - status.startedAt);
   if (status.phase === "cancelling") {
     return t("ai.status.cancelling");
@@ -229,8 +257,8 @@ export function statusText(status: AiGenerationStatus, now: number, t: AiStatusT
  */
 export function liveAnnouncementText(status: AiGenerationStatus, now: number, t: AiStatusTranslate): string {
   // A completed reply is silent for screen readers too — never re-announce the
-  // waitingModel/idle copy under a finished generation.
-  if (status.phase === "finished") return "";
+  // waitingModel/idle copy under a finished/finalizing generation.
+  if (status.phase === "finished" || status.phase === "finalizing") return "";
   if (status.phase === "cancelling") return t("ai.status.cancelling");
 
   const idle = status.lastEventAt !== undefined && now - status.lastEventAt > STATUS_IDLE_THRESHOLD_MS;
@@ -251,5 +279,5 @@ export function liveAnnouncementText(status: AiGenerationStatus, now: number, t:
 
 /** Whether the gentle "响应时间较长，可继续等待或停止" hint should appear next to Stop. */
 export function shouldShowLongRunningHint(status: AiGenerationStatus, now: number): boolean {
-  return status.phase !== "finished" && now - status.startedAt > STATUS_LONG_RUNNING_THRESHOLD_MS;
+  return status.phase !== "finished" && status.phase !== "finalizing" && now - status.startedAt > STATUS_LONG_RUNNING_THRESHOLD_MS;
 }

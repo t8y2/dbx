@@ -1003,16 +1003,20 @@ fn grok_usage_tokens(usage: &Value) -> Option<TokenUsage> {
 /// Stream a CLI agent's JSONL output to `on_event`, then return the accumulated
 /// final text.
 ///
-/// The synthesized `AgentEnd` (used when the CLI does not emit its own terminal
-/// marker) is dispatched as soon as stdout is fully consumed — before
-/// `child.wait()` / the stderr drain. The frontend hides the generation-status
-/// line the instant `AgentEnd` arrives, so the process reap must not delay it:
-/// some CLIs finish their work but are slow to exit (lingering shutdown, held
-/// stderr, session teardown), which previously kept the status line visible for
-/// the entire reap duration. The process is still reaped and a non-zero exit
-/// still yields an error; only the terminal-event ordering changes.
-/// Cancellation / read-error paths skip the early `AgentEnd` so the frontend
-/// cancel flow keeps its `cancelling` phase until `finally`.
+/// `AgentEnd` is emitted ONLY after the process is confirmed successful: the CLI
+/// is reaped via `child.wait()` and the run must have no terminal error, no
+/// cancellation, and a zero exit status. Both the CLI's own `end` marker and the
+/// synthesized `AgentEnd` (used when the CLI emits none) are gated behind that
+/// confirmed exit — a CLI that closes stdout then hangs or exits non-zero must
+/// never be shown to the frontend as a completed reply.
+///
+/// To still let the frontend stop the reply animation promptly, a NON-terminal
+/// `ResponseComplete` is dispatched as soon as stdout is fully consumed (before
+/// `child.wait()` / the stderr drain, which can take seconds on some CLIs). The
+/// frontend may hide the status line on `ResponseComplete` but must keep
+/// listening for the real `AgentEnd` (success) / `Error` (failure). Cancellation
+/// / read-error paths skip `ResponseComplete` so the frontend cancel flow keeps
+/// its `cancelling` phase until `finally`.
 pub async fn run_cli_jsonl_agent(
     spec: CliAgentProcessSpec,
     cancelled: &Notify,
@@ -1052,7 +1056,7 @@ pub async fn run_cli_jsonl_agent(
     });
 
     let mut final_text = String::new();
-    let mut saw_agent_end = false;
+    let mut pending_agent_end: Option<AgentEvent> = None;
     let mut total_usage = TokenUsage::default();
     let mut terminal_error: Option<String> = None;
 
@@ -1076,8 +1080,17 @@ pub async fn run_cli_jsonl_agent(
                     total_usage.add(&usage);
                 }
                 for event in parsed.events {
+                    // A CLI-emitted `end` is a stream marker, not a confirmed
+                    // success: the process may still exit non-zero (or hang)
+                    // after closing stdout. Buffer it and re-emit only after
+                    // child.wait() confirms the exit status (see below).
+                    // Dialects that emit one `end` per tool result (e.g. Cursor)
+                    // collapse into the single confirmed-success AgentEnd here —
+                    // forwarding them inline would show the run as complete at
+                    // the first tool result.
                     if matches!(event, AgentEvent::AgentEnd { .. }) {
-                        saw_agent_end = true;
+                        pending_agent_end = Some(event);
+                        continue;
                     }
                     on_event(event);
                 }
@@ -1095,14 +1108,13 @@ pub async fn run_cli_jsonl_agent(
         }
     }
 
-    // Emit the terminal event as soon as the CLI output is fully consumed so the
-    // frontend hides the status line on AgentEnd instead of lingering through the
-    // process reap (child.wait + stderr drain can take seconds on some CLIs).
-    if terminal_error.is_none() && !saw_agent_end {
-        on_event(AgentEvent::AgentEnd {
-            input_tokens: (total_usage.input_tokens > 0).then_some(total_usage.input_tokens),
-            output_tokens: (total_usage.output_tokens > 0).then_some(total_usage.output_tokens),
-        });
+    // stdout is fully consumed. Emit a NON-terminal marker so the frontend can
+    // stop the reply animation (hide the status line) without treating the run
+    // as finished — the process is not confirmed successful until child.wait()
+    // returns a zero exit status below. Skipped on error/cancel paths so the
+    // frontend keeps its `cancelling`/`error` handling until `finally`.
+    if terminal_error.is_none() {
+        on_event(AgentEvent::ResponseComplete);
     }
 
     let status = child.wait().await.map_err(|e| format!("CLI agent wait failed: {e}"))?;
@@ -1114,6 +1126,25 @@ pub async fn run_cli_jsonl_agent(
 
     if !status.success() {
         return Err((spec.classify_run_error)(&stderr));
+    }
+
+    // Confirmed success. Forward the CLI's own `end` (backfilling usage from the
+    // accumulated totals when it carried none), else synthesize an `AgentEnd`.
+    if let Some(agent_end) = pending_agent_end {
+        if let AgentEvent::AgentEnd { input_tokens, output_tokens } = agent_end {
+            let agent_end = AgentEvent::AgentEnd {
+                input_tokens: input_tokens
+                    .or_else(|| (total_usage.input_tokens > 0).then_some(total_usage.input_tokens)),
+                output_tokens: output_tokens
+                    .or_else(|| (total_usage.output_tokens > 0).then_some(total_usage.output_tokens)),
+            };
+            on_event(agent_end);
+        }
+    } else {
+        on_event(AgentEvent::AgentEnd {
+            input_tokens: (total_usage.input_tokens > 0).then_some(total_usage.input_tokens),
+            output_tokens: (total_usage.output_tokens > 0).then_some(total_usage.output_tokens),
+        });
     }
 
     Ok(final_text)
@@ -1303,12 +1334,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn jsonl_agent_emits_synthesized_agent_end_before_process_reap() {
+    async fn jsonl_agent_never_emits_agent_end_when_process_fails_after_stdout_eof() {
         // The CLI emits its final JSONL line, closes stdout (so the read loop
-        // sees EOF), then lingers for 2 seconds before actually exiting. The
-        // synthesized AgentEnd must be dispatched as soon as stdout is consumed
-        // — before child.wait() / the stderr drain — so the frontend hides the
-        // status line immediately instead of waiting out the lingering process.
+        // sees EOF), lingers for a second, then exits with status 1. AgentEnd
+        // must NOT be emitted before the failure is determined — the frontend
+        // must not be shown a completed reply for a failed run. `ResponseComplete`
+        // (non-terminal) is still dispatched early so the reply animation stops.
         let spec = CliAgentProcessSpec {
             command: CliAgentCommandSpec {
                 program: "sh".to_string(),
@@ -1319,7 +1350,7 @@ mod tests {
                         "'{\"type\":\"step_finish\",\"part\":{\"tokens\":{\"input\":10,\"output\":2}}}' ",
                         "'{\"type\":\"text\",\"part\":{\"text\":\"hello\"}}' ",
                         "'{\"type\":\"step_finish\",\"part\":{\"tokens\":{\"input\":3,\"output\":4}}}'; ",
-                        "exec 1>&-; sleep 2",
+                        "exec 1>&-; sleep 1; exit 1",
                     )
                     .to_string(),
                 ],
@@ -1334,26 +1365,110 @@ mod tests {
         };
         let events = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&events);
-        let (agent_end_tx, mut agent_end_rx) = tokio::sync::watch::channel(false);
+        let (probe_tx, mut probe_rx) = tokio::sync::watch::channel(0u8);
         let cancelled = Arc::new(Notify::new());
         let runner_cancelled = Arc::clone(&cancelled);
 
         let runner = tokio::spawn(async move {
             run_cli_jsonl_agent(spec, runner_cancelled.as_ref(), move |event| {
+                if matches!(event, AgentEvent::ResponseComplete) {
+                    let _ = probe_tx.send(1);
+                }
                 if matches!(event, AgentEvent::AgentEnd { .. }) {
-                    let _ = agent_end_tx.send(true);
+                    let _ = probe_tx.send(2);
                 }
                 captured.lock().unwrap().push(event);
             })
             .await
         });
 
-        // AgentEnd must arrive as soon as the CLI output is consumed — well
-        // before the lingering process finishes its 2s shutdown.
-        timeout(Duration::from_secs(1), agent_end_rx.wait_for(|seen| *seen))
+        // ResponseComplete must arrive as soon as stdout is consumed — well
+        // before the lingering process finishes its 1s shutdown.
+        timeout(Duration::from_secs(1), probe_rx.wait_for(|seen| *seen >= 1))
             .await
-            .expect("AgentEnd should be emitted before the process reap completes")
-            .expect("AgentEnd watch channel closed before the terminal event was emitted");
+            .expect("ResponseComplete should be emitted while the process still runs")
+            .expect("probe watch channel closed before ResponseComplete was emitted");
+
+        // While the process is still alive (sleeping before its exit 1), AgentEnd
+        // must NOT have been emitted yet — the failure is not yet confirmed.
+        assert_eq!(*probe_rx.borrow(), 1, "AgentEnd must not be emitted before the exit status is known");
+
+        let result = timeout(Duration::from_secs(5), runner)
+            .await
+            .expect("runner should return once the failing process exits")
+            .expect("runner task should not panic");
+        assert!(result.is_err(), "run must fail for a non-zero exit");
+
+        let events = events.lock().unwrap();
+        assert_eq!(
+            events.iter().filter(|event| matches!(event, AgentEvent::AgentEnd { .. })).count(),
+            0,
+            "AgentEnd must never be emitted for a failed run"
+        );
+        assert!(
+            events.iter().any(|event| matches!(event, AgentEvent::ResponseComplete)),
+            "ResponseComplete should still be emitted for the failed run"
+        );
+    }
+
+    #[tokio::test]
+    async fn jsonl_agent_emits_response_complete_early_and_agent_end_only_after_confirmed_exit() {
+        // The CLI emits its final JSONL line, closes stdout (so the read loop
+        // sees EOF), lingers for a second, then exits with status 0. The
+        // non-terminal ResponseComplete must be dispatched as soon as stdout is
+        // consumed (before the process reap), while AgentEnd must wait for the
+        // confirmed-success exit and be the final event.
+        let spec = CliAgentProcessSpec {
+            command: CliAgentCommandSpec {
+                program: "sh".to_string(),
+                args: vec![
+                    "-c".to_string(),
+                    concat!(
+                        "printf '%s\\n' ",
+                        "'{\"type\":\"step_finish\",\"part\":{\"tokens\":{\"input\":10,\"output\":2}}}' ",
+                        "'{\"type\":\"text\",\"part\":{\"text\":\"hello\"}}' ",
+                        "'{\"type\":\"step_finish\",\"part\":{\"tokens\":{\"input\":3,\"output\":4}}}'; ",
+                        "exec 1>&-; sleep 1",
+                    )
+                    .to_string(),
+                ],
+            },
+            env: Vec::new(),
+            env_remove: Vec::new(),
+            current_dir: None,
+            stdin: None,
+            dialect: CliAgentJsonlDialect::OpenCodeRun,
+            classify_spawn_error,
+            classify_run_error,
+        };
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+        let (probe_tx, mut probe_rx) = tokio::sync::watch::channel(0u8);
+        let cancelled = Arc::new(Notify::new());
+        let runner_cancelled = Arc::clone(&cancelled);
+
+        let runner = tokio::spawn(async move {
+            run_cli_jsonl_agent(spec, runner_cancelled.as_ref(), move |event| {
+                if matches!(event, AgentEvent::ResponseComplete) {
+                    let _ = probe_tx.send(1);
+                }
+                if matches!(event, AgentEvent::AgentEnd { .. }) {
+                    let _ = probe_tx.send(2);
+                }
+                captured.lock().unwrap().push(event);
+            })
+            .await
+        });
+
+        // ResponseComplete must arrive as soon as the CLI output is consumed —
+        // well before the lingering process finishes its 1s shutdown.
+        timeout(Duration::from_secs(1), probe_rx.wait_for(|seen| *seen >= 1))
+            .await
+            .expect("ResponseComplete should be emitted while the process still runs")
+            .expect("probe watch channel closed before ResponseComplete was emitted");
+
+        // While the process is still alive, AgentEnd must not have been emitted yet.
+        assert_eq!(*probe_rx.borrow(), 1, "AgentEnd must not be emitted before the exit status is known");
 
         let result = timeout(Duration::from_secs(5), runner)
             .await
@@ -1366,6 +1481,15 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| { matches!(event, AgentEvent::AgentEnd { input_tokens: Some(13), output_tokens: Some(6) }) }));
+        let response_complete_at = events
+            .iter()
+            .position(|event| matches!(event, AgentEvent::ResponseComplete))
+            .expect("ResponseComplete should have been emitted");
+        let agent_end_at = events
+            .iter()
+            .position(|event| matches!(event, AgentEvent::AgentEnd { .. }))
+            .expect("AgentEnd should have been emitted after confirmed success");
+        assert!(response_complete_at < agent_end_at, "ResponseComplete must precede AgentEnd");
         assert!(matches!(events.last(), Some(AgentEvent::AgentEnd { .. })), "AgentEnd should be the terminal event");
     }
 

@@ -22,7 +22,12 @@ pub enum AgentEvent {
     ToolCallEnd { tool_call_id: String, tool_name: String, result: serde_json::Value, is_error: bool },
     /// A turn in the agent loop has ended.
     TurnEnd { turn: u32 },
-    /// The agent loop has finished.
+    /// The reply stream is fully consumed, but the run is NOT yet confirmed
+    /// successful (the CLI process may still exit non-zero or hang after closing
+    /// stdout). Non-terminal: the frontend may stop the reply animation on it,
+    /// but must keep listening for the real `AgentEnd` / `Error`.
+    ResponseComplete,
+    /// The agent loop has finished successfully.
     AgentEnd { input_tokens: Option<u32>, output_tokens: Option<u32> },
     /// Context was compacted to stay within context window limits.
     ContextCompacted {

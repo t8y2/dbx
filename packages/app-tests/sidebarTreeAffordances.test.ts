@@ -77,7 +77,11 @@ test("tree filters retain a temporary expansion state", () => {
   assert.match(connectionTree, /return \{ \.\.\.node, children: matchingChildren \};/);
   assert.doesNotMatch(connectionTree, /children: matchingChildren,\s*isExpanded:\s*true/);
   assert.match(connectionTree, /function onSearchToggle\(node: TreeNode\) \{\s*if \(!isTreeSearchFiltering\.value \|\| !node\.children\) return;/);
-  assert.match(connectionTree, /function onNodeToggled\(node: TreeNode, expanded: boolean\) \{\s*if \(isTreeSearchFiltering\.value\) return;\s*syncSidebarTreeNodeExpansion\(store\.treeNodes, node, expanded\)/);
+  // The search guard must stay the first thing in onNodeToggled (filter toggles
+  // must never sync back to the live tree); side-effect-free diagnostics may be
+  // interleaved before the sync call, so match the guard and the required sync
+  // separately instead of pinning the exact body.
+  assert.match(connectionTree, /function onNodeToggled\(node: TreeNode, expanded: boolean\) \{\s*if \(isTreeSearchFiltering\.value\) return;[\s\S]*?syncSidebarTreeNodeExpansion\(store\.treeNodes, node, expanded\)/);
   assert.match(runtimeHost, /shouldRunTreeNodeRowAction\(action, clickDetail, isGroupLabel\(node\) \|\| isRepeatableNavigationTreeNode\(node\.type\)\)/);
 });
 

@@ -741,6 +741,14 @@ function readExpandedSidebarSchemas(): Array<{ id: string; label: string }> {
   return expanded;
 }
 
+// The plain (non-virtualized) renderer keeps the sticky database/schema header
+// via native CSS position: sticky on the container rows, mirroring the overlay
+// the virtual branch renders. Only container rows stick; children scroll under
+// them until the next container takes over.
+function isPlainStickyContainerNode(node: TreeNode): boolean {
+  return DATABASE_LEVEL_TYPES.has(node.type) || SCHEMA_LEVEL_TYPES.has(node.type);
+}
+
 const sidebarLayoutMonitor = createSidebarLayoutMonitor({
   readContext: () => ({
     flatNodeCount: flatNodes.value.length,
@@ -1052,21 +1060,25 @@ const stickyHeaderStyle = computed<CSSProperties>(() => {
 // Reset tracking when the tree rebuilds (connect/disconnect/collapse) so a
 // stale scrollTop doesn't keep the overlay mounted after a structural change.
 watch(flatNodes, (nodes, previousNodes) => {
-  const previousCount = previousNodes?.length ?? 0;
-  if (nodes.length !== previousCount) {
-    const previousIds = new Set((previousNodes ?? []).map((entry) => entry.id));
-    const added = nodes
-      .filter((entry) => !previousIds.has(entry.id))
-      .slice(0, 5)
-      .map((entry) => ({ type: entry.node.type, label: entry.node.label }));
-    sidebarLayoutMonitor.recordEvent({
-      type: "tree-change",
-      prevCount: previousCount,
-      count: nodes.length,
-      expandedConnections: readExpandedSidebarConnections(),
-      added,
-      expandedSchemas: readExpandedSidebarSchemas(),
-    });
+  // The diagnostic events walk the whole expanded tree; only do that work when
+  // the layout monitor is actually armed (dev default, disabled in production).
+  if (sidebarLayoutMonitor.isEnabled()) {
+    const previousCount = previousNodes?.length ?? 0;
+    if (nodes.length !== previousCount) {
+      const previousIds = new Set((previousNodes ?? []).map((entry) => entry.id));
+      const added = nodes
+        .filter((entry) => !previousIds.has(entry.id))
+        .slice(0, 5)
+        .map((entry) => ({ type: entry.node.type, label: entry.node.label }));
+      sidebarLayoutMonitor.recordEvent({
+        type: "tree-change",
+        prevCount: previousCount,
+        count: nodes.length,
+        expandedConnections: readExpandedSidebarConnections(),
+        added,
+        expandedSchemas: readExpandedSidebarSchemas(),
+      });
+    }
   }
   const contextMenuTarget = sidebarContextMenuTarget.value;
   if (contextMenuTarget) {
@@ -1080,7 +1092,6 @@ watch(flatNodes, (nodes, previousNodes) => {
   stickyScrollTop.value = 0;
   void nextTick(scheduleSidebarScrollMetricsUpdate);
   // After a structural change (list grew/shrunk, e.g. a Dameng connection
-// After a structural change (list grew/shrunk, e.g. a Dameng connection
   // expands or collapses) or a same-length search projection replacement,
   // reconcile the virtual scroller with the browser's scroll position. The
   // recycle pool is rebuilt from the live scrollTop, but scrollTop is only
@@ -2486,6 +2497,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
               :pending-rename="pendingRenameNodeId === item.node.id"
               :highlighted="highlightedNodeId === item.id"
               :comment-label-width="sidebarCommentLabelWidths.get(item.node.id)"
+              :sticky-header="isPlainStickyContainerNode(item.node)"
               @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)"
               @rename-started="pendingRenameNodeId = null"
               @group-created="startRenamingCreatedGroup"
@@ -2689,6 +2701,13 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
 .connection-tree-scroller :deep(.vue-recycle-scroller__item-view) {
   min-width: 100%;
   contain: style;
+  /* The virtual renderer positions rows at fixed item-size offsets (28px, see
+     SIDEBAR_TREE_ROW_HEIGHT). TreeItem rows only guarantee min-h-7, so rename
+     inputs or larger sidebar fonts could grow a row beyond 28px and overlap
+     the next row. Pin every materialized row to the fixed height and clip any
+     overflow instead of letting the layout drift. */
+  height: 28px;
+  overflow: hidden;
 }
 
 .connection-tree-scroller.sidebar-tree-horizontal-scroll :deep(.vue-recycle-scroller__item-view) {

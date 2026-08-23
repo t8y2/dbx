@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dataGridBottomScrollTop, isDataGridAtScrollBottom, restoredDataGridScrollLeft } from "@/lib/dataGrid/dataGridInfiniteScroll";
+import { dataGridBottomScrollTop, dataGridInfiniteScrollAppendCompletion, didDataGridInfiniteScrollContextChange, isDataGridAtScrollBottom, restoredDataGridScrollLeft } from "@/lib/dataGrid/dataGridInfiniteScroll";
 
 describe("data grid bottom anchoring", () => {
   it("keeps DOM rows anchored when scrollbar padding increases the scroll height", () => {
@@ -42,5 +42,38 @@ describe("data grid horizontal restoration", () => {
 
   it("resets the position when the rebuilt grid no longer overflows", () => {
     expect(restoredDataGridScrollLeft(320, 500, 600)).toBe(0);
+  });
+});
+
+describe("data grid infinite-scroll append completion", () => {
+  const firstPageRows = Array.from({ length: 100 }, (_, index) => [index + 1]);
+
+  it("stops after an incomplete cursor-backed final segment", () => {
+    const completion = dataGridInfiniteScrollAppendCompletion({ rows: firstPageRows, session_id: "oracle-go-4", has_more: true }, { rows: [...firstPageRows, [101], [102], [103], [104]], appended_from_row_count: 100, has_more: false }, { pageSize: 100, maxRows: 100_000 });
+
+    expect(completion).toEqual({ loadedPage: 2, allLoaded: true });
+  });
+
+  it("honors cursor exhaustion when the total is an exact page multiple", () => {
+    const completion = dataGridInfiniteScrollAppendCompletion(
+      { rows: firstPageRows, session_id: "oracle-go-5", has_more: true },
+      { rows: [...firstPageRows, ...Array.from({ length: 100 }, (_, index) => [index + 101])], appended_from_row_count: 100, has_more: false },
+      { pageSize: 100, maxRows: 100_000 },
+    );
+
+    expect(completion).toEqual({ loadedPage: 2, allLoaded: true });
+  });
+
+  it("keeps offset pagination available after a full non-cursor segment", () => {
+    const completion = dataGridInfiniteScrollAppendCompletion({ rows: firstPageRows, has_more: false }, { rows: [...firstPageRows, ...Array.from({ length: 100 }, (_, index) => [index + 101])], appended_from_row_count: 100, has_more: false }, { pageSize: 100, maxRows: 100_000 });
+
+    expect(completion).toEqual({ loadedPage: 2, allLoaded: false });
+  });
+
+  it("does not reset a completed append when equivalent metadata is replaced", () => {
+    const context = ["SELECT COUNT(*) FROM users", "public", "users", "", "app", "connection-1"];
+
+    expect(didDataGridInfiniteScrollContextChange([...context], context)).toBe(false);
+    expect(didDataGridInfiniteScrollContextChange([...context.slice(0, 2), "audit", ...context.slice(3)], context)).toBe(true);
   });
 });

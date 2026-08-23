@@ -12,6 +12,13 @@ export interface DataGridScrollMetrics {
 export interface DataGridAppendResult {
   rows: readonly unknown[];
   appended_from_row_count?: number;
+  session_id?: string | null;
+  has_more?: boolean;
+}
+
+export interface DataGridInfiniteScrollAppendCompletion {
+  loadedPage: number;
+  allLoaded: boolean;
 }
 
 export function dataGridScrollPosition(top: number, left: number): DataGridScrollPosition {
@@ -38,6 +45,26 @@ export function isDataGridNearScrollBottom(metrics: DataGridScrollMetrics, thres
 export function isDataGridPrefixAppend(previous: DataGridAppendResult | undefined, next: DataGridAppendResult): boolean {
   if (!previous || next.appended_from_row_count !== previous.rows.length || next.rows.length < previous.rows.length) return false;
   return previous.rows.every((row, index) => row === next.rows[index]);
+}
+
+export function dataGridInfiniteScrollAppendCompletion(previous: DataGridAppendResult | undefined, next: DataGridAppendResult, options: { pageSize: number; maxRows: number }): DataGridInfiniteScrollAppendCompletion | undefined {
+  if (!isDataGridPrefixAppend(previous, next)) return undefined;
+
+  const pageSize = Math.max(1, Math.floor(options.pageSize));
+  const maxRows = Math.max(1, Math.floor(options.maxRows));
+  const appendedFromRowCount = next.appended_from_row_count!;
+  const appendedRowCount = next.rows.length - appendedFromRowCount;
+  const requestedRowCount = Math.min(pageSize, Math.max(0, maxRows - appendedFromRowCount));
+  const cursorExhausted = !!previous?.session_id && previous.has_more === true && next.has_more === false;
+
+  return {
+    loadedPage: Math.max(1, Math.ceil(next.rows.length / pageSize)),
+    allLoaded: next.rows.length >= maxRows || appendedRowCount < requestedRowCount || cursorExhausted,
+  };
+}
+
+export function didDataGridInfiniteScrollContextChange(current: readonly string[], previous: readonly string[] | undefined): boolean {
+  return !previous || current.length !== previous.length || current.some((value, index) => value !== previous[index]);
 }
 
 export function isDataGridAtScrollBottom(metrics: DataGridScrollMetrics, tolerance = 1): boolean {

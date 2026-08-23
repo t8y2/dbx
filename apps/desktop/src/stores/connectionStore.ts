@@ -1328,7 +1328,12 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function isConnectionUtilityNode(node: TreeNode): boolean {
-    return node.type === "user-admin" || node.type === "dameng-job-admin" || node.type === "saved-sql-root";
+    // dameng-users / dameng-roles must be here too: they are synthesized admin
+    // nodes (fixed ids, rebuilt on every re-normalization). If they were treated
+    // as metadata children, withConnectionUtilityNodes would keep the old copies
+    // AND append fresh ones on every useCachedChildren pass, duplicating the
+    // 用户/角色 menus once per refresh cycle.
+    return node.type === "user-admin" || node.type === "dameng-users" || node.type === "dameng-roles" || node.type === "dameng-job-admin" || node.type === "saved-sql-root";
   }
 
   function connectionMetadataChildren(children: TreeNode[] | undefined): TreeNode[] {
@@ -1425,6 +1430,22 @@ export const useConnectionStore = defineStore("connection", () => {
     return false;
   }
 
+  function dedupeTreeNodeChildrenById(children: TreeNode[]): TreeNode[] {
+    // Keep the LAST occurrence of each id (reverse pass): if a stale copy was
+    // preserved ahead of a freshly synthesized node with the same id, the fresh
+    // node — carrying the current members/data — is the one that must survive.
+    const seen = new Set<string>();
+    const deduped: TreeNode[] = [];
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      const child = children[index];
+      if (seen.has(child.id)) continue;
+      seen.add(child.id);
+      deduped.push(child);
+    }
+    deduped.reverse();
+    return deduped;
+  }
+
   function setChildren(parent: TreeNode, children: TreeNode[]) {
     // Compare markers against the resolved child list (after connection preserve), not the raw loader payload.
     children = preserveExistingConnectionMetadataChildren(parent, children);
@@ -1432,6 +1453,12 @@ export const useConnectionStore = defineStore("connection", () => {
     if (parent.type === "database") {
       children = withDatabaseSavedSqlRoot(parent, children, savedSqlFilesByDatabase);
     }
+    // Defensive: sibling ids must be unique (RecycleScroller keys rows by id).
+    // The Dameng users/roles admin nodes were once re-appended by every
+    // re-normalization, leaving duplicate rows in the sidebar; last-wins keeps
+    // the freshly synthesized copy so such a regression can never surface as
+    // repeated menus or stale member data.
+    children = dedupeTreeNodeChildrenById(children);
     if (shouldClearDescendantLoadedMarkers(parent, children)) {
       clearDescendantLoadedChildrenMarkers(parent.id);
       // Parent load may still be current; only supersede descendant generations.
@@ -2262,6 +2289,19 @@ export const useConnectionStore = defineStore("connection", () => {
       .finally(() => staleTreeRefreshIds.delete(liveNode.id));
   }
 
+  // The metadata tree cache must not persist UI state. isExpanded flags written
+  // while a schema was expanded would replay that expansion on every cache hit
+  // (a manual collapse never rewrites the cache), so opening a connection would
+  // keep auto-expanding a schema the user collapsed. Expansion state is instead
+  // restored from the live tree (restoreExpandedChildren) within a session.
+  function stripTreeNodeExpansionState(nodes: TreeNode[]): TreeNode[] {
+    return nodes.map((node) => ({
+      ...node,
+      isExpanded: false,
+      children: node.children ? stripTreeNodeExpansionState(node.children) : node.children,
+    }));
+  }
+
   async function loadPersistedTreeChildren(node: TreeNode, cacheKey: string, load: TreeNodeLoadHandle): Promise<PersistedTreeChildrenLoadResult> {
     const trace = createMetadataLoadTrace({
       kind: "persisted-tree-cache",
@@ -2278,7 +2318,7 @@ export const useConnectionStore = defineStore("connection", () => {
       return { hit: false, isStale: false };
     }
     const config = node.connectionId ? getConfig(node.connectionId) : undefined;
-    const cachedChildren = normalizeCataloglessDatabaseNodes(expandCachedObjectBrowserNodes(decoded.children));
+    const cachedChildren = normalizeCataloglessDatabaseNodes(stripTreeNodeExpansionState(expandCachedObjectBrowserNodes(decoded.children)));
     const childrenWithLinkedServers = node.type === "connection" && node.connectionId ? ensureSqlServerLinkedRootNode(node.connectionId, cachedChildren, config) : cachedChildren;
     if (node.type === "connection" && !hasConnectionMetadataChildren(childrenWithLinkedServers)) {
       logMetadataLoadTrace(metadataTraceLogger, trace, "cache-miss", { cacheStatus: "miss", resultCount: 0 });
@@ -2303,7 +2343,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function savePersistedTreeChildren(cacheKey: string, children: TreeNode[]) {
-    await api.saveSchemaCache(cacheKey, encodeSchemaTreeCache(stripDatabaseSavedSqlTreeNodes(children))).catch(() => undefined);
+    await api.saveSchemaCache(cacheKey, encodeSchemaTreeCache(stripTreeNodeExpansionState(stripDatabaseSavedSqlTreeNodes(children)))).catch(() => undefined);
   }
 
   function sidebarTableSearchTreeCacheKey(parent: TreeNode): string | null {

@@ -54,10 +54,13 @@ test("connection groups use per-node pool types to avoid recycled row state", ()
   assert.equal(flat[2].poolType, "connection");
 });
 
-test("shouldVirtualizeFlatTree virtualizes every non-empty sidebar tree", () => {
+test("shouldVirtualizeFlatTree keeps small/medium trees on the plain renderer", () => {
   assert.equal(shouldVirtualizeFlatTree(0), false);
-  assert.equal(shouldVirtualizeFlatTree(1), true);
-  assert.equal(shouldVirtualizeFlatTree(100), true);
+  assert.equal(shouldVirtualizeFlatTree(1), false);
+  assert.equal(shouldVirtualizeFlatTree(100), false);
+  assert.equal(shouldVirtualizeFlatTree(499), false);
+  assert.equal(shouldVirtualizeFlatTree(500), true);
+  assert.equal(shouldVirtualizeFlatTree(5000), true);
 });
 
 test("sidebar virtual tree keeps enough buffered rows for fast scrolling", () => {

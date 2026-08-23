@@ -46,7 +46,7 @@ import {
   type SidebarNodeScrollAlign,
 } from "@/lib/sidebar/sidebarActiveTabTarget";
 import { findLoadedTableTargetForCandidate, queryContextTargetFromCandidate, queryCursorTableCandidate, type QueryCursorTableCandidate } from "@/lib/sql/queryCursorTableTarget";
-import { createFlatTreeIndex, flatTreeRowsChanged, SIDEBAR_TREE_ROW_HEIGHT, SIDEBAR_TREE_PRERENDER_COUNT, SIDEBAR_TREE_SCROLL_BUFFER, flattenTree, shouldVirtualizeFlatTree, type FlatTreeNode } from "@/composables/useFlatTree";
+import { createFlatTreeIndex, flatTreeRowsChanged, SIDEBAR_TREE_ROW_HEIGHT, SIDEBAR_TREE_PRERENDER_COUNT, SIDEBAR_TREE_SCROLL_BUFFER, SIDEBAR_TREE_VIRTUALIZE_HYSTERESIS, SIDEBAR_TREE_VIRTUALIZE_THRESHOLD, flattenTree, shouldVirtualizeFlatTree, type FlatTreeNode } from "@/composables/useFlatTree";
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
 import { createSidebarTreeRuntime, sidebarTreeRuntimeKey, type SidebarTreeRuntimeHostInstance } from "@/lib/sidebar/sidebarTreeRuntime";
 import { createSidebarPasteHandlerRegistry } from "@/lib/sidebar/sidebarPasteHandlerRegistry";
@@ -79,6 +79,7 @@ import { sidebarDisplayTableName } from "@/lib/sidebar/sidebarTableNameDisplay";
 import { alignedSidebarCommentLabelWidths, isSidebarCommentAlignableNode, sidebarTreeNaturalContentWidth, sidebarTreeNodeComment, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
 import { formatSidebarObjectStorage, sidebarTableStorageScopes, supportsSidebarTableStorage } from "@/lib/sidebar/sidebarDatabaseStorage";
 import { sidebarScrollbarGeometry as calculateSidebarScrollbarGeometry } from "@/lib/sidebar/sidebarScrollbar";
+import { createSidebarLayoutMonitor, type SidebarExpandedConnectionInfo } from "@/lib/sidebar/sidebarLayoutMonitor";
 import { disconnectSidebarConnections } from "@/lib/sidebar/sidebarConnectionDisconnect";
 import { compileSearchRegex } from "@/lib/common/searchPattern";
 
@@ -101,6 +102,7 @@ const sidebarRootStyle = computed<Record<string, string>>(() => ({ fontSize: `${
 const pointerInsideTree = ref(false);
 const treeScrollerRef = ref<InstanceType<typeof RecycleScroller> | null>(null);
 const plainTreeScrollerRef = ref<HTMLElement | null>(null);
+const treeScrollShellRef = ref<HTMLElement | null>(null);
 const sidebarScrollbarTrackRef = ref<HTMLElement | null>(null);
 const sidebarHorizontalScrollbarTrackRef = ref<HTMLElement | null>(null);
 const sidebarContextMenuRef = ref<{ close: () => void } | null>(null);
@@ -701,6 +703,57 @@ const flatNodes = computed<FlatTreeNode[]>(() =>
   }),
 );
 
+// Debug instrumentation for the "expanded tree leaves the scroll shell stuck
+// (e.g. Dameng connection expanded and the viewport froze near half height)"
+// class of layout bugs. Feeds the layout monitor with expand events and
+// tree-size changes so its anomaly reports can describe the transition.
+function readExpandedSidebarConnections(): SidebarExpandedConnectionInfo[] {
+  const expanded: SidebarExpandedConnectionInfo[] = [];
+  for (const node of filteredNodes.value) {
+    if (node.type !== "connection" && node.type !== "connection-group") continue;
+    if (!node.isExpanded) continue;
+    let descendantCount = 0;
+    const stack = [...(node.children ?? [])];
+    while (stack.length > 0) {
+      const child = stack.pop() as TreeNode;
+      descendantCount += 1;
+      if (child.children) stack.push(...child.children);
+    }
+    expanded.push({ id: node.id, label: node.label, type: node.type, descendantCount });
+  }
+  return expanded;
+}
+
+// Which schema nodes are expanded right now — lets the layout monitor tell a
+// user-initiated expand (an expand-toggle event precedes it) from a
+// programmatic one (the schema shows up here without one).
+function readExpandedSidebarSchemas(): Array<{ id: string; label: string }> {
+  const expanded: Array<{ id: string; label: string }> = [];
+  for (const connection of filteredNodes.value) {
+    if (connection.type !== "connection" && connection.type !== "connection-group") continue;
+    const stack = [...(connection.children ?? [])];
+    while (stack.length > 0) {
+      const child = stack.pop() as TreeNode;
+      if (child.type === "schema" && child.isExpanded) expanded.push({ id: child.id, label: child.label });
+      if (child.children) stack.push(...child.children);
+    }
+  }
+  return expanded;
+}
+
+const sidebarLayoutMonitor = createSidebarLayoutMonitor({
+  readContext: () => ({
+    flatNodeCount: flatNodes.value.length,
+    useVirtualTree: useVirtualTree.value,
+    virtualItemSize: SIDEBAR_TREE_ROW_HEIGHT,
+    scrollerEl: currentTreeScroller(),
+    shellEl: treeScrollShellRef.value,
+    rootEl: rootRef.value ?? null,
+    virtualScroller: (treeScrollerRef.value as unknown as Record<string, unknown> | null) ?? null,
+    expandedConnections: readExpandedSidebarConnections(),
+  }),
+});
+
 const sidebarCommentLabelWidths = shallowRef(new Map<string, number>());
 let sidebarCommentMeasureFrame = 0;
 const sidebarTreeContentWidth = ref(0);
@@ -830,7 +883,38 @@ const flatTreeIndex = computed(() =>
 const visibleNodes = computed<TreeNode[]>(() => flatTreeIndex.value.visibleNodes);
 const selectableVisibleNodes = computed<TreeNode[]>(() => flatTreeIndex.value.selectableVisibleNodes);
 const selectableVisibleNodeIndexById = computed(() => flatTreeIndex.value.selectableVisibleNodeIndexById);
-const useVirtualTree = computed(() => shouldVirtualizeFlatTree(flatNodes.value.length));
+// Virtualization with hysteresis: switching between the plain and virtual
+// renderers remounts the tree (scroll reset), so once virtualized stay virtual
+// until the tree drops well below the threshold — otherwise search/filter
+// oscillation around the boundary would thrash between the two branches.
+const treeVirtualizationArmed = ref(false);
+watch(
+  () => flatNodes.value.length,
+  (count) => {
+    if (treeVirtualizationArmed.value) {
+      if (count < SIDEBAR_TREE_VIRTUALIZE_THRESHOLD - SIDEBAR_TREE_VIRTUALIZE_HYSTERESIS) {
+        treeVirtualizationArmed.value = false;
+      }
+    } else if (shouldVirtualizeFlatTree(count)) {
+      treeVirtualizationArmed.value = true;
+    }
+  },
+  { immediate: true },
+);
+const useVirtualTree = computed(() => treeVirtualizationArmed.value);
+
+// The plain and virtual branches mount separate scroller elements; keep the
+// scroll position when the renderer flips so crossing the threshold does not
+// jump the user back to the top.
+watch(useVirtualTree, (virtual, wasVirtual) => {
+  const previous = (wasVirtual ? treeScrollerRef.value?.$el : plainTreeScrollerRef.value) as HTMLElement | undefined;
+  const savedScrollTop = previous?.scrollTop ?? 0;
+  if (!savedScrollTop) return;
+  void nextTick(() => {
+    const next = (virtual ? treeScrollerRef.value?.$el : plainTreeScrollerRef.value) as HTMLElement | undefined;
+    if (next) next.scrollTop = savedScrollTop;
+  });
+});
 const activeTab = computed(() => queryStore.tabs.find((tab) => tab.id === queryStore.activeTabId));
 const hasTreeMultiSelection = computed(() => store.connectionMultiSelectActive || store.selectedTreeNodeIds.length > 1);
 
@@ -968,6 +1052,22 @@ const stickyHeaderStyle = computed<CSSProperties>(() => {
 // Reset tracking when the tree rebuilds (connect/disconnect/collapse) so a
 // stale scrollTop doesn't keep the overlay mounted after a structural change.
 watch(flatNodes, (nodes, previousNodes) => {
+  const previousCount = previousNodes?.length ?? 0;
+  if (nodes.length !== previousCount) {
+    const previousIds = new Set((previousNodes ?? []).map((entry) => entry.id));
+    const added = nodes
+      .filter((entry) => !previousIds.has(entry.id))
+      .slice(0, 5)
+      .map((entry) => ({ type: entry.node.type, label: entry.node.label }));
+    sidebarLayoutMonitor.recordEvent({
+      type: "tree-change",
+      prevCount: previousCount,
+      count: nodes.length,
+      expandedConnections: readExpandedSidebarConnections(),
+      added,
+      expandedSchemas: readExpandedSidebarSchemas(),
+    });
+  }
   const contextMenuTarget = sidebarContextMenuTarget.value;
   if (contextMenuTarget) {
     const visibleContextMenuTarget = nodes.find(({ node }) => matchesSidebarActionTarget(node, contextMenuTarget))?.node;
@@ -980,6 +1080,7 @@ watch(flatNodes, (nodes, previousNodes) => {
   stickyScrollTop.value = 0;
   void nextTick(scheduleSidebarScrollMetricsUpdate);
   // After a structural change (list grew/shrunk, e.g. a Dameng connection
+// After a structural change (list grew/shrunk, e.g. a Dameng connection
   // expands or collapses) or a same-length search projection replacement,
   // reconcile the virtual scroller with the browser's scroll position. The
   // recycle pool is rebuilt from the live scrollTop, but scrollTop is only
@@ -989,9 +1090,10 @@ watch(flatNodes, (nodes, previousNodes) => {
   // Reading scrollHeight forces that layout (applying the clamp), then one
   // explicit pool refresh keeps the rendered window aligned.
   if (!flatTreeRowsChanged(nodes, previousNodes)) return;
+  if (!useVirtualTree.value) return;
   void nextTick(() => {
     const scroller = treeScrollerRef.value;
-    if (!scroller || !useVirtualTree.value) return;
+    if (!scroller) return;
     const el = scroller.$el as HTMLElement | undefined;
     if (!el) return;
     const maxScrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
@@ -1603,6 +1705,13 @@ function onSearchToggle(node: TreeNode) {
 
 function onNodeToggled(node: TreeNode, expanded: boolean) {
   if (isTreeSearchFiltering.value) return;
+  sidebarLayoutMonitor.recordEvent({
+    type: "expand-toggle",
+    nodeId: node.id,
+    label: node.label,
+    nodeType: node.type,
+    expanded,
+  });
   syncSidebarTreeNodeExpansion(store.treeNodes, node, expanded);
 }
 
@@ -2135,10 +2244,12 @@ function requestSelectedSidebarPaste(): boolean {
 }
 
 onMounted(() => {
+  sidebarLayoutMonitor.start();
   window.addEventListener("keydown", onWindowKeydown);
 });
 
 onUnmounted(() => {
+  sidebarLayoutMonitor.dispose();
   sidebarTreeRuntime.dispose();
   sidebarActionGeneration += 1;
   sidebarContextMenuTarget.value = null;
@@ -2296,7 +2407,13 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
       </div>
     </div>
     <CustomContextMenu ref="sidebarContextMenuRef" :items="sidebarContextMenuItems" v-slot="contextMenuSlot">
-      <div v-if="flatNodes.length > 0 && useVirtualTree" class="connection-tree-scroll-shell relative min-h-0 flex-1" :class="{ 'connection-tree-scroll-shell--horizontal-overflow': hasSidebarHorizontalOverflow }">
+      <div v-if="flatNodes.length > 0 && useVirtualTree" ref="treeScrollShellRef" class="connection-tree-scroll-shell relative min-h-0 flex-1" :class="{ 'connection-tree-scroll-shell--horizontal-overflow': hasSidebarHorizontalOverflow }">
+        <!-- NOTE: flow-mode is intentionally NOT used here. vue-virtual-scroller
+             v3.0.4's flow-mode view-pool bookkeeping produces an internally
+             inconsistent DOM in this app (window/spacers updated but pool views
+             never materialized -> blank band). Tree rows are fixed 28px (labels
+             truncate), so the standard absolute-positioning mode is safe and
+             keeps the materialized window in sync with the viewport. -->
         <RecycleScroller
           ref="treeScrollerRef"
           class="sidebar-tree connection-tree-scroller h-full overflow-y-auto"
@@ -2311,7 +2428,6 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
           key-field="renderKey"
           type-field="poolType"
           list-class="connection-tree-content"
-          flow-mode
         >
           <template #default="{ item }">
             <TreeItem
@@ -2357,7 +2473,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
           <div class="sidebar-tree-horizontal-scrollbar__thumb" :style="sidebarHorizontalScrollbarThumbStyle" @pointerdown.stop="onSidebarHorizontalScrollbarThumbPointerDown" />
         </div>
       </div>
-      <div v-else-if="flatNodes.length > 0" class="connection-tree-scroll-shell relative min-h-0 flex-1" :class="{ 'connection-tree-scroll-shell--horizontal-overflow': hasSidebarHorizontalOverflow }">
+      <div v-else-if="flatNodes.length > 0" ref="treeScrollShellRef" class="connection-tree-scroll-shell relative min-h-0 flex-1" :class="{ 'connection-tree-scroll-shell--horizontal-overflow': hasSidebarHorizontalOverflow }">
         <div ref="plainTreeScrollerRef" class="sidebar-tree connection-tree-scroller h-full overflow-y-auto" :class="sidebarTreeOverflowClass" :style="sidebarTreeScrollerStyle" @click="clearSidebarSelection" @scroll.passive="onTreeScroll">
           <div class="connection-tree-content">
             <TreeItem
@@ -2562,6 +2678,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
   contain: content;
   scrollbar-width: none;
   -ms-overflow-style: none;
+  overflow-anchor: none;
 }
 
 .connection-tree-scroller::-webkit-scrollbar {

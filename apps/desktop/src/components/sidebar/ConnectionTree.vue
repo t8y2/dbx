@@ -13,11 +13,13 @@ import {
   filterSidebarSearchRootsByConnectionState,
   filterSidebarTree,
   filterSidebarTreeToConnectedConnections,
+  findNodePathByIdentity,
   mergeSidebarRegexIndexScopes,
   resolveSidebarFilterGuards,
   resolveSidebarObjectSearchFilter,
   reuseLiveSidebarTreeNodes,
   type SidebarRegexIndexScope,
+  type SidebarRegexScopeIdentity,
 } from "@/lib/sidebar/sidebarSearchTree";
 import { createSidebarLabelMatcher, matchSidebarLabel } from "@/lib/sidebar/sidebarSearch";
 import { collectSidebarRegexIndexScopes, resolveSidebarRemoteSearchQuery, resolveSidebarSearchDispatchMode } from "@/lib/sidebar/sidebarRegexSearchIndex";
@@ -51,7 +53,7 @@ import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
 import { createSidebarTreeRuntime, sidebarTreeRuntimeKey, type SidebarTreeRuntimeHostInstance } from "@/lib/sidebar/sidebarTreeRuntime";
 import { createSidebarPasteHandlerRegistry } from "@/lib/sidebar/sidebarPasteHandlerRegistry";
 import { insertSidebarTableSearchControls, isSidebarTableSearchControlNode } from "@/lib/sidebar/sidebarTableSearchControl";
-import { createSidebarTableSearchDebouncer, loadOrBuildSidebarTableSearchIndex, scheduleExclusiveSidebarTableSearchDebounce } from "@/lib/sidebar/sidebarTableSearchIndex";
+import { createSidebarTableSearchDebouncer, invalidateSidebarTableSearchBuild, loadOrBuildSidebarTableSearchIndex, scheduleExclusiveSidebarTableSearchDebounce } from "@/lib/sidebar/sidebarTableSearchIndex";
 import TreeItem from "./TreeItem.vue";
 import SidebarTreeRuntimeHost from "./SidebarTreeRuntimeHost.vue";
 import SidebarTreeItemDialogs from "./SidebarTreeItemDialogs.vue";
@@ -579,6 +581,9 @@ function restoreTableSearchInput(focusRestore: TableSearchFocusRestore) {
 
 const displayedTreeNodes = computed(() => sortConnectionListForDisplay(store.treeNodes, settingsStore.editorSettings.sidebarConnectionSortMode));
 const localTableSearchResults = ref<Record<string, TableInfo[] | null>>({});
+const localTableSearchRequestRevisions = new Map<string, number>();
+type InvalidatedTableSearchScope = SidebarRegexScopeIdentity & { parentNodeId: string };
+const pendingInvalidatedTableSearchScopes = new Map<string, InvalidatedTableSearchScope>();
 const regexTableSearchScopes = shallowRef<SidebarRegexIndexScope[]>([]);
 
 const localTableSearchParentTypes = new Set<TreeNodeType>(["database", "schema", "linked-server-schema", "group-tables"]);
@@ -636,7 +641,13 @@ function scheduleLocalSidebarTableSearchRefresh(parentNodeId: string, focusResto
   });
 }
 
-async function loadLocalTableSearchResults(parentNodeId: string, refresh = false, focusRestore?: TableSearchFocusRestore) {
+function invalidatedTableSearchScopeKey(scope: InvalidatedTableSearchScope): string {
+  return [scope.connectionId, scope.catalog ?? "", scope.database, scope.schema ?? "", scope.nodeType, scope.parentNodeId].join("\0");
+}
+
+async function loadLocalTableSearchResults(parentNodeId: string, refresh = false, focusRestore?: TableSearchFocusRestore, identity?: SidebarRegexScopeIdentity) {
+  const requestRevision = (localTableSearchRequestRevisions.get(parentNodeId) ?? 0) + 1;
+  localTableSearchRequestRevisions.set(parentNodeId, requestRevision);
   try {
     // A missing persisted index (null) means this scope was never indexed, so
     // only the currently loaded first page of children is searchable. That
@@ -649,15 +660,48 @@ async function loadLocalTableSearchResults(parentNodeId: string, refresh = false
     const entries = await loadOrBuildSidebarTableSearchIndex(
       parentNodeId,
       query,
-      () => store.loadSidebarTableSearchIndex(parentNodeId),
-      () => store.refreshSidebarTableSearchIndex(parentNodeId),
+      () => store.loadSidebarTableSearchIndex(parentNodeId, identity),
+      () => store.refreshSidebarTableSearchIndex(parentNodeId, identity),
       refresh,
     );
+    if (localTableSearchRequestRevisions.get(parentNodeId) !== requestRevision) return;
     if (query || refresh) localTableSearchResults.value = { ...localTableSearchResults.value, [parentNodeId]: entries };
   } finally {
     if (focusRestore) restoreTableSearchInput(focusRestore);
   }
 }
+
+function refreshPendingInvalidatedTableSearchScopes() {
+  for (const [scopeKey, scope] of pendingInvalidatedTableSearchScopes) {
+    const query = store.sidebarTableSearchQueries[scope.parentNodeId]?.trim() ?? "";
+    if (!settingsStore.editorSettings.sidebarTableSearchLocal || !query) {
+      pendingInvalidatedTableSearchScopes.delete(scopeKey);
+      continue;
+    }
+    if (!store.connectedIds.has(scope.connectionId)) continue;
+    if (!findNodePathByIdentity(store.treeNodes, scope.parentNodeId, scope)) continue;
+    pendingInvalidatedTableSearchScopes.delete(scopeKey);
+    void loadLocalTableSearchResults(scope.parentNodeId, true, undefined, scope).catch((error) => {
+      console.debug("[DBX][sidebar-table-search:index-rebuild-failed]", { scope, error });
+    });
+  }
+}
+
+watch(
+  () => store.sidebarTableSearchIndexInvalidation,
+  (invalidation) => {
+    if (!invalidation.scopes.length) return;
+    const nextResults = { ...localTableSearchResults.value };
+    for (const scope of invalidation.scopes) {
+      delete nextResults[scope.parentNodeId];
+      localTableSearchDebouncer.cancel(scope.parentNodeId);
+      invalidateSidebarTableSearchBuild(scope.parentNodeId);
+      pendingInvalidatedTableSearchScopes.set(invalidatedTableSearchScopeKey(scope), scope);
+    }
+    localTableSearchResults.value = nextResults;
+    refreshPendingInvalidatedTableSearchScopes();
+  },
+);
 
 const filteredNodes = computed(() => {
   let nodes = displayedTreeNodes.value;
@@ -700,6 +744,8 @@ const flatNodes = computed<FlatTreeNode[]>(() =>
     activeQueries: store.sidebarTableSearchQueries,
   }),
 );
+
+watch(flatNodes, refreshPendingInvalidatedTableSearchScopes, { flush: "post" });
 
 const sidebarCommentLabelWidths = shallowRef(new Map<string, number>());
 let sidebarCommentMeasureFrame = 0;
@@ -2156,6 +2202,8 @@ onUnmounted(() => {
   cancelPendingSidebarDataOpen();
   remoteTableSearchDebouncer.cancelAll();
   localTableSearchDebouncer.cancelAll();
+  localTableSearchRequestRevisions.clear();
+  pendingInvalidatedTableSearchScopes.clear();
   tableSearchFocusRestoreTokens.clear();
   latestTableSearchInteractionParentId = null;
   latestTableSearchInteractionId = 0;

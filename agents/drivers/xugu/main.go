@@ -238,6 +238,12 @@ var xuguDataTypes = []string{
 	"DOUBLE[]",
 	"FLOAT",
 	"GUID",
+	"GEOMETRY",
+	"GEOGRAPHY",
+	"BOX2D",
+	"BOX3D",
+	"SPHEROID",
+	"RASTER",
 	"INT",
 	"INTEGER",
 	"INTEGER[]",
@@ -311,12 +317,14 @@ type queryOptions struct {
 }
 
 type queryResult struct {
-	Columns         []string `json:"columns"`
-	ColumnTypes     []string `json:"column_types"`
-	Rows            [][]any  `json:"rows"`
-	AffectedRows    int64    `json:"affected_rows"`
-	ExecutionTimeMS int64    `json:"execution_time_ms"`
-	Truncated       bool     `json:"truncated"`
+	Columns         []string        `json:"columns"`
+	ColumnTypes     []string        `json:"column_types"`
+	SpatialColumns  []spatialColumn `json:"spatial_columns,omitempty"`
+	SpatialValues   [][]*uint32     `json:"spatial_values,omitempty"`
+	Rows            [][]any         `json:"rows"`
+	AffectedRows    int64           `json:"affected_rows"`
+	ExecutionTimeMS int64           `json:"execution_time_ms"`
+	Truncated       bool            `json:"truncated"`
 }
 
 func (r queryResult) MarshalJSON() ([]byte, error) {
@@ -335,14 +343,16 @@ func (r queryResult) MarshalJSON() ([]byte, error) {
 }
 
 type queryPageResult struct {
-	Columns         []string `json:"columns"`
-	ColumnTypes     []string `json:"column_types"`
-	Rows            [][]any  `json:"rows"`
-	AffectedRows    int64    `json:"affected_rows"`
-	ExecutionTimeMS int64    `json:"execution_time_ms"`
-	Truncated       bool     `json:"truncated"`
-	SessionID       *string  `json:"session_id"`
-	HasMore         bool     `json:"has_more"`
+	Columns         []string        `json:"columns"`
+	ColumnTypes     []string        `json:"column_types"`
+	SpatialColumns  []spatialColumn `json:"spatial_columns,omitempty"`
+	SpatialValues   [][]*uint32     `json:"spatial_values,omitempty"`
+	Rows            [][]any         `json:"rows"`
+	AffectedRows    int64           `json:"affected_rows"`
+	ExecutionTimeMS int64           `json:"execution_time_ms"`
+	Truncated       bool            `json:"truncated"`
+	SessionID       *string         `json:"session_id"`
+	HasMore         bool            `json:"has_more"`
 }
 
 func (r queryPageResult) MarshalJSON() ([]byte, error) {
@@ -361,11 +371,13 @@ func (r queryPageResult) MarshalJSON() ([]byte, error) {
 }
 
 type querySession struct {
-	rows        *sql.Rows
-	columns     []string
-	columnTypes []string
-	pending     []any
-	remaining   int
+	rows           *sql.Rows
+	columns        []string
+	columnTypes    []string
+	scanner        *xuguRowScanner
+	pending        []any
+	pendingSpatial []*uint32
+	remaining      int
 }
 
 type databaseInfo struct {
@@ -3535,6 +3547,8 @@ func (s *server) executeQueryPage(opts queryOptions, pageSize int) (queryPageRes
 		return queryPageResult{
 			Columns:         result.Columns,
 			ColumnTypes:     result.ColumnTypes,
+			SpatialColumns:  result.SpatialColumns,
+			SpatialValues:   result.SpatialValues,
 			Rows:            result.Rows,
 			AffectedRows:    result.AffectedRows,
 			ExecutionTimeMS: result.ExecutionTimeMS,
@@ -3553,11 +3567,19 @@ func (s *server) executeQueryPage(opts queryOptions, pageSize int) (queryPageRes
 		return queryPageResult{}, err
 	}
 	columnTypes := columnTypeNames(rows)
+	rowScanner := newXuguRowScanner(len(columns), columnTypes)
+	columnTypes = rowScanner.spatial.columnTypes
 	maxRows := opts.MaxRows
 	if maxRows <= 0 {
 		maxRows = defaultMaxRows
 	}
-	session := &querySession{rows: rows, columns: columns, columnTypes: columnTypes, remaining: maxRows}
+	session := &querySession{
+		rows:        rows,
+		columns:     columns,
+		columnTypes: columnTypes,
+		scanner:     rowScanner,
+		remaining:   maxRows,
+	}
 	result, err := readQuerySessionPage(session, pageSize)
 	result.ExecutionTimeMS = time.Since(start).Milliseconds()
 	if err != nil {
@@ -3619,37 +3641,42 @@ func readQuerySessionPage(session *querySession, pageSize int) (queryPageResult,
 		pageSize = defaultMaxRows
 	}
 	result := queryPageResult{Columns: session.columns, ColumnTypes: session.columnTypes, Rows: [][]any{}, SessionID: nil, HasMore: false}
+	spatialValues := make([][]*uint32, 0, pageSize)
 	for len(result.Rows) < pageSize && session.remaining > 0 {
 		if session.pending != nil {
 			result.Rows = append(result.Rows, session.pending)
+			spatialValues = append(spatialValues, session.pendingSpatial)
 			session.pending = nil
+			session.pendingSpatial = nil
 			session.remaining--
 			continue
 		}
 		if !session.rows.Next() {
-			return result, session.rows.Err()
+			return finishXuguSpatialPage(result, session.scanner, spatialValues), session.rows.Err()
 		}
-		row, err := scanRow(session.rows, len(session.columns))
+		row, rowSpatial, err := session.scanner.scan(session.rows)
 		if err != nil {
 			return queryPageResult{}, err
 		}
 		result.Rows = append(result.Rows, row)
+		spatialValues = append(spatialValues, rowSpatial)
 		session.remaining--
 	}
 	if session.remaining <= 0 {
 		result.Truncated = true
-		return result, nil
+		return finishXuguSpatialPage(result, session.scanner, spatialValues), nil
 	}
 	if session.rows.Next() {
-		row, err := scanRow(session.rows, len(session.columns))
+		row, rowSpatial, err := session.scanner.scan(session.rows)
 		if err != nil {
 			return queryPageResult{}, err
 		}
 		session.pending = row
+		session.pendingSpatial = rowSpatial
 		result.HasMore = true
-		return result, nil
+		return finishXuguSpatialPage(result, session.scanner, spatialValues), nil
 	}
-	return result, session.rows.Err()
+	return finishXuguSpatialPage(result, session.scanner, spatialValues), session.rows.Err()
 }
 
 func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
@@ -3696,18 +3723,24 @@ func (s *server) executeSelect(sqlText string, maxRows int, timeoutSecs int) (qu
 	if err != nil {
 		return queryResult{}, err
 	}
-	result := queryResult{Columns: columns, ColumnTypes: columnTypeNames(rows), Rows: [][]any{}}
+	columnTypes := columnTypeNames(rows)
+	scanner := newXuguRowScanner(len(columns), columnTypes)
+	columnTypes = scanner.spatial.columnTypes
+	result := queryResult{Columns: columns, ColumnTypes: columnTypes, Rows: [][]any{}}
+	spatialValues := make([][]*uint32, 0)
 	for rows.Next() {
 		if len(result.Rows) >= maxRows {
 			result.Truncated = true
 			break
 		}
-		values, err := scanRow(rows, len(columns))
+		values, rowSpatial, err := scanner.scan(rows)
 		if err != nil {
 			return queryResult{}, err
 		}
 		result.Rows = append(result.Rows, values)
+		spatialValues = append(spatialValues, rowSpatial)
 	}
+	result.SpatialColumns, result.SpatialValues = xuguSpatialResultMetadata(scanner, spatialValues)
 	return result, rows.Err()
 }
 

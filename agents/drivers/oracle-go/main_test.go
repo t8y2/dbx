@@ -1734,8 +1734,11 @@ func TestResolveOracleSchemaFallsBackToSessionUser(t *testing.T) {
 func TestListTablesSQLUsesSplitDictionaryQuery(t *testing.T) {
 	sqlText := strings.ToUpper(oracleListTablesSQL)
 
-	if !strings.Contains(sqlText, "ALL_TABLES") || !strings.Contains(sqlText, "ALL_OBJECTS") {
+	if !strings.Contains(sqlText, "ALL_TABLES") || !strings.Contains(sqlText, "ALL_VIEWS") || !strings.Contains(sqlText, "ALL_MVIEWS") {
 		t.Fatalf("table listing should split tables and views, got: %s", oracleListTablesSQL)
+	}
+	if strings.Contains(sqlText, "ALL_OBJECTS") {
+		t.Fatalf("table listing should avoid sorting the expensive ALL_OBJECTS view, got: %s", oracleListTablesSQL)
 	}
 	if !strings.Contains(sqlText, "UNION ALL") {
 		t.Fatalf("table listing should union table and view metadata, got: %s", oracleListTablesSQL)
@@ -1751,26 +1754,32 @@ func TestOracleMetadataQueriesClassifyMaterializedViews(t *testing.T) {
 		sqlText    string
 		tableView  string
 		objectView string
+		objectName string
+		objectType bool
 		ownerMatch string
 	}{
 		{
 			name:       "all list tables",
 			sqlText:    oracleListTablesBaseSQL,
 			tableView:  "ALL_TABLES",
-			objectView: "ALL_OBJECTS",
+			objectView: "ALL_MVIEWS",
+			objectName: "MV.MVIEW_NAME",
 			ownerMatch: "MV.OWNER = T.OWNER",
 		},
 		{
 			name:       "user list tables",
 			sqlText:    oracleListTablesSessionUserBaseSQL,
 			tableView:  "USER_TABLES",
-			objectView: "USER_OBJECTS",
+			objectView: "USER_MVIEWS",
+			objectName: "MV.MVIEW_NAME",
 		},
 		{
 			name:       "all list objects",
 			sqlText:    oracleListObjectsBaseSQL,
 			tableView:  "ALL_TABLES",
 			objectView: "ALL_OBJECTS",
+			objectName: "MV.OBJECT_NAME",
+			objectType: true,
 			ownerMatch: "MV.OWNER = T.OWNER",
 		},
 		{
@@ -1778,6 +1787,8 @@ func TestOracleMetadataQueriesClassifyMaterializedViews(t *testing.T) {
 			sqlText:    oracleListObjectsSessionUserBaseSQL,
 			tableView:  "USER_TABLES",
 			objectView: "USER_OBJECTS",
+			objectName: "MV.OBJECT_NAME",
+			objectType: true,
 		},
 	}
 
@@ -1787,14 +1798,20 @@ func TestOracleMetadataQueriesClassifyMaterializedViews(t *testing.T) {
 			if !strings.Contains(sqlText, "FROM "+test.tableView+" T") || !strings.Contains(sqlText, "FROM "+test.objectView+" MV") {
 				t.Fatalf("metadata query should classify tables against materialized-view objects: %s", test.sqlText)
 			}
-			if !strings.Contains(sqlText, "NOT EXISTS") || !strings.Contains(sqlText, "MV.OBJECT_NAME = T.TABLE_NAME") || !strings.Contains(sqlText, "MV.OBJECT_TYPE = 'MATERIALIZED VIEW'") {
+			if !strings.Contains(sqlText, "NOT EXISTS") || !strings.Contains(sqlText, test.objectName+" = T.TABLE_NAME") {
 				t.Fatalf("metadata query should exclude materialized-view storage tables: %s", test.sqlText)
+			}
+			if test.objectType && !strings.Contains(sqlText, "MV.OBJECT_TYPE = 'MATERIALIZED VIEW'") {
+				t.Fatalf("object query should identify materialized views by object type: %s", test.sqlText)
 			}
 			if test.ownerMatch != "" && !strings.Contains(sqlText, test.ownerMatch) {
 				t.Fatalf("cross-schema metadata query should keep materialized-view classification owner-scoped: %s", test.sqlText)
 			}
-			if !strings.Contains(sqlText, "'MATERIALIZED_VIEW'") || !strings.Contains(sqlText, "'MATERIALIZED VIEW'") {
+			if !strings.Contains(sqlText, "'MATERIALIZED_VIEW'") {
 				t.Fatalf("metadata query should return the normalized materialized-view type: %s", test.sqlText)
+			}
+			if test.objectType && !strings.Contains(sqlText, "'MATERIALIZED VIEW'") {
+				t.Fatalf("object query should select materialized-view objects: %s", test.sqlText)
 			}
 		})
 	}
@@ -1809,19 +1826,19 @@ func TestListTablesQueryAppliesMetadataConstraints(t *testing.T) {
 	})
 	sqlText := strings.ToUpper(query.SQL)
 
-	if !strings.Contains(sqlText, "UPPER(OBJECT_NAME) LIKE :3 ESCAPE '\\'") {
+	if !strings.Contains(sqlText, "UPPER(OBJECT_NAME) LIKE :4 ESCAPE '\\'") {
 		t.Fatalf("table listing should push filter predicate, got: %s", query.SQL)
 	}
-	if !strings.Contains(sqlText, "TABLE_TYPE IN (:4,:5)") {
+	if !strings.Contains(sqlText, "TABLE_TYPE IN (:5,:6)") {
 		t.Fatalf("table listing should push table type predicate, got: %s", query.SQL)
 	}
-	if !strings.Contains(sqlText, "ROWNUM <= :6") || !strings.Contains(sqlText, "DBX_RN > :7") {
+	if !strings.Contains(sqlText, "ROWNUM <= :7") || !strings.Contains(sqlText, "DBX_RN > :8") {
 		t.Fatalf("table listing should use rownum pagination, got: %s", query.SQL)
 	}
-	if len(query.Args) != 7 {
+	if len(query.Args) != 8 {
 		t.Fatalf("unexpected args: %#v", query.Args)
 	}
-	if query.Args[0] != "APP" || query.Args[1] != "APP" || query.Args[2] != "%U%\\_%R%" || query.Args[3] != "TABLE" || query.Args[4] != "VIEW" || query.Args[5] != 511 || query.Args[6] != 10 {
+	if query.Args[0] != "APP" || query.Args[1] != "APP" || query.Args[2] != "APP" || query.Args[3] != "%U%\\_%R%" || query.Args[4] != "TABLE" || query.Args[5] != "VIEW" || query.Args[6] != 511 || query.Args[7] != 10 {
 		t.Fatalf("constraints args were not normalized: %#v", query.Args)
 	}
 }
@@ -1835,10 +1852,10 @@ func TestListSessionUserTablesQueryUsesUserDictionary(t *testing.T) {
 	})
 	sqlText := strings.ToUpper(query.SQL)
 
-	if !strings.Contains(sqlText, "USER_TABLES") || !strings.Contains(sqlText, "USER_OBJECTS") {
+	if !strings.Contains(sqlText, "USER_TABLES") || !strings.Contains(sqlText, "USER_VIEWS") || !strings.Contains(sqlText, "USER_MVIEWS") {
 		t.Fatalf("session-user table listing should use USER_* dictionaries, got: %s", query.SQL)
 	}
-	if strings.Contains(sqlText, "ALL_TABLES") || strings.Contains(sqlText, "ALL_OBJECTS") {
+	if strings.Contains(sqlText, "ALL_TABLES") || strings.Contains(sqlText, "ALL_VIEWS") || strings.Contains(sqlText, "ALL_MVIEWS") || strings.Contains(sqlText, "USER_OBJECTS") {
 		t.Fatalf("session-user table listing should avoid ALL_* dictionaries, got: %s", query.SQL)
 	}
 	if strings.Contains(sqlText, "OWNER =") {

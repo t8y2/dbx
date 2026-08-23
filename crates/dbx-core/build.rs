@@ -46,7 +46,7 @@ fn generate_core_dialects(dialects_dir: &Path, out_dir: &Path) {
     let mut code = String::from("{\n");
 
     for path in &entries {
-        let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
         let file_name = path.file_stem().unwrap().to_str().unwrap();
         let path_str = canonical.to_str().unwrap();
 

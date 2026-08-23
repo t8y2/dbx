@@ -3665,7 +3665,6 @@ export const useConnectionStore = defineStore("connection", () => {
     clearConnectionIdentifierQuote(connectionId);
     forgetSuccessfulLocalConnectionAttempt(connectionId);
     clearConnectionHealthCheck(connectionId);
-    await invalidateSidebarTableSearchIndexesForConnection(connectionId);
     const node = findConnectionNode(connectionId);
     if (node) {
       node.isLoading = false;
@@ -3684,6 +3683,7 @@ export const useConnectionStore = defineStore("connection", () => {
     }
     invalidateCompletionCache(connectionId);
     invalidateObjectBrowserRowsCache({ connectionId });
+    await invalidateSidebarTableSearchIndexesForConnection(connectionId);
     const { useQueryStore } = await import("@/stores/queryStore");
     const queryStore = useQueryStore();
     // 断开连接是明确的元数据新鲜度边界：数据标签页保留展示/编辑状态，但

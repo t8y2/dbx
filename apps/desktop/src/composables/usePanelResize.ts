@@ -26,10 +26,13 @@ export function usePanelResize() {
     return (e: MouseEvent) => {
       e.preventDefault();
       const startX = e.clientX;
-      const startWidth = widthRef.value;
       const resizeHandle = e.currentTarget as HTMLElement | null;
       const resolvedMaxWidth = typeof maxWidth === "function" ? maxWidth(resizeHandle) : maxWidth;
       const upperBound = Number.isFinite(resolvedMaxWidth) ? Math.max(PANEL_MIN_WIDTH, resolvedMaxWidth) : DEFAULT_PANEL_MAX_WIDTH;
+      const renderedWidth = resizeHandle?.parentElement?.getBoundingClientRect().width;
+      const requestedStartWidth = typeof renderedWidth === "number" && Number.isFinite(renderedWidth) && renderedWidth > 0 ? renderedWidth : widthRef.value;
+      const startWidth = Math.max(PANEL_MIN_WIDTH, Math.min(upperBound, requestedStartWidth));
+      widthRef.value = startWidth;
 
       const onMouseMove = (ev: MouseEvent) => {
         const delta = ev.clientX - startX;

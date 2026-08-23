@@ -32,6 +32,7 @@ describe("usePanelResize", () => {
   });
 
   afterEach(() => {
+    document.body.replaceChildren();
     vi.unstubAllGlobals();
   });
 
@@ -55,9 +56,27 @@ describe("usePanelResize", () => {
 
     expect(aiPanelWidth.value).toBe(1060);
     expect(localStorage.getItem("dbx-ai-panel-width")).toBe("1060");
+  });
 
-    handle.remove();
-    editor.remove();
-    panel.remove();
+  it("resizes from the flex-shrunk width after a wide panel is restored in a narrow window", () => {
+    localStorage.setItem("dbx-ai-panel-width", "1060");
+
+    const editor = document.createElement("div");
+    const panel = document.createElement("div");
+    const handle = document.createElement("div");
+    panel.append(handle);
+    document.body.append(editor, panel);
+
+    vi.spyOn(editor, "getBoundingClientRect").mockReturnValue(rect(300, 0));
+    vi.spyOn(panel, "getBoundingClientRect").mockReturnValue(rect(300, 700));
+
+    const { aiPanelWidth, startAiPanelResize } = usePanelResize();
+    handle.addEventListener("mousedown", startAiPanelResize);
+    handle.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientX: 300 }));
+    document.dispatchEvent(new MouseEvent("mousemove", { clientX: 400 }));
+    document.dispatchEvent(new MouseEvent("mouseup"));
+
+    expect(aiPanelWidth.value).toBe(600);
+    expect(localStorage.getItem("dbx-ai-panel-width")).toBe("600");
   });
 });

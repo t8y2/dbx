@@ -54,7 +54,7 @@ describe("right sidebar panel entry points", () => {
     expect(appSource).toContain("const isAiPanelMaximized = ref(false);");
     expect(appSource).toContain(':maximized="isAiPanelMaximized"');
     expect(appSource).toContain('@toggle-maximize="toggleAiPanelMaximized"');
-    expect(appSource).toContain("isAiPanelMaximized ? 'min-w-0 flex-1' : 'shrink-0'");
+    expect(appSource).toContain("isAiPanelMaximized ? 'min-w-0 flex-1' : 'min-w-[180px] max-w-full'");
     expect(appSource).toContain('v-show="!isAiPanelMaximized"');
     expect(functionSource("setRightSidebarPanelOpen", "toggleRightSidebarPanel")).toContain("isAiPanelMaximized.value = false;");
   });

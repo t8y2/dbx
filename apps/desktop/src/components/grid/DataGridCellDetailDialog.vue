@@ -13,6 +13,7 @@ import { BINARY_CELL_DOWNLOAD_MODES, binaryCellUtf8Text, isBlobCellColumnType, t
 import { isGeometryColumnType } from "@/lib/dataGrid/cellDetailPresentation";
 import { isHexGeometry, renderWktOnCanvas } from "@/lib/dataGrid/geometryPreview";
 import type { DataGridCellDetail } from "@/lib/dataGrid/dataGridDetail";
+import type { DatabaseType } from "@/types/database";
 
 const { t } = useI18n();
 const settingsStore = useSettingsStore();
@@ -27,6 +28,8 @@ const props = defineProps<{
   downloadBinaryValue: (detail: DataGridCellDetail | null, mode: BinaryCellDownloadMode) => void | Promise<void>;
   canImportBinaryValue: (detail: DataGridCellDetail | null) => boolean;
   importBinaryValue: (detail: DataGridCellDetail | null) => void | Promise<void>;
+  /** BLOB 文本预览与编辑写回一致，仅在 MySQL 连接开启。 */
+  databaseType?: DatabaseType;
 }>();
 
 const emit = defineEmits<{
@@ -41,7 +44,7 @@ let jsonPreviewEditor: UseCellDetailEditorReturn | null = null;
 
 const jsonFormatted = computed(() => settingsStore.editorSettings.cellDetailJsonFormatted);
 const jsonView = computed(() => jsonFormatted.value && !!props.detail?.formattedJson);
-const binaryTextPreview = computed(() => (props.detail && isBlobCellColumnType(props.detail.type) ? binaryCellUtf8Text(props.detail.value, props.detail.type) : null));
+const binaryTextPreview = computed(() => (props.detail && isBlobCellColumnType(props.detail.type) ? binaryCellUtf8Text(props.detail.value, props.detail.type, props.databaseType) : null));
 const presentedValuePreview = computed(() => (binaryTextPreview.value === null ? props.detail?.rawValuePreview : props.detail?.displayValuePreview) ?? "");
 
 function toggleJsonFormatted() {

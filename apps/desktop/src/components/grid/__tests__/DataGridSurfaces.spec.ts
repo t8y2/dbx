@@ -1205,6 +1205,7 @@ describe("cell detail surfaces", () => {
       downloadBinaryValue: vi.fn(),
       canImportBinaryValue: () => false,
       importBinaryValue: vi.fn(),
+      databaseType: "mysql",
     });
     const panel = mountComponent(DataGridCellDetailPanel, {
       detail: blobDetail,
@@ -1222,6 +1223,7 @@ describe("cell detail surfaces", () => {
       importBinaryValue: vi.fn(),
       openImagePreview: vi.fn(),
       canCopySqlCondition: () => true,
+      databaseType: "mysql",
     });
 
     expect(hostText(dialog.root)).toContain("#2005");
@@ -1233,6 +1235,29 @@ describe("cell detail surfaces", () => {
       "click",
     );
     expect(copyText).toHaveBeenCalledWith("#2005805");
+  });
+
+  it("keeps non-MySQL BLOB detail previews in hex", () => {
+    const panel = mountComponent(DataGridCellDetailPanel, {
+      detail: detail({ type: "BLOB", value: "0x2332303035383035", rawValue: "0x2332303035383035", rawValuePreview: "0x2332303035383035", displayValue: "BLOB [8 bytes]", displayValuePreview: "BLOB [8 bytes]", formattedJson: "" }),
+      panelIsBottom: true,
+      metadataCollapsed: false,
+      valueFillsHeight: false,
+      editing: false,
+      sideJsonView: false,
+      showCompactJson: false,
+      canCompactJson: false,
+      typeColorClass: () => "",
+      canDownloadBinaryValue: () => true,
+      downloadBinaryValue: vi.fn(),
+      canImportBinaryValue: () => false,
+      importBinaryValue: vi.fn(),
+      openImagePreview: vi.fn(),
+      canCopySqlCondition: () => true,
+      databaseType: "sqlite",
+    });
+
+    expect(hostText(panel.root)).toContain("0x2332303035383035");
   });
 
   it("keeps non-text LONG BLOB values in hex", () => {
@@ -1252,6 +1277,7 @@ describe("cell detail surfaces", () => {
       importBinaryValue: vi.fn(),
       openImagePreview: vi.fn(),
       canCopySqlCondition: () => true,
+      databaseType: "mysql",
     });
 
     expect(hostText(panel.root)).toContain("0x89504e470d0a1a0a");

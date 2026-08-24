@@ -13330,6 +13330,7 @@ function currentGridContextMenuItems(): ContextMenuItem[] {
                 :import-binary-value="importDetailBinaryValue"
                 :open-image-preview="openImagePreview"
                 :can-copy-sql-condition="canCopyPreparedDetailSqlCondition"
+                :database-type="resolvedDatabaseType"
                 @start-edit="startDetailEdit"
                 @compact-json="compactDetailJson"
                 @toggle-formatted="toggleCellDetailJsonFormatted"
@@ -13519,6 +13520,7 @@ function currentGridContextMenuItems(): ContextMenuItem[] {
       :download-binary-value="downloadDetailBinaryValue"
       :can-import-binary-value="canImportDetailBinaryValue"
       :import-binary-value="importDetailBinaryValue"
+      :database-type="resolvedDatabaseType"
       @edit="openDialogCellInSidePanel"
     />
 

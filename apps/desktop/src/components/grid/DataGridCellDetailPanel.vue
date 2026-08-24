@@ -13,6 +13,7 @@ import { isGeometryColumnType } from "@/lib/dataGrid/cellDetailPresentation";
 import { isHexGeometry } from "@/lib/dataGrid/geometryPreview";
 import type { DataGridCellDetail } from "@/lib/dataGrid/dataGridDetail";
 import type { TemporalCellEditorConfig } from "@/lib/dataGrid/dataGridTemporalEditor";
+import type { DatabaseType } from "@/types/database";
 
 const { t } = useI18n();
 
@@ -34,6 +35,8 @@ const props = defineProps<{
   importBinaryValue: (detail: DataGridCellDetail | null) => void | Promise<void>;
   openImagePreview: (src: string, title: string) => void;
   canCopySqlCondition: () => boolean;
+  /** BLOB 文本预览与编辑写回一致，仅在 MySQL 连接开启。 */
+  databaseType?: DatabaseType;
 }>();
 
 const detailEditValue = defineModel<string>("value", { default: "" });
@@ -55,7 +58,7 @@ void geometryCanvas;
 void detailsEditorContainer;
 void sideJsonPreviewContainer;
 
-const binaryTextPreview = computed(() => (isBlobCellColumnType(props.detail.type) ? binaryCellUtf8Text(props.detail.value, props.detail.type) : null));
+const binaryTextPreview = computed(() => (isBlobCellColumnType(props.detail.type) ? binaryCellUtf8Text(props.detail.value, props.detail.type, props.databaseType) : null));
 const presentedValuePreview = computed(() => (binaryTextPreview.value === null ? props.detail.rawValuePreview : props.detail.displayValuePreview));
 
 function startJsonEditFromBlankArea(event: MouseEvent) {

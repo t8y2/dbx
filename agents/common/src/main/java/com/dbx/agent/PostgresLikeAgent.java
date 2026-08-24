@@ -544,7 +544,7 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
             // characters in the text (#6312 review).
             Map<String, IndexBuilder> byName = new LinkedHashMap<>();
             String sql = "SELECT i.relname AS index_name, am.amname AS index_type, " +
-                "ix.indisunique AS is_unique, ix.indisprimary AS is_primary, " +
+                "(ix.indisunique AND ix.indisvalid) AS is_unique, ix.indisprimary AS is_primary, " +
                 "COALESCE(a.attname, " + profile.catalogPrefixedFunction("get_indexdef") + "(ix.indexrelid, k.n, true)) AS column_text, " +
                 "(a.attname IS NULL) AS is_expression " +
                 "FROM " + profile.catalogRelation("index") + " ix " +
@@ -622,7 +622,7 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
         return unchecked(() -> {
             List<CatalogIndex> catalogIndexes = new ArrayList<>();
             String sql = "SELECT i.relname AS index_name, am.amname AS index_type, " +
-                "ix.indisunique AS is_unique, ix.indisprimary AS is_primary, " +
+                "(ix.indisunique AND ix.indisvalid) AS is_unique, ix.indisprimary AS is_primary, " +
                 "ix.indkey AS column_numbers " +
                 "FROM " + profile.catalogRelation("index") + " ix " +
                 "JOIN " + profile.catalogRelation("class") + " t ON t.oid = ix.indrelid " +

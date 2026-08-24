@@ -4,12 +4,16 @@
     {
       "dbType": "mysql",
       "label": "MySQL",
+      "dialect": "MySQL",
       "runtimeMode": "native",
       "mcpMode": "direct",
       "singleConnectionPool": false,
       "metadataConnectionScoped": true,
       "skipTcpProbe": false,
       "defaultPort": 3306,
+      "traits": {
+        "diagramSql": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -33,12 +37,20 @@
     {
       "dbType": "postgres",
       "label": "PostgreSQL",
+      "dialect": "PostgreSQL",
       "runtimeMode": "native",
       "mcpMode": "direct",
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": false,
       "defaultPort": 5432,
+      "traits": {
+        "schemaAware": true,
+        "treeSchema": true,
+        "pgVacuum": true,
+        "pgLikeStructure": true,
+        "diagramSql": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -62,11 +74,16 @@
     {
       "dbType": "sqlite",
       "label": "SQLite",
+      "dialect": "SQLite",
       "runtimeMode": "file",
       "mcpMode": "direct",
       "singleConnectionPool": true,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
+      "localFile": true,
+      "traits": {
+        "diagramSql": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -90,12 +107,16 @@
     {
       "dbType": "rqlite",
       "label": "RQLite",
+      "dialect": "Rqlite",
       "runtimeMode": "native",
       "mcpMode": "direct",
       "singleConnectionPool": true,
       "metadataConnectionScoped": false,
       "skipTcpProbe": false,
       "defaultPort": 4001,
+      "traits": {
+        "diagramSql": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -117,14 +138,51 @@
       }
     },
     {
+      "dbType": "turso",
+      "label": "Turso",
+      "dialect": "Turso",
+      "runtimeMode": "native",
+      "mcpMode": "direct",
+      "singleConnectionPool": true,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 443,
+      "traits": {
+        "diagramSql": true
+      },
+      "supportLevel": "operate",
+      "capabilities": {
+        "queryExecution": true,
+        "metadataBrowse": true,
+        "objectBrowser": true,
+        "objectSource": true,
+        "schemaSearch": true,
+        "diagram": true,
+        "tableDataEdit": true,
+        "tableStructureEdit": true,
+        "tableImport": true,
+        "dataTransfer": true,
+        "sqlFileExecution": true,
+        "databaseCreate": false,
+        "fieldLineage": true,
+        "sqlExplain": false,
+        "userAdmin": false,
+        "driverManagement": false
+      }
+    },
+    {
       "dbType": "cloudflare-d1",
       "label": "Cloudflare D1",
+      "dialect": "SQLite",
       "runtimeMode": "native",
       "mcpMode": "bridge",
       "singleConnectionPool": true,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 443,
+      "traits": {
+        "diagramSql": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -177,11 +235,25 @@
     {
       "dbType": "duckdb",
       "label": "DuckDB",
+      "dialect": "DuckDB",
       "runtimeMode": "file",
       "mcpMode": "bridge",
+      "managedDrivers": [
+        {
+          "key": "duckdb",
+          "label": "DuckDB",
+          "storeVisible": true,
+          "storeOrder": 43
+        }
+      ],
       "singleConnectionPool": true,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
+      "localFile": true,
+      "traits": {
+        "schemaAware": true,
+        "treeSchema": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -205,6 +277,7 @@
     {
       "dbType": "clickhouse",
       "label": "ClickHouse",
+      "dialect": "ClickHouse",
       "runtimeMode": "native",
       "mcpMode": "bridge",
       "singleConnectionPool": false,
@@ -234,19 +307,29 @@
     {
       "dbType": "sqlserver",
       "label": "SQL Server",
+      "dialect": "SQL Server",
       "runtimeMode": "native",
       "mcpMode": "bridge",
+      "driverProfiles": [
+        {
+          "profile": "sqlserver-legacy",
+          "agentKey": "sqlserver-legacy",
+          "label": "SQL Server legacy compatibility component",
+          "storeVisible": true,
+          "storeOrder": 47
+        }
+      ],
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": false,
       "defaultPort": 1433,
+      "traits": {
+        "schemaAware": true,
+        "databaseSchemaQualified": true,
+        "treeSchema": true,
+        "diagramSql": true
+      },
       "supportLevel": "operate",
-      "driverProfiles": [
-        {
-          "profile": "sqlserver-legacy",
-          "agentKey": "sqlserver-legacy"
-        }
-      ],
       "capabilities": {
         "queryExecution": true,
         "metadataBrowse": true,
@@ -272,6 +355,16 @@
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "mongodb",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 41,
+      "driverProfiles": [
+        {
+          "profile": "mongodb-legacy",
+          "agentKey": "mongodb",
+          "label": "MongoDB (Legacy)",
+          "storeVisible": false
+        }
+      ],
       "singleConnectionPool": true,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
@@ -328,13 +421,37 @@
     {
       "dbType": "oracle",
       "label": "Oracle",
+      "dialect": "Oracle",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "oracle",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 18,
+      "driverProfiles": [
+        {
+          "profile": "oracle-legacy",
+          "agentKey": "oracle",
+          "label": "Oracle",
+          "storeVisible": false
+        },
+        {
+          "profile": "oracle-10g",
+          "agentKey": "oracle",
+          "label": "Oracle",
+          "storeVisible": false
+        }
+      ],
       "singleConnectionPool": true,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 1521,
+      "traits": {
+        "schemaAware": true,
+        "singleDatabase": true,
+        "clearableQuerySchema": true,
+        "fetchFirst": true,
+        "diagramSql": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -590,6 +707,7 @@
     {
       "dbType": "doris",
       "label": "Doris",
+      "dialect": "Doris",
       "runtimeMode": "native",
       "mcpMode": "direct",
       "singleConnectionPool": false,
@@ -619,6 +737,7 @@
     {
       "dbType": "starrocks",
       "label": "StarRocks",
+      "dialect": "StarRocks",
       "runtimeMode": "native",
       "mcpMode": "direct",
       "singleConnectionPool": false,
@@ -648,6 +767,7 @@
     {
       "dbType": "manticoresearch",
       "label": "Manticore Search",
+      "dialect": "ManticoreSearch",
       "runtimeMode": "native",
       "mcpMode": "direct",
       "singleConnectionPool": false,
@@ -677,12 +797,19 @@
     {
       "dbType": "redshift",
       "label": "Redshift",
+      "dialect": "Redshift",
       "runtimeMode": "native",
       "mcpMode": "direct",
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": false,
       "defaultPort": 5439,
+      "traits": {
+        "schemaAware": true,
+        "treeSchema": true,
+        "pgLikeStructure": true,
+        "diagramSql": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -706,13 +833,23 @@
     {
       "dbType": "dameng",
       "label": "达梦 DM8",
+      "dialect": "Dameng",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "dameng",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 1,
       "singleConnectionPool": true,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 5236,
+      "traits": {
+        "schemaAware": true,
+        "singleDatabase": true,
+        "clearableQuerySchema": true,
+        "fetchFirst": true,
+        "diagramSql": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -736,13 +873,21 @@
     {
       "dbType": "kingbase",
       "label": "金仓KingbaseES",
+      "dialect": "Kingbase",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "kingbase",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 2,
       "singleConnectionPool": true,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 54321,
+      "traits": {
+        "schemaAware": true,
+        "treeSchema": true,
+        "pgVacuum": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -766,13 +911,21 @@
     {
       "dbType": "highgo",
       "label": "瀚高 HighGo",
+      "dialect": "HighGo",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "highgo",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 3,
       "singleConnectionPool": true,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 5866,
+      "traits": {
+        "schemaAware": true,
+        "treeSchema": true,
+        "pgVacuum": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -796,13 +949,21 @@
     {
       "dbType": "uxdb",
       "label": "优炫 UXDB",
+      "dialect": "PostgreSQL",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "uxdb",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 4,
       "singleConnectionPool": true,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 52025,
+      "traits": {
+        "schemaAware": true,
+        "treeSchema": true,
+        "pgVacuum": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -826,13 +987,21 @@
     {
       "dbType": "vastbase",
       "label": "海量 Vastbase",
+      "dialect": "Vastbase",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "vastbase",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 5,
       "singleConnectionPool": true,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 5432,
+      "traits": {
+        "schemaAware": true,
+        "treeSchema": true,
+        "pgVacuum": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -856,9 +1025,12 @@
     {
       "dbType": "goldendb",
       "label": "金篆 GoldenDB",
+      "dialect": "GoldenDB",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "goldendb",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 6,
       "singleConnectionPool": true,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
@@ -886,13 +1058,19 @@
     {
       "dbType": "databend",
       "label": "Databend",
+      "dialect": "Databend",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "databend",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 7,
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 8000,
+      "traits": {
+        "schemaAware": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -916,12 +1094,21 @@
     {
       "dbType": "gaussdb",
       "label": "GaussDB",
+      "dialect": "GaussDB",
       "runtimeMode": "native",
       "mcpMode": "bridge",
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": false,
-      "defaultPort": 8000,
+      "defaultPort": 5432,
+      "traits": {
+        "schemaAware": true,
+        "clearableQuerySchema": true,
+        "treeSchema": true,
+        "pgVacuum": true,
+        "pgLikeStructure": true,
+        "diagramSql": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -945,12 +1132,20 @@
     {
       "dbType": "kwdb",
       "label": "KWDB",
+      "dialect": "KwDB",
       "runtimeMode": "native",
       "mcpMode": "direct",
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": false,
       "defaultPort": 26257,
+      "traits": {
+        "schemaAware": true,
+        "treeSchema": true,
+        "pgVacuum": true,
+        "pgLikeStructure": true,
+        "diagramSql": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -974,13 +1169,20 @@
     {
       "dbType": "yashandb",
       "label": "崖山 YashanDB",
+      "dialect": "YashanDB",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "yashandb",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 35,
       "singleConnectionPool": true,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 1688,
+      "traits": {
+        "schemaAware": true,
+        "treeSchema": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -1007,10 +1209,16 @@
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "databricks",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 8,
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 443,
+      "traits": {
+        "schemaAware": true,
+        "treeSchema": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -1037,10 +1245,16 @@
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "saphana",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 9,
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 30015,
+      "traits": {
+        "schemaAware": true,
+        "treeSchema": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -1067,10 +1281,16 @@
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "teradata",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 10,
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 1025,
+      "traits": {
+        "schemaAware": true,
+        "treeSchema": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -1094,13 +1314,20 @@
     {
       "dbType": "vertica",
       "label": "Vertica",
+      "dialect": "Vertica",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "vertica",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 11,
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 5433,
+      "traits": {
+        "schemaAware": true,
+        "treeSchema": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -1124,13 +1351,19 @@
     {
       "dbType": "firebird",
       "label": "Firebird",
+      "dialect": "Firebird",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "firebird",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 12,
       "singleConnectionPool": true,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 3050,
+      "traits": {
+        "singleDatabase": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -1154,13 +1387,20 @@
     {
       "dbType": "exasol",
       "label": "Exasol",
+      "dialect": "Exasol",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "exasol",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 13,
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 8563,
+      "traits": {
+        "schemaAware": true,
+        "treeSchema": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -1184,12 +1424,20 @@
     {
       "dbType": "opengauss",
       "label": "openGauss",
+      "dialect": "openGauss",
       "runtimeMode": "native",
       "mcpMode": "bridge",
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": false,
       "defaultPort": 5432,
+      "traits": {
+        "schemaAware": true,
+        "treeSchema": true,
+        "pgVacuum": true,
+        "pgLikeStructure": true,
+        "diagramSql": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -1213,12 +1461,18 @@
     {
       "dbType": "questdb",
       "label": "QuestDB",
+      "dialect": "QuestDB",
       "runtimeMode": "native",
       "mcpMode": "direct",
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": false,
       "defaultPort": 8812,
+      "traits": {
+        "singleDatabase": true,
+        "pgLikeStructure": true,
+        "diagramSql": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -1242,13 +1496,23 @@
     {
       "dbType": "oceanbase-oracle",
       "label": "OceanBase Oracle Mode",
+      "dialect": "OceanBase",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "oceanbase-oracle",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 14,
       "singleConnectionPool": true,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 2883,
+      "traits": {
+        "schemaAware": true,
+        "singleDatabase": true,
+        "clearableQuerySchema": true,
+        "treeSchema": true,
+        "diagramSql": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -1272,25 +1536,36 @@
     {
       "dbType": "gbase",
       "label": "南大通用 GBase 8a",
+      "dialect": "GBase",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "gbase8a",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 15,
+      "driverProfiles": [
+        {
+          "profile": "gbase8s",
+          "agentKey": "gbase8s",
+          "label": "南大通用 GBase 8s",
+          "storeVisible": true,
+          "storeOrder": 16
+        },
+        {
+          "profile": "gbase8a",
+          "agentKey": "gbase8a",
+          "label": "南大通用 GBase 8a",
+          "storeVisible": true,
+          "storeOrder": 15
+        }
+      ],
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 5258,
-      "driverProfiles": [
-        {
-          "profile": "gbase8s",
-          "label": "南大通用 GBase 8s",
-          "agentKey": "gbase8s"
-        },
-        {
-          "profile": "gbase8a",
-          "label": "南大通用 GBase 8a",
-          "agentKey": "gbase8a"
-        }
-      ],
+      "traits": {
+        "schemaAware": true,
+        "treeSchema": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -1314,12 +1589,19 @@
     {
       "dbType": "access",
       "label": "Microsoft Access",
+      "dialect": "Access",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "access",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 17,
       "singleConnectionPool": true,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
+      "localFile": true,
+      "traits": {
+        "singleDatabase": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -1343,13 +1625,54 @@
     {
       "dbType": "h2",
       "label": "H2",
+      "dialect": "H2",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "h2",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 19,
+      "driverProfiles": [
+        {
+          "profile": "h2-legacy",
+          "agentKey": "h2",
+          "packageKey": "h2-legacy",
+          "label": "H2 2.1 Legacy",
+          "storeVisible": false
+        },
+        {
+          "profile": "h2-v1",
+          "agentKey": "h2",
+          "label": "H2 1.x",
+          "storeVisible": false
+        },
+        {
+          "profile": "h2-v2",
+          "agentKey": "h2",
+          "label": "H2 2.0–2.1",
+          "storeVisible": false
+        },
+        {
+          "profile": "h2-v3",
+          "agentKey": "h2",
+          "label": "H2 2.2+",
+          "storeVisible": false
+        },
+        {
+          "profile": "h2-custom",
+          "agentKey": "h2",
+          "label": "H2 Custom JAR",
+          "storeVisible": false
+        }
+      ],
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
+      "localFile": true,
       "defaultPort": 9092,
+      "traits": {
+        "schemaAware": true,
+        "treeSchema": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -1376,10 +1699,15 @@
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "snowflake",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 20,
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 443,
+      "traits": {
+        "schemaAware": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -1406,10 +1734,17 @@
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "trino",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 21,
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 8080,
+      "traits": {
+        "schemaAware": true,
+        "databaseSchemaQualified": true,
+        "treeSchema": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -1439,6 +1774,11 @@
       "metadataConnectionScoped": false,
       "skipTcpProbe": false,
       "defaultPort": 8080,
+      "traits": {
+        "schemaAware": true,
+        "databaseSchemaQualified": true,
+        "treeSchema": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -1465,10 +1805,15 @@
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "hive",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 22,
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 10000,
+      "traits": {
+        "schemaAware": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -1495,10 +1840,14 @@
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "hive",
+      "driverStoreVisible": false,
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 10009,
+      "traits": {
+        "schemaAware": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -1525,10 +1874,14 @@
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "hive",
+      "driverStoreVisible": false,
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 21050,
+      "traits": {
+        "schemaAware": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -1555,10 +1908,16 @@
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "db2",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 24,
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 50000,
+      "traits": {
+        "schemaAware": true,
+        "treeSchema": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -1582,13 +1941,20 @@
     {
       "dbType": "informix",
       "label": "IBM Informix",
+      "dialect": "Informix",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "informix",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 25,
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 9088,
+      "traits": {
+        "schemaAware": true,
+        "treeSchema": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -1615,6 +1981,8 @@
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "neo4j",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 26,
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
@@ -1645,6 +2013,8 @@
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "cassandra",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 27,
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
@@ -1675,6 +2045,8 @@
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "bigquery",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 28,
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
@@ -1704,10 +2076,16 @@
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "spanner",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 29,
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 443,
+      "traits": {
+        "schemaAware": true,
+        "treeSchema": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -1734,6 +2112,8 @@
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "kylin",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 30,
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
@@ -1764,10 +2144,16 @@
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "ignite",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 31,
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 10800,
+      "traits": {
+        "schemaAware": true,
+        "treeSchema": true
+      },
       "supportLevel": "understand",
       "capabilities": {
         "queryExecution": true,
@@ -1794,10 +2180,16 @@
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "ignite3",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 32,
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 10800,
+      "traits": {
+        "schemaAware": true,
+        "treeSchema": true
+      },
       "supportLevel": "understand",
       "capabilities": {
         "queryExecution": true,
@@ -1821,9 +2213,12 @@
     {
       "dbType": "sundb",
       "label": "科蓝 SUNDB",
+      "dialect": "SunDB",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "sundb",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 33,
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
@@ -1854,10 +2249,16 @@
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "oscar",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 34,
       "singleConnectionPool": true,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 2003,
+      "traits": {
+        "schemaAware": true,
+        "treeSchema": true
+      },
       "supportLevel": "browse",
       "capabilities": {
         "queryExecution": true,
@@ -1884,6 +2285,8 @@
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "tdengine",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 36,
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
@@ -1911,13 +2314,20 @@
     {
       "dbType": "xugu",
       "label": "虚谷 XuguDB",
+      "dialect": "Xugu",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "xugu",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 37,
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 5138,
+      "traits": {
+        "schemaAware": true,
+        "treeSchema": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -1944,6 +2354,8 @@
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "etcd",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 39,
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
@@ -1974,6 +2386,8 @@
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "zookeeper",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 40,
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
@@ -1999,6 +2413,67 @@
       }
     },
     {
+      "dbType": "nacos",
+      "label": "Nacos",
+      "runtimeMode": "native",
+      "mcpMode": "unsupported",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": false,
+      "defaultPort": 8848,
+      "formKind": "nacos",
+      "supportLevel": "connect",
+      "specializedSurface": true,
+      "capabilities": {
+        "queryExecution": false,
+        "metadataBrowse": false,
+        "objectBrowser": false,
+        "objectSource": false,
+        "schemaSearch": false,
+        "diagram": false,
+        "tableDataEdit": false,
+        "tableStructureEdit": false,
+        "tableImport": false,
+        "dataTransfer": false,
+        "sqlFileExecution": false,
+        "databaseCreate": false,
+        "fieldLineage": false,
+        "sqlExplain": false,
+        "userAdmin": false,
+        "driverManagement": false
+      }
+    },
+    {
+      "dbType": "consul",
+      "label": "Consul",
+      "runtimeMode": "native",
+      "mcpMode": "unsupported",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": false,
+      "defaultPort": 8500,
+      "supportLevel": "connect",
+      "specializedSurface": true,
+      "capabilities": {
+        "queryExecution": false,
+        "metadataBrowse": false,
+        "objectBrowser": false,
+        "objectSource": false,
+        "schemaSearch": false,
+        "diagram": false,
+        "tableDataEdit": false,
+        "tableStructureEdit": false,
+        "tableImport": false,
+        "dataTransfer": false,
+        "sqlFileExecution": false,
+        "databaseCreate": false,
+        "fieldLineage": false,
+        "sqlExplain": false,
+        "userAdmin": false,
+        "driverManagement": false
+      }
+    },
+    {
       "dbType": "mq",
       "label": "Message Queue",
       "runtimeMode": "native",
@@ -2007,21 +2482,28 @@
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 8080,
+      "formKind": "mq",
       "driverProfiles": [
         {
           "profile": "kafka",
           "label": "Apache Kafka",
-          "agentKey": "kafka"
+          "agentKey": "kafka",
+          "storeVisible": true,
+          "storeOrder": 44
         },
         {
           "profile": "rocketmq",
           "label": "Apache RocketMQ",
-          "agentKey": "rocketmq"
+          "agentKey": "rocketmq",
+          "storeVisible": true,
+          "storeOrder": 45
         },
         {
           "profile": "rabbitmq",
           "label": "RabbitMQ",
-          "agentKey": "rabbitmq"
+          "agentKey": "rabbitmq",
+          "storeVisible": true,
+          "storeOrder": 46
         }
       ],
       "supportLevel": "connect",
@@ -2045,15 +2527,51 @@
       }
     },
     {
+      "dbType": "mqtt",
+      "label": "MQTT",
+      "runtimeMode": "native",
+      "mcpMode": "unsupported",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 1883,
+      "formKind": "mqtt",
+      "supportLevel": "connect",
+      "specializedSurface": true,
+      "capabilities": {
+        "queryExecution": false,
+        "metadataBrowse": false,
+        "objectBrowser": false,
+        "objectSource": false,
+        "schemaSearch": false,
+        "diagram": false,
+        "tableDataEdit": false,
+        "tableStructureEdit": false,
+        "tableImport": false,
+        "dataTransfer": false,
+        "sqlFileExecution": false,
+        "databaseCreate": false,
+        "fieldLineage": false,
+        "sqlExplain": false,
+        "userAdmin": false,
+        "driverManagement": false
+      }
+    },
+    {
       "dbType": "iotdb",
       "label": "Apache IoTDB",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "iotdb",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 38,
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 6667,
+      "traits": {
+        "schemaAware": true
+      },
       "supportLevel": "understand",
       "capabilities": {
         "queryExecution": true,
@@ -2077,13 +2595,20 @@
     {
       "dbType": "iris",
       "label": "InterSystems IRIS",
+      "dialect": "Iris",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "iris",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 42,
       "singleConnectionPool": true,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 1972,
+      "traits": {
+        "schemaAware": true,
+        "treeSchema": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -2110,6 +2635,7 @@
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "influxdb",
+      "driverStoreVisible": false,
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
@@ -2143,6 +2669,9 @@
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 8428,
+      "traits": {
+        "singleDatabase": true
+      },
       "supportLevel": "browse",
       "capabilities": {
         "queryExecution": true,
@@ -2171,6 +2700,12 @@
       "singleConnectionPool": true,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
+      "formKind": "jdbc",
+      "traits": {
+        "schemaAware": true,
+        "treeSchema": true,
+        "databaseObjectTree": true
+      },
       "supportLevel": "browse",
       "capabilities": {
         "queryExecution": true,
@@ -2197,10 +2732,15 @@
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "spark",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 23,
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 10015,
+      "traits": {
+        "schemaAware": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,

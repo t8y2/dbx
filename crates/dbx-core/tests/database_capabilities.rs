@@ -29,6 +29,8 @@ struct DriverManifestEntry {
     #[serde(default)]
     skip_tcp_probe: bool,
     #[serde(default)]
+    specialized_surface: bool,
+    #[serde(default)]
     driver_profiles: Vec<DriverProfileEntry>,
 }
 
@@ -235,18 +237,14 @@ fn driver_manifest_matches_core_database_capabilities() {
     let support_levels = ["connect", "browse", "understand", "operate"];
 
     for driver in &manifest.drivers {
-        // MQ is a message queue, not a database — skip database capability checks
-        if driver.db_type == DatabaseType::MessageQueue {
-            continue;
-        }
         assert!(
             support_levels.contains(&driver.support_level.as_str()),
             "invalid support level for {:?}",
             driver.db_type
         );
         assert!(
-            driver.capabilities.any_enabled(),
-            "database {:?} should declare at least one product capability",
+            driver.capabilities.any_enabled() || driver.specialized_surface,
+            "database {:?} should declare a product capability or a specialized surface",
             driver.db_type
         );
         assert_eq!(

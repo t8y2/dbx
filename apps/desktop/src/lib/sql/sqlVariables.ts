@@ -67,6 +67,7 @@ function collectDeclarations(sql: string, databaseType?: DatabaseType): Declarat
   const declarations: DeclarationSpan[] = [];
   let i = 0;
   let dollarQuoteEnd = "";
+  let statementStart = true;
 
   while (i < sql.length) {
     if (dollarQuoteEnd) {
@@ -80,11 +81,17 @@ function collectDeclarations(sql: string, databaseType?: DatabaseType): Declarat
     const ch = sql[i];
     const next = sql[i + 1];
 
+    if (/\s/.test(ch)) {
+      i += 1;
+      continue;
+    }
     if (ch === "'" || ch === '"' || ch === "`") {
+      statementStart = false;
       i = skipQuoted(sql, i, ch);
       continue;
     }
     if (ch === "[") {
+      statementStart = false;
       i = skipBracketIdentifier(sql, i, databaseType);
       continue;
     }
@@ -99,19 +106,27 @@ function collectDeclarations(sql: string, databaseType?: DatabaseType): Declarat
     if (ch === "$") {
       const marker = readDollarQuoteMarker(sql, i);
       if (marker) {
+        statementStart = false;
         dollarQuoteEnd = marker;
         i += marker.length;
         continue;
       }
     }
-    if (ch === "@" && matchesWord(sql, i + 1, "set") && isStatementStart(sql, i)) {
+    if (ch === "@" && statementStart && matchesWord(sql, i + 1, "set")) {
       const declaration = readDeclaration(sql, i, databaseType);
       if (declaration) {
         declarations.push(declaration);
         i = declaration.end;
+        statementStart = true;
         continue;
       }
     }
+    if (ch === ";") {
+      statementStart = true;
+      i += 1;
+      continue;
+    }
+    statementStart = false;
     i += 1;
   }
 
@@ -281,12 +296,6 @@ function stripDeclaration(sql: string, start: number, end: number): string {
   if (trimmableStart === lineStart && sql[lineEnd] === "\n") lineEnd += 1;
 
   return sql.slice(0, trimmableStart) + sql.slice(lineEnd);
-}
-
-function isStatementStart(sql: string, start: number): boolean {
-  let i = start - 1;
-  while (i >= 0 && /\s/.test(sql[i])) i -= 1;
-  return i < 0 || sql[i] === ";";
 }
 
 function matchesWord(sql: string, start: number, word: string): boolean {

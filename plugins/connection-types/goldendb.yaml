@@ -1,0 +1,33 @@
+schemaVersion: 1
+order: 310
+dbType: goldendb
+rustVariant: Goldendb
+label: 金篆 GoldenDB
+dialect: GoldenDB
+runtimeMode: agent
+mcpMode: bridge
+agentKey: goldendb
+driverStoreVisible: true
+driverStoreOrder: 6
+singleConnectionPool: true
+metadataConnectionScoped: false
+skipTcpProbe: true
+defaultPort: 3306
+supportLevel: operate
+capabilities:
+  queryExecution: true
+  metadataBrowse: true
+  objectBrowser: true
+  objectSource: true
+  schemaSearch: true
+  diagram: true
+  tableDataEdit: true
+  tableStructureEdit: true
+  tableImport: true
+  dataTransfer: true
+  sqlFileExecution: true
+  databaseCreate: true
+  fieldLineage: false
+  sqlExplain: false
+  userAdmin: true
+  driverManagement: true

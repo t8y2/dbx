@@ -16,7 +16,7 @@ import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import EditorSearchPanel from "@/components/editor/EditorSearchPanel.vue";
 import NacosConfigDiffDialog from "@/components/nacos/NacosConfigDiffDialog.vue";
 import NacosConfigHistoryDialog from "@/components/nacos/NacosConfigHistoryDialog.vue";
-import NacosConfigBatchDialog, { type NacosBatchDialogMode, type NacosConfigTransferTarget } from "@/components/nacos/NacosConfigBatchDialog.vue";
+import NacosConfigBatchDialog, { type NacosBatchDialogMode, type NacosConfigTransferDialogPayload, type NacosConfigTransferTarget } from "@/components/nacos/NacosConfigBatchDialog.vue";
 import NacosContentSearchDialog from "@/components/nacos/NacosContentSearchDialog.vue";
 import { useToast } from "@/composables/useToast";
 import { useNacosConfigListColumnResize, type ToggleableNacosConfigListColumnKey } from "@/composables/useNacosConfigListColumnResize";
@@ -67,7 +67,6 @@ import type {
   NacosConnectionInfo,
   NacosContentMatch,
   NacosContentSearchResult,
-  NacosConflictPolicy,
   NacosInstanceInfo,
   NacosInstancePatch,
   NacosInstanceRef,
@@ -434,6 +433,8 @@ function selectedKeys(): NacosConfigKey[] {
     return { namespace: selectedNamespace || undefined, group, dataId };
   });
 }
+
+const selectedConfigTransferKeys = computed(() => selectedKeys());
 
 function isBatchDeleteSnapshotInScope(snapshot: NacosBatchDeleteSnapshot) {
   return snapshot.connectionId === props.connectionId && snapshot.namespace === namespace.value;
@@ -1245,7 +1246,7 @@ async function exportConfigArchive(scope: NacosConfigSelectionScope) {
 
 const batchTransferRequest = shallowRef<NacosConfigTransferRequest | null>(null);
 
-async function previewBatch(payload: { scope: NacosConfigSelectionScope; targetConnectionId: string; targetNamespace: string; targetGroup: string; policy: NacosConflictPolicy }) {
+async function previewBatch(payload: NacosConfigTransferDialogPayload) {
   batchLoading.value = true;
   batchError.value = "";
   batchPreview.value = null;
@@ -1262,6 +1263,7 @@ async function previewBatch(payload: { scope: NacosConfigSelectionScope; targetC
         source: buildConfigSelector(payload.scope),
         targetNamespace: payload.targetNamespace,
         targetGroup: payload.targetGroup || undefined,
+        dataIdMappings: payload.dataIdMappings,
         conflictPolicy: payload.policy,
       };
       batchTransferRequest.value = req;
@@ -1274,7 +1276,7 @@ async function previewBatch(payload: { scope: NacosConfigSelectionScope; targetC
   }
 }
 
-async function applyBatch(payload: { scope: NacosConfigSelectionScope; targetConnectionId: string; targetNamespace: string; targetGroup: string; policy: NacosConflictPolicy }) {
+async function applyBatch(payload: NacosConfigTransferDialogPayload) {
   if (batchLoading.value || batchReport.value || !batchPreview.value) return;
   if (payload.policy === "OVERWRITE" && !window.confirm(t("nacos.overwriteConfirm"))) return;
   const targetConnectionId = batchMode.value === "import" ? props.connectionId : payload.targetConnectionId;
@@ -3030,6 +3032,7 @@ onBeforeUnmount(() => {
       :mode="batchMode"
       :loading="batchLoading"
       :selected-count="selectedConfigCount"
+      :selected-keys="selectedConfigTransferKeys"
       :filtered-count="configTotal"
       :target-connections="batchTargetConnections"
       :target-connection-id="batchTargetConnectionId"

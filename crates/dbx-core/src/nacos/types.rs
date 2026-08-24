@@ -818,6 +818,14 @@ pub struct NacosBatchReport {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct NacosConfigDataIdMapping {
+    pub source_group: String,
+    pub source_data_id: String,
+    pub target_data_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct NacosConfigTransferRequest {
     pub operation_id: String,
     pub source_connection_id: String,
@@ -826,6 +834,8 @@ pub struct NacosConfigTransferRequest {
     pub target_namespace: String,
     #[serde(default)]
     pub target_group: Option<String>,
+    #[serde(default)]
+    pub data_id_mappings: Vec<NacosConfigDataIdMapping>,
     #[serde(default)]
     pub conflict_policy: NacosConflictPolicy,
 }

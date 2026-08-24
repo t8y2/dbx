@@ -1,0 +1,37 @@
+schemaVersion: 1
+order: 270
+dbType: kingbase
+rustVariant: Kingbase
+label: 金仓KingbaseES
+dialect: Kingbase
+runtimeMode: agent
+mcpMode: bridge
+agentKey: kingbase
+driverStoreVisible: true
+driverStoreOrder: 2
+singleConnectionPool: true
+metadataConnectionScoped: false
+skipTcpProbe: true
+defaultPort: 54321
+traits:
+  schemaAware: true
+  treeSchema: true
+  pgVacuum: true
+supportLevel: operate
+capabilities:
+  queryExecution: true
+  metadataBrowse: true
+  objectBrowser: true
+  objectSource: true
+  schemaSearch: true
+  diagram: true
+  tableDataEdit: true
+  tableStructureEdit: true
+  tableImport: true
+  dataTransfer: true
+  sqlFileExecution: true
+  databaseCreate: true
+  fieldLineage: false
+  sqlExplain: false
+  userAdmin: true
+  driverManagement: true

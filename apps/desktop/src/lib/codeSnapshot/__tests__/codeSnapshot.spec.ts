@@ -14,7 +14,7 @@ const { createCodeHighlighter, highlightCode, toPng, isTauriRuntime, save, write
 });
 
 vi.mock("@/lib/ai/aiCodeHighlighter", () => ({
-  createAiShikiCodeHighlighter: createCodeHighlighter,
+  createAiShikiBlockCodeHighlighter: createCodeHighlighter,
 }));
 
 vi.mock("dom-to-image-more", () => ({

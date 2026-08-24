@@ -22,24 +22,26 @@ import { createConcurrencyLimiter, mapWithConcurrency, schemaDiffMetadataConcurr
 import { createSchemaDiffTableListLoader, type SchemaDiffTableIdentity } from "@/lib/schema/schemaDiffTableList";
 import { normalizeSchemaDiffCompareOptions } from "@/types/schemaDiff";
 import type { SchemaDiffCompareOptions, SchemaDiffConfig, FieldMappingEntry } from "@/types/schemaDiff";
-import type { ObjectSourceKind, TableInfo } from "@/types/database";
+import type { DatabaseType, ObjectSourceKind, TableInfo } from "@/types/database";
 import {
-  buildDeploySqlForObjects,
   convertToSchemaDiffObjects,
   detectDestructiveSchemaDiffStatements,
   groupDiffObjects,
   injectColumnRenameSql,
   schemaDiffDeployTargetSchema,
-  schemaDiffSelectionOwnerId,
+  findSchemaDiffObject,
+  flattenSchemaDiffObjects,
+  schemaDiffSelectionTargets,
+  selectSchemaDiffInput,
   selectedSchemaDiffObjects,
   setSchemaDiffObjectSelected,
+  setSchemaDiffObjectSelectedWithDependencies,
   summarizeSchemaDiffOperations,
   databaseTypeToDialectKind,
   normalizeDialectKind,
   type OperationGroup,
   type SchemaDiffObject,
   type DiffOperationType,
-  type DiffObjectKind,
   type SchemaDiffPreparation,
   type MissingRollbackObject,
   type RollbackCompleteness,
@@ -122,6 +124,7 @@ const renameCandidates = ref<RenameCandidate[]>([]);
 const compatibilityWarnings = ref<CompatibilityWarning[]>([]);
 const permissionDiffs = ref<PermissionDiff[]>([]);
 const dependencyGraph = ref<DependencyGraph | null>(null);
+let deploySqlGeneration = 0;
 
 // Rename candidates panel
 const showRenamePanel = ref(true);
@@ -250,25 +253,54 @@ const { configs, activeConfigId, activeConfig, recentConfigs, ensureDefaultConfi
 const schemaDiffPanelOptions = computed(() => normalizeSchemaDiffCompareOptions(activeConfig.value?.options, getDbType()));
 
 const selectedObject = computed(() => {
+  const object = selectedTreeObject.value;
+  if (!object) return null;
+  return object.parentId ? (findSchemaDiffObject(diffObjects.value, object.parentId) ?? object) : object;
+});
+
+const selectedTreeObject = computed(() => {
   if (!selectedObjectId.value) return null;
   for (const group of diffGroups.value) {
     for (const typeGroup of group.typeGroups) {
-      const obj = typeGroup.objects.find((o) => o.id === selectedObjectId.value);
-      if (obj) return obj;
+      const object = flattenSchemaDiffObjects(typeGroup.objects).find((candidate) => candidate.id === selectedObjectId.value);
+      if (object) return object;
     }
   }
   return null;
 });
 
 const canDeploy = computed(() => {
-  return diffObjects.value.some((o) => o.selected && o.operationType !== "none");
+  return selectedSchemaDiffObjects(diffObjects.value).length > 0;
 });
+
+function resetComparisonResultState() {
+  deploySqlGeneration++;
+  step.value = "config";
+  diffObjects.value = [];
+  diffGroups.value = [];
+  selectedObjectId.value = null;
+  deploySql.value = "";
+  deploySqlAll.value = "";
+  lastDiffResult.value = null;
+  rollbackSql.value = "";
+  rollbackCompleteness.value = "complete";
+  missingRollbackObjects.value = [];
+  renameCandidates.value = [];
+  compatibilityWarnings.value = [];
+  permissionDiffs.value = [];
+  dependencyGraph.value = null;
+  deploySqlMode.value = "forward";
+  showConfirmDialog.value = false;
+  showResultDialog.value = false;
+  deployResult.value = null;
+}
 
 // Watch for prefilled values
 watch(
   () => open.value,
   (isOpen) => {
     if (isOpen) {
+      resetComparisonResultState();
       ensureDefaultConfig();
       if (props.prefillConnectionId) {
         sourceConnectionId.value = props.prefillConnectionId;
@@ -308,7 +340,7 @@ watch(
   },
 );
 
-function getDbType(): string {
+function getDbType(): DatabaseType {
   const targetConfig = store.getConfig(targetConnectionId.value);
   return targetConfig?.db_type || "postgres";
 }
@@ -528,7 +560,7 @@ async function handleCompare() {
       }
     }
     deploySqlMode.value = "forward";
-    regenerateDeploySql();
+    await regenerateDeploySql();
 
     step.value = "result";
   } catch (e: any) {
@@ -543,39 +575,29 @@ function handleToggleGroup(operationType: DiffOperationType) {
   diffGroups.value = diffGroups.value.map((g) => (g.operationType === operationType ? { ...g, expanded: !g.expanded } : g));
 }
 
-function handleToggleTypeGroup(operationType: DiffOperationType, kind: DiffObjectKind) {
-  diffGroups.value = diffGroups.value.map((g) => {
-    if (g.operationType !== operationType) return g;
-    return {
-      ...g,
-      typeGroups: g.typeGroups.map((tg) => (tg.kind === kind ? { ...tg, expanded: !tg.expanded } : tg)),
-    };
-  });
-}
-
 function handleToggleGroupSelection(operationType: DiffOperationType, selected: boolean) {
   const group = diffGroups.value.find((candidate) => candidate.operationType === operationType);
   for (const object of group?.typeGroups.flatMap((typeGroup) => typeGroup.objects) ?? []) {
-    setSchemaDiffObjectSelected(diffObjects.value, schemaDiffSelectionOwnerId(object), selected);
+    for (const target of schemaDiffSelectionTargets(object)) {
+      updateObjectSelection(target.id, selected);
+    }
   }
   rebuildDiffGroups();
-  regenerateDeploySql();
+  void regenerateDeploySql();
 }
 
-function handleToggleTypeSelection(operationType: DiffOperationType, kind: DiffObjectKind, selected: boolean) {
-  const typeGroup = diffGroups.value.find((group) => group.operationType === operationType)?.typeGroups.find((candidate) => candidate.kind === kind);
-  for (const object of typeGroup?.objects ?? []) {
-    setSchemaDiffObjectSelected(diffObjects.value, schemaDiffSelectionOwnerId(object), selected);
+function handleToggleObjectSelection(object: SchemaDiffObject, selected: boolean) {
+  let changed = false;
+  for (const target of schemaDiffSelectionTargets(object)) {
+    changed = updateObjectSelection(target.id, selected) || changed;
   }
+  if (!changed) return;
   rebuildDiffGroups();
-  regenerateDeploySql();
+  void regenerateDeploySql();
 }
 
-function handleToggleObjectSelection(objectId: string, selected: boolean) {
-  const reviewObject = diffGroups.value.flatMap((group) => group.typeGroups.flatMap((typeGroup) => typeGroup.objects)).find((object) => object.id === objectId);
-  if (!setSchemaDiffObjectSelected(diffObjects.value, reviewObject ? schemaDiffSelectionOwnerId(reviewObject) : objectId, selected)) return;
-  rebuildDiffGroups();
-  regenerateDeploySql();
+function updateObjectSelection(objectId: string, selected: boolean): boolean {
+  return lastDiffResult.value ? setSchemaDiffObjectSelectedWithDependencies(diffObjects.value, lastDiffResult.value, objectId, selected) : setSchemaDiffObjectSelected(diffObjects.value, objectId, selected);
 }
 
 function rebuildDiffGroups() {
@@ -591,8 +613,43 @@ function rebuildDiffGroups() {
   }));
 }
 
-function regenerateDeploySql() {
-  deploySql.value = buildDeploySqlForObjects(diffObjects.value);
+async function regenerateDeploySql() {
+  const result = lastDiffResult.value;
+  if (!result) {
+    deploySql.value = "-- No objects selected";
+    rollbackSql.value = "";
+    return;
+  }
+
+  const generation = ++deploySqlGeneration;
+  const options = normalizeSchemaDiffCompareOptions(activeConfig.value?.options, getDbType());
+  const input = selectSchemaDiffInput(result, diffObjects.value);
+  let plan;
+  try {
+    plan = await api.generateSchemaSyncPlan(input, {
+      databaseType: getDbType(),
+      targetSchema: schemaDiffDeployTargetSchema(getDbType(), targetDatabase.value, targetSchema.value),
+      cascadeDelete: options.cascadeDelete,
+      sourceDialect: options.sourceDialect ? normalizeDialectKind(options.sourceDialect) : sourceDbType.value ? databaseTypeToDialectKind(sourceDbType.value) : undefined,
+      fieldMappings: options.fieldMappings,
+      enableRollback: options.enableRollback,
+    });
+  } catch (error: any) {
+    if (generation === deploySqlGeneration) toast(error?.message || String(error), 5000);
+    return;
+  }
+  if (generation !== deploySqlGeneration) return;
+
+  let forwardSql = plan.syncSql || "-- No objects selected";
+  let nextRollbackSql = plan.rollbackSyncSql ?? "";
+  rollbackCompleteness.value = plan.rollbackCompleteness ?? "complete";
+  missingRollbackObjects.value = plan.missingRollbackObjects ?? [];
+  if (options.detectRenames && options.renameThreshold) {
+    forwardSql = injectColumnRenameSql(forwardSql, input.diffs, options.renameThreshold);
+    if (nextRollbackSql) nextRollbackSql = injectColumnRenameSql(nextRollbackSql, input.diffs, options.renameThreshold, true);
+  }
+  rollbackSql.value = nextRollbackSql;
+  deploySql.value = deploySqlMode.value === "rollback" && nextRollbackSql ? nextRollbackSql : forwardSql;
 }
 
 function switchDeploySqlMode(mode: "forward" | "rollback") {
@@ -604,7 +661,7 @@ function switchDeploySqlMode(mode: "forward" | "rollback") {
   if (mode === "rollback" && rollbackSql.value) {
     deploySql.value = rollbackSql.value;
   } else {
-    regenerateDeploySql();
+    void regenerateDeploySql();
   }
 }
 
@@ -643,7 +700,8 @@ function applyRename(rc: RenameCandidate) {
     }
   }
   if (found) {
-    regenerateDeploySql();
+    rebuildDiffGroups();
+    void regenerateDeploySql();
     toast(t("diff.renameApplied"), 2000);
   }
 }
@@ -659,11 +717,12 @@ function ignoreRename(index: number) {
     }
   }
   renameCandidates.value.splice(index, 1);
-  regenerateDeploySql();
+  rebuildDiffGroups();
+  void regenerateDeploySql();
 }
 
 async function handleExecuteScript() {
-  if (!deploySql.value || deploySql.value.startsWith("-- ")) {
+  if (!deploySql.value.trim() || deploySql.value.trim() === "-- No objects selected") {
     toast(t("diff.noObjectsSelected"), 3000);
     return;
   }
@@ -706,8 +765,9 @@ function showDeployTxResult(txLog: any) {
   deployResult.value = buildDeployTxResult(txLog, t);
   showResultDialog.value = true;
 }
-async function handleSelectObject(obj: SchemaDiffObject) {
-  selectedObjectId.value = obj.id;
+async function handleSelectObject(reviewObject: SchemaDiffObject) {
+  selectedObjectId.value = reviewObject.id;
+  const obj = reviewObject.parentId ? (findSchemaDiffObject(diffObjects.value, reviewObject.parentId) ?? reviewObject) : reviewObject;
 
   // Dynamically fetch DDL for objects that don't have pre-generated DDL
   // (views need runtime retrieval; functions should already have definition)
@@ -806,7 +866,7 @@ async function fetchDbVersion(connectionId: string, database: string, schema: st
 }
 
 function handleDeployReview() {
-  const selectedObjects = diffObjects.value.filter((o) => o.selected && o.operationType !== "none");
+  const selectedObjects = selectedSchemaDiffObjects(diffObjects.value);
   if (selectedObjects.length === 0) {
     toast(t("diff.noObjectsSelected"), 3000);
     return;
@@ -841,6 +901,13 @@ const deployStats = computed(() => {
     delete: counts.delete,
     total: selectedSchemaDiffObjects(diffObjects.value).length,
   };
+});
+
+const selectedCompatibilityWarnings = computed(() => {
+  if (!lastDiffResult.value) return [];
+  const input = selectSchemaDiffInput(lastDiffResult.value, diffObjects.value);
+  const selectedColumns = new Set(input.diffs.flatMap((diff) => (diff.columns ?? []).map((column) => `${diff.name}\u0000${column.name}`)));
+  return compatibilityWarnings.value.filter((warning) => selectedColumns.has(`${warning.table}\u0000${warning.column}`));
 });
 
 const targetConnectionInfo = computed(() => {
@@ -959,24 +1026,16 @@ const targetConnectionInfo = computed(() => {
           <Splitpanes horizontal class="flex-1 min-h-0" @resized="handleSplitpanesResized">
             <Pane :size="splitpanesSize" min-size="20">
               <div class="h-full overflow-auto">
-                <SchemaDiffObjectTree
-                  :groups="diffGroups"
-                  :selected-object-id="selectedObject?.id ?? null"
-                  @toggle-group="handleToggleGroup"
-                  @toggle-type-group="handleToggleTypeGroup"
-                  @toggle-group-selection="handleToggleGroupSelection"
-                  @toggle-type-selection="handleToggleTypeSelection"
-                  @toggle-object-selection="handleToggleObjectSelection"
-                  @select-object="handleSelectObject"
-                />
+                <SchemaDiffObjectTree :groups="diffGroups" :selected-object-id="selectedObjectId" @toggle-group="handleToggleGroup" @toggle-group-selection="handleToggleGroupSelection" @toggle-object-selection="handleToggleObjectSelection" @select-object="handleSelectObject" />
               </div>
             </Pane>
             <Pane :size="100 - splitpanesSize" min-size="20">
               <SchemaDiffDdlPanel
                 :selected-object="selectedObject"
+                :focused-object="selectedTreeObject"
                 :deploy-sql="deploySql"
                 :deploy-sql-all="deploySqlAll"
-                :compatibility-warnings="compatibilityWarnings"
+                :compatibility-warnings="selectedCompatibilityWarnings"
                 :rollback-sql="rollbackSql"
                 :deploy-sql-mode="deploySqlMode"
                 :dependency-graph="dependencyGraph"
@@ -1002,7 +1061,7 @@ const targetConnectionInfo = computed(() => {
             :executing="executing"
             :rollback-sql="rollbackSql"
             :deploy-sql-mode="deploySqlMode"
-            :compatibility-warnings="compatibilityWarnings"
+            :compatibility-warnings="selectedCompatibilityWarnings"
             :rename-candidates="renameCandidates"
             :rollback-completeness="rollbackCompleteness"
             :missing-rollback-objects="missingRollbackObjects"

@@ -32,6 +32,7 @@ use crate::types::{
 };
 
 use super::file_validator::validate_file_path;
+use crate::mysql_event_sql::MysqlEventInfo;
 
 /// DBX-owned MySQL pool handle. The driver does not expose its configured
 /// maximum, so retain that value beside the driver pool for checkout phase
@@ -68,6 +69,44 @@ impl Deref for MySqlPool {
 pub trait MySqlPoolAccess {
     fn driver_pool(&self) -> &mysql_async::Pool;
     fn checkout_max_connections(&self) -> Option<usize>;
+}
+
+pub async fn get_event_info<P: MySqlPoolAccess + ?Sized>(
+    pool: &P,
+    database: &str,
+    name: &str,
+) -> Result<MysqlEventInfo, String> {
+    let mut conn = get_conn_with_health_check(pool).await?;
+    let sql = format!(
+        "SELECT EVENT_SCHEMA, EVENT_NAME, DEFINER, TIME_ZONE, EVENT_TYPE, EXECUTE_AT, INTERVAL_VALUE, INTERVAL_FIELD, STARTS, ENDS, STATUS, ON_COMPLETION, EVENT_COMMENT, EVENT_DEFINITION, CREATED, LAST_ALTERED, LAST_EXECUTED FROM information_schema.EVENTS WHERE EVENT_SCHEMA = {} AND EVENT_NAME = {} LIMIT 1",
+        quote_value(database), quote_value(name)
+    );
+    let row = conn
+        .query_first::<mysql_async::Row, _>(sql)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("MySQL event not found: {database}.{name}"))?;
+    Ok(MysqlEventInfo {
+        schema: get_str_by_name(&row, "EVENT_SCHEMA"),
+        name: get_str_by_name(&row, "EVENT_NAME"),
+        definer: get_opt_str(&row, "DEFINER"),
+        time_zone: get_opt_str(&row, "TIME_ZONE"),
+        event_type: get_opt_str(&row, "EVENT_TYPE"),
+        execute_at: get_opt_str(&row, "EXECUTE_AT"),
+        interval_value: get_opt_str(&row, "INTERVAL_VALUE"),
+        interval_field: get_opt_str(&row, "INTERVAL_FIELD"),
+        starts: get_opt_str(&row, "STARTS"),
+        ends: get_opt_str(&row, "ENDS"),
+        status: get_opt_str(&row, "STATUS"),
+        on_completion: get_opt_str(&row, "ON_COMPLETION"),
+        comment: get_opt_str(&row, "EVENT_COMMENT"),
+        event_body: get_opt_str(&row, "EVENT_DEFINITION"),
+        event_definition: get_opt_str(&row, "EVENT_DEFINITION"),
+        created_at: get_opt_str(&row, "CREATED"),
+        updated_at: get_opt_str(&row, "LAST_ALTERED"),
+        last_executed: get_opt_str(&row, "LAST_EXECUTED"),
+        source: None,
+    })
 }
 
 impl MySqlPoolAccess for MySqlPool {

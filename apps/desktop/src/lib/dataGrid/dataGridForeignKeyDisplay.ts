@@ -1,7 +1,8 @@
 import { displayCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
-import type { ColumnFormatterConfig } from "@/lib/dataGrid/columnFormatter";
+import type { ColumnFormatterConfig, ForeignKeyDisplayFilterConfig } from "@/lib/dataGrid/columnFormatter";
+import { isNumericColumnType } from "@/lib/dataGrid/dataGridColumnType";
 import type { ForeignKeyAssociation } from "@/lib/dataGrid/dataGridForeignKeyNavigation";
-import type { ForeignKeyInfo, QueryResult } from "@/types/database";
+import type { ColumnInfo, ForeignKeyInfo, QueryResult } from "@/types/database";
 
 export type ForeignKeyDisplayConfig = Extract<ColumnFormatterConfig, { kind: "foreign-key-display" }>;
 
@@ -160,22 +161,71 @@ export function foreignKeyDisplayConfigMatches(config: ForeignKeyDisplayConfig, 
   return config.refTable.toLowerCase() === foreignKey.ref_table.toLowerCase() && config.refColumn.toLowerCase() === foreignKey.ref_column.toLowerCase() && expectedSchema.toLowerCase() === actualSchema.toLowerCase();
 }
 
-export function foreignKeyDisplayValueKey(value: CellValue | undefined): string | undefined {
+export function foreignKeyDisplayConfigIsUsable(config: ForeignKeyDisplayConfig, foreignKey: ForeignKeyInfo | undefined, currentSchema?: string): boolean {
+  if (config.referenceMode === "manual") return true;
+  return !!foreignKey && foreignKeyDisplayConfigMatches(config, foreignKey, currentSchema);
+}
+
+export type ManualReferenceMetadataStatus = "loading" | "available" | "unavailable";
+export type ManualReferenceColumnValidation = "pending" | "valid" | "invalid" | "unavailable";
+
+export function manualReferenceKeyColumns(columns: readonly ColumnInfo[], referenceKeyColumnNames: readonly string[]): ColumnInfo[] {
+  const uniqueColumnNames = new Set(referenceKeyColumnNames);
+  return columns.filter((column) => uniqueColumnNames.has(column.name));
+}
+
+export function manualReferenceKeyColumnIsUnique(columns: readonly ColumnInfo[], referenceKeyColumnNames: readonly string[], columnName: string): boolean {
+  return !!columnName && manualReferenceKeyColumns(columns, referenceKeyColumnNames).some((column) => column.name === columnName);
+}
+
+export function manualReferenceColumnValidation(columns: readonly ColumnInfo[], referenceKeyColumnNames: readonly string[], columnName: string, metadataStatus: ManualReferenceMetadataStatus): ManualReferenceColumnValidation {
+  if (metadataStatus === "loading") return "pending";
+  if (metadataStatus === "unavailable") return "unavailable";
+  return manualReferenceKeyColumnIsUnique(columns, referenceKeyColumnNames, columnName) ? "valid" : "invalid";
+}
+
+export function reconcileManualReferenceColumn(currentColumn: string, referenceColumns: readonly ColumnInfo[], metadataStatus: ManualReferenceMetadataStatus): string {
+  if (currentColumn || metadataStatus !== "available") return currentColumn;
+  return referenceColumns[0]?.name ?? "";
+}
+
+function canonicalNumericReferenceValue(value: string | number): string | undefined {
+  const text = typeof value === "number" ? (Number.isFinite(value) ? String(value) : "") : value.trim();
+  const match = /^([+-]?)(?:(\d+)(?:\.(\d*))?|\.(\d+))(?:[eE]([+-]?\d+))?$/.exec(text);
+  if (!match) return undefined;
+  const integerDigits = match[2] ?? "";
+  const fractionalDigits = match[3] ?? match[4] ?? "";
+  const explicitExponent = Number(match[5] ?? 0);
+  if (!Number.isSafeInteger(explicitExponent)) return undefined;
+  let digits = `${integerDigits}${fractionalDigits}`;
+  const firstNonZero = digits.search(/[1-9]/);
+  if (firstNonZero < 0) return "0";
+  let decimalPosition = integerDigits.length + explicitExponent - firstNonZero;
+  digits = digits.slice(firstNonZero).replace(/0+$/, "");
+  decimalPosition -= digits.length;
+  return `${match[1] === "-" ? "-" : ""}${digits}e${decimalPosition}`;
+}
+
+export function foreignKeyDisplayValueKey(value: CellValue | undefined, keyDataType?: string): string | undefined {
   if (value === null || value === undefined || typeof value === "object") return undefined;
+  if (isNumericColumnType(keyDataType) && (typeof value === "number" || typeof value === "string")) {
+    const numericValue = canonicalNumericReferenceValue(value);
+    if (numericValue !== undefined) return `numeric\u0000${numericValue}`;
+  }
   return `${typeof value}\u0000${String(value)}`;
 }
 
-export function foreignKeyDisplayLookupRequestKey(options: { connectionId: string; database?: string; catalog?: string; schema?: string; table: string; refColumn: string; displayColumn: string; values: readonly CellValue[] }): string {
-  const valueKeys = options.values.map((value) => foreignKeyDisplayValueKey(value) ?? "").sort();
-  return JSON.stringify(["lookup", options.connectionId, options.database ?? "", options.catalog ?? "", options.schema ?? "", options.table, options.refColumn, options.displayColumn, valueKeys]);
+export function foreignKeyDisplayLookupRequestKey(options: { connectionId: string; database?: string; catalog?: string; schema?: string; table: string; refColumn: string; displayColumn: string; keyDataType?: string; filter?: ForeignKeyDisplayFilterConfig; values: readonly CellValue[] }): string {
+  const valueKeys = options.values.map((value) => foreignKeyDisplayValueKey(value, options.keyDataType) ?? "").sort();
+  return JSON.stringify(["lookup", options.connectionId, options.database ?? "", options.catalog ?? "", options.schema ?? "", options.table, options.refColumn, options.displayColumn, options.keyDataType ?? "", options.filter ?? null, valueKeys]);
 }
 
-export function collectForeignKeyDisplayValues(rows: QueryResult["rows"], columnIndex: number, maxValues = FOREIGN_KEY_DISPLAY_MAX_VALUES): CellValue[] {
+export function collectForeignKeyDisplayValues(rows: QueryResult["rows"], columnIndex: number, keyDataType?: string, maxValues = FOREIGN_KEY_DISPLAY_MAX_VALUES): CellValue[] {
   const values: CellValue[] = [];
   const seen = new Set<string>();
   for (const row of rows) {
     const value = row[columnIndex] as CellValue | undefined;
-    const key = foreignKeyDisplayValueKey(value);
+    const key = foreignKeyDisplayValueKey(value, keyDataType);
     if (!key || seen.has(key)) continue;
     seen.add(key);
     values.push(value!);
@@ -191,13 +241,13 @@ export function splitForeignKeyDisplayValues(values: readonly CellValue[], batch
   return batches;
 }
 
-export function foreignKeyDisplayMapFromResult(result: QueryResult, keyColumn = result.columns[0], displayColumn = result.columns[1]): Map<string, string> {
+export function foreignKeyDisplayMapFromResult(result: QueryResult, keyColumn = result.columns[0], displayColumn = result.columns[1], keyDataType?: string): Map<string, string> {
   const map = new Map<string, string>();
-  const keyIndex = result.columns.findIndex((column) => column.toLowerCase() === keyColumn?.toLowerCase());
-  const displayIndex = result.columns.findIndex((column) => column.toLowerCase() === displayColumn?.toLowerCase());
+  const keyIndex = result.columns.findIndex((column) => column === keyColumn);
+  const displayIndex = result.columns.findIndex((column) => column === displayColumn);
   if (keyIndex < 0 || displayIndex < 0) return map;
   for (const row of result.rows) {
-    const key = foreignKeyDisplayValueKey(row[keyIndex] as CellValue | undefined);
+    const key = foreignKeyDisplayValueKey(row[keyIndex] as CellValue | undefined, keyDataType);
     const labelValue = row[displayIndex] as CellValue | undefined;
     if (!key || labelValue === null || labelValue === undefined || map.has(key)) continue;
     map.set(key, displayCellValue(labelValue));
@@ -205,9 +255,9 @@ export function foreignKeyDisplayMapFromResult(result: QueryResult, keyColumn = 
   return map;
 }
 
-export function formatForeignKeyDisplayValue(value: CellValue, labels: ReadonlyMap<string, string> | undefined): string {
+export function formatForeignKeyDisplayValue(value: CellValue, labels: ReadonlyMap<string, string> | undefined, keyDataType?: string): string {
   const raw = displayCellValue(value);
-  const key = foreignKeyDisplayValueKey(value);
+  const key = foreignKeyDisplayValueKey(value, keyDataType);
   const label = key ? labels?.get(key) : undefined;
   if (label === undefined || label === raw || !label.trim()) return raw;
   return `${raw} (${label})`;

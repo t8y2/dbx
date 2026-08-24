@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createFlatTreeIndex, flattenTree, mutateFlatTreeExpansion, replaceFlatTreeChildren, type FlatTreeNode } from "@/composables/useFlatTree";
+import { createFlatTreeIndex, flatTreeRowsChanged, flattenTree, mutateFlatTreeExpansion, replaceFlatTreeChildren, type FlatTreeNode } from "@/composables/useFlatTree";
 import type { TreeNode, TreeNodeType } from "@/types/database";
 
 function item(id: string, type: TreeNodeType, depth: number, children?: TreeNode[]): FlatTreeNode {
@@ -145,6 +145,15 @@ describe("flat-tree range mutations", () => {
 });
 
 describe("flat-tree render identities", () => {
+  it("detects same-length table-search row replacements for #6951", () => {
+    const previous = [item("table-a", "table", 1), item("table-b", "table", 1)];
+    const unchanged = previous.map((entry) => ({ ...entry }));
+    const next = [item("table-c", "table", 1), item("table-b", "table", 1)];
+
+    expect(flatTreeRowsChanged(unchanged, previous)).toBe(false);
+    expect(flatTreeRowsChanged(next, previous)).toBe(true);
+  });
+
   it("isolates equal business ids that belong to different lineages", () => {
     const collidingId = "connection:a:b";
     const collidingSchemaId = "connection:a:b:c";

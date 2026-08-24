@@ -1,0 +1,47 @@
+schemaVersion: 1
+order: 450
+dbType: gbase
+rustVariant: Gbase
+label: 南大通用 GBase 8a
+dialect: GBase
+runtimeMode: agent
+mcpMode: bridge
+agentKey: gbase8a
+driverStoreVisible: true
+driverStoreOrder: 15
+driverProfiles:
+  - profile: gbase8s
+    agentKey: gbase8s
+    label: 南大通用 GBase 8s
+    storeVisible: true
+    storeOrder: 16
+  - profile: gbase8a
+    agentKey: gbase8a
+    label: 南大通用 GBase 8a
+    storeVisible: true
+    storeOrder: 15
+singleConnectionPool: false
+metadataConnectionScoped: false
+skipTcpProbe: true
+defaultPort: 5258
+traits:
+  schemaAware: true
+  treeSchema: true
+supportLevel: operate
+capabilities:
+  queryExecution: true
+  metadataBrowse: true
+  objectBrowser: true
+  objectSource: false
+  schemaSearch: true
+  diagram: true
+  tableDataEdit: true
+  tableStructureEdit: true
+  tableImport: false
+  dataTransfer: false
+  sqlFileExecution: true
+  databaseCreate: false
+  fieldLineage: false
+  sqlExplain: false
+  userAdmin: false
+  driverManagement: true

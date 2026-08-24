@@ -1,6 +1,8 @@
 import type { ConnectionConfig, SidebarLayout, TunnelProfile } from "@/types/database";
 import { filterSidebarLayoutByConnectionIds as filterLayoutByConnectionIds } from "@/lib/sidebar/sidebarLayout";
 
+export type ConnectionExportProtection = { mode: "encrypted"; passphrase: string } | { mode: "plaintext" };
+
 export interface ConnectionConfigBundle {
   connections: ConnectionConfig[];
   layout?: SidebarLayout;

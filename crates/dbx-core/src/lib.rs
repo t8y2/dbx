@@ -7,6 +7,7 @@ pub mod agent_explain;
 pub mod agent_kv;
 pub mod agent_loop;
 pub mod agent_manager;
+pub mod agent_offline_export;
 pub mod agent_recovery;
 pub mod agent_runtime;
 pub mod agent_service;
@@ -37,6 +38,7 @@ pub mod data_grid_extractors;
 pub mod data_grid_sql;
 pub mod database_capabilities;
 pub mod database_export;
+pub mod database_manifest;
 pub mod database_search_sql;
 pub mod db;
 pub mod db_admin_sql;
@@ -57,6 +59,7 @@ pub mod mq;
 #[cfg(feature = "mq-admin")]
 pub mod mqtt;
 pub(crate) mod mysql_ddl_normalize;
+pub mod mysql_event_sql;
 pub mod nacos;
 #[cfg(all(target_os = "windows", target_env = "gnu"))]
 mod nanosleep_stub;

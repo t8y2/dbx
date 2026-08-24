@@ -1,0 +1,33 @@
+schemaVersion: 1
+order: 630
+dbType: sundb
+rustVariant: Sundb
+label: 科蓝 SUNDB
+dialect: SunDB
+runtimeMode: agent
+mcpMode: bridge
+agentKey: sundb
+driverStoreVisible: true
+driverStoreOrder: 33
+singleConnectionPool: false
+metadataConnectionScoped: false
+skipTcpProbe: true
+defaultPort: 22581
+supportLevel: operate
+capabilities:
+  queryExecution: true
+  metadataBrowse: true
+  objectBrowser: true
+  objectSource: false
+  schemaSearch: true
+  diagram: false
+  tableDataEdit: true
+  tableStructureEdit: true
+  tableImport: false
+  dataTransfer: false
+  sqlFileExecution: true
+  databaseCreate: false
+  fieldLineage: false
+  sqlExplain: false
+  userAdmin: false
+  driverManagement: true

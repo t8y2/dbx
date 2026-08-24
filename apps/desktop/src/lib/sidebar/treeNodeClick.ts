@@ -27,6 +27,7 @@ const toggleLeafNodeTypes = new Set<TreeNodeType>([
   "dynamodb-table",
   "vector-collection",
   "elasticsearch-index",
+  "meilisearch-system",
   "user-admin",
   "dameng-users",
   "dameng-roles",
@@ -34,7 +35,7 @@ const toggleLeafNodeTypes = new Set<TreeNodeType>([
 // These are application entry points rather than database objects. They should
 // always navigate on a single click, even when the user prefers double-click
 // activation for ordinary tree objects.
-const directNavigationTreeNodeTypes = new Set<TreeNodeType>(["consul-root", "consul-overview", "nacos-namespace", "nacos-access-control"]);
+const directNavigationTreeNodeTypes = new Set<TreeNodeType>(["consul-root", "consul-overview", "nacos-namespace", "nacos-access-control", "meilisearch-system"]);
 const repeatableNavigationTreeNodeTypes = new Set<TreeNodeType>(["nacos-namespace", "nacos-access-control"]);
 
 export function isDirectNavigationTreeNode(type: TreeNodeType): boolean {

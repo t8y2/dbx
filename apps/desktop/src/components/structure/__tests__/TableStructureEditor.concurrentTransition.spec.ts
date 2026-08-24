@@ -11,14 +11,18 @@ const mocks = vi.hoisted(() => ({
     driver_label: "PostgreSQL",
   },
   ensureConnected: vi.fn(),
+  executeQuery: vi.fn(),
   listDataTypes: vi.fn(),
   buildTableStructureChangeSql: vi.fn(),
   updateEditorSettings: vi.fn(),
   loadObjectDdl: vi.fn(),
   invalidateObjectDdl: vi.fn(),
   loadObjectMetadataFacet: vi.fn(),
+  invalidateObjectMetadataCache: vi.fn(),
   invalidateTableMetadataCache: vi.fn(),
   getTablePartitionStatus: vi.fn(),
+  getTableOwner: vi.fn(),
+  buildTableOwnerChangeSql: vi.fn(),
   toast: vi.fn(),
 }));
 
@@ -46,6 +50,7 @@ vi.mock("@lucide/vue", async () => {
     Settings: Icon,
     SlidersHorizontal: Icon,
     Trash2: Icon,
+    UserRound: Icon,
     X: Icon,
   };
 });
@@ -231,12 +236,15 @@ vi.mock("@/lib/metadata/objectDdlCache", () => ({
   loadObjectDdl: mocks.loadObjectDdl,
   invalidateObjectDdl: mocks.invalidateObjectDdl,
 }));
-vi.mock("@/lib/metadata/objectMetadataCache", () => ({ loadObjectMetadataFacet: mocks.loadObjectMetadataFacet }));
+vi.mock("@/lib/metadata/objectMetadataCache", () => ({ loadObjectMetadataFacet: mocks.loadObjectMetadataFacet, invalidateObjectMetadataCache: mocks.invalidateObjectMetadataCache }));
 vi.mock("@/lib/metadata/tableMetadataCache", () => ({ invalidateTableMetadataCache: mocks.invalidateTableMetadataCache }));
 vi.mock("@/lib/backend/api", () => ({
+  executeQuery: mocks.executeQuery,
   listDataTypes: mocks.listDataTypes,
   buildTableStructureChangeSql: mocks.buildTableStructureChangeSql,
+  buildTableOwnerChangeSql: mocks.buildTableOwnerChangeSql,
   getTablePartitionStatus: mocks.getTablePartitionStatus,
+  getTableOwner: mocks.getTableOwner,
 }));
 
 import TableStructureEditor from "@/components/structure/TableStructureEditor.vue";
@@ -248,11 +256,12 @@ async function mountIndexesEditor() {
   mocks.connection.name = "postgres";
   mocks.connection.driver_label = "postgres";
   mocks.ensureConnected.mockResolvedValue(undefined);
+  mocks.executeQuery.mockResolvedValue({ columns: ["user", "host", "plugin"], rows: [["app_user", "LOGIN", ""]] });
   mocks.listDataTypes.mockResolvedValue([]);
   mocks.getTablePartitionStatus.mockResolvedValue({ isPartitionedParent: false, isPartition: false });
   mocks.loadObjectDdl.mockResolvedValue({ ddl: "CREATE TABLE users (id bigint)", cacheStatus: "remote" });
   mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet: string) => ({
-    value: facet === "comment" ? "" : [],
+    value: facet === "comment" ? "" : facet === "owner" ? "app_user" : [],
     cacheStatus: "remote",
   }));
   // The SQL builder mirrors the Concurrent checkbox onto the generated
@@ -298,6 +307,8 @@ function concurrentCheckboxInRow(row: HTMLElement): HTMLInputElement {
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.getTablePartitionStatus.mockResolvedValue({ isPartitionedParent: false, isPartition: false });
+  mocks.getTableOwner.mockResolvedValue("app_user");
+  mocks.buildTableOwnerChangeSql.mockResolvedValue({ statements: [], warnings: [] });
 });
 
 afterEach(() => {

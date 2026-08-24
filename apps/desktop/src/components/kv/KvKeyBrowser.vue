@@ -24,7 +24,7 @@ import { decideKvMetadataRefresh, hasPositiveKvLease, knownKvLeaseSummaries, mer
 import { classifyKvMutationError, type KvMutationErrorKind } from "@/lib/kv/kvMutationError";
 import { refreshedKvSelectionSummary } from "@/lib/kv/kvRefreshSelection";
 import { parseKvLeaseId, parseOptionalTtl } from "@/lib/kv/kvTtl";
-import { formatZooKeeperMetadataRows, formatZooKeeperSummaryBadges, prettyPrintJsonText } from "@/lib/kv/kvValueDisplay";
+import { decodeBase64Utf8Preview, formatZooKeeperMetadataRows, formatZooKeeperSummaryBadges, prettyPrintJsonText } from "@/lib/kv/kvValueDisplay";
 import { formatTtl } from "@/lib/common/ttlFormat";
 import {
   createLazyKvKeyTreeState,
@@ -118,6 +118,8 @@ interface KvKeyBrowserLabels {
   copy?: string;
   copied?: string;
   copyFailed?: string;
+  utf8PreviewLossy?: string;
+  utf8PreviewUnavailable?: string;
   valueTooLarge?: string;
   deletePrefix?: string;
   selectAll?: string;
@@ -195,6 +197,7 @@ const props = withDefaults(
     safeWrite?: boolean;
     maxValueBytes?: number;
     allowBinaryEdit?: boolean;
+    enableBase64Utf8Preview?: boolean;
     readOnly?: boolean;
     exportFormat?: string;
     exportFileExtension?: string;
@@ -221,6 +224,7 @@ const props = withDefaults(
     safeWrite: false,
     maxValueBytes: 0,
     allowBinaryEdit: false,
+    enableBase64Utf8Preview: false,
     readOnly: false,
     exportFormat: "dbx-kv-bundle",
     exportFileExtension: ".dbx-kv.json",
@@ -290,6 +294,7 @@ const showHistoryDiff = ref(false);
 const restoring = ref(false);
 const selectedCreateMode = ref<KvCreateMode>("persistent");
 const selectedPrettyValue = ref<string | null>(null);
+const selectedBase64ViewMode = ref<"utf8" | "base64">("utf8");
 const selectedValueCopied = ref(false);
 const lazyTreeState = reactive(createLazyKvKeyTreeState(lazyKvRootPath(props.lazyPathStyle), props.lazyPathStyle));
 const multiSelectedKeys = ref<Map<string, KvMultiSelection>>(new Map());
@@ -385,8 +390,28 @@ const selectedTextValue = computed(() => {
   if (!value) return "";
   return value.encoding === "utf8" ? value.data : value.data;
 });
-const displayedSelectedTextValue = computed(() => selectedPrettyValue.value ?? selectedTextValue.value);
 const selectedValueIsBase64 = computed(() => selectedValue.value?.value?.encoding === "base64");
+const selectedBase64Utf8Preview = computed(() => {
+  if (!props.enableBase64Utf8Preview || !selectedValueIsBase64.value) return null;
+  return decodeBase64Utf8Preview(selectedTextValue.value);
+});
+const showSelectedBase64Utf8Controls = computed(() => props.enableBase64Utf8Preview && selectedValueIsBase64.value);
+const selectedBase64DisplayMode = computed<"utf8" | "base64">(() => (selectedBase64ViewMode.value === "utf8" && selectedBase64Utf8Preview.value?.ok ? "utf8" : "base64"));
+const selectedValueUsesUtf8Preview = computed(() => showSelectedBase64Utf8Controls.value && selectedBase64DisplayMode.value === "utf8");
+const selectedBase64Utf8PreviewIsLossy = computed(() => {
+  const preview = selectedBase64Utf8Preview.value;
+  return preview?.ok === true && preview.lossy;
+});
+const selectedBase64Utf8PreviewUnavailable = computed(() => selectedBase64Utf8Preview.value?.ok === false);
+const displayedSelectedTextValue = computed(() => {
+  if (selectedPrettyValue.value != null) return selectedPrettyValue.value;
+  const preview = selectedBase64Utf8Preview.value;
+  return selectedValueUsesUtf8Preview.value && preview?.ok ? preview.value : selectedTextValue.value;
+});
+const selectedValueClipboardText = computed(() => {
+  const preview = selectedBase64Utf8Preview.value;
+  return selectedValueUsesUtf8Preview.value && preview?.ok ? preview.value : selectedTextValue.value;
+});
 const selectedKeyBytes = computed(() => selectedValue.value?.keyBytes ?? selectedRouteKeyBytes.value ?? null);
 const selectedKeyLocked = computed(() => Boolean(String(selectedMetadata.value?.session ?? "").trim()));
 const isWatchingSelectedKey = computed(() => Boolean(selectedKey.value && props.watchActiveKey === selectedKey.value));
@@ -856,6 +881,7 @@ async function loadSelectedKey(input: string | KvKeyRoute) {
   selectedRouteKeyBytes.value = route.keyBytes ?? null;
   selectedValue.value = null;
   selectedPrettyValue.value = null;
+  selectedBase64ViewMode.value = "utf8";
   detailLoading.value = true;
   detailError.value = "";
   try {
@@ -891,6 +917,7 @@ function clearSelectedKey() {
   selectedRouteKeyBytes.value = null;
   selectedValue.value = null;
   selectedPrettyValue.value = null;
+  selectedBase64ViewMode.value = "utf8";
   detailLoading.value = false;
 }
 
@@ -1364,7 +1391,7 @@ async function copyText(value: string | number | null | undefined) {
 async function copySelectedValue() {
   if (!selectedValue.value?.found) return;
   try {
-    await copyToClipboard(selectedTextValue.value);
+    await copyToClipboard(selectedValueClipboardText.value);
     selectedValueCopied.value = true;
     toast(props.labels.copied || "Copied", 1500);
     if (selectedValueCopyTimer) clearTimeout(selectedValueCopyTimer);
@@ -2025,7 +2052,23 @@ defineExpose({
                 </div>
               </div>
               <div class="min-h-0">
-                <div v-if="metadataStyle === 'zookeeper'" class="mb-2 text-xs font-medium text-muted-foreground">{{ labels.value || "Value" }}</div>
+                <div v-if="metadataStyle === 'zookeeper' || showSelectedBase64Utf8Controls" class="mb-2 flex min-h-8 items-center justify-between gap-3">
+                  <div v-if="metadataStyle === 'zookeeper'" class="text-xs font-medium text-muted-foreground">{{ labels.value || "Value" }}</div>
+                  <div v-if="showSelectedBase64Utf8Controls" class="ml-auto inline-flex rounded-md border bg-muted/20 p-0.5" role="group" aria-label="Value encoding">
+                    <Button
+                      data-testid="kv-base64-utf8-view"
+                      size="sm"
+                      :variant="selectedBase64DisplayMode === 'utf8' ? 'secondary' : 'ghost'"
+                      class="h-7 rounded-sm px-2.5 text-xs"
+                      :aria-pressed="selectedBase64DisplayMode === 'utf8'"
+                      :disabled="selectedBase64Utf8PreviewUnavailable"
+                      @click="selectedBase64ViewMode = 'utf8'"
+                    >
+                      UTF-8
+                    </Button>
+                    <Button data-testid="kv-base64-raw-view" size="sm" :variant="selectedBase64DisplayMode === 'base64' ? 'secondary' : 'ghost'" class="h-7 rounded-sm px-2.5 text-xs" :aria-pressed="selectedBase64DisplayMode === 'base64'" @click="selectedBase64ViewMode = 'base64'"> Base64 </Button>
+                  </div>
+                </div>
                 <div class="relative">
                   <Button
                     size="icon"
@@ -2043,6 +2086,12 @@ defineExpose({
                     class="dbx-editor-font-family m-0 max-h-[40vh] min-h-32 overflow-auto rounded-md border bg-muted/20 p-3 pr-12 text-sm"
                     :class="settingsStore.editorSettings.wordWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'"
                   ><template v-for="(segment, index) in selectedValueHighlightSegments" :key="index"><mark v-if="segment.matched" class="rounded-sm bg-amber-300/80 px-0.5 text-foreground dark:bg-amber-500/40">{{ segment.text }}</mark><span v-else>{{ segment.text }}</span></template></pre>
+                </div>
+                <div v-if="selectedValueUsesUtf8Preview && selectedBase64Utf8PreviewIsLossy" class="mt-2 text-xs text-amber-700 dark:text-amber-300">
+                  {{ labels.utf8PreviewLossy || "Invalid UTF-8 bytes are shown as replacement characters (�). The original Base64 value is unchanged." }}
+                </div>
+                <div v-else-if="showSelectedBase64Utf8Controls && selectedBase64Utf8PreviewUnavailable" class="mt-2 text-xs text-destructive">
+                  {{ labels.utf8PreviewUnavailable || "The Base64 value is invalid, so the original value is shown." }}
                 </div>
                 <div v-if="selectedValueCanPrettyJson" class="mt-2 flex justify-end">
                   <Button size="sm" variant="outline" class="h-8" @click="prettifySelectedJson">

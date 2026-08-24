@@ -24,6 +24,21 @@ describe("expandSqlVariables", () => {
     expect(expandSqlVariables(sql).sql).toBe("select * from t where post_id = '224'");
   });
 
+  it("recognizes a declaration after a leading line comment", () => {
+    const sql = ["-- saved query", "@set devid=7062;", "select * from t where device_id = ${devid}"].join("\n");
+    expect(expandSqlVariables(sql).sql).toBe("-- saved query\nselect * from t where device_id = 7062");
+  });
+
+  it("recognizes declarations after comments at a statement boundary", () => {
+    const sql = ["select 1;", "/* next statement */", "@set devid = 7062;", "select ${devid}"].join("\n");
+    expect(expandSqlVariables(sql).sql).toBe("select 1;\n/* next statement */\nselect 7062");
+  });
+
+  it("does not recognize a declaration after an unterminated statement", () => {
+    const sql = ["select 1", "-- same statement", "@set devid = 7062;", "select ${devid}"].join("\n");
+    expect(expandSqlVariables(sql)).toEqual({ sql, expanded: false });
+  });
+
   it("uses declarations from the surrounding document for a selected statement", () => {
     const selectedSql = "select * from t where post_id = ${postid}";
     const declarationSql = ["@set postid = '224';", selectedSql].join("\n");

@@ -397,6 +397,17 @@ pub struct SchemaDiffPreparation {
     pub dependency_graph: Option<DependencyGraph>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaSyncSqlPlan {
+    pub sync_sql: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rollback_sync_sql: Option<String>,
+    pub rollback_completeness: RollbackCompleteness,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_rollback_objects: Vec<MissingRollbackObject>,
+}
+
 fn default_rollback_complete() -> RollbackCompleteness {
     RollbackCompleteness::Complete
 }
@@ -3839,6 +3850,50 @@ pub fn generate_schema_sync_sql(
     .0
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn generate_schema_sync_sql_plan(
+    diffs: &[TableDiff],
+    function_diffs: &[FunctionDiff],
+    sequence_diffs: &[SequenceDiff],
+    rule_diffs: &[RuleDiff],
+    owner_diffs: &[OwnerDiff],
+    db_type: DatabaseType,
+    schema: Option<&str>,
+    cascade_delete: bool,
+    source_dialect: Option<DialectKind>,
+    field_mappings: &[FieldMapping],
+    enable_rollback: bool,
+) -> SchemaSyncSqlPlan {
+    let (sync_sql, _) = generate_schema_sync_sql_inner(
+        diffs,
+        function_diffs,
+        sequence_diffs,
+        rule_diffs,
+        owner_diffs,
+        db_type,
+        schema,
+        cascade_delete,
+        source_dialect,
+        field_mappings,
+    );
+
+    let (rollback_sync_sql, missing_rollback_objects) = if enable_rollback {
+        let dependency_graph = DependencyGraph { nodes: HashMap::new(), topological_order: Vec::new() };
+        let rollback_graph = RollbackGraph::from_forward_diffs(diffs, &[], &dependency_graph);
+        let (sql, missing) = generate_rollback_sync_sql_with_missing(&rollback_graph, db_type, schema, cascade_delete);
+        (Some(sql), missing)
+    } else {
+        (None, Vec::new())
+    };
+    let rollback_completeness = if missing_rollback_objects.is_empty() {
+        RollbackCompleteness::Complete
+    } else {
+        RollbackCompleteness::Incomplete
+    };
+
+    SchemaSyncSqlPlan { sync_sql, rollback_sync_sql, rollback_completeness, missing_rollback_objects }
+}
+
 fn generate_schema_sync_sql_inner(
     diffs: &[TableDiff],
     function_diffs: &[FunctionDiff],
@@ -5950,6 +6005,43 @@ mod tests {
 
         assert!(table_sync_sql.contains("ALTER TABLE `users`"));
         assert!(!table_sync_sql.contains("CREATE TABLE"));
+    }
+
+    #[test]
+    fn schema_sync_plan_builds_matching_forward_and_rollback_sql_for_selected_children() {
+        let selected_diff = TableDiff {
+            diff_type: "modified".to_string(),
+            object_type: Some("table".to_string()),
+            name: "users".to_string(),
+            columns: Some(vec![ColumnDiff {
+                diff_type: "added".to_string(),
+                name: "nickname".to_string(),
+                source: Some(column("nickname", "varchar(64)", None)),
+                target: None,
+                changes: Vec::new(),
+                add_position: None,
+            }]),
+            ..Default::default()
+        };
+
+        let plan = generate_schema_sync_sql_plan(
+            &[selected_diff],
+            &[],
+            &[],
+            &[],
+            &[],
+            DatabaseType::Mysql,
+            Some("shop"),
+            false,
+            None,
+            &[],
+            true,
+        );
+
+        assert!(plan.sync_sql.contains("ADD COLUMN `nickname`"), "{}", plan.sync_sql);
+        let rollback = plan.rollback_sync_sql.expect("rollback SQL");
+        assert!(rollback.contains("DROP COLUMN `nickname`"), "{rollback}");
+        assert_eq!(plan.rollback_completeness, RollbackCompleteness::Complete);
     }
 
     #[test]

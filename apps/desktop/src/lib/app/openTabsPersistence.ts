@@ -9,6 +9,7 @@ export interface SavedQueryResultRun {
   sequence: number;
   sql: string;
   createdAt: number;
+  pinned?: boolean;
   activeResultIndex?: number;
   resultCacheKey?: string;
   resultEvicted?: boolean;
@@ -138,6 +139,7 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
             sequence: run.sequence,
             sql: run.sql,
             createdAt: run.createdAt,
+            ...(run.pinned ? { pinned: true } : {}),
             activeResultIndex: run.activeResultIndex,
             ...(run.resultCacheKey !== undefined ? { resultCacheKey: run.resultCacheKey } : {}),
             ...(run.resultEvicted ? { resultEvicted: true } : {}),

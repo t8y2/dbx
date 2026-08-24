@@ -3,6 +3,14 @@ import { describe, expect, it } from "vitest";
 
 const tabBarSource = readFileSync(new URL("../AppTabBar.vue", import.meta.url), "utf8");
 
+function sourceBetween(start: string, end: string): string {
+  const startIndex = tabBarSource.indexOf(start);
+  const endIndex = tabBarSource.indexOf(end, startIndex + start.length);
+  expect(startIndex).toBeGreaterThanOrEqual(0);
+  expect(endIndex).toBeGreaterThan(startIndex);
+  return tabBarSource.slice(startIndex, endIndex);
+}
+
 describe("AppTabBar close confirmation layout", () => {
   it("allows long unbroken tab titles to shrink and wrap inside the dialog", () => {
     expect(tabBarSource).toMatch(/<DialogContent class="[^"]*\bmin-w-0\b[^"]*\bsm:max-w-md\b/);
@@ -35,6 +43,26 @@ describe("AppTabBar object browser presentation", () => {
     expect(tabBarSource.match(/tab\.mode === 'databases'/g)).toHaveLength(2);
     expect(tabBarSource.match(/:class="tabIconClass\(tab\)"/g)).toHaveLength(2);
     expect(tabBarSource.match(/tabMenuIcon\(tab\).*tabIconClass\(tab\)/g)).toHaveLength(2);
+  });
+});
+
+describe("AppTabBar locate-in-sidebar action", () => {
+  it("emits the exact right-clicked tab only when it has a sidebar target", () => {
+    const menu = sourceBetween("function getTabMenuItems", "function handleSaveAndClose");
+
+    expect(tabBarSource).toContain('"locate-tab": [tab: QueryTab];');
+    expect(menu).toMatch(/label: t\("sidebar\.locateActiveTab"\),\s*action: \(\) => emit\("locate-tab", tab\),\s*icon: Crosshair,\s*visible: !!activeTabSidebarTarget\(tab\)/);
+    expect(menu).not.toContain("activateTab(tab.id)");
+  });
+
+  it("leaves settings, driver, and existing regular-tab menu actions unchanged", () => {
+    const specialMenu = sourceBetween("function getSpecialRegularTabMenuItems", "function getTabMenuItems");
+    const regularMenu = sourceBetween("function getTabMenuItems", "function handleSaveAndClose");
+
+    expect(specialMenu).not.toContain('t("sidebar.locateActiveTab")');
+    expect(regularMenu).toContain('label: t("contextMenu.copyName")');
+    expect(regularMenu).toContain("action: () => queryStore.togglePinnedTab(tab.id)");
+    expect(regularMenu).toContain("action: () => queryStore.closeTab(tab.id)");
   });
 });
 

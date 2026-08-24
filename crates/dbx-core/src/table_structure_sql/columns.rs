@@ -1,9 +1,10 @@
 use super::column_alter::{
-    build_clickhouse_existing_column_sql, build_doris_existing_column_sql, build_h2_existing_column_sql,
-    build_informix_existing_column_sql, build_iris_existing_column_sql, build_mysql_existing_column_clause,
-    build_oracle_like_existing_column_sql, build_oscar_existing_column_sql, build_postgres_existing_column_sql,
-    build_questdb_existing_column_sql, build_sqlite_existing_column_sql, build_sqlserver_existing_column_sql,
-    build_xugu_existing_column_sql, has_column_extra_change, has_existing_column_attribute_change,
+    build_clickhouse_existing_column_sql, build_dameng_existing_column_sql, build_doris_existing_column_sql,
+    build_h2_existing_column_sql, build_informix_existing_column_sql, build_iris_existing_column_sql,
+    build_mysql_existing_column_clause, build_oracle_like_existing_column_sql, build_oscar_existing_column_sql,
+    build_postgres_existing_column_sql, build_questdb_existing_column_sql, build_sqlite_existing_column_sql,
+    build_sqlserver_existing_column_sql, build_xugu_existing_column_sql, dameng_drops_identity,
+    has_column_extra_change, has_existing_column_attribute_change, validate_dameng_existing_identity_change,
 };
 use super::column_format::{
     column_definition, has_dameng_identity, is_dameng_identity_compatible_type, is_mysql_character_data_type,
@@ -25,6 +26,32 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
     let table = qualified_table(dialect, options.schema.as_deref(), &options.table_name);
     let database_label = database_label(options.database_type);
     let active_columns: Vec<_> = options.columns.iter().filter(|column| !column.marked_for_drop).collect();
+    if dialect == StructureDialect::Dameng {
+        let identity_columns: Vec<_> = active_columns.iter().filter(|column| has_dameng_identity(column)).collect();
+        if identity_columns.len() > 1
+            || identity_columns.iter().any(|column| {
+                column.extra.as_ref().and_then(|extra| extra.identity.as_ref()).and_then(|identity| identity.increment)
+                    == Some(0)
+            })
+        {
+            return Vec::new();
+        }
+        let mut valid_identity_changes = true;
+        for column in &active_columns {
+            if has_dameng_identity(column) && !is_dameng_identity_compatible_type(&column.data_type) {
+                warnings.push(format!(
+                    "Dameng identity column \"{}\" must use tinyint, smallint, int, integer, bigint, number, numeric, or decimal/dec with scale 0.",
+                    column.name
+                ));
+                valid_identity_changes = false;
+            } else if column.original.is_some() && !validate_dameng_existing_identity_change(column, warnings) {
+                valid_identity_changes = false;
+            }
+        }
+        if !valid_identity_changes {
+            return Vec::new();
+        }
+    }
     if is_oracle_like(dialect)
         && active_columns.is_empty()
         && options.columns.iter().any(|column| column.marked_for_drop)
@@ -56,6 +83,13 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
         .filter(|change| options.columns.iter().any(|column| mysql_auto_increment_touches_primary_key(column, change)));
     let mut mysql_primary_key_column_clauses = Vec::new();
     let mut statements = Vec::new();
+    // DM8 owns identity at table level, so remove the old identity before any per-column ADD,
+    // even when the target column appears earlier in the submitted draft.
+    if dialect == StructureDialect::Dameng
+        && options.columns.iter().any(|column| !column.marked_for_drop && dameng_drops_identity(column))
+    {
+        statements.push(format!("ALTER TABLE {table} DROP IDENTITY;"));
+    }
 
     for column in &options.columns {
         if column.marked_for_drop {
@@ -105,16 +139,6 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
             {
                 warnings.push(format!(
                     "SQL Server identity column \"{}\" must use tinyint, smallint, int, bigint, or decimal/numeric with scale 0.",
-                    column.name
-                ));
-                continue;
-            }
-            if dialect == StructureDialect::Dameng
-                && has_dameng_identity(column)
-                && !is_dameng_identity_compatible_type(&column.data_type)
-            {
-                warnings.push(format!(
-                    "Dameng identity column \"{}\" must use tinyint, smallint, int, integer, bigint, number, numeric, or decimal/dec with scale 0.",
                     column.name
                 ));
                 continue;
@@ -215,7 +239,7 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
             }
             StructureDialect::Doris => statements.extend(build_doris_existing_column_sql(&table, column, "")),
             StructureDialect::Postgres => statements.extend(build_postgres_existing_column_sql(&table, column)),
-            StructureDialect::Oracle | StructureDialect::Dameng => {
+            StructureDialect::Oracle => {
                 if options.database_type == Some(crate::models::connection::DatabaseType::Iris) {
                     statements.extend(build_iris_existing_column_sql(&table, column));
                 } else if options.database_type == Some(crate::models::connection::DatabaseType::Xugu) {
@@ -223,6 +247,9 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
                 } else {
                     statements.extend(build_oracle_like_existing_column_sql(dialect, &table, column))
                 }
+            }
+            StructureDialect::Dameng => {
+                statements.extend(build_dameng_existing_column_sql(&table, column, false, warnings))
             }
             // 神通 MODIFY 语法与 Oracle 有差异（NULL/NOT NULL 须单独一条），用专属实现。
             StructureDialect::Oscar => statements.extend(build_oscar_existing_column_sql(dialect, &table, column)),
@@ -319,6 +346,32 @@ fn primary_key_change(options: &TableStructureSqlOptions) -> Option<PrimaryKeyCh
     Some(PrimaryKeyChange { old_ids, new_ids, new_names })
 }
 
+fn unsupported_primary_key_change_warning(options: &TableStructureSqlOptions, change: &PrimaryKeyChange<'_>) -> String {
+    let action = if change.old_ids.is_empty() { "Adding" } else { "Changing" };
+    format!("{action} primary keys is not supported for {} from this editor.", database_label(options.database_type))
+}
+
+pub(super) fn validate_primary_key_change_scope(options: &TableStructureSqlOptions) -> Vec<String> {
+    if let Some(original) = options
+        .columns
+        .iter()
+        .find(|column| column.marked_for_drop && was_primary_key_column(column))
+        .and_then(|column| column.original.as_ref())
+    {
+        return vec![format!("Primary key column \"{}\" cannot be dropped from this editor.", original.name)];
+    }
+
+    let Some(change) = primary_key_change(options) else { return Vec::new() };
+    let capabilities = capabilities_for(options.database_type);
+    let supported =
+        if change.old_ids.is_empty() { capabilities.add_primary_key } else { capabilities.alter_primary_key };
+    if supported {
+        Vec::new()
+    } else {
+        vec![unsupported_primary_key_change_warning(options, &change)]
+    }
+}
+
 fn mysql_auto_increment_touches_primary_key(column: &EditableStructureColumn, change: &PrimaryKeyChange<'_>) -> bool {
     column.extra.as_ref().is_some_and(|extra| extra.auto_increment.unwrap_or(false))
         && (change.old_ids.contains(column.id.as_str()) || change.new_ids.contains(column.id.as_str()))
@@ -336,11 +389,10 @@ pub(super) fn build_primary_key_sql(
     // columns is not a PK change. A draft that drops a PK column is also rejected here.
     let Some(change) = primary_key_change(options) else { return Vec::new() };
 
-    if !capabilities.alter_primary_key {
-        warnings.push(format!(
-            "Changing primary keys is not supported for {} from this editor.",
-            database_label(options.database_type)
-        ));
+    let supported =
+        if change.old_ids.is_empty() { capabilities.add_primary_key } else { capabilities.alter_primary_key };
+    if !supported {
+        warnings.push(unsupported_primary_key_change_warning(options, &change));
         return Vec::new();
     }
 

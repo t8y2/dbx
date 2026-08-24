@@ -32,3 +32,36 @@ export function supportsObjectRename(databaseType: DatabaseType | undefined, obj
 export function buildRenameObjectSql(options: BuildRenameObjectSqlOptions): Promise<string> {
   return api.buildRenameObjectSql(options);
 }
+
+// ── Database rename (PostgreSQL family) ──
+
+const DATABASE_RENAME_TYPES = new Set<DatabaseType>(["postgres", "redshift", "gaussdb", "kwdb", "kingbase", "highgo", "uxdb", "vastbase", "opengauss"]);
+
+export function supportsDatabaseRename(databaseType?: DatabaseType): boolean {
+  return !!databaseType && DATABASE_RENAME_TYPES.has(databaseType);
+}
+
+export function databaseRenameMaintenanceDatabase(configuredDatabase: string | undefined, targetDatabase: string): string {
+  if (configuredDatabase && configuredDatabase !== targetDatabase) return configuredDatabase;
+  return targetDatabase === "postgres" ? "template1" : "postgres";
+}
+
+export interface BuildRenameDatabaseSqlOptions {
+  databaseType?: DatabaseType;
+  oldName: string;
+  newName: string;
+  terminateConnections?: boolean;
+}
+
+export function buildRenameDatabaseSql(options: BuildRenameDatabaseSqlOptions): Promise<string> {
+  return api.buildRenameDatabaseSql({ ...options, terminateConnections: options.terminateConnections ?? false });
+}
+
+export interface BuildRenameDatabasePreflightSqlOptions {
+  databaseType?: DatabaseType;
+  databaseName: string;
+}
+
+export function buildRenameDatabasePreflightSql(options: BuildRenameDatabasePreflightSqlOptions): Promise<string> {
+  return api.buildRenameDatabasePreflightSql(options);
+}

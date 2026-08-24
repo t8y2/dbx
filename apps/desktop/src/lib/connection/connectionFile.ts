@@ -1,5 +1,6 @@
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { h2FilePathFromJdbcUrl } from "@/lib/database/h2Connection";
+import { isKnownDatabaseType, isLocalFileDatabaseType } from "@/lib/database/databaseDriverManifest";
 
 /**
  * Whether the database type is one that (potentially) backs onto a local file.
@@ -9,7 +10,7 @@ import { h2FilePathFromJdbcUrl } from "@/lib/database/h2Connection";
  * available.
  */
 export function isLocalFileTypeDb(dbType: DatabaseType | string): boolean {
-  return dbType === "sqlite" || dbType === "duckdb" || dbType === "access" || dbType === "h2";
+  return isKnownDatabaseType(dbType) && isLocalFileDatabaseType(dbType);
 }
 
 /**

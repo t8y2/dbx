@@ -397,6 +397,12 @@ export interface NacosBatchReport {
   items: NacosBatchItemResult[];
 }
 
+export interface NacosConfigDataIdMapping {
+  sourceGroup: string;
+  sourceDataId: string;
+  targetDataId: string;
+}
+
 export interface NacosConfigTransferRequest {
   operationId: string;
   sourceConnectionId: string;
@@ -404,6 +410,7 @@ export interface NacosConfigTransferRequest {
   source: NacosConfigSelector;
   targetNamespace: string;
   targetGroup?: string;
+  dataIdMappings?: NacosConfigDataIdMapping[];
   conflictPolicy: NacosConflictPolicy;
 }
 

@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { createApp, nextTick, type App, type ComputedRef, type InjectionKey } from "vue";
+import { createApp, defineComponent, h, nextTick, type App, type ComputedRef, type InjectionKey } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const backend = vi.hoisted(() => ({
@@ -93,8 +93,7 @@ vi.mock("@/stores/settingsStore", () => ({
   useSettingsStore: () => settings,
 }));
 
-vi.mock("@/components/grid/DataGrid.vue", async () => {
-  const { defineComponent, h } = await import("vue");
+vi.mock("@/components/grid/DataGrid.vue", () => {
   return {
     default: defineComponent({
       name: "DataGridStub",

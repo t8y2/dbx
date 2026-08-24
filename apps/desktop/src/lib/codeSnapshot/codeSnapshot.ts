@@ -12,7 +12,7 @@
  * clones the node into a foreignObject.
  */
 import type { AppThemeAppearance } from "@/lib/app/appTheme";
-import { createAiShikiCodeHighlighter, type AiCodeHighlighter } from "@/lib/ai/aiCodeHighlighter";
+import { createAiShikiBlockCodeHighlighter, type AiCodeHighlighter } from "@/lib/ai/aiCodeHighlighter";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 
 export interface CodeSnapshotSource {
@@ -135,7 +135,7 @@ let highlighterPromise: Promise<AiCodeHighlighter> | undefined;
 
 /** Lazy singleton reusing the AI assistant's shiki highlighter instance. */
 export function getCodeSnapshotHighlighter(): Promise<AiCodeHighlighter> {
-  highlighterPromise ??= createAiShikiCodeHighlighter({
+  highlighterPromise ??= createAiShikiBlockCodeHighlighter({
     appearance: () => "dark",
   }).catch((err: unknown) => {
     // Reset so a transient highlighter failure can be retried on the next

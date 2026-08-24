@@ -173,6 +173,7 @@ class PostgresLikeAgentTest {
         String sql = String.join("\n", MetadataSqlFake.statements);
         assertTrue(sql.contains("LEFT JOIN pg_catalog.pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum AND k.attnum > 0"), sql);
         assertTrue(sql.contains("pg_catalog.pg_get_indexdef(ix.indexrelid, k.n, true)"), sql);
+        assertTrue(sql.contains("ix.indisunique AND ix.indisvalid"), sql);
     }
 
     @Test

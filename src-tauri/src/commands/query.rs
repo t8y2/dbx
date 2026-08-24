@@ -563,6 +563,24 @@ pub fn build_rename_object_sql(options: dbx_core::db_admin_sql::RenameObjectSqlO
 }
 
 #[tauri::command]
+pub fn build_rename_database_sql(
+    database_type: Option<dbx_core::models::connection::DatabaseType>,
+    old_name: String,
+    new_name: String,
+    terminate_connections: bool,
+) -> Result<String, String> {
+    dbx_core::db_admin_sql::build_rename_database_sql(database_type, &old_name, &new_name, terminate_connections)
+}
+
+#[tauri::command]
+pub fn build_rename_database_preflight_sql(
+    database_type: Option<dbx_core::models::connection::DatabaseType>,
+    database_name: String,
+) -> Result<String, String> {
+    dbx_core::db_admin_sql::build_rename_database_preflight_sql(database_type, &database_name)
+}
+
+#[tauri::command]
 pub fn build_create_database_sql(options: dbx_core::db_admin_sql::CreateDatabaseSqlOptions) -> Result<String, String> {
     dbx_core::db_admin_sql::build_create_database_sql(options)
 }
@@ -693,6 +711,13 @@ pub fn build_table_structure_change_sql(
     options: dbx_core::table_structure_sql::TableStructureSqlOptions,
 ) -> Result<dbx_core::table_structure_sql::TableStructureSqlResult, String> {
     Ok(dbx_core::table_structure_sql::build_table_structure_change_sql(options))
+}
+
+#[tauri::command]
+pub fn build_table_owner_change_sql(
+    options: dbx_core::table_structure_sql::TableOwnerChangeSqlOptions,
+) -> Result<dbx_core::table_structure_sql::TableStructureSqlResult, String> {
+    Ok(dbx_core::table_structure_sql::build_table_owner_change_sql(options))
 }
 
 #[tauri::command]

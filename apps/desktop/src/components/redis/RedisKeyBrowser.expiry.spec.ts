@@ -799,7 +799,7 @@ describe("RedisKeyBrowser command completion", () => {
     await setCommandInput("VGE");
 
     expect(mocks.listRedisCompletionCommandDocs).toHaveBeenCalledWith("connection", "0");
-    expect(commandCompletionLabels()).toContain("VGETReads a vendor key.string");
+    expect(commandCompletionLabels()).toEqual(expect.arrayContaining([expect.stringContaining("VGET")]));
 
     const input = requiredElement<HTMLInputElement>("[data-redis-command-input]");
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", shiftKey: true, bubbles: true }));
@@ -808,7 +808,7 @@ describe("RedisKeyBrowser command completion", () => {
 
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
     await settle();
-    expect(input.value).toBe("VGET ");
+    expect(input.value).toBe("VGET arg1");
   });
 
   it("completes known keys only at a documented key argument", async () => {
@@ -929,8 +929,35 @@ describe("RedisKeyBrowser command completion", () => {
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     await settle();
 
-    expect(input.value).toBe("SET ");
-    expect(commandCompletionLabels()).toContain("user:1key");
+    expect(input.value).toBe("SET arg1 arg2");
+    expect(mocks.redisExecuteCommand).not.toHaveBeenCalled();
+  });
+
+  it("inserts documented Redis argument examples before executing on Enter", async () => {
+    mocks.listRedisCompletionCommandDocs.mockResolvedValueOnce([
+      {
+        name: "GETBIT",
+        group: "bitmap",
+        arity: 3,
+        keySpecs: [{ beginSearch: { type: "index" as const, index: 1 }, findKeys: { type: "range" as const, lastKey: 0, keyStep: 1, limit: 0 } }],
+        arguments: [
+          { name: "key", type: "key" },
+          { name: "offset", type: "integer" },
+        ],
+      },
+    ]);
+    mountBrowser();
+    await settle();
+    await openCommandPanel();
+    await setCommandInput("GETB");
+
+    const input = requiredElement<HTMLInputElement>("[data-redis-command-input]");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await settle();
+
+    expect(input.value).toBe("GETBIT key offset");
+    expect(mocks.redisExecuteCommand).not.toHaveBeenCalled();
+    expect(commandCompletionLabels()).toEqual([]);
   });
 
   it("waits for command metadata instead of sending a partial command on Enter", async () => {
@@ -952,7 +979,7 @@ describe("RedisKeyBrowser command completion", () => {
     await settle();
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     await settle();
-    expect(input.value).toBe("SET ");
+    expect(input.value).toBe("SET arg1 arg2");
     expect(mocks.redisExecuteCommand).not.toHaveBeenCalled();
   });
 

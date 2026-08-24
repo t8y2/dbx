@@ -1,6 +1,6 @@
 {
   "name": "dbx",
-  "version": "0.5.91",
+  "version": "0.5.92",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
@@ -23,6 +23,9 @@
     "release:packages": "node scripts/release.mjs packages",
     "test:release": "node --test scripts/release.test.mjs",
     "build:knowledge-base": "node scripts/build-knowledge-base.mjs",
+    "generate:connection-types": "node scripts/sync-connection-types.mjs",
+    "check:connection-types": "node scripts/sync-connection-types.mjs --check",
+    "pretypecheck": "pnpm generate:connection-types",
     "typecheck": "vue-tsc --noEmit --project apps/desktop/tsconfig.json",
     "build": "vite build --config apps/desktop/vite.config.ts",
     "build:docs-export": "vite build --config apps/desktop/vite.docs-export.config.ts",
@@ -35,6 +38,7 @@
     "bench:table-import": "cargo run -p dbx-core --no-default-features --example table_import_bench --release --",
     "lint": "oxlint --vue-plugin apps/desktop/src",
     "fmt": "oxfmt \"apps/desktop/src/**/*.{ts,vue}\"",
+    "pretest": "pnpm generate:connection-types",
     "test": "vitest run",
     "preview": "vite preview --config apps/desktop/vite.config.ts",
     "tauri": "tauri",
@@ -128,7 +132,8 @@
     "typescript": "~6.0.3",
     "vite": "^8.2.1",
     "vitest": "^4.1.8",
-    "vue-tsc": "^3.3.3"
+    "vue-tsc": "^3.3.3",
+    "yaml": "2.8.4"
   },
   "lint-staged": {
     "apps/desktop/src/**/*.{ts,vue}": "oxfmt"

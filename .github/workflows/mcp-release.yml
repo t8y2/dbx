@@ -117,11 +117,10 @@ jobs:
           const updateLockDependency = (dependency, packageDirectory) => {
             const escapedDependency = dependency.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
             const dependencyPattern = new RegExp(`('${escapedDependency}':\\n\\s+specifier: )[^\\n]+(\\n\\s+version: )([^\\n]+)`);
-            const updated = lockfile.replace(dependencyPattern, `$1${version}$2link:../${packageDirectory}`);
-            if (updated === lockfile) {
+            if (!dependencyPattern.test(lockfile)) {
               throw new Error(`Unable to update ${dependency} in pnpm-lock.yaml.`);
             }
-            lockfile = updated;
+            lockfile = lockfile.replace(dependencyPattern, `$1${version}$2link:../${packageDirectory}`);
           };
           for (const dependency of Object.keys(mcpPackage.optionalDependencies ?? {})) {
             updateLockDependency(dependency, dependency.replace("@dbx-app/", ""));
@@ -357,6 +356,34 @@ jobs:
           cache-targets: false
           cache-on-failure: true
 
+      - name: Setup full Perl for vendored OpenSSL on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          PERL_ARCHIVE_URL: https://github.com/shogo82148/build-perl/releases/download/perl-5.42.3-20260803012115/perl-5.42.3-thr-win32-x64.zip
+          PERL_ARCHIVE_SHA256: 4f0ac6fe1a4221c1fa1804c2d81999bdecebd505a61d0d04720e9b3925cd6db4
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "perl-5.42.3-thr-win32-x64.zip"
+          $destination = Join-Path $env:RUNNER_TEMP "openssl-perl"
+          curl.exe --fail --location --retry 5 --retry-all-errors $env:PERL_ARCHIVE_URL --output $archive
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to download the full Perl runtime."
+          }
+          $actualHash = (Get-FileHash -Path $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne $env:PERL_ARCHIVE_SHA256) {
+            throw "Unexpected Perl archive SHA256: $actualHash"
+          }
+          Expand-Archive -Path $archive -DestinationPath $destination -Force
+          $perl = Get-ChildItem -Path $destination -Filter perl.exe -Recurse | Where-Object { $_.FullName -match '[\\/]bin[\\/]perl\.exe$' } | Select-Object -First 1
+          if (-not $perl) {
+            throw "Unable to locate perl.exe in the downloaded runtime."
+          }
+          & $perl.FullName -MParams::Check -e 1
+          if ($LASTEXITCODE -ne 0) {
+            throw "The downloaded Perl runtime cannot load Params::Check."
+          }
+          "OPENSSL_SRC_PERL=$($perl.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Install Linux native dependencies
         if: runner.os == 'Linux'
         run: |
@@ -546,6 +573,34 @@ jobs:
           shared-key: dbx-mcp-${{ matrix.target }}
           cache-targets: false
           cache-on-failure: true
+
+      - name: Setup full Perl for vendored OpenSSL on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          PERL_ARCHIVE_URL: https://github.com/shogo82148/build-perl/releases/download/perl-5.42.3-20260803012115/perl-5.42.3-thr-win32-x64.zip
+          PERL_ARCHIVE_SHA256: 4f0ac6fe1a4221c1fa1804c2d81999bdecebd505a61d0d04720e9b3925cd6db4
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "perl-5.42.3-thr-win32-x64.zip"
+          $destination = Join-Path $env:RUNNER_TEMP "openssl-perl"
+          curl.exe --fail --location --retry 5 --retry-all-errors $env:PERL_ARCHIVE_URL --output $archive
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to download the full Perl runtime."
+          }
+          $actualHash = (Get-FileHash -Path $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne $env:PERL_ARCHIVE_SHA256) {
+            throw "Unexpected Perl archive SHA256: $actualHash"
+          }
+          Expand-Archive -Path $archive -DestinationPath $destination -Force
+          $perl = Get-ChildItem -Path $destination -Filter perl.exe -Recurse | Where-Object { $_.FullName -match '[\\/]bin[\\/]perl\.exe$' } | Select-Object -First 1
+          if (-not $perl) {
+            throw "Unable to locate perl.exe in the downloaded runtime."
+          }
+          & $perl.FullName -MParams::Check -e 1
+          if ($LASTEXITCODE -ne 0) {
+            throw "The downloaded Perl runtime cannot load Params::Check."
+          }
+          "OPENSSL_SRC_PERL=$($perl.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Install Linux native dependencies
         if: runner.os == 'Linux'

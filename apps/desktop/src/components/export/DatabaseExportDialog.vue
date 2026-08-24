@@ -13,7 +13,7 @@ import type { ExportProgress } from "@/lib/backend/api";
 import { isSchemaAware, isSingleDatabase } from "@/lib/database/databaseFeatureSupport";
 import { databaseOptionsForConnection, fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOptions";
 import { buildAllDatabaseExportPlan, generateDatabaseExportId, runDatabaseExportUntilTerminal, runWithDatabaseBackupSnapshot, shouldUseDatabaseBackupSnapshot, type AllDatabaseExportPlanItem } from "@/lib/export/databaseExport";
-import { buildSelectedTablesPayload } from "@/lib/export/databaseExportSelection";
+import { buildSelectedTablesPayload, isDatabaseExportTableSelectionValid } from "@/lib/export/databaseExportSelection";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useToast } from "@/composables/useToast";
 import { Input } from "@/components/ui/input";
@@ -109,7 +109,18 @@ const canExport = computed(() => {
   const hasContent = includeStructure.value || includeData.value || includeObjects.value;
   if (!connectionId.value || !hasContent || isExporting.value) return false;
   if (exportAllDatabases.value) return selectedDatabases.value.length > 0 && !loadingMeta.value;
-  return database.value && schema.value && !loadingTables.value && !tableError.value && (tables.value.length === 0 || selectedTables.value.length > 0);
+  return (
+    database.value &&
+    schema.value &&
+    !loadingTables.value &&
+    !tableError.value &&
+    isDatabaseExportTableSelectionValid({
+      allTableCount: tables.value.length,
+      selectedTableCount: selectedTables.value.length,
+      includeStructure: includeStructure.value,
+      includeData: includeData.value,
+    })
+  );
 });
 
 const selectedTableSet = computed(() => new Set(selectedTables.value));
@@ -340,7 +351,7 @@ async function startExport() {
           database: database.value,
           schema: schema.value,
           filePath,
-          selectedTables: buildSelectedTablesPayload(tables.value, selectedTables.value),
+          selectedTables: includeStructure.value || includeData.value ? buildSelectedTablesPayload(tables.value, selectedTables.value) : undefined,
           includeStructure: includeStructure.value,
           includeData: includeData.value,
           includeObjects: includeObjects.value,

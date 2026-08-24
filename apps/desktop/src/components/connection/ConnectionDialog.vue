@@ -15,6 +15,7 @@ import { HelpTooltip, Tooltip, TooltipContent, TooltipTrigger } from "@/componen
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Switch } from "@/components/ui/switch";
 import type { ConnectionConfig, ConnectionTestResult, DatabaseConnectionInfo, DatabaseType, HttpTunnelConfig, IdentifierCase, JdbcDriverInfo, JdbcLocalBundleInfo, JdbcMavenBundleInfo, ProxyTunnelConfig, SshConfigHostEntry, SshTunnelConfig, TransportLayerConfig } from "@/types/database";
+import { CONNECTION_PICKER_OPTIONS, CONNECTION_PROFILES, CONNECTION_PROFILE_ICONS, type ConnectionPickerOption, type ConnectionProfileCategory, type ConnectionProfileDefinition } from "@/types/generated/connectionProfiles";
 import type { InfluxDbExternalConfig, InfluxDbVersion } from "@/types/influxdb";
 import type { VictoriaMetricsExternalConfig } from "@/types/victoriametrics";
 import type { MqAdminConfig, MqAuth, MqSystemKind } from "@/types/mq";
@@ -104,6 +105,7 @@ import {
 import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, initialVisibleDatabaseSelection, visibleObjectFiltersNeedReset } from "@/lib/connection/connectionVisibleDatabases";
 import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, filterDatabaseNamesForVisiblePicker, filterSchemaNamesForVisiblePicker, normalizeVisibleDatabaseSelection, buildDraftVisibleSchemasConnectionId, normalizeVisibleSchemaSelection } from "@/lib/database/visibleDatabases";
 import { isSchemaAware, isSingleDatabase } from "@/lib/database/databaseFeatureSupport";
+import { databaseConnectionFormKind } from "@/lib/database/databaseDriverManifest";
 import VisibleSchemasDialog from "@/components/sidebar/VisibleSchemasDialog.vue";
 import CloudflareD1ConnectionFields from "@/components/connection/CloudflareD1ConnectionFields.vue";
 import SpannerConnectionFields from "@/components/connection/SpannerConnectionFields.vue";
@@ -161,8 +163,8 @@ import {
   jdbcProductProfileIdsForCategory,
 } from "@/lib/database/jdbcProductProfiles";
 
-type DbOption = { value: string; label: string };
-type DbCategoryKey = "sql" | "analytics" | "domestic" | "lightweight" | "document" | "graph_ai" | "timeseries" | "mq" | "registry_config";
+type DbOption = ConnectionPickerOption;
+type DbCategoryKey = ConnectionProfileCategory;
 type DbCategory = { key: DbCategoryKey; title: string; options: DbOption[] };
 type DialogStep = "select" | "config";
 export type ConfigTab = "connection" | "advanced" | "tls" | "transport";
@@ -1085,230 +1087,8 @@ function handleCustomColorInput(value: string) {
   applyCustomColor(value);
 }
 
-const driverProfiles: Record<
-  string,
-  {
-    type: DatabaseType;
-    port: number;
-    user: string;
-    label: string;
-    icon: string;
-    host?: string;
-    urlParams?: string;
-  }
-> = {
-  mysql: { type: "mysql", port: 3306, user: "root", label: "MySQL", icon: "mysql", urlParams: "" },
-  postgres: {
-    type: "postgres",
-    port: 5432,
-    user: "postgres",
-    label: "PostgreSQL",
-    icon: "postgres",
-    urlParams: "",
-  },
-  cloudberry: {
-    type: "postgres",
-    port: 5432,
-    user: "postgres",
-    label: "Apache Cloudberry",
-    icon: "cloudberry",
-    urlParams: "",
-  },
-  opentenbase: {
-    type: "postgres",
-    port: 11000,
-    user: "opentenbase",
-    label: "OpenTenBase",
-    icon: "opentenbase",
-    urlParams: "",
-  },
-  redis: { type: "redis", port: 6379, user: "", label: "Redis", icon: "redis" },
-  sqlite: { type: "sqlite", port: 0, user: "", label: "SQLite", icon: "sqlite" },
-  rqlite: { type: "rqlite", port: 4001, user: "", label: "RQLite", icon: "rqlite" },
-  turso: { type: "turso", port: 443, user: "", label: "Turso", icon: "turso" },
-  "cloudflare-d1": { type: "cloudflare-d1", port: 443, user: "", label: "Cloudflare D1", icon: "cloudflare-d1" },
-  duckdb: { type: "duckdb", port: 0, user: "", label: "DuckDB", icon: "duckdb" },
-  access: { type: "access", port: 0, user: "", label: "Microsoft Access", icon: "access" },
-  mongodb: { type: "mongodb", port: 27017, user: "", label: "MongoDB", icon: "mongodb" },
-  "mongodb-legacy": { type: "mongodb", port: 27017, user: "", label: "MongoDB (Legacy)", icon: "mongodb" },
-  dynamodb: {
-    type: "dynamodb",
-    port: 443,
-    user: "",
-    label: "Amazon DynamoDB",
-    icon: "dynamodb",
-    host: "dynamodb.us-east-1.amazonaws.com",
-  },
-  clickhouse: {
-    type: "clickhouse",
-    port: 8123,
-    user: "default",
-    label: "ClickHouse",
-    icon: "clickhouse",
-  },
-  sqlserver: { type: "sqlserver", port: 1433, user: "sa", label: "SQL Server", icon: "sqlserver" },
-  oracle: { type: "oracle", port: 1521, user: "system", label: "Oracle", icon: "oracle" },
-  elasticsearch: {
-    type: "elasticsearch",
-    port: 9200,
-    user: "",
-    label: "Elasticsearch",
-    icon: "elasticsearch",
-  },
-  easysearch: {
-    type: "easysearch",
-    port: 9200,
-    user: "",
-    label: "Easysearch",
-    icon: "easysearch",
-  },
-  meilisearch: {
-    type: "meilisearch",
-    port: 7700,
-    user: "",
-    label: "Meilisearch",
-    icon: "meilisearch",
-  },
-  hbase: { type: "hbase", port: 8080, user: "", label: "Apache HBase", icon: "hbase" },
-  qdrant: { type: "qdrant", port: 6333, user: "", label: "Qdrant", icon: "qdrant" },
-  milvus: { type: "milvus", port: 19530, user: "root", label: "Milvus", icon: "milvus" },
-  weaviate: { type: "weaviate", port: 8080, user: "", label: "Weaviate", icon: "weaviate" },
-  chromadb: { type: "chromadb", port: 8000, user: "", label: "ChromaDB", icon: "chromadb" },
-  mariadb: { type: "mysql", port: 3306, user: "root", label: "MariaDB", icon: "mariadb" },
-  tidb: { type: "mysql", port: 4000, user: "root", label: "TiDB", icon: "tidb" },
-  oceanbase: { type: "mysql", port: 2883, user: "root", label: "OceanBase", icon: "oceanbase" },
-  "oceanbase-oracle": {
-    type: "oceanbase-oracle",
-    port: 2883,
-    user: "SYS",
-    label: "OceanBase Oracle Mode",
-    icon: "oceanbase",
-  },
-  goldendb: { type: "goldendb", port: 3306, user: "root", label: "金篆 GoldenDB", icon: "goldendb" },
-  databend: { type: "databend", port: 8000, user: "databend", label: "Databend", icon: "databend" },
-  tdsql: { type: "mysql", port: 3306, user: "root", label: "TDSQL", icon: "tdsql" },
-  polardb: { type: "mysql", port: 3306, user: "root", label: "PolarDB", icon: "polardb" },
-  greatsql: { type: "mysql", port: 3306, user: "root", label: "GreatSQL", icon: "greatsql" },
-  databricks: { type: "databricks", port: 443, user: "token", label: "Databricks SQL", icon: "databricks" },
-  saphana: { type: "saphana", port: 30015, user: "SYSTEM", label: "SAP HANA", icon: "saphana" },
-  teradata: { type: "teradata", port: 1025, user: "", label: "Teradata", icon: "teradata" },
-  vertica: { type: "vertica", port: 5433, user: "dbadmin", label: "Vertica", icon: "vertica" },
-  firebird: { type: "firebird", port: 3050, user: "SYSDBA", label: "Firebird", icon: "firebird" },
-  exasol: { type: "exasol", port: 8563, user: "sys", label: "Exasol", icon: "exasol" },
-  gbase: { type: "gbase", port: 5258, user: "gbasedbt", label: "南大通用 GBase 8a", icon: "gbase" },
-  gbase8a: { type: "gbase", port: 5258, user: "gbasedbt", label: "南大通用 GBase 8a", icon: "gbase" },
-  gbase8s: { type: "gbase", port: 9088, user: "gbasedbt", label: "南大通用 GBase 8s", icon: "gbase" },
-  opengauss: {
-    type: "opengauss",
-    port: 5432,
-    user: "gaussdb",
-    label: "openGauss",
-    icon: "opengauss",
-  },
-  gaussdb: { type: "gaussdb", port: 5432, user: "gaussdb", label: "GaussDB", icon: "gaussdb" },
-  kwdb: { type: "kwdb", port: 26257, user: "root", label: "KWDB", icon: "kwdb" },
-  questdb: { type: "questdb", port: 8812, user: "questdb", label: "QuestDB", icon: "questdb" },
-  kingbase: { type: "kingbase", port: 54321, user: "system", label: "金仓KingbaseES", icon: "kingbase" },
-  highgo: { type: "highgo", port: 5866, user: "highgo", label: "瀚高 HighGo", icon: "highgo" },
-  uxdb: { type: "uxdb", port: 52025, user: "uxdb", label: "优炫 UXDB", icon: "uxdb" },
-  yashandb: { type: "yashandb", port: 1688, user: "sys", label: "崖山 YashanDB", icon: "yashandb" },
-  vastbase: { type: "vastbase", port: 5432, user: "vastbase", label: "海量 Vastbase", icon: "vastbase" },
-  doris: { type: "mysql", port: 9030, user: "root", label: "Doris", icon: "doris", urlParams: "" },
-  selectdb: {
-    type: "mysql",
-    port: 9030,
-    user: "root",
-    label: "SelectDB",
-    icon: "selectdb",
-    urlParams: "",
-  },
-  starrocks: {
-    type: "mysql",
-    port: 9030,
-    user: "root",
-    label: "StarRocks",
-    icon: "starrocks",
-    urlParams: "",
-  },
-  manticoresearch: {
-    type: "manticoresearch",
-    port: 9306,
-    user: "root",
-    label: "Manticore Search",
-    icon: "manticoresearch",
-    urlParams: "",
-  },
-  redshift: { type: "redshift", port: 5439, user: "awsuser", label: "Redshift", icon: "redshift" },
-  cockroachdb: {
-    type: "postgres",
-    port: 26257,
-    user: "root",
-    label: "CockroachDB",
-    icon: "cockroachdb",
-  },
-  dm: { type: "dameng", port: 5236, user: "SYSDBA", label: "达梦 Dameng", icon: "dm" },
-  h2: { type: "h2", port: 9092, user: "sa", label: "H2", icon: "h2" },
-  "h2-legacy": { type: "h2", port: 9092, user: "sa", label: "H2 2.1 Legacy", icon: "h2" },
-  snowflake: { type: "snowflake", port: 443, user: "", label: "Snowflake", icon: "snowflake" },
-  trino: { type: "trino", port: 8080, user: "", label: "Trino", icon: "trino" },
-  prestosql: { type: "prestosql", port: 8080, user: "", label: "PrestoSQL", icon: "presto" },
-  hive: { type: "hive", port: 10000, user: "", label: "Apache Hive", icon: "hive" },
-  kyuubi: { type: "kyuubi", port: 10009, user: "", label: "Apache Kyuubi", icon: "kyuubi", urlParams: "auth=NONE" },
-  impala: { type: "impala", port: 21050, user: "", label: "Apache Impala", icon: "impala", urlParams: "auth=noSasl" },
-  spark: { type: "spark", port: 10015, user: "", label: "Apache Spark", icon: "spark" },
-  db2: { type: "db2", port: 50000, user: "db2inst1", label: "IBM DB2", icon: "db2" },
-  informix: { type: "informix", port: 9088, user: "informix", label: "Informix", icon: "informix" },
-  dremio: { type: "jdbc", port: 31010, user: "", label: "Dremio", icon: "dremio" },
-  jdbcx: { type: "jdbc", port: 0, user: "", label: "JDBCX", icon: "jdbcx" },
-  neo4j: { type: "neo4j", port: 7687, user: "neo4j", label: "Neo4j", icon: "neo4j" },
-  cassandra: { type: "cassandra", port: 9042, user: "cassandra", label: "Cassandra", icon: "cassandra" },
-  bigquery: {
-    type: "bigquery",
-    port: 443,
-    user: "",
-    label: "BigQuery",
-    icon: "bigquery",
-    host: "https://www.googleapis.com/bigquery/v2",
-  },
-  spanner: { type: "spanner", port: 443, user: "", label: "Cloud Spanner", icon: "spanner" },
-  kylin: { type: "kylin", port: 7070, user: "ADMIN", label: "Apache Kylin", icon: "kylin" },
-  ignite: { type: "ignite", port: 10800, user: "", label: "Apache Ignite", icon: "ignite" },
-  ignite3: { type: "ignite3", port: 10800, user: "", label: "Apache Ignite 3", icon: "ignite" },
-  sundb: { type: "sundb", port: 22000, user: "root", label: "科蓝 SUNDB", icon: "sundb" },
-  oscar: { type: "oscar", port: 2003, user: "SYSDBA", label: "神通 OSCAR", icon: "oscar" },
-  jdbc: { type: "jdbc", port: 0, user: "", label: "JDBC", icon: "jdbc" },
-  tdengine: { type: "tdengine", port: 6041, user: "root", label: "TDengine", icon: "tdengine" },
-  xugu: { type: "xugu", port: 5138, user: "", label: "虚谷 XuguDB", icon: "xugu" },
-  iotdb: { type: "iotdb", port: 6667, user: "root", label: "Apache IoTDB", icon: "iotdb" },
-  etcd: { type: "etcd", port: 2379, user: "", label: "etcd", icon: "etcd" },
-  zookeeper: { type: "zookeeper", port: 2181, user: "", label: "Apache ZooKeeper", icon: "zookeeper" },
-  mq: { type: "mq", port: 8080, user: "", label: "Apache Pulsar", icon: "pulsar", host: "127.0.0.1" },
-  kafka: { type: "mq", port: 9092, user: "", label: "Apache Kafka", icon: "kafka", host: "127.0.0.1" },
-  rocketmq: { type: "mq", port: 9876, user: "", label: "Apache RocketMQ", icon: "rocketmq", host: "127.0.0.1" },
-  rabbitmq: { type: "mq", port: 5672, user: "", label: "RabbitMQ", icon: "rabbitmq", host: "127.0.0.1" },
-  nacos: { type: "nacos", port: 8848, user: "nacos", label: "Nacos", icon: "nacos", host: "127.0.0.1" },
-  consul: { type: "consul", port: 8500, user: "", label: "Consul", icon: "consul", host: "127.0.0.1" },
-  mqtt: { type: "mqtt", port: 1883, user: "", label: "MQTT", icon: "mqtt", host: "127.0.0.1" },
-  iris: { type: "iris", port: 1972, user: "_SYSTEM", label: "IRIS", icon: "iris" },
-  influxdb: { type: "influxdb", port: 8086, user: "", label: "InfluxDB", icon: "InfluxDB" },
-  victoriametrics: { type: "victoriametrics", port: 8428, user: "", label: "VictoriaMetrics", icon: "victoriametrics" },
-  custom_mysql: {
-    type: "mysql",
-    port: 3306,
-    user: "root",
-    label: "Custom",
-    icon: "mysql",
-    urlParams: "",
-  },
-  dolt: { type: "mysql", port: 3306, user: "root", label: "Dolt", icon: "dolt", urlParams: "" },
-  custom_postgres: {
-    type: "postgres",
-    port: 5432,
-    user: "postgres",
-    label: "Custom",
-    icon: "postgres",
-    urlParams: "",
-  },
+const driverProfiles: Record<string, ConnectionProfileDefinition> = {
+  ...CONNECTION_PROFILES,
   ...jdbcProductDriverProfiles(),
 };
 
@@ -2481,6 +2261,13 @@ function isCustomCompatibleProfile() {
   return selectedType.value === "custom_mysql" || selectedType.value === "custom_postgres";
 }
 
+function connectionUrlPreferredProfile() {
+  if (selectedType.value === "oceanbase" && form.value.driver_profile === "oceanbase-oracle") {
+    return "oceanbase-oracle";
+  }
+  return selectedType.value;
+}
+
 function applyProfile(val: string, preserveConnectionFields = false) {
   const profile = driverProfiles[val];
   if (!profile) return;
@@ -2964,258 +2751,34 @@ function isH2FileJdbcUrlLikePath(value: string): boolean {
 }
 
 const iconTypeMap: Record<string, string> = {
-  mysql: "mysql",
-  postgres: "postgres",
-  cloudberry: "cloudberry",
-  opentenbase: "opentenbase",
-  sqlite: "sqlite",
-  rqlite: "rqlite",
-  turso: "turso",
-  "cloudflare-d1": "cloudflare-d1",
-  access: "access",
-  redis: "redis",
-  mongodb: "mongodb",
-  dynamodb: "dynamodb",
-  duckdb: "duckdb",
-  clickhouse: "clickhouse",
-  sqlserver: "sqlserver",
-  oracle: "oracle",
-  elasticsearch: "elasticsearch",
-  easysearch: "easysearch",
-  meilisearch: "meilisearch",
-  hbase: "hbase",
-  qdrant: "qdrant",
-  milvus: "milvus",
-  weaviate: "weaviate",
-  chromadb: "chromadb",
-  mariadb: "mariadb",
-  tidb: "tidb",
-  oceanbase: "oceanbase",
-  "oceanbase-oracle": "oceanbase",
-  goldendb: "goldendb",
-  databend: "databend",
-  tdsql: "tdsql",
-  polardb: "polardb",
-  greatsql: "greatsql",
-  databricks: "databricks",
-  saphana: "saphana",
-  teradata: "teradata",
-  vertica: "vertica",
-  firebird: "firebird",
-  exasol: "exasol",
-  gbase: "gbase",
-  opengauss: "opengauss",
-  gaussdb: "gaussdb",
-  kwdb: "kwdb",
-  questdb: "questdb",
-  kingbase: "kingbase",
-  highgo: "highgo",
-  uxdb: "uxdb",
-  yashandb: "yashandb",
-  vastbase: "vastbase",
-  doris: "doris",
-  selectdb: "selectdb",
-  starrocks: "starrocks",
-  manticoresearch: "manticoresearch",
-  redshift: "redshift",
-  cockroachdb: "cockroachdb",
-  tdengine: "tdengine",
-  xugu: "xugu",
-  iotdb: "iotdb",
-  etcd: "etcd",
-  zookeeper: "zookeeper",
-  mq: "mq",
-  kafka: "kafka",
-  rocketmq: "rocketmq",
-  rabbitmq: "rabbitmq",
-  nacos: "nacos",
-  consul: "consul",
-  mqtt: "mqtt",
-  dm: "dm",
-  h2: "h2",
-  snowflake: "snowflake",
-  trino: "trino",
-  prestosql: "prestosql",
-  hive: "hive",
-  kyuubi: "kyuubi",
-  impala: "impala",
-  spark: "spark",
-  db2: "db2",
-  informix: "informix",
-  dremio: "dremio",
-  jdbcx: "jdbcx",
-  iris: "iris",
-  neo4j: "neo4j",
-  cassandra: "cassandra",
-  bigquery: "bigquery",
-  spanner: "spanner",
-  kylin: "kylin",
-  ignite: "ignite",
-  ignite3: "ignite",
-  sundb: "sundb",
-  oscar: "oscar",
-  influxdb: "influxdb",
-  victoriametrics: "victoriametrics",
-  jdbc: "jdbc",
-  custom_mysql: "mysql",
-  dolt: "dolt",
-  custom_postgres: "postgres",
+  ...CONNECTION_PROFILE_ICONS,
   ...jdbcProductIconTypes(),
 };
 
-const dbOptions: DbOption[] = [
-  { value: "postgres", label: "PostgreSQL" },
-  { value: "cloudberry", label: "Apache Cloudberry" },
-  { value: "opentenbase", label: "OpenTenBase" },
-  { value: "mysql", label: "MySQL" },
-  { value: "mongodb", label: "MongoDB" },
-  { value: "dynamodb", label: "Amazon DynamoDB" },
-  { value: "redis", label: "Redis" },
-  { value: "oracle", label: "Oracle" },
-  { value: "sqlite", label: "SQLite" },
-  { value: "sqlserver", label: "SQL Server" },
-  { value: "elasticsearch", label: "Elasticsearch" },
-  { value: "easysearch", label: "Easysearch" },
-  { value: "meilisearch", label: "Meilisearch" },
-  { value: "hbase", label: "Apache HBase" },
-  { value: "qdrant", label: "Qdrant" },
-  { value: "milvus", label: "Milvus" },
-  { value: "weaviate", label: "Weaviate" },
-  { value: "chromadb", label: "ChromaDB" },
-  { value: "dm", label: "达梦 Dameng" },
-  { value: "opengauss", label: "openGauss" },
-  { value: "turso", label: "Turso" },
-  { value: "cloudflare-d1", label: "Cloudflare D1" },
-  { value: "duckdb", label: "DuckDB" },
-  { value: "rqlite", label: "RQLite" },
-  { value: "access", label: "Microsoft Access" },
-  { value: "mariadb", label: "MariaDB" },
-  { value: "clickhouse", label: "ClickHouse" },
-  { value: "gaussdb", label: "GaussDB" },
-  { value: "kwdb", label: "KWDB" },
-  { value: "questdb", label: "QuestDB" },
-  { value: "tidb", label: "TiDB" },
-  { value: "oceanbase", label: "OceanBase" },
-  { value: "goldendb", label: "金篆 GoldenDB" },
-  { value: "databend", label: "Databend" },
-  { value: "tdsql", label: "TDSQL" },
-  { value: "polardb", label: "PolarDB" },
-  { value: "greatsql", label: "GreatSQL" },
-  { value: "doris", label: "Doris" },
-  { value: "selectdb", label: "SelectDB" },
-  { value: "starrocks", label: "StarRocks" },
-  { value: "tdengine", label: "TDengine" },
-  { value: "databricks", label: "Databricks SQL" },
-  { value: "saphana", label: "SAP HANA" },
-  { value: "teradata", label: "Teradata" },
-  { value: "vertica", label: "Vertica" },
-  { value: "firebird", label: "Firebird" },
-  { value: "exasol", label: "Exasol" },
-  { value: "gbase", label: "南大通用 GBase" },
-  { value: "kingbase", label: "金仓KingbaseES" },
-  { value: "highgo", label: "瀚高 HighGo" },
-  { value: "uxdb", label: "优炫 UXDB" },
-  { value: "yashandb", label: "崖山 YashanDB" },
-  { value: "vastbase", label: "海量 Vastbase" },
-  { value: "redshift", label: "Redshift" },
-  { value: "cockroachdb", label: "CockroachDB" },
-  { value: "h2", label: "H2" },
-  { value: "snowflake", label: "Snowflake" },
-  { value: "trino", label: "Trino" },
-  { value: "prestosql", label: "PrestoSQL" },
-  { value: "hive", label: "Hive" },
-  { value: "kyuubi", label: "Apache Kyuubi" },
-  { value: "impala", label: "Apache Impala" },
-  { value: "spark", label: "Apache Spark" },
-  { value: "db2", label: "DB2" },
-  { value: "informix", label: "Informix" },
-  { value: "neo4j", label: "Neo4j" },
-  { value: "cassandra", label: "Cassandra" },
-  { value: "bigquery", label: "BigQuery" },
-  { value: "spanner", label: "Cloud Spanner" },
-  { value: "kylin", label: "Kylin" },
-  { value: "ignite", label: "Apache Ignite" },
-  { value: "ignite3", label: "Apache Ignite 3" },
-  { value: "sundb", label: "科蓝 SUNDB" },
-  { value: "oscar", label: "神通 OSCAR" },
-  { value: "xugu", label: "虚谷 XuguDB" },
-  { value: "iotdb", label: "Apache IoTDB" },
-  { value: "etcd", label: "etcd" },
-  { value: "zookeeper", label: "Apache ZooKeeper" },
-  { value: "mq", label: "Apache Pulsar" },
-  { value: "kafka", label: "Apache Kafka" },
-  { value: "rocketmq", label: "Apache RocketMQ" },
-  { value: "rabbitmq", label: "RabbitMQ" },
-  { value: "mqtt", label: "MQTT" },
-  { value: "nacos", label: "Nacos" },
-  { value: "consul", label: "Consul" },
-  { value: "influxdb", label: "InfluxDB" },
-  { value: "victoriametrics", label: "VictoriaMetrics" },
-  { value: "iris", label: "IRIS" },
-  { value: "jdbcx", label: "JDBCX" },
-  { value: "manticoresearch", label: "Manticore Search" },
-  { value: "custom_mysql", label: "Custom (MySQL)" },
-  { value: "dolt", label: "Dolt" },
-  { value: "custom_postgres", label: "Custom (PostgreSQL)" },
-  { value: "dremio", label: "Dremio" },
-  ...jdbcProductPickerOptions(),
+const dbCategoryMetadata: Array<{ key: DbCategoryKey; titleKey: string }> = [
+  { key: "sql", titleKey: "connection.databaseCategorySql" },
+  { key: "analytics", titleKey: "connection.databaseCategoryAnalytics" },
+  { key: "domestic", titleKey: "connection.databaseCategoryDomestic" },
+  { key: "lightweight", titleKey: "connection.databaseCategoryLightweight" },
+  { key: "document", titleKey: "connection.databaseCategoryDocument" },
+  { key: "graph_ai", titleKey: "connection.databaseCategoryGraphAi" },
+  { key: "timeseries", titleKey: "connection.databaseCategoryTimeseries" },
+  { key: "mq", titleKey: "connection.databaseCategoryMq" },
+  { key: "registry_config", titleKey: "connection.databaseCategoryRegistryConfig" },
 ];
 
-const dbCategoryDefinitions: Array<{
-  key: DbCategoryKey;
-  titleKey: string;
-  optionValues: string[];
-}> = [
-  {
-    key: "sql",
-    titleKey: "connection.databaseCategorySql",
-    optionValues: ["postgres", "mysql", "oracle", "sqlserver", "mariadb", "cockroachdb", "db2", "informix", "firebird", "iris", "spanner", "jdbcx", "custom_mysql", "custom_postgres", "dolt"],
-  },
-  {
-    key: "analytics",
-    titleKey: "connection.databaseCategoryAnalytics",
-    optionValues: ["cloudberry", "clickhouse", "doris", "starrocks", "databend", "selectdb", "databricks", "saphana", "teradata", "vertica", "exasol", "redshift", "snowflake", "trino", "prestosql", "hive", "kyuubi", "impala", "spark", "bigquery", "kylin", "ignite", "ignite3", "dremio"],
-  },
-  {
-    key: "domestic",
-    titleKey: "connection.databaseCategoryDomestic",
-    optionValues: ["dm", "opengauss", "opentenbase", "gaussdb", "kwdb", "tidb", "oceanbase", "goldendb", "tdsql", "polardb", "greatsql", "gbase", "kingbase", "highgo", "uxdb", "yashandb", "vastbase", "sundb", "oscar", "xugu"],
-  },
-  {
-    key: "lightweight",
-    titleKey: "connection.databaseCategoryLightweight",
-    optionValues: ["sqlite", "turso", "cloudflare-d1", "duckdb", "rqlite", "access", "h2"],
-  },
-  {
-    key: "document",
-    titleKey: "connection.databaseCategoryDocument",
-    optionValues: ["mongodb", "dynamodb", "redis", "elasticsearch", "easysearch", "meilisearch", "hbase", "manticoresearch", "cassandra"],
-  },
-  {
-    key: "graph_ai",
-    titleKey: "connection.databaseCategoryGraphAi",
-    optionValues: ["neo4j", "qdrant", "milvus", "weaviate", "chromadb"],
-  },
-  {
-    key: "timeseries",
-    titleKey: "connection.databaseCategoryTimeseries",
-    optionValues: ["questdb", "tdengine", "iotdb", "influxdb", "victoriametrics"],
-  },
-  {
-    key: "mq",
-    titleKey: "connection.databaseCategoryMq",
-    optionValues: ["mq", "kafka", "rocketmq", "rabbitmq", "mqtt"],
-  },
-  {
-    key: "registry_config",
-    titleKey: "connection.databaseCategoryRegistryConfig",
-    optionValues: ["etcd", "zookeeper", "nacos", "consul"],
-  },
-];
-
-for (const category of dbCategoryDefinitions) {
-  category.optionValues.push(...jdbcProductProfileIdsForCategory(category.key));
+function jdbcProductCategory(profileId: string): DbCategoryKey {
+  const category = dbCategoryMetadata.find(({ key }) => jdbcProductProfileIdsForCategory(key).includes(profileId))?.key;
+  if (!category) throw new Error(`JDBC product profile ${profileId} has no connection picker category`);
+  return category;
 }
+
+const dbOptions: DbOption[] = [...CONNECTION_PICKER_OPTIONS, ...jdbcProductPickerOptions().map((option) => ({ ...option, category: jdbcProductCategory(option.value) }))];
+
+const dbCategoryDefinitions = dbCategoryMetadata.map((category) => ({
+  ...category,
+  optionValues: dbOptions.filter((option) => option.category === category.key).map((option) => option.value),
+}));
 
 // Keep the picker exhaustive as database drivers are added or reorganized.
 assertCompleteDatabaseCategories(
@@ -3291,7 +2854,8 @@ function supportsNativeAgentJdbcDriverConfigType(dbType: DatabaseType): boolean 
 }
 
 const jdbcBackedDatabaseTypes = new Set<DatabaseType>(["jdbc", "prestosql", "bigquery"]);
-const isJdbcConnection = computed(() => form.value.db_type === "jdbc");
+const connectionFormKind = computed(() => databaseConnectionFormKind(form.value.db_type));
+const isJdbcConnection = computed(() => connectionFormKind.value === "jdbc");
 const isJdbcxConnection = computed(() => isJdbcConnection.value && form.value.driver_profile === JDBCX_DRIVER_PROFILE);
 const isJdbcProductConnection = computed(() => Boolean(activeJdbcProductProfile.value));
 const jdbcxHighPrivilegeExtensionsAllowed = computed({
@@ -3870,7 +3434,7 @@ function applyConnectionUrlToForm(input: string): boolean {
       return true;
     }
 
-    const parsed = parseConnectionUrl(input, selectedType.value);
+    const parsed = parseConnectionUrl(input, connectionUrlPreferredProfile());
     form.value = applyParsedConnectionUrl(form.value, parsed);
     if (form.value.db_type === "victoriametrics") {
       hydrateVictoriaMetricsFields(form.value.external_config);
@@ -3881,7 +3445,12 @@ function applyConnectionUrlToForm(input: string): boolean {
       resetMeilisearchHostInput();
     }
     oracleTnsAdminPath.value = parseOracleTnsConnectionString(parsed.connectionString)?.tnsAdmin || "";
-    selectedType.value = parsed.driverProfile;
+    if (parsed.driverProfile === "oceanbase-oracle") {
+      oceanbaseSubMode.value = "oracle";
+      selectedType.value = "oceanbase";
+    } else {
+      selectedType.value = parsed.driverProfile;
+    }
     customDriverName.value = isCustomCompatibleProfile() ? parsed.driverLabel : "";
     mongoUseUrl.value = !!parsed.useMongoUrl;
     if (form.value.db_type === "h2") {
@@ -3936,7 +3505,7 @@ function formValueForSubmit(): Omit<ConnectionConfig, "id"> {
       return applyConnectionDraftToConfig(form.value, { ...draft, oneTime: undefined });
     }
 
-    return applyParsedConnectionUrl(form.value, parseConnectionUrl(url, selectedType.value));
+    return applyParsedConnectionUrl(form.value, parseConnectionUrl(url, connectionUrlPreferredProfile()));
   }
 
   if (form.value.db_type === "meilisearch" && hasPendingMeilisearchHostInput()) {

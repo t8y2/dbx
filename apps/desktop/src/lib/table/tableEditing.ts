@@ -26,9 +26,10 @@ export function editablePrimaryKeys(databaseType: DatabaseType | undefined, colu
 
 export function editableRowIdentifierColumns(databaseType: DatabaseType | undefined, columns: ColumnInfo[], indexes?: IndexInfo[], tableType?: string): string[] {
   const primaryKeys = editablePrimaryKeys(databaseType, columns, tableType);
-  if (primaryKeys.length > 0) return primaryKeys;
+  const oracleRowIdFallback = getDatabaseCapability(databaseType).syntheticKey === "oracle-rowid" && primaryKeys.length === 1 && primaryKeys[0]?.toUpperCase() === DBX_ROWID_COLUMN;
+  if (primaryKeys.length > 0 && !oracleRowIdFallback) return primaryKeys;
   const uniqueIndex = indexes?.filter((index) => !index.filter && index.columns.length > 0 && (index.is_primary || index.is_unique)).sort((left, right) => Number(right.is_primary) - Number(left.is_primary) || left.columns.length - right.columns.length)[0];
-  return uniqueIndex?.columns ?? [];
+  return uniqueIndex?.columns ?? primaryKeys;
 }
 
 export function isTableDataEditable(databaseType: DatabaseType | undefined, primaryKeys: string[], tableType?: string): boolean {

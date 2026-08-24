@@ -8,7 +8,7 @@ export type ObjectBrowserRow = {
   name: string;
   displayName: string;
   schema?: string;
-  type: "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
+  type: "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
   valid?: boolean | null;
   signature?: string | null;
   comment?: string | null;
@@ -24,7 +24,7 @@ export type ObjectBrowserRow = {
 
 export type ObjectBrowserSortKey = "name" | "type" | "estimatedRows" | "totalBytes" | "created_at" | "updated_at" | "comment";
 export type ObjectBrowserSortDirection = "asc" | "desc";
-export type ObjectBrowserFilter = "all" | "tables" | "views" | "materializedViews" | "procedures" | "functions" | "triggers" | "sequences" | "packages" | "types";
+export type ObjectBrowserFilter = "all" | "tables" | "views" | "materializedViews" | "procedures" | "functions" | "triggers" | "events" | "sequences" | "packages" | "types";
 export type ObjectBrowserFilterCounts = Record<ObjectBrowserFilter, number>;
 
 export type ObjectBrowserPinnedTreeNodeContext = {
@@ -42,6 +42,7 @@ export function objectBrowserRowTreeNodeType(type: ObjectBrowserRow["type"]): Tr
   if (type === "PROCEDURE") return "procedure";
   if (type === "FUNCTION") return "function";
   if (type === "TRIGGER") return "trigger";
+  if (type === "EVENT") return "event";
   if (type === "SEQUENCE") return "sequence";
   if (type === "PACKAGE_BODY") return "package-body";
   if (type === "PACKAGE") return "package";
@@ -142,6 +143,7 @@ export function normalizeObjectBrowserType(type: string): ObjectBrowserRow["type
   if (normalized.includes("TYPE_BODY")) return "TYPE_BODY";
   if (normalized.includes("PACKAGE")) return "PACKAGE";
   if (normalized.includes("TRIGGER")) return "TRIGGER";
+  if (normalized.includes("EVENT")) return "EVENT";
   if (normalized.includes("TYPE")) return "TYPE";
   if (normalized.includes("MATERIALIZED_VIEW")) return "MATERIALIZED_VIEW";
   if (value.includes("VIEW")) return "VIEW";
@@ -250,6 +252,7 @@ export function countObjectBrowserRowsByFilter(rows: ObjectBrowserRow[]): Object
     procedures: 0,
     functions: 0,
     triggers: 0,
+    events: 0,
     sequences: 0,
     packages: 0,
     types: 0,
@@ -262,6 +265,7 @@ export function countObjectBrowserRowsByFilter(rows: ObjectBrowserRow[]): Object
     else if (row.type === "PROCEDURE") counts.procedures++;
     else if (row.type === "FUNCTION") counts.functions++;
     else if (row.type === "TRIGGER") counts.triggers++;
+    else if (row.type === "EVENT") counts.events++;
     else if (row.type === "SEQUENCE") counts.sequences++;
     else if (row.type === "PACKAGE" || row.type === "PACKAGE_BODY") counts.packages++;
     else if (row.type === "TYPE" || row.type === "TYPE_BODY") counts.types++;

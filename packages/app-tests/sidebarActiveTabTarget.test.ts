@@ -542,6 +542,13 @@ test("sidebar node scrolling supports top and smart locate alignment", () => {
   assert.equal(scrollTopForSidebarNode({ index: 0, currentScrollTop: 300, viewportHeight: 140, topOcclusionHeight: 28, align: "smart" }), 0);
 });
 
+test("sidebar node scrolling centers explicit tab locate with sticky and boundary clamping", () => {
+  assert.equal(scrollTopForSidebarNode({ index: 20, currentScrollTop: 0, viewportHeight: 140, align: "center" }), 504);
+  assert.equal(scrollTopForSidebarNode({ index: 11, currentScrollTop: 0, viewportHeight: 140, topOcclusionHeight: 28, align: "center" }), 238);
+  assert.equal(scrollTopForSidebarNode({ index: 0, currentScrollTop: 300, viewportHeight: 140, topOcclusionHeight: 28, align: "center" }), 0);
+  assert.equal(scrollTopForSidebarNode({ index: 20, currentScrollTop: 0, viewportHeight: 140, scrollHeight: 588, align: "center" }), 448);
+});
+
 test("active sidebar selection only scrolls on tab or setting changes", () => {
   assert.equal(
     shouldScrollActiveSidebarSelection({

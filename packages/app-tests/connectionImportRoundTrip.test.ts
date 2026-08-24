@@ -4,6 +4,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { useConnectionStore } from "../../apps/desktop/src/stores/connectionStore.ts";
 import { hasSidebarLayoutEntries } from "../../apps/desktop/src/lib/sidebar/sidebarLayout.ts";
 import { decryptConfig } from "../../apps/desktop/src/lib/backend/configCrypto.ts";
+import type { ConnectionExportProtection } from "../../apps/desktop/src/lib/connection/connectionConfigTransfer.ts";
 import type { ConnectionConfig, SidebarLayout, TreeNode, TunnelProfile } from "../../apps/desktop/src/types/database.ts";
 
 const PASSPHRASE = "round-trip-pass";
@@ -114,7 +115,7 @@ function outline(nodes: TreeNode[]): string[] {
 }
 
 /** Build "machine A" through the real store API and export it through the real export path. */
-async function exportFromMachineA(): Promise<string> {
+async function exportFromMachineA(protection: ConnectionExportProtection = { mode: "encrypted", passphrase: PASSPHRASE }): Promise<string> {
   const backend = installBackend([], null);
   const capture = installExportCapture();
   const storage = installMemoryStorage();
@@ -132,7 +133,7 @@ async function exportFromMachineA(): Promise<string> {
 
     assert.deepEqual(outline(store.treeNodes), ["[Prod]", "Prod/Prod DB 1", "Prod/Prod DB 2", "[Dev]", "Dev/Dev DB 1", "Scratch"]);
 
-    await store.exportConnectionsToFile(PASSPHRASE);
+    await store.exportConnectionsToFile(protection);
     return await capture.content();
   } finally {
     storage.restore();
@@ -228,7 +229,7 @@ test("selective encrypted export keeps only chosen connections, layout, and tunn
     await store.addConnection(conn("a-4", "Scratch", 3309), null);
 
     const selected = store.connections.filter((connection) => connection.name === "Prod DB 1" || connection.name === "Dev DB 1").map((connection) => connection.id);
-    await store.exportConnectionsToFile(PASSPHRASE, selected);
+    await store.exportConnectionsToFile({ mode: "encrypted", passphrase: PASSPHRASE }, selected);
     const decrypted = await decryptExport(await capture.content());
 
     assert.deepEqual(
@@ -255,6 +256,59 @@ test("selective encrypted export keeps only chosen connections, layout, and tunn
       }
     };
     walk(decrypted.layout.order);
+    assert.deepEqual(layoutIds.sort(), selected.slice().sort());
+  } finally {
+    storage.restore();
+    capture.restore();
+    backend.restore();
+  }
+});
+
+test("selective plaintext export keeps only chosen connections, layout, and tunnel profiles", async () => {
+  const backend = installBackend([], null, [
+    { type: "ssh", id: "tunnel-1", host: "bastion-1", port: 22, user: "root" },
+    { type: "ssh", id: "tunnel-2", host: "bastion-2", port: 22, user: "root" },
+  ]);
+  const capture = installExportCapture();
+  const storage = installMemoryStorage();
+  try {
+    setActivePinia(createPinia());
+    const store = useConnectionStore();
+    await store.initFromDisk();
+
+    const prod = store.createConnectionGroup("Prod");
+    const dev = store.createConnectionGroup("Dev");
+    await store.addConnection({ ...conn("a-1", "Prod DB 1", 3306), transport_layers: [tunnelLayer("layer-a", "tunnel-1")] }, prod);
+    await store.addConnection({ ...conn("a-2", "Prod DB 2", 3307), transport_layers: [tunnelLayer("layer-b", "tunnel-2")] }, prod);
+    await store.addConnection({ ...conn("a-3", "Dev DB 1", 3308), transport_layers: [tunnelLayer("layer-c", "tunnel-1")] }, dev);
+    await store.addConnection(conn("a-4", "Scratch", 3309), null);
+
+    const selected = store.connections.filter((connection) => connection.name === "Prod DB 1" || connection.name === "Dev DB 1").map((connection) => connection.id);
+    await store.exportConnectionsToFile({ mode: "plaintext" }, selected);
+    const plain = JSON.parse(await capture.content());
+
+    assert.equal(plain.format, undefined);
+    assert.equal(plain.salt, undefined);
+    assert.deepEqual(
+      plain.connections.map((connection: ConnectionConfig) => connection.name),
+      ["Prod DB 1", "Dev DB 1"],
+    );
+    assert.deepEqual(
+      plain.tunnelProfiles.map((profile: TunnelProfile) => profile.id),
+      ["tunnel-1"],
+    );
+    assert.deepEqual(
+      plain.layout.groups.map((group: { name: string }) => group.name),
+      ["Prod", "Dev"],
+    );
+    const layoutIds: string[] = [];
+    const walk = (entries: Array<{ type: string; id: string; children?: typeof entries }>) => {
+      for (const entry of entries) {
+        if (entry.type === "connection") layoutIds.push(entry.id);
+        else if (entry.children) walk(entry.children);
+      }
+    };
+    walk(plain.layout.order);
     assert.deepEqual(layoutIds.sort(), selected.slice().sort());
   } finally {
     storage.restore();
@@ -347,6 +401,69 @@ test("wrong passphrase and preview-only parse do not mutate local connections", 
     assert.equal(store.connections.length, 0);
   } finally {
     storage.restore();
+    backend.restore();
+  }
+});
+
+test("plaintext dbx export round-trips through the password-free import path", async () => {
+  const exported = await exportFromMachineA({ mode: "plaintext" });
+  const backend = installBackend([], null);
+  const storage = installMemoryStorage();
+  try {
+    setActivePinia(createPinia());
+    const store = useConnectionStore();
+    await store.initFromDisk();
+
+    const preview = await store.parseConnectionsImport(exported, null);
+    assert.equal(preview.connections.length, 4);
+    assert.ok(preview.layout);
+    const selectedIds = preview.connections.filter((connection) => connection.name === "Prod DB 1" || connection.name === "Dev DB 1").map((connection) => connection.id);
+    const result = await store.applyConnectionsImport(preview, selectedIds);
+
+    assert.equal(result.count, 2);
+    assert.ok(result.layout);
+    assert.deepEqual(store.connections.map((connection) => connection.name).sort(), ["Dev DB 1", "Prod DB 1"]);
+  } finally {
+    storage.restore();
+    backend.restore();
+  }
+});
+
+test("encrypted export rejects an empty passphrase instead of selecting plaintext", async () => {
+  const backend = installBackend([], null);
+  const storage = installMemoryStorage();
+  try {
+    setActivePinia(createPinia());
+    const store = useConnectionStore();
+    await store.initFromDisk();
+
+    await assert.rejects(() => store.exportConnectionsToFile({ mode: "encrypted", passphrase: "" }), /passphrase_required/);
+  } finally {
+    storage.restore();
+    backend.restore();
+  }
+});
+
+test("encrypted export fails closed when Web Crypto is unavailable", async () => {
+  const backend = installBackend([], null);
+  const capture = installExportCapture();
+  const storage = installMemoryStorage();
+  const originalCrypto = globalThis.crypto;
+  Object.defineProperty(globalThis, "crypto", {
+    configurable: true,
+    value: { getRandomValues: originalCrypto.getRandomValues.bind(originalCrypto) },
+  });
+  try {
+    setActivePinia(createPinia());
+    const store = useConnectionStore();
+    await store.initFromDisk();
+
+    await assert.rejects(() => store.exportConnectionsToFile({ mode: "encrypted", passphrase: PASSPHRASE }), /crypto_unavailable/);
+    await assert.rejects(() => capture.content(), /export did not produce a file blob/);
+  } finally {
+    Object.defineProperty(globalThis, "crypto", { configurable: true, value: originalCrypto });
+    storage.restore();
+    capture.restore();
     backend.restore();
   }
 });

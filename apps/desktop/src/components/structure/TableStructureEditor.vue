@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { AlertTriangle, Check, ChevronDown, ChevronUp, Copy, Database, Info, KeyRound, ListChevronsUpDown, Loader2, Maximize2, Plus, RefreshCw, Save, Search, Settings, SlidersHorizontal, Trash2, X } from "@lucide/vue";
+import { AlertTriangle, Check, ChevronDown, ChevronUp, Copy, Database, Info, KeyRound, ListChevronsUpDown, Loader2, Maximize2, Plus, RefreshCw, Save, Search, Settings, SlidersHorizontal, Trash2, UserRound, X } from "@lucide/vue";
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -28,7 +28,7 @@ import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sql/sqlFor
 import { queryTimeoutSecsForConcurrentIndex, queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { invalidateObjectDdl, loadObjectDdl } from "@/lib/metadata/objectDdlCache";
-import { loadObjectMetadataFacet, type ObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
+import { invalidateObjectMetadataCache, loadObjectMetadataFacet, type ObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
 import { invalidateTableMetadataCache } from "@/lib/metadata/tableMetadataCache";
 import { type BuildTableStructureChangeSqlOptions, type EditableStructureColumn, type EditableStructureForeignKey, type EditableStructureIndex, type EditableStructureTrigger } from "@/lib/table/tableStructureEditorSql";
 import { PRESET_FIELDS_TEMPLATE_ID, createTableColumnTemplateDrafts } from "@/lib/table/tableColumnTemplates";
@@ -42,6 +42,7 @@ import { getConcurrentIndexAvailability, concurrentIndexNamesInStatements, norma
 import { orderedColumnIndexes, uniqueDataGridColumnOrderKeys } from "@/lib/dataGrid/dataGridColumnOrder";
 import { loadTableDataGridColumnOrder, notifyTableDataGridColumnOrderChanged, removeTableDataGridColumnOrder, saveTableDataGridColumnOrder, tableDataGridColumnOrderScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 import { connectionObjectTreeQuerySchema, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { postgresListRolesSql, usersFromPostgresRolesResult } from "@/lib/database/databaseUserAdmin";
 import type { ColumnInfo, ConstraintInfo, TableInfo, TableInfoTab, TableStructureEditorDraft, TableStructureEditorTarget, TableStructureEditorViewport } from "@/types/database";
 import {
   applyManticoreDdlColumnExtras,
@@ -894,6 +895,19 @@ const canAddColumn = computed(() => canAddTableStructureColumn(databaseType.valu
 const newTableName = ref("");
 const tableComment = ref("");
 const originalTableComment = ref("");
+const tableOwner = ref("");
+const originalTableOwner = ref("");
+const tableOwnerLoading = ref(false);
+const tableOwnerLoadError = ref("");
+const tableOwnerRoles = ref<string[]>([]);
+const tableOwnerRolesLoading = ref(false);
+const tableOwnerRolesLoadError = ref("");
+const supportsTableOwner = computed(() => !isCreateMode.value && databaseType.value === "postgres");
+const tableOwnerOptions = computed(() => {
+  const owner = tableOwner.value;
+  if (!owner || tableOwnerRoles.value.includes(owner)) return tableOwnerRoles.value;
+  return [owner, ...tableOwnerRoles.value];
+});
 const targetLabel = computed(() => buildStructureTargetLabel(connection.value?.name, props.database, props.schema, isCreateMode.value ? undefined : props.tableName));
 
 function isManticoreTextColumn(column: EditableStructureColumn): boolean {
@@ -909,6 +923,8 @@ function isManticoreJsonColumn(column: EditableStructureColumn): boolean {
 
 let sqlPreviewRequestId = 0;
 let structureLoadRequestId = 0;
+let tableOwnerLoadRequestId = 0;
+let tableOwnerRolesLoadRequestId = 0;
 let dataTypeOptionsRequestId = 0;
 let sqlPreviewDebounceTimer: ReturnType<typeof setTimeout> | undefined;
 let deferredSqlPreviewRefresh = false;
@@ -1094,6 +1110,8 @@ function createCurrentDraft(initialized = true): TableStructureEditorDraft {
     newTableName: newTableName.value,
     tableComment: tableComment.value,
     originalTableComment: originalTableComment.value,
+    tableOwner: tableOwner.value,
+    originalTableOwner: originalTableOwner.value,
     columns: cloneDraftValue(columns.value),
     indexes: cloneDraftValue(indexes.value),
     foreignKeys: cloneDraftValue(foreignKeys.value),
@@ -1122,6 +1140,8 @@ function restoreDraft(draft: TableStructureEditorDraft) {
   newTableName.value = draft.newTableName || "";
   tableComment.value = draft.tableComment || "";
   originalTableComment.value = draft.originalTableComment || "";
+  tableOwner.value = draft.tableOwner || "";
+  originalTableOwner.value = draft.originalTableOwner || "";
   columns.value = cloneDraftValue(draft.columns || []);
   // Existing-index edits never support Concurrent (the checkbox is disabled and
   // the core builder rejects the request), so a stale `concurrently: true`
@@ -1206,7 +1226,7 @@ function hasPendingStructureChanges(): boolean {
     return !!newTableName.value.trim() || !!tableComment.value.trim() || columns.value.length > 0 || indexes.value.length > 0 || foreignKeys.value.length > 0 || triggers.value.length > 0;
   }
   const scope = captureStructureRefreshScope();
-  return scope.columns || scope.indexes || scope.foreignKeys || scope.triggers || scope.tableComment;
+  return scope.columns || scope.indexes || scope.foreignKeys || scope.triggers || scope.tableComment || (supportsTableOwner.value && tableOwner.value.trim() !== originalTableOwner.value.trim());
 }
 
 function clearSqlPreviewState() {
@@ -1390,9 +1410,18 @@ async function refreshSqlPreview() {
   const options = structureChangeOptions();
   try {
     const result = isCreateMode.value ? await api.buildCreateTableSql(options) : hasSqliteTypeChange.value ? await api.previewSqliteTableStructureChange(props.connectionId, props.database, options) : await api.buildTableStructureChangeSql(options);
+    const ownerResult = supportsTableOwner.value
+      ? await api.buildTableOwnerChangeSql({
+          databaseType: databaseType.value,
+          schema: metadataSchema.value,
+          tableName: props.tableName || "",
+          owner: tableOwner.value,
+          originalOwner: originalTableOwner.value,
+        })
+      : { statements: [], warnings: [] };
     if (requestId !== sqlPreviewRequestId) return;
-    pendingStatements.value = result.statements;
-    warnings.value = result.warnings;
+    pendingStatements.value = [...result.statements, ...ownerResult.statements];
+    warnings.value = [...result.warnings, ...ownerResult.warnings];
     sqliteSchemaRevision.value = "schemaRevision" in result && typeof result.schemaRevision === "string" ? result.schemaRevision : undefined;
   } catch (e: any) {
     if (requestId !== sqlPreviewRequestId) return;
@@ -1459,6 +1488,15 @@ function resetState() {
   newTableName.value = "";
   tableComment.value = "";
   originalTableComment.value = "";
+  tableOwner.value = "";
+  originalTableOwner.value = "";
+  tableOwnerLoadRequestId += 1;
+  tableOwnerLoading.value = false;
+  tableOwnerLoadError.value = "";
+  tableOwnerRoles.value = [];
+  tableOwnerRolesLoadRequestId += 1;
+  tableOwnerRolesLoading.value = false;
+  tableOwnerRolesLoadError.value = "";
   columnSearchText.value = "";
   highlightedColumnId.value = null;
   indexSearchText.value = "";
@@ -1486,9 +1524,9 @@ async function reloadStructureFromDatabase() {
   loadedMetadataFacets.clear();
   if (refreshDdl) {
     ddlFetched.value = false;
-    await fetchDdl(true);
+    await Promise.all([fetchDdl(true), loadTableOwner(true), loadTableOwnerRoles()]);
   } else {
-    await loadStructure(false, visibleTableStructureRefreshScope(activeTab.value), true, { blockSecondaryMetadata: true, forceDdl: true, forceMetadata: true });
+    await Promise.all([loadStructure(false, visibleTableStructureRefreshScope(activeTab.value), true, { blockSecondaryMetadata: true, forceDdl: true, forceMetadata: true }), loadTableOwner(true), loadTableOwnerRoles()]);
   }
 }
 
@@ -1521,6 +1559,59 @@ async function fetchTableCommentValue(connectionId: string, database: string, sc
 
 function loadCachedTableComment(request: ReturnType<typeof ddlRequest>, force = false): Promise<{ value: string | undefined; cacheStatus: "memory" | "disk" | "remote" }> {
   return loadObjectMetadataFacet(request, "comment", () => fetchTableCommentValue(request.connectionId, request.database, request.schema, request.tableName, request.catalog), { force });
+}
+
+async function loadTableOwner(force = false, preserveDraft = false) {
+  const connectionId = props.connectionId;
+  const database = props.database;
+  const schema = metadataSchema.value;
+  const tableName = props.tableName;
+  const catalog = props.catalog;
+  if (!supportsTableOwner.value || !connectionId || !database || !schema || !tableName) return;
+  const requestId = ++tableOwnerLoadRequestId;
+  tableOwnerLoading.value = true;
+  tableOwnerLoadError.value = "";
+  try {
+    await store.ensureConnected(connectionId);
+    const result = await loadObjectMetadataFacet({ connectionId, database, schema, tableName, catalog }, "owner", () => api.getTableOwner(connectionId, database, schema, tableName), { force });
+    if (requestId !== tableOwnerLoadRequestId) return;
+    const owner = result.value || "";
+    originalTableOwner.value = owner;
+    if (!preserveDraft) tableOwner.value = owner;
+    loadedMetadataFacets.add("owner");
+  } catch (error: any) {
+    if (requestId !== tableOwnerLoadRequestId) return;
+    tableOwnerLoadError.value = error?.message || String(error);
+  } finally {
+    if (requestId === tableOwnerLoadRequestId) tableOwnerLoading.value = false;
+  }
+}
+
+async function loadTableOwnerRoles() {
+  const connectionId = props.connectionId;
+  const database = props.database;
+  if (!supportsTableOwner.value || !connectionId || !database) return;
+  const requestId = ++tableOwnerRolesLoadRequestId;
+  tableOwnerRolesLoading.value = true;
+  tableOwnerRolesLoadError.value = "";
+  try {
+    await store.ensureConnected(connectionId);
+    const result = await api.executeQuery(connectionId, database, postgresListRolesSql(), undefined, undefined, { maxRows: 5000 });
+    if (requestId !== tableOwnerRolesLoadRequestId) return;
+    tableOwnerRoles.value = [
+      ...new Set(
+        usersFromPostgresRolesResult(result)
+          .map((role) => role.user)
+          .filter(Boolean),
+      ),
+    ];
+  } catch (error: any) {
+    if (requestId !== tableOwnerRolesLoadRequestId) return;
+    tableOwnerRoles.value = [];
+    tableOwnerRolesLoadError.value = error?.message || String(error);
+  } finally {
+    if (requestId === tableOwnerRolesLoadRequestId) tableOwnerRolesLoading.value = false;
+  }
 }
 
 async function loadStructure(
@@ -1679,7 +1770,7 @@ async function loadStructure(
 
 async function refreshStructureAfterSave(scope: TableStructureRefreshScope, characterLengthUnitsAfterSave: ReadonlyMap<string, string>) {
   try {
-    await loadStructure(true, scope, false, { blockSecondaryMetadata: true, characterLengthUnitsAfterSave });
+    await Promise.all([loadStructure(true, scope, false, { blockSecondaryMetadata: true, characterLengthUnitsAfterSave }), loadTableOwner(true)]);
   } catch (e) {
     console.warn("[DBX][structure-editor:post-save-refresh-failed]", e);
   } finally {
@@ -1993,10 +2084,18 @@ function isDamengIdentityChecked(column: EditableStructureColumn): boolean {
   return !!column.extra.autoIncrement || !!column.extra.identity;
 }
 
+function originalHasDamengIdentity(column: EditableStructureColumn): boolean {
+  return column.original?.extra?.toLowerCase().includes("identity") ?? false;
+}
+
 function canEditDamengIdentity(column: EditableStructureColumn): boolean {
-  if (column.original || column.markedForDrop || !isDamengIdentityCompatibleDataType(column.dataType)) return false;
+  if (column.markedForDrop || !isDamengIdentityCompatibleDataType(column.dataType)) return false;
   // DM8 permits only one identity column per table, so prevent creating an invalid draft in the editor.
   return isDamengIdentityChecked(column) || !columns.value.some((candidate) => candidate !== column && !candidate.markedForDrop && isDamengIdentityChecked(candidate));
+}
+
+function canEditDamengIdentityParameters(column: EditableStructureColumn): boolean {
+  return canEditDamengIdentity(column) && !originalHasDamengIdentity(column);
 }
 
 function clearDamengIdentity(column: EditableStructureColumn) {
@@ -2012,10 +2111,11 @@ function syncDamengIdentityForDataType(column: EditableStructureColumn) {
 }
 
 function ensureDamengIdentity(column: EditableStructureColumn) {
+  const originalIdentity = parseExtraToColumnExtra(column.original?.extra, "dameng").identity;
   column.extra.autoIncrement = true;
   column.extra.identity = {
-    seed: column.extra.identity?.seed ?? 1,
-    increment: column.extra.identity?.increment ?? 1,
+    seed: column.extra.identity?.seed ?? originalIdentity?.seed ?? 1,
+    increment: column.extra.identity?.increment ?? originalIdentity?.increment ?? 1,
   };
 }
 
@@ -2030,13 +2130,13 @@ function setDamengIdentity(column: EditableStructureColumn, checked: boolean) {
 }
 
 function updateDamengIdentitySeed(column: EditableStructureColumn, value: string | number) {
-  if (!canEditDamengIdentity(column)) return;
+  if (!canEditDamengIdentityParameters(column)) return;
   ensureDamengIdentity(column);
   column.extra.identity!.seed = parseOptionalNumberInput(value);
 }
 
 function updateDamengIdentityIncrement(column: EditableStructureColumn, value: string | number) {
-  if (!canEditDamengIdentity(column)) return;
+  if (!canEditDamengIdentityParameters(column)) return;
   ensureDamengIdentity(column);
   column.extra.identity!.increment = parseOptionalNumberInput(value);
 }
@@ -2424,8 +2524,9 @@ function isColumnCharsetDisabled(column: EditableStructureColumn): boolean {
 
 function isPrimaryKeyDisabled(column: EditableStructureColumn): boolean {
   if (column.markedForDrop) return true;
-  if (!column.original) return false;
-  return !structureCapabilities.value.alterPrimaryKey;
+  if (isCreateMode.value || structureCapabilities.value.alterPrimaryKey) return false;
+  if (!structureCapabilities.value.addPrimaryKey) return true;
+  return columns.value.some((candidate) => candidate.original?.is_primary_key);
 }
 
 function canDropColumn(column: EditableStructureColumn): boolean {
@@ -2834,7 +2935,9 @@ async function applyChanges() {
       : await api.executeBatch(props.connectionId, props.database, pendingStatements.value, props.schema, executionTimeoutSecs);
     await recordStructureHistory(sql, startedAt, true, result);
     if (!isCreateMode.value && props.tableName) {
-      invalidateTableMetadataCache({ connectionId: props.connectionId, database: props.database, schema: metadataSchema.value, tableName: props.tableName });
+      const metadataMatch = { connectionId: props.connectionId, database: props.database, schema: metadataSchema.value, tableName: props.tableName };
+      invalidateTableMetadataCache(metadataMatch);
+      await invalidateObjectMetadataCache(metadataMatch);
       await invalidateObjectDdl(ddlRequest());
       loadedMetadataFacets.clear();
     }
@@ -2943,6 +3046,8 @@ onMounted(() => {
   }
   structureEditorReady = true;
   observeStructureHorizontalScroller();
+  void loadTableOwner(false, props.draft?.tableOwner !== undefined);
+  void loadTableOwnerRoles();
   if (props.draft?.initialized) {
     void hydrateRestoredDraftFromDatabase().then(() => {
       applyInitialStructureTarget();
@@ -2961,6 +3066,8 @@ onActivated(() => {
   registerStructureEditorShortcuts();
   observeStructureHorizontalScroller();
   void loadDynamicDataTypeOptions();
+  if (supportsTableOwner.value && !loadedMetadataFacets.has("owner")) void loadTableOwner(false, props.draft?.tableOwner !== undefined);
+  if (supportsTableOwner.value && !tableOwnerRolesLoading.value && tableOwnerRoles.value.length === 0 && !tableOwnerRolesLoadError.value) void loadTableOwnerRoles();
   if (props.draft?.initialized && !draftHydrated) {
     restoreDraft(props.draft);
     applyInitialStructureTarget();
@@ -3074,7 +3181,7 @@ watch([() => props.connectionId, () => props.database, databaseType], () => {
 });
 
 watch(
-  [isCreateMode, () => props.connectionId, () => props.database, databaseType, () => props.schema, () => props.tableName, newTableName, tableComment, columns, indexes, foreignKeys, triggers],
+  [isCreateMode, () => props.connectionId, () => props.database, databaseType, () => props.schema, () => props.tableName, newTableName, tableComment, tableOwner, columns, indexes, foreignKeys, triggers],
   () => {
     scheduleSqlPreviewRefresh();
     syncDraftToParent();
@@ -3180,6 +3287,40 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
           <Info :class="[structureIconClass, 'shrink-0 text-muted-foreground']" />
         </TooltipTrigger>
         <TooltipContent>{{ t("structureEditor.tableCommentUnsupported") }}</TooltipContent>
+      </Tooltip>
+    </div>
+
+    <div v-if="supportsTableOwner" class="flex shrink-0 items-center gap-2">
+      <label class="flex shrink-0 items-center gap-1 font-medium text-muted-foreground">
+        <UserRound :class="structureIconClass" />
+        {{ t("structureEditor.owner") }}
+      </label>
+      <SearchableSelect
+        v-model="tableOwner"
+        :options="tableOwnerOptions"
+        :placeholder="t('structureEditor.ownerPlaceholder')"
+        :search-placeholder="t('structureEditor.ownerSearchPlaceholder')"
+        :empty-text="t('structureEditor.ownerRolesEmpty')"
+        :loading-text="t('common.loading')"
+        :loading="tableOwnerRolesLoading"
+        :allow-custom="true"
+        :trim-custom="false"
+        :disabled="tableOwnerLoading || !!tableOwnerLoadError"
+        :trigger-class="[structureMonoControlClass, 'w-[220px] max-w-[220px]']"
+        data-owner-select
+      />
+      <Loader2 v-if="tableOwnerLoading" :class="[structureIconClass, 'animate-spin text-muted-foreground']" />
+      <Tooltip v-else-if="tableOwnerLoadError">
+        <TooltipTrigger as-child>
+          <AlertTriangle :class="[structureIconClass, 'shrink-0 text-destructive']" />
+        </TooltipTrigger>
+        <TooltipContent>{{ t("structureEditor.ownerLoadFailed", { message: tableOwnerLoadError }) }}</TooltipContent>
+      </Tooltip>
+      <Tooltip v-else-if="tableOwnerRolesLoadError">
+        <TooltipTrigger as-child>
+          <AlertTriangle :class="[structureIconClass, 'shrink-0 text-amber-500']" />
+        </TooltipTrigger>
+        <TooltipContent>{{ t("structureEditor.ownerRolesLoadFailed", { message: tableOwnerRolesLoadError }) }}</TooltipContent>
       </Tooltip>
     </div>
 
@@ -3539,7 +3680,7 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                             type="number"
                             :class="[structureControlClass, 'w-14']"
                             :placeholder="t('structureEditor.identitySeed')"
-                            :disabled="!canEditDamengIdentity(column)"
+                            :disabled="!canEditDamengIdentityParameters(column)"
                             @update:model-value="(v) => updateDamengIdentitySeed(column, v)"
                           />
                           <Input
@@ -3547,7 +3688,7 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                             type="number"
                             :class="[structureControlClass, 'w-14']"
                             :placeholder="t('structureEditor.identityIncrement')"
-                            :disabled="!canEditDamengIdentity(column)"
+                            :disabled="!canEditDamengIdentityParameters(column)"
                             @update:model-value="(v) => updateDamengIdentityIncrement(column, v)"
                           />
                         </template>

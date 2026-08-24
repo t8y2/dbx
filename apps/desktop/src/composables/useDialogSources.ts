@@ -22,6 +22,8 @@ const pendingImportLayout = ref<SidebarLayout | null>(null);
 const showConfigPassphraseDialog = ref(false);
 const configPassphraseMode = ref<"export" | "import">("export");
 const configPassphraseError = ref("");
+const showConfigUnencryptedExportConfirm = ref(false);
+const configExportBusy = ref(false);
 const pendingImportContent = ref("");
 const showConfigConnectionSelectDialog = ref(false);
 const configConnectionSelectMode = ref<"export" | "import">("export");
@@ -330,14 +332,55 @@ export function useDialogSources() {
   }
 
   async function onExportConfirm(passphrase: string) {
+    if (configExportBusy.value) return;
+    configExportBusy.value = true;
     try {
-      await connectionStore.exportConnectionsToFile(passphrase, pendingExportConnectionIds.value);
+      const result = await connectionStore.exportConnectionsToFile({ mode: "encrypted", passphrase }, pendingExportConnectionIds.value);
+      if (result === "cancelled") return;
       showConfigPassphraseDialog.value = false;
       clearPendingExportState();
       toast(t("configExport.exportSuccess"), 2000);
     } catch (e: any) {
-      configPassphraseError.value = e?.message === "crypto_unavailable" ? t("configExport.cryptoUnavailable") : e?.message || String(e);
+      configPassphraseError.value = e?.message === "crypto_unavailable" ? t("configExport.cryptoUnavailable") : e?.message === "passphrase_required" ? t("configExport.passphraseRequired") : t("configExport.exportFailed");
+    } finally {
+      configExportBusy.value = false;
     }
+  }
+
+  function onRequestUnencryptedExport() {
+    if (configExportBusy.value) return;
+    showConfigPassphraseDialog.value = false;
+    showConfigUnencryptedExportConfirm.value = true;
+  }
+
+  async function onConfigUnencryptedExportConfirm() {
+    if (configExportBusy.value) return;
+    configExportBusy.value = true;
+    try {
+      const result = await connectionStore.exportConnectionsToFile({ mode: "plaintext" }, pendingExportConnectionIds.value);
+      if (result === "cancelled") return;
+      showConfigUnencryptedExportConfirm.value = false;
+      clearPendingExportState();
+      toast(t("configExport.exportSuccess"), 2000);
+    } catch {
+      showConfigUnencryptedExportConfirm.value = false;
+      configPassphraseError.value = t("configExport.exportFailed");
+      showConfigPassphraseDialog.value = true;
+    } finally {
+      configExportBusy.value = false;
+    }
+  }
+
+  function onConfigUnencryptedExportCancel() {
+    if (configExportBusy.value) return;
+    showConfigUnencryptedExportConfirm.value = false;
+    showConfigPassphraseDialog.value = true;
+  }
+
+  function onConfigUnencryptedExportOpenChange(open: boolean) {
+    if (configExportBusy.value) return;
+    showConfigUnencryptedExportConfirm.value = open;
+    if (!open) showConfigPassphraseDialog.value = true;
   }
 
   async function onImportClick(source: "dbx" | "navicat" | "dbeaver" | "datagrip" = "dbx") {
@@ -414,8 +457,9 @@ export function useDialogSources() {
   function onConfigPassphraseOpenChange(open: boolean) {
     showConfigPassphraseDialog.value = open;
     if (open) return;
-    if (configPassphraseMode.value === "export") clearPendingExportState();
-    else if (!pendingImportPreview.value) clearPendingImportState();
+    if (configPassphraseMode.value === "export") {
+      if (!showConfigUnencryptedExportConfirm.value) clearPendingExportState();
+    } else if (!pendingImportPreview.value) clearPendingImportState();
   }
 
   return {
@@ -435,6 +479,8 @@ export function useDialogSources() {
     showConfigPassphraseDialog,
     configPassphraseMode,
     configPassphraseError,
+    showConfigUnencryptedExportConfirm,
+    configExportBusy,
     pendingImportContent,
     showConfigConnectionSelectDialog,
     applyingImportSelection,
@@ -489,6 +535,10 @@ export function useDialogSources() {
     databaseExportAllDatabases,
     onExportClick,
     onExportConfirm,
+    onRequestUnencryptedExport,
+    onConfigUnencryptedExportConfirm,
+    onConfigUnencryptedExportCancel,
+    onConfigUnencryptedExportOpenChange,
     onImportClick,
     onImportConfirm,
     onConfigConnectionSelectConfirm,

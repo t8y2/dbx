@@ -98,6 +98,15 @@ export function mutateFlatTreeExpansion(nodes: readonly FlatTreeNode[], parentIn
   return replaceFlatTreeChildren(nodes, parentIndex, parent);
 }
 
+/** Whether the visible row identities changed enough to refresh recycled views. */
+export function flatTreeRowsChanged(nodes: readonly FlatTreeNode[], previousNodes: readonly FlatTreeNode[] | undefined): boolean {
+  if (!previousNodes || nodes.length !== previousNodes.length) return true;
+  return nodes.some((item, index) => {
+    const previous = previousNodes[index];
+    return !previous || item.renderKey !== previous.renderKey || item.poolType !== previous.poolType || item.depth !== previous.depth;
+  });
+}
+
 export function shouldVirtualizeFlatTree(count: number): boolean {
   return count > 0;
 }

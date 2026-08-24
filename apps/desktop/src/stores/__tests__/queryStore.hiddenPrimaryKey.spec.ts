@@ -440,6 +440,84 @@ describe("queryStore hidden primary key editing", () => {
     expect(tab.queryEditabilityReason).toBeUndefined();
   });
 
+  it.each([
+    {
+      connection: { id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", query_timeout_secs: 30 },
+      label: "native Oracle",
+    },
+    {
+      connection: { id: "oracle-jdbc-1", name: "Oracle JDBC", db_type: "jdbc", connection_string: "jdbc:oracle:thin:@//localhost:1521/ORCL", database: "ORCL", query_timeout_secs: 30 },
+      label: "Oracle-inferred JDBC",
+    },
+  ])("uses a physical primary index for $label star projections when column flags omit it", async ({ connection }) => {
+    getConnectionConfig.mockReturnValue(connection);
+    getColumns.mockResolvedValue([
+      { name: "OFFER_RELA_ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
+      { name: "ORI_OFFER_ID", data_type: "NUMBER", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ]);
+    listIndexes.mockResolvedValue([{ name: "PK_OFFER_RELA", columns: ["OFFER_RELA_ID"], is_unique: true, is_primary: true }]);
+    lookupLocalCompletionTables.mockReturnValue([{ name: "OFFER_RELA", type: "table", schema: "APP" }]);
+
+    const projections = [
+      {
+        sql: "SELECT T.* FROM APP.OFFER_RELA t",
+        analysisColumns: [],
+        resultColumns: ["OFFER_RELA_ID", "ORI_OFFER_ID"],
+        sourceColumns: undefined,
+        selectStar: true,
+      },
+      {
+        sql: "SELECT T.*, T.ROWID FROM APP.OFFER_RELA t",
+        analysisColumns: [
+          { star: true, sourceQualifier: "T", sourceKey: "t:0", resultName: "*", expression: "T.*" },
+          { sourceName: "ROWID", sourceNameQuoted: false, sourceQualifier: "T", sourceKey: "t:0", resultName: "ROWID", expression: "T.ROWID" },
+        ],
+        resultColumns: ["OFFER_RELA_ID", "ORI_OFFER_ID", "ROWID"],
+        sourceColumns: ["OFFER_RELA_ID", "ORI_OFFER_ID", undefined],
+        selectStar: false,
+      },
+    ];
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+
+    for (const projection of projections) {
+      analyzeEditableQueryEditability.mockResolvedValue({
+        editable: true,
+        analysis: {
+          schema: "APP",
+          tableName: "OFFER_RELA",
+          tableAlias: "t",
+          selectStar: projection.selectStar,
+          columns: projection.analysisColumns,
+        },
+      });
+      executeMulti.mockResolvedValue([
+        {
+          columns: projection.resultColumns,
+          rows: [],
+          affected_rows: 0,
+          execution_time_ms: 1,
+        },
+      ]);
+
+      const tabId = store.createTab(connection.id, "ORCL", "Query");
+      store.setAutoCommit(tabId, true);
+      await store.executeTabSql(tabId, projection.sql);
+
+      expect(executeMulti).toHaveBeenLastCalledWith(connection.id, "ORCL", projection.sql, undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
+      const tab = store.tabs.find((item) => item.id === tabId)!;
+      if (projection.sourceColumns) {
+        await vi.waitFor(() => expect(tab.querySourceColumns).toEqual(projection.sourceColumns));
+      } else {
+        expect(tab.querySourceColumns).toBeUndefined();
+      }
+      await vi.waitFor(() => expect(tab.tableMeta?.primaryKeys).toEqual(["OFFER_RELA_ID"]));
+      expect(tab.queryAnalysis).toBeDefined();
+      expect(tab.queryEditabilityReason).toBeUndefined();
+    }
+  });
+
   it("uses the configured current schema to keep an unqualified Oracle base-table query editable", async () => {
     getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", default_schema: "APP", query_timeout_secs: 30 });
     getColumns.mockResolvedValue([

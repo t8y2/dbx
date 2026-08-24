@@ -31,6 +31,7 @@ export type ConnectionProfile = {
 
 const SCHEME_PROFILES: Record<string, ConnectionProfile> = {
   mysql: { type: "mysql", profile: "mysql", label: "MySQL", defaultPort: 3306 },
+  oceanbase: { type: "mysql", profile: "oceanbase", label: "OceanBase", defaultPort: 2883 },
   mariadb: { type: "mysql", profile: "mariadb", label: "MariaDB", defaultPort: 3306 },
   postgres: { type: "postgres", profile: "postgres", label: "PostgreSQL", defaultPort: 5432 },
   postgresql: { type: "postgres", profile: "postgres", label: "PostgreSQL", defaultPort: 5432 },
@@ -80,6 +81,13 @@ const SCHEME_PROFILES: Record<string, ConnectionProfile> = {
   iotdb: { type: "iotdb", profile: "iotdb", label: "Apache IoTDB", defaultPort: 6667 },
   iris: { type: "iris", profile: "iris", label: "IRIS", defaultPort: 1972 },
   victoriametrics: { type: "victoriametrics", profile: "victoriametrics", label: "VictoriaMetrics", defaultPort: 8428 },
+};
+
+const OCEANBASE_ORACLE_PROFILE: ConnectionProfile = {
+  type: "oceanbase-oracle",
+  profile: "oceanbase-oracle",
+  label: "OceanBase Oracle Mode",
+  defaultPort: 2883,
 };
 
 const HTTP_SELECTED_PROFILES: Record<string, ConnectionProfile> = {
@@ -376,6 +384,9 @@ export function connectionProfileForScheme(scheme: string, preferredProfile?: st
   if ((normalizedScheme === "http" || normalizedScheme === "https") && normalizedPreferredProfile) {
     return HTTP_SELECTED_PROFILES[normalizedPreferredProfile];
   }
+  if (normalizedScheme === "oceanbase" && normalizedPreferredProfile === "oceanbase-oracle") {
+    return OCEANBASE_ORACLE_PROFILE;
+  }
   // PostgreSQL-compatible products use standard PostgreSQL URLs, so keep the
   // selected product profile when parsing a pasted URL.
   if ((normalizedScheme === "postgres" || normalizedScheme === "postgresql") && (normalizedPreferredProfile === "cloudberry" || normalizedPreferredProfile === "opentenbase")) {
@@ -657,6 +668,9 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
   if (!input) {
     throw new Error("Connection URL is empty");
   }
+  if (/^jdbc:oceanbase:(?:oracle:)?loadbalance:\/\//i.test(input)) {
+    throw new Error("Unsupported OceanBase JDBC URL variant: loadbalance");
+  }
   const jdbcHive = parseJdbcHiveUrl(input);
   if (jdbcHive) return jdbcHive;
   const jdbcH2 = parseH2JdbcUrl(input);
@@ -676,7 +690,8 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
   const jdbcSqlServer = parseJdbcSqlServerUrl(input);
   if (jdbcSqlServer) return jdbcSqlServer;
   const isJdbcUrl = /^jdbc:/i.test(input);
-  const source = isJdbcUrl ? input.replace(/^jdbc:/i, "") : input;
+  const isOceanBaseOracleJdbc = /^jdbc:oceanbase:oracle:\/\//i.test(input);
+  const source = isOceanBaseOracleJdbc ? input.replace(/^jdbc:oceanbase:oracle:/i, "oceanbase:") : isJdbcUrl ? input.replace(/^jdbc:/i, "") : input;
 
   const mongoResult = parseMongoUrl(source);
   if (mongoResult) return mongoResult;
@@ -692,7 +707,7 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
   }
 
   const scheme = parsed.protocol.replace(/:$/, "").toLowerCase();
-  const profile = connectionProfileForScheme(scheme, preferredProfile);
+  const profile = connectionProfileForScheme(scheme, isOceanBaseOracleJdbc ? "oceanbase-oracle" : preferredProfile);
   if (!profile) {
     throw new Error(`Unsupported connection URL scheme: ${scheme}`);
   }
@@ -702,8 +717,8 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
   const urlParamsWithoutName = stripConnectionNameParam(urlParams);
   const normalizedFragment = decodeUrlPart(parsed.hash.replace(/^#/, "")).trim().toLowerCase();
   const parsedUrlParams = profile.type === "redis" && normalizedFragment === "insecure" ? [urlParamsWithoutName, "insecure=true"].filter(Boolean).join("&") : urlParamsWithoutName;
-  const mysqlCredentials = isJdbcUrl && profile.type === "mysql" ? extractMysqlCredentialParams(parsedUrlParams) : undefined;
-  const effectiveUrlParams = mysqlCredentials?.urlParams ?? parsedUrlParams;
+  const jdbcCredentials = isJdbcUrl && (profile.type === "mysql" || profile.profile === "oceanbase-oracle") ? extractMysqlCredentialParams(parsedUrlParams) : undefined;
+  const effectiveUrlParams = jdbcCredentials?.urlParams ?? parsedUrlParams;
   if (profile.type === "mongodb") {
     return {
       dbType: profile.type,
@@ -738,7 +753,7 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
   }
 
   const isMeilisearch = profile.type === "meilisearch";
-  const defaultPort = isMeilisearch && scheme === "http" ? 80 : isMeilisearch && scheme === "https" ? 443 : profile.defaultPort;
+  const defaultPort = isJdbcUrl && scheme === "oceanbase" ? 3306 : isMeilisearch && scheme === "http" ? 80 : isMeilisearch && scheme === "https" ? 443 : profile.defaultPort;
 
   return {
     ...(name ? { name } : {}),
@@ -748,8 +763,8 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
     host: parsed.hostname,
     port: parsed.port ? Number(parsed.port) : defaultPort,
     ...(profile.type === "sqlserver" && parsed.port ? { portExplicit: true } : {}),
-    username: mysqlCredentials?.username ?? decodeUrlPart(parsed.username),
-    password: mysqlCredentials?.password ?? decodeUrlPart(parsed.password),
+    username: jdbcCredentials?.username ?? decodeUrlPart(parsed.username),
+    password: jdbcCredentials?.password ?? decodeUrlPart(parsed.password),
     database: profile.type === "victoriametrics" ? "metrics" : profile.type === "dynamodb" ? dynamodbRegionFromHost(parsed.hostname) : isMeilisearch ? undefined : databaseFromPath(parsed.pathname),
     urlParams: effectiveUrlParams,
     ssl: scheme === "rediss" || scheme === "https" || urlParamsRequireTls(profile.type, effectiveUrlParams) || (profile.type === "mysql" && isTidbCloudHost(parsed.hostname)),

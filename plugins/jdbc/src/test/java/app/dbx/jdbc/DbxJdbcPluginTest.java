@@ -27,6 +27,8 @@ import java.sql.Statement;
 import java.sql.Time;
 import java.sql.Timestamp;
 import java.sql.Types;
+import java.time.Instant;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
@@ -53,6 +55,20 @@ final class DbxJdbcPluginTest {
         request("close", """
             { "connection": %s }
             """.formatted(CONNECTION));
+    }
+
+    @Test
+    void parsesTdengineTimezoneDescription() {
+        assertEquals(ZoneId.of("Asia/Shanghai"), DbxJdbcPlugin.parseTdengineTimezone("Asia/Shanghai (CST, +0800)"));
+        assertEquals(ZoneId.of("Etc/UTC"), DbxJdbcPlugin.parseTdengineTimezone("Etc/UTC (UTC, +0000)"));
+        assertEquals(null, DbxJdbcPlugin.parseTdengineTimezone("unknown (+0800)"));
+    }
+
+    @Test
+    void formatsTimestampInTdengineSessionTimezone() {
+        Timestamp timestamp = Timestamp.from(Instant.parse("2025-03-06T01:19:49.433Z"));
+
+        assertEquals("2025-03-06 09:19:49.433", DbxJdbcPlugin.formatTimestamp(timestamp, ZoneId.of("Asia/Shanghai")));
     }
 
     @Test
@@ -690,7 +706,7 @@ final class DbxJdbcPluginTest {
 
             assertFalse(response.has("error"), response.toString());
             assertEquals("row-value", response.path("result").path("rows").path(0).path(0).asText());
-            assertEquals(List.of("createStatement", "executeQuery"), calls);
+            assertEquals(List.of("createStatement", "executeQuery", "createStatement", "executeQuery"), calls);
         } finally {
             DriverManager.deregisterDriver(driver);
         }
@@ -727,6 +743,8 @@ final class DbxJdbcPluginTest {
                     List.of(
                         "setCatalog:bopu_light",
                         "setClientInfo:dbname:bopu_light",
+                        "createStatement",
+                        "executeQuery",
                         "createStatement",
                         "executeQuery"
                     ),
@@ -787,7 +805,7 @@ final class DbxJdbcPluginTest {
                 """.formatted(connection));
 
             assertFalse(response.has("error"), response.toString());
-            assertEquals(List.of("createStatement", "executeQuery"), calls);
+            assertEquals(List.of("createStatement", "executeQuery", "createStatement", "executeQuery"), calls);
         } finally {
             closeAndDeregister(connection, driver);
         }

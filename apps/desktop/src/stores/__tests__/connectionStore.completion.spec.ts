@@ -582,6 +582,78 @@ describe("connectionStore completion assistant", () => {
     ]);
   });
 
+  it("keeps PostgreSQL quoted column caches separate from unquoted identifiers", async () => {
+    const completionAssistantSearch = vi.fn(async (request: { parent_name?: string | null; parent_schema?: string | null }) => ({
+      candidates: [
+        {
+          name: request.parent_name === "Orders" ? "QuotedId" : "lower_id",
+          kind: "column",
+          parent_schema: request.parent_schema,
+          parent_name: request.parent_name,
+          data_type: "integer",
+        },
+      ],
+      incomplete: false,
+      fallback_used: false,
+    }));
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      getColumns: vi.fn(),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [postgresConnection()];
+    store.connectedIds.add("pg-1");
+
+    const unquoted = await store.listCompletionColumns("pg-1", "app", "orders", "public", { tableQuoted: false, schemaQuoted: false });
+    const quoted = await store.listCompletionColumns("pg-1", "app", "Orders", "Public", { tableQuoted: true, schemaQuoted: true });
+
+    expect(completionAssistantSearch).toHaveBeenCalledTimes(2);
+    expect(unquoted.map((column) => column.name)).toEqual(["lower_id"]);
+    expect(quoted.map((column) => column.name)).toEqual(["QuotedId"]);
+    expect(store.lookupLocalCompletionColumns("pg-1", "app", "orders", "public", undefined, { tableQuoted: false, schemaQuoted: false }).map((column) => column.name)).toEqual(["lower_id"]);
+    expect(store.lookupLocalCompletionColumns("pg-1", "app", "Orders", "Public", undefined, { tableQuoted: true, schemaQuoted: true }).map((column) => column.name)).toEqual(["QuotedId"]);
+  });
+
+  it("reads PostgreSQL prefix columns back with the same quoted context", async () => {
+    const completionAssistantSearch = vi.fn(async (request: { parent_name?: string | null; parent_schema?: string | null }) => ({
+      candidates: (request.parent_name === "Orders" ? ["QuotedName"] : ["name", "native"]).map((name) => ({
+        name,
+        kind: "column",
+        parent_schema: request.parent_schema,
+        parent_name: request.parent_name,
+        data_type: "text",
+      })),
+      incomplete: false,
+      fallback_used: false,
+    }));
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [postgresConnection()];
+    store.connectedIds.add("pg-1");
+
+    await store.listCompletionColumnsByPrefix("pg-1", "app", "orders", "public", "na", undefined, { tableQuoted: false, schemaQuoted: false });
+    const narrowed = await store.listCompletionColumnsByPrefix("pg-1", "app", "orders", "public", "nam", undefined, { tableQuoted: false, schemaQuoted: false });
+    await store.listCompletionColumnsByPrefix("pg-1", "app", "Orders", "Public", "Na", undefined, { tableQuoted: true, schemaQuoted: true });
+
+    expect(completionAssistantSearch).toHaveBeenCalledTimes(2);
+    expect(narrowed.map((column) => column.name)).toEqual(["name"]);
+    expect(store.lookupLocalCompletionColumnsByPrefix("pg-1", "app", "orders", "public", "na", undefined, { tableQuoted: false, schemaQuoted: false }).map((column) => column.name)).toEqual(["name", "native"]);
+    expect(store.lookupLocalCompletionColumnsByPrefix("pg-1", "app", "orders", "public", "nam", undefined, { tableQuoted: false, schemaQuoted: false }).map((column) => column.name)).toEqual(["name"]);
+    expect(store.lookupLocalCompletionColumnsByPrefix("pg-1", "app", "Orders", "Public", "Na", undefined, { tableQuoted: true, schemaQuoted: true }).map((column) => column.name)).toEqual(["QuotedName"]);
+  });
+
   it("normalizes unquoted Oracle aliases while preserving quoted case before catalog lookup", async () => {
     const completionAssistantSearch = vi.fn();
     const getColumns = vi.fn().mockResolvedValue([]);

@@ -1,0 +1,36 @@
+schemaVersion: 1
+order: 390
+dbType: vertica
+rustVariant: Vertica
+label: Vertica
+dialect: Vertica
+runtimeMode: agent
+mcpMode: bridge
+agentKey: vertica
+driverStoreVisible: true
+driverStoreOrder: 11
+singleConnectionPool: false
+metadataConnectionScoped: false
+skipTcpProbe: true
+defaultPort: 5433
+traits:
+  schemaAware: true
+  treeSchema: true
+supportLevel: operate
+capabilities:
+  queryExecution: true
+  metadataBrowse: true
+  objectBrowser: true
+  objectSource: false
+  schemaSearch: true
+  diagram: true
+  tableDataEdit: true
+  tableStructureEdit: true
+  tableImport: false
+  dataTransfer: false
+  sqlFileExecution: true
+  databaseCreate: false
+  fieldLineage: false
+  sqlExplain: false
+  userAdmin: false
+  driverManagement: true

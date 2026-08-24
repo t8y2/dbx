@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	admin "github.com/amigoer/rocketmq-admin-go"
+	"github.com/amigoer/rocketmq-admin-go/protocol/remoting"
 )
 
 type fakeConsumeStatusReader struct {
@@ -65,6 +66,112 @@ func TestDecodeConsumeStatsRepairsObjectKeys(t *testing.T) {
 		if offset.BrokerOffset != 20 || offset.ConsumerOffset != 12 {
 			t.Fatalf("unexpected offset: %#v", offset)
 		}
+	}
+}
+
+func TestDecodeConsumerStatusUnwrapsRocketMQ48Body(t *testing.T) {
+	body := []byte(`{
+		"messageQueueTable": {},
+		"consumerTable": {
+			"client-b": {{"brokerName":"broker-a","queueId":0,"topic":"Orders"}:90},
+			"client-a": {
+				"MessageQueue [topic=Orders, brokerName=broker-a, queueId=1]": 50
+			}
+		}
+	}`)
+
+	status, err := decodeConsumerStatus(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]map[string]int64{
+		"client-b": {
+			`{"brokerName":"broker-a","queueId":0,"topic":"Orders"}`: 90,
+		},
+		"client-a": {
+			`MessageQueue [topic=Orders, brokerName=broker-a, queueId=1]`: 50,
+		},
+	}
+	if !reflect.DeepEqual(status, want) {
+		t.Fatalf("consumer status = %#v, want %#v", status, want)
+	}
+}
+
+func TestDecodeConsumerStatusHandlesEmptyAndMalformedBodies(t *testing.T) {
+	status, err := decodeConsumerStatus([]byte(`{"messageQueueTable":{},"consumerTable":{}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(status) != 0 {
+		t.Fatalf("empty consumer table decoded as %#v", status)
+	}
+	if _, err := decodeConsumerStatus([]byte(`{"consumerTable":[]}`)); err == nil {
+		t.Fatal("expected malformed consumer table to fail")
+	}
+}
+
+func TestReadConsumerStatusFromBrokersUsesBoundedRequestsAndMerges(t *testing.T) {
+	responses := map[string][]byte{
+		"broker-a:10911": []byte(`{"consumerTable":{"client-a":{"{\"topic\":\"Orders\",\"brokerName\":\"broker-a\",\"queueId\":0}":90,"{\"topic\":\"Orders\",\"brokerName\":\"broker-a\",\"queueId\":1}":50}}}`),
+		"broker-b:10911": []byte(`{"consumerTable":{"client-a":{"MessageQueue [topic=Orders, brokerName=broker-b, queueId=0]":20}}}`),
+	}
+	calls := make([]string, 0, len(responses))
+	invoke := func(_ context.Context, address string, command *remoting.RemotingCommand) (*remoting.RemotingCommand, error) {
+		calls = append(calls, address)
+		if command.Code != remoting.InvokeBrokerToGetConsumerStatus {
+			t.Fatalf("request code = %d, want %d", command.Code, remoting.InvokeBrokerToGetConsumerStatus)
+		}
+		if command.ExtFields["topic"] != "Orders" || command.ExtFields["group"] != "GID_Orders" {
+			t.Fatalf("unexpected request fields: %#v", command.ExtFields)
+		}
+		if _, exists := command.ExtFields["clientAddr"]; exists {
+			t.Fatalf("empty client address sent on wire: %#v", command.ExtFields)
+		}
+		return &remoting.RemotingCommand{Code: remoting.Success, Body: responses[address]}, nil
+	}
+
+	status, err := readConsumerStatusFromBrokers(
+		context.Background(), []string{"broker-b:10911", "broker-a:10911"},
+		"Orders", "GID_Orders", "", invoke,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(calls, []string{"broker-a:10911", "broker-b:10911"}) {
+		t.Fatalf("broker calls = %#v", calls)
+	}
+	if len(status["client-a"]) != 3 {
+		t.Fatalf("merged status = %#v", status)
+	}
+}
+
+func TestReadConsumerStatusFromBrokersKeepsPartialResults(t *testing.T) {
+	invoke := func(_ context.Context, address string, _ *remoting.RemotingCommand) (*remoting.RemotingCommand, error) {
+		if address == "broker-b:10911" {
+			return nil, errors.New("consumer offline")
+		}
+		return &remoting.RemotingCommand{Code: remoting.Success, Body: []byte(
+			`{"consumerTable":{"client-a":{"{\"topic\":\"Orders\",\"brokerName\":\"broker-a\",\"queueId\":0}":90}}}`,
+		)}, nil
+	}
+
+	status, err := readConsumerStatusFromBrokers(
+		context.Background(), []string{"broker-a:10911", "broker-b:10911"},
+		"Orders", "GID_Orders", "", invoke,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(status["client-a"]) != 1 {
+		t.Fatalf("partial status = %#v", status)
+	}
+
+	_, err = readConsumerStatusFromBrokers(
+		context.Background(), []string{"broker-b:10911"},
+		"Orders", "GID_Orders", "", invoke,
+	)
+	if err == nil {
+		t.Fatal("expected all-broker request failure")
 	}
 }
 

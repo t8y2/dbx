@@ -8,6 +8,8 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { DEFAULT_CUSTOM_THEME_DDL_COLORS } from "@/stores/settingsStore";
 import { useDiffScrollSync } from "@/composables/useDiffScrollSync";
 import { buildHunks, type DiffLine } from "@/components/diff/DiffHunkBuilder";
+import { buildSchemaDiffHighlightSegments, type SchemaDiffHighlightSegment } from "@/lib/schema/schemaDiffHighlight";
+import { findSchemaDiffDdlLineNumber } from "@/lib/schema/schemaDiffDdlLocate";
 import DiffSvgConnector from "@/components/diff/DiffSvgConnector.vue";
 import { FileCode, ScrollText, Copy, Play, FileDiff } from "@lucide/vue";
 import { Splitpanes, Pane } from "splitpanes";
@@ -34,6 +36,7 @@ function toRgba(hex: string, alpha: number): string {
 
 const props = defineProps<{
   selectedObject: SchemaDiffObject | null;
+  focusedObject?: SchemaDiffObject | null;
   deploySql: string;
   deploySqlAll: string;
   compatibilityWarnings?: CompatibilityWarning[];
@@ -57,6 +60,8 @@ const leftPaneRef = ref<HTMLDivElement>();
 const rightPaneRef = ref<HTMLDivElement>();
 const containerSize = ref({ width: 0, height: 0 });
 const connectorKey = ref(0);
+const focusedSourceLineNumber = ref<number | null>(null);
+const focusedTargetLineNumber = ref<number | null>(null);
 
 const rollbackDiffContainerRef = ref<HTMLDivElement>();
 const rollbackLeftPaneRef = ref<HTMLDivElement>();
@@ -89,7 +94,7 @@ const { syncScroll: rollbackSyncScroll, measureHunks: rollbackMeasureHunks } = u
 });
 
 function collectModifySegments(diffHunks: ReturnType<typeof buildHunks>) {
-  const map = new Map<string, { leftSegments: Segment[]; rightSegments: Segment[] }>();
+  const map = new Map<string, { leftSegments: SchemaDiffHighlightSegment[]; rightSegments: SchemaDiffHighlightSegment[] }>();
   for (const hunk of diffHunks) {
     for (let i = 0; i < hunk.leftLines.length; i++) {
       const left = hunk.leftLines[i];
@@ -99,13 +104,13 @@ function collectModifySegments(diffHunks: ReturnType<typeof buildHunks>) {
         map.set(key, renderModifyLine(left, right));
       } else if (left.type === "modify" && !left.isPadding && left.comparisonContent !== undefined) {
         map.set(key, {
-          leftSegments: renderModifyContent(left.content, left.comparisonContent).sourceSegments,
+          leftSegments: buildSchemaDiffHighlightSegments(left.content, left.comparisonContent).sourceSegments,
           rightSegments: [],
         });
       } else if (right.type === "modify" && !right.isPadding && right.comparisonContent !== undefined) {
         map.set(key, {
           leftSegments: [],
-          rightSegments: renderModifyContent(right.comparisonContent, right.content).targetSegments,
+          rightSegments: buildSchemaDiffHighlightSegments(right.comparisonContent, right.content).targetSegments,
         });
       }
     }
@@ -177,14 +182,46 @@ function rollbackUpdateContainerSize() {
   rollbackContainerSize.value = { width: rect.width, height: rect.height };
 }
 
-watch(
-  () => props.selectedObject?.id,
-  async () => {
-    await nextTick();
-    updateContainerSize();
-    requestMeasure();
-  },
-);
+watch([() => props.selectedObject?.id, () => props.focusedObject?.id, hunks], async () => {
+  if (props.focusedObject?.parentId) activeTab.value = "ddl";
+  await nextTick();
+  updateContainerSize();
+  requestMeasure();
+  locateFocusedObject();
+});
+
+function scrollPaneToLine(pane: HTMLDivElement | undefined, lineNumber: number | null) {
+  if (!pane || lineNumber === null) return;
+  const row = pane.querySelector<HTMLElement>(`[data-ddl-line-number="${lineNumber}"]`);
+  if (!row) return;
+  const paneRect = pane.getBoundingClientRect();
+  const rowRect = row.getBoundingClientRect();
+  pane.scrollTo({
+    top: Math.max(0, pane.scrollTop + rowRect.top - paneRect.top - pane.clientHeight / 2 + rowRect.height / 2),
+    behavior: "smooth",
+  });
+}
+
+function locateFocusedObject() {
+  const selectedObject = props.selectedObject;
+  const focusedObject = props.focusedObject;
+  if (!selectedObject || !focusedObject || focusedObject.id === selectedObject.id) {
+    focusedSourceLineNumber.value = null;
+    focusedTargetLineNumber.value = null;
+    return;
+  }
+
+  focusedSourceLineNumber.value = findSchemaDiffDdlLineNumber(selectedObject.sourceDdl ?? "", focusedObject, "source");
+  focusedTargetLineNumber.value = findSchemaDiffDdlLineNumber(selectedObject.targetDdl ?? "", focusedObject, "target");
+  scrollPaneToLine(leftPaneRef.value, focusedSourceLineNumber.value);
+  scrollPaneToLine(rightPaneRef.value, focusedTargetLineNumber.value);
+}
+
+function focusedLineClass(line: DiffLine, side: "source" | "target"): string {
+  const focusedLineNumber = side === "source" ? focusedSourceLineNumber.value : focusedTargetLineNumber.value;
+  if (line.isPadding || focusedLineNumber === null) return "";
+  return line.lineNumber === focusedLineNumber ? "outline outline-1 -outline-offset-1 outline-primary/70" : "";
+}
 
 function updateContainerSize() {
   const el = diffContainerRef.value;
@@ -225,84 +262,9 @@ function lineTextClass(line: DiffLine): string {
   return "";
 }
 
-function computeCharDiffs(source: string, target: string): { source: string; target: string }[] {
-  const result: { source: string; target: string }[] = [];
-  let sIdx = 0;
-  let tIdx = 0;
-  while (sIdx < source.length || tIdx < target.length) {
-    if (sIdx >= source.length) {
-      result.push({ source: "", target: target.substring(tIdx) });
-      break;
-    }
-    if (tIdx >= target.length) {
-      result.push({ source: source.substring(sIdx), target: "" });
-      break;
-    }
-    if (source[sIdx] === target[tIdx]) {
-      let matchLen = 0;
-      while (sIdx + matchLen < source.length && tIdx + matchLen < target.length && source[sIdx + matchLen] === target[tIdx + matchLen]) {
-        matchLen++;
-      }
-      result.push({
-        source: source.substring(sIdx, sIdx + matchLen),
-        target: target.substring(tIdx, tIdx + matchLen),
-      });
-      sIdx += matchLen;
-      tIdx += matchLen;
-    } else {
-      let sMatch = -1;
-      let tMatch = -1;
-      for (let i = 0; i < Math.min(10, source.length - sIdx, target.length - tIdx); i++) {
-        if (source[sIdx + i] === target[tIdx]) {
-          sMatch = i;
-          tMatch = 0;
-          break;
-        }
-        if (source[sIdx] === target[tIdx + i]) {
-          sMatch = 0;
-          tMatch = i;
-          break;
-        }
-      }
-      if (sMatch === -1) {
-        sMatch = Math.min(1, source.length - sIdx);
-        tMatch = Math.min(1, target.length - tIdx);
-      }
-      result.push({
-        source: source.substring(sIdx, sIdx + (sMatch > 0 ? sMatch : 1)),
-        target: target.substring(tIdx, tIdx + (tMatch > 0 ? tMatch : 1)),
-      });
-      sIdx += sMatch > 0 ? sMatch : 1;
-      tIdx += tMatch > 0 ? tMatch : 1;
-    }
-  }
-  return result;
-}
-
-function renderModifyLine(leftLine: DiffLine, rightLine: DiffLine): { leftSegments: Segment[]; rightSegments: Segment[] } {
-  const { sourceSegments, targetSegments } = renderModifyContent(leftLine.content, rightLine.content);
+function renderModifyLine(leftLine: DiffLine, rightLine: DiffLine): { leftSegments: SchemaDiffHighlightSegment[]; rightSegments: SchemaDiffHighlightSegment[] } {
+  const { sourceSegments, targetSegments } = buildSchemaDiffHighlightSegments(leftLine.content, rightLine.content);
   return { leftSegments: sourceSegments, rightSegments: targetSegments };
-}
-
-function renderModifyContent(source: string, target: string): { sourceSegments: Segment[]; targetSegments: Segment[] } {
-  const charDiffs = computeCharDiffs(source, target);
-  const leftSegments: Segment[] = [];
-  const rightSegments: Segment[] = [];
-  for (const cd of charDiffs) {
-    if (cd.source === cd.target) {
-      leftSegments.push({ text: cd.source, changed: false });
-      rightSegments.push({ text: cd.target, changed: false });
-    } else {
-      if (cd.source) leftSegments.push({ text: cd.source, changed: true });
-      if (cd.target) rightSegments.push({ text: cd.target, changed: true });
-    }
-  }
-  return { sourceSegments: leftSegments, targetSegments: rightSegments };
-}
-
-interface Segment {
-  text: string;
-  changed: boolean;
 }
 
 function copyDeploySql() {
@@ -386,19 +348,11 @@ function copyDeploySqlAll() {
           <!-- Source DDL -->
           <Pane min-size="20">
             <div ref="leftPaneRef" class="h-full overflow-y-auto border-r" @scroll="handleScroll('left')">
-              <div class="sticky top-0 bg-muted/50 px-3 py-1.5 text-xs font-medium border-b z-10">
+              <div class="sticky top-0 bg-background px-3 py-1.5 text-xs font-medium border-b z-10">
                 {{ t("diff.sourceDdl") }}
               </div>
               <div v-for="hunk in hunks" :key="`left-${hunk.id}`" :data-hunk-id="hunk.id">
-                <div
-                  v-for="(line, idx) in hunk.leftLines"
-                  :key="`l-${hunk.id}-${idx}`"
-                  class="flex min-h-[1.5em]"
-                  :class="{
-                    'border rounded-sm border-yellow-500/40': line.type === 'modify',
-                  }"
-                  :style="{ backgroundColor: lineBackground(line) }"
-                >
+                <div v-for="(line, idx) in hunk.leftLines" :key="`l-${hunk.id}-${idx}`" class="flex min-h-[1.5em]" :class="focusedLineClass(line, 'source')" :data-ddl-line-number="line.lineNumber ?? undefined" :style="{ backgroundColor: lineBackground(line) }">
                   <span class="text-muted-foreground w-8 text-right pr-2 select-none shrink-0">
                     {{ line.lineNumber ?? "" }}
                   </span>
@@ -418,19 +372,11 @@ function copyDeploySqlAll() {
           <!-- Target DDL -->
           <Pane min-size="20">
             <div ref="rightPaneRef" class="h-full overflow-y-auto" @scroll="handleScroll('right')">
-              <div class="sticky top-0 bg-muted/50 px-3 py-1.5 text-xs font-medium border-b z-10">
+              <div class="sticky top-0 bg-background px-3 py-1.5 text-xs font-medium border-b z-10">
                 {{ t("diff.targetDdl") }}
               </div>
               <div v-for="hunk in hunks" :key="`right-${hunk.id}`" :data-hunk-id="hunk.id">
-                <div
-                  v-for="(line, idx) in hunk.rightLines"
-                  :key="`r-${hunk.id}-${idx}`"
-                  class="flex min-h-[1.5em]"
-                  :class="{
-                    'border rounded-sm border-yellow-500/40': line.type === 'modify',
-                  }"
-                  :style="{ backgroundColor: lineBackground(line) }"
-                >
+                <div v-for="(line, idx) in hunk.rightLines" :key="`r-${hunk.id}-${idx}`" class="flex min-h-[1.5em]" :class="focusedLineClass(line, 'target')" :data-ddl-line-number="line.lineNumber ?? undefined" :style="{ backgroundColor: lineBackground(line) }">
                   <span class="text-muted-foreground w-8 text-right pr-2 select-none shrink-0">
                     {{ line.lineNumber ?? "" }}
                   </span>
@@ -462,19 +408,11 @@ function copyDeploySqlAll() {
         <Splitpanes class="h-full" @resized="rollbackOnSplitpanesResized">
           <Pane min-size="20">
             <div ref="rollbackLeftPaneRef" class="h-full overflow-y-auto border-r" @scroll="rollbackHandleScroll('left')">
-              <div class="sticky top-0 bg-muted/50 px-3 py-1.5 text-xs font-medium border-b z-10">
+              <div class="sticky top-0 bg-background px-3 py-1.5 text-xs font-medium border-b z-10">
                 {{ t("rollbackComparison.forwardSql") }}
               </div>
               <div v-for="hunk in rollbackHunks" :key="`left-${hunk.id}`" :data-hunk-id="hunk.id">
-                <div
-                  v-for="(line, idx) in hunk.leftLines"
-                  :key="`l-${hunk.id}-${idx}`"
-                  class="flex min-h-[1.5em]"
-                  :class="{
-                    'border rounded-sm border-yellow-500/40': line.type === 'modify',
-                  }"
-                  :style="{ backgroundColor: lineBackground(line) }"
-                >
+                <div v-for="(line, idx) in hunk.leftLines" :key="`l-${hunk.id}-${idx}`" class="flex min-h-[1.5em]" :style="{ backgroundColor: lineBackground(line) }">
                   <span class="text-muted-foreground w-8 text-right pr-2 select-none shrink-0">
                     {{ line.lineNumber ?? "" }}
                   </span>
@@ -492,19 +430,11 @@ function copyDeploySqlAll() {
           </Pane>
           <Pane min-size="20">
             <div ref="rollbackRightPaneRef" class="h-full overflow-y-auto" @scroll="rollbackHandleScroll('right')">
-              <div class="sticky top-0 bg-muted/50 px-3 py-1.5 text-xs font-medium border-b z-10">
+              <div class="sticky top-0 bg-background px-3 py-1.5 text-xs font-medium border-b z-10">
                 {{ t("rollbackComparison.rollbackSql") }}
               </div>
               <div v-for="hunk in rollbackHunks" :key="`right-${hunk.id}`" :data-hunk-id="hunk.id">
-                <div
-                  v-for="(line, idx) in hunk.rightLines"
-                  :key="`r-${hunk.id}-${idx}`"
-                  class="flex min-h-[1.5em]"
-                  :class="{
-                    'border rounded-sm border-yellow-500/40': line.type === 'modify',
-                  }"
-                  :style="{ backgroundColor: lineBackground(line) }"
-                >
+                <div v-for="(line, idx) in hunk.rightLines" :key="`r-${hunk.id}-${idx}`" class="flex min-h-[1.5em]" :style="{ backgroundColor: lineBackground(line) }">
                   <span class="text-muted-foreground w-8 text-right pr-2 select-none shrink-0">
                     {{ line.lineNumber ?? "" }}
                   </span>

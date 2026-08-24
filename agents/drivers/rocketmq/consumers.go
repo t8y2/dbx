@@ -273,12 +273,198 @@ func (a *rocketMQAgent) getConsumerLag(params map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	consumerClients := resolveConsumerClients(ctx, client, groupID, topic)
+	consumerClients := resolveConsumerClients(ctx, remotingConsumeStatusReader{
+		client: client,
+		invoke: invokeRemotingWithClient,
+	}, groupID, topic)
 	return buildConsumerLagResult(stats, consumerClients), nil
 }
 
 type consumeStatusReader interface {
 	GetConsumeStatus(context.Context, string, string, string) (map[string]map[string]int64, error)
+}
+
+type consumerStatusInvoker func(
+	context.Context,
+	string,
+	*remoting.RemotingCommand,
+) (*remoting.RemotingCommand, error)
+
+type remotingConsumeStatusReader struct {
+	client *admin.Client
+	invoke consumerStatusInvoker
+}
+
+func (r remotingConsumeStatusReader) GetConsumeStatus(
+	ctx context.Context,
+	topic string,
+	groupID string,
+	clientAddr string,
+) (map[string]map[string]int64, error) {
+	route, err := r.client.ExamineTopicRouteInfo(ctx, topic)
+	if err != nil {
+		return nil, err
+	}
+	return readConsumerStatusFromBrokers(
+		ctx, masterAddressesFromRoute(route), topic, groupID, clientAddr, r.invoke,
+	)
+}
+
+func readConsumerStatusFromBrokers(
+	ctx context.Context,
+	addresses []string,
+	topic string,
+	groupID string,
+	clientAddr string,
+	invoke consumerStatusInvoker,
+) (map[string]map[string]int64, error) {
+	if len(addresses) == 0 {
+		return nil, fmt.Errorf("no RocketMQ master broker found for topic %s", topic)
+	}
+	orderedAddresses := append([]string(nil), addresses...)
+	sort.Strings(orderedAddresses)
+	merged := make(map[string]map[string]int64)
+	successCount := 0
+	var lastErr error
+	for _, address := range orderedAddresses {
+		fields := map[string]string{"topic": topic, "group": groupID}
+		if clientAddr != "" {
+			fields["clientAddr"] = clientAddr
+		}
+		response, requestErr := invoke(ctx, address,
+			remoting.NewRequest(remoting.InvokeBrokerToGetConsumerStatus, fields))
+		if requestErr != nil {
+			lastErr = requestErr
+			continue
+		}
+		if response == nil {
+			lastErr = fmt.Errorf("empty consumer status response from %s", address)
+			continue
+		}
+		partial, decodeErr := decodeConsumerStatus(response.Body)
+		if decodeErr != nil {
+			lastErr = decodeErr
+			continue
+		}
+		successCount++
+		for _, clientID := range sortedKeys(partial) {
+			if merged[clientID] == nil {
+				merged[clientID] = make(map[string]int64)
+			}
+			for _, queueKey := range sortedKeys(partial[clientID]) {
+				merged[clientID][queueKey] = partial[clientID][queueKey]
+			}
+		}
+	}
+	if successCount == 0 {
+		return nil, fmt.Errorf("query consumer status for group %s on all masters: %w", groupID, lastErr)
+	}
+	return merged, nil
+}
+
+func decodeConsumerStatus(body []byte) (map[string]map[string]int64, error) {
+	// RocketMQ wraps assignments in GetConsumerStatusBody; admin-go v1.1.1
+	// incorrectly decodes the complete response as the inner table.
+	var wrapper struct {
+		ConsumerTable map[string]map[string]int64 `json:"consumerTable"`
+	}
+	if err := json.Unmarshal(repairConsumerStatusJSON(body), &wrapper); err != nil {
+		return nil, fmt.Errorf("decode consumer status: %w", err)
+	}
+	if wrapper.ConsumerTable == nil {
+		wrapper.ConsumerTable = make(map[string]map[string]int64)
+	}
+	return wrapper.ConsumerTable, nil
+}
+
+func repairConsumerStatusJSON(body []byte) []byte {
+	repaired := repairRocketMQJSON(body)
+	result := make([]byte, 0, len(repaired)+64)
+	for index := 0; index < len(repaired); {
+		mapStart := index + 1
+		for mapStart < len(repaired) && isJSONSpace(repaired[mapStart]) {
+			mapStart++
+		}
+		if repaired[index] == ':' && mapStart+1 < len(repaired) &&
+			repaired[mapStart] == '{' && repaired[mapStart+1] == '{' {
+			if converted, next, ok := convertObjectKeyedInt64Map(repaired, mapStart); ok {
+				result = append(result, repaired[index:mapStart]...)
+				result = append(result, converted...)
+				index = next
+				continue
+			}
+		}
+		result = append(result, repaired[index])
+		index++
+	}
+	return result
+}
+
+func convertObjectKeyedInt64Map(body []byte, start int) ([]byte, int, bool) {
+	result := []byte{'{'}
+	index := start + 1
+	first := true
+	for index < len(body) {
+		for index < len(body) && isJSONSpace(body[index]) {
+			index++
+		}
+		if index >= len(body) {
+			return nil, start, false
+		}
+		if body[index] == '}' {
+			return append(result, '}'), index + 1, true
+		}
+		if body[index] == ',' {
+			index++
+			continue
+		}
+		if body[index] != '{' {
+			return nil, start, false
+		}
+		keyEnd := matchingBrace(body, index)
+		if keyEnd < 0 {
+			return nil, start, false
+		}
+		key := body[index : keyEnd+1]
+		index = keyEnd + 1
+		for index < len(body) && isJSONSpace(body[index]) {
+			index++
+		}
+		if index >= len(body) || body[index] != ':' {
+			return nil, start, false
+		}
+		index++
+		for index < len(body) && isJSONSpace(body[index]) {
+			index++
+		}
+		valueStart := index
+		if index < len(body) && body[index] == '-' {
+			index++
+		}
+		digitStart := index
+		for index < len(body) && body[index] >= '0' && body[index] <= '9' {
+			index++
+		}
+		if index == digitStart {
+			return nil, start, false
+		}
+		valueEnd := index
+		for index < len(body) && isJSONSpace(body[index]) {
+			index++
+		}
+		if index >= len(body) || (body[index] != ',' && body[index] != '}') {
+			return nil, start, false
+		}
+		if !first {
+			result = append(result, ',')
+		}
+		first = false
+		result = append(result, '"')
+		result = append(result, escapeJSONString(key)...)
+		result = append(result, '"', ':')
+		result = append(result, body[valueStart:valueEnd]...)
+	}
+	return nil, start, false
 }
 
 func resolveConsumerClients(

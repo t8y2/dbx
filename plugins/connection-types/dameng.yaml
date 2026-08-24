@@ -1,0 +1,39 @@
+schemaVersion: 1
+order: 260
+dbType: dameng
+rustVariant: Dameng
+label: 达梦 DM8
+dialect: Dameng
+runtimeMode: agent
+mcpMode: bridge
+agentKey: dameng
+driverStoreVisible: true
+driverStoreOrder: 1
+singleConnectionPool: true
+metadataConnectionScoped: false
+skipTcpProbe: true
+defaultPort: 5236
+traits:
+  schemaAware: true
+  singleDatabase: true
+  clearableQuerySchema: true
+  fetchFirst: true
+  diagramSql: true
+supportLevel: operate
+capabilities:
+  queryExecution: true
+  metadataBrowse: true
+  objectBrowser: true
+  objectSource: true
+  schemaSearch: true
+  diagram: true
+  tableDataEdit: true
+  tableStructureEdit: true
+  tableImport: true
+  dataTransfer: true
+  sqlFileExecution: true
+  databaseCreate: false
+  fieldLineage: true
+  sqlExplain: true
+  userAdmin: false
+  driverManagement: true

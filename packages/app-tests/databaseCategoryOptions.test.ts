@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { test } from "vitest";
 import { assertCompleteDatabaseCategories, databaseSelectionForCategory } from "../../apps/desktop/src/lib/connection/databaseCategoryOptions.ts";
 import { JDBC_PRODUCT_PROFILES } from "../../apps/desktop/src/lib/database/jdbcProductProfiles.ts";
+import { CONNECTION_PICKER_OPTIONS } from "../../apps/desktop/src/types/generated/connectionProfiles.ts";
 
 test("database categories cover every option exactly once", () => {
   assert.doesNotThrow(() => assertCompleteDatabaseCategories(["mysql", "redis", "kafka"], [["mysql"], ["redis", "kafka"]]));
@@ -22,19 +23,14 @@ test("database category changes keep only visible selections", () => {
 test("ConnectionDialog database categories stay exhaustive", () => {
   const dialogPath = join(dirname(fileURLToPath(import.meta.url)), "../../apps/desktop/src/components/connection/ConnectionDialog.vue");
   const source = readFileSync(dialogPath, "utf8");
-  const optionsMatch = source.match(/const dbOptions: DbOption\[] = \[([\s\S]*?)\];/);
-  const categoriesMatch = source.match(/const dbCategoryDefinitions: Array<\{[\s\S]*?\}> = \[([\s\S]*?)\];/);
-  assert.ok(optionsMatch, "dbOptions not found");
-  assert.ok(categoriesMatch, "dbCategoryDefinitions not found");
-
-  const optionValues = [...optionsMatch[1].matchAll(/value:\s*"([^"]+)"/g)].map((match) => match[1]);
-  const categoryBlocks = [...categoriesMatch[1].matchAll(/optionValues:\s*\[([^\]]*)\]/g)].map((match) => [...match[1].matchAll(/"([^"]+)"/g)].map((valueMatch) => valueMatch[1]));
-  optionValues.push(...JDBC_PRODUCT_PROFILES.map((profile) => profile.id));
-  categoryBlocks.push(JDBC_PRODUCT_PROFILES.map((profile) => profile.id));
+  const optionValues = [...CONNECTION_PICKER_OPTIONS.map((option) => option.value), ...JDBC_PRODUCT_PROFILES.map((profile) => profile.id)];
+  const categories = new Set([...CONNECTION_PICKER_OPTIONS.map((option) => option.category), ...JDBC_PRODUCT_PROFILES.map((profile) => profile.category)]);
+  const categoryBlocks = [...categories].map((category) => [...CONNECTION_PICKER_OPTIONS.filter((option) => option.category === category).map((option) => option.value), ...JDBC_PRODUCT_PROFILES.filter((profile) => profile.category === category).map((profile) => profile.id)]);
 
   assert.doesNotThrow(() => assertCompleteDatabaseCategories(optionValues, categoryBlocks));
-  assert.match(source, /for \(const category of dbCategoryDefinitions\)/);
-  assert.match(source, /jdbcProductProfileIdsForCategory\(category\.key\)/);
+  assert.match(source, /\.\.\.CONNECTION_PICKER_OPTIONS/);
+  assert.match(source, /\.\.\.CONNECTION_PROFILES/);
+  assert.match(source, /jdbcProductProfileIdsForCategory\(key\)/);
   assert.match(source, /\.\.\.jdbcProductIconTypes\(\)/);
   assert.ok(optionValues.includes("rabbitmq"), "rabbitmq must remain in dbOptions");
   assert.ok(

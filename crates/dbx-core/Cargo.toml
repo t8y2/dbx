@@ -94,3 +94,8 @@ windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32
 mysql_common = { git = "https://github.com/t8y2/rust_mysql_common.git", rev = "47740d85a8277167a5717afac785d37b46a36296", default-features = false }
 tokio = { version = "1", features = ["test-util"] }
 tokio-openssl = "0.6"
+
+[build-dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml_ng = "0.10"

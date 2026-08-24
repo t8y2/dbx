@@ -1,0 +1,31 @@
+schemaVersion: 1
+order: 750
+dbType: influxdb
+rustVariant: InfluxDb
+label: InfluxDB
+runtimeMode: agent
+mcpMode: bridge
+agentKey: influxdb
+driverStoreVisible: false
+singleConnectionPool: false
+metadataConnectionScoped: false
+skipTcpProbe: true
+defaultPort: 8086
+supportLevel: connect
+capabilities:
+  queryExecution: true
+  metadataBrowse: true
+  objectBrowser: true
+  objectSource: false
+  schemaSearch: false
+  diagram: false
+  tableDataEdit: false
+  tableStructureEdit: false
+  tableImport: false
+  dataTransfer: false
+  sqlFileExecution: true
+  databaseCreate: true
+  fieldLineage: false
+  sqlExplain: false
+  userAdmin: false
+  driverManagement: false

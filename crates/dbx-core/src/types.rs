@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+pub use crate::mysql_event_sql::MysqlEventInfo;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DatabaseInfo {
     pub name: String,

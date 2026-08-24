@@ -58,6 +58,7 @@ use std::future::Future;
 use std::time::Duration;
 
 // Re-export types so that `db::QueryResult` etc. work within dbx-core
+pub use crate::mysql_event_sql::MysqlEventInfo;
 pub use crate::types::*;
 pub use file_validator::validate_file_path;
 

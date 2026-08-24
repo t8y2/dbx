@@ -111,6 +111,22 @@ test("command mode completes documented names case-insensitively", () => {
   assert.ok(!labels(complete("GET")).some((name) => name.includes(" ")));
 });
 
+test("command completion inserts a server-documented argument example", () => {
+  const getbit: RedisCommandDocumentation = {
+    name: "GETBIT",
+    group: "bitmap",
+    arity: 3,
+    arguments: [
+      { name: "key", type: "key" },
+      { name: "offset", type: "integer" },
+    ],
+    keySpecs: oneKey,
+  };
+  const item = buildRedisCompletionItems("GETB", 4, { commands: [getbit] })[0];
+  assert.equal(item?.apply, "GETBIT key offset");
+  assert.match(item?.info ?? "", /Example: GETBIT key offset/);
+});
+
 test("subcommand mode follows the server's command hierarchy", () => {
   const names = labels(complete("XGROUP "));
   assert.deepEqual(new Set(names), new Set(["CREATE", "DESTROY", "SETID"]));

@@ -14,6 +14,7 @@ pub enum DatabaseObjectType {
     MaterializedView,
     Procedure,
     Function,
+    Event,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -909,6 +910,65 @@ pub fn build_rename_object_sql(options: RenameObjectSqlOptions) -> Result<String
     ))
 }
 
+pub fn supports_database_rename(database_type: Option<DatabaseType>) -> bool {
+    matches!(
+        database_type,
+        Some(
+            DatabaseType::Postgres
+                | DatabaseType::Redshift
+                | DatabaseType::Gaussdb
+                | DatabaseType::Kwdb
+                | DatabaseType::Kingbase
+                | DatabaseType::Highgo
+                | DatabaseType::Uxdb
+                | DatabaseType::Vastbase
+                | DatabaseType::OpenGauss
+        )
+    )
+}
+
+pub fn build_rename_database_sql(
+    database_type: Option<DatabaseType>,
+    old_name: &str,
+    new_name: &str,
+    terminate_connections: bool,
+) -> Result<String, String> {
+    if !supports_database_rename(database_type) {
+        return Err(format!("Renaming databases is not supported for {}.", database_label(database_type)));
+    }
+    let mut parts = Vec::new();
+    if terminate_connections {
+        let escaped = old_name.replace('\'', "''");
+        parts.push(format!(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{escaped}' AND pid <> pg_backend_pid();"
+        ));
+    }
+    parts.push(format!(
+        "ALTER DATABASE {} RENAME TO {};",
+        quote_table_identifier(database_type, old_name),
+        quote_rename_identifier(database_type, new_name)
+    ));
+    Ok(parts.join("\n"))
+}
+
+/// Generates a preflight SQL query that checks whether the database can be renamed.
+/// Returns a single-row result with:
+///   - active_connections: number of connections to the database (excluding self)
+///   - prepared_transactions: number of prepared transactions in the database
+///   - is_owner: whether the current user owns the database
+pub fn build_rename_database_preflight_sql(
+    database_type: Option<DatabaseType>,
+    database_name: &str,
+) -> Result<String, String> {
+    if !supports_database_rename(database_type) {
+        return Err(format!("Renaming databases is not supported for {}.", database_label(database_type)));
+    }
+    let escaped = database_name.replace('\'', "''");
+    Ok(format!(
+        "SELECT (SELECT count(*) FROM pg_stat_activity WHERE datname = '{escaped}' AND pid <> pg_backend_pid()) AS active_connections, (SELECT count(*) FROM pg_prepared_xacts WHERE database = '{escaped}') AS prepared_transactions, (SELECT pg_catalog.pg_get_userbyid(datdba) = current_user AS is_owner FROM pg_database WHERE datname = '{escaped}') AS is_owner;"
+    ))
+}
+
 fn is_postgres_like_rename(database_type: DatabaseType) -> bool {
     // openGauss 兼容 PG 的 ALTER TABLE/VIEW ... RENAME TO 语法，与 gaussdb 等同开放重命名能力。
     matches!(
@@ -1047,6 +1107,7 @@ fn object_type_keyword(object_type: DatabaseObjectType) -> &'static str {
         DatabaseObjectType::MaterializedView => "MATERIALIZED VIEW",
         DatabaseObjectType::Procedure => "PROCEDURE",
         DatabaseObjectType::Function => "FUNCTION",
+        DatabaseObjectType::Event => "EVENT",
     }
 }
 
@@ -2429,5 +2490,54 @@ mod tests {
         })
         .unwrap_err()
         .contains("Renaming PROCEDURE is not supported"));
+    }
+
+    #[test]
+    fn builds_postgres_database_rename_sql() {
+        assert!(supports_database_rename(Some(DatabaseType::Postgres)));
+        assert_eq!(
+            build_rename_database_sql(Some(DatabaseType::Postgres), "old_db", "new db", false).unwrap(),
+            "ALTER DATABASE \"old_db\" RENAME TO \"new db\";"
+        );
+        // With terminate_connections
+        let sql = build_rename_database_sql(Some(DatabaseType::Postgres), "old_db", "new db", true).unwrap();
+        assert!(sql.contains("pg_terminate_backend"), "should include terminate");
+        assert!(sql.contains("ALTER DATABASE"), "should include rename");
+    }
+
+    #[test]
+    fn builds_rename_database_preflight_sql() {
+        let sql = build_rename_database_preflight_sql(Some(DatabaseType::Postgres), "my_db").unwrap();
+        assert!(sql.contains("active_connections"), "should check active connections");
+        assert!(sql.contains("prepared_transactions"), "should check prepared transactions");
+        assert!(sql.contains("is_owner"), "should check ownership");
+        assert!(sql.contains("pg_stat_activity"), "should query pg_stat_activity");
+        assert!(sql.contains("pg_prepared_xacts"), "should query pg_prepared_xacts");
+        assert!(sql.contains("pg_database"), "should query pg_database");
+    }
+
+    #[test]
+    fn rejects_unsupported_database_rename() {
+        assert!(!supports_database_rename(Some(DatabaseType::Mysql)));
+        assert!(!supports_database_rename(Some(DatabaseType::Sqlite)));
+        assert!(build_rename_database_sql(Some(DatabaseType::Mysql), "old_db", "new_db", false).is_err());
+        assert!(build_rename_database_preflight_sql(Some(DatabaseType::Mysql), "old_db").is_err());
+    }
+
+    #[test]
+    fn builds_various_postgres_family_database_rename_sql() {
+        for db_type in [
+            DatabaseType::Gaussdb,
+            DatabaseType::Kingbase,
+            DatabaseType::Highgo,
+            DatabaseType::Vastbase,
+            DatabaseType::OpenGauss,
+            DatabaseType::Redshift,
+        ] {
+            assert!(supports_database_rename(Some(db_type)), "{db_type:?} should support database rename");
+            let sql = build_rename_database_sql(Some(db_type), "old_db", "new_db", false).unwrap();
+            assert!(sql.contains("ALTER DATABASE"), "{db_type:?}: missing ALTER DATABASE");
+            assert!(sql.contains("RENAME TO"), "{db_type:?}: missing RENAME TO");
+        }
     }
 }

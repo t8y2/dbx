@@ -210,7 +210,7 @@ describe("useSqlExecution", () => {
 
   it("expands preceding @set values in a selected shell-style statement", async () => {
     const selectedSql = "SELECT * FROM patrol WHERE post_id = ${postid};";
-    const fullSql = ["@set postid = '224';", selectedSql, "@set postid = 'future';"].join("\n");
+    const fullSql = ["-- saved query", "@set postid='224';", selectedSql, "@set postid = 'future';"].join("\n");
     const selectionFrom = fullSql.indexOf("SELECT");
     const selectionTo = selectionFrom + selectedSql.length;
     const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql: fullSql });

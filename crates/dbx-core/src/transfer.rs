@@ -3673,6 +3673,64 @@ fn can_reuse_source_table_ddl(
             || (is_postgres_family_target(source_db_type) && is_postgres_family_target(target_db_type)))
 }
 
+fn strip_dameng_storage_clauses(sql: &str) -> String {
+    map_sql_code_spans(sql, false, |code| {
+        let mut output = String::with_capacity(code.len());
+        let bytes = code.as_bytes();
+        let mut position = 0;
+
+        while position < bytes.len() {
+            let Some(relative_start) = code[position..].to_ascii_uppercase().find("STORAGE") else {
+                output.push_str(&code[position..]);
+                break;
+            };
+            let start = position + relative_start;
+            let before_is_identifier = start > 0
+                && (bytes[start - 1].is_ascii_alphanumeric() || matches!(bytes[start - 1], b'_' | b'$' | b'#'));
+            let keyword_end = start + "STORAGE".len();
+            let after_is_identifier = keyword_end < bytes.len()
+                && (bytes[keyword_end].is_ascii_alphanumeric() || matches!(bytes[keyword_end], b'_' | b'$' | b'#'));
+            if before_is_identifier || after_is_identifier {
+                output.push_str(&code[position..keyword_end]);
+                position = keyword_end;
+                continue;
+            }
+
+            let mut open = keyword_end;
+            while open < bytes.len() && bytes[open].is_ascii_whitespace() {
+                open += 1;
+            }
+            if open >= bytes.len() || bytes[open] != b'(' {
+                output.push_str(&code[position..keyword_end]);
+                position = keyword_end;
+                continue;
+            }
+
+            let mut depth = 1usize;
+            let mut end = open + 1;
+            while end < bytes.len() && depth > 0 {
+                match bytes[end] {
+                    b'(' => depth += 1,
+                    b')' => depth -= 1,
+                    _ => {}
+                }
+                end += 1;
+            }
+            if depth != 0 {
+                output.push_str(&code[position..keyword_end]);
+                position = keyword_end;
+                continue;
+            }
+
+            let clause_start = position + code[position..start].trim_end().len();
+            output.push_str(&code[position..clause_start]);
+            position = end;
+        }
+
+        output
+    })
+}
+
 fn rewrite_transfer_source_table_ddl(
     sql: &str,
     source_schema: &str,
@@ -3683,7 +3741,7 @@ fn rewrite_transfer_source_table_ddl(
     if is_postgres_family_target(source_db_type) && is_postgres_family_target(target_db_type) {
         rewrite_postgres_schema_qualified_references(sql, source_schema, target_schema)
     } else if matches!((source_db_type, target_db_type), (DatabaseType::Dameng, DatabaseType::Dameng)) {
-        rewrite_double_quoted_schema_qualifier(sql, source_schema, target_schema)
+        strip_dameng_storage_clauses(&rewrite_double_quoted_schema_qualifier(sql, source_schema, target_schema))
     } else {
         sql.to_string()
     }
@@ -9904,6 +9962,7 @@ mod tests {
         assert!(!can_reuse_source_table_ddl(&DatabaseType::ClickHouse, &DatabaseType::ClickHouse, None, None, true,));
         assert!(can_reuse_source_table_ddl(&DatabaseType::Postgres, &DatabaseType::Postgres, None, None, true,));
         assert!(!can_reuse_source_table_ddl(&DatabaseType::Postgres, &DatabaseType::Postgres, None, None, false,));
+        assert!(can_reuse_source_table_ddl(&DatabaseType::Dameng, &DatabaseType::Dameng, None, None, true,));
     }
 
     #[test]
@@ -10029,12 +10088,16 @@ mod tests {
     }
 
     #[test]
-    fn dameng_transfer_reused_table_ddl_rewrites_only_code_schema_qualifiers() {
+    fn dameng_transfer_reused_table_ddl_rewrites_schema_and_strips_storage() {
         let ddl = concat!(
-            "CREATE TABLE \"SRC\".\"items\" (\"note\" VARCHAR(100) DEFAULT '\"SRC\".literal');\n",
-            "COMMENT ON TABLE \"SRC\".\"items\" IS '\"SRC\".comment';\n",
-            "-- keep \"SRC\".line_comment\n",
-            "/* keep \"SRC\".block_comment */\n",
+            "CREATE TABLE \"SRC\".\"items\" (\n",
+            "\"ID\" BIGINT IDENTITY(1, 1) NOT NULL,\n",
+            "\"NOTE\" VARCHAR(100) DEFAULT '\"SRC\".literal',\n",
+            "NOT CLUSTER PRIMARY KEY(\"ID\")) ",
+            "STORAGE(ON \"SOURCE_TS\", CLUSTERBTR);\n",
+            "COMMENT ON TABLE \"SRC\".\"items\" IS 'keep STORAGE(ON literal_ts) and \"SRC\".comment';\n",
+            "-- keep STORAGE(ON line_comment_ts) and \"SRC\".line_comment\n",
+            "/* keep STORAGE(ON block_comment_ts) and \"SRC\".block_comment */\n",
             "ALTER TABLE \"SRC\".\"items\" ADD \"value\" INTEGER;",
         );
 
@@ -10044,17 +10107,21 @@ mod tests {
         assert!(rewritten.contains("CREATE TABLE \"DST\".\"items\""));
         assert!(rewritten.contains("COMMENT ON TABLE \"DST\".\"items\""));
         assert!(rewritten.contains("ALTER TABLE \"DST\".\"items\""));
+        assert!(!rewritten.contains("STORAGE(ON \"SOURCE_TS\", CLUSTERBTR)"));
+        assert!(rewritten.contains("\"ID\" BIGINT IDENTITY(1, 1) NOT NULL"));
+        assert!(rewritten.contains("NOT CLUSTER PRIMARY KEY(\"ID\")"));
         assert!(rewritten.contains("'\"SRC\".literal'"));
-        assert!(rewritten.contains("'\"SRC\".comment'"));
-        assert!(rewritten.contains("-- keep \"SRC\".line_comment"));
-        assert!(rewritten.contains("/* keep \"SRC\".block_comment */"));
+        assert!(rewritten.contains("'keep STORAGE(ON literal_ts) and \"SRC\".comment'"));
+        assert!(rewritten.contains("-- keep STORAGE(ON line_comment_ts) and \"SRC\".line_comment"));
+        assert!(rewritten.contains("/* keep STORAGE(ON block_comment_ts) and \"SRC\".block_comment */"));
+        let storage_portable_ddl = strip_dameng_storage_clauses(ddl);
         assert_eq!(
             rewrite_transfer_source_table_ddl(ddl, "SRC", "SRC", &DatabaseType::Dameng, &DatabaseType::Dameng),
-            ddl
+            storage_portable_ddl
         );
         assert_eq!(
             rewrite_transfer_source_table_ddl(ddl, "", "DST", &DatabaseType::Dameng, &DatabaseType::Dameng),
-            ddl
+            storage_portable_ddl
         );
     }
 

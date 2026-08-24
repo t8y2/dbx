@@ -20,6 +20,21 @@ export interface TableDataCopyColumnOptions {
   sqlserverIdentityInsert: boolean;
 }
 
+export interface TablePasteFeedback {
+  successCount: number;
+  failedCount: number;
+  firstError: unknown;
+}
+
+/** Keep batch paste feedback bounded while preserving the first actionable error. */
+export function tablePasteFeedback(successCount: number, failedCount: number, firstError: unknown): TablePasteFeedback {
+  return {
+    successCount,
+    failedCount,
+    firstError,
+  };
+}
+
 function normalizeSchema(schema: string | null | undefined): string {
   return schema?.trim() ?? "";
 }

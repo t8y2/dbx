@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { structureColumnSelectionRange } from "@/lib/table/tableStructureEditorState";
+import { isSyntheticContextMenuClick, resolveColumnSelectionActiveId, structureColumnSelectionRange } from "@/lib/table/tableStructureEditorState";
 
 function columnsOf(...ids: string[]) {
   return ids.map((id) => ({ id, markedForDrop: id.startsWith("drop:") }));
@@ -36,5 +36,19 @@ describe("structureColumnSelectionRange", () => {
     // helper; a stale range still resolves like the object browser does.
     const columns = columnsOf("a", "drop:b", "c");
     expect(structureColumnSelectionRange(columns, "c", "drop:b")).toEqual(["c"]);
+  });
+});
+
+describe("structure column interaction state", () => {
+  it("moves the active row to the last remaining selected column after toggling one off", () => {
+    const columns = columnsOf("a", "b", "c");
+    expect(resolveColumnSelectionActiveId(columns, new Set(["a", "c"]), "b")).toBe("c");
+    expect(resolveColumnSelectionActiveId(columns, new Set(), "b")).toBeNull();
+  });
+
+  it("only suppresses the macOS Ctrl+right-click synthetic click", () => {
+    expect(isSyntheticContextMenuClick(2, true, 0)).toBe(true);
+    expect(isSyntheticContextMenuClick(2, false, 0)).toBe(false);
+    expect(isSyntheticContextMenuClick(0, true, 0)).toBe(false);
   });
 });

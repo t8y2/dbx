@@ -5,6 +5,19 @@ export function hasExistingColumnTypeChange(columns: readonly EditableStructureC
   return columns.some((column) => !!column.original && !column.markedForDrop && column.dataType !== column.original.data_type);
 }
 
+export function resolveColumnSelectionActiveId(columns: readonly Pick<EditableStructureColumn, "id" | "markedForDrop">[], selectedIds: ReadonlySet<string>, preferredId: string): string | null {
+  if (selectedIds.has(preferredId)) return preferredId;
+  for (let index = columns.length - 1; index >= 0; index -= 1) {
+    const column = columns[index];
+    if (column && !column.markedForDrop && selectedIds.has(column.id)) return column.id;
+  }
+  return null;
+}
+
+export function isSyntheticContextMenuClick(contextMenuButton: number | null, contextMenuCtrlKey: boolean, clickButton: number): boolean {
+  return contextMenuButton === 2 && contextMenuCtrlKey && clickButton === 0;
+}
+
 type TableStructureIdentifierCaseInfo = Pick<DatabaseConnectionInfo, "unquotedIdentifierCase" | "quotedIdentifierCase">;
 
 const LOWER_UNQUOTED_MIXED_QUOTED_DATABASES = new Set<DatabaseType>(["postgres", "redshift", "opengauss", "gaussdb", "highgo", "uxdb"]);

@@ -83,6 +83,8 @@ import {
   restoreCharacterLengthUnitsAfterSave,
   sameStructureIndexType,
   structureColumnSelectionRange,
+  isSyntheticContextMenuClick,
+  resolveColumnSelectionActiveId,
   tableStructureIdentifierComparisonKey,
   toColumnNames,
 } from "@/lib/table/tableStructureEditorState";
@@ -1819,7 +1821,7 @@ function toggleColumnSelection(column: EditableStructureColumn) {
   const next = new Set(selectedColumnIds.value);
   if (next.has(column.id)) next.delete(column.id);
   else next.add(column.id);
-  setColumnSelection(next, column.id, column.id);
+  setColumnSelection(next, resolveColumnSelectionActiveId(columns.value, next, column.id), column.id);
 }
 
 /** Shift-click: select the visible range between the anchor and this row; the anchor stays put. */
@@ -1833,9 +1835,18 @@ function selectColumnRangeFromAnchor(column: EditableStructureColumn) {
 // not reset an in-progress ctrl/shift multi-selection; the flag is cleared on
 // click and on any mouseup as a fallback.
 let columnPointerSelectionActive = false;
+let columnContextMenuButton: number | null = null;
+let columnContextMenuCtrlKey = false;
 
-function onColumnRowMouseDown() {
+function onColumnRowMouseDown(event: MouseEvent) {
   columnPointerSelectionActive = true;
+  if (event.button === 0) {
+    columnContextMenuButton = null;
+    columnContextMenuCtrlKey = false;
+  } else {
+    columnContextMenuButton = event.button;
+    columnContextMenuCtrlKey = event.ctrlKey;
+  }
 }
 
 function onColumnSelectionPointerUp() {
@@ -1843,6 +1854,14 @@ function onColumnSelectionPointerUp() {
 }
 
 function onColumnRowClick(column: EditableStructureColumn, event: MouseEvent) {
+  if (isSyntheticContextMenuClick(columnContextMenuButton, columnContextMenuCtrlKey, event.button)) {
+    columnContextMenuButton = null;
+    columnContextMenuCtrlKey = false;
+    columnPointerSelectionActive = false;
+    return;
+  }
+  columnContextMenuButton = null;
+  columnContextMenuCtrlKey = false;
   columnPointerSelectionActive = false;
   if (!columnIsSelectable(column)) return;
   if (event.shiftKey) {
@@ -2620,7 +2639,7 @@ function columnContextMenuItems(column: EditableStructureColumn): ContextMenuIte
   const isBatchContext = selectedColumnIds.value.has(column.id) && selectedColumnIds.value.size > 1;
   const targets = isBatchContext ? selectedColumnsInOrder() : [column];
   const count = targets.length;
-  const anyDroppable = targets.some((item) => !item.original || canDropColumn(item));
+  const allDroppable = targets.every((item) => !item.original || canDropColumn(item));
   return [
     {
       label: isBatchContext ? t("structureEditor.copySelectedColumns", { count }) : t("structureEditor.copyColumn"),
@@ -2632,7 +2651,7 @@ function columnContextMenuItems(column: EditableStructureColumn): ContextMenuIte
       label: isBatchContext ? t("structureEditor.dropSelectedColumns", { count }) : column.original ? t("structureEditor.drop") : t("structureEditor.remove"),
       icon: Trash2,
       variant: "destructive",
-      disabled: !anyDroppable,
+      disabled: !allDroppable,
       action: () => dropOrRemoveColumns(targets),
     },
   ];
@@ -3635,7 +3654,7 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                     :data-new-column-row="!column.original ? 'true' : undefined"
                     :data-column-row-index="index"
                     :data-column-id="column.id"
-                    @mousedown="onColumnRowMouseDown"
+                    @mousedown="onColumnRowMouseDown($event)"
                     @click="onColumnRowClick(column, $event)"
                     @focusin="onColumnRowActivate(column)"
                     @contextmenu="onContextMenu"

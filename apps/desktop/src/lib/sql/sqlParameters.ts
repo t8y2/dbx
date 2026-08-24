@@ -428,9 +428,11 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
     }
 
     if (ch === "'" || ch === '"') {
-      // Exact quoted placeholders use SQL-literal replacement; embedded placeholders
-      // in ordinary single-quoted values use escaped text replacement below.
-      const quoted = tryReadQuotedBracedPlaceholder(sql, i, ch as "'" | '"', isSyntaxEnabled);
+      // Double-quoted exact placeholders retain their historical typed-literal
+      // behavior. Single quotes define a string context, including when the
+      // placeholder occupies the whole string, so interpolation below must
+      // preserve those quotes.
+      const quoted = ch === '"' ? tryReadQuotedBracedPlaceholder(sql, i, ch, isSyntaxEnabled) : null;
       if (quoted) {
         occurrences.push(quoted);
         i = quoted.end;

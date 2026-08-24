@@ -162,9 +162,13 @@ This does not require DBX Web and does not use WebSocket.
 
 ## File Databases
 
-SQLite and Access connections are file-based and do not use tunnel / proxy layers. DuckDB usually uses a local file as well, so only configure tunnel / proxy layers when the selected driver profile uses a network endpoint.
+Access connections are file-based and do not use tunnel / proxy layers. DuckDB usually uses a local file as well, so only configure tunnel / proxy layers when the selected driver profile uses a network endpoint.
 
-An Oracle TNS descriptor may contain multiple failover addresses. DBX does not rewrite that descriptor through one temporary endpoint, so TNS mode cannot be combined with SSH, proxy, or HTTP tunnel layers. Use Service Name or SID mode when a tunnel is required.
+SQLite is also a file database. A local SQLite file still does not use a TCP tunnel. In the desktop app you can attach SSH hops to a SQLite connection to open a **remote SQLite file** on a Linux amd64/arm64 host. DBX then starts a short-lived worker on the **final SSH hop** and talks to that worker; it does not copy the `.db` to your laptop. The path field is an absolute path on that file host, not a local file picker.
+
+The first Test or Connect that would upload the worker asks for consent and shows the destination path and digest. You can keep the worker for the session only, persist it under `~/.cache/dbx/sqlite-worker/<digest>`, or point at a pre-placed binary that matches this DBX build. SQLCipher, loadable extensions, and attached databases are not supported on that remote path in v1. Backup and restore write or read files on the file host.
+
+Oracle TNS descriptors may contain multiple failover addresses. DBX does not rewrite that descriptor through one temporary endpoint, so TNS mode cannot be combined with SSH, proxy, or HTTP tunnel layers. Use Service Name or SID mode when a tunnel is required.
 
 <Cards>
   <Card title="Create a Connection" href="/en/docs/getting-started">

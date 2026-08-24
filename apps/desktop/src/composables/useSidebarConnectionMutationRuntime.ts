@@ -196,16 +196,40 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
     if (!connectionId || !config || !sourcePath) return;
 
     try {
-      const { save } = await import("@tauri-apps/plugin-dialog");
-      const destinationPath = await save({
-        defaultPath: defaultSqliteBackupFileName(config),
-        filters: [{ name: "SQLite", extensions: ["db", "sqlite", "sqlite3"] }],
-      });
+      const usesSsh = (config.transport_layers || []).some((layer) => layer.enabled !== false && layer.type === "ssh");
+      let destinationPath: string | null = null;
+      if (usesSsh) {
+        destinationPath = window.prompt(t("contextMenu.backupSqliteDatabaseRemotePrompt"), `${sourcePath}.bak`);
+      } else {
+        const { save } = await import("@tauri-apps/plugin-dialog");
+        destinationPath = await save({
+          defaultPath: defaultSqliteBackupFileName(config),
+          filters: [{ name: "SQLite", extensions: ["db", "sqlite", "sqlite3"] }],
+        });
+      }
       if (!destinationPath) return;
 
       toast(t("contextMenu.backupSqliteDatabaseInProgress"), 2000);
       if (!isMemorySqlitePath(sourcePath)) await connectionStore.ensureConnected(connectionId);
       await api.backupSqliteDatabase(connectionId, destinationPath);
+      toast(t("contextMenu.backupSqliteDatabaseSuccess"), 3000);
+    } catch (error: any) {
+      toast(t("contextMenu.backupSqliteDatabaseFailed", { message: error?.message || String(error) }), 5000);
+    }
+  }
+
+  async function restoreSqliteDatabase() {
+    const connectionId = activeNode.value.connectionId;
+    const config = connectionId ? connectionStore.getConfig(connectionId) : undefined;
+    if (!connectionId || !config) return;
+    const usesSsh = (config.transport_layers || []).some((layer) => layer.enabled !== false && layer.type === "ssh");
+    if (!usesSsh) return;
+    const sourcePath = window.prompt(t("contextMenu.restoreSqliteDatabaseRemotePrompt"));
+    if (!sourcePath) return;
+    try {
+      toast(t("contextMenu.backupSqliteDatabaseInProgress"), 2000);
+      await connectionStore.ensureConnected(connectionId);
+      await api.restoreSqliteDatabase(connectionId, sourcePath);
       toast(t("contextMenu.backupSqliteDatabaseSuccess"), 3000);
     } catch (error: any) {
       toast(t("contextMenu.backupSqliteDatabaseFailed", { message: error?.message || String(error) }), 5000);
@@ -423,6 +447,7 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
     sqliteBackupSource,
     canBackupSqliteDatabase,
     backupSqliteDatabase,
+    restoreSqliteDatabase,
     disconnectConnection,
     connectionDisconnectMenuLabel,
     canDisconnectConnection,

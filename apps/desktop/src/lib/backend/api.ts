@@ -141,6 +141,7 @@ export const revealPathInFileManager = forward("revealPathInFileManager");
 export const deleteDatabaseBackupFiles = forward("deleteDatabaseBackupFiles");
 export const isSqliteDatabaseFile = forward("isSqliteDatabaseFile");
 export const backupSqliteDatabase = forward("backupSqliteDatabase");
+export const restoreSqliteDatabase = forward("restoreSqliteDatabase");
 export const syncSavedSqlDirectory = forward("syncSavedSqlDirectory");
 
 // Schema

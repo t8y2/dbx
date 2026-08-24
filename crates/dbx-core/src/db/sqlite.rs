@@ -23,7 +23,8 @@ const SQLITE_DATABASE_HEADER: &[u8; 16] = b"SQLite format 3\0";
 
 #[derive(Clone)]
 pub struct SqliteHandle {
-    conn: Arc<Mutex<Connection>>,
+    conn: Option<Arc<Mutex<Connection>>>,
+    worker: Option<Arc<super::sqlite_worker::SqliteWorkerClient>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,11 +34,27 @@ pub struct SqliteExtensionSpec {
 }
 
 impl SqliteHandle {
+    pub fn from_worker(worker: Arc<super::sqlite_worker::SqliteWorkerClient>) -> Self {
+        Self { conn: None, worker: Some(worker) }
+    }
+
+    pub fn is_remote(&self) -> bool {
+        self.worker.is_some()
+    }
+
+    pub fn worker(&self) -> Option<Arc<super::sqlite_worker::SqliteWorkerClient>> {
+        self.worker.clone()
+    }
+
     pub fn with_connection<T, F>(&self, f: F) -> Result<T, String>
     where
         F: FnOnce(&mut Connection) -> Result<T, String>,
     {
-        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let conn = self
+            .conn
+            .as_ref()
+            .ok_or_else(|| "This operation is not available for a remote SQLite file opened over SSH".to_string())?;
+        let mut conn = conn.lock().map_err(|e| e.to_string())?;
         f(&mut conn)
     }
 }
@@ -161,7 +178,7 @@ fn open_sqlite_handle(
         load_sqlite_extensions(&conn, &extensions)?;
         register_sqlite_compat_functions(&conn)?;
 
-        return Ok(SqliteHandle { conn: Arc::new(Mutex::new(conn)) });
+        return Ok(SqliteHandle { conn: Some(Arc::new(Mutex::new(conn))), worker: None });
     }
 
     Err(unlock_error.unwrap_or_else(|| "SQLCipher database unlock failed.".to_string()))
@@ -1277,7 +1294,50 @@ mod tests {
     }
 }
 
+fn json_cell_text(row: &[serde_json::Value], index: usize) -> String {
+    match row.get(index) {
+        Some(serde_json::Value::String(value)) => value.clone(),
+        Some(serde_json::Value::Null) | None => String::new(),
+        Some(value) => value.to_string().trim_matches('"').to_string(),
+    }
+}
+
+fn json_cell_i32(row: &[serde_json::Value], index: usize) -> i32 {
+    match row.get(index) {
+        Some(serde_json::Value::Number(value)) => value.as_i64().unwrap_or(0) as i32,
+        Some(serde_json::Value::String(value)) => value.parse().unwrap_or(0),
+        _ => 0,
+    }
+}
+
+fn remote_schema_name(schema: &str) -> String {
+    let trimmed = schema.trim();
+    if trimmed.is_empty() {
+        "main".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+async fn query_remote_rows(pool: &SqliteHandle, sql: &str) -> Result<Vec<Vec<serde_json::Value>>, String> {
+    Ok(execute_query_with_max_rows(pool, sql, None).await?.rows)
+}
+
 pub async fn list_databases(pool: &SqliteHandle) -> Result<Vec<DatabaseInfo>, String> {
+    if pool.is_remote() {
+        return Ok(query_remote_rows(pool, "PRAGMA database_list")
+            .await?
+            .into_iter()
+            .filter_map(|row| {
+                let name = json_cell_text(&row, 1);
+                if name.eq_ignore_ascii_case("temp") {
+                    None
+                } else {
+                    Some(DatabaseInfo { name, ..Default::default() })
+                }
+            })
+            .collect());
+    }
     let pool = pool.clone();
     tokio::task::spawn_blocking(move || {
         pool.with_connection(|conn| {
@@ -1297,6 +1357,27 @@ pub async fn list_databases(pool: &SqliteHandle) -> Result<Vec<DatabaseInfo>, St
 }
 
 pub async fn list_tables(pool: &SqliteHandle, schema: &str) -> Result<Vec<TableInfo>, String> {
+    if pool.is_remote() {
+        let schema = remote_schema_name(schema);
+        let sql = format!(
+            "SELECT name, type FROM {}.sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' ORDER BY name",
+            sqlite_quote_ident(&schema)
+        );
+        return Ok(query_remote_rows(pool, &sql)
+            .await?
+            .into_iter()
+            .map(|row| {
+                let table_type = json_cell_text(&row, 1);
+                TableInfo {
+                    name: json_cell_text(&row, 0),
+                    table_type: if table_type == "view" { "VIEW".to_string() } else { "BASE TABLE".to_string() },
+                    comment: None,
+                    parent_schema: None,
+                    parent_name: None,
+                }
+            })
+            .collect());
+    }
     let pool = pool.clone();
     let requested_schema = schema.to_string();
     tokio::task::spawn_blocking(move || {
@@ -1328,6 +1409,39 @@ pub async fn list_tables(pool: &SqliteHandle, schema: &str) -> Result<Vec<TableI
 }
 
 pub async fn get_columns(pool: &SqliteHandle, schema: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
+    if pool.is_remote() {
+        let schema = remote_schema_name(schema);
+        let sql = format!("PRAGMA {}.table_info({})", sqlite_quote_ident(&schema), sqlite_quote_string(table));
+        return Ok(query_remote_rows(pool, &sql)
+            .await?
+            .into_iter()
+            .map(|row| {
+                let name = json_cell_text(&row, 1);
+                let is_pk = json_cell_i32(&row, 5) > 0;
+                ColumnInfo {
+                    name,
+                    data_type: json_cell_text(&row, 2),
+                    is_nullable: json_cell_i32(&row, 3) == 0,
+                    column_default: {
+                        let value = json_cell_text(&row, 4);
+                        if value.is_empty() {
+                            None
+                        } else {
+                            Some(value)
+                        }
+                    },
+                    is_primary_key: is_pk,
+                    extra: None,
+                    comment: None,
+                    numeric_precision: None,
+                    numeric_scale: None,
+                    character_maximum_length: None,
+                    enum_values: None,
+                    ..Default::default()
+                }
+            })
+            .collect());
+    }
     let pool = pool.clone();
     let requested_schema = schema.to_string();
     let table = table.to_string();
@@ -2224,6 +2338,41 @@ fn is_sql_keyword(value: &str) -> bool {
 }
 
 pub async fn list_indexes(pool: &SqliteHandle, schema: &str, table: &str) -> Result<Vec<IndexInfo>, String> {
+    if pool.is_remote() {
+        let schema = remote_schema_name(schema);
+        let list_sql = format!("PRAGMA {}.index_list({})", sqlite_quote_ident(&schema), sqlite_quote_string(table));
+        let mut indexes = Vec::new();
+        for row in query_remote_rows(pool, &list_sql).await? {
+            let name = json_cell_text(&row, 1);
+            let is_unique = json_cell_i32(&row, 2) != 0;
+            let origin = json_cell_text(&row, 3);
+            let info_sql = format!("PRAGMA {}.index_info({})", sqlite_quote_ident(&schema), sqlite_quote_string(&name));
+            let columns = query_remote_rows(pool, &info_sql)
+                .await?
+                .into_iter()
+                .filter_map(|info| {
+                    let column = json_cell_text(&info, 2);
+                    if column.is_empty() {
+                        None
+                    } else {
+                        Some(column)
+                    }
+                })
+                .collect();
+            indexes.push(IndexInfo {
+                name,
+                columns,
+                is_unique,
+                is_primary: origin == "pk",
+                filter: None,
+                index_type: None,
+                included_columns: None,
+                comment: None,
+                key_is_expression: Vec::new(),
+            });
+        }
+        return Ok(indexes);
+    }
     let pool = pool.clone();
     let requested_schema = schema.to_string();
     let table = table.to_string();
@@ -2283,6 +2432,23 @@ pub async fn list_indexes(pool: &SqliteHandle, schema: &str, table: &str) -> Res
 }
 
 pub async fn list_foreign_keys(pool: &SqliteHandle, schema: &str, table: &str) -> Result<Vec<ForeignKeyInfo>, String> {
+    if pool.is_remote() {
+        let schema = remote_schema_name(schema);
+        let sql = format!("PRAGMA {}.foreign_key_list({})", sqlite_quote_ident(&schema), sqlite_quote_string(table));
+        return Ok(query_remote_rows(pool, &sql)
+            .await?
+            .into_iter()
+            .map(|row| ForeignKeyInfo {
+                name: format!("fk_{}", json_cell_i32(&row, 0)),
+                column: json_cell_text(&row, 3),
+                ref_schema: None,
+                ref_table: json_cell_text(&row, 2),
+                ref_column: json_cell_text(&row, 4),
+                on_update: None,
+                on_delete: None,
+            })
+            .collect());
+    }
     let pool = pool.clone();
     let requested_schema = schema.to_string();
     let table = table.to_string();
@@ -2313,6 +2479,49 @@ pub async fn list_foreign_keys(pool: &SqliteHandle, schema: &str, table: &str) -
 }
 
 pub async fn list_triggers(pool: &SqliteHandle, schema: &str, table: &str) -> Result<Vec<TriggerInfo>, String> {
+    if pool.is_remote() {
+        let schema = remote_schema_name(schema);
+        let sql = format!(
+            "SELECT name, sql FROM {}.sqlite_master WHERE type = 'trigger' AND tbl_name = {} ORDER BY name",
+            sqlite_quote_ident(&schema),
+            sqlite_quote_string(table)
+        );
+        return Ok(query_remote_rows(pool, &sql)
+            .await?
+            .into_iter()
+            .map(|row| {
+                let sql_text = json_cell_text(&row, 1);
+                let upper = sql_text.to_uppercase();
+                let timing = if upper.contains("BEFORE") {
+                    "BEFORE"
+                } else if upper.contains("AFTER") {
+                    "AFTER"
+                } else {
+                    "INSTEAD OF"
+                };
+                let event = if upper.contains("INSERT") {
+                    "INSERT"
+                } else if upper.contains("UPDATE") {
+                    "UPDATE"
+                } else {
+                    "DELETE"
+                };
+                TriggerInfo {
+                    name: json_cell_text(&row, 0),
+                    event: event.to_string(),
+                    timing: timing.to_string(),
+                    level: None,
+                    condition: None,
+                    language: None,
+                    enabled: None,
+                    valid: None,
+                    comment: None,
+                    created_at: None,
+                    statement: if sql_text.is_empty() { None } else { Some(sql_text) },
+                }
+            })
+            .collect());
+    }
     let pool = pool.clone();
     let requested_schema = schema.to_string();
     let table = table.to_string();
@@ -2486,8 +2695,11 @@ pub async fn execute_query_with_max_rows(
     sql: &str,
     max_rows: Option<usize>,
 ) -> Result<QueryResult, String> {
-    let pool = pool.clone();
     let sql = normalize_sqlite_sql(sql);
+    if let Some(worker) = pool.worker() {
+        return worker.query(&sql, max_rows).await;
+    }
+    let pool = pool.clone();
     tokio::task::spawn_blocking(move || execute_query_blocking(&pool, &sql, max_rows))
         .await
         .map_err(|e| e.to_string())?

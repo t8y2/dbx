@@ -2184,6 +2184,10 @@ export async function backupSqliteDatabase(connectionId: string, destinationPath
   return invoke("backup_sqlite_database", { connectionId, destinationPath });
 }
 
+export async function restoreSqliteDatabase(connectionId: string, sourcePath: string): Promise<void> {
+  return invoke("restore_sqlite_database", { connectionId, sourcePath });
+}
+
 export async function syncSavedSqlDirectory(request: SavedSqlSyncRequest): Promise<void> {
   return invoke("sync_saved_sql_directory", { request });
 }

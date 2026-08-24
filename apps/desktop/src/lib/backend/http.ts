@@ -751,6 +751,10 @@ export async function backupSqliteDatabase(_connectionId: string, _destinationPa
   throw new Error("SQLite backup is only available in the desktop app.");
 }
 
+export async function restoreSqliteDatabase(_connectionId: string, _sourcePath: string): Promise<void> {
+  throw new Error("Remote SQLite restore is only available in the desktop app.");
+}
+
 export async function syncSavedSqlDirectory(_request: SavedSqlSyncRequest): Promise<void> {
   throw new Error("SQL directory sync is only available in the desktop app.");
 }

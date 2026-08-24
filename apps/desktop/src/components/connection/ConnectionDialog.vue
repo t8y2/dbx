@@ -3050,7 +3050,35 @@ const zookeeperAuthScheme = computed<ZooKeeperAuthScheme>({
     resetTestState();
   },
 });
-const canUseTransportLayers = computed(() => form.value.db_type !== "sqlite" && form.value.db_type !== "access" && !isCloudflareD1Connection(form.value) && !isH2FileMode.value && !(form.value.db_type === "oracle" && form.value.oracle_connection_type === "tns"));
+const canUseTransportLayers = computed(() => {
+  if (form.value.db_type === "access" || isCloudflareD1Connection(form.value) || isH2FileMode.value || (form.value.db_type === "oracle" && form.value.oracle_connection_type === "tns")) {
+    return false;
+  }
+  if (form.value.db_type === "sqlite") {
+    return isDesktop;
+  }
+  return true;
+});
+const sqliteUsesSsh = computed(() => form.value.db_type === "sqlite" && (form.value.transport_layers || []).some((layer) => layer.enabled !== false && layer.type === "ssh"));
+const sqliteWorkerPlacement = computed({
+  get: () => getUrlParam(form.value.url_params, "dbx_sqlite_worker") || "session",
+  set: (value: string) => {
+    const next = value === "session" ? "" : value;
+    form.value.url_params = setUrlParam(form.value.url_params, "dbx_sqlite_worker", next);
+    if (value !== "preplaced" && !getUrlParam(form.value.url_params, "dbx_sqlite_worker_path")) {
+      return;
+    }
+    if (value === "session") {
+      form.value.url_params = setUrlParam(form.value.url_params, "dbx_sqlite_worker_path", "");
+    }
+  },
+});
+const sqliteWorkerPath = computed({
+  get: () => getUrlParam(form.value.url_params, "dbx_sqlite_worker_path"),
+  set: (value: string) => {
+    form.value.url_params = setUrlParam(form.value.url_params, "dbx_sqlite_worker_path", value);
+  },
+});
 const shouldShowAgentDriverInstallHint = computed(() => showAgentDriverInstallHint(form.value.db_type, agentDrivers.value, form.value.driver_profile));
 const h2DriverMissing = computed(() => form.value.db_type === "h2" && isH2FileMode.value && agentDrivers.value.find((d) => d.db_type === "h2")?.installed !== true);
 const agentDriverFocus = computed<DriverStoreFocus>(() => ({ target: "driver", driver: agentDriverInstallKey(form.value.db_type, form.value.driver_profile) }));
@@ -6019,10 +6047,10 @@ function openExternalUrl(url: string) {
                     <Label :class="connectionLabelClass">{{ t("connection.filePath") }}</Label>
                     <div class="col-span-3 space-y-1">
                       <div class="flex items-center gap-1">
-                        <Input v-model="form.host" class="flex-1" :placeholder="filePathPlaceholder" />
+                        <Input v-model="form.host" class="flex-1" :placeholder="sqliteUsesSsh ? t('connection.sqliteRemotePathPlaceholder') : filePathPlaceholder" />
                         <Tooltip v-if="isDesktop">
                           <TooltipTrigger as-child>
-                            <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" @click="browseDbFilePath">
+                            <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" :disabled="sqliteUsesSsh" @click="browseDbFilePath">
                               <FolderOpen class="h-4 w-4" />
                             </Button>
                           </TooltipTrigger>
@@ -6038,23 +6066,45 @@ function openExternalUrl(url: string) {
                         </Tooltip>
                         <Tooltip v-if="isDesktop && form.db_type === 'sqlite'">
                           <TooltipTrigger as-child>
-                            <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" @click="createSqliteFilePath">
+                            <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" :disabled="sqliteUsesSsh" @click="createSqliteFilePath">
                               <FilePlus2 class="h-4 w-4" />
                             </Button>
                           </TooltipTrigger>
                           <TooltipContent>{{ t("connection.createSqliteFile") }}</TooltipContent>
                         </Tooltip>
                       </div>
-                      <p v-if="supportsMemoryDatabasePath" class="text-xs text-muted-foreground">
+                      <p v-if="sqliteUsesSsh" class="text-xs text-muted-foreground">
+                        {{ t("connection.sqliteRemotePathHint") }}
+                      </p>
+                      <p v-else-if="supportsMemoryDatabasePath" class="text-xs text-muted-foreground">
                         {{ t("connection.memoryDatabasePathHint") }}
                       </p>
                     </div>
                   </div>
-                  <div v-if="form.db_type === 'sqlite'" class="grid grid-cols-4 items-center gap-4">
+                  <div v-if="form.db_type === 'sqlite' && sqliteUsesSsh" class="grid grid-cols-4 items-start gap-4">
+                    <Label :class="connectionLabelTopClass">{{ t("connection.sqliteWorkerPlacement") }}</Label>
+                    <div class="col-span-3 space-y-2">
+                      <label class="flex items-start gap-2 text-sm">
+                        <input type="radio" class="mt-1" value="session" v-model="sqliteWorkerPlacement" />
+                        <span>{{ t("connection.sqliteWorkerPlacementSession") }}</span>
+                      </label>
+                      <label class="flex items-start gap-2 text-sm">
+                        <input type="radio" class="mt-1" value="persist" v-model="sqliteWorkerPlacement" />
+                        <span>{{ t("connection.sqliteWorkerPlacementPersist") }}</span>
+                      </label>
+                      <label class="flex items-start gap-2 text-sm">
+                        <input type="radio" class="mt-1" value="preplaced" v-model="sqliteWorkerPlacement" />
+                        <span>{{ t("connection.sqliteWorkerPlacementPreplaced") }}</span>
+                      </label>
+                      <Input v-if="sqliteWorkerPlacement !== 'session'" v-model="sqliteWorkerPath" :placeholder="sqliteWorkerPlacement === 'persist' ? t('connection.sqliteWorkerPersistPathPlaceholder') : t('connection.sqliteWorkerPreplacedPathPlaceholder')" />
+                      <p class="text-xs text-muted-foreground">{{ t("connection.sqliteWorkerPlacementHint") }}</p>
+                    </div>
+                  </div>
+                  <div v-if="form.db_type === 'sqlite' && !sqliteUsesSsh" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ t("connection.sqliteCipherKey") }}</Label>
                     <PasswordInput v-model="form.password" class="col-span-3" :placeholder="t('connection.sqliteCipherKeyPlaceholder')" />
                   </div>
-                  <div v-if="form.db_type === 'sqlite'" class="grid grid-cols-4 items-start gap-4">
+                  <div v-if="form.db_type === 'sqlite' && !sqliteUsesSsh" class="grid grid-cols-4 items-start gap-4">
                     <Label :class="connectionLabelTopClass">{{ t("connection.sqliteExtensions") }}</Label>
                     <div class="col-span-3 space-y-1">
                       <div class="flex items-start gap-1">

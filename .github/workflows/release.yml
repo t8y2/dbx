@@ -580,6 +580,55 @@ jobs:
           gh release upload "${GITHUB_REF_NAME}" "$ASSET" "$CHECKSUM" \
             --repo "${GITHUB_REPOSITORY}" --clobber
 
+  sqlite-worker:
+    needs: release-ready
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+            artifact: dbx-sqlite-worker-linux-amd64
+            rustflags: "-C target-feature=+crt-static"
+          - platform: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-musl
+            artifact: dbx-sqlite-worker-linux-arm64
+            rustflags: "-C target-feature=+crt-static -C link-arg=-z -C link-arg=max-page-size=65536"
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cargo-zigbuild
+        run: pip3 install cargo-zigbuild
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./ -> target"
+          shared-key: sqlite-worker-${{ matrix.target }}
+          cache-on-failure: true
+
+      - name: Build musl SQLite worker
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: cargo zigbuild --release -p dbx-sqlite-worker --target ${{ matrix.target }}
+
+      - name: Upload SQLite worker
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SOURCE="target/${{ matrix.target }}/release/dbx-sqlite-worker"
+          ASSET="${{ matrix.artifact }}"
+          cp "$SOURCE" "$ASSET"
+          sha256sum "$ASSET" | tee "${ASSET}.sha256"
+          gh release upload "${GITHUB_REF_NAME}" "$ASSET" "${ASSET}.sha256" \
+            --repo "${GITHUB_REPOSITORY}" --clobber
+
   cleanup-release-signatures:
     needs: [build, build-windows-7-offline]
     runs-on: ubuntu-latest

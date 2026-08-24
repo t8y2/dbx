@@ -119,7 +119,7 @@ test("successful tree table paste consumes only the clipboard used to start it",
   const confirmPasteTableBody = functionBody(runtimeHost, "confirmPasteTable");
 
   assert.match(confirmPasteTableBody, /const clipboardAtPasteStart = connectionStore\.treeClipboard/);
-  assert.match(confirmPasteTableBody, /if \(pasteFeedback\.failedCount === 0\)/);
+  assert.match(confirmPasteTableBody, /if \(pasteFailCount === 0\)/);
   assert.match(confirmPasteTableBody, /connectionStore\.treeClipboard === clipboardAtPasteStart/);
   assert.match(confirmPasteTableBody, /connectionStore\.treeClipboard = null/);
 });
@@ -142,8 +142,7 @@ test("tree table paste consumes the clipboard even if only the object-list refre
   assert.match(confirmPasteTableBody, /let refreshFailCount = 0/);
   assert.match(confirmPasteTableBody, /pasteFailCount\+\+/);
   assert.match(confirmPasteTableBody, /refreshFailCount\+\+/);
-  assert.match(confirmPasteTableBody, /const pasteFeedback = tablePasteFeedback\(successCount, pasteFailCount, firstPasteError\)/);
-  assert.match(confirmPasteTableBody, /if \(pasteFeedback\.failedCount === 0\)[\s\S]*?connectionStore\.treeClipboard = null/);
+  assert.match(confirmPasteTableBody, /if \(pasteFailCount === 0\)[\s\S]*?connectionStore\.treeClipboard = null/);
   assert.match(confirmPasteTableBody, /if \(refreshFailCount > 0\)[\s\S]*?pasteTableRefreshFailed/);
 });
 

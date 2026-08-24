@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { applyStatusEvent, createGenerationStatus, liveAnnouncementText, markCancelling, shouldShowLongRunningHint, statusText, toolLabel, STATUS_IDLE_THRESHOLD_MS, STATUS_LONG_RUNNING_THRESHOLD_MS, type AiStatusTranslate } from "@/lib/ai/aiGenerationStatus";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { applyStatusEvent, createGenerationStatus, createStatusTicker, liveAnnouncementText, markCancelling, nextStatusTickDelay, shouldShowLongRunningHint, statusText, toolLabel, STATUS_IDLE_THRESHOLD_MS, STATUS_LONG_RUNNING_THRESHOLD_MS, type AiStatusTranslate } from "@/lib/ai/aiGenerationStatus";
 
 // Mock vue-i18n `t` mirroring the zh-CN copy matrix (Issue #6743 feature 1).
 const t: AiStatusTranslate = (key: string, named?: Record<string, unknown>) => {
@@ -400,6 +400,72 @@ describe("aiGenerationStatus", () => {
 
     it("falls back to the raw snake_case name for unknown tools", () => {
       expect(toolLabel("mystery_tool", t)).toBe("mystery_tool");
+    });
+  });
+
+  describe("status ticker (createStatusTicker / nextStatusTickDelay)", () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("nextStatusTickDelay aligns to the next wall-clock second", () => {
+      expect(nextStatusTickDelay(1_000_000_000)).toBe(1000); // exactly on a boundary -> next second
+      expect(nextStatusTickDelay(1_000_000_123)).toBe(877); // 123ms in -> 877ms to the boundary
+      expect(nextStatusTickDelay(1_000_000_999)).toBe(1); // 1ms before the boundary
+    });
+
+    it("start() seeds immediately then ticks once per whole second (not once per frame)", () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(1_000_000_123);
+      const seen: number[] = [];
+      const ticker = createStatusTicker((now) => seen.push(now));
+
+      ticker.start(Date.now());
+      expect(seen).toEqual([1_000_000_123]); // fresh timestamp seed at start
+
+      // 876ms of elapsed time sits strictly before the next boundary -> no tick.
+      vi.advanceTimersByTime(876);
+      expect(seen).toHaveLength(1);
+
+      // Crossing 1_000_001_000 fires exactly one boundary tick (not 60 frames).
+      vi.advanceTimersByTime(1);
+      expect(seen).toEqual([1_000_000_123, 1_000_001_000]);
+
+      // A whole second later -> exactly one more tick, re-aligned to the boundary.
+      vi.advanceTimersByTime(1000);
+      expect(seen).toEqual([1_000_000_123, 1_000_001_000, 1_000_002_000]);
+    });
+
+    it("stop() cancels the pending tick and the ticker stays stopped", () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(1_000_000_123);
+      const seen: number[] = [];
+      const ticker = createStatusTicker((now) => seen.push(now));
+
+      ticker.start(Date.now());
+      vi.advanceTimersByTime(1000);
+      const countAfterBoundary = seen.length;
+      expect(countAfterBoundary).toBe(2);
+
+      ticker.stop();
+      vi.advanceTimersByTime(10_000);
+      expect(seen.length).toBe(countAfterBoundary);
+    });
+
+    it("start() after stop() re-seeds from the new time and keeps ticking", () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(1_000_000_123);
+      const seen: number[] = [];
+      const ticker = createStatusTicker((now) => seen.push(now));
+
+      ticker.start(Date.now());
+      vi.advanceTimersByTime(877); // boundary tick at 1_000_001_000
+      ticker.stop();
+      ticker.start(Date.now()); // re-seed at 1_000_001_000
+      expect(seen).toEqual([1_000_000_123, 1_000_001_000, 1_000_001_000]);
+
+      vi.advanceTimersByTime(1000); // next boundary at 1_000_002_000
+      expect(seen).toEqual([1_000_000_123, 1_000_001_000, 1_000_001_000, 1_000_002_000]);
     });
   });
 });

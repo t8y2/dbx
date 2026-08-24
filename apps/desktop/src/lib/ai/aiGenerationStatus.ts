@@ -3,11 +3,13 @@
  * line (Issue #6743, feature 1).
  *
  * The component keeps an `AiGenerationStatus` ref, feeds every `ai-agent-event`
- * into `applyStatusEvent`, and drives an animation-frame ticker that recomputes
- * `now` for `statusText`/`shouldShowLongRunningHint`. Keeping the reducer and the copy
- * selection pure (both inject `now`, i18n `t` is injected into `statusText`)
- * makes the whole feature unit-testable without a DOM harness, matching the
- * existing pattern of `aiConversationLifecycle.ts` / `aiGenerationGuard.ts`.
+ * into `applyStatusEvent`, and runs a wall-clock whole-second ticker
+ * (`createStatusTicker`) that recomputes `now` for
+ * `statusText`/`shouldShowLongRunningHint`. Keeping the reducer, the copy
+ * selection, and the ticker pure (all inject `now`; i18n `t` is injected into
+ * `statusText`) makes the whole feature unit-testable without a DOM harness,
+ * matching the existing pattern of `aiConversationLifecycle.ts` /
+ * `aiGenerationGuard.ts`.
  *
  * Phase determination is EVENT-DRIVEN, never mode-based: Ask mode also emits
  * `turn_start` and can invoke read-only tools, so `running_tool` is decided purely
@@ -280,4 +282,69 @@ export function liveAnnouncementText(status: AiGenerationStatus, now: number, t:
 /** Whether the gentle "响应时间较长，可继续等待或停止" hint should appear next to Stop. */
 export function shouldShowLongRunningHint(status: AiGenerationStatus, now: number): boolean {
   return status.phase !== "finished" && status.phase !== "finalizing" && now - status.startedAt > STATUS_LONG_RUNNING_THRESHOLD_MS;
+}
+
+/**
+ * Delay (ms) until the next real wall-clock second boundary. Used to align the
+ * status ticker to whole-second boundaries so the displayed elapsed/idle rolls
+ * +1s exactly when the wall clock does — a fixed `setInterval(1000)` drifts and
+ * skips values when a late callback shifts the phase.
+ */
+export function nextStatusTickDelay(now: number): number {
+  return 1000 - (now % 1000);
+}
+
+/**
+ * Cancellable whole-second ticker for the live generation-status line.
+ *
+ * Replaces a per-frame `requestAnimationFrame` loop that rescheduled 60+ times
+ * per second while only updating displayed state once per second. This ticker
+ * runs ONE `setTimeout` per whole-second boundary: it schedules the next tick to
+ * the next real wall-clock second (`nextStatusTickDelay`), so a delayed tick
+ * re-aligns instead of accumulating drift. Being wall-clock based it also keeps
+ * ticking while the document is hidden/occluded (rAF pauses then), so a long
+ * request's idle/elapsed display stays live in the background.
+ *
+ * `start` seeds the callback immediately with `now` (so the line shows a fresh
+ * timestamp) and schedules the next boundary tick. `stop` cancels a pending
+ * tick and clears the running flag; a tick callback already queued when `stop`
+ * runs bails without rescheduling (the `running` guard), so a stopped ticker
+ * stays stopped. `start` is idempotent (re-starts from the given `now`).
+ */
+export interface StatusTicker {
+  start(now: number): void;
+  stop(): void;
+}
+
+export function createStatusTicker(onTick: (now: number) => void): StatusTicker {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let running = false;
+
+  function tick() {
+    timer = null;
+    // A tick queued before stop() may still fire once after it — bail without
+    // rescheduling so a stopped ticker stays stopped.
+    if (!running) return;
+    const now = Date.now();
+    onTick(now);
+    timer = setTimeout(tick, nextStatusTickDelay(now));
+  }
+
+  function stop() {
+    running = false;
+    if (timer !== null) {
+      clearTimeout(timer);
+      timer = null;
+    }
+  }
+
+  return {
+    start(now: number) {
+      stop();
+      running = true;
+      onTick(now);
+      timer = setTimeout(tick, nextStatusTickDelay(now));
+    },
+    stop,
+  };
 }

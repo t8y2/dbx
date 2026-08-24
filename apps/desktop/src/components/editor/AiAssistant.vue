@@ -106,7 +106,7 @@ import {
 import { isAiConfigModelCandidate } from "@/lib/ai/aiConfigCandidates";
 import { deleteConversationWithCancellation, stopAiGenerationWithFallback } from "@/lib/ai/aiConversationLifecycle";
 import { AiGenerationGuard } from "@/lib/ai/aiGenerationGuard";
-import { applyStatusEvent, createGenerationStatus, liveAnnouncementText, markCancelling, shouldShowLongRunningHint, statusText, toolLabel, STATUS_IDLE_THRESHOLD_MS, type AiGenerationStatus } from "@/lib/ai/aiGenerationStatus";
+import { applyStatusEvent, createGenerationStatus, createStatusTicker, liveAnnouncementText, markCancelling, shouldShowLongRunningHint, statusText, toolLabel, STATUS_IDLE_THRESHOLD_MS, type AiGenerationStatus } from "@/lib/ai/aiGenerationStatus";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { addConfiguredAiModel, aiModelOptions } from "@/lib/ai/aiConfigList";
 import { orderAiConfigsForDisplay } from "@/lib/ai/aiConfigOrdering";
@@ -380,48 +380,44 @@ const aiGenerationGuard = new AiGenerationGuard();
 
 // Live generation-status line (Issue #6743 feature 1). `generationStatus` is the
 // per-request state machine fed by every `ai-agent-event`; `statusNow` is bumped
-// by an animation-frame ticker only when the displayed whole second changes, so
-// `statusText` recomputes elapsed/idle at each real second boundary instead of a
-// fixed 1s interval (a delayed interval tick used to skip values — Math.ceil of a
-// late wall-clock sample — and freeze the display in between). Both are
-// per-request transient state and MUST be reset on both the normal `finally` path
-// and `resetPendingRequestState()` (abandon path) — see the dual-path note next to
-// `resetPendingRequestState`.
+// by the whole-second ticker (`createStatusTicker`, lib/ai/aiGenerationStatus.ts)
+// only when the displayed whole second changes, so `statusText` recomputes
+// elapsed/idle at each real second boundary instead of a fixed 1s interval (a
+// delayed interval tick used to skip values — Math.ceil of a late wall-clock
+// sample — and freeze the display in between). The wall-clock `setTimeout`
+// replaces a per-frame rAF loop that rescheduled ~60×/s while only updating once
+// per second, and keeps ticking while the document is hidden (rAF pauses then).
+// Both refs are per-request transient state and MUST be reset on both the normal
+// `finally` path and `resetPendingRequestState()` (abandon path) — see the
+// dual-path note next to `resetPendingRequestState`.
 const generationStatus = ref<AiGenerationStatus>(createGenerationStatus(Date.now()));
 const statusNow = ref(Date.now());
-let statusFrame: number | null = null;
 /** Last displayed whole second (`Math.ceil((statusNow - startedAt) / 1000)`). */
 let lastStatusSecond = -1;
 
-function runStatusFrame() {
-  // A frame queued before stopStatusTimer() may still fire once after the timer
-  // was stopped — bail without rescheduling so a stopped timer stays stopped.
-  if (statusFrame === null) return;
-  statusFrame = null;
-  const now = Date.now();
+// Aligned-to-the-next-second ticker. The callback mirrors the old
+// requestAnimationFrame body: write `statusNow` only when the displayed whole
+// second changes, so the display rolls +1s at each real boundary.
+const statusTicker = createStatusTicker((now: number) => {
   const second = Math.ceil((now - generationStatus.value.startedAt) / 1000);
   if (second !== lastStatusSecond) {
     lastStatusSecond = second;
     statusNow.value = now;
   }
-  statusFrame = requestAnimationFrame(runStatusFrame);
-}
+});
 
 function startStatusTimer() {
-  stopStatusTimer();
-  statusNow.value = Date.now();
+  const now = Date.now();
+  statusNow.value = now;
   // Seed the boundary so the ticker writes only when the displayed whole second
   // changes — the display then rolls +1s within ~a frame of each real boundary
   // instead of skipping values when a tick is delayed.
-  lastStatusSecond = Math.ceil((statusNow.value - generationStatus.value.startedAt) / 1000);
-  statusFrame = requestAnimationFrame(runStatusFrame);
+  lastStatusSecond = Math.ceil((now - generationStatus.value.startedAt) / 1000);
+  statusTicker.start(now);
 }
 
 function stopStatusTimer() {
-  if (statusFrame !== null) {
-    cancelAnimationFrame(statusFrame);
-    statusFrame = null;
-  }
+  statusTicker.stop();
 }
 
 const generationStatusText = computed(() => statusText(generationStatus.value, statusNow.value, t));

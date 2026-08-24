@@ -1117,8 +1117,25 @@ pub async fn run_cli_jsonl_agent(
         on_event(AgentEvent::ResponseComplete);
     }
 
-    let status = child.wait().await.map_err(|e| format!("CLI agent wait failed: {e}"))?;
-    let stderr = stderr_task.await.unwrap_or_default();
+    // The read loop above is gone, so this wait is the last chance to observe a
+    // cancel. Race the (potentially slow) post-EOF reap and stderr drain against
+    // `cancelled` so Stop still kills and reaps a CLI that closes stdout and
+    // then hangs. On cancel we kill() then wait() (kill-and-reap) so the child
+    // leaves no zombie behind, then return the cancel error. `stderr_task` is
+    // dropped on that branch — the pipe closes once the child is terminated, so
+    // the reader completes on its own (no leak, no hang).
+    let (status, stderr) = tokio::select! {
+        status = child.wait() => {
+            let status = status.map_err(|e| format!("CLI agent wait failed: {e}"))?;
+            let stderr = stderr_task.await.unwrap_or_default();
+            (status, stderr)
+        }
+        _ = cancelled.notified() => {
+            let _ = child.kill().await;
+            let _ = child.wait().await; // reap; kill() then wait() prevents a zombie
+            return Err("Agent loop cancelled".to_string());
+        }
+    };
 
     if let Some(error) = terminal_error {
         return Err(error);
@@ -1568,5 +1585,82 @@ mod tests {
         let pid = std::fs::read_to_string(&pid_file).expect("child pid should be captured");
         assert!(!process_is_alive(pid.trim()));
         let _ = std::fs::remove_file(pid_file);
+    }
+
+    #[tokio::test]
+    async fn jsonl_eof_cancel_kills_and_reaps_hanging_child() {
+        // The CLI emits a valid JSONL line, closes stdout (EOF -> ResponseComplete),
+        // then hangs before exiting. A cancel fired after EOF must race the
+        // post-EOF child.wait(): the child is killed AND reaped (no zombie) and
+        // the run returns promptly with the cancel error. No AgentEnd may be
+        // emitted on the cancel path.
+        let pid_file = std::env::temp_dir().join(format!(
+            "dbx-cli-agent-eof-cancel-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let script = format!(
+            "echo $$ > {}; printf '%s\\n' '{{\"type\":\"text\",\"part\":{{\"text\":\"hello\"}}}}'; exec 1>&-; exec sleep 30",
+            pid_file.display()
+        );
+
+        let spec = CliAgentProcessSpec {
+            command: CliAgentCommandSpec { program: "sh".to_string(), args: vec!["-c".to_string(), script] },
+            env: Vec::new(),
+            env_remove: Vec::new(),
+            current_dir: None,
+            stdin: None,
+            dialect: CliAgentJsonlDialect::OpenCodeRun,
+            classify_spawn_error,
+            classify_run_error,
+        };
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+        let (probe_tx, mut probe_rx) = tokio::sync::watch::channel(0u8);
+        let cancelled = Arc::new(Notify::new());
+        let runner_cancelled = Arc::clone(&cancelled);
+
+        let runner = tokio::spawn(async move {
+            run_cli_jsonl_agent(spec, runner_cancelled.as_ref(), move |event| {
+                if matches!(event, AgentEvent::ResponseComplete) {
+                    let _ = probe_tx.send(1);
+                }
+                if matches!(event, AgentEvent::AgentEnd { .. }) {
+                    let _ = probe_tx.send(2);
+                }
+                captured.lock().unwrap().push(event);
+            })
+            .await
+        });
+
+        // ResponseComplete must arrive as soon as stdout is consumed — the child
+        // is still hanging at that point, before the post-EOF wait.
+        timeout(Duration::from_secs(1), probe_rx.wait_for(|seen| *seen >= 1))
+            .await
+            .expect("ResponseComplete should be emitted while the process still runs")
+            .expect("probe watch channel closed before ResponseComplete was emitted");
+
+        assert_eq!(*probe_rx.borrow(), 1, "AgentEnd must not be emitted before the exit status is known");
+        let pid = std::fs::read_to_string(&pid_file).expect("child pid should be captured");
+        assert!(process_is_alive(pid.trim()), "hanging child should still be alive after ResponseComplete");
+
+        cancelled.notify_waiters();
+
+        let result = timeout(Duration::from_secs(3), runner)
+            .await
+            .expect("runner should return promptly after post-EOF cancellation")
+            .expect("runner task should not panic");
+        assert_eq!(result.unwrap_err(), "Agent loop cancelled");
+
+        sleep(Duration::from_millis(100)).await;
+        assert!(!process_is_alive(pid.trim()), "hanging child should be killed and reaped");
+        let _ = std::fs::remove_file(pid_file);
+
+        let events = events.lock().unwrap();
+        assert_eq!(
+            events.iter().filter(|event| matches!(event, AgentEvent::AgentEnd { .. })).count(),
+            0,
+            "AgentEnd must never be emitted on the cancel path"
+        );
     }
 }

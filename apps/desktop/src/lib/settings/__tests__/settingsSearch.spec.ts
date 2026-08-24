@@ -55,6 +55,22 @@ describe("settings search", () => {
     expect(searchSettings(webEntries, "desktop", "en")).toEqual([]);
   });
 
+  it("exposes WebDAV sync in Web settings without exposing snippet sync", () => {
+    const webEntries = resolveSettingsSearchEntries(SETTINGS_SEARCH_DEFINITIONS, { isWeb: true, visibleCategories: new Set<SettingsCategory>(["sync"]) }, translate, categoryLabels);
+
+    expect(webEntries.map((entry) => entry.id)).toEqual(["sync-webdav", "sync-webdav-endpoint", "sync-webdav-username", "sync-webdav-password", "sync-webdav-remote-path", "sync-webdav-auto-upload", "sync-secrets", "sync-secrets-passphrase"]);
+    expect(settingsDialogSource).toContain('{ value: "sync", label: t("settings.syncTab") }');
+    expect(settingsDialogSource).not.toContain('...(isWeb ? [] : [{ value: "sync"');
+    expect(settingsDialogSource).toContain('<TabsList v-if="!isWeb"');
+  });
+
+  it("defines the WebDAV Web-runtime notice in every supported locale", () => {
+    for (const locale of ["zh-CN", "zh-TW", "en", "es", "it", "ja", "ko", "pt-BR"]) {
+      const source = readFileSync(new URL(`../../../i18n/locales/${locale}.ts`, import.meta.url), "utf8");
+      expect(source, locale).toContain("syncWebDavWebDescription:");
+    }
+  });
+
   it("matches Chinese text as a Unicode substring", () => {
     expect(searchSettings([{ id: "font", category: "editor", title: "界面字体", description: "选择应用字体", categoryLabel: "编辑器", targetId: "editor" }], "字体", "zh-CN").map((entry) => entry.id)).toEqual(["font"]);
   });

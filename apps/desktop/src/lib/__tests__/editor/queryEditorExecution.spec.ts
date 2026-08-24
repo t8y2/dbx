@@ -50,7 +50,7 @@ describe("QueryEditor execution routing", () => {
   });
 
   it("preserves the source range when executing from the statement gutter", () => {
-    expect(queryEditorSource).toContain("const editorViewportRequestId = gutterExecutionViewport.beginRequest()");
+    expect(queryEditorSource).toContain("const editorViewportRequestId = executionViewportOwnership.beginRequest()");
     expect(queryEditorSource).toContain("emitExecutionRequest({ ...sqlExecutionSnapshotForRange(currentView, statementRange), editorViewportRequestId })");
     expect(queryEditorSource).not.toContain('emit("execute", statementRange.sql)');
   });
@@ -60,6 +60,13 @@ describe("QueryEditor execution routing", () => {
     expect(contentAreaSource).toContain("acceptGutterExecutionViewport(requestId)");
     expect(sqlExecutionSource).toContain("onExecutionStarted: () => deps.onExecutionStarted?.(options.editorViewportRequestId!)");
     expect(queryStoreSource.indexOf("tab.isExecuting = true")).toBeLessThan(queryStoreSource.indexOf("options?.onExecutionStarted?.()"));
+  });
+
+  it("tracks editor interaction while a query is executing", () => {
+    expect(contentAreaSource).toContain("queryEditorRef.value?.beginExecutionViewportTracking()");
+    expect(queryEditorSource).toContain('@wheel="recordExecutionViewportInteraction"');
+    expect(queryEditorSource).toContain('@pointerdown="recordExecutionViewportInteraction"');
+    expect(queryEditorSource).toContain("executionViewportOwnership.recordUserInteraction()");
   });
 
   it("lets the shortcut skip the picker without affecting other execution entry points", () => {
@@ -75,7 +82,33 @@ describe("QueryEditor execution routing", () => {
   });
 });
 
-describe("QueryEditor gutter execution viewport ownership", () => {
+describe("QueryEditor execution viewport ownership", () => {
+  it("keeps automatic cursor centering when the user does not interact during execution", () => {
+    const ownership = createQueryEditorExecutionViewportOwnership();
+
+    ownership.beginExecution();
+
+    expect(ownership.consumeCompletionPreservation()).toBe(false);
+  });
+
+  it("preserves the viewport once after user interaction during execution", () => {
+    const ownership = createQueryEditorExecutionViewportOwnership();
+
+    ownership.beginExecution();
+    ownership.recordUserInteraction();
+
+    expect(ownership.consumeCompletionPreservation()).toBe(true);
+    expect(ownership.consumeCompletionPreservation()).toBe(false);
+  });
+
+  it("ignores editor interaction outside an active execution", () => {
+    const ownership = createQueryEditorExecutionViewportOwnership();
+
+    ownership.recordUserInteraction();
+
+    expect(ownership.consumeCompletionPreservation()).toBe(false);
+  });
+
   it("does not let a cancelled or early-returned gutter request affect the next ordinary execution", () => {
     const ownership = createQueryEditorExecutionViewportOwnership();
     const cancelledRequestId = ownership.beginRequest();
@@ -83,7 +116,7 @@ describe("QueryEditor gutter execution viewport ownership", () => {
     ownership.cancelPendingRequest();
 
     expect(ownership.acceptRequest(cancelledRequestId)).toBe(false);
-    expect(ownership.consumeAcceptedRequest()).toBe(false);
+    expect(ownership.consumeCompletionPreservation()).toBe(false);
   });
 
   it("preserves the viewport once for the matching accepted execution", () => {
@@ -91,8 +124,9 @@ describe("QueryEditor gutter execution viewport ownership", () => {
     const requestId = ownership.beginRequest();
 
     expect(ownership.acceptRequest(requestId)).toBe(true);
-    expect(ownership.consumeAcceptedRequest()).toBe(true);
-    expect(ownership.consumeAcceptedRequest()).toBe(false);
+    ownership.beginExecution();
+    expect(ownership.consumeCompletionPreservation()).toBe(true);
+    expect(ownership.consumeCompletionPreservation()).toBe(false);
   });
 
   it("clears pending and accepted ownership when the editor becomes inactive", () => {
@@ -106,7 +140,17 @@ describe("QueryEditor gutter execution viewport ownership", () => {
     expect(ownership.acceptRequest(acceptedRequestId)).toBe(true);
     ownership.reset();
 
-    expect(ownership.consumeAcceptedRequest()).toBe(false);
+    expect(ownership.consumeCompletionPreservation()).toBe(false);
+  });
+
+  it("clears execution interaction when the editor becomes inactive", () => {
+    const ownership = createQueryEditorExecutionViewportOwnership();
+    ownership.beginExecution();
+    ownership.recordUserInteraction();
+
+    ownership.reset();
+
+    expect(ownership.consumeCompletionPreservation()).toBe(false);
   });
 });
 

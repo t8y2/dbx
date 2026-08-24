@@ -65,6 +65,7 @@ import { rememberExternalSqlFileTarget, resolveExternalSqlFileTarget, unassociat
 import { externalSqlFileOpenErrorMessage, readBrowserSqlFile, sqlFileTitleFromPath } from "@/lib/sql/sqlFileOpen";
 import type { ConnectionConfig, DatabaseType, ObjectSourceKind, QueryTab, TreeNode } from "@/types/database";
 import { parseConnectionDeepLink, type ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
+import { parseAiConfigDeepLink, type AiConfigDeepLinkDraft } from "@/lib/ai/aiConfigDeepLink";
 import {
   isBrowserReloadShortcut,
   isCloseOtherTabsShortcut,
@@ -223,6 +224,8 @@ const settingsPageTabOpen = ref(false);
 const settingsInitialTab = ref("appearance");
 const settingsInitialSection = ref<string | undefined>(undefined);
 const settingsNavigationRequestId = ref(0);
+const settingsAiConfigDraft = ref<AiConfigDeepLinkDraft | null>(null);
+const settingsAiConfigRequestId = ref(0);
 const showQueryEditorDdlDialog = ref(false);
 const showQueryEditorObjectSourceDialog = ref(false);
 const driverStoreTabOpen = ref(false);
@@ -511,6 +514,7 @@ const { setupTauriListeners, cleanupTauriListeners } = useTauriEvents({
   openSqlFilePath,
   openDbFilePath,
   openConnectionDeepLink,
+  openAiConfigDeepLink,
 });
 const { showCloseActionPrompt, chooseQuit, chooseMinimize, cancelCloseActionPrompt, performCloseAction, setupCloseActionPromptListener, cleanupCloseActionPromptListener } = useCloseActionPrompt({ requestClose: requestAppClose });
 useVisibilityChange();
@@ -531,6 +535,13 @@ function openSettings(initialTab = "appearance", initialSection?: string) {
   activateSettingsPage();
 }
 
+type MainContentSurface = "query" | "settings" | "driverStore";
+
+function activateMainContentSurface(surface: MainContentSurface) {
+  settingsStore.settingsPageActive = surface === "settings";
+  driverStoreActive.value = surface === "driverStore";
+}
+
 watch(
   () => settingsStore.settingsNavigationRequest,
   (request) => {
@@ -542,23 +553,20 @@ watch(
 
 function activateSettingsPage() {
   settingsPageTabOpen.value = true;
-  settingsStore.settingsPageActive = true;
-  driverStoreActive.value = false;
+  activateMainContentSurface("settings");
 }
 
 function activateQuerySurface() {
-  driverStoreActive.value = false;
-  settingsStore.settingsPageActive = false;
+  activateMainContentSurface("query");
 }
 
 function closeSettingsPage() {
   settingsPageTabOpen.value = false;
-  settingsStore.settingsPageActive = false;
   if (settingsReturnSurface.value === "driverStore" && driverStoreTabOpen.value) {
-    driverStoreActive.value = true;
+    activateMainContentSurface("driverStore");
     return;
   }
-  driverStoreActive.value = false;
+  activateMainContentSurface("query");
 }
 
 const driverStoreFocus = ref<DriverStoreFocus | null>(null);
@@ -574,13 +582,12 @@ function openDriverStorePage(target?: "agent" | "jdbc" | "storage" | "runtime" |
     driverStoreFocus.value = target ?? null;
   }
   driverStoreTabOpen.value = true;
-  driverStoreActive.value = true;
-  settingsStore.settingsPageActive = false;
+  activateMainContentSurface("driverStore");
 }
 
 function closeDriverStorePage() {
   driverStoreTabOpen.value = false;
-  driverStoreActive.value = false;
+  activateMainContentSurface("query");
   driverStoreActiveTab.value = "agent";
   driverStoreFocus.value = null;
 }
@@ -1654,6 +1661,35 @@ async function openPendingConnectionLinks() {
     const links = await api.pendingOpenConnectionLinks();
     for (const link of links) {
       await openConnectionDeepLink(link);
+    }
+  } catch {
+    /* ignore startup deep-link probing errors */
+  }
+}
+
+async function openAiConfigDeepLink(url: string) {
+  try {
+    const draft = parseAiConfigDeepLink(url);
+    if (!draft) return;
+    settingsAiConfigDraft.value = draft;
+    settingsAiConfigRequestId.value += 1;
+    openSettings("ai");
+  } catch (e: any) {
+    toast(
+      t("ai.deepLinkInvalid", {
+        message: e?.message || String(e),
+      }),
+      5000,
+    );
+  }
+}
+
+async function openPendingAiConfigLinks() {
+  if (!isTauriRuntime()) return;
+  try {
+    const links = await api.pendingOpenAiConfigLinks();
+    for (const link of links) {
+      await openAiConfigDeepLink(link);
     }
   } catch {
     /* ignore startup deep-link probing errors */
@@ -2779,6 +2815,7 @@ onMounted(async () => {
   void openPendingSqlFiles();
   void openPendingDbFiles();
   void openPendingConnectionLinks();
+  void openPendingAiConfigLinks();
   console.log(`[STARTUP] onMounted sync done: ${(performance.now() - mountStart).toFixed(0)}ms`);
 });
 
@@ -2890,6 +2927,8 @@ onUnmounted(() => {
                 :initial-tab="settingsInitialTab"
                 :initial-section="settingsInitialSection"
                 :navigation-request-id="settingsNavigationRequestId"
+                :ai-config-draft="settingsAiConfigDraft"
+                :ai-config-request-id="settingsAiConfigRequestId"
                 :app-version="appVersion"
                 :checking-updates="checkingUpdates"
                 class="flex-1 min-h-0"

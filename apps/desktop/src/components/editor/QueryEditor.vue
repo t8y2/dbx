@@ -226,7 +226,7 @@ let viewportEmitFrame: number | null = null;
 let viewportRestoreFrame: number | null = null;
 let latestViewport: { scrollTop: number; scrollLeft: number } | undefined = props.initialViewport;
 let lastEmittedViewport: { scrollTop: number; scrollLeft: number } | undefined = props.initialViewport;
-const gutterExecutionViewport = createQueryEditorExecutionViewportOwnership();
+const executionViewportOwnership = createQueryEditorExecutionViewportOwnership();
 let latestSelection: { anchor: number; head: number } | undefined = props.initialSelection;
 const connectionStore = useConnectionStore();
 const settingsStore = useSettingsStore();
@@ -830,7 +830,7 @@ interface RequestExecuteOptions {
 
 function emitExecutionRequest(source: SqlExecutionOverride, openInNewResultTab = false) {
   if (typeof source === "string" || source.editorViewportRequestId === undefined) {
-    gutterExecutionViewport.cancelPendingRequest();
+    executionViewportOwnership.cancelPendingRequest();
   }
   if (openInNewResultTab) {
     emit("executeInNewResultTab", source);
@@ -840,7 +840,7 @@ function emitExecutionRequest(source: SqlExecutionOverride, openInNewResultTab =
 }
 
 function requestExecute(options: RequestExecuteOptions = {}) {
-  gutterExecutionViewport.cancelPendingRequest();
+  executionViewportOwnership.cancelPendingRequest();
   const currentView = view.value;
   if (!currentView) return false;
   currentView.focus();
@@ -1689,7 +1689,7 @@ function executeSqlStatementFromGutter(currentView: EditorViewType, line: { from
   event.stopPropagation();
   // Gutter play is always scoped to the statement/command for that line, even
   // when the main editor execute action would run the full document.
-  const editorViewportRequestId = gutterExecutionViewport.beginRequest();
+  const editorViewportRequestId = executionViewportOwnership.beginRequest();
   emitExecutionRequest({ ...sqlExecutionSnapshotForRange(currentView, statementRange), editorViewportRequestId });
   // 不主动聚焦编辑器，否则 CodeMirror 会把屏幕滚回之前的光标位置。
   // currentView.focus();
@@ -2515,6 +2515,34 @@ function createHoverDom(title: string, detail: string, sqlContent?: string, rows
   let handleCopy: ((event: ClipboardEvent) => void) | null = null;
 
   if (sqlContent) {
+    heading.className = "flex items-center justify-between gap-3 font-medium";
+
+    const copyButton = document.createElement("button");
+    copyButton.type = "button";
+    copyButton.className = "rounded border border-border/60 px-1.5 py-0.5 text-[11px] leading-none text-muted-foreground hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
+    copyButton.textContent = t("grid.copyDdl");
+    copyButton.title = t("grid.copyDdl");
+    copyButton.setAttribute("aria-label", t("grid.copyDdl"));
+    copyButton.addEventListener("pointerdown", (event) => {
+      // Keep CodeMirror's editor gestures from dismissing the tooltip before
+      // the click can reach the copy action.
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    copyButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void (async () => {
+        try {
+          await copyToClipboard(normalizeAlignedSqlWhitespace(sqlContent));
+          toast(t("contextMenu.ddlCopied"), 2000);
+        } catch (error: any) {
+          toast(t("grid.copyFailed", { message: error?.message || String(error) }), 5000);
+        }
+      })();
+    });
+    heading.appendChild(copyButton);
+
     const separator = document.createElement("div");
     separator.className = "mt-2 border-t border-border/60";
     dom.appendChild(separator);
@@ -5819,7 +5847,7 @@ function pauseQueryEditorBackgroundWork() {
   flushEditorSelection();
   clearTableNavigationHover();
   clearPendingCompletionTab();
-  gutterExecutionViewport.reset();
+  executionViewportOwnership.reset();
   editorIsActive = false;
   clearScheduledSemanticDiagnostics();
   completionEpoch++;
@@ -5978,7 +6006,7 @@ function openReplace(): boolean {
 }
 
 function scrollCursorIntoView() {
-  const preserveViewport = gutterExecutionViewport.consumeAcceptedRequest();
+  const preserveViewport = executionViewportOwnership.consumeCompletionPreservation();
   if (!view.value || !editorViewModule || !editorIsActive || preserveViewport) return;
   const pos = view.value.state.selection.main.head;
   // Use "center" rather than "nearest": by the time this runs, the results pane has already
@@ -5992,19 +6020,28 @@ function scrollCursorIntoView() {
   });
 }
 
+function beginExecutionViewportTracking() {
+  executionViewportOwnership.beginExecution();
+}
+
+function recordExecutionViewportInteraction() {
+  executionViewportOwnership.recordUserInteraction();
+}
+
 function dismissHoverTooltip() {
   if (!view.value || !hoverCloseEffect) return;
   view.value.dispatch({ effects: hoverCloseEffect });
 }
 
 function acceptGutterExecutionViewport(requestId: number) {
-  return gutterExecutionViewport.acceptRequest(requestId);
+  return executionViewportOwnership.acceptRequest(requestId);
 }
 
 defineExpose({
   openSearch,
   openReplace,
   scrollCursorIntoView,
+  beginExecutionViewportTracking,
   acceptGutterExecutionViewport,
   requestExecute,
   requestExecuteInNewResultTab,
@@ -6016,7 +6053,7 @@ defineExpose({
 </script>
 
 <template>
-  <div class="h-full w-full overflow-hidden relative" @gesturestart="onEditorGestureStart" @gesturechange="onEditorGestureChange" @gestureend="onEditorGestureEnd">
+  <div class="h-full w-full overflow-hidden relative" @wheel="recordExecutionViewportInteraction" @pointerdown="recordExecutionViewportInteraction" @gesturestart="onEditorGestureStart" @gesturechange="onEditorGestureChange" @gestureend="onEditorGestureEnd">
     <CustomContextMenu :items="currentContextMenuItems" @close="contextMenuOpen = false" v-slot="{ onContextMenu }">
       <div
         ref="editorRef"

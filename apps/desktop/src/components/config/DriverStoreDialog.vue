@@ -2224,8 +2224,8 @@ watch(driverStoreTab, (tab) => {
         </Tabs>
       </div>
     </div>
+    <AgentOfflineExportDialog v-model:open="offlineExportDialogOpen" :preview="offlineExportPreview" :loading="offlineExportLoading" :exporting="offlineExporting" :error="offlineExportError" @confirm="exportOfflinePackage" />
   </div>
-  <AgentOfflineExportDialog v-model:open="offlineExportDialogOpen" :preview="offlineExportPreview" :loading="offlineExportLoading" :exporting="offlineExporting" :error="offlineExportError" @confirm="exportOfflinePackage" />
 </template>
 
 <style>

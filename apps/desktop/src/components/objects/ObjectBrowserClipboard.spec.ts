@@ -22,7 +22,15 @@ describe("ObjectBrowser table clipboard context menu", () => {
   });
 
   it("consumes only the clipboard used by a fully successful paste", () => {
-    expect(objectBrowserSource).toMatch(/async function confirmPasteTable\(\)[\s\S]*?const clipboardAtPasteStart = connectionStore\.treeClipboard[\s\S]*?if \(failCount === 0\)[\s\S]*?connectionStore\.treeClipboard === clipboardAtPasteStart[\s\S]*?connectionStore\.treeClipboard = null/);
+    expect(objectBrowserSource).toMatch(
+      /async function confirmPasteTable\(\)[\s\S]*?const clipboardAtPasteStart = connectionStore\.treeClipboard[\s\S]*?const pasteFeedback = tablePasteFeedback\(successCount, pasteFailCount, firstPasteError\)[\s\S]*?if \(pasteFailCount === 0\)[\s\S]*?connectionStore\.treeClipboard === clipboardAtPasteStart[\s\S]*?connectionStore\.treeClipboard = null/,
+    );
+  });
+
+  it("shows the first paste failure reason without concatenating every error", () => {
+    expect(objectBrowserSource).toMatch(/pasteFailCount\+\+/);
+    expect(objectBrowserSource).toMatch(/firstPasteError \?\?= e/);
+    expect(objectBrowserSource).toMatch(/batchPastePartialFail[\s\S]*?tableOperationFailed[\s\S]*?translateBackendError\(t, pasteFeedback\.firstError\)/);
   });
 
   it("refreshes created tables and retains the clipboard when a later paste step is cancelled", () => {

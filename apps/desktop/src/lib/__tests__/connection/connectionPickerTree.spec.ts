@@ -81,6 +81,17 @@ describe("buildConnectionPickerRows", () => {
     expect(buildConnectionPickerRows(layout(), connections, new Set(), "不存在")).toEqual([]);
   });
 
+  it("prunes groups that hold none of the given connections", () => {
+    const onlyC3 = connections.filter((connection) => connection.id === "c3");
+    expect(kinds(buildConnectionPickerRows(layout(), onlyC3, new Set(), ""))).toEqual(["connection:c3@0"]);
+  });
+
+  it("prunes nested groups without usable descendants even when collapsed", () => {
+    const onlyC2 = connections.filter((connection) => connection.id === "c2");
+    const rows = buildConnectionPickerRows(layout(), onlyC2, new Set(["g2"]), "");
+    expect(kinds(rows)).toEqual(["group:g1@0", "connection:c2@1"]);
+  });
+
   it("falls back to the connection id when the name is empty", () => {
     const rows = buildConnectionPickerRows({ groups: [], order: [] }, [{ id: "c9", name: "" }], new Set(), "");
     expect(rows[0]?.label).toBe("c9");

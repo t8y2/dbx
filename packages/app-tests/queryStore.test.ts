@@ -296,7 +296,7 @@ test("external SQL file paths persist with open query tabs", async () => {
   }
 });
 
-test("legacy Oracle query tabs restore with the manual transaction default", async () => {
+test("legacy Oracle query tabs restore with the auto-commit default", async () => {
   const restoreStorage = installMemoryStorage();
   try {
     setActivePinia(createPinia());
@@ -317,7 +317,7 @@ test("legacy Oracle query tabs restore with the manual transaction default", asy
     store = useQueryStore();
     await store.initOpenTabs();
 
-    assert.equal(store.tabs.find((tab) => tab.id === tabId)?.autoCommit, false);
+    assert.equal(store.tabs.find((tab) => tab.id === tabId)?.autoCommit, true);
   } finally {
     restoreStorage();
   }

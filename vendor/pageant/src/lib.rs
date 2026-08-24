@@ -19,6 +19,9 @@ pub(crate) use windows_modern as windows;
 mod error;
 pub use error::*;
 
+#[cfg(any(windows, test))]
+mod username;
+
 #[cfg(all(windows, feature = "wmmessage"))]
 pub mod wmmessage;
 

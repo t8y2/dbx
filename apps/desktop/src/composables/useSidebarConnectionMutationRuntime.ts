@@ -212,16 +212,12 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
     }
   }
 
-  async function disconnectConnection() {
-    const targets = selectedConnectionDisconnectTargets(activeNode.value, selectedTreeNodesInVisibleOrder()).filter((target) => connectionStore.connectedIds.has(target.connectionId));
-    if (!targets.length) return;
+  async function disconnectConnectionIds(connectionIds: readonly string[]) {
+    if (!connectionIds.length) return;
 
-    const result = await disconnectSidebarConnections(
-      targets.map((target) => target.connectionId),
-      (connectionId) => connectionStore.disconnect(connectionId),
-    );
+    const result = await disconnectSidebarConnections(connectionIds, (connectionId) => connectionStore.disconnect(connectionId));
     if (!result.failed) {
-      toast(targets.length > 1 ? t("connection.disconnectedSelected", { count: targets.length }) : t("connection.disconnected"), 2000);
+      toast(connectionIds.length > 1 ? t("connection.disconnectedSelected", { count: connectionIds.length }) : t("connection.disconnected"), 2000);
       return;
     }
     if (result.succeeded > 0) {
@@ -230,6 +226,13 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
     }
     const message = result.firstError instanceof Error ? result.firstError.message : String(result.firstError);
     toast(t("connection.saveFailed", { message }), 5000);
+  }
+
+  async function disconnectConnection() {
+    const connectionIds = selectedConnectionDisconnectTargets(activeNode.value, selectedTreeNodesInVisibleOrder())
+      .filter((target) => connectionStore.connectedIds.has(target.connectionId))
+      .map((target) => target.connectionId);
+    await disconnectConnectionIds(connectionIds);
   }
 
   function connectionDisconnectTargets() {
@@ -244,6 +247,24 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
 
   function canDisconnectConnection(): boolean {
     return connectionDisconnectTargets().some((target) => connectionStore.connectedIds.has(target.connectionId));
+  }
+
+  function connectionGroupDisconnectTargets(): string[] {
+    const node = activeNode.value;
+    if (node.type !== "connection-group") return [];
+    return connectionStore.connectionIdsInGroups([node.id]).filter((connectionId) => connectionStore.connectedIds.has(connectionId));
+  }
+
+  function connectionGroupDisconnectMenuLabel(): string {
+    return t("connectionGroup.closeConnections", { count: connectionGroupDisconnectTargets().length });
+  }
+
+  function canDisconnectConnectionGroup(): boolean {
+    return connectionGroupDisconnectTargets().length > 0;
+  }
+
+  async function disconnectConnectionGroup() {
+    await disconnectConnectionIds(connectionGroupDisconnectTargets());
   }
 
   /** "断开并忘记本次密码"是否可用：save_password=false 且当前已连接（本次运行期必已输入密码）。 */
@@ -426,6 +447,9 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
     disconnectConnection,
     connectionDisconnectMenuLabel,
     canDisconnectConnection,
+    connectionGroupDisconnectMenuLabel,
+    canDisconnectConnectionGroup,
+    disconnectConnectionGroup,
     canForgetSessionCredential,
     disconnectAndForgetConnectionPassword,
     cancelConnectionAttempt,

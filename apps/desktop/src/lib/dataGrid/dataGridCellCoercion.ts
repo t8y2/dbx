@@ -27,7 +27,9 @@ export function coerceDataGridCellValue(options: CoerceDataGridCellValueOptions)
   const numericInput = isNumericColumnType(options.columnInfo?.data_type) || (useSampledValueType && typeof oldValue === "number");
   const numericText = normalizeGroupedNumberText(value, options.columnInfo, oldValue);
   if (isBooleanInputColumn(options) || (useSampledValueType && typeof oldValue === "boolean")) {
-    const booleanValue = parseBooleanInput(numericText);
+    // MySQL exposes TINYINT(1) as an integer in the grid. Keep its numeric
+    // 0/1 edits numeric while still accepting explicit TRUE/FALSE aliases.
+    const booleanValue = parseBooleanInput(numericText, !isMysqlTinyintOneColumn(options));
     if (booleanValue !== undefined) return booleanValue;
   }
   if (numericInput) {
@@ -50,10 +52,16 @@ function isBooleanInputColumn(options: CoerceDataGridCellValueOptions): boolean 
   return options.databaseType === "mysql" && options.columnInfo?.data_type.trim().toLowerCase() === "tinyint(1)";
 }
 
-function parseBooleanInput(value: string): boolean | undefined {
+function isMysqlTinyintOneColumn(options: CoerceDataGridCellValueOptions): boolean {
+  return options.databaseType === "mysql" && options.columnInfo?.data_type.trim().toLowerCase() === "tinyint(1)";
+}
+
+function parseBooleanInput(value: string, allowNumericAliases: boolean): boolean | undefined {
   const normalized = value.trim().toLowerCase();
-  if (normalized === "true" || normalized === "1") return true;
-  if (normalized === "false" || normalized === "0") return false;
+  if (normalized === "true") return true;
+  if (normalized === "false") return false;
+  if (allowNumericAliases && normalized === "1") return true;
+  if (allowNumericAliases && normalized === "0") return false;
   return undefined;
 }
 

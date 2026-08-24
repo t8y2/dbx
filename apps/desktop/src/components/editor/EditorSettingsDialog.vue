@@ -65,7 +65,8 @@ import TunnelProfileManager from "@/components/connection/TunnelProfileManager.v
 import DangerConfirmDialog from "./DangerConfirmDialog.vue";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useTheme } from "@/composables/useTheme";
-import { copyToClipboard } from "@/lib/common/clipboard";
+import { copyToClipboard, readTextFromClipboard } from "@/lib/common/clipboard";
+import { importClipboardApiKeyAfterConfirmation, type AiConfigDeepLinkDraft } from "@/lib/ai/aiConfigDeepLink";
 import { clearDebugLogs as clearStoredDebugLogs, downloadDebugLogs, getDebugLogBundleText } from "@/lib/backend/debugLog";
 import {
   aiTestConnection,
@@ -205,6 +206,8 @@ const props = defineProps<{
   initialTab?: string;
   initialSection?: string;
   navigationRequestId?: number;
+  aiConfigDraft?: AiConfigDeepLinkDraft | null;
+  aiConfigRequestId?: number;
   appVersion?: string;
   checkingUpdates?: boolean;
 }>();
@@ -1572,7 +1575,7 @@ const settingsCategoryNav = computed<{ value: SettingsCategory; label: string }[
   { value: "tunnels", label: t("settings.tunnelsTab") },
   { value: "shortcuts", label: t("settings.shortcutsTab") },
   { value: "snippets", label: t("settings.snippetsTab") },
-  ...(isWeb ? [] : [{ value: "sync" as const, label: t("settings.syncTab") }]),
+  { value: "sync", label: t("settings.syncTab") },
   { value: "ai", label: t("settings.aiTab") },
   { value: "mcp" as const, label: t("settings.mcpTab") },
   ...(isWeb ? [{ value: "security" as const, label: t("settings.securityTab") }] : []),
@@ -2420,6 +2423,7 @@ async function scrollToInitialSettingsSection() {
 const aiConfigListMode = ref<"list" | "edit">("list");
 const aiEditConfigName = ref("");
 const aiEditConfigId = ref<string | null>(null);
+let handledAiConfigRequestId = 0;
 const displayedAiConfigs = computed(() => orderAiConfigsForDisplay(settingsStore.aiConfigs));
 
 watch(
@@ -2479,6 +2483,7 @@ watch(
       await refreshSnippetTokenStatus();
       await refreshSnippetSyncSettings();
       syncAiEditState();
+      await applyPendingAiConfigDeepLinkDraft();
       if (!isWeb && activeSettingsTab.value === "mcp") void refreshMcpStatus();
       if (!isWeb && activeSettingsTab.value === "ai" && aiIsCliProvider.value) void ensureCliMcpStatus();
       if (activeSettingsTab.value === "about") void refreshAppSupportInfo();
@@ -2512,6 +2517,13 @@ watch(
     if (!settingsVisible.value || !props.initialTab) return;
     activeSettingsTab.value = props.initialTab;
     void scrollToInitialSettingsSection();
+  },
+);
+
+watch(
+  () => props.aiConfigRequestId,
+  () => {
+    if (settingsVisible.value) void applyPendingAiConfigDeepLinkDraft();
   },
 );
 
@@ -3217,6 +3229,46 @@ function aiEnterEditMode(configId?: string) {
     aiEditCodeBuddyCliEnvRows.value = [];
     aiEditQoderCliPath.value = "";
     aiEditQoderCliEnvRows.value = [];
+  }
+}
+
+async function applyPendingAiConfigDeepLinkDraft() {
+  const requestId = props.aiConfigRequestId ?? 0;
+  const draft = props.aiConfigDraft;
+  if (!settingsVisible.value || !requestId || requestId === handledAiConfigRequestId || !draft) return;
+
+  handledAiConfigRequestId = requestId;
+  activeSettingsTab.value = "ai";
+  aiEnterEditMode();
+  aiEditConfigName.value = draft.name;
+  aiEditProvider.value = draft.provider;
+  aiEditApiKey.value = "";
+  aiEditAuthMethod.value = draft.authMethod;
+  aiEditEndpoint.value = draft.endpoint;
+  aiEditModel.value = draft.model;
+  aiEditLegacyModels.value = [];
+  aiEditApiStyle.value = draft.apiStyle;
+
+  if (!draft.promptForClipboardApiKey) return;
+
+  try {
+    const result = await importClipboardApiKeyAfterConfirmation(async () => {
+      const { ask } = await import("@tauri-apps/plugin-dialog");
+      return ask(t("ai.deepLinkClipboardPrompt"), {
+        title: t("ai.deepLinkClipboardTitle"),
+        kind: "info",
+      });
+    }, readTextFromClipboard);
+    if (result.kind === "accepted") aiEditApiKey.value = result.apiKey;
+    else if (result.kind === "empty") toast(t("ai.deepLinkClipboardEmpty"), 4000);
+    else if (result.kind === "invalid") toast(t("ai.deepLinkClipboardInvalid"), 4000);
+  } catch (e: any) {
+    toast(
+      t("ai.deepLinkClipboardReadFailed", {
+        message: e?.message || String(e),
+      }),
+      5000,
+    );
   }
 }
 
@@ -5696,7 +5748,7 @@ onUnmounted(() => {
 
             <section v-else-if="activeSettingsTab === 'sync'" data-settings-search-id="sync" :class="['py-2', settingsSearchTargetClass('sync')]">
               <Tabs v-model="syncMethodTab" class="w-full">
-                <TabsList class="grid w-full grid-cols-2">
+                <TabsList v-if="!isWeb" class="grid w-full grid-cols-2">
                   <TabsTrigger value="webdav">WebDAV</TabsTrigger>
                   <TabsTrigger value="snippet">GitHub / Gitee</TabsTrigger>
                 </TabsList>
@@ -5709,6 +5761,9 @@ onUnmounted(() => {
                     </div>
                     <p class="text-xs text-muted-foreground">
                       {{ t("settings.syncWebDavDescription") }}
+                    </p>
+                    <p v-if="isWeb" class="text-xs text-muted-foreground">
+                      {{ t("settings.syncWebDavWebDescription") }}
                     </p>
                   </div>
 
@@ -5922,7 +5977,7 @@ onUnmounted(() => {
                   <div class="space-y-1">
                     <Label for="sync-secrets">{{ t("settings.syncSecrets") }}</Label>
                     <p class="text-xs text-muted-foreground">
-                      {{ t("settings.syncSecretsSharedDescription") }}
+                      {{ t(isWeb ? "settings.syncSecretsDescription" : "settings.syncSecretsSharedDescription") }}
                     </p>
                   </div>
                   <Switch id="sync-secrets" v-model="webdavSyncSecrets" />

@@ -172,6 +172,14 @@ export function getCachedTableMetadata(request: Pick<TableMetadataRequest, "conn
   return { metadata: hit.value, cacheStatus: hit.stale ? "stale" : "hit", ageMs: hit.ageMs };
 }
 
+export function updateCachedTableMetadataType(request: Pick<TableMetadataRequest, "connectionId" | "database" | "schema" | "tableName" | "tableType" | "driverProfile" | "databaseType" | "catalog">, tableType: string): boolean {
+  const scope = tableMetadataScope(request);
+  const hit = tableMetadataCache.get(scope);
+  if (!hit) return false;
+  tableMetadataCache.set(scope, { ...hit.value, tableType }, { cachedAt: hit.cachedAt });
+  return true;
+}
+
 export function getCachedTableColumns(request: Pick<TableMetadataRequest, "connectionId" | "database" | "schema" | "tableName" | "tableType" | "driverProfile" | "databaseType" | "catalog">): TableColumnsLoadResult | undefined {
   const hit = tableColumnsCache.get(tableMetadataScope(request));
   if (!hit) return undefined;

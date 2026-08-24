@@ -825,6 +825,10 @@ export async function pendingOpenConnectionLinks(): Promise<string[]> {
   return invoke("pending_open_connection_links");
 }
 
+export async function pendingOpenAiConfigLinks(): Promise<string[]> {
+  return invoke("pending_open_ai_config_links");
+}
+
 export interface ExternalSqlFileSnapshot {
   content: string;
   version: ExternalSqlFileVersion;

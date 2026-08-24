@@ -2821,9 +2821,9 @@ onBeforeUnmount(() => {
       </Pane>
 
       <Pane :size="100 - nacosSplitSize" min-size="20">
-        <div class="flex h-full min-h-0 flex-col">
+        <div class="nacos-service-workbench flex h-full min-h-0 flex-col">
           <header class="shrink-0 border-b bg-background">
-            <div class="flex min-h-16 flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3">
+            <div class="nacos-service-heading flex min-h-16 flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3">
               <div class="min-w-0 flex-1">
                 <div class="truncate text-base font-semibold">{{ selectedService?.serviceName || t("nacos.instances") }}</div>
                 <div v-if="selectedService" class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
@@ -2838,9 +2838,9 @@ onBeforeUnmount(() => {
                 {{ t("nacos.refresh") }}
               </Button>
             </div>
-            <div v-if="selectedService" class="flex flex-wrap items-center gap-x-4 gap-y-2 border-t bg-muted/30 px-4 py-2">
-              <div class="flex shrink-0 items-center gap-1">
-                <Input v-model="serviceCluster" class="h-8 w-40" :placeholder="t('nacos.filterInstanceCluster')" @keyup.enter="loadInstances" />
+            <div v-if="selectedService" class="nacos-service-toolbar flex flex-wrap items-center gap-x-4 gap-y-2 border-t bg-muted/30 px-4 py-2">
+              <div class="nacos-service-filter-group flex min-w-0 items-center gap-1">
+                <Input v-model="serviceCluster" class="nacos-service-cluster-input h-8 min-w-0" :placeholder="t('nacos.filterInstanceCluster')" @keyup.enter="loadInstances" />
                 <Button size="sm" variant="secondary" class="h-8" :disabled="instancesLoading" @click="loadInstances">{{ t("nacos.filter") }}</Button>
                 <Button
                   size="sm"
@@ -2855,7 +2855,7 @@ onBeforeUnmount(() => {
                   >{{ t("nacos.clear") }}</Button
                 >
               </div>
-              <div class="ml-auto flex flex-wrap items-center gap-2">
+              <div class="nacos-service-management-actions flex flex-wrap items-center gap-2">
                 <div class="flex items-center gap-1 rounded-md border bg-background p-1">
                   <span class="px-1 text-xs text-muted-foreground">{{ t("nacos.serviceSettings") }}</span>
                   <Button
@@ -2895,7 +2895,7 @@ onBeforeUnmount(() => {
               <span class="text-xs font-medium">{{ t("nacos.serviceDetails") }}</span>
               <span class="text-xs text-muted-foreground">{{ serviceDetailExpanded ? t("nacos.collapse") : t("nacos.expand") }}</span>
             </button>
-            <div class="mt-2 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
+            <div class="nacos-service-stat-grid mt-2 grid gap-2 text-xs">
               <div class="rounded border bg-muted/20 px-2 py-1.5">
                 <div class="text-muted-foreground">{{ t("nacos.instanceStat") }}</div>
                 <div class="mt-0.5 font-medium">{{ selectedService.ipCount ?? instances.length }}</div>
@@ -2913,7 +2913,7 @@ onBeforeUnmount(() => {
                 <div class="mt-0.5 font-medium">{{ selectedServiceDetail?.protectThreshold ?? "-" }}</div>
               </div>
             </div>
-            <div v-if="serviceDetailExpanded" class="mt-2 grid gap-2 text-xs lg:grid-cols-2">
+            <div v-if="serviceDetailExpanded" class="nacos-service-detail-grid mt-2 grid gap-2 text-xs">
               <div class="min-w-0 rounded border p-2">
                 <div class="mb-1 flex items-center justify-between text-muted-foreground">
                   <span>{{ t("nacos.metadataLabel") }}</span
@@ -2939,16 +2939,16 @@ onBeforeUnmount(() => {
           <div class="min-h-0 flex-1 overflow-auto bg-muted/20 p-3">
             <div v-if="instances.length" class="space-y-2">
               <article v-for="instance in instances" :key="instanceIdentity(instance)" class="rounded-lg border bg-background p-3 shadow-sm">
-                <div class="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
-                  <div class="min-w-0 flex-1">
+                <div class="nacos-instance-layout flex gap-3">
+                  <div class="nacos-instance-main min-w-0">
                     <div class="flex flex-wrap items-center gap-2">
-                      <span class="font-mono text-sm font-medium">{{ instance.ip }}:{{ instance.port }}</span>
+                      <span class="nacos-instance-address max-w-full font-mono text-sm font-medium">{{ instance.ip }}:{{ instance.port }}</span>
                       <Badge variant="outline">{{ instance.clusterName || "DEFAULT" }}</Badge>
                       <Badge variant="outline" :class="instance.healthy === false ? 'border-destructive/50 text-destructive' : 'border-emerald-500/50 text-emerald-700 dark:text-emerald-300'">{{ instance.healthy === false ? t("nacos.unhealthy") : t("nacos.healthy") }}</Badge>
                       <Badge :variant="instance.enabled === false ? 'outline' : 'secondary'" :class="instance.enabled === false ? 'border-muted-foreground/50 text-muted-foreground' : ''">{{ instance.enabled === false ? t("nacos.offline") : t("nacos.enabled") }}</Badge>
                       <Badge v-if="instance.ephemeral != null" variant="outline">{{ instance.ephemeral ? t("nacos.ephemeral") : t("nacos.persistent") }}</Badge>
                     </div>
-                    <div class="mt-3 grid gap-x-5 gap-y-3 text-xs sm:grid-cols-[auto_minmax(0,1fr)]">
+                    <div class="nacos-instance-detail-grid mt-3 grid gap-x-5 gap-y-3 text-xs">
                       <div class="flex items-end gap-1 self-start">
                         <label class="grid gap-1 text-muted-foreground">
                           <span>{{ t("nacos.weight") }}</span>
@@ -2974,7 +2974,7 @@ onBeforeUnmount(() => {
                       <span v-else class="self-start text-muted-foreground">{{ t("nacos.noMetadata") }}</span>
                     </div>
                   </div>
-                  <div class="flex shrink-0 flex-wrap items-center gap-2 xl:justify-end">
+                  <div class="nacos-instance-actions flex flex-wrap items-center gap-2">
                     <Button size="sm" variant="outline" class="h-7" :disabled="readOnly || !supportsInstanceUpdate || isInstanceUpdating(instance)" @click="openInstanceEditor(instance)">{{ t("nacos.edit") }}</Button>
                     <Button
                       size="sm"
@@ -3323,6 +3323,39 @@ onBeforeUnmount(() => {
   container-type: inline-size;
 }
 
+.nacos-service-workbench {
+  container: nacos-service-workbench / inline-size;
+}
+
+.nacos-service-cluster-input {
+  width: 10rem;
+}
+
+.nacos-service-management-actions {
+  margin-inline-start: auto;
+}
+
+.nacos-service-stat-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.nacos-service-detail-grid,
+.nacos-instance-detail-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.nacos-instance-layout {
+  flex-direction: column;
+}
+
+.nacos-instance-address {
+  overflow-wrap: anywhere;
+}
+
+.nacos-instance-actions {
+  min-width: 0;
+}
+
 .nacos-config-context-bar {
   display: flex;
   align-items: center;
@@ -3387,6 +3420,54 @@ onBeforeUnmount(() => {
 @container (max-width: 480px) {
   .nacos-config-secondary-label {
     display: none;
+  }
+}
+
+@container nacos-service-workbench (max-width: 480px) {
+  .nacos-service-filter-group,
+  .nacos-service-management-actions {
+    flex-basis: 100%;
+  }
+
+  .nacos-service-cluster-input {
+    width: auto;
+    flex: 1 1 auto;
+  }
+
+  .nacos-service-management-actions {
+    margin-inline-start: 0;
+  }
+}
+
+@container nacos-service-workbench (min-width: 620px) {
+  .nacos-service-stat-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .nacos-service-detail-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .nacos-instance-detail-grid {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+}
+
+@container nacos-service-workbench (min-width: 720px) {
+  .nacos-instance-layout {
+    flex-direction: row;
+    align-items: flex-start;
+    justify-content: space-between;
+  }
+
+  .nacos-instance-main {
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+
+  .nacos-instance-actions {
+    flex: 0 1 auto;
+    justify-content: flex-end;
   }
 }
 

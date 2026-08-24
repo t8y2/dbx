@@ -130,7 +130,10 @@ impl PoolKind {
             Self::Rqlite(client) => Some(Self::Rqlite(client.clone())),
             Self::Turso(client) => Some(Self::Turso(client.clone())),
             Self::CloudflareD1(client) => Some(Self::CloudflareD1(client.clone())),
+            #[cfg(feature = "duckdb-sidecar")]
             Self::DuckDbWorker(client) => Some(Self::DuckDbWorker(client.clone())),
+            #[cfg(not(feature = "duckdb-sidecar"))]
+            Self::DuckDbWorker(_) => Some(Self::DuckDbWorker(())),
             Self::MongoDb(client) => Some(Self::MongoDb(client.clone())),
             Self::ClickHouse(client) => Some(Self::ClickHouse(client.clone())),
             Self::SqlServer(client) => Some(Self::SqlServer(client.clone())),
@@ -183,6 +186,14 @@ pub enum TxnConnection {
     Agent {
         client: Arc<db::agent_driver::PooledAgentClient>,
         /// Client-session id used when opening the dedicated agent pool.
+        client_session_id: String,
+        database: Option<String>,
+        cleanup_guard: ClientSessionPoolCleanupGuard,
+    },
+    /// Dedicated external-driver process whose shared JDBC connection owns the TX.
+    ExternalDriver {
+        session: Arc<PluginDriverSession>,
+        config: Arc<ConnectionConfig>,
         client_session_id: String,
         database: Option<String>,
         cleanup_guard: ClientSessionPoolCleanupGuard,

@@ -14,9 +14,11 @@ use crate::windows::Win32::Security::Authentication::Identity::{GetUserNameExA, 
 use crate::windows::Win32::Security::Cryptography::{
     CRYPTPROTECTMEMORY_BLOCK_SIZE, CRYPTPROTECTMEMORY_CROSS_PROCESS, CryptProtectMemory,
 };
+use crate::windows::Win32::System::WindowsProgramming::GetUserNameA;
 use crate::windows::core::PSTR;
 
 use crate::Error;
+use crate::username::{UsernameLookupError, format_pipe_name, resolve_username};
 
 /// Pageant transport stream. Implements [AsyncRead] and [AsyncWrite].
 pub struct PageantStream {
@@ -48,40 +50,52 @@ impl PageantStream {
     fn determine_pipe_name() -> Result<String, Error> {
         let username = Self::get_username()?;
         let suffix = Self::capi_obfuscate_string("Pageant")?;
-        Ok(format!("\\\\.\\pipe\\pageant.{username}.{suffix}"))
+        Ok(format_pipe_name(&username, &suffix))
     }
 
     fn get_username() -> Result<String, Error> {
+        match resolve_username(Self::get_principal_username(), Self::get_local_username) {
+            Ok(username) => Ok(username),
+            Err(UsernameLookupError::Api(error)) => Err(error),
+            Err(UsernameLookupError::Invalid) => Err(Error::InvalidUsername),
+        }
+    }
+
+    fn get_principal_username() -> Result<Vec<u8>, Error> {
         unsafe {
             let mut name_length = 0;
-
-            // don't check result on this, always returns ERROR_MORE_DATA
             GetUserNameExA(NameUserPrincipal, None, &mut name_length);
+            if name_length == 0 {
+                return Ok(Vec::new());
+            }
 
             let mut name_buf = vec![0u8; name_length as usize];
-
-            if !GetUserNameExA(
+            if GetUserNameExA(
                 NameUserPrincipal,
                 Some(PSTR(name_buf.as_mut_ptr())),
                 &mut name_length,
             ) {
-                // Pageant falls back to GetUserNameA here,
-                // but as far as I can tell, all Versions of Windows supported by Rust today
-                // should be able to answer the UserNameEx request - the comments in Pageant source
-                // point to Windows XP and earlier compatibility...
-                return Err(Error::from_win32());
+                Ok(name_buf)
+            } else {
+                Err(Error::from_win32())
+            }
+        }
+    }
+
+    fn get_local_username() -> Result<Vec<u8>, Error> {
+        unsafe {
+            let mut name_length = 0;
+            let size_result = GetUserNameA(None, &mut name_length);
+            if name_length == 0 {
+                return match size_result {
+                    Ok(()) => Ok(Vec::new()),
+                    Err(error) => Err(error.into()),
+                };
             }
 
-            //remove terminating null
-            if let Some(0) = name_buf.pop() {
-                let mut name = String::from_utf8(name_buf).map_err(|_| Error::InvalidUsername)?;
-                if let Some(at_index) = name.find('@') {
-                    name.drain(at_index..);
-                }
-                Ok(name)
-            } else {
-                Err(Error::InvalidUsername)
-            }
+            let mut name_buf = vec![0u8; name_length as usize];
+            GetUserNameA(Some(PSTR(name_buf.as_mut_ptr())), &mut name_length)?;
+            Ok(name_buf)
         }
     }
 

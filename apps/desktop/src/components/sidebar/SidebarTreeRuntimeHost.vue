@@ -149,7 +149,18 @@ import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sql/sqlFor
 import { getTableStructureCapabilities } from "@/lib/table/tableStructureCapabilities";
 import { connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
-import { defaultPasteTableMode, pasteTableModeCopiesData, supportsWholeRowTableDataCopy, tableClipboardMatchesTarget, tableClipboardMenuState, tableClipboardSourceContext, tableDataCopyColumnOptions, type TableClipboardContext, type TableClipboardTableContext } from "@/lib/table/tableClipboard";
+import {
+  defaultPasteTableMode,
+  pasteTableModeCopiesData,
+  supportsWholeRowTableDataCopy,
+  tableClipboardMatchesTarget,
+  tableClipboardMenuState,
+  tableClipboardSourceContext,
+  tableDataCopyColumnOptions,
+  tablePasteFeedback,
+  type TableClipboardContext,
+  type TableClipboardTableContext,
+} from "@/lib/table/tableClipboard";
 import { selectedSidebarBatchTargets, selectedTreeNodesInVisibleOrder as orderSelectedTreeNodes } from "@/lib/sidebar/sidebarTreeSelection";
 import { connectionPasteTargetGroupId, selectedConnectionClipboardTargets, selectedConnectionEditTarget, selectedConnectionMoveTargets } from "@/lib/sidebar/sidebarConnectionSelection";
 import { connectionSupportsDatabaseUserAdmin, resolveDatabaseUserAdminProviderForConnection, type DatabaseUserIdentity } from "@/lib/database/databaseUserAdmin";
@@ -414,6 +425,9 @@ const {
   disconnectConnection,
   connectionDisconnectMenuLabel,
   canDisconnectConnection,
+  connectionGroupDisconnectMenuLabel,
+  canDisconnectConnectionGroup,
+  disconnectConnectionGroup,
   canForgetSessionCredential,
   disconnectAndForgetConnectionPassword,
   cancelConnectionAttempt,
@@ -3831,6 +3845,7 @@ async function confirmPasteTable() {
   showPasteDialog.value = false;
   let successCount = 0;
   let pasteFailCount = 0;
+  let firstPasteError: unknown;
   let refreshFailCount = 0;
   let refreshError: unknown;
   let pasteCancelled = false;
@@ -3902,6 +3917,7 @@ async function confirmPasteTable() {
       successCount++;
     } catch (e: any) {
       pasteFailCount++;
+      firstPasteError ??= e;
       console.error(`Failed to paste table "${entry.sourceName}" -> "${targetName}":`, e);
     }
   }
@@ -3924,13 +3940,14 @@ async function confirmPasteTable() {
     }
     return;
   }
+  const pasteFeedback = tablePasteFeedback(successCount, pasteFailCount, firstPasteError);
   if (pasteFailCount === 0) {
     if (connectionStore.treeClipboard === clipboardAtPasteStart) {
       connectionStore.treeClipboard = null;
     }
     toast(t("contextMenu.batchPasteSuccess", { count: successCount }), 3000);
   } else {
-    toast(t("contextMenu.batchPastePartialFail", { success: successCount, failed: pasteFailCount }), 5000);
+    toast(`${t("contextMenu.batchPastePartialFail", { success: pasteFeedback.successCount, failed: pasteFeedback.failedCount })}\n${t("contextMenu.tableOperationFailed", { message: translateBackendError(t, pasteFeedback.firstError) })}`, 5000);
   }
   if (refreshFailCount > 0) {
     const refreshMessage = refreshError instanceof Error ? refreshError.message : String(refreshError);
@@ -4949,6 +4966,12 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
     items.push({ label: "", separator: true });
     items.push({ label: t("toolbar.newConnection"), action: newConnectionInGroup, icon: Plus });
     items.push({ label: t("connectionGroup.newGroup"), action: newSubgroup, icon: FolderPlus });
+    items.push({
+      label: connectionGroupDisconnectMenuLabel(),
+      action: disconnectConnectionGroup,
+      icon: Unplug,
+      disabled: !canDisconnectConnectionGroup(),
+    });
     items.push({ label: "", separator: true });
     items.push({
       label: t("connectionGroup.renameGroup"),

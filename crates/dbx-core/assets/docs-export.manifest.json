@@ -7,7 +7,7 @@
     "apps/desktop/src/docs-export/exportTranslate.ts": "2e01bf9ad20fb38f3dfab96769ed87c44a24e5eb8d0aa352f4b398606fb77e3b",
     "apps/desktop/src/docs-export/main.ts": "08c541f19fa6e368ea42fd096320da4312624f1961cd2b59387aa618288fc397",
     "apps/desktop/src/docs/DocsApp.vue": "60fa8c3f434efb39622688f8ad65dcad77eedd99bde9ffb9103d711519aa29d3",
-    "apps/desktop/src/docs/components/ColumnTable.vue": "a3e40f27e2d20f46c16b8b5b4f5cb83037ebb35ee667563a351dbe0a41e2f745",
+    "apps/desktop/src/docs/components/ColumnTable.vue": "a025b78a96eb194d0768afc8ecb7653e5066dcb2af05bbbec925f7b7e5ced1e6",
     "apps/desktop/src/docs/components/DocsSearch.vue": "163d585dc3400b30d7ff37b4efec7ce646933699131e11e4120979b2d3286c78",
     "apps/desktop/src/docs/components/DocsSidebar.vue": "cf4a394b9b1ceff18e463c3ba5366921b61033d6ccf530373a9b300b23f0baf8",
     "apps/desktop/src/docs/components/EnumPage.vue": "e570c3b0f322816646025b185909cf4a46e85cc87ff153706d9080f5e3c36f84",

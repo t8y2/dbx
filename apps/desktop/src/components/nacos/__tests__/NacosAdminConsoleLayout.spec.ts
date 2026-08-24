@@ -93,10 +93,22 @@ describe("NacosAdminConsole config workbench layout", () => {
 
   it("reserves the cluster-clear action space so entering a filter cannot reflow the toolbar", () => {
     expect(source).toContain('class="min-w-0 flex-1"');
-    expect(source).toContain('class="flex shrink-0 items-center gap-1"');
+    expect(source).toContain('class="nacos-service-filter-group flex min-w-0 items-center gap-1"');
     expect(source).toContain(':class="{ invisible: !serviceCluster }"');
     expect(source).toContain(':disabled="instancesLoading || !serviceCluster"');
     expect(source).not.toContain('v-if="serviceCluster"\n                  size="sm"');
+  });
+
+  it("uses the service split pane width for responsive service and instance layouts", () => {
+    expect(source).toContain(".nacos-service-workbench {\n  container: nacos-service-workbench / inline-size;");
+    expect(source).toContain("@container nacos-service-workbench (max-width: 480px)");
+    expect(source).toContain("@container nacos-service-workbench (min-width: 620px)");
+    expect(source).toContain("@container nacos-service-workbench (min-width: 720px)");
+    expect(source).toContain('class="nacos-instance-layout flex gap-3"');
+    expect(source).toContain('class="nacos-instance-actions flex flex-wrap items-center gap-2"');
+    expect(source).toContain("overflow-wrap: anywhere;");
+    expect(source).not.toContain("xl:flex-row xl:items-start xl:justify-between");
+    expect(source).not.toContain("sm:grid-cols-[auto_minmax(0,1fr)]");
   });
 
   it("adds icon-only clear controls to populated configuration and service filters", () => {
@@ -205,7 +217,7 @@ describe("NacosAdminConsole config workbench layout", () => {
 
   it("separates the service header, filtering controls, and management actions", () => {
     expect(source).toContain('<header class="shrink-0 border-b bg-background">');
-    expect(source).toContain('class="flex flex-wrap items-center gap-x-4 gap-y-2 border-t bg-muted/30 px-4 py-2"');
+    expect(source).toContain('class="nacos-service-toolbar flex flex-wrap items-center gap-x-4 gap-y-2 border-t bg-muted/30 px-4 py-2"');
     expect(source).toContain('t("nacos.serviceSettings")');
     expect(source).toContain('t("nacos.registerInstance")');
   });

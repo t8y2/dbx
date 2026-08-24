@@ -751,6 +751,9 @@ watch(
 watch(
   () => props.activeTab.isExecuting,
   (isExecuting, wasExecuting) => {
+    if (isExecuting && !wasExecuting) {
+      queryEditorRef.value?.beginExecutionViewportTracking();
+    }
     if (!isExecuting && wasExecuting) {
       nextTick(() => {
         requestAnimationFrame(() => {

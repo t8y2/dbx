@@ -87,7 +87,18 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { generateDatabaseExportId } from "@/lib/export/databaseExport";
 import { buildXlsxHeaderOverrides, hasXlsxHeaderComments, type XlsxHeaderMode } from "@/lib/export/xlsxHeader";
 import { copyToClipboard, eventTargetAllowsAppClipboardShortcut } from "@/lib/common/clipboard";
-import { defaultPasteTableMode, pasteTableModeCopiesData, supportsWholeRowTableDataCopy, tableClipboardMatchesTarget, tableClipboardMenuState, tableClipboardSourceContext, tableDataCopyColumnOptions, type PasteTableMode, type TableClipboardContext } from "@/lib/table/tableClipboard";
+import {
+  defaultPasteTableMode,
+  pasteTableModeCopiesData,
+  supportsWholeRowTableDataCopy,
+  tableClipboardMatchesTarget,
+  tableClipboardMenuState,
+  tableClipboardSourceContext,
+  tableDataCopyColumnOptions,
+  tablePasteFeedback,
+  type PasteTableMode,
+  type TableClipboardContext,
+} from "@/lib/table/tableClipboard";
 import { buildSingleDdlExportFileContent } from "@/lib/export/ddlExport";
 import { fetchTableDataForExport } from "@/lib/table/tableDataExport";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -2285,7 +2296,8 @@ async function confirmPasteTable() {
   const copyData = pasteTableModeCopiesData(mode) && pasteTableDataCopySupported.value;
   showPasteDialog.value = false;
   let successCount = 0;
-  let failCount = 0;
+  let pasteFailCount = 0;
+  let firstPasteError: unknown;
   let pasteCancelled = false;
   let hasMutatedTable = false;
   for (const entry of entries) {
@@ -2327,7 +2339,8 @@ async function confirmPasteTable() {
       }
       successCount++;
     } catch (e: any) {
-      failCount++;
+      pasteFailCount++;
+      firstPasteError ??= e;
       console.error(`Failed to paste table "${entry.sourceName}" -> "${targetName}":`, e);
     }
   }
@@ -2343,13 +2356,14 @@ async function confirmPasteTable() {
     }
     return;
   }
-  if (failCount === 0) {
+  const pasteFeedback = tablePasteFeedback(successCount, pasteFailCount, firstPasteError);
+  if (pasteFailCount === 0) {
     if (connectionStore.treeClipboard === clipboardAtPasteStart) {
       connectionStore.treeClipboard = null;
     }
     toast(t("contextMenu.batchPasteSuccess", { count: successCount }), 3000);
   } else {
-    toast(t("contextMenu.batchPastePartialFail", { success: successCount, failed: failCount }), 5000);
+    toast(`${t("contextMenu.batchPastePartialFail", { success: pasteFeedback.successCount, failed: pasteFeedback.failedCount })}\n${t("contextMenu.tableOperationFailed", { message: translateBackendError(t, pasteFeedback.firstError) })}`, 5000);
   }
   await reload();
   await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, selectedSchema.value);

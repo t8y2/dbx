@@ -10,10 +10,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import SearchableSelect from "@/components/ui/searchable-select/SearchableSelect.vue";
-import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
+import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
-import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
-import { connectionIconType } from "@/lib/connection/connectionPresentation";
 import * as api from "@/lib/backend/api";
 import type { TransferContent, TransferMode, TransferObjectKind, TransferTableNameCase } from "@/lib/backend/api";
 import { crossFamilyTransferableKinds, isSameTransferFamily, transferObjectKindsForDatabase } from "@/lib/database/transferObjectKinds";
@@ -946,25 +944,16 @@ async function saveConfigTask() {
 
                 <div class="space-y-1.5">
                   <Label class="text-xs">{{ t("transfer.sourceConnection") }}</Label>
-                  <SearchableSelect
+                  <ConnectionTreeSelect
                     v-model="sourceConnectionId"
-                    :options="sqlConnections.map((c) => c.id)"
+                    :connections="sqlConnections"
+                    :layout="store.sidebarLayout"
                     :placeholder="t('transfer.selectConnection')"
                     :search-placeholder="t('transfer.searchConnection')"
                     :empty-text="t('common.noResults')"
-                    :display-name="getConnectionName"
-                    trigger-variant="outline"
-                    trigger-class="h-8 w-full justify-between text-xs"
-                    content-class="w-[var(--reka-popover-trigger-width)]"
-                  >
-                    <template #option-label="{ option, label }">
-                      <div class="flex min-w-0 items-center gap-1.5">
-                        <DatabaseIcon :db-type="connectionIconType(sqlConnections.find((c) => c.id === option))" class="h-3.5 w-3.5 shrink-0" />
-                        <ConnectionGroupBadge :connection-id="option" />
-                        <span class="min-w-0 flex-1 truncate">{{ label }}</span>
-                      </div>
-                    </template>
-                  </SearchableSelect>
+                    trigger-class="h-8 w-full max-w-none justify-between gap-1.5 border border-input rounded-md bg-transparent px-2.5 text-xs shadow-none hover:bg-muted/40 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 dark:hover:bg-input/50"
+                    list-class="w-[var(--reka-popover-trigger-width)]"
+                  />
                 </div>
 
                 <!-- Source Catalog (Doris/StarRocks multi-catalog) -->
@@ -1025,25 +1014,16 @@ async function saveConfigTask() {
 
                 <div class="space-y-1.5">
                   <Label class="text-xs">{{ t("transfer.targetConnection") }}</Label>
-                  <SearchableSelect
+                  <ConnectionTreeSelect
                     v-model="targetConnectionId"
-                    :options="sqlConnections.map((c) => c.id)"
+                    :connections="sqlConnections"
+                    :layout="store.sidebarLayout"
                     :placeholder="t('transfer.selectConnection')"
                     :search-placeholder="t('transfer.searchConnection')"
                     :empty-text="t('common.noResults')"
-                    :display-name="getConnectionName"
-                    trigger-variant="outline"
-                    trigger-class="h-8 w-full justify-between text-xs"
-                    content-class="w-[var(--reka-popover-trigger-width)]"
-                  >
-                    <template #option-label="{ option, label }">
-                      <div class="flex min-w-0 items-center gap-1.5">
-                        <DatabaseIcon :db-type="connectionIconType(sqlConnections.find((c) => c.id === option))" class="h-3.5 w-3.5 shrink-0" />
-                        <ConnectionGroupBadge :connection-id="option" />
-                        <span class="min-w-0 flex-1 truncate">{{ label }}</span>
-                      </div>
-                    </template>
-                  </SearchableSelect>
+                    trigger-class="h-8 w-full max-w-none justify-between gap-1.5 border border-input rounded-md bg-transparent px-2.5 text-xs shadow-none hover:bg-muted/40 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 dark:hover:bg-input/50"
+                    list-class="w-[var(--reka-popover-trigger-width)]"
+                  />
                 </div>
 
                 <!-- Target Catalog (Doris/StarRocks multi-catalog) -->

@@ -42,7 +42,7 @@ import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
 import { isDataTabMetadataLifecycleStale } from "@/lib/sidebar/dataTabOpenPolicy";
 import { dataTabExecutionDatabase } from "@/lib/table/dataTabExecutionDatabase";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
-import { getCachedTableMetadata, loadTableColumns, loadTableIndexes, loadTableMetadata, tableMetadataToDataTabMeta, type TableMetadataRequest } from "@/lib/metadata/tableMetadataCache";
+import { getCachedTableMetadata, loadTableColumns, loadTableIndexes, loadTableMetadata, tableMetadataToDataTabMeta, updateCachedTableMetadataType, type TableMetadataRequest } from "@/lib/metadata/tableMetadataCache";
 import { MetadataTaskLimiter } from "@/lib/metadata/metadataTaskLimiter";
 import { buildTableSelectSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
 import { connectionObjectTreeNodeSchema, connectionQueryExecutionSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, gaussdbCountQueryDopHint, metadataSchemaForConnection } from "@/lib/database/jdbcDialect";
@@ -70,7 +70,7 @@ import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { useExportTracker } from "@/composables/useExportTracker";
 import { recordQueryCancellationLatency, resourceLifecycleDiagnostics } from "@/lib/diagnostics/resourceLifecycleDiagnostics";
 import { appendDebugLog } from "@/lib/backend/debugLog";
-import { BackendErrorException, formatError, normalizeBackendError, type BackendError } from "@/lib/backend/errorUtils";
+import { BackendErrorException, formatError, isManualTransactionSessionExpired, normalizeBackendError, type BackendError } from "@/lib/backend/errorUtils";
 import { createSavedSqlEditorPosition, initSavedSqlEditorPositions, restoreSavedSqlEditorPosition, saveSavedSqlEditorPosition } from "@/lib/app/savedSqlEditorPosition";
 import { ensureSqlExtension } from "@/lib/savedSql/savedSqlFileName";
 import { resolveSavedSqlExecutionTarget, savedSqlExecutionTargetFromTab, type SavedSqlExecutionTarget, type SavedSqlOpenTargetMode } from "@/lib/savedSql/savedSqlExecutionTarget";
@@ -3848,6 +3848,32 @@ export const useQueryStore = defineStore("query", () => {
     return matches.length === 1 && matches[0]?.type === "table";
   }
 
+  async function resolveOracleRowIdSafety(tab: QueryTab, loaded: LoadedEditableSource): Promise<boolean> {
+    if (oracleRowIdIsSafeForQuery(tab, loaded)) return true;
+    if (loaded.tableMeta.tableType?.trim()) return false;
+
+    const connection = useConnectionStore().getConfig(tab.connectionId!);
+    const schema = loaded.tableMeta.schema?.trim() || tab.schema?.trim() || connection?.default_schema?.trim() || "";
+    const tables = await api.listTables(tab.connectionId!, loaded.tableMeta.database ?? tab.database, schema, loaded.tableMeta.tableName);
+    const exactMatches = tables.filter((table) => table.name === loaded.tableMeta.tableName);
+    if (exactMatches.length !== 1) return false;
+
+    loaded.tableMeta.tableType = exactMatches[0]!.table_type;
+    updateCachedTableMetadataType(
+      {
+        connectionId: tab.connectionId!,
+        database: loaded.tableMeta.database ?? tab.database,
+        schema: loaded.tableMeta.schema,
+        tableName: loaded.tableMeta.tableName,
+        databaseType: "oracle",
+        driverProfile: connection?.driver_profile || connection?.db_type,
+        catalog: loaded.tableMeta.catalog,
+      },
+      loaded.tableMeta.tableType,
+    );
+    return oracleRowIdIsSafeForQuery(tab, loaded);
+  }
+
   function primaryKeyIndex(indexes: IndexInfo[]): IndexInfo | undefined {
     return indexes.find((index) => !index.filter && index.columns.length > 0 && index.is_primary);
   }
@@ -3915,12 +3941,14 @@ export const useQueryStore = defineStore("query", () => {
       loaded ??= await loadEditableQuerySource(tab, analysis, sources[0]!, conn, databaseType, executionDatabase, traceId, elapsed);
       if (loaded.tableMeta.columns.length === 0) return unchanged;
       if (loaded.tableMeta.tableType?.toUpperCase().includes("VIEW")) return unchanged;
-      const declaredPrimaryKeys = loaded.tableMeta.columns.filter((column) => column.is_primary_key).map((column) => column.name);
-      // Oracle base tables without declared keys use the same ROWID identity as
-      // table-data tabs. Confirm the object is a base table because selecting
-      // ROWID from a view can fail with ORA-01445.
-      if (databaseType === "oracle" && declaredPrimaryKeys.length === 0 && !oracleRowIdIsSafeForQuery(tab, loaded)) return unchanged;
-      const primaryKeys = editablePrimaryKeys(databaseType, loaded.tableMeta.columns, loaded.tableMeta.tableType);
+      const columnPrimaryKeys = loaded.tableMeta.columns.filter((column) => column.is_primary_key).map((column) => column.name);
+      const primaryKeys = databaseType === "oracle" ? loaded.tableMeta.primaryKeys : editablePrimaryKeys(databaseType, loaded.tableMeta.columns, loaded.tableMeta.tableType);
+      const syntheticOracleRowId = databaseType === "oracle" && usesSyntheticRowIdKey(databaseType, primaryKeys, loaded.tableMeta.tableType);
+      // Oracle base tables without a natural identifier use the same ROWID
+      // identity as table-data tabs. Confirm the object is a base table because
+      // selecting ROWID from a view can fail with ORA-01445.
+      if (syntheticOracleRowId && !(await resolveOracleRowIdSafety(tab, loaded))) return unchanged;
+      const declaredPrimaryKeys = databaseType === "oracle" && !syntheticOracleRowId ? primaryKeys : columnPrimaryKeys;
       return buildHiddenPrimaryKeyPreparation(tab, sql, databaseType, loaded, primaryKeys, declaredPrimaryKeys, traceId, elapsed);
     } catch (error) {
       // Metadata enrichment is optional. Query execution must retain its prior
@@ -5107,7 +5135,24 @@ export const useQueryStore = defineStore("query", () => {
         }
         queryExecutionLog("info", "execute-in-txn:invoke", { traceId, txnSessionId: tab.txnSessionId, elapsed: elapsed() });
         executionDispatched = true;
-        executionPromise = api.executeInManualTransaction(tab.txnSessionId, sqlToExecute, executionDatabase, executionSchema, pageLimit ?? agentProtocolQueryResultMaxRows(queryResultMaxRows), useOracleLobPreview);
+        let manualTransactionRecoveryAttempted = false;
+        executionPromise = (async () => {
+          const txnSessionId = tab.txnSessionId;
+          if (!txnSessionId) throw new Error("Manual transaction session was not initialized");
+          try {
+            return await api.executeInManualTransaction(txnSessionId, sqlToExecute, executionDatabase, executionSchema, pageLimit ?? agentProtocolQueryResultMaxRows(queryResultMaxRows), useOracleLobPreview);
+          } catch (error) {
+            if (manualTransactionRecoveryAttempted || !isManualTransactionSessionExpired(error)) throw error;
+            manualTransactionRecoveryAttempted = true;
+            tab.txnSessionId = undefined;
+            tab.txnAutoRolledBack = true;
+            queryExecutionLog("info", "manual-txn:expired-recover", { traceId, elapsed: elapsed() });
+            const refreshedSessionId = await api.beginManualTransaction(executionConnectionId, executionDatabase, executionSchema, executionCatalog);
+            tab.txnSessionId = refreshedSessionId;
+            queryExecutionLog("info", "manual-txn:restarted", { traceId, txnSessionId: refreshedSessionId, elapsed: elapsed() });
+            return api.executeInManualTransaction(refreshedSessionId, sqlToExecute, executionDatabase, executionSchema, pageLimit ?? agentProtocolQueryResultMaxRows(queryResultMaxRows), useOracleLobPreview);
+          }
+        })();
       } else {
         queryExecutionLog("info", "execute-multi:start", { traceId, elapsed: elapsed() });
         // Query and data tabs use a tab-scoped pool so repeated executions keep

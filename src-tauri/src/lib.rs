@@ -507,7 +507,7 @@ fn linux_uses_native_wayland(
     }
 
     let automatic_backend = linux_appimage_wayland_backend_override(appimage, wayland_display, gdk_backend);
-    gdk_backend.or_else(|| automatic_backend.map(std::ffi::OsStr::new)).map_or(true, |backends| {
+    gdk_backend.or_else(|| automatic_backend.map(std::ffi::OsStr::new)).is_none_or(|backends| {
         backends
             .to_string_lossy()
             .split(',')
@@ -725,9 +725,20 @@ fn open_connection_deep_links(app: &tauri::AppHandle, links: Vec<String>) {
         return;
     }
     if let Some(state) = app.try_state::<commands::deep_link::DeepLinkOpenState>() {
-        state.push(links.clone());
+        state.push_connection_links(links.clone());
     }
     let _ = app.emit("dbx-open-connection-links", links);
+    show_main_window(app);
+}
+
+fn open_ai_config_deep_links(app: &tauri::AppHandle, links: Vec<String>) {
+    if links.is_empty() {
+        return;
+    }
+    if let Some(state) = app.try_state::<commands::deep_link::DeepLinkOpenState>() {
+        state.push_ai_config_links(links.clone());
+    }
+    let _ = app.emit("dbx-open-ai-config-links", links);
     show_main_window(app);
 }
 
@@ -1521,6 +1532,8 @@ pub fn run() {
             let app_open_requested = args.iter().any(|arg| commands::deep_link::is_app_open_deep_link(arg));
             let links = commands::deep_link::connection_deep_links_from_args(args.clone());
             open_connection_deep_links(app, links);
+            let ai_config_links = commands::deep_link::ai_config_deep_links_from_args(args.clone());
+            open_ai_config_deep_links(app, ai_config_links);
 
             let paths = commands::external_sql::sql_file_paths_from_args(args.clone(), std::path::Path::new(&cwd));
             if !paths.is_empty() {
@@ -1720,8 +1733,11 @@ pub fn run() {
             macos_escape_guard::install_escape_fullscreen_guard();
             #[cfg(target_os = "windows")]
             webview2_recovery::install(app.handle());
-            let startup_links = commands::deep_link::connection_deep_links_from_args(std::env::args().skip(1));
+            let startup_args: Vec<String> = std::env::args().skip(1).collect();
+            let startup_links = commands::deep_link::connection_deep_links_from_args(&startup_args);
             open_connection_deep_links(app.handle(), startup_links);
+            let startup_ai_config_links = commands::deep_link::ai_config_deep_links_from_args(&startup_args);
+            open_ai_config_deep_links(app.handle(), startup_ai_config_links);
 
             let app_handle = app.handle().clone();
             commands::mcp_bridge::start(app_handle, state, data_dir);
@@ -2023,6 +2039,7 @@ pub fn run() {
             commands::keychain::read_keychain_password,
             commands::keychain::read_keychain_passwords,
             commands::deep_link::pending_open_connection_links,
+            commands::deep_link::pending_open_ai_config_links,
             commands::table_import::preview_table_import_file,
             commands::table_import::import_table_file,
             commands::table_import::cancel_table_import,
@@ -2609,6 +2626,13 @@ pub fn run() {
                     .filter_map(|url| commands::deep_link::connection_deep_link_from_arg(&url))
                     .collect();
                 open_connection_deep_links(app_handle, links);
+
+                let ai_config_links: Vec<String> = urls
+                    .iter()
+                    .map(|url| url.to_string())
+                    .filter_map(|url| commands::deep_link::ai_config_deep_link_from_arg(&url))
+                    .collect();
+                open_ai_config_deep_links(app_handle, ai_config_links);
 
                 let paths: Vec<String> = urls
                     .iter()

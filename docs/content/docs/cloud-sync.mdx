@@ -4,7 +4,7 @@ description: Sync DBX connections, settings, and saved SQL with WebDAV, GitHub G
 ---
 
 <Callout type="info">
-DBX can package connections, application settings, and saved SQL into a snapshot, upload it to WebDAV or a private code snippet, and restore it on another device.
+DBX can package connections, application settings, and saved SQL into a snapshot. Desktop can sync through WebDAV or private snippets, while Web/Docker can sync through WebDAV and restore the snapshot in another DBX instance.
 </Callout>
 
 <Callout type="warn">Cloud Sync backs up DBX configuration. It does not read or back up the business databases behind your connections. Use [Database Export](/en/docs/database-export) for schema and data, or [Database Backup](/en/docs/database-backup) for scheduled Desktop MySQL/PostgreSQL backups.</Callout>
@@ -12,7 +12,7 @@ DBX can package connections, application settings, and saved SQL into a snapshot
 Choose a provider under **Settings → Sync**:
 
 - **WebDAV**: Best when you already use a NAS, Nextcloud, or another WebDAV service. Supports scheduled uploads.
-- **GitHub / Gitee snippets**: Stores the snapshot in a private Gist or code snippet without requiring your own server. Uploads and downloads are currently manual.
+- **GitHub / Gitee snippets**: Stores the snapshot in a private Gist or code snippet without requiring your own server. It is currently exposed in Desktop only, and uploads and downloads are manual.
 
 ## What Is Synchronized
 
@@ -109,7 +109,9 @@ Neither password can be recovered. An encrypted GitHub/Gitee snippet cannot be r
 
 Enter the WebDAV endpoint, username, application password, and remote snapshot path. The default path is `DBX/sync/snapshot.json`.
 
-WebDAV supports scheduled uploads while DBX is running. Downloads always require confirmation to prevent accidental replacement of local data.
+In Web/Docker mode, the DBX server sends WebDAV requests, so browser CORS restrictions do not apply. WebDAV application passwords are encrypted in the current DBX instance and are never included in sync snapshots.
+
+WebDAV supports scheduled uploads while the corresponding DBX client remains open. Keep at least one DBX page open when using Web/Docker. Downloads always require confirmation to prevent accidental replacement of data in the current instance.
 
 ## Troubleshooting
 

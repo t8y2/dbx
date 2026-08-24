@@ -5,6 +5,19 @@ export function hasExistingColumnTypeChange(columns: readonly EditableStructureC
   return columns.some((column) => !!column.original && !column.markedForDrop && column.dataType !== column.original.data_type);
 }
 
+export function resolveColumnSelectionActiveId(columns: readonly Pick<EditableStructureColumn, "id" | "markedForDrop">[], selectedIds: ReadonlySet<string>, preferredId: string): string | null {
+  if (selectedIds.has(preferredId)) return preferredId;
+  for (let index = columns.length - 1; index >= 0; index -= 1) {
+    const column = columns[index];
+    if (column && !column.markedForDrop && selectedIds.has(column.id)) return column.id;
+  }
+  return null;
+}
+
+export function isSyntheticContextMenuClick(contextMenuButton: number | null, contextMenuCtrlKey: boolean, clickButton: number): boolean {
+  return contextMenuButton === 2 && contextMenuCtrlKey && clickButton === 0;
+}
+
 type TableStructureIdentifierCaseInfo = Pick<DatabaseConnectionInfo, "unquotedIdentifierCase" | "quotedIdentifierCase">;
 
 const LOWER_UNQUOTED_MIXED_QUOTED_DATABASES = new Set<DatabaseType>(["postgres", "redshift", "opengauss", "gaussdb", "highgo", "uxdb"]);
@@ -1381,6 +1394,27 @@ export function resolveInsertColumnIndex(columns: readonly { id: string; markedF
   // Dropped rows are not valid insertion anchors.
   const index = columns.findIndex((column) => column.id === selectedColumnId && !column.markedForDrop);
   return index >= 0 ? index + 1 : columns.length;
+}
+
+/**
+ * Compute the contiguous column-id range for a shift-click in the structure
+ * editor, mirroring the object browser's range-select behavior
+ * (objectBrowserSelection.ts): the range spans every row between the anchor
+ * and the clicked row in visible order, but rows marked for drop are not
+ * selectable and are dropped from the result.
+ */
+export function structureColumnSelectionRange(columns: readonly { id: string; markedForDrop?: boolean }[], anchorId: string, currentId: string): string[] {
+  const anchorIndex = columns.findIndex((column) => column.id === anchorId);
+  const currentIndex = columns.findIndex((column) => column.id === currentId);
+  if (anchorIndex < 0 || currentIndex < 0) {
+    return columns.some((column) => column.id === currentId && !column.markedForDrop) ? [currentId] : [];
+  }
+  const start = Math.min(anchorIndex, currentIndex);
+  const end = Math.max(anchorIndex, currentIndex);
+  return columns
+    .slice(start, end + 1)
+    .filter((column) => !column.markedForDrop)
+    .map((column) => column.id);
 }
 
 function isMysqlDeprecatedDefaultParameterType(baseType: string): boolean {

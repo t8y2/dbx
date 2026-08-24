@@ -5,6 +5,27 @@ export type SqlFormatDialect = "mysql" | "postgres" | "sqlite" | "sqlserver" | "
 
 export const MAX_SQL_FORMAT_CHARS = 1_000_000;
 
+type SqlFormatterModule = typeof import("sql-formatter");
+
+// sql-formatter classifies ClickHouse date-part abbreviations as reserved
+// keywords even where ClickHouse accepts them as ordinary identifiers. Keep
+// them identifier-like so keyword casing cannot rewrite aliases such as `m`.
+const CLICKHOUSE_IDENTIFIER_LIKE_DATE_PARTS = new Set(["D", "DD", "H", "HH", "M", "MCS", "MI", "MM", "MS", "N", "NS", "Q", "QQ", "S", "SS", "WK", "WW", "YY", "YYYY"]);
+let clickHouseIdentifierSafeDialect: SqlFormatterModule["clickhouse"] | null = null;
+
+function resolveClickHouseIdentifierSafeDialect(sqlFormatter: SqlFormatterModule): SqlFormatterModule["clickhouse"] {
+  if (clickHouseIdentifierSafeDialect) return clickHouseIdentifierSafeDialect;
+
+  clickHouseIdentifierSafeDialect = {
+    ...sqlFormatter.clickhouse,
+    tokenizerOptions: {
+      ...sqlFormatter.clickhouse.tokenizerOptions,
+      reservedKeywords: sqlFormatter.clickhouse.tokenizerOptions.reservedKeywords.filter((keyword) => !CLICKHOUSE_IDENTIFIER_LIKE_DATE_PARTS.has(keyword)),
+    },
+  };
+  return clickHouseIdentifierSafeDialect;
+}
+
 export function canFormatSqlForDatabaseType(dbType: string | null | undefined): boolean {
   return dbType !== "victoriametrics";
 }
@@ -223,7 +244,8 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
     throw new UnsupportedStructuredInputError("xml");
   }
 
-  const { format } = await import("sql-formatter");
+  const sqlFormatter = await import("sql-formatter");
+  const { format, formatDialect } = sqlFormatter;
   const normalizedSettings = normalizeSqlFormatterSettings(settings);
   const options = sqlFormatterOptions(normalizedSettings);
   const language = formatterLanguage(dialect);
@@ -244,6 +266,9 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
       : options;
   const formatWithFallback = (input: string): string => {
     try {
+      if (dialect === "clickhouse") {
+        return formatDialect(input, { ...formatterOptions, dialect: resolveClickHouseIdentifierSafeDialect(sqlFormatter) });
+      }
       return format(input, { language, ...formatterOptions });
     } catch (err) {
       // The generic "sql" dialect can't parse many real-world constructs (PostgreSQL

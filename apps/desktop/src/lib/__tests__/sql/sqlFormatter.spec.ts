@@ -124,6 +124,42 @@ OR inside$$ as note
     expect(formatted).toContain("x -> dictGet");
     expect(formatted).not.toContain("- >");
   });
+
+  it("preserves the ClickHouse table alias from issue #7079", async () => {
+    const formatted = await formatSqlText("SELECT *\nFROM MATERIAL m\nLIMIT 100;", sqlFormatDialectForDbType("clickhouse"));
+
+    expect(formatted).toBe("SELECT\n  *\nFROM\n  MATERIAL m\nLIMIT\n  100;");
+  });
+
+  it.each(["d", "dd", "h", "hh", "m", "mcs", "mi", "mm", "ms", "n", "ns", "q", "qq", "s", "ss", "wk", "ww", "yy", "yyyy"])("preserves ClickHouse identifier-like date part %s while formatting keywords", async (identifier) => {
+    const formatted = await formatSqlText(`select ${identifier}, t.${identifier} from material ${identifier} limit 100;`, sqlFormatDialectForDbType("clickhouse"));
+
+    expect(formatted).toContain(`  ${identifier},`);
+    expect(formatted).toContain(`material ${identifier}`);
+    expect(formatted).toContain("SELECT");
+    expect(formatted).toContain("FROM");
+    expect(formatted).toContain("LIMIT");
+  });
+
+  it("keeps ClickHouse identifier casing independent from keyword casing", async () => {
+    const sql = "SELECT * FROM MATERIAL M LIMIT 100;";
+
+    const lowerKeywords = await formatSqlText(sql, sqlFormatDialectForDbType("clickhouse"), { keywordCase: "lower", identifierCase: "preserve" });
+    const lowerIdentifiers = await formatSqlText(sql, sqlFormatDialectForDbType("clickhouse"), { keywordCase: "upper", identifierCase: "lower" });
+
+    expect(lowerKeywords).toContain("from\n  MATERIAL M");
+    expect(lowerKeywords).toContain("limit\n  100");
+    expect(lowerIdentifiers).toContain("FROM\n  material m");
+    expect(lowerIdentifiers).toContain("LIMIT\n  100");
+  });
+
+  it("still formats unambiguous ClickHouse interval keywords", async () => {
+    const formatted = await formatSqlText("select now() + interval 1 minutes from source_table m;", sqlFormatDialectForDbType("clickhouse"));
+
+    expect(formatted).toContain("INTERVAL 1 MINUTES");
+    expect(formatted).toContain("FROM\n  source_table m");
+  });
+
   it("preserves DBX brace placeholders in generic and MySQL SQL", async () => {
     const sql = "SELECT ${x} AS shell_value, #{x} AS mybatis_value, '${date}' AS quoted_value";
 

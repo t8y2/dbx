@@ -3181,9 +3181,13 @@ pub async fn get_table_partition_info(
         return Ok(PostgresTablePartitionInfo::default());
     }
 
-    let rows = postgres_query_cached(&client, postgres_table_partition_info_sql(), &[&schema, &table])
-        .await
-        .map_err(|e| e.to_string())?;
+    let params: [&(dyn tokio_postgres::types::ToSql + Sync); 2] = [&schema, &table];
+    let rows = query_with_compat_fallback(
+        "get_table_partition_info",
+        &[postgres_table_partition_info_sql(), postgres_table_partition_info_compat_sql()],
+        |sql| postgres_query_cached(&client, sql, &params),
+    )
+    .await?;
     let Some(row) = rows.first() else {
         return Ok(PostgresTablePartitionInfo { is_partition, is_foreign, ..Default::default() });
     };
@@ -3310,6 +3314,28 @@ fn postgres_partition_tree_sql() -> &'static str {
      ORDER BY t.oid"
 }
 
+/// 9.x 没有 relispartition/relpartbound/pg_get_partkeydef，主查询会用到一个
+/// 不存在的列，直接报错；旧式 INHERITS 子表在 9.x 按普通表处理，
+/// 这里只返回请求的关系本身。
+///
+/// Pre-10 servers lack the declarative-partition catalog (relispartition /
+/// relpartbound / pg_get_partkeydef) the primary query needs; old-style
+/// INHERITS children are plain tables there, so just the requested relation
+/// is returned.
+fn postgres_partition_tree_compat_sql() -> &'static str {
+    "SELECT c.oid::bigint AS oid, n.nspname::text AS schema, c.relname::text AS relname, \
+            NULL::bigint AS parent_oid, NULL::text AS parent_schema, NULL::text AS parent_relname, \
+            c.relkind::text AS relkind, \
+            NULL::text AS partition_bound, NULL::text AS partition_key, \
+            fs.srvname AS foreign_server, \
+            ft.ftoptions AS foreign_options \
+     FROM pg_catalog.pg_class c \
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     LEFT JOIN pg_catalog.pg_foreign_table ft ON ft.ftrelid = c.oid \
+     LEFT JOIN pg_catalog.pg_foreign_server fs ON fs.oid = ft.ftserver \
+     WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r','p','f')"
+}
+
 /// The whole partition tree rooted at (schema, table) — the root itself plus
 /// every descendant partition at any depth — plus each node's partition info,
 /// in a single round trip. Used by `pg_ddl_with_partitions` instead of
@@ -3322,9 +3348,13 @@ pub async fn fetch_postgres_partition_tree(
 ) -> Result<Vec<PostgresPartitionTreeNode>, String> {
     let schema = if schema.is_empty() { "public" } else { schema };
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let rows = postgres_query_cached(&client, postgres_partition_tree_sql(), &[&schema, &table])
-        .await
-        .map_err(pg_error_to_string)?;
+    let params: [&(dyn tokio_postgres::types::ToSql + Sync); 2] = [&schema, &table];
+    let rows = query_with_compat_fallback(
+        "fetch_postgres_partition_tree",
+        &[postgres_partition_tree_sql(), postgres_partition_tree_compat_sql()],
+        |sql| postgres_query_cached(&client, sql, &params),
+    )
+    .await?;
     Ok(rows
         .into_iter()
         .filter_map(|row| {
@@ -3928,6 +3958,24 @@ fn postgres_table_partition_info_sql() -> &'static str {
      LEFT JOIN pg_catalog.pg_foreign_server fs ON fs.oid = ft.ftserver \
      WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r','p','f') \
      ORDER BY i.inhseqno NULLS LAST \
+     LIMIT 1"
+}
+
+/// 9.x 没有分区父表（也没有 relpartbound/pg_get_partkeydef），只保留
+/// 外部表字段，其余列给 NULL，列序与主查询保持一致。
+///
+/// Pre-10 servers have no partition parent (nor the 10+ columns/functions);
+/// only the foreign-table fields are kept, same column order as the primary.
+fn postgres_table_partition_info_compat_sql() -> &'static str {
+    "SELECT NULL::text AS parent_schema, NULL::text AS parent_table, NULL::text AS partition_bound, \
+            NULL::text AS partition_key, \
+            CASE WHEN c.relkind = 'f' THEN fs.srvname ELSE NULL END AS foreign_server, \
+            CASE WHEN c.relkind = 'f' THEN ft.ftoptions ELSE NULL END AS foreign_options \
+     FROM pg_catalog.pg_class c \
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     LEFT JOIN pg_catalog.pg_foreign_table ft ON ft.ftrelid = c.oid \
+     LEFT JOIN pg_catalog.pg_foreign_server fs ON fs.oid = ft.ftserver \
+     WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r','p','f') \
      LIMIT 1"
 }
 
@@ -6824,13 +6872,43 @@ fn postgres_table_dependencies_sql() -> &'static str {
      ORDER BY table_name, ref_table"
 }
 
+/// 9.x 没有 relispartition；INHERITS 子表同样要先建父表，所以保留这条边。
+///
+/// No relispartition pre-10; INHERITS children still need their parent
+/// created first, so the edge is kept without the filter.
+fn postgres_table_dependencies_compat_sql() -> &'static str {
+    "SELECT child.relname AS table_name, parent.relname AS ref_table \
+     FROM pg_catalog.pg_constraint con \
+     JOIN pg_catalog.pg_class child ON child.oid = con.conrelid \
+     JOIN pg_catalog.pg_namespace child_schema ON child_schema.oid = child.relnamespace \
+     JOIN pg_catalog.pg_class parent ON parent.oid = con.confrelid \
+     JOIN pg_catalog.pg_namespace parent_schema ON parent_schema.oid = parent.relnamespace \
+     WHERE con.contype = 'f' \
+       AND child_schema.nspname = $1 \
+       AND parent_schema.nspname = $1 \
+     UNION \
+     SELECT child.relname AS table_name, parent.relname AS ref_table \
+     FROM pg_catalog.pg_inherits i \
+     JOIN pg_catalog.pg_class child ON child.oid = i.inhrelid \
+     JOIN pg_catalog.pg_namespace child_schema ON child_schema.oid = child.relnamespace \
+     JOIN pg_catalog.pg_class parent ON parent.oid = i.inhparent \
+     JOIN pg_catalog.pg_namespace parent_schema ON parent_schema.oid = parent.relnamespace \
+     WHERE child_schema.nspname = $1 \
+       AND parent_schema.nspname = $1 \
+     ORDER BY table_name, ref_table"
+}
+
 /// Fetch all same-schema table dependencies in one round trip. Whole-database
 /// exports use this instead of issuing one information_schema query per table.
 pub async fn list_table_dependencies(pool: &Pool, schema: &str) -> Result<Vec<(String, String)>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let rows = postgres_query_cached(&client, postgres_table_dependencies_sql(), &[&schema])
-        .await
-        .map_err(|e| e.to_string())?;
+    let params: [&(dyn tokio_postgres::types::ToSql + Sync); 1] = [&schema];
+    let rows = query_with_compat_fallback(
+        "list_table_dependencies",
+        &[postgres_table_dependencies_sql(), postgres_table_dependencies_compat_sql()],
+        |sql| postgres_query_cached(&client, sql, &params),
+    )
+    .await?;
 
     Ok(rows.iter().map(|row| (pg_row_try_string(row, 0), pg_row_try_string(row, 1))).collect())
 }
@@ -9042,6 +9120,7 @@ mod tests {
     #[test]
     fn postgres_table_dependencies_sql_batches_schema_foreign_keys() {
         let sql = postgres_table_dependencies_sql();
+        let compat_sql = postgres_table_dependencies_compat_sql();
 
         assert!(sql.contains("pg_catalog.pg_constraint"));
         assert!(sql.contains("con.contype = 'f'"));
@@ -9050,6 +9129,12 @@ mod tests {
         assert!(!sql.contains("information_schema"));
         assert!(sql.contains("pg_catalog.pg_inherits"));
         assert!(sql.contains("child.relispartition"));
+        // 兼容版面向 9.x：不能引用 relispartition，但 INHERITS 边要保留
+        // （旧式子表同样要先建父表）。
+        assert!(!compat_sql.contains("relispartition"));
+        assert!(compat_sql.contains("pg_catalog.pg_inherits"));
+        assert!(compat_sql.contains("con.contype = 'f'"));
+        assert!(compat_sql.contains("ORDER BY table_name, ref_table"));
     }
 
     #[test]
@@ -9761,6 +9846,7 @@ mod tests {
     fn postgres_table_partition_sql_tracks_parents_bounds_and_local_objects() {
         let relation_sql = postgres_table_partition_relation_sql();
         let info_sql = postgres_table_partition_info_sql();
+        let info_compat_sql = postgres_table_partition_info_compat_sql();
         let local_objects_sql = postgres_table_partition_local_objects_sql();
 
         assert!(!relation_sql.contains("row_to_json"));
@@ -9783,12 +9869,54 @@ mod tests {
         assert!(info_sql.contains("fs.srvname"));
         assert!(info_sql.contains("ft.ftoptions"));
         assert!(info_sql.contains("c.relkind IN ('r','p','f')"));
+        // 兼容版面向 9.x：没有 relispartition/relpartbound/pg_get_partkeydef，
+        // 但保留了与主查询一致的列序和 LIMIT 形状。
+        assert!(!info_compat_sql.contains("relispartition"));
+        assert!(!info_compat_sql.contains("relpartbound"));
+        assert!(!info_compat_sql.contains("pg_get_partkeydef"));
+        assert!(!info_compat_sql.contains("pg_inherits"));
+        assert!(info_compat_sql.contains("NULL::text AS parent_schema"));
+        assert!(info_compat_sql.contains("NULL::text AS parent_table"));
+        assert!(info_compat_sql.contains("NULL::text AS partition_bound"));
+        assert!(info_compat_sql.contains("NULL::text AS partition_key"));
+        assert!(info_compat_sql.contains("fs.srvname"));
+        assert!(info_compat_sql.contains("ft.ftoptions"));
+        assert!(info_compat_sql.contains("c.relkind IN ('r','p','f')"));
+        assert!(info_compat_sql.contains("LIMIT 1"));
         assert!(local_objects_sql.contains("row_to_json(con)->>'conparentid'"));
         assert!(local_objects_sql.contains("con.contype IN ('p','f')"));
         assert!(local_objects_sql.contains("i.inhrelid = idx.oid"));
         assert!(local_objects_sql.contains("con.contype = 'c' AND con.conislocal"));
         assert!(!local_objects_sql.contains("con.coninhcount = 0"));
         assert!(local_objects_sql.contains("pg_catalog.pg_attrdef"));
+    }
+
+    #[test]
+    fn postgres_partition_tree_compat_sql_collapses_to_single_relation() {
+        let sql = postgres_partition_tree_sql();
+        let compat_sql = postgres_partition_tree_compat_sql();
+
+        // 主查询只支持 PostgreSQL 10+（声明式分区）；兼容版不能引用任何
+        // 10+ 的目录列/函数。
+        assert!(sql.contains("c.relispartition"));
+        assert!(sql.contains("pg_catalog.pg_get_expr(c.relpartbound"));
+        assert!(sql.contains("pg_catalog.pg_get_partkeydef"));
+
+        assert!(!compat_sql.contains("relispartition"));
+        assert!(!compat_sql.contains("relpartbound"));
+        assert!(!compat_sql.contains("pg_get_partkeydef"));
+        assert!(!compat_sql.contains("pg_inherits"));
+        assert!(!compat_sql.contains("WITH RECURSIVE"));
+        assert!(compat_sql.contains("NULL::bigint AS parent_oid"));
+        assert!(compat_sql.contains("NULL::text AS parent_schema"));
+        assert!(compat_sql.contains("NULL::text AS parent_relname"));
+        assert!(compat_sql.contains("NULL::text AS partition_bound"));
+        assert!(compat_sql.contains("NULL::text AS partition_key"));
+        assert!(compat_sql.contains("c.relkind::text AS relkind"));
+        assert!(compat_sql.contains("fs.srvname AS foreign_server"));
+        assert!(compat_sql.contains("ft.ftoptions AS foreign_options"));
+        assert!(compat_sql.contains("n.nspname = $1 AND c.relname = $2"));
+        assert!(compat_sql.contains("c.relkind IN ('r','p','f')"));
     }
 
     #[test]
@@ -10377,10 +10505,18 @@ mod tests {
         let partition_info =
             get_table_partition_info(&pool, &schema, "child").await.expect("classify PostgreSQL 9.x inherited table");
         let ddl = crate::schema::pg_ddl(&pool, &schema, "child").await;
+        // 查看表 DDL（DISPLAY 路径）在 9.x 上不能因 relispartition 报错，
+        // INHERITS 子表也不能被当成声明式分区渲染。
+        // The view-DDL path must not fail on the missing relispartition
+        // column pre-10, and INHERITS children must render as plain tables.
+        let ddl_with_partitions = crate::schema::pg_ddl_with_partitions(&pool, &schema, "child").await;
+        let parent_ddl = crate::schema::pg_ddl_with_partitions(&pool, &schema, "parent").await;
         execute_query(&pool, &format!("DROP SCHEMA {schema_ident} CASCADE"))
             .await
             .expect("drop PostgreSQL 9.x DDL fixtures");
         let ddl = ddl.expect("generate PostgreSQL 9.x table DDL");
+        let ddl_with_partitions = ddl_with_partitions.expect("generate PostgreSQL 9.x partition-tree DDL");
+        let parent_ddl = parent_ddl.expect("generate PostgreSQL 9.x partition-tree DDL for parent");
 
         assert!(ddl.contains("CREATE TABLE"), "ddl: {ddl}");
         assert!(ddl.contains("PRIMARY KEY"), "ddl: {ddl}");
@@ -10389,6 +10525,11 @@ mod tests {
         assert!(ddl.contains("CREATE TRIGGER child_bi"), "ddl: {ddl}");
         assert_eq!(partition_info, PostgresTablePartitionInfo::default());
         assert!(!ddl.contains("PARTITION OF"), "ddl: {ddl}");
+        assert!(ddl_with_partitions.contains("CREATE TABLE"), "ddl_with_partitions: {ddl_with_partitions}");
+        assert!(!ddl_with_partitions.contains("PARTITION OF"), "ddl_with_partitions: {ddl_with_partitions}");
+        // 9.x 没有声明式分区：父表的分区树只含父表自身（子表按普通表）。
+        assert_eq!(parent_ddl.matches("CREATE TABLE").count(), 1, "parent_ddl: {parent_ddl}");
+        assert!(!parent_ddl.contains("PARTITION OF"), "parent_ddl: {parent_ddl}");
     }
 
     #[tokio::test]

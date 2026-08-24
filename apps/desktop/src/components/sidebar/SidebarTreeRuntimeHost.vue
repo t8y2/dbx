@@ -174,6 +174,7 @@ import { runBatchTableTruncate } from "@/lib/table/batchTableTruncate";
 import { runBatchTableDrop } from "@/lib/table/batchTableDrop";
 import { buildSidebarDdlTemplateSql, sidebarDdlTargetsForExecutionContext } from "@/lib/sidebar/sidebarDdlTemplate";
 import { sidebarStructureExportTargets } from "@/lib/sidebar/sidebarExportRuntime";
+import { supportsScheduledDatabaseBackup } from "@/lib/backup/scheduledDatabaseBackup";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { rankSavedSqlHistory, type SavedSqlHistoryScope } from "@/lib/savedSql/savedSqlHistory";
@@ -4076,6 +4077,10 @@ const canExportAllDatabases = computed(() => {
   return !["redis", "mongodb", "dynamodb", "elasticsearch", "easysearch", "meilisearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "nacos"].includes(dbType || "");
 });
 
+const canOpenScheduledBackups = computed(() => {
+  return isTauriRuntime() && supportsScheduledDatabaseBackup(currentDatabaseType());
+});
+
 const canOpenDiagram = computed(() => {
   return !!activeNode.value.database && supportsSchemaDiagram(currentDatabaseType());
 });
@@ -4872,9 +4877,9 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
     }
     if (canExportAllDatabases.value) {
       items.push({ label: t("contextMenu.exportAllDatabases"), action: openAllDatabasesExport, icon: Upload });
-      if (isTauriRuntime()) {
-        items.push({ label: t("databaseBackup.title"), action: openScheduledBackups, icon: CalendarClock });
-      }
+    }
+    if (canOpenScheduledBackups.value) {
+      items.push({ label: t("databaseBackup.title"), action: openScheduledBackups, icon: CalendarClock });
     }
     if (canCreateDatabase.value) {
       items.push({

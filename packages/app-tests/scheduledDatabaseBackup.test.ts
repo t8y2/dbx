@@ -268,6 +268,7 @@ test("explicit backup databases fail when any configured target is missing", () 
 test("scheduled backups are limited to databases with consistent snapshot support", () => {
   assert.equal(supportsScheduledDatabaseBackup("postgres"), true);
   assert.equal(supportsScheduledDatabaseBackup("mysql"), true);
+  assert.equal(supportsScheduledDatabaseBackup("dameng"), false);
   assert.equal(supportsScheduledDatabaseBackup("sqlite"), false);
   assert.equal(supportsScheduledDatabaseBackup("sqlserver"), false);
 });

@@ -394,6 +394,9 @@ fn format_export_sql_literal_typed(
     if let Some(literal) = format_mysql_spatial_export_literal(value, database_type, column_type) {
         return literal;
     }
+    if let Some(literal) = format_xugu_spatial_export_literal(value, database_type, column_type) {
+        return literal;
+    }
     if is_mysql_compatible_export_literal_target(database_type) {
         if column_type.is_some_and(is_mysql_binary_export_type) {
             if let Some(literal) = format_mysql_binary_export_literal(value) {
@@ -830,6 +833,38 @@ pub(crate) fn is_mysql_spatial_export_type(column_type: &str) -> bool {
             | "geometrycollection"
             | "geomcollection"
     )
+}
+
+pub(crate) fn is_xugu_spatial_export_type(column_type: &str) -> bool {
+    let normalized = column_type.trim().to_ascii_lowercase();
+    let base = normalized.split(['(', ':', ' ', '\t', '\n']).next().unwrap_or("").trim();
+    matches!(base, "geometry" | "geography")
+}
+
+/// Xugu returns spatial values as readable WKT/EWKT text. Plain WKT is
+/// accepted by the server, but it cannot carry a non-zero SRID; database
+/// exports therefore select EWKT and replay it through the Xugu constructor.
+/// This branch is intentionally Xugu-only so PostgreSQL/PostGIS and other
+/// dialects retain their existing export behavior.
+pub(crate) fn format_xugu_spatial_export_literal(
+    value: &Value,
+    database_type: Option<DatabaseType>,
+    column_type: Option<&str>,
+) -> Option<String> {
+    if database_type != Some(DatabaseType::Xugu) || !column_type.is_some_and(is_xugu_spatial_export_type) {
+        return None;
+    }
+    if value.is_null() {
+        return Some("NULL".to_string());
+    }
+    let text = value.as_str().map_or_else(|| value.to_string(), ToString::to_string);
+    let trimmed = text.trim_start();
+    if trimmed.len() > 5 && trimmed[..5].eq_ignore_ascii_case("SRID=") {
+        return Some(format!("ST_GeomFromEWKT({})", quote_export_sql_string(&text)));
+    }
+    // Xugu accepts a plain WKT string for both GEOMETRY and GEOGRAPHY. Keep
+    // that form for SRID 0/legacy values rather than inventing a constructor.
+    Some(quote_export_sql_string(&text))
 }
 
 /// Database exports encode MySQL spatial cells as `DBX_WKB:<srid>:<hex>` while
@@ -1627,6 +1662,11 @@ fn database_export_select_list(columns: &[String], column_types: &[Option<String
                 && column_types.get(index).and_then(|value| value.as_deref()).is_some_and(is_mysql_spatial_export_type)
             {
                 mysql_spatial_export_marker_expression(column)
+            } else if *db_type == DatabaseType::Xugu
+                && column_types.get(index).and_then(|value| value.as_deref()).is_some_and(is_xugu_spatial_export_type)
+            {
+                let quoted = quote_identifier(column, db_type);
+                format!("ST_AsEWKT({quoted}) AS {quoted}")
             } else {
                 quote_identifier(column, db_type)
             }
@@ -1649,7 +1689,7 @@ pub(crate) fn replace_database_export_select_list(
     let prefix = format!("SELECT {original}");
     if !sql.starts_with(&prefix) {
         log::warn!(
-            "MySQL spatial database export could not replace its SELECT list; geometry columns will be exported as WKT"
+            "Spatial database export could not replace its SELECT list; geometry columns may lose SRID metadata"
         );
         return sql;
     }
@@ -2967,14 +3007,15 @@ mod tests {
         database_export_select_sql, database_export_total_objects, drop_table_if_exists_sql,
         ensure_export_destination_dir, export_destination_identity_mismatch, filter_export_table_infos,
         format_export_sql_literal, format_export_table_ddl, format_mysql_spatial_export_literal,
-        generate_postgres_extension_ddl, generate_postgres_sequence_create_ddl, generate_postgres_sequence_owner_ddl,
-        generate_postgres_sequence_setval_sql, is_postgres_extension_member_routine, mysql_database_export_preamble,
-        mysql_view_dependencies_from_rows, mysql_view_dependencies_sql, normalize_export_table_ddl,
-        record_export_destination_identity, record_export_error, replace_database_export_select_list,
-        sort_export_views_by_dependencies, split_postgres_export_table_triggers, write_database_export_rows,
-        BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions, DatabaseExportObjectCounts,
-        DatabaseExportRequest, DdlNormalizeOptions, ExportedTableSql, PostgresExportExtension, PostgresExportSequence,
-        PostgresExtensionMembers, DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT,
+        format_xugu_spatial_export_literal, generate_postgres_extension_ddl, generate_postgres_sequence_create_ddl,
+        generate_postgres_sequence_owner_ddl, generate_postgres_sequence_setval_sql,
+        is_postgres_extension_member_routine, mysql_database_export_preamble, mysql_view_dependencies_from_rows,
+        mysql_view_dependencies_sql, normalize_export_table_ddl, record_export_destination_identity,
+        record_export_error, replace_database_export_select_list, sort_export_views_by_dependencies,
+        split_postgres_export_table_triggers, write_database_export_rows, BuildDatabaseSqlExportOptions,
+        BuildExportInsertStatementsOptions, DatabaseExportObjectCounts, DatabaseExportRequest, DdlNormalizeOptions,
+        ExportedTableSql, PostgresExportExtension, PostgresExportSequence, PostgresExtensionMembers,
+        DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT,
     };
     use crate::connection::AppState;
     use crate::models::connection::DatabaseType;
@@ -3506,6 +3547,59 @@ mod tests {
         ));
         assert!(sql.contains("WHERE `id` > 7"), "sql: {sql}");
         assert!(sql.contains("ORDER BY `id` ASC LIMIT 1000"), "sql: {sql}");
+    }
+
+    #[test]
+    fn xugu_spatial_export_selects_ewkt_to_preserve_srid() {
+        let sql = database_export_select_sql(
+            &["id".to_string(), "shape".to_string(), "location".to_string(), "name".to_string()],
+            &[
+                Some("INTEGER".to_string()),
+                Some("GEOMETRY".to_string()),
+                Some("GEOGRAPHY".to_string()),
+                Some("VARCHAR(32)".to_string()),
+            ],
+            "places",
+            "app",
+            &DatabaseType::Xugu,
+        );
+
+        assert_eq!(
+            sql,
+            "SELECT \"id\", ST_AsEWKT(\"shape\") AS \"shape\", ST_AsEWKT(\"location\") AS \"location\", \"name\" FROM \"app\".\"places\""
+        );
+    }
+
+    #[test]
+    fn xugu_spatial_export_replays_ewkt_and_keeps_plain_wkt_compatible() {
+        assert_eq!(
+            format_xugu_spatial_export_literal(
+                &json!("SRID=3857;POINT(1 2)"),
+                Some(DatabaseType::Xugu),
+                Some("GEOMETRY"),
+            ),
+            Some("ST_GeomFromEWKT('SRID=3857;POINT(1 2)')".to_string())
+        );
+        assert_eq!(
+            format_xugu_spatial_export_literal(&json!("POINT(1 2)"), Some(DatabaseType::Xugu), Some("GEOGRAPHY"),),
+            Some("'POINT(1 2)'".to_string())
+        );
+        assert_eq!(
+            format_xugu_spatial_export_literal(&Value::Null, Some(DatabaseType::Xugu), Some("GEOMETRY")),
+            Some("NULL".to_string())
+        );
+        assert!(format_xugu_spatial_export_literal(
+            &json!("SRID=3857;POINT(1 2)"),
+            Some(DatabaseType::Xugu),
+            Some("VARCHAR")
+        )
+        .is_none());
+        assert!(format_xugu_spatial_export_literal(
+            &json!("SRID=3857;POINT(1 2)"),
+            Some(DatabaseType::Postgres),
+            Some("GEOMETRY")
+        )
+        .is_none());
     }
 
     #[test]

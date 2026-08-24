@@ -29,6 +29,29 @@ function context(): PreviewActionContext {
 }
 
 describe("buildGeometryMapFeatureCollection", () => {
+  it("treats GEOGRAPHY columns as map-preview layers and preserves SRID metadata", () => {
+    const ctx = context();
+    ctx.result.column_types = ["GEOGRAPHY", "text"];
+    ctx.result.columns = ["location", "name"];
+    ctx.result.rows = [["SRID=4326;POINT(116.397 39.908)", "wgs84"]];
+    ctx.result.spatial_columns = [{ column_index: 0, srid: 4326 }];
+    ctx.result.spatial_values = [[4326, null]];
+    ctx.displayRowRefs = [{ id: 1, sourceIndex: 0, isNew: false }];
+
+    expect(hasGeometryMapPreviewColumns(ctx.result)).toBe(true);
+    expect(buildGeometryMapFeatureCollection(ctx)).toEqual({
+      type: "FeatureCollection",
+      detectedSrid: 4326,
+      features: [
+        {
+          type: "Feature",
+          geometry: { type: "Point", coordinates: [116.397, 39.908] },
+          properties: { _column: "location", _row: 0, _srid: 4326, name: "wgs84" },
+        },
+      ],
+    });
+  });
+
   it("checks preview availability from column metadata without parsing result rows", () => {
     const result = context().result;
     expect(hasGeometryMapPreviewColumns(result)).toBe(true);

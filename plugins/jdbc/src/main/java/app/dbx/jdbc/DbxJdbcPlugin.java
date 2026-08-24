@@ -611,10 +611,14 @@ public final class DbxJdbcPlugin {
     }
 
     private static void configureOrdinaryAutoCommit(Connection jdbcConnection) throws SQLException {
-        if (manualTransactionActive || jdbcConnection.getAutoCommit()) {
+        if (manualTransactionActive || hasActiveQuerySession(jdbcConnection) || jdbcConnection.getAutoCommit()) {
             return;
         }
         jdbcConnection.setAutoCommit(true);
+    }
+
+    private static boolean hasActiveQuerySession(Connection jdbcConnection) {
+        return QUERY_SESSIONS.values().stream().anyMatch(session -> session.connection == jdbcConnection);
     }
 
     private static boolean isPhoenixConnection(JsonNode connection, String url) {
@@ -868,8 +872,9 @@ public final class DbxJdbcPlugin {
             throw new SQLException("A manual transaction is already active");
         }
         Connection conn = openConnection(connection);
-        DatabaseMetaData metadata = conn.getMetaData();
-        if (metadata != null && !metadata.supportsTransactions()) {
+        DatabaseMetaData metadata = readMetadata(conn::getMetaData);
+        Boolean supportsTransactions = metadata == null ? null : readMetadata(metadata::supportsTransactions);
+        if (Boolean.FALSE.equals(supportsTransactions)) {
             throw new SQLFeatureNotSupportedException("This JDBC driver does not support transactions");
         }
         applyExecutionContext(connection, conn, database, schema);

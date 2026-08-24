@@ -265,6 +265,60 @@ final class DbxJdbcPluginTest {
         assertEquals(1, manualTransactionRowCount());
     }
 
+    @Test
+    void manualTransactionFallsBackWhenTransactionMetadataIsUnavailable() throws Exception {
+        for (Throwable failure : List.of(
+            new UnsupportedOperationException("unsupported"),
+            new AbstractMethodError("unsupported")
+        )) {
+            String connection = """
+                { "connection_string": "jdbc:dbx-transaction-metadata:%s" }
+                """.formatted(failure.getClass().getSimpleName());
+            Driver driver = testDriver(
+                "jdbc:dbx-transaction-metadata:",
+                transactionMetadataConnection(failure, true)
+            );
+            DriverManager.registerDriver(driver);
+            try {
+                JsonNode begun = request("beginManualTransaction", """
+                    { "connection": %s }
+                    """.formatted(connection));
+                assertFalse(begun.has("error"), failure.getClass().getSimpleName() + ": " + begun);
+
+                JsonNode rolledBack = request("rollbackManualTransaction", """
+                    { "connection": %s }
+                    """.formatted(connection));
+                assertFalse(rolledBack.has("error"), failure.getClass().getSimpleName() + ": " + rolledBack);
+            } finally {
+                closeAndDeregister(connection, driver);
+            }
+        }
+    }
+
+    @Test
+    void manualTransactionRejectsExplicitUnsupportedMetadata() throws Exception {
+        String connection = """
+            { "connection_string": "jdbc:dbx-transaction-metadata:false" }
+            """;
+        Driver driver = testDriver(
+            "jdbc:dbx-transaction-metadata:",
+            transactionMetadataConnection(null, false)
+        );
+        DriverManager.registerDriver(driver);
+        try {
+            JsonNode response = request("beginManualTransaction", """
+                { "connection": %s }
+                """.formatted(connection));
+
+            assertEquals(
+                "This JDBC driver does not support transactions",
+                response.path("error").path("message").asText()
+            );
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
+    }
+
     private static int manualTransactionRowCount() throws Exception {
         JsonNode result = request("executeQuery", """
             {
@@ -423,6 +477,51 @@ final class DbxJdbcPluginTest {
         assertEquals(5, third.path("result").path("rows").path(0).path(0).asInt());
         assertEquals(false, third.path("result").path("has_more").asBoolean());
         assertEquals(true, third.path("result").path("session_id").isNull());
+    }
+
+    @Test
+    void ordinaryRequestDoesNotInvalidateActivePostgresPagedQuery() throws Exception {
+        List<String> calls = new ArrayList<>();
+        Driver driver = testDriver("jdbc:postgresql:dbx-interleaved", interleavedPostgresConnection(calls));
+        DriverManager.registerDriver(driver);
+        String connection = """
+            { "connection_string": "jdbc:postgresql:dbx-interleaved" }
+            """;
+        try {
+            JsonNode first = request("executeQueryPage", """
+                {
+                  "connection": %s,
+                  "sql": "SELECT value FROM paged_values",
+                  "pageSize": 1,
+                  "maxRows": 10
+                }
+                """.formatted(connection));
+            assertFalse(first.has("error"), first.toString());
+            assertEquals(1, first.path("result").path("rows").path(0).path(0).asInt());
+            String sessionId = first.path("result").path("session_id").asText();
+
+            JsonNode ordinary = request("executeQuery", """
+                {
+                  "connection": %s,
+                  "sql": "SELECT 99 AS ordinary_value"
+                }
+                """.formatted(connection));
+            assertFalse(ordinary.has("error"), ordinary.toString());
+            assertEquals(99, ordinary.path("result").path("rows").path(0).path(0).asInt());
+
+            JsonNode second = request("fetchQueryPage", """
+                {
+                  "connection": %s,
+                  "sessionId": "%s",
+                  "pageSize": 1
+                }
+                """.formatted(connection, sessionId));
+            assertFalse(second.has("error"), second.toString());
+            assertEquals(2, second.path("result").path("rows").path(0).path(0).asInt());
+            assertFalse(calls.contains("setAutoCommit:true"), calls.toString());
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
     }
 
     @Test
@@ -3168,6 +3267,154 @@ final class DbxJdbcPluginTest {
                         case "getString" -> rows[index][((Integer) args[0]) - 1];
                         case "getObject" -> rows[index][((Integer) args[0]) - 1];
                         case "close" -> null;
+                        default -> defaultValue(method.getReturnType());
+                    };
+                }
+            }
+        );
+    }
+
+    private static Driver testDriver(String urlPrefix, Connection connection) {
+        return (Driver) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Driver.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "connect" -> ((String) args[0]).startsWith(urlPrefix) ? connection : null;
+                case "acceptsURL" -> ((String) args[0]).startsWith(urlPrefix);
+                case "getPropertyInfo" -> new DriverPropertyInfo[0];
+                case "getMajorVersion" -> 1;
+                case "getMinorVersion" -> 0;
+                case "jdbcCompliant" -> false;
+                case "getParentLogger" -> java.util.logging.Logger.getGlobal();
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    private static Connection transactionMetadataConnection(Throwable metadataFailure, boolean supportsTransactions) {
+        boolean[] autoCommit = { true };
+        DatabaseMetaData metadata = (DatabaseMetaData) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { DatabaseMetaData.class },
+            (proxy, method, args) -> {
+                if ("supportsTransactions".equals(method.getName())) {
+                    if (metadataFailure != null) {
+                        throw metadataFailure;
+                    }
+                    return supportsTransactions;
+                }
+                return defaultValue(method.getReturnType());
+            }
+        );
+        return (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getAutoCommit" -> autoCommit[0];
+                case "setAutoCommit" -> {
+                    autoCommit[0] = (boolean) args[0];
+                    yield null;
+                }
+                case "getMetaData" -> metadata;
+                case "isClosed" -> false;
+                case "rollback", "close", "setCatalog", "setSchema" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    private static Connection interleavedPostgresConnection(List<String> calls) {
+        boolean[] autoCommit = { true };
+        boolean[] activePagedCursor = { false };
+        boolean[] cursorInvalidated = { false };
+        return (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getAutoCommit" -> {
+                    calls.add("getAutoCommit");
+                    yield autoCommit[0];
+                }
+                case "setAutoCommit" -> {
+                    boolean next = (boolean) args[0];
+                    calls.add("setAutoCommit:" + next);
+                    if (next && !autoCommit[0] && activePagedCursor[0]) {
+                        cursorInvalidated[0] = true;
+                    }
+                    autoCommit[0] = next;
+                    yield null;
+                }
+                case "createStatement" -> interleavedStatement(activePagedCursor, cursorInvalidated);
+                case "isClosed" -> false;
+                case "rollback", "close", "setCatalog", "setSchema" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    private static Statement interleavedStatement(boolean[] activePagedCursor, boolean[] cursorInvalidated) {
+        return (Statement) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Statement.class },
+            new java.lang.reflect.InvocationHandler() {
+                private ResultSet resultSet;
+
+                @Override
+                public Object invoke(Object proxy, Method method, Object[] args) {
+                    return switch (method.getName()) {
+                        case "execute" -> {
+                            String sql = (String) args[0];
+                            boolean paged = sql.contains("paged_values");
+                            if (paged) {
+                                activePagedCursor[0] = true;
+                            }
+                            resultSet = integerResultSet(
+                                paged ? new int[] { 1, 2, 3 } : new int[] { 99 },
+                                paged,
+                                activePagedCursor,
+                                cursorInvalidated
+                            );
+                            yield true;
+                        }
+                        case "getResultSet" -> resultSet;
+                        case "getUpdateCount" -> -1;
+                        case "setMaxRows", "setFetchSize", "setQueryTimeout", "close" -> null;
+                        default -> defaultValue(method.getReturnType());
+                    };
+                }
+            }
+        );
+    }
+
+    private static ResultSet integerResultSet(
+        int[] values,
+        boolean paged,
+        boolean[] activePagedCursor,
+        boolean[] cursorInvalidated
+    ) {
+        return (ResultSet) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { ResultSet.class },
+            new java.lang.reflect.InvocationHandler() {
+                private int index = -1;
+
+                @Override
+                public Object invoke(Object proxy, Method method, Object[] args) throws SQLException {
+                    return switch (method.getName()) {
+                        case "next" -> {
+                            if (paged && cursorInvalidated[0]) {
+                                throw new SQLException("PostgreSQL cursor was invalidated by auto-commit");
+                            }
+                            yield ++index < values.length;
+                        }
+                        case "getMetaData" -> columnMeta(Types.INTEGER);
+                        case "getObject" -> values[index];
+                        case "close" -> {
+                            if (paged) {
+                                activePagedCursor[0] = false;
+                            }
+                            yield null;
+                        }
                         default -> defaultValue(method.getReturnType());
                     };
                 }

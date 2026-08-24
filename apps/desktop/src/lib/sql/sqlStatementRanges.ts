@@ -231,6 +231,8 @@ const COMMON_SOFT_STATEMENT_START_KEYWORDS = [
   "COPY",
 ] as const;
 
+const SOFT_STATEMENT_FUNCTION_KEYWORDS = new Set(["REPLACE", "TRUNCATE"]);
+
 const DATABASE_SOFT_STATEMENT_KEYWORDS: Partial<Record<DatabaseType, readonly string[]>> = {
   mysql: ["HANDLER", "LOAD", "OPTIMIZE", "REPAIR"],
   postgres: ["DO", "LISTEN", "NOTIFY", "UNLISTEN"],
@@ -957,7 +959,7 @@ function softStatementKeywordAt(sql: string, pos: number, databaseType?: Databas
   const match = /^[A-Za-z_][\w$]*/.exec(sql.slice(pos));
   if (!match) return null;
   const keyword = match[0].toUpperCase();
-  if (keyword === "REPLACE" && nextNonWhitespaceChar(sql, pos + match[0].length) === "(") return null;
+  if (SOFT_STATEMENT_FUNCTION_KEYWORDS.has(keyword) && nextNonWhitespaceChar(sql, pos + match[0].length) === "(") return null;
   // COMMENT is also a common column name. Only COMMENT ON starts a standalone
   // SQL command; otherwise a line-start projection column must stay in SELECT.
   if (keyword === "COMMENT" && nextSqlWord(sql, pos + match[0].length, databaseType, parameterOptions) !== "ON") return null;
@@ -1780,7 +1782,7 @@ function oraclePlSqlBlockEnd(sql: string): number | null {
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
     if (token.kind === "semicolon") {
-      const complete = objectKind === "spec" ? stack.length === 0 : sawBegin && stack.length === 0;
+      const complete = objectKind !== null ? stack.length === 0 : sawBegin && stack.length === 0;
       if (complete) return token.to;
       continue;
     }
@@ -1950,6 +1952,7 @@ function oraclePlSqlTokens(sql: string): OraclePlSqlToken[] {
 
 function previousWordToken(tokens: Array<{ kind: "word" | "semicolon"; value: string }>, index: number): string | null {
   for (let i = index - 1; i >= 0; i -= 1) {
+    if (tokens[i].kind === "semicolon") return null;
     if (tokens[i].kind === "word") return tokens[i].value;
   }
   return null;
@@ -1957,6 +1960,7 @@ function previousWordToken(tokens: Array<{ kind: "word" | "semicolon"; value: st
 
 function nextWordToken(tokens: Array<{ kind: "word" | "semicolon"; value: string }>, index: number): string | null {
   for (let i = index + 1; i < tokens.length; i += 1) {
+    if (tokens[i].kind === "semicolon") return null;
     if (tokens[i].kind === "word") return tokens[i].value;
   }
   return null;

@@ -91,7 +91,19 @@ const supplementalDrivers = [
 
 const manifestUrl = new URL("../../crates/dbx-core/assets/database-drivers.manifest.json", import.meta.url);
 const manifest = JSON.parse(fs.readFileSync(manifestUrl, "utf8"));
-const catalogEntries = [...manifest.drivers, ...supplementalDrivers];
+const manifestDbTypes = new Set(manifest.drivers.map((driver) => driver.dbType));
+const supplementalByDbType = new Map(supplementalDrivers.map((driver) => [driver.dbType, driver]));
+const catalogEntries = [
+  ...manifest.drivers.map((driver) => {
+    const supplemental = supplementalByDbType.get(driver.dbType);
+    if (!supplemental) return driver;
+    return {
+      ...driver,
+      aliases: [...new Set([...(driver.aliases || []), ...(supplemental.aliases || [])])],
+    };
+  }),
+  ...supplementalDrivers.filter((driver) => !manifestDbTypes.has(driver.dbType)),
+];
 const duplicateDbTypes = catalogEntries
   .map((driver) => driver.dbType)
   .filter((dbType, index, values) => values.indexOf(dbType) !== index);

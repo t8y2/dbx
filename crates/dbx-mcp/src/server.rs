@@ -14,6 +14,7 @@ use crate::mongo::{self, MongoCommand, MongoSafetyError};
 use crate::session::{McpSession, McpSessionStore};
 use dbx_core::{
     agent_tools::{format_query_result_as_text, QueryCellWindow},
+    database_manifest,
     db::redis_driver::{classify_command, parse_command_argv, RedisCommandResult, RedisCommandSafety},
     models::connection::DatabaseType,
     production_safety::{
@@ -655,7 +656,7 @@ impl DbxMcpServer {
             Ok(db_type) => db_type,
             Err(error) => return tool_error("INVALID_CONNECTION_TYPE", error),
         };
-        let port = match request.port.or_else(|| default_port(&request.db_type)) {
+        let port = match request.port.or_else(|| database_manifest::default_port(&db_type)) {
             Some(port) => port,
             None => return text("Port is required for this database type."),
         };
@@ -1205,24 +1206,6 @@ fn scoped_connection_ids(value: Option<&str>) -> Vec<String> {
         }
     }
     ids
-}
-
-fn default_port(db_type: &str) -> Option<u16> {
-    match db_type.trim().to_ascii_lowercase().as_str() {
-        "mysql" | "doris" | "starrocks" | "manticoresearch" => Some(3306),
-        "postgres" | "redshift" | "highgo" | "kingbase" | "opengauss" | "gaussdb" => Some(5432),
-        "uxdb" => Some(52025),
-        "redis" => Some(6379),
-        "mongodb" => Some(27017),
-        "rqlite" => Some(4001),
-        "kwdb" => Some(26257),
-        "cloudflare-d1" => Some(443),
-        "tdengine" => Some(6041),
-        "iotdb" => Some(6667),
-        "xugu" => Some(5138),
-        "sqlite" | "duckdb" | "access" => Some(0),
-        _ => None,
-    }
 }
 
 fn ambiguous_connections(name: &str, connections: &[dbx_core::models::connection::ConnectionConfig]) -> String {

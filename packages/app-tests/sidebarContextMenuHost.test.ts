@@ -178,12 +178,34 @@ test("saved SQL tree rows expose copy, paste, export, rename, and confirmed dele
 
 test("explicit locate prioritizes the saved SQL row over SQL cursor table navigation", () => {
   const connectionTree = readFileSync("apps/desktop/src/components/sidebar/ConnectionTree.vue", "utf8");
-  const locateBody = functionBody(connectionTree, "locateActiveTabInSidebar");
+  const locateBody = functionBody(connectionTree, "locateTabInSidebar");
 
   assert.match(locateBody, /const locatesSavedSql = tabTarget\?\.type === "saved-sql-file"/);
   assert.match(locateBody, /const cursorCandidate = locatesSavedSql \? null : queryCursorTableCandidate/);
   assert.match(locateBody, /locatesSavedSql && savedSqlFile\?\.connectionId && savedSqlFile\.database[\s\S]*?type: "query-context"/);
   assert.match(locateBody, /findNodePathForTarget\(target, store\.treeNodes\)/);
+});
+
+test("tab context menu forwards the exact tab to centered sidebar locate without activating it", () => {
+  const app = readFileSync("apps/desktop/src/App.vue", "utf8");
+  const appSidebar = readFileSync("apps/desktop/src/components/layout/AppSidebar.vue", "utf8");
+  const connectionTree = readFileSync("apps/desktop/src/components/sidebar/ConnectionTree.vue", "utf8");
+  const appLocateBody = functionBody(app, "locateTabInSidebar");
+  const sidebarLocateBody = functionBody(appSidebar, "locateTabInSidebar");
+  const activeLocateBody = functionBody(connectionTree, "locateActiveTabInSidebar");
+  const locateBody = functionBody(connectionTree, "locateTabInSidebar");
+
+  assert.match(app, /@locate-tab="locateTabInSidebar"/);
+  assert.match(appLocateBody, /setSidebarOpen\(true\)/);
+  assert.match(appLocateBody, /await nextTick\(\)/);
+  assert.match(appLocateBody, /await appSidebarRef\.value\?\.locateTabInSidebar\(tab\)/);
+  assert.doesNotMatch(appLocateBody, /activateQueryTab|activeTabId/);
+  assert.match(sidebarLocateBody, /return connectionTreeRef\.value\?\.locateTabInSidebar\(tab\)/);
+  assert.match(appSidebar, /defineExpose\(\{ focusSearch, locateTabInSidebar \}\)/);
+  assert.match(activeLocateBody, /await locateTabInSidebar\(activeTab\.value, "smart"\)/);
+  assert.match(locateBody, /await scrollToSidebarNode\(match\.id, \{ align \}\)/);
+  assert.match(connectionTree, /defineExpose\(\{ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSidebar \}\)/);
+  assert.match(connectionTree, /@request-connection-rename="startRenamingConnectionNode"/);
 });
 
 test("batch table paste refreshes each object list after all tables are processed", () => {

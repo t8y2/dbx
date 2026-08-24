@@ -13,11 +13,15 @@ import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.sql.Array;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Types;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -261,6 +265,107 @@ class SpannerAgentTest extends JdbcFakeExecutionBehaviorTest {
         assertEquals("ARRAY<STRING(MAX)>", columns.get(1).getData_type());
         assertFalse(columns.get(1).getIs_primary_key());
         assertTrue(columns.get(1).getIs_nullable());
+    }
+
+    @Test
+    void readsArrayValuesInOrderWithoutUsingGetStringAndFreesTheArray() {
+        List<String> calls = new ArrayList<>();
+        Array array = fakeArray(new Object[]{7L, "two", null}, calls, false);
+        ResultSet resultSet = arrayResultSet(array, calls);
+
+        Object value = resultValue(new SpannerAgent(), resultSet, Types.ARRAY);
+
+        assertEquals(Arrays.asList(7L, "two", null), value);
+        assertEquals(Arrays.asList("getArray(1)", "array.getArray()", "array.free()"), calls);
+    }
+
+    @Test
+    void returnsNullForNullArraysWithoutUsingGetString() {
+        List<String> calls = new ArrayList<>();
+        ResultSet resultSet = arrayResultSet(null, calls);
+
+        assertNull(resultValue(new SpannerAgent(), resultSet, Types.ARRAY));
+        assertEquals(Collections.singletonList("getArray(1)"), calls);
+    }
+
+    @Test
+    void keepsTheReadArrayValueWhenFreeFails() {
+        List<String> calls = new ArrayList<>();
+        Array array = fakeArray(new String[]{"first", "second"}, calls, true);
+
+        Object value = resultValue(new SpannerAgent(), arrayResultSet(array, calls), Types.ARRAY);
+
+        assertEquals(Arrays.asList("first", "second"), value);
+        assertEquals(Arrays.asList("getArray(1)", "array.getArray()", "array.free()"), calls);
+    }
+
+    @Test
+    void delegatesScalarValuesToTheSharedReader() {
+        List<String> calls = new ArrayList<>();
+        ResultSet resultSet = proxy(ResultSet.class, (method, args) -> {
+            if ("getInt".equals(method.getName())) {
+                calls.add("getInt(" + args[0] + ")");
+                return 42;
+            }
+            if ("wasNull".equals(method.getName())) {
+                calls.add("wasNull()");
+                return false;
+            }
+            if ("getArray".equals(method.getName()) || "getString".equals(method.getName())) {
+                throw new AssertionError("Unexpected " + method.getName());
+            }
+            return defaultValue(method.getReturnType());
+        });
+
+        assertEquals(42, resultValue(new SpannerAgent(), resultSet, Types.INTEGER));
+        assertEquals(Arrays.asList("getInt(1)", "wasNull()"), calls);
+    }
+
+    @Test
+    void omitsIntrinsicNumericParametersWhileKeepingNativeArrayAndStringTypes() {
+        Map<String, List<Map<String, Object>>> rows = new LinkedHashMap<>();
+        rows.put("getColumns", Arrays.asList(
+            row(
+                "COLUMN_NAME", "amount",
+                "TYPE_NAME", "NUMERIC",
+                "NULLABLE", DatabaseMetaData.columnNullable,
+                "COLUMN_SIZE", 15,
+                "DECIMAL_DIGITS", 0
+            ),
+            row(
+                "COLUMN_NAME", "ratio",
+                "TYPE_NAME", "DECIMAL",
+                "NULLABLE", DatabaseMetaData.columnNullable,
+                "COLUMN_SIZE", 15,
+                "DECIMAL_DIGITS", 0
+            ),
+            row(
+                "COLUMN_NAME", "tags",
+                "TYPE_NAME", "ARRAY<STRING(MAX)>",
+                "NULLABLE", DatabaseMetaData.columnNullable
+            ),
+            row(
+                "COLUMN_NAME", "nickname",
+                "TYPE_NAME", "STRING(100)",
+                "NULLABLE", DatabaseMetaData.columnNullable,
+                "COLUMN_SIZE", 100
+            )
+        ));
+        SpannerAgent agent = connectedAgent(GOOGLE_SQL_PRODUCT, null, rows);
+
+        List<ColumnInfo> columns = agent.getColumns("", "singers");
+        String ddl = agent.getTableDdl("", "singers");
+
+        assertNull(columns.get(0).getNumeric_precision());
+        assertNull(columns.get(0).getNumeric_scale());
+        assertNull(columns.get(1).getNumeric_precision());
+        assertNull(columns.get(1).getNumeric_scale());
+        assertTrue(ddl.contains("`amount` NUMERIC"), ddl);
+        assertTrue(ddl.contains("`ratio` DECIMAL"), ddl);
+        assertFalse(ddl.contains("NUMERIC("), ddl);
+        assertFalse(ddl.contains("DECIMAL("), ddl);
+        assertTrue(ddl.contains("`tags` ARRAY<STRING(MAX)>"), ddl);
+        assertTrue(ddl.contains("`nickname` STRING(100)"), ddl);
     }
 
     @Test
@@ -564,6 +669,55 @@ class SpannerAgentTest extends JdbcFakeExecutionBehaviorTest {
             }
             return defaultValue(method.getReturnType());
         });
+    }
+
+    private static ResultSet arrayResultSet(Array array, List<String> calls) {
+        return proxy(ResultSet.class, (method, args) -> {
+            if ("getArray".equals(method.getName())) {
+                calls.add("getArray(" + args[0] + ")");
+                return array;
+            }
+            if ("getString".equals(method.getName())) {
+                throw new AssertionError("ARRAY values must not be read with getString");
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static Array fakeArray(Object value, List<String> calls, boolean failFree) {
+        return proxy(Array.class, (method, args) -> {
+            if ("getArray".equals(method.getName())) {
+                calls.add("array.getArray()");
+                return value;
+            }
+            if ("free".equals(method.getName())) {
+                calls.add("array.free()");
+                if (failFree) {
+                    throw new SQLException("cleanup failed");
+                }
+                return null;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static Object resultValue(SpannerAgent agent, ResultSet resultSet, int sqlType) {
+        try {
+            Method method = SpannerAgent.class.getDeclaredMethod("resultValue", ResultSet.class, int.class, int.class);
+            method.setAccessible(true);
+            return method.invoke(agent, resultSet, 1, sqlType);
+        } catch (InvocationTargetException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof RuntimeException) {
+                throw (RuntimeException) cause;
+            }
+            if (cause instanceof Error) {
+                throw (Error) cause;
+            }
+            throw new IllegalStateException(cause);
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     private static Map<String, Object> row(Object... keyValues) {

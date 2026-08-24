@@ -17,6 +17,7 @@ export type ObjectBrowserRowAction = "table-info" | "type-info" | "open-table" |
 export function singleClickRowAction(row: ObjectBrowserRow | null | undefined, dbType?: DatabaseType): ObjectBrowserRowAction {
   if (!row) return "none";
   if (row.type === "TABLE") return "table-info";
+  if (row.type === "EVENT") return "none";
   if (row.type === "TYPE" && customTypeCapabilities(dbType).details) return "type-info";
   if (canOpenSource(row, dbType)) return "open-source";
   return "none";
@@ -31,6 +32,7 @@ export function singleClickRowAction(row: ObjectBrowserRow | null | undefined, d
 export function doubleClickRowAction(row: ObjectBrowserRow | null | undefined, dbType?: DatabaseType): ObjectBrowserRowAction {
   if (!row) return "none";
   if (row.type === "TABLE") return "open-table";
+  if (row.type === "EVENT") return "open-source";
   if (row.type === "TYPE" && customTypeCapabilities(dbType).details) return "type-info";
   if (canOpenSource(row, dbType)) return "open-source";
   return "none";
@@ -83,5 +85,7 @@ function canOpenSource(row: ObjectBrowserRow, dbType?: DatabaseType): boolean {
   // Xugu keeps its source editor entry through supportsTypeObjectSource below.
   if (row.type === "TYPE" && customTypeCapabilities(dbType).details) return false;
   if ((row.type === "TYPE" || row.type === "TYPE_BODY") && !supportsTypeObjectSource(dbType)) return false;
-  return row.type === "VIEW" || row.type === "MATERIALIZED_VIEW" || row.type === "PROCEDURE" || row.type === "FUNCTION" || row.type === "TRIGGER" || row.type === "SEQUENCE" || row.type === "PACKAGE" || row.type === "PACKAGE_BODY" || row.type === "TYPE" || row.type === "TYPE_BODY";
+  return (
+    row.type === "VIEW" || row.type === "MATERIALIZED_VIEW" || row.type === "PROCEDURE" || row.type === "FUNCTION" || row.type === "TRIGGER" || row.type === "EVENT" || row.type === "SEQUENCE" || row.type === "PACKAGE" || row.type === "PACKAGE_BODY" || row.type === "TYPE" || row.type === "TYPE_BODY"
+  );
 }

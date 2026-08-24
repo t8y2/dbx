@@ -122,19 +122,37 @@ fn windows_npm_codex_shim_command(program: &str) -> Option<CodexCommandSpec> {
     Some(CodexCommandSpec { program: node, args: vec![codex_js.to_string_lossy().to_string()] })
 }
 
-fn codex_process_env(config: &AiConfig, command: &CodexCommandSpec) -> Result<Vec<(String, String)>, String> {
+async fn codex_process_env(config: &AiConfig, command: &CodexCommandSpec) -> Result<Vec<(String, String)>, String> {
     let inherited_env_keys = env::vars_os().map(|(key, _)| key.to_string_lossy().into_owned()).collect::<Vec<_>>();
-    codex_process_env_with_system_proxy(
+    #[cfg(not(windows))]
+    let node_runtime_dir = shell_program_path("node").await.and_then(|path| {
+        Path::new(&path).parent().filter(|parent| !parent.as_os_str().is_empty()).map(|parent| parent.to_path_buf())
+    });
+    #[cfg(windows)]
+    let node_runtime_dir: Option<PathBuf> = None;
+    codex_process_env_with_runtime_and_system_proxy(
         config,
         command,
+        node_runtime_dir.as_deref(),
         crate::update::system_proxy_url().as_deref(),
         &inherited_env_keys,
     )
 }
 
+#[cfg(test)]
 fn codex_process_env_with_system_proxy(
     config: &AiConfig,
     command: &CodexCommandSpec,
+    system_proxy: Option<&str>,
+    inherited_env_keys: &[String],
+) -> Result<Vec<(String, String)>, String> {
+    codex_process_env_with_runtime_and_system_proxy(config, command, None, system_proxy, inherited_env_keys)
+}
+
+fn codex_process_env_with_runtime_and_system_proxy(
+    config: &AiConfig,
+    command: &CodexCommandSpec,
+    node_runtime_dir: Option<&Path>,
     system_proxy: Option<&str>,
     inherited_env_keys: &[String],
 ) -> Result<Vec<(String, String)>, String> {
@@ -143,9 +161,13 @@ fn codex_process_env_with_system_proxy(
         insert_env_if_absent(&mut env, inherited_env_keys, "HTTP_PROXY", proxy);
         insert_env_if_absent(&mut env, inherited_env_keys, "HTTPS_PROXY", proxy);
     }
-    if let Some(dir) = command.parent_dir() {
+    let command_dir = command.parent_dir();
+    if command_dir.is_some() || node_runtime_dir.is_some() {
         let user_path = env.get("PATH").map(String::as_str);
-        env.insert("PATH".to_string(), merged_path_with_dir(&dir, user_path));
+        env.insert(
+            "PATH".to_string(),
+            merged_codex_path(command_dir.as_deref().map(Path::new), node_runtime_dir, user_path),
+        );
     }
     Ok(env.into_iter().collect())
 }
@@ -342,9 +364,20 @@ fn common_executable_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+#[cfg(test)]
 fn merged_path_with_dir(dir: &str, user_path: Option<&str>) -> String {
+    merged_codex_path(Some(Path::new(dir)), None, user_path)
+}
+
+fn merged_codex_path(codex_dir: Option<&Path>, node_runtime_dir: Option<&Path>, user_path: Option<&str>) -> String {
     let mut seen = BTreeSet::new();
-    let mut dirs = vec![PathBuf::from(dir)];
+    let mut dirs = Vec::new();
+    if let Some(dir) = codex_dir {
+        dirs.push(dir.to_path_buf());
+    }
+    if let Some(dir) = node_runtime_dir {
+        dirs.push(dir.to_path_buf());
+    }
     if let Some(path) = user_path {
         dirs.extend(env::split_paths(path));
     }
@@ -572,7 +605,7 @@ fn attach_codex_images(command: &mut CodexCommandSpec, image_paths: &[PathBuf]) 
 pub async fn list_codex_models(config: &AiConfig) -> Result<Vec<AiModelInfo>, String> {
     validate_codex_program(config)?;
     let command = resolve_codex_command(config).await;
-    let process_env = codex_process_env(config, &command)?;
+    let process_env = codex_process_env(config, &command).await?;
     let cache_key = codex_model_cache_key(&command, &process_env);
     Ok(list_codex_models_cached(&CODEX_MODEL_CACHE, cache_key, || async {
         list_codex_models_uncached(&command, &process_env).await
@@ -946,7 +979,8 @@ pub async fn test_codex_connection(config: &AiConfig) -> Result<AiTestConnection
     let mut command = cli_command(&codex_command.program);
     command.args(codex_command.args.iter().map(String::as_str));
     command.args(["login", "status"]);
-    command.envs(codex_process_env(config, &codex_command)?.iter().map(|(key, value)| (key.as_str(), value.as_str())));
+    let process_env = codex_process_env(config, &codex_command).await?;
+    command.envs(process_env.iter().map(|(key, value)| (key.as_str(), value.as_str())));
 
     let output = command.output().await.map_err(|e| classify_codex_spawn_error(&e.to_string()))?;
 
@@ -1017,7 +1051,7 @@ pub async fn run_codex_agent(
     command.program = resolved_command.program;
     command.args.splice(0..0, resolved_command.args);
     attach_codex_images(&mut command, &image_paths);
-    let env = codex_process_env(config, &command)?;
+    let env = codex_process_env(config, &command).await?;
     run_cli_jsonl_agent(
         CliAgentProcessSpec {
             command,
@@ -1050,7 +1084,10 @@ mod tests {
         DEFAULT_CODEX_MODELS,
     };
     #[cfg(not(windows))]
-    use super::{codex_process_env, common_executable_dirs, merged_path_with_dir};
+    use super::{
+        codex_command_for_program, codex_process_env_with_runtime_and_system_proxy, common_executable_dirs,
+        merged_path_with_dir,
+    };
     #[cfg(windows)]
     use super::{
         direct_program_path, first_windows_program_path, program_path_candidates, resolve_codex_command,
@@ -1366,14 +1403,27 @@ mod tests {
 
     #[test]
     #[cfg(not(windows))]
-    fn codex_command_env_prepends_resolved_program_dir_and_keeps_node_dirs() {
-        let config = codex_config("default");
-        let command = CliAgentCommandSpec { program: "/opt/homebrew/bin/codex".to_string(), args: Vec::new() };
-        let env = codex_process_env(&config, &command).unwrap();
+    fn codex_command_env_orders_program_node_and_explicit_path_with_deduplication() {
+        let mut config = codex_config("default");
+        config
+            .codex_cli_env
+            .insert("PATH".to_string(), "/custom/bin:/Users/test/.nvm/versions/node/v22.13.0/bin:/usr/bin".to_string());
+        let command = CliAgentCommandSpec { program: "/Users/test/Library/pnpm/codex".to_string(), args: Vec::new() };
+        let node_runtime_dir = std::path::Path::new("/Users/test/.nvm/versions/node/v22.13.0/bin");
+        let env = codex_process_env_with_runtime_and_system_proxy(&config, &command, Some(node_runtime_dir), None, &[])
+            .unwrap();
         let path = env.iter().find(|(key, _)| key == "PATH").map(|(_, value)| value).unwrap();
         let dirs = std::env::split_paths(path).collect::<Vec<_>>();
 
-        assert_eq!(dirs.first().unwrap(), std::path::Path::new("/opt/homebrew/bin"));
+        assert_eq!(
+            &dirs[..3],
+            [
+                std::path::PathBuf::from("/Users/test/Library/pnpm"),
+                node_runtime_dir.to_path_buf(),
+                std::path::PathBuf::from("/custom/bin"),
+            ]
+        );
+        assert_eq!(dirs.iter().filter(|dir| dir.as_path() == node_runtime_dir).count(), 1);
         assert!(dirs.iter().any(|dir| dir == std::path::Path::new("/usr/bin")));
     }
 
@@ -1389,17 +1439,27 @@ mod tests {
 
     #[test]
     #[cfg(not(windows))]
-    fn codex_process_env_keeps_resolved_program_dir_before_user_path() {
+    fn codex_process_env_keeps_old_path_behavior_when_node_is_missing() {
         let mut config = codex_config("default");
         config.codex_cli_env.insert("PATH".to_string(), "/custom/bin:/usr/bin".to_string());
         let command = CliAgentCommandSpec { program: "/opt/homebrew/bin/codex".to_string(), args: Vec::new() };
 
-        let env = codex_process_env(&config, &command).unwrap();
+        let env = codex_process_env_with_runtime_and_system_proxy(&config, &command, None, None, &[]).unwrap();
         let path = env.iter().find(|(key, _)| key == "PATH").map(|(_, value)| value).unwrap();
         let dirs = std::env::split_paths(path).collect::<Vec<_>>();
 
         assert_eq!(dirs.first().unwrap(), std::path::Path::new("/opt/homebrew/bin"));
         assert!(dirs.iter().any(|dir| dir == std::path::Path::new("/custom/bin")));
+        assert_eq!(path, &merged_path_with_dir("/opt/homebrew/bin", Some("/custom/bin:/usr/bin")));
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn native_codex_binary_command_remains_direct() {
+        let command = codex_command_for_program("/Applications/DBX.app/Contents/MacOS/codex".to_string());
+
+        assert_eq!(command.program, "/Applications/DBX.app/Contents/MacOS/codex");
+        assert!(command.args.is_empty());
     }
 
     #[test]

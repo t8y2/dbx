@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::fmt::Write as FmtWrite;
 use std::io::{Cursor, Seek, Write};
 
 use crate::temporal_format::{excel_temporal_serial, ExcelTemporalKind};
@@ -130,6 +131,7 @@ pub struct StreamingXlsxWriter<W: Write + Seek> {
     column_comments: Vec<Option<String>>,
     date_time_format: Option<String>,
     numeric_right_align: bool,
+    row_buffer: String,
 }
 
 /// Estimate column widths from header names only (used by the streaming path
@@ -159,8 +161,8 @@ fn cols_xml(widths: &[usize]) -> String {
 
 /// Resolve the effective header text: prefer a non-empty column comment, fall
 /// back to the original column name.
-fn effective_header(column: &str, comment: Option<&str>) -> String {
-    comment.filter(|c| !c.is_empty()).unwrap_or(column).to_string()
+fn effective_header<'a>(column: &'a str, comment: Option<&'a str>) -> &'a str {
+    comment.filter(|c| !c.is_empty()).unwrap_or(column)
 }
 
 /// Build a single `<row>` XML fragment for the header row (row 1).
@@ -172,30 +174,36 @@ pub(crate) fn header_row_xml(columns: &[String], column_comments: &[Option<Strin
             .enumerate()
             .map(|(index, col)| {
                 let header = effective_header(col, column_comments.get(index).and_then(|c| c.as_deref()));
-                cell_xml(Some(&Value::String(header)), 0, index, Some(1))
+                cell_xml(Some(&Value::String(header.to_string())), 0, index, Some(1))
             })
             .collect::<String>()
     )
 }
 
-fn data_row_xml_with_date_time_format(
+fn push_data_row_xml(
+    output: &mut String,
     row_number: usize,
     columns: &[String],
     column_types: &[String],
     row: &[Value],
     date_time_format: Option<&str>,
     numeric_right_align: bool,
-) -> String {
-    let cells = columns
-        .iter()
-        .enumerate()
-        .map(|(col_index, _)| {
-            let col_type = column_types.get(col_index);
-            let align_style = numeric_column_style(col_type, numeric_right_align);
-            typed_cell_xml(row.get(col_index), col_type, row_number - 1, col_index, align_style, date_time_format)
-        })
-        .collect::<String>();
-    format!("<row r=\"{row_number}\">{cells}</row>")
+) {
+    write!(output, "<row r=\"{row_number}\">").expect("writing XLSX XML into a String cannot fail");
+    for (col_index, _) in columns.iter().enumerate() {
+        let col_type = column_types.get(col_index);
+        let align_style = numeric_column_style(col_type, numeric_right_align);
+        push_typed_cell_xml(
+            output,
+            row.get(col_index),
+            col_type,
+            row_number - 1,
+            col_index,
+            align_style,
+            date_time_format,
+        );
+    }
+    output.push_str("</row>");
 }
 
 /// Shared ZIP entry options for all XLSX parts. XLSX is a ZIP of XML, and the
@@ -298,6 +306,7 @@ fn start_xlsx_writer_inner<W: Write + Seek>(
         column_comments: column_comments.to_vec(),
         date_time_format: date_time_format.map(str::to_string),
         numeric_right_align,
+        row_buffer: String::with_capacity(columns.len().saturating_mul(48)),
     })
 }
 
@@ -355,19 +364,17 @@ impl<W: Write + Seek> StreamingXlsxWriter<W> {
             self.finish_current_sheet()?;
             self.start_next_data_sheet()?;
         }
-        self.zip
-            .write_all(
-                data_row_xml_with_date_time_format(
-                    self.next_row_number,
-                    &self.columns,
-                    &self.column_types,
-                    row,
-                    self.date_time_format.as_deref(),
-                    self.numeric_right_align,
-                )
-                .as_bytes(),
-            )
-            .map_err(|err| err.to_string())?;
+        self.row_buffer.clear();
+        push_data_row_xml(
+            &mut self.row_buffer,
+            self.next_row_number,
+            &self.columns,
+            &self.column_types,
+            row,
+            self.date_time_format.as_deref(),
+            self.numeric_right_align,
+        );
+        self.zip.write_all(self.row_buffer.as_bytes()).map_err(|err| err.to_string())?;
         self.next_row_number += 1;
         self.current_data_rows += 1;
         Ok(())
@@ -469,6 +476,11 @@ pub(crate) fn finish_streaming_xlsx_workbook<W: Write + Seek>(writer: StreamingX
 
 fn escape_xml(value: &str) -> String {
     let mut result = String::with_capacity(value.len());
+    push_xml_escaped(&mut result, value);
+    result
+}
+
+fn push_xml_escaped(result: &mut String, value: &str) {
     for ch in value.chars() {
         let code = ch as u32;
         if code != 9 && code != 10 && code != 13 && code < 32 {
@@ -482,22 +494,36 @@ fn escape_xml(value: &str) -> String {
             _ => result.push(ch),
         }
     }
-    result
 }
 
 fn column_name(index: usize) -> String {
-    let mut out = String::new();
+    let mut out = String::with_capacity(4);
+    push_column_name(&mut out, index);
+    out
+}
+
+fn push_column_name(out: &mut String, index: usize) {
+    let mut buffer = [0u8; 16];
+    let mut cursor = buffer.len();
     let mut n = index + 1;
     while n > 0 {
         let rem = (n - 1) % 26;
-        out.push((b'A' + rem as u8) as char);
+        cursor -= 1;
+        buffer[cursor] = b'A' + rem as u8;
         n = (n - 1) / 26;
     }
-    out.chars().rev().collect()
+    out.push_str(std::str::from_utf8(&buffer[cursor..]).expect("XLSX column names are ASCII"));
 }
 
 fn cell_ref(row_index: usize, col_index: usize) -> String {
-    format!("{}{}", column_name(col_index), row_index + 1)
+    let mut reference = String::with_capacity(8);
+    push_cell_ref(&mut reference, row_index, col_index);
+    reference
+}
+
+fn push_cell_ref(out: &mut String, row_index: usize, col_index: usize) {
+    push_column_name(out, col_index);
+    write!(out, "{}", row_index + 1).expect("writing XLSX cell references into a String cannot fail");
 }
 
 fn sheet_range(column_count: usize, row_count: usize) -> String {
@@ -557,6 +583,56 @@ fn cell_xml(value: Option<&Value>, row_index: usize, col_index: usize, style: Op
             "<c r=\"{reference}\" t=\"inlineStr\"{style_attr}><is><t>{}</t></is></c>",
             escape_xml(&other.to_string())
         ),
+    }
+}
+
+fn push_cell_style(output: &mut String, style: Option<usize>) {
+    if let Some(style) = style {
+        write!(output, " s=\"{style}\"").expect("writing XLSX cell styles into a String cannot fail");
+    }
+}
+
+fn push_cell_xml(output: &mut String, value: Option<&Value>, row_index: usize, col_index: usize, style: Option<usize>) {
+    output.push_str("<c r=\"");
+    push_cell_ref(output, row_index, col_index);
+    output.push('"');
+    match value {
+        Some(Value::Null) | None => {
+            push_cell_style(output, style);
+            output.push_str("/>");
+        }
+        Some(Value::Bool(value)) => {
+            let bool_value = if *value { 1 } else { 0 };
+            output.push_str(" t=\"b\"");
+            push_cell_style(output, style);
+            write!(output, "><v>{bool_value}</v></c>").expect("writing XLSX booleans into a String cannot fail");
+        }
+        Some(Value::Number(value)) => {
+            if value.as_f64().is_some_and(|number| number.is_finite()) {
+                push_cell_style(output, style);
+                write!(output, "><v>{value}</v></c>").expect("writing XLSX numbers into a String cannot fail");
+            } else {
+                output.push_str(" t=\"inlineStr\"");
+                push_cell_style(output, style);
+                output.push_str("><is><t>");
+                push_xml_escaped(output, &value.to_string());
+                output.push_str("</t></is></c>");
+            }
+        }
+        Some(Value::String(value)) => {
+            output.push_str(" t=\"inlineStr\"");
+            push_cell_style(output, style);
+            output.push_str("><is><t>");
+            push_xml_escaped(output, value);
+            output.push_str("</t></is></c>");
+        }
+        Some(value) => {
+            output.push_str(" t=\"inlineStr\"");
+            push_cell_style(output, style);
+            output.push_str("><is><t>");
+            push_xml_escaped(output, &value.to_string());
+            output.push_str("</t></is></c>");
+        }
     }
 }
 
@@ -659,36 +735,43 @@ fn safe_excel_number(value: &str) -> Option<&str> {
     (significant_digits <= 15).then_some(trimmed)
 }
 
-fn typed_cell_xml(
+fn push_typed_cell_xml(
+    output: &mut String,
     value: Option<&Value>,
     column_type: Option<&String>,
     row_index: usize,
     col_index: usize,
     style: Option<usize>,
     date_time_format: Option<&str>,
-) -> String {
+) {
     if let Some(Value::String(value)) = value {
         if let Some((serial, temporal_kind)) =
             excel_temporal_serial(value, column_type.map(String::as_str), date_time_format)
         {
-            let reference = cell_ref(row_index, col_index);
             let style = match temporal_kind {
                 ExcelTemporalKind::Date => XLSX_DATE_STYLE,
                 ExcelTemporalKind::DateTime => XLSX_DATETIME_STYLE,
             };
-            return format!("<c r=\"{reference}\" s=\"{style}\"><v>{serial}</v></c>");
+            output.push_str("<c r=\"");
+            push_cell_ref(output, row_index, col_index);
+            write!(output, "\" s=\"{style}\"><v>{serial}</v></c>")
+                .expect("writing XLSX temporal cells into a String cannot fail");
+            return;
         }
     }
     if is_numeric_column_type(column_type) {
         if let Some(Value::String(value)) = value {
             if let Some(number) = safe_excel_number(value) {
-                let reference = cell_ref(row_index, col_index);
-                let style_attr = style.map_or(String::new(), |style| format!(" s=\"{style}\""));
-                return format!("<c r=\"{reference}\"{style_attr}><v>{number}</v></c>");
+                output.push_str("<c r=\"");
+                push_cell_ref(output, row_index, col_index);
+                output.push('"');
+                push_cell_style(output, style);
+                write!(output, "><v>{number}</v></c>").expect("writing XLSX numeric cells into a String cannot fail");
+                return;
             }
         }
     }
-    cell_xml(value, row_index, col_index, style)
+    push_cell_xml(output, value, row_index, col_index, style);
 }
 
 fn write_worksheet_xml<W: Write>(writer: &mut W, segment: &WorksheetSegment) -> Result<(), String> {
@@ -718,21 +801,20 @@ fn write_worksheet_xml<W: Write>(writer: &mut W, segment: &WorksheetSegment) -> 
         .write_all(header_row_xml(segment.columns, segment.column_comments).as_bytes())
         .map_err(|err| err.to_string())?;
 
+    let mut row_buffer = String::with_capacity(segment.columns.len().saturating_mul(48));
     for (row_index, row) in segment.rows.iter().enumerate() {
         let excel_row = row_index + 2;
-        writer
-            .write_all(
-                data_row_xml_with_date_time_format(
-                    excel_row,
-                    segment.columns,
-                    segment.column_types,
-                    row,
-                    None,
-                    segment.numeric_column_right_align,
-                )
-                .as_bytes(),
-            )
-            .map_err(|err| err.to_string())?;
+        row_buffer.clear();
+        push_data_row_xml(
+            &mut row_buffer,
+            excel_row,
+            segment.columns,
+            segment.column_types,
+            row,
+            None,
+            segment.numeric_column_right_align,
+        );
+        writer.write_all(row_buffer.as_bytes()).map_err(|err| err.to_string())?;
     }
 
     writer
@@ -1982,5 +2064,18 @@ mod tests {
 
         let sheet2 = read_zip_entry(&data, "xl/worksheets/sheet2.xml");
         assert!(sheet2.contains("row_3"), "row 3 should be on sheet 2: {sheet2}");
+    }
+
+    #[test]
+    fn reusable_cell_buffer_matches_reference_xml() {
+        let values = [Value::Null, json!(true), json!(42.5), json!("a<&\"b"), json!({"key": "value"})];
+        for (index, value) in values.iter().enumerate() {
+            for style in [None, Some(1), Some(4)] {
+                let expected = super::cell_xml(Some(value), index, index + 1, style);
+                let mut actual = String::new();
+                super::push_cell_xml(&mut actual, Some(value), index, index + 1, style);
+                assert_eq!(actual, expected, "value={value:?}, style={style:?}");
+            }
+        }
     }
 }

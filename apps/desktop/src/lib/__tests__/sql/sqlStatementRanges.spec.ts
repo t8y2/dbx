@@ -89,6 +89,17 @@ BEGIN
    SELECT 1 + 2 INTO PRE_TRD_DATE FROM DUAL;
 END;`;
 
+const oracleConsecutiveNestedBlocks = `CREATE OR REPLACE PROCEDURE dbx_consecutive_blocks AS
+BEGIN
+  BEGIN
+    NULL;
+  END;
+  BEGIN
+    NULL;
+  END;
+  NULL;
+END;`;
+
 const gaussDbNestedProcedure = `CREATE OR REPLACE PROCEDURE public.dbx_issue_4318()
 AS
 BEGIN
@@ -263,6 +274,18 @@ BEGIN
 END;
 SELECT 2;`;
 
+const mysqlRoutineWithConsecutiveBlocksFixture = `CREATE PROCEDURE p_consecutive_blocks()
+BEGIN
+  BEGIN
+    SELECT 1;
+  END;
+  BEGIN
+    SELECT 2;
+  END;
+  SELECT 3;
+END;
+SELECT 4;`;
+
 const mysqlDelimitedRoutineFixture = `DELIMITER //
 CREATE PROCEDURE sp_insert_random_users(IN p_count INT)
 BEGIN
@@ -284,6 +307,17 @@ BEGIN
   SELECT 1 AS "Result" FROM DUMMY;
 END;
 SELECT 2 FROM DUMMY;`;
+
+const sapHanaDoBlockWithConsecutiveBlocksFixture = `DO
+BEGIN
+  BEGIN
+    SELECT 1 AS "First" FROM DUMMY;
+  END;
+  BEGIN
+    SELECT 2 AS "Second" FROM DUMMY;
+  END;
+END;
+SELECT 3 FROM DUMMY;`;
 
 describe("splitSqlStatementRanges", () => {
   it("splits multiple top-level statements", () => {
@@ -379,6 +413,10 @@ describe("splitSqlStatementRanges", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(mysqlRoutineWithNestedCaseBlockFixture, "mysql"))).toEqual([mysqlRoutineWithNestedCaseBlockFixture.slice(0, mysqlRoutineWithNestedCaseBlockFixture.indexOf("\nSELECT 2;")).replace(/;$/, "").trim(), "SELECT 2"]);
   });
 
+  it("keeps consecutive nested MySQL blocks inside their procedure", () => {
+    expect(rangeSqlTexts(splitSqlStatementRanges(mysqlRoutineWithConsecutiveBlocksFixture, "mysql"))).toEqual([mysqlRoutineWithConsecutiveBlocksFixture.slice(0, mysqlRoutineWithConsecutiveBlocksFixture.indexOf("\nSELECT 4;")).replace(/;$/, "").trim(), "SELECT 4"]);
+  });
+
   it("does not merge regular MySQL transaction statements as routine blocks", () => {
     const sql = "BEGIN; INSERT INTO t VALUES (1); COMMIT;";
     expect(rangeSqlTexts(splitSqlStatementRanges(sql, "mysql"))).toEqual(["BEGIN", "INSERT INTO t VALUES (1)", "COMMIT"]);
@@ -404,6 +442,32 @@ describe("splitSqlStatementRanges", () => {
 
   it("keeps issue #2405 Oracle PL/SQL block together without a slash delimiter", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(oracleIssue2405PlSql, "oracle"))).toEqual([oracleIssue2405PlSql]);
+  });
+
+  it("keeps consecutive nested Oracle blocks inside their procedure", () => {
+    expect(rangeSqlTexts(splitSqlStatementRanges(`${oracleConsecutiveNestedBlocks}\nSELECT 1;`, "oracle"))).toEqual([oracleConsecutiveNestedBlocks, "SELECT 1"]);
+  });
+
+  it.each([
+    ["BEGIN", "BEGIN\n    NULL;\n  END;"],
+    ["IF", "IF 1 = 1 THEN\n    NULL;\n  END IF;"],
+    ["LOOP", "LOOP\n    EXIT;\n  END LOOP;"],
+    ["CASE", "CASE WHEN 1 = 1 THEN\n    NULL;\n  END CASE;"],
+  ])("treats %s after a semicolon as a new Oracle scope", (_starter, scope) => {
+    const procedure = `CREATE OR REPLACE PROCEDURE dbx_delimited_scope AS
+BEGIN
+  BEGIN
+    NULL;
+  END;
+  ${scope}
+  NULL;
+END;`;
+
+    expect(rangeSqlTexts(splitSqlStatementRanges(`${procedure}\nSELECT 1;`, "oracle"))).toEqual([procedure, "SELECT 1"]);
+  });
+
+  it("keeps BEGIN TRANSACTION outside Oracle PL/SQL block handling", () => {
+    expect(rangeSqlTexts(splitSqlStatementRanges("BEGIN TRANSACTION;\nSELECT 1;", "oracle"))).toEqual(["BEGIN TRANSACTION", "SELECT 1"]);
   });
 
   it("splits large Dameng package bodies without repeated prefix parsing", () => {
@@ -467,6 +531,15 @@ END pkg_utils_without_replace;`;
     expect(rangeSqlTexts(splitSqlStatementRanges(`${packageSpecWithoutReplace}\nSELECT 1;`, "xugu"))).toEqual([packageSpecWithoutReplace, "SELECT 1"]);
   });
 
+  it("splits a declaration-only Oracle package body before following DML", () => {
+    const packageBody = `CREATE OR REPLACE PACKAGE BODY packageName IS
+null;
+END packageName;`;
+
+    expect(rangeSqlTexts(splitSqlStatementRanges(`${packageBody}\nSELECT * FROM goods;`, "oracle"))).toEqual([packageBody, "SELECT * FROM goods"]);
+    expect(rangeSqlTexts(splitSqlStatementRanges(`${packageBody}\n/\nSELECT * FROM goods;`, "oracle"))).toEqual([packageBody, "SELECT * FROM goods"]);
+  });
+
   it("splits plain CREATE TYPE AS OBJECT on semicolon without waiting for END", () => {
     const sql = "CREATE OR REPLACE TYPE address_t AS OBJECT (id INT);\nSELECT 1;";
     expect(rangeSqlTexts(splitSqlStatementRanges(sql, "xugu"))).toEqual(["CREATE OR REPLACE TYPE address_t AS OBJECT (id INT)", "SELECT 1"]);
@@ -495,6 +568,10 @@ END;`;
     expect(rangeSqlTexts(ranges)).toEqual([sapHanaDoBlockFixture.slice(0, sapHanaDoBlockFixture.indexOf("\nSELECT 2")), "SELECT 2 FROM DUMMY"]);
     expect(ranges[0].sql).toContain('SELECT 1 AS "Result" FROM DUMMY;');
     expect(ranges[0].sql).toContain("END;");
+  });
+
+  it("keeps consecutive nested SAP HANA blocks inside their DO block", () => {
+    expect(rangeSqlTexts(splitSqlStatementRanges(sapHanaDoBlockWithConsecutiveBlocksFixture, "saphana"))).toEqual([sapHanaDoBlockWithConsecutiveBlocksFixture.slice(0, sapHanaDoBlockWithConsecutiveBlocksFixture.indexOf("\nSELECT 3")), "SELECT 3 FROM DUMMY"]);
   });
 });
 
@@ -1033,6 +1110,22 @@ WHERE request_json LIKE '%"paperFlag":null%';`;
 
     expect(statementRangeAtCursor(sql, indexOf(sql, "REPLACE"), "mysql")?.sql.trim()).toBe(sql.slice(0, -1));
     expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual([sql.slice(0, -1)]);
+  });
+
+  it("keeps a line-start MySQL TRUNCATE function inside a SELECT projection", () => {
+    const sql = `SELECT
+  order_id,
+  TRUNCATE(amount, 2) AS rounded_amount
+FROM orders;`;
+
+    expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual([sql.slice(0, -1)]);
+    expect(currentExecutableStatementRange(sql, indexOf(sql, "TRUNCATE"), "mysql")?.sql.trim()).toBe(sql.slice(0, -1));
+  });
+
+  it("keeps standalone TRUNCATE TABLE statements separate", () => {
+    const sql = "SELECT 1;\nTRUNCATE TABLE t;";
+
+    expect(rangeSqlTexts(executableStatementRanges(sql, "mysql"))).toEqual(["SELECT 1", "TRUNCATE TABLE t"]);
   });
 
   it("does not merge a plain MySQL DESC table statement with the next query", () => {

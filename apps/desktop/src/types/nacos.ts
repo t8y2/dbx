@@ -38,6 +38,7 @@ export interface NacosServiceCapabilities {
   deleteService: NacosOperationCapability;
   listInstances: NacosOperationCapability;
   updateInstance: NacosOperationCapability;
+  updateInstanceHealth?: NacosOperationCapability;
   registerInstance: NacosOperationCapability;
   deregisterInstance: NacosOperationCapability;
 }
@@ -241,12 +242,14 @@ export interface NacosAuthConfig {
 
 export type NacosImplementation = "nacos" | "rnacos";
 export type NacosVersionMode = "auto" | "v2" | "v3";
+export type NacosApiPlane = "admin" | "console";
 export type NacosMetricsMode = "auto" | "disabled" | "custom";
 export type NacosRNacosConsoleAuth = { kind: "inherit" } | { kind: "usernamePassword"; username: string; password: string };
 
 export interface NacosAdminConfig {
   implementation?: NacosImplementation;
   versionMode?: NacosVersionMode;
+  apiPlane?: NacosApiPlane;
   serverAddr: string;
   contextPath?: string;
   /** Namespace IDs used when an official Nacos ordinary user cannot enumerate namespaces or authorization data. */
@@ -394,6 +397,12 @@ export interface NacosBatchReport {
   items: NacosBatchItemResult[];
 }
 
+export interface NacosConfigDataIdMapping {
+  sourceGroup: string;
+  sourceDataId: string;
+  targetDataId: string;
+}
+
 export interface NacosConfigTransferRequest {
   operationId: string;
   sourceConnectionId: string;
@@ -401,6 +410,7 @@ export interface NacosConfigTransferRequest {
   source: NacosConfigSelector;
   targetNamespace: string;
   targetGroup?: string;
+  dataIdMappings?: NacosConfigDataIdMapping[];
   conflictPolicy: NacosConflictPolicy;
 }
 

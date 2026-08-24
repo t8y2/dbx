@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { canFormatSqlForDatabaseType, formatSqlForDisplay, formatSqlForEditing, formatSqlText, MAX_SQL_FORMAT_CHARS, sqlFormatDialectForDbType, UnsupportedStructuredInputError } from "@/lib/sql/sqlFormatter";
+import { extractSqlParameters } from "@/lib/sql/sqlParameters";
 
 const sqlFormatterSource = readFileSync(new URL("../../sql/sqlFormatter.ts", import.meta.url), "utf8");
 
@@ -29,6 +30,81 @@ describe("sqlFormatter", () => {
 
   it("maps Dameng to its scoped formatter dialect", () => {
     expect(sqlFormatDialectForDbType("dameng")).toBe("dameng");
+  });
+
+  it("maps DuckDB to its scoped formatter dialect", () => {
+    expect(sqlFormatDialectForDbType("duckdb")).toBe("duckdb");
+  });
+
+  it("keeps DuckDB prefix aliases out of formatted named parameters", async () => {
+    const cases = [
+      ["select 日期:date(订单日期) from 订单;", []],
+      ['select total:price * quantity, "order":sum(amount) from sales;', []],
+      ["from r:range(:row_count) select total:r.range + :offset;", ["row_count", "offset"]],
+      ["select res: col1 + col2, root: sqrt(col1) from tbl;", []],
+    ] as const;
+
+    for (const [sql, expectedParameters] of cases) {
+      const formatted = await formatSqlText(sql, sqlFormatDialectForDbType("duckdb"));
+
+      expect(formatted).not.toBe(sql);
+      expect(extractSqlParameters(formatted, { databaseType: "duckdb" })).toEqual(expectedParameters);
+      expect(formatted).not.toContain("__DBX_DUCKDB_PREFIX_ALIAS_COLON_");
+    }
+  });
+
+  it("keeps ordinary DuckDB named parameters enabled independently of prefix aliases", async () => {
+    const formatted = await formatSqlText("select :outside, total:price from sales;", sqlFormatDialectForDbType("duckdb"));
+
+    expect(extractSqlParameters(formatted, { databaseType: "duckdb" })).toEqual(["outside"]);
+    expect(extractSqlParameters(formatted, { databaseType: "duckdb", enabledSyntaxes: [] })).toEqual([]);
+  });
+
+  it("does not change generic formatting of compact colon syntax", async () => {
+    const formatted = await formatSqlText("select total:price from sales;", "generic");
+
+    expect(extractSqlParameters(formatted, { databaseType: "postgres" })).toEqual(["price"]);
+  });
+
+  it("preserves DuckDB strings and comments while protecting prefix aliases", async () => {
+    const sql = `select total:price, 'literal:date', $$dollar:date
+AND inside
+OR inside$$ as note
+      from sales /* alias:date */ /*__DBX_DUCKDB_PREFIX_ALIAS_COLON_0__*/ -- trailing:date`;
+    const formatted = await formatSqlText(sql, sqlFormatDialectForDbType("duckdb"), { logicalOperatorNewline: "none" });
+
+    expect(extractSqlParameters(formatted, { databaseType: "duckdb" })).toEqual([]);
+    expect(formatted).toContain("'literal:date'");
+    expect(formatted).toContain("$$dollar:date\nAND inside\nOR inside$$");
+    expect(formatted).toContain("/* alias:date */");
+    expect(formatted).toContain("/*__DBX_DUCKDB_PREFIX_ALIAS_COLON_0__*/");
+    expect(formatted).toContain("-- trailing:date");
+  });
+
+  it("keeps DuckDB casts, named arguments, and their real parameters intact", async () => {
+    const sql = "select struct_pack(key := :value), total:price, value::integer;";
+    const formatted = await formatSqlText(sql, sqlFormatDialectForDbType("duckdb"));
+
+    expect(extractSqlParameters(formatted, { databaseType: "duckdb" })).toEqual(["value"]);
+    expect(formatted).toContain("value::integer");
+  });
+
+  it("returns unsupported DuckDB struct literals unchanged without leaking formatter markers", async () => {
+    const sql = "select {'key': value, nested: {'inner': inner_value}}, total:price;";
+    const formatted = await formatSqlForEditing(sql, sqlFormatDialectForDbType("duckdb"));
+
+    expect(formatted).toBe(sql);
+    expect(extractSqlParameters(formatted, { databaseType: "duckdb" })).toEqual([]);
+    expect(formatted).not.toContain("__DBX_DUCKDB_PREFIX_ALIAS_COLON_");
+  });
+
+  it("returns malformed DuckDB SQL unchanged without leaking formatter markers", async () => {
+    const sql = "select total:price from dbname.\n;";
+
+    const formatted = await formatSqlForEditing(sql, sqlFormatDialectForDbType("duckdb"));
+
+    expect(formatted).toBe(sql);
+    expect(formatted).not.toContain("__DBX_DUCKDB_PREFIX_ALIAS_COLON_");
   });
 
   it("preserves ClickHouse lambda arrows when formatting issue #3573 SQL", async () => {

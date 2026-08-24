@@ -3263,9 +3263,19 @@ pub fn generate_insert_typed(
         return String::new();
     }
 
-    let template = InsertSqlTemplate::new(columns, table, schema, db_type, catalog, false);
     let value_rows = value_rows_sql(rows, column_types, db_type, false);
-    template.build(&value_rows)
+    generate_insert_typed_from_value_rows(columns, &value_rows, table, schema, db_type, catalog)
+}
+
+pub(crate) fn generate_insert_typed_from_value_rows(
+    columns: &[String],
+    value_rows: &[String],
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    catalog: Option<&str>,
+) -> String {
+    InsertSqlTemplate::new(columns, table, schema, db_type, catalog, false).build(value_rows)
 }
 
 #[derive(Debug)]
@@ -3302,7 +3312,13 @@ impl InsertSqlTemplate {
             return String::new();
         }
         if let Some(into_prefix) = self.oracle_into_prefix.as_deref().filter(|_| value_rows.len() > 1) {
-            let mut sql = String::from("INSERT ALL\n");
+            let capacity = "INSERT ALL\n".len()
+                + into_prefix.len().saturating_mul(value_rows.len())
+                + value_rows.iter().map(String::len).sum::<usize>()
+                + value_rows.len().saturating_sub(1)
+                + "\nSELECT 1 FROM dual".len();
+            let mut sql = String::with_capacity(capacity);
+            sql.push_str("INSERT ALL\n");
             for (index, values) in value_rows.iter().enumerate() {
                 if index > 0 {
                     sql.push('\n');
@@ -3314,8 +3330,17 @@ impl InsertSqlTemplate {
             return sql;
         }
 
-        let mut sql = self.standard_prefix.clone();
-        sql.push_str(&value_rows.join(",\n"));
+        let capacity = self.standard_prefix.len()
+            + value_rows.iter().map(String::len).sum::<usize>()
+            + ",\n".len().saturating_mul(value_rows.len().saturating_sub(1));
+        let mut sql = String::with_capacity(capacity);
+        sql.push_str(&self.standard_prefix);
+        for (index, values) in value_rows.iter().enumerate() {
+            if index > 0 {
+                sql.push_str(",\n");
+            }
+            sql.push_str(values);
+        }
         sql
     }
 
@@ -3350,8 +3375,12 @@ fn value_rows_sql(
 ) -> Vec<String> {
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        let mut vals = Vec::with_capacity(row.len());
+        let mut values = String::with_capacity(row.len().saturating_mul(16).saturating_add(2));
+        values.push('(');
         for (index, v) in row.iter().enumerate() {
+            if index > 0 {
+                values.push_str(", ");
+            }
             let column_type = column_types.get(index).and_then(|value| value.as_deref());
             let value = if mysql_spatial_markers {
                 crate::database_export::format_mysql_spatial_export_literal(v, Some(*db_type), column_type)
@@ -3359,9 +3388,10 @@ fn value_rows_sql(
                 None
             }
             .unwrap_or_else(|| escape_value_typed(v, db_type, column_type));
-            vals.push(value);
+            values.push_str(&value);
         }
-        out.push(format!("({})", vals.join(", ")));
+        values.push(')');
+        out.push(values);
     }
     out
 }
@@ -3643,6 +3673,64 @@ fn can_reuse_source_table_ddl(
             || (is_postgres_family_target(source_db_type) && is_postgres_family_target(target_db_type)))
 }
 
+fn strip_dameng_storage_clauses(sql: &str) -> String {
+    map_sql_code_spans(sql, false, |code| {
+        let mut output = String::with_capacity(code.len());
+        let bytes = code.as_bytes();
+        let mut position = 0;
+
+        while position < bytes.len() {
+            let Some(relative_start) = code[position..].to_ascii_uppercase().find("STORAGE") else {
+                output.push_str(&code[position..]);
+                break;
+            };
+            let start = position + relative_start;
+            let before_is_identifier = start > 0
+                && (bytes[start - 1].is_ascii_alphanumeric() || matches!(bytes[start - 1], b'_' | b'$' | b'#'));
+            let keyword_end = start + "STORAGE".len();
+            let after_is_identifier = keyword_end < bytes.len()
+                && (bytes[keyword_end].is_ascii_alphanumeric() || matches!(bytes[keyword_end], b'_' | b'$' | b'#'));
+            if before_is_identifier || after_is_identifier {
+                output.push_str(&code[position..keyword_end]);
+                position = keyword_end;
+                continue;
+            }
+
+            let mut open = keyword_end;
+            while open < bytes.len() && bytes[open].is_ascii_whitespace() {
+                open += 1;
+            }
+            if open >= bytes.len() || bytes[open] != b'(' {
+                output.push_str(&code[position..keyword_end]);
+                position = keyword_end;
+                continue;
+            }
+
+            let mut depth = 1usize;
+            let mut end = open + 1;
+            while end < bytes.len() && depth > 0 {
+                match bytes[end] {
+                    b'(' => depth += 1,
+                    b')' => depth -= 1,
+                    _ => {}
+                }
+                end += 1;
+            }
+            if depth != 0 {
+                output.push_str(&code[position..keyword_end]);
+                position = keyword_end;
+                continue;
+            }
+
+            let clause_start = position + code[position..start].trim_end().len();
+            output.push_str(&code[position..clause_start]);
+            position = end;
+        }
+
+        output
+    })
+}
+
 fn rewrite_transfer_source_table_ddl(
     sql: &str,
     source_schema: &str,
@@ -3653,7 +3741,7 @@ fn rewrite_transfer_source_table_ddl(
     if is_postgres_family_target(source_db_type) && is_postgres_family_target(target_db_type) {
         rewrite_postgres_schema_qualified_references(sql, source_schema, target_schema)
     } else if matches!((source_db_type, target_db_type), (DatabaseType::Dameng, DatabaseType::Dameng)) {
-        rewrite_double_quoted_schema_qualifier(sql, source_schema, target_schema)
+        strip_dameng_storage_clauses(&rewrite_double_quoted_schema_qualifier(sql, source_schema, target_schema))
     } else {
         sql.to_string()
     }
@@ -3714,6 +3802,7 @@ fn generate_transfer_write_sql(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn generate_insert_typed_sql_batches(
     columns: &[String],
     column_types: &[Option<String>],
@@ -3724,18 +3813,21 @@ pub(crate) fn generate_insert_typed_sql_batches(
     catalog: Option<&str>,
     limits: SqlBatchLimits,
 ) -> Result<Vec<(String, usize)>, String> {
-    generate_insert_typed_sql_batches_for_transfer(
-        columns,
-        column_types,
-        rows,
-        table,
-        schema,
-        db_type,
-        catalog,
-        limits,
-        false,
-        false,
-    )
+    let value_rows = value_rows_sql(rows, column_types, db_type, false);
+    generate_insert_typed_sql_batches_from_value_rows(columns, &value_rows, table, schema, db_type, catalog, limits)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn generate_insert_typed_sql_batches_from_value_rows(
+    columns: &[String],
+    value_rows: &[String],
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    catalog: Option<&str>,
+    limits: SqlBatchLimits,
+) -> Result<Vec<(String, usize)>, String> {
+    generate_insert_sql_batches_from_value_rows(columns, value_rows, table, schema, db_type, catalog, limits, false)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3755,6 +3847,34 @@ fn generate_insert_typed_sql_batches_for_transfer(
         return Ok(Vec::new());
     }
 
+    let value_rows = value_rows_sql(rows, column_types, db_type, mysql_spatial_markers);
+    generate_insert_sql_batches_from_value_rows(
+        columns,
+        &value_rows,
+        table,
+        schema,
+        db_type,
+        catalog,
+        limits,
+        overrides_postgres_system_values,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn generate_insert_sql_batches_from_value_rows(
+    columns: &[String],
+    value_rows: &[String],
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    catalog: Option<&str>,
+    limits: SqlBatchLimits,
+    overrides_postgres_system_values: bool,
+) -> Result<Vec<(String, usize)>, String> {
+    if value_rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
     let max_rows = limits.max_rows.max(1).min(match db_type {
         DatabaseType::SqlServer => MAX_SQLSERVER_INSERT_ROWS,
         DatabaseType::Oracle => MAX_ORACLE_INSERT_ALL_ROWS,
@@ -3763,7 +3883,6 @@ fn generate_insert_typed_sql_batches_for_transfer(
     let target_sql_bytes = limits.target_sql_bytes.max(1);
     let batch_sql_bytes = limits.hard_sql_bytes.map_or(target_sql_bytes, |hard| target_sql_bytes.min(hard));
     let template = InsertSqlTemplate::new(columns, table, schema, db_type, catalog, overrides_postgres_system_values);
-    let value_rows = value_rows_sql(rows, column_types, db_type, mysql_spatial_markers);
     let value_row_bytes = value_rows.iter().map(|row| sql_text_bytes(row, db_type)).collect::<Vec<_>>();
     let mut statements = Vec::new();
     let mut start = 0usize;
@@ -9843,6 +9962,7 @@ mod tests {
         assert!(!can_reuse_source_table_ddl(&DatabaseType::ClickHouse, &DatabaseType::ClickHouse, None, None, true,));
         assert!(can_reuse_source_table_ddl(&DatabaseType::Postgres, &DatabaseType::Postgres, None, None, true,));
         assert!(!can_reuse_source_table_ddl(&DatabaseType::Postgres, &DatabaseType::Postgres, None, None, false,));
+        assert!(can_reuse_source_table_ddl(&DatabaseType::Dameng, &DatabaseType::Dameng, None, None, true,));
     }
 
     #[test]
@@ -9968,12 +10088,16 @@ mod tests {
     }
 
     #[test]
-    fn dameng_transfer_reused_table_ddl_rewrites_only_code_schema_qualifiers() {
+    fn dameng_transfer_reused_table_ddl_rewrites_schema_and_strips_storage() {
         let ddl = concat!(
-            "CREATE TABLE \"SRC\".\"items\" (\"note\" VARCHAR(100) DEFAULT '\"SRC\".literal');\n",
-            "COMMENT ON TABLE \"SRC\".\"items\" IS '\"SRC\".comment';\n",
-            "-- keep \"SRC\".line_comment\n",
-            "/* keep \"SRC\".block_comment */\n",
+            "CREATE TABLE \"SRC\".\"items\" (\n",
+            "\"ID\" BIGINT IDENTITY(1, 1) NOT NULL,\n",
+            "\"NOTE\" VARCHAR(100) DEFAULT '\"SRC\".literal',\n",
+            "NOT CLUSTER PRIMARY KEY(\"ID\")) ",
+            "STORAGE(ON \"SOURCE_TS\", CLUSTERBTR);\n",
+            "COMMENT ON TABLE \"SRC\".\"items\" IS 'keep STORAGE(ON literal_ts) and \"SRC\".comment';\n",
+            "-- keep STORAGE(ON line_comment_ts) and \"SRC\".line_comment\n",
+            "/* keep STORAGE(ON block_comment_ts) and \"SRC\".block_comment */\n",
             "ALTER TABLE \"SRC\".\"items\" ADD \"value\" INTEGER;",
         );
 
@@ -9983,17 +10107,21 @@ mod tests {
         assert!(rewritten.contains("CREATE TABLE \"DST\".\"items\""));
         assert!(rewritten.contains("COMMENT ON TABLE \"DST\".\"items\""));
         assert!(rewritten.contains("ALTER TABLE \"DST\".\"items\""));
+        assert!(!rewritten.contains("STORAGE(ON \"SOURCE_TS\", CLUSTERBTR)"));
+        assert!(rewritten.contains("\"ID\" BIGINT IDENTITY(1, 1) NOT NULL"));
+        assert!(rewritten.contains("NOT CLUSTER PRIMARY KEY(\"ID\")"));
         assert!(rewritten.contains("'\"SRC\".literal'"));
-        assert!(rewritten.contains("'\"SRC\".comment'"));
-        assert!(rewritten.contains("-- keep \"SRC\".line_comment"));
-        assert!(rewritten.contains("/* keep \"SRC\".block_comment */"));
+        assert!(rewritten.contains("'keep STORAGE(ON literal_ts) and \"SRC\".comment'"));
+        assert!(rewritten.contains("-- keep STORAGE(ON line_comment_ts) and \"SRC\".line_comment"));
+        assert!(rewritten.contains("/* keep STORAGE(ON block_comment_ts) and \"SRC\".block_comment */"));
+        let storage_portable_ddl = strip_dameng_storage_clauses(ddl);
         assert_eq!(
             rewrite_transfer_source_table_ddl(ddl, "SRC", "SRC", &DatabaseType::Dameng, &DatabaseType::Dameng),
-            ddl
+            storage_portable_ddl
         );
         assert_eq!(
             rewrite_transfer_source_table_ddl(ddl, "", "DST", &DatabaseType::Dameng, &DatabaseType::Dameng),
-            ddl
+            storage_portable_ddl
         );
     }
 

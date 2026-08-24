@@ -1,17 +1,19 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from "vue";
-import { AlertTriangle, Check, ChevronLeft, ChevronRight, CircleAlert, KeyRound, Link2, Loader2, LockKeyhole, Pencil, Plus, RefreshCw, RotateCcw, Search, Shield, ShieldCheck, Trash2, UserRound, X } from "@lucide/vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { AlertTriangle, Check, ChevronLeft, ChevronRight, CircleAlert, KeyRound, Link2, Loader2, LockKeyhole, Pencil, Plus, RefreshCw, RotateCcw, Search, Shield, ShieldCheck, ShieldPlus, Trash2, UserPlus, UserRound, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { useToast } from "@/composables/useToast";
 import * as api from "@/lib/backend/api";
 import { executeWithProductionContextGuard } from "@/lib/database/productionExecutionGuard";
 import { mergeNacosNamespacePermissionAssignments, type NacosNamespacePermissionAction } from "@/lib/nacos/nacosAdmin";
+import { subscribeNacosNamespacesChanged, type NacosNamespacesChangedDetail } from "@/lib/nacos/nacosNamespaceCache";
 import { useConnectionStore } from "@/stores/connectionStore";
-import type { NacosAccessControlCapabilities, NacosAccessControlSnapshot, NacosAccessOperationRequest, NacosAccessOperationResult, NacosPermissionDraft, NacosPermissionInfo, NacosUserInfo } from "@/types/nacos";
+import type { NacosAccessControlCapabilities, NacosAccessControlSnapshot, NacosAccessOperationRequest, NacosAccessOperationResult, NacosAdminConfig, NacosPermissionDraft, NacosPermissionInfo, NacosUserInfo } from "@/types/nacos";
 
 const props = defineProps<{
   connectionId: string;
@@ -28,6 +30,7 @@ type PermissionAction = NacosNamespacePermissionAction;
 type PermissionAssignment = { namespaceId: string; action: PermissionAction };
 
 const { t } = useI18n();
+const { toast } = useToast();
 const connectionStore = useConnectionStore();
 const snapshot = ref<NacosAccessControlSnapshot | null>(null);
 const loading = ref(false);
@@ -59,6 +62,8 @@ const operation = ref<NacosAccessOperationResult | null>(null);
 const pendingAdvancedPermission = ref<NacosPermissionInfo | null>(null);
 const advancedPermissionConfirmation = ref("");
 const retryPasswords = reactive<Record<string, string>>({});
+let latestSnapshotRequestId = 0;
+let stopNacosNamespacesChangedListener: (() => void) | null = null;
 
 const users = computed(() => snapshot.value?.users ?? []);
 const roles = computed(() => snapshot.value?.roles ?? []);
@@ -122,6 +127,8 @@ const canRevokePermission = computed(() => !props.readOnly && props.capabilities
 const canCreateRole = computed(() => canAssignRole.value && canGrantPermission.value);
 const canEditUserRoles = computed(() => canAssignRole.value || canRemoveRole.value);
 const canEditRole = computed(() => canAssignRole.value || canRemoveRole.value || canGrantPermission.value || canRevokePermission.value || canCreateUser.value);
+const userDeleteConfirmed = computed(() => userForm.confirmation === userForm.username);
+const roleDeleteConfirmed = computed(() => roleForm.confirmation === roleForm.role);
 
 function setHasAdded(before: Iterable<string>, after: Iterable<string>) {
   const original = new Set(before);
@@ -179,10 +186,14 @@ const roleOperationWritable = computed(() => {
 });
 
 async function loadSnapshot(preserveSelection = true) {
+  const requestId = ++latestSnapshotRequestId;
+  const connectionId = props.connectionId;
   loading.value = true;
   error.value = "";
   try {
-    snapshot.value = await api.nacosAccessSnapshot(props.connectionId);
+    const nextSnapshot = await api.nacosAccessSnapshot(connectionId);
+    if (requestId !== latestSnapshotRequestId || connectionId !== props.connectionId) return;
+    snapshot.value = nextSnapshot;
     if (!preserveSelection || !users.value.some((user) => user.username === selectedUserName.value)) {
       selectedUserName.value = users.value[0]?.username ?? "";
     }
@@ -190,10 +201,15 @@ async function loadSnapshot(preserveSelection = true) {
       selectedRoleName.value = roles.value[0]?.role ?? "";
     }
   } catch (cause) {
+    if (requestId !== latestSnapshotRequestId || connectionId !== props.connectionId) return;
     error.value = cause instanceof Error ? cause.message : String(cause);
   } finally {
-    loading.value = false;
+    if (requestId === latestSnapshotRequestId) loading.value = false;
   }
+}
+
+function handleNacosNamespacesChanged(detail: NacosNamespacesChangedDetail) {
+  if (detail.connectionId === props.connectionId) void loadSnapshot();
 }
 
 function isManagedPermission(permission: NacosPermissionInfo) {
@@ -317,6 +333,45 @@ function openDeleteUser() {
   userDialog.value = "delete";
 }
 
+async function syncCurrentConnectionPassword(username: string, password: string) {
+  if (snapshot.value?.currentUsername !== username) return;
+  const config = connectionStore.getConfig(props.connectionId);
+  if (!config || config.db_type !== "nacos") return;
+  const hasExternalConfig = !!config.external_config && typeof config.external_config === "object";
+  const externalConfig = (config.external_config || {}) as NacosAdminConfig;
+  const primaryAuth = externalConfig.auth;
+  const primaryMatches = (primaryAuth?.kind === "usernamePassword" && primaryAuth.username === username) || (!hasExternalConfig && config.username === username);
+  const consoleAuth = externalConfig.rnacosConsoleAuth;
+  const consoleMatches = consoleAuth?.kind === "usernamePassword" && consoleAuth.username === username;
+  if (!primaryMatches && !consoleMatches) return;
+  if (config.save_password === false) {
+    try {
+      await api.replaceNacosSessionCredential(props.connectionId, username, password);
+      toast(t("nacos.currentSessionPasswordUpdated"), 4000);
+    } catch {
+      toast(t("nacos.currentPasswordNotSaved"), 5000);
+    }
+    return;
+  }
+  const nextExternal: NacosAdminConfig | undefined = hasExternalConfig
+    ? {
+        ...externalConfig,
+        auth: primaryMatches ? { kind: "usernamePassword", username, password } : primaryAuth,
+        rnacosConsoleAuth: consoleMatches ? { kind: "usernamePassword", username, password } : consoleAuth,
+      }
+    : undefined;
+  try {
+    await connectionStore.updateConnection({
+      ...config,
+      password: primaryMatches ? password : config.password,
+      external_config: nextExternal,
+    });
+    toast(t("nacos.currentPasswordSaved"), 4000);
+  } catch {
+    toast(t("nacos.currentPasswordNotSaved"), 5000);
+  }
+}
+
 function resetRoleForm(role = "") {
   Object.assign(roleForm, { role, members: [], newUsers: [], permissions: [], confirmation: "" });
   availableNamespaceSearch.value = "";
@@ -342,7 +397,7 @@ function openEditRole() {
 
 function openDeleteRole() {
   if (!selectedRole.value) return;
-  roleForm.confirmation = "";
+  resetRoleForm(selectedRole.value.role);
   formError.value = "";
   roleDialog.value = "delete";
 }
@@ -360,7 +415,10 @@ function openAssociatedRole(role: string) {
 function filterNamespaces<T extends { id?: string; namespaceId?: string; name: string }>(items: T[], query: string) {
   const normalized = query.trim().toLocaleLowerCase();
   if (!normalized) return items;
-  return items.filter((item) => `${item.name} ${item.id ?? item.namespaceId ?? ""}`.toLocaleLowerCase().includes(normalized));
+  return items.filter((item) => {
+    const id = item.id ?? item.namespaceId ?? "";
+    return item.name.toLocaleLowerCase().includes(normalized) || id.toLocaleLowerCase().includes(normalized);
+  });
 }
 
 function moveNamespacesToGranted() {
@@ -393,12 +451,17 @@ async function submitUser() {
   if (userDialog.value === "password") {
     if (!userForm.password) return void (formError.value = t("nacos.accessPasswordRequired"));
     if (!(await confirmAccessMutation(`${t("nacos.accessUserDialog.password")}: ${userForm.username}`))) return;
+    const username = userForm.username;
     saving.value = true;
     try {
-      await api.nacosUpdateUser(props.connectionId, { username: userForm.username, password: userForm.password });
+      await api.nacosUpdateUser(props.connectionId, { username, password: userForm.password });
+      await syncCurrentConnectionPassword(username, userForm.password);
       userDialog.value = null;
+      toast(t("nacos.passwordResetSucceeded", { username }), 2500);
     } catch (cause) {
-      formError.value = cause instanceof Error ? cause.message : String(cause);
+      const message = cause instanceof Error ? cause.message : String(cause);
+      formError.value = message;
+      toast(t("nacos.passwordResetFailed", { message }), 5000);
     } finally {
       saving.value = false;
     }
@@ -422,7 +485,8 @@ async function submitRole() {
     await runOperation({ kind: "deleteRole", role: roleForm.role, confirmation: roleForm.confirmation || undefined }, () => (roleDialog.value = null));
     return;
   }
-  if (!roleForm.role.trim() || (!roleForm.members.length && !roleForm.newUsers.length)) {
+  const roleRequiresMember = roleDialog.value === "create" || selectedRole.value?.administrator;
+  if (!roleForm.role.trim() || (roleRequiresMember && !roleForm.members.length && !roleForm.newUsers.length)) {
     formError.value = t("nacos.accessRoleMemberRequired");
     return;
   }
@@ -518,7 +582,17 @@ watch(
   },
 );
 watch(normalizedSearch, () => (page.value = 1));
-onMounted(() => void loadSnapshot(false));
+onMounted(() => {
+  stopNacosNamespacesChangedListener = subscribeNacosNamespacesChanged(handleNacosNamespacesChanged);
+  void loadSnapshot(false);
+});
+onBeforeUnmount(() => {
+  latestSnapshotRequestId += 1;
+  stopNacosNamespacesChangedListener?.();
+  stopNacosNamespacesChangedListener = null;
+});
+
+defineExpose({ refresh: () => loadSnapshot() });
 </script>
 
 <template>
@@ -529,8 +603,16 @@ onMounted(() => void loadSnapshot(false));
           <Search class="pointer-events-none absolute left-2.5 top-2 h-3.5 w-3.5 text-muted-foreground" />
           <Input v-model="search" class="h-8 pl-8" :placeholder="tab === 'users' ? t('nacos.searchUsers') : t('nacos.accessSearchRoles')" />
         </div>
-        <Button size="sm" variant="ghost" class="h-8 w-8 p-0" :aria-label="t('nacos.refresh')" :disabled="loading" @click="loadSnapshot()">
-          <RefreshCw class="h-3.5 w-3.5" :class="loading ? 'animate-spin' : ''" />
+        <Button
+          size="sm"
+          class="h-8 w-8 shrink-0 p-0"
+          :title="tab === 'users' ? t('nacos.createUser') : t('nacos.accessCreateRole')"
+          :aria-label="tab === 'users' ? t('nacos.createUser') : t('nacos.accessCreateRole')"
+          :disabled="tab === 'users' ? !canCreateUser : !canCreateRole"
+          @click="tab === 'users' ? openCreateUser() : openCreateRole()"
+        >
+          <UserPlus v-if="tab === 'users'" class="h-3.5 w-3.5" />
+          <ShieldPlus v-else class="h-3.5 w-3.5" />
         </Button>
       </div>
 
@@ -554,8 +636,7 @@ onMounted(() => void loadSnapshot(false));
         <div v-if="!loading && !currentItems.length" class="flex h-32 items-center justify-center px-4 text-center text-xs text-muted-foreground">{{ tab === "users" ? t("nacos.noUsers") : t("nacos.accessNoRoles") }}</div>
       </div>
 
-      <div class="shrink-0 space-y-2 border-t p-2">
-        <Button class="h-8 w-full" :disabled="tab === 'users' ? !canCreateUser : !canCreateRole" @click="tab === 'users' ? openCreateUser() : openCreateRole()"><Plus class="mr-1.5 h-3.5 w-3.5" />{{ tab === "users" ? t("nacos.createUser") : t("nacos.accessCreateRole") }}</Button>
+      <div class="shrink-0 border-t p-2">
         <div class="flex h-7 items-center justify-between px-1 text-xs text-muted-foreground">
           <span>{{ currentItems.length }}</span>
           <div class="flex items-center gap-1">
@@ -787,20 +868,29 @@ onMounted(() => void loadSnapshot(false));
         </div>
       </div>
       <div v-if="userDialog === 'delete'" class="rounded border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">{{ t("nacos.deleteUserDescription", { username: userForm.username }) }}</div>
-      <div v-if="userForm.roles.includes('ROLE_ADMIN') || (snapshot?.currentUsername === userForm.username && userDialog !== 'password')" class="grid gap-1.5">
+      <div v-if="userDialog === 'delete'" class="grid gap-1.5">
+        <Label for="access-delete-user-confirm">{{ t("nacos.accessDeleteUserConfirmationLabel") }}</Label>
+        <p id="access-delete-user-confirm-hint" class="text-xs text-muted-foreground">
+          {{ t("nacos.accessDeleteUserConfirmationHint") }} <code class="select-all rounded bg-muted px-1.5 py-0.5 font-mono text-foreground">{{ userForm.username }}</code>
+        </p>
+        <Input id="access-delete-user-confirm" v-model="userForm.confirmation" autocomplete="off" :placeholder="t('nacos.accessDeleteUserConfirmationPlaceholder')" aria-describedby="access-delete-user-confirm-hint" />
+      </div>
+      <div v-if="userDialog !== 'delete' && (userForm.roles.includes('ROLE_ADMIN') || (snapshot?.currentUsername === userForm.username && userDialog !== 'password'))" class="grid gap-1.5">
         <Label for="access-user-confirm">{{ t("nacos.accessTypeUsername", { value: userForm.username }) }}</Label
         ><Input id="access-user-confirm" v-model="userForm.confirmation" autocomplete="off" />
       </div>
       <p v-if="formError" class="text-sm text-destructive">{{ formError }}</p>
       <DialogFooter
         ><Button variant="outline" :disabled="saving" @click="userDialog = null">{{ t("nacos.cancel") }}</Button
-        ><Button :variant="userDialog === 'delete' ? 'destructive' : 'default'" :disabled="saving || !userOperationWritable" @click="submitUser"><Loader2 v-if="saving" class="mr-2 h-4 w-4 animate-spin" />{{ userDialog === "delete" ? t("nacos.delete") : t("nacos.save") }}</Button></DialogFooter
+        ><Button :variant="userDialog === 'delete' ? 'destructive' : 'default'" :disabled="saving || !userOperationWritable || (userDialog === 'delete' && !userDeleteConfirmed)" @click="submitUser"
+          ><Loader2 v-if="saving" class="mr-2 h-4 w-4 animate-spin" />{{ userDialog === "delete" ? t("nacos.delete") : t("nacos.save") }}</Button
+        ></DialogFooter
       >
     </DialogContent>
   </Dialog>
 
   <Dialog :open="!!roleDialog" @update:open="!$event && (roleDialog = null)">
-    <DialogContent class="max-h-[90vh] overflow-auto sm:max-w-2xl">
+    <DialogContent class="max-h-[90vh] overflow-auto sm:max-w-3xl">
       <DialogHeader
         ><DialogTitle>{{ t(`nacos.accessRoleDialog.${roleDialog}`) }}</DialogTitle
         ><DialogDescription>{{ t(`nacos.accessRoleDialog.${roleDialog}Hint`) }}</DialogDescription></DialogHeader
@@ -815,7 +905,9 @@ onMounted(() => void loadSnapshot(false));
             <div class="mb-2 flex items-end justify-between">
               <div>
                 <Label>{{ t("nacos.accessMembers") }}</Label>
-                <p class="mt-0.5 text-xs text-muted-foreground">{{ t("nacos.accessMembersRequiredHint") }}</p>
+                <p class="mt-0.5 text-xs text-muted-foreground">
+                  {{ t(roleDialog === "edit" && !selectedRole?.administrator ? "nacos.accessMembersOptionalHint" : "nacos.accessMembersRequiredHint") }}
+                </p>
               </div>
               <Button size="sm" variant="outline" :disabled="!canCreateUser || !canAssignRole" @click="addNewUser"><Plus class="mr-1 h-3.5 w-3.5" />{{ t("nacos.accessInlineCreateUser") }}</Button>
             </div>
@@ -843,17 +935,21 @@ onMounted(() => void loadSnapshot(false));
                 <p class="mt-0.5 text-xs text-muted-foreground">{{ t("nacos.accessPermissionRequiredHint") }}</p>
               </div>
             </div>
-            <div class="grid min-h-[17rem] grid-cols-[minmax(0,1fr)_2.5rem_minmax(0,1.15fr)] gap-2 sm:gap-3">
+            <div class="grid h-[min(28rem,45vh)] min-h-[17rem] grid-cols-[minmax(0,1fr)_2.5rem_minmax(0,1.15fr)] gap-2 sm:gap-3">
               <div class="flex min-h-0 flex-col overflow-hidden rounded border">
                 <div class="border-b bg-muted/30 px-3 py-2 text-sm font-medium">{{ t("nacos.accessUnassignedNamespaces") }}</div>
                 <div class="border-b p-2">
-                  <div class="relative"><Search class="pointer-events-none absolute left-2.5 top-2 h-3.5 w-3.5 text-muted-foreground" /><Input v-model="availableNamespaceSearch" class="h-8 pl-8 text-sm" :placeholder="t('nacos.accessSearchNamespaces')" /></div>
+                  <div class="relative">
+                    <Search class="pointer-events-none absolute left-2.5 top-2 h-3.5 w-3.5 text-muted-foreground" /><Input v-model="availableNamespaceSearch" class="h-8 pl-8 text-sm" :placeholder="t('nacos.accessSearchNamespaces')" :aria-label="t('nacos.accessSearchNamespaces')" />
+                  </div>
                 </div>
                 <div class="min-h-0 flex-1 overflow-auto p-1.5">
-                  <label v-for="namespace in availableNamespaces" :key="namespace.id" class="flex min-h-9 items-center gap-2 rounded px-2 text-sm hover:bg-muted/60">
+                  <label v-for="namespace in availableNamespaces" :key="namespace.id" class="flex min-h-11 items-center gap-2 rounded px-2 py-1 text-sm hover:bg-muted/60">
                     <input type="checkbox" :checked="selectedAvailableNamespaceIds.includes(namespace.id)" @change="selectedAvailableNamespaceIds = toggle(selectedAvailableNamespaceIds, namespace.id, ($event.target as HTMLInputElement).checked)" />
-                    <span class="min-w-0 flex-1 truncate">{{ namespace.name }}</span>
-                    <code v-if="namespace.name !== namespace.id" class="truncate text-[10px] text-muted-foreground">{{ namespace.id }}</code>
+                    <span class="min-w-0 flex-1">
+                      <span class="block truncate font-medium" :title="namespace.name">{{ namespace.name }}</span>
+                      <code v-if="namespace.name !== namespace.id" class="block break-all text-[10px] leading-4 text-muted-foreground" :title="namespace.id">{{ namespace.id }}</code>
+                    </span>
                   </label>
                   <div v-if="!availableNamespaces.length" class="flex h-24 items-center justify-center px-3 text-center text-xs text-muted-foreground">{{ t("nacos.accessNoUnassignedNamespaces") }}</div>
                 </div>
@@ -865,12 +961,16 @@ onMounted(() => void loadSnapshot(false));
               <div class="flex min-h-0 flex-col overflow-hidden rounded border">
                 <div class="border-b bg-muted/30 px-3 py-2 text-sm font-medium">{{ t("nacos.accessGrantedNamespaces") }}</div>
                 <div class="border-b p-2">
-                  <div class="relative"><Search class="pointer-events-none absolute left-2.5 top-2 h-3.5 w-3.5 text-muted-foreground" /><Input v-model="grantedNamespaceSearch" class="h-8 pl-8 text-sm" :placeholder="t('nacos.accessSearchNamespaces')" /></div>
+                  <div class="relative">
+                    <Search class="pointer-events-none absolute left-2.5 top-2 h-3.5 w-3.5 text-muted-foreground" /><Input v-model="grantedNamespaceSearch" class="h-8 pl-8 text-sm" :placeholder="t('nacos.accessSearchNamespaces')" :aria-label="t('nacos.accessSearchNamespaces')" />
+                  </div>
                 </div>
                 <div class="min-h-0 flex-1 overflow-auto p-1.5">
-                  <div v-for="namespace in grantedNamespaces" :key="namespace.namespaceId" class="flex min-h-10 items-center gap-2 rounded px-2 text-sm hover:bg-muted/60">
+                  <div v-for="namespace in grantedNamespaces" :key="namespace.namespaceId" class="flex min-h-11 items-center gap-2 rounded px-2 py-1 text-sm hover:bg-muted/60">
                     <input type="checkbox" :checked="selectedGrantedNamespaceIds.includes(namespace.namespaceId)" @change="selectedGrantedNamespaceIds = toggle(selectedGrantedNamespaceIds, namespace.namespaceId, ($event.target as HTMLInputElement).checked)" />
-                    <span class="min-w-0 flex-1 truncate font-medium">{{ namespace.name }}</span>
+                    <span class="min-w-0 flex-1">
+                      <span class="block truncate font-medium" :title="namespace.name">{{ namespace.name }}</span>
+                    </span>
                     <div class="flex shrink-0 items-center gap-2">
                       <label
                         v-for="action in ['r', 'w', 'rw'] as PermissionAction[]"
@@ -903,13 +1003,18 @@ onMounted(() => void loadSnapshot(false));
       <template v-else
         ><div class="rounded border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">{{ t("nacos.accessDeleteRoleHint", { role: roleForm.role }) }}</div>
         <div class="grid gap-1.5">
-          <Label for="access-delete-role-confirm">{{ t("nacos.accessTypeRole", { value: roleForm.role }) }}</Label
-          ><Input id="access-delete-role-confirm" v-model="roleForm.confirmation" /></div
+          <Label for="access-delete-role-confirm">{{ t("nacos.accessDeleteRoleConfirmationLabel") }}</Label>
+          <p id="access-delete-role-confirm-hint" class="text-xs text-muted-foreground">
+            {{ t("nacos.accessDeleteRoleConfirmationHint") }} <code class="select-all rounded bg-muted px-1.5 py-0.5 font-mono text-foreground">{{ roleForm.role }}</code>
+          </p>
+          <Input id="access-delete-role-confirm" v-model="roleForm.confirmation" autocomplete="off" :placeholder="t('nacos.accessDeleteRoleConfirmationPlaceholder')" aria-describedby="access-delete-role-confirm-hint" /></div
       ></template>
       <p v-if="formError" class="text-sm text-destructive">{{ formError }}</p>
       <DialogFooter
         ><Button variant="outline" :disabled="saving" @click="roleDialog = null">{{ t("nacos.cancel") }}</Button
-        ><Button :variant="roleDialog === 'delete' ? 'destructive' : 'default'" :disabled="saving || !roleOperationWritable" @click="submitRole"><Loader2 v-if="saving" class="mr-2 h-4 w-4 animate-spin" />{{ roleDialog === "delete" ? t("nacos.delete") : t("nacos.save") }}</Button></DialogFooter
+        ><Button :variant="roleDialog === 'delete' ? 'destructive' : 'default'" :disabled="saving || !roleOperationWritable || (roleDialog === 'delete' && !roleDeleteConfirmed)" @click="submitRole"
+          ><Loader2 v-if="saving" class="mr-2 h-4 w-4 animate-spin" />{{ roleDialog === "delete" ? t("nacos.delete") : t("nacos.save") }}</Button
+        ></DialogFooter
       >
     </DialogContent>
   </Dialog>

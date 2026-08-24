@@ -221,6 +221,7 @@ pub async fn list_objects(
     offset: Option<usize>,
     object_types: Option<Vec<String>>,
     catalog: Option<String>,
+    table_name_filter: Option<dbx_core::schema::TableNameFilter>,
 ) -> Result<Vec<db::ObjectInfo>, String> {
     if let Some(catalog) = external_doris_catalog(&state, &connection_id, catalog.as_deref()).await {
         let tables = dbx_core::schema::list_doris_catalog_tables_core(
@@ -232,7 +233,7 @@ pub async fn list_objects(
             limit,
             offset,
             object_types.as_deref(),
-            None,
+            table_name_filter.as_ref(),
         )
         .await?;
         return Ok(tables
@@ -264,6 +265,7 @@ pub async fn list_objects(
         limit,
         offset,
         object_types.as_deref(),
+        table_name_filter.as_ref(),
     )
     .await
 }
@@ -318,6 +320,17 @@ pub async fn get_object_source(
         relation_name.as_deref(),
     )
     .await
+}
+
+#[tauri::command]
+pub async fn get_event_info(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    schema: String,
+    name: String,
+) -> Result<db::MysqlEventInfo, String> {
+    dbx_core::schema::get_event_info_core(&state, &connection_id, &database, &schema, &name).await
 }
 
 #[tauri::command]
@@ -391,6 +404,24 @@ pub async fn list_indexes(
             .await;
     }
     dbx_core::schema::list_indexes_core(&state, &connection_id, &database, &schema, &table).await
+}
+
+#[tauri::command]
+pub async fn list_reference_key_columns(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    schema: String,
+    table: String,
+    catalog: Option<String>,
+) -> Result<Vec<String>, String> {
+    if let Some(catalog) = external_doris_catalog(&state, &connection_id, catalog.as_deref()).await {
+        let indexes =
+            dbx_core::schema::list_doris_catalog_indexes_core(&state, &connection_id, &catalog, &database, &table)
+                .await?;
+        return Ok(dbx_core::schema::reference_key_columns_from_indexes(&indexes));
+    }
+    dbx_core::schema::list_reference_key_columns_core(&state, &connection_id, &database, &schema, &table).await
 }
 
 #[tauri::command]
@@ -552,6 +583,17 @@ pub async fn list_owners(
     schema: String,
 ) -> Result<Vec<db::OwnerInfo>, String> {
     dbx_core::schema::list_owners_core(&state, &connection_id, &database, &schema).await
+}
+
+#[tauri::command]
+pub async fn get_table_owner(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    schema: String,
+    table: String,
+) -> Result<Option<String>, String> {
+    dbx_core::schema::get_table_owner_core(&state, &connection_id, &database, &schema, &table).await
 }
 
 #[tauri::command]

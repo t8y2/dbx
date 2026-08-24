@@ -40,4 +40,5 @@ pub mod text_export;
 pub mod transfer;
 pub mod tunnel_profiles;
 pub mod update;
+pub mod vector;
 pub mod zookeeper;

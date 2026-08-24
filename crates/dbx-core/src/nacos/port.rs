@@ -64,6 +64,9 @@ pub trait NacosAdmin: Send + Sync {
     async fn list_namespaces(&self) -> Result<Vec<NacosNamespaceInfo>, String>;
     async fn create_namespace(&self, req: NacosNamespaceCreate) -> Result<(), String>;
     async fn update_namespace(&self, req: NacosNamespaceUpdate) -> Result<(), String>;
+    async fn delete_namespace(&self, _: String) -> Result<(), String> {
+        Err("Nacos namespace deletion is unavailable for this connection".to_string())
+    }
     async fn list_configs(&self, query: NacosConfigQuery) -> Result<NacosConfigList, String>;
     /// Returns `Ok(None)` only when the server does not expose a native
     /// content-search endpoint. Authentication, throttling and transport

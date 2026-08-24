@@ -66,6 +66,44 @@ describe("coerceDataGridCellValue", () => {
     expect(coerceDataGridCellValue({ ...options, preserveEmptyString: true })).toBe("");
   });
 
+  it.each([null, false, true])("coerces MySQL TINYINT(1) from metadata when the sampled value is %p", (oldValue) => {
+    expect(
+      coerceDataGridCellValue({
+        value: "true",
+        oldValue,
+        databaseType: "mysql",
+        columnInfo: { data_type: "TINYINT(1)" },
+      }),
+    ).toBe(true);
+  });
+
+  it.each([
+    ["missing numeric metadata", 1, undefined, "2", 2],
+    ["empty numeric metadata", 1, { data_type: "" }, "2", 2],
+    ["missing boolean metadata", false, undefined, "true", true],
+    ["empty boolean metadata", true, { data_type: "" }, "0", false],
+  ])("falls back to the sampled value type for %s", (_name, oldValue, columnInfo, value, expected) => {
+    expect(
+      coerceDataGridCellValue({
+        value,
+        oldValue,
+        databaseType: "mysql",
+        columnInfo,
+      }),
+    ).toBe(expected);
+  });
+
+  it("prefers column metadata over the sampled value type", () => {
+    expect(
+      coerceDataGridCellValue({
+        value: "2",
+        oldValue: 1,
+        databaseType: "mysql",
+        columnInfo: { data_type: "varchar(255)" },
+      }),
+    ).toBe("2");
+  });
+
   it.each([
     ["numeric non-nullable", 42, "integer", false],
     ["boolean nullable", true, "boolean", true],

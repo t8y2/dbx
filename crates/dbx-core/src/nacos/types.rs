@@ -161,6 +161,8 @@ pub struct NacosServiceCapabilities {
     pub delete_service: NacosOperationCapability,
     pub list_instances: NacosOperationCapability,
     pub update_instance: NacosOperationCapability,
+    #[serde(default)]
+    pub update_instance_health: NacosOperationCapability,
     pub register_instance: NacosOperationCapability,
     pub deregister_instance: NacosOperationCapability,
 }
@@ -175,6 +177,7 @@ impl NacosServiceCapabilities {
             delete_service: NacosOperationCapability::unsupported(reason),
             list_instances: NacosOperationCapability::supported(),
             update_instance: NacosOperationCapability::unsupported(reason),
+            update_instance_health: NacosOperationCapability::unsupported(reason),
             register_instance: NacosOperationCapability::unsupported(reason),
             deregister_instance: NacosOperationCapability::unsupported(reason),
         }
@@ -815,6 +818,14 @@ pub struct NacosBatchReport {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct NacosConfigDataIdMapping {
+    pub source_group: String,
+    pub source_data_id: String,
+    pub target_data_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct NacosConfigTransferRequest {
     pub operation_id: String,
     pub source_connection_id: String,
@@ -823,6 +834,8 @@ pub struct NacosConfigTransferRequest {
     pub target_namespace: String,
     #[serde(default)]
     pub target_group: Option<String>,
+    #[serde(default)]
+    pub data_id_mappings: Vec<NacosConfigDataIdMapping>,
     #[serde(default)]
     pub conflict_policy: NacosConflictPolicy,
 }

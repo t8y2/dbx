@@ -28,6 +28,40 @@ test("estimated display totals do not become pagination bounds", () => {
   );
 });
 
+test("exact display totals keep pagination inside the configured result cap", () => {
+  assert.equal(
+    resolveDataGridPaginationTotal({
+      serverKnownTotalRowCount: 175_390,
+      totalRowCountIsExact: true,
+      maxRows: 100_000,
+    }),
+    100_000,
+  );
+  assert.equal(
+    resolveDataGridPaginationTotal({
+      serverKnownTotalRowCount: 99_999,
+      totalRowCountIsExact: true,
+      maxRows: 100_000,
+    }),
+    99_999,
+  );
+  assert.equal(
+    resolveDataGridPaginationTotal({
+      serverKnownTotalRowCount: 100_000,
+      totalRowCountIsExact: true,
+      maxRows: 100_000,
+    }),
+    100_000,
+  );
+  assert.equal(
+    resolveDataGridPaginationTotal({
+      serverKnownTotalRowCount: 175_390,
+      totalRowCountIsExact: true,
+    }),
+    175_390,
+  );
+});
+
 test("first query page is complete when its known total is already loaded", () => {
   assert.equal(
     hasCompleteLocalDataGridResult({
@@ -208,9 +242,17 @@ test("last page always re-counts when a count path is available", () => {
 test("jumping to last page does not rewrite indexes before the new page loads", () => {
   const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
   const jumpFn = source.match(/function jumpToCountedLastPage\(total: number\) \{[\s\S]*?\n\}/)?.[0] ?? "";
+  assert.match(jumpFn, /resolveDataGridPaginationTotal/);
+  assert.match(jumpFn, /maxRows: paginationMaxRows\.value/);
   assert.match(jumpFn, /emit\("paginate"/);
   assert.doesNotMatch(jumpFn, /currentPage\.value\s*=/);
   assert.match(source, /function rowNumberPageOffset/);
+});
+
+test("query result caps do not limit table-data pagination", () => {
+  const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
+  assert.match(source, /const paginationMaxRows = computed\(\(\) => \(isResultsContext\.value \? queryResultMaxRows\.value : undefined\)\)/);
+  assert.equal(source.match(/maxRows: paginationMaxRows\.value/g)?.length, 2);
 });
 
 test("row number gutter width tracks the largest visible row index", () => {

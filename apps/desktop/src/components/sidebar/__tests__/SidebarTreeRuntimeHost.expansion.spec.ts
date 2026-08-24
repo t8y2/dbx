@@ -192,6 +192,38 @@ describe("SidebarTreeRuntimeHost expansion", () => {
     expect(queryStore.openNacosAdmin).not.toHaveBeenCalled();
   });
 
+  it("opens the Meilisearch system workspace from its direct-navigation node", async () => {
+    connectionStore.getConfig.mockReturnValue({ db_type: "meilisearch", name: "local-meilisearch" });
+    const systemNode: TreeNode = {
+      id: "meili:meilisearch-system",
+      label: "meilisearch.systemManagement",
+      type: "meilisearch-system",
+      connectionId: "meili",
+      isExpanded: true,
+      children: [],
+    };
+    connectionStore.treeNodes = [systemNode];
+
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp(
+      defineComponent({
+        setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node: systemNode, depth: 0 }),
+      }),
+    );
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+    await nextTick();
+
+    host.value!.handleRowClick(systemNode, 1);
+
+    await vi.waitFor(() => expect(connectionStore.ensureConnected).toHaveBeenCalledWith("meili", undefined));
+    expect(queryStore.createTab).toHaveBeenCalledWith("meili", "default", expect.any(String), "meilisearch-system");
+    expect(systemNode.isExpanded).toBe(true);
+  });
+
   it("expands an unloaded object group without leaking the regex source as a search filter", async () => {
     const group: TreeNode = {
       id: "mysql:basic:__tables",

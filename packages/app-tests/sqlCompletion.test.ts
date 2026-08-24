@@ -47,6 +47,18 @@ const columnsByTable = new Map<string, SqlCompletionColumn[]>([
   ],
 ]);
 
+function buildSemanticSqlCompletionItems(sql: string, options: { columns?: Map<string, SqlCompletionColumn[]>; databaseType?: DatabaseType } = {}) {
+  const databaseType = options.databaseType ?? "mysql";
+  const dialect = databaseType === "sqlserver" ? "sqlserver" : databaseType === "postgres" ? "postgres" : "mysql";
+  const semanticOptions = { databaseType, dialect } as const;
+  const context = sqlCompletionContextFromSemantic(buildSqlSemanticModel(sql, sql.length, semanticOptions), getSqlCompletionContext(sql, sql.length, semanticOptions));
+  return buildSqlCompletionItemsFromContext(context, {
+    tables,
+    columnsByTable: options.columns ?? columnsByTable,
+    ...semanticOptions,
+  });
+}
+
 const mysqlCrossDatabaseColumnsByTable = new Map<string, SqlCompletionColumn[]>([
   [
     "other_db.orders",
@@ -266,6 +278,123 @@ test("suggests MySQL VERSION and REVERSE without broadening other dialects", () 
     false,
   );
   assert.equal(buildFunctionItems("reve").find((item) => item.label === "REVERSE")?.apply, "REVERSE(${string})");
+});
+
+test("suggests the reported MySQL 5.7 built-in functions with dialect-specific signatures", () => {
+  const reportedFunctions = [
+    "VERSION",
+    "POSITION",
+    "REPEAT",
+    "STRCMP",
+    "POW",
+    "EXP",
+    "LN",
+    "LOG",
+    "LOG10",
+    "LOG2",
+    "SIN",
+    "PI",
+    "COS",
+    "TAN",
+    "ASIN",
+    "ACOS",
+    "ATAN",
+    "ATAN2",
+    "DEGREES",
+    "RADIANS",
+    "MONTHNAME",
+    "DAYOFMONTH",
+    "WEEKDAY",
+    "WEEK",
+    "QUARTER",
+    "ADDDATE",
+    "SUBDATE",
+    "ADDTIME",
+    "SUBTIME",
+    "TIMEDIFF",
+    "FROM_DAYS",
+    "TO_DAYS",
+    "MAKEDATE",
+    "MAKETIME",
+    "BIN",
+    "HEX",
+    "UNHEX",
+    "OCT",
+    "CONV",
+    "JSON_OBJECT",
+    "JSON_ARRAY",
+    "JSON_SET",
+    "JSON_INSERT",
+    "JSON_REPLACE",
+    "JSON_REMOVE",
+    "JSON_CONTAINS",
+    "JSON_LENGTH",
+    "PASSWORD",
+    "DATABASE",
+    "SCHEMA",
+    "USER",
+    "CURRENT_USER",
+    "COLLATION",
+    "FOUND_ROWS",
+    "LAST_INSERT_ID",
+    "BENCHMARK",
+    "SLEEP",
+    "UUID_SHORT",
+    "ELT",
+    "FIELD",
+    "MAKE_SET",
+    "TRUNCATE",
+    "MD5",
+    "SHA1",
+    "SHA2",
+  ] as const;
+  const mysqlItems = buildSqlCompletionItems("select ", "select ".length, {
+    tables: [],
+    columnsByTable: new Map(),
+    databaseType: "mysql",
+  });
+  const mysqlFunctions = mysqlItems.filter((item) => item.type === "function");
+  const mysqlFunctionLabels = new Set(mysqlFunctions.map((item) => item.label));
+
+  assert.deepEqual(
+    reportedFunctions.filter((name) => !mysqlFunctionLabels.has(name)),
+    [],
+  );
+  assert.equal(mysqlFunctions.find((item) => item.label === "POSITION")?.apply, "POSITION(${substring} IN ${string})");
+  assert.deepEqual(getSqlFunctionSignatureHelp("select position(", "select position(".length, "mysql")?.parameters, ["substring", "string"]);
+  assert.deepEqual(getSqlFunctionSignatureHelp("select log(10,", "select log(10,".length, "mysql")?.parameters, ["base", "number"]);
+  assert.deepEqual(getSqlFunctionSignatureHelp("select json_contains(", "select json_contains(".length, "mysql")?.parameters, ["target", "candidate"]);
+  assert.deepEqual(getSqlFunctionSignatureHelp("select json_length(", "select json_length(".length, "mysql")?.parameters, ["json"]);
+  assert.deepEqual(getSqlFunctionSignatureHelp("select benchmark(", "select benchmark(".length, "mysql")?.parameters, ["count", "expression"]);
+
+  for (const databaseType of ["postgres", "sqlserver"] as const) {
+    const items = buildSqlCompletionItems("select strc", "select strc".length, {
+      tables: [],
+      columnsByTable: new Map(),
+      databaseType,
+    });
+    assert.equal(
+      items.some((item) => item.type === "function" && item.label === "STRCMP"),
+      false,
+    );
+    assert.equal(getSqlFunctionSignatureHelp("select strcmp(", "select strcmp(".length, databaseType), null);
+  }
+
+  for (const name of ["TRUNCATE", "REPEAT", "DATABASE", "SCHEMA", "USER", "CURRENT_USER"]) {
+    const items = buildSqlCompletionItems(name.toLowerCase(), name.length, {
+      tables: [],
+      columnsByTable: new Map(),
+      databaseType: "mysql",
+    });
+    assert.ok(
+      items.some((item) => item.type === "function" && item.label === name),
+      `${name} function suggestion missing`,
+    );
+    assert.ok(
+      items.some((item) => item.type === "keyword" && item.label === name),
+      `${name} keyword suggestion missing`,
+    );
+  }
 });
 
 test("suggests Oracle SQL, PL/SQL, and data type keywords", () => {
@@ -1095,7 +1224,7 @@ test("shows column comments in WHERE field completions", () => {
   });
 
   const column = items.find((item) => item.type === "column" && item.label === "status");
-  assert.equal(column?.detail, "public.orders  [varchar]  NOT NULL  -- Order lifecycle state");
+  assert.equal(column?.detail, "public.orders  [varchar]  NOT NULL");
   assert.equal(column?.info, "public.orders.status\nType: varchar\nNullable: no\nComment: Order lifecycle state");
 });
 
@@ -2455,6 +2584,94 @@ test("prioritizes select aliases in GROUP BY completion", () => {
 
   assert.equal(items[0]?.label, "display_name");
   assert.equal(items[0]?.detail, "SELECT alias");
+});
+
+test("offers all safe SELECT aliases as one completion for an empty GROUP BY", () => {
+  const sql = "select voucher_date, member_id, min(voucher_date) from dwq_orders_actual_sale_amount_df group by ";
+  const items = buildSemanticSqlCompletionItems(sql);
+  const combined = items.find((item) => item.detail === "All non-aggregated SELECT aliases");
+
+  assert.deepEqual(combined, {
+    label: "voucher_date, member_id",
+    type: "snippet",
+    detail: "All non-aggregated SELECT aliases",
+    apply: "voucher_date, member_id",
+    boost: 3650,
+    dedupeKey: "group-by-all-select-aliases",
+  });
+  assert.ok(items.indexOf(combined!) < items.findIndex((item) => item.label === "voucher_date" && item.detail === "SELECT alias"));
+  assert.deepEqual(
+    items.filter((item) => item.detail === "SELECT alias").map((item) => item.label),
+    ["voucher_date", "member_id"],
+  );
+});
+
+test("preserves SELECT order and deduplicates combined GROUP BY aliases case-insensitively", () => {
+  const sql = "select region as region_key, status as REGION_KEY, email as state, sum(id) as total from public.users group by ";
+  const items = buildSemanticSqlCompletionItems(sql);
+  const combined = items.find((item) => item.detail === "All non-aggregated SELECT aliases");
+
+  assert.equal(combined?.label, "region_key, state");
+  assert.equal(combined?.apply, "region_key, state");
+});
+
+test("uses stable expression aliases and existing quoted column apply text in combined GROUP BY completion", () => {
+  const sql = "select date(created_at) as day, u.order, sum(u.id) as total from public.users u group by ";
+  const items = buildSemanticSqlCompletionItems(sql, {
+    columns: new Map([
+      [
+        "public.users",
+        [
+          { name: "order", table: "users", schema: "public" },
+          { name: "created_at", table: "users", schema: "public" },
+          { name: "id", table: "users", schema: "public" },
+        ],
+      ],
+    ]),
+  });
+  const combined = items.find((item) => item.detail === "All non-aggregated SELECT aliases");
+
+  assert.equal(combined?.label, "day, order");
+  assert.equal(combined?.apply, "day, `order`");
+});
+
+test("hides combined GROUP BY completion for unsafe or incomplete candidate sets", () => {
+  for (const sql of ["select name, count(id) as total from public.users group by ", "select lower(name), email, count(id) as total from public.users group by ", "select count(id) as total, sum(id) as sum_id from public.users group by "]) {
+    const items = buildSemanticSqlCompletionItems(sql);
+    assert.equal(
+      items.some((item) => item.detail === "All non-aggregated SELECT aliases"),
+      false,
+      sql,
+    );
+  }
+});
+
+test("hides combined GROUP BY completion after existing expressions or a non-empty prefix", () => {
+  for (const sql of ["select name, email from public.users group by name, ", "select name, email from public.users group by na"]) {
+    const items = buildSemanticSqlCompletionItems(sql);
+    assert.equal(
+      items.some((item) => item.detail === "All non-aggregated SELECT aliases"),
+      false,
+      sql,
+    );
+  }
+});
+
+test("does not add combined SELECT alias completion to ORDER BY", () => {
+  const sql = "select name as display_name, email as display_email from public.users order by ";
+  const items = buildSemanticSqlCompletionItems(sql);
+
+  assert.equal(
+    items.some((item) => item.detail === "All non-aggregated SELECT aliases"),
+    false,
+  );
+  assert.deepEqual(
+    items.slice(0, 2).map((item) => [item.label, item.detail]),
+    [
+      ["display_name", "SELECT alias"],
+      ["display_email", "SELECT alias"],
+    ],
+  );
 });
 
 test("suggests likely join condition snippets after ON", () => {

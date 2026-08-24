@@ -200,8 +200,16 @@ describe("buildSelectAllSql", () => {
     expect(buildSelectAllSql("mysql", { schema: "mydb", tableName: "users" })).toBe("SELECT * FROM `users`");
   });
 
+  it("includes the MySQL database when requested", () => {
+    expect(buildSelectAllSql("mysql", { database: "mydb", tableName: "users" }, undefined, undefined, true)).toBe("SELECT * FROM `mydb`.`users`");
+  });
+
   it("qualifies and quotes a PostgreSQL table with its schema", () => {
     expect(buildSelectAllSql("postgres", { schema: "public", tableName: "users" })).toBe('SELECT * FROM "public"."users"');
+  });
+
+  it("preserves the Phoenix schema for new-query prefill", () => {
+    expect(buildSelectAllSql("jdbc", { schema: "APP", tableName: "USERS" }, '"', "phoenix")).toBe('SELECT * FROM "APP"."USERS"');
   });
 
   it("bracket-quotes a SQL Server table", () => {
@@ -256,6 +264,20 @@ describe("resolveNewQueryInitialSql", () => {
         databaseType: "postgres",
       }),
     ).toBe('SELECT * FROM "public"."users"');
+  });
+
+  it("passes the Phoenix driver profile into the initial SQL builder", () => {
+    expect(
+      resolveNewQueryInitialSql({
+        activeTab: dataTab({ schema: "APP", tableMeta: { schema: "APP", tableName: "USERS", columns: [], primaryKeys: [] } }),
+        prefillEnabled: true,
+        targetConnectionId: "conn-1",
+        targetDatabase: "app_db",
+        databaseType: "jdbc",
+        driverProfile: "phoenix",
+        identifierQuote: '"',
+      }),
+    ).toBe('SELECT * FROM "APP"."USERS"');
   });
 
   it("leaves new queries empty when the setting is disabled", () => {

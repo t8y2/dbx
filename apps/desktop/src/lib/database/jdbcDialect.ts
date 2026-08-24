@@ -21,6 +21,9 @@ const CONNECTION_ROOT_SCHEMA_TYPES = new Set<DatabaseType>(["oracle", "dameng", 
 const JDBC_DIALECT_MATCHERS: Array<{ type: DatabaseType; patterns: RegExp[] }> = [
   { type: "databend", patterns: [/jdbc:databend:/i, /com\.databend\.jdbc\.DatabendDriver/i, /databend-jdbc/i] },
   { type: "starrocks", patterns: [/starrocks/i] },
+  // Phoenix remains a generic JDBC connection, but exposes queryable schemas.
+  // Returning `jdbc` keeps its generic SQL behavior while enabling the schema tree.
+  { type: "jdbc", patterns: [/phoenix/i] },
   { type: "doris", patterns: [/doris/i] },
   { type: "goldendb", patterns: [/jdbc:goldendb:/i, /goldendb/i] },
   { type: "mysql", patterns: [/kyuubi/i] },
@@ -52,6 +55,10 @@ export function inferJdbcDialect(connection?: JdbcDialectConnection): DatabaseTy
     .join("\n");
   if (!haystack) return undefined;
   return JDBC_DIALECT_MATCHERS.find((matcher) => matcher.patterns.some((pattern) => pattern.test(haystack)))?.type;
+}
+
+export function jdbcDriverProfileUsesSchemaQualification(driverProfile?: string): boolean {
+  return inferJdbcDialect({ db_type: "jdbc", driver_profile: driverProfile }) === "jdbc";
 }
 
 export function effectiveDatabaseTypeForConnection(connection?: JdbcDialectConnection): DatabaseType | undefined {
@@ -90,7 +97,8 @@ export function connectionShouldLoadIdentifierQuote(connection: JdbcDialectConne
   if (gaussdbIdentifierQuoteStyle(connection) !== "auto") return false;
   if (connection.db_type === "gaussdb") return true;
   if (connection.db_type !== "jdbc") return false;
-  return ["gaussdb", "opengauss", "postgres"].includes(inferJdbcDialect(connection) ?? "");
+  const dialect = inferJdbcDialect(connection);
+  return dialect === "jdbc" || ["gaussdb", "opengauss", "postgres"].includes(dialect ?? "");
 }
 
 export function supportsGaussdbIdentifierQuoteStyle(connection: JdbcDialectConnection | undefined): boolean {

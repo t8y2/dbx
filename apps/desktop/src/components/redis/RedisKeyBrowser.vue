@@ -1046,6 +1046,18 @@ function requestGroupDelete(node: RedisKeyTreeNode, event: Event) {
   showDangerConfirm.value = true;
 }
 
+function requestKeyDelete(node: RedisKeyTreeNode, event: Event) {
+  event.stopPropagation();
+  if (node.kind !== "leaf" || selectionBusy.value) return;
+  pendingDanger.value = {
+    kind: "delete-keys",
+    title: node.fullKeyDisplay,
+    keyRaws: [node.keyRaw],
+    loadedSearchResults: false,
+  };
+  showDangerConfirm.value = true;
+}
+
 async function copyRedisKeyName(keyName: string) {
   try {
     await copyToClipboard(keyName);
@@ -1780,7 +1792,9 @@ function commandCompletionInsertion(index = commandCompletionSelectedIndex.value
   const insert = item.apply ?? item.label;
   const commandHead = context.mode === "command" || context.mode === "subcommand";
   const appendSpace = (commandHead || item.appendSpace === true) && !/^\s/.test(text.slice(to));
-  return { text, from, to, insert, replacement: `${insert}${appendSpace ? " " : ""}`, appendSpace, commandHead };
+  const hasCommandExample = commandHead && item.apply !== undefined && item.apply !== item.label;
+  const replacement = `${insert}${appendSpace && !hasCommandExample ? " " : ""}`;
+  return { text, from, to, insert, replacement, appendSpace: appendSpace && !hasCommandExample, commandHead };
 }
 
 function selectedCompletionMatchesInput(): boolean {
@@ -2192,6 +2206,18 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
                     <Button v-if="row.node.kind === 'group' && !isFuzzyHierarchyView" variant="ghost" size="icon" class="h-5 w-5 shrink-0 text-destructive opacity-0 group-hover:opacity-100" :title="t('redis.deleteGroup')" :disabled="selectionBusy" @click="requestGroupDelete(row.node, $event)">
                       <Trash2 class="h-3 w-3" />
                     </Button>
+                    <Button
+                      v-else-if="row.node.kind === 'leaf'"
+                      variant="ghost"
+                      size="icon"
+                      class="h-5 w-5 shrink-0 text-destructive opacity-0 group-hover:opacity-100"
+                      :title="t('redis.deleteKey')"
+                      :aria-label="t('redis.deleteKey')"
+                      :disabled="selectionBusy"
+                      @click="requestKeyDelete(row.node, $event)"
+                    >
+                      <Trash2 class="h-3 w-3" />
+                    </Button>
                   </div>
                 </div>
               </CustomContextMenu>
@@ -2308,6 +2334,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
                           <span class="min-w-0 flex-1">
                             <span class="block truncate font-mono">{{ item.label }}</span>
                             <span v-if="item.summary" class="block truncate text-[11px] text-slate-400">{{ item.summary }}</span>
+                            <span v-if="item.apply && item.apply !== item.label" class="block truncate text-[11px] text-slate-500">{{ item.apply }}</span>
                           </span>
                           <span v-if="item.detail" class="shrink-0 text-slate-400">{{ item.detail }}</span>
                         </button>

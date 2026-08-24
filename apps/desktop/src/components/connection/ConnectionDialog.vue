@@ -15,11 +15,12 @@ import { HelpTooltip, Tooltip, TooltipContent, TooltipTrigger } from "@/componen
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Switch } from "@/components/ui/switch";
 import type { ConnectionConfig, ConnectionTestResult, DatabaseConnectionInfo, DatabaseType, HttpTunnelConfig, IdentifierCase, JdbcDriverInfo, JdbcLocalBundleInfo, JdbcMavenBundleInfo, ProxyTunnelConfig, SshConfigHostEntry, SshTunnelConfig, TransportLayerConfig } from "@/types/database";
+import { CONNECTION_PICKER_OPTIONS, CONNECTION_PROFILES, CONNECTION_PROFILE_ICONS, type ConnectionPickerOption, type ConnectionProfileCategory, type ConnectionProfileDefinition } from "@/types/generated/connectionProfiles";
 import type { InfluxDbExternalConfig, InfluxDbVersion } from "@/types/influxdb";
 import type { VictoriaMetricsExternalConfig } from "@/types/victoriametrics";
 import type { MqAdminConfig, MqAuth, MqSystemKind } from "@/types/mq";
 import type { MqttConnectionConfig } from "@/types/mqtt";
-import type { NacosAdminConfig, NacosAuthConfig, NacosImplementation, NacosMetricsMode, NacosNamespaceInfo, NacosRNacosConsoleAuth, NacosVersionMode } from "@/types/nacos";
+import type { NacosAdminConfig, NacosApiPlane, NacosAuthConfig, NacosImplementation, NacosMetricsMode, NacosNamespaceInfo, NacosRNacosConsoleAuth, NacosVersionMode } from "@/types/nacos";
 import { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } from "@/stores/connectionStore";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
 import { detachTunnelProfileLayer, tunnelProfileReferenceLayer, tunnelProfileSummary } from "@/lib/connection/tunnelProfiles";
@@ -60,7 +61,7 @@ import { connectionAttemptOriginalErrorMessage, connectionAttemptTimeoutMessage,
 import { consulAgentAddressesMatch } from "@/lib/consul/agentTarget";
 import { appendConnectionErrorHints, isJdbcMissingRuntimeDependencyError } from "@/lib/connection/connectionErrorHints";
 import { preventDialogDocumentSelectAll } from "@/lib/connection/dialogTextSelection";
-import { postgresTlsModeForForm } from "@/lib/connection/postgresTlsMode";
+import { postgresLegacyTlsEnabled, postgresTlsModeForForm, setPostgresLegacyTlsEnabled } from "@/lib/connection/postgresTlsMode";
 import { buildMqKafkaConnectionExtra, mqKafkaConnectionTarget, resolveMqKafkaConnectionSource, type MqKafkaConnectionSource } from "@/lib/connection/mqKafkaConnection";
 import { assertCompleteDatabaseCategories, databaseSelectionForCategory } from "@/lib/connection/databaseCategoryOptions";
 import { loadConnectionPickerView, saveConnectionPickerView, type DbPickerView } from "@/lib/connection/connectionPickerViewPreference";
@@ -104,6 +105,7 @@ import {
 import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, initialVisibleDatabaseSelection, visibleObjectFiltersNeedReset } from "@/lib/connection/connectionVisibleDatabases";
 import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, filterDatabaseNamesForVisiblePicker, filterSchemaNamesForVisiblePicker, normalizeVisibleDatabaseSelection, buildDraftVisibleSchemasConnectionId, normalizeVisibleSchemaSelection } from "@/lib/database/visibleDatabases";
 import { isSchemaAware, isSingleDatabase } from "@/lib/database/databaseFeatureSupport";
+import { databaseConnectionFormKind } from "@/lib/database/databaseDriverManifest";
 import VisibleSchemasDialog from "@/components/sidebar/VisibleSchemasDialog.vue";
 import CloudflareD1ConnectionFields from "@/components/connection/CloudflareD1ConnectionFields.vue";
 import SpannerConnectionFields from "@/components/connection/SpannerConnectionFields.vue";
@@ -161,8 +163,8 @@ import {
   jdbcProductProfileIdsForCategory,
 } from "@/lib/database/jdbcProductProfiles";
 
-type DbOption = { value: string; label: string };
-type DbCategoryKey = "sql" | "analytics" | "domestic" | "lightweight" | "document" | "graph_ai" | "timeseries" | "mq" | "registry_config";
+type DbOption = ConnectionPickerOption;
+type DbCategoryKey = ConnectionProfileCategory;
 type DbCategory = { key: DbCategoryKey; title: string; options: DbOption[] };
 type DialogStep = "select" | "config";
 export type ConfigTab = "connection" | "advanced" | "tls" | "transport";
@@ -298,6 +300,11 @@ const visibleNacosNamespaces = ref<NacosNamespaceInfo[]>([]);
 const visibleNacosNamespaceSelection = ref<Set<string>>(new Set());
 const visibleNacosNamespaceSearchText = ref("");
 const visibleNacosNamespaceError = ref("");
+const visibleNacosNamespaceListingPermissionDenied = ref(false);
+const isResolvingManualNacosNamespaces = ref(false);
+const visibleNacosNamespaceAccessMode = ref<"automatic" | "manual">("automatic");
+const nacosDynamicAllNamespaces = ref(false);
+const visibleNacosNamespaceDynamicAllSupported = ref(false);
 const showProductionDatabasesDialog = ref(false);
 const isLoadingProductionDatabases = ref(false);
 const productionDatabaseNames = ref<string[]>([]);
@@ -883,8 +890,9 @@ const nacosImplementation = ref<NacosImplementation>("nacos");
 // Nacos 2 and 3 expose different API planes. New connections must therefore
 // choose an explicit version instead of relying on endpoint-shape guessing.
 const nacosVersionMode = ref<NacosVersionMode>("v2");
+const nacosApiPlane = ref<NacosApiPlane>("admin");
 const nacosServerAddr = ref("");
-const nacosOrdinaryAccount = ref(false);
+const nacosContextPath = ref("");
 const nacosManagedNamespacesText = ref("");
 const nacosRNacosConsoleAddr = ref("");
 const nacosHistoryEnabled = ref(false);
@@ -898,6 +906,11 @@ const nacosTlsSkipVerify = ref(false);
 const nacosMetricsMode = ref<NacosMetricsMode>("auto");
 const nacosMetricsUrl = ref("");
 const nacosPageSize = ref(20);
+let nacosScopeFingerprintBaseline = "";
+
+function currentNacosScopeFingerprint(): string {
+  return JSON.stringify([nacosImplementation.value, nacosVersionMode.value, nacosApiPlane.value, nacosServerAddr.value.trim().replace(/\/+$/, ""), nacosContextPath.value.trim(), nacosAuthKind.value, nacosUsername.value.trim()]);
+}
 type ConsulConsistency = "default" | "stale" | "consistent";
 const consulServerAddr = ref("http://127.0.0.1:8500");
 const consulDatacenter = ref("");
@@ -935,15 +948,25 @@ const mqttConnectTimeoutSecs = ref(30);
 const mqttMaxPacketSizeBytes = ref(16 * 1024 * 1024);
 const mqttSavedTopics = ref<MqttConnectionConfig["savedTopics"]>([]);
 const nacosPrimaryAddressPlaceholder = computed(() => {
+  if (nacosImplementation.value === "nacos" && nacosVersionMode.value === "v3" && nacosApiPlane.value === "console") {
+    return "http://127.0.0.1:8080";
+  }
   return "http://127.0.0.1:8848/nacos";
+});
+const nacosServiceAddressHint = computed(() => {
+  if (nacosImplementation.value === "nacos" && nacosVersionMode.value === "v3" && nacosApiPlane.value === "console") {
+    return t("nacos.nacosConsoleServiceAddressHint");
+  }
+  return t("nacos.nacosServiceAddressHint");
 });
 const nacosV3AdminEndpointWarning = computed(() => {
   if (nacosImplementation.value !== "nacos" || nacosVersionMode.value !== "v3" || !nacosServerAddr.value.trim()) return "";
   try {
     const url = new URL(nacosServerAddr.value.trim());
-    if (url.port === "8080") {
+    if (nacosApiPlane.value === "admin" && url.port === "8080") {
       return t("nacos.nacosV3ConsolePortWarning");
     }
+    if (nacosApiPlane.value === "console" && url.port === "8848") return t("nacos.nacosV3AdminPortWarning");
   } catch {
     // The normal form validation will report an invalid URL on save.
   }
@@ -971,6 +994,7 @@ function selectNacosConnectionProfile(profile: NacosConnectionProfile) {
   }
   nacosImplementation.value = "nacos";
   nacosVersionMode.value = profile;
+  if (profile !== "v3") nacosApiPlane.value = "admin";
 }
 
 watch(nacosImplementation, (implementation) => {
@@ -1063,230 +1087,8 @@ function handleCustomColorInput(value: string) {
   applyCustomColor(value);
 }
 
-const driverProfiles: Record<
-  string,
-  {
-    type: DatabaseType;
-    port: number;
-    user: string;
-    label: string;
-    icon: string;
-    host?: string;
-    urlParams?: string;
-  }
-> = {
-  mysql: { type: "mysql", port: 3306, user: "root", label: "MySQL", icon: "mysql", urlParams: "" },
-  postgres: {
-    type: "postgres",
-    port: 5432,
-    user: "postgres",
-    label: "PostgreSQL",
-    icon: "postgres",
-    urlParams: "",
-  },
-  cloudberry: {
-    type: "postgres",
-    port: 5432,
-    user: "postgres",
-    label: "Apache Cloudberry",
-    icon: "cloudberry",
-    urlParams: "",
-  },
-  opentenbase: {
-    type: "postgres",
-    port: 11000,
-    user: "opentenbase",
-    label: "OpenTenBase",
-    icon: "opentenbase",
-    urlParams: "",
-  },
-  redis: { type: "redis", port: 6379, user: "", label: "Redis", icon: "redis" },
-  sqlite: { type: "sqlite", port: 0, user: "", label: "SQLite", icon: "sqlite" },
-  rqlite: { type: "rqlite", port: 4001, user: "", label: "RQLite", icon: "rqlite" },
-  turso: { type: "turso", port: 443, user: "", label: "Turso", icon: "turso" },
-  "cloudflare-d1": { type: "cloudflare-d1", port: 443, user: "", label: "Cloudflare D1", icon: "cloudflare-d1" },
-  duckdb: { type: "duckdb", port: 0, user: "", label: "DuckDB", icon: "duckdb" },
-  access: { type: "access", port: 0, user: "", label: "Microsoft Access", icon: "access" },
-  mongodb: { type: "mongodb", port: 27017, user: "", label: "MongoDB", icon: "mongodb" },
-  "mongodb-legacy": { type: "mongodb", port: 27017, user: "", label: "MongoDB (Legacy)", icon: "mongodb" },
-  dynamodb: {
-    type: "dynamodb",
-    port: 443,
-    user: "",
-    label: "Amazon DynamoDB",
-    icon: "dynamodb",
-    host: "dynamodb.us-east-1.amazonaws.com",
-  },
-  clickhouse: {
-    type: "clickhouse",
-    port: 8123,
-    user: "default",
-    label: "ClickHouse",
-    icon: "clickhouse",
-  },
-  sqlserver: { type: "sqlserver", port: 1433, user: "sa", label: "SQL Server", icon: "sqlserver" },
-  oracle: { type: "oracle", port: 1521, user: "system", label: "Oracle", icon: "oracle" },
-  elasticsearch: {
-    type: "elasticsearch",
-    port: 9200,
-    user: "",
-    label: "Elasticsearch",
-    icon: "elasticsearch",
-  },
-  easysearch: {
-    type: "easysearch",
-    port: 9200,
-    user: "",
-    label: "Easysearch",
-    icon: "easysearch",
-  },
-  meilisearch: {
-    type: "meilisearch",
-    port: 7700,
-    user: "",
-    label: "Meilisearch",
-    icon: "meilisearch",
-  },
-  hbase: { type: "hbase", port: 8080, user: "", label: "Apache HBase", icon: "hbase" },
-  qdrant: { type: "qdrant", port: 6333, user: "", label: "Qdrant", icon: "qdrant" },
-  milvus: { type: "milvus", port: 19530, user: "root", label: "Milvus", icon: "milvus" },
-  weaviate: { type: "weaviate", port: 8080, user: "", label: "Weaviate", icon: "weaviate" },
-  chromadb: { type: "chromadb", port: 8000, user: "", label: "ChromaDB", icon: "chromadb" },
-  mariadb: { type: "mysql", port: 3306, user: "root", label: "MariaDB", icon: "mariadb" },
-  tidb: { type: "mysql", port: 4000, user: "root", label: "TiDB", icon: "tidb" },
-  oceanbase: { type: "mysql", port: 2883, user: "root", label: "OceanBase", icon: "oceanbase" },
-  "oceanbase-oracle": {
-    type: "oceanbase-oracle",
-    port: 2883,
-    user: "SYS",
-    label: "OceanBase Oracle Mode",
-    icon: "oceanbase",
-  },
-  goldendb: { type: "goldendb", port: 3306, user: "root", label: "金篆 GoldenDB", icon: "goldendb" },
-  databend: { type: "databend", port: 8000, user: "databend", label: "Databend", icon: "databend" },
-  tdsql: { type: "mysql", port: 3306, user: "root", label: "TDSQL", icon: "tdsql" },
-  polardb: { type: "mysql", port: 3306, user: "root", label: "PolarDB", icon: "polardb" },
-  greatsql: { type: "mysql", port: 3306, user: "root", label: "GreatSQL", icon: "greatsql" },
-  databricks: { type: "databricks", port: 443, user: "token", label: "Databricks SQL", icon: "databricks" },
-  saphana: { type: "saphana", port: 30015, user: "SYSTEM", label: "SAP HANA", icon: "saphana" },
-  teradata: { type: "teradata", port: 1025, user: "", label: "Teradata", icon: "teradata" },
-  vertica: { type: "vertica", port: 5433, user: "dbadmin", label: "Vertica", icon: "vertica" },
-  firebird: { type: "firebird", port: 3050, user: "SYSDBA", label: "Firebird", icon: "firebird" },
-  exasol: { type: "exasol", port: 8563, user: "sys", label: "Exasol", icon: "exasol" },
-  gbase: { type: "gbase", port: 5258, user: "gbasedbt", label: "南大通用 GBase 8a", icon: "gbase" },
-  gbase8a: { type: "gbase", port: 5258, user: "gbasedbt", label: "南大通用 GBase 8a", icon: "gbase" },
-  gbase8s: { type: "gbase", port: 9088, user: "gbasedbt", label: "南大通用 GBase 8s", icon: "gbase" },
-  opengauss: {
-    type: "opengauss",
-    port: 5432,
-    user: "gaussdb",
-    label: "openGauss",
-    icon: "opengauss",
-  },
-  gaussdb: { type: "gaussdb", port: 5432, user: "gaussdb", label: "GaussDB", icon: "gaussdb" },
-  kwdb: { type: "kwdb", port: 26257, user: "root", label: "KWDB", icon: "kwdb" },
-  questdb: { type: "questdb", port: 8812, user: "questdb", label: "QuestDB", icon: "questdb" },
-  kingbase: { type: "kingbase", port: 54321, user: "system", label: "金仓KingbaseES", icon: "kingbase" },
-  highgo: { type: "highgo", port: 5866, user: "highgo", label: "瀚高 HighGo", icon: "highgo" },
-  uxdb: { type: "uxdb", port: 52025, user: "uxdb", label: "优炫 UXDB", icon: "uxdb" },
-  yashandb: { type: "yashandb", port: 1688, user: "sys", label: "崖山 YashanDB", icon: "yashandb" },
-  vastbase: { type: "vastbase", port: 5432, user: "vastbase", label: "海量 Vastbase", icon: "vastbase" },
-  doris: { type: "mysql", port: 9030, user: "root", label: "Doris", icon: "doris", urlParams: "" },
-  selectdb: {
-    type: "mysql",
-    port: 9030,
-    user: "root",
-    label: "SelectDB",
-    icon: "selectdb",
-    urlParams: "",
-  },
-  starrocks: {
-    type: "mysql",
-    port: 9030,
-    user: "root",
-    label: "StarRocks",
-    icon: "starrocks",
-    urlParams: "",
-  },
-  manticoresearch: {
-    type: "manticoresearch",
-    port: 9306,
-    user: "root",
-    label: "Manticore Search",
-    icon: "manticoresearch",
-    urlParams: "",
-  },
-  redshift: { type: "redshift", port: 5439, user: "awsuser", label: "Redshift", icon: "redshift" },
-  cockroachdb: {
-    type: "postgres",
-    port: 26257,
-    user: "root",
-    label: "CockroachDB",
-    icon: "cockroachdb",
-  },
-  dm: { type: "dameng", port: 5236, user: "SYSDBA", label: "达梦 Dameng", icon: "dm" },
-  h2: { type: "h2", port: 9092, user: "sa", label: "H2", icon: "h2" },
-  "h2-legacy": { type: "h2", port: 9092, user: "sa", label: "H2 2.1 Legacy", icon: "h2" },
-  snowflake: { type: "snowflake", port: 443, user: "", label: "Snowflake", icon: "snowflake" },
-  trino: { type: "trino", port: 8080, user: "", label: "Trino", icon: "trino" },
-  prestosql: { type: "prestosql", port: 8080, user: "", label: "PrestoSQL", icon: "presto" },
-  hive: { type: "hive", port: 10000, user: "", label: "Apache Hive", icon: "hive" },
-  kyuubi: { type: "kyuubi", port: 10009, user: "", label: "Apache Kyuubi", icon: "kyuubi", urlParams: "auth=NONE" },
-  impala: { type: "impala", port: 21050, user: "", label: "Apache Impala", icon: "impala", urlParams: "auth=noSasl" },
-  spark: { type: "spark", port: 10015, user: "", label: "Apache Spark", icon: "spark" },
-  db2: { type: "db2", port: 50000, user: "db2inst1", label: "IBM DB2", icon: "db2" },
-  informix: { type: "informix", port: 9088, user: "informix", label: "Informix", icon: "informix" },
-  dremio: { type: "jdbc", port: 31010, user: "", label: "Dremio", icon: "dremio" },
-  jdbcx: { type: "jdbc", port: 0, user: "", label: "JDBCX", icon: "jdbcx" },
-  neo4j: { type: "neo4j", port: 7687, user: "neo4j", label: "Neo4j", icon: "neo4j" },
-  cassandra: { type: "cassandra", port: 9042, user: "cassandra", label: "Cassandra", icon: "cassandra" },
-  bigquery: {
-    type: "bigquery",
-    port: 443,
-    user: "",
-    label: "BigQuery",
-    icon: "bigquery",
-    host: "https://www.googleapis.com/bigquery/v2",
-  },
-  spanner: { type: "spanner", port: 443, user: "", label: "Cloud Spanner", icon: "spanner" },
-  kylin: { type: "kylin", port: 7070, user: "ADMIN", label: "Apache Kylin", icon: "kylin" },
-  ignite: { type: "ignite", port: 10800, user: "", label: "Apache Ignite", icon: "ignite" },
-  ignite3: { type: "ignite3", port: 10800, user: "", label: "Apache Ignite 3", icon: "ignite" },
-  sundb: { type: "sundb", port: 22000, user: "root", label: "科蓝 SUNDB", icon: "sundb" },
-  oscar: { type: "oscar", port: 2003, user: "SYSDBA", label: "神通 OSCAR", icon: "oscar" },
-  jdbc: { type: "jdbc", port: 0, user: "", label: "JDBC", icon: "jdbc" },
-  tdengine: { type: "tdengine", port: 6041, user: "root", label: "TDengine", icon: "tdengine" },
-  xugu: { type: "xugu", port: 5138, user: "", label: "虚谷 XuguDB", icon: "xugu" },
-  iotdb: { type: "iotdb", port: 6667, user: "root", label: "Apache IoTDB", icon: "iotdb" },
-  etcd: { type: "etcd", port: 2379, user: "", label: "etcd", icon: "etcd" },
-  zookeeper: { type: "zookeeper", port: 2181, user: "", label: "Apache ZooKeeper", icon: "zookeeper" },
-  mq: { type: "mq", port: 8080, user: "", label: "Apache Pulsar", icon: "pulsar", host: "127.0.0.1" },
-  kafka: { type: "mq", port: 9092, user: "", label: "Apache Kafka", icon: "kafka", host: "127.0.0.1" },
-  rocketmq: { type: "mq", port: 9876, user: "", label: "Apache RocketMQ", icon: "rocketmq", host: "127.0.0.1" },
-  rabbitmq: { type: "mq", port: 5672, user: "", label: "RabbitMQ", icon: "rabbitmq", host: "127.0.0.1" },
-  nacos: { type: "nacos", port: 8848, user: "nacos", label: "Nacos", icon: "nacos", host: "127.0.0.1" },
-  consul: { type: "consul", port: 8500, user: "", label: "Consul", icon: "consul", host: "127.0.0.1" },
-  mqtt: { type: "mqtt", port: 1883, user: "", label: "MQTT", icon: "mqtt", host: "127.0.0.1" },
-  iris: { type: "iris", port: 1972, user: "_SYSTEM", label: "IRIS", icon: "iris" },
-  influxdb: { type: "influxdb", port: 8086, user: "", label: "InfluxDB", icon: "InfluxDB" },
-  victoriametrics: { type: "victoriametrics", port: 8428, user: "", label: "VictoriaMetrics", icon: "victoriametrics" },
-  custom_mysql: {
-    type: "mysql",
-    port: 3306,
-    user: "root",
-    label: "Custom",
-    icon: "mysql",
-    urlParams: "",
-  },
-  dolt: { type: "mysql", port: 3306, user: "root", label: "Dolt", icon: "dolt", urlParams: "" },
-  custom_postgres: {
-    type: "postgres",
-    port: 5432,
-    user: "postgres",
-    label: "Custom",
-    icon: "postgres",
-    urlParams: "",
-  },
+const driverProfiles: Record<string, ConnectionProfileDefinition> = {
+  ...CONNECTION_PROFILES,
   ...jdbcProductDriverProfiles(),
 };
 
@@ -1309,7 +1111,8 @@ function profileForConfig(config: ConnectionConfig) {
 }
 
 function selectedProfile() {
-  return driverProfiles[selectedType.value] ?? driverProfiles.mysql;
+  const profile = selectedType.value === "gbase" && (form.value.driver_profile === "gbase8a" || form.value.driver_profile === "gbase8s") ? form.value.driver_profile : selectedType.value;
+  return driverProfiles[profile] ?? driverProfiles.mysql;
 }
 
 function mqExtraRecord(config?: Partial<MqAdminConfig>): Record<string, unknown> {
@@ -1459,11 +1262,13 @@ function resetNacosFields(config?: Partial<NacosAdminConfig>) {
   // Saved `auto` profiles are legacy records. The form always saves an
   // explicit selection and no longer relies on a separate Console address.
   nacosVersionMode.value = config?.versionMode === "v3" ? "v3" : "v2";
+  nacosApiPlane.value = config?.versionMode === "v3" ? config?.apiPlane || "admin" : "admin";
   const serverAddr = config?.serverAddr?.trim() || "";
   const contextPath = config?.contextPath?.trim() || "";
-  nacosServerAddr.value = serverAddr && contextPath && contextPath !== "/" && !serverAddr.endsWith(contextPath) ? `${serverAddr.replace(/\/+$/, "")}/${contextPath.replace(/^\/+/, "")}` : serverAddr;
-  nacosOrdinaryAccount.value = !!config?.managedNamespaces?.length;
+  nacosServerAddr.value = serverAddr;
+  nacosContextPath.value = contextPath;
   nacosManagedNamespacesText.value = (config?.managedNamespaces || []).join("\n");
+  nacosDynamicAllNamespaces.value = !!config && !config.managedNamespaces?.length && !Array.isArray(form.value.visible_databases);
   nacosRNacosConsoleAddr.value = config?.rnacosConsoleAddr?.trim() || "";
   nacosHistoryEnabled.value = config?.rnacosHistoryEnabled ?? !!config?.rnacosConsoleAddr;
   const consoleAuth = config?.rnacosConsoleAuth || { kind: "inherit" };
@@ -1478,6 +1283,7 @@ function resetNacosFields(config?: Partial<NacosAdminConfig>) {
   nacosAuthKind.value = auth.kind || "none";
   nacosUsername.value = auth.username || "nacos";
   nacosPassword.value = auth.password || "";
+  nacosScopeFingerprintBaseline = currentNacosScopeFingerprint();
 }
 
 function hydrateNacosFields(value: unknown) {
@@ -1805,7 +1611,8 @@ function buildNacosAdminConfig(): NacosAdminConfig {
   const normalized = normalizeNacosEndpoint(primaryAddress, {
     implementation: nacosImplementation.value,
     versionMode: nacosVersionMode.value,
-    contextPath: undefined,
+    apiPlane: nacosApiPlane.value,
+    contextPath: nacosContextPath.value,
   });
   if (nacosImplementation.value === "rnacos" && normalized.warnings.length) {
     throw new Error(t("connection.nacosRNacosOpenApiRequired"));
@@ -1815,11 +1622,7 @@ function buildNacosAdminConfig(): NacosAdminConfig {
     throw new Error(t("connection.nacosRNacosConsoleUrlRequired"));
   }
   let rnacosConsoleAuth: NacosRNacosConsoleAuth | undefined;
-  const usesManagedNamespaces = nacosImplementation.value === "nacos" && nacosAuthKind.value === "usernamePassword" && nacosOrdinaryAccount.value;
-  const managedNamespaces = usesManagedNamespaces ? parseNacosManagedNamespaces(nacosManagedNamespacesText.value) : [];
-  if (usesManagedNamespaces && managedNamespaces.length === 0) {
-    throw new Error(t("nacos.nacosOrdinaryNamespacesRequired"));
-  }
+  const managedNamespaces = nacosImplementation.value === "nacos" && nacosAuthKind.value === "usernamePassword" ? parseNacosManagedNamespaces(nacosManagedNamespacesText.value) : [];
   let metricsUrl: string | undefined;
   if (nacosMetricsMode.value === "custom") {
     try {
@@ -1843,6 +1646,7 @@ function buildNacosAdminConfig(): NacosAdminConfig {
   return {
     implementation: nacosImplementation.value,
     versionMode: nacosImplementation.value === "nacos" ? nacosVersionMode.value : undefined,
+    apiPlane: nacosImplementation.value === "nacos" && nacosVersionMode.value === "v3" ? nacosApiPlane.value : undefined,
     serverAddr: normalized.serverAddr,
     contextPath: normalized.contextPath || undefined,
     managedNamespaces: managedNamespaces.length ? managedNamespaces : undefined,
@@ -2457,6 +2261,13 @@ function isCustomCompatibleProfile() {
   return selectedType.value === "custom_mysql" || selectedType.value === "custom_postgres";
 }
 
+function connectionUrlPreferredProfile() {
+  if (selectedType.value === "oceanbase" && form.value.driver_profile === "oceanbase-oracle") {
+    return "oceanbase-oracle";
+  }
+  return selectedType.value;
+}
+
 function applyProfile(val: string, preserveConnectionFields = false) {
   const profile = driverProfiles[val];
   if (!profile) return;
@@ -2940,258 +2751,34 @@ function isH2FileJdbcUrlLikePath(value: string): boolean {
 }
 
 const iconTypeMap: Record<string, string> = {
-  mysql: "mysql",
-  postgres: "postgres",
-  cloudberry: "cloudberry",
-  opentenbase: "opentenbase",
-  sqlite: "sqlite",
-  rqlite: "rqlite",
-  turso: "turso",
-  "cloudflare-d1": "cloudflare-d1",
-  access: "access",
-  redis: "redis",
-  mongodb: "mongodb",
-  dynamodb: "dynamodb",
-  duckdb: "duckdb",
-  clickhouse: "clickhouse",
-  sqlserver: "sqlserver",
-  oracle: "oracle",
-  elasticsearch: "elasticsearch",
-  easysearch: "easysearch",
-  meilisearch: "meilisearch",
-  hbase: "hbase",
-  qdrant: "qdrant",
-  milvus: "milvus",
-  weaviate: "weaviate",
-  chromadb: "chromadb",
-  mariadb: "mariadb",
-  tidb: "tidb",
-  oceanbase: "oceanbase",
-  "oceanbase-oracle": "oceanbase",
-  goldendb: "goldendb",
-  databend: "databend",
-  tdsql: "tdsql",
-  polardb: "polardb",
-  greatsql: "greatsql",
-  databricks: "databricks",
-  saphana: "saphana",
-  teradata: "teradata",
-  vertica: "vertica",
-  firebird: "firebird",
-  exasol: "exasol",
-  gbase: "gbase",
-  opengauss: "opengauss",
-  gaussdb: "gaussdb",
-  kwdb: "kwdb",
-  questdb: "questdb",
-  kingbase: "kingbase",
-  highgo: "highgo",
-  uxdb: "uxdb",
-  yashandb: "yashandb",
-  vastbase: "vastbase",
-  doris: "doris",
-  selectdb: "selectdb",
-  starrocks: "starrocks",
-  manticoresearch: "manticoresearch",
-  redshift: "redshift",
-  cockroachdb: "cockroachdb",
-  tdengine: "tdengine",
-  xugu: "xugu",
-  iotdb: "iotdb",
-  etcd: "etcd",
-  zookeeper: "zookeeper",
-  mq: "mq",
-  kafka: "kafka",
-  rocketmq: "rocketmq",
-  rabbitmq: "rabbitmq",
-  nacos: "nacos",
-  consul: "consul",
-  mqtt: "mqtt",
-  dm: "dm",
-  h2: "h2",
-  snowflake: "snowflake",
-  trino: "trino",
-  prestosql: "prestosql",
-  hive: "hive",
-  kyuubi: "kyuubi",
-  impala: "impala",
-  spark: "spark",
-  db2: "db2",
-  informix: "informix",
-  dremio: "dremio",
-  jdbcx: "jdbcx",
-  iris: "iris",
-  neo4j: "neo4j",
-  cassandra: "cassandra",
-  bigquery: "bigquery",
-  spanner: "spanner",
-  kylin: "kylin",
-  ignite: "ignite",
-  ignite3: "ignite",
-  sundb: "sundb",
-  oscar: "oscar",
-  influxdb: "influxdb",
-  victoriametrics: "victoriametrics",
-  jdbc: "jdbc",
-  custom_mysql: "mysql",
-  dolt: "dolt",
-  custom_postgres: "postgres",
+  ...CONNECTION_PROFILE_ICONS,
   ...jdbcProductIconTypes(),
 };
 
-const dbOptions: DbOption[] = [
-  { value: "postgres", label: "PostgreSQL" },
-  { value: "cloudberry", label: "Apache Cloudberry" },
-  { value: "opentenbase", label: "OpenTenBase" },
-  { value: "mysql", label: "MySQL" },
-  { value: "mongodb", label: "MongoDB" },
-  { value: "dynamodb", label: "Amazon DynamoDB" },
-  { value: "redis", label: "Redis" },
-  { value: "oracle", label: "Oracle" },
-  { value: "sqlite", label: "SQLite" },
-  { value: "sqlserver", label: "SQL Server" },
-  { value: "elasticsearch", label: "Elasticsearch" },
-  { value: "easysearch", label: "Easysearch" },
-  { value: "meilisearch", label: "Meilisearch" },
-  { value: "hbase", label: "Apache HBase" },
-  { value: "qdrant", label: "Qdrant" },
-  { value: "milvus", label: "Milvus" },
-  { value: "weaviate", label: "Weaviate" },
-  { value: "chromadb", label: "ChromaDB" },
-  { value: "dm", label: "达梦 Dameng" },
-  { value: "opengauss", label: "openGauss" },
-  { value: "turso", label: "Turso" },
-  { value: "cloudflare-d1", label: "Cloudflare D1" },
-  { value: "duckdb", label: "DuckDB" },
-  { value: "rqlite", label: "RQLite" },
-  { value: "access", label: "Microsoft Access" },
-  { value: "mariadb", label: "MariaDB" },
-  { value: "clickhouse", label: "ClickHouse" },
-  { value: "gaussdb", label: "GaussDB" },
-  { value: "kwdb", label: "KWDB" },
-  { value: "questdb", label: "QuestDB" },
-  { value: "tidb", label: "TiDB" },
-  { value: "oceanbase", label: "OceanBase" },
-  { value: "goldendb", label: "金篆 GoldenDB" },
-  { value: "databend", label: "Databend" },
-  { value: "tdsql", label: "TDSQL" },
-  { value: "polardb", label: "PolarDB" },
-  { value: "greatsql", label: "GreatSQL" },
-  { value: "doris", label: "Doris" },
-  { value: "selectdb", label: "SelectDB" },
-  { value: "starrocks", label: "StarRocks" },
-  { value: "tdengine", label: "TDengine" },
-  { value: "databricks", label: "Databricks SQL" },
-  { value: "saphana", label: "SAP HANA" },
-  { value: "teradata", label: "Teradata" },
-  { value: "vertica", label: "Vertica" },
-  { value: "firebird", label: "Firebird" },
-  { value: "exasol", label: "Exasol" },
-  { value: "gbase", label: "南大通用 GBase" },
-  { value: "kingbase", label: "金仓KingbaseES" },
-  { value: "highgo", label: "瀚高 HighGo" },
-  { value: "uxdb", label: "优炫 UXDB" },
-  { value: "yashandb", label: "崖山 YashanDB" },
-  { value: "vastbase", label: "海量 Vastbase" },
-  { value: "redshift", label: "Redshift" },
-  { value: "cockroachdb", label: "CockroachDB" },
-  { value: "h2", label: "H2" },
-  { value: "snowflake", label: "Snowflake" },
-  { value: "trino", label: "Trino" },
-  { value: "prestosql", label: "PrestoSQL" },
-  { value: "hive", label: "Hive" },
-  { value: "kyuubi", label: "Apache Kyuubi" },
-  { value: "impala", label: "Apache Impala" },
-  { value: "spark", label: "Apache Spark" },
-  { value: "db2", label: "DB2" },
-  { value: "informix", label: "Informix" },
-  { value: "neo4j", label: "Neo4j" },
-  { value: "cassandra", label: "Cassandra" },
-  { value: "bigquery", label: "BigQuery" },
-  { value: "spanner", label: "Cloud Spanner" },
-  { value: "kylin", label: "Kylin" },
-  { value: "ignite", label: "Apache Ignite" },
-  { value: "ignite3", label: "Apache Ignite 3" },
-  { value: "sundb", label: "科蓝 SUNDB" },
-  { value: "oscar", label: "神通 OSCAR" },
-  { value: "xugu", label: "虚谷 XuguDB" },
-  { value: "iotdb", label: "Apache IoTDB" },
-  { value: "etcd", label: "etcd" },
-  { value: "zookeeper", label: "Apache ZooKeeper" },
-  { value: "mq", label: "Apache Pulsar" },
-  { value: "kafka", label: "Apache Kafka" },
-  { value: "rocketmq", label: "Apache RocketMQ" },
-  { value: "rabbitmq", label: "RabbitMQ" },
-  { value: "mqtt", label: "MQTT" },
-  { value: "nacos", label: "Nacos" },
-  { value: "consul", label: "Consul" },
-  { value: "influxdb", label: "InfluxDB" },
-  { value: "victoriametrics", label: "VictoriaMetrics" },
-  { value: "iris", label: "IRIS" },
-  { value: "jdbcx", label: "JDBCX" },
-  { value: "manticoresearch", label: "Manticore Search" },
-  { value: "custom_mysql", label: "Custom (MySQL)" },
-  { value: "dolt", label: "Dolt" },
-  { value: "custom_postgres", label: "Custom (PostgreSQL)" },
-  { value: "dremio", label: "Dremio" },
-  ...jdbcProductPickerOptions(),
+const dbCategoryMetadata: Array<{ key: DbCategoryKey; titleKey: string }> = [
+  { key: "sql", titleKey: "connection.databaseCategorySql" },
+  { key: "analytics", titleKey: "connection.databaseCategoryAnalytics" },
+  { key: "domestic", titleKey: "connection.databaseCategoryDomestic" },
+  { key: "lightweight", titleKey: "connection.databaseCategoryLightweight" },
+  { key: "document", titleKey: "connection.databaseCategoryDocument" },
+  { key: "graph_ai", titleKey: "connection.databaseCategoryGraphAi" },
+  { key: "timeseries", titleKey: "connection.databaseCategoryTimeseries" },
+  { key: "mq", titleKey: "connection.databaseCategoryMq" },
+  { key: "registry_config", titleKey: "connection.databaseCategoryRegistryConfig" },
 ];
 
-const dbCategoryDefinitions: Array<{
-  key: DbCategoryKey;
-  titleKey: string;
-  optionValues: string[];
-}> = [
-  {
-    key: "sql",
-    titleKey: "connection.databaseCategorySql",
-    optionValues: ["postgres", "mysql", "oracle", "sqlserver", "mariadb", "cockroachdb", "db2", "informix", "firebird", "iris", "spanner", "jdbcx", "custom_mysql", "custom_postgres", "dolt"],
-  },
-  {
-    key: "analytics",
-    titleKey: "connection.databaseCategoryAnalytics",
-    optionValues: ["cloudberry", "clickhouse", "doris", "starrocks", "databend", "selectdb", "databricks", "saphana", "teradata", "vertica", "exasol", "redshift", "snowflake", "trino", "prestosql", "hive", "kyuubi", "impala", "spark", "bigquery", "kylin", "ignite", "ignite3", "dremio"],
-  },
-  {
-    key: "domestic",
-    titleKey: "connection.databaseCategoryDomestic",
-    optionValues: ["dm", "opengauss", "opentenbase", "gaussdb", "kwdb", "tidb", "oceanbase", "goldendb", "tdsql", "polardb", "greatsql", "gbase", "kingbase", "highgo", "uxdb", "yashandb", "vastbase", "sundb", "oscar", "xugu"],
-  },
-  {
-    key: "lightweight",
-    titleKey: "connection.databaseCategoryLightweight",
-    optionValues: ["sqlite", "turso", "cloudflare-d1", "duckdb", "rqlite", "access", "h2"],
-  },
-  {
-    key: "document",
-    titleKey: "connection.databaseCategoryDocument",
-    optionValues: ["mongodb", "dynamodb", "redis", "elasticsearch", "easysearch", "meilisearch", "hbase", "manticoresearch", "cassandra"],
-  },
-  {
-    key: "graph_ai",
-    titleKey: "connection.databaseCategoryGraphAi",
-    optionValues: ["neo4j", "qdrant", "milvus", "weaviate", "chromadb"],
-  },
-  {
-    key: "timeseries",
-    titleKey: "connection.databaseCategoryTimeseries",
-    optionValues: ["questdb", "tdengine", "iotdb", "influxdb", "victoriametrics"],
-  },
-  {
-    key: "mq",
-    titleKey: "connection.databaseCategoryMq",
-    optionValues: ["mq", "kafka", "rocketmq", "rabbitmq", "mqtt"],
-  },
-  {
-    key: "registry_config",
-    titleKey: "connection.databaseCategoryRegistryConfig",
-    optionValues: ["etcd", "zookeeper", "nacos", "consul"],
-  },
-];
-
-for (const category of dbCategoryDefinitions) {
-  category.optionValues.push(...jdbcProductProfileIdsForCategory(category.key));
+function jdbcProductCategory(profileId: string): DbCategoryKey {
+  const category = dbCategoryMetadata.find(({ key }) => jdbcProductProfileIdsForCategory(key).includes(profileId))?.key;
+  if (!category) throw new Error(`JDBC product profile ${profileId} has no connection picker category`);
+  return category;
 }
+
+const dbOptions: DbOption[] = [...CONNECTION_PICKER_OPTIONS, ...jdbcProductPickerOptions().map((option) => ({ ...option, category: jdbcProductCategory(option.value) }))];
+
+const dbCategoryDefinitions = dbCategoryMetadata.map((category) => ({
+  ...category,
+  optionValues: dbOptions.filter((option) => option.category === category.key).map((option) => option.value),
+}));
 
 // Keep the picker exhaustive as database drivers are added or reorganized.
 assertCompleteDatabaseCategories(
@@ -3267,7 +2854,8 @@ function supportsNativeAgentJdbcDriverConfigType(dbType: DatabaseType): boolean 
 }
 
 const jdbcBackedDatabaseTypes = new Set<DatabaseType>(["jdbc", "prestosql", "bigquery"]);
-const isJdbcConnection = computed(() => form.value.db_type === "jdbc");
+const connectionFormKind = computed(() => databaseConnectionFormKind(form.value.db_type));
+const isJdbcConnection = computed(() => connectionFormKind.value === "jdbc");
 const isJdbcxConnection = computed(() => isJdbcConnection.value && form.value.driver_profile === JDBCX_DRIVER_PROFILE);
 const isJdbcProductConnection = computed(() => Boolean(activeJdbcProductProfile.value));
 const jdbcxHighPrivilegeExtensionsAllowed = computed({
@@ -3401,6 +2989,12 @@ const postgresTlsMode = computed({
     form.value.url_params = setUrlParam(form.value.url_params, "sslmode", value);
   },
 });
+const postgresLegacyTls = computed({
+  get: () => postgresLegacyTlsEnabled(form.value.url_params),
+  set: (value: boolean) => {
+    form.value.url_params = setPostgresLegacyTlsEnabled(form.value.url_params, value);
+  },
+});
 const postgresRootCertPath = computed({
   get: () => getUrlParam(form.value.url_params, "sslrootcert"),
   set: (value: string) => {
@@ -3461,6 +3055,24 @@ const shouldShowAgentDriverInstallHint = computed(() => showAgentDriverInstallHi
 const h2DriverMissing = computed(() => form.value.db_type === "h2" && isH2FileMode.value && agentDrivers.value.find((d) => d.db_type === "h2")?.installed !== true);
 const agentDriverFocus = computed<DriverStoreFocus>(() => ({ target: "driver", driver: agentDriverInstallKey(form.value.db_type, form.value.driver_profile) }));
 const canChooseVisibleNacosNamespaces = computed(() => form.value.db_type === "nacos");
+const isNacosV3AdminPlane = computed(() => nacosImplementation.value === "nacos" && nacosVersionMode.value === "v3" && nacosApiPlane.value === "admin");
+const isNacosV3ConsolePlane = computed(() => nacosImplementation.value === "nacos" && nacosVersionMode.value === "v3" && nacosApiPlane.value === "console");
+const canDetectNacosNamespaceAccess = computed(() => form.value.db_type === "nacos" && nacosImplementation.value === "nacos" && nacosAuthKind.value === "usernamePassword");
+const nacosManualNamespaceLabelKey = computed(() => (isNacosV3AdminPlane.value ? "nacos.nacosManagedNamespaces" : "nacos.nacosManagedNamespacesNameOrId"));
+const nacosManualNamespacePlaceholderKey = computed(() => (isNacosV3AdminPlane.value ? "nacos.nacosManagedNamespacesIdPlaceholder" : "nacos.nacosManagedNamespacesPlaceholder"));
+const nacosManualNamespaceHintKey = computed(() => {
+  if (isNacosV3AdminPlane.value) return "nacos.nacosV3AdminManagedNamespacesHint";
+  if (isNacosV3ConsolePlane.value) return "nacos.nacosV3ConsoleManagedNamespacesHint";
+  return "nacos.nacosManagedNamespacesHint";
+});
+const nacosNamespacePickerTitleKey = computed(() => (canDetectNacosNamespaceAccess.value ? "nacos.nacosDetectAccessibleNamespaces" : "nacos.nacosVisibleNamespacesTitle"));
+const nacosNamespacePickerDescriptionKey = computed(() => (canDetectNacosNamespaceAccess.value ? "nacos.nacosDetectAccessibleNamespacesHint" : "nacos.nacosVisibleNamespacesDescription"));
+function hasNacosNamespaceScopeForSave(): boolean {
+  if (!canDetectNacosNamespaceAccess.value) return true;
+  if (nacosDynamicAllNamespaces.value) return true;
+  if (parseNacosManagedNamespaces(nacosManagedNamespacesText.value).length > 0) return true;
+  return Array.isArray(form.value.visible_databases) && form.value.visible_databases.length > 0;
+}
 const canChooseVisibleDatabases = computed(() => !canChooseVisibleNacosNamespaces.value && connectionCanChooseVisibleDatabases(form.value));
 const visibleFilterUsesSchemas = computed(() => connectionUsesVisibleSchemaFilter(form.value));
 const hasVisibleDatabaseFilter = computed(() => Array.isArray(form.value.visible_databases));
@@ -3494,7 +3106,7 @@ const filteredVisibleNacosNamespaces = computed(() => {
   });
 });
 const visibleNacosNamespaceSelectedCount = computed(() => visibleNacosNamespaceSelection.value.size);
-const visibleNacosNamespaceCanSave = computed(() => visibleNacosNamespaceSelection.value.size > 0);
+const visibleNacosNamespaceCanSave = computed(() => (visibleNacosNamespaceAccessMode.value === "manual" ? parseNacosManagedNamespaces(nacosManagedNamespacesText.value).length > 0 : visibleNacosNamespaceSelection.value.size > 0));
 const filteredProductionDatabaseNames = computed(() => {
   const query = productionDatabaseSearchText.value.trim().toLowerCase();
   if (!query) return productionDatabaseNames.value;
@@ -3822,7 +3434,7 @@ function applyConnectionUrlToForm(input: string): boolean {
       return true;
     }
 
-    const parsed = parseConnectionUrl(input, selectedType.value);
+    const parsed = parseConnectionUrl(input, connectionUrlPreferredProfile());
     form.value = applyParsedConnectionUrl(form.value, parsed);
     if (form.value.db_type === "victoriametrics") {
       hydrateVictoriaMetricsFields(form.value.external_config);
@@ -3833,7 +3445,12 @@ function applyConnectionUrlToForm(input: string): boolean {
       resetMeilisearchHostInput();
     }
     oracleTnsAdminPath.value = parseOracleTnsConnectionString(parsed.connectionString)?.tnsAdmin || "";
-    selectedType.value = parsed.driverProfile;
+    if (parsed.driverProfile === "oceanbase-oracle") {
+      oceanbaseSubMode.value = "oracle";
+      selectedType.value = "oceanbase";
+    } else {
+      selectedType.value = parsed.driverProfile;
+    }
     customDriverName.value = isCustomCompatibleProfile() ? parsed.driverLabel : "";
     mongoUseUrl.value = !!parsed.useMongoUrl;
     if (form.value.db_type === "h2") {
@@ -3888,7 +3505,7 @@ function formValueForSubmit(): Omit<ConnectionConfig, "id"> {
       return applyConnectionDraftToConfig(form.value, { ...draft, oneTime: undefined });
     }
 
-    return applyParsedConnectionUrl(form.value, parseConnectionUrl(url, selectedType.value));
+    return applyParsedConnectionUrl(form.value, parseConnectionUrl(url, connectionUrlPreferredProfile()));
   }
 
   if (form.value.db_type === "meilisearch" && hasPendingMeilisearchHostInput()) {
@@ -4482,6 +4099,15 @@ function mysqlTlsModeFromParams(params: string | undefined, ssl: boolean | undef
       return "verify_identity";
   }
 
+  const jdbcUseSsl = getUrlParam(params, "useSSL").trim().toLowerCase();
+  const jdbcRequireSsl = getUrlParam(params, "requireSSL").trim().toLowerCase();
+  const jdbcVerifyServerCertificate = getUrlParam(params, "verifyServerCertificate").trim().toLowerCase();
+  const isTrue = (value: string) => ["true", "1", "yes", "on"].includes(value);
+  if (isTrue(jdbcVerifyServerCertificate) && (isTrue(jdbcUseSsl) || isTrue(jdbcRequireSsl))) return "verify_ca";
+  if (isTrue(jdbcRequireSsl)) return "required";
+  if (["false", "0", "no", "off"].includes(jdbcUseSsl)) return "disabled";
+  if (isTrue(jdbcUseSsl)) return "preferred";
+
   if (!ssl && getUrlParam(params, "require_ssl").toLowerCase() !== "true") return "disabled";
   if (getUrlParam(params, "verify_identity").toLowerCase() === "true") return "verify_identity";
   if (getUrlParam(params, "verify_ca").toLowerCase() === "true") return "verify_ca";
@@ -4489,7 +4115,7 @@ function mysqlTlsModeFromParams(params: string | undefined, ssl: boolean | undef
 }
 
 function applyMysqlTlsMode(params: string | undefined, mode: string): string {
-  let next = deleteUrlParams(params, ["ssl-mode", "sslmode", "require_ssl", "verify_ca", "verify_identity"]);
+  let next = deleteUrlParams(params, ["ssl-mode", "sslmode", "sslMode", "require_ssl", "verify_ca", "verify_identity", "useSSL", "requireSSL", "verifyServerCertificate"]);
   if (mode === "disabled") {
     return setUrlParam(next, "ssl-mode", "disabled");
   }
@@ -4632,6 +4258,10 @@ function resetVisibleNacosNamespaceDraftState() {
   visibleNacosNamespaceSelection.value = new Set();
   visibleNacosNamespaceSearchText.value = "";
   visibleNacosNamespaceError.value = "";
+  visibleNacosNamespaceListingPermissionDenied.value = false;
+  isResolvingManualNacosNamespaces.value = false;
+  visibleNacosNamespaceAccessMode.value = "automatic";
+  visibleNacosNamespaceDynamicAllSupported.value = false;
 }
 
 function resetProductionDatabaseDraftState() {
@@ -4715,24 +4345,99 @@ function normalizeVisibleNacosNamespaceSelection(selected: Iterable<string>, nam
   return normalizeNacosNamespaceSelection(selected, namespaces);
 }
 
+function normalizeManualNacosNamespaceNames(namespaces: string[], availableNamespaces: NacosNamespaceInfo[]): string[] {
+  const namespaceIds = new Map(availableNamespaces.map((namespace) => [nacosNamespaceIdentity(namespace.namespace), namespace.namespace]));
+  const namespaceNames = new Map<string, string[]>();
+  for (const namespace of availableNamespaces) {
+    const name = nacosNamespaceLabel(namespace).trim();
+    if (!name) continue;
+    namespaceNames.set(name, [...(namespaceNames.get(name) || []), namespace.namespace]);
+  }
+
+  const normalized: string[] = [];
+  const seen = new Set<string>();
+  for (const namespace of namespaces) {
+    const namespaceId = namespaceIds.get(nacosNamespaceIdentity(namespace));
+    const matchingNames = namespaceNames.get(namespace.trim()) || [];
+    // Display names are only safe to convert when the server returned one
+    // exact match. Keep unknown or ambiguous values intact so the regular
+    // permission check can report them instead of targeting a wrong namespace.
+    const value = namespaceId ?? (matchingNames.length === 1 ? matchingNames[0] : namespace);
+    const identity = nacosNamespaceIdentity(value);
+    if (!seen.has(identity)) {
+      seen.add(identity);
+      normalized.push(value);
+    }
+  }
+  return normalized;
+}
+
+async function resolveManualNacosNamespaceNames(namespaces: string[]): Promise<string[]> {
+  const draftId = buildDraftVisibleDatabasesConnectionId(uuid());
+  try {
+    const submittedConfig = connectionConfigForSubmit(draftId);
+    const draftConfig = {
+      ...submittedConfig,
+      // Resolve display names against the authenticated directory rather than
+      // passing them as namespace IDs to the configuration and naming APIs.
+      external_config: submittedConfig.db_type === "nacos" ? { ...(submittedConfig.external_config as NacosAdminConfig), managedNamespaces: undefined } : submittedConfig.external_config,
+      id: draftId,
+      one_time: true,
+    };
+    await api.connectDb(draftConfig);
+    return normalizeManualNacosNamespaceNames(namespaces, await loadReadableNacosNamespaces(draftId, api));
+  } catch {
+    // Some Nacos deployments do not expose a readable namespace directory to
+    // ordinary users. Preserve manually entered IDs for the normal test path.
+    return namespaces;
+  } finally {
+    await api.disconnectDb(draftId).catch(() => undefined);
+  }
+}
+
+function isNacosNamespaceListingPermissionError(error: unknown): boolean {
+  const message = errorMessage(error);
+  if (/NACOS_ERROR\[(?:v3ManagedNamespacesRequired|managedNamespacesRequired)\]/.test(message)) return true;
+  return /\/v3\/(?:admin|console)\/core\/namespace\/list/.test(message) && /\b403\b/.test(message) && /authorization failed/i.test(message);
+}
+
 async function openVisibleNacosNamespacesPicker() {
   if (!ensureConnectionHostResolvedFromUrl()) return;
   if (!canChooseVisibleNacosNamespaces.value || isLoadingVisibleNacosNamespaces.value) return;
 
   isLoadingVisibleNacosNamespaces.value = true;
   visibleNacosNamespaceError.value = "";
+  visibleNacosNamespaceListingPermissionDenied.value = false;
+  visibleNacosNamespaceDynamicAllSupported.value = false;
   visibleNacosNamespaceSearchText.value = "";
+  visibleNacosNamespaceAccessMode.value = "automatic";
   const draftId = buildDraftVisibleDatabasesConnectionId(uuid());
 
   try {
+    const submittedConfig = connectionConfigForSubmit(draftId);
     const draftConfig = {
-      ...connectionConfigForSubmit(draftId),
+      ...submittedConfig,
+      // Automatic detection must not inherit a previously saved manual scope.
+      // Otherwise it would only rediscover that old subset instead of checking
+      // what the currently configured account can really access.
+      external_config: canDetectNacosNamespaceAccess.value && submittedConfig.db_type === "nacos" ? { ...(submittedConfig.external_config as NacosAdminConfig), managedNamespaces: undefined } : submittedConfig.external_config,
+      visible_databases: undefined,
       id: draftId,
       one_time: true,
     };
     await api.connectDb(draftConfig);
     const namespaces = await loadReadableNacosNamespaces(draftId, api);
     visibleNacosNamespaces.value = [...namespaces].sort((left, right) => nacosNamespaceLabel(left).localeCompare(nacosNamespaceLabel(right)));
+    try {
+      const sidebarSnapshot = await api.nacosSidebarSnapshot(draftId);
+      const readableIds = normalizeVisibleNacosNamespaceSelection(visibleNacosNamespaces.value.map(nacosNamespaceValue), visibleNacosNamespaces.value);
+      const sidebarIds = normalizeVisibleNacosNamespaceSelection(sidebarSnapshot.namespaces.map(nacosNamespaceValue), visibleNacosNamespaces.value);
+      const readableSet = new Set(readableIds.map(nacosNamespaceIdentity));
+      const sidebarSet = new Set(sidebarIds.map(nacosNamespaceIdentity));
+      visibleNacosNamespaceDynamicAllSupported.value = readableSet.size === sidebarSet.size && [...readableSet].every((namespace) => sidebarSet.has(namespace));
+    } catch {
+      visibleNacosNamespaceDynamicAllSupported.value = false;
+    }
     const configured = form.value.visible_databases;
     const initialSelection = Array.isArray(configured) ? normalizeVisibleNacosNamespaceSelection(configured, visibleNacosNamespaces.value) : visibleNacosNamespaces.value.map(nacosNamespaceValue);
     visibleNacosNamespaceSelection.value = new Set(initialSelection);
@@ -4740,7 +4445,8 @@ async function openVisibleNacosNamespacesPicker() {
   } catch (e: any) {
     visibleNacosNamespaces.value = [];
     visibleNacosNamespaceSelection.value = new Set();
-    visibleNacosNamespaceError.value = errorMessage(e);
+    visibleNacosNamespaceListingPermissionDenied.value = isNacosNamespaceListingPermissionError(e);
+    visibleNacosNamespaceError.value = visibleNacosNamespaceListingPermissionDenied.value ? t("nacos.nacosManagedNamespacesRequired") : errorMessage(e);
     testResult.value = { ok: false, message: visibleNacosNamespaceError.value };
     showVisibleNacosNamespacesDialog.value = true;
   } finally {
@@ -4765,13 +4471,31 @@ function clearVisibleNacosNamespaceSelection() {
 }
 
 function showAllVisibleNacosNamespaces() {
+  nacosDynamicAllNamespaces.value = true;
+  nacosManagedNamespacesText.value = "";
   form.value.visible_databases = undefined;
   resetVisibleNacosNamespaceDraftState();
 }
 
-function saveVisibleNacosNamespaceSelection() {
+async function saveVisibleNacosNamespaceSelection() {
   if (!visibleNacosNamespaceCanSave.value) return;
-  form.value.visible_databases = normalizeVisibleNacosNamespaceSelection(visibleNacosNamespaceSelection.value, visibleNacosNamespaces.value);
+  if (visibleNacosNamespaceAccessMode.value === "manual") {
+    const manualNamespaces = parseNacosManagedNamespaces(nacosManagedNamespacesText.value);
+    isResolvingManualNacosNamespaces.value = true;
+    const resolvedNamespaces = isNacosV3AdminPlane.value ? manualNamespaces : await resolveManualNacosNamespaceNames(manualNamespaces);
+    isResolvingManualNacosNamespaces.value = false;
+    nacosManagedNamespacesText.value = resolvedNamespaces.join("\n");
+    form.value.visible_databases = resolvedNamespaces;
+    nacosDynamicAllNamespaces.value = false;
+  } else {
+    nacosManagedNamespacesText.value = "";
+    const selected = normalizeVisibleNacosNamespaceSelection(visibleNacosNamespaceSelection.value, visibleNacosNamespaces.value);
+    const all = normalizeVisibleNacosNamespaceSelection(visibleNacosNamespaces.value.map(nacosNamespaceValue), visibleNacosNamespaces.value);
+    const selectsEntireReadableList = selected.length === all.length && selected.every((namespace, index) => namespace === all[index]);
+    const useDynamicAll = selectsEntireReadableList && visibleNacosNamespaceDynamicAllSupported.value;
+    form.value.visible_databases = useDynamicAll ? undefined : selected;
+    nacosDynamicAllNamespaces.value = useDynamicAll;
+  }
   showVisibleNacosNamespacesDialog.value = false;
 }
 
@@ -5214,6 +4938,26 @@ watch(
   },
 );
 
+watch(
+  () => currentNacosScopeFingerprint(),
+  (current) => {
+    if (form.value.db_type !== "nacos") {
+      nacosScopeFingerprintBaseline = current;
+      return;
+    }
+    if (!nacosScopeFingerprintBaseline || current === nacosScopeFingerprintBaseline) {
+      nacosScopeFingerprintBaseline = current;
+      return;
+    }
+    nacosScopeFingerprintBaseline = current;
+    nacosManagedNamespacesText.value = "";
+    nacosDynamicAllNamespaces.value = false;
+    form.value.visible_databases = undefined;
+    resetVisibleNacosNamespaceDraftState();
+    resetTestState();
+  },
+);
+
 watch(visibleDatabaseShowSystem, (show) => {
   if (show) return;
   const connection = connectionConfigSnapshotForVisibleDatabases();
@@ -5404,6 +5148,11 @@ async function persistConnectionNoteVisibilityDraft() {
 async function save() {
   if (!ensureConnectionHostResolvedFromUrl()) return;
   if (isSaving.value) return;
+  if (!hasNacosNamespaceScopeForSave()) {
+    testResult.value = null;
+    await openVisibleNacosNamespacesPicker();
+    return;
+  }
   const databaseInfoForSave = visibleTestDatabaseInfo.value ?? visibleSavedDatabaseInfo.value;
   isSaving.value = true;
   let connectionSaved = false;
@@ -6619,11 +6368,28 @@ function openExternalUrl(url: string) {
 
                   <section data-nacos-endpoint-section class="rounded-lg border p-4">
                     <div class="grid gap-4">
+                      <div v-if="nacosImplementation === 'nacos' && nacosVersionMode === 'v3'" class="grid gap-1.5">
+                        <Label>{{ t("nacos.nacosApiPlane") }}</Label>
+                        <div class="grid grid-cols-2 gap-1 rounded-md border bg-muted/20 p-1">
+                          <button
+                            v-for="plane in ['admin', 'console'] as NacosApiPlane[]"
+                            :key="plane"
+                            type="button"
+                            class="min-w-0 rounded px-3 py-2 text-left transition-colors"
+                            :class="nacosApiPlane === plane ? 'bg-background shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                            :aria-pressed="nacosApiPlane === plane"
+                            @click="nacosApiPlane = plane"
+                          >
+                            <span class="block text-sm font-medium">{{ t(`nacos.nacosApiPlane${plane === "admin" ? "Admin" : "Console"}`) }}</span>
+                            <span class="mt-0.5 block text-xs leading-4">{{ t(`nacos.nacosApiPlane${plane === "admin" ? "Admin" : "Console"}Hint`) }}</span>
+                          </button>
+                        </div>
+                      </div>
                       <div class="grid gap-1.5">
                         <Label>{{ t("nacos.nacosServiceAddress") }}</Label>
                         <Input v-model="nacosServerAddr" :placeholder="nacosPrimaryAddressPlaceholder" />
                         <p class="text-xs leading-5 text-muted-foreground">
-                          <template>{{ t("nacos.nacosServiceAddressHint") }}</template>
+                          <template>{{ nacosServiceAddressHint }}</template>
                         </p>
                       </div>
                       <p v-if="nacosV3AdminEndpointWarning" class="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs leading-5 text-amber-700 dark:text-amber-400">
@@ -6655,29 +6421,12 @@ function openExternalUrl(url: string) {
                         <PasswordInput v-model="nacosPassword" />
                       </div>
                     </div>
-                    <div v-if="nacosImplementation === 'nacos' && nacosAuthKind === 'usernamePassword'" data-nacos-ordinary-user-toggle class="mt-4 border-t pt-4">
-                      <div class="flex items-start justify-between gap-4">
-                        <span class="min-w-0">
-                          <span class="block text-sm font-medium">{{ t("nacos.nacosOrdinaryAccount") }}</span>
-                          <span class="mt-0.5 block text-xs leading-5 text-muted-foreground">{{ t("nacos.nacosOrdinaryAccountHint") }}</span>
-                        </span>
-                        <Switch v-model="nacosOrdinaryAccount" class="mt-0.5 shrink-0" />
-                      </div>
-                      <div v-if="nacosOrdinaryAccount" class="mt-3 grid gap-1.5 pl-0 sm:pl-4">
-                        <div class="flex items-center justify-between gap-3">
-                          <Label>{{ t("nacos.nacosManagedNamespaces") }}</Label>
-                          <span class="text-[11px] text-muted-foreground">{{ t("nacos.nacosManagedNamespacesSeparator") }}</span>
-                        </div>
-                        <textarea
-                          v-model="nacosManagedNamespacesText"
-                          data-nacos-managed-namespaces
-                          rows="2"
-                          class="min-h-14 resize-y rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm outline-none placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring"
-                          :placeholder="t('nacos.nacosManagedNamespacesPlaceholder')"
-                        />
-                        <p class="text-[11px] leading-4 text-muted-foreground">{{ t("nacos.nacosManagedNamespacesHint") }}</p>
-                      </div>
-                    </div>
+                    <p v-if="isNacosV3AdminPlane && nacosAuthKind === 'usernamePassword'" class="mt-4 border-t pt-4 text-xs leading-5 text-muted-foreground">
+                      {{ t("nacos.nacosV3AdminNamespaceScopeHint") }}
+                    </p>
+                    <p v-else-if="nacosImplementation === 'rnacos' && nacosAuthKind === 'usernamePassword'" class="mt-4 border-t pt-4 text-xs leading-5 text-muted-foreground">
+                      {{ t("nacos.rnacosNamespaceAccessScopeHint") }}
+                    </p>
                   </section>
 
                   <section data-nacos-advanced-hint class="flex items-start gap-3 rounded-lg border border-dashed bg-muted/20 px-4 py-3">
@@ -8002,6 +7751,16 @@ function openExternalUrl(url: string) {
                     </Select>
                   </div>
 
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.postgresLegacyTls") }}</Label>
+                    <div class="col-span-3 flex items-center gap-2">
+                      <Switch v-model="postgresLegacyTls" :disabled="postgresTlsMode === 'disable'" />
+                      <HelpTooltip :label="t('connection.postgresLegacyTlsHint')">
+                        {{ t("connection.postgresLegacyTlsHint") }}
+                      </HelpTooltip>
+                    </div>
+                  </div>
+
                   <div class="grid grid-cols-4 items-start gap-4">
                     <Label :class="connectionLabelSmallPaddedClass">
                       <span class="inline-flex items-center justify-end gap-1">
@@ -8106,6 +7865,17 @@ function openExternalUrl(url: string) {
                     <p class="mt-0.5 text-xs leading-5 text-muted-foreground">{{ t("nacos.nacosAdvancedDescription") }}</p>
                   </div>
                   <div class="grid gap-5 p-4">
+                    <div class="grid gap-1.5">
+                      <div class="flex items-center justify-between gap-3">
+                        <Label>{{ t("connection.nacosContextPath") }}</Label>
+                        <Button v-if="nacosContextPath" type="button" variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="nacosContextPath = ''">
+                          {{ t("connection.nacosContextPathRestoreAuto") }}
+                        </Button>
+                      </div>
+                      <Input v-model="nacosContextPath" :placeholder="t('connection.nacosContextPathPlaceholder')" />
+                      <p class="text-[11px] leading-4 text-muted-foreground">{{ t("nacos.nacosContextPathHint") }}</p>
+                    </div>
+
                     <div class="grid gap-1.5">
                       <Label>{{ t("connection.nacosPageSize") }}</Label>
                       <Input v-model.number="nacosPageSize" type="number" min="1" max="500" />
@@ -8721,7 +8491,7 @@ function openExternalUrl(url: string) {
           <Button v-if="canChooseVisibleNacosNamespaces" variant="outline" class="shrink-0" :disabled="isTesting || isSaving || isLoadingVisibleNacosNamespaces || !hasRequiredConnectionTarget" @click="openVisibleNacosNamespacesPicker">
             <Loader2 v-if="isLoadingVisibleNacosNamespaces" class="mr-1.5 h-4 w-4 animate-spin" />
             <ListFilter v-else class="mr-1.5 h-4 w-4" />
-            {{ t("nacos.nacosVisibleNamespacesTitle") }}
+            {{ t(nacosNamespacePickerTitleKey) }}
           </Button>
           <Button v-else-if="canChooseVisibleDatabases" variant="outline" class="shrink-0" :disabled="isTesting || isSaving || isLoadingVisibleDatabases || !hasRequiredConnectionTarget" @click="openVisibleDatabasesPicker">
             <Loader2 v-if="isLoadingVisibleDatabases" class="mr-1.5 h-4 w-4 animate-spin" />
@@ -8817,51 +8587,89 @@ function openExternalUrl(url: string) {
   <Dialog v-model:open="showVisibleNacosNamespacesDialog">
     <DialogContent class="sm:max-w-[460px]" @interact-outside.prevent @escape-key-down.prevent>
       <DialogHeader>
-        <DialogTitle>{{ t("nacos.nacosVisibleNamespacesTitle") }}</DialogTitle>
-        <p class="text-sm text-muted-foreground">{{ t("nacos.nacosVisibleNamespacesDescription", { name: form.name || selectedProfile().label }) }}</p>
+        <DialogTitle>{{ t(nacosNamespacePickerTitleKey) }}</DialogTitle>
+        <p class="text-sm text-muted-foreground">{{ t(nacosNamespacePickerDescriptionKey, { name: form.name || selectedProfile().label }) }}</p>
       </DialogHeader>
 
-      <div class="flex items-center gap-2 rounded-md border bg-background px-2">
-        <Search class="h-4 w-4 shrink-0 text-muted-foreground" />
-        <Input v-model="visibleNacosNamespaceSearchText" :placeholder="t('nacos.nacosSearchNamespaces')" class="h-8 border-0 px-0 shadow-none focus-visible:ring-0" :disabled="isLoadingVisibleNacosNamespaces || !!visibleNacosNamespaceError" />
-      </div>
+      <Tabs v-model="visibleNacosNamespaceAccessMode" class="grid gap-3">
+        <TabsList class="grid h-9 w-full" :class="canDetectNacosNamespaceAccess ? 'grid-cols-2' : 'grid-cols-1'">
+          <TabsTrigger value="automatic">{{ t("nacos.nacosNamespaceAccessAutomatic") }}</TabsTrigger>
+          <TabsTrigger v-if="canDetectNacosNamespaceAccess" value="manual">{{ t("nacos.nacosNamespaceAccessManual") }}</TabsTrigger>
+        </TabsList>
 
-      <div class="flex items-center justify-between text-xs text-muted-foreground">
-        <span>{{ t("nacos.nacosSelectedNamespaces", { selected: visibleNacosNamespaceSelectedCount, total: visibleNacosNamespaces.length }) }}</span>
-        <div class="flex items-center gap-2">
-          <button class="hover:text-foreground disabled:opacity-50" :disabled="isLoadingVisibleNacosNamespaces" @click="selectAllVisibleNacosNamespaces">{{ t("nacos.nacosSelectAll") }}</button>
-          <button class="hover:text-foreground disabled:opacity-50" :disabled="isLoadingVisibleNacosNamespaces" @click="clearVisibleNacosNamespaceSelection">{{ t("nacos.nacosClearSelection") }}</button>
-          <button class="hover:text-foreground disabled:opacity-50" :disabled="isLoadingVisibleNacosNamespaces" @click="showAllVisibleNacosNamespaces">{{ t("nacos.nacosShowAll") }}</button>
-        </div>
-      </div>
-      <p v-if="!isLoadingVisibleNacosNamespaces && !visibleNacosNamespaceError && !visibleNacosNamespaceCanSave" class="text-xs text-destructive">{{ t("nacos.nacosNamespaceSelectionRequired") }}</p>
+        <TabsContent value="automatic" class="m-0 grid gap-3">
+          <div class="flex items-center gap-2 rounded-md border bg-background px-2">
+            <Search class="h-4 w-4 shrink-0 text-muted-foreground" />
+            <Input v-model="visibleNacosNamespaceSearchText" :placeholder="t('nacos.nacosSearchNamespaces')" class="h-8 border-0 px-0 shadow-none focus-visible:ring-0" :disabled="isLoadingVisibleNacosNamespaces || !!visibleNacosNamespaceError" />
+          </div>
 
-      <div class="h-72 overflow-y-auto rounded-md border bg-background/50 p-1">
-        <div v-if="isLoadingVisibleNacosNamespaces" class="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
-          <Loader2 class="h-4 w-4 animate-spin" />
-          {{ t("common.loading") }}
-        </div>
-        <div v-else-if="visibleNacosNamespaceError" class="p-3 text-sm text-destructive">{{ t("nacos.nacosLoadNamespacesFailed", { message: visibleNacosNamespaceError }) }}</div>
-        <div v-else-if="!filteredVisibleNacosNamespaces.length" class="p-3 text-sm text-muted-foreground">{{ t("grid.noSearchResults") }}</div>
-        <template v-else>
-          <button
-            v-for="namespace in filteredVisibleNacosNamespaces"
-            :key="nacosNamespaceValue(namespace) || '__public__'"
-            type="button"
-            class="flex min-h-9 w-full min-w-0 items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none"
-            @click="toggleVisibleNacosNamespace(nacosNamespaceValue(namespace))"
-          >
-            <CheckSquare v-if="visibleNacosNamespaceSelection.has(nacosNamespaceValue(namespace))" class="h-4 w-4 shrink-0 text-primary" />
-            <Square v-else class="h-4 w-4 shrink-0 text-muted-foreground" />
-            <span class="min-w-0 flex-1 truncate">{{ nacosNamespaceLabel(namespace) }}</span>
-            <span v-if="namespace.namespace && namespace.namespace !== nacosNamespaceLabel(namespace)" class="shrink-0 truncate text-xs text-muted-foreground">{{ namespace.namespace }}</span>
-          </button>
-        </template>
-      </div>
+          <div class="flex items-center justify-between text-xs text-muted-foreground">
+            <span>{{ t("nacos.nacosSelectedNamespaces", { selected: visibleNacosNamespaceSelectedCount, total: visibleNacosNamespaces.length }) }}</span>
+            <div class="flex items-center gap-2">
+              <button class="hover:text-foreground disabled:opacity-50" :disabled="isLoadingVisibleNacosNamespaces" @click="selectAllVisibleNacosNamespaces">{{ t("nacos.nacosSelectAll") }}</button>
+              <button class="hover:text-foreground disabled:opacity-50" :disabled="isLoadingVisibleNacosNamespaces" @click="clearVisibleNacosNamespaceSelection">{{ t("nacos.nacosClearSelection") }}</button>
+              <button v-if="visibleNacosNamespaceDynamicAllSupported" class="hover:text-foreground disabled:opacity-50" :disabled="isLoadingVisibleNacosNamespaces" @click="showAllVisibleNacosNamespaces">{{ t("nacos.nacosShowAll") }}</button>
+            </div>
+          </div>
+          <p v-if="!isLoadingVisibleNacosNamespaces && !visibleNacosNamespaceError && !visibleNacosNamespaceCanSave" class="text-xs text-destructive">{{ t("nacos.nacosNamespaceSelectionRequired") }}</p>
+
+          <div class="h-72 overflow-y-auto rounded-md border bg-background/50 p-1">
+            <div v-if="isLoadingVisibleNacosNamespaces" class="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
+              <Loader2 class="h-4 w-4 animate-spin" />
+              {{ t("common.loading") }}
+            </div>
+            <div v-else-if="visibleNacosNamespaceListingPermissionDenied" class="grid gap-3 p-3 text-sm text-destructive">
+              <p>{{ visibleNacosNamespaceError }}</p>
+              <Button v-if="canDetectNacosNamespaceAccess" variant="outline" size="sm" class="justify-self-start" @click="visibleNacosNamespaceAccessMode = 'manual'">
+                {{ t("nacos.nacosNamespaceAccessManual") }}
+              </Button>
+            </div>
+            <div v-else-if="visibleNacosNamespaceError" class="p-3 text-sm text-destructive">{{ t("nacos.nacosLoadNamespacesFailed", { message: visibleNacosNamespaceError }) }}</div>
+            <div v-else-if="!filteredVisibleNacosNamespaces.length" class="p-3 text-sm text-muted-foreground">{{ t("grid.noSearchResults") }}</div>
+            <template v-else>
+              <button
+                v-for="namespace in filteredVisibleNacosNamespaces"
+                :key="nacosNamespaceValue(namespace) || '__public__'"
+                type="button"
+                class="flex min-h-9 w-full min-w-0 items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none"
+                @click="toggleVisibleNacosNamespace(nacosNamespaceValue(namespace))"
+              >
+                <CheckSquare v-if="visibleNacosNamespaceSelection.has(nacosNamespaceValue(namespace))" class="h-4 w-4 shrink-0 text-primary" />
+                <Square v-else class="h-4 w-4 shrink-0 text-muted-foreground" />
+                <span class="min-w-0 flex-1 truncate">{{ nacosNamespaceLabel(namespace) }}</span>
+                <span v-if="namespace.namespace && namespace.namespace !== nacosNamespaceLabel(namespace)" class="shrink-0 truncate text-xs text-muted-foreground">{{ namespace.namespace }}</span>
+              </button>
+            </template>
+          </div>
+        </TabsContent>
+
+        <TabsContent v-if="canDetectNacosNamespaceAccess" value="manual" class="m-0 grid gap-3">
+          <p class="text-xs leading-5 text-muted-foreground">{{ t("nacos.nacosNamespaceAccessScopeHint") }}</p>
+          <div v-if="isNacosV3AdminPlane" class="flex gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 text-xs leading-5 text-amber-800 dark:text-amber-300">
+            <ShieldAlert class="mt-0.5 h-4 w-4 shrink-0" />
+            <p>{{ t("nacos.nacosV3AdminManagedNamespacesHint") }}</p>
+          </div>
+          <div class="grid gap-1.5">
+            <div class="flex items-center justify-between gap-3">
+              <Label>{{ t(nacosManualNamespaceLabelKey) }}</Label>
+              <span class="text-[11px] text-muted-foreground">{{ t("nacos.nacosManagedNamespacesSeparator") }}</span>
+            </div>
+            <textarea
+              v-model="nacosManagedNamespacesText"
+              data-nacos-managed-namespaces
+              rows="6"
+              class="min-h-32 resize-y rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm outline-none placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring"
+              :placeholder="t(nacosManualNamespacePlaceholderKey)"
+            />
+            <p class="text-[11px] leading-4 text-muted-foreground">{{ t(nacosManualNamespaceHintKey) }}</p>
+          </div>
+          <p v-if="!visibleNacosNamespaceCanSave" class="text-xs text-destructive">{{ t("nacos.nacosOrdinaryNamespacesRequired") }}</p>
+        </TabsContent>
+      </Tabs>
 
       <DialogFooter>
         <Button variant="outline" @click="showVisibleNacosNamespacesDialog = false">{{ t("dangerDialog.cancel") }}</Button>
-        <Button :disabled="isLoadingVisibleNacosNamespaces || !!visibleNacosNamespaceError || !visibleNacosNamespaceCanSave" @click="saveVisibleNacosNamespaceSelection">{{ t("nacos.save") }}</Button>
+        <Button :disabled="isResolvingManualNacosNamespaces || !visibleNacosNamespaceCanSave || (visibleNacosNamespaceAccessMode === 'automatic' && (isLoadingVisibleNacosNamespaces || !!visibleNacosNamespaceError))" @click="saveVisibleNacosNamespaceSelection">{{ t("nacos.save") }}</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>

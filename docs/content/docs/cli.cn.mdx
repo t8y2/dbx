@@ -168,7 +168,21 @@ CLI JSON 错误使用稳定错误码：
 
 ## 桌面端 Deep Link
 
-DBX 桌面端支持通过 `dbx://connection/new` 从浏览器、堡垒机或脚本打开新建连接窗口并预填连接信息。
+DBX 桌面端支持通过 Deep Link 从浏览器、堡垒机或脚本唤起客户端。
+
+仅启动或聚焦 DBX，不打开其他窗口：
+
+```bash
+open 'dbx://open'
+```
+
+网页按钮可以直接使用：
+
+```html
+<a href="dbx://open">使用 DBX 打开</a>
+```
+
+使用 `dbx://connection/new` 可以打开新建连接窗口并预填连接信息。
 
 DSN 模式：
 
@@ -214,7 +228,7 @@ open 'dbx://connection/new?type=r-nacos&url=http%3A%2F%2F127.0.0.1%3A8848%2Fnaco
 
 `nacos` 是 `nacos-v2` 的别名，`rnacos` 是 `r-nacos` 的别名。URL 模式会保留服务端点路径，顶层 `host`、`port`、`user`、`password`、`ssl` 会覆盖 `url` 中的对应值。Consul 的 `password` 表示 ACL token；Nacos 传入 `password` 时必须同时传入 `user`。省略 `v` 或使用 `v=1` 表示当前深链协议，其他版本会被拒绝。
 
-<Callout type="info">测试系统级 `dbx://` 唤起前，请先安装并启动一次 DBX 桌面端，让系统注册 URL 协议。macOS 可使用 `open 'dbx://connection/new?...'` 测试。</Callout>
+<Callout type="info">测试系统级 `dbx://` 唤起前，请先安装并启动一次 DBX 桌面端，让系统注册 URL 协议。macOS 可使用 `open 'dbx://open'` 或 `open 'dbx://connection/new?...'` 测试。</Callout>
 
 <Callout type="warning">深链可能在浏览器或终端历史中暴露数据库密码或 Consul ACL token。不要将携带凭据的链接写入共享日志、Shell 历史、工单或聊天消息。</Callout>
 

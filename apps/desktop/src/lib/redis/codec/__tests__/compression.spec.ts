@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { deflateRawSync, deflateSync, gzipSync } from "zlib";
-import { decompressRedisValue, isGzipMagic, REDIS_DECOMPRESS_MAX_OUTPUT_BYTES } from "../redisCompression";
+import { decompressRedisValue, isGzipMagic, REDIS_DECOMPRESS_MAX_OUTPUT_BYTES } from "../compression";
 
 // Decompression runs against the real pako implementation (pure JS), so these
 // tests exercise the actual production path in Node the same way it runs in the

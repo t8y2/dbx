@@ -37,6 +37,8 @@ import java.sql.Statement;
 import java.sql.Time;
 import java.sql.Timestamp;
 import java.sql.Types;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.time.temporal.TemporalAccessor;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -50,6 +52,7 @@ import java.util.ServiceLoader;
 import java.util.Set;
 import java.util.UUID;
 import java.util.logging.Logger;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 public final class DbxJdbcPlugin {
@@ -59,6 +62,12 @@ public final class DbxJdbcPlugin {
     private static final String JDBCX_EXTENSION_WHITELIST_PROPERTY = "jdbcx.extension.whitelist";
     private static final String JDBCX_HIGH_PRIVILEGE_EXTENSIONS_OPT_IN = "-Ddbx.jdbcx.allowHighPrivilegeExtensions=";
     private static final String JDBCX_SAFE_EXTENSION_WHITELIST = "help,var,version";
+    private static final int PHOENIX_VARBINARY_ENCODED_TYPE = 9000;
+    private static final String PHOENIX_VARBINARY_ENCODED_TYPE_NAME = "VARBINARY_ENCODED";
+    private static final Pattern PHOENIX_SYSTEM_CATALOG_WILDCARD = Pattern.compile(
+        "^SELECT\\s+\\*\\s+FROM\\s+(?:SYSTEM|\\\"SYSTEM\\\")\\s*\\.\\s*(?:CATALOG|\\\"CATALOG\\\")$",
+        Pattern.CASE_INSENSITIVE
+    );
     private static final String[] DEFAULT_TABLE_TYPES = new String[] {
         "TABLE",
         "VIEW",
@@ -725,6 +734,37 @@ public final class DbxJdbcPlugin {
         }
     }
 
+    private static ZoneId tdengineTimestampZone(JsonNode connection, Connection jdbcConnection) {
+        String url = jdbcUrl(connection);
+        if (
+            !urlMatchesPrefix(url, "jdbc:taos:") &&
+            !urlMatchesPrefix(url, "jdbc:taos-ws:") &&
+            !urlMatchesPrefix(url, "jdbc:taos-rs:")
+        ) {
+            return null;
+        }
+        try (
+            Statement statement = jdbcConnection.createStatement();
+            ResultSet result = statement.executeQuery("SELECT timezone()")
+        ) {
+            return result.next() ? parseTdengineTimezone(result.getString(1)) : null;
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+            return null;
+        }
+    }
+
+    static ZoneId parseTdengineTimezone(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        String name = value.trim().split("\\s+", 2)[0];
+        try {
+            return ZoneId.of(name);
+        } catch (RuntimeException ignored) {
+            return null;
+        }
+    }
+
     private static JsonNode executeQuery(
         JsonNode connection,
         String sql,
@@ -740,10 +780,12 @@ public final class DbxJdbcPlugin {
         applyExecutionContext(connection, conn, database, schema);
         JdbcDriverQuirks quirks = driverQuirks(connection);
         boolean preserveOracleDateTime = isOracleUrl(jdbcUrl(connection));
+        ZoneId timestampZone = tdengineTimestampZone(connection, conn);
         try (Statement statement = conn.createStatement()) {
             applyStatementOptions(statement, maxRows, fetchSize, timeoutSecs, quirks);
             String trimmedSql = trimStatementSql(sql);
-            ExecutedStatement executed = executeStatementForResult(statement, trimmedSql, quirks);
+            String effectiveSql = rewritePhoenixSystemCatalogQuery(connection, conn, trimmedSql);
+            ExecutedStatement executed = executeStatementForResult(statement, effectiveSql, quirks);
             ObjectNode result = MAPPER.createObjectNode();
             ArrayNode columns = MAPPER.createArrayNode();
             ArrayNode rows = MAPPER.createArrayNode();
@@ -768,7 +810,7 @@ public final class DbxJdbcPlugin {
                         }
                         ArrayNode row = MAPPER.createArrayNode();
                         for (int i = 1; i <= columnCount; i++) {
-                            row.add(MAPPER.valueToTree(readValue(rs, meta, i, preserveOracleDateTime)));
+                            row.add(MAPPER.valueToTree(readValue(rs, meta, i, preserveOracleDateTime, timestampZone)));
                         }
                         rows.add(row);
                     }
@@ -798,6 +840,7 @@ public final class DbxJdbcPlugin {
         private final Connection connection;
         private final boolean restoreAutoCommit;
         private final boolean preserveOracleDateTime;
+        private final ZoneId timestampZone;
         private int rowsReturned;
         private ArrayNode pendingRow;
 
@@ -811,7 +854,8 @@ public final class DbxJdbcPlugin {
             long startNanos,
             Connection connection,
             boolean restoreAutoCommit,
-            boolean preserveOracleDateTime
+            boolean preserveOracleDateTime,
+            ZoneId timestampZone
         ) {
             this.id = id;
             this.statement = statement;
@@ -823,6 +867,7 @@ public final class DbxJdbcPlugin {
             this.connection = connection;
             this.restoreAutoCommit = restoreAutoCommit;
             this.preserveOracleDateTime = preserveOracleDateTime;
+            this.timestampZone = timestampZone;
         }
     }
 
@@ -841,6 +886,7 @@ public final class DbxJdbcPlugin {
         applyExecutionContext(connection, conn, database, schema);
         JdbcDriverQuirks quirks = driverQuirks(connection);
         boolean preserveOracleDateTime = isOracleUrl(jdbcUrl(connection));
+        ZoneId timestampZone = tdengineTimestampZone(connection, conn);
         boolean restoreAutoCommit = beginPagedQueryTransaction(connection, conn);
         Statement statement;
         try {
@@ -852,7 +898,8 @@ public final class DbxJdbcPlugin {
         try {
             applyStatementOptions(statement, maxRows, fetchSize, timeoutSecs, quirks);
             String trimmedSql = trimStatementSql(sql);
-            ExecutedStatement executed = executeStatementForResult(statement, trimmedSql, quirks);
+            String effectiveSql = rewritePhoenixSystemCatalogQuery(connection, conn, trimmedSql);
+            ExecutedStatement executed = executeStatementForResult(statement, effectiveSql, quirks);
             ResultSet rs = executed.resultSet();
             if (rs == null) {
                 ObjectNode result = MAPPER.createObjectNode();
@@ -886,7 +933,8 @@ public final class DbxJdbcPlugin {
                 start,
                 conn,
                 restoreAutoCommit,
-                preserveOracleDateTime
+                preserveOracleDateTime,
+                timestampZone
             );
             QUERY_SESSIONS.put(sessionId, session);
             try {
@@ -959,7 +1007,7 @@ public final class DbxJdbcPlugin {
                     closeQuerySession(session.id);
                     return queryPageResult(session, rows, false, false);
                 }
-                row = readRow(session.resultSet, session.meta, session.preserveOracleDateTime);
+                row = readRow(session.resultSet, session.meta, session.preserveOracleDateTime, session.timestampZone);
             }
             rows.add(row);
             session.rowsReturned++;
@@ -977,7 +1025,7 @@ public final class DbxJdbcPlugin {
             return queryPageResult(session, rows, false, false);
         }
 
-        session.pendingRow = readRow(session.resultSet, session.meta, session.preserveOracleDateTime);
+        session.pendingRow = readRow(session.resultSet, session.meta, session.preserveOracleDateTime, session.timestampZone);
         return queryPageResult(session, rows, false, true);
     }
 
@@ -1030,11 +1078,12 @@ public final class DbxJdbcPlugin {
     private static ArrayNode readRow(
         ResultSet rs,
         ResultSetMetaData meta,
-        boolean preserveOracleDateTime
+        boolean preserveOracleDateTime,
+        ZoneId timestampZone
     ) throws SQLException {
         ArrayNode row = MAPPER.createArrayNode();
         for (int i = 1; i <= meta.getColumnCount(); i++) {
-            row.add(MAPPER.valueToTree(readValue(rs, meta, i, preserveOracleDateTime)));
+            row.add(MAPPER.valueToTree(readValue(rs, meta, i, preserveOracleDateTime, timestampZone)));
         }
         return row;
     }
@@ -1872,7 +1921,39 @@ public final class DbxJdbcPlugin {
             }
         }
 
+        if ((allowedObjectTypes.isEmpty() || allowedObjectTypes.contains("EVENT")) && isMysqlFamilyConnection(connection)) {
+            appendMysqlEvents(result, conn, database, schema);
+        }
+
         return filterMetadataNodes(result, filter, limit, offset, objectTypes, "object_type", false);
+    }
+
+    private static boolean isMysqlFamilyConnection(JsonNode connection) {
+        String url = jdbcUrl(connection);
+        return urlMatchesPrefix(url, "jdbc:mysql:") || urlMatchesPrefix(url, "jdbc:mariadb:") || urlMatchesPrefix(url, "jdbc:tidb:");
+    }
+
+    private static void appendMysqlEvents(ArrayNode result, Connection conn, String database, String schema) {
+        String eventSchema = emptyToNull(schema) != null ? schema : database;
+        if (eventSchema == null || eventSchema.isBlank()) return;
+        String sql = "SELECT EVENT_NAME, EVENT_SCHEMA, EVENT_COMMENT, CREATED, LAST_ALTERED FROM information_schema.EVENTS WHERE EVENT_SCHEMA = ?";
+        try (PreparedStatement statement = conn.prepareStatement(sql)) {
+            statement.setString(1, eventSchema);
+            try (ResultSet rs = statement.executeQuery()) {
+                while (rs.next()) {
+                    ObjectNode item = MAPPER.createObjectNode();
+                    item.put("name", rs.getString("EVENT_NAME"));
+                    item.put("object_type", "EVENT");
+                    putNullable(item, "schema", rs.getString("EVENT_SCHEMA"));
+                    putNullable(item, "comment", rs.getString("EVENT_COMMENT"));
+                    putNullable(item, "created_at", rs.getString("CREATED"));
+                    putNullable(item, "updated_at", rs.getString("LAST_ALTERED"));
+                    result.add(item);
+                }
+            }
+        } catch (SQLException ignored) {
+            // Lack of EVENT privilege must not hide tables and routines.
+        }
     }
 
     private static JsonNode listDataTypes(JsonNode connection, String database) throws SQLException {
@@ -3253,6 +3334,16 @@ public final class DbxJdbcPlugin {
         int index,
         boolean preserveOracleDateTime
     ) throws SQLException {
+        return readValue(rs, meta, index, preserveOracleDateTime, null);
+    }
+
+    private static Object readValue(
+        ResultSet rs,
+        ResultSetMetaData meta,
+        int index,
+        boolean preserveOracleDateTime,
+        ZoneId timestampZone
+    ) throws SQLException {
         int columnType = meta.getColumnType(index);
 
         if (columnType == Types.BOOLEAN) {
@@ -3261,6 +3352,14 @@ public final class DbxJdbcPlugin {
                 return boolValue;
             }
             return null;
+        }
+
+        // Phoenix exposes VARBINARY_ENCODED as a private type id (9000). Read it through the
+        // binary JDBC accessor before a generic getObject() path can ask the driver for an
+        // unsupported Java representation.
+        if (isPhoenixEncodedBinaryColumn(meta, index, columnType)) {
+            byte[] bytes = rs.getBytes(index);
+            return bytes == null ? null : binaryToHex(bytes);
         }
 
         Object value = rs.getObject(index);
@@ -3280,11 +3379,14 @@ public final class DbxJdbcPlugin {
             byte[] bytes = rs.getBytes(index);
             return bytes == null ? null : binaryToHex(bytes);
         }
-        Object temporalValue = readTemporalValue(rs, meta, index, preserveOracleDateTime);
+        Object temporalValue = readTemporalValue(rs, meta, index, preserveOracleDateTime, timestampZone);
         if (temporalValue != null) {
             return temporalValue;
         }
-        if (value instanceof Date || value instanceof Time || value instanceof Timestamp || value instanceof TemporalAccessor) {
+        if (value instanceof Timestamp timestamp) {
+            return formatTimestamp(timestamp, timestampZone);
+        }
+        if (value instanceof Date || value instanceof Time || value instanceof TemporalAccessor) {
             return value.toString();
         }
         if (value instanceof BigDecimal decimal) {
@@ -3314,7 +3416,8 @@ public final class DbxJdbcPlugin {
         ResultSet rs,
         ResultSetMetaData meta,
         int index,
-        boolean preserveOracleDateTime
+        boolean preserveOracleDateTime,
+        ZoneId timestampZone
     ) throws SQLException {
         return switch (meta.getColumnType(index)) {
             case Types.DATE -> {
@@ -3331,10 +3434,18 @@ public final class DbxJdbcPlugin {
             }
             case Types.TIMESTAMP -> {
                 Timestamp timestamp = rs.getTimestamp(index);
-                yield timestamp == null ? null : timestamp.toString();
+                yield timestamp == null ? null : formatTimestamp(timestamp, timestampZone);
             }
             default -> null;
         };
+    }
+
+    static String formatTimestamp(Timestamp timestamp, ZoneId timestampZone) {
+        if (timestampZone == null) {
+            return timestamp.toString();
+        }
+        LocalDateTime local = LocalDateTime.ofInstant(timestamp.toInstant(), timestampZone);
+        return Timestamp.valueOf(local).toString();
     }
 
     private static boolean isBinaryColumn(ResultSetMetaData meta, int index) throws SQLException {
@@ -3345,6 +3456,69 @@ public final class DbxJdbcPlugin {
                  Types.BLOB -> true;
             default -> false;
         };
+    }
+
+    private static boolean isPhoenixEncodedBinaryColumn(
+        ResultSetMetaData meta,
+        int index,
+        int columnType
+    ) throws SQLException {
+        return columnType == PHOENIX_VARBINARY_ENCODED_TYPE
+            && PHOENIX_VARBINARY_ENCODED_TYPE_NAME.equalsIgnoreCase(meta.getColumnTypeName(index));
+    }
+
+    private static boolean isPhoenixEncodedBinaryType(int sqlType, String typeName) {
+        return sqlType == PHOENIX_VARBINARY_ENCODED_TYPE
+            || PHOENIX_VARBINARY_ENCODED_TYPE_NAME.equalsIgnoreCase(typeName);
+    }
+
+    static String rewritePhoenixSystemCatalogQuery(
+        JsonNode connection,
+        Connection jdbcConnection,
+        String sql
+    ) {
+        String url = jdbcUrl(connection);
+        String normalizedSql = stripLeadingSqlComments(trimStatementSql(sql));
+        if (
+            !isPhoenixConnection(connection, url)
+                || !PHOENIX_SYSTEM_CATALOG_WILDCARD.matcher(normalizedSql).matches()
+        ) {
+            return sql;
+        }
+
+        List<String> projections = new ArrayList<>();
+        boolean hasEncodedColumn = false;
+        try (ResultSet columns = jdbcConnection.getMetaData().getColumns(null, "SYSTEM", "CATALOG", "%")) {
+            while (columns.next()) {
+                String columnName = columns.getString("COLUMN_NAME");
+                if (columnName == null || columnName.isBlank()) {
+                    continue;
+                }
+                int sqlType = columns.getInt("DATA_TYPE");
+                String typeName = columns.getString("TYPE_NAME");
+                String quotedColumn = quotePhoenixIdentifier(columnName);
+                if (isPhoenixEncodedBinaryType(sqlType, typeName)) {
+                    projections.add("CAST(" + quotedColumn + " AS VARBINARY) AS " + quotedColumn);
+                    hasEncodedColumn = true;
+                } else {
+                    projections.add(quotedColumn);
+                }
+            }
+        } catch (SQLException | RuntimeException ignored) {
+            // Keep the original SQL when a driver cannot expose its column metadata. The
+            // compatibility path must not turn an optional workaround into a new failure.
+            return sql;
+        }
+
+        if (!hasEncodedColumn || projections.isEmpty()) {
+            return sql;
+        }
+        return "SELECT " + String.join(", ", projections)
+            + " FROM " + quotePhoenixIdentifier("SYSTEM") + "." + quotePhoenixIdentifier("CATALOG");
+    }
+
+    private static String quotePhoenixIdentifier(String identifier) {
+        return "\"" + identifier.replace("\"", "\"\"") + "\"";
     }
 
     private static String binaryToHex(byte[] bytes) {

@@ -1,86 +1,9 @@
 import type { BackendError } from "@/lib/backend/errorUtils";
 import type { TransferContent, TransferMode, TransferObjectKind, TransferTableNameCase } from "@/lib/backend/tauri";
-import type { MultiDbResultRunExecution } from "@/types/sqlExecution";
+import type { MultiDbExecutionTarget, MultiDbResultRunExecution } from "@/types/sqlExecution";
+import type { DatabaseType } from "@/types/generated/databaseTypes";
 
-export type DatabaseType =
-  | "mysql"
-  | "postgres"
-  | "sqlite"
-  | "rqlite"
-  | "turso"
-  | "cloudflare-d1"
-  | "redis"
-  | "duckdb"
-  | "clickhouse"
-  | "sqlserver"
-  | "mongodb"
-  | "dynamodb"
-  | "oracle"
-  | "elasticsearch"
-  | "easysearch"
-  | "meilisearch"
-  | "hbase"
-  | "qdrant"
-  | "milvus"
-  | "weaviate"
-  | "chromadb"
-  | "doris"
-  | "starrocks"
-  | "manticoresearch"
-  | "databend"
-  | "redshift"
-  | "dameng"
-  | "gaussdb"
-  | "kingbase"
-  | "highgo"
-  | "uxdb"
-  | "vastbase"
-  | "goldendb"
-  | "kwdb"
-  | "yashandb"
-  | "databricks"
-  | "saphana"
-  | "teradata"
-  | "vertica"
-  | "firebird"
-  | "exasol"
-  | "opengauss"
-  | "oceanbase-oracle"
-  | "questdb"
-  | "gbase"
-  | "access"
-  | "h2"
-  | "snowflake"
-  | "trino"
-  | "prestosql"
-  | "hive"
-  | "kyuubi"
-  | "impala"
-  | "spark"
-  | "db2"
-  | "informix"
-  | "neo4j"
-  | "cassandra"
-  | "bigquery"
-  | "spanner"
-  | "kylin"
-  | "ignite"
-  | "ignite3"
-  | "sundb"
-  | "oscar"
-  | "tdengine"
-  | "xugu"
-  | "iotdb"
-  | "etcd"
-  | "zookeeper"
-  | "iris"
-  | "influxdb"
-  | "victoriametrics"
-  | "jdbc"
-  | "mq"
-  | "mqtt"
-  | "nacos"
-  | "consul";
+export type { DatabaseType } from "@/types/generated/databaseTypes";
 
 export function isElasticsearchCompatibleDatabaseType(dbType?: DatabaseType): boolean {
   return dbType === "elasticsearch" || dbType === "easysearch";
@@ -443,7 +366,7 @@ export interface TableInfo {
   parent_name?: string | null;
 }
 
-export type DatabaseObjectType = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "SEQUENCE" | "SYNONYM" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
+export type DatabaseObjectType = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" | "SEQUENCE" | "SYNONYM" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
 
 export interface ObjectInfo {
   name: string;
@@ -480,6 +403,28 @@ export interface ObjectSource {
   schema?: string | null;
   source: string;
   editable?: boolean;
+}
+
+export interface MysqlEventInfo {
+  name: string;
+  schema: string;
+  definer?: string | null;
+  time_zone?: string | null;
+  event_type?: string | null;
+  execute_at?: string | null;
+  interval_value?: string | null;
+  interval_field?: string | null;
+  starts?: string | null;
+  ends?: string | null;
+  status?: string | null;
+  on_completion?: string | null;
+  comment?: string | null;
+  event_body?: string | null;
+  event_definition?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  last_executed?: string | null;
+  source?: string | null;
 }
 
 export type CustomTypeKind = "base" | "composite" | "domain" | "enum" | "range" | "multirange";
@@ -771,7 +716,9 @@ export interface BatchSqlExecution {
   completed: number;
   total: number;
   startedAt: number;
+  executionTarget?: MultiDbExecutionTarget;
   finishedAt?: number;
+  recoveryDismissed?: boolean;
   items: BatchStatementExecutionItem[];
 }
 
@@ -791,6 +738,8 @@ export interface QueryResultRun {
   sequence: number;
   sql: string;
   createdAt: number;
+  /** Keeps this result from being replaced by an ordinary query execution. */
+  pinned?: boolean;
   /** Distinguishes successive result payloads that reuse the same run slot. */
   resultGridRevision?: string;
   result?: QueryResult;
@@ -971,6 +920,7 @@ export type TreeNodeType =
   | "vector-database"
   | "vector-collection"
   | "elasticsearch-index"
+  | "meilisearch-system"
   | "mqtt-topic";
 
 export interface ConnectionGroup {
@@ -1068,6 +1018,8 @@ export interface TableStructureEditorDraft {
   newTableName: string;
   tableComment: string;
   originalTableComment: string;
+  tableOwner?: string;
+  originalTableOwner?: string;
   columns: import("@/lib/table/tableStructureEditorSql").EditableStructureColumn[];
   indexes: import("@/lib/table/tableStructureEditorSql").EditableStructureIndex[];
   foreignKeys: import("@/lib/table/tableStructureEditorSql").EditableStructureForeignKey[];
@@ -1195,6 +1147,7 @@ export interface QueryTab {
     | "redis-dashboard"
     | "mongo"
     | "meilisearch"
+    | "meilisearch-system"
     | "mongo-gridfs"
     | "mongo-bucket"
     | "vector"
@@ -1242,6 +1195,10 @@ export interface QueryTab {
     catalog?: string;
     schema?: string;
     objectType?: "tables";
+    eventName?: string;
+    eventReadOnly?: boolean;
+    eventOpenRequestId?: number;
+    initialObjectFilter?: "tables" | "events";
     viewport?: ObjectBrowserViewport;
   };
   objectSource?: {

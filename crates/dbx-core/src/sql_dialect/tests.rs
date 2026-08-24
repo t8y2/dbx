@@ -379,6 +379,44 @@ fn jdbc_non_tdengine_and_unscoped_tdengine_previews_remain_unqualified() {
 }
 
 #[test]
+fn jdbc_table_data_qualifies_schema_without_forcing_identifier_quotes() {
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Jdbc),
+            driver_profile: Some("phoenix".to_string()),
+            schema: Some("DEMO".to_string()),
+            table_name: "STUDENT".to_string(),
+            limit: Some(100),
+            ..Default::default()
+        }),
+        "SELECT * FROM DEMO.STUDENT;"
+    );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Jdbc),
+            driver_profile: Some("phoenix".to_string()),
+            identifier_quote: Some("\"".to_string()),
+            schema: Some("MY_SCHEMA".to_string()),
+            table_name: "ORDER".to_string(),
+            limit: Some(100),
+            ..Default::default()
+        }),
+        "SELECT * FROM \"MY_SCHEMA\".\"ORDER\";"
+    );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Jdbc),
+            driver_profile: Some("phoenix".to_string()),
+            schema: None,
+            table_name: "STUDENT".to_string(),
+            limit: Some(100),
+            ..Default::default()
+        }),
+        "SELECT * FROM STUDENT;"
+    );
+}
+
+#[test]
 fn builds_table_data_where_and_schema_queries() {
     assert_eq!(
         build_count_table_sql(Some(DatabaseType::Kingbase), Some("cqbq_ls"), "actionlogs"),

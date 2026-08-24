@@ -167,7 +167,7 @@ SELECT o.OBJECT_NAME,
        CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
 FROM ALL_OBJECTS o
 WHERE o.OWNER = :2
-  AND o.OBJECT_TYPE IN ('VIEW', 'MATERIALIZED VIEW', 'PROCEDURE', 'FUNCTION', 'PACKAGE', 'PACKAGE BODY')
+  AND o.OBJECT_TYPE IN ('VIEW', 'MATERIALIZED VIEW', 'PROCEDURE', 'FUNCTION', 'SEQUENCE', 'PACKAGE', 'PACKAGE BODY')
 UNION ALL
 SELECT s.SYNONYM_NAME AS OBJECT_NAME,
        'SYNONYM' AS OBJECT_TYPE,
@@ -198,7 +198,7 @@ SELECT o.OBJECT_NAME,
        END AS OBJECT_TYPE,
        CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
 FROM USER_OBJECTS o
-WHERE o.OBJECT_TYPE IN ('VIEW', 'MATERIALIZED VIEW', 'PROCEDURE', 'FUNCTION', 'PACKAGE', 'PACKAGE BODY')
+WHERE o.OBJECT_TYPE IN ('VIEW', 'MATERIALIZED VIEW', 'PROCEDURE', 'FUNCTION', 'SEQUENCE', 'PACKAGE', 'PACKAGE BODY')
 UNION ALL
 SELECT s.SYNONYM_NAME AS OBJECT_NAME,
        'SYNONYM' AS OBJECT_TYPE,
@@ -211,9 +211,10 @@ const oracleListObjectsOrderSQL = `ORDER BY CASE OBJECT_TYPE
   WHEN 'MATERIALIZED_VIEW' THEN 2
   WHEN 'PROCEDURE' THEN 3
   WHEN 'FUNCTION' THEN 4
-  WHEN 'SYNONYM' THEN 5
-  WHEN 'PACKAGE' THEN 6
-  ELSE 7
+  WHEN 'SEQUENCE' THEN 5
+  WHEN 'SYNONYM' THEN 6
+  WHEN 'PACKAGE' THEN 7
+  ELSE 8
 END, OBJECT_NAME`
 const oracleListObjectsSQL = oracleListObjectsBaseSQL + "\n" + oracleListObjectsOrderSQL
 const oracleListTriggersSQL = `
@@ -528,6 +529,10 @@ type server struct {
 	db                     *sql.DB
 	params                 connectParams
 	legacyLOBFetchDeferred bool
+	// manualConn + manualTx pin one physical Oracle session for interactive
+	// commit/rollback control across multiple execute_query RPCs.
+	manualConn             *sql.Conn
+	manualTx               *sql.Tx
 	sessions               map[string]*querySession
 	tableReadSessions      map[string]*querySession
 	nextSessionID          int64
@@ -631,7 +636,7 @@ func (r *runtimeServer) dispatch(method string, params map[string]json.RawMessag
 		return map[string]any{
 			"protocolVersion":      multiSessionProtocolVersion,
 			"agentProtocolVersion": multiSessionProtocolVersion,
-			"capabilities":         []string{"connect", "test_connection", "metadata", "query", "ddl", "multi_session"},
+			"capabilities":         []string{"connect", "test_connection", "metadata", "query", "transaction", "ddl", "multi_session"},
 		}, false, nil
 	case "open_session":
 		agentSessionID := stringParam(params, "agentSessionId")
@@ -817,7 +822,7 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		return map[string]any{
 			"protocolVersion":      protocolVersion,
 			"agentProtocolVersion": protocolVersion,
-			"capabilities":         []string{"connect", "test_connection", "metadata", "query", "ddl"},
+			"capabilities":         []string{"connect", "test_connection", "metadata", "query", "transaction", "ddl"},
 		}, false, nil
 	case "connect":
 		var cp connectParams
@@ -947,6 +952,12 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 	case "execute_transaction":
 		result, err := s.executeTransaction(params)
 		return result, false, err
+	case "begin_manual_transaction":
+		return map[string]bool{"ok": true}, false, s.beginManualTransaction(stringParam(params, "schema"))
+	case "commit_manual_transaction":
+		return map[string]bool{"ok": true}, false, s.commitManualTransaction()
+	case "rollback_manual_transaction":
+		return map[string]bool{"ok": true}, false, s.rollbackManualTransaction()
 	case "disconnect":
 		return map[string]bool{"ok": true}, false, s.disconnect()
 	case "shutdown":
@@ -1127,6 +1138,7 @@ func withOracleLOBFetchPost(params connectParams) connectParams {
 
 func (s *server) disconnect() error {
 	s.closeAllQuerySessions()
+	_ = s.rollbackManualTransactionQuiet()
 	s.legacyLOBFetchDeferred = false
 	if s.db == nil {
 		return nil
@@ -1134,6 +1146,75 @@ func (s *server) disconnect() error {
 	err := s.db.Close()
 	s.db = nil
 	return err
+}
+
+func (s *server) beginManualTransaction(schema string) error {
+	if s.manualTx != nil {
+		return errors.New("manual transaction already open")
+	}
+	db, err := s.requireDB()
+	if err != nil {
+		return err
+	}
+	// Hold one exclusive physical connection so DML/SELECT/schema stay on the
+	// same Oracle session for the life of the interactive transaction.
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		return fmt.Errorf("reserve connection for manual transaction: %w", err)
+	}
+	if strings.TrimSpace(schema) != "" {
+		if _, err := conn.ExecContext(context.Background(), "ALTER SESSION SET CURRENT_SCHEMA = "+quoteIdentifier(schema)); err != nil {
+			_ = conn.Close()
+			return err
+		}
+	}
+	tx, err := conn.BeginTx(context.Background(), nil)
+	if err != nil {
+		_ = conn.Close()
+		return fmt.Errorf("begin manual transaction: %w", err)
+	}
+	s.manualConn = conn
+	s.manualTx = tx
+	return nil
+}
+
+func (s *server) commitManualTransaction() error {
+	if s.manualTx == nil {
+		return errors.New("no manual transaction open")
+	}
+	err := s.manualTx.Commit()
+	s.clearManualTransaction()
+	return err
+}
+
+func (s *server) rollbackManualTransaction() error {
+	if s.manualTx == nil {
+		return errors.New("no manual transaction open")
+	}
+	err := s.manualTx.Rollback()
+	s.clearManualTransaction()
+	return err
+}
+
+func (s *server) rollbackManualTransactionQuiet() error {
+	if s.manualTx == nil {
+		return nil
+	}
+	err := s.manualTx.Rollback()
+	s.clearManualTransaction()
+	return err
+}
+
+func (s *server) clearManualTransaction() {
+	s.manualTx = nil
+	if s.manualConn != nil {
+		_ = s.manualConn.Close()
+		s.manualConn = nil
+	}
+}
+
+func (s *server) hasManualTransaction() bool {
+	return s.manualTx != nil
 }
 
 func openDB(params connectParams) (*sql.DB, error) {
@@ -2834,7 +2915,7 @@ func (s *server) getObjectSource(schema, name, objectType string) (map[string]an
 		}
 		return map[string]any{"name": name, "object_type": objectType, "schema": schema, "source": source}, nil
 	}
-	if upperType == "SYNONYM" {
+	if upperType == "SEQUENCE" || upperType == "SYNONYM" {
 		return s.getMetadataObjectSource(schema, name, upperType)
 	}
 
@@ -3552,6 +3633,9 @@ func restoreOracleCurrentSchema(conn *sql.Conn, schema string) {
 }
 
 func (s *server) executeTransaction(params map[string]json.RawMessage) (queryResult, error) {
+	if s.hasManualTransaction() {
+		return queryResult{}, errors.New("cannot start a one-shot transaction while a manual transaction is open")
+	}
 	var payload struct {
 		Statements []string `json:"statements"`
 		Schema     string   `json:"schema"`
@@ -3601,7 +3685,7 @@ func (s *server) executeTransaction(params map[string]json.RawMessage) (queryRes
 
 func (s *server) executeQueryPage(opts queryOptions, pageSize int) (queryPageResult, error) {
 	start := time.Now()
-	if strings.TrimSpace(opts.Schema) != "" {
+	if strings.TrimSpace(opts.Schema) != "" && !s.hasManualTransaction() {
 		if err := s.setSchema(opts.Schema); err != nil {
 			return queryPageResult{}, err
 		}
@@ -3677,7 +3761,7 @@ func (s *server) storeQuerySession(session *querySession) string {
 
 func (s *server) startTableRead(opts queryOptions, pageSize int) (queryPageResult, error) {
 	start := time.Now()
-	if strings.TrimSpace(opts.Schema) != "" {
+	if strings.TrimSpace(opts.Schema) != "" && !s.hasManualTransaction() {
 		if err := s.setSchema(opts.Schema); err != nil {
 			return queryPageResult{}, err
 		}
@@ -3810,7 +3894,7 @@ func readQuerySessionPage(session *querySession, pageSize int) (queryPageResult,
 
 func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 	start := time.Now()
-	if strings.TrimSpace(opts.Schema) != "" {
+	if strings.TrimSpace(opts.Schema) != "" && !s.hasManualTransaction() {
 		if err := s.setSchema(opts.Schema); err != nil {
 			return queryResult{}, err
 		}
@@ -3825,8 +3909,7 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 		result.ExecutionTimeMS = time.Since(start).Milliseconds()
 		return result, err
 	}
-	db, err := s.requireDB()
-	if err != nil {
+	if _, err := s.requireDB(); err != nil {
 		return queryResult{}, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -3856,12 +3939,23 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 		}
 		s.activeCancelMu.Unlock()
 	}()
-	execResult, err := db.ExecContext(ctx, sqlText)
+	execResult, err := s.execContext(ctx, sqlText)
 	if err != nil {
 		return queryResult{}, err
 	}
 	affected, _ := execResult.RowsAffected()
 	return queryResult{Columns: []string{}, ColumnTypes: []string{}, Rows: [][]any{}, AffectedRows: affected, ExecutionTimeMS: time.Since(start).Milliseconds()}, nil
+}
+
+func (s *server) execContext(ctx context.Context, sqlText string) (sql.Result, error) {
+	if s.manualTx != nil {
+		return s.manualTx.ExecContext(ctx, sqlText)
+	}
+	db, err := s.requireDB()
+	if err != nil {
+		return nil, err
+	}
+	return db.ExecContext(ctx, sqlText)
 }
 
 func (s *server) executeSelect(sqlText string, maxRows int, timeoutSecs int, deferLOBs bool) (queryResult, error) {
@@ -4286,7 +4380,7 @@ func rewriteOracleSelectItems(items []string, columns []oracleColumnMeta, tableR
 			for _, column := range columns {
 				columnRef := oracleColumnRef(tableRef.AliasText, column.Name)
 				outputAlias := quoteIdentifier(column.Name)
-				if isOracleXMLType(column.DataType) {
+				if isOracleXMLType(column.DataType) && !deferLOBs {
 					rewritten = append(rewritten, oracleXMLSerializeExpression(columnRef, outputAlias))
 				} else if deferLOBs {
 					if expressions, ok := oracleDeferredLOBExpressions(columnRef, outputAlias, sourceIndex, column.DataType); ok {
@@ -4310,7 +4404,7 @@ func rewriteOracleSelectItems(items []string, columns []oracleColumnMeta, tableR
 					outputAlias = quoteIdentifier(meta.Name)
 				}
 				columnRef := oracleColumnRef(qualifier, meta.Name)
-				if isOracleXMLType(meta.DataType) {
+				if isOracleXMLType(meta.DataType) && !deferLOBs {
 					rewritten = append(rewritten, oracleXMLSerializeExpression(columnRef, outputAlias))
 					changed = true
 					sourceIndex++
@@ -4353,6 +4447,8 @@ func oracleDeferredLOBKind(dataType string) (kind, placeholder string, ok bool) 
 		return "L", "<BLOB>", true
 	case "BFILE":
 		return "F", "<BFILE>", true
+	case "XMLTYPE", "SYS.XMLTYPE":
+		return "C", "<XMLTYPE>", true
 	default:
 		return "", "", false
 	}
@@ -4725,11 +4821,20 @@ func skipBlockCommentSQL(value string, pos int) int {
 }
 
 func (s *server) setSchema(schema string) error {
+	sqlText := "ALTER SESSION SET CURRENT_SCHEMA = " + quoteIdentifier(schema)
+	if s.manualTx != nil {
+		_, err := s.manualTx.Exec(sqlText)
+		return err
+	}
+	if s.manualConn != nil {
+		_, err := s.manualConn.ExecContext(context.Background(), sqlText)
+		return err
+	}
 	db, err := s.requireDB()
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec("ALTER SESSION SET CURRENT_SCHEMA = " + quoteIdentifier(schema))
+	_, err = db.Exec(sqlText)
 	return err
 }
 
@@ -4738,8 +4843,7 @@ func (s *server) queryRows(sqlText string, args []any) (*sql.Rows, error) {
 }
 
 func (s *server) queryRowsWithTimeout(sqlText string, args []any, timeoutSecs int) (*sql.Rows, error) {
-	db, err := s.requireDB()
-	if err != nil {
+	if _, err := s.requireDB(); err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -4761,7 +4865,18 @@ func (s *server) queryRowsWithTimeout(sqlText string, args []any, timeoutSecs in
 	s.activeTimer = timer
 	s.activeTimedOut = false
 	s.activeCancelMu.Unlock()
-	rows, queryErr := db.QueryContext(ctx, sqlText, args...)
+	var rows *sql.Rows
+	var queryErr error
+	if s.manualTx != nil {
+		rows, queryErr = s.manualTx.QueryContext(ctx, sqlText, args...)
+	} else {
+		db, err := s.requireDB()
+		if err != nil {
+			cancel()
+			return nil, err
+		}
+		rows, queryErr = db.QueryContext(ctx, sqlText, args...)
+	}
 	s.activeCancelMu.Lock()
 	s.activeCancel = nil
 	if s.activeTimer != nil {

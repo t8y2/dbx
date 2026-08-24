@@ -3,6 +3,7 @@ import vue from "@vitejs/plugin-vue";
 import tailwindcss from "@tailwindcss/vite";
 import path from "path";
 import { publicBasePathRedirectPlugin } from "./vitePublicBasePathRedirect";
+import { connectionTypesPlugin } from "./viteConnectionTypesPlugin.ts";
 
 const host = process.env.TAURI_DEV_HOST;
 const isTauri = !!host || !!process.env.TAURI_ENV_ARCH;
@@ -64,7 +65,7 @@ const backendUrl = process.env.DBX_BACKEND_URL || "http://localhost:4224";
 export default defineConfig(async () => ({
   root: import.meta.dirname,
   base: viteBase,
-  plugins: [publicBasePathRedirectPlugin(publicBasePath), vue(), tailwindcss()],
+  plugins: [connectionTypesPlugin(), publicBasePathRedirectPlugin(publicBasePath), vue(), tailwindcss()],
   resolve: {
     alias: {
       "@": path.resolve(import.meta.dirname, "./src"),

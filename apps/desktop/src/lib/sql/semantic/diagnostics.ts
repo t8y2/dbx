@@ -25,8 +25,7 @@ export interface SqlSemanticDiagnosticVisibleRange {
 }
 
 export function sqlSemanticDiagnosticRangesForViewport(sql: string, visibleRanges: readonly SqlSemanticDiagnosticVisibleRange[], databaseType?: DatabaseType): SqlTextRange[] {
-  const executableRanges = executableStatementRanges(sql, databaseType);
-  const statements = databaseType === "sqlserver" ? mergeSqlServerDiagnosticBatchRanges(sql, executableRanges) : executableRanges;
+  const statements = databaseType === "sqlserver" ? sqlServerSemanticDiagnosticRanges(sql) : executableStatementRanges(sql, databaseType);
   if (statements.length === 0 || visibleRanges.length === 0) return [];
 
   const selected: SqlTextRange[] = [];
@@ -42,20 +41,190 @@ export function sqlSemanticDiagnosticRangesForViewport(sql: string, visibleRange
   return selected;
 }
 
-function mergeSqlServerDiagnosticBatchRanges(sql: string, statements: readonly SqlTextRange[]): SqlTextRange[] {
-  if (statements.length < 2) return [...statements];
-
+function sqlServerSemanticDiagnosticRanges(sql: string): SqlTextRange[] {
   const ranges: SqlTextRange[] = [];
-  let batch: SqlTextRange[] = [statements[0]];
-  for (const statement of statements.slice(1)) {
-    if (sqlServerGapContainsGoSeparator(sql.slice(batch[batch.length - 1].to, statement.from))) {
-      pushSqlServerDiagnosticBatchRanges(ranges, sql, batch);
-      batch = [];
-    }
-    batch.push(statement);
+  for (const batch of sqlServerBatchRanges(sql)) {
+    if (isSqlServerRoutineDefinitionBatch(batch.sql)) continue;
+    const statements = executableStatementRanges(batch.sql, "sqlserver").map((statement) => ({
+      from: batch.from + statement.from,
+      to: batch.from + statement.to,
+      sql: statement.sql,
+    }));
+    pushSqlServerDiagnosticBatchRanges(ranges, sql, statements);
   }
-  pushSqlServerDiagnosticBatchRanges(ranges, sql, batch);
   return ranges;
+}
+
+function isSqlServerRoutineDefinitionBatch(sql: string): boolean {
+  const keywords = leadingUnquotedSqlKeywords(sql, 4);
+  const routineKeyword = (value: string | undefined) => value === "PROC" || value === "PROCEDURE" || value === "FUNCTION";
+  return (keywords[0] === "ALTER" && routineKeyword(keywords[1])) || (keywords[0] === "CREATE" && routineKeyword(keywords[1])) || (keywords[0] === "CREATE" && keywords[1] === "OR" && keywords[2] === "ALTER" && routineKeyword(keywords[3]));
+}
+
+function leadingUnquotedSqlKeywords(sql: string, limit: number): string[] {
+  const keywords: string[] = [];
+  let index = 0;
+  while (index < sql.length && keywords.length < limit) {
+    if (/\s/.test(sql[index])) {
+      index++;
+      continue;
+    }
+    if (sql.startsWith("--", index)) {
+      const carriageReturn = sql.indexOf("\r", index + 2);
+      const lineFeed = sql.indexOf("\n", index + 2);
+      const newline = carriageReturn < 0 ? lineFeed : lineFeed < 0 ? carriageReturn : Math.min(carriageReturn, lineFeed);
+      index = newline < 0 ? sql.length : newline + 1;
+      if (sql[newline] === "\r" && sql[newline + 1] === "\n") index += 1;
+      continue;
+    }
+    if (sql.startsWith("/*", index)) {
+      let depth = 1;
+      index += 2;
+      while (index < sql.length && depth > 0) {
+        if (sql.startsWith("/*", index)) {
+          depth += 1;
+          index += 2;
+        } else if (sql.startsWith("*/", index)) {
+          depth -= 1;
+          index += 2;
+        } else {
+          index += 1;
+        }
+      }
+      if (depth > 0) break;
+      continue;
+    }
+    const match = /^[A-Za-z]+/.exec(sql.slice(index));
+    if (!match) break;
+    keywords.push(match[0].toUpperCase());
+    index += match[0].length;
+  }
+  return keywords;
+}
+
+function sqlServerBatchRanges(sql: string): SqlTextRange[] {
+  const separators = sqlServerGoSeparatorRanges(sql);
+  const ranges: SqlTextRange[] = [];
+  let from = 0;
+  for (const separator of separators) {
+    if (separator.from > from) ranges.push({ from, to: separator.from, sql: sql.slice(from, separator.from) });
+    from = separator.to;
+  }
+  if (from < sql.length) ranges.push({ from, to: sql.length, sql: sql.slice(from) });
+  return ranges;
+}
+
+type SqlServerBatchQuote = "none" | "single" | "double" | "bracket";
+
+interface SqlServerBatchScanState {
+  blockCommentDepth: number;
+  quote: SqlServerBatchQuote;
+}
+
+function sqlServerGoSeparatorRanges(sql: string): Array<{ from: number; to: number }> {
+  const ranges: Array<{ from: number; to: number }> = [];
+  const state: SqlServerBatchScanState = { blockCommentDepth: 0, quote: "none" };
+  let lineStart = 0;
+  while (lineStart <= sql.length) {
+    const newline = sql.indexOf("\n", lineStart);
+    const lineEnd = newline < 0 ? sql.length : newline;
+    const line = sql.slice(lineStart, lineEnd);
+    if (state.blockCommentDepth === 0 && state.quote === "none" && isSqlServerGoSeparatorLine(line)) {
+      ranges.push({ from: lineStart, to: newline < 0 ? lineEnd : lineEnd + 1 });
+    } else {
+      updateSqlServerBatchScanState(line, state);
+    }
+    if (newline < 0) break;
+    lineStart = newline + 1;
+  }
+  return ranges;
+}
+
+function isSqlServerGoSeparatorLine(line: string): boolean {
+  let index = 0;
+  while (index < line.length && /\s/.test(line[index] ?? "")) index += 1;
+  if (line.slice(index, index + 2).toUpperCase() !== "GO") return false;
+  index += 2;
+  if (index < line.length && !/\s/.test(line[index] ?? "") && !line.startsWith("--", index) && !line.startsWith("/*", index)) return false;
+
+  let sawWhitespace = false;
+  while (index < line.length && /\s/.test(line[index] ?? "")) {
+    sawWhitespace = true;
+    index += 1;
+  }
+  if (sawWhitespace && /\d/.test(line[index] ?? "")) {
+    while (index < line.length && /\d/.test(line[index] ?? "")) index += 1;
+  }
+
+  while (index < line.length) {
+    while (index < line.length && /\s/.test(line[index] ?? "")) index += 1;
+    if (index >= line.length || line.startsWith("--", index)) return true;
+    if (!line.startsWith("/*", index)) return false;
+
+    let depth = 1;
+    index += 2;
+    while (index < line.length && depth > 0) {
+      if (line.startsWith("/*", index)) {
+        depth += 1;
+        index += 2;
+      } else if (line.startsWith("*/", index)) {
+        depth -= 1;
+        index += 2;
+      } else {
+        index += 1;
+      }
+    }
+    if (depth > 0) return false;
+  }
+  return true;
+}
+
+function updateSqlServerBatchScanState(line: string, state: SqlServerBatchScanState) {
+  let index = 0;
+  while (index < line.length) {
+    if (state.blockCommentDepth > 0) {
+      if (line.startsWith("/*", index)) {
+        state.blockCommentDepth += 1;
+        index += 2;
+      } else if (line.startsWith("*/", index)) {
+        state.blockCommentDepth -= 1;
+        index += 2;
+      } else {
+        index += 1;
+      }
+      continue;
+    }
+
+    if (state.quote !== "none") {
+      const quote = state.quote === "single" ? "'" : state.quote === "double" ? '"' : "]";
+      if (line[index] !== quote) {
+        index += 1;
+      } else if (line[index + 1] === quote) {
+        index += 2;
+      } else {
+        state.quote = "none";
+        index += 1;
+      }
+      continue;
+    }
+
+    if (line.startsWith("--", index)) break;
+    if (line.startsWith("/*", index)) {
+      state.blockCommentDepth = 1;
+      index += 2;
+    } else if (line[index] === "'") {
+      state.quote = "single";
+      index += 1;
+    } else if (line[index] === '"') {
+      state.quote = "double";
+      index += 1;
+    } else if (line[index] === "[") {
+      state.quote = "bracket";
+      index += 1;
+    } else {
+      index += 1;
+    }
+  }
 }
 
 function pushSqlServerDiagnosticBatchRanges(ranges: SqlTextRange[], sql: string, batch: readonly SqlTextRange[]) {
@@ -70,38 +239,6 @@ function pushSqlServerDiagnosticBatchRanges(ranges: SqlTextRange[], sql: string,
 
 function sqlServerStatementNeedsBatchContext(sql: string): boolean {
   return /^\s*(?:WHILE|BEGIN|END|IF|ELSE|TRY|CATCH)\b/i.test(sql) || /^\s*DECLARE\s+(?:\[[^\]]+\]|"[^"]+"|[A-Z_@#][\w@$#]*)\s+CURSOR\b/i.test(sql);
-}
-
-function sqlServerGapContainsGoSeparator(gap: string): boolean {
-  let inBlockComment = false;
-  let lineStart = 0;
-  while (lineStart <= gap.length) {
-    const newline = gap.indexOf("\n", lineStart);
-    const lineEnd = newline < 0 ? gap.length : newline;
-    const line = gap.slice(lineStart, lineEnd).replace(/\r$/, "");
-    if (!inBlockComment && /^\s*go(?:\s+\d+)?\s*$/i.test(line)) return true;
-
-    let offset = 0;
-    while (offset < line.length) {
-      if (inBlockComment) {
-        const close = line.indexOf("*/", offset);
-        if (close < 0) break;
-        inBlockComment = false;
-        offset = close + 2;
-        continue;
-      }
-      const open = line.indexOf("/*", offset);
-      if (open < 0) break;
-      const lineComment = line.indexOf("--", offset);
-      if (lineComment >= 0 && lineComment < open) break;
-      inBlockComment = true;
-      offset = open + 2;
-    }
-
-    if (newline < 0) break;
-    lineStart = newline + 1;
-  }
-  return false;
 }
 
 export function buildSqlSemanticDiagnostics(analysis: SqlReferenceAnalysis, schema: SqlSemanticDiagnosticSchema): SqlSemanticDiagnostic[] {

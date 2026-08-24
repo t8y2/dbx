@@ -1,4 +1,4 @@
-import { ref, shallowRef, computed, nextTick, watch, getCurrentInstance, onActivated, onBeforeUnmount, onDeactivated, onMounted, toRaw, type ComputedRef, type Ref } from "vue";
+import { ref, shallowRef, triggerRef, computed, nextTick, watch, getCurrentInstance, onActivated, onBeforeUnmount, onDeactivated, onMounted, toRaw, type ComputedRef, type Ref } from "vue";
 import * as api from "@/lib/backend/api";
 import type { CellValue } from "@/lib/dataGrid/cellValue";
 import { coerceDataGridCellValue, dataGridCellEditorText } from "@/lib/dataGrid/dataGridCellCoercion";
@@ -14,6 +14,8 @@ import { assessProductionSql, productionContextForDatabase } from "@/lib/databas
 import type { ColumnInfo, DatabaseType } from "@/types/database";
 import { DBX_NEO4J_ELEMENT_ID_COLUMN, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { normalizeBackendError } from "@/lib/backend/errorUtils";
+import { uuid } from "@/lib/common/utils";
 import i18n from "@/i18n";
 
 interface RowItem {
@@ -32,6 +34,16 @@ export const DATA_GRID_QUICK_ENTRY_DRAFT_ROW_ID = Number.MIN_SAFE_INTEGER;
 export const DATA_GRID_MAX_BATCH_INSERT_ROWS = 1000;
 
 type RowKind = "none" | "existing" | "new" | "draft";
+type ConditionalUpdateOutcome = "not-started" | "running" | "completed" | "failed" | "unknown";
+
+interface ConditionalUpdateExecution {
+  executionId: string;
+  dispatched: boolean;
+  cancelRequested: boolean;
+  cancelling: boolean;
+  terminalCheckScheduled: boolean;
+  outcome: ConditionalUpdateOutcome;
+}
 
 export type DataGridAppendPastedRowsResult = { ok: true; rowCount: number } | { ok: false; reason: "not-editable" | "invalid-target" | "target-not-empty" | "empty-paste" | "readonly-column" };
 
@@ -105,6 +117,7 @@ export interface UseDataGridEditorOptions {
   cacheKey?: ComputedRef<string | undefined>;
   /** 保存成功后结果负载被原地修改时通知宿主，使缓存的字节估算失效。 */
   onResultPayloadMutated?: () => void;
+  onCellValueChanged?: (rowId: number, columnIndex: number) => void;
   prepareFullReload?: () => void;
   emit: {
     (event: "reload", sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number): void;
@@ -217,6 +230,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     pageSize,
     currentPage,
     cacheKey,
+    onCellValueChanged,
   } = options;
 
   const editingCell = ref<{ rowId: number; col: number } | null>(null);
@@ -321,6 +335,8 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   const transactionActive = ref(false);
   const isSaving = ref(false);
   const saveError = ref("");
+  const conditionalUpdateExecution = shallowRef<ConditionalUpdateExecution>();
+  const isConditionalUpdateActive = computed(() => conditionalUpdateExecution.value !== undefined);
 
   const hasBackendSaveTarget = computed(() => !!connectionId.value && !!tableMeta.value);
   const useTransaction = computed(() => editable.value && supportsDataGridTransaction(resolvedDatabaseType.value) && (!!customSaveHandler?.value || hasBackendSaveTarget.value));
@@ -342,7 +358,9 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       if (input) focusDataGridEditorWithoutScrolling(input, scroller);
       if (select && input) {
         if (input instanceof HTMLTextAreaElement && input.dataset.expandedCellEditor === "true") {
-          input.setSelectionRange?.(0, 0);
+          // Expanded editors must match single-line editors: a double-click selects the whole value.
+          input.select();
+          input.setSelectionRange?.(0, input.value.length);
           input.scrollTop = 0;
         } else {
           input.select();
@@ -391,14 +409,27 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   function restorePendingChangesSnapshot(snapshot: PendingChangesHistorySnapshot) {
+    const previousDirtyRows = dirtyRows.value;
+    const restoredDirtyRows = new Map([...snapshot.dirtyRows].map(([rowIndex, changes]) => [rowIndex, new Map(changes)]));
     newRows.value = snapshot.newRows.map((row) => [...row]);
     restoreNewRowMeta(snapshot.newRowMeta ?? []);
     quickEntryDraftRow.value = snapshot.quickEntryDraftRow ? [...snapshot.quickEntryDraftRow] : emptyDraftRow();
-    dirtyRows.value = new Map([...snapshot.dirtyRows].map(([rowIndex, changes]) => [rowIndex, new Map(changes)]));
+    dirtyRows.value = restoredDirtyRows;
     deletedRows.value = new Set(snapshot.deletedRows);
     transactionActive.value = snapshot.transactionActive === true && useTransaction.value === true;
     queuedAutoSaveChanges.clear();
     editingCell.value = null;
+    for (const rowIndex of new Set([...previousDirtyRows.keys(), ...restoredDirtyRows.keys()])) {
+      const previousChanges = previousDirtyRows.get(rowIndex);
+      const restoredChanges = restoredDirtyRows.get(rowIndex);
+      for (const columnIndex of new Set([...(previousChanges?.keys() ?? []), ...(restoredChanges?.keys() ?? [])])) {
+        const previousHasValue = previousChanges?.has(columnIndex) ?? false;
+        const restoredHasValue = restoredChanges?.has(columnIndex) ?? false;
+        if (previousHasValue !== restoredHasValue || previousChanges?.get(columnIndex) !== restoredChanges?.get(columnIndex)) {
+          onCellValueChanged?.(rowIndex, columnIndex);
+        }
+      }
+    }
     touchPendingChanges();
   }
 
@@ -613,7 +644,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
 
   function canEditColumn(columnIndex: number): boolean {
     const sources = sourceColumns.value;
-    return (!sources || sources[columnIndex] !== undefined) && !readonlyColumnIndexes.value?.has(columnIndex);
+    return !isConditionalUpdateActive.value && (!sources || sources[columnIndex] !== undefined) && !readonlyColumnIndexes.value?.has(columnIndex);
   }
 
   // --- Row data helpers ---
@@ -824,6 +855,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     if (dataGridQuickEntryEnabled.value && isSaving.value && changed) {
       rememberQueuedAutoSaveChange(item.sourceIndex, col, newVal);
     }
+    if (changed) onCellValueChanged?.(rowId, col);
     return changed ? { changed: true, rowKind: "existing" } : { changed: false, rowKind: "existing" };
   }
 
@@ -942,6 +974,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       dirtyRows.value = new Map(dirtyRows.value);
       touchPendingChanges();
     }
+    onCellValueChanged?.(rowId, col);
   }
 
   function restoreCellValue(rowId: number, col: number) {
@@ -982,6 +1015,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     if (rowChanges.size === 0) dirtyRows.value.delete(item.sourceIndex);
     dirtyRows.value = new Map(dirtyRows.value);
     touchPendingChanges();
+    onCellValueChanged?.(rowId, col);
   }
 
   function cancelEdit() {
@@ -1005,6 +1039,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   function addRow() {
+    if (isConditionalUpdateActive.value) return;
     pushUndoSnapshot();
     rowStatusFilter.value = rowStatusFilterAfterAddingRow(rowStatusFilter.value);
     newRows.value.push(result.value.columns.map(() => null));
@@ -1033,6 +1068,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   // positions). Returns the first inserted row's id, or undefined when the
   // count was rejected.
   function addRows(count: number, placement: GridNewRowPlacement | null = null): number | undefined {
+    if (isConditionalUpdateActive.value) return undefined;
     if (!Number.isInteger(count) || count <= 0) return undefined;
     const clampedCount = Math.min(count, DATA_GRID_MAX_BATCH_INSERT_ROWS);
     const firstNewIndex = newRows.value.length;
@@ -1172,6 +1208,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   function cloneRows(rowIds: number[], resolvedValues?: ReadonlyMap<number, ReadonlyMap<number, CellValue>>) {
+    if (isConditionalUpdateActive.value) return;
     const rowsToClone = rowIds.map((rowId) => getRowItem(rowId)).filter(Boolean) as RowItem[];
     if (rowsToClone.length === 0) return;
     pushUndoSnapshot();
@@ -1190,6 +1227,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   function applyDeleteRows(rowIds: number[]) {
+    if (isConditionalUpdateActive.value) return;
     const items = rowIds.map((rowId) => getRowItem(rowId)).filter((item): item is RowItem => !!item);
     if (items.length === 0) return;
 
@@ -1275,6 +1313,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   );
 
   function restoreRow(rowId: number) {
+    if (isConditionalUpdateActive.value) return;
     const item = getRowItem(rowId);
     if (item?.sourceIndex !== undefined && deletedRows.value.has(item.sourceIndex)) {
       pushUndoSnapshot();
@@ -1285,6 +1324,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   function restoreRows(rowIds: number[]) {
+    if (isConditionalUpdateActive.value) return;
     const sourceIndexes = rowIds.map((rowId) => getRowItem(rowId)?.sourceIndex).filter((sourceIndex): sourceIndex is number => sourceIndex !== undefined && deletedRows.value.has(sourceIndex));
     if (sourceIndexes.length === 0) return;
     pushUndoSnapshot();
@@ -1458,9 +1498,171 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     return message;
   }
 
+  async function recordConditionalUpdateHistory(statement: string, elapsed: number, historyResult: { affectedRows?: number; success?: boolean; error?: string } = {}) {
+    if (!connectionId.value || !tableMeta.value) return;
+    const connectionName = connectionStore.getConfig(connectionId.value)?.name || "";
+    const success = historyResult.success ?? true;
+    await historyStore.add({
+      connection_id: connectionId.value,
+      connection_name: connectionName,
+      database: database.value ?? "",
+      sql: statement,
+      execution_time_ms: elapsed,
+      success,
+      error: success ? undefined : historyResult.error,
+      activity_kind: "data_change",
+      operation: "UPDATE",
+      target: tableHistoryTarget(),
+      affected_rows: success ? historyResult.affectedRows : undefined,
+      details_json: JSON.stringify({
+        schema: tableMeta.value.schema,
+        table: tableMeta.value.tableName,
+        conditional_update: true,
+        statement_count: 1,
+        execution_outcome: success ? "completed" : "failed",
+        error: success ? undefined : historyResult.error,
+      }),
+    });
+  }
+
+  function isConditionalUpdateTerminalFailure(error: unknown) {
+    const backendError = normalizeBackendError(error);
+    return backendError?.operationOutcome === "not_started" || backendError?.code === "DBX-JDBC-4001" || backendError?.diagnostics?.category === "sql";
+  }
+
   function reloadCurrentData() {
     options.prepareFullReload?.();
     options.emit("reload", sql.value, searchText.value, options.currentWhereInput.value, orderByInput.value.trim() || undefined, pageSize.value, (currentPage.value - 1) * pageSize.value);
+  }
+
+  function completeConditionalUpdate(execution: ConditionalUpdateExecution) {
+    if (conditionalUpdateExecution.value !== execution) return false;
+    execution.outcome = "completed";
+    conditionalUpdateExecution.value = undefined;
+    isSaving.value = false;
+    reloadCurrentData();
+    return true;
+  }
+
+  function scheduleConditionalUpdateTerminalCheck(execution: ConditionalUpdateExecution) {
+    if (execution.terminalCheckScheduled) return;
+    execution.terminalCheckScheduled = true;
+    setTimeout(() => {
+      execution.terminalCheckScheduled = false;
+      if (conditionalUpdateExecution.value !== execution) return;
+      void api
+        .cancelConditionalUpdate(execution.executionId)
+        .then((cancellation) => {
+          if (cancellation.terminal) {
+            completeConditionalUpdate(execution);
+          } else {
+            scheduleConditionalUpdateTerminalCheck(execution);
+          }
+        })
+        .catch(() => scheduleConditionalUpdateTerminalCheck(execution));
+    }, 1_000);
+  }
+
+  async function executeConditionalUpdate(statement: string): Promise<{ affectedRows?: number } | null> {
+    if (isSaving.value || !connectionId.value || !tableMeta.value) return null;
+    if (editingCell.value) commitEdit();
+    if (hasPendingChanges.value) {
+      saveError.value = i18n.global.t("grid.conditionalBulkEditPendingChanges");
+      return null;
+    }
+
+    saveError.value = "";
+    const connection = connectionStore.getConfig(connectionId.value);
+    const productionAssessment = assessProductionSql(statement, connection, database.value);
+    if (productionAssessment.active && productionAssessment.isMutation) {
+      const confirmed = await productionSafetyStore.requestConfirmation({
+        sql: statement,
+        connectionName: connection?.name,
+        database: database.value,
+        productionDatabases: productionAssessment.databases,
+        source: "Data editor",
+      });
+      if (!confirmed) return null;
+    }
+
+    const execution: ConditionalUpdateExecution = {
+      executionId: uuid(),
+      dispatched: false,
+      cancelRequested: false,
+      cancelling: false,
+      terminalCheckScheduled: false,
+      outcome: "not-started",
+    };
+    conditionalUpdateExecution.value = execution;
+    isSaving.value = true;
+    const startedAt = Date.now();
+    try {
+      if (execution.cancelRequested) return null;
+      execution.dispatched = true;
+      execution.outcome = "running";
+      const result = await api.executeConditionalUpdate(connectionId.value, database.value ?? "", statement, tableMeta.value.schema, execution.executionId);
+      if (conditionalUpdateExecution.value !== execution) return null;
+      execution.outcome = "completed";
+      try {
+        await recordConditionalUpdateHistory(statement, Date.now() - startedAt, { affectedRows: result.affected_rows });
+      } catch (historyError) {
+        console.warn("[DBX] failed to record conditional data grid update history", historyError);
+      }
+      reloadCurrentData();
+      return { affectedRows: result?.affected_rows };
+    } catch (error) {
+      if (conditionalUpdateExecution.value !== execution) return null;
+      const message = normalizeDataGridSaveError(databaseType.value, error);
+      saveError.value = message;
+      if (isConditionalUpdateTerminalFailure(error)) {
+        execution.outcome = "failed";
+        try {
+          await recordConditionalUpdateHistory(statement, Date.now() - startedAt, { success: false, error: message });
+        } catch (historyError) {
+          console.warn("[DBX] failed to record conditional data grid update history", historyError);
+        }
+        reloadCurrentData();
+      } else {
+        // A dispatch may reach the database even when the client times out or
+        // loses its transport. Keep the cancel path alive until the outcome is known.
+        execution.outcome = normalizeBackendError(error)?.operationOutcome === "not_started" ? "not-started" : "unknown";
+      }
+      return null;
+    } finally {
+      if (conditionalUpdateExecution.value === execution && execution.outcome !== "unknown") {
+        conditionalUpdateExecution.value = undefined;
+        isSaving.value = false;
+      }
+    }
+  }
+
+  async function cancelConditionalUpdate(): Promise<boolean> {
+    const execution = conditionalUpdateExecution.value;
+    if (!execution || execution.cancelling) return false;
+    execution.cancelRequested = true;
+    if (!execution.dispatched) {
+      execution.outcome = "not-started";
+      conditionalUpdateExecution.value = undefined;
+      isSaving.value = false;
+      return true;
+    }
+    execution.cancelling = true;
+    triggerRef(conditionalUpdateExecution);
+    try {
+      const cancellation = await api.cancelConditionalUpdate(execution.executionId);
+      if (conditionalUpdateExecution.value !== execution) return false;
+      if (!cancellation.terminal) {
+        scheduleConditionalUpdateTerminalCheck(execution);
+        return false;
+      }
+      return completeConditionalUpdate(execution);
+    } catch (error) {
+      saveError.value = normalizeDataGridSaveError(databaseType.value, error);
+      return false;
+    } finally {
+      execution.cancelling = false;
+      if (conditionalUpdateExecution.value === execution) triggerRef(conditionalUpdateExecution);
+    }
   }
 
   async function saveChanges(saveOptions: SaveChangesOptions = {}) {
@@ -1627,6 +1829,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   function discardChanges() {
+    if (isConditionalUpdateActive.value) return;
     dirtyRows.value = new Map();
     newRows.value = [];
     newRowMeta.value = [];
@@ -1776,6 +1979,8 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     transactionActive,
     isSaving,
     saveError,
+    isConditionalUpdateActive,
+    conditionalUpdateExecution,
     useTransaction,
     beginBatch,
     commitBatch,
@@ -1805,6 +2010,8 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     restoreRows,
     deleteSelectedRow,
     saveChanges,
+    executeConditionalUpdate,
+    cancelConditionalUpdate,
     discardChanges,
     canUndoPendingChange,
     canRedoPendingChange,

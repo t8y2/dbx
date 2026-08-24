@@ -96,6 +96,8 @@ export const showEditNacosNamespaceDialog = ref(false);
 export const editNacosNamespaceName = ref("");
 export const editNacosNamespaceDesc = ref("");
 export const editNacosNamespaceLoading = ref(false);
+export const showDeleteNacosNamespaceConfirm = ref(false);
+export const deleteNacosNamespaceLoading = ref(false);
 export const createDatabaseCharsetOptions = ref<string[]>(fallbackCreateDatabaseCharset.charsets);
 export const createDatabaseCollationsByCharset = ref<Record<string, string[]>>(fallbackCreateDatabaseCharset.collationsByCharset);
 export const createDatabaseCharsetLoading = ref(false);
@@ -241,6 +243,8 @@ export function resetSidebarTreeDialogState() {
   sidebarTreeDialogOwner.value = null;
   sidebarDangerTarget.value = null;
   sidebarFormTarget.value = null;
+  sidebarDangerRunningExecutionId.value = "";
+  sidebarDangerRunningCancel.value = null;
   connectionDeleteTargetSnapshot.value = [];
   connectionGroupDeleteTargetSnapshot.value = [];
   deleteConnectionsWithGroup.value = false;

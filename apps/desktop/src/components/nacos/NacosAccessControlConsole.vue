@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import { KeyRound, Loader2, RefreshCw, ShieldCheck, UsersRound } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Badge } from "@/components/ui/badge";
@@ -16,6 +16,7 @@ const props = defineProps<{
 }>();
 
 type AccessTab = "users" | "roles";
+type AccessControlWorkspace = { refresh: () => Promise<void> };
 
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
@@ -23,6 +24,8 @@ const connectionInfo = ref<NacosConnectionInfo | null>(null);
 const connectionError = ref("");
 const loading = ref(false);
 const activeTab = ref<AccessTab>("users");
+const legacyWorkspace = ref<AccessControlWorkspace | null>(null);
+const enhancedWorkspaceRef = ref<AccessControlWorkspace | null>(null);
 
 const accessControl = computed(() => connectionInfo.value?.capabilities.accessControl);
 const supportsUsers = computed(() => accessControl.value?.listUsers.supported === true);
@@ -30,13 +33,17 @@ const supportsRoles = computed(() => accessControl.value?.mode === "roleBindings
 const enhancedWorkspace = computed(() => accessControl.value?.enhancedWorkspace === true);
 const permissionWorkspaceUnavailable = computed(() => accessControl.value?.mode === "roleBindings" && accessControl.value.listPermissions?.supported === false && accessControl.value.listPermissions.reason !== "versionUnsupported");
 
-async function loadConnectionInfo() {
+async function loadConnectionInfo(refreshWorkspace = false) {
   loading.value = true;
   connectionError.value = "";
   try {
     await connectionStore.ensureConnected(props.connectionId);
-    connectionInfo.value = await api.nacosTestConnection(props.connectionId);
+    connectionInfo.value = await api.nacosTestConnection(props.connectionId, refreshWorkspace);
     if (!supportsUsers.value && supportsRoles.value) activeTab.value = "roles";
+    if (refreshWorkspace) {
+      await nextTick();
+      await (enhancedWorkspace.value ? enhancedWorkspaceRef.value : legacyWorkspace.value)?.refresh();
+    }
   } catch (error) {
     connectionInfo.value = null;
     connectionError.value = error instanceof Error ? error.message : String(error);
@@ -74,7 +81,7 @@ watch(
       <Badge v-if="connectionInfo?.serverVersion" variant="secondary">{{ connectionInfo.serverVersion }}</Badge>
       <div class="flex-1" />
       <Badge v-if="readOnly" variant="outline">{{ t("nacos.readOnly") }}</Badge>
-      <Button size="sm" variant="outline" class="h-8 gap-1.5" :disabled="loading" @click="loadConnectionInfo">
+      <Button size="sm" variant="outline" class="h-8 gap-1.5" :disabled="loading" @click="loadConnectionInfo(true)">
         <RefreshCw class="h-3.5 w-3.5" :class="loading ? 'animate-spin' : ''" />
         {{ t("nacos.refresh") }}
       </Button>
@@ -88,8 +95,8 @@ watch(
     </div>
     <template v-else-if="connectionInfo">
       <div v-if="!supportsUsers && !supportsRoles" class="m-4 rounded border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">{{ t("nacos.accessControlUnavailable") }}</div>
-      <NacosRoleAccessControl v-if="enhancedWorkspace && accessControl" :connection-id="connectionId" :capabilities="accessControl" :read-only="readOnly" :tab="activeTab" @select-user="activeTab = 'users'" @select-role="activeTab = 'roles'" />
-      <NacosAccessControl v-else-if="supportsUsers || supportsRoles" :connection-id="connectionId" :connection-info="connectionInfo" :read-only="readOnly" :tab="activeTab" />
+      <NacosRoleAccessControl v-if="enhancedWorkspace && accessControl" ref="enhancedWorkspaceRef" :connection-id="connectionId" :capabilities="accessControl" :read-only="readOnly" :tab="activeTab" @select-user="activeTab = 'users'" @select-role="activeTab = 'roles'" />
+      <NacosAccessControl v-else-if="supportsUsers || supportsRoles" ref="legacyWorkspace" :connection-id="connectionId" :connection-info="connectionInfo" :read-only="readOnly" :tab="activeTab" />
     </template>
   </section>
 </template>

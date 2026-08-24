@@ -6,7 +6,7 @@ use futures::StreamExt;
 use prometheus_parse::{Labels, Sample, Scrape, Value};
 use sha2::{Digest, Sha256};
 
-use crate::nacos::config::{NacosAdminConfig, NacosImplementation, NacosMetricsMode};
+use crate::nacos::config::{NacosAdminConfig, NacosApiPlane, NacosImplementation, NacosMetricsMode};
 use crate::nacos::types::{
     NacosPrometheusConfigMetrics, NacosPrometheusNamingMetrics, NacosPrometheusResourceMetrics,
     NacosPrometheusSnapshot, NacosPrometheusSource, NacosPrometheusTrafficMetrics,
@@ -20,6 +20,10 @@ pub(crate) fn endpoint_candidates(cfg: &NacosAdminConfig) -> Result<Vec<String>,
         NacosMetricsMode::Disabled => return Ok(Vec::new()),
         NacosMetricsMode::Custom => return Ok(vec![cfg.metrics_url.clone()]),
         NacosMetricsMode::Auto => {}
+    }
+
+    if cfg.api_plane() == NacosApiPlane::Console {
+        return Ok(Vec::new());
     }
 
     let base = cfg.server_addr.trim_end_matches('/');
@@ -802,6 +806,7 @@ app_memory_usage 1
         NacosAdminConfig {
             implementation: Some(implementation),
             version_mode: None,
+            api_plane: None,
             server_addr: server_addr.to_string(),
             display_server_addr: server_addr.to_string(),
             namespace: String::new(),

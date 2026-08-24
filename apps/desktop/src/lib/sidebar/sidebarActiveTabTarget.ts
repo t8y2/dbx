@@ -65,6 +65,10 @@ export type ActiveTabSidebarTarget =
       connectionId: string;
     }
   | {
+      type: "meilisearch-system";
+      connectionId: string;
+    }
+  | {
       type: "mq-tenant";
       connectionId: string;
       tenant: string;
@@ -85,6 +89,22 @@ export type ActiveTabSidebarTarget =
       type: "saved-sql-file";
       savedSqlId: string;
     };
+
+/**
+ * Resolve a connection root without walking its potentially large object tree.
+ * Grouped connections live below connection-group nodes, while a connection
+ * id can also appear on descendants, so only group children are traversed.
+ */
+export function findSidebarConnectionNode(nodes: readonly TreeNode[], connectionId: string): TreeNode | null {
+  for (const node of nodes) {
+    if (node.type === "connection" && node.id === connectionId) return node;
+    if (node.type === "connection-group" && node.children) {
+      const found = findSidebarConnectionNode(node.children, connectionId);
+      if (found) return found;
+    }
+  }
+  return null;
+}
 
 export function activeTabSidebarTarget(tab: QueryTab | undefined | null): ActiveTabSidebarTarget | null {
   if (!tab) return null;
@@ -125,6 +145,10 @@ export function activeTabSidebarTarget(tab: QueryTab | undefined | null): Active
       database: tab.database,
       collectionName,
     };
+  }
+
+  if (tab.mode === "meilisearch-system") {
+    return { type: "meilisearch-system", connectionId: tab.connectionId };
   }
 
   if (tab.mode === "mongo-bucket") {
@@ -239,6 +263,10 @@ export function matchesTarget(node: TreeNode, target: ActiveTabSidebarTarget): b
     return node.type === "mongo-collection" && node.connectionId === target.connectionId && node.database === target.database && node.label === target.collectionName;
   }
 
+  if (target.type === "meilisearch-system") {
+    return node.type === "meilisearch-system" && node.connectionId === target.connectionId;
+  }
+
   if (target.type === "mongo-gridfs") {
     return node.type === "mongo-gridfs" && node.connectionId === target.connectionId && node.database === target.database;
   }
@@ -315,30 +343,37 @@ export function shouldScrollActiveSidebarSelection(options: { activeTabId: strin
   return options.activeTabId !== options.previousActiveTabId || (options.autoSelectEnabled && options.previousAutoSelectEnabled === false);
 }
 
-// nearest is used for passive auto-selection; smart keeps context for explicit locate actions.
-export type SidebarNodeScrollAlign = "nearest" | "top" | "smart";
+// nearest is used for passive auto-selection; smart keeps context for the existing toolbar action.
+export type SidebarNodeScrollAlign = "nearest" | "top" | "smart" | "center";
 
-export function scrollTopForSidebarNode(options: { index: number; currentScrollTop: number; viewportHeight: number; rowHeight?: number; topOcclusionHeight?: number; align?: SidebarNodeScrollAlign }): number {
+export function scrollTopForSidebarNode(options: { index: number; currentScrollTop: number; viewportHeight: number; scrollHeight?: number; rowHeight?: number; topOcclusionHeight?: number; align?: SidebarNodeScrollAlign }): number {
   const rowHeight = options.rowHeight ?? SIDEBAR_TREE_ROW_HEIGHT;
   if (options.index < 0 || options.viewportHeight <= 0) return options.currentScrollTop;
 
   const rowTop = options.index * rowHeight;
   const rowBottom = rowTop + rowHeight;
   const topOcclusionHeight = options.topOcclusionHeight ?? 0;
-  if (options.align === "top") return Math.max(0, rowTop - topOcclusionHeight);
+  const maxScrollTop = options.scrollHeight == null ? Number.POSITIVE_INFINITY : Math.max(0, options.scrollHeight - options.viewportHeight);
+  const clampScrollTop = (value: number) => Math.max(0, Math.min(maxScrollTop, value));
+  if (options.align === "top") return clampScrollTop(rowTop - topOcclusionHeight);
   if (options.align === "smart") {
     // Similar to IDE Locate: place the target around the upper third of the viewport.
     const availableViewportHeight = Math.max(rowHeight, options.viewportHeight - topOcclusionHeight);
     const smartOffset = Math.max(0, (availableViewportHeight - rowHeight) / 3);
-    return Math.max(0, Math.round(rowTop - topOcclusionHeight - smartOffset));
+    return clampScrollTop(Math.round(rowTop - topOcclusionHeight - smartOffset));
+  }
+  if (options.align === "center") {
+    const availableViewportHeight = Math.max(rowHeight, options.viewportHeight - topOcclusionHeight);
+    const centerOffset = Math.max(0, (availableViewportHeight - rowHeight) / 2);
+    return clampScrollTop(Math.round(rowTop - topOcclusionHeight - centerOffset));
   }
 
   const viewportTop = options.currentScrollTop + topOcclusionHeight;
   const viewportBottom = options.currentScrollTop + options.viewportHeight;
 
-  if (rowTop < viewportTop) return Math.max(0, rowTop - topOcclusionHeight);
-  if (rowBottom > viewportBottom) return Math.max(0, rowBottom - options.viewportHeight);
-  return options.currentScrollTop;
+  if (rowTop < viewportTop) return clampScrollTop(rowTop - topOcclusionHeight);
+  if (rowBottom > viewportBottom) return clampScrollTop(rowBottom - options.viewportHeight);
+  return clampScrollTop(options.currentScrollTop);
 }
 
 export function findNodePathForActiveTab(tab: QueryTab | undefined | null, treeNodes: readonly TreeNode[]): TreeNode[] | null {

@@ -1,21 +1,14 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { CONNECTION_PICKER_OPTIONS, CONNECTION_PROFILES } from "@/types/generated/connectionProfiles";
 
 const dialogSource = readFileSync(new URL("../../../components/connection/ConnectionDialog.vue", import.meta.url), "utf8");
 const fieldsSource = readFileSync(new URL("../../../components/connection/SpannerConnectionFields.vue", import.meta.url), "utf8");
 
 describe("Cloud Spanner connection dialog", () => {
   it("registers the bundled agent profile in the SQL category", () => {
-    expect(dialogSource).toContain('spanner: { type: "spanner", port: 443, user: "", label: "Cloud Spanner", icon: "spanner" }');
-    expect(dialogSource).toContain('{ value: "spanner", label: "Cloud Spanner" }');
-    expect(dialogSource).toContain('spanner: "spanner",');
-
-    // Cloud Spanner is an OLTP relational database, so it belongs to the SQL
-    // category rather than the analytics one.
-    const sqlCategory = dialogSource.match(/key: "sql",\s*\n\s*titleKey: "connection\.databaseCategorySql",\s*\n\s*optionValues: \[([\s\S]*?)\]/)?.[1] ?? "";
-    const analyticsCategory = dialogSource.match(/key: "analytics",[\s\S]*?optionValues: \[([\s\S]*?)\]/)?.[1] ?? "";
-    expect(sqlCategory).toContain('"spanner"');
-    expect(analyticsCategory).not.toContain('"spanner"');
+    expect(CONNECTION_PROFILES.spanner).toMatchObject({ type: "spanner", port: 443, user: "", label: "Cloud Spanner", icon: "spanner" });
+    expect(CONNECTION_PICKER_OPTIONS.find((option) => option.value === "spanner")).toEqual({ value: "spanner", label: "Cloud Spanner", category: "sql" });
   });
 
   it("does not expose external JDBC driver configuration because the driver is bundled", () => {

@@ -73,6 +73,17 @@ describe("jdbc dialect inference", () => {
     ).toBe("sqlserver");
   });
 
+  it("keeps Phoenix as generic JDBC while preserving its schema tree", () => {
+    const connection = { db_type: "jdbc" as const, driver_profile: "phoenix" };
+
+    expect(inferJdbcDialect(connection)).toBe("jdbc");
+    expect(effectiveDatabaseTypeForConnection(connection)).toBe("jdbc");
+    expect(connectionUsesDatabaseObjectTreeMode(connection)).toBe(false);
+    expect(connectionObjectTreeQuerySchema(connection, "default", "DEMO")).toBe("DEMO");
+    expect(connectionObjectTreeNodeSchema(connection, "default", "DEMO")).toBe("DEMO");
+    expect(connectionShouldLoadIdentifierQuote(connection)).toBe(true);
+  });
+
   it.each([
     ["jdbc:oracle:thin:@//localhost:1521/XE", "oracle"],
     ["jdbc:dm://localhost:5236/DAMENG", "dameng"],

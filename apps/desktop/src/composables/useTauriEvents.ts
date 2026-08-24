@@ -9,6 +9,7 @@ export function useTauriEvents(deps: {
   openDbFilePath: (path: string) => Promise<void>;
   openConnectionDeepLink: (url: string) => Promise<void>;
   openSqlProjectPaths: (paths: string[]) => Promise<void>;
+  openAiConfigDeepLink: (url: string) => Promise<void>;
 }) {
   const connectionStore = useConnectionStore();
   const queryStore = useQueryStore();
@@ -112,6 +113,17 @@ export function useTauriEvents(deps: {
             focusCurrentWindow();
           } catch (e) {
             console.error("[DBX] dbx-open-connection-links error:", e);
+          }
+        }).then((unlisten) => unlistenHandles.push(unlisten));
+
+        listen<string[]>("dbx-open-ai-config-links", async (event) => {
+          try {
+            for (const url of event.payload) {
+              await deps.openAiConfigDeepLink(url);
+            }
+            focusCurrentWindow();
+          } catch (e) {
+            console.error("[DBX] dbx-open-ai-config-links error:", e);
           }
         }).then((unlisten) => unlistenHandles.push(unlisten));
       })

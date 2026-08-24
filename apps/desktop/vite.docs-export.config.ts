@@ -4,6 +4,7 @@ import path from "node:path";
 import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
 import tailwindcss from "@tailwindcss/vite";
+import { connectionTypesPlugin } from "./viteConnectionTypesPlugin.ts";
 
 const repoRoot = path.resolve(__dirname, "../..");
 const assetsDir = path.join(repoRoot, "crates/dbx-core/assets");
@@ -128,10 +129,7 @@ function exportBundlePlugin() {
         if (name.endsWith(".css") && typeof chunk.source === "string") chunk.source = fontFace + chunk.source;
       }
 
-      writeFileSync(
-        path.join(assetsDir, "docs-export.manifest.json"),
-        `${JSON.stringify({ sources: Object.fromEntries(Object.entries(sources).sort()), deps: Object.fromEntries(Object.entries(deps).sort()) }, null, 2)}\n`,
-      );
+      writeFileSync(path.join(assetsDir, "docs-export.manifest.json"), `${JSON.stringify({ sources: Object.fromEntries(Object.entries(sources).sort()), deps: Object.fromEntries(Object.entries(deps).sort()) }, null, 2)}\n`);
     },
   };
 }
@@ -141,7 +139,7 @@ export default defineConfig({
   // The app's public/ holds the font files this build inlines. Left on, Vite
   // would copy all of them into crates/dbx-core/assets beside the bundle.
   publicDir: false,
-  plugins: [vue(), tailwindcss(), exportBundlePlugin()],
+  plugins: [connectionTypesPlugin(), vue(), tailwindcss(), exportBundlePlugin()],
   resolve: { alias: { "@": path.resolve(__dirname, "src") } },
   build: {
     outDir: assetsDir,

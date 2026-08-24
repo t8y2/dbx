@@ -16,7 +16,7 @@ import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import EditorSearchPanel from "@/components/editor/EditorSearchPanel.vue";
 import NacosConfigDiffDialog from "@/components/nacos/NacosConfigDiffDialog.vue";
 import NacosConfigHistoryDialog from "@/components/nacos/NacosConfigHistoryDialog.vue";
-import NacosConfigBatchDialog, { type NacosBatchDialogMode, type NacosConfigTransferTarget } from "@/components/nacos/NacosConfigBatchDialog.vue";
+import NacosConfigBatchDialog, { type NacosBatchDialogMode, type NacosConfigTransferDialogPayload, type NacosConfigTransferTarget } from "@/components/nacos/NacosConfigBatchDialog.vue";
 import NacosContentSearchDialog from "@/components/nacos/NacosContentSearchDialog.vue";
 import { useToast } from "@/composables/useToast";
 import { useNacosConfigListColumnResize, type ToggleableNacosConfigListColumnKey } from "@/composables/useNacosConfigListColumnResize";
@@ -67,7 +67,6 @@ import type {
   NacosConnectionInfo,
   NacosContentMatch,
   NacosContentSearchResult,
-  NacosConflictPolicy,
   NacosInstanceInfo,
   NacosInstancePatch,
   NacosInstanceRef,
@@ -313,6 +312,7 @@ const updateServiceCapability = computed(() => operationCapability(serviceCapabi
 const deleteServiceCapability = computed(() => operationCapability(serviceCapabilities.value?.deleteService, createServiceCapability.value.supported));
 const listInstancesCapability = computed(() => operationCapability(serviceCapabilities.value?.listInstances, listServicesCapability.value.supported));
 const updateInstanceCapability = computed(() => operationCapability(serviceCapabilities.value?.updateInstance, legacyInstanceUpdateSupported.value));
+const updateInstanceHealthCapability = computed(() => operationCapability(serviceCapabilities.value?.updateInstanceHealth, updateInstanceCapability.value.supported));
 const registerInstanceCapability = computed(() => operationCapability(serviceCapabilities.value?.registerInstance, updateInstanceCapability.value.supported));
 const deregisterInstanceCapability = computed(() => operationCapability(serviceCapabilities.value?.deregisterInstance, updateInstanceCapability.value.supported));
 const supportsServiceManagement = computed(() => listServicesCapability.value.supported);
@@ -433,6 +433,8 @@ function selectedKeys(): NacosConfigKey[] {
     return { namespace: selectedNamespace || undefined, group, dataId };
   });
 }
+
+const selectedConfigTransferKeys = computed(() => selectedKeys());
 
 function isBatchDeleteSnapshotInScope(snapshot: NacosBatchDeleteSnapshot) {
   return snapshot.connectionId === props.connectionId && snapshot.namespace === namespace.value;
@@ -1244,7 +1246,7 @@ async function exportConfigArchive(scope: NacosConfigSelectionScope) {
 
 const batchTransferRequest = shallowRef<NacosConfigTransferRequest | null>(null);
 
-async function previewBatch(payload: { scope: NacosConfigSelectionScope; targetConnectionId: string; targetNamespace: string; targetGroup: string; policy: NacosConflictPolicy }) {
+async function previewBatch(payload: NacosConfigTransferDialogPayload) {
   batchLoading.value = true;
   batchError.value = "";
   batchPreview.value = null;
@@ -1261,6 +1263,7 @@ async function previewBatch(payload: { scope: NacosConfigSelectionScope; targetC
         source: buildConfigSelector(payload.scope),
         targetNamespace: payload.targetNamespace,
         targetGroup: payload.targetGroup || undefined,
+        dataIdMappings: payload.dataIdMappings,
         conflictPolicy: payload.policy,
       };
       batchTransferRequest.value = req;
@@ -1273,7 +1276,7 @@ async function previewBatch(payload: { scope: NacosConfigSelectionScope; targetC
   }
 }
 
-async function applyBatch(payload: { scope: NacosConfigSelectionScope; targetConnectionId: string; targetNamespace: string; targetGroup: string; policy: NacosConflictPolicy }) {
+async function applyBatch(payload: NacosConfigTransferDialogPayload) {
   if (batchLoading.value || batchReport.value || !batchPreview.value) return;
   if (payload.policy === "OVERWRITE" && !window.confirm(t("nacos.overwriteConfirm"))) return;
   const targetConnectionId = batchMode.value === "import" ? props.connectionId : payload.targetConnectionId;
@@ -2876,9 +2879,7 @@ onBeforeUnmount(() => {
                 </div>
                 <div class="flex items-center gap-1 rounded-md border bg-background p-1">
                   <span class="px-1 text-xs text-muted-foreground">{{ t("nacos.instances") }}</span>
-                  <Button size="sm" class="h-7" :disabled="readOnly || !registerInstanceCapability.supported" :title="readOnly || !registerInstanceCapability.supported ? capabilityReason(registerInstanceCapability) : undefined" @click="registerInstanceOpen = true">{{
-                    t("nacos.registerInstance")
-                  }}</Button>
+                  <Button v-if="registerInstanceCapability.supported" size="sm" class="h-7" :disabled="readOnly" :title="readOnly ? capabilityReason(registerInstanceCapability) : undefined" @click="registerInstanceOpen = true">{{ t("nacos.registerInstance") }}</Button>
                 </div>
               </div>
             </div>
@@ -2986,15 +2987,16 @@ onBeforeUnmount(() => {
                       <Loader2 v-if="isInstanceUpdating(instance)" class="h-3 w-3 animate-spin" />
                       {{ instance.enabled === false ? t("nacos.enable") : t("nacos.disable") }}
                     </Button>
-                    <Button size="sm" variant="outline" class="h-7" :disabled="readOnly || !supportsInstanceUpdate || isInstanceUpdating(instance)" @click="requestUpdateInstance(instance, { healthy: !instance.healthy })">
+                    <Button v-if="updateInstanceHealthCapability.supported" size="sm" variant="outline" class="h-7" :disabled="readOnly || isInstanceUpdating(instance)" @click="requestUpdateInstance(instance, { healthy: !instance.healthy })">
                       {{ instance.healthy === false ? t("nacos.markHealthy") : t("nacos.markUnhealthy") }}
                     </Button>
                     <Button
+                      v-if="deregisterInstanceCapability.supported"
                       size="sm"
                       variant="outline"
                       class="h-7 text-destructive"
-                      :disabled="readOnly || !deregisterInstanceCapability.supported || isInstanceUpdating(instance)"
-                      :title="readOnly || !deregisterInstanceCapability.supported ? capabilityReason(deregisterInstanceCapability) : undefined"
+                      :disabled="readOnly || isInstanceUpdating(instance)"
+                      :title="readOnly ? capabilityReason(deregisterInstanceCapability) : undefined"
                       @click="pendingInstanceDeregister = instance"
                       >{{ t("nacos.deregister") }}</Button
                     >
@@ -3030,6 +3032,7 @@ onBeforeUnmount(() => {
       :mode="batchMode"
       :loading="batchLoading"
       :selected-count="selectedConfigCount"
+      :selected-keys="selectedConfigTransferKeys"
       :filtered-count="configTotal"
       :target-connections="batchTargetConnections"
       :target-connection-id="batchTargetConnectionId"

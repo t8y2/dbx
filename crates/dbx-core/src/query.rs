@@ -237,6 +237,7 @@ impl ExecuteMultiResult {
         }
     }
 
+    #[cfg(test)]
     fn execution_error_with_index(result: db::QueryResult, statement_index: usize) -> Self {
         let error = error_from_query_result(&result);
         Self {
@@ -943,6 +944,9 @@ pub struct QueryExecutionOptions {
     /// Query timeout in seconds. `None` uses the default (30s).
     /// `Some(0)` disables the timeout entirely.
     pub timeout_secs: Option<u64>,
+    /// Keep awaiting the database response after cancellation so callers can
+    /// distinguish an interrupt request from a confirmed terminal state.
+    pub await_cancel_completion: bool,
     pub execution_id: Option<String>,
     /// When `Some(true)`, multiple statements are executed within a single transaction
     /// (BEGIN … COMMIT) instead of auto-commit mode. `None` and `Some(false)` behave
@@ -1558,12 +1562,16 @@ async fn sqlserver_pool_is_current(
     matches!(connections.get(pool_key), Some(PoolKind::SqlServer(current)) if Arc::ptr_eq(current, client))
 }
 
-fn resolve_query_timeout(timeout_secs: Option<u64>) -> Option<Duration> {
+pub fn query_timeout_duration(timeout_secs: Option<u64>) -> Option<Duration> {
     match timeout_secs {
         Some(0) => None,
         Some(n) => Some(Duration::from_secs(n)),
         None => Some(QUERY_TIMEOUT),
     }
+}
+
+fn resolve_query_timeout(timeout_secs: Option<u64>) -> Option<Duration> {
+    query_timeout_duration(timeout_secs)
 }
 
 fn query_pool_database<'a>(database: &'a str, catalog: Option<&str>) -> Option<&'a str> {
@@ -1735,8 +1743,9 @@ async fn do_execute_typed(
                 ),
             )
             .await?;
+            let execution_cancel_token = if options.await_cancel_completion { None } else { cancel_token };
             wait_for_result_opt(
-                cancel_token,
+                execution_cancel_token,
                 query_timeout,
                 db::mysql::execute_query_on_conn_with_limits(
                     &mut conn,
@@ -2873,6 +2882,14 @@ fn mysql_batch_pool_error_action(db_type: Option<DatabaseType>, error: &str) -> 
     }
 }
 
+fn mysql_batch_backend_error(action: PoolErrorAction, error: &str) -> crate::backend_error::BackendError {
+    if action == PoolErrorAction::Keep {
+        crate::backend_error::BackendError::from_sql_detail(error)
+    } else {
+        crate::backend_error::BackendError::from_legacy_backend(error)
+    }
+}
+
 fn mysql_non_result_batch_end(
     statements: &[String],
     start: usize,
@@ -2956,7 +2973,7 @@ where
                 }
                 let failed_index = statement_index + completed;
                 let result = error_query_result(error.clone());
-                let backend_error = crate::backend_error::BackendError::from_legacy_backend(&error);
+                let backend_error = mysql_batch_backend_error(action, &error);
                 report_execute_multi_progress(
                     progress,
                     failed_index,
@@ -3002,15 +3019,20 @@ where
             Err(err) => {
                 let action = mysql_batch_pool_error_action(db_type, &err);
                 let result = error_query_result(err.clone());
+                let backend_error = mysql_batch_backend_error(action, &err);
                 report_execute_multi_progress(
                     progress,
                     statement_index,
                     statements.len(),
                     &result,
                     false,
-                    Some(crate::backend_error::BackendError::from_legacy_backend(&err)),
+                    Some(backend_error.clone()),
                 );
-                results.push(ExecuteMultiResult::execution_error_with_index(result, statement_index));
+                results.push(ExecuteMultiResult::execution_error_with_backend(
+                    result,
+                    Some(statement_index),
+                    backend_error,
+                ));
                 // Statement errors are safe to collect, but connection-level failures leave
                 // the protocol state unusable and must still trigger pool cleanup.
                 if !should_continue_batch_after_error(continue_on_error, action) {
@@ -4307,24 +4329,28 @@ async fn begin_transaction_session(
 ) -> Result<String, String> {
     let mysql_catalog_dialect = connection_mysql_catalog_dialect(state, connection_id).await;
     let pool_database = query_pool_database(database, catalog);
-    let pool_key = state.get_or_create_pool(connection_id, pool_database).await?;
+    // Probe the primary pool to learn the backend kind. Agent manual TX opens a
+    // dedicated multi_session workload pool so sticky TX state is isolated.
+    let probe_pool_key = state.get_or_create_pool(connection_id, pool_database).await?;
 
     // Clone the pool handle under a brief read lock, then drop the lock before
     // any async I/O — same pattern as do_execute throughout this file.
     enum TxnPoolHandle {
         Postgres(deadpool_postgres::Pool),
         Mysql(db::mysql::MySqlPool),
+        Agent,
     }
     let pool_handle = {
         let connections = state.connections.read().await;
-        match connections.get(&pool_key).ok_or("Connection not found")? {
+        match connections.get(&probe_pool_key).ok_or("Connection not found")? {
             PoolKind::Postgres(pg) => TxnPoolHandle::Postgres(pg.clone()),
             PoolKind::Mysql(mp, _) => TxnPoolHandle::Mysql(mp.clone()),
+            PoolKind::Agent(_) if !consistent_snapshot => TxnPoolHandle::Agent,
             _ => return Err("Manual transaction is not supported for this database type".to_string()),
         }
     }; // connections lock released here
 
-    let txn_conn = match pool_handle {
+    let (txn_conn, pool_key) = match pool_handle {
         TxnPoolHandle::Postgres(pg_pool) => {
             let conn = pg_pool.get().await.map_err(|e| format!("Failed to get Postgres connection: {e}"))?;
             let begin_sql = postgres_transaction_begin_sql(consistent_snapshot);
@@ -4339,7 +4365,7 @@ async fn begin_transaction_session(
                 .await
                 .map_err(|e| format!("SET search_path failed: {e}"))?;
             }
-            TxnConnection::Postgres(Box::new(conn))
+            (TxnConnection::Postgres(Box::new(conn)), probe_pool_key.clone())
         }
         TxnPoolHandle::Mysql(mysql_pool) => {
             let mut conn = mysql_pool.get_conn().await.map_err(|e| format!("Failed to get MySQL connection: {e}"))?;
@@ -4363,7 +4389,45 @@ async fn begin_transaction_session(
             if !syntax_errors.is_empty() {
                 return Err(format!("START TRANSACTION failed for all compatible forms: {}", syntax_errors.join("; ")));
             }
-            TxnConnection::Mysql(conn)
+            (TxnConnection::Mysql(conn), probe_pool_key.clone())
+        }
+        TxnPoolHandle::Agent => {
+            let client_session_id = format!("manual-txn-{}", uuid::Uuid::new_v4());
+            let agent_pool_key =
+                state.get_or_create_pool_for_session(connection_id, pool_database, Some(&client_session_id)).await?;
+            let client = {
+                let connections = state.connections.read().await;
+                match connections.get(&agent_pool_key) {
+                    Some(PoolKind::Agent(client)) => client.clone(),
+                    _ => {
+                        let _ = state.close_client_session_pool(connection_id, pool_database, &client_session_id).await;
+                        return Err("Agent connection not found for manual transaction".to_string());
+                    }
+                }
+            };
+            let begin_result = {
+                let mut locked = client.lock().await;
+                locked.begin_manual_transaction::<serde_json::Value>(schema).await
+            };
+            if let Err(error) = begin_result {
+                let _ = state.close_client_session_pool(connection_id, pool_database, &client_session_id).await;
+                return Err(format!("BEGIN manual transaction failed: {error}"));
+            }
+            let Some(cleanup_guard) =
+                state.workload_session_pool_cleanup_guard(connection_id, pool_database, &client_session_id).await
+            else {
+                let _ = state.close_client_session_pool(connection_id, pool_database, &client_session_id).await;
+                return Err("Manual transaction requires a dedicated Agent session".to_string());
+            };
+            (
+                TxnConnection::Agent {
+                    client,
+                    client_session_id,
+                    database: pool_database.map(str::to_string),
+                    cleanup_guard,
+                },
+                agent_pool_key,
+            )
         }
     };
 
@@ -4452,10 +4516,24 @@ pub async fn execute_in_manual_transaction(
     state: &AppState,
     txn_session_id: &str,
     sql: &str,
-    _database: &str,
-    _schema: Option<&str>,
+    database: &str,
+    schema: Option<&str>,
     max_rows: Option<usize>,
 ) -> Result<Vec<db::QueryResult>, String> {
+    execute_in_manual_transaction_with_options(state, txn_session_id, sql, database, schema, max_rows, false)
+        .await
+        .map(|results| results.into_iter().map(ExecuteMultiResult::into_query_result).collect())
+}
+
+pub async fn execute_in_manual_transaction_with_options(
+    state: &AppState,
+    txn_session_id: &str,
+    sql: &str,
+    database: &str,
+    schema: Option<&str>,
+    max_rows: Option<usize>,
+    table_data_preview: bool,
+) -> Result<Vec<ExecuteMultiResult>, String> {
     const TXN_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
     // Resolve statements and validate before taking the per-session connection
@@ -4475,7 +4553,10 @@ pub async fn execute_in_manual_transaction(
         |db_type| crate::sql::split_sql_statements_for_database(sql, db_type),
     );
     if statements.is_empty() {
-        return Ok(vec![empty_query_result(0)]);
+        return Ok(vec![ExecuteMultiResult::success_with_optional_server_large_values(
+            empty_query_result(0),
+            table_data_preview,
+        )]);
     }
 
     // Read-only check while the session is still in the map. If this fails the
@@ -4495,16 +4576,17 @@ pub async fn execute_in_manual_transaction(
         }
         if session.last_activity.elapsed() > TXN_IDLE_TIMEOUT {
             let session = sessions.remove(txn_session_id).expect("session exists");
-            Some(session.connection)
+            Some(session)
         } else {
             session.busy = true;
             session.last_activity = std::time::Instant::now();
             None
         }
     };
-    if let Some(connection) = connection {
-        let mut conn = connection.lock().await;
+    if let Some(session) = connection {
+        let mut conn = session.connection.lock().await;
         let _ = rollback_manual_txn_connection(&mut conn).await;
+        release_manual_txn_agent_pool(state, &session.connection_id, &mut conn).await;
         return Err("Transaction was auto-rolled back due to 5 minutes of inactivity".to_string());
     }
 
@@ -4525,9 +4607,26 @@ pub async fn execute_in_manual_transaction(
                 execute_manual_txn_postgres_statement(conn.as_ref(), statement, row_limit).await
             }
             TxnConnection::Mysql(conn) => execute_manual_txn_mysql_statement(conn, statement, row_limit).await,
+            TxnConnection::Agent { client, .. } => {
+                execute_manual_txn_agent_statement(
+                    client,
+                    db_type,
+                    statement,
+                    database,
+                    schema,
+                    row_limit,
+                    table_data_preview,
+                )
+                .await
+            }
         };
         match result {
-            Ok(query_result) => results.push(query_result),
+            Ok(query_result) => {
+                results.push(ExecuteMultiResult::success_with_optional_server_large_values(
+                    query_result,
+                    table_data_preview,
+                ));
+            }
             Err(e) => {
                 // Statement failure ends the transaction. If another cleanup path
                 // already removed the session, it owns the final rollback.
@@ -4537,8 +4636,9 @@ pub async fn execute_in_manual_transaction(
                 };
                 if should_rollback {
                     let _ = rollback_manual_txn_connection(&mut conn).await;
+                    release_manual_txn_agent_pool(state, &connection_id, &mut conn).await;
                 }
-                return Err(format!("Statement {} failed: {}. Transaction was auto-rolled back.", i + 1, e));
+                return Err(format!("Statement {} failed: {}. The manual transaction was rolled back.", i + 1, e));
             }
         }
     }
@@ -4671,12 +4771,19 @@ where
             },
             Err(err) => Err(format!("Query failed: {err}")),
         },
+        TxnConnection::Agent { .. } => {
+            Err("Streaming rows inside an agent manual transaction is not supported".to_string())
+        }
     };
 
     if let Err(err) = &stream_result {
-        let should_rollback = state.transaction_sessions.write().await.remove(txn_session_id).is_some();
-        if should_rollback {
+        let removed = {
+            let mut sessions = state.transaction_sessions.write().await;
+            sessions.remove(txn_session_id)
+        };
+        if let Some(session) = removed {
             let _ = rollback_manual_txn_connection(&mut conn).await;
+            release_manual_txn_agent_pool(state, &session.connection_id, &mut conn).await;
         }
         return Err(format!("{err}. Transaction was auto-rolled back."));
     }
@@ -4706,8 +4813,54 @@ async fn rollback_manual_txn_connection(conn: &mut TxnConnection) -> Result<(), 
         TxnConnection::Mysql(conn) => {
             conn.query_drop("ROLLBACK").await.map_err(|e| format!("ROLLBACK failed: {e}"))?;
         }
+        TxnConnection::Agent { client, .. } => {
+            let mut locked = client.lock().await;
+            match locked.rollback_manual_transaction::<serde_json::Value>().await {
+                Ok(_) => {}
+                Err(error) if error.to_ascii_lowercase().contains("no manual transaction") => {}
+                Err(error) => return Err(format!("ROLLBACK failed: {error}")),
+            }
+            // Close the dedicated agent session so Oracle resources are released even if
+            // the pool map entry is cleaned up later.
+            let _ = locked.disconnect().await;
+        }
     }
     Ok(())
+}
+
+async fn release_manual_txn_agent_pool(state: &AppState, connection_id: &str, conn: &mut TxnConnection) {
+    let TxnConnection::Agent { client_session_id, database, cleanup_guard, .. } = conn else {
+        return;
+    };
+    if state.detach_client_session_pool(connection_id, database.as_deref(), client_session_id).await.unwrap_or(false) {
+        cleanup_guard.disarm();
+    }
+}
+
+fn manual_txn_agent_query_options(row_limit: usize, table_data_preview: bool) -> QueryExecutionOptions {
+    QueryExecutionOptions { max_rows: Some(row_limit.max(1)), table_data_preview, ..QueryExecutionOptions::default() }
+}
+
+async fn execute_manual_txn_agent_statement(
+    client: &Arc<crate::db::agent_driver::PooledAgentClient>,
+    db_type: Option<DatabaseType>,
+    statement: &str,
+    database: &str,
+    schema: Option<&str>,
+    row_limit: usize,
+    table_data_preview: bool,
+) -> Result<db::QueryResult, String> {
+    let sql = sql_for_execution_context(db_type, statement, schema);
+    let execution_schema = schema_for_execution_context(db_type, schema);
+    let options = manual_txn_agent_query_options(row_limit, table_data_preview);
+    let params =
+        agent_execute_query_params(&sql, Some(database).filter(|value| !value.is_empty()), execution_schema, options);
+    let mut locked = client.lock().await;
+    locked
+        .execute_query_typed_with_timeout::<db::QueryResult>(params, None)
+        .await
+        .map(|result| truncate_result_with_max_rows(result, Some(row_limit.max(1))))
+        .map_err(|error| error.into_legacy_string())
 }
 
 /// Spawn a background task that removes and rolls back a transaction session
@@ -4857,7 +5010,16 @@ pub async fn commit_manual_transaction(state: &AppState, txn_session_id: &str) -
         TxnConnection::Mysql(conn) => {
             conn.query_drop("COMMIT").await.map_err(|e| format!("COMMIT failed: {e}"))?;
         }
+        TxnConnection::Agent { client, .. } => {
+            let mut locked = client.lock().await;
+            locked
+                .commit_manual_transaction::<serde_json::Value>()
+                .await
+                .map_err(|error| format!("COMMIT failed: {error}"))?;
+            let _ = locked.disconnect().await;
+        }
     }
+    release_manual_txn_agent_pool(state, &session.connection_id, &mut conn).await;
 
     log::info!("[query][manual_txn:commit] session_id={}", txn_session_id);
     Ok(db::QueryResult {
@@ -4886,6 +5048,7 @@ pub async fn rollback_manual_transaction(state: &AppState, txn_session_id: &str)
 
     let mut conn = session.connection.lock().await;
     rollback_manual_txn_connection(&mut conn).await?;
+    release_manual_txn_agent_pool(state, &session.connection_id, &mut conn).await;
 
     log::info!("[query][manual_txn:rollback] session_id={}", txn_session_id);
     Ok(db::QueryResult {
@@ -5776,7 +5939,7 @@ for line in sys.stdin:
                     success: false,
                     execution_time_ms: 0,
                     affected_rows: 0,
-                    error: Some(crate::backend_error::BackendError::from_legacy_backend("Duplicate entry")),
+                    error: Some(crate::backend_error::BackendError::from_sql_detail("Duplicate entry")),
                 },
             ]
         );
@@ -5889,6 +6052,7 @@ for line in sys.stdin:
         assert_eq!(results[0].statement_index, Some(0));
         assert_eq!(results[1].statement_index, Some(1));
         assert!(results[1].execution_error);
+        assert_eq!(results[1].error.as_ref().map(|error| error.code()), Some("DBX-JDBC-4001"));
         assert_eq!(
             progress_events
                 .lock()
@@ -6243,6 +6407,7 @@ for line in sys.stdin:
         assert_eq!(results.len(), 2);
         assert_eq!(results.iter().map(|result| result.statement_index).collect::<Vec<_>>(), vec![Some(0), Some(1)]);
         assert!(results[1].execution_error);
+        assert_eq!(results[1].error.as_ref().map(|error| error.code()), Some("DBX-LEGACY-0001"));
         assert_eq!(error_action, Some(PoolErrorAction::ReconnectAndRetry));
     }
 
@@ -7198,6 +7363,19 @@ for line in sys.stdin:
         assert_eq!(params["fetchSize"], 250);
         assert_eq!(params["rowOffset"], 100);
         assert_eq!(params["timeoutSecs"], 600);
+        assert_eq!(params["deferLobs"], true);
+    }
+
+    #[test]
+    fn manual_transaction_agent_query_options_preserve_preview_mode() {
+        let params = agent_execute_query_params(
+            "SELECT * FROM documents",
+            Some("ORCL"),
+            Some("APP"),
+            manual_txn_agent_query_options(250, true),
+        );
+
+        assert_eq!(params["maxRows"], 250);
         assert_eq!(params["deferLobs"], true);
     }
 

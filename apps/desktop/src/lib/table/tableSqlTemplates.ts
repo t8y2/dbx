@@ -3,10 +3,12 @@ import { metricRangeQuery, qualifiedTableName, quoteTableDataIdentifier } from "
 
 export interface TableSqlTemplateOptions {
   databaseType?: DatabaseType;
+  driverProfile?: string;
   identifierQuote?: string;
   schema?: string;
   catalog?: string;
   database?: string;
+  includeDatabaseName?: boolean;
   tableName: string;
   columns?: ColumnInfo[];
   tableType?: string;
@@ -100,9 +102,11 @@ export function buildTableDeleteTemplate(options: TableSqlTemplateOptions): stri
 function templateTableName(options: TableSqlTemplateOptions): string {
   return qualifiedTableName({
     databaseType: options.databaseType,
+    driverProfile: options.driverProfile,
     identifierQuote: options.identifierQuote,
     catalog: options.catalog,
     database: options.database,
+    includeDatabaseName: options.includeDatabaseName,
     schema: options.schema,
     tableName: options.tableName,
   });

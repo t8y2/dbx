@@ -1,4 +1,4 @@
-import type { ConnectionConfig, DatabaseType, TreeNodeType } from "@/types/database";
+import type { CatalogInfo, ConnectionConfig, DatabaseType, TreeNodeType } from "@/types/database";
 import { supportsDatabaseFeature } from "@/lib/database/databaseDriverManifest";
 import { canEditTableStructure } from "@/lib/table/tableStructureCapabilities";
 import { CLEARABLE_QUERY_SCHEMA_TYPES, DATABASE_OBJECT_TREE_TYPES, DATABASE_SCHEMA_QUALIFIED_TYPES, FETCH_FIRST_TYPES, PG_LIKE_STRUCTURE_TYPES, PG_VACUUM_TYPES, SCHEMA_AWARE_TYPES, SINGLE_DATABASE_TYPES, TREE_SCHEMA_TYPES } from "@/lib/database/databaseCapabilitySets";
@@ -43,6 +43,15 @@ export function isInternalDorisCatalog(catalogType?: string | null, catalogName?
   const type = (catalogType ?? "").trim().toLowerCase();
   if (type) return type === "internal";
   return (catalogName ?? "").trim() === "internal";
+}
+
+/**
+ * Keep the catalog grouping layer whenever SHOW CATALOGS exposes an external
+ * catalog. A single visible external catalog still carries namespace
+ * information that cannot be represented by the flat database tree.
+ */
+export function shouldShowDorisCatalogTree(catalogs: readonly CatalogInfo[]): boolean {
+  return catalogs.some((catalog) => !isInternalDorisCatalog(catalog.catalog_type, catalog.name));
 }
 
 export function usesTreeSchemaMode(dbType?: DatabaseType): boolean {
@@ -229,7 +238,7 @@ export function usesPostgresLikeStructureCopy(dbType?: DatabaseType): boolean {
   return !!dbType && PG_LIKE_STRUCTURE_TYPES.has(dbType);
 }
 
-const TRANSACTION_SUPPORTED_TYPES: readonly string[] = ["postgres", "mysql"];
+const TRANSACTION_SUPPORTED_TYPES: readonly string[] = ["postgres", "mysql", "oracle"];
 
 /**
  * Returns true if the given database type supports explicit transaction control
@@ -237,4 +246,12 @@ const TRANSACTION_SUPPORTED_TYPES: readonly string[] = ["postgres", "mysql"];
  */
 export function supportsTransaction(dbType?: string): boolean {
   return !!dbType && TRANSACTION_SUPPORTED_TYPES.includes(dbType);
+}
+
+/**
+ * Default auto-commit mode when opening a query tab for the given database type.
+ * Oracle defaults to manual transactions so edits require an explicit Commit.
+ */
+export function defaultAutoCommitForDbType(dbType?: string): boolean {
+  return dbType !== "oracle";
 }

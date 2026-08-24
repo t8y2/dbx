@@ -93,10 +93,21 @@ describe("tableStructureCapabilities", () => {
     expect(getTableStructureCapabilities("dameng", "dameng").comment).toBe(true);
   });
 
-  it("enables alter primary key for Dameng without enabling it for Oracle", () => {
-    expect(getTableStructureCapabilities("dameng", "dameng").alterPrimaryKey).toBe(true);
-    expect(getTableStructureCapabilities("oracle", "oracle").alterPrimaryKey).toBe(false);
-    expect(getTableStructureCapabilities("oceanbase-oracle", "oceanbase-oracle").alterPrimaryKey).toBe(false);
+  it("separates adding a primary key from replacing an existing one", () => {
+    expect(getTableStructureCapabilities("dameng", "dameng")).toMatchObject({
+      addPrimaryKey: true,
+      alterPrimaryKey: true,
+    });
+    expect(getTableStructureCapabilities("oracle", "oracle")).toMatchObject({
+      addPrimaryKey: true,
+      alterPrimaryKey: false,
+    });
+    for (const databaseType of ["oceanbase-oracle", "iris"] as const) {
+      expect(getTableStructureCapabilities(databaseType, databaseType)).toMatchObject({
+        addPrimaryKey: false,
+        alterPrimaryKey: false,
+      });
+    }
   });
 
   it("uses local-only column reordering for editable databases without physical reorder support", () => {

@@ -1,7 +1,7 @@
 import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, sqlFormatterOptions, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
 import { looksLikeXml } from "@/lib/sql/autoFormat";
 
-export type SqlFormatDialect = "mysql" | "postgres" | "sqlite" | "sqlserver" | "clickhouse" | "dameng" | "generic";
+export type SqlFormatDialect = "mysql" | "postgres" | "sqlite" | "sqlserver" | "clickhouse" | "dameng" | "duckdb" | "generic";
 
 export const MAX_SQL_FORMAT_CHARS = 1_000_000;
 
@@ -28,10 +28,10 @@ export class UnsupportedStructuredInputError extends Error {
  * Maps a connection's database type to the SQL-formatter dialect to use.
  *
  * Postgres-compatible engines (GaussDB/openGauss/Kingbase/...) reuse the
- * "postgres" grammar, SQLite-compatible ones reuse "sqlite", and anything
- * unrecognized falls back to the permissive "generic" dialect. Centralized
- * here so every surface that formats SQL (editor, object source, DDL viewers)
- * stays in sync.
+ * "postgres" grammar, SQLite-compatible ones reuse "sqlite", and DuckDB gets
+ * a scoped preprocessing pass over the generic grammar. Anything unrecognized
+ * falls back to the permissive "generic" dialect. Centralized here so every
+ * surface that formats SQL (editor, object source, DDL viewers) stays in sync.
  */
 export function sqlFormatDialectForDbType(dbType: string | null | undefined): SqlFormatDialect {
   switch (dbType) {
@@ -59,6 +59,8 @@ export function sqlFormatDialectForDbType(dbType: string | null | undefined): Sq
       return "clickhouse";
     case "dameng":
       return "dameng";
+    case "duckdb":
+      return "duckdb";
     default:
       return "generic";
   }
@@ -91,6 +93,126 @@ function splitTrailingStandaloneDot(sql: string): { body: string; suffix: string
   };
 }
 
+const DUCKDB_ALIAS_IDENTIFIER_START_RE = /[\p{L}_]/u;
+const DUCKDB_ALIAS_IDENTIFIER_CHAR_RE = /[\p{L}\p{N}_]/u;
+
+function hasDuckDbBarePrefixAliasBefore(sql: string, colonIndex: number): boolean {
+  let start = colonIndex;
+  while (start > 0 && DUCKDB_ALIAS_IDENTIFIER_CHAR_RE.test(sql[start - 1])) start -= 1;
+  return start < colonIndex && DUCKDB_ALIAS_IDENTIFIER_START_RE.test(sql[start]);
+}
+
+function duckDbDollarQuoteMarkerAt(sql: string, index: number): string | null {
+  if (sql[index] !== "$" || DUCKDB_ALIAS_IDENTIFIER_CHAR_RE.test(sql[index - 1] ?? "")) return null;
+  if (sql[index + 1] === "$") return "$$";
+  if (!/[A-Za-z_]/.test(sql[index + 1] ?? "")) return null;
+
+  let end = index + 2;
+  while (/[A-Za-z0-9_]/.test(sql[end] ?? "")) end += 1;
+  return sql[end] === "$" ? sql.slice(index, end + 1) : null;
+}
+
+function protectDuckDbPrefixAliasSeparators(sql: string): { sql: string; marker: string | null } {
+  let markerIndex = 0;
+  let marker = "";
+  do {
+    marker = `/*__DBX_DUCKDB_PREFIX_ALIAS_COLON_${markerIndex}__*/`;
+    markerIndex += 1;
+  } while (sql.includes(marker));
+
+  let protectedSql = "";
+  let quotedIdentifierEnd = -1;
+  let replaced = false;
+  let index = 0;
+
+  while (index < sql.length) {
+    const ch = sql[index];
+    const next = sql[index + 1];
+
+    if (ch === "-" && next === "-") {
+      const start = index;
+      index += 2;
+      while (index < sql.length && sql[index] !== "\n" && sql[index] !== "\r") index += 1;
+      protectedSql += sql.slice(start, index);
+      continue;
+    }
+
+    if (ch === "/" && next === "*") {
+      const start = index;
+      index += 2;
+      let depth = 1;
+      while (index < sql.length && depth > 0) {
+        if (sql[index] === "/" && sql[index + 1] === "*") {
+          depth += 1;
+          index += 2;
+        } else if (sql[index] === "*" && sql[index + 1] === "/") {
+          depth -= 1;
+          index += 2;
+        } else {
+          index += 1;
+        }
+      }
+      protectedSql += sql.slice(start, index);
+      continue;
+    }
+
+    const dollarQuoteMarker = ch === "$" ? duckDbDollarQuoteMarkerAt(sql, index) : null;
+    if (dollarQuoteMarker) {
+      const start = index;
+      const end = sql.indexOf(dollarQuoteMarker, index + dollarQuoteMarker.length);
+      index = end < 0 ? sql.length : end + dollarQuoteMarker.length;
+      protectedSql += sql.slice(start, index);
+      continue;
+    }
+
+    if (ch === "'" || ch === '"' || ch === "`") {
+      const start = index;
+      const quote = ch;
+      let closed = false;
+      index += 1;
+      while (index < sql.length) {
+        if (sql[index] === "\\" && index + 1 < sql.length) {
+          index += 2;
+          continue;
+        }
+        if (sql[index] === quote) {
+          if (sql[index + 1] === quote) {
+            index += 2;
+            continue;
+          }
+          index += 1;
+          closed = true;
+          break;
+        }
+        index += 1;
+      }
+      protectedSql += sql.slice(start, index);
+      if (quote === '"' && closed) quotedIdentifierEnd = index;
+      continue;
+    }
+
+    const prefixAlias = ch === ":" && sql[index - 1] !== ":" && next !== ":" && next !== "=" && (quotedIdentifierEnd === index || hasDuckDbBarePrefixAliasBefore(sql, index));
+    if (prefixAlias) {
+      // sql-formatter tokenizes a compact DuckDB prefix alias as a named
+      // parameter and inserts a space before `:`. Keeping an opaque separator
+      // through formatting preserves the boundary used by DBX's parameter scan.
+      protectedSql += marker;
+      replaced = true;
+      index += 1;
+      continue;
+    }
+
+    protectedSql += ch;
+    index += 1;
+  }
+
+  return replaced ? { sql: protectedSql, marker } : { sql, marker: null };
+}
+
+function restoreDuckDbPrefixAliasSeparators(sql: string, marker: string | null): string {
+  return marker ? sql.split(marker).join(":") : sql;
+}
+
 export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "generic", settings: Partial<SqlFormatterSettings> = DEFAULT_SQL_FORMATTER_SETTINGS): Promise<string> {
   if (!sql.trim()) return sql;
   if (sql.length > MAX_SQL_FORMAT_CHARS) {
@@ -105,6 +227,7 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
   const normalizedSettings = normalizeSqlFormatterSettings(settings);
   const options = sqlFormatterOptions(normalizedSettings);
   const language = formatterLanguage(dialect);
+  const protectedInput = dialect === "duckdb" ? protectDuckDbPrefixAliasSeparators(sql) : { sql, marker: null };
   const formatterOptions =
     language === "postgresql"
       ? {
@@ -139,7 +262,8 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
   };
 
   try {
-    return applySqlFormatterLayout(formatWithFallback(sql), normalizedSettings, dialect);
+    const formatted = restoreDuckDbPrefixAliasSeparators(formatWithFallback(protectedInput.sql), protectedInput.marker);
+    return applySqlFormatterLayout(formatted, normalizedSettings, dialect);
   } catch (err) {
     const trailingDot = dialect === "dameng" ? splitTrailingStandaloneDot(sql) : null;
     if (!trailingDot) throw err;
@@ -165,7 +289,7 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
  *
  * The scanner reuses the same dialect-aware token recognition as
  * {@link compressSqlText}: block comments (with nesting for Postgres/SQL
- * Server/ClickHouse), `--`/`#` line comments, Postgres dollar-quoted strings,
+ * Server/ClickHouse), `--`/`#` line comments, Postgres/DuckDB dollar-quoted strings,
  * single-quoted strings (`''` and MySQL/`E'...'` backslash escapes), double-
  * quoted identifiers (`""` escapes), MySQL backtick identifiers and SQL Server
  * `[...]` identifiers. sql-formatter normalizes string literals to a single
@@ -240,7 +364,7 @@ function maskStringAndCommentSpans(sql: string, dialect: SqlFormatDialect): { ma
     }
 
     // PostgreSQL dollar-quoted 字符串
-    if (dialect === "postgres" && ch === "$") {
+    if ((dialect === "postgres" || dialect === "duckdb") && ch === "$") {
       const tag = dollarQuoteTagAt(i);
       if (tag) {
         const start = i;

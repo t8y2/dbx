@@ -41,4 +41,10 @@ describe("cross-database table paste", () => {
     expect(runtimeSource).toMatch(/buildDuplicateTableStructurePlan\(\{[\s\S]*?connectionId: entry\.connectionId[\s\S]*?sourceName: entry\.sourceName[\s\S]*?tableComment: entry\.tableComment/);
     expect(runtimeSource).toContain("sourceColumns = plan.sourceColumns");
   });
+
+  it("shows the first paste failure reason without concatenating every error", () => {
+    expect(runtimeSource).toMatch(/pasteFailCount\+\+/);
+    expect(runtimeSource).toMatch(/firstPasteError \?\?= e/);
+    expect(runtimeSource).toMatch(/batchPastePartialFail[\s\S]*?tableOperationFailed[\s\S]*?translateBackendError\(t, pasteFeedback\.firstError\)/);
+  });
 });

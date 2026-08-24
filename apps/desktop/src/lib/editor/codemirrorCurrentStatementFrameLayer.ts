@@ -140,7 +140,9 @@ interface CurrentStatementFrameModule {
  */
 export function currentStatementFrameLayer(viewModule: CurrentStatementFrameModule, resolve: StatementFrameResolver): Extension {
   return viewModule.layer({
-    above: false,
+    // Keep the outline above line decorations so opaque active-line colors
+    // from editor themes cannot cover the frame border.
+    above: true,
     class: "cm-db-currentStatementFrameLayer",
     markers(view) {
       const request = resolve(view);

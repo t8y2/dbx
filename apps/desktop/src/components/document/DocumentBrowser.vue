@@ -134,7 +134,7 @@ const documentLoadExecutionId = ref("");
 const documentLoadCancelling = ref(false);
 const documentLoadingElapsedSeconds = ref("0.0");
 const page = ref(0);
-const pageSize = ref(normalizeResultPageSize(settingsStore.editorSettings.pageSize));
+const pageSize = ref(normalizeResultPageSize(settingsStore.editorSettings.tableOpenPageSize));
 const selectedIdx = ref<number | null>(null);
 const editJson = ref("");
 const isEditing = ref(false);
@@ -2300,6 +2300,7 @@ defineExpose({ focusSearch });
       :table-meta="props.tableMeta"
       :column-layout-scope-key="documentColumnLayoutScopeKey"
       context="results"
+      page-size-preference="table-open"
       :database-type="props.databaseType"
       :mongo-update-target="mongoUpdateTarget"
       :editable="documentStoreEditable"

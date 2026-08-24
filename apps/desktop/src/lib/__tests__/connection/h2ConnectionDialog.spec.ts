@@ -1,8 +1,8 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { CONNECTION_PICKER_OPTIONS, CONNECTION_PROFILES } from "@/types/generated/connectionProfiles";
 
 const dialogSource = readFileSync(new URL("../../../components/connection/ConnectionDialog.vue", import.meta.url), "utf8");
-const categoriesSource = readFileSync(new URL("../../connection/driver-category-definitions.ts", import.meta.url), "utf8");
 
 describe("H2 connection dialog driver profiles", () => {
   it("offers auto, bundled compatibility ranges, and a custom JAR fallback", () => {
@@ -35,8 +35,8 @@ describe("H2 connection dialog driver profiles", () => {
   });
 
   it("keeps legacy profile hydration without exposing a second H2 catalog entry", () => {
-    expect(dialogSource).toContain('"h2-legacy": { type: "h2"');
-    expect(categoriesSource).toContain('h2: "lightweight"');
-    expect(categoriesSource).not.toContain('"h2-legacy": "lightweight"');
+    expect(CONNECTION_PROFILES["h2-legacy"]).toMatchObject({ type: "h2", port: 9092, user: "sa" });
+    expect(CONNECTION_PICKER_OPTIONS.find((option) => option.value === "h2")?.category).toBe("lightweight");
+    expect(CONNECTION_PICKER_OPTIONS.some((option) => option.value === "h2-legacy")).toBe(false);
   });
 });

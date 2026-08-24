@@ -258,25 +258,74 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
   // danger dialog's Cancel Query button (sidebarDangerDialogCancelling is a
   // shared singleton — see ConnectionTree.vue).
   const CANCEL_QUERY_OVERALL_TIMEOUT_MS = 10_000;
+  // Each attempt gets an even share of the overall budget, so a single hung
+  // api.cancelQuery call can't block the remaining retries — it can only
+  // ever stop *waiting* on that attempt, not actually abort it (neither
+  // backend transport plumbs an AbortSignal through cancelQuery).
+  const CANCEL_QUERY_PER_ATTEMPT_TIMEOUT_MS = Math.floor(CANCEL_QUERY_OVERALL_TIMEOUT_MS / CANCEL_QUERY_MAX_ATTEMPTS);
 
   async function confirmCancelWithRetry(executionId: string): Promise<boolean> {
-    for (let attempt = 0; attempt < CANCEL_QUERY_MAX_ATTEMPTS; attempt++) {
-      let confirmed = false;
-      try {
-        confirmed = await api.cancelQuery(executionId);
-      } catch {
-        confirmed = false;
-      }
-      if (confirmed) return true;
+    // Once an attempt's own per-attempt timeout elapses, the loop below
+    // moves on to firing the next attempt without waiting for it — but it
+    // must keep observing that attempt's eventual result instead of just
+    // dropping the promise. A retry fired after the timeout hits the
+    // backend *after* it already removed the execution id on a first
+    // attempt that merely answered late, so every subsequent retry can only
+    // ever return false; discarding the first attempt's own (eventually
+    // `true`) result would make the whole call report an unconfirmed
+    // cancel even though the backend did cancel it.
+    let confirmed = false;
+    let settledAttempts = 0;
+    let totalAttempts = 0;
+    let notifyNextSettle: (() => void) | undefined;
+
+    function trackAttempt(attemptPromise: Promise<boolean>) {
+      totalAttempts += 1;
+      void attemptPromise.then((result) => {
+        settledAttempts += 1;
+        if (result) confirmed = true;
+        notifyNextSettle?.();
+      });
     }
-    return false;
+
+    for (let attempt = 0; attempt < CANCEL_QUERY_MAX_ATTEMPTS && !confirmed; attempt++) {
+      trackAttempt(api.cancelQuery(executionId).catch(() => false));
+      await new Promise<void>((resolve) => {
+        const timeoutId = setTimeout(resolve, CANCEL_QUERY_PER_ATTEMPT_TIMEOUT_MS);
+        notifyNextSettle = () => {
+          clearTimeout(timeoutId);
+          resolve();
+        };
+      });
+    }
+
+    // All attempts have been fired; wait for any still-outstanding ones so
+    // a slow-but-successful cancel is not lost just because it settled
+    // after its own attempt's pacing timeout.
+    while (!confirmed && settledAttempts < totalAttempts) {
+      await new Promise<void>((resolve) => {
+        notifyNextSettle = resolve;
+      });
+    }
+
+    return confirmed;
   }
 
-  function confirmCancelWithRetryAndTimeout(executionId: string): Promise<boolean> {
+  // Races the retry loop against a UI-facing deadline, but also returns the
+  // retry loop's own promise so a caller can keep observing it after the
+  // race settles — otherwise a retry that is still running when the timeout
+  // wins would have its eventual result silently discarded.
+  function confirmCancelWithRetryAndTimeout(executionId: string): { confirmedWithinTimeout: Promise<boolean>; retryPromise: Promise<boolean> } {
+    const retryPromise = confirmCancelWithRetry(executionId);
+    let timeoutId: ReturnType<typeof setTimeout>;
     const timeout = new Promise<boolean>((resolve) => {
-      setTimeout(() => resolve(false), CANCEL_QUERY_OVERALL_TIMEOUT_MS);
+      timeoutId = setTimeout(() => resolve(false), CANCEL_QUERY_OVERALL_TIMEOUT_MS);
     });
-    return Promise.race([confirmCancelWithRetry(executionId), timeout]);
+    // Once the retry loop itself settles, the timeout has nothing left to
+    // race against — clear it instead of leaving it to fire (and resolve an
+    // already-settled promise) up to CANCEL_QUERY_OVERALL_TIMEOUT_MS later.
+    void retryPromise.finally(() => clearTimeout(timeoutId));
+    return { confirmedWithinTimeout: Promise.race([retryPromise, timeout]), retryPromise };
   }
 
   const DANGER_OPERATION_CANCELLED_BEFORE_DISPATCH_MESSAGE = "Operation cancelled before it was sent to the database.";
@@ -287,6 +336,7 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
     markDispatched: () => void;
     wasCancelled: () => boolean;
     cancelConfirmed: () => boolean;
+    waitForCancelConfirmation: () => Promise<boolean>;
     markHandedOff: () => void;
   }
 
@@ -295,10 +345,22 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
     let dispatched = false;
     let cancelledByUser = false;
     let cancelConfirmedFlag = false;
+    let cancelConfirmationPromise: Promise<boolean> | null = null;
     // Set once the owning confirm*Table() call has already given up waiting
     // (a client-observed timeout) and deferred final cleanup to a later
     // confirmed cancel — see markHandedOff below.
     let handedOff = false;
+
+    // Shared by both the immediate (raced) outcome and a later-arriving
+    // retry result so a confirmed cancel is finalized exactly once, however
+    // late it arrives.
+    function finalizeConfirmedCancel() {
+      cancelConfirmedFlag = true;
+      if (handedOff && sidebarDangerRunningExecutionId.value === executionId) {
+        toast(t("contextMenu.tableOperationCancelled", { name: nodeLabel }), 3000);
+        endDangerRunningExecution();
+      }
+    }
 
     sidebarDangerRunningExecutionId.value = executionId;
     sidebarDangerRunningCancel.value = async () => {
@@ -306,11 +368,47 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
       // Nothing has reached the backend yet: the pending dispatch will see
       // isCancelledBeforeDispatch() and skip the network call entirely, so
       // this is already a confirmed cancellation.
-      const confirmed = dispatched ? await confirmCancelWithRetryAndTimeout(executionId) : true;
-      if (confirmed) cancelConfirmedFlag = true;
-      if (handedOff && confirmed && sidebarDangerRunningExecutionId.value === executionId) {
-        toast(t("contextMenu.tableOperationCancelled", { name: nodeLabel }), 3000);
-        endDangerRunningExecution();
+      if (!dispatched) {
+        finalizeConfirmedCancel();
+        return;
+      }
+      if (!cancelConfirmationPromise) {
+        cancelConfirmationPromise = (async () => {
+          const { confirmedWithinTimeout, retryPromise } = confirmCancelWithRetryAndTimeout(executionId);
+          // Do not discard the losing side of the race: if the retry loop is
+          // still going when the UI timeout wins below and it later succeeds,
+          // still finalize the confirmed cancel instead of dropping the result.
+          void retryPromise.then((eventuallyConfirmed) => {
+            if (eventuallyConfirmed) finalizeConfirmedCancel();
+          });
+          const confirmed = await confirmedWithinTimeout;
+          if (confirmed) {
+            finalizeConfirmedCancel();
+          } else if (sidebarDangerRunningExecutionId.value === executionId) {
+            // The confirmation window elapsed with no answer from the database.
+            // The operation may genuinely still be running server-side, so leave
+            // sidebarDangerRunningExecutionId / the running-execution state
+            // intact — the user can retry Cancel or just wait for it to settle
+            // — but don't leave the Cancel button silently usable again with
+            // zero explanation of what happened.
+            //
+            // Only surface this if the execution is still the one being tracked:
+            // by the time this arrives, confirmDropTable/confirmEmptyTable/
+            // confirmTruncateTable may have already resolved (success or an
+            // unrelated failure) and moved on, in which case this stale warning
+            // would contradict the outcome the user already saw.
+            toast(t("contextMenu.tableOperationCancelPending", { name: nodeLabel }), 6000);
+          }
+          return confirmed;
+        })();
+      }
+      const currentConfirmation = cancelConfirmationPromise;
+      try {
+        await currentConfirmation;
+      } finally {
+        if (cancelConfirmationPromise === currentConfirmation) {
+          cancelConfirmationPromise = null;
+        }
       }
     };
 
@@ -322,6 +420,7 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
       },
       wasCancelled: () => cancelledByUser,
       cancelConfirmed: () => cancelConfirmedFlag,
+      waitForCancelConfirmation: () => cancelConfirmationPromise ?? Promise.resolve(cancelConfirmedFlag),
       markHandedOff: () => {
         handedOff = true;
       },
@@ -345,36 +444,55 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
     }
   }
 
-  async function confirmDropTable() {
-    const node = sidebarDangerTarget.value ?? activeNode.value;
+  interface DangerOperationConfig {
+    node: TreeNode;
+    buildSql: () => string | Promise<string>;
+    onSuccess: (node: TreeNode) => void | Promise<void>;
+  }
+
+  async function runDangerOperation(config: DangerOperationConfig) {
+    const { node, buildSql, onSuccess } = config;
     if (!node.connectionId || node.database == null) return;
-    const { executionId, isCancelledBeforeDispatch, markDispatched, wasCancelled, cancelConfirmed, markHandedOff } = beginDangerRunningExecution(node.label);
+    const { executionId, isCancelledBeforeDispatch, markDispatched, wasCancelled, cancelConfirmed, waitForCancelConfirmation, markHandedOff } = beginDangerRunningExecution(node.label);
     try {
       await connectionStore.ensureConnected(node.connectionId);
-      const sql = dropTablePreviewSql.value || (await buildDropTableSql(tableAdminSqlOptionsForNode(node, { cascade: dropTableCascade.value && supportsDropTableCascade(databaseTypeForNode(node)) })));
+      const sql = await buildSql();
       if (isCancelledBeforeDispatch()) throw new Error(DANGER_OPERATION_CANCELLED_BEFORE_DISPATCH_MESSAGE);
       const executed = await options.executeWithProductionGuard(node, sql, { database: node.database, schema: node.schema, executionId, isCancelledBeforeDispatch, markDispatched });
       if (executed === undefined) {
         // The user declined the production-safety confirmation: the SQL was
-        // never sent, so this must not be reported as a successful drop.
+        // never sent, so this must not be reported as a successful operation.
         endDangerRunningExecution();
         return;
       }
-      toast(t("contextMenu.dropTableSuccess", { name: node.label }), 3000);
-      options.closeDroppedTableObjectTabsForNode(node);
-      connectionStore.removeTreeNode(node.id);
-      options.releaseActiveNodeReference([node.id]);
+      await onSuccess(node);
       endDangerRunningExecution();
     } catch (error: any) {
       const message = error?.message || String(error);
       const backendError = normalizeBackendError(error) ?? undefined;
-      toastDangerOperationError(node.label, message, wasCancelled(), cancelConfirmed(), backendError);
-      if (cancelConfirmed() || !isQueryTimeoutErrorMessage(message, backendError)) {
+      const cancellationWasRequested = wasCancelled();
+      const cancellationWasConfirmed = cancelConfirmed() || (cancellationWasRequested && (await waitForCancelConfirmation()));
+      toastDangerOperationError(node.label, message, cancellationWasRequested, cancellationWasConfirmed, backendError);
+      if (cancellationWasConfirmed || !isQueryTimeoutErrorMessage(message, backendError)) {
         endDangerRunningExecution();
       } else {
         markHandedOff();
       }
     }
+  }
+
+  async function confirmDropTable() {
+    const node = sidebarDangerTarget.value ?? activeNode.value;
+    await runDangerOperation({
+      node,
+      buildSql: () => dropTablePreviewSql.value || buildDropTableSql(tableAdminSqlOptionsForNode(node, { cascade: dropTableCascade.value && supportsDropTableCascade(databaseTypeForNode(node)) })),
+      onSuccess: (node) => {
+        toast(t("contextMenu.dropTableSuccess", { name: node.label }), 3000);
+        options.closeDroppedTableObjectTabsForNode(node);
+        connectionStore.removeTreeNode(node.id);
+        options.releaseActiveNodeReference([node.id]);
+      },
+    });
   }
 
   function emptyTable() {
@@ -384,33 +502,15 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
 
   async function confirmEmptyTable() {
     const node = sidebarDangerTarget.value ?? activeNode.value;
-    if (!node.connectionId || node.database == null) return;
-    const { executionId, isCancelledBeforeDispatch, markDispatched, wasCancelled, cancelConfirmed, markHandedOff } = beginDangerRunningExecution(node.label);
-    try {
-      await connectionStore.ensureConnected(node.connectionId);
-      const sql = emptyTablePreviewSql.value || (await buildEmptyTableSql(tableAdminSqlOptionsForNode(node)));
-      if (isCancelledBeforeDispatch()) throw new Error(DANGER_OPERATION_CANCELLED_BEFORE_DISPATCH_MESSAGE);
-      const executed = await options.executeWithProductionGuard(node, sql, { database: node.database, schema: node.schema, executionId, isCancelledBeforeDispatch, markDispatched });
-      if (executed === undefined) {
-        // The user declined the production-safety confirmation: the SQL was
-        // never sent, so this must not be reported as a successful empty.
-        endDangerRunningExecution();
-        return;
-      }
-      const messageKey = databaseTypeForNode(node) === "clickhouse" ? "contextMenu.emptyTableSubmitted" : "contextMenu.emptyTableSuccess";
-      toast(t(messageKey, { name: node.label }), 3000);
-      await options.refreshMutatedTableDataTabsForNode(node);
-      endDangerRunningExecution();
-    } catch (error: any) {
-      const message = error?.message || String(error);
-      const backendError = normalizeBackendError(error) ?? undefined;
-      toastDangerOperationError(node.label, message, wasCancelled(), cancelConfirmed(), backendError);
-      if (cancelConfirmed() || !isQueryTimeoutErrorMessage(message, backendError)) {
-        endDangerRunningExecution();
-      } else {
-        markHandedOff();
-      }
-    }
+    await runDangerOperation({
+      node,
+      buildSql: () => emptyTablePreviewSql.value || buildEmptyTableSql(tableAdminSqlOptionsForNode(node)),
+      onSuccess: async (node) => {
+        const messageKey = databaseTypeForNode(node) === "clickhouse" ? "contextMenu.emptyTableSubmitted" : "contextMenu.emptyTableSuccess";
+        toast(t(messageKey, { name: node.label }), 3000);
+        await options.refreshMutatedTableDataTabsForNode(node);
+      },
+    });
   }
 
   function truncateTable() {
@@ -421,32 +521,14 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
 
   async function confirmTruncateTable() {
     const node = sidebarDangerTarget.value ?? activeNode.value;
-    if (!node.connectionId || node.database == null) return;
-    const { executionId, isCancelledBeforeDispatch, markDispatched, wasCancelled, cancelConfirmed, markHandedOff } = beginDangerRunningExecution(node.label);
-    try {
-      await connectionStore.ensureConnected(node.connectionId);
-      const sql = truncateTablePreviewSql.value || (await buildTruncateTableSql(tableAdminSqlOptionsForNode(node, { cascade: truncateTableCascade.value && supportsTruncateTableCascade(databaseTypeForNode(node)) })));
-      if (isCancelledBeforeDispatch()) throw new Error(DANGER_OPERATION_CANCELLED_BEFORE_DISPATCH_MESSAGE);
-      const executed = await options.executeWithProductionGuard(node, sql, { database: node.database, schema: node.schema, executionId, isCancelledBeforeDispatch, markDispatched });
-      if (executed === undefined) {
-        // The user declined the production-safety confirmation: the SQL was
-        // never sent, so this must not be reported as a successful truncate.
-        endDangerRunningExecution();
-        return;
-      }
-      toast(t("contextMenu.truncateTableSuccess", { name: node.label }), 3000);
-      await options.refreshMutatedTableDataTabsForNode(node);
-      endDangerRunningExecution();
-    } catch (error: any) {
-      const message = error?.message || String(error);
-      const backendError = normalizeBackendError(error) ?? undefined;
-      toastDangerOperationError(node.label, message, wasCancelled(), cancelConfirmed(), backendError);
-      if (cancelConfirmed() || !isQueryTimeoutErrorMessage(message, backendError)) {
-        endDangerRunningExecution();
-      } else {
-        markHandedOff();
-      }
-    }
+    await runDangerOperation({
+      node,
+      buildSql: () => truncateTablePreviewSql.value || buildTruncateTableSql(tableAdminSqlOptionsForNode(node, { cascade: truncateTableCascade.value && supportsTruncateTableCascade(databaseTypeForNode(node)) })),
+      onSuccess: async (node) => {
+        toast(t("contextMenu.truncateTableSuccess", { name: node.label }), 3000);
+        await options.refreshMutatedTableDataTabsForNode(node);
+      },
+    });
   }
 
   return {

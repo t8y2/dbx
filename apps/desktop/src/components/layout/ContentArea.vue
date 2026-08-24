@@ -5,6 +5,7 @@ import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { canReloadUnavailableDataTab } from "@/lib/table/tableDataRefresh";
 import { defaultViewForResult } from "@/lib/query/queryResultDefaultView";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
+import { batchSqlRecoveryState, type BatchSqlRecoveryAction } from "@/lib/query/batchSqlRecovery";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
 import {
@@ -36,6 +37,11 @@ import {
   AlignRight,
   PanelsTopLeft,
   Palette,
+  CircleAlert,
+  CircleStop,
+  RotateCcw,
+  SkipForward,
+  ListX,
 } from "@lucide/vue";
 import { Splitpanes, Pane } from "splitpanes";
 import { DynamicScroller, DynamicScrollerItem } from "vue-virtual-scroller";
@@ -43,6 +49,7 @@ import "splitpanes/dist/splitpanes.css";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSub, DropdownMenuSubTrigger, DropdownMenuSubContent, DropdownMenuPortal } from "@/components/ui/dropdown-menu";
+import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { Switch } from "@/components/ui/switch";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import QueryEditor from "@/components/editor/QueryEditor.vue";
@@ -87,6 +94,7 @@ const ConsulOverview = defineAsyncComponent(() => import("@/components/consul/Co
 const ConsulWorkspace = defineAsyncComponent(() => import("@/components/consul/ConsulWorkspace.vue"));
 const DocumentBrowser = defineAsyncComponent(() => import("@/components/document/DocumentBrowser.vue"));
 const MeilisearchIndexView = defineAsyncComponent(() => import("@/components/meilisearch/MeilisearchIndexView.vue"));
+const MeilisearchSystemWorkspace = defineAsyncComponent(() => import("@/components/meilisearch/MeilisearchSystemWorkspace.vue"));
 const MongoGridFsBrowser = defineAsyncComponent(() => import("@/components/document/MongoGridFsBrowser.vue"));
 const MongoBucketBrowser = defineAsyncComponent(() => import("@/components/document/MongoBucketBrowser.vue"));
 const VectorBrowser = defineAsyncComponent(() => import("@/components/vector/VectorBrowser.vue"));
@@ -249,6 +257,7 @@ onMounted(() => {
   window.addEventListener("resize", updateStandaloneResultToolbarDimensions);
   window.visualViewport?.addEventListener("resize", updateStandaloneResultToolbarDimensions);
   window.addEventListener("dbx:ui-scale-applied", updateStandaloneResultToolbarDimensions);
+  revealActiveResultRunAfterRender();
 });
 
 watch(
@@ -468,18 +477,49 @@ const activeResultRunItem = computed(() => resultRuns.value.find((run) => run.ac
 const showResultRunTabs = computed(() => resultRuns.value.length > 0 && resultRunDisplayMode.value === "tabs");
 const showResultRunSelector = computed(() => resultRuns.value.length > 0 && resultRunDisplayMode.value === "list");
 const canCloseQueryResult = computed(() => props.activeTab.mode === "query" && !props.activeTab.isExecuting && !props.activeTab.activeResultRunId && (!!props.activeTab.result || !!props.activeTab.results?.length || props.activeTab.resultEvicted === true));
+
+function updateResultTabsAfterRender() {
+  nextTick(() => updateResultTabsScrollbar());
+}
+
+function revealActiveResultRunAfterRender() {
+  nextTick(() => {
+    if (!showResultRunTabs.value) return;
+    updateResultTabsScrollbar();
+    resultTabsScrollerRef.value?.querySelector<HTMLElement>('[data-active-result-run="true"]')?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  });
+}
+
+function resultRunIdsWereAppended(previous: string[], current: string[]) {
+  return current.length > previous.length && previous.every((id, index) => current[index] === id);
+}
+
 watch(
-  () => `${resultRunDisplayMode.value}:${resultRuns.value.map((run) => run.id).join(",")}:${props.activeTab.activeResultRunId ?? ""}`,
-  () => {
-    nextTick(() => {
-      updateResultTabsScrollbar();
-      resultTabsScrollerRef.value?.querySelector<HTMLElement>('[data-active-result-run="true"]')?.scrollIntoView({ block: "nearest", inline: "nearest" });
-    });
+  () => ({
+    tabId: props.activeTab.id,
+    displayMode: resultRunDisplayMode.value,
+    runIds: resultRuns.value.map((run) => run.id),
+    activeRunId: props.activeTab.activeResultRunId,
+  }),
+  (current, previous) => {
+    const switchedTab = current.tabId !== previous.tabId;
+    const switchedDisplayMode = current.displayMode !== previous.displayMode;
+    const activeRunChanged = current.activeRunId !== previous.activeRunId;
+
+    // Appending a fresh result must keep the user's horizontal position stable.
+    // Reused result slots, tab/display-mode changes, and keyboard/close flows
+    // still reveal the active run when it may be outside the visible strip.
+    if (switchedTab || switchedDisplayMode || (activeRunChanged && !resultRunIdsWereAppended(previous.runIds, current.runIds))) {
+      revealActiveResultRunAfterRender();
+      return;
+    }
+    updateResultTabsAfterRender();
   },
 );
 const summaryItems = computed(() => executionSummaryItems(props.activeTab));
 const hasExecutionSummary = computed(() => summaryItems.value.length > 0 || props.activeTab.isExecuting);
 const batchExecutionProgress = computed(() => props.activeTab.batchSqlExecution);
+const batchRecovery = computed(() => batchSqlRecoveryState(props.activeTab));
 const batchExecutionPercent = computed(() => {
   const progress = batchExecutionProgress.value;
   return progress?.total ? Math.round((progress.completed / progress.total) * 100) : 0;
@@ -904,6 +944,61 @@ async function removeResultRun(runId: string) {
   activeRunTab?.scrollIntoView({ block: "nearest", inline: "nearest" });
 }
 
+function toggleResultRunPinned(runId: string) {
+  queryStore.toggleResultRunPinned(props.activeTab.id, runId);
+}
+
+async function closeOtherResultRuns(runId: string) {
+  if (!(await queryStore.closeOtherResultRuns(props.activeTab.id, runId))) return;
+  await selectResultRun(runId);
+}
+
+async function closeResultRunsToLeft(runId: string) {
+  if (!(await queryStore.closeResultRunsToLeft(props.activeTab.id, runId))) return;
+  await selectResultRun(runId);
+}
+
+async function closeResultRunsToRight(runId: string) {
+  if (!(await queryStore.closeResultRunsToRight(props.activeTab.id, runId))) return;
+  await selectResultRun(runId);
+}
+
+function resultRunContextMenuItems(run: (typeof resultRuns.value)[number]): ContextMenuItem[] {
+  return [
+    {
+      label: t(run.pinned ? "tabs.unpinResultRun" : "tabs.pinResultRun"),
+      action: () => toggleResultRunPinned(run.id),
+      icon: Pin,
+      iconClass: run.pinned ? "fill-current" : "",
+    },
+    {
+      label: t("tabs.unpinAllResultRuns"),
+      action: () => queryStore.unpinAllResultRuns(props.activeTab.id),
+      disabled: !resultRuns.value.some((item) => item.pinned),
+      icon: Pin,
+    },
+    { label: "", separator: true },
+    {
+      label: t("tabs.closeOtherResultRuns"),
+      action: () => void closeOtherResultRuns(run.id),
+      disabled: resultRuns.value.length <= 1,
+      icon: X,
+    },
+    {
+      label: t("tabs.closeResultRunsToLeft"),
+      action: () => void closeResultRunsToLeft(run.id),
+      disabled: resultRuns.value.findIndex((item) => item.id === run.id) <= 0,
+      icon: X,
+    },
+    {
+      label: t("tabs.closeResultRunsToRight"),
+      action: () => void closeResultRunsToRight(run.id),
+      disabled: resultRuns.value.findIndex((item) => item.id === run.id) >= resultRuns.value.length - 1,
+      icon: X,
+    },
+  ];
+}
+
 async function closeCurrentQueryResult() {
   if (!(await queryStore.closeQueryResult(props.activeTab.id))) return;
   emit("update:activeOutputView", "result");
@@ -976,6 +1071,14 @@ async function copyExecutionSummaryError(error: string) {
   } catch (copyError: any) {
     toast(t("grid.copyFailed", { message: copyError?.message || String(copyError) }), 5000);
   }
+}
+
+function dismissBatchRecovery() {
+  queryStore.dismissBatchSqlRecovery(props.activeTab.id);
+}
+
+function resumeBatchExecution(action: BatchSqlRecoveryAction) {
+  void queryStore.resumeBatchSql(props.activeTab.id, action);
 }
 
 function handleModRTarget(target: Element): boolean {
@@ -1148,36 +1251,38 @@ defineExpose({
                   </div>
                   <div ref="resultTabsScrollerRef" class="result-tab-scroll flex h-full items-center gap-1 overflow-x-auto overflow-y-hidden px-1" :style="resultTabsScrollerStyle" @scroll="updateResultTabsScrollbar" @wheel="onResultTabsWheel">
                     <div role="tablist" :aria-label="t('tabs.resultRuns')" class="flex h-full shrink-0 items-center gap-1">
-                      <div
-                        v-for="(run, runIndex) in resultRuns"
-                        :key="run.id"
-                        role="presentation"
-                        class="group/result-run inline-flex h-7 shrink-0 items-center overflow-hidden rounded-md border transition-colors"
-                        :class="run.active ? 'border-border bg-background text-foreground shadow-sm' : 'border-transparent text-muted-foreground hover:border-border/70 hover:bg-background/70 hover:text-foreground'"
-                      >
-                        <button
-                          type="button"
-                          role="tab"
-                          data-result-run-tab
-                          :tabindex="run.active ? 0 : -1"
-                          :aria-selected="run.active"
-                          :data-active-result-run="run.active ? 'true' : undefined"
-                          class="h-full whitespace-nowrap pl-2.5 pr-1 text-xs font-medium outline-none focus-visible:bg-accent focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50"
-                          @click="selectResultRun(run.id)"
-                          @keydown="onResultRunTabKeydown($event, runIndex)"
+                      <CustomContextMenu v-for="(run, runIndex) in resultRuns" :key="run.id" :items="() => resultRunContextMenuItems(run)" v-slot="{ onContextMenu }">
+                        <div
+                          role="presentation"
+                          class="group/result-run inline-flex h-7 shrink-0 select-none items-center overflow-hidden rounded-md border transition-colors"
+                          :class="run.active ? 'border-border bg-background text-foreground shadow-sm' : 'border-transparent text-muted-foreground hover:border-border/70 hover:bg-background/70 hover:text-foreground'"
+                          @contextmenu="onContextMenu"
                         >
-                          {{ run.title || t("tabs.runN", { n: run.sequence }) }}
-                        </button>
-                        <button
-                          type="button"
-                          class="mr-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground/70 outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:bg-accent focus-visible:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50"
-                          :title="t('tabs.removeRun', { n: run.sequence })"
-                          :aria-label="t('tabs.removeRun', { n: run.sequence })"
-                          @click.stop.prevent="removeResultRun(run.id)"
-                        >
-                          <X class="h-3 w-3" />
-                        </button>
-                      </div>
+                          <button
+                            type="button"
+                            role="tab"
+                            data-result-run-tab
+                            :tabindex="run.active ? 0 : -1"
+                            :aria-selected="run.active"
+                            :data-active-result-run="run.active ? 'true' : undefined"
+                            class="flex h-full select-none items-center gap-1 whitespace-nowrap pl-2.5 pr-1 text-xs font-medium outline-none focus-visible:bg-accent focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50"
+                            @click="selectResultRun(run.id)"
+                            @keydown="onResultRunTabKeydown($event, runIndex)"
+                          >
+                            <Pin v-if="run.pinned" class="h-3 w-3 shrink-0 fill-current text-primary" />
+                            {{ run.title || t("tabs.runN", { n: run.sequence }) }}
+                          </button>
+                          <button
+                            type="button"
+                            class="mr-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground/70 outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:bg-accent focus-visible:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50"
+                            :title="t('tabs.removeRun', { n: run.sequence })"
+                            :aria-label="t('tabs.removeRun', { n: run.sequence })"
+                            @click.stop.prevent="removeResultRun(run.id)"
+                          >
+                            <X class="h-3 w-3" />
+                          </button>
+                        </div>
+                      </CustomContextMenu>
                     </div>
                   </div>
                 </div>
@@ -1190,20 +1295,23 @@ defineExpose({
                       </Button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="start" class="w-48">
-                      <DropdownMenuItem v-for="run in resultRuns" :key="run.id" class="flex items-center gap-2 pr-1" @select="selectResultRun(run.id)">
-                        <Check v-if="run.active" class="h-3.5 w-3.5 shrink-0" />
-                        <span v-else class="h-3.5 w-3.5 shrink-0" />
-                        <span class="min-w-0 flex-1 truncate">{{ run.title || t("tabs.runN", { n: run.sequence }) }}</span>
-                        <button
-                          type="button"
-                          class="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground"
-                          :title="t('tabs.removeRun', { n: run.sequence })"
-                          :aria-label="t('tabs.removeRun', { n: run.sequence })"
-                          @click.stop.prevent="removeResultRun(run.id)"
-                        >
-                          <X class="h-3 w-3" />
-                        </button>
-                      </DropdownMenuItem>
+                      <CustomContextMenu v-for="run in resultRuns" :key="run.id" :items="() => resultRunContextMenuItems(run)" v-slot="{ onContextMenu }">
+                        <DropdownMenuItem class="flex items-center gap-2 pr-1" @select="selectResultRun(run.id)" @contextmenu="onContextMenu">
+                          <Check v-if="run.active" class="h-3.5 w-3.5 shrink-0" />
+                          <span v-else class="h-3.5 w-3.5 shrink-0" />
+                          <Pin v-if="run.pinned" class="h-3 w-3 shrink-0 fill-current text-primary" />
+                          <span class="min-w-0 flex-1 truncate">{{ run.title || t("tabs.runN", { n: run.sequence }) }}</span>
+                          <button
+                            type="button"
+                            class="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground"
+                            :title="t('tabs.removeRun', { n: run.sequence })"
+                            :aria-label="t('tabs.removeRun', { n: run.sequence })"
+                            @click.stop.prevent="removeResultRun(run.id)"
+                          >
+                            <X class="h-3 w-3" />
+                          </button>
+                        </DropdownMenuItem>
+                      </CustomContextMenu>
                     </DropdownMenuContent>
                   </DropdownMenu>
                 </div>
@@ -1509,6 +1617,32 @@ defineExpose({
                   </div>
                   <div class="h-1.5 overflow-hidden rounded-full bg-muted">
                     <div class="h-full rounded-full bg-primary transition-[width] duration-200" :style="{ width: `${batchExecutionPercent}%` }" />
+                  </div>
+                </div>
+                <div v-if="batchRecovery" class="flex shrink-0 items-center gap-3 border-b border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                  <CircleAlert class="h-4 w-4 shrink-0" />
+                  <span class="min-w-0 flex-1 truncate">
+                    {{ t("executionSummary.recoveryPrompt", { statement: batchRecovery.failedStatementIndex + 1, count: batchRecovery.remainingStatementCount }) }}
+                  </span>
+                  <div class="flex shrink-0 items-center gap-1">
+                    <Button variant="ghost" size="sm" class="h-6 gap-1 px-2 text-xs text-foreground hover:bg-background/70" @click="dismissBatchRecovery">
+                      <CircleStop class="h-3.5 w-3.5" />
+                      {{ t("executionSummary.stop") }}
+                    </Button>
+                    <Button variant="ghost" size="sm" class="h-6 gap-1 px-2 text-xs text-foreground hover:bg-background/70" @click="resumeBatchExecution('retry')">
+                      <RotateCcw class="h-3.5 w-3.5" />
+                      {{ t("executionSummary.retry") }}
+                    </Button>
+                    <Button variant="ghost" size="sm" class="h-6 gap-1 px-2 text-xs text-foreground hover:bg-background/70" @click="resumeBatchExecution('skip')">
+                      <SkipForward class="h-3.5 w-3.5" />
+                      {{ t("executionSummary.skipAndContinue") }}
+                    </Button>
+                    <LightTooltip :text="t('executionSummary.skipAllHint')" side="bottom" :delay="0" :close-delay="0" nowrap>
+                      <Button variant="ghost" size="sm" class="h-6 gap-1 px-2 text-xs text-foreground hover:bg-background/70" @click="resumeBatchExecution('skip-all')">
+                        <ListX class="h-3.5 w-3.5" />
+                        {{ t("executionSummary.skipAll") }}
+                      </Button>
+                    </LightTooltip>
                   </div>
                 </div>
                 <div class="grid shrink-0 grid-cols-[4rem_minmax(14rem,1fr)_7rem_7rem_6rem] border-b bg-muted/30 px-3 py-2 text-xs font-medium text-muted-foreground">
@@ -2100,6 +2234,12 @@ defineExpose({
       </div>
     </template>
 
+    <template v-else-if="activeTab.mode === 'meilisearch-system'">
+      <div class="flex-1 min-h-0">
+        <MeilisearchSystemWorkspace :key="activeTab.id" :connection-id="activeTab.connectionId" />
+      </div>
+    </template>
+
     <template v-else-if="activeTab.mode === 'mongo-gridfs'">
       <div class="flex-1 min-h-0">
         <MongoGridFsBrowser :key="activeTab.id" :connection-id="activeTab.connectionId" :database="activeTab.database" />
@@ -2169,6 +2309,10 @@ defineExpose({
           :database="activeTab.database"
           :catalog="activeTab.objectBrowser?.catalog"
           :schema="activeTab.objectBrowser?.schema"
+          :initial-event-name="activeTab.objectBrowser?.eventName"
+          :initial-event-read-only="activeTab.objectBrowser?.eventReadOnly"
+          :initial-event-open-request-id="activeTab.objectBrowser?.eventOpenRequestId"
+          :initial-object-filter="activeTab.objectBrowser?.initialObjectFilter"
           :viewport="activeTab.objectBrowser?.viewport"
           @open-table="emit('openObjectTable', $event)"
           @schema-change="emit('objectSchemaChange', $event)"

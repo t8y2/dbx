@@ -5,7 +5,7 @@ import { useI18n } from "vue-i18n";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import type { NacosBatchPreview, NacosBatchReport, NacosConfigSelectionScope, NacosConflictPolicy, NacosNamespaceInfo } from "@/types/nacos";
+import type { NacosBatchPreview, NacosBatchReport, NacosConfigDataIdMapping, NacosConfigKey, NacosConfigSelectionScope, NacosConflictPolicy, NacosNamespaceInfo } from "@/types/nacos";
 import { nacosNamespaceIdentity } from "@/lib/nacos/nacosNamespaceVisibility";
 
 export type NacosBatchDialogMode = "export" | "import" | "copy";
@@ -15,11 +15,21 @@ export interface NacosConfigTransferTarget {
   label: string;
 }
 
+export interface NacosConfigTransferDialogPayload {
+  scope: NacosConfigSelectionScope;
+  targetConnectionId: string;
+  targetNamespace: string;
+  targetGroup: string;
+  dataIdMappings?: NacosConfigDataIdMapping[];
+  policy: NacosConflictPolicy;
+}
+
 const props = defineProps<{
   open: boolean;
   mode: NacosBatchDialogMode;
   loading: boolean;
   selectedCount: number;
+  selectedKeys: NacosConfigKey[];
   filteredCount: number;
   targetConnections: NacosConfigTransferTarget[];
   targetConnectionId: string;
@@ -37,8 +47,8 @@ const emit = defineEmits<{
   chooseFile: [];
   reset: [];
   targetConnectionChange: [connectionId: string];
-  preview: [payload: { scope: NacosConfigSelectionScope; targetConnectionId: string; targetNamespace: string; targetGroup: string; policy: NacosConflictPolicy }];
-  apply: [payload: { scope: NacosConfigSelectionScope; targetConnectionId: string; targetNamespace: string; targetGroup: string; policy: NacosConflictPolicy }];
+  preview: [payload: NacosConfigTransferDialogPayload];
+  apply: [payload: NacosConfigTransferDialogPayload];
   export: [scope: NacosConfigSelectionScope];
 }>();
 
@@ -47,6 +57,7 @@ const scope = ref<NacosConfigSelectionScope>("selected");
 const policy = ref<NacosConflictPolicy>("ABORT");
 const targetNamespace = ref("");
 const targetGroup = ref("");
+const targetDataIdDrafts = ref<NacosConfigDataIdMapping[]>([]);
 
 const titleKey = computed(() => `nacos.batch${props.mode[0].toUpperCase()}${props.mode.slice(1)}Title`);
 const descriptionKey = computed(() => `nacos.batch${props.mode[0].toUpperCase()}${props.mode.slice(1)}Description`);
@@ -111,6 +122,32 @@ function resetTargetNamespace() {
   targetNamespace.value = targetNamespaces.value[0] ? JSON.stringify(targetNamespaces.value[0].namespace) : "";
 }
 
+function resetTargetDataIdDrafts() {
+  targetDataIdDrafts.value = props.selectedKeys.map((key) => ({
+    sourceGroup: key.group,
+    sourceDataId: key.dataId,
+    targetDataId: "",
+  }));
+}
+
+function transferPayload(): NacosConfigTransferDialogPayload {
+  const dataIdMappings =
+    scope.value === "selected"
+      ? targetDataIdDrafts.value.flatMap((mapping) => {
+          const targetDataId = mapping.targetDataId.trim();
+          return targetDataId && targetDataId !== mapping.sourceDataId ? [{ ...mapping, targetDataId }] : [];
+        })
+      : [];
+  return {
+    scope: scope.value,
+    targetConnectionId: props.targetConnectionId,
+    targetNamespace: selectedTargetNamespace.value,
+    targetGroup: targetGroup.value.trim(),
+    ...(dataIdMappings.length ? { dataIdMappings } : {}),
+    policy: policy.value,
+  };
+}
+
 watch(
   () => props.open,
   (open) => {
@@ -118,6 +155,7 @@ watch(
     scope.value = props.selectedCount ? "selected" : "filtered";
     policy.value = "ABORT";
     targetGroup.value = "";
+    resetTargetDataIdDrafts();
     resetTargetNamespace();
   },
   { immediate: true },
@@ -206,7 +244,29 @@ watch(targetNamespaces, () => {
           </div>
           <div class="space-y-2">
             <div class="text-sm font-medium">{{ t("nacos.targetGroup") }}</div>
-            <input v-model="targetGroup" type="text" class="h-10 w-full rounded-md border border-input bg-background px-3 text-sm" :disabled="loading" :placeholder="t('nacos.targetGroupPlaceholder')" @change="emit('reset')" />
+            <input v-model="targetGroup" data-testid="nacos-target-group" type="text" class="h-10 w-full rounded-md border border-input bg-background px-3 text-sm" :disabled="loading" :placeholder="t('nacos.targetGroupPlaceholder')" @change="emit('reset')" />
+          </div>
+          <div v-if="scope === 'selected' && targetDataIdDrafts.length" class="space-y-2">
+            <div class="text-sm font-medium">{{ t("nacos.targetDataIds") }}</div>
+            <p class="text-xs text-muted-foreground">{{ t("nacos.targetDataIdsHint") }}</p>
+            <div class="max-h-52 space-y-2 overflow-auto rounded-md border p-2">
+              <label v-for="(mapping, index) in targetDataIdDrafts" :key="`${mapping.sourceGroup}\u0000${mapping.sourceDataId}`" :for="`nacos-target-data-id-${index}`" class="grid gap-2 rounded-md bg-muted/30 p-2 text-xs sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] sm:items-center">
+                <span class="min-w-0">
+                  <span class="block truncate font-medium text-foreground" :title="mapping.sourceDataId">{{ mapping.sourceDataId }}</span>
+                  <span class="block truncate text-muted-foreground" :title="mapping.sourceGroup">{{ mapping.sourceGroup }}</span>
+                </span>
+                <input
+                  :id="`nacos-target-data-id-${index}`"
+                  v-model="mapping.targetDataId"
+                  data-testid="nacos-target-data-id"
+                  type="text"
+                  class="h-9 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground"
+                  :disabled="loading"
+                  :placeholder="mapping.sourceDataId"
+                  @input="emit('reset')"
+                />
+              </label>
+            </div>
           </div>
           <p class="text-xs text-muted-foreground">{{ t("nacos.copyKeepsSource") }}</p>
         </div>
@@ -285,11 +345,11 @@ watch(targetNamespaces, () => {
             {{ t("nacos.exportZip") }}
           </Button>
           <template v-else>
-            <Button v-if="!preview" :disabled="loading || !canContinue" @click="emit('preview', { scope, targetConnectionId, targetNamespace: selectedTargetNamespace, targetGroup: targetGroup.trim(), policy })">
+            <Button v-if="!preview" :disabled="loading || !canContinue" @click="emit('preview', transferPayload())">
               <Loader2 v-if="loading" class="mr-2 h-4 w-4 animate-spin" />
               {{ t("nacos.preview") }}
             </Button>
-            <Button v-else :variant="policy === 'OVERWRITE' ? 'destructive' : 'default'" :disabled="loading || hasPreviewBlockingErrors" @click="emit('apply', { scope, targetConnectionId, targetNamespace: selectedTargetNamespace, targetGroup: targetGroup.trim(), policy })">
+            <Button v-else :variant="policy === 'OVERWRITE' ? 'destructive' : 'default'" :disabled="loading || hasPreviewBlockingErrors" @click="emit('apply', transferPayload())">
               <Loader2 v-if="loading" class="mr-2 h-4 w-4 animate-spin" />
               {{ t("nacos.apply") }}
             </Button>

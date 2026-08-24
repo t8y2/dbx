@@ -2373,8 +2373,10 @@ impl OraclePlSqlBlock {
         }
 
         match object_kind {
-            // Specs complete on outer END [name]; without requiring BEGIN.
-            Some(OraclePlSqlCreateObjectKind::Spec) => complete,
+            // Package/type objects complete on their outer END [name]; a package
+            // body may omit an initialization BEGIN when it has no executable
+            // initialization section.
+            Some(OraclePlSqlCreateObjectKind::Body | OraclePlSqlCreateObjectKind::Spec) => complete,
             _ => saw_begin && complete,
         }
     }
@@ -4009,6 +4011,22 @@ SELECT 1;";
                 "CREATE PACKAGE pkg_utils_without_replace AS\n    PROCEDURE ping;\nEND pkg_utils_without_replace;",
                 "SELECT 1"
             ]
+        );
+    }
+
+    #[test]
+    fn oracle_like_split_declaration_only_package_body_before_following_dml() {
+        let package_body = "CREATE OR REPLACE PACKAGE BODY packageName IS\nnull;\nEND packageName;";
+        assert_eq!(
+            split_sql_statements_for_database(&format!("{package_body}\nSELECT * FROM goods;"), DatabaseType::Oracle),
+            vec![package_body, "SELECT * FROM goods"]
+        );
+        assert_eq!(
+            split_sql_statements_for_database(
+                &format!("{package_body}\n/\nSELECT * FROM goods;"),
+                DatabaseType::Oracle
+            ),
+            vec![package_body, "SELECT * FROM goods"]
         );
     }
 

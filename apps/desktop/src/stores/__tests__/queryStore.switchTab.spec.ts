@@ -11,6 +11,7 @@ describe("queryStore switchTab", () => {
       setItem: vi.fn(),
       removeItem: vi.fn(),
     });
+    vi.stubGlobal("window", { dispatchEvent: vi.fn() });
     setActivePinia(createPinia());
   });
 
@@ -34,6 +35,16 @@ describe("queryStore switchTab", () => {
     expect(settingsStore.settingsPageActive).toBe(false);
     // Active tab should still be the same
     expect(queryStore.activeTabId).toBe(tabId);
+  });
+
+  it("notifies the app when switching to an existing tab", async () => {
+    const queryStore = useQueryStore();
+    const tabId = queryStore.createTab("pg-1", "app", "users", "data", "public");
+    const dispatchEvent = window.dispatchEvent as ReturnType<typeof vi.fn>;
+
+    queryStore.switchTab(tabId);
+
+    expect(dispatchEvent).toHaveBeenCalledWith(expect.objectContaining({ type: "dbx:activate-query-surface" }));
   });
 
   it("deactivates settings page when switching to a different tab", async () => {

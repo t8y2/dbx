@@ -14,6 +14,20 @@ describe("query editor table reference drop", () => {
     expect(tableReferenceInsertText(payload!)).toBe("`app-db`");
   });
 
+  it("preserves the Phoenix schema in dragged table references", () => {
+    const payload = createTableReferencePayload({
+      connectionId: "conn-1",
+      database: "default",
+      schema: "APP",
+      tableName: "USERS",
+      databaseType: "jdbc",
+      driverProfile: "phoenix",
+    })!;
+
+    expect(parseTableReferencePayload(JSON.stringify(payload))).toEqual(payload);
+    expect(tableReferenceInsertText(payload)).toBe("APP.USERS");
+  });
+
   it("round-trips database reference payloads", () => {
     const payload = createTableReferencePayload({
       connectionId: "conn-1",

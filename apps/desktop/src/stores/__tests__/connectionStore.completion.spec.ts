@@ -582,6 +582,78 @@ describe("connectionStore completion assistant", () => {
     ]);
   });
 
+  it("keeps PostgreSQL quoted column caches separate from unquoted identifiers", async () => {
+    const completionAssistantSearch = vi.fn(async (request: { parent_name?: string | null; parent_schema?: string | null }) => ({
+      candidates: [
+        {
+          name: request.parent_name === "Orders" ? "QuotedId" : "lower_id",
+          kind: "column",
+          parent_schema: request.parent_schema,
+          parent_name: request.parent_name,
+          data_type: "integer",
+        },
+      ],
+      incomplete: false,
+      fallback_used: false,
+    }));
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      getColumns: vi.fn(),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [postgresConnection()];
+    store.connectedIds.add("pg-1");
+
+    const unquoted = await store.listCompletionColumns("pg-1", "app", "orders", "public", { tableQuoted: false, schemaQuoted: false });
+    const quoted = await store.listCompletionColumns("pg-1", "app", "Orders", "Public", { tableQuoted: true, schemaQuoted: true });
+
+    expect(completionAssistantSearch).toHaveBeenCalledTimes(2);
+    expect(unquoted.map((column) => column.name)).toEqual(["lower_id"]);
+    expect(quoted.map((column) => column.name)).toEqual(["QuotedId"]);
+    expect(store.lookupLocalCompletionColumns("pg-1", "app", "orders", "public", undefined, { tableQuoted: false, schemaQuoted: false }).map((column) => column.name)).toEqual(["lower_id"]);
+    expect(store.lookupLocalCompletionColumns("pg-1", "app", "Orders", "Public", undefined, { tableQuoted: true, schemaQuoted: true }).map((column) => column.name)).toEqual(["QuotedId"]);
+  });
+
+  it("reads PostgreSQL prefix columns back with the same quoted context", async () => {
+    const completionAssistantSearch = vi.fn(async (request: { parent_name?: string | null; parent_schema?: string | null }) => ({
+      candidates: (request.parent_name === "Orders" ? ["QuotedName"] : ["name", "native"]).map((name) => ({
+        name,
+        kind: "column",
+        parent_schema: request.parent_schema,
+        parent_name: request.parent_name,
+        data_type: "text",
+      })),
+      incomplete: false,
+      fallback_used: false,
+    }));
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [postgresConnection()];
+    store.connectedIds.add("pg-1");
+
+    await store.listCompletionColumnsByPrefix("pg-1", "app", "orders", "public", "na", undefined, { tableQuoted: false, schemaQuoted: false });
+    const narrowed = await store.listCompletionColumnsByPrefix("pg-1", "app", "orders", "public", "nam", undefined, { tableQuoted: false, schemaQuoted: false });
+    await store.listCompletionColumnsByPrefix("pg-1", "app", "Orders", "Public", "Na", undefined, { tableQuoted: true, schemaQuoted: true });
+
+    expect(completionAssistantSearch).toHaveBeenCalledTimes(2);
+    expect(narrowed.map((column) => column.name)).toEqual(["name"]);
+    expect(store.lookupLocalCompletionColumnsByPrefix("pg-1", "app", "orders", "public", "na", undefined, { tableQuoted: false, schemaQuoted: false }).map((column) => column.name)).toEqual(["name", "native"]);
+    expect(store.lookupLocalCompletionColumnsByPrefix("pg-1", "app", "orders", "public", "nam", undefined, { tableQuoted: false, schemaQuoted: false }).map((column) => column.name)).toEqual(["name"]);
+    expect(store.lookupLocalCompletionColumnsByPrefix("pg-1", "app", "Orders", "Public", "Na", undefined, { tableQuoted: true, schemaQuoted: true }).map((column) => column.name)).toEqual(["QuotedName"]);
+  });
+
   it("normalizes unquoted Oracle aliases while preserving quoted case before catalog lookup", async () => {
     const completionAssistantSearch = vi.fn();
     const getColumns = vi.fn().mockResolvedValue([]);
@@ -680,6 +752,144 @@ describe("connectionStore completion assistant", () => {
     await store.listCompletionColumns("sqlserver-1", "app", "users", "dbo");
     await store.listCompletionColumns("sqlserver-1", "app", "orders", "dbo");
     expect(getColumns.mock.calls.map((call) => call[3])).toEqual(["users", "orders", "users"]);
+  });
+
+  it("does not let an invalidated column request overwrite fresh metadata", async () => {
+    const staleColumns = deferred<unknown[]>();
+    const freshColumns = deferred<unknown[]>();
+    const getColumns = vi.fn().mockReturnValueOnce(staleColumns.promise).mockReturnValueOnce(freshColumns.promise);
+    const column = (name: string) => ({
+      name,
+      data_type: "integer",
+      is_nullable: false,
+      column_default: null,
+      is_primary_key: false,
+      extra: null,
+      comment: null,
+    });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch: vi.fn().mockRejectedValue(new Error("assistant unavailable")),
+      getColumns,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [sqlServerConnection()];
+    store.connectedIds.add("sqlserver-1");
+
+    const staleRequest = store.listCompletionColumns("sqlserver-1", "app", "users", "dbo");
+    await vi.waitFor(() => expect(getColumns).toHaveBeenCalledTimes(1));
+    store.invalidateCompletionTableCache("sqlserver-1", "app", "users", "dbo");
+    const freshRequest = store.listCompletionColumns("sqlserver-1", "app", "users", "dbo");
+    freshColumns.resolve([column("fresh_column")]);
+    await expect(freshRequest).resolves.toEqual([expect.objectContaining({ name: "fresh_column" })]);
+
+    staleColumns.resolve([column("stale_column")]);
+    await expect(staleRequest).resolves.toEqual([expect.objectContaining({ name: "fresh_column" })]);
+    await expect(store.listCompletionColumns("sqlserver-1", "app", "users", "dbo")).resolves.toEqual([expect.objectContaining({ name: "fresh_column" })]);
+    expect(getColumns).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not reuse or index a stale assistant column response after invalidation", async () => {
+    const staleResponse = deferred<any>();
+    const freshResponse = deferred<any>();
+    const completionAssistantSearch = vi.fn().mockReturnValueOnce(staleResponse.promise).mockReturnValueOnce(freshResponse.promise);
+    const response = (name: string) => ({
+      candidates: [{ name, kind: "column", parent_schema: "dbo", parent_name: "users", data_type: "integer" }],
+      incomplete: false,
+      fallback_used: false,
+    });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [sqlServerConnection()];
+    store.connectedIds.add("sqlserver-1");
+
+    const staleRequest = store.listCompletionColumns("sqlserver-1", "app", "users", "dbo");
+    await vi.waitFor(() => expect(completionAssistantSearch).toHaveBeenCalledTimes(1));
+    store.invalidateCompletionTableCache("sqlserver-1", "app", "users", "dbo");
+    const freshRequest = store.listCompletionColumns("sqlserver-1", "app", "users", "dbo");
+    await vi.waitFor(() => expect(completionAssistantSearch).toHaveBeenCalledTimes(2));
+
+    freshResponse.resolve(response("fresh_column"));
+    await expect(freshRequest).resolves.toEqual([expect.objectContaining({ name: "fresh_column" })]);
+
+    staleResponse.resolve(response("stale_column"));
+    await expect(staleRequest).resolves.toEqual([expect.objectContaining({ name: "fresh_column" })]);
+    expect(store.lookupLocalCompletionColumns("sqlserver-1", "app", "users", "dbo")).toEqual([expect.objectContaining({ name: "fresh_column" })]);
+  });
+
+  it("does not let an invalidated table request overwrite fresh metadata", async () => {
+    const staleTables = deferred<any[]>();
+    const freshTables = deferred<any[]>();
+    const listTables = vi.fn().mockReturnValueOnce(staleTables.promise).mockReturnValueOnce(freshTables.promise);
+    const table = (name: string) => ({ name, table_type: "BASE TABLE", comment: null });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      listTables,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [postgresConnection()];
+    store.connectedIds.add("pg-1");
+
+    const staleRequest = store.listCompletionTables("pg-1", "app", "", undefined, "public");
+    await vi.waitFor(() => expect(listTables).toHaveBeenCalledTimes(1));
+    store.invalidateCompletionCache("pg-1", "app");
+    const freshRequest = store.listCompletionTables("pg-1", "app", "", undefined, "public");
+    await vi.waitFor(() => expect(listTables).toHaveBeenCalledTimes(2));
+
+    freshTables.resolve([table("fresh_table")]);
+    await expect(freshRequest).resolves.toEqual([expect.objectContaining({ name: "fresh_table" })]);
+
+    staleTables.resolve([table("stale_table")]);
+    await expect(staleRequest).resolves.toEqual([expect.objectContaining({ name: "fresh_table" })]);
+    await expect(store.listCompletionTables("pg-1", "app", "", undefined, "public")).resolves.toEqual([expect.objectContaining({ name: "fresh_table" })]);
+    expect(listTables).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not let an invalidated foreign key request overwrite fresh metadata", async () => {
+    const staleForeignKeys = deferred<any[]>();
+    const freshForeignKeys = deferred<any[]>();
+    const listForeignKeys = vi.fn().mockReturnValueOnce(staleForeignKeys.promise).mockReturnValueOnce(freshForeignKeys.promise);
+    const foreignKey = (name: string) => ({ name, column: "customer_id", ref_schema: "public", ref_table: "customers", ref_column: "id" });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      listForeignKeys,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [postgresConnection()];
+    store.connectedIds.add("pg-1");
+
+    const staleRequest = store.listCompletionForeignKeys("pg-1", "app", "orders", "public");
+    await vi.waitFor(() => expect(listForeignKeys).toHaveBeenCalledTimes(1));
+    store.invalidateCompletionTableCache("pg-1", "app", "orders", "public");
+    const freshRequest = store.listCompletionForeignKeys("pg-1", "app", "orders", "public");
+    await vi.waitFor(() => expect(listForeignKeys).toHaveBeenCalledTimes(2));
+
+    freshForeignKeys.resolve([foreignKey("fresh_fk")]);
+    await expect(freshRequest).resolves.toEqual([expect.objectContaining({ name: "fresh_fk" })]);
+
+    staleForeignKeys.resolve([foreignKey("stale_fk")]);
+    await expect(staleRequest).resolves.toEqual([expect.objectContaining({ name: "fresh_fk" })]);
+    await expect(store.listCompletionForeignKeys("pg-1", "app", "orders", "public")).resolves.toEqual([expect.objectContaining({ name: "fresh_fk" })]);
+    expect(listForeignKeys).toHaveBeenCalledTimes(2);
   });
 
   it("keeps the same table cached in other catalogs", async () => {

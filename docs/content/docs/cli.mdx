@@ -170,7 +170,21 @@ CLI JSON errors use stable codes:
 
 ## Desktop Deep Links
 
-DBX Desktop supports `dbx://connection/new` links for opening the new connection dialog from browsers, bastion hosts, or scripts with connection fields prefilled.
+DBX Desktop supports deep links for launching the client from browsers, bastion hosts, or scripts.
+
+Launch or focus DBX without opening another dialog:
+
+```bash
+open 'dbx://open'
+```
+
+A web button can link to the protocol directly:
+
+```html
+<a href="dbx://open">Open in DBX</a>
+```
+
+Use `dbx://connection/new` to open the new connection dialog with connection fields prefilled.
 
 DSN mode:
 
@@ -216,7 +230,7 @@ open 'dbx://connection/new?type=r-nacos&url=http%3A%2F%2F127.0.0.1%3A8848%2Fnaco
 
 `nacos` is an alias for `nacos-v2`, and `rnacos` is an alias for `r-nacos`. In URL mode, service endpoint paths are preserved; top-level `host`, `port`, `user`, `password`, and `ssl` fields override values from `url`. For Consul, `password` is the ACL token. Nacos requires `user` when `password` is present. Omitting `v` or using `v=1` selects the current deep-link protocol; other versions are rejected.
 
-<Callout type="info">Before testing system-level `dbx://` launches, install and open DBX Desktop once so the operating system can register the URL scheme. On macOS, use `open 'dbx://connection/new?...'` to test it.</Callout>
+<Callout type="info">Before testing system-level `dbx://` launches, install and open DBX Desktop once so the operating system can register the URL scheme. On macOS, use `open 'dbx://open'` or `open 'dbx://connection/new?...'` to test it.</Callout>
 
 <Callout type="warning">A deep link may expose a database password or Consul ACL token in browser and terminal history. Do not put credential-bearing links in shared logs, shell history, tickets, or chat messages.</Callout>
 

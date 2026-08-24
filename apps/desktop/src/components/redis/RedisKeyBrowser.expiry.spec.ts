@@ -400,11 +400,12 @@ function resetApiMocks() {
   mocks.canBuildRedisFuzzyTree.mockImplementation((loadedKeyCount: number) => loadedKeyCount <= 200_000);
 }
 
-function mountBrowser() {
+function mountBrowser(withDeleteDetails = false) {
   const host = document.createElement("div");
   document.body.append(host);
   const app = createApp(RedisKeyBrowser, { connectionId: "connection", db: 0, blockDangerousRedisCommands: false });
-  app.use(createI18n({ legacy: false, locale: "en", messages: { en: {} }, missingWarn: false, fallbackWarn: false }));
+  const messages = { en: { redis: { deleteGroupDetails: withDeleteDetails ? "{target}\n{count} keys" : "redis.deleteGroupDetails" } } };
+  app.use(createI18n({ legacy: false, locale: "en", messages, missingWarn: false, fallbackWarn: false }));
   app.mount(host);
   mountedApps.push({ unmount: () => app.unmount(), host });
   return host;
@@ -798,7 +799,7 @@ describe("RedisKeyBrowser command completion", () => {
     await setCommandInput("VGE");
 
     expect(mocks.listRedisCompletionCommandDocs).toHaveBeenCalledWith("connection", "0");
-    expect(commandCompletionLabels()).toContain("VGETReads a vendor key.string");
+    expect(commandCompletionLabels()).toEqual(expect.arrayContaining([expect.stringContaining("VGET")]));
 
     const input = requiredElement<HTMLInputElement>("[data-redis-command-input]");
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", shiftKey: true, bubbles: true }));
@@ -807,7 +808,7 @@ describe("RedisKeyBrowser command completion", () => {
 
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
     await settle();
-    expect(input.value).toBe("VGET ");
+    expect(input.value).toBe("VGET arg1");
   });
 
   it("completes known keys only at a documented key argument", async () => {
@@ -928,8 +929,35 @@ describe("RedisKeyBrowser command completion", () => {
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     await settle();
 
-    expect(input.value).toBe("SET ");
-    expect(commandCompletionLabels()).toContain("user:1key");
+    expect(input.value).toBe("SET arg1 arg2");
+    expect(mocks.redisExecuteCommand).not.toHaveBeenCalled();
+  });
+
+  it("inserts documented Redis argument examples before executing on Enter", async () => {
+    mocks.listRedisCompletionCommandDocs.mockResolvedValueOnce([
+      {
+        name: "GETBIT",
+        group: "bitmap",
+        arity: 3,
+        keySpecs: [{ beginSearch: { type: "index" as const, index: 1 }, findKeys: { type: "range" as const, lastKey: 0, keyStep: 1, limit: 0 } }],
+        arguments: [
+          { name: "key", type: "key" },
+          { name: "offset", type: "integer" },
+        ],
+      },
+    ]);
+    mountBrowser();
+    await settle();
+    await openCommandPanel();
+    await setCommandInput("GETB");
+
+    const input = requiredElement<HTMLInputElement>("[data-redis-command-input]");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await settle();
+
+    expect(input.value).toBe("GETBIT key offset");
+    expect(mocks.redisExecuteCommand).not.toHaveBeenCalled();
+    expect(commandCompletionLabels()).toEqual([]);
   });
 
   it("waits for command metadata instead of sending a partial command on Enter", async () => {
@@ -951,7 +979,7 @@ describe("RedisKeyBrowser command completion", () => {
     await settle();
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     await settle();
-    expect(input.value).toBe("SET ");
+    expect(input.value).toBe("SET arg1 arg2");
     expect(mocks.redisExecuteCommand).not.toHaveBeenCalled();
   });
 
@@ -1126,6 +1154,29 @@ describe("RedisKeyBrowser expiry creation", () => {
 });
 
 describe("RedisKeyBrowser fuzzy key hierarchy", () => {
+  it("deletes a leaf directly from the key list after confirmation", async () => {
+    const key = { key_display: "session:current", key_raw: "c2Vzc2lvbjpjdXJyZW50", key_type: "string", ttl: -1 };
+    mocks.redisScanKeysBatch.mockResolvedValue({ cursor: 0, keys: [key], total_keys: 1 });
+    mocks.redisDeleteKeys.mockResolvedValue(1);
+    mountBrowser(true);
+    await settle();
+
+    groupRow("session").dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    await settle();
+
+    const deleteButton = requiredElement<HTMLButtonElement>('button[title="redis.deleteKey"]');
+    deleteButton.click();
+    await settle();
+
+    expect(mocks.redisDeleteKeys).not.toHaveBeenCalled();
+    expect(requiredElement<HTMLElement>("[data-test-danger-details]").textContent).toContain("session:current");
+    requiredElement<HTMLButtonElement>("[data-test-danger-confirm]").click();
+    await settle();
+
+    expect(mocks.redisDeleteKeys).toHaveBeenCalledWith("connection", 0, [key.key_raw]);
+    expect(document.body.textContent).not.toContain("session:current");
+  });
+
   it("preserves the cursor and finds a sparse fuzzy match after a bounded continuation", async () => {
     mocks.redisScanPageSize = 1_000;
     mountBrowser();

@@ -1,14 +1,141 @@
 import type { ColumnInfo, DatabaseType, QueryResult } from "@/types/database";
+import type { CellValue } from "@/lib/dataGrid/cellValue";
 
 export const TABLE_DATA_RESULT_MAX_BYTES = 32 * 1024 * 1024;
 export const TABLE_DATA_CELL_PREVIEW_MIN_SIZE = 1;
 export const TABLE_DATA_CELL_PREVIEW_SIZE = 8 * 1024;
 export const TABLE_DATA_PREVIEW_CONTENT_MAX_BYTES = 24 * 1024 * 1024;
 export const TABLE_DATA_TEXT_SERIALIZED_BYTES_PER_CHARACTER = 6;
+export const TABLE_DATA_VISIBLE_PREVIEW_SIZE = 512;
+export const TABLE_DATA_VISIBLE_PREVIEW_MAX_ROWS = 100;
+export const TABLE_DATA_VISIBLE_PREVIEW_CACHE_ROWS = 2_000;
+export const TABLE_DATA_VISIBLE_PREVIEW_CACHE_CONTENT_MAX_BYTES = 16 * 1024 * 1024;
 const TABLE_DATA_LARGE_VALUE_MARKER_PREFIX = "__DBX_LARGE_VALUE_BYTES_";
+
+export interface TableDataVisiblePreviewRowRange {
+  start: number;
+  end: number;
+}
+
+export interface ResultScopedRowCache<T> {
+  has(rowIndex: number, columnIndex: number): boolean;
+  get(rowIndex: number, columnIndex: number): T | undefined;
+  touch(rowIndex: number): void;
+  remember(rowIndex: number, columnIndex: number, value: T): void;
+  forget(rowIndex: number, columnIndex: number): void;
+  evict(protectedRows?: ReadonlySet<number>): Array<{ rowIndex: number; columnIndex: number; value: T }>;
+}
+
+export function tableDataVisiblePreviewRowRange(scrollTop: number, viewportHeight: number, rowHeight: number, rowCount: number, maxRows = TABLE_DATA_VISIBLE_PREVIEW_MAX_ROWS): TableDataVisiblePreviewRowRange | null {
+  if (rowHeight <= 0 || rowCount <= 0 || maxRows <= 0) return null;
+  const firstVisible = Math.max(0, Math.min(rowCount - 1, Math.floor(Math.max(0, scrollTop) / rowHeight)));
+  const visibleRows = Math.max(1, Math.ceil(Math.max(rowHeight, viewportHeight) / rowHeight));
+  const targetRows = Math.min(rowCount, maxRows, visibleRows * 3);
+  const rowsBefore = Math.floor(Math.max(0, targetRows - visibleRows) / 2);
+  let start = Math.max(0, firstVisible - rowsBefore);
+  const end = Math.min(rowCount, start + targetRows);
+  start = Math.max(0, end - targetRows);
+  return { start, end };
+}
+
+export function tableDataVisiblePreviewContentBytes(value: CellValue): number {
+  if (typeof value === "string") return value.length * 2;
+  if (typeof value === "number") return 8;
+  if (typeof value === "boolean") return 4;
+  return 0;
+}
+
+export function createResultScopedRowCache<T>(maxRows: number, options: { maxBytes?: number; sizeOf?: (value: T) => number } = {}): ResultScopedRowCache<T> {
+  const rows = new Map<number, Map<number, T>>();
+  const rowBytes = new Map<number, number>();
+  const maxCachedRows = Math.max(0, maxRows);
+  const maxCachedBytes = Math.max(0, options.maxBytes ?? Number.POSITIVE_INFINITY);
+  const sizeOf = options.sizeOf ?? (() => 0);
+  let cachedBytes = 0;
+
+  function touch(rowIndex: number, values: Map<number, T>) {
+    rows.delete(rowIndex);
+    rows.set(rowIndex, values);
+  }
+
+  function removeRow(rowIndex: number, values: Map<number, T>, evicted: Array<{ rowIndex: number; columnIndex: number; value: T }>) {
+    rows.delete(rowIndex);
+    cachedBytes = Math.max(0, cachedBytes - (rowBytes.get(rowIndex) ?? 0));
+    rowBytes.delete(rowIndex);
+    for (const [columnIndex, value] of values) evicted.push({ rowIndex, columnIndex, value });
+  }
+
+  function exceedsLimit(): boolean {
+    return rows.size > maxCachedRows || cachedBytes > maxCachedBytes;
+  }
+
+  return {
+    has(rowIndex, columnIndex) {
+      return rows.get(rowIndex)?.has(columnIndex) ?? false;
+    },
+    get(rowIndex, columnIndex) {
+      return rows.get(rowIndex)?.get(columnIndex);
+    },
+    touch(rowIndex) {
+      const values = rows.get(rowIndex);
+      if (values) touch(rowIndex, values);
+    },
+    remember(rowIndex, columnIndex, value) {
+      const values = rows.get(rowIndex) ?? new Map<number, T>();
+      if (!values.has(columnIndex)) {
+        values.set(columnIndex, value);
+        const valueBytes = Math.max(0, sizeOf(value));
+        cachedBytes += valueBytes;
+        rowBytes.set(rowIndex, (rowBytes.get(rowIndex) ?? 0) + valueBytes);
+      }
+      touch(rowIndex, values);
+    },
+    forget(rowIndex, columnIndex) {
+      const values = rows.get(rowIndex);
+      if (!values) return;
+      const value = values.get(columnIndex);
+      if (value === undefined && !values.has(columnIndex)) return;
+      values.delete(columnIndex);
+      const valueBytes = Math.max(0, sizeOf(value as T));
+      cachedBytes = Math.max(0, cachedBytes - valueBytes);
+      const remainingRowBytes = Math.max(0, (rowBytes.get(rowIndex) ?? 0) - valueBytes);
+      if (values.size === 0) {
+        rows.delete(rowIndex);
+        rowBytes.delete(rowIndex);
+      } else {
+        rowBytes.set(rowIndex, remainingRowBytes);
+      }
+    },
+    evict(protectedRows = new Set<number>()) {
+      const evicted: Array<{ rowIndex: number; columnIndex: number; value: T }> = [];
+      for (const [rowIndex, values] of rows) {
+        if (!exceedsLimit()) break;
+        if (protectedRows.has(rowIndex)) continue;
+        removeRow(rowIndex, values, evicted);
+      }
+      for (const [rowIndex, values] of rows) {
+        if (!exceedsLimit()) break;
+        removeRow(rowIndex, values, evicted);
+      }
+      return evicted;
+    },
+  };
+}
 
 function normalizedDataTypeBase(dataType: string): string {
   return dataType.trim().split(/[([]/, 1)[0]?.trim().toLocaleLowerCase() ?? "";
+}
+
+export function isTableDataVisiblePreviewColumn(databaseType: DatabaseType | undefined, dataType: string): boolean {
+  const normalized = dataType.trim().toLocaleLowerCase();
+  const base = normalizedDataTypeBase(dataType);
+  if (databaseType === "mysql") {
+    return base === "text" || base === "tinytext" || base === "mediumtext" || base === "longtext" || base === "varchar" || base === "json";
+  }
+  if (databaseType === "postgres") {
+    return !normalized.includes("[") && (base === "char" || base === "character" || base === "varchar" || base === "text" || base === "citext" || base === "name" || base === "xml" || base === "json" || base === "jsonb" || base === "tsvector" || normalized.startsWith("character varying"));
+  }
+  return false;
 }
 
 function declaredDataTypeLength(dataType: string): number | undefined {

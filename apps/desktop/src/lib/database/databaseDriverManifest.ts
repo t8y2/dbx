@@ -3,6 +3,7 @@ import driverManifest from "../../../../../crates/dbx-core/assets/database-drive
 
 export type DatabaseSupportLevel = "connect" | "browse" | "understand" | "operate";
 export type DatabaseRuntimeMode = "native" | "file" | "agent" | "external";
+export type ConnectionFormKind = "standard" | "jdbc" | "mq" | "mqtt" | "nacos";
 
 export const DATABASE_PRODUCT_CAPABILITY_KEYS = [
   "queryExecution",
@@ -26,9 +27,46 @@ export const DATABASE_PRODUCT_CAPABILITY_KEYS = [
 export type DatabaseProductCapability = (typeof DATABASE_PRODUCT_CAPABILITY_KEYS)[number];
 export type DatabaseProductCapabilities = Record<DatabaseProductCapability, boolean>;
 
-interface DatabaseDriverManifestEntry {
+export const DATABASE_BEHAVIOR_TRAIT_KEYS = ["schemaAware", "databaseSchemaQualified", "singleDatabase", "clearableQuerySchema", "fetchFirst", "treeSchema", "databaseObjectTree", "pgVacuum", "pgLikeStructure", "diagramSql"] as const;
+
+export type DatabaseBehaviorTrait = (typeof DATABASE_BEHAVIOR_TRAIT_KEYS)[number];
+export type DatabaseBehaviorTraits = Partial<Record<DatabaseBehaviorTrait, boolean>>;
+
+export interface DatabaseDriverProfile {
+  profile: string;
+  agentKey: string;
+  packageKey?: string;
+  label: string;
+  storeVisible: boolean;
+  storeOrder?: number;
+}
+
+export interface ManagedDatabaseDriver {
+  key: string;
+  label: string;
+  storeVisible: boolean;
+  storeOrder?: number;
+}
+
+export interface DatabaseDriverManifestEntry {
   dbType: DatabaseType;
+  label: string;
+  dialect?: string;
   runtimeMode: DatabaseRuntimeMode;
+  mcpMode: "direct" | "bridge" | "unsupported";
+  agentKey?: string;
+  driverStoreVisible?: boolean;
+  driverStoreOrder?: number;
+  driverProfiles?: DatabaseDriverProfile[];
+  managedDrivers?: ManagedDatabaseDriver[];
+  singleConnectionPool: boolean;
+  metadataConnectionScoped: boolean;
+  skipTcpProbe: boolean;
+  defaultPort?: number;
+  localFile?: boolean;
+  specializedSurface?: boolean;
+  formKind?: ConnectionFormKind;
+  traits?: DatabaseBehaviorTraits;
   supportLevel: DatabaseSupportLevel;
   capabilities: Partial<DatabaseProductCapabilities>;
 }
@@ -72,6 +110,30 @@ const DATABASE_DRIVER_BY_TYPE = new Map<DatabaseType, DatabaseDriverManifestEntr
 
 export function databaseSupportLevel(dbType?: DatabaseType): DatabaseSupportLevel | undefined {
   return dbType ? DATABASE_DRIVER_BY_TYPE.get(dbType)?.supportLevel : undefined;
+}
+
+export function databaseManifestEntry(dbType?: DatabaseType): DatabaseDriverManifestEntry | undefined {
+  return dbType ? DATABASE_DRIVER_BY_TYPE.get(dbType) : undefined;
+}
+
+export function databaseDefaultPort(dbType?: DatabaseType): number | undefined {
+  return databaseManifestEntry(dbType)?.defaultPort;
+}
+
+export function databaseConnectionFormKind(dbType?: DatabaseType): ConnectionFormKind {
+  return databaseManifestEntry(dbType)?.formKind ?? "standard";
+}
+
+export function isKnownDatabaseType(value: string): value is DatabaseType {
+  return DATABASE_DRIVER_BY_TYPE.has(value as DatabaseType);
+}
+
+export function isLocalFileDatabaseType(dbType?: DatabaseType): boolean {
+  return databaseManifestEntry(dbType)?.localFile === true;
+}
+
+export function databaseTypesWithTrait(trait: DatabaseBehaviorTrait): Set<DatabaseType> {
+  return new Set(DATABASE_DRIVER_ENTRIES.filter((entry) => entry.traits?.[trait] === true).map((entry) => entry.dbType));
 }
 
 export function databaseRuntimeMode(dbType?: DatabaseType): DatabaseRuntimeMode | undefined {

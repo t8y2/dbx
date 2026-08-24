@@ -128,7 +128,7 @@ function createQuickEntryEditor(options: {
     database: computed(() => undefined),
     tableMeta: computed(() => ({
       tableName: "people",
-      columns: [column("id", true), column("name")],
+      columns: [{ ...column("id", true), data_type: "INTEGER" }, column("name")],
       primaryKeys: ["id"],
     })),
     onExecuteSql: computed(() => undefined),
@@ -1056,10 +1056,13 @@ test("addRows records the display placement alongside the pending rows", () => {
   const firstId = editor.addRows(2, { anchorId: 0, position: "below" });
   assert.equal(firstId, -1);
   assert.equal(editor.newRowMeta.value.length, 2);
-  assert.deepEqual(editor.newRowMeta.value.map((meta) => meta.placement), [
-    { anchorId: 0, position: "below" },
-    { anchorId: 0, position: "below" },
-  ]);
+  assert.deepEqual(
+    editor.newRowMeta.value.map((meta) => meta.placement),
+    [
+      { anchorId: 0, position: "below" },
+      { anchorId: 0, position: "below" },
+    ],
+  );
   // Stable tokens are unique and monotonic.
   assert.equal(editor.newRowMeta.value[0].token, 1);
   assert.equal(editor.newRowMeta.value[1].token, 2);
@@ -1071,7 +1074,10 @@ test("addRows with a null placement appends at the end", () => {
 
   const editor = createPeopleGridEditor();
   editor.addRows(2, null);
-  assert.deepEqual(editor.newRowMeta.value.map((meta) => meta.placement), [null, null]);
+  assert.deepEqual(
+    editor.newRowMeta.value.map((meta) => meta.placement),
+    [null, null],
+  );
 });
 
 test("addRows can anchor to another pending row by its token", () => {
@@ -1096,10 +1102,13 @@ test("undo and redo restore the placement metadata", () => {
   assert.equal(editor.newRowMeta.value.length, 0);
   editor.redoPendingChange();
   assert.equal(editor.newRows.value.length, 2);
-  assert.deepEqual(editor.newRowMeta.value.map((meta) => meta.placement), [
-    { anchorId: 0, position: "above" },
-    { anchorId: 0, position: "above" },
-  ]);
+  assert.deepEqual(
+    editor.newRowMeta.value.map((meta) => meta.placement),
+    [
+      { anchorId: 0, position: "above" },
+      { anchorId: 0, position: "above" },
+    ],
+  );
 });
 
 test("deleting a pending row keeps the placement metadata aligned", () => {
@@ -1119,16 +1128,25 @@ test("restoring a cached snapshot resumes token allocation past restored tokens"
   const firstEditor = createQuickEntryEditor({ quickEntryEnabled: true, cacheKey: "token-restore" });
 
   firstEditor.addRows(2);
-  assert.deepEqual(firstEditor.newRowMeta.value.map((m) => m.token), [1, 2]);
+  assert.deepEqual(
+    firstEditor.newRowMeta.value.map((m) => m.token),
+    [1, 2],
+  );
   firstEditor.savePendingSnapshot(false, false);
 
   const restoredEditor = createQuickEntryEditor({ quickEntryEnabled: true, cacheKey: "token-restore" });
-  assert.deepEqual(restoredEditor.newRowMeta.value.map((m) => m.token), [1, 2]);
+  assert.deepEqual(
+    restoredEditor.newRowMeta.value.map((m) => m.token),
+    [1, 2],
+  );
 
   restoredEditor.addRows(1);
   // The fresh instance restarts the allocator at 1; it must resume past the
   // restored tokens so a new row never shares a token with a restored row.
-  assert.deepEqual(restoredEditor.newRowMeta.value.map((m) => m.token), [1, 2, 3]);
+  assert.deepEqual(
+    restoredEditor.newRowMeta.value.map((m) => m.token),
+    [1, 2, 3],
+  );
 });
 
 test("batch row delete records a single undo snapshot", () => {
@@ -2100,7 +2118,7 @@ test("quick entry draft row pasted values become a new row and save once", async
   await Promise.resolve();
 
   assert.equal(saveCalls, 1);
-  assert.deepEqual(savedNewRows, [[["2", "Grace"]]]);
+  assert.deepEqual(savedNewRows, [[[2, "Grace"]]]);
   assert.deepEqual(editor.newRows.value, []);
   assert.deepEqual(editor.quickEntryDraftRow.value, [null, null]);
   assert.equal(editor.saveError.value, "");

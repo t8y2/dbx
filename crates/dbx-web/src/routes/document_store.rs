@@ -191,6 +191,64 @@ pub struct MeilisearchSettingsUpdateRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MeilisearchConnectionRequest {
+    pub connection_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchKeyListRequest {
+    pub connection_id: String,
+    pub offset: Option<u64>,
+    pub limit: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchKeyRequest {
+    pub connection_id: String,
+    pub uid: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchKeyCreateRequest {
+    pub connection_id: String,
+    pub input: dbx_core::db::meilisearch_driver::MeilisearchKeyCreateInput,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchKeyUpdateRequest {
+    pub connection_id: String,
+    pub uid: String,
+    pub input: dbx_core::db::meilisearch_driver::MeilisearchKeyUpdateInput,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchTaskListRequest {
+    pub connection_id: String,
+    pub input: dbx_core::db::meilisearch_driver::MeilisearchTaskListInput,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchTaskRequest {
+    pub connection_id: String,
+    pub uid: u64,
+    pub expected_index_uid: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchTaskMutationRequest {
+    pub connection_id: String,
+    pub selector: dbx_core::db::meilisearch_driver::MeilisearchTaskSelector,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GridFsBucketRequest {
     pub connection_id: String,
     pub database: String,
@@ -530,6 +588,128 @@ pub async fn meilisearch_delete_all_documents(
         .await
         .map_err(AppError::from)?;
     Ok(Json(()))
+}
+
+pub async fn meilisearch_get_system_overview(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MeilisearchConnectionRequest>,
+) -> Result<Json<dbx_core::db::meilisearch_driver::MeilisearchSystemOverview>, AppError> {
+    let result = dbx_core::document_ops::meilisearch_get_system_overview_core(&state.app, &req.connection_id)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn meilisearch_list_keys(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MeilisearchKeyListRequest>,
+) -> Result<Json<dbx_core::db::meilisearch_driver::MeilisearchKeyPage>, AppError> {
+    let result = dbx_core::document_ops::meilisearch_list_keys_core(
+        &state.app,
+        &req.connection_id,
+        req.offset.unwrap_or(0),
+        req.limit.unwrap_or(20),
+    )
+    .await
+    .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn meilisearch_get_key(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MeilisearchKeyRequest>,
+) -> Result<Json<dbx_core::db::meilisearch_driver::MeilisearchKeyListItem>, AppError> {
+    let result = dbx_core::document_ops::meilisearch_get_key_core(&state.app, &req.connection_id, &req.uid)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn meilisearch_create_key(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MeilisearchKeyCreateRequest>,
+) -> Result<Json<dbx_core::db::meilisearch_driver::MeilisearchCreatedKey>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "Create API key").await?;
+    let result = dbx_core::document_ops::meilisearch_create_key_core(&state.app, &req.connection_id, &req.input)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn meilisearch_update_key(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MeilisearchKeyUpdateRequest>,
+) -> Result<Json<dbx_core::db::meilisearch_driver::MeilisearchKeyListItem>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "Update API key").await?;
+    let result =
+        dbx_core::document_ops::meilisearch_update_key_core(&state.app, &req.connection_id, &req.uid, &req.input)
+            .await
+            .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn meilisearch_delete_key(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MeilisearchKeyRequest>,
+) -> Result<Json<()>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "Delete API key").await?;
+    dbx_core::document_ops::meilisearch_delete_key_core(&state.app, &req.connection_id, &req.uid)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn meilisearch_get_tasks(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MeilisearchTaskListRequest>,
+) -> Result<Json<dbx_core::db::meilisearch_driver::MeilisearchTaskPage>, AppError> {
+    let result = dbx_core::document_ops::meilisearch_get_tasks_core(
+        &state.app,
+        &req.connection_id,
+        &req.input.selector,
+        req.input.from,
+        req.input.limit.unwrap_or(20),
+    )
+    .await
+    .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn meilisearch_get_task(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MeilisearchTaskRequest>,
+) -> Result<Json<dbx_core::db::meilisearch_driver::MeilisearchTask>, AppError> {
+    let result = dbx_core::document_ops::meilisearch_get_task_core(
+        &state.app,
+        &req.connection_id,
+        req.uid,
+        req.expected_index_uid.as_deref(),
+    )
+    .await
+    .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn meilisearch_cancel_tasks(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MeilisearchTaskMutationRequest>,
+) -> Result<Json<dbx_core::db::meilisearch_driver::MeilisearchEnqueuedTaskSummary>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "Cancel tasks").await?;
+    let result = dbx_core::document_ops::meilisearch_cancel_tasks_core(&state.app, &req.connection_id, &req.selector)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn meilisearch_delete_tasks(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MeilisearchTaskMutationRequest>,
+) -> Result<Json<dbx_core::db::meilisearch_driver::MeilisearchEnqueuedTaskSummary>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "Delete tasks").await?;
+    let result = dbx_core::document_ops::meilisearch_delete_tasks_core(&state.app, &req.connection_id, &req.selector)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(result))
 }
 
 pub async fn list_gridfs_files(

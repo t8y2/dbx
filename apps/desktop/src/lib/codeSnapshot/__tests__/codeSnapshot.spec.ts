@@ -1,15 +1,20 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CODE_SNAPSHOT_CSS, renderCodeSnapshotHtml, savePngDataUrlToFile, snapshotElementToPng } from "@/lib/codeSnapshot/codeSnapshot";
 
-const { toPng, isTauriRuntime, save, writeFile } = vi.hoisted(() => ({
-  toPng: vi.fn(),
-  isTauriRuntime: vi.fn(),
-  save: vi.fn(),
-  writeFile: vi.fn(),
-}));
+const { createCodeHighlighter, highlightCode, toPng, isTauriRuntime, save, writeFile } = vi.hoisted(() => {
+  const highlightCode = vi.fn((content: string, _lang: string) => `<span class="line">${content}</span>`);
+  return {
+    createCodeHighlighter: vi.fn(async () => highlightCode),
+    highlightCode,
+    toPng: vi.fn(),
+    isTauriRuntime: vi.fn(),
+    save: vi.fn(),
+    writeFile: vi.fn(),
+  };
+});
 
 vi.mock("@/lib/ai/aiCodeHighlighter", () => ({
-  createAiShikiCodeHighlighter: vi.fn().mockResolvedValue((content: string, _lang: string) => `<span class="line">${content}</span>`),
+  createAiShikiBlockCodeHighlighter: createCodeHighlighter,
 }));
 
 vi.mock("dom-to-image-more", () => ({
@@ -23,7 +28,45 @@ vi.mock("@/lib/backend/tauriRuntime", () => ({
 vi.mock("@tauri-apps/plugin-dialog", () => ({ save }));
 vi.mock("@tauri-apps/plugin-fs", () => ({ writeFile }));
 
+beforeEach(() => {
+  createCodeHighlighter.mockResolvedValue(highlightCode);
+  highlightCode.mockClear();
+  highlightCode.mockImplementation((content: string) => `<span class="line">${content}</span>`);
+});
+
 describe("renderCodeSnapshotHtml", () => {
+  it("falls back to safe text when the code highlighter cannot initialize", async () => {
+    createCodeHighlighter.mockRejectedValueOnce(new SyntaxError("Invalid regular expression: invalid group specifier name"));
+
+    const html = await renderCodeSnapshotHtml({ code: "SELECT <初始化失败>", lang: "sql" }, { appearance: "light" });
+
+    expect(html).toContain('<code><span class="line">SELECT &lt;初始化失败&gt;</span></code>');
+  });
+
+  it("falls back to safe line-preserving text when legacy WebKit cannot compile highlighting regexes", async () => {
+    highlightCode.mockImplementationOnce(() => {
+      throw new SyntaxError("Invalid regular expression: invalid group specifier name");
+    });
+
+    const html = await renderCodeSnapshotHtml({ code: `SELECT '<用户>&" 😀'\r\n-- 第二行\n`, lang: "sql" }, { appearance: "light" });
+
+    expect(html).toContain('<code><span class="line">SELECT &#39;&lt;用户&gt;&amp;&quot; 😀&#39;</span><span class="line">-- 第二行</span><span class="line"></span></code>');
+    expect(html).not.toContain("<用户>");
+    expect(html.match(/class="line"/g)).toHaveLength(3);
+  });
+
+  it("renders large fallback selections with one highlighter attempt", async () => {
+    const code = Array.from({ length: 5_000 }, (_, index) => `SELECT ${index}`).join("\n");
+    highlightCode.mockImplementationOnce(() => {
+      throw new SyntaxError("Invalid regular expression: invalid group specifier name");
+    });
+
+    const html = await renderCodeSnapshotHtml({ code, lang: "sql" }, { appearance: "dark" });
+
+    expect(highlightCode).toHaveBeenCalledOnce();
+    expect(html.match(/class="line"/g)).toHaveLength(5_000);
+  });
+
   it("renders a self-contained snapshot with embedded styles", async () => {
     const html = await renderCodeSnapshotHtml({ code: "SELECT 1", lang: "sql" }, { appearance: "dark" });
 

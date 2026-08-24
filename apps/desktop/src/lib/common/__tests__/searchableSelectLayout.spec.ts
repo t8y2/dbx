@@ -12,6 +12,12 @@ describe("SearchableSelect layout", () => {
     expect(labelBoundaries).toHaveLength(3);
   });
 
+  it("can preserve custom option whitespace for exact database identifiers", () => {
+    expect(searchableSelectSource).toContain("trimCustom?: boolean");
+    expect(searchableSelectSource).toContain("trimCustom: true");
+    expect(searchableSelectSource).toContain("props.trimCustom ? searchText.value.trim() : searchText.value");
+  });
+
   it("truncates long data transfer connection labels without shrinking their icons", () => {
     const truncatedConnectionLabels = dataTransferDialogSource.match(/<span class="min-w-0 flex-1 truncate">\{\{ label \}\}<\/span>/g) ?? [];
     const fixedConnectionIcons = dataTransferDialogSource.match(/class="h-3\.5 w-3\.5 shrink-0"/g) ?? [];

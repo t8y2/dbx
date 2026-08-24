@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { createApp, defineComponent, h, nextTick, type App } from "vue";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
 import type { ConnectionConfig } from "@/types/database";
 
@@ -34,6 +34,11 @@ vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast
 import { useDialogSources } from "@/composables/useDialogSources";
 
 const mountedApps: App[] = [];
+
+beforeEach(() => {
+  mocks.store.connections = [];
+  mocks.store.exportConnectionsToFile.mockReset().mockResolvedValue("saved");
+});
 
 afterEach(() => {
   for (const app of mountedApps.splice(0)) app.unmount();
@@ -83,5 +88,94 @@ describe("useDialogSources", () => {
     resolveApply({ count: 1 });
     await applyPromise;
     await nextTick();
+  });
+
+  it("requires confirmation before an unencrypted export and preserves the flow when cancelled", async () => {
+    mocks.store.connections = [conn("selected")];
+    const dialogs = await mountDialogs();
+
+    dialogs.onExportClick();
+    dialogs.onConfigConnectionSelectConfirm(["selected"]);
+    expect(dialogs.showConfigPassphraseDialog.value).toBe(true);
+
+    dialogs.onRequestUnencryptedExport();
+    expect(dialogs.showConfigPassphraseDialog.value).toBe(false);
+    expect(dialogs.showConfigUnencryptedExportConfirm.value).toBe(true);
+    expect(mocks.store.exportConnectionsToFile).not.toHaveBeenCalled();
+
+    dialogs.onConfigUnencryptedExportOpenChange(false);
+    expect(dialogs.showConfigUnencryptedExportConfirm.value).toBe(false);
+    expect(dialogs.showConfigPassphraseDialog.value).toBe(true);
+    expect(mocks.store.exportConnectionsToFile).not.toHaveBeenCalled();
+
+    dialogs.onRequestUnencryptedExport();
+    await dialogs.onConfigUnencryptedExportConfirm();
+    expect(mocks.store.exportConnectionsToFile).toHaveBeenCalledWith({ mode: "plaintext" }, ["selected"]);
+  });
+
+  it("keeps encrypted export state when the native save dialog is cancelled", async () => {
+    mocks.store.connections = [conn("selected")];
+    mocks.store.exportConnectionsToFile.mockResolvedValueOnce("cancelled").mockResolvedValueOnce("saved");
+    const dialogs = await mountDialogs();
+
+    dialogs.onExportClick();
+    dialogs.onConfigConnectionSelectConfirm(["selected"]);
+    await dialogs.onExportConfirm("passphrase");
+
+    expect(dialogs.showConfigPassphraseDialog.value).toBe(true);
+    expect(mocks.toast).not.toHaveBeenCalled();
+
+    await dialogs.onExportConfirm("passphrase");
+    expect(mocks.store.exportConnectionsToFile.mock.calls).toEqual([
+      [{ mode: "encrypted", passphrase: "passphrase" }, ["selected"]],
+      [{ mode: "encrypted", passphrase: "passphrase" }, ["selected"]],
+    ]);
+    expect(dialogs.showConfigPassphraseDialog.value).toBe(false);
+    expect(mocks.toast).toHaveBeenCalledOnce();
+  });
+
+  it("keeps plaintext export state when the native save dialog is cancelled", async () => {
+    mocks.store.connections = [conn("selected")];
+    mocks.store.exportConnectionsToFile.mockResolvedValueOnce("cancelled").mockResolvedValueOnce("saved");
+    const dialogs = await mountDialogs();
+
+    dialogs.onExportClick();
+    dialogs.onConfigConnectionSelectConfirm(["selected"]);
+    dialogs.onRequestUnencryptedExport();
+    await dialogs.onConfigUnencryptedExportConfirm();
+
+    expect(dialogs.showConfigUnencryptedExportConfirm.value).toBe(true);
+    expect(mocks.toast).not.toHaveBeenCalled();
+
+    await dialogs.onConfigUnencryptedExportConfirm();
+    expect(mocks.store.exportConnectionsToFile.mock.calls).toEqual([
+      [{ mode: "plaintext" }, ["selected"]],
+      [{ mode: "plaintext" }, ["selected"]],
+    ]);
+    expect(dialogs.showConfigUnencryptedExportConfirm.value).toBe(false);
+    expect(mocks.toast).toHaveBeenCalledOnce();
+  });
+
+  it("prevents duplicate unencrypted exports while the file is being written", async () => {
+    let resolveExport!: () => void;
+    const exportPromise = new Promise<void>((resolve) => {
+      resolveExport = resolve;
+    });
+    mocks.store.connections = [conn("selected")];
+    mocks.store.exportConnectionsToFile.mockReturnValue(exportPromise);
+    const dialogs = await mountDialogs();
+
+    dialogs.onExportClick();
+    dialogs.onConfigConnectionSelectConfirm(["selected"]);
+    dialogs.onRequestUnencryptedExport();
+    const first = dialogs.onConfigUnencryptedExportConfirm();
+    const second = dialogs.onConfigUnencryptedExportConfirm();
+
+    expect(dialogs.configExportBusy.value).toBe(true);
+    expect(mocks.store.exportConnectionsToFile).toHaveBeenCalledTimes(1);
+    resolveExport();
+    await first;
+    await second;
+    expect(dialogs.configExportBusy.value).toBe(false);
   });
 });

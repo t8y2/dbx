@@ -10,6 +10,9 @@ import {
   formatRedisStringValue,
   getRedisMemberSelectionKey,
   highlightRedisJsonDetail,
+  isJsonDerivedView,
+  jsonToXmlText,
+  jsonToYamlText,
   parseRedisJsonDetail,
   preferredRedisValueFormat,
   redisClipboardSafeText,
@@ -110,13 +113,14 @@ test("string/blob formats stay text-oriented and binary-first where needed", () 
   assert.equal(binaryDetail.binaryText, "10101100111011010000000000000101");
 });
 
-test("detects Java-serialized payloads as a dedicated view", () => {
+test("detects Java-serialized payloads as a codec, not a view tab", () => {
   const javaSerializedString = formatRedisMemberDetail({
     raw_base64: "rO0ABXQACHNvbWV0ZXh0",
     encoding: "binary" as const,
   });
-  assert.deepEqual(javaSerializedString.availableFormats, ["javaserialize", "binary", "hex", "base64"]);
-  assert.equal(javaSerializedString.defaultFormat, "javaserialize");
+  assert.deepEqual(javaSerializedString.availableFormats, ["hex", "binary", "base64"]);
+  assert.equal(javaSerializedString.defaultFormat, "hex");
+  assert.equal(javaSerializedString.defaultCodec, "none");
   assert.equal(javaSerializedString.javaSerialized?.formattedText, '"sometext"');
 
   const javaSerializedMap = formatRedisMemberDetail({
@@ -132,10 +136,7 @@ test("detects Java-serialized payloads as a dedicated view", () => {
 
   const plainText = formatRedisMemberDetail(blobFromText("Ada"));
   assert.equal(canRenderRedisValueFormat(plainText, "json"), false);
-  assert.equal(canRenderRedisValueFormat(plainText, "javaserialize"), false);
   assert.equal(canRenderRedisValueFormat(plainText, "utf8"), true);
-
-  assert.equal(canRenderRedisValueFormat(javaSerializedMap, "javaserialize"), true);
 });
 
 test("normalizes self-referential Java maps without recursing forever", () => {
@@ -163,7 +164,7 @@ test("only payload views opt into JSON text formatting", () => {
 
   const payloadDetail = formatRedisMemberDetail(blobFromText('{"name":"Ada"}'), { allowJsonText: true });
   assert.equal(payloadDetail.rawLabel, "ASCII");
-  assert.deepEqual(payloadDetail.availableFormats, ["utf8", "ascii", "binary", "json", "hex", "base64"]);
+  assert.deepEqual(payloadDetail.availableFormats, ["utf8", "ascii", "binary", "json", "unicodejson", "yaml", "xml", "hex", "base64"]);
   assert.equal(payloadDetail.defaultFormat, "utf8");
   assert.equal(payloadDetail.json?.formattedText, '{\n  "name": "Ada"\n}');
 });
@@ -301,4 +302,19 @@ test("clamps Redis member detail sheet width to viewport and usable bounds", () 
   assert.equal(clampRedisMemberDetailSheetWidth(640, 1200), 640);
   assert.equal(clampRedisMemberDetailSheetWidth(1200, 1400), 900);
   assert.equal(clampRedisMemberDetailSheetWidth(900, 500), 468);
+});
+
+test("exposes JSON-derived unicode/yaml/xml views only for JSON values", () => {
+  const jsonDetail = formatRedisMemberDetail(blobFromText('{"id":1}'), { allowJsonText: true });
+  const plainDetail = formatRedisMemberDetail("plain");
+
+  assert.equal(isJsonDerivedView("yaml"), true);
+  assert.equal(isJsonDerivedView("utf8"), false);
+  assert.equal(canRenderRedisValueFormat(jsonDetail, "yaml"), true);
+  assert.equal(canRenderRedisValueFormat(plainDetail, "yaml"), false);
+});
+
+test("renders JSON values as YAML and XML text", () => {
+  assert.equal(jsonToYamlText({ id: 1, tags: ["a", "b"] }), "id: 1\ntags:\n  - a\n  - b\n");
+  assert.equal(jsonToXmlText({ id: 1 }), '<?xml version="1.0" encoding="UTF-8"?>\n<root>\n  <id>1</id>\n</root>');
 });

@@ -105,6 +105,15 @@ function handleUpdateSelectedTables(value: string[]) {
   if (restrictTables.value) emit("update:selectedTables", [...value]);
 }
 
+function clearUnavailableTableSelection() {
+  sourceTableList.value = [];
+  targetTableList.value = [];
+  if (props.selectedTables === undefined && !restrictTables.value && localSelectedTables.value.length === 0) return;
+  restrictTables.value = false;
+  localSelectedTables.value = [];
+  emit("update:selectedTables", undefined);
+}
+
 function getTableIdentity(side: SchemaDiffTableSide): SchemaDiffTableIdentity {
   return side === "source" ? { connectionId: props.sourceConnectionId, database: props.sourceDatabase, schema: props.sourceSchema } : { connectionId: props.targetConnectionId, database: props.targetDatabase, schema: props.targetSchema };
 }
@@ -277,13 +286,17 @@ watch(
     selectedTables: props.selectedTables,
   }),
   (current, previous) => {
+    if (!isTableIdentityReady("source")) {
+      clearUnavailableTableSelection();
+      return;
+    }
+    if (!previous) return;
     if (current.source.every((value, index) => value === previous.source[index])) return;
     if (current.selectedTables !== previous.selectedTables) return;
     if (current.selectedTables === undefined && !restrictTables.value) return;
-    restrictTables.value = false;
-    localSelectedTables.value = [];
-    emit("update:selectedTables", undefined);
+    clearUnavailableTableSelection();
   },
+  { immediate: true },
 );
 
 watch(
@@ -435,20 +448,6 @@ async function fetchDbVersion(connectionId: string, database: string, schema: st
           />
         </div>
 
-        <!-- Source Table Selection -->
-        <div class="mt-3 space-y-1.5">
-          <div class="flex items-center justify-between gap-2">
-            <Label class="text-xs font-medium">{{ t("diff.tableSelection") }}</Label>
-            <Button v-if="restrictTables || canConfigureTableSelection" variant="ghost" size="sm" class="h-6 px-2 text-xs" @click="handleToggleRestrict(!restrictTables)">
-              {{ restrictTables ? t("diff.compareAllTables") : t("diff.chooseTables") }}
-            </Button>
-          </div>
-          <div v-if="!restrictTables" class="text-[11px] text-muted-foreground">
-            {{ t("diff.tableSelectionUnrestricted") }}
-          </div>
-          <TableMultiSelect v-if="restrictTables" :key="`${sourceConnectionId}.${sourceDatabase}.${sourceSchema}`" :model-value="localSelectedTables" @update:model-value="handleUpdateSelectedTables" :tables="sourceTableList" :title="t('diff.sourceTables')" :empty-text="t('dataCompare.noTables')" />
-        </div>
-
         <!-- Source Info -->
         <div v-if="getConnectionInfo(sourceConnectionId)" class="mt-4 p-3 rounded-lg bg-muted/30 border space-y-1.5">
           <div class="text-xs font-medium text-blue-500">{{ t("diff.info") }}</div>
@@ -534,17 +533,6 @@ async function fetchDbVersion(connectionId: string, database: string, schema: st
           />
         </div>
 
-        <!-- Target Same-Name Match -->
-        <div v-if="restrictTables && localSelectedTables.length" class="mt-3 space-y-1.5 rounded-lg border p-3 text-xs">
-          <div class="font-medium">{{ t("diff.autoMatchHint") }}</div>
-          <div class="text-muted-foreground">
-            {{ t("diff.matchedTables", { matched: matchResult.matched.length, total: localSelectedTables.length }) }}
-          </div>
-          <div v-if="missingTargetTables.length" class="text-destructive">
-            {{ t("diff.missingTargetTables", { tables: missingTargetTables.join(", ") }) }}
-          </div>
-        </div>
-
         <!-- Target Info -->
         <div v-if="getConnectionInfo(targetConnectionId)" class="mt-4 p-3 rounded-lg bg-muted/30 border space-y-1.5">
           <div class="text-xs font-medium text-green-500">{{ t("diff.info") }}</div>
@@ -560,6 +548,41 @@ async function fetchDbVersion(connectionId: string, database: string, schema: st
             <span class="text-muted-foreground">{{ t("diff.serverVersion") }}</span>
             <span>{{ targetDbVersion || "--" }}</span>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Comparison Scope -->
+    <div class="space-y-3 rounded-lg border bg-muted/20 p-3">
+      <div class="space-y-1.5">
+        <div class="flex items-center justify-between gap-2">
+          <Label class="text-xs font-medium">{{ t("diff.tableSelection") }}</Label>
+          <Button v-if="restrictTables || canConfigureTableSelection" variant="ghost" size="sm" class="h-6 px-2 text-xs" @click="handleToggleRestrict(!restrictTables)">
+            {{ restrictTables ? t("diff.compareAllTables") : t("diff.chooseTables") }}
+          </Button>
+        </div>
+        <div v-if="!restrictTables" class="text-[11px] text-muted-foreground">
+          {{ t("diff.tableSelectionUnrestricted") }}
+        </div>
+        <TableMultiSelect
+          v-if="restrictTables && canConfigureTableSelection"
+          :key="`${sourceConnectionId}.${sourceDatabase}.${sourceSchema}`"
+          :model-value="localSelectedTables"
+          @update:model-value="handleUpdateSelectedTables"
+          :tables="sourceTableList"
+          :title="t('diff.sourceTables')"
+          :empty-text="t('dataCompare.noTables')"
+        />
+      </div>
+
+      <!-- Target Same-Name Match -->
+      <div v-if="restrictTables && localSelectedTables.length && canConfigureTableSelection && isTableIdentityReady('target')" class="space-y-1.5 rounded-lg border p-3 text-xs">
+        <div class="font-medium">{{ t("diff.autoMatchHint") }}</div>
+        <div class="text-muted-foreground">
+          {{ t("diff.matchedTables", { matched: matchResult.matched.length, total: localSelectedTables.length }) }}
+        </div>
+        <div v-if="missingTargetTables.length" class="text-destructive">
+          {{ t("diff.missingTargetTables", { tables: missingTargetTables.join(", ") }) }}
         </div>
       </div>
     </div>

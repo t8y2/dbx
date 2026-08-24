@@ -1,10 +1,12 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::State;
 use axum::http::{header, HeaderMap, HeaderValue};
 use axum::response::Response;
 use axum::Json;
 use serde::Deserialize;
+use tokio::sync::oneshot;
 
 use crate::error::AppError;
 use crate::state::WebState;
@@ -41,6 +43,8 @@ pub struct ExecuteQueryRequest {
 pub struct CancelRequest {
     pub execution_id: String,
 }
+
+const CONDITIONAL_UPDATE_CANCEL_WAIT: Duration = Duration::from_secs(10);
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -122,6 +126,8 @@ pub struct BuildDroppedFilePreviewSqlRequest {
 #[serde(rename_all = "camelCase")]
 pub struct BuildTableSelectSqlRequest {
     pub options: dbx_core::sql_dialect::TableDataSelectSqlOptions,
+    #[serde(default)]
+    pub include_database_name: bool,
 }
 
 #[derive(Deserialize)]
@@ -140,6 +146,22 @@ pub struct BuildSearchResultWhereRequest {
 #[serde(rename_all = "camelCase")]
 pub struct BuildRenameObjectSqlRequest {
     pub options: dbx_core::db_admin_sql::RenameObjectSqlOptions,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildRenameDatabaseSqlRequest {
+    pub database_type: Option<dbx_core::models::connection::DatabaseType>,
+    pub old_name: String,
+    pub new_name: String,
+    pub terminate_connections: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildRenameDatabasePreflightSqlRequest {
+    pub database_type: Option<dbx_core::models::connection::DatabaseType>,
+    pub database_name: String,
 }
 
 #[derive(Deserialize)]
@@ -247,6 +269,12 @@ pub struct BuildTableStructureSqlRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct BuildTableOwnerChangeSqlRequest {
+    pub options: dbx_core::table_structure_sql::TableOwnerChangeSqlOptions,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PreviewSqliteTableStructureChangeRequest {
     pub connection_id: String,
     pub database: String,
@@ -326,6 +354,12 @@ pub struct BuildDataGridCountSqlRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct BuildDataGridConditionalUpdateSqlRequest {
+    pub options: dbx_core::data_grid_sql::DataGridConditionalUpdateSqlOptions,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BuildHiveTablePropertiesSqlRequest {
     pub options: dbx_core::data_grid_sql::HiveTablePropertiesSqlOptions,
 }
@@ -356,7 +390,9 @@ pub async fn execute_query(
     let allow_database_switch = req.client_session_id.as_deref().is_some_and(|id| !id.trim().is_empty());
     super::mcp_policy::ensure_sql(&state, &headers, &req.connection_id, &req.database, &req.sql, allow_database_switch)
         .await?;
-    let execution_id = req.execution_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let requested_execution_id = req.execution_id.filter(|id| !id.trim().is_empty());
+    let keep_timeout_reachable = requested_execution_id.is_some();
+    let execution_id = requested_execution_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     let registered = state.app.running_queries.register_task(
         execution_id.clone(),
@@ -391,11 +427,89 @@ pub async fn execute_query(
             ..Default::default()
         },
     )
-    .await
-    .map_err(|error| AppError::from(error.into_backend_error()))?;
+    .await;
 
-    drop(registered);
+    registered.finish_with_late_cancel(&result, keep_timeout_reachable);
+
+    let result = result.map_err(|error| AppError::from(error.into_backend_error()))?;
     Ok(Json(result))
+}
+
+pub async fn execute_conditional_update(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Json(req): Json<ExecuteQueryRequest>,
+) -> Result<Json<dbx_core::db::QueryResult>, AppError> {
+    let allow_database_switch = req.client_session_id.as_deref().is_some_and(|id| !id.trim().is_empty());
+    super::mcp_policy::ensure_sql(&state, &headers, &req.connection_id, &req.database, &req.sql, allow_database_switch)
+        .await?;
+
+    let execution_id = req.execution_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let registered = state.app.running_queries.register_task_for_terminal_confirmation(
+        execution_id.clone(),
+        RunningTaskMetadata::query(req.connection_id.clone(), req.database.clone(), req.client_session_id.clone()),
+    );
+    let cancel_token = registered.token();
+    let response_timeout = dbx_core::query::query_timeout_duration(req.timeout_secs);
+    let app = state.app.clone();
+    let (result_tx, result_rx) = oneshot::channel();
+
+    tokio::spawn(async move {
+        let result = dbx_core::query::execute_sql_statement_with_options_typed(
+            &app,
+            &req.connection_id,
+            &req.database,
+            &req.sql,
+            req.schema.as_deref(),
+            Some(cancel_token),
+            dbx_core::query::QueryExecutionOptions {
+                max_rows: req.max_rows,
+                fetch_size: req.fetch_size,
+                page_size: req.page_size,
+                row_offset: req.row_offset,
+                max_result_bytes: req.max_result_bytes,
+                result_key_columns: req.result_key_columns,
+                table_data_preview: req.table_data_preview,
+                catalog: req.catalog,
+                result_session_id: req.result_session_id,
+                client_session_id: req.client_session_id,
+                // The outer response timeout reports uncertainty to the client
+                // without dropping this task. The task remains reachable for a
+                // later cancel and only releases its registration on terminal
+                // completion.
+                timeout_secs: Some(0),
+                await_cancel_completion: true,
+                execution_id: Some(execution_id),
+                use_transaction: req.use_transaction,
+                execution_mode: req.execution_mode.unwrap_or_default(),
+                ..Default::default()
+            },
+        )
+        .await;
+        let _ = result_tx.send(result);
+        drop(registered);
+    });
+
+    let result = match response_timeout {
+        Some(timeout) => match tokio::time::timeout(timeout, result_rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => return Err(AppError::internal("Conditional update execution task stopped unexpectedly")),
+            Err(_) => {
+                return Err(AppError::from(
+                    dbx_core::query::QueryExecutionError::Timeout(format!(
+                        "Query timed out after {} seconds",
+                        timeout.as_secs().max(1)
+                    ))
+                    .into_backend_error(),
+                ));
+            }
+        },
+        None => match result_rx.await {
+            Ok(result) => result,
+            Err(_) => return Err(AppError::internal("Conditional update execution task stopped unexpectedly")),
+        },
+    };
+    result.map(Json).map_err(|error| AppError::from(error.into_backend_error()))
 }
 
 pub async fn execute_multi(
@@ -406,7 +520,9 @@ pub async fn execute_multi(
     let allow_database_switch = req.client_session_id.as_deref().is_some_and(|id| !id.trim().is_empty());
     super::mcp_policy::ensure_sql(&state, &headers, &req.connection_id, &req.database, &req.sql, allow_database_switch)
         .await?;
-    let execution_id = req.execution_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let requested_execution_id = req.execution_id.filter(|id| !id.trim().is_empty());
+    let keep_timeout_reachable = requested_execution_id.is_some();
+    let execution_id = requested_execution_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     let registered = state.app.running_queries.register_task(
         execution_id.clone(),
@@ -436,17 +552,19 @@ pub async fn execute_multi(
             result_session_id: req.result_session_id,
             client_session_id: req.client_session_id,
             timeout_secs: req.timeout_secs,
+            await_cancel_completion: false,
             execution_id: Some(execution_id),
             use_transaction: req.use_transaction,
             continue_on_error: req.continue_on_error.unwrap_or(false),
             execution_mode: req.execution_mode.unwrap_or_default(),
         },
     )
-    .await
-    .map_err(|error| AppError::from(error.into_backend_error()))?;
+    .await;
     let core_ms = core_started_at.elapsed().as_millis();
 
-    drop(registered);
+    registered.finish_with_late_cancel(&result, keep_timeout_reachable);
+
+    let result = result.map_err(|error| AppError::from(error.into_backend_error()))?;
     execute_multi_response(result, core_ms)
 }
 
@@ -499,6 +617,13 @@ pub async fn cancel_query(
 ) -> Json<serde_json::Value> {
     let cancelled = state.app.running_queries.cancel(&req.execution_id);
     Json(serde_json::json!({ "cancelled": cancelled }))
+}
+
+pub async fn cancel_conditional_update(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<CancelRequest>,
+) -> Json<dbx_core::query_cancel::CancellationWaitResult> {
+    Json(state.app.running_queries.cancel_and_wait(&req.execution_id, CONDITIONAL_UPDATE_CANCEL_WAIT).await)
 }
 
 pub async fn close_query_session(
@@ -681,7 +806,7 @@ pub async fn build_dropped_file_preview_sql(
 }
 
 pub async fn build_table_select_sql(Json(req): Json<BuildTableSelectSqlRequest>) -> Json<String> {
-    Json(dbx_core::sql_dialect::build_table_data_select_sql(req.options))
+    Json(dbx_core::sql_dialect::build_table_data_select_sql_with_database(req.options, req.include_database_name))
 }
 
 pub async fn build_database_search_sql(
@@ -696,6 +821,27 @@ pub async fn build_search_result_where(Json(req): Json<BuildSearchResultWhereReq
 
 pub async fn build_rename_object_sql(Json(req): Json<BuildRenameObjectSqlRequest>) -> Result<Json<String>, AppError> {
     dbx_core::db_admin_sql::build_rename_object_sql(req.options).map(Json).map_err(AppError::from)
+}
+
+pub async fn build_rename_database_sql(
+    Json(req): Json<BuildRenameDatabaseSqlRequest>,
+) -> Result<Json<String>, AppError> {
+    dbx_core::db_admin_sql::build_rename_database_sql(
+        req.database_type,
+        &req.old_name,
+        &req.new_name,
+        req.terminate_connections,
+    )
+    .map(Json)
+    .map_err(AppError::from)
+}
+
+pub async fn build_rename_database_preflight_sql(
+    Json(req): Json<BuildRenameDatabasePreflightSqlRequest>,
+) -> Result<Json<String>, AppError> {
+    dbx_core::db_admin_sql::build_rename_database_preflight_sql(req.database_type, &req.database_name)
+        .map(Json)
+        .map_err(AppError::from)
 }
 
 pub async fn build_create_database_sql(
@@ -805,6 +951,12 @@ pub async fn build_table_structure_change_sql(
     Json(req): Json<BuildTableStructureSqlRequest>,
 ) -> Json<dbx_core::table_structure_sql::TableStructureSqlResult> {
     Json(dbx_core::table_structure_sql::build_table_structure_change_sql(req.options))
+}
+
+pub async fn build_table_owner_change_sql(
+    Json(req): Json<BuildTableOwnerChangeSqlRequest>,
+) -> Json<dbx_core::table_structure_sql::TableStructureSqlResult> {
+    Json(dbx_core::table_structure_sql::build_table_owner_change_sql(req.options))
 }
 
 pub async fn preview_sqlite_table_structure_change(
@@ -932,6 +1084,12 @@ pub async fn build_data_grid_column_distinct_values_sql(
 
 pub async fn build_data_grid_count_sql(Json(req): Json<BuildDataGridCountSqlRequest>) -> Json<String> {
     Json(dbx_core::data_grid_sql::build_data_grid_count_sql(req.options))
+}
+
+pub async fn build_data_grid_conditional_update_sql(
+    Json(req): Json<BuildDataGridConditionalUpdateSqlRequest>,
+) -> Json<Option<String>> {
+    Json(dbx_core::data_grid_sql::build_data_grid_conditional_update_sql(req.options))
 }
 
 pub async fn build_hive_table_properties_sql(Json(req): Json<BuildHiveTablePropertiesSqlRequest>) -> Json<String> {

@@ -50,6 +50,14 @@ test("Kingbase aliases retain historical and current company names", () => {
   assert.equal(kingbase.aliases.includes("中电科金仓"), false);
 });
 
+test("supplemental aliases merge into manifest entries without duplicating labels", () => {
+  const mqttEntries = databaseIssueDrivers.filter((driver) => driver.dbType === "mqtt");
+  assert.equal(mqttEntries.length, 1);
+  assert.equal(mqttEntries[0].aliases.includes("emqx"), true);
+  assert.equal(mqttEntries[0].aliases.includes("hivemq"), true);
+  assert.equal(mqttEntries[0].aliases.includes("mosquitto"), true);
+});
+
 test("labels native and compatibility database products with their families", () => {
   const cases = [
     ["Turso", ["db/turso"]],

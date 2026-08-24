@@ -42,6 +42,14 @@ test("serializes unsaved query tabs with editor context", () => {
   ]);
 });
 
+test("round-trips query transaction mode", () => {
+  const saved = serializeOpenTabs([queryTab({ autoCommit: false })]);
+  const restored = restoreOpenTabsState(JSON.stringify(saved), "tab-1");
+
+  assert.equal(saved[0]?.autoCommit, false);
+  assert.equal(restored.tabs[0]?.autoCommit, false);
+});
+
 test("serializes object source query tabs with save context", () => {
   const saved = serializeOpenTabs([
     queryTab({
@@ -171,6 +179,7 @@ test("serializes query result run metadata without row payloads", () => {
           sequence: 1,
           sql: "select 1",
           createdAt: 100,
+          pinned: true,
           result: {
             columns: ["id"],
             rows: [[1]],
@@ -192,6 +201,7 @@ test("serializes query result run metadata without row payloads", () => {
       sequence: 1,
       sql: "select 1",
       createdAt: 100,
+      pinned: true,
       activeResultIndex: undefined,
       resultCacheKey: "tab:tab-1:run:run-1",
       resultEvicted: true,
@@ -213,6 +223,7 @@ test("restores query result run metadata as disk-backed runtime state", () => {
           sequence: 1,
           sql: "select 1",
           createdAt: 100,
+          pinned: true,
           resultCacheKey: "tab:tab-1:run:run-1",
           resultEvicted: true,
         },
@@ -226,6 +237,7 @@ test("restores query result run metadata as disk-backed runtime state", () => {
   assert.equal(restored.tabs[0]?.resultRuns?.[0]?.id, "run-1");
   assert.equal(restored.tabs[0]?.resultRuns?.[0]?.resultCacheState, "disk");
   assert.equal(restored.tabs[0]?.resultRuns?.[0]?.result, undefined);
+  assert.equal(restored.tabs[0]?.resultRuns?.[0]?.pinned, true);
 });
 
 test("ignores legacy table data result cache handles on restore", () => {

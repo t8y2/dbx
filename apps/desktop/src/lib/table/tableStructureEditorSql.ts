@@ -97,6 +97,14 @@ export interface TableStructureChangeSql {
   warnings: string[];
 }
 
+export interface BuildTableOwnerChangeSqlOptions {
+  databaseType?: DatabaseType;
+  schema?: string;
+  tableName: string;
+  owner: string;
+  originalOwner: string;
+}
+
 export interface SqliteTableStructureChangePreview extends TableStructureChangeSql {
   schemaRevision: string;
 }

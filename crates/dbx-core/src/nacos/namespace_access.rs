@@ -2,6 +2,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use futures::{stream, StreamExt};
 use sha2::{Digest, Sha256};
 
 use crate::nacos::port::{NacosAdmin, NacosNamespaceAuthorizationSnapshot};
@@ -11,6 +12,10 @@ const AUTH_PAGE_SIZE: u32 = 500;
 const CACHE_TTL: Duration = Duration::from_secs(60);
 const CACHE_MAX_CONNECTIONS: usize = 64;
 const ADMIN_ROLE: &str = "ROLE_ADMIN";
+// Namespace probing is deliberately reserved for the explicit connection-form
+// action. Keep enough parallelism for useful feedback without overwhelming a
+// Nacos server that contains many namespaces.
+const DISCOVERY_CONCURRENCY: usize = 8;
 
 #[derive(Clone)]
 struct NamespaceAccessCacheEntry {
@@ -49,6 +54,100 @@ pub async fn list_readable_namespaces(
     Ok(load_readable_namespaces(connection_id, connection_fingerprint, admin).await?.namespaces)
 }
 
+/// Lists namespaces for the explicit connection-form access-scope selector.
+///
+/// Authorization metadata provides the fast path. Some ordinary Nacos
+/// accounts may enumerate namespaces but cannot read that metadata; for that
+/// case only, this user-initiated operation verifies both configuration and
+/// service access before offering a namespace. Sidebar loading never calls
+/// this function, so it cannot trigger an N-per-namespace scan.
+pub async fn list_displayable_namespaces(
+    connection_id: &str,
+    connection_fingerprint: String,
+    admin: Arc<dyn NacosAdmin>,
+) -> Result<Vec<NacosNamespaceInfo>, String> {
+    let namespaces = admin.list_namespaces().await?;
+    match resolve_readable_namespaces(connection_id, connection_fingerprint, admin.clone(), namespaces.clone()).await {
+        Ok(result) => Ok(result.namespaces),
+        Err(error) if is_managed_namespaces_required_error(&error) => {
+            probe_displayable_namespaces(namespaces, admin).await
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn probe_displayable_namespaces(
+    namespaces: Vec<NacosNamespaceInfo>,
+    admin: Arc<dyn NacosAdmin>,
+) -> Result<Vec<NacosNamespaceInfo>, String> {
+    let mut checked = stream::iter(namespaces.into_iter().enumerate().map(|(index, namespace)| {
+        let admin = admin.clone();
+        async move { probe_namespace_access(admin, namespace).await.map(|accessible| (index, accessible)) }
+    }))
+    .buffer_unordered(DISCOVERY_CONCURRENCY)
+    .collect::<Vec<_>>()
+    .await
+    .into_iter()
+    .collect::<Result<Vec<_>, _>>()?;
+
+    checked.sort_by_key(|(index, _)| *index);
+    Ok(checked.into_iter().filter_map(|(_, namespace)| namespace).collect())
+}
+
+async fn probe_namespace_access(
+    admin: Arc<dyn NacosAdmin>,
+    namespace: NacosNamespaceInfo,
+) -> Result<Option<NacosNamespaceInfo>, String> {
+    let namespace_id = namespace.namespace.clone();
+    match admin
+        .list_configs(NacosConfigQuery {
+            namespace: Some(namespace_id.clone()),
+            group: None,
+            group_contains: false,
+            data_id: None,
+            app_name: None,
+            search: None,
+            page_no: Some(1),
+            page_size: Some(1),
+        })
+        .await
+    {
+        Ok(_) => {}
+        Err(error) if is_access_denied_error(&error) => return Ok(None),
+        Err(error) => return Err(namespace_probe_error(&namespace_id, "configuration", &error)),
+    }
+
+    match admin
+        .list_services(NacosServiceQuery {
+            namespace: Some(namespace_id.clone()),
+            group_name: None,
+            service_name: None,
+            page_no: Some(1),
+            page_size: Some(1),
+        })
+        .await
+    {
+        Ok(_) => Ok(Some(namespace)),
+        Err(error) if is_access_denied_error(&error) => Ok(None),
+        Err(error) => Err(namespace_probe_error(&namespace_id, "service", &error)),
+    }
+}
+
+fn is_access_denied_error(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("403")
+        || error.contains("forbidden")
+        || error.contains("access denied")
+        || error.contains("authorization failed")
+        || error.contains("authfailed")
+}
+
+fn namespace_probe_error(namespace: &str, capability: &str, detail: &str) -> String {
+    format!(
+        "NACOS_ERROR[namespaceAccessDetectionFailed]: unable to verify {capability} access for namespace `{namespace}`: {detail}"
+    )
+}
+
 pub async fn sidebar_snapshot(
     connection_id: &str,
     connection_fingerprint: String,
@@ -75,9 +174,36 @@ pub async fn sidebar_snapshot(
     }
 }
 
+/// Applies a user-saved display scope without relying on Nacos role metadata.
+/// The scope only narrows the namespaces already returned by the server.
+pub async fn sidebar_snapshot_with_visible_scope(
+    connection_id: &str,
+    connection_fingerprint: String,
+    admin: Arc<dyn NacosAdmin>,
+    visible_scope: Option<&[String]>,
+) -> Result<NacosNamespaceSidebarSnapshot, String> {
+    let Some(visible_scope) = visible_scope else {
+        return sidebar_snapshot(connection_id, connection_fingerprint, admin).await;
+    };
+
+    let namespaces = admin.list_namespaces().await?;
+    let visible = visible_scope.iter().map(|namespace| namespace_identity(namespace)).collect();
+    Ok(NacosNamespaceSidebarSnapshot {
+        namespaces: filter_namespaces(namespaces, &visible),
+        // A saved display scope only limits the namespace tree. It must not
+        // suppress the independent probe that determines whether the account
+        // can open the user and role workspace.
+        access_control: admin.refresh_access_control_capabilities().await,
+    })
+}
+
 fn is_namespace_authorization_error(error: &str) -> bool {
     error.contains("NACOS_ERROR[managedNamespacesRequired]")
         || error.contains("NACOS_ERROR[namespaceAuthorizationUnavailable]")
+}
+
+fn is_managed_namespaces_required_error(error: &str) -> bool {
+    error.contains("NACOS_ERROR[managedNamespacesRequired]")
 }
 
 async fn load_readable_namespaces(
@@ -86,6 +212,15 @@ async fn load_readable_namespaces(
     admin: Arc<dyn NacosAdmin>,
 ) -> Result<ReadableNamespaces, String> {
     let namespaces = admin.list_namespaces().await?;
+    resolve_readable_namespaces(connection_id, connection_fingerprint, admin, namespaces).await
+}
+
+async fn resolve_readable_namespaces(
+    connection_id: &str,
+    connection_fingerprint: String,
+    admin: Arc<dyn NacosAdmin>,
+    namespaces: Vec<NacosNamespaceInfo>,
+) -> Result<ReadableNamespaces, String> {
     let Some(username) =
         admin.current_username().map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
     else {
@@ -420,13 +555,18 @@ mod tests {
     struct CountingAdmin {
         namespaces: Vec<NacosNamespaceInfo>,
         readable_ids: BTreeSet<String>,
+        role_error: bool,
         permission_error: bool,
+        config_transport_error: bool,
+        service_denied_ids: BTreeSet<String>,
         explicitly_scoped_ids: Option<Vec<String>>,
         namespace_calls: AtomicUsize,
         capability_calls: AtomicUsize,
+        access_control_refresh_calls: AtomicUsize,
         role_calls: AtomicUsize,
         permission_calls: AtomicUsize,
         config_calls: AtomicUsize,
+        service_calls: AtomicUsize,
     }
 
     impl CountingAdmin {
@@ -441,13 +581,18 @@ mod tests {
             Self {
                 namespaces,
                 readable_ids,
+                role_error: false,
                 permission_error: false,
+                config_transport_error: false,
+                service_denied_ids: BTreeSet::new(),
                 explicitly_scoped_ids: None,
                 namespace_calls: AtomicUsize::new(0),
                 capability_calls: AtomicUsize::new(0),
+                access_control_refresh_calls: AtomicUsize::new(0),
                 role_calls: AtomicUsize::new(0),
                 permission_calls: AtomicUsize::new(0),
                 config_calls: AtomicUsize::new(0),
+                service_calls: AtomicUsize::new(0),
             }
         }
 
@@ -457,6 +602,7 @@ mod tests {
                 + self.role_calls.load(Ordering::SeqCst)
                 + self.permission_calls.load(Ordering::SeqCst)
                 + self.config_calls.load(Ordering::SeqCst)
+                + self.service_calls.load(Ordering::SeqCst)
         }
     }
 
@@ -476,6 +622,11 @@ mod tests {
 
         fn explicitly_scoped_namespace_ids(&self) -> Option<Vec<String>> {
             self.explicitly_scoped_ids.clone()
+        }
+
+        async fn refresh_access_control_capabilities(&self) -> NacosAccessControlCapabilities {
+            self.access_control_refresh_calls.fetch_add(1, Ordering::SeqCst);
+            self.access_control_capabilities()
         }
 
         async fn refresh_namespace_authorization(
@@ -524,9 +675,16 @@ mod tests {
             Err("unused".to_string())
         }
 
-        async fn list_configs(&self, _: NacosConfigQuery) -> Result<NacosConfigList, String> {
+        async fn list_configs(&self, query: NacosConfigQuery) -> Result<NacosConfigList, String> {
             self.config_calls.fetch_add(1, Ordering::SeqCst);
-            Err("per-namespace probes are forbidden in the sidebar path".to_string())
+            if self.config_transport_error {
+                return Err("connection reset by peer".to_string());
+            }
+            let namespace = query.namespace.unwrap_or_default();
+            if !self.readable_ids.contains(&namespace) {
+                return Err("403 Forbidden".to_string());
+            }
+            Ok(NacosConfigList { page_no: 1, page_size: 1, total_count: 0, items: Vec::new() })
         }
 
         async fn search_config_content_page(
@@ -573,6 +731,9 @@ mod tests {
 
         async fn list_role_bindings(&self, _: NacosRoleQuery) -> Result<NacosRoleList, String> {
             self.role_calls.fetch_add(1, Ordering::SeqCst);
+            if self.role_error {
+                return Err("403 Forbidden".to_string());
+            }
             Ok(NacosRoleList {
                 page_no: 1,
                 page_size: AUTH_PAGE_SIZE,
@@ -602,8 +763,13 @@ mod tests {
             Ok(NacosPermissionList { page_no: 1, page_size: AUTH_PAGE_SIZE, total_count: items.len() as u64, items })
         }
 
-        async fn list_services(&self, _: NacosServiceQuery) -> Result<NacosServiceList, String> {
-            Err("unused".to_string())
+        async fn list_services(&self, query: NacosServiceQuery) -> Result<NacosServiceList, String> {
+            self.service_calls.fetch_add(1, Ordering::SeqCst);
+            let namespace = query.namespace.unwrap_or_default();
+            if !self.readable_ids.contains(&namespace) || self.service_denied_ids.contains(&namespace) {
+                return Err("403 Forbidden".to_string());
+            }
+            Ok(NacosServiceList { page_no: 1, page_size: 1, total_count: 0, items: Vec::new() })
         }
 
         async fn get_service(&self, _: NacosServiceQuery) -> Result<NacosServiceDetail, String> {
@@ -756,6 +922,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explicit_namespace_detection_probes_config_and_service_when_role_read_is_forbidden() {
+        let connection_id = "displayable-namespaces-role-forbidden";
+        invalidate(connection_id);
+        let mut admin = CountingAdmin::restricted(4);
+        admin.role_error = true;
+        let admin = Arc::new(admin);
+
+        let namespaces =
+            list_displayable_namespaces(connection_id, "server-a".to_string(), admin.clone()).await.unwrap();
+
+        assert_eq!(
+            namespaces.iter().map(|namespace| namespace.namespace.as_str()).collect::<Vec<_>>(),
+            vec!["team-0", "team-2"]
+        );
+        assert_eq!(admin.namespace_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(admin.capability_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(admin.role_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(admin.permission_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(admin.config_calls.load(Ordering::SeqCst), 4);
+        assert_eq!(admin.service_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn explicit_namespace_detection_aborts_on_unexpected_probe_failure() {
+        let connection_id = "displayable-namespaces-probe-failure";
+        invalidate(connection_id);
+        let mut admin = CountingAdmin::restricted(4);
+        admin.role_error = true;
+        admin.config_transport_error = true;
+        let admin = Arc::new(admin);
+
+        let error =
+            list_displayable_namespaces(connection_id, "server-a".to_string(), admin.clone()).await.unwrap_err();
+
+        assert!(error.contains("NACOS_ERROR[namespaceAccessDetectionFailed]"));
+        assert_eq!(admin.namespace_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(admin.role_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(admin.permission_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn explicit_namespace_detection_requires_service_access_too() {
+        let connection_id = "displayable-namespaces-service-denied";
+        invalidate(connection_id);
+        let mut admin = CountingAdmin::restricted(4);
+        admin.role_error = true;
+        admin.service_denied_ids.insert("team-0".to_string());
+        let admin = Arc::new(admin);
+
+        let namespaces =
+            list_displayable_namespaces(connection_id, "server-a".to_string(), admin.clone()).await.unwrap();
+
+        assert_eq!(namespaces.iter().map(|namespace| namespace.namespace.as_str()).collect::<Vec<_>>(), vec!["team-2"]);
+        assert_eq!(admin.config_calls.load(Ordering::SeqCst), 4);
+        assert_eq!(admin.service_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
     async fn roles_only_sidebar_keeps_access_control_entry_without_widening_namespaces() {
         let connection_id = "roles-only-sidebar-authorization";
         invalidate(connection_id);
@@ -789,6 +1013,36 @@ mod tests {
         );
         assert_eq!(admin.total_authorization_calls(), 1);
         assert!(!snapshot.access_control.list_users.supported);
+    }
+
+    #[tokio::test]
+    async fn visible_sidebar_scope_refreshes_access_control_without_authorization_inference() {
+        let connection_id = "visible-sidebar-scope";
+        invalidate(connection_id);
+        let admin = CountingAdmin::restricted(100);
+        let admin = Arc::new(admin);
+        let visible_scope = vec!["team-2".to_string(), "team-78".to_string()];
+
+        let snapshot = sidebar_snapshot_with_visible_scope(
+            connection_id,
+            "server-a".to_string(),
+            admin.clone(),
+            Some(&visible_scope),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            snapshot.namespaces.iter().map(|namespace| namespace.namespace.as_str()).collect::<Vec<_>>(),
+            vec!["team-2", "team-78"]
+        );
+        assert_eq!(admin.namespace_calls.load(Ordering::SeqCst), 1);
+        assert!(snapshot.access_control.list_users.supported);
+        assert_eq!(admin.access_control_refresh_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(admin.capability_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(admin.role_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(admin.permission_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(admin.config_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]

@@ -1,12 +1,12 @@
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { GAUSSDB_M_JDBC_DRIVER_PROFILE } from "@/lib/database/jdbcDialect";
+import { isLocalFileDatabaseType } from "@/lib/database/databaseDriverManifest";
 import { parseGaussdbHosts, serializeGaussdbHosts } from "@/lib/connection/gaussdbHosts";
 import { spannerDisplayDatabase } from "@/lib/connection/spannerResourcePath";
 
 type ConnectionPresentationConfig = Pick<ConnectionConfig, "db_type" | "driver_profile" | "driver_label" | "host" | "port" | "database">;
 type ConnectionNamePresentationConfig = ConnectionPresentationConfig & Pick<ConnectionConfig, "name">;
 
-const LOCAL_DATABASE_TYPES = new Set(["sqlite", "duckdb", "access"]);
 const REDACTED_HOST_SEGMENT = "***";
 const REDACTED_PORT = "****";
 
@@ -24,7 +24,7 @@ export function connectionEndpointLabel(connection?: ConnectionPresentationConfi
   // Cloud Spanner stores the whole resource path in `database`; only the trailing
   // database ID is short enough for a subtitle, and the host is empty on Google Cloud.
   if (connection.db_type === "spanner") return connection.host ? `${connection.host}:${connection.port}` : spannerDisplayDatabase(connection.database);
-  if (LOCAL_DATABASE_TYPES.has(connection.db_type) || (connection.db_type === "h2" && connection.port === 0)) {
+  if (isLocalFilePresentationConnection(connection)) {
     return connection.host || connection.database || "local";
   }
   const endpoint = normalizedPresentationEndpoint(connection);
@@ -88,7 +88,7 @@ export function connectionRedactedEndpointLabel(connection?: ConnectionPresentat
   // no more than any other database name; without this branch the fallback below
   // would print the full `projects/.../databases/...` path.
   if (connection.db_type === "spanner") return connection.host ? `${redactConnectionHost(connection.host)}:${REDACTED_PORT}` : spannerDisplayDatabase(connection.database);
-  if (LOCAL_DATABASE_TYPES.has(connection.db_type) || (connection.db_type === "h2" && connection.port === 0)) {
+  if (isLocalFilePresentationConnection(connection)) {
     return connectionEndpointLabel(connection);
   }
 
@@ -106,7 +106,7 @@ export function connectionRedactedEndpointLabel(connection?: ConnectionPresentat
 
 export function connectionRedactedNameLabel(connection?: ConnectionNamePresentationConfig): string {
   const name = connection?.name.trim() || "";
-  if (!connection || !name || LOCAL_DATABASE_TYPES.has(connection.db_type) || (connection.db_type === "h2" && connection.port === 0)) return name;
+  if (!connection || !name || isLocalFilePresentationConnection(connection)) return name;
 
   const host = connection.host.trim();
   if (!host) return name;
@@ -121,6 +121,10 @@ export function connectionRedactedNameLabel(connection?: ConnectionNamePresentat
   }
 
   return hostNames.has(name) ? connectionRedactedEndpointLabel(connection) : name;
+}
+
+function isLocalFilePresentationConnection(connection: Pick<ConnectionPresentationConfig, "db_type" | "port">): boolean {
+  return isLocalFileDatabaseType(connection.db_type) && (connection.db_type !== "h2" || connection.port === 0);
 }
 
 export function connectionDisplayUrlScheme(connection: Pick<ConnectionConfig, "db_type"> & Partial<Pick<ConnectionConfig, "driver_profile" | "ssl">>): string {

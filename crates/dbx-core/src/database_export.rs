@@ -994,54 +994,63 @@ pub fn build_export_insert_statements(options: BuildExportInsertStatementsOption
     let statement_overhead_bytes = export_sql_statement_bytes(options.database_type, &statement_prefix) + 1;
     let target_statement_bytes = DATABASE_EXPORT_TARGET_STATEMENT_BYTES;
     let separator_bytes = export_sql_statement_bytes(options.database_type, ", ");
-    let mut current_values = Vec::with_capacity(batch_size);
+    let mut current_values = String::new();
     let mut current_values_bytes = 0usize;
+    let mut current_row_count = 0usize;
 
-    let flush_values = |statements: &mut Vec<String>, values: &mut Vec<String>, values_bytes: &mut usize| {
-        if values.is_empty() {
-            return;
-        }
-        let insert_sql = format!("{statement_prefix}{};", values.join(", "));
-        if needs_dameng_identity_insert {
-            statements.push(wrap_dameng_identity_insert_sql_for_table(&insert_sql, &table));
-        } else {
-            statements.push(insert_sql);
-        }
-        values.clear();
-        *values_bytes = 0;
-    };
+    let flush_values =
+        |statements: &mut Vec<String>, values: &mut String, values_bytes: &mut usize, row_count: &mut usize| {
+            if *row_count == 0 {
+                return;
+            }
+            let mut insert_sql = String::with_capacity(statement_prefix.len() + values.len() + 1);
+            insert_sql.push_str(&statement_prefix);
+            insert_sql.push_str(values);
+            insert_sql.push(';');
+            if needs_dameng_identity_insert {
+                statements.push(wrap_dameng_identity_insert_sql_for_table(&insert_sql, &table));
+            } else {
+                statements.push(insert_sql);
+            }
+            values.clear();
+            *values_bytes = 0;
+            *row_count = 0;
+        };
 
     for row in options.rows {
-        let row_values = insert_columns
-            .iter()
-            .map(|(index, _, sqlserver_unicode_string)| {
-                let value = row.get(*index).unwrap_or(&Value::Null);
-                format_export_sql_literal_typed(
-                    value,
-                    options.database_type,
-                    options.column_types.get(*index).and_then(|value| value.as_deref()),
-                    *sqlserver_unicode_string,
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        let rendered_row = format!("({row_values})");
+        let mut rendered_row = String::with_capacity(insert_columns.len().saturating_mul(16).saturating_add(2));
+        rendered_row.push('(');
+        for (column_index, (index, _, sqlserver_unicode_string)) in insert_columns.iter().enumerate() {
+            if column_index > 0 {
+                rendered_row.push_str(", ");
+            }
+            let value = row.get(*index).unwrap_or(&Value::Null);
+            rendered_row.push_str(&format_export_sql_literal_typed(
+                value,
+                options.database_type,
+                options.column_types.get(*index).and_then(|value| value.as_deref()),
+                *sqlserver_unicode_string,
+            ));
+        }
+        rendered_row.push(')');
         let rendered_row_bytes = export_sql_statement_bytes(options.database_type, &rendered_row);
         let candidate_bytes = statement_overhead_bytes
             + current_values_bytes
-            + if current_values.is_empty() { 0 } else { separator_bytes }
+            + if current_row_count == 0 { 0 } else { separator_bytes }
             + rendered_row_bytes;
 
-        if !current_values.is_empty()
-            && (current_values.len() >= batch_size || candidate_bytes > target_statement_bytes)
-        {
-            flush_values(&mut statements, &mut current_values, &mut current_values_bytes);
+        if current_row_count > 0 && (current_row_count >= batch_size || candidate_bytes > target_statement_bytes) {
+            flush_values(&mut statements, &mut current_values, &mut current_values_bytes, &mut current_row_count);
         }
-        current_values_bytes += if current_values.is_empty() { 0 } else { separator_bytes };
+        if current_row_count > 0 {
+            current_values.push_str(", ");
+            current_values_bytes += separator_bytes;
+        }
+        current_values.push_str(&rendered_row);
         current_values_bytes += rendered_row_bytes;
-        current_values.push(rendered_row);
+        current_row_count += 1;
     }
-    flush_values(&mut statements, &mut current_values, &mut current_values_bytes);
+    flush_values(&mut statements, &mut current_values, &mut current_values_bytes, &mut current_row_count);
 
     Ok(statements)
 }
@@ -2090,6 +2099,7 @@ async fn export_database_sql_core_inner(
             &request.connection_id,
             &request.database,
             &request.schema,
+            None,
             None,
             None,
             None,

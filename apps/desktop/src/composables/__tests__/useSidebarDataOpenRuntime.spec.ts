@@ -359,6 +359,31 @@ describe("useSidebarDataOpenRuntime", () => {
     });
   });
 
+  it("preserves JDBC table schema through the table-data request", async () => {
+    mocks.databaseType = "jdbc";
+    mocks.loadTableMetadata.mockImplementation(async (request: { database: string; schema?: string; tableName: string; tableType?: string }) => ({
+      metadata: {
+        schema: request.schema,
+        tableName: request.tableName,
+        tableType: request.tableType,
+        database: request.database,
+        columns: [{ name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+        indexes: [],
+        primaryKeys: ["id"],
+        cachedAt: Date.now(),
+      },
+      cacheStatus: "miss",
+      ageMs: 0,
+    }));
+
+    await useSidebarDataOpenRuntime().openData(tableNode);
+
+    await vi.waitFor(() => expect(mocks.tabs[0]?.tableMeta?.primaryKeys).toEqual(["id"]));
+    expect(mocks.loadTableMetadata).toHaveBeenCalledWith(expect.objectContaining({ database: "app", schema: "public" }));
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ database: "app", schema: "public", tableName: "users" }));
+    expect(mocks.tabs[0]?.tableMeta).toMatchObject({ database: "app", schema: "public", tableName: "users" });
+  });
+
   it("keeps MySQL data-tab identity unqualified after metadata loads", async () => {
     mocks.databaseType = "mysql";
     mocks.loadTableMetadata.mockImplementation(async (request: { database: string; schema?: string; tableName: string; tableType?: string }) => ({

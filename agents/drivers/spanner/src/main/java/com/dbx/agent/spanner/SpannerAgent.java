@@ -24,9 +24,12 @@ import com.google.cloud.spanner.DatabaseId;
 import com.google.cloud.spanner.Dialect;
 import com.google.cloud.spanner.jdbc.CloudSpannerJdbcConnection;
 
+import java.sql.Array;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Types;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -296,6 +299,37 @@ public final class SpannerAgent extends ConfiguredJdbcAgent {
     }
 
     @Override
+    protected Object resultValue(ResultSet rs, int index, int sqlType) {
+        if (sqlType != Types.ARRAY) {
+            return super.resultValue(rs, index, sqlType);
+        }
+        return unchecked(() -> {
+            Array array = rs.getArray(index);
+            if (array == null) {
+                return null;
+            }
+            try {
+                Object raw = array.getArray();
+                if (raw == null) {
+                    return null;
+                }
+                int length = java.lang.reflect.Array.getLength(raw);
+                List<Object> values = new ArrayList<>(length);
+                for (int element = 0; element < length; element++) {
+                    values.add(java.lang.reflect.Array.get(raw, element));
+                }
+                return values;
+            } finally {
+                try {
+                    array.free();
+                } catch (SQLException ignored) {
+                    // The value has already been read; cleanup failure must not discard it.
+                }
+            }
+        });
+    }
+
+    @Override
     public List<IndexInfo> listIndexes(String schema, String table) {
         return spannerIndexes(requireConnection(), resolveSchema(schema), table);
     }
@@ -485,6 +519,8 @@ public final class SpannerAgent extends ConfiguredJdbcAgent {
                     String name = rs.getString("COLUMN_NAME");
                     // TYPE_NAME already carries the native Spanner type (STRING(100), ARRAY<INT64>).
                     String typeName = rs.getString("TYPE_NAME");
+                    Integer columnSize = intOrNull(rs, "COLUMN_SIZE");
+                    boolean intrinsicNumeric = isIntrinsicNumericType(typeName);
                     result.add(new ColumnInfo(
                         name,
                         typeName,
@@ -493,9 +529,9 @@ public final class SpannerAgent extends ConfiguredJdbcAgent {
                         primaryKeys.contains(name),
                         null,
                         rs.getString("REMARKS"),
-                        intOrNull(rs, "COLUMN_SIZE"),
-                        intOrNull(rs, "DECIMAL_DIGITS"),
-                        characterLength(typeName, intOrNull(rs, "COLUMN_SIZE"))
+                        intrinsicNumeric ? null : columnSize,
+                        intrinsicNumeric ? null : intOrNull(rs, "DECIMAL_DIGITS"),
+                        characterLength(typeName, columnSize)
                     ));
                 }
             }
@@ -724,6 +760,10 @@ public final class SpannerAgent extends ConfiguredJdbcAgent {
             return null;
         }
         return columnSize;
+    }
+
+    private static boolean isIntrinsicNumericType(String typeName) {
+        return "NUMERIC".equalsIgnoreCase(typeName) || "DECIMAL".equalsIgnoreCase(typeName);
     }
 
     private static Integer intOrNull(ResultSet rs, String column) throws Exception {

@@ -1,5 +1,42 @@
 import { describe, expect, it } from "vitest";
-import { applyColumnFormatter, defaultIoTDBTimestampFormatter, formatIoTDBTimestampEditorValue, normalizeSupportedDateTimePattern, parseIoTDBTimestampEditorValue } from "@/lib/dataGrid/columnFormatter";
+import { applyColumnFormatter, defaultIoTDBTimestampFormatter, formatIoTDBTimestampEditorValue, normalizeColumnFormatter, normalizeSupportedDateTimePattern, parseIoTDBTimestampEditorValue } from "@/lib/dataGrid/columnFormatter";
+
+describe("normalizeColumnFormatter", () => {
+  it("preserves a structured manual reference filter", () => {
+    expect(
+      normalizeColumnFormatter({
+        kind: "foreign-key-display",
+        referenceMode: "manual",
+        refSchema: " public ",
+        refTable: " dictionary ",
+        refColumn: " dict_key ",
+        displayColumn: " dict_value ",
+        filter: { column: " dict_type ", mode: "equals", value: " order_status " },
+      }),
+    ).toEqual({
+      kind: "foreign-key-display",
+      referenceMode: "manual",
+      refSchema: "public",
+      refTable: "dictionary",
+      refColumn: "dict_key",
+      displayColumn: "dict_value",
+      filter: { column: "dict_type", mode: "equals", value: "order_status", endValue: undefined },
+    });
+  });
+
+  it("rejects incomplete or unsupported manual reference filters", () => {
+    const base = {
+      kind: "foreign-key-display",
+      referenceMode: "manual",
+      refTable: "dictionary",
+      refColumn: "dict_key",
+      displayColumn: "dict_value",
+    };
+    expect(normalizeColumnFormatter({ ...base, filter: { column: "dict_type", mode: "equals", value: "" } })).toBeUndefined();
+    expect(normalizeColumnFormatter({ ...base, filter: { column: "dict_type", mode: "between", value: "A" } })).toBeUndefined();
+    expect(normalizeColumnFormatter({ ...base, filter: { column: "dict_type", mode: "raw-sql", value: "1=1" } })).toBeUndefined();
+  });
+});
 
 describe("normalizeSupportedDateTimePattern", () => {
   it("accepts the format grammar shared by the frontend and backend", () => {

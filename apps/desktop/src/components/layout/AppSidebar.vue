@@ -2,7 +2,7 @@
 import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
-import { Upload, Download, FolderPlus, RefreshCw, ChevronsLeft, ChevronsUp, Trash2, FolderInput, Check, Minus, Square, X } from "@lucide/vue";
+import { Upload, Download, FolderPlus, FolderOpen, RefreshCw, ChevronsLeft, ChevronsUp, Trash2, FolderInput, Check, Minus, Square, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -10,9 +10,10 @@ import LightDropdown from "@/components/ui/LightDropdown.vue";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import ConnectionTree from "@/components/sidebar/ConnectionTree.vue";
 import { applyConnectionMultiSelection, emptyConnectionMultiSelection, isExitConnectionMultiSelectionShortcut } from "@/lib/sidebar/sidebarConnectionMultiSelect";
+import { connectionGroupDestinationRows } from "@/lib/sidebar/sidebarLayout";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
-import type { TreeNode } from "@/types/database";
+import type { QueryTab, TreeNode } from "@/types/database";
 
 defineProps<{
   sidebarWidth: number;
@@ -53,9 +54,12 @@ const allConnectionsSelected = computed(() => allConnectionIds.value.length > 0 
 const selectAllIcon = computed(() => (allConnectionsSelected.value ? Check : selectedConnectionCount.value > 0 ? Minus : Square));
 const selectAllLabel = computed(() => (allConnectionsSelected.value ? t("connectionGroup.deselectAllConnections") : t("connectionGroup.selectAllConnections")));
 const moveGroupItems = computed(() => [
-  ...connectionStore.sidebarLayout.groups.map((group) => ({
+  ...connectionGroupDestinationRows(connectionStore.sidebarLayout).map((group) => ({
     value: group.id,
     label: group.name,
+    title: group.path.join(" / "),
+    icon: FolderOpen,
+    indentLevel: group.depth,
   })),
   {
     value: UNGROUPED_GROUP_VALUE,
@@ -86,6 +90,10 @@ function collapseAllTreeNodes() {
 
 function focusSearch(): boolean {
   return connectionTreeRef.value?.focusSearch() ?? false;
+}
+
+function locateTabInSidebar(tab: QueryTab) {
+  return connectionTreeRef.value?.locateTabInSidebar(tab);
 }
 
 function clearConnectionMultiSelection() {
@@ -163,7 +171,7 @@ function confirmCreateSelectedGroup() {
   showCreateSelectedGroupDialog.value = false;
 }
 
-defineExpose({ focusSearch });
+defineExpose({ focusSearch, locateTabInSidebar });
 </script>
 
 <template>

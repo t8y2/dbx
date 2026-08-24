@@ -1,6 +1,6 @@
 use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, CONTROLS};
 use reqwest::{Client as HttpClient, Method, RequestBuilder, StatusCode};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
@@ -27,6 +27,8 @@ const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b'{')
     .add(b'|')
     .add(b'}');
+
+const QUERY_VALUE_ENCODE_SET: &AsciiSet = &PATH_SEGMENT_ENCODE_SET.add(b'&').add(b'=').add(b'+');
 
 const INDEX_PAGE_SIZE: u64 = 1_000;
 const FIELD_SAMPLE_SIZE: u64 = 100;
@@ -1098,6 +1100,663 @@ pub async fn delete_all_documents(client: &MeilisearchClient, index: &str) -> Re
     wait_for_task(client, task.task_uid).await
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchTaskSelector {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uids: Vec<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub batch_uids: Vec<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub canceled_by: Vec<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub index_uids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub statuses: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub types: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_enqueued_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_enqueued_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_started_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_started_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_finished_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_finished_at: Option<String>,
+}
+
+impl MeilisearchTaskSelector {
+    fn has_filter(&self) -> bool {
+        !self.uids.is_empty()
+            || !self.batch_uids.is_empty()
+            || !self.canceled_by.is_empty()
+            || self.index_uids.iter().any(|value| non_empty(value))
+            || self.statuses.iter().any(|value| non_empty(value))
+            || self.types.iter().any(|value| non_empty(value))
+            || self.after_enqueued_at.as_deref().is_some_and(non_empty)
+            || self.before_enqueued_at.as_deref().is_some_and(non_empty)
+            || self.after_started_at.as_deref().is_some_and(non_empty)
+            || self.before_started_at.as_deref().is_some_and(non_empty)
+            || self.after_finished_at.as_deref().is_some_and(non_empty)
+            || self.before_finished_at.as_deref().is_some_and(non_empty)
+    }
+
+    fn with_allowed_statuses(&self, allowed: &[&str], action: &str) -> Result<Self, String> {
+        let mut selector = self.clone();
+        selector.index_uids = normalized_strings(&selector.index_uids, false);
+        selector.types = normalized_strings(&selector.types, false);
+        selector.statuses = normalized_strings(&selector.statuses, true);
+        if !selector.has_filter() {
+            return Err(format!("Meilisearch task {action} requires at least one explicit filter"));
+        }
+        selector.statuses = if selector.statuses.is_empty() {
+            allowed.iter().map(|status| (*status).to_string()).collect()
+        } else {
+            allowed
+                .iter()
+                .filter(|allowed_status| selector.statuses.iter().any(|status| status == **allowed_status))
+                .map(|status| (*status).to_string())
+                .collect()
+        };
+        if selector.statuses.is_empty() {
+            return Err(format!("Meilisearch task {action} selector does not match any allowed task status"));
+        }
+        Ok(selector)
+    }
+}
+
+fn non_empty(value: &str) -> bool {
+    !value.trim().is_empty()
+}
+
+fn normalized_strings(values: &[String], lowercase: bool) -> Vec<String> {
+    let mut normalized = values
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(|value| if lowercase { value.to_ascii_lowercase() } else { value.to_string() })
+        .collect::<Vec<_>>();
+    normalized.sort();
+    normalized.dedup();
+    normalized
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchTask {
+    pub uid: u64,
+    #[serde(default)]
+    pub batch_uid: Option<u64>,
+    #[serde(default)]
+    pub index_uid: Option<String>,
+    pub status: String,
+    #[serde(rename = "type")]
+    pub task_type: String,
+    #[serde(default)]
+    pub canceled_by: Option<u64>,
+    #[serde(default)]
+    pub details: Option<Value>,
+    #[serde(default)]
+    pub error: Option<Value>,
+    #[serde(default)]
+    pub duration: Option<String>,
+    pub enqueued_at: String,
+    #[serde(default)]
+    pub started_at: Option<String>,
+    #[serde(default)]
+    pub finished_at: Option<String>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+pub fn ensure_task_index(task: &MeilisearchTask, expected_index_uid: Option<&str>) -> Result<(), String> {
+    let Some(expected_index_uid) = expected_index_uid else {
+        return Ok(());
+    };
+    match task.index_uid.as_deref() {
+        Some(actual_index_uid) if actual_index_uid == expected_index_uid => Ok(()),
+        Some(actual_index_uid) => Err(format!(
+            "Meilisearch task {} belongs to index '{}', expected index '{}'",
+            task.uid, actual_index_uid, expected_index_uid
+        )),
+        None => Err(format!(
+            "Meilisearch task {} is not associated with an index; expected index '{}'",
+            task.uid, expected_index_uid
+        )),
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchTaskPage {
+    pub results: Vec<MeilisearchTask>,
+    pub total: u64,
+    pub limit: u64,
+    #[serde(default)]
+    pub from: Option<u64>,
+    #[serde(default)]
+    pub next: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchTaskListInput {
+    #[serde(default)]
+    pub selector: MeilisearchTaskSelector,
+    #[serde(default)]
+    pub from: Option<u64>,
+    #[serde(default)]
+    pub limit: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchEnqueuedTaskSummary {
+    pub task_uid: u64,
+    #[serde(default)]
+    pub index_uid: Option<String>,
+    pub status: String,
+    #[serde(rename = "type")]
+    pub task_type: String,
+    pub enqueued_at: String,
+}
+
+fn push_csv<T: ToString>(query: &mut Vec<(String, String)>, key: &str, values: &[T]) {
+    if !values.is_empty() {
+        query.push((key.to_string(), values.iter().map(ToString::to_string).collect::<Vec<_>>().join(",")));
+    }
+}
+
+fn push_optional(query: &mut Vec<(String, String)>, key: &str, value: Option<&str>) {
+    if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+        query.push((key.to_string(), value.to_string()));
+    }
+}
+
+fn task_selector_query(selector: &MeilisearchTaskSelector) -> String {
+    let mut query = Vec::<(String, String)>::new();
+    push_csv(&mut query, "uids", &selector.uids);
+    push_csv(&mut query, "batchUids", &selector.batch_uids);
+    push_csv(&mut query, "canceledBy", &selector.canceled_by);
+    push_csv(&mut query, "indexUids", &selector.index_uids);
+    push_csv(&mut query, "statuses", &selector.statuses);
+    push_csv(&mut query, "types", &selector.types);
+    push_optional(&mut query, "afterEnqueuedAt", selector.after_enqueued_at.as_deref());
+    push_optional(&mut query, "beforeEnqueuedAt", selector.before_enqueued_at.as_deref());
+    push_optional(&mut query, "afterStartedAt", selector.after_started_at.as_deref());
+    push_optional(&mut query, "beforeStartedAt", selector.before_started_at.as_deref());
+    push_optional(&mut query, "afterFinishedAt", selector.after_finished_at.as_deref());
+    push_optional(&mut query, "beforeFinishedAt", selector.before_finished_at.as_deref());
+    query
+        .into_iter()
+        .map(|(key, value)| format!("{key}={}", utf8_percent_encode(&value, QUERY_VALUE_ENCODE_SET)))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+pub async fn get_tasks(
+    client: &MeilisearchClient,
+    selector: &MeilisearchTaskSelector,
+    from: Option<u64>,
+    limit: u64,
+) -> Result<MeilisearchTaskPage, String> {
+    let mut query = task_selector_query(selector);
+    if !query.is_empty() {
+        query.push('&');
+    }
+    query.push_str(&format!("limit={}", limit.clamp(1, 100)));
+    if let Some(from) = from {
+        query.push_str(&format!("&from={from}"));
+    }
+    let response = client
+        .get(&format!("/tasks?{query}"))
+        .send()
+        .await
+        .map_err(|error| format!("Meilisearch request failed: {error}"))?;
+    let value = response_json(response, "task listing").await?;
+    serde_json::from_value(value).map_err(|error| format!("Meilisearch task list parse error: {error}"))
+}
+
+pub async fn get_task(client: &MeilisearchClient, uid: u64) -> Result<MeilisearchTask, String> {
+    let response = client
+        .get(&format!("/tasks/{uid}"))
+        .send()
+        .await
+        .map_err(|error| format!("Meilisearch request failed: {error}"))?;
+    let value = response_json(response, "task lookup").await?;
+    serde_json::from_value(value).map_err(|error| format!("Meilisearch task parse error: {error}"))
+}
+
+async fn mutate_tasks(
+    client: &MeilisearchClient,
+    selector: &MeilisearchTaskSelector,
+    cancel: bool,
+) -> Result<MeilisearchEnqueuedTaskSummary, String> {
+    let (selector, action) = if cancel {
+        (selector.with_allowed_statuses(&["enqueued", "processing"], "cancellation")?, "cancellation")
+    } else {
+        (selector.with_allowed_statuses(&["succeeded", "failed", "canceled"], "deletion")?, "deletion")
+    };
+    let query = task_selector_query(&selector);
+    let path = if cancel { format!("/tasks/cancel?{query}") } else { format!("/tasks?{query}") };
+    let request = if cancel { client.post(&path) } else { client.delete(&path) };
+    let response = request.send().await.map_err(|error| format!("Meilisearch request failed: {error}"))?;
+    let value = response_json(response, &format!("task {action}")).await?;
+    serde_json::from_value(value).map_err(|error| format!("Meilisearch task {action} parse error: {error}"))
+}
+
+pub async fn cancel_tasks(
+    client: &MeilisearchClient,
+    selector: &MeilisearchTaskSelector,
+) -> Result<MeilisearchEnqueuedTaskSummary, String> {
+    mutate_tasks(client, selector, true).await
+}
+
+pub async fn delete_tasks(
+    client: &MeilisearchClient,
+    selector: &MeilisearchTaskSelector,
+) -> Result<MeilisearchEnqueuedTaskSummary, String> {
+    mutate_tasks(client, selector, false).await
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchKeyCreateInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub actions: Vec<String>,
+    pub indexes: Vec<String>,
+    pub expires_at: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchKeyUpdateInput {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchKeyListItem {
+    pub uid: String,
+    /// Meilisearch returns the secret in its key-management responses. Keep it
+    /// in memory so callers can copy the credential while still rendering the
+    /// separately masked value in tables.
+    pub key: String,
+    pub masked_key: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub actions: Vec<String>,
+    pub indexes: Vec<String>,
+    pub expires_at: Value,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchCreatedKey {
+    #[serde(flatten)]
+    pub metadata: MeilisearchKeyListItem,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchKeyPage {
+    pub results: Vec<MeilisearchKeyListItem>,
+    pub total: u64,
+    pub offset: u64,
+    pub limit: u64,
+}
+
+fn mask_key(secret: &str) -> String {
+    let chars = secret.chars().collect::<Vec<_>>();
+    if chars.len() < 12 {
+        return "••••••••".to_string();
+    }
+    format!("{}…{}", chars[..4].iter().collect::<String>(), chars[chars.len() - 4..].iter().collect::<String>())
+}
+
+fn parse_key(value: Value) -> Result<(MeilisearchKeyListItem, String), String> {
+    let object = value.as_object().ok_or_else(|| "Meilisearch key response must be an object".to_string())?;
+    let string = |field: &str| {
+        object
+            .get(field)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| format!("Missing key field: {field}"))
+    };
+    let secret = string("key")?;
+    let strings = |field: &str| {
+        object
+            .get(field)
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("Missing key field: {field}"))?
+            .iter()
+            .map(|value| value.as_str().map(str::to_string).ok_or_else(|| format!("Invalid key field: {field}")))
+            .collect::<Result<Vec<_>, String>>()
+    };
+    Ok((
+        MeilisearchKeyListItem {
+            uid: string("uid")?,
+            key: secret.clone(),
+            masked_key: mask_key(&secret),
+            name: object.get("name").and_then(Value::as_str).map(str::to_string),
+            description: object.get("description").and_then(Value::as_str).map(str::to_string),
+            actions: strings("actions")?,
+            indexes: strings("indexes")?,
+            expires_at: object.get("expiresAt").cloned().unwrap_or(Value::Null),
+            created_at: string("createdAt")?,
+            updated_at: string("updatedAt")?,
+        },
+        secret,
+    ))
+}
+
+pub async fn list_keys(client: &MeilisearchClient, offset: u64, limit: u64) -> Result<MeilisearchKeyPage, String> {
+    let limit = limit.clamp(1, 100);
+    let response = client
+        .get(&format!("/keys?offset={offset}&limit={limit}"))
+        .send()
+        .await
+        .map_err(|error| format!("Meilisearch request failed: {error}"))?;
+    let value = response_json(response, "key listing").await?;
+    let object = value.as_object().ok_or_else(|| "Meilisearch key list response must be an object".to_string())?;
+    let results = object
+        .get("results")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Meilisearch key list response is missing results".to_string())?
+        .iter()
+        .cloned()
+        .map(parse_key)
+        .map(|result| result.map(|(key, _)| key))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(MeilisearchKeyPage {
+        results,
+        total: object.get("total").and_then(Value::as_u64).unwrap_or(0),
+        offset: object.get("offset").and_then(Value::as_u64).unwrap_or(offset),
+        limit: object.get("limit").and_then(Value::as_u64).unwrap_or(limit),
+    })
+}
+
+pub async fn get_key(client: &MeilisearchClient, uid: &str) -> Result<MeilisearchKeyListItem, String> {
+    let response = client
+        .get(&format!("/keys/{}", encode_path_segment(uid)))
+        .send()
+        .await
+        .map_err(|error| format!("Meilisearch request failed: {error}"))?;
+    let value = response_json(response, "key lookup").await?;
+    parse_key(value).map(|(key, _)| key)
+}
+
+pub async fn create_key(
+    client: &MeilisearchClient,
+    input: &MeilisearchKeyCreateInput,
+) -> Result<MeilisearchCreatedKey, String> {
+    if input.actions.is_empty() || input.indexes.is_empty() {
+        return Err("Meilisearch key actions and indexes must not be empty".to_string());
+    }
+    let response = client
+        .post("/keys")
+        .json(input)
+        .send()
+        .await
+        .map_err(|error| format!("Meilisearch request failed: {error}"))?;
+    let value = response_json(response, "key creation").await?;
+    let (metadata, _key) = parse_key(value)?;
+    Ok(MeilisearchCreatedKey { metadata })
+}
+
+pub async fn update_key(
+    client: &MeilisearchClient,
+    uid: &str,
+    input: &MeilisearchKeyUpdateInput,
+) -> Result<MeilisearchKeyListItem, String> {
+    let response = client
+        .request(Method::PATCH, &format!("/keys/{}", encode_path_segment(uid)))
+        .json(input)
+        .send()
+        .await
+        .map_err(|error| format!("Meilisearch request failed: {error}"))?;
+    let value = response_json(response, "key update").await?;
+    parse_key(value).map(|(key, _)| key)
+}
+
+pub async fn delete_key(client: &MeilisearchClient, uid: &str) -> Result<(), String> {
+    let response = client
+        .delete(&format!("/keys/{}", encode_path_segment(uid)))
+        .send()
+        .await
+        .map_err(|error| format!("Meilisearch request failed: {error}"))?;
+    response_json(response, "key deletion").await.map(|_| ())
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MeilisearchOverviewSectionStatus {
+    Available,
+    Forbidden,
+    Unsupported,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchOverviewSection<T> {
+    pub status: MeilisearchOverviewSectionStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<T>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+impl<T> MeilisearchOverviewSection<T> {
+    fn available(data: T) -> Self {
+        Self { status: MeilisearchOverviewSectionStatus::Available, data: Some(data), message: None }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchSystemStats {
+    pub database_size: Option<u64>,
+    pub used_database_size: Option<u64>,
+    pub last_update: Option<String>,
+    pub index_count: u64,
+    pub document_count: u64,
+    pub indexing_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchIndexSummary {
+    pub uid: String,
+    pub number_of_documents: u64,
+    pub is_indexing: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchSystemOverview {
+    pub health: MeilisearchOverviewSection<Value>,
+    pub version: MeilisearchOverviewSection<Value>,
+    pub stats: MeilisearchOverviewSection<MeilisearchSystemStats>,
+    pub task_counts: MeilisearchOverviewSection<BTreeMap<String, u64>>,
+    pub key_count: MeilisearchOverviewSection<u64>,
+    pub top_indexes: MeilisearchOverviewSection<Vec<MeilisearchIndexSummary>>,
+    pub refreshed_at: String,
+}
+
+async fn overview_value(client: &MeilisearchClient, path: &str, context: &str) -> MeilisearchOverviewSection<Value> {
+    let response = match client.get(path).send().await {
+        Ok(response) => response,
+        Err(error) => {
+            return MeilisearchOverviewSection {
+                status: MeilisearchOverviewSectionStatus::Error,
+                data: None,
+                message: Some(format!("Meilisearch request failed: {error}")),
+            };
+        }
+    };
+    let status = response.status();
+    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+        return MeilisearchOverviewSection {
+            status: MeilisearchOverviewSectionStatus::Forbidden,
+            data: None,
+            message: Some(format!("Meilisearch {context} is forbidden")),
+        };
+    }
+    if matches!(status, StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED | StatusCode::NOT_IMPLEMENTED) {
+        return MeilisearchOverviewSection {
+            status: MeilisearchOverviewSectionStatus::Unsupported,
+            data: None,
+            message: Some(format!("Meilisearch {context} is unsupported")),
+        };
+    }
+    match response_json(response, context).await {
+        Ok(value) => MeilisearchOverviewSection::available(value),
+        Err(error) => MeilisearchOverviewSection {
+            status: MeilisearchOverviewSectionStatus::Error,
+            data: None,
+            message: Some(error),
+        },
+    }
+}
+
+fn unavailable_stats(
+    status: MeilisearchOverviewSectionStatus,
+    message: Option<String>,
+) -> (
+    MeilisearchOverviewSection<MeilisearchSystemStats>,
+    MeilisearchOverviewSection<Vec<MeilisearchIndexSummary>>,
+    MeilisearchOverviewSection<Option<String>>,
+) {
+    (
+        MeilisearchOverviewSection { status: status.clone(), data: None, message: message.clone() },
+        MeilisearchOverviewSection { status: status.clone(), data: None, message: message.clone() },
+        MeilisearchOverviewSection { status, data: None, message },
+    )
+}
+
+fn parse_system_stats(
+    section: MeilisearchOverviewSection<Value>,
+) -> (
+    MeilisearchOverviewSection<MeilisearchSystemStats>,
+    MeilisearchOverviewSection<Vec<MeilisearchIndexSummary>>,
+    MeilisearchOverviewSection<Option<String>>,
+) {
+    let Some(value) = section.data else {
+        return unavailable_stats(section.status, section.message);
+    };
+    let Some(indexes) = value.get("indexes").and_then(Value::as_object) else {
+        return unavailable_stats(
+            MeilisearchOverviewSectionStatus::Error,
+            Some("Meilisearch stats response is missing indexes".to_string()),
+        );
+    };
+    let mut summaries = indexes
+        .iter()
+        .map(|(uid, stats)| MeilisearchIndexSummary {
+            uid: uid.clone(),
+            number_of_documents: stats.get("numberOfDocuments").and_then(Value::as_u64).unwrap_or(0),
+            is_indexing: stats.get("isIndexing").and_then(Value::as_bool).unwrap_or(false),
+        })
+        .collect::<Vec<_>>();
+    let document_count = summaries.iter().map(|summary| summary.number_of_documents).sum();
+    let indexing_index_count = summaries.iter().filter(|summary| summary.is_indexing).count() as u64;
+    summaries.sort_by(|left, right| {
+        right.number_of_documents.cmp(&left.number_of_documents).then_with(|| left.uid.cmp(&right.uid))
+    });
+    let index_count = summaries.len() as u64;
+    summaries.truncate(10);
+    let last_update = value.get("lastUpdate").and_then(Value::as_str).map(str::to_string);
+    (
+        MeilisearchOverviewSection::available(MeilisearchSystemStats {
+            database_size: value.get("databaseSize").and_then(Value::as_u64),
+            used_database_size: value.get("usedDatabaseSize").and_then(Value::as_u64),
+            last_update: last_update.clone(),
+            index_count,
+            document_count,
+            indexing_count: indexing_index_count,
+        }),
+        MeilisearchOverviewSection::available(summaries),
+        MeilisearchOverviewSection::available(last_update),
+    )
+}
+
+fn parse_count(section: MeilisearchOverviewSection<Value>) -> Result<u64, MeilisearchOverviewSection<Value>> {
+    if let Some(total) = section.data.as_ref().and_then(|value| value.get("total")).and_then(Value::as_u64) {
+        Ok(total)
+    } else if section.data.is_some() {
+        Err(MeilisearchOverviewSection {
+            status: MeilisearchOverviewSectionStatus::Error,
+            data: None,
+            message: Some("Meilisearch count response is missing total".to_string()),
+        })
+    } else {
+        Err(section)
+    }
+}
+
+pub async fn get_system_overview(client: &MeilisearchClient) -> MeilisearchSystemOverview {
+    let (health, version, stats, enqueued, processing, succeeded, failed, canceled, key_count) = tokio::join!(
+        overview_value(client, "/health", "health lookup"),
+        overview_value(client, "/version", "version lookup"),
+        overview_value(client, "/stats", "stats lookup"),
+        overview_value(client, "/tasks?statuses=enqueued&limit=1", "enqueued task count"),
+        overview_value(client, "/tasks?statuses=processing&limit=1", "processing task count"),
+        overview_value(client, "/tasks?statuses=succeeded&limit=1", "succeeded task count"),
+        overview_value(client, "/tasks?statuses=failed&limit=1", "failed task count"),
+        overview_value(client, "/tasks?statuses=canceled&limit=1", "canceled task count"),
+        overview_value(client, "/keys?offset=0&limit=1", "key count"),
+    );
+    let task_sections = [
+        ("enqueued", enqueued),
+        ("processing", processing),
+        ("succeeded", succeeded),
+        ("failed", failed),
+        ("canceled", canceled),
+    ];
+    let mut counts = BTreeMap::new();
+    let mut task_error = None;
+    for (status, section) in task_sections {
+        match parse_count(section) {
+            Ok(total) => {
+                counts.insert(status.to_string(), total);
+            }
+            Err(section) => {
+                task_error = Some(section);
+                break;
+            }
+        }
+    }
+    let task_counts = if let Some(section) = task_error {
+        MeilisearchOverviewSection { status: section.status, data: None, message: section.message }
+    } else {
+        MeilisearchOverviewSection::available(counts)
+    };
+    let key_count = match parse_count(key_count) {
+        Ok(total) => MeilisearchOverviewSection::available(total),
+        Err(section) => MeilisearchOverviewSection { status: section.status, data: None, message: section.message },
+    };
+    let (stats, top_indexes, _) = parse_system_stats(stats);
+    let refreshed_at = chrono::Utc::now().to_rfc3339();
+    MeilisearchSystemOverview { health, version, stats, task_counts, key_count, top_indexes, refreshed_at }
+}
+
 async fn read_bounded_rest_response(mut response: reqwest::Response) -> Result<(String, bool), String> {
     let read_limit = REST_RESPONSE_MAX_BYTES.saturating_add(1);
     let capacity = response.content_length().unwrap_or(0).min(read_limit as u64) as usize;
@@ -1193,13 +1852,165 @@ fn raw_response_result(status: u16, body: String, start: Instant, truncated: boo
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_bounded_rest_body, decoded_identity, filter_expression, identity_path, meilisearch_base_url,
-        meilisearch_filter_from_request, meilisearch_search_body, meilisearch_sort_from_request,
-        parse_meilisearch_search_response, parse_rest_request_line, MeilisearchClient,
+        decode_bounded_rest_body, decoded_identity, ensure_task_index, filter_expression, identity_path,
+        meilisearch_base_url, meilisearch_filter_from_request, meilisearch_search_body, meilisearch_sort_from_request,
+        parse_key, parse_meilisearch_search_response, parse_rest_request_line, parse_system_stats, task_selector_query,
+        MeilisearchClient, MeilisearchOverviewSection, MeilisearchTask, MeilisearchTaskSelector,
     };
     use reqwest::Method;
     use serde_json::{json, Value};
     use std::time::Duration;
+
+    #[test]
+    fn task_selector_encodes_all_filters_and_cursor_safe_values() {
+        let selector = MeilisearchTaskSelector {
+            uids: vec![3, 7],
+            batch_uids: vec![9],
+            canceled_by: vec![11],
+            index_uids: vec!["movies / 2026&sort=false".to_string()],
+            statuses: vec!["failed".to_string()],
+            types: vec!["documentAdditionOrUpdate".to_string()],
+            after_enqueued_at: Some("2026-08-22T00:00:00Z".to_string()),
+            ..Default::default()
+        };
+
+        let query = task_selector_query(&selector);
+        assert!(query.contains("uids=3,7"));
+        assert!(query.contains("batchUids=9"));
+        assert!(query.contains("canceledBy=11"));
+        assert!(query.contains("indexUids=movies%20%2F%202026%26sort%3Dfalse"));
+        assert!(query.contains("statuses=failed"));
+        assert!(query.contains("types=documentAdditionOrUpdate"));
+        assert!(!query.contains("reverse="));
+        assert!(query.contains("afterEnqueuedAt=2026-08-22T00:00:00Z"));
+    }
+
+    #[test]
+    fn task_mutations_require_filters_and_intersect_allowed_statuses() {
+        let empty = MeilisearchTaskSelector::default();
+        assert!(empty.with_allowed_statuses(&["enqueued", "processing"], "cancellation").is_err());
+        let blank = MeilisearchTaskSelector { index_uids: vec!["   ".to_string()], ..Default::default() };
+        assert!(blank.with_allowed_statuses(&["enqueued", "processing"], "cancellation").is_err());
+
+        let selector = MeilisearchTaskSelector {
+            index_uids: vec!["movies".to_string()],
+            statuses: vec!["processing".to_string(), "failed".to_string()],
+            ..Default::default()
+        };
+        let cancel = selector.with_allowed_statuses(&["enqueued", "processing"], "cancellation").unwrap();
+        assert_eq!(cancel.statuses, vec!["processing"]);
+        let delete = selector.with_allowed_statuses(&["succeeded", "failed", "canceled"], "deletion").unwrap();
+        assert_eq!(delete.statuses, vec!["failed"]);
+
+        let succeeded_only = MeilisearchTaskSelector { statuses: vec!["succeeded".to_string()], ..Default::default() };
+        assert!(succeeded_only.with_allowed_statuses(&["enqueued", "processing"], "cancellation").is_err());
+    }
+
+    #[test]
+    fn key_dto_keeps_copyable_secret_and_masked_display_value() {
+        let secret = "0123456789abcdef";
+        let (item, parsed_secret) = parse_key(json!({
+            "uid": "key-uid",
+            "key": secret,
+            "name": "Search",
+            "description": null,
+            "actions": ["search"],
+            "indexes": ["movies"],
+            "expiresAt": null,
+            "createdAt": "2026-08-22T00:00:00Z",
+            "updatedAt": "2026-08-22T00:00:00Z"
+        }))
+        .unwrap();
+
+        assert_eq!(parsed_secret, secret);
+        assert_eq!(item.key, secret);
+        assert_eq!(item.masked_key, "0123…cdef");
+        let wire = serde_json::to_string(&item).unwrap();
+        assert!(wire.contains(secret));
+        assert!(wire.contains("maskedKey"));
+    }
+
+    #[test]
+    fn task_dto_preserves_unknown_fields_and_task_types() {
+        let task: MeilisearchTask = serde_json::from_value(json!({
+            "uid": 42,
+            "batchUid": 7,
+            "indexUid": "movies",
+            "status": "futureStatus",
+            "type": "futureTaskType",
+            "details": {"receivedDocuments": 10},
+            "error": null,
+            "duration": null,
+            "enqueuedAt": "2026-08-22T00:00:00Z",
+            "startedAt": null,
+            "finishedAt": null,
+            "futureField": {"kept": true}
+        }))
+        .unwrap();
+
+        assert_eq!(task.task_type, "futureTaskType");
+        assert_eq!(task.extra["futureField"], json!({"kept": true}));
+    }
+
+    #[test]
+    fn task_index_guard_accepts_global_and_matching_index_details() {
+        let task: MeilisearchTask = serde_json::from_value(json!({
+            "uid": 42,
+            "indexUid": "movies",
+            "status": "succeeded",
+            "type": "documentAdditionOrUpdate",
+            "enqueuedAt": "2026-08-22T00:00:00Z"
+        }))
+        .unwrap();
+
+        assert!(ensure_task_index(&task, None).is_ok());
+        assert!(ensure_task_index(&task, Some("movies")).is_ok());
+    }
+
+    #[test]
+    fn task_index_guard_rejects_mismatched_and_indexless_details() {
+        let mut task: MeilisearchTask = serde_json::from_value(json!({
+            "uid": 42,
+            "indexUid": "movies",
+            "status": "succeeded",
+            "type": "documentAdditionOrUpdate",
+            "enqueuedAt": "2026-08-22T00:00:00Z"
+        }))
+        .unwrap();
+
+        let mismatch = ensure_task_index(&task, Some("books")).unwrap_err();
+        assert!(mismatch.contains("belongs to index 'movies'"));
+        assert!(mismatch.contains("expected index 'books'"));
+
+        task.index_uid = None;
+        let indexless = ensure_task_index(&task, Some("books")).unwrap_err();
+        assert!(indexless.contains("not associated with an index"));
+    }
+
+    #[test]
+    fn system_stats_compute_totals_and_top_ten_deterministically() {
+        let indexes = (0..12)
+            .map(|index| {
+                (format!("index-{index:02}"), json!({ "numberOfDocuments": index, "isIndexing": index % 2 == 0 }))
+            })
+            .collect::<serde_json::Map<_, _>>();
+        let (stats, top, refreshed_at) = parse_system_stats(MeilisearchOverviewSection::available(json!({
+            "databaseSize": 1000,
+            "usedDatabaseSize": 900,
+            "lastUpdate": "2026-08-22T00:00:00Z",
+            "indexes": indexes
+        })));
+
+        let stats = stats.data.unwrap();
+        assert_eq!(stats.index_count, 12);
+        assert_eq!(stats.document_count, 66);
+        assert_eq!(stats.indexing_count, 6);
+        let top = top.data.unwrap();
+        assert_eq!(top.len(), 10);
+        assert_eq!(top[0].uid, "index-11");
+        assert_eq!(top[9].uid, "index-02");
+        assert_eq!(refreshed_at.data.flatten().as_deref(), Some("2026-08-22T00:00:00Z"));
+    }
 
     #[test]
     fn normalizes_canonical_and_legacy_proxy_base_paths() {

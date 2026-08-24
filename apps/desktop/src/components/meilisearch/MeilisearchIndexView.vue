@@ -10,13 +10,14 @@ import "dayjs/locale/it";
 import "dayjs/locale/ja";
 import "dayjs/locale/ko";
 import "dayjs/locale/pt-br";
-import { Copy, FileText, Settings } from "@lucide/vue";
+import { Copy, FileText, ListChecks, Settings } from "@lucide/vue";
 import * as api from "@/lib/backend/api";
 import type { MeilisearchIndexOverview } from "@/lib/backend/tauri";
 import { formatBytes } from "@/lib/database/serverMetrics";
 import { useToast } from "@/composables/useToast";
 import MeilisearchDocumentsPage from "./MeilisearchDocumentsPage.vue";
 import MeilisearchSettingsPage from "./MeilisearchSettingsPage.vue";
+import MeilisearchTasksPage from "./MeilisearchTasksPage.vue";
 
 dayjs.extend(relativeTime);
 
@@ -35,7 +36,7 @@ const props = defineProps<{
   index: string;
 }>();
 
-type ActiveSection = "documents" | "settings";
+type ActiveSection = "documents" | "tasks" | "settings";
 
 const { t, locale } = useI18n();
 const { toast } = useToast();
@@ -45,6 +46,7 @@ const overview = ref<MeilisearchIndexOverview | null>(null);
 
 const navSections = computed<Array<{ value: ActiveSection; label: string; icon: typeof FileText }>>(() => [
   { value: "documents", label: t("meilisearch.documents"), icon: FileText },
+  { value: "tasks", label: t("meilisearch.tasks"), icon: ListChecks },
   { value: "settings", label: t("meilisearch.settings"), icon: Settings },
 ]);
 
@@ -139,6 +141,7 @@ onMounted(() => {
     <!-- Content -->
     <div class="flex-1 min-h-0 min-w-0 overflow-hidden">
       <MeilisearchDocumentsPage v-if="activeSection === 'documents'" :connection-id="connectionId" :index="index" @refresh-stats="refreshStats" />
+      <MeilisearchTasksPage v-else-if="activeSection === 'tasks'" :connection-id="connectionId" :fixed-index-uid="index" />
       <MeilisearchSettingsPage v-else :connection-id="connectionId" :index="index" @refresh-stats="refreshStats" />
     </div>
   </div>

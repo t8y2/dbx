@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { Text } from "@codemirror/state";
-import { currentStatementFrameRect, FRAME_INSET_PX } from "@/lib/editor/codemirrorCurrentStatementFrameLayer";
+import { currentStatementFrameLayer, currentStatementFrameRect, FRAME_INSET_PX } from "@/lib/editor/codemirrorCurrentStatementFrameLayer";
 
 interface CoordRect {
   left: number;
@@ -251,5 +251,16 @@ describe("currentStatementFrameRect", () => {
     // bottom = lineBlockAt(73).bottom = 73 * LINE_HEIGHT
     const expectedHeight = (73 - 47) * LINE_HEIGHT + FRAME_INSET_PX * 2;
     expect(rect!.height).toBe(expectedHeight);
+  });
+});
+
+describe("currentStatementFrameLayer", () => {
+  it("renders above line decorations so active-line backgrounds cannot cover the frame", () => {
+    const layer = vi.fn((config) => config);
+    const RectangleMarker = vi.fn();
+
+    currentStatementFrameLayer({ layer, RectangleMarker } as never, () => ({ from: 0, to: 1 }));
+
+    expect(layer).toHaveBeenCalledWith(expect.objectContaining({ above: true, class: "cm-db-currentStatementFrameLayer" }));
   });
 });

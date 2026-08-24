@@ -176,6 +176,7 @@ mod tests {
         NacosAdminConfig {
             implementation: Some(NacosImplementation::RNacos),
             version_mode: None,
+            api_plane: None,
             server_addr: "http://127.0.0.1:8848".to_string(),
             display_server_addr: "http://127.0.0.1:8848".to_string(),
             namespace: "public".to_string(),

@@ -13,6 +13,7 @@ export interface QueryEditorTableReferencePayload {
   columnName?: string;
   referenceType?: "database" | "table" | "column";
   databaseType?: DatabaseType;
+  driverProfile?: string;
 }
 
 export interface QueryEditorTableReferenceDropDetail {
@@ -23,7 +24,16 @@ export interface QueryEditorTableReferenceDropDetail {
 
 let activeTableReferencePayload: QueryEditorTableReferencePayload | null = null;
 
-export function createTableReferencePayload(options: { connectionId?: string; database?: string; schema?: string; tableName?: string; columnName?: string; referenceType?: "database" | "table" | "column"; databaseType?: DatabaseType }): QueryEditorTableReferencePayload | null {
+export function createTableReferencePayload(options: {
+  connectionId?: string;
+  database?: string;
+  schema?: string;
+  tableName?: string;
+  columnName?: string;
+  referenceType?: "database" | "table" | "column";
+  databaseType?: DatabaseType;
+  driverProfile?: string;
+}): QueryEditorTableReferencePayload | null {
   if (!options.connectionId || options.database == null) return null;
   const referenceType = options.referenceType ?? (options.columnName ? "column" : "table");
   if (referenceType !== "database" && !options.tableName) return null;
@@ -43,6 +53,7 @@ export function createTableReferencePayload(options: { connectionId?: string; da
   }
   if (options.schema) payload.schema = options.schema;
   if (options.databaseType) payload.databaseType = options.databaseType;
+  if (options.driverProfile) payload.driverProfile = options.driverProfile;
   return payload;
 }
 
@@ -65,6 +76,7 @@ export function parseTableReferencePayload(value: string | undefined | null): Qu
         referenceType: "database",
       };
       if (parsed.databaseType) payload.databaseType = parsed.databaseType;
+      if (typeof parsed.driverProfile === "string" && parsed.driverProfile) payload.driverProfile = parsed.driverProfile;
       return payload;
     }
     if (typeof parsed.tableName !== "string" || !parsed.tableName) return null;
@@ -83,6 +95,7 @@ export function parseTableReferencePayload(value: string | undefined | null): Qu
     }
     if (typeof parsed.schema === "string" && parsed.schema) payload.schema = parsed.schema;
     if (parsed.databaseType) payload.databaseType = parsed.databaseType;
+    if (typeof parsed.driverProfile === "string" && parsed.driverProfile) payload.driverProfile = parsed.driverProfile;
     return payload;
   } catch {
     return null;
@@ -126,6 +139,7 @@ export function tableReferenceInsertText(payload: QueryEditorTableReferencePaylo
   const tableName = payload.tableName || payload.database;
   return qualifiedTableName({
     databaseType,
+    driverProfile: payload.driverProfile,
     schema: payload.schema,
     tableName,
   });

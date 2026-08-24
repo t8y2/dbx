@@ -122,7 +122,7 @@ describe("native RedisJSON editor", () => {
   });
 
   it("uses the same foldable source editor as JSON strings and hash fields", () => {
-    const stringEditor = findTemplateElement((element) => element.tag === "RedisJsonEditor" && directiveExpression(element, "if") === "stringValueView === 'json' && stringValueDetail.json");
+    const stringEditor = findTemplateElement((element) => element.tag === "RedisJsonEditor" && directiveExpression(element, "if") === "stringValueView === 'json' && stringValueDetail.json && stringValueCodec === 'none'");
     const nativeJsonBranch = findTemplateElement((element) => directiveExpression(element, "else-if") === "redisKind === 'json'");
     const hashEditor = findTemplateElement((element) => element.tag === "RedisJsonEditor" && directiveExpression(element, "if") === "isEditingHashJson");
     const nativeJsonEditors = templateElements(nativeJsonBranch).filter((element) => element.tag === "RedisJsonEditor");
@@ -257,8 +257,8 @@ describe("native RedisJSON editor", () => {
     expect(unsavedDraft.getText()).toContain("hasRetainedStringDraft.value");
     expect(unsavedDraft.getText()).toContain("hasRetainedMemberDraft.value");
     expect(textFormat.getText()).toContain('format === "json"');
-    expect(labels.some((element) => element.tag === "label" && directiveExpression(element, "if") === "isTextRedisFormat(stringValueView)")).toBe(true);
-    expect(labels.some((element) => element.tag === "label" && directiveExpression(element, "if") === "isTextRedisFormat(memberValueView)")).toBe(true);
+    expect(labels.some((element) => element.tag === "label" && directiveExpression(element, "if") === "isTextRedisFormat(stringValueView) || activeStructuredStringDetail || isDecompressCodec(stringValueCodec)")).toBe(true);
+    expect(labels.some((element) => element.tag === "label" && directiveExpression(element, "if") === "isTextRedisFormat(memberValueView) || activeStructuredMemberDetail || isDecompressCodec(memberValueCodec)")).toBe(true);
     expect(directiveExpression(stringTextarea, "bind", "readonly")).toBe("!canEditCurrentStringFormat || savingString");
     expect(directiveExpression(memberTextarea, "bind", "readonly")).toBe("savingMember");
     expect(directiveExpression(refreshButton, "bind", "disabled")).toBe("loading || refreshingValue || hasUnsavedRedisDraft");

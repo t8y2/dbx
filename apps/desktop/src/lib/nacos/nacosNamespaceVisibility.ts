@@ -4,7 +4,11 @@ type NacosNamespaceAccessClient = {
   nacosListNamespaces(connectionId: string): Promise<NacosNamespaceInfo[]>;
 };
 
-/** The backend applies account authorization or an explicitly configured namespace scope. */
+/**
+ * The backend returns namespaces verified through authorization metadata, or,
+ * for this explicit user action, by checking configuration and service reads.
+ * It never returns merely enumerable namespaces as selectable access scope.
+ */
 export async function loadReadableNacosNamespaces(connectionId: string, client: NacosNamespaceAccessClient): Promise<NacosNamespaceInfo[]> {
   return normalizeNacosNamespacesForDisplay(await client.nacosListNamespaces(connectionId));
 }

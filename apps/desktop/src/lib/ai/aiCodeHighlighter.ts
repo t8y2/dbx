@@ -58,6 +58,38 @@ export async function createAiShikiCodeHighlighter(options: AiShikiCodeHighlight
     });
 }
 
+/**
+ * Like `createAiShikiCodeHighlighter`, but keeps shiki's per-line `.line`
+ * wrappers (structure "classic") instead of flattening them away. Callers
+ * that lay out code as a block — one line per row, e.g. with CSS-counter
+ * line numbers — need this; `structure: "inline"` discards the `.line`
+ * elements entirely, so counters/line-based layout silently no-op.
+ */
+export async function createAiShikiBlockCodeHighlighter(options: AiShikiCodeHighlighterOptions): Promise<AiCodeHighlighter> {
+  const highlighter = await getAiShikiHighlighter();
+  return (content, lang, appearance = options.appearance()) => {
+    const html = highlighter.codeToHtml(content, {
+      lang: resolveShikiLanguage(lang),
+      structure: "classic",
+      theme: SHIKI_THEMES[appearance],
+    });
+    return extractShikiCodeInnerHtml(html);
+  };
+}
+
+/**
+ * Shiki's "classic" structure wraps lines in `<pre ...><code ...>...</code></pre>`;
+ * callers that supply their own `<pre>/<code>` shell only want what's inside.
+ * It also joins `<span class="line">` siblings with a literal "\n" text node —
+ * redundant once `.line{display:block}` already breaks each line, and doubles
+ * the visual line spacing under `white-space:pre` if left in.
+ */
+function extractShikiCodeInnerHtml(html: string): string {
+  const match = /<code[^>]*>([\s\S]*)<\/code>/.exec(html);
+  const inner = match ? match[1] : html;
+  return inner.replace(/<\/span>\n/g, "</span>");
+}
+
 function getAiShikiHighlighter(): Promise<ShikiHighlighter> {
   highlighterPromise ??= loadAiShikiHighlighter();
   return highlighterPromise;

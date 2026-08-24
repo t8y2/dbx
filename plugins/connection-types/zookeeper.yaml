@@ -1,0 +1,32 @@
+schemaVersion: 1
+order: 680
+dbType: zookeeper
+rustVariant: ZooKeeper
+label: Apache ZooKeeper
+runtimeMode: agent
+mcpMode: bridge
+agentKey: zookeeper
+driverStoreVisible: true
+driverStoreOrder: 40
+singleConnectionPool: false
+metadataConnectionScoped: false
+skipTcpProbe: true
+defaultPort: 2181
+supportLevel: connect
+capabilities:
+  queryExecution: true
+  metadataBrowse: false
+  objectBrowser: false
+  objectSource: false
+  schemaSearch: true
+  diagram: false
+  tableDataEdit: false
+  tableStructureEdit: false
+  tableImport: false
+  dataTransfer: false
+  sqlFileExecution: false
+  databaseCreate: false
+  fieldLineage: false
+  sqlExplain: false
+  userAdmin: false
+  driverManagement: true

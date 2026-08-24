@@ -2,7 +2,7 @@
 import { computed, ref, watch, nextTick, onUnmounted } from "vue";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { X, Pin, ChevronDown, Search, Table2, Code2, TableProperties, PencilRuler, KeyRound, Pencil, Package, Lock, Copy, AlertTriangle, Network, Minimize2, Maximize2, Settings, CalendarClock, Activity, Gauge, ShieldCheck, Database, GitBranch } from "@lucide/vue";
+import { X, Pin, ChevronDown, Search, Table2, Code2, TableProperties, PencilRuler, KeyRound, Pencil, Package, Lock, Copy, AlertTriangle, Network, Minimize2, Maximize2, Settings, CalendarClock, Activity, Gauge, ShieldCheck, Database, GitBranch, Crosshair } from "@lucide/vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -19,6 +19,7 @@ import { connectionColor, isConnectionReadonly, tabDisplayTitle, tabTooltipLines
 import { hexToRgba } from "@/lib/common/color";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { useToast } from "@/composables/useToast";
+import { activeTabSidebarTarget } from "@/lib/sidebar/sidebarActiveTabTarget";
 import type { QueryTab } from "@/types/database";
 
 const props = defineProps<{
@@ -31,6 +32,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   "activate-tab": [];
+  "locate-tab": [tab: QueryTab];
   "activate-driver-store": [];
   "close-driver-store": [];
   "activate-settings-page": [];
@@ -317,6 +319,12 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
         }
       },
       icon: Copy,
+    },
+    {
+      label: t("sidebar.locateActiveTab"),
+      action: () => emit("locate-tab", tab),
+      icon: Crosshair,
+      visible: !!activeTabSidebarTarget(tab),
     },
     { label: "", separator: true },
     {

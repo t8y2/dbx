@@ -14,6 +14,18 @@ describe("MCP config templates", () => {
     });
   });
 
+  it("preserves the standard mcpServers launch config for ZCode full configuration", () => {
+    const launch = {
+      command: "node",
+      args: ["C:\\dbx\\mcp\\dist\\index.js"],
+      env: { DBX_DATA_DIR: "D:\\DBX Data" },
+    };
+    const config = JSON.parse(buildMcpJsonConfig(launch));
+
+    expect(config).toEqual({ mcpServers: { dbx: launch } });
+    expect(config).not.toHaveProperty("mcp");
+  });
+
   it("builds the standard mcpServers JSON used by the Pi agent", () => {
     expect(JSON.parse(buildMcpPiConfig())).toEqual({
       mcpServers: {

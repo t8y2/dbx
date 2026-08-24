@@ -6055,6 +6055,8 @@ export default withEnglishFallback({
     showExecutionTargetPickerDescription: "Al activarlo, ejecutar sin selección permite elegir entre la sentencia actual y todo el SQL.",
     showStatementRunButtons: "Mostrar botones de ejecución laterales",
     showStatementRunButtonsDescription: "Muestra botones para ejecutar cada sentencia en el margen del editor SQL. Los atajos de teclado y el menú contextual seguirán funcionando al desactivarlo.",
+    showLineNumbers: "Mostrar números de línea",
+    showLineNumbersDescription: "Mostrar números de línea en el margen del editor SQL",
     showCurrentStatementFrame: "Mostrar marco de la sentencia actual",
     showCurrentStatementFrameDescription: "Al activarlo, el editor SQL dibuja un contorno alrededor de la sentencia ejecutable actual; al desactivarlo, se oculta.",
     showInsertValueHints: "Mostrar pistas de columnas en VALUES de INSERT",

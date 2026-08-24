@@ -5373,6 +5373,8 @@ export default withEnglishFallback({
     showExecutionTargetPickerDescription: "啟用後，無選取執行時可在目前語句與全部 SQL 之間臨時選擇。",
     showStatementRunButtons: "顯示左側執行按鈕",
     showStatementRunButtonsDescription: "在 SQL 編輯器左側顯示按語句執行的快捷按鈕。關閉後仍可透過快捷鍵和右鍵選單執行。",
+    showLineNumbers: "顯示行號",
+    showLineNumbersDescription: "在 SQL 編輯器左側顯示行號",
     showCurrentStatementFrame: "顯示目前語句外框線",
     showCurrentStatementFrameDescription: "啟用後，在 SQL 編輯器中用外框線標出目前可執行語句；關閉後不顯示外框線。",
     showInsertValueHints: "顯示 INSERT 值欄位提示",

@@ -6055,6 +6055,8 @@ export default withEnglishFallback({
     showExecutionTargetPickerDescription: "Se attivo, l'esecuzione senza selezione permette di scegliere tra istruzione corrente e tutto l'SQL.",
     showStatementRunButtons: "Mostra pulsanti di esecuzione laterali",
     showStatementRunButtonsDescription: "Mostra nel margine dell'editor SQL i pulsanti per eseguire ogni istruzione. Scorciatoie da tastiera e menu contestuale continuano a funzionare quando disattivati.",
+    showLineNumbers: "Mostra numeri di riga",
+    showLineNumbersDescription: "Mostra i numeri di riga nel margine dell'editor SQL",
     showCurrentStatementFrame: "Mostra cornice istruzione corrente",
     showCurrentStatementFrameDescription: "Se attivo, l'editor SQL disegna un contorno intorno all'istruzione eseguibile corrente; se disattivato, il contorno è nascosto.",
     showInsertValueHints: "Mostra suggerimenti colonne nei VALUES di INSERT",

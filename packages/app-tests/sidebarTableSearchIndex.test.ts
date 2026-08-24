@@ -12,7 +12,7 @@
 // and never for an empty (cleared) query.
 import { expect, test, vi } from "vitest";
 import assert from "node:assert/strict";
-import { createSidebarTableSearchDebouncer, loadOrBuildSidebarTableSearchIndex, scheduleExclusiveSidebarTableSearchDebounce } from "../../apps/desktop/src/lib/sidebar/sidebarTableSearchIndex.ts";
+import { createSidebarTableSearchDebouncer, invalidateSidebarTableSearchBuild, loadOrBuildSidebarTableSearchIndex, scheduleExclusiveSidebarTableSearchDebounce } from "../../apps/desktop/src/lib/sidebar/sidebarTableSearchIndex.ts";
 import type { TableInfo } from "../../apps/desktop/src/types/database.ts";
 
 const TARGET: TableInfo = { name: "T_Erp_Nc_SuPlan_List", table_type: "TABLE", comment: null };
@@ -64,10 +64,7 @@ test("concurrent first-use searches share a single in-flight build", async () =>
     await new Promise((resolve) => setTimeout(resolve, 20));
     return [TARGET];
   });
-  const [first, second] = await Promise.all([
-    loadOrBuildSidebarTableSearchIndex("scope", "erpncs", read, build),
-    loadOrBuildSidebarTableSearchIndex("scope", "erpncs", read, build),
-  ]);
+  const [first, second] = await Promise.all([loadOrBuildSidebarTableSearchIndex("scope", "erpncs", read, build), loadOrBuildSidebarTableSearchIndex("scope", "erpncs", read, build)]);
   assert.deepEqual(first, [TARGET]);
   assert.deepEqual(second, [TARGET]);
   expect(build).toHaveBeenCalledTimes(1);
@@ -77,10 +74,7 @@ test("parallel builds for different scopes run independently", async () => {
   const read = async () => null;
   const buildA = vi.fn(async () => [TARGET]);
   const buildB = vi.fn(async () => [{ name: "other", table_type: "TABLE", comment: null }]);
-  const [a, b] = await Promise.all([
-    loadOrBuildSidebarTableSearchIndex("scope-a", "erpncs", read, buildA),
-    loadOrBuildSidebarTableSearchIndex("scope-b", "erpncs", read, buildB),
-  ]);
+  const [a, b] = await Promise.all([loadOrBuildSidebarTableSearchIndex("scope-a", "erpncs", read, buildA), loadOrBuildSidebarTableSearchIndex("scope-b", "erpncs", read, buildB)]);
   assert.deepEqual(a, [TARGET]);
   assert.deepEqual(b, [{ name: "other", table_type: "TABLE", comment: null }]);
   expect(buildA).toHaveBeenCalledTimes(1);
@@ -101,12 +95,42 @@ test("concurrent refreshes for the same scope share a single in-flight build", a
     await new Promise((resolve) => setTimeout(resolve, 20));
     return [TARGET];
   });
-  const results = await Promise.all([
-    loadOrBuildSidebarTableSearchIndex("scope", "", read, build, true),
-    loadOrBuildSidebarTableSearchIndex("scope", "", read, build, true),
-  ]);
+  const results = await Promise.all([loadOrBuildSidebarTableSearchIndex("scope", "", read, build, true), loadOrBuildSidebarTableSearchIndex("scope", "", read, build, true)]);
   assert.deepEqual(results, [[TARGET], [TARGET]]);
   expect(build).toHaveBeenCalledTimes(1);
+});
+
+test("invalidating a scope lets a replacement build bypass stale in-flight work", async () => {
+  let releaseStale!: () => void;
+  const staleGate = new Promise<void>((resolve) => {
+    releaseStale = resolve;
+  });
+  let releaseFresh!: () => void;
+  const freshGate = new Promise<void>((resolve) => {
+    releaseFresh = resolve;
+  });
+  const staleBuild = vi.fn(async () => {
+    await staleGate;
+    return [TARGET];
+  });
+  const fresh = { name: "fresh", table_type: "TABLE", comment: null } satisfies TableInfo;
+  const freshBuild = vi.fn(async () => {
+    await freshGate;
+    return [fresh];
+  });
+
+  const staleRequest = loadOrBuildSidebarTableSearchIndex("scope-invalidated", "old", async () => null, staleBuild, true);
+  await vi.waitFor(() => expect(staleBuild).toHaveBeenCalledTimes(1));
+  invalidateSidebarTableSearchBuild("scope-invalidated");
+  const freshRequest = loadOrBuildSidebarTableSearchIndex("scope-invalidated", "fresh", async () => null, freshBuild, true);
+
+  await vi.waitFor(() => expect(freshBuild).toHaveBeenCalledTimes(1));
+  releaseStale();
+  await expect(staleRequest).resolves.toEqual([TARGET]);
+  const concurrentFreshRequest = loadOrBuildSidebarTableSearchIndex("scope-invalidated", "fresh", async () => null, freshBuild, true);
+  expect(freshBuild).toHaveBeenCalledTimes(1);
+  releaseFresh();
+  await expect(Promise.all([freshRequest, concurrentFreshRequest])).resolves.toEqual([[fresh], [fresh]]);
 });
 
 test("rapid consecutive schedules coalesce into a single run", () => {

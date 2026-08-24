@@ -16,6 +16,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "executeAllOnBlankLine",
   "showExecutionTargetPicker",
   "showStatementRunButtons",
+  "showLineNumbers",
   "showCurrentStatementFrame",
   "showInsertValueHints",
   "autoAliasTables",

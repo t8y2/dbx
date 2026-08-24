@@ -107,6 +107,7 @@ import type { SqlHighlighter } from "@/lib/sql/sqlHighlighter";
 import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, editorDiagnosticColors, editorThemeAppearanceFor, loadEditorTheme, editorFontTheme, shellLineCommentTheme, sqlCompletionTheme, sqlSemanticHighlightTheme } from "@/lib/editor/editorThemes";
 import { createStatementGutterMarkerDom, shouldShowStatementGutter } from "@/lib/editor/codemirrorStatementGutter";
 import { createQueryEditorSearchKeymap } from "@/lib/editor/queryEditorSearchKeymap";
+import { buildQueryEditorLineNumbersExtension } from "@/lib/editor/queryEditorLineNumbers";
 import { searchKeymapWithoutModD } from "@/lib/editor/codemirrorSearchKeymap";
 import { defaultKeymapForGlobalShortcuts } from "@/lib/editor/codemirrorDefaultKeymap";
 import { appendSqlCompletionSpace } from "@/lib/editor/sqlCompletionInsertion";
@@ -512,12 +513,14 @@ interface EditorGestureEvent extends Event {
 }
 
 let editorViewModule: typeof import("@codemirror/view") | null = null;
+let codeMirrorLineNumbers: typeof import("@codemirror/view").lineNumbers | null = null;
 let codeMirrorPrec: typeof import("@codemirror/state").Prec | null = null;
 let codeMirrorEditorSelection: typeof import("@codemirror/state").EditorSelection | null = null;
 let hoverCloseEffect: StateEffect<unknown> | null = null;
 let fontThemeComp: import("@codemirror/state").Compartment | null = null;
 let codeMirrorTheme: import("@codemirror/state").Compartment | null = null;
 let wordWrapComp: import("@codemirror/state").Compartment | null = null;
+let lineNumbersComp: import("@codemirror/state").Compartment | null = null;
 let vimModeComp: import("@codemirror/state").Compartment | null = null;
 let closeBracketsComp: import("@codemirror/state").Compartment | null = null;
 let sqlLanguageComp: import("@codemirror/state").Compartment | null = null;
@@ -694,6 +697,7 @@ const queryEditorAppearanceSettings = computed(() => {
     autoCloseBrackets: settings.autoCloseBrackets,
     showCurrentStatementFrame: settings.showCurrentStatementFrame,
     showInsertValueHints: settings.showInsertValueHints,
+    showLineNumbers: settings.showLineNumbers,
     shortcuts: settings.shortcuts,
     showStatementRunButtons: settings.showStatementRunButtons,
   };
@@ -2051,6 +2055,14 @@ function waitForCompletionTab(view: EditorViewType): boolean {
 function wordWrapExtension() {
   if (!editorViewModule) return [];
   return props.forceWordWrap || settingsStore.editorSettings.wordWrap ? editorViewModule.EditorView.lineWrapping : [];
+}
+
+function lineNumbersExtension(enabled = settingsStore.editorSettings.showLineNumbers) {
+  return buildQueryEditorLineNumbersExtension(codeMirrorLineNumbers, enabled, {
+    domEventHandlers: {
+      mousedown: selectSqlLineFromGutter,
+    },
+  });
 }
 
 function closeBracketsExtension(enabled = settingsStore.editorSettings.autoCloseBrackets) {
@@ -4649,12 +4661,14 @@ onMounted(async () => {
     rectangularSelection,
   } as typeof import("@codemirror/view");
   hoverCloseEffect = closeHoverTooltips;
+  codeMirrorLineNumbers = lineNumbers;
   codeMirrorPrec = Prec;
   codeMirrorEditorSelection = EditorSelection;
   codeMirrorSnippetCompletion = snippetCompletion;
   fontThemeComp = new Compartment();
   codeMirrorTheme = new Compartment();
   wordWrapComp = new Compartment();
+  lineNumbersComp = new Compartment();
   vimModeComp = new Compartment();
   closeBracketsComp = new Compartment();
   sqlLanguageComp = new Compartment();
@@ -5115,11 +5129,7 @@ onMounted(async () => {
         scrollToMatch: (range) => EditorView.scrollIntoView(range, { y: "center" }),
       }),
       runGutterComp.of(runStatementGutterExtension()),
-      lineNumbers({
-        domEventHandlers: {
-          mousedown: selectSqlLineFromGutter,
-        },
-      }),
+      lineNumbersComp.of(lineNumbersExtension(initialSettings.showLineNumbers)),
       currentStatementFrameExtension,
       highlightActiveLineGutter(),
       highlightSpecialChars(),
@@ -5763,7 +5773,7 @@ function getCurrentCustomThemeColors() {
 watch(
   [queryEditorAppearanceSettings, () => isDark.value, () => themePalette.value, editorThemeAppearance],
   async ([ss]) => {
-    if (!view.value || !codeMirrorTheme || !fontThemeComp || !wordWrapComp || !vimModeComp || !closeBracketsComp || !runGutterComp || !runKeymapComp || !editorViewModule) {
+    if (!view.value || !codeMirrorTheme || !fontThemeComp || !wordWrapComp || !lineNumbersComp || !vimModeComp || !closeBracketsComp || !runGutterComp || !runKeymapComp || !editorViewModule) {
       return;
     }
     if (!isGestureZooming.value && !zoomCommitScheduler.hasPendingCommit() && liveFontSize.value !== ss.fontSize) {
@@ -5773,13 +5783,14 @@ watch(
     syncEditorDiagnosticCssVars();
     const themeColors = getCurrentCustomThemeColors();
     const [themeExt] = await Promise.all([loadEditorTheme(ss.theme, editorThemeAppearance(), themeColors, themePalette.value), ss.vimModeEnabled ? ensureCodeMirrorVim() : Promise.resolve(false)]);
-    if (!view.value || !codeMirrorTheme || !wordWrapComp || !vimModeComp || !closeBracketsComp || !runGutterComp || !runKeymapComp || !editorViewModule) {
+    if (!view.value || !codeMirrorTheme || !wordWrapComp || !lineNumbersComp || !vimModeComp || !closeBracketsComp || !runGutterComp || !runKeymapComp || !editorViewModule) {
       return;
     }
     view.value.dispatch({
       effects: [
         codeMirrorTheme.reconfigure(themeExt),
         wordWrapComp.reconfigure(props.forceWordWrap || ss.wordWrap ? editorViewModule.EditorView.lineWrapping : []),
+        lineNumbersComp.reconfigure(lineNumbersExtension(ss.showLineNumbers)),
         vimModeComp.reconfigure(vimModeExtension(settingsStore.editorSettings.vimModeEnabled)),
         closeBracketsComp.reconfigure(closeBracketsExtension(settingsStore.editorSettings.autoCloseBrackets)),
         runGutterComp.reconfigure(runStatementGutterExtension()),

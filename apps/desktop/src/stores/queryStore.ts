@@ -5139,10 +5139,14 @@ export const useQueryStore = defineStore("query", () => {
         executionPromise = (async () => {
           const txnSessionId = tab.txnSessionId;
           if (!txnSessionId) throw new Error("Manual transaction session was not initialized");
+          const executeInTransaction = (sessionId: string) =>
+            useAgentResultSession
+              ? api.executeInManualTransaction(sessionId, sqlToExecute, executionDatabase, executionSchema, agentProtocolQueryResultMaxRows(queryResultMaxRows), useOracleLobPreview, pageLimit, options?.pagination?.sessionId)
+              : api.executeInManualTransaction(sessionId, sqlToExecute, executionDatabase, executionSchema, pageLimit ?? agentProtocolQueryResultMaxRows(queryResultMaxRows), useOracleLobPreview);
           try {
-            return await api.executeInManualTransaction(txnSessionId, sqlToExecute, executionDatabase, executionSchema, pageLimit ?? agentProtocolQueryResultMaxRows(queryResultMaxRows), useOracleLobPreview);
+            return await executeInTransaction(txnSessionId);
           } catch (error) {
-            if (manualTransactionRecoveryAttempted || !isManualTransactionSessionExpired(error)) throw error;
+            if (options?.pagination?.sessionId || manualTransactionRecoveryAttempted || !isManualTransactionSessionExpired(error)) throw error;
             manualTransactionRecoveryAttempted = true;
             tab.txnSessionId = undefined;
             tab.txnAutoRolledBack = true;
@@ -5150,7 +5154,7 @@ export const useQueryStore = defineStore("query", () => {
             const refreshedSessionId = await api.beginManualTransaction(executionConnectionId, executionDatabase, executionSchema, executionCatalog);
             tab.txnSessionId = refreshedSessionId;
             queryExecutionLog("info", "manual-txn:restarted", { traceId, txnSessionId: refreshedSessionId, elapsed: elapsed() });
-            return api.executeInManualTransaction(refreshedSessionId, sqlToExecute, executionDatabase, executionSchema, pageLimit ?? agentProtocolQueryResultMaxRows(queryResultMaxRows), useOracleLobPreview);
+            return executeInTransaction(refreshedSessionId);
           }
         })();
       } else {

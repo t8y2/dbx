@@ -37,6 +37,30 @@ describe("settings search", () => {
     { id: "desktop", category: "about", titleKey: "hidden", visible: ({ isWeb }) => !isWeb },
   ];
 
+  it("indexes the query editor line-number preference", () => {
+    const definition = SETTINGS_SEARCH_DEFINITIONS.find((entry) => entry.id === "editor-line-numbers");
+    expect(definition).toEqual({
+      id: "editor-line-numbers",
+      category: "editor",
+      titleKey: "settings.showLineNumbers",
+      descriptionKey: "settings.showLineNumbersDescription",
+      targetId: "editor",
+    });
+
+    const entries = resolveSettingsSearchEntries(
+      [definition!],
+      { isWeb: false, visibleCategories: new Set<SettingsCategory>(["editor"]) },
+      (key) =>
+        ({
+          "settings.showLineNumbers": "Show line numbers",
+          "settings.showLineNumbersDescription": "Show line numbers in the SQL editor gutter",
+        })[key] ?? key,
+      categoryLabels,
+    );
+
+    expect(searchSettings(entries, "line number", "en").map((entry) => entry.id)).toEqual(["editor-line-numbers"]);
+  });
+
   it("does not index connection or query timeout under editor settings", () => {
     expect(SETTINGS_SEARCH_DEFINITIONS.map((definition) => definition.id)).not.toContain("editor-global-connect-timeout");
     expect(SETTINGS_SEARCH_DEFINITIONS.map((definition) => definition.id)).not.toContain("editor-global-query-timeout");

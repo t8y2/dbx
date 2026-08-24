@@ -109,6 +109,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "editor-execute-all-on-blank-line", category: "editor", titleKey: "settings.executeAllOnBlankLine", descriptionKey: "settings.executeAllOnBlankLineDescription", targetId: "editor" },
   { id: "editor-execution-target", category: "editor", titleKey: "settings.showExecutionTargetPicker", descriptionKey: "settings.showExecutionTargetPickerDescription", targetId: "editor" },
   { id: "editor-run-buttons", category: "editor", titleKey: "settings.showStatementRunButtons", descriptionKey: "settings.showStatementRunButtonsDescription", targetId: "editor" },
+  { id: "editor-line-numbers", category: "editor", titleKey: "settings.showLineNumbers", descriptionKey: "settings.showLineNumbersDescription", targetId: "editor" },
   { id: "editor-statement-frame", category: "editor", titleKey: "settings.showCurrentStatementFrame", descriptionKey: "settings.showCurrentStatementFrameDescription", targetId: "editor" },
   { id: "editor-value-hints", category: "editor", titleKey: "settings.showInsertValueHints", descriptionKey: "settings.showInsertValueHintsDescription", targetId: "editor" },
   { id: "editor-word-wrap", category: "editor", titleKey: "settings.wordWrap", descriptionKey: "settings.wordWrapDescription", targetId: "editor" },

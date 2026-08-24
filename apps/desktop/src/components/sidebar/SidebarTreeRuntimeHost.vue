@@ -982,6 +982,10 @@ function runRowClickAction(clickDetail: number, requestId: number) {
     return;
   }
   if (node.type === "event") {
+    void openObjectBrowser(false, true);
+    return;
+  }
+  if (node.type === "group-events") {
     void openObjectBrowser();
     return;
   }
@@ -1343,7 +1347,7 @@ function requestDeleteSelectedNode(): boolean {
 function onDoubleClick(event: MouseEvent) {
   if (dataTabOpenModeFromTreeClick(activeNode.value.type, event, settingsStore.editorSettings.shortcuts.openDataInNewTab) === "new-tab") return;
   if (activeNode.value.type === "event") {
-    void openObjectBrowser();
+    void openObjectBrowser(false, true);
     return;
   }
   if (activeNode.value.type === "group-events") {

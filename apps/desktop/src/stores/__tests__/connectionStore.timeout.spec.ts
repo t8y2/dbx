@@ -674,7 +674,9 @@ describe("connectionStore timeout recovery", () => {
       connectDb,
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
       disconnectDb,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
       saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
       saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
     }));
 
@@ -736,7 +738,9 @@ describe("connectionStore timeout recovery", () => {
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
       disconnectDb,
       listInstalledAgents: vi.fn().mockResolvedValue([]),
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
       saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
       saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
     }));
 
@@ -776,7 +780,9 @@ describe("connectionStore timeout recovery", () => {
       connectDb,
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
       disconnectDb,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
       saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
       saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
     }));
 

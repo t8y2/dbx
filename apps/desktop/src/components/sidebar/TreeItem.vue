@@ -294,7 +294,7 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
     case "trigger":
       return { icon: Zap, colorClass: "text-orange-300" };
     case "event":
-      return { icon: Clock, colorClass: "text-orange-300" };
+      return { icon: Clock, colorClass: "text-orange-400" };
     case "redis-db":
       return { icon: Database, colorClass: "text-red-400" };
     case "mq-tenant":

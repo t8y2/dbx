@@ -40,7 +40,7 @@
     "apps/desktop/src/lib/diagram/erDiagram.ts": "1b9522b41cd2ee15ef04dc11e0f855459287fca2d5e0f551263dfc6f8de5764e",
     "apps/desktop/src/styles/tokens.css": "b8852ce50865ad98ebc992971f7a06670c5d830ca82efcee956f8d3eb7c2e9a3",
     "apps/desktop/tsconfig.json": "5ad521941835ad8529e9b81ba79c11650e5f020f0e376b7a9f17e22a9306fa76",
-    "apps/desktop/vite.docs-export.config.ts": "edfb240d8b73e7dfca309f25bc03ea7612dfc8239f11f971d57daeadd8347161"
+    "apps/desktop/vite.docs-export.config.ts": "833bc2cbd99f9c0740cbc1584640458492bad75c9518db4d1ce0edd6958881ec"
   },
   "deps": {
     "@vue/reactivity": "3.5.35",

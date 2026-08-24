@@ -38,6 +38,10 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).not.toContain("globalQueryTimeoutSecs");
   });
 
+  it("includes showLineNumbers", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("showLineNumbers");
+  });
+
   it("includes continueOnErrorOnBatch", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("continueOnErrorOnBatch");
   });
@@ -103,6 +107,16 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
 });
 
 describe("editorSettingsDraftFromSettings", () => {
+  it("round-trips a hidden line-number preference through the draft patch", () => {
+    const settings = makeSettings({ showLineNumbers: true });
+    const draft = editorSettingsDraftFromSettings(settings);
+    const base = editorSettingsDraftFromSettings(settings);
+
+    draft.showLineNumbers = false;
+
+    expect(editorSettingsPatchFromDraft(draft, base)).toEqual({ showLineNumbers: false });
+  });
+
   it("toggles substitution without discarding per-database overrides", () => {
     const base = editorSettingsDraftFromSettings(
       makeSettings({

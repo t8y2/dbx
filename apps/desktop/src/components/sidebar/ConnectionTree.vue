@@ -746,6 +746,9 @@ function readExpandedSidebarSchemas(): Array<{ id: string; label: string }> {
 // the virtual branch renders. Only container rows stick; children scroll under
 // them until the next container takes over.
 function isPlainStickyContainerNode(node: TreeNode): boolean {
+  // Mirror the virtual branch's sticky overlay: both suppress sticky headers
+  // while a search filter is active so filtered rows don't pin at the top.
+  if (isTreeSearchFiltering.value) return false;
   return DATABASE_LEVEL_TYPES.has(node.type) || SCHEMA_LEVEL_TYPES.has(node.type);
 }
 
@@ -2489,7 +2492,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
           <div class="connection-tree-content">
             <TreeItem
               v-for="item in flatNodes"
-              :key="item.id"
+              :key="item.renderKey"
               :node="item.node"
               :depth="item.depth"
               :reorder-disabled="isRootListPartial"

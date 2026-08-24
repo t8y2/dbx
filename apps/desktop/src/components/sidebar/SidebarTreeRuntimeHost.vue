@@ -4078,7 +4078,10 @@ const canExportAllDatabases = computed(() => {
 });
 
 const canOpenScheduledBackups = computed(() => {
-  return isTauriRuntime() && supportsScheduledDatabaseBackup(currentDatabaseType());
+  // Match the backup page/engine, which filter and key off the raw db_type
+  // (effectiveDatabaseTypeForConnection maps gbase/mysql-dialect jdbc to "mysql",
+  // which would show an entry the backup dialog then can't list).
+  return isTauriRuntime() && supportsScheduledDatabaseBackup(rawDatabaseType());
 });
 
 const canOpenDiagram = computed(() => {

@@ -3840,6 +3840,8 @@ export default withEnglishFallback({
     restore: "恢复",
     remove: "移除",
     moveColumnUp: "上移字段",
+    copySelectedColumns: "复制选中的 {count} 个字段",
+    dropSelectedColumns: "删除选中的 {count} 个字段",
     moveColumnDown: "下移字段",
     dragColumn: "拖拽调整字段顺序",
     localColumnOrderNotice: "字段顺序仅保存在本地，不会修改数据库表结构。",

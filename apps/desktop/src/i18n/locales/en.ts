@@ -3855,6 +3855,8 @@ export default {
     restore: "Restore",
     remove: "Remove",
     moveColumnUp: "Move column up",
+    copySelectedColumns: "Copy selected fields ({count})",
+    dropSelectedColumns: "Drop selected fields ({count})",
     moveColumnDown: "Move column down",
     dragColumn: "Drag to reorder column",
     localColumnOrderNotice: "Column order is saved locally and does not change the database table structure.",

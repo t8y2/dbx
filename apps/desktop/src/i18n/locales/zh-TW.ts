@@ -3410,6 +3410,8 @@ export default withEnglishFallback({
     restore: "復原",
     remove: "移除",
     moveColumnUp: "上移欄位",
+    copySelectedColumns: "複製選中的 {count} 個欄位",
+    dropSelectedColumns: "刪除選中的 {count} 個欄位",
     moveColumnDown: "下移欄位",
     dragColumn: "拖曳調整欄位順序",
     localColumnOrderNotice: "欄位順序僅儲存在本機，不會修改資料庫資料表結構。",

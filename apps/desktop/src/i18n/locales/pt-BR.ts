@@ -3670,6 +3670,8 @@ export default withEnglishFallback({
     restore: "Restaurar",
     remove: "Remover",
     moveColumnUp: "Mover coluna para cima",
+    copySelectedColumns: "Copiar campos selecionados ({count})",
+    dropSelectedColumns: "Excluir campos selecionados ({count})",
     moveColumnDown: "Mover coluna para baixo",
     dragColumn: "Arraste para reordenar colunas",
     localColumnOrderNotice: "A ordem das colunas é salva apenas localmente e não altera a estrutura do banco de dados.",

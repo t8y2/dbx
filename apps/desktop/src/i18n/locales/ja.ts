@@ -3730,6 +3730,8 @@ export default withEnglishFallback({
     restore: "復元",
     remove: "削除",
     moveColumnUp: "列を上に移動",
+    copySelectedColumns: "選択したフィールドをコピー ({count})",
+    dropSelectedColumns: "選択したフィールドを削除 ({count})",
     moveColumnDown: "列を下に移動",
     dragColumn: "ドラッグして列の順序を変更",
     localColumnOrderNotice: "列の順序はローカルにのみ保存され、データベースのテーブル構造は変更されません。",

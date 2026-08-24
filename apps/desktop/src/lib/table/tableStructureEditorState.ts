@@ -1383,6 +1383,27 @@ export function resolveInsertColumnIndex(columns: readonly { id: string; markedF
   return index >= 0 ? index + 1 : columns.length;
 }
 
+/**
+ * Compute the contiguous column-id range for a shift-click in the structure
+ * editor, mirroring the object browser's range-select behavior
+ * (objectBrowserSelection.ts): the range spans every row between the anchor
+ * and the clicked row in visible order, but rows marked for drop are not
+ * selectable and are dropped from the result.
+ */
+export function structureColumnSelectionRange(columns: readonly { id: string; markedForDrop?: boolean }[], anchorId: string, currentId: string): string[] {
+  const anchorIndex = columns.findIndex((column) => column.id === anchorId);
+  const currentIndex = columns.findIndex((column) => column.id === currentId);
+  if (anchorIndex < 0 || currentIndex < 0) {
+    return columns.some((column) => column.id === currentId && !column.markedForDrop) ? [currentId] : [];
+  }
+  const start = Math.min(anchorIndex, currentIndex);
+  const end = Math.max(anchorIndex, currentIndex);
+  return columns
+    .slice(start, end + 1)
+    .filter((column) => !column.markedForDrop)
+    .map((column) => column.id);
+}
+
 function isMysqlDeprecatedDefaultParameterType(baseType: string): boolean {
   const typeName = baseType.split(/\s+/)[0];
   return ["tinyint", "smallint", "mediumint", "int", "integer", "bigint", "float", "double", "real"].includes(typeName ?? "");

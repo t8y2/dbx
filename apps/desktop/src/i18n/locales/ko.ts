@@ -3624,6 +3624,8 @@ export default withEnglishFallback({
     restore: "복원",
     remove: "제거",
     moveColumnUp: "컬럼을 위로 이동",
+    copySelectedColumns: "선택한 필드 복사 ({count})",
+    dropSelectedColumns: "선택한 필드 삭제 ({count})",
     moveColumnDown: "컬럼을 아래로 이동",
     dragColumn: "드래그하여 컬럼 순서 변경",
     localColumnOrderNotice: "컬럼 순서는 로컬에만 저장되며 데이터베이스 테이블 구조를 변경하지 않습니다.",

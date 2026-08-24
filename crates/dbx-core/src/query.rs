@@ -4578,11 +4578,17 @@ pub async fn execute_in_manual_transaction_with_options(
             options.table_data_preview,
         )]);
     }
+    // A result-session cursor can only track one result set, so pagination is
+    // single-statement only. Multi-statement scripts predate pagination: keep
+    // the legacy sequential execution and ignore the pagination options rather
+    // than failing the whole script.
+    let options = if statements.len() != 1 && (options.page_size.is_some() || options.result_session_id.is_some()) {
+        ManualTransactionExecutionOptions { page_size: None, result_session_id: None, ..options }
+    } else {
+        options
+    };
     if options.result_session_id.is_some() && options.page_size.is_none() {
         return Err("Manual transaction result pagination requires a page size".to_string());
-    }
-    if (options.page_size.is_some() || options.result_session_id.is_some()) && statements.len() != 1 {
-        return Err("Manual transaction result pagination supports exactly one statement".to_string());
     }
 
     // Read-only check while the session is still in the map. If this fails the
@@ -7695,6 +7701,120 @@ for line in sys.stdin:
         assert_eq!(second_params["sessionId"], "oracle-go-1");
         assert_eq!(second_params["pageSize"], 100);
         assert!(second_params.get("sql").is_none());
+    }
+
+    /// Spawns a fake Python agent and registers a manual transaction session in
+    /// the app state so `execute_in_manual_transaction_with_options` can run
+    /// end to end without a live database.
+    #[cfg(unix)]
+    async fn manual_transaction_test_state(db_type: DatabaseType) -> (AppState, String, std::path::PathBuf) {
+        use std::io::Write;
+
+        let mut script = tempfile::NamedTempFile::new().unwrap();
+        write!(
+            script,
+            r#"import json
+import sys
+
+print(json.dumps({{"ready": True}}), flush=True)
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request.get("method")
+    if method == "execute_query":
+        sql = request.get("params", {{}}).get("sql", "")
+        row = [sql]
+    else:
+        # commit_manual_transaction / rollback_manual_transaction / disconnect
+        row = []
+    result = {{
+        "columns": ["stmt"],
+        "column_types": [],
+        "column_sortables": [],
+        "rows": [row],
+        "affected_rows": 0,
+        "execution_time_ms": 1,
+        "truncated": False,
+        "session_id": None,
+        "has_more": False
+    }}
+    print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "result": result}}), flush=True)
+"#
+        )
+        .unwrap();
+        script.flush().unwrap();
+
+        let client = AgentDriverClient::spawn(
+            AgentLaunchSpec::new("python3").with_args([script.path().to_string_lossy().to_string()]),
+        )
+        .await
+        .unwrap();
+
+        let dir = std::env::temp_dir().join(format!("dbx-manual-txn-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+        let mut config = test_connection_config(db_type);
+        config.id = "agent-conn".to_string();
+        state.configs.write().await.insert(config.id.clone(), config);
+
+        let txn_session_id = uuid::Uuid::new_v4().to_string();
+        let client_session_id = format!("manual-txn-{}", uuid::Uuid::new_v4());
+        // The session pool is not registered in the state map; on commit or
+        // rollback the detach reports "not found" and the cleanup guard is
+        // disarmed, matching production flows where the pool was already gone.
+        let cleanup_guard = state
+            .workload_session_pool_cleanup_guard("agent-conn", None, &client_session_id)
+            .await
+            .expect("agent connections get a session-scoped cleanup guard");
+        state.transaction_sessions.write().await.insert(
+            txn_session_id.clone(),
+            TransactionSession {
+                connection: Arc::new(tokio::sync::Mutex::new(TxnConnection::Agent {
+                    client: Arc::new(crate::db::agent_driver::PooledAgentClient::new(client)),
+                    client_session_id,
+                    database: None,
+                    cleanup_guard,
+                })),
+                pool_key: "agent-conn".to_string(),
+                last_activity: std::time::Instant::now(),
+                busy: false,
+                connection_id: "agent-conn".to_string(),
+                database: "ORCL".to_string(),
+                schema: None,
+            },
+        );
+        (state, txn_session_id, dir)
+    }
+
+    /// Regression: multi-statement scripts under a manual transaction must keep
+    /// executing sequentially even when pagination options are set — they are
+    /// ignored instead of failing the script (single-statement pagination stays
+    /// cursor-based).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn manual_transaction_multi_statement_script_ignores_pagination_options() {
+        let (state, txn_session_id, dir) = manual_transaction_test_state(DatabaseType::Oracle).await;
+
+        let results = execute_in_manual_transaction_with_options(
+            &state,
+            &txn_session_id,
+            "SELECT 1 FROM DUAL; SELECT 2 FROM DUAL",
+            "ORCL",
+            None,
+            ManualTransactionExecutionOptions { max_rows: Some(100), page_size: Some(100), ..Default::default() },
+        )
+        .await
+        .expect("multi-statement script executes sequentially");
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].result.rows[0][0], serde_json::json!("SELECT 1 FROM DUAL"));
+        assert_eq!(results[1].result.rows[0][0], serde_json::json!("SELECT 2 FROM DUAL"));
+        // Both statements ran on the plain execute path — no cursor session was
+        // opened, so nothing leaks a query cursor on the agent.
+        assert!(results.iter().all(|result| result.result.session_id.is_none()));
+
+        assert!(rollback_manual_transaction(&state, &txn_session_id).await.is_ok());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

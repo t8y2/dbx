@@ -845,6 +845,8 @@ describe("queryStore hidden primary key editing", () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
     const tabId = store.createTab("oracle-1", "ORCL", "Query");
+    // Tabs default to auto-commit; exercise the explicit manual-transaction path.
+    store.setAutoCommit(tabId, false);
     const sql = "SELECT ID FROM APP.EVENTS ORDER BY ID";
 
     await store.executeTabSql(tabId, sql);

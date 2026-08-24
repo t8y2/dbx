@@ -1428,7 +1428,7 @@ export async function beginManualTransaction(connectionId: string, database: str
   return invoke("begin_manual_transaction", { connectionId, database, schema, catalog });
 }
 
-export async function executeInManualTransaction(txnSessionId: string, sql: string, database: string, schema?: string, maxRows?: number, tableDataPreview?: boolean): Promise<QueryResult[]> {
+export async function executeInManualTransaction(txnSessionId: string, sql: string, database: string, schema?: string, maxRows?: number, tableDataPreview?: boolean, pageSize?: number, resultSessionId?: string): Promise<QueryResult[]> {
   return invoke("execute_in_manual_transaction", {
     txnSessionId,
     sql,
@@ -1436,6 +1436,8 @@ export async function executeInManualTransaction(txnSessionId: string, sql: stri
     schema,
     maxRows,
     tableDataPreview,
+    pageSize,
+    resultSessionId,
   });
 }
 

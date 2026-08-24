@@ -4528,9 +4528,24 @@ pub async fn execute_in_manual_transaction(
     schema: Option<&str>,
     max_rows: Option<usize>,
 ) -> Result<Vec<db::QueryResult>, String> {
-    execute_in_manual_transaction_with_options(state, txn_session_id, sql, database, schema, max_rows, false)
-        .await
-        .map(|results| results.into_iter().map(ExecuteMultiResult::into_query_result).collect())
+    execute_in_manual_transaction_with_options(
+        state,
+        txn_session_id,
+        sql,
+        database,
+        schema,
+        ManualTransactionExecutionOptions { max_rows, ..Default::default() },
+    )
+    .await
+    .map(|results| results.into_iter().map(ExecuteMultiResult::into_query_result).collect())
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ManualTransactionExecutionOptions {
+    pub max_rows: Option<usize>,
+    pub table_data_preview: bool,
+    pub page_size: Option<usize>,
+    pub result_session_id: Option<String>,
 }
 
 pub async fn execute_in_manual_transaction_with_options(
@@ -4539,8 +4554,7 @@ pub async fn execute_in_manual_transaction_with_options(
     sql: &str,
     database: &str,
     schema: Option<&str>,
-    max_rows: Option<usize>,
-    table_data_preview: bool,
+    options: ManualTransactionExecutionOptions,
 ) -> Result<Vec<ExecuteMultiResult>, String> {
     const TXN_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(MANUAL_TRANSACTION_IDLE_TIMEOUT_SECS);
 
@@ -4561,8 +4575,14 @@ pub async fn execute_in_manual_transaction_with_options(
     if statements.is_empty() {
         return Ok(vec![ExecuteMultiResult::success_with_optional_server_large_values(
             empty_query_result(0),
-            table_data_preview,
+            options.table_data_preview,
         )]);
+    }
+    if options.result_session_id.is_some() && options.page_size.is_none() {
+        return Err("Manual transaction result pagination requires a page size".to_string());
+    }
+    if (options.page_size.is_some() || options.result_session_id.is_some()) && statements.len() != 1 {
+        return Err("Manual transaction result pagination supports exactly one statement".to_string());
     }
 
     // Read-only check while the session is still in the map. If this fails the
@@ -4600,7 +4620,7 @@ pub async fn execute_in_manual_transaction_with_options(
             .map(|session| Arc::clone(&session.connection))
             .ok_or(MANUAL_TRANSACTION_SESSION_NOT_FOUND_ERROR)?
     };
-    let row_limit = max_rows.unwrap_or(MAX_ROWS).max(1);
+    let row_limit = options.max_rows.unwrap_or(MAX_ROWS).max(1);
     let mut results = Vec::with_capacity(statements.len());
 
     let mut conn = connection.lock().await;
@@ -4618,7 +4638,9 @@ pub async fn execute_in_manual_transaction_with_options(
                     database,
                     schema,
                     row_limit,
-                    table_data_preview,
+                    options.table_data_preview,
+                    options.page_size,
+                    options.result_session_id.as_deref(),
                 )
                 .await
             }
@@ -4627,7 +4649,7 @@ pub async fn execute_in_manual_transaction_with_options(
             Ok(query_result) => {
                 results.push(ExecuteMultiResult::success_with_optional_server_large_values(
                     query_result,
-                    table_data_preview,
+                    options.table_data_preview,
                 ));
             }
             Err(e) => {
@@ -4837,8 +4859,46 @@ async fn release_manual_txn_agent_pool(state: &AppState, connection_id: &str, co
     }
 }
 
-fn manual_txn_agent_query_options(row_limit: usize, table_data_preview: bool) -> QueryExecutionOptions {
-    QueryExecutionOptions { max_rows: Some(row_limit.max(1)), table_data_preview, ..QueryExecutionOptions::default() }
+fn manual_txn_agent_query_options(
+    row_limit: usize,
+    table_data_preview: bool,
+    page_size: Option<usize>,
+    result_session_id: Option<&str>,
+) -> QueryExecutionOptions {
+    QueryExecutionOptions {
+        max_rows: Some(row_limit.max(1)),
+        table_data_preview,
+        page_size,
+        result_session_id: result_session_id.map(str::to_owned),
+        ..QueryExecutionOptions::default()
+    }
+}
+
+#[derive(Debug)]
+enum ManualTxnAgentQueryRequest {
+    Execute(serde_json::Value),
+    ExecutePage(serde_json::Value),
+    FetchPage(serde_json::Value),
+}
+
+fn manual_txn_agent_query_request(
+    sql: &str,
+    database: Option<&str>,
+    schema: Option<&str>,
+    options: QueryExecutionOptions,
+) -> ManualTxnAgentQueryRequest {
+    if let Some(session_id) = options.result_session_id.as_deref() {
+        return ManualTxnAgentQueryRequest::FetchPage(agent_fetch_query_page_params(
+            session_id,
+            options.page_size.unwrap_or(MAX_ROWS),
+        ));
+    }
+    if options.page_size.is_some() {
+        return ManualTxnAgentQueryRequest::ExecutePage(agent_execute_query_page_params(
+            sql, database, schema, options,
+        ));
+    }
+    ManualTxnAgentQueryRequest::Execute(agent_execute_query_params(sql, database, schema, options))
 }
 
 async fn execute_manual_txn_agent_statement(
@@ -4849,16 +4909,31 @@ async fn execute_manual_txn_agent_statement(
     schema: Option<&str>,
     row_limit: usize,
     table_data_preview: bool,
+    page_size: Option<usize>,
+    result_session_id: Option<&str>,
 ) -> Result<db::QueryResult, String> {
     let sql = sql_for_execution_context(db_type, statement, schema);
     let execution_schema = schema_for_execution_context(db_type, schema);
-    let options = manual_txn_agent_query_options(row_limit, table_data_preview);
-    let params =
-        agent_execute_query_params(&sql, Some(database).filter(|value| !value.is_empty()), execution_schema, options);
+    let options = manual_txn_agent_query_options(row_limit, table_data_preview, page_size, result_session_id);
+    let request = manual_txn_agent_query_request(
+        &sql,
+        Some(database).filter(|value| !value.is_empty()),
+        execution_schema,
+        options,
+    );
     let mut locked = client.lock().await;
-    locked
-        .execute_query_typed_with_timeout::<db::QueryResult>(params, None)
-        .await
+    let result = match request {
+        ManualTxnAgentQueryRequest::Execute(params) => {
+            locked.execute_query_typed_with_timeout::<db::QueryResult>(params, None).await
+        }
+        ManualTxnAgentQueryRequest::ExecutePage(params) => {
+            locked.execute_query_page_typed_with_timeout_and_cancel::<db::QueryResult>(params, None, None).await
+        }
+        ManualTxnAgentQueryRequest::FetchPage(params) => {
+            locked.fetch_query_page_typed_with_timeout_and_cancel::<db::QueryResult>(params, None, None).await
+        }
+    };
+    result
         .map(|result| truncate_result_with_max_rows(result, Some(row_limit.max(1))))
         .map_err(|error| error.into_legacy_string())
 }
@@ -7373,7 +7448,7 @@ for line in sys.stdin:
             "SELECT * FROM documents",
             Some("ORCL"),
             Some("APP"),
-            manual_txn_agent_query_options(250, true),
+            manual_txn_agent_query_options(250, true, None, None),
         );
 
         assert_eq!(params["maxRows"], 250);
@@ -7592,6 +7667,34 @@ for line in sys.stdin:
 
         assert_eq!(params["sessionId"], "session-1");
         assert_eq!(params["pageSize"], 500);
+    }
+
+    #[test]
+    fn manual_transaction_agent_query_uses_cursor_for_later_pages() {
+        let first_page = manual_txn_agent_query_request(
+            "SELECT ID FROM APP.EVENTS ORDER BY ID",
+            Some("ORCL"),
+            Some("APP"),
+            manual_txn_agent_query_options(10_000, false, Some(100), None),
+        );
+        let ManualTxnAgentQueryRequest::ExecutePage(first_params) = first_page else {
+            panic!("first page must start an Agent query cursor");
+        };
+        assert_eq!(first_params["pageSize"], 100);
+        assert_eq!(first_params["maxRows"], 10_000);
+
+        let second_page = manual_txn_agent_query_request(
+            "SELECT ID FROM APP.EVENTS ORDER BY ID",
+            Some("ORCL"),
+            Some("APP"),
+            manual_txn_agent_query_options(10_000, false, Some(100), Some("oracle-go-1")),
+        );
+        let ManualTxnAgentQueryRequest::FetchPage(second_params) = second_page else {
+            panic!("later pages must continue the existing Agent query cursor");
+        };
+        assert_eq!(second_params["sessionId"], "oracle-go-1");
+        assert_eq!(second_params["pageSize"], 100);
+        assert!(second_params.get("sql").is_none());
     }
 
     #[test]

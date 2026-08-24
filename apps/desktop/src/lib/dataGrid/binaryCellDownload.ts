@@ -114,6 +114,7 @@ const HEX_ESCAPE_RE = /^(?:\\x[0-9a-fA-F]{2}|\s)+$/;
 const BINARY_TYPE_RE = /^(?:blob|tinyblob|mediumblob|longblob|bytea|bytes|binary|varbinary|image|raw|long\s+raw)(?:\b|\()/i;
 const FIXED_BINARY_TYPE_RE = /^binary(?:\b|\()/i;
 const BINARY_STRING_TYPE_RE = /^(?:binary|varbinary)(?:\b|\()/i;
+const BLOB_TYPE_RE = /^(?:blob|tinyblob|mediumblob|longblob)(?:\b|\()/i;
 const MYSQL_FILE_IMPORT_TYPE_RE = /^(?:blob|tinyblob|mediumblob|longblob|binary|varbinary)(?:\b|\()/i;
 
 function copyBytesForBlob(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
@@ -182,6 +183,11 @@ export function isBinaryCellColumnType(columnType?: string): boolean {
   return !!type && BINARY_TYPE_RE.test(type);
 }
 
+export function isBlobCellColumnType(columnType?: string): boolean {
+  const type = (columnType ?? "").trim();
+  return !!type && BLOB_TYPE_RE.test(type);
+}
+
 export function canImportBinaryCellFile(databaseType?: DatabaseType, columnType?: string): boolean {
   const type = (columnType ?? "").trim();
   if (databaseType === "postgres") return /^bytea(?:\b|\()/i.test(type);
@@ -200,12 +206,19 @@ export function binaryCellDisplayText(value: unknown, columnType?: string, origi
   }
   const bytes = parseBinaryCellBytes(value, columnType, databaseType);
   if (!bytes || !isBinaryCellColumnType(columnType)) return null;
-  if (BINARY_STRING_TYPE_RE.test((columnType ?? "").trim())) {
-    const previewBytes = FIXED_BINARY_TYPE_RE.test((columnType ?? "").trim()) ? trimTrailingNullBytes(bytes) : bytes;
-    const text = printableUtf8Text(previewBytes);
+  if (BINARY_STRING_TYPE_RE.test((columnType ?? "").trim()) || isBlobCellColumnType(columnType)) {
+    const text = binaryCellUtf8Text(value, columnType, databaseType);
     if (text !== null) return text;
   }
   return `${binaryCellDisplayLabel(columnType)} [${formatBinaryCellByteSize(bytes.length)}]`;
+}
+
+export function binaryCellUtf8Text(value: unknown, columnType?: string, databaseType?: DatabaseType): string | null {
+  if (!isBinaryCellColumnType(columnType)) return null;
+  const bytes = parseBinaryCellBytes(value, columnType, databaseType);
+  if (!bytes) return null;
+  const previewBytes = FIXED_BINARY_TYPE_RE.test((columnType ?? "").trim()) ? trimTrailingNullBytes(bytes) : bytes;
+  return printableUtf8Text(previewBytes);
 }
 
 function trimTrailingNullBytes(bytes: Uint8Array): Uint8Array {

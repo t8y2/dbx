@@ -1184,6 +1184,79 @@ describe("DataGridTextFilterWorkbench", () => {
 });
 
 describe("cell detail surfaces", () => {
+  it("presents printable LONG BLOB bytes as text and copies the presented value", async () => {
+    const copyText = vi.fn();
+    const blobDetail = detail({
+      type: "LONGBLOB",
+      value: "0x2332303035383035",
+      rawValue: "0x2332303035383035",
+      rawValuePreview: "0x2332303035383035",
+      displayValue: "#2005805",
+      displayValuePreview: "#2005",
+      formattedJson: "",
+    });
+    const dialog = mountComponent(DataGridCellDetailDialog, {
+      open: true,
+      detail: blobDetail,
+      typeColorClass: () => "",
+      openImagePreview: vi.fn(),
+      copyText,
+      canDownloadBinaryValue: () => true,
+      downloadBinaryValue: vi.fn(),
+      canImportBinaryValue: () => false,
+      importBinaryValue: vi.fn(),
+    });
+    const panel = mountComponent(DataGridCellDetailPanel, {
+      detail: blobDetail,
+      panelIsBottom: true,
+      metadataCollapsed: false,
+      valueFillsHeight: false,
+      editing: false,
+      sideJsonView: false,
+      showCompactJson: false,
+      canCompactJson: false,
+      typeColorClass: () => "",
+      canDownloadBinaryValue: () => true,
+      downloadBinaryValue: vi.fn(),
+      canImportBinaryValue: () => false,
+      importBinaryValue: vi.fn(),
+      openImagePreview: vi.fn(),
+      canCopySqlCondition: () => true,
+    });
+
+    expect(hostText(dialog.root)).toContain("#2005");
+    expect(hostText(dialog.root)).not.toContain("#2005805");
+    expect(hostText(panel.root)).toContain("#2005");
+    expect(hostText(panel.root)).not.toContain("#2005805");
+    dispatch(
+      findOne(dialog.root, (node) => node.props.title === "grid.copyValue"),
+      "click",
+    );
+    expect(copyText).toHaveBeenCalledWith("#2005805");
+  });
+
+  it("keeps non-text LONG BLOB values in hex", () => {
+    const panel = mountComponent(DataGridCellDetailPanel, {
+      detail: detail({ type: "LONGBLOB", value: "0x89504e470d0a1a0a", rawValue: "0x89504e470d0a1a0a", rawValuePreview: "0x89504e470d0a1a0a", formattedJson: "" }),
+      panelIsBottom: true,
+      metadataCollapsed: false,
+      valueFillsHeight: false,
+      editing: false,
+      sideJsonView: false,
+      showCompactJson: false,
+      canCompactJson: false,
+      typeColorClass: () => "",
+      canDownloadBinaryValue: () => true,
+      downloadBinaryValue: vi.fn(),
+      canImportBinaryValue: () => false,
+      importBinaryValue: vi.fn(),
+      openImagePreview: vi.fn(),
+      canCopySqlCondition: () => true,
+    });
+
+    expect(hostText(panel.root)).toContain("0x89504e470d0a1a0a");
+  });
+
   it("copies the presented value, emits edit, closes, and replaces the JSON result", async () => {
     const copyText = vi.fn();
     const edit = vi.fn();

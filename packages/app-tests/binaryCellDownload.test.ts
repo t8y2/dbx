@@ -10,6 +10,8 @@ import {
   canDownloadBinaryCellValue,
   formatBinaryCellByteSize,
   isBinaryCellColumnType,
+  binaryCellUtf8Text,
+  isBlobCellColumnType,
   MAX_BINARY_CELL_IMPORT_BYTES,
   parseBinaryCellBytes,
   parseBinaryCellHexValue,
@@ -52,6 +54,8 @@ test("binary cell download detects common blob column types", () => {
   assert.equal(isBinaryCellColumnType("RAW(2000)"), true);
   assert.equal(isBinaryCellColumnType("long raw"), true);
   assert.equal(isBinaryCellColumnType("varchar"), false);
+  assert.equal(isBlobCellColumnType("longblob"), true);
+  assert.equal(isBlobCellColumnType("varbinary(255)"), false);
 });
 
 test("binary cell download menu closes when hover moves to another cell", () => {
@@ -83,13 +87,23 @@ test("binaryCellDisplayText previews printable binary strings without changing t
   assert.equal(binaryCellDisplayText("0x68690a", "VARBINARY(3)"), "hi\n");
   assert.equal(binaryCellDisplayText("0x680069", "VARBINARY(3)"), "VARBINARY [3 bytes]");
   assert.equal(binaryCellDisplayText("0xdeadbeef", "VARBINARY(4)"), "VARBINARY [4 bytes]");
+  assert.equal(binaryCellDisplayText("0x48656c6c6f", "LONGBLOB"), "Hello");
+  assert.equal(binaryCellDisplayText("0xe8a1a8e8bebee5bc8f", "LONGBLOB"), "表达式");
   assert.equal(binaryCellDisplayText("0x89504e47", "BLOB"), "BLOB [4 bytes]");
+  assert.equal(binaryCellDisplayText("0x680069", "LONGBLOB"), "BLOB [3 bytes]");
   assert.equal(binaryCellDisplayText(`0x${"00".repeat(2048)}`, "VARBINARY(2048)"), "VARBINARY [2.0 KB]");
   assert.equal(binaryCellDisplayText("0xffd8ffe000104a46...", "VARBINARY"), "VARBINARY [...]");
   assert.equal(binaryCellDisplayText("0x89504e47...", "LONGBLOB"), "BLOB [...]");
   assert.equal(binaryCellDisplayText("0xffd8ffe000104a46...", "VARBINARY", 25_143), "VARBINARY [25 KB]");
   assert.equal(binaryCellDisplayText("0x89504e47"), null);
   assert.equal(binaryCellDisplayText("0x", "VARBINARY(0)"), "");
+});
+
+test("binaryCellUtf8Text only returns strict printable text", () => {
+  assert.equal(binaryCellUtf8Text("0x2332303035383035", "LONGBLOB"), "#2005805");
+  assert.equal(binaryCellUtf8Text("0xfffe", "LONGBLOB"), null);
+  assert.equal(binaryCellUtf8Text("0x0061", "LONGBLOB"), null);
+  assert.equal(binaryCellUtf8Text("0x4869", "varchar"), null);
 });
 
 test("binaryCellDownloadPayload builds raw and decoded payloads", () => {

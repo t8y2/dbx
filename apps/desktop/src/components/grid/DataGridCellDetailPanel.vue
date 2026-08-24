@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { toRef } from "vue";
+import { computed, toRef } from "vue";
 import { Code2, Copy, Download, Eye, FileUp, Pencil, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
@@ -8,7 +8,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { TabsContent } from "@/components/ui/tabs";
 import TemporalCellEditor from "@/components/grid/TemporalCellEditor.vue";
 import { useDataGridCellDetail } from "@/composables/useDataGridCellDetail";
-import { BINARY_CELL_DOWNLOAD_MODES, type BinaryCellDownloadMode } from "@/lib/dataGrid/binaryCellDownload";
+import { BINARY_CELL_DOWNLOAD_MODES, binaryCellUtf8Text, isBlobCellColumnType, type BinaryCellDownloadMode } from "@/lib/dataGrid/binaryCellDownload";
 import { isGeometryColumnType } from "@/lib/dataGrid/cellDetailPresentation";
 import { isHexGeometry } from "@/lib/dataGrid/geometryPreview";
 import type { DataGridCellDetail } from "@/lib/dataGrid/dataGridDetail";
@@ -54,6 +54,9 @@ const { geometryPreviewOpen, geometryCanvas, detailsEditorContainer, sideJsonPre
 void geometryCanvas;
 void detailsEditorContainer;
 void sideJsonPreviewContainer;
+
+const binaryTextPreview = computed(() => (isBlobCellColumnType(props.detail.type) ? binaryCellUtf8Text(props.detail.value, props.detail.type) : null));
+const presentedValuePreview = computed(() => (binaryTextPreview.value === null ? props.detail.rawValuePreview : props.detail.displayValuePreview));
 
 function startJsonEditFromBlankArea(event: MouseEvent) {
   const target = event.target as { closest?: (selector: string) => Element | null } | null;
@@ -181,7 +184,7 @@ defineExpose({ openSearch });
           class="dbx-data-grid-value-font overflow-auto rounded border bg-muted/20 p-2 text-xs whitespace-pre-wrap break-words cursor-pointer hover:border-primary/50"
           :class="[{ 'cursor-text': detail.isEditable }, panelIsBottom && detail.imagePreviewUrl ? 'min-h-24 max-h-32 shrink-0' : '', valueFillsHeight && !detail.imagePreviewUrl ? 'min-h-0 flex-1' : '']"
           @dblclick="emit('startEdit')"
-          >{{ detail.rawValuePreview }}</pre
+          >{{ presentedValuePreview }}</pre
         >
         <div v-if="detail.isValuePreviewTruncated && !sideJsonView" class="text-[11px] text-muted-foreground">{{ t("grid.largeValuePreviewHint", { count: detail.rawValuePreview.length }) }}</div>
       </div>

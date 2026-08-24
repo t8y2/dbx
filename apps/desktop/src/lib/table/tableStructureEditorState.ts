@@ -822,7 +822,7 @@ function columnDefaultForEditor(column: ColumnInfo, databaseType?: DatabaseType)
   return defaultValue;
 }
 
-const CHARACTER_LENGTH_METADATA_TYPES = new Set(["binary", "char", "character", "character varying", "nchar", "nvarchar", "nvarchar2", "varbinary", "varchar", "varchar2"]);
+const CHARACTER_LENGTH_METADATA_TYPES = new Set(["binary", "bpchar", "char", "character", "character varying", "nchar", "nvarchar", "nvarchar2", "varbinary", "varchar", "varchar2"]);
 const NUMERIC_PRECISION_METADATA_TYPES = new Set(["decimal", "number", "numeric"]);
 const XUGU_SINGLE_PRECISION_METADATA_TYPES = new Set(["bit", "time", "time with time zone", "timestamp", "timestamp with time zone", "varbit"]);
 

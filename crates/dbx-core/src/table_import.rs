@@ -1234,9 +1234,8 @@ fn sql_statement_ranges(bytes: &[u8]) -> Vec<(usize, usize)> {
     let mut index = 0usize;
     while index < bytes.len() {
         let byte = bytes[index];
-        if byte == b'-' && index + 1 < bytes.len() && bytes[index + 1] == b'-' {
-            index = sql_skip_line_comment(bytes, index);
-        } else if byte == b'#' {
+        // `--` 与 `#` 都是行注释，统一交给 sql_skip_line_comment 跳过
+        if byte == b'#' || (byte == b'-' && index + 1 < bytes.len() && bytes[index + 1] == b'-') {
             index = sql_skip_line_comment(bytes, index);
         } else if byte == b'/' && index + 1 < bytes.len() && bytes[index + 1] == b'*' {
             index = sql_skip_block_comment(bytes, index);

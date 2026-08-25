@@ -364,7 +364,8 @@ fn common_executable_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-#[cfg(test)]
+// 仅在非 Windows 平台的测试里使用，条件与调用点保持一致，避免 Windows 测试构建时误报 dead_code
+#[cfg(all(test, not(windows)))]
 fn merged_path_with_dir(dir: &str, user_path: Option<&str>) -> String {
     merged_codex_path(Some(Path::new(dir)), None, user_path)
 }

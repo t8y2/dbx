@@ -285,9 +285,9 @@ async fn initializes_lists_tools_and_calls_a_tool() {
     let tools = client.peer().list_tools(None).await.expect("list tools");
     let names = tools.tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
     #[cfg(feature = "mq-admin")]
-    assert_eq!(names.len(), 17);
+    assert_eq!(names.len(), 25);
     #[cfg(not(feature = "mq-admin"))]
-    assert_eq!(names.len(), 16);
+    assert_eq!(names.len(), 24);
     assert!(names.contains(&"dbx_list_connections"));
     assert!(names.contains(&"dbx_list_databases"));
     assert!(names.contains(&"dbx_duplicate_connection"));
@@ -297,6 +297,14 @@ async fn initializes_lists_tools_and_calls_a_tool() {
     assert!(names.contains(&"dbx_close_session"));
     #[cfg(feature = "mq-admin")]
     assert!(names.contains(&"dbx_send_message"));
+    assert!(names.contains(&"dbx_preview_import_file"));
+    assert!(names.contains(&"dbx_prepare_table_import"));
+    assert!(names.contains(&"dbx_start_table_import"));
+    assert!(names.contains(&"dbx_get_import_status"));
+    assert!(names.contains(&"dbx_cancel_import"));
+    assert!(names.contains(&"dbx_vector_search"));
+    assert!(names.contains(&"dbx_vector_upsert_file"));
+    assert!(names.contains(&"dbx_vector_delete_by_batch"));
 
     let result = client.peer().call_tool(CallToolRequestParams::new("dbx_list_connections")).await.expect("call tool");
     let response = result.content[0].as_text().expect("text response");
@@ -333,6 +341,31 @@ async fn remove_connection_respects_global_connection_scope() {
         .expect("call blocked connection removal");
     assert_eq!(result.is_error, Some(true));
     assert!(result.content[0].as_text().expect("blocked removal result").text.contains("CONNECTION_OUT_OF_SCOPE"));
+
+    client.cancel().await.expect("close MCP client");
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn web_import_tool_returns_versioned_structured_error() {
+    let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
+    let server = DbxMcpServer::with_runtime_options(Arc::new(EmptyBackend), McpScope::default(), true);
+    let server_task = tokio::spawn(async move { server.serve(server_transport).await });
+    let client = ().serve(client_transport).await.expect("initialize MCP client");
+
+    let result = client
+        .peer()
+        .call_tool(
+            CallToolRequestParams::new("dbx_preview_import_file")
+                .with_arguments(Map::from_iter([("file_path".to_string(), json!("/tmp/input.xlsx"))])),
+        )
+        .await
+        .expect("call import preview tool");
+
+    assert_eq!(result.is_error, Some(true));
+    let structured = result.structured_content.expect("structured error");
+    assert_eq!(structured.get("formatVersion"), Some(&json!(1)));
+    assert_eq!(structured.pointer("/error/code"), Some(&json!("IMPORT_UNSUPPORTED_IN_WEB_MODE_V1")));
 
     client.cancel().await.expect("close MCP client");
     server_task.abort();

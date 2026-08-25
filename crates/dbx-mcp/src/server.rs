@@ -5,11 +5,20 @@ use rmcp::{
     model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerInfo},
     schemars, tool, tool_handler, tool_router, ServerHandler,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 
 use crate::backend::{format_query_result, new_connection_config, parse_database_type, ConnectionSummary, DbxBackend};
+use crate::enterprise_tools::{
+    build_milvus_filter, build_plan, cell_char_limit, column_type_hints, file_identity, milvus_delete_batch_query,
+    milvus_search_query, milvus_upsert_query, preview_limit, query_result_rows, read_semantic_jsonl,
+    revalidate_plan_file, sanitize_preview, structure_fingerprint, validate_embedding, validate_import_file,
+    validate_mappings, validate_staging_target, validate_vector_collection, vector_output_fields, vector_top_k,
+    vector_upsert_batch_size, EnterpriseRuntime, EnterpriseToolError, ImportStatusRequest, PrepareTableImportRequest,
+    PreviewImportFileRequest, StartTableImportRequest, VectorDeleteByBatchRequest, VectorSearchRequest,
+    VectorUpsertFileRequest, FORMAT_VERSION, STRUCTURE_PROFILE_ROWS,
+};
 use crate::mongo::{self, MongoCommand, MongoSafetyError};
 use crate::session::{McpSession, McpSessionStore};
 use dbx_core::{
@@ -37,7 +46,7 @@ pub struct ListDatabasesRequest {
     pub selector: ConnectionSelector,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ConnectionSelector {
     #[schemars(description = "Unique ID of the DBX connection")]
     #[schemars(extend("type" = "string"))]
@@ -275,6 +284,8 @@ pub struct DbxMcpServer {
     backend: Arc<dyn DbxBackend>,
     scope: McpScope,
     sessions: Arc<McpSessionStore>,
+    enterprise: Arc<EnterpriseRuntime>,
+    web_mode: bool,
     tool_router: ToolRouter<Self>,
 }
 
@@ -354,7 +365,14 @@ impl DbxMcpServer {
         }
         #[cfg(not(feature = "mq-admin"))]
         tool_router.disable_route("dbx_send_message");
-        Self { backend, scope, sessions: McpSessionStore::new(), tool_router }
+        Self {
+            backend,
+            scope,
+            sessions: McpSessionStore::new(),
+            enterprise: Arc::new(EnterpriseRuntime::default()),
+            web_mode,
+            tool_router,
+        }
     }
 
     async fn close_backend_sessions_best_effort(&self, sessions: Vec<McpSession>) {
@@ -541,6 +559,510 @@ impl DbxMcpServer {
             Ok(source) if source.source.trim().is_empty() => text("Routine source is empty."),
             Ok(source) => text(source.source),
             Err(error) => tool_error("ROUTINE_SOURCE_ERROR", error),
+        }
+    }
+
+    #[tool(
+        name = "dbx_preview_import_file",
+        description = "Preview an allowed local Excel/CSV/TSV/JSON file without writing data. Returns bounded rows, sheets, hashes, columns, row counts and a structure fingerprint. Local DBX Desktop/MCP mode only."
+    )]
+    async fn preview_import_file(&self, Parameters(request): Parameters<PreviewImportFileRequest>) -> CallToolResult {
+        if self.web_mode {
+            return enterprise_error(EnterpriseToolError::new(
+                "IMPORT_UNSUPPORTED_IN_WEB_MODE_V1",
+                "v1 文件导入仅支持本地 DBX Desktop/MCP 模式。",
+            ));
+        }
+        let path = match validate_import_file(&request.file_path, false) {
+            Ok(path) => path,
+            Err(error) => return enterprise_error(error),
+        };
+        let identity = match file_identity(path.clone()).await {
+            Ok(identity) => identity,
+            Err(error) => return enterprise_error(error),
+        };
+        let parse_options = match request.parse_options.into_core() {
+            Ok(options) => options,
+            Err(error) => return enterprise_error(error),
+        };
+        let preview_rows = match preview_limit(request.preview_rows) {
+            Ok(limit) => limit,
+            Err(error) => return enterprise_error(error),
+        };
+        let char_limit = match cell_char_limit(request.cell_char_limit) {
+            Ok(limit) => limit,
+            Err(error) => return enterprise_error(error),
+        };
+        let preview = dbx_core::table_import::preview_table_import_file_with_request(
+            dbx_core::table_import::TableImportPreviewRequest {
+                file_path: path.to_string_lossy().to_string(),
+                source_ref: Some(identity.sha256.clone()),
+                source_format: request.source_format.map(Into::into),
+                parse_options: parse_options.clone(),
+                preview_limit: Some(STRUCTURE_PROFILE_ROWS),
+            },
+        )
+        .await;
+        let mut preview = match preview {
+            Ok(preview) => sanitize_preview(preview, char_limit),
+            Err(error) => {
+                return enterprise_error(EnterpriseToolError::new("IMPORT_PREVIEW_FAILED", error));
+            }
+        };
+        let fingerprint = structure_fingerprint(&preview, &parse_options);
+        let type_hints = column_type_hints(&preview);
+        preview.rows.truncate(preview_rows);
+        let title_row = parse_options.title_row.or_else(|| parse_options.has_header.unwrap_or(true).then_some(1));
+        let data_start_row = parse_options.data_start_row.unwrap_or_else(|| title_row.map_or(1, |row| row + 1));
+        let last_row = data_start_row.saturating_add(preview.total_rows.saturating_sub(1));
+        let summary = format!(
+            "已只读剖析 {}：{} 列，{} 行，返回 {} 行预览。",
+            preview.file_name,
+            preview.columns.len(),
+            preview.total_rows,
+            preview.rows.len()
+        );
+        structured_success(
+            summary,
+            json!({
+                "file": identity,
+                "structureFingerprint": fingerprint,
+                "columnTypeHints": type_hints,
+                "usedRange": {
+                    "firstRow": title_row.unwrap_or(data_start_row),
+                    "lastRow": last_row,
+                    "firstColumn": if preview.columns.is_empty() { 0 } else { 1 },
+                    "lastColumn": preview.columns.len(),
+                },
+                "preview": preview,
+            }),
+        )
+    }
+
+    #[tool(
+        name = "dbx_prepare_table_import",
+        description = "Validate an approved-template mapping and immutable local source, then create a single-use import plan valid for 30 minutes. This tool never writes data."
+    )]
+    async fn prepare_table_import(&self, Parameters(request): Parameters<PrepareTableImportRequest>) -> CallToolResult {
+        if self.web_mode {
+            return enterprise_error(EnterpriseToolError::new(
+                "IMPORT_UNSUPPORTED_IN_WEB_MODE_V1",
+                "v1 文件导入仅支持本地 DBX Desktop/MCP 模式。",
+            ));
+        }
+        if let Err(error) = validate_staging_target(&request.schema, &request.table) {
+            return enterprise_error(error);
+        }
+        let resolved = match self.resolve_connection(&request.selector).await {
+            Ok(resolved) => resolved,
+            Err(error) => return error,
+        };
+        let database = match self.resolve_database(request.database.clone(), &resolved.connection) {
+            Ok(database) => database,
+            Err(error) => return error,
+        };
+        if resolved.connection.db_type != DatabaseType::Postgres {
+            return enterprise_error(EnterpriseToolError::new(
+                "IMPORT_REQUIRES_POSTGRES_V1",
+                "v1 MCP 表导入只允许 PostgreSQL staging 连接。",
+            ));
+        }
+        if let Err(error) = validate_safe_write_connection(&resolved.connection, &resolved.policy, &database) {
+            return error;
+        }
+        let path = match validate_import_file(&request.file_path, false) {
+            Ok(path) => path,
+            Err(error) => return enterprise_error(error),
+        };
+        let identity = match file_identity(path.clone()).await {
+            Ok(identity) => identity,
+            Err(error) => return enterprise_error(error),
+        };
+        let parse_options = match request.parse_options.into_core() {
+            Ok(options) => options,
+            Err(error) => return enterprise_error(error),
+        };
+        let source_format = request.source_format.map(Into::into);
+        let preview = dbx_core::table_import::preview_table_import_file_with_request(
+            dbx_core::table_import::TableImportPreviewRequest {
+                file_path: path.to_string_lossy().to_string(),
+                source_ref: Some(identity.sha256.clone()),
+                source_format,
+                parse_options: parse_options.clone(),
+                preview_limit: Some(STRUCTURE_PROFILE_ROWS),
+            },
+        )
+        .await;
+        let preview = match preview {
+            Ok(preview) => preview,
+            Err(error) => return enterprise_error(EnterpriseToolError::new("IMPORT_PREVIEW_FAILED", error)),
+        };
+        let mappings = request.mappings.into_iter().map(Into::into).collect::<Vec<_>>();
+        if let Err(error) = validate_mappings(&mappings, &preview.columns) {
+            return enterprise_error(error);
+        }
+        if !request.create_table {
+            let columns = match self
+                .backend
+                .get_columns(&resolved.connection, &database, &request.schema, &request.table)
+                .await
+            {
+                Ok(columns) => columns,
+                Err(error) => return enterprise_error(EnterpriseToolError::new("IMPORT_TARGET_CHECK_FAILED", error)),
+            };
+            let target_columns =
+                columns.iter().map(|column| column.name.as_str()).collect::<std::collections::HashSet<_>>();
+            if let Some(missing) =
+                mappings.iter().find(|mapping| !target_columns.contains(mapping.target_column.as_str()))
+            {
+                return enterprise_error(EnterpriseToolError::new(
+                    "IMPORT_TARGET_COLUMN_NOT_FOUND",
+                    format!("目标表缺少字段 {}。", missing.target_column),
+                ));
+            }
+        }
+        let batch_size = request.batch_size.unwrap_or(1_000);
+        if !(1..=50_000).contains(&batch_size) {
+            return enterprise_error(EnterpriseToolError::new(
+                "IMPORT_BATCH_SIZE_INVALID",
+                "batch_size 必须在 1 到 50000 之间。",
+            ));
+        }
+        let fingerprint = structure_fingerprint(&preview, &parse_options);
+        let plan = match build_plan(
+            resolved.connection.id.clone(),
+            resolved.connection.name.clone(),
+            database,
+            request.schema,
+            request.table,
+            request.template_version,
+            identity,
+            fingerprint,
+            source_format,
+            parse_options,
+            mappings,
+            request.create_table,
+            batch_size,
+            request.date_time_format,
+        ) {
+            Ok(plan) => plan,
+            Err(error) => return enterprise_error(error),
+        };
+        self.enterprise.insert_plan(plan.clone()).await;
+        structured_success(
+            format!("导入计划 {} 已准备；绑定模板 {}，30 分钟内可启动一次。", plan.plan_id, plan.template_version),
+            json!({ "plan": plan }),
+        )
+    }
+
+    #[tool(
+        name = "dbx_start_table_import",
+        description = "Start a previously prepared single-use PostgreSQL staging import. The file, target, parsing options and mappings are revalidated and cannot be replaced."
+    )]
+    async fn start_table_import(&self, Parameters(request): Parameters<StartTableImportRequest>) -> CallToolResult {
+        if self.web_mode {
+            return enterprise_error(EnterpriseToolError::new(
+                "IMPORT_UNSUPPORTED_IN_WEB_MODE_V1",
+                "v1 文件导入仅支持本地 DBX Desktop/MCP 模式。",
+            ));
+        }
+        let plan = match self.enterprise.consume_plan(request.plan_id.trim()).await {
+            Ok(plan) => plan,
+            Err(error) => return enterprise_error(error),
+        };
+        if let Err(error) = revalidate_plan_file(&plan).await {
+            return enterprise_error(error);
+        }
+        let selector = ConnectionSelector { connection_id: Some(plan.connection_id.clone()), connection_name: None };
+        let resolved = match self.resolve_connection(&selector).await {
+            Ok(resolved) => resolved,
+            Err(error) => return error,
+        };
+        if resolved.connection.db_type != DatabaseType::Postgres {
+            return enterprise_error(EnterpriseToolError::new(
+                "IMPORT_REQUIRES_POSTGRES_V1",
+                "计划绑定的连接已不再是 PostgreSQL。",
+            ));
+        }
+        if let Err(error) = validate_safe_write_connection(&resolved.connection, &resolved.policy, &plan.database) {
+            return error;
+        }
+        let job = self.enterprise.create_job(&plan).await;
+        let import_id = job.snapshot.lock().unwrap_or_else(|error| error.into_inner()).import_id.clone();
+        let import_request = plan.to_import_request(import_id.clone());
+        let backend = self.backend.clone();
+        let connection = resolved.connection.clone();
+        let task_job = job.clone();
+        tokio::spawn(async move {
+            let progress_job = task_job.clone();
+            let progress = Arc::new(move |mut update: dbx_core::table_import::TableImportProgress| {
+                if update.status == dbx_core::table_import::TableImportStatus::Done {
+                    update.status = dbx_core::table_import::TableImportStatus::Running;
+                    update.phase = dbx_core::table_import::TableImportPhase::Finalizing;
+                }
+                progress_job.snapshot.lock().unwrap_or_else(|error| error.into_inner()).apply_progress(update);
+            });
+            let result = backend
+                .import_table_file_for_mcp(&connection, import_request, task_job.cancelled.clone(), progress)
+                .await;
+            let mut snapshot = task_job.snapshot.lock().unwrap_or_else(|error| error.into_inner());
+            match result {
+                Ok(summary) => {
+                    snapshot.status = dbx_core::table_import::TableImportStatus::Done;
+                    snapshot.phase = dbx_core::table_import::TableImportPhase::Done;
+                    snapshot.rows_imported = summary.rows_imported;
+                    snapshot.total_rows = summary.total_rows;
+                    snapshot.elapsed_ms = summary.elapsed_ms;
+                    snapshot.summary = Some(summary);
+                    snapshot.error = None;
+                }
+                Err(error) => {
+                    snapshot.status = if task_job.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                        dbx_core::table_import::TableImportStatus::Cancelled
+                    } else {
+                        dbx_core::table_import::TableImportStatus::Error
+                    };
+                    snapshot.error = Some(error);
+                }
+            }
+        });
+        structured_success(
+            format!("导入任务 {import_id} 已启动；只会写入隔离 staging。"),
+            json!({ "importId": import_id, "planId": plan.plan_id, "status": "running" }),
+        )
+    }
+
+    #[tool(
+        name = "dbx_get_import_status",
+        description = "Get machine-readable progress, row counts, bytes, elapsed time, errors and final summary for an MCP table import."
+    )]
+    async fn get_import_status(&self, Parameters(request): Parameters<ImportStatusRequest>) -> CallToolResult {
+        if self.web_mode {
+            return enterprise_error(EnterpriseToolError::new(
+                "IMPORT_UNSUPPORTED_IN_WEB_MODE_V1",
+                "v1 文件导入仅支持本地 DBX Desktop/MCP 模式。",
+            ));
+        }
+        let Some(job) = self.enterprise.job(request.import_id.trim()).await else {
+            return enterprise_error(EnterpriseToolError::new("IMPORT_JOB_NOT_FOUND", "没有找到指定导入任务。"));
+        };
+        let snapshot = job.snapshot.lock().unwrap_or_else(|error| error.into_inner()).clone();
+        structured_success(
+            format!("导入任务 {} 当前状态：{:?} / {:?}。", snapshot.import_id, snapshot.status, snapshot.phase),
+            json!({ "job": snapshot }),
+        )
+    }
+
+    #[tool(
+        name = "dbx_cancel_import",
+        description = "Request cancellation of an MCP staging import. Cancellation stops subsequent batches and never publishes staging data to core or mart."
+    )]
+    async fn cancel_import(&self, Parameters(request): Parameters<ImportStatusRequest>) -> CallToolResult {
+        if self.web_mode {
+            return enterprise_error(EnterpriseToolError::new(
+                "IMPORT_UNSUPPORTED_IN_WEB_MODE_V1",
+                "v1 文件导入仅支持本地 DBX Desktop/MCP 模式。",
+            ));
+        }
+        let snapshot = match self.enterprise.cancel_job(request.import_id.trim()).await {
+            Ok(snapshot) => snapshot,
+            Err(error) => return enterprise_error(error),
+        };
+        structured_success(
+            format!("已向导入任务 {} 发送取消请求。", snapshot.import_id),
+            json!({ "importId": snapshot.import_id, "cancellationRequested": true, "lastStatus": snapshot.status }),
+        )
+    }
+
+    #[tool(
+        name = "dbx_vector_search",
+        description = "Search an allowed Milvus semantic collection with a bounded vector and safe equality filters. Approval status and semantic version are always enforced."
+    )]
+    async fn vector_search(&self, Parameters(request): Parameters<VectorSearchRequest>) -> CallToolResult {
+        let resolved = match self.resolve_connection(&request.selector).await {
+            Ok(resolved) => resolved,
+            Err(error) => return error,
+        };
+        if resolved.connection.db_type != DatabaseType::Milvus {
+            return enterprise_error(EnterpriseToolError::new(
+                "VECTOR_REQUIRES_MILVUS",
+                "dbx_vector_search 只接受 Milvus 连接。",
+            ));
+        }
+        if let Err(error) = validate_vector_collection(&request.collection) {
+            return enterprise_error(error);
+        }
+        if let Err(error) = validate_embedding(&request.embedding) {
+            return enterprise_error(error);
+        }
+        let top_k = match vector_top_k(request.top_k) {
+            Ok(value) => value,
+            Err(error) => return enterprise_error(error),
+        };
+        let output_fields = match vector_output_fields(request.output_fields) {
+            Ok(fields) => fields,
+            Err(error) => return enterprise_error(error),
+        };
+        let filter =
+            match build_milvus_filter(&request.active_at, request.semantic_version.as_deref(), &request.filters) {
+                Ok(filter) => filter,
+                Err(error) => return enterprise_error(error),
+            };
+        let database = match self.resolve_database(request.database, &resolved.connection) {
+            Ok(database) => database,
+            Err(error) => return error,
+        };
+        let query =
+            milvus_search_query(&database, &request.collection, &request.embedding, top_k, &filter, &output_fields);
+        match self.backend.execute_query(&resolved.connection, &database, &query, Some(top_k), Some(30)).await {
+            Ok(result) => {
+                let rows = query_result_rows(result);
+                structured_success(
+                    format!("Milvus 语义检索返回 {} 条已批准结果。", rows.len()),
+                    json!({
+                        "collection": request.collection,
+                        "activeAt": request.active_at,
+                        "semanticVersion": request.semantic_version,
+                        "topK": top_k,
+                        "filter": filter,
+                        "rows": rows,
+                    }),
+                )
+            }
+            Err(error) => enterprise_error(EnterpriseToolError::new("VECTOR_SEARCH_FAILED", error)),
+        }
+    }
+
+    #[tool(
+        name = "dbx_vector_upsert_file",
+        description = "Upsert approved semantic cards from one allowed JSONL file into an allowed Milvus collection. Requires MCP safe-write permission."
+    )]
+    async fn vector_upsert_file(&self, Parameters(request): Parameters<VectorUpsertFileRequest>) -> CallToolResult {
+        let resolved = match self.resolve_connection(&request.selector).await {
+            Ok(resolved) => resolved,
+            Err(error) => return error,
+        };
+        if resolved.connection.db_type != DatabaseType::Milvus {
+            return enterprise_error(EnterpriseToolError::new(
+                "VECTOR_REQUIRES_MILVUS",
+                "dbx_vector_upsert_file 只接受 Milvus 连接。",
+            ));
+        }
+        let database = match self.resolve_database(request.database, &resolved.connection) {
+            Ok(database) => database,
+            Err(error) => return error,
+        };
+        if let Err(error) = validate_safe_write_connection(&resolved.connection, &resolved.policy, &database) {
+            return error;
+        }
+        if let Err(error) = validate_vector_collection(&request.collection) {
+            return enterprise_error(error);
+        }
+        let path = match validate_import_file(&request.file_path, true) {
+            Ok(path) => path,
+            Err(error) => return enterprise_error(error),
+        };
+        let identity = match file_identity(path.clone()).await {
+            Ok(identity) => identity,
+            Err(error) => return enterprise_error(error),
+        };
+        let semantic_batch_id = request.semantic_batch_id.clone();
+        let records = match tokio::task::spawn_blocking(move || read_semantic_jsonl(&path, &semantic_batch_id)).await {
+            Ok(Ok(records)) => records,
+            Ok(Err(error)) => return enterprise_error(error),
+            Err(error) => {
+                return enterprise_error(EnterpriseToolError::new("VECTOR_JSONL_READ_FAILED", error.to_string()))
+            }
+        };
+        let current_identity = match file_identity(std::path::PathBuf::from(&identity.canonical_path)).await {
+            Ok(identity) => identity,
+            Err(error) => return enterprise_error(error),
+        };
+        if current_identity != identity {
+            return enterprise_error(EnterpriseToolError::new(
+                "VECTOR_JSONL_CHANGED",
+                "语义 JSONL 在校验期间发生变化；未向 Milvus 写入。",
+            ));
+        }
+        let batch_size = match vector_upsert_batch_size(request.batch_size) {
+            Ok(batch_size) => batch_size,
+            Err(error) => return enterprise_error(error),
+        };
+        let mut upserted = 0usize;
+        for chunk in records.chunks(batch_size) {
+            let query = milvus_upsert_query(&database, &request.collection, chunk);
+            if let Err(error) =
+                self.backend.execute_query(&resolved.connection, &database, &query, Some(1), Some(60)).await
+            {
+                return enterprise_error(EnterpriseToolError::new(
+                    "VECTOR_UPSERT_FAILED",
+                    format!("已提交 {upserted} 条后失败；语义版本尚未激活，可按 semantic_batch_id 撤销：{error}"),
+                ));
+            }
+            upserted += chunk.len();
+        }
+        structured_success(
+            format!("已向 Milvus upsert {upserted} 张 approved 语义卡。"),
+            json!({
+                "collection": request.collection,
+                "semanticBatchId": request.semantic_batch_id,
+                "upserted": upserted,
+                "source": identity,
+            }),
+        )
+    }
+
+    #[tool(
+        name = "dbx_vector_delete_by_batch",
+        description = "Delete one unpublished Milvus semantic batch by exact semantic_batch_id. Requires high-risk MCP permission; arbitrary filter expressions are never accepted."
+    )]
+    async fn vector_delete_by_batch(
+        &self,
+        Parameters(request): Parameters<VectorDeleteByBatchRequest>,
+    ) -> CallToolResult {
+        let resolved = match self.resolve_connection(&request.selector).await {
+            Ok(resolved) => resolved,
+            Err(error) => return error,
+        };
+        if resolved.connection.db_type != DatabaseType::Milvus {
+            return enterprise_error(EnterpriseToolError::new(
+                "VECTOR_REQUIRES_MILVUS",
+                "dbx_vector_delete_by_batch 只接受 Milvus 连接。",
+            ));
+        }
+        let database = match self.resolve_database(request.database, &resolved.connection) {
+            Ok(database) => database,
+            Err(error) => return error,
+        };
+        if let Err(error) = validate_safe_write_connection(&resolved.connection, &resolved.policy, &database) {
+            return error;
+        }
+        if !resolved.policy.allow_dangerous_sql {
+            return enterprise_error(EnterpriseToolError::new(
+                "VECTOR_HIGH_RISK_WRITE_BLOCKED",
+                "按批删除语义向量需要开启 DBX MCP 高风险写入权限。",
+            ));
+        }
+        if let Err(error) = validate_vector_collection(&request.collection) {
+            return enterprise_error(error);
+        }
+        if request.semantic_batch_id.trim().is_empty() || request.semantic_batch_id.len() > 200 {
+            return enterprise_error(EnterpriseToolError::new(
+                "SEMANTIC_BATCH_ID_INVALID",
+                "semantic_batch_id 必须是 1～200 个字符。",
+            ));
+        }
+        let query = milvus_delete_batch_query(&database, &request.collection, &request.semantic_batch_id);
+        match self.backend.execute_query(&resolved.connection, &database, &query, Some(1), Some(30)).await {
+            Ok(_) => structured_success(
+                format!("已删除未发布语义批次 {}。", request.semantic_batch_id),
+                json!({
+                    "collection": request.collection,
+                    "semanticBatchId": request.semantic_batch_id,
+                    "deleted": true,
+                }),
+            ),
+            Err(error) => enterprise_error(EnterpriseToolError::new("VECTOR_DELETE_FAILED", error)),
         }
     }
 
@@ -1452,8 +1974,62 @@ fn text(value: impl Into<String>) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(value)])
 }
 
+fn structured_success(summary: impl Into<String>, data: serde_json::Value) -> CallToolResult {
+    let summary = summary.into();
+    let mut result = CallToolResult::structured(json!({
+        "formatVersion": FORMAT_VERSION,
+        "ok": true,
+        "summary": summary,
+        "data": data,
+    }));
+    result.content = vec![ContentBlock::text(summary)];
+    result
+}
+
+fn enterprise_error(error: EnterpriseToolError) -> CallToolResult {
+    let summary = format!("错误 [{}]：{}", error.code, error.message);
+    let mut result = CallToolResult::structured_error(json!({
+        "formatVersion": FORMAT_VERSION,
+        "ok": false,
+        "error": {
+            "code": error.code,
+            "message": error.message,
+        },
+    }));
+    result.content = vec![ContentBlock::text(summary)];
+    result
+}
+
 fn tool_error(code: &str, message: impl Into<String>) -> CallToolResult {
     CallToolResult::error(vec![ContentBlock::text(format!("Error [{code}]: {}", message.into()))])
+}
+
+// CallToolResult 是 MCP 原生错误载荷；保持不装箱可让所有工具直接返回一致错误。
+#[allow(clippy::result_large_err)]
+fn validate_safe_write_connection(
+    connection: &dbx_core::models::connection::ConnectionConfig,
+    policy: &McpGlobalPolicy,
+    database: &str,
+) -> Result<(), CallToolResult> {
+    if policy.read_only {
+        return Err(enterprise_error(EnterpriseToolError::new(
+            "MCP_READ_ONLY",
+            "DBX 全局 MCP 只读模式已开启，写入被阻断。",
+        )));
+    }
+    if connection.read_only {
+        return Err(enterprise_error(EnterpriseToolError::new(
+            "CONNECTION_READ_ONLY",
+            format!("连接 {} 已启用只读保护。", connection.name),
+        )));
+    }
+    if is_production_database(connection, database) {
+        return Err(enterprise_error(EnterpriseToolError::new(
+            "PRODUCTION_WRITE_BLOCKED",
+            "MCP 不允许对标记为生产的数据库执行文件或向量写入。",
+        )));
+    }
+    Ok(())
 }
 
 fn backend_tool_error(default_code: &str, error: impl Into<String>) -> CallToolResult {
@@ -1924,6 +2500,8 @@ mod tests {
     use dbx_core::models::connection::ConnectionConfig;
     use std::collections::HashSet;
 
+    static IMPORT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     struct FakeBackend {
         connections: Vec<ConnectionConfig>,
         policy: McpGlobalPolicy,
@@ -2075,9 +2653,9 @@ mod tests {
         let tools = server.tool_router.list_all();
         let names = tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
         #[cfg(feature = "mq-admin")]
-        assert_eq!(tools.len(), 17);
+        assert_eq!(tools.len(), 25);
         #[cfg(not(feature = "mq-admin"))]
-        assert_eq!(tools.len(), 16);
+        assert_eq!(tools.len(), 24);
         assert!(names.contains(&"dbx_list_connections"));
         assert!(names.contains(&"dbx_list_databases"));
         assert!(names.contains(&"dbx_list_tables"));
@@ -2096,6 +2674,14 @@ mod tests {
         assert!(names.contains(&"dbx_close_session"));
         #[cfg(feature = "mq-admin")]
         assert!(names.contains(&"dbx_send_message"));
+        assert!(names.contains(&"dbx_preview_import_file"));
+        assert!(names.contains(&"dbx_prepare_table_import"));
+        assert!(names.contains(&"dbx_start_table_import"));
+        assert!(names.contains(&"dbx_get_import_status"));
+        assert!(names.contains(&"dbx_cancel_import"));
+        assert!(names.contains(&"dbx_vector_search"));
+        assert!(names.contains(&"dbx_vector_upsert_file"));
+        assert!(names.contains(&"dbx_vector_delete_by_batch"));
     }
 
     #[tokio::test]
@@ -2123,6 +2709,83 @@ mod tests {
         let tools = server.policy_filtered_tools().await;
 
         assert_eq!(tools.len(), server.tool_router.list_all().len());
+    }
+
+    #[tokio::test]
+    async fn import_plan_rejects_source_changed_after_prepare() {
+        let _environment_guard = IMPORT_ENV_LOCK.lock().unwrap();
+        let previous_roots = std::env::var_os("DBX_MCP_IMPORT_ROOTS");
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("orders.csv");
+        std::fs::write(&source, "order_id,amount\nA001,10.00\n").unwrap();
+        std::env::set_var("DBX_MCP_IMPORT_ROOTS", directory.path());
+
+        let postgres = connection("write-pg", "运营组数据写入", "postgres", "enterprise");
+        let server = DbxMcpServer::with_runtime_options(
+            Arc::new(FakeBackend { connections: vec![postgres], ..Default::default() }),
+            McpScope::default(),
+            false,
+        );
+        let preview = server
+            .preview_import_file(Parameters(PreviewImportFileRequest {
+                file_path: source.to_string_lossy().to_string(),
+                source_format: None,
+                parse_options: Default::default(),
+                preview_rows: Some(5),
+                cell_char_limit: Some(100),
+            }))
+            .await;
+        assert_eq!(preview.is_error, Some(false));
+        assert_eq!(preview.structured_content.as_ref().and_then(|value| value.get("formatVersion")), Some(&json!(1)));
+
+        let prepared = server
+            .prepare_table_import(Parameters(PrepareTableImportRequest {
+                selector: ConnectionSelector { connection_id: Some("write-pg".to_string()), connection_name: None },
+                database: Some("enterprise".to_string()),
+                schema: "staging".to_string(),
+                table: "orders_batch_1".to_string(),
+                template_version: "orders-v1".to_string(),
+                file_path: source.to_string_lossy().to_string(),
+                source_format: None,
+                parse_options: Default::default(),
+                mappings: vec![
+                    crate::enterprise_tools::McpImportColumnMapping {
+                        source_column: "order_id".to_string(),
+                        target_column: "order_id".to_string(),
+                        target_data_type: Some("TEXT".to_string()),
+                    },
+                    crate::enterprise_tools::McpImportColumnMapping {
+                        source_column: "amount".to_string(),
+                        target_column: "amount".to_string(),
+                        target_data_type: Some("NUMERIC(20,2)".to_string()),
+                    },
+                ],
+                create_table: true,
+                batch_size: Some(1_000),
+                date_time_format: None,
+            }))
+            .await;
+        assert_eq!(prepared.is_error, Some(false));
+        let plan_id = prepared
+            .structured_content
+            .as_ref()
+            .and_then(|value| value.pointer("/data/plan/planId"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap()
+            .to_string();
+
+        std::fs::write(&source, "order_id,amount\nA001,10.00\nA002,20.00\n").unwrap();
+        let started = server.start_table_import(Parameters(StartTableImportRequest { plan_id })).await;
+        assert_eq!(started.is_error, Some(true));
+        assert_eq!(
+            started.structured_content.as_ref().and_then(|value| value.pointer("/error/code")),
+            Some(&json!("IMPORT_FILE_CHANGED"))
+        );
+
+        match previous_roots {
+            Some(value) => std::env::set_var("DBX_MCP_IMPORT_ROOTS", value),
+            None => std::env::remove_var("DBX_MCP_IMPORT_ROOTS"),
+        }
     }
 
     #[test]
@@ -2155,7 +2818,15 @@ mod tests {
         let server = DbxMcpServer::with_runtime_options(Arc::new(FakeBackend::default()), McpScope::default(), false);
         let tools = server.tool_router.list_all();
 
-        for tool_name in ["dbx_execute_query", "dbx_list_tables", "dbx_open_session"] {
+        for tool_name in [
+            "dbx_execute_query",
+            "dbx_list_tables",
+            "dbx_open_session",
+            "dbx_prepare_table_import",
+            "dbx_vector_search",
+            "dbx_vector_upsert_file",
+            "dbx_vector_delete_by_batch",
+        ] {
             let tool = tools.iter().find(|tool| tool.name == tool_name).expect("selector tool should be registered");
             let properties = tool
                 .input_schema
@@ -2204,6 +2875,17 @@ mod tests {
             ("dbx_remove_connection", &["connection_id", "connection_name"]),
             ("dbx_execute_redis_command", &["db"]),
             ("dbx_get_schema_context", &["database", "schema", "max_tables"]),
+            ("dbx_preview_import_file", &["source_format", "preview_rows", "cell_char_limit"]),
+            (
+                "dbx_prepare_table_import",
+                &["connection_id", "connection_name", "database", "source_format", "batch_size", "date_time_format"],
+            ),
+            (
+                "dbx_vector_search",
+                &["connection_id", "connection_name", "database", "semantic_version", "top_k", "output_fields"],
+            ),
+            ("dbx_vector_upsert_file", &["connection_id", "connection_name", "database", "batch_size"]),
+            ("dbx_vector_delete_by_batch", &["connection_id", "connection_name", "database"]),
         ];
         #[cfg(feature = "mq-admin")]
         checks
@@ -2319,9 +3001,9 @@ mod tests {
         );
         let names = server.tool_router.list_all().into_iter().map(|tool| tool.name).collect::<Vec<_>>();
         #[cfg(feature = "mq-admin")]
-        assert_eq!(names.len(), 12);
+        assert_eq!(names.len(), 20);
         #[cfg(not(feature = "mq-admin"))]
-        assert_eq!(names.len(), 11);
+        assert_eq!(names.len(), 19);
         assert!(!names.iter().any(|name| name == "dbx_add_connection"));
         assert!(!names.iter().any(|name| name == "dbx_duplicate_connection"));
         assert!(!names.iter().any(|name| name == "dbx_remove_connection"));

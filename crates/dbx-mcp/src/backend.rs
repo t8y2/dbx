@@ -1,7 +1,10 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
 use async_trait::async_trait;
@@ -12,6 +15,7 @@ use dbx_core::{
     db::{mongo_driver::MongoIndexSpec, redis_driver::RedisCommandResult, ColumnInfo, TableInfo},
     models::connection::{ConnectionConfig, DatabaseType},
     storage::{DesktopSettings, McpGlobalPolicy, McpGlobalPolicyState, Storage},
+    table_import::{TableImportProgress, TableImportRequest, TableImportSummary},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -295,6 +299,18 @@ pub trait DbxBackend: Send + Sync {
     ) -> Result<dbx_core::docs::SchemaSnapshot, String> {
         let _ = (connection, database, options);
         Err("Documentation snapshots are not supported by this backend.".to_string())
+    }
+
+    /// 执行已经由 MCP prepare 固化并复验的本地文件导入。
+    async fn import_table_file_for_mcp(
+        &self,
+        connection: &ConnectionConfig,
+        request: TableImportRequest,
+        cancelled: Arc<AtomicBool>,
+        progress: Arc<dyn Fn(TableImportProgress) + Send + Sync>,
+    ) -> Result<TableImportSummary, String> {
+        let _ = (connection, request, cancelled, progress);
+        Err("IMPORT_UNSUPPORTED_IN_WEB_MODE_V1: v1 文件导入仅支持本地 DBX Desktop/MCP 模式。".to_string())
     }
 }
 
@@ -799,6 +815,69 @@ impl DbxBackend for LocalBackend {
             &std::sync::atomic::AtomicBool::new(false),
         )
         .await
+    }
+
+    async fn import_table_file_for_mcp(
+        &self,
+        connection: &ConnectionConfig,
+        mut request: TableImportRequest,
+        cancelled: Arc<AtomicBool>,
+        progress: Arc<dyn Fn(TableImportProgress) + Send + Sync>,
+    ) -> Result<TableImportSummary, String> {
+        // prepare/start 复验后再复制到任务私有快照，避免源文件在后台读取期间被替换。
+        let expected_sha256 = request
+            .source_ref
+            .as_deref()
+            .filter(|value| value.len() == 64)
+            .ok_or_else(|| "IMPORT_SOURCE_HASH_REQUIRED: 导入计划缺少源文件 SHA-256。".to_string())?
+            .to_string();
+        let snapshot_root = self.data_dir.join("tmp").join("mcp_import");
+        tokio::fs::create_dir_all(&snapshot_root).await.map_err(|error| format!("创建导入快照目录失败：{error}"))?;
+        let snapshot_dir = snapshot_root.join(&request.import_id);
+        tokio::fs::create_dir(&snapshot_dir).await.map_err(|error| format!("创建任务快照目录失败：{error}"))?;
+        let extension = Path::new(&request.file_path).extension().and_then(|value| value.to_str()).unwrap_or("data");
+        let snapshot_path = snapshot_dir.join(format!("source.{extension}"));
+        let snapshot_result = async {
+            tokio::fs::copy(&request.file_path, &snapshot_path)
+                .await
+                .map_err(|error| format!("复制导入源快照失败：{error}"))?;
+            let identity = crate::enterprise_tools::file_identity(snapshot_path.clone())
+                .await
+                .map_err(|error| error.to_string())?;
+            if identity.sha256 != expected_sha256 {
+                return Err("IMPORT_FILE_CHANGED: 源文件在启动导入时发生变化；未写入数据库。".to_string());
+            }
+            request.file_path = snapshot_path.to_string_lossy().to_string();
+            let database = (!request.database.trim().is_empty()).then_some(request.database.as_str());
+            let client_session_id = dbx_core::table_import::table_import_client_session_id(&request.import_id);
+            let pool_key = self
+                .state
+                .get_or_create_pool_for_session(&request.connection_id, database, Some(&client_session_id))
+                .await?;
+            let cancellation = cancelled.clone();
+            let result = dbx_core::table_import::import_table_file_core(
+                &self.state,
+                &request,
+                &connection.db_type,
+                &pool_key,
+                move |_| {
+                    let cancellation = cancellation.clone();
+                    Box::pin(async move { cancellation.load(Ordering::Acquire) })
+                },
+                move |update| progress(update),
+            )
+            .await;
+            let cleanup =
+                self.state.detach_client_session_pool(&request.connection_id, database, &client_session_id).await;
+            if let Err(error) = cleanup {
+                return Err(format!("导入连接清理失败：{error}"));
+            }
+            result
+        }
+        .await;
+        let _ = tokio::fs::remove_file(&snapshot_path).await;
+        let _ = tokio::fs::remove_dir(&snapshot_dir).await;
+        snapshot_result
     }
 
     async fn execute_redis_command(

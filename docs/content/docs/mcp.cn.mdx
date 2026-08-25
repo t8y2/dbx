@@ -87,7 +87,7 @@ DeepSeek Harness 通过 Cordis 插件条目加载 MCP Server，不读取 `mcpSer
 
 ## 工具列表
 
-DBX MCP 当前提供 17 个工具：
+DBX MCP 当前提供 25 个工具：
 
 | 工具 | 说明 |
 | --- | --- |
@@ -108,8 +108,42 @@ DBX MCP 当前提供 17 个工具：
 | `dbx_send_message` | 向支持的消息队列 Topic 或队列发送消息 |
 | `dbx_open_table` | 在运行中的 DBX 桌面端打开表 |
 | `dbx_execute_and_show` | 执行查询并在 DBX 中展示结果 |
+| `dbx_preview_import_file` | 只读预览并计算允许目录内 Excel/CSV/TSV/JSON 的指纹 |
+| `dbx_prepare_table_import` | 创建有效 30 分钟、不可变且只能使用一次的 PostgreSQL staging 导入计划 |
+| `dbx_start_table_import` | 启动已经准备并复验的 staging 导入 |
+| `dbx_get_import_status` | 查看导入进度、行数、错误和最终摘要 |
+| `dbx_cancel_import` | 请求在后续 staging 批次写入前取消任务 |
+| `dbx_vector_search` | 在允许的 Milvus 集合中按批准状态和生效时间检索语义卡 |
+| `dbx_vector_upsert_file` | 从允许目录中的 JSONL upsert 已批准语义卡 |
+| `dbx_vector_delete_by_batch` | 在完全访问权限下删除一个明确的未发布语义批次 |
 
 启用连接作用域后，修改连接和桌面 UI 工具会被隐藏。
+
+## 本地文件导入与 Milvus 工具
+
+导入工具只支持本地 DBX Desktop/MCP 模式；在 Web 模式中会稳定返回 `IMPORT_UNSUPPORTED_IN_WEB_MODE_V1`。必须用平台路径分隔符在 `DBX_MCP_IMPORT_ROOTS` 中配置一个或多个允许目录。文件路径必须是绝对路径，解析后仍位于允许目录内，是普通且非符号链接的文件，扩展名受支持，并且没有超过大小限制。
+
+`dbx_prepare_table_import` 会把连接、已批准模板版本、规范路径、大小、修改时间、SHA-256、解析参数、字段映射和 staging 目标固化为不可变摘要。计划 30 分钟后过期，且只能启动一次。`dbx_start_table_import` 在后台启动前会重新核对完整文件身份。导入目标仅限 `DBX_MCP_IMPORT_STAGING_SCHEMAS` 中的 PostgreSQL Schema（默认为 `staging`）；发布到业务 Schema 仍由调用方通过独立治理流程完成。
+
+Milvus 工具只接受 allowlist 中的集合、过滤字段和输出字段。检索请求必须提供 `active_at`；服务端始终追加 `approval_status == "approved"` 以及 `effective_from`/`effective_to` 生效时间过滤，并可选追加精确 `semantic_version`。JSONL upsert 需要“数据读写”权限；删除只能按精确 `semantic_batch_id` 执行，并要求“完全访问”权限。通过 `dbx_execute_query` 提交的通用向量 REST 请求也会按端点分类，因此写入或破坏性 `POST` 不能绕过 MCP 策略。
+
+向量检索的核心参数形状如下：
+
+```jsonc
+{
+  "connection_name": "运营组语义库",
+  "database": "default",
+  "collection": "semantic_cards",
+  "active_at": "2026-08-25T10:00:00+08:00",
+  "semantic_version": "semantic-v3",
+  "embedding": [/* 必须恰好包含 1024 个有限浮点数 */],
+  "top_k": 12,
+  "filters": { "business_domain": "交易" },
+  "output_fields": ["card_id", "card_type", "title", "content", "source_uri"]
+}
+```
+
+仅依赖生效日期选择活动语义卡时可以省略 `semantic_version`，但 `active_at` 仍为必填。`embedding` 的实际长度必须等于 `DBX_MCP_VECTOR_DIMENSION`；上面数组内的注释只是文档缩写，不是可直接提交的工具参数。
 
 ## 有状态查询会话
 
@@ -250,6 +284,15 @@ DBX 在 **设置 → MCP** 中保存一份权威策略，并在每次请求时�
 | `DBX_MCP_SCOPE_CONNECTION_IDS` | 兼容旧配置：限制为多个连接 ID |
 | `DBX_MCP_SCOPE_CONNECTION_NAME` | 限制为一个连接名称 |
 | `DBX_MCP_SCOPE_DATABASE` | 限制为一个数据库 |
+| `DBX_MCP_IMPORT_ROOTS` | 导入和语义 JSONL 工具可读取的本地目录 allowlist，使用平台路径分隔符 |
+| `DBX_MCP_IMPORT_STAGING_SCHEMAS` | 允许导入的 PostgreSQL staging Schema，逗号分隔，默认 `staging` |
+| `DBX_MCP_IMPORT_FILE_MAX_BYTES` | Excel/CSV/TSV/JSON 最大字节数，默认 512 MiB |
+| `DBX_MCP_SEMANTIC_FILE_MAX_BYTES` | 语义 JSONL 最大字节数，默认 64 MiB |
+| `DBX_MCP_VECTOR_COLLECTIONS` | Milvus 集合 allowlist，逗号分隔，默认 `semantic_cards` |
+| `DBX_MCP_VECTOR_DIMENSION` | 固定向量维度，默认 `1024` |
+| `DBX_MCP_VECTOR_TOP_K_MAX` | Milvus Top K 上限，默认 `20`，硬上限 50 |
+| `DBX_MCP_VECTOR_FILTER_FIELDS` | 允许用于安全等值过滤的附加字段，逗号分隔 |
+| `DBX_MCP_VECTOR_OUTPUT_FIELDS` | 向量检索允许返回的标量字段，逗号分隔 |
 | `DBX_MCP_DEBUG_SQL` | 临时诊断时输出 SQL |
 
 ## 常见问题

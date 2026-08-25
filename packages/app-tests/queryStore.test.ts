@@ -3003,6 +3003,101 @@ test("uses the visible Vastbase relation schema for unqualified query writes", a
   }
 });
 
+test("uses the visible Kingbase relation schema for an unqualified aliased query target", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  const columnRequests: Array<{ database: string | null; schema: string | null; table: string | null }> = [];
+
+  connectionStore.addEphemeralConnection(kingbaseConn("kingbase-1"));
+
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/query/execute-multi") {
+      return new Response(
+        JSON.stringify([
+          {
+            columns: ["feearea", "month", "status"],
+            rows: [["1010", 202507, "3"]],
+            affected_rows: 0,
+            execution_time_ms: 1,
+          },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url === "/api/query/analyze-editability") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      const explicitSchema = body.sql.includes("actual_schema") ? "actual_schema" : undefined;
+      return new Response(
+        JSON.stringify({
+          editable: true,
+          analysis: {
+            schema: explicitSchema,
+            schemaQuoted: false,
+            tableName: "m_workflow",
+            tableNameQuoted: false,
+            tableAlias: "mw",
+            selectStar: true,
+            sources: [{ key: "mw:0", schema: explicitSchema, tableName: "m_workflow", tableNameQuoted: false, schemaQuoted: false, alias: "mw" }],
+            columns: [],
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url.startsWith("/api/schema/columns?")) {
+      const params = new URL(url, "http://localhost").searchParams;
+      columnRequests.push({ database: params.get("database"), schema: params.get("schema"), table: params.get("table") });
+      const resolvedSchema = params.get("schema") || "workflow_schema";
+      return new Response(
+        JSON.stringify([
+          { name: "feearea", data_type: "varchar", resolved_schema: resolvedSchema, is_nullable: false, column_default: null, is_primary_key: false, extra: null, comment: null },
+          { name: "month", data_type: "integer", resolved_schema: resolvedSchema, is_nullable: false, column_default: null, is_primary_key: false, extra: null, comment: null },
+          { name: "status", data_type: "varchar", resolved_schema: resolvedSchema, is_nullable: false, column_default: null, is_primary_key: false, extra: null, comment: null },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url === "/api/query/prepare-pagination-plan") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      return new Response(JSON.stringify({ sqlToExecute: body.options.sql, useAgentResultSession: false }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    const tabId = store.createTab("kingbase-1", "lx_dev_db", "Unqualified", "query");
+    await store.executeTabSql(tabId, "select * from m_workflow AS mw where feearea = '1010' and month = 202507");
+
+    const tab = store.tabs.find((item) => item.id === tabId);
+    await waitFor(() => columnRequests.length > 0 && tab?.tableMeta?.tableName === "m_workflow");
+    assert.deepEqual(columnRequests, [{ database: "lx_dev_db", schema: "", table: "m_workflow" }]);
+    assert.equal(tab?.tableMeta?.database, "lx_dev_db");
+    assert.equal(tab?.tableMeta?.schema, "workflow_schema");
+    assert.deepEqual(tab?.tableMeta?.primaryKeys, []);
+    assert.equal(tab?.queryAnalysis?.tableAlias, "mw");
+    assert.equal(tab?.queryEditabilityReason, undefined);
+
+    const explicitTabId = store.createTab("kingbase-1", "lx_dev_db", "Explicit", "query");
+    await store.executeTabSql(explicitTabId, "select * from actual_schema.m_workflow AS mw where feearea = '1010'");
+
+    const explicitTab = store.tabs.find((item) => item.id === explicitTabId);
+    await waitFor(() => columnRequests.length > 1 && explicitTab?.tableMeta?.tableName === "m_workflow");
+    assert.deepEqual(columnRequests[1], { database: "lx_dev_db", schema: "actual_schema", table: "m_workflow" });
+    assert.equal(explicitTab?.tableMeta?.schema, "actual_schema");
+    assert.equal(explicitTab?.queryAnalysis?.tableAlias, "mw");
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
 test("keeps PostgreSQL quoted primary keys distinct from case-only result columns", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());

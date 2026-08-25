@@ -33,11 +33,11 @@ use crate::query::{await_stream_with_progress_timeout, DbOperationBudget, Stream
 use crate::sql::starts_with_executable_sql_keyword;
 use crate::types::{
     ColumnInfo, CompletionAssistantCandidate, CompletionAssistantCandidateKind, CompletionAssistantMatchMode,
-    CompletionAssistantObjectKind, CompletionAssistantRequest, CompletionAssistantResponse, CustomTypeDdl,
-    CustomTypeDetails, CustomTypeDomainConstraint, CustomTypeKind, CustomTypeMember, CustomTypeProperties,
-    DatabaseInfo, DatabaseStorageInfo, ExtensionInfo, ForeignKeyInfo, FunctionInfo, IndexInfo, ObjectInfo,
-    ObjectStatistics, OwnerInfo, QueryMessage, QueryResult, RuleInfo, SchemaInfo, SequenceInfo, SpatialColumnBuilder,
-    TableInfo, TriggerInfo,
+    CompletionAssistantObjectKind, CompletionAssistantRequest, CompletionAssistantResponse, ConstraintInfo,
+    CustomTypeDdl, CustomTypeDetails, CustomTypeDomainConstraint, CustomTypeKind, CustomTypeMember,
+    CustomTypeProperties, DatabaseInfo, DatabaseStorageInfo, ExtensionInfo, ForeignKeyInfo, FunctionInfo, IndexInfo,
+    ObjectInfo, ObjectStatistics, OwnerInfo, QueryMessage, QueryResult, RuleInfo, SchemaInfo, SequenceInfo,
+    SpatialColumnBuilder, TableInfo, TriggerInfo,
 };
 
 pub(crate) const GAUSSDB_COMPATIBILITY_SQL: &str =
@@ -4006,6 +4006,117 @@ fn postgres_check_constraints_sql() -> &'static str {
      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
      WHERE n.nspname = $1 AND c.relname = $2 AND con.contype = 'c' \
      ORDER BY con.conname"
+}
+
+/// All constraints on a table (primary key, foreign key, unique, check,
+/// exclude, and — on PG 18+ — not-null), as full `ConstraintInfo` records.
+/// `pg_constraint.contype` letters are expanded to display labels and the
+/// `conkey`/`confkey` attribute numbers are resolved to column names.
+/// PostgreSQL has no per-constraint disabled state, so `enabled` is always
+/// true; a `NOT VALID` constraint (e.g. an added-but-unvalidated CHECK or
+/// FK) reports `valid = false` and surfaces the "Not validated" badge.
+pub async fn list_constraints(pool: &Pool, schema: &str, table: &str) -> Result<Vec<ConstraintInfo>, String> {
+    let schema = if schema.is_empty() { "public" } else { schema };
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let rows = postgres_query_cached(&client, postgres_constraints_sql(), &[&schema, &table])
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(rows
+        .iter()
+        .map(|row| ConstraintInfo {
+            name: pg_row_try_string(row, 0),
+            constraint_type: postgres_constraint_type_label(&pg_row_try_string(row, 1)),
+            definition: pg_row_try_string(row, 2),
+            columns: row.try_get::<_, Vec<String>>(3).unwrap_or_default(),
+            ref_schema: row.try_get::<_, Option<String>>(4).ok().flatten(),
+            ref_table: row.try_get::<_, Option<String>>(5).ok().flatten(),
+            ref_columns: row.try_get::<_, Vec<String>>(6).unwrap_or_default(),
+            match_type: postgres_constraint_match_type(row.try_get::<_, Option<String>>(7).ok().flatten()),
+            on_update: postgres_fk_action_label(row.try_get::<_, Option<String>>(8).ok().flatten()),
+            on_delete: postgres_fk_action_label(row.try_get::<_, Option<String>>(9).ok().flatten()),
+            deferrable: row.try_get::<_, bool>(10).unwrap_or(false),
+            initially_deferred: row.try_get::<_, bool>(11).unwrap_or(false),
+            enabled: true,
+            valid: row.try_get::<_, bool>(12).unwrap_or(true),
+        })
+        .collect())
+}
+
+fn postgres_constraints_sql() -> &'static str {
+    "SELECT con.conname, \
+            con.contype::text, \
+            pg_catalog.pg_get_constraintdef(con.oid, true) AS definition, \
+            COALESCE(conkey.attnames, ARRAY[]::text[]) AS columns, \
+            refn.nspname AS ref_schema, \
+            refc.relname AS ref_table, \
+            COALESCE(confkey.attnames, ARRAY[]::text[]) AS ref_columns, \
+            CASE WHEN con.contype = 'f' THEN con.confmatchtype::text END AS match_type, \
+            CASE WHEN con.contype = 'f' THEN con.confupdtype::text END AS on_update, \
+            CASE WHEN con.contype = 'f' THEN con.confdeltype::text END AS on_delete, \
+            con.condeferrable, \
+            con.condeferred, \
+            con.convalidated \
+     FROM pg_catalog.pg_constraint con \
+     JOIN pg_catalog.pg_class c ON c.oid = con.conrelid \
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     LEFT JOIN pg_catalog.pg_class refc ON refc.oid = con.confrelid \
+     LEFT JOIN pg_catalog.pg_namespace refn ON refn.oid = refc.relnamespace \
+     LEFT JOIN LATERAL ( \
+         SELECT array_agg(a.attname::text ORDER BY ord.ord) AS attnames \
+         FROM unnest(con.conkey) WITH ORDINALITY AS ord(attnum, ord) \
+         JOIN pg_catalog.pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = ord.attnum AND NOT a.attisdropped \
+     ) conkey ON true \
+     LEFT JOIN LATERAL ( \
+         SELECT array_agg(a.attname::text ORDER BY ord.ord) AS attnames \
+         FROM unnest(con.confkey) WITH ORDINALITY AS ord(attnum, ord) \
+         JOIN pg_catalog.pg_attribute a ON a.attrelid = con.confrelid AND a.attnum = ord.attnum AND NOT a.attisdropped \
+     ) confkey ON true \
+     WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r','p','f') \
+     ORDER BY con.conname"
+}
+
+/// Expand a `pg_constraint.contype` letter to a human-readable label.
+fn postgres_constraint_type_label(contype: &str) -> String {
+    match contype {
+        "c" => "CHECK".to_string(),
+        "f" => "FOREIGN KEY".to_string(),
+        "p" => "PRIMARY KEY".to_string(),
+        "u" => "UNIQUE".to_string(),
+        "t" => "CONSTRAINT TRIGGER".to_string(),
+        "x" => "EXCLUDE".to_string(),
+        "n" => "NOT NULL".to_string(),
+        _ => contype.to_string(),
+    }
+}
+
+/// Normalize a `confupdtype`/`confdeltype` letter to an `information_schema`
+/// style referential-action label, mirroring `postgres_foreign_key_action`.
+fn postgres_fk_action_label(action: Option<String>) -> Option<String> {
+    action
+        .as_deref()
+        .and_then(|value| match value {
+            "a" => Some("NO ACTION"),
+            "r" => Some("RESTRICT"),
+            "c" => Some("CASCADE"),
+            "n" => Some("SET NULL"),
+            "d" => Some("SET DEFAULT"),
+            _ => None,
+        })
+        .map(str::to_string)
+}
+
+/// Normalize a `confmatchtype` letter to a match-type label.
+fn postgres_constraint_match_type(match_type: Option<String>) -> Option<String> {
+    match_type
+        .as_deref()
+        .and_then(|value| match value {
+            "f" => Some("FULL"),
+            "p" => Some("PARTIAL"),
+            "s" => Some("SIMPLE"),
+            _ => None,
+        })
+        .map(str::to_string)
 }
 
 fn postgres_table_partition_relation_sql() -> &'static str {
@@ -10060,6 +10171,54 @@ mod tests {
         assert!(sql.contains("pg_catalog.pg_get_constraintdef(con.oid, true)"));
         assert!(sql.contains("n.nspname = $1 AND c.relname = $2"));
         assert!(sql.contains("ORDER BY con.conname"));
+    }
+
+    #[test]
+    fn postgres_constraints_sql_covers_all_contypes_and_referential_fields() {
+        let sql = postgres_constraints_sql();
+        assert!(sql.contains("con.contype::text"));
+        assert!(sql.contains("pg_catalog.pg_get_constraintdef(con.oid, true)"));
+        // FK-only referential columns are conditionally selected.
+        assert!(sql.contains("CASE WHEN con.contype = 'f' THEN con.confmatchtype::text END"));
+        assert!(sql.contains("CASE WHEN con.contype = 'f' THEN con.confupdtype::text END"));
+        assert!(sql.contains("CASE WHEN con.contype = 'f' THEN con.confdeltype::text END"));
+        // conkey/confkey attribute numbers are resolved to names via laterals.
+        assert!(sql.contains("unnest(con.conkey) WITH ORDINALITY"));
+        assert!(sql.contains("unnest(con.confkey) WITH ORDINALITY"));
+        // attname (pg_attribute type `name`) is explicitly cast to text so the
+        // array decodes as text[] (matching the COALESCE fallback and Vec<String>).
+        assert!(sql.contains("array_agg(a.attname::text ORDER BY ord.ord)"));
+        assert_eq!(sql.matches("attname::text").count(), 2);
+        assert!(sql.contains("a.attisdropped"));
+        assert!(sql.contains("n.nspname = $1 AND c.relname = $2"));
+        assert!(sql.contains("c.relkind IN ('r','p','f')"));
+        assert!(sql.contains("ORDER BY con.conname"));
+    }
+
+    #[test]
+    fn postgres_constraint_type_label_expands_contype_letters() {
+        assert_eq!(postgres_constraint_type_label("p"), "PRIMARY KEY");
+        assert_eq!(postgres_constraint_type_label("f"), "FOREIGN KEY");
+        assert_eq!(postgres_constraint_type_label("u"), "UNIQUE");
+        assert_eq!(postgres_constraint_type_label("c"), "CHECK");
+        assert_eq!(postgres_constraint_type_label("x"), "EXCLUDE");
+        assert_eq!(postgres_constraint_type_label("n"), "NOT NULL");
+        assert_eq!(postgres_constraint_type_label("unknown"), "unknown");
+    }
+
+    #[test]
+    fn postgres_fk_action_label_and_match_type_normalize_letters() {
+        assert_eq!(postgres_fk_action_label(Some("c".to_string())).as_deref(), Some("CASCADE"));
+        assert_eq!(postgres_fk_action_label(Some("n".to_string())).as_deref(), Some("SET NULL"));
+        assert_eq!(postgres_fk_action_label(Some("d".to_string())).as_deref(), Some("SET DEFAULT"));
+        assert_eq!(postgres_fk_action_label(Some("a".to_string())).as_deref(), Some("NO ACTION"));
+        assert_eq!(postgres_fk_action_label(Some("r".to_string())).as_deref(), Some("RESTRICT"));
+        assert_eq!(postgres_fk_action_label(Some("zz".to_string())), None);
+        assert_eq!(postgres_fk_action_label(None), None);
+        assert_eq!(postgres_constraint_match_type(Some("f".to_string())).as_deref(), Some("FULL"));
+        assert_eq!(postgres_constraint_match_type(Some("s".to_string())).as_deref(), Some("SIMPLE"));
+        assert_eq!(postgres_constraint_match_type(Some("p".to_string())).as_deref(), Some("PARTIAL"));
+        assert_eq!(postgres_constraint_match_type(Some("zz".to_string())), None);
     }
 
     #[test]

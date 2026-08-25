@@ -479,7 +479,9 @@ pub async fn list_constraints(
     database: String,
     schema: String,
     table: String,
+    catalog: Option<String>,
 ) -> Result<Vec<dbx_core::db::ConstraintInfo>, String> {
+    let _ = catalog;
     dbx_core::schema::list_constraints_core(&state, &connection_id, &database, &schema, &table).await
 }
 

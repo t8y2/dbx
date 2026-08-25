@@ -645,6 +645,7 @@ pub async fn list_constraints(
     let database = q.database.as_deref().unwrap_or("");
     let schema = q.schema.as_deref().unwrap_or("");
     let table = q.table.as_deref().unwrap_or("");
+    let _ = q.catalog.as_deref();
     let result = dbx_core::schema::list_constraints_core(&state.app, &q.connection_id, database, schema, table)
         .await
         .map_err(AppError::from)?;

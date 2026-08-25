@@ -1,3 +1,4 @@
+import { executableStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import type { SqlTextSpan } from "@/types/database";
 
 export interface MysqlRoutineSyntaxDiagnostic {
@@ -26,45 +27,49 @@ interface RoutineDeclaration {
 }
 
 const NON_ROUTINE_CREATE_TYPES = new Set(["DATABASE", "INDEX", "LOGFILE", "ROLE", "SCHEMA", "SERVER", "SPATIAL", "TABLE", "TEMPORARY", "UNIQUE", "USER", "VIEW"]);
-const CONTROL_BLOCK_SUFFIXES = new Set(["IF", "LOOP", "CASE", "REPEAT", "WHILE"]);
+
+export function supportsMysqlRoutineSyntaxDiagnostics(driverProfile?: string): boolean {
+  const profile = driverProfile?.trim().toLowerCase();
+  return !profile || profile === "mysql" || profile === "custom_mysql";
+}
 
 export function analyzeMysqlRoutineSyntax(sql: string): MysqlRoutineSyntaxAnalysis {
-  const tokens = tokenizeMysqlRoutineSql(sql);
-  const declarations = findRoutineDeclarations(tokens);
   const diagnostics: MysqlRoutineSyntaxDiagnostic[] = [];
   const routineRanges: Array<{ from: number; to: number }> = [];
 
-  declarations.forEach((declaration, declarationIndex) => {
-    const nextDeclarationTokenIndex = declarations[declarationIndex + 1]?.createTokenIndex ?? tokens.length;
-    const parameterStart = findTokenKind(tokens, declaration.tokenIndex + 1, nextDeclarationTokenIndex, "leftParen");
-    if (parameterStart === -1) return;
-    const parameterEnd = findMatchingRightParen(tokens, parameterStart, nextDeclarationTokenIndex);
-    if (parameterEnd === -1) return;
-    const routineEnd = findRoutineEndToken(tokens, parameterEnd + 1, nextDeclarationTokenIndex);
-    const routineEndOffset = routineEnd === -1 ? (tokens[nextDeclarationTokenIndex]?.from ?? sql.length) : tokens[routineEnd].to;
-    routineRanges.push({ from: tokens[declaration.createTokenIndex].from, to: routineEndOffset });
+  for (const statement of executableStatementRanges(sql, "mysql")) {
+    const tokens = tokenizeMysqlRoutineSql(statement.sql, statement.from);
+    const declarations = findRoutineDeclarations(tokens);
 
-    const previousParameterToken = tokens[parameterEnd - 1];
-    if (previousParameterToken?.kind === "comma") {
-      diagnostics.push(diagnosticAtOffset(sql, previousParameterToken.from, previousParameterToken.to, "Trailing comma is not allowed in a MySQL routine parameter list"));
-    }
+    declarations.forEach((declaration, declarationIndex) => {
+      const nextDeclarationTokenIndex = declarations[declarationIndex + 1]?.createTokenIndex ?? tokens.length;
+      const parameterStart = findTokenKind(tokens, declaration.tokenIndex + 1, nextDeclarationTokenIndex, "leftParen");
+      if (parameterStart === -1) return;
+      const parameterEnd = findMatchingRightParen(tokens, parameterStart, nextDeclarationTokenIndex);
+      if (parameterEnd === -1) return;
+      routineRanges.push({ from: tokens[declaration.createTokenIndex].from, to: statement.to });
 
-    const bodyEnd = routineEnd === -1 ? nextDeclarationTokenIndex : routineEnd + 1;
-    for (let index = parameterEnd + 1; index < bodyEnd; index += 1) {
-      const token = tokens[index];
-      if (token.kind !== "word" || token.value !== "RETURN") continue;
-      if (declaration.kind === "PROCEDURE") {
-        diagnostics.push(diagnosticAtOffset(sql, token.from, token.to, "RETURN is not valid in a MySQL procedure; use LEAVE with a block label"));
-        continue;
+      const previousParameterToken = tokens[parameterEnd - 1];
+      if (previousParameterToken?.kind === "comma") {
+        diagnostics.push(diagnosticAtOffset(sql, previousParameterToken.from, previousParameterToken.to, "Trailing comma is not allowed in a MySQL routine parameter list"));
       }
-      const nextToken = tokens[index + 1];
-      if (!nextToken || nextToken.kind === "semicolon") {
-        diagnostics.push(diagnosticAtOffset(sql, token.from, token.to, "RETURN in a MySQL function requires an expression"));
-      }
-    }
-  });
 
-  return { diagnostics, hasRoutine: declarations.length > 0, routineRanges };
+      for (let index = parameterEnd + 1; index < nextDeclarationTokenIndex; index += 1) {
+        const token = tokens[index];
+        if (token.kind !== "word" || token.value !== "RETURN") continue;
+        if (declaration.kind === "PROCEDURE") {
+          diagnostics.push(diagnosticAtOffset(sql, token.from, token.to, "RETURN is not valid in a MySQL procedure; use LEAVE with a block label"));
+          continue;
+        }
+        const nextToken = tokens[index + 1];
+        if (!nextToken || nextToken.kind === "semicolon") {
+          diagnostics.push(diagnosticAtOffset(sql, token.from, token.to, "RETURN in a MySQL function requires an expression"));
+        }
+      }
+    });
+  }
+
+  return { diagnostics, hasRoutine: routineRanges.length > 0, routineRanges };
 }
 
 function findRoutineDeclarations(tokens: readonly RoutineToken[]): RoutineDeclaration[] {
@@ -83,46 +88,6 @@ function findRoutineDeclarations(tokens: readonly RoutineToken[]): RoutineDeclar
     }
   }
   return declarations;
-}
-
-function findRoutineEndToken(tokens: readonly RoutineToken[], from: number, to: number): number {
-  const bodyStart = findWordToken(tokens, from, to, "BEGIN");
-  if (bodyStart === -1) return findTokenKind(tokens, from, to, "semicolon");
-
-  let depth = 0;
-  for (let index = bodyStart; index < to; index += 1) {
-    const token = tokens[index];
-    if (token.kind !== "word") continue;
-    if (token.value === "BEGIN") {
-      if (previousWordToken(tokens, index, bodyStart) !== "END") depth += 1;
-      continue;
-    }
-    if (token.value !== "END" || CONTROL_BLOCK_SUFFIXES.has(nextWordToken(tokens, index, to) ?? "")) continue;
-    depth = Math.max(0, depth - 1);
-    if (depth === 0) return index;
-  }
-  return -1;
-}
-
-function findWordToken(tokens: readonly RoutineToken[], from: number, to: number, value: string): number {
-  for (let index = from; index < to; index += 1) {
-    if (tokens[index]?.kind === "word" && tokens[index]?.value === value) return index;
-  }
-  return -1;
-}
-
-function previousWordToken(tokens: readonly RoutineToken[], from: number, lowerBound: number): string | null {
-  for (let index = from - 1; index >= lowerBound; index -= 1) {
-    if (tokens[index]?.kind === "word") return tokens[index].value;
-  }
-  return null;
-}
-
-function nextWordToken(tokens: readonly RoutineToken[], from: number, upperBound: number): string | null {
-  for (let index = from + 1; index < upperBound; index += 1) {
-    if (tokens[index]?.kind === "word") return tokens[index].value;
-  }
-  return null;
 }
 
 function findTokenKind(tokens: readonly RoutineToken[], from: number, to: number, kind: RoutineToken["kind"]): number {
@@ -170,7 +135,7 @@ function offsetToPosition(sql: string, offset: number): { line: number; column: 
   return { line, column: boundedOffset - lineStart + 1 };
 }
 
-function tokenizeMysqlRoutineSql(sql: string): RoutineToken[] {
+function tokenizeMysqlRoutineSql(sql: string, baseOffset = 0): RoutineToken[] {
   const tokens: RoutineToken[] = [];
   let index = 0;
 
@@ -192,25 +157,25 @@ function tokenizeMysqlRoutineSql(sql: string): RoutineToken[] {
     }
     if (char === "'" || char === '"' || char === "`") {
       const end = skipQuoted(sql, index, char);
-      tokens.push({ kind: "other", value: sql.slice(index, end), from: index, to: end });
+      tokens.push({ kind: "other", value: sql.slice(index, end), from: baseOffset + index, to: baseOffset + end });
       index = end;
       continue;
     }
 
     const kind = char === "(" ? "leftParen" : char === ")" ? "rightParen" : char === "," ? "comma" : char === ";" ? "semicolon" : null;
     if (kind) {
-      tokens.push({ kind, value: char, from: index, to: index + 1 });
+      tokens.push({ kind, value: char, from: baseOffset + index, to: baseOffset + index + 1 });
       index += 1;
       continue;
     }
 
     const word = /^[A-Za-z_][A-Za-z0-9_]*/.exec(sql.slice(index))?.[0];
     if (word) {
-      tokens.push({ kind: "word", value: word.toUpperCase(), from: index, to: index + word.length });
+      tokens.push({ kind: "word", value: word.toUpperCase(), from: baseOffset + index, to: baseOffset + index + word.length });
       index += word.length;
       continue;
     }
-    if (!/\s/.test(char)) tokens.push({ kind: "other", value: char, from: index, to: index + 1 });
+    if (!/\s/.test(char)) tokens.push({ kind: "other", value: char, from: baseOffset + index, to: baseOffset + index + 1 });
     index += 1;
   }
   return tokens;

@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { analyzeMysqlRoutineSyntax } from "../../apps/desktop/src/lib/sql/mysqlRoutineSyntaxDiagnostics.ts";
+import { analyzeMysqlRoutineSyntax, supportsMysqlRoutineSyntaxDiagnostics } from "../../apps/desktop/src/lib/sql/mysqlRoutineSyntaxDiagnostics.ts";
 
 const reportedSql = `drop procedure if exists proc_check_gys;
 CREATE PROCEDURE proc_check_gys(
@@ -84,9 +84,11 @@ test("ignores ordinary SQL and quoted routine keywords", () => {
 });
 
 test("keeps multiple routine ranges separate from ordinary SQL", () => {
-  const sql = `CREATE PROCEDURE first_proc() BEGIN RETURN; END$$
-SELECT missing_column FROM users;
-CREATE FUNCTION second_func() RETURNS INT BEGIN RETURN 1; END$$`;
+  const sql = `DELIMITER $$
+CREATE PROCEDURE first_proc() BEGIN RETURN; END$$
+CREATE FUNCTION second_func() RETURNS INT BEGIN RETURN 1; END$$
+DELIMITER ;
+SELECT missing_column FROM users;`;
   const analysis = analyzeMysqlRoutineSyntax(sql);
 
   assert.equal(analysis.routineRanges.length, 2);
@@ -98,4 +100,53 @@ CREATE FUNCTION second_func() RETURNS INT BEGIN RETURN 1; END$$`;
     analysis.diagnostics.map((diagnostic) => diagnostic.message),
     ["RETURN is not valid in a MySQL procedure; use LEAVE with a block label"],
   );
+});
+
+test("keeps CASE expression endings inside the routine statement", () => {
+  const sql = `CREATE PROCEDURE update_status()
+BEGIN
+  SET @status_code = CASE WHEN 1 = 1 THEN 1 ELSE 0 END;
+  RETURN;
+END;
+SELECT missing_column FROM users;`;
+  const analysis = analyzeMysqlRoutineSyntax(sql);
+
+  assert.deepEqual(
+    analysis.diagnostics.map((diagnostic) => diagnostic.message),
+    ["RETURN is not valid in a MySQL procedure; use LEAVE with a block label"],
+  );
+  assert.equal(sql.slice(analysis.routineRanges[0].from, analysis.routineRanges[0].to).includes("RETURN;"), true);
+  assert.equal(sql.slice(analysis.routineRanges[0].from, analysis.routineRanges[0].to).includes("SELECT missing_column"), false);
+});
+
+test("uses custom delimiters to bound single-statement functions", () => {
+  const sql = `DELIMITER $$
+CREATE FUNCTION answer() RETURNS INT
+RETURN$$
+DELIMITER ;
+SELECT missing_column FROM users;`;
+  const analysis = analyzeMysqlRoutineSyntax(sql);
+
+  assert.deepEqual(
+    analysis.diagnostics.map((diagnostic) => diagnostic.message),
+    ["RETURN in a MySQL function requires an expression"],
+  );
+  assert.equal(sql.slice(analysis.routineRanges[0].from, analysis.routineRanges[0].to), "CREATE FUNCTION answer() RETURNS INT\nRETURN");
+});
+
+test("limits routine diagnostics to native and custom MySQL profiles", () => {
+  assert.equal(supportsMysqlRoutineSyntaxDiagnostics(), true);
+  assert.equal(supportsMysqlRoutineSyntaxDiagnostics("mysql"), true);
+  assert.equal(supportsMysqlRoutineSyntaxDiagnostics("custom_mysql"), true);
+  assert.equal(supportsMysqlRoutineSyntaxDiagnostics("mariadb"), false);
+  assert.equal(supportsMysqlRoutineSyntaxDiagnostics("tidb"), false);
+  assert.equal(supportsMysqlRoutineSyntaxDiagnostics("oceanbase"), false);
+});
+
+test("leaves MySQL triggers and events to the existing diagnostics path", () => {
+  const trigger = analyzeMysqlRoutineSyntax("CREATE TRIGGER before_insert BEFORE INSERT ON users FOR EACH ROW SET NEW.created_at = NOW()");
+  const event = analyzeMysqlRoutineSyntax("CREATE EVENT purge_logs ON SCHEDULE EVERY 1 DAY DO DELETE FROM logs WHERE created_at < NOW() - INTERVAL 30 DAY");
+
+  assert.deepEqual(trigger, { diagnostics: [], hasRoutine: false, routineRanges: [] });
+  assert.deepEqual(event, { diagnostics: [], hasRoutine: false, routineRanges: [] });
 });

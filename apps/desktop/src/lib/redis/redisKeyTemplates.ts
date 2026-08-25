@@ -4,12 +4,7 @@
  */
 
 export function normalizeRedisKeyTemplates(value: unknown): string[] {
-  const rawLines =
-    typeof value === "string"
-      ? value.split(/\r?\n/)
-      : Array.isArray(value)
-        ? value.filter((item): item is string => typeof item === "string")
-        : [];
+  const rawLines = typeof value === "string" ? value.split(/\r?\n/) : Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 
   const seen = new Set<string>();
   const templates: string[] = [];
@@ -23,10 +18,7 @@ export function normalizeRedisKeyTemplates(value: unknown): string[] {
 }
 
 /** Empty connection list means inherit global (not “no templates”). */
-export function resolveRedisKeyTemplates(
-  connectionTemplates: string[] | undefined | null,
-  globalTemplates: string[] | undefined | null,
-): string[] {
+export function resolveRedisKeyTemplates(connectionTemplates: string[] | undefined | null, globalTemplates: string[] | undefined | null): string[] {
   const fromConnection = normalizeRedisKeyTemplates(connectionTemplates);
   if (fromConnection.length > 0) return fromConnection;
   return normalizeRedisKeyTemplates(globalTemplates);

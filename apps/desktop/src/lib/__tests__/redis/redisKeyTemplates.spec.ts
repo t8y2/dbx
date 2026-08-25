@@ -1,16 +1,9 @@
 import { describe, expect, it } from "vitest";
-import {
-  filterRedisKeyTemplates,
-  normalizeRedisKeyTemplates,
-  redisKeyTemplatesToTextarea,
-  resolveRedisKeyTemplates,
-} from "@/lib/redis/redisKeyTemplates";
+import { filterRedisKeyTemplates, normalizeRedisKeyTemplates, redisKeyTemplatesToTextarea, resolveRedisKeyTemplates } from "@/lib/redis/redisKeyTemplates";
 
 describe("redisKeyTemplates", () => {
   it("normalizes arrays and newline text, trimming and deduping", () => {
-    expect(
-      normalizeRedisKeyTemplates(["  user:{$id}  ", "", "v3:adui:{$positionID}", "user:{$id}", "  "]),
-    ).toEqual(["user:{$id}", "v3:adui:{$positionID}"]);
+    expect(normalizeRedisKeyTemplates(["  user:{$id}  ", "", "v3:adui:{$positionID}", "user:{$id}", "  "])).toEqual(["user:{$id}", "v3:adui:{$positionID}"]);
 
     expect(normalizeRedisKeyTemplates("user:{$id}\n\nv3:adui\nuser:{$id}\n")).toEqual(["user:{$id}", "v3:adui"]);
     expect(normalizeRedisKeyTemplates(null)).toEqual([]);
@@ -30,10 +23,7 @@ describe("redisKeyTemplates", () => {
     const templates = ["v3:adui:{$positionID}", "v4:adui:creative_feed:{$arg1}", "cache:session"];
     expect(filterRedisKeyTemplates(templates, "")).toEqual(templates);
     expect(filterRedisKeyTemplates(templates, "  ")).toEqual(templates);
-    expect(filterRedisKeyTemplates(templates, "ADUI")).toEqual([
-      "v3:adui:{$positionID}",
-      "v4:adui:creative_feed:{$arg1}",
-    ]);
+    expect(filterRedisKeyTemplates(templates, "ADUI")).toEqual(["v3:adui:{$positionID}", "v4:adui:creative_feed:{$arg1}"]);
     expect(filterRedisKeyTemplates(templates, "session")).toEqual(["cache:session"]);
     expect(filterRedisKeyTemplates(templates, "missing")).toEqual([]);
   });

@@ -4184,7 +4184,6 @@ function firstRedisClusterEndpoint(value?: string): { host: string; port: number
   return parseRedisEndpoint(first, 6379);
 }
 
-
 function parseRedisEndpoint(value: string, defaultPort: number): { host: string; port: number } {
   const endpoint = value
     .trim()

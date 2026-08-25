@@ -121,11 +121,11 @@ Connection-scoped sessions hide connection-mutating and desktop UI tools.
 
 ## Local file imports and Milvus tools
 
-The import tools are available only in local DBX Desktop/MCP mode. In Web mode they return the stable `IMPORT_UNSUPPORTED_IN_WEB_MODE_V1` code. Configure `DBX_MCP_IMPORT_ROOTS` with one or more directories using the platform path separator. Every file path must be absolute, resolve inside one configured root, be a regular non-symlink file, use an allowed extension, and stay below the configured size limit.
+The import tools are available only in local DBX Desktop/MCP mode. In Web mode they return the stable `IMPORT_UNSUPPORTED_IN_WEB_MODE_V1` code. Configure `DBX_MCP_IMPORT_ROOTS` with one or more real directories using the platform path separator. Every file path must be absolute, resolve inside one configured root, be a regular non-symlink file, use an allowed extension, and stay below the configured size limit. Preview supports Excel, JSON, CSV, and TSV; governed database import in v1 is deliberately limited to streaming UTF-8 CSV/TSV. Excel/JSON or non-UTF-8 prepare calls fail with a stable unsupported code before a plan or database write exists.
 
-`dbx_prepare_table_import` binds the connection, approved template version, canonical path, size, modification time, SHA-256, parsing options, mappings, and staging target into an immutable digest. The returned plan expires after 30 minutes and can be started once. `dbx_start_table_import` rechecks the complete file identity before launching a background import. Import targets are limited to PostgreSQL schemas listed in `DBX_MCP_IMPORT_STAGING_SCHEMAS` (default `staging`); publication to business schemas remains the caller's separately governed workflow.
+`dbx_prepare_table_import` binds the connection, caller-approved template version, canonical path, size, modification time, SHA-256, parsing options, and mappings into an immutable digest. Each mapping supplies the 1-based `source_position`, the exact `source_name` returned by preview, and `target_column`. The server—not the caller—generates a unique `staging.mcp_<uuid>` relation, forces a new table, and makes every business column `TEXT`. The returned plan expires after 30 minutes and can be started once. Start rechecks the source and streams it into a bounded governed snapshot before opening a database pool. Every row gains `import_id`, `plan_id`, `source_sha`, the real `source_row_number`, `source_row_hash`, and `loaded_at`; if exact lineage cannot be produced, the import fails before database access. Status returns the generated relation. Publication to business schemas remains a separately governed workflow.
 
-Milvus tools accept only collections, filter fields, and output fields on their corresponding allowlists. Search requires `active_at`, always adds `approval_status == "approved"` plus `effective_from`/`effective_to` activity filters, and optionally applies an exact `semantic_version`. Upsert reads bounded `.jsonl` files and requires Data read/write permission. Delete accepts only an exact `semantic_batch_id` and requires Full access. Generic vector REST passed to `dbx_execute_query` is also classified by endpoint, so write or destructive POST requests cannot bypass MCP policy.
+Milvus tools accept only collections, filter fields, and output fields on their corresponding allowlists. Search requires `active_at`, always adds `approval_status == "approved"` plus effective-date filters, and optionally applies an exact `semantic_version`. Upsert accepts a strict semantic-card schema, verifies the 64-hex `content_checksum` against `content`, requires `embedding_revision`, rejects `chunk_index` and `embedding_dimension`, enforces unique card IDs and one semantic version per file, and preflights existing IDs so another batch/version cannot be overwritten. Delete requires Full access and an explicit `published: false` attestation. All entity search/query/mutation REST submitted through generic `dbx_execute_query` returns `VECTOR_DEDICATED_TOOL_REQUIRED`; only explicit management diagnostics remain available there.
 
 The core vector-search arguments are:
 
@@ -134,7 +134,7 @@ The core vector-search arguments are:
   "connection_name": "Operations semantics",
   "database": "default",
   "collection": "semantic_cards",
-  "active_at": "2026-08-25T10:00:00+08:00",
+  "active_at": "2026-08-25",
   "semantic_version": "semantic-v3",
   "embedding": [/* exactly 1024 finite floating-point values */],
   "top_k": 12,
@@ -143,7 +143,7 @@ The core vector-search arguments are:
 }
 ```
 
-Omit `semantic_version` when effective dates alone select the active cards. `active_at` remains required. `embedding` must contain exactly `DBX_MCP_VECTOR_DIMENSION` finite values; the abbreviated comment above is documentation only, not valid tool input.
+Omit `semantic_version` when effective dates alone select the active cards. `active_at` remains required. In v1, `embedding` must contain exactly 1024 finite values; the abbreviated comment above is documentation only, not valid tool input.
 
 ## Stateful Query Sessions
 
@@ -287,9 +287,12 @@ Updated servers do not let `DBX_MCP_ALLOW_WRITES` or `DBX_MCP_ALLOW_DANGEROUS_SQ
 | `DBX_MCP_IMPORT_ROOTS` | Platform-separated allowlist of local directories readable by import and semantic JSONL tools |
 | `DBX_MCP_IMPORT_STAGING_SCHEMAS` | Comma-separated PostgreSQL staging schema allowlist (default `staging`) |
 | `DBX_MCP_IMPORT_FILE_MAX_BYTES` | Maximum Excel/CSV/TSV/JSON source size (default 512 MiB) |
+| `DBX_MCP_IMPORT_CONCURRENCY` | Concurrent governed imports, clamped to 1–16 (default `2`) |
+| `DBX_MCP_IMPORT_PLAN_CAPACITY` | Maximum live prepared plans (default `512`) |
+| `DBX_MCP_IMPORT_JOB_CAPACITY` | Maximum retained running/terminal jobs (default `256`) |
+| `DBX_MCP_IMPORT_TERMINAL_LIMIT` | Maximum terminal jobs retained within the 24-hour TTL (default `128`) |
 | `DBX_MCP_SEMANTIC_FILE_MAX_BYTES` | Maximum semantic JSONL size (default 64 MiB) |
 | `DBX_MCP_VECTOR_COLLECTIONS` | Comma-separated Milvus collection allowlist (default `semantic_cards`) |
-| `DBX_MCP_VECTOR_DIMENSION` | Required embedding dimension (default `1024`) |
 | `DBX_MCP_VECTOR_TOP_K_MAX` | Maximum Milvus Top K, hard-capped at 50 (default `20`) |
 | `DBX_MCP_VECTOR_FILTER_FIELDS` | Comma-separated additional safe equality-filter fields |
 | `DBX_MCP_VECTOR_OUTPUT_FIELDS` | Comma-separated scalar fields that vector search may return |

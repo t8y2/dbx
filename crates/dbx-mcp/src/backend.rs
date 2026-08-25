@@ -306,10 +306,11 @@ pub trait DbxBackend: Send + Sync {
         &self,
         connection: &ConnectionConfig,
         request: TableImportRequest,
+        plan_id: String,
         cancelled: Arc<AtomicBool>,
         progress: Arc<dyn Fn(TableImportProgress) + Send + Sync>,
     ) -> Result<TableImportSummary, String> {
-        let _ = (connection, request, cancelled, progress);
+        let _ = (connection, request, plan_id, cancelled, progress);
         Err("IMPORT_UNSUPPORTED_IN_WEB_MODE_V1: v1 文件导入仅支持本地 DBX Desktop/MCP 模式。".to_string())
     }
 }
@@ -821,6 +822,7 @@ impl DbxBackend for LocalBackend {
         &self,
         connection: &ConnectionConfig,
         mut request: TableImportRequest,
+        plan_id: String,
         cancelled: Arc<AtomicBool>,
         progress: Arc<dyn Fn(TableImportProgress) + Send + Sync>,
     ) -> Result<TableImportSummary, String> {
@@ -837,6 +839,7 @@ impl DbxBackend for LocalBackend {
         tokio::fs::create_dir(&snapshot_dir).await.map_err(|error| format!("创建任务快照目录失败：{error}"))?;
         let extension = Path::new(&request.file_path).extension().and_then(|value| value.to_str()).unwrap_or("data");
         let snapshot_path = snapshot_dir.join(format!("source.{extension}"));
+        let normalized_path = snapshot_dir.join("normalized.csv");
         let snapshot_result = async {
             tokio::fs::copy(&request.file_path, &snapshot_path)
                 .await
@@ -848,6 +851,14 @@ impl DbxBackend for LocalBackend {
                 return Err("IMPORT_FILE_CHANGED: 源文件在启动导入时发生变化；未写入数据库。".to_string());
             }
             request.file_path = snapshot_path.to_string_lossy().to_string();
+            request = crate::enterprise_tools::build_governed_import_snapshot(
+                request,
+                &plan_id,
+                &expected_sha256,
+                &normalized_path,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
             let database = (!request.database.trim().is_empty()).then_some(request.database.as_str());
             let client_session_id = dbx_core::table_import::table_import_client_session_id(&request.import_id);
             let pool_key = self
@@ -875,6 +886,7 @@ impl DbxBackend for LocalBackend {
             result
         }
         .await;
+        let _ = tokio::fs::remove_file(&normalized_path).await;
         let _ = tokio::fs::remove_file(&snapshot_path).await;
         let _ = tokio::fs::remove_dir(&snapshot_dir).await;
         snapshot_result

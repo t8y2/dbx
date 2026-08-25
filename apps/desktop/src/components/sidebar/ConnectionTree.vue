@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, shallowRef, computed, nextTick, watch, provide, onMounted, onUnmounted, type Component, type ComponentPublicInstance, type CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { Search, X, ListFilter, ListOrdered, ArrowDownAZ, ArrowUpZA, CircleDot, Crosshair, Server, Database, FolderTree, Table2, Eye, RotateCcw, Loader2, Unplug } from "@lucide/vue";
+import { Search, X, ListFilter, ListOrdered, ArrowDownAZ, ArrowUpZA, Crosshair, Server, Database, FolderTree, Table2, Eye, RotateCcw, Loader2, Unplug } from "@lucide/vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
@@ -2457,13 +2457,16 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
         <LightTooltip :text="t('sidebar.showActiveConnectionsOnly')" side="top" :delay="300" nowrap>
           <button
             type="button"
-            class="shrink-0 h-6 w-6 flex items-center justify-center rounded border hover:bg-accent"
+            class="relative shrink-0 h-6 w-6 flex items-center justify-center rounded border hover:bg-accent"
             :class="showConnectedConnectionsOnly ? 'text-primary bg-primary/10 border-primary/30' : 'border-border text-muted-foreground hover:text-foreground'"
             :aria-label="t('sidebar.showActiveConnectionsOnly')"
             :aria-pressed="showConnectedConnectionsOnly"
             @click="showConnectedConnectionsOnly = !showConnectedConnectionsOnly"
           >
-            <CircleDot class="h-3.5 w-3.5" />
+            <span
+              class="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full border-[1.5px] transition-[width,height,border-color,background-color] duration-200 ease-out"
+              :class="store.connectedIds.size > 0 ? 'h-1.5 w-1.5 border-green-500 bg-green-500' : 'h-3 w-3 border-current bg-transparent'"
+            />
           </button>
         </LightTooltip>
       </div>

@@ -303,7 +303,7 @@ Legacy connection scope variables can still narrow the DBX allowlist for existin
 }
 ```
 
-Use `DBX_MCP_SCOPE_CONNECTION_ID`, comma-separated `DBX_MCP_SCOPE_CONNECTION_IDS`, or `DBX_MCP_SCOPE_CONNECTION_NAME`. ID scopes take precedence over the name scope. The scoped database is optional.
+Use `DBX_MCP_SCOPE_CONNECTION_ID`, comma-separated `DBX_MCP_SCOPE_CONNECTION_IDS`, or `DBX_MCP_SCOPE_CONNECTION_NAME`. ID scopes take precedence over the name scope. The scoped database is optional. Resolution uses the intersection with the global connection allowlist. An exact `connection_id`, exact ID passed through `connection_name`, or case-insensitive name can select any effective candidate. Omit the selector only when exactly one candidate remains; multiple scoped IDs return `CONNECTION_SELECTOR_REQUIRED`.
 
 ## Safety
 
@@ -664,7 +664,7 @@ DBX 在 **设置 → MCP** 中保存一份权威策略，并在每次请求时�
 }
 ```
 
-可使用 `DBX_MCP_SCOPE_CONNECTION_ID`、逗号分隔的 `DBX_MCP_SCOPE_CONNECTION_IDS` 或 `DBX_MCP_SCOPE_CONNECTION_NAME`。ID scope 优先于名称 scope；作用域模式会隐藏连接增删和桌面 UI 工具。
+可使用 `DBX_MCP_SCOPE_CONNECTION_ID`、逗号分隔的 `DBX_MCP_SCOPE_CONNECTION_IDS` 或 `DBX_MCP_SCOPE_CONNECTION_NAME`。ID scope 优先于名称 scope；作用域模式会隐藏连接增删和桌面 UI 工具。连接候选取 scope 与全局 allowlist 的交集，可按精确 ID 或大小写不敏感名称选择；只有唯一候选时才能省略 selector，多个 scoped ID 会返回 `CONNECTION_SELECTOR_REQUIRED`。
 
 ### SQL 和命令安全
 

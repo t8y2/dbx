@@ -380,7 +380,7 @@ mod tests {
             Ok(_) => panic!("SQLCipher attachments must be rejected"),
             Err(error) => error,
         };
-        assert!(error.contains("SQLCipher"), "{error}");
+        assert!(error.contains("encrypted connections"), "{error}");
     }
 
     #[tokio::test]
@@ -600,7 +600,7 @@ mod tests {
             Ok(_) => panic!("wrong SQLCipher key must fail"),
             Err(err) => err,
         };
-        assert!(wrong_key.contains("SQLCipher database unlock failed"));
+        assert!(wrong_key.contains("Encrypted SQLite database unlock failed"));
 
         let missing_key = match connect_sqlite_from_config(&sqlite_config(&path, "")).await {
             Ok(_) => panic!("missing SQLCipher key must fail"),

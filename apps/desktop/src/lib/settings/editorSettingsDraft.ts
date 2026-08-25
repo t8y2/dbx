@@ -22,6 +22,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "autoAliasTables",
   "insertSpaceAfterCompletion",
   "sortCompletionColumnsAlphabetically",
+  "selectFirstCompletionOnOpen",
   "wordWrap",
   "vimModeEnabled",
   "autoCloseBrackets",

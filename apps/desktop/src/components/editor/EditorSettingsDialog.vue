@@ -332,6 +332,7 @@ const editShowInsertValueHints = ref(settingsStore.editorSettings.showInsertValu
 const editAutoAliasTables = ref(settingsStore.editorSettings.autoAliasTables);
 const editInsertSpaceAfterCompletion = ref(settingsStore.editorSettings.insertSpaceAfterCompletion);
 const editSortCompletionColumnsAlphabetically = ref(settingsStore.editorSettings.sortCompletionColumnsAlphabetically);
+const editSelectFirstCompletionOnOpen = ref(settingsStore.editorSettings.selectFirstCompletionOnOpen);
 const editCompletionTriggerMode = ref<SqlCompletionTriggerMode>(settingsStore.editorSettings.completionTriggerMode);
 const editWordWrap = ref(settingsStore.editorSettings.wordWrap);
 const editVimModeEnabled = ref(settingsStore.editorSettings.vimModeEnabled);
@@ -536,6 +537,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     autoAliasTables: editAutoAliasTables.value,
     insertSpaceAfterCompletion: editInsertSpaceAfterCompletion.value,
     sortCompletionColumnsAlphabetically: editSortCompletionColumnsAlphabetically.value,
+    selectFirstCompletionOnOpen: editSelectFirstCompletionOnOpen.value,
     completionTriggerMode: editCompletionTriggerMode.value,
     wordWrap: editWordWrap.value,
     vimModeEnabled: editVimModeEnabled.value,
@@ -825,6 +827,7 @@ function syncEditorSettingsDraftFromStore() {
   editAutoAliasTables.value = settingsStore.editorSettings.autoAliasTables;
   editInsertSpaceAfterCompletion.value = settingsStore.editorSettings.insertSpaceAfterCompletion;
   editSortCompletionColumnsAlphabetically.value = settingsStore.editorSettings.sortCompletionColumnsAlphabetically;
+  editSelectFirstCompletionOnOpen.value = settingsStore.editorSettings.selectFirstCompletionOnOpen;
   editCompletionTriggerMode.value = settingsStore.editorSettings.completionTriggerMode;
   editWordWrap.value = settingsStore.editorSettings.wordWrap;
   editVimModeEnabled.value = settingsStore.editorSettings.vimModeEnabled;
@@ -1079,6 +1082,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
     editInsertSpaceAfterCompletion.value = DEFAULT_EDITOR_SETTINGS.insertSpaceAfterCompletion;
     editSortCompletionColumnsAlphabetically.value = DEFAULT_EDITOR_SETTINGS.sortCompletionColumnsAlphabetically;
+    editSelectFirstCompletionOnOpen.value = DEFAULT_EDITOR_SETTINGS.selectFirstCompletionOnOpen;
     editCompletionTriggerMode.value = DEFAULT_EDITOR_SETTINGS.completionTriggerMode;
     editWordWrap.value = DEFAULT_EDITOR_SETTINGS.wordWrap;
     editVimModeEnabled.value = DEFAULT_EDITOR_SETTINGS.vimModeEnabled;
@@ -1194,6 +1198,7 @@ function resetAllDefaults() {
   editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
   editInsertSpaceAfterCompletion.value = DEFAULT_EDITOR_SETTINGS.insertSpaceAfterCompletion;
   editSortCompletionColumnsAlphabetically.value = DEFAULT_EDITOR_SETTINGS.sortCompletionColumnsAlphabetically;
+  editSelectFirstCompletionOnOpen.value = DEFAULT_EDITOR_SETTINGS.selectFirstCompletionOnOpen;
   editWordWrap.value = DEFAULT_EDITOR_SETTINGS.wordWrap;
   editVimModeEnabled.value = DEFAULT_EDITOR_SETTINGS.vimModeEnabled;
   editAutoCloseBrackets.value = DEFAULT_EDITOR_SETTINGS.autoCloseBrackets;
@@ -4032,16 +4037,6 @@ onUnmounted(() => {
 
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
-                    <Label for="editor-auto-close-brackets">{{ t("settings.autoCloseBrackets") }}</Label>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.autoCloseBracketsDescription") }}
-                    </p>
-                  </div>
-                  <Switch id="editor-auto-close-brackets" v-model="editAutoCloseBrackets" class="mt-0.5" />
-                </div>
-
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
                     <Label for="regex-max-match-count">{{ t("settings.regexMaxMatchCount") }}</Label>
                     <p class="text-xs text-muted-foreground">{{ t("settings.regexMaxMatchCountDescription") }}</p>
                   </div>
@@ -4055,54 +4050,86 @@ onUnmounted(() => {
                     class="h-7 w-24 px-2 text-xs tabular-nums [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
                   />
                 </div>
+              </div>
 
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
-                    <Label for="editor-insert-space-after-completion">{{ t("settings.insertSpaceAfterCompletion") }}</Label>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.insertSpaceAfterCompletionDescription") }}
-                    </p>
-                  </div>
-                  <Switch id="editor-insert-space-after-completion" v-model="editInsertSpaceAfterCompletion" class="mt-0.5" />
+              <Separator />
+
+              <div class="space-y-3">
+                <div class="text-sm font-medium text-muted-foreground">
+                  {{ t("settings.sqlCompletionSection") }}
                 </div>
 
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
-                    <Label for="editor-sort-completion-columns-alphabetically">{{ t("settings.sortCompletionColumnsAlphabetically") }}</Label>
+                <div class="grid gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+                  <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                    <div class="space-y-1">
+                      <Label for="editor-auto-close-brackets">{{ t("settings.autoCloseBrackets") }}</Label>
+                      <p class="text-xs text-muted-foreground">
+                        {{ t("settings.autoCloseBracketsDescription") }}
+                      </p>
+                    </div>
+                    <Switch id="editor-auto-close-brackets" v-model="editAutoCloseBrackets" class="mt-0.5" />
+                  </div>
+
+                  <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                    <div class="space-y-1">
+                      <Label for="editor-insert-space-after-completion">{{ t("settings.insertSpaceAfterCompletion") }}</Label>
+                      <p class="text-xs text-muted-foreground">
+                        {{ t("settings.insertSpaceAfterCompletionDescription") }}
+                      </p>
+                    </div>
+                    <Switch id="editor-insert-space-after-completion" v-model="editInsertSpaceAfterCompletion" class="mt-0.5" />
+                  </div>
+
+                  <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                    <div class="space-y-1">
+                      <Label for="editor-sort-completion-columns-alphabetically">{{ t("settings.sortCompletionColumnsAlphabetically") }}</Label>
+                      <p class="text-xs text-muted-foreground">
+                        {{ t("settings.sortCompletionColumnsAlphabeticallyDescription") }}
+                      </p>
+                    </div>
+                    <Switch id="editor-sort-completion-columns-alphabetically" v-model="editSortCompletionColumnsAlphabetically" class="mt-0.5" />
+                  </div>
+
+                  <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                    <div class="space-y-1">
+                      <Label for="editor-select-first-completion-on-open">{{ t("settings.selectFirstCompletionOnOpen") }}</Label>
+                      <p class="text-xs text-muted-foreground">
+                        {{ t("settings.selectFirstCompletionOnOpenDescription") }}
+                      </p>
+                    </div>
+                    <Switch id="editor-select-first-completion-on-open" v-model="editSelectFirstCompletionOnOpen" class="mt-0.5" />
+                  </div>
+
+                  <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                    <div class="space-y-1">
+                      <Label for="editor-auto-alias-tables">{{ t("settings.autoAliasTables") }}</Label>
+                      <p class="text-xs text-muted-foreground">
+                        {{ t("settings.autoAliasTablesDescription") }}
+                      </p>
+                    </div>
+                    <Switch id="editor-auto-alias-tables" v-model="editAutoAliasTables" class="mt-0.5" />
+                  </div>
+
+                  <div class="space-y-2">
+                    <Label>{{ t("settings.completionTriggerMode") }}</Label>
+                    <Select :model-value="editCompletionTriggerMode" @update:model-value="onCompletionTriggerModeChange">
+                      <SelectTrigger>
+                        <SelectValue :placeholder="t('settings.completionTriggerMode')" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="manual">{{ t("settings.completionTriggerModeManual") }}</SelectItem>
+                        <SelectItem value="require-prefix">{{ t("settings.completionTriggerModeRequirePrefix") }}</SelectItem>
+                        <SelectItem value="positional">{{ t("settings.completionTriggerModePositional") }}</SelectItem>
+                      </SelectContent>
+                    </Select>
                     <p class="text-xs text-muted-foreground">
-                      {{ t("settings.sortCompletionColumnsAlphabeticallyDescription") }}
+                      {{ t("settings.completionTriggerModeDescription") }}
                     </p>
                   </div>
-                  <Switch id="editor-sort-completion-columns-alphabetically" v-model="editSortCompletionColumnsAlphabetically" class="mt-0.5" />
-                </div>
-
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
-                    <Label for="editor-auto-alias-tables">{{ t("settings.autoAliasTables") }}</Label>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.autoAliasTablesDescription") }}
-                    </p>
-                  </div>
-                  <Switch id="editor-auto-alias-tables" v-model="editAutoAliasTables" class="mt-0.5" />
-                </div>
-
-                <div class="space-y-2">
-                  <Label>{{ t("settings.completionTriggerMode") }}</Label>
-                  <Select :model-value="editCompletionTriggerMode" @update:model-value="onCompletionTriggerModeChange">
-                    <SelectTrigger>
-                      <SelectValue :placeholder="t('settings.completionTriggerMode')" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="manual">{{ t("settings.completionTriggerModeManual") }}</SelectItem>
-                      <SelectItem value="require-prefix">{{ t("settings.completionTriggerModeRequirePrefix") }}</SelectItem>
-                      <SelectItem value="positional">{{ t("settings.completionTriggerModePositional") }}</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <p class="text-xs text-muted-foreground">
-                    {{ t("settings.completionTriggerModeDescription") }}
-                  </p>
                 </div>
               </div>
+
+              <Separator />
 
               <div class="grid gap-3 md:grid-cols-2">
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2 md:col-span-2">

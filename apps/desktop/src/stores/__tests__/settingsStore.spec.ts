@@ -132,6 +132,13 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ insertSpaceAfterCompletion: false }).insertSpaceAfterCompletion).toBe(false);
   });
 
+  it("keeps non-intrusive completion selection as the default", () => {
+    expect(normalizeEditorSettings({}).selectFirstCompletionOnOpen).toBe(false);
+    expect(normalizeEditorSettings({ selectFirstCompletionOnOpen: true }).selectFirstCompletionOnOpen).toBe(true);
+    expect(normalizeEditorSettings({ selectFirstCompletionOnOpen: false }).selectFirstCompletionOnOpen).toBe(false);
+    expect(normalizeEditorSettings({ selectFirstCompletionOnOpen: "true" } as any).selectFirstCompletionOnOpen).toBe(false);
+  });
+
   it("defaults sidebar connection sorting to manual order and preserves valid alphabetical modes", () => {
     expect(normalizeEditorSettings({}).sidebarConnectionSortMode).toBe("manual");
     expect(normalizeEditorSettings({ sidebarConnectionSortMode: "asc" }).sidebarConnectionSortMode).toBe("asc");

@@ -531,6 +531,7 @@ export interface EditorSettings {
   autoAliasTables: boolean;
   insertSpaceAfterCompletion: boolean;
   sortCompletionColumnsAlphabetically: boolean;
+  selectFirstCompletionOnOpen: boolean;
   wordWrap: boolean;
   tableDdlWordWrap: boolean;
   vimModeEnabled: boolean;
@@ -742,6 +743,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   autoAliasTables: true,
   insertSpaceAfterCompletion: true,
   sortCompletionColumnsAlphabetically: true,
+  selectFirstCompletionOnOpen: false,
   wordWrap: false,
   tableDdlWordWrap: true,
   vimModeEnabled: false,
@@ -1117,6 +1119,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     autoAliasTables: settings.autoAliasTables ?? DEFAULT_EDITOR_SETTINGS.autoAliasTables,
     insertSpaceAfterCompletion: typeof settings.insertSpaceAfterCompletion === "boolean" ? settings.insertSpaceAfterCompletion : DEFAULT_EDITOR_SETTINGS.insertSpaceAfterCompletion,
     sortCompletionColumnsAlphabetically: typeof settings.sortCompletionColumnsAlphabetically === "boolean" ? settings.sortCompletionColumnsAlphabetically : DEFAULT_EDITOR_SETTINGS.sortCompletionColumnsAlphabetically,
+    selectFirstCompletionOnOpen: typeof settings.selectFirstCompletionOnOpen === "boolean" ? settings.selectFirstCompletionOnOpen : DEFAULT_EDITOR_SETTINGS.selectFirstCompletionOnOpen,
     wordWrap: settings.wordWrap ?? DEFAULT_EDITOR_SETTINGS.wordWrap,
     tableDdlWordWrap: typeof settings.tableDdlWordWrap === "boolean" ? settings.tableDdlWordWrap : DEFAULT_EDITOR_SETTINGS.tableDdlWordWrap,
     vimModeEnabled: typeof settings.vimModeEnabled === "boolean" ? settings.vimModeEnabled : DEFAULT_EDITOR_SETTINGS.vimModeEnabled,
@@ -1720,6 +1723,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.autoAliasTables !== undefined) editorSettings.value.autoAliasTables = partial.autoAliasTables;
     if (partial.insertSpaceAfterCompletion !== undefined) editorSettings.value.insertSpaceAfterCompletion = partial.insertSpaceAfterCompletion === true;
     if (partial.sortCompletionColumnsAlphabetically !== undefined) editorSettings.value.sortCompletionColumnsAlphabetically = partial.sortCompletionColumnsAlphabetically === true;
+    if (partial.selectFirstCompletionOnOpen !== undefined) editorSettings.value.selectFirstCompletionOnOpen = partial.selectFirstCompletionOnOpen === true;
     if (partial.wordWrap !== undefined) editorSettings.value.wordWrap = partial.wordWrap;
     if (partial.tableDdlWordWrap !== undefined) editorSettings.value.tableDdlWordWrap = partial.tableDdlWordWrap === true;
     if (partial.vimModeEnabled !== undefined) editorSettings.value.vimModeEnabled = partial.vimModeEnabled === true;

@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import ts from "typescript";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { acceptSelectedOrFirstCompletion } from "@/lib/editor/queryEditorCompletionAcceptance";
 import { DEFAULT_SHORTCUT_SETTINGS, normalizeShortcutSettings, shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 
 const queryEditorSource = readFileSync(new URL("../../../components/editor/QueryEditor.vue", import.meta.url), "utf8");
@@ -47,6 +48,7 @@ interface MockView {
 
 interface TabHarness {
   handleTab: (view: MockView) => boolean;
+  handleEnter: (view: MockView) => boolean;
   insertNewlineWithoutCompletion: (view: MockView) => boolean;
   acceptCompletionOrNextSnippetField: (view: MockView) => boolean;
   clearPendingCompletionTab: () => void;
@@ -56,11 +58,14 @@ interface TabHarness {
 function createHarness(options: {
   completionStatus: (state: MockState) => "active" | "pending" | null;
   acceptCompletion?: (view: MockView) => boolean;
+  selectedCompletionIndex?: (state: MockState) => number | null;
+  selectFirstCompletion?: (view: MockView) => boolean;
   closeCompletion?: (view: MockView) => boolean;
   insertNewlineKeepIndent?: (view: MockView) => boolean;
   nextSnippetField?: (view: MockView) => boolean;
   indentMore?: (view: MockView) => boolean;
   acceptCompletionShortcut?: string;
+  selectFirstCompletionOnOpen?: boolean;
 }): TabHarness {
   const source = [
     extractDeclaration(/const COMPLETION_REMOTE_LATENCY_BUDGET_MS = \d+;/, "remote completion latency budget"),
@@ -74,6 +79,7 @@ function createHarness(options: {
     extractFunction("tabKeyAcceptsCompletion"),
     extractFunction("handleTabWithoutAcceptingCompletion"),
     extractFunction("performNormalTab"),
+    extractFunction("handleEnter"),
     extractFunction("insertNewlineWithoutCompletion"),
     extractFunction("acceptCompletionOrNextSnippetField"),
     extractFunction("clearPendingCompletionTab"),
@@ -86,6 +92,9 @@ function createHarness(options: {
   const factory = new Function(
     "codeMirrorCompletionStatus",
     "codeMirrorAcceptCompletion",
+    "codeMirrorSelectedCompletionIndex",
+    "codeMirrorSelectFirstCompletion",
+    "acceptSelectedOrFirstCompletion",
     "codeMirrorCloseCompletion",
     "codeMirrorInsertNewlineKeepIndent",
     "insertQueryEditorNewline",
@@ -95,11 +104,14 @@ function createHarness(options: {
     "normalizeShortcutSettings",
     "shortcutToCodeMirrorKey",
     "props",
-    `${javascript}\nreturn { handleTab, insertNewlineWithoutCompletion, acceptCompletionOrNextSnippetField, clearPendingCompletionTab, consumeSqlCompletionAutoStartSuppression };`,
+    `${javascript}\nreturn { handleTab, handleEnter, insertNewlineWithoutCompletion, acceptCompletionOrNextSnippetField, clearPendingCompletionTab, consumeSqlCompletionAutoStartSuppression };`,
   );
   return factory(
     options.completionStatus,
     options.acceptCompletion ?? (() => false),
+    options.selectedCompletionIndex ?? (() => 0),
+    options.selectFirstCompletion ?? (() => false),
+    acceptSelectedOrFirstCompletion,
     options.closeCompletion ?? (() => false),
     options.insertNewlineKeepIndent ?? (() => false),
     (view: MockView, fallback: ((view: MockView) => boolean) | null | undefined) => fallback?.(view) ?? false,
@@ -109,6 +121,7 @@ function createHarness(options: {
       editorSettings: {
         sqlFormatter: { useTabs: false, tabWidth: 2 },
         shortcuts: { ...DEFAULT_SHORTCUT_SETTINGS, acceptCompletion: options.acceptCompletionShortcut ?? DEFAULT_SHORTCUT_SETTINGS.acceptCompletion },
+        selectFirstCompletionOnOpen: options.selectFirstCompletionOnOpen ?? false,
       },
     },
     normalizeShortcutSettings,
@@ -154,6 +167,19 @@ describe("QueryEditor completion Tab keymap", () => {
     expect(closeCompletion).toHaveBeenCalledWith(view);
     expect(insertNewlineKeepIndent).toHaveBeenCalledWith(view);
     expect(harness.consumeSqlCompletionAutoStartSuppression()).toBe(false);
+  });
+
+  it("accepts the selected completion on Enter only in first-option mode", () => {
+    const acceptCompletion = vi.fn(() => true);
+    const closeCompletion = vi.fn(() => true);
+    const insertNewlineKeepIndent = vi.fn(() => true);
+    const harness = createHarness({ completionStatus: () => "active", acceptCompletion, closeCompletion, insertNewlineKeepIndent, selectFirstCompletionOnOpen: true });
+    const view = createView();
+
+    expect(harness.handleEnter(view)).toBe(true);
+    expect(acceptCompletion).toHaveBeenCalledWith(view);
+    expect(closeCompletion).not.toHaveBeenCalled();
+    expect(insertNewlineKeepIndent).not.toHaveBeenCalled();
   });
 
   it("does not suppress later completion when Enter cannot insert a newline", () => {

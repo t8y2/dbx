@@ -20,6 +20,8 @@ use crate::types::{
 };
 
 const SQLITE_DATABASE_HEADER: &[u8; 16] = b"SQLite format 3\0";
+// Probe the common modern and legacy sizes first, then the remaining supported powers of two.
+const SQLITE_LEGACY_PAGE_SIZES: &[i64] = &[4096, 1024, 512, 2048, 8192, 16384, 32768, 65536];
 
 #[derive(Clone)]
 pub struct SqliteHandle {
@@ -148,24 +150,25 @@ fn open_sqlite_handle(
         validate_existing_sqlite_file(path)?;
     }
 
-    let cipher_attempts: &[SqliteCipherAttempt] = if !encrypted {
-        &[SqliteCipherAttempt::Plain]
+    let cipher_attempts = if !encrypted {
+        vec![SqliteCipherAttempt::Plain]
     } else if create_if_missing {
-        &[SqliteCipherAttempt::SqlCipher(4)]
+        vec![SqliteCipherAttempt::SqlCipher(4)]
     } else {
-        &[
+        let mut attempts = vec![
             SqliteCipherAttempt::SqlCipher(4),
             SqliteCipherAttempt::SqlCipher(3),
             SqliteCipherAttempt::SqlCipher(2),
             SqliteCipherAttempt::SqlCipher(1),
-            SqliteCipherAttempt::Rc4Legacy,
-        ]
+        ];
+        attempts.extend(SQLITE_LEGACY_PAGE_SIZES.iter().copied().map(SqliteCipherAttempt::Rc4Legacy));
+        attempts
     };
     let mut unlock_error: Option<String> = None;
 
     for attempt in cipher_attempts {
         let conn = open_sqlite_connection(path, create_if_missing)?;
-        if let Err(err) = apply_sqlite_cipher_key(&conn, cipher_key.as_deref(), *attempt) {
+        if let Err(err) = apply_sqlite_cipher_key(&conn, cipher_key.as_deref(), attempt) {
             unlock_error = Some(err);
             continue;
         }
@@ -184,7 +187,7 @@ fn open_sqlite_handle(
 enum SqliteCipherAttempt {
     Plain,
     SqlCipher(i64),
-    Rc4Legacy,
+    Rc4Legacy(i64),
 }
 
 fn open_sqlite_connection(path: &str, create_if_missing: bool) -> Result<Connection, String> {
@@ -245,9 +248,11 @@ fn apply_sqlite_cipher_key(
             conn.pragma_update(None, "legacy", compatibility)
                 .map_err(|e| format!("SQLCipher compatibility setup failed: {e}"))?;
         }
-        SqliteCipherAttempt::Rc4Legacy => {
+        SqliteCipherAttempt::Rc4Legacy(page_size) => {
             conn.pragma_update(None, "cipher", "rc4").map_err(|e| format!("SQLite cipher setup failed: {e}"))?;
             conn.pragma_update(None, "legacy", 1).map_err(|e| format!("RC4 compatibility setup failed: {e}"))?;
+            conn.pragma_update(None, "legacy_page_size", page_size)
+                .map_err(|e| format!("RC4 legacy page size setup failed: {e}"))?;
         }
     }
     conn.pragma_update(None, "key", cipher_key).map_err(|e| format!("SQLite encryption key setup failed: {e}"))?;
@@ -788,9 +793,10 @@ mod tests {
 
     #[cfg(feature = "sqlite-sqlcipher")]
     #[tokio::test]
-    async fn encrypted_sqlite_key_opens_and_updates_rc4_legacy_database() {
+    async fn encrypted_sqlite_key_opens_and_updates_1024_page_rc4_legacy_database() {
         let path = std::env::temp_dir().join(format!("dbx-rc4-legacy-{}.db", uuid::Uuid::new_v4()));
         let key = "123456";
+        let page_size = 1024;
 
         {
             let conn =
@@ -798,6 +804,7 @@ mod tests {
                     .expect("create RC4-compatible encrypted sqlite");
             conn.pragma_update(None, "cipher", "rc4").expect("select RC4");
             conn.pragma_update(None, "legacy", 1).expect("set RC4 legacy mode");
+            conn.pragma_update(None, "legacy_page_size", page_size).expect("set RC4 legacy page size");
             conn.pragma_update(None, "key", key).expect("set RC4 key");
             conn.execute_batch("CREATE TABLE t (name TEXT); INSERT INTO t VALUES ('navicat-compatible');")
                 .expect("write RC4-compatible encrypted sqlite");
@@ -815,7 +822,11 @@ mod tests {
         let conn = Connection::open(&path).expect("reopen RC4 database independently");
         conn.pragma_update(None, "cipher", "rc4").expect("select RC4");
         conn.pragma_update(None, "legacy", 1).expect("set RC4 legacy mode");
+        conn.pragma_update(None, "legacy_page_size", page_size).expect("set RC4 legacy page size");
         conn.pragma_update(None, "key", key).expect("set RC4 key");
+        let reopened_page_size: i64 =
+            conn.pragma_query_value(None, "page_size", |row| row.get(0)).expect("read page size");
+        assert_eq!(reopened_page_size, page_size);
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0)).expect("verify RC4 writes");
         assert_eq!(count, 2);
 

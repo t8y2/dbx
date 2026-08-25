@@ -1015,6 +1015,9 @@ async fn main() {
         .route("/cloud-sync/snippet/upload", post(routes::cloud_sync::snippet_sync_upload))
         .route("/cloud-sync/snippet/download", post(routes::cloud_sync::snippet_sync_download));
 
+    #[cfg(feature = "mongo-js-runtime")]
+    let api = api.route("/mongo/execute-script", post(routes::mongo::execute_script));
+
     // Do not expose DuckDB-only handlers from builds that omit DuckDB sidecar support.
     #[cfg(feature = "duckdb-sidecar")]
     let api =

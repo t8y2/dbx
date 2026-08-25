@@ -21,6 +21,31 @@ pub async fn parse_shell_command(
     dbx_core::mongo_shell::parse(&req.source).map(Json).map_err(AppError::from)
 }
 
+#[cfg(feature = "mongo-js-runtime")]
+fn ensure_interactive_script_request(headers: &HeaderMap) -> Result<(), AppError> {
+    if super::mcp_policy::is_mcp_request(headers) {
+        return Err(AppError::from("MongoDB shell JavaScript is not available through MCP requests."));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "mongo-js-runtime")]
+pub async fn execute_script(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Json(request): Json<dbx_core::mongo_script::MongoScriptRequest>,
+) -> Result<Json<dbx_core::mongo_script::MongoScriptResult>, AppError> {
+    ensure_interactive_script_request(&headers)?;
+    dbx_core::mongo_script::execute_mongo_script_managed_core(
+        state.app.clone(),
+        request,
+        dbx_core::mongo_script::MongoScriptLimits::default(),
+    )
+    .await
+    .map(Json)
+    .map_err(AppError::from)
+}
+
 async fn run_cancellable<T, F>(state: &Arc<WebState>, execution_id: Option<String>, future: F) -> Result<T, AppError>
 where
     F: Future<Output = Result<T, String>>,
@@ -944,6 +969,14 @@ mod tests {
     use dbx_core::models::connection::ConnectionConfig;
     use dbx_core::storage::{McpGlobalPolicy, Storage};
     use std::sync::Arc;
+
+    #[cfg(feature = "mongo-js-runtime")]
+    #[test]
+    fn script_execution_is_not_available_to_mcp_requests() {
+        let error = super::ensure_interactive_script_request(&mcp_headers()).unwrap_err();
+        assert_eq!(error.message, "MongoDB shell JavaScript is not available through MCP requests.");
+        assert!(super::ensure_interactive_script_request(&HeaderMap::new()).is_ok());
+    }
 
     fn mongo_config(is_production: bool) -> ConnectionConfig {
         serde_json::from_value(serde_json::json!({

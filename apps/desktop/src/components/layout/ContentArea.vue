@@ -215,6 +215,7 @@ const emit = defineEmits<{
   sendSelectionToAi: [sql: string];
   execute: [sqlOverride?: SqlExecutionOverride];
   executeInNewResultTab: [sqlOverride?: SqlExecutionOverride];
+  executeMongoScript: [sqlOverride?: SqlExecutionOverride];
   saveSql: [];
   cancel: [];
   explain: [];
@@ -1124,6 +1125,10 @@ function acceptQueryEditorExecutionViewport(requestId: number) {
   return queryEditorRef.value?.acceptGutterExecutionViewport(requestId) ?? false;
 }
 
+function requestQueryEditorExecuteMongoScript() {
+  return queryEditorRef.value?.requestExecuteMongoScript();
+}
+
 async function handleExportQuery(payload: { sql: string; format: "csv" | "xlsx" | "txt"; columnComments?: (string | null)[] }) {
   const tab = props.activeTab;
   if (!tab || tab.mode !== "query") return;
@@ -1165,6 +1170,7 @@ defineExpose({
   requestQueryEditorExecute,
   requestQueryEditorExecuteInNewResultTab,
   acceptQueryEditorExecutionViewport,
+  requestQueryEditorExecuteMongoScript,
   pasteClipboardAsSqlInCondition,
   applyTableStructureChanges,
   insertRedisCommand,
@@ -1223,6 +1229,7 @@ defineExpose({
               @format-error="emit('formatError')"
               @execute="emit('execute', $event)"
               @execute-in-new-result-tab="emit('executeInNewResultTab', $event)"
+              @execute-mongo-script="emit('executeMongoScript', $event)"
               @export-query="handleExportQuery"
               @save="emit('saveSql')"
               @click-table="onHandleClickTable"

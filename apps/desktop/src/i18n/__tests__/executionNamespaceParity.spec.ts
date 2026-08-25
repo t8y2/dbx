@@ -20,7 +20,7 @@ const locales: Array<[string, Messages]> = [
   ["zh-TW", zhTW],
 ];
 
-const namespaces = ["multiDbExecute", "exportProgress"] as const;
+const namespaces = ["multiDbExecute", "exportProgress", "mongoScript"] as const;
 
 function leafEntries(value: unknown, prefix = ""): Array<[string, string]> {
   if (typeof value === "string") return [[prefix, value]];

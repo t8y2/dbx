@@ -1,5 +1,57 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MongoDatabaseMethod {
+    Version,
+    RunCommand,
+    CreateUser,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MongoCollectionMethod {
+    Find,
+    FindExplain,
+    FindOne,
+    CountDocuments,
+    Count,
+    Aggregate,
+    Distinct,
+    GetIndexes,
+    Stats,
+    DataSize,
+    StorageSize,
+    TotalIndexSize,
+    InsertOne,
+    InsertMany,
+    Insert,
+    UpdateOne,
+    UpdateMany,
+    Update,
+    DeleteOne,
+    DeleteMany,
+    CreateIndex,
+    DropIndex,
+    DropIndexes,
+    Drop,
+    FindOneAndUpdate,
+    FindOneAndReplace,
+    FindOneAndDelete,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MongoFindCursor {
+    pub sort: Option<Value>,
+    pub collation: Option<Value>,
+    pub skip: u64,
+    /// Zero means that the command executor should apply the caller's row cap.
+    pub limit: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explain_verbosity: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind")]
@@ -153,6 +205,310 @@ pub fn validate_safety(
         return Err(MongoSafetyError::ProductionWrite);
     }
     Ok(())
+}
+
+pub fn build_mongo_database_command(method: MongoDatabaseMethod, args: &[Value]) -> Result<MongoCommand, String> {
+    match method {
+        MongoDatabaseMethod::Version => {
+            require_argument_count(args, 0, 0, "MongoDB version() requires no arguments.")?;
+            Ok(MongoCommand::Version)
+        }
+        MongoDatabaseMethod::RunCommand => {
+            require_argument_count(args, 1, 1, "MongoDB runCommand() requires exactly one command document.")?;
+            let command = args[0].as_object().ok_or("MongoDB runCommand() requires a command document.")?;
+            if command.is_empty() {
+                return Err("MongoDB runCommand() requires a non-empty command document.".to_string());
+            }
+            Ok(MongoCommand::RunCommand { command_json: json_value_string(&args[0])? })
+        }
+        MongoDatabaseMethod::CreateUser => {
+            require_argument_count(
+                args,
+                1,
+                2,
+                "MongoDB createUser() requires a user document and optional write concern.",
+            )?;
+            let user = args[0].as_object().ok_or("MongoDB createUser() requires a user document.")?;
+            if user.get("user").and_then(Value::as_str).is_none_or(|user| user.trim().is_empty()) {
+                return Err("MongoDB createUser() requires a non-empty user name.".to_string());
+            }
+            if args.get(1).filter(|value| !value.is_null()).is_some_and(|value| !value.is_object()) {
+                return Err("MongoDB createUser() write concern must be a document.".to_string());
+            }
+            Ok(MongoCommand::CreateUser {
+                user_json: json_value_string(&args[0])?,
+                write_concern_json: optional_json_value(args.get(1))?,
+            })
+        }
+    }
+}
+
+pub fn build_mongo_collection_command(
+    collection: &str,
+    method: MongoCollectionMethod,
+    args: &[Value],
+) -> Result<MongoCommand, String> {
+    if collection.trim().is_empty() {
+        return Err("MongoDB collection name must not be empty.".to_string());
+    }
+    let collection = collection.to_string();
+    match method {
+        MongoCollectionMethod::Find => {
+            require_argument_count(args, 0, 2, "MongoDB find() accepts at most filter and projection arguments.")?;
+            Ok(MongoCommand::Find {
+                collection,
+                filter: json_value_or_default(args.first(), serde_json::json!({}))?,
+                projection: optional_json_value(args.get(1))?,
+                sort: None,
+                collation: None,
+                skip: 0,
+                limit: 100,
+            })
+        }
+        MongoCollectionMethod::FindExplain => {
+            Err("MongoDB findExplain is only available through a find() cursor.".to_string())
+        }
+        MongoCollectionMethod::FindOne => {
+            require_argument_count(args, 0, 3, "Invalid MongoDB findOne() command.")?;
+            Ok(MongoCommand::FindOne {
+                collection,
+                filter: json_value_or_default(args.first(), serde_json::json!({}))?,
+                projection: optional_json_value(args.get(1))?,
+                options: optional_json_value(args.get(2))?,
+            })
+        }
+        MongoCollectionMethod::FindOneAndUpdate | MongoCollectionMethod::FindOneAndReplace => {
+            let name = if method == MongoCollectionMethod::FindOneAndUpdate {
+                "findOneAndUpdate"
+            } else {
+                "findOneAndReplace"
+            };
+            require_argument_count(args, 2, 3, &format!("Invalid MongoDB {name}() command."))?;
+            let filter = json_value_string(&args[0])?;
+            let value = json_value_string(&args[1])?;
+            let options = optional_json_value(args.get(2))?;
+            Ok(if method == MongoCollectionMethod::FindOneAndUpdate {
+                MongoCommand::FindOneAndUpdate { collection, filter, update: value, options }
+            } else {
+                MongoCommand::FindOneAndReplace { collection, filter, replacement: value, options }
+            })
+        }
+        MongoCollectionMethod::FindOneAndDelete => {
+            require_argument_count(args, 1, 2, "Invalid MongoDB findOneAndDelete() command.")?;
+            Ok(MongoCommand::FindOneAndDelete {
+                collection,
+                filter: json_value_string(&args[0])?,
+                options: optional_json_value(args.get(1))?,
+            })
+        }
+        MongoCollectionMethod::CountDocuments | MongoCollectionMethod::Count => {
+            let name = if method == MongoCollectionMethod::CountDocuments { "countDocuments" } else { "count" };
+            require_argument_count(args, 0, 1, &format!("Invalid MongoDB {name}() command."))?;
+            Ok(MongoCommand::Count {
+                collection,
+                filter: json_value_or_default(args.first(), serde_json::json!({}))?,
+                accurate: method == MongoCollectionMethod::CountDocuments,
+            })
+        }
+        MongoCollectionMethod::Aggregate => {
+            require_argument_count(args, 1, 2, "Invalid MongoDB aggregate() command.")?;
+            if !args[0].is_array() {
+                return Err("MongoDB aggregate() requires a pipeline array.".to_string());
+            }
+            Ok(MongoCommand::Aggregate {
+                collection,
+                pipeline: json_value_string(&args[0])?,
+                options: optional_json_value(args.get(1))?,
+            })
+        }
+        MongoCollectionMethod::Distinct => {
+            require_argument_count(args, 1, 2, "Invalid MongoDB distinct() command.")?;
+            let field = args[0]
+                .as_str()
+                .filter(|field| !field.is_empty())
+                .ok_or("MongoDB distinct() field must be a non-empty string.")?
+                .to_string();
+            Ok(MongoCommand::Distinct { collection, field, filter: optional_json_value(args.get(1))? })
+        }
+        MongoCollectionMethod::GetIndexes => {
+            require_argument_count(args, 0, 0, "Invalid MongoDB getIndexes() command.")?;
+            Ok(MongoCommand::GetIndexes { collection })
+        }
+        MongoCollectionMethod::Stats
+        | MongoCollectionMethod::DataSize
+        | MongoCollectionMethod::StorageSize
+        | MongoCollectionMethod::TotalIndexSize => {
+            let metric = method.collection_metric().ok_or("Invalid MongoDB collection metric.")?;
+            require_argument_count(args, 0, 1, &format!("Invalid MongoDB {metric}() command."))?;
+            let scale = args
+                .first()
+                .filter(|value| !value.is_null())
+                .map(|value| {
+                    value
+                        .as_f64()
+                        .and_then(serde_json::Number::from_f64)
+                        .ok_or_else(|| format!("Invalid {metric} scale."))
+                })
+                .transpose()?;
+            Ok(MongoCommand::CollectionStats { collection, metric: metric.to_string(), scale })
+        }
+        MongoCollectionMethod::InsertOne => {
+            require_argument_count(args, 1, 1, "Invalid MongoDB insertOne() command.")?;
+            if !args[0].is_object() {
+                return Err("MongoDB insertOne() requires a document.".to_string());
+            }
+            Ok(MongoCommand::Insert { collection, documents: json_value_string(&args[0])? })
+        }
+        MongoCollectionMethod::InsertMany => {
+            require_argument_count(args, 1, 1, "Invalid MongoDB insertMany() command.")?;
+            if !args[0].is_array() {
+                return Err("MongoDB insertMany() requires an array.".to_string());
+            }
+            Ok(MongoCommand::Insert { collection, documents: json_value_string(&args[0])? })
+        }
+        MongoCollectionMethod::Insert => {
+            require_argument_count(args, 1, 1, "Invalid MongoDB insert() command.")?;
+            if !args[0].is_object() && !args[0].is_array() {
+                return Err("MongoDB insert() requires a document or document array.".to_string());
+            }
+            Ok(MongoCommand::Insert { collection, documents: json_value_string(&args[0])? })
+        }
+        MongoCollectionMethod::UpdateOne | MongoCollectionMethod::UpdateMany => {
+            let many = method == MongoCollectionMethod::UpdateMany;
+            let name = if many { "updateMany" } else { "updateOne" };
+            require_argument_count(args, 2, 3, &format!("Invalid MongoDB {name}() command."))?;
+            Ok(MongoCommand::Update {
+                collection,
+                filter: json_value_string(&args[0])?,
+                update: json_value_string(&args[1])?,
+                options: optional_json_value(args.get(2))?,
+                many,
+            })
+        }
+        MongoCollectionMethod::Update => {
+            require_argument_count(args, 2, 3, "Invalid MongoDB update() command.")?;
+            let (options, many) = structured_legacy_update_options(args.get(2))?;
+            Ok(MongoCommand::Update {
+                collection,
+                filter: json_value_string(&args[0])?,
+                update: json_value_string(&args[1])?,
+                options,
+                many,
+            })
+        }
+        MongoCollectionMethod::DeleteOne | MongoCollectionMethod::DeleteMany => {
+            let many = method == MongoCollectionMethod::DeleteMany;
+            let name = if many { "deleteMany" } else { "deleteOne" };
+            require_argument_count(args, 1, 1, &format!("Invalid MongoDB {name}() command."))?;
+            Ok(MongoCommand::Delete { collection, filter: json_value_string(&args[0])?, many })
+        }
+        MongoCollectionMethod::CreateIndex => {
+            require_argument_count(args, 1, 2, "Invalid MongoDB createIndex() command.")?;
+            Ok(MongoCommand::CreateIndex {
+                collection,
+                keys: json_value_string(&args[0])?,
+                options: optional_json_value(args.get(1))?,
+            })
+        }
+        MongoCollectionMethod::DropIndex => {
+            require_argument_count(args, 1, 1, "Invalid MongoDB dropIndex() command.")?;
+            Ok(MongoCommand::DropIndexes { collection, indexes: Some(json_value_string(&args[0])?), single: true })
+        }
+        MongoCollectionMethod::DropIndexes => {
+            require_argument_count(args, 0, 1, "Invalid MongoDB dropIndexes() command.")?;
+            Ok(MongoCommand::DropIndexes { collection, indexes: optional_json_value(args.first())?, single: false })
+        }
+        MongoCollectionMethod::Drop => {
+            require_argument_count(args, 0, 0, "Invalid MongoDB drop() command.")?;
+            Ok(MongoCommand::DropCollection { collection })
+        }
+    }
+}
+
+pub fn apply_mongo_find_cursor(command: &mut MongoCommand, cursor: &MongoFindCursor) -> Result<(), String> {
+    let MongoCommand::Find { sort, collation, skip, limit, .. } = command else {
+        return Err("MongoDB cursor options can only be applied to find().".to_string());
+    };
+    *sort = optional_json_value(cursor.sort.as_ref())?;
+    *collation = optional_json_value(cursor.collation.as_ref())?;
+    *skip = cursor.skip;
+    *limit = cursor.limit;
+    Ok(())
+}
+
+pub fn build_mongo_find_explain_command(
+    collection: &str,
+    args: &[Value],
+    cursor: &MongoFindCursor,
+) -> Result<MongoCommand, String> {
+    let mut command = build_mongo_collection_command(collection, MongoCollectionMethod::Find, args)?;
+    apply_mongo_find_cursor(&mut command, cursor)?;
+    let MongoCommand::Find { collection, filter, projection, sort, collation, skip, limit } = command else {
+        return Err("MongoDB find() command state is unavailable.".to_string());
+    };
+    let verbosity = cursor.explain_verbosity.as_deref().unwrap_or("queryPlanner");
+    validate_explain_verbosity(verbosity)?;
+    Ok(MongoCommand::FindExplain {
+        collection,
+        filter,
+        projection,
+        sort,
+        collation,
+        skip,
+        limit,
+        verbosity: verbosity.to_string(),
+    })
+}
+
+impl MongoCollectionMethod {
+    fn collection_metric(self) -> Option<&'static str> {
+        match self {
+            Self::Stats => Some("stats"),
+            Self::DataSize => Some("dataSize"),
+            Self::StorageSize => Some("storageSize"),
+            Self::TotalIndexSize => Some("totalIndexSize"),
+            _ => None,
+        }
+    }
+}
+
+fn require_argument_count(args: &[Value], minimum: usize, maximum: usize, message: &str) -> Result<(), String> {
+    if (minimum..=maximum).contains(&args.len()) {
+        Ok(())
+    } else {
+        Err(message.to_string())
+    }
+}
+
+fn json_value_string(value: &Value) -> Result<String, String> {
+    serde_json::to_string(value).map_err(|error| error.to_string())
+}
+
+fn json_value_or_default(value: Option<&Value>, default: Value) -> Result<String, String> {
+    match value.filter(|value| !value.is_null()) {
+        Some(value) => json_value_string(value),
+        None => json_value_string(&default),
+    }
+}
+
+fn optional_json_value(value: Option<&Value>) -> Result<Option<String>, String> {
+    value.filter(|value| !value.is_null()).map(json_value_string).transpose()
+}
+
+fn structured_legacy_update_options(value: Option<&Value>) -> Result<(Option<String>, bool), String> {
+    let Some(value) = value.filter(|value| !value.is_null()) else {
+        return Ok((None, false));
+    };
+    let Value::Object(mut options) = value.clone() else {
+        return Err("MongoDB update() options must be a document.".to_string());
+    };
+    let many = match options.remove("multi") {
+        Some(Value::Bool(many)) => many,
+        Some(_) => return Err("MongoDB update() multi option must be a boolean.".to_string()),
+        None => false,
+    };
+    let options = if options.is_empty() { None } else { Some(json_value_string(&Value::Object(options))?) };
+    Ok((options, many))
 }
 
 pub fn mongo_filter_is_effectively_unbounded(filter_json: &str) -> bool {
@@ -363,7 +719,7 @@ pub fn parse(input: &str) -> Result<MongoCommand, String> {
     }
     let source = input.trim().trim_end_matches(';').trim();
     if source.eq_ignore_ascii_case("db.version()") {
-        return Ok(MongoCommand::Version);
+        return build_mongo_database_command(MongoDatabaseMethod::Version, &[]);
     }
     if let Some(database) = parse_use_database(source) {
         return Ok(MongoCommand::Use { database });
@@ -372,92 +728,62 @@ pub fn parse(input: &str) -> Result<MongoCommand, String> {
         if !tail.is_empty() || args.len() != 1 {
             return Err("MongoDB runCommand() requires exactly one command document.".to_string());
         }
-        let command_json = normalized_json(&args[0])?;
-        let command = parse_json_value(&command_json)
-            .and_then(|value| value.as_object().cloned())
-            .ok_or("MongoDB runCommand() requires a command document.")?;
-        if command.is_empty() {
-            return Err("MongoDB runCommand() requires a non-empty command document.".to_string());
-        }
-        return Ok(MongoCommand::RunCommand { command_json });
+        return build_mongo_database_command(MongoDatabaseMethod::RunCommand, &structured_args(&args)?);
     }
     if let Some((args, tail)) = database_method_call(source, "createUser") {
         if !tail.is_empty() || !(1..=2).contains(&args.len()) {
             return Err("MongoDB createUser() requires a user document and optional write concern.".to_string());
         }
-        let user_json = normalized_json(&args[0])?;
-        let user = parse_json_value(&user_json)
-            .and_then(|value| value.as_object().cloned())
-            .ok_or("MongoDB createUser() requires a user document.")?;
-        if user.get("user").and_then(Value::as_str).is_none_or(|user| user.trim().is_empty()) {
-            return Err("MongoDB createUser() requires a non-empty user name.".to_string());
-        }
-        let write_concern_json = optional_json_argument(args.get(1))?;
-        if write_concern_json.as_deref().and_then(parse_json_value).is_some_and(|value| !value.is_object()) {
-            return Err("MongoDB createUser() write concern must be a document.".to_string());
-        }
-        return Ok(MongoCommand::CreateUser { user_json, write_concern_json });
+        return build_mongo_database_command(MongoDatabaseMethod::CreateUser, &structured_args(&args)?);
     }
     let (collection, prefix_end) = parse_collection_prefix(source)?;
 
     if let Some((args, tail)) = method_call(source, prefix_end, "find") {
-        let filter = normalized_json(args.first().map(String::as_str).unwrap_or("{}"))?;
-        let projection =
-            if args.get(1).is_some_and(|arg| !arg.trim().is_empty()) { Some(normalized_json(&args[1])?) } else { None };
         if args.len() > 2 {
             return Err("MongoDB find() accepts at most filter and projection arguments.".to_string());
         }
-        let mut sort = None;
-        let mut collation = None;
-        let mut skip = 0;
-        let mut limit = 100;
+        let structured_find_args = structured_args(&args)?;
+        let mut command =
+            build_mongo_collection_command(&collection, MongoCollectionMethod::Find, &structured_find_args)?;
+        let mut cursor = MongoFindCursor { limit: 100, ..MongoFindCursor::default() };
         let calls = chained_calls(&tail)?;
         let call_count = calls.len();
         for (index, (name, call_args)) in calls.into_iter().enumerate() {
             match name.as_str() {
-                "sort" => sort = Some(normalized_json(call_args.first().map(String::as_str).unwrap_or("{}"))?),
+                "sort" => cursor.sort = Some(structured_arg_or_default(call_args.first(), serde_json::json!({}))?),
                 "collation" => {
                     if call_args.len() != 1 {
                         return Err("MongoDB collation() requires one options object.".to_string());
                     }
-                    collation = Some(normalized_json(&call_args[0])?);
+                    cursor.collation = Some(structured_arg(&call_args[0])?);
                 }
-                "skip" => skip = parse_integer(&call_args, "skip")? as u64,
-                "limit" => limit = parse_integer(&call_args, "limit")?,
+                "skip" => cursor.skip = parse_integer(&call_args, "skip")? as u64,
+                "limit" => cursor.limit = parse_integer(&call_args, "limit")?,
                 "count" if call_args.is_empty() => {
+                    let MongoCommand::Find { filter, .. } = command else {
+                        return Err("MongoDB find() command state is unavailable.".to_string());
+                    };
                     return Ok(MongoCommand::Count { collection, filter, accurate: false });
                 }
                 "explain" => {
                     if index + 1 != call_count {
                         return Err("MongoDB explain() must be the final find() chain operation.".to_string());
                     }
-                    return Ok(MongoCommand::FindExplain {
-                        collection,
-                        filter,
-                        projection,
-                        sort,
-                        collation,
-                        skip,
-                        limit,
-                        verbosity: parse_explain_verbosity(&call_args)?,
-                    });
+                    cursor.explain_verbosity = Some(parse_explain_verbosity(&call_args)?);
+                    return build_mongo_find_explain_command(&collection, &structured_find_args, &cursor);
                 }
                 _ => return Err(format!("Unsupported MongoDB find() chain: {name}()")),
             }
         }
-        return Ok(MongoCommand::Find { collection, filter, projection, sort, collation, skip, limit });
+        apply_mongo_find_cursor(&mut command, &cursor)?;
+        return Ok(command);
     }
 
     if let Some((args, tail)) = method_call(source, prefix_end, "findOne") {
         if !tail.is_empty() || args.len() > 3 {
             return Err("Invalid MongoDB findOne() command.".to_string());
         }
-        return Ok(MongoCommand::FindOne {
-            collection,
-            filter: normalized_json(args.first().map(String::as_str).unwrap_or("{}"))?,
-            projection: optional_json_argument(args.get(1))?,
-            options: optional_json_argument(args.get(2))?,
-        });
+        return build_mongo_collection_command(&collection, MongoCollectionMethod::FindOne, &structured_args(&args)?);
     }
 
     for method in ["findOneAndUpdate", "findOneAndReplace"] {
@@ -465,25 +791,23 @@ pub fn parse(input: &str) -> Result<MongoCommand, String> {
             if !tail.is_empty() || !(2..=3).contains(&args.len()) {
                 return Err(format!("Invalid MongoDB {method}() command."));
             }
-            let filter = normalized_json(&args[0])?;
-            let value = normalized_json(&args[1])?;
-            let options = optional_json_argument(args.get(2))?;
-            return Ok(if method == "findOneAndUpdate" {
-                MongoCommand::FindOneAndUpdate { collection, filter, update: value, options }
+            let method = if method == "findOneAndUpdate" {
+                MongoCollectionMethod::FindOneAndUpdate
             } else {
-                MongoCommand::FindOneAndReplace { collection, filter, replacement: value, options }
-            });
+                MongoCollectionMethod::FindOneAndReplace
+            };
+            return build_mongo_collection_command(&collection, method, &structured_args(&args)?);
         }
     }
     if let Some((args, tail)) = method_call(source, prefix_end, "findOneAndDelete") {
         if !tail.is_empty() || !(1..=2).contains(&args.len()) {
             return Err("Invalid MongoDB findOneAndDelete() command.".to_string());
         }
-        return Ok(MongoCommand::FindOneAndDelete {
-            collection,
-            filter: normalized_json(&args[0])?,
-            options: optional_json_argument(args.get(1))?,
-        });
+        return build_mongo_collection_command(
+            &collection,
+            MongoCollectionMethod::FindOneAndDelete,
+            &structured_args(&args)?,
+        );
     }
 
     for (method, accurate) in [("countDocuments", true), ("count", false)] {
@@ -491,11 +815,8 @@ pub fn parse(input: &str) -> Result<MongoCommand, String> {
             if !tail.is_empty() || args.len() > 1 {
                 return Err(format!("Invalid MongoDB {method}() command."));
             }
-            return Ok(MongoCommand::Count {
-                collection,
-                filter: normalized_json(args.first().map(String::as_str).unwrap_or("{}"))?,
-                accurate,
-            });
+            let method = if accurate { MongoCollectionMethod::CountDocuments } else { MongoCollectionMethod::Count };
+            return build_mongo_collection_command(&collection, method, &structured_args(&args)?);
         }
     }
 
@@ -503,28 +824,21 @@ pub fn parse(input: &str) -> Result<MongoCommand, String> {
         if !tail.is_empty() || !(1..=2).contains(&args.len()) {
             return Err("Invalid MongoDB aggregate() command.".to_string());
         }
-        let pipeline = normalized_json(&args[0])?;
-        if !parse_json_value(&pipeline).is_some_and(|value| value.is_array()) {
-            return Err("MongoDB aggregate() requires a pipeline array.".to_string());
-        }
-        let options = args.get(1).filter(|arg| !arg.trim().is_empty()).map(|arg| normalized_json(arg)).transpose()?;
-        return Ok(MongoCommand::Aggregate { collection, pipeline, options });
+        return build_mongo_collection_command(&collection, MongoCollectionMethod::Aggregate, &structured_args(&args)?);
     }
 
     if let Some((args, tail)) = method_call(source, prefix_end, "distinct") {
         if !tail.is_empty() || !(1..=2).contains(&args.len()) {
             return Err("Invalid MongoDB distinct() command.".to_string());
         }
-        let field = parse_string_arg(&args[0])?;
-        let filter = args.get(1).filter(|arg| !arg.trim().is_empty()).map(|arg| normalized_json(arg)).transpose()?;
-        return Ok(MongoCommand::Distinct { collection, field, filter });
+        return build_mongo_collection_command(&collection, MongoCollectionMethod::Distinct, &structured_args(&args)?);
     }
 
     if let Some((args, tail)) = method_call(source, prefix_end, "getIndexes") {
         if !tail.is_empty() || !args.is_empty() {
             return Err("Invalid MongoDB getIndexes() command.".to_string());
         }
-        return Ok(MongoCommand::GetIndexes { collection });
+        return build_mongo_collection_command(&collection, MongoCollectionMethod::GetIndexes, &[]);
     }
 
     for metric in ["stats", "dataSize", "storageSize", "totalIndexSize"] {
@@ -532,18 +846,14 @@ pub fn parse(input: &str) -> Result<MongoCommand, String> {
             if !tail.is_empty() || args.len() > 1 {
                 return Err(format!("Invalid MongoDB {metric}() command."));
             }
-            let scale = args
-                .first()
-                .filter(|arg| !arg.trim().is_empty())
-                .map(|arg| {
-                    arg.trim()
-                        .parse::<f64>()
-                        .ok()
-                        .and_then(serde_json::Number::from_f64)
-                        .ok_or_else(|| format!("Invalid {metric} scale."))
-                })
-                .transpose()?;
-            return Ok(MongoCommand::CollectionStats { collection, metric: metric.to_string(), scale });
+            let method = match metric {
+                "stats" => MongoCollectionMethod::Stats,
+                "dataSize" => MongoCollectionMethod::DataSize,
+                "storageSize" => MongoCollectionMethod::StorageSize,
+                "totalIndexSize" => MongoCollectionMethod::TotalIndexSize,
+                _ => return Err(format!("Invalid MongoDB {metric}() command.")),
+            };
+            return build_mongo_collection_command(&collection, method, &structured_args(&args)?);
         }
     }
 
@@ -551,17 +861,17 @@ pub fn parse(input: &str) -> Result<MongoCommand, String> {
         if !tail.is_empty() || args.len() != 1 {
             return Err("Invalid MongoDB insertOne() command.".to_string());
         }
-        return Ok(MongoCommand::Insert { collection, documents: normalized_json(&args[0])? });
+        return build_mongo_collection_command(&collection, MongoCollectionMethod::InsertOne, &structured_args(&args)?);
     }
     if let Some((args, tail)) = method_call(source, prefix_end, "insertMany") {
         if !tail.is_empty() || args.len() != 1 {
             return Err("Invalid MongoDB insertMany() command.".to_string());
         }
-        let documents = normalized_json(&args[0])?;
-        if !parse_json_value(&documents).is_some_and(|value| value.is_array()) {
-            return Err("MongoDB insertMany() requires an array.".to_string());
-        }
-        return Ok(MongoCommand::Insert { collection, documents });
+        return build_mongo_collection_command(
+            &collection,
+            MongoCollectionMethod::InsertMany,
+            &structured_args(&args)?,
+        );
     }
     // MongoDB keeps insert() for legacy shell compatibility; preserve its
     // single-document-or-array contract without silently ignoring options.
@@ -569,11 +879,7 @@ pub fn parse(input: &str) -> Result<MongoCommand, String> {
         if !tail.is_empty() || args.len() != 1 {
             return Err("Invalid MongoDB insert() command.".to_string());
         }
-        let documents = normalized_json(&args[0])?;
-        if !parse_json_value(&documents).is_some_and(|value| value.is_object() || value.is_array()) {
-            return Err("MongoDB insert() requires a document or document array.".to_string());
-        }
-        return Ok(MongoCommand::Insert { collection, documents });
+        return build_mongo_collection_command(&collection, MongoCollectionMethod::Insert, &structured_args(&args)?);
     }
 
     for (method, many) in [("updateOne", false), ("updateMany", true)] {
@@ -581,71 +887,56 @@ pub fn parse(input: &str) -> Result<MongoCommand, String> {
             if !tail.is_empty() || !(2..=3).contains(&args.len()) {
                 return Err(format!("Invalid MongoDB {method}() command."));
             }
-            return Ok(MongoCommand::Update {
-                collection,
-                filter: normalized_json(&args[0])?,
-                update: normalized_json(&args[1])?,
-                options: args
-                    .get(2)
-                    .filter(|arg| !arg.trim().is_empty())
-                    .map(|arg| normalized_json(arg))
-                    .transpose()?,
-                many,
-            });
+            let method = if many { MongoCollectionMethod::UpdateMany } else { MongoCollectionMethod::UpdateOne };
+            return build_mongo_collection_command(&collection, method, &structured_args(&args)?);
         }
     }
     if let Some((args, tail)) = method_call(source, prefix_end, "update") {
         if !tail.is_empty() || !(2..=3).contains(&args.len()) {
             return Err("Invalid MongoDB update() command.".to_string());
         }
-        let (options, many) = legacy_update_options(args.get(2))?;
-        return Ok(MongoCommand::Update {
-            collection,
-            filter: normalized_json(&args[0])?,
-            update: normalized_json(&args[1])?,
-            options,
-            many,
-        });
+        return build_mongo_collection_command(&collection, MongoCollectionMethod::Update, &structured_args(&args)?);
     }
     for (method, many) in [("deleteOne", false), ("deleteMany", true)] {
         if let Some((args, tail)) = method_call(source, prefix_end, method) {
             if !tail.is_empty() || args.len() != 1 {
                 return Err(format!("Invalid MongoDB {method}() command."));
             }
-            return Ok(MongoCommand::Delete { collection, filter: normalized_json(&args[0])?, many });
+            let method = if many { MongoCollectionMethod::DeleteMany } else { MongoCollectionMethod::DeleteOne };
+            return build_mongo_collection_command(&collection, method, &structured_args(&args)?);
         }
     }
     if let Some((args, tail)) = method_call(source, prefix_end, "createIndex") {
         if !tail.is_empty() || !(1..=2).contains(&args.len()) {
             return Err("Invalid MongoDB createIndex() command.".to_string());
         }
-        return Ok(MongoCommand::CreateIndex {
-            collection,
-            keys: normalized_json(&args[0])?,
-            options: args.get(1).filter(|arg| !arg.trim().is_empty()).map(|arg| normalized_json(arg)).transpose()?,
-        });
+        return build_mongo_collection_command(
+            &collection,
+            MongoCollectionMethod::CreateIndex,
+            &structured_args(&args)?,
+        );
     }
     if let Some((args, tail)) = method_call(source, prefix_end, "dropIndex") {
         if !tail.is_empty() || args.len() != 1 {
             return Err("Invalid MongoDB dropIndex() command.".to_string());
         }
-        return Ok(MongoCommand::DropIndexes { collection, indexes: Some(normalized_json(&args[0])?), single: true });
+        return build_mongo_collection_command(&collection, MongoCollectionMethod::DropIndex, &structured_args(&args)?);
     }
     if let Some((args, tail)) = method_call(source, prefix_end, "dropIndexes") {
         if !tail.is_empty() || args.len() > 1 {
             return Err("Invalid MongoDB dropIndexes() command.".to_string());
         }
-        return Ok(MongoCommand::DropIndexes {
-            collection,
-            indexes: args.first().filter(|arg| !arg.trim().is_empty()).map(|arg| normalized_json(arg)).transpose()?,
-            single: false,
-        });
+        return build_mongo_collection_command(
+            &collection,
+            MongoCollectionMethod::DropIndexes,
+            &structured_args(&args)?,
+        );
     }
     if let Some((args, tail)) = method_call(source, prefix_end, "drop") {
         if !tail.is_empty() || !args.is_empty() {
             return Err("Invalid MongoDB drop() command.".to_string());
         }
-        return Ok(MongoCommand::DropCollection { collection });
+        return build_mongo_collection_command(&collection, MongoCollectionMethod::Drop, &[]);
     }
 
     Err("Unsupported MongoDB shell command.".to_string())
@@ -840,8 +1131,13 @@ fn parse_explain_verbosity(args: &[String]) -> Result<String, String> {
         Some(value) => parse_string_arg(value)?,
         None => "queryPlanner".to_string(),
     };
-    match verbosity.as_str() {
-        "queryPlanner" | "executionStats" | "allPlansExecution" => Ok(verbosity),
+    validate_explain_verbosity(&verbosity)?;
+    Ok(verbosity)
+}
+
+fn validate_explain_verbosity(verbosity: &str) -> Result<(), String> {
+    match verbosity {
+        "queryPlanner" | "executionStats" | "allPlansExecution" => Ok(()),
         _ => Err("MongoDB explain() verbosity must be queryPlanner, executionStats, or allPlansExecution.".to_string()),
     }
 }
@@ -886,30 +1182,16 @@ fn parse_json_value(value: &str) -> Option<Value> {
     serde_json::from_str(value).ok()
 }
 
-fn optional_json_argument(value: Option<&String>) -> Result<Option<String>, String> {
-    value.filter(|value| !value.trim().is_empty()).map(|value| normalized_json(value)).transpose()
+fn structured_arg(value: &str) -> Result<Value, String> {
+    parse_json_value(&normalized_json(value)?).ok_or_else(|| "Invalid MongoDB JSON argument.".to_string())
 }
 
-fn legacy_update_options(value: Option<&String>) -> Result<(Option<String>, bool), String> {
-    let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
-        return Ok((None, false));
-    };
-    let normalized = normalized_json(value)?;
-    let value = parse_json_value(&normalized).ok_or("Invalid MongoDB update() options.")?;
-    let Value::Object(mut options) = value else {
-        return Err("MongoDB update() options must be a document.".to_string());
-    };
-    let many = match options.remove("multi") {
-        Some(Value::Bool(many)) => many,
-        Some(_) => return Err("MongoDB update() multi option must be a boolean.".to_string()),
-        None => false,
-    };
-    let options = if options.is_empty() {
-        None
-    } else {
-        Some(serde_json::to_string(&Value::Object(options)).map_err(|error| error.to_string())?)
-    };
-    Ok((options, many))
+fn structured_args(args: &[String]) -> Result<Vec<Value>, String> {
+    args.iter().map(|value| structured_arg(value)).collect()
+}
+
+fn structured_arg_or_default(value: Option<&String>, default: Value) -> Result<Value, String> {
+    value.map(|value| structured_arg(value)).unwrap_or(Ok(default))
 }
 
 fn parse_use_database(source: &str) -> Option<String> {
@@ -1348,5 +1630,103 @@ mod tests {
             MongoCommand::CollectionStats { metric, scale: Some(_), .. } if metric == "stats"
         ));
         assert!(parse("db.users.find({}).skip(-1)").is_err());
+    }
+
+    #[test]
+    fn structured_builders_match_text_parser_command_semantics() {
+        assert_eq!(
+            build_mongo_database_command(MongoDatabaseMethod::RunCommand, &[serde_json::json!({ "ping": 1 })],)
+                .unwrap(),
+            parse("db.runCommand({ping: 1})").unwrap()
+        );
+        assert_eq!(
+            build_mongo_collection_command(
+                "items",
+                MongoCollectionMethod::InsertOne,
+                &[serde_json::json!({ "_id": 7, "active": true })],
+            )
+            .unwrap(),
+            parse("db.items.insertOne({_id: 7, active: true})").unwrap()
+        );
+        assert_eq!(
+            build_mongo_collection_command(
+                "items",
+                MongoCollectionMethod::Update,
+                &[
+                    serde_json::json!({ "tenant": 7 }),
+                    serde_json::json!({ "$set": { "active": true } }),
+                    serde_json::json!({ "multi": true, "upsert": true }),
+                ],
+            )
+            .unwrap(),
+            parse("db.items.update({tenant: 7}, {$set: {active: true}}, {multi: true, upsert: true})").unwrap()
+        );
+
+        let mut structured_find = build_mongo_collection_command(
+            "items",
+            MongoCollectionMethod::Find,
+            &[serde_json::json!({ "active": true }), serde_json::json!({ "name": 1 })],
+        )
+        .unwrap();
+        apply_mongo_find_cursor(
+            &mut structured_find,
+            &MongoFindCursor {
+                sort: Some(serde_json::json!({ "name": 1 })),
+                collation: None,
+                skip: 2,
+                limit: 5,
+                explain_verbosity: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            structured_find,
+            parse("db.items.find({active: true}, {name: 1}).sort({name: 1}).skip(2).limit(5)").unwrap()
+        );
+
+        let structured_explain = build_mongo_find_explain_command(
+            "items",
+            &[serde_json::json!({ "active": true }), serde_json::json!({ "name": 1 })],
+            &MongoFindCursor {
+                sort: Some(serde_json::json!({ "name": 1 })),
+                collation: None,
+                skip: 2,
+                limit: 5,
+                explain_verbosity: Some("executionStats".to_string()),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            structured_explain,
+            parse(
+                "db.items.find({active: true}, {name: 1}).sort({name: 1}).skip(2).limit(5).explain(\"executionStats\")"
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn structured_builders_reject_untyped_or_unsupported_argument_shapes() {
+        assert!(build_mongo_database_command(MongoDatabaseMethod::RunCommand, &[serde_json::json!("ping")])
+            .unwrap_err()
+            .contains("command document"));
+        assert!(build_mongo_collection_command(
+            "items",
+            MongoCollectionMethod::InsertMany,
+            &[serde_json::json!({ "not": "an array" })],
+        )
+        .unwrap_err()
+        .contains("array"));
+        assert!(build_mongo_collection_command(
+            "items",
+            MongoCollectionMethod::Update,
+            &[
+                serde_json::json!({}),
+                serde_json::json!({ "$set": { "active": true } }),
+                serde_json::json!({ "multi": "yes" }),
+            ],
+        )
+        .unwrap_err()
+        .contains("boolean"));
     }
 }

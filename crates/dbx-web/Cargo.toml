@@ -9,9 +9,10 @@ name = "dbx-web"
 path = "src/main.rs"
 
 [features]
-default = ["duckdb-sidecar", "dynamodb", "mq-admin", "sqlite-sqlcipher", "system-fonts"]
+default = ["duckdb-sidecar", "dynamodb", "mongo-js-runtime", "mq-admin", "sqlite-sqlcipher", "system-fonts"]
 duckdb-sidecar = ["dbx-core/duckdb-sidecar"]
 dynamodb = ["dbx-core/dynamodb"]
+mongo-js-runtime = ["dbx-core/mongo-js-runtime"]
 mq-admin = ["dbx-core/mq-admin"]
 sqlite-sqlcipher = ["dbx-core/sqlite-sqlcipher"]
 system-fonts = ["dbx-core/system-fonts"]

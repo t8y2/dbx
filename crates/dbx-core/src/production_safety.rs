@@ -1,4 +1,5 @@
 use crate::models::connection::{ConnectionConfig, DatabaseType};
+use crate::mongo_shell::MongoCommand;
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
@@ -166,6 +167,35 @@ pub fn mongo_pipeline_targets_production_database(
     }
 
     has_write_stage && (uncertain || targets.iter().any(|database| is_production_database(config, database)))
+}
+
+/// Returns whether one concrete MongoDB command would mutate production
+/// scope. The JavaScript facade resolves its active database dynamically, so
+/// callers must run this check for every host operation immediately before
+/// dispatch instead of trusting a frontend confirmation made for the whole
+/// script.
+pub fn mongo_command_targets_production_database(
+    config: &ConnectionConfig,
+    active_database: &str,
+    command: &MongoCommand,
+) -> bool {
+    if !command.is_mutating() {
+        return false;
+    }
+
+    match command {
+        MongoCommand::Aggregate { pipeline, .. } => {
+            mongo_pipeline_targets_production_database(config, active_database, pipeline)
+        }
+        // Generic commands and user creation can reference databases outside
+        // the active database. Their targets cannot be proven from the
+        // structured facade command, so fail closed whenever this connection
+        // protects any production database.
+        MongoCommand::RunCommand { .. } | MongoCommand::CreateUser { .. } => {
+            config.is_production || config.production_databases.iter().any(|database| !database.trim().is_empty())
+        }
+        _ => is_production_database(config, active_database),
+    }
 }
 
 fn add_mongo_current_database(targets: &mut HashSet<String>, uncertain: &mut bool, active_database: &str) {
@@ -624,8 +654,12 @@ fn append_quoted_identifier_token(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_production_database, mongo_pipeline_targets_production_database, targets_production_database};
+    use super::{
+        is_production_database, mongo_command_targets_production_database, mongo_pipeline_targets_production_database,
+        targets_production_database,
+    };
     use crate::models::connection::{ConnectionConfig, DatabaseType};
+    use crate::mongo_shell::MongoCommand;
     use serde::Deserialize;
 
     #[derive(Deserialize)]
@@ -817,5 +851,59 @@ mod tests {
             "staging",
             r#"[{"$merge":{"whenMatched":"replace"}}]"#
         ));
+    }
+
+    #[test]
+    fn evaluates_each_mongo_command_against_its_actual_database_and_mutability() {
+        let mut mongo = config();
+        mongo.db_type = DatabaseType::MongoDb;
+        mongo.production_databases = vec!["production".to_string()];
+
+        let read = MongoCommand::Find {
+            collection: "users".to_string(),
+            filter: "{}".to_string(),
+            projection: None,
+            sort: None,
+            collation: None,
+            skip: 0,
+            limit: 10,
+        };
+        let write = MongoCommand::Delete { collection: "users".to_string(), filter: "{}".to_string(), many: true };
+
+        assert!(!mongo_command_targets_production_database(&mongo, "production", &read));
+        assert!(mongo_command_targets_production_database(&mongo, "production", &write));
+        assert!(!mongo_command_targets_production_database(&mongo, "staging", &write));
+
+        mongo.is_production = true;
+        assert!(mongo_command_targets_production_database(&mongo, "staging", &write));
+    }
+
+    #[test]
+    fn evaluates_mongo_aggregate_output_targets_and_uncertain_generic_commands() {
+        let mut mongo = config();
+        mongo.db_type = DatabaseType::MongoDb;
+        mongo.production_databases = vec!["production".to_string()];
+
+        for pipeline in [
+            r#"[{"$out":{"db":"production","coll":"copied"}}]"#,
+            r#"[{"$merge":{"into":{"db":"production","coll":"copied"}}}]"#,
+        ] {
+            let aggregate = MongoCommand::Aggregate {
+                collection: "source".to_string(),
+                pipeline: pipeline.to_string(),
+                options: None,
+            };
+            assert!(mongo_command_targets_production_database(&mongo, "staging", &aggregate));
+        }
+
+        for command in [
+            MongoCommand::RunCommand { command_json: r#"{"ping":1}"#.to_string() },
+            MongoCommand::CreateUser {
+                user_json: r#"{"user":"reader","pwd":"secret","roles":[]}"#.to_string(),
+                write_concern_json: None,
+            },
+        ] {
+            assert!(mongo_command_targets_production_database(&mongo, "staging", &command));
+        }
     }
 }

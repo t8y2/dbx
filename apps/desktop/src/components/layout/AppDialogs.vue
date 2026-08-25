@@ -37,6 +37,7 @@ const props = defineProps<{
   connectionInitialTab?: ConfigTab;
   showDangerDialog: boolean;
   dangerSql: string;
+  dangerKind: "sql" | "redis" | "mongo-script";
   suppressDangerConfirm: boolean;
   activeDatabaseType?: DatabaseType;
   showSqlParameterDialog: boolean;
@@ -112,6 +113,13 @@ const multiDbDangerMessage = computed(() => {
   const request = sqlExecutionDangerStore.pending;
   return request?.kind === "redis" ? t("dangerDialog.redisCommandMessage") : t("dangerDialog.message");
 });
+const editorDangerTitle = computed(() => (props.dangerKind === "mongo-script" ? t("mongoScript.confirmTitle") : undefined));
+const editorDangerMessage = computed(() => {
+  if (props.dangerKind === "mongo-script") return t("mongoScript.confirmMessage");
+  if (props.dangerKind === "redis") return t("dangerDialog.redisCommandMessage");
+  return undefined;
+});
+const editorDangerConfirmLabel = computed(() => (props.dangerKind === "mongo-script" ? t("mongoScript.confirmAction") : undefined));
 
 const editConfig = computed(() => {
   const id = connectionStore.editingConnectionId;
@@ -160,7 +168,10 @@ watch(
     v-if="showDangerDialog"
     :open="showDangerDialog"
     :sql="dangerSql"
-    :show-suppress-toggle="activeDatabaseType !== 'redis'"
+    :title="editorDangerTitle"
+    :message="editorDangerMessage"
+    :confirm-label="editorDangerConfirmLabel"
+    :show-suppress-toggle="dangerKind === 'sql' && activeDatabaseType !== 'redis'"
     :suppress-future-prompts="suppressDangerConfirm"
     @update:open="emit('update:showDangerDialog', $event)"
     @update:suppress-future-prompts="emit('update:suppressDangerConfirm', $event)"

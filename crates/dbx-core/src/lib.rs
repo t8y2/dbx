@@ -53,6 +53,8 @@ pub mod jdbc;
 pub mod models;
 pub mod mongo_oidc;
 pub mod mongo_ops;
+#[cfg(feature = "mongo-js-runtime")]
+pub mod mongo_script;
 pub mod mongo_shell;
 #[cfg(feature = "mq-admin")]
 pub mod mq;

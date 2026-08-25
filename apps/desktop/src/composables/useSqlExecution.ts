@@ -31,6 +31,8 @@ const DANGER_RE = /^\s*(DROP|DELETE|TRUNCATE|ALTER|UPDATE|MERGE|REPLACE)\b/i;
 interface SqlExecutionOptions {
   openInNewResultTab?: boolean;
   editorViewportRequestId?: number;
+  mongoScriptExecution?: boolean;
+  dangerousMongoScriptConfirmed?: boolean;
 }
 
 interface TargetSqlExecutionInput {
@@ -135,7 +137,7 @@ export function useSqlExecution(deps: {
   const sqlParameterDatabaseType = ref<DatabaseType | undefined>();
   const sqlParameterEnabledSyntaxes = ref<SqlParameterSyntax[]>([]);
   const pendingSourceOffset = ref<number | undefined>();
-  const pendingDangerKind = ref<"sql" | "redis">("sql");
+  const pendingDangerKind = ref<"sql" | "redis" | "mongo-script">("sql");
   const pendingDangerSourceOffset = ref<number | undefined>();
   const pendingOpenInNewResultTab = ref(false);
   const pendingSqlParameterEditorViewportRequestId = ref<number | undefined>();
@@ -175,7 +177,21 @@ export function useSqlExecution(deps: {
     return tryExecute(sqlOverride, { openInNewResultTab: true });
   }
 
+  function tryExecuteMongoScript(sqlOverride?: SqlExecutionOverride) {
+    return tryExecute(sqlOverride, { mongoScriptExecution: true });
+  }
+
   async function continueExecute(sql: string, sourceOffset?: number, options: SqlExecutionOptions = {}) {
+    if (options.mongoScriptExecution === true && deps.activeConnection.value?.db_type === "mongodb" && options.dangerousMongoScriptConfirmed !== true) {
+      dangerSql.value = sql;
+      pendingDangerSql.value = sql;
+      pendingDangerKind.value = "mongo-script";
+      pendingDangerSourceOffset.value = sourceOffset;
+      pendingOpenInNewResultTab.value = options.openInNewResultTab === true;
+      suppressDangerConfirm.value = false;
+      showDangerDialog.value = true;
+      return;
+    }
     // Redis: block dangerous commands when toggle is on (scan entire batch for highest safety level)
     if (deps.activeConnection.value?.db_type === "redis" && deps.blockDangerousRedisCommands?.value !== false) {
       const commands = sql
@@ -290,13 +306,15 @@ export function useSqlExecution(deps: {
       deps.onMissingDatabase?.();
       return;
     }
-    const statementCount = splitSqlStatementRanges(sql, executionDatabaseType).length;
+    const statementCount = options.mongoScriptExecution === true ? 1 : splitSqlStatementRanges(sql, executionDatabaseType).length;
     deps.activeOutputView.value = statementCount > 1 ? "summary" : "result";
     const connName = executionConnection?.name || "";
     const start = Date.now();
     const isRedis = executionDatabaseType === "redis";
     const producedResult = await queryStore.executeCurrentSql(sql, {
       ...(isRedis ? { skipRedisSafetyCheck: deps.blockDangerousRedisCommands?.value === false } : {}),
+      ...(options.mongoScriptExecution ? { mongoScriptExecution: true } : {}),
+      ...(options.dangerousMongoScriptConfirmed ? { dangerousMongoScriptConfirmed: true } : {}),
       ...(sourceOffset !== undefined ? { sourceOffset } : {}),
       ...(options.openInNewResultTab ? { openInNewResultTab: true } : {}),
       ...(options.editorViewportRequestId !== undefined ? { onExecutionStarted: () => deps.onExecutionStarted?.(options.editorViewportRequestId!) } : {}),
@@ -544,7 +562,11 @@ export function useSqlExecution(deps: {
       settingsStore.updateEditorSettings({ confirmDangerousSqlExecution: false });
     }
     suppressDangerConfirm.value = false;
-    await doExecute(sql, sourceOffset, { openInNewResultTab, editorViewportRequestId });
+    await doExecute(sql, sourceOffset, {
+      openInNewResultTab,
+      editorViewportRequestId,
+      ...(kind === "mongo-script" ? { mongoScriptExecution: true, dangerousMongoScriptConfirmed: true } : {}),
+    });
   }
 
   async function onSqlParametersConfirm(sql: string) {
@@ -590,10 +612,12 @@ export function useSqlExecution(deps: {
   return {
     dangerSql,
     pendingDangerSql,
+    pendingDangerKind,
     showDangerDialog,
     suppressDangerConfirm,
     tryExecute,
     tryExecuteInNewResultTab,
+    tryExecuteMongoScript,
     doExecute,
     cancelActiveExecution,
     tryExplain,

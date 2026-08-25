@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { BackendErrorException, type BackendError } from "@/lib/backend/errorUtils";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { normalizeRustMongoCommand, type MongoCommand } from "@/lib/mongo/mongoShellCommand";
+import type { MongoScriptRequest, MongoScriptResult } from "@/lib/mongo/mongoScript";
 import { ExternalSqlFileTooLargeError } from "@/lib/sql/sqlFileOpen";
 import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { decodeMeilisearchDocumentPage, decodeMeilisearchSearchResult, type MeilisearchDocumentPage, type MeilisearchDocumentPageWire, type MeilisearchSearchResult, type MeilisearchSearchWireResult } from "@/lib/backend/meilisearchTransport";
@@ -3707,6 +3708,10 @@ export async function mongoFindOne(connectionId: string, database: string, colle
 export async function mongoParseShellCommand(source: string): Promise<MongoCommand> {
   const raw = await invoke<Record<string, unknown>>("mongo_parse_shell_command", { source });
   return normalizeRustMongoCommand(raw);
+}
+
+export async function mongoExecuteScript(request: MongoScriptRequest): Promise<MongoScriptResult> {
+  return invoke("mongo_execute_script", { request });
 }
 
 export async function documentFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, projection?: string, sort?: string, collation?: string, executionId?: string, cursor?: string): Promise<DocumentQueryResult> {

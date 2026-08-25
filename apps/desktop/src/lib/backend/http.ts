@@ -47,6 +47,7 @@ import type {
   TunnelProfile,
 } from "@/types/database";
 import { normalizeRustMongoCommand, type MongoCommand } from "@/lib/mongo/mongoShellCommand";
+import type { MongoScriptRequest, MongoScriptResult } from "@/lib/mongo/mongoScript";
 import { BackendErrorException, type BackendError } from "@/lib/backend/errorUtils";
 import { decodeMeilisearchDocumentPage, decodeMeilisearchSearchResult, type MeilisearchDocumentPage, type MeilisearchDocumentPageWire, type MeilisearchSearchResult, type MeilisearchSearchWireResult } from "@/lib/backend/meilisearchTransport";
 import type { CreatedKey, EnqueuedTaskSummary, KeyCreateInput, KeyListItem, KeyPage, KeyUpdateInput, MeilisearchSystemOverview, MeilisearchTask, TaskListInput, TaskPage, TaskSelector } from "@/types/meilisearchManagement";
@@ -3717,6 +3718,10 @@ export async function mongoFindDocuments(connectionId: string, database: string,
 export async function mongoParseShellCommand(source: string): Promise<MongoCommand> {
   const raw = await post<Record<string, unknown>>("/api/mongo/parse-shell-command", { source });
   return normalizeRustMongoCommand(raw);
+}
+
+export async function mongoExecuteScript(request: MongoScriptRequest): Promise<MongoScriptResult> {
+  return post("/api/mongo/execute-script", request);
 }
 
 export async function mongoFindOne(connectionId: string, database: string, collection: string, filter?: string, projection?: string, options?: string, executionId?: string): Promise<MongoDocumentResult> {

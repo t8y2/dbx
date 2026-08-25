@@ -30,6 +30,7 @@ import {
   splitMongoCommandRanges,
   type MongoAggregateSafetyOptions,
 } from "@/lib/mongo/mongoShellCommand";
+import { clampMongoScriptMaxRows, mongoScriptResultToQueryResult, translateMongoScriptError } from "@/lib/mongo/mongoScript";
 import { refreshLoadedMongoIndexes } from "@/lib/mongo/mongoIndexMetadata";
 import { redisCommandResultToQueryResult } from "@/lib/redis/redisQueryResult";
 import { nextRedisCommandDb } from "@/lib/redis/redisCommandSession";
@@ -3635,7 +3636,7 @@ export const useQueryStore = defineStore("query", () => {
     // Single funnel for every query execution failure, so backend messages DBX
     // knows about are shown in the active locale rather than as raw English.
     const error = normalizeBackendError(e) ?? undefined;
-    const message = translateBackendError(i18n.global.t, e);
+    const message = translateMongoScriptError(i18n.global.t, e) ?? translateBackendError(i18n.global.t, e);
     return markQueryResultRowsRaw({
       columns: ["Error"],
       execution_error: true,
@@ -3692,7 +3693,7 @@ export const useQueryStore = defineStore("query", () => {
     await executeCurrentSql(tab.sql);
   }
 
-  async function executeCurrentSql(sql: string, options?: { skipRedisSafetyCheck?: boolean; sourceOffset?: number; openInNewResultTab?: boolean; onExecutionStarted?: () => void }) {
+  async function executeCurrentSql(sql: string, options?: { skipRedisSafetyCheck?: boolean; mongoScriptExecution?: boolean; dangerousMongoScriptConfirmed?: boolean; sourceOffset?: number; openInNewResultTab?: boolean; onExecutionStarted?: () => void }) {
     const executionTabId = activeTabId.value;
     if (!executionTabId) return;
     const tab = tabs.value.find((item) => item.id === executionTabId);
@@ -4464,6 +4465,8 @@ export const useQueryStore = defineStore("query", () => {
       preserveActiveResultIndex?: boolean;
       replaceActiveResultInGroup?: boolean;
       skipRedisSafetyCheck?: boolean;
+      mongoScriptExecution?: boolean;
+      dangerousMongoScriptConfirmed?: boolean;
       sourceOffset?: number;
       sourceTraceId?: string;
       skipEnsureConnected?: boolean;
@@ -4580,12 +4583,18 @@ export const useQueryStore = defineStore("query", () => {
       const executionTarget = resumedExecutionTarget ?? options?.executionTarget;
       const usesExternalExecutionTarget = !!executionTarget;
       let conn = connStore.getConfig(executionConnectionId);
-      const parsedMongoCommands = conn?.db_type === "mongodb" ? splitMongoCommandRanges(sql) : undefined;
+      const mongoScriptRequested = options?.mongoScriptExecution === true;
+      const parsedMongoCommands = conn?.db_type === "mongodb" && !mongoScriptRequested ? splitMongoCommandRanges(sql) : undefined;
       let mongoCommands = parsedMongoCommands ?? [];
       const mongoNeedsConnection = mongoCommands.some(({ command }) => command.kind !== "use");
 
       if (options?.skipEnsureConnected) {
         queryExecutionLog("info", "ensure-connected:skip", { traceId, elapsed: elapsed(), reason: "caller" });
+      } else if (conn?.db_type === "mongodb" && !mongoScriptRequested && mongoCommands.length === 0 && sql.trim()) {
+        // Keep ordinary parser failures local. In particular, never ensure a
+        // connection (or enter QuickJS) merely because the command parser
+        // rejected malformed or unsupported input.
+        throw new Error(describeMongoCommandParseFailure(sql));
       } else if (conn?.db_type === "mongodb" && mongoCommands.length > 0 && !mongoNeedsConnection) {
         queryExecutionLog("info", "ensure-connected:skip", { traceId, elapsed: elapsed(), reason: "mongo-use-only" });
       } else {
@@ -4594,8 +4603,14 @@ export const useQueryStore = defineStore("query", () => {
         queryExecutionLog("info", "ensure-connected:done", { traceId, elapsed: elapsed() });
       }
       conn = connStore.getConfig(executionConnectionId);
-      if (parsedMongoCommands === undefined && conn?.db_type === "mongodb") {
+      if (mongoScriptRequested && conn?.db_type !== "mongodb") {
+        throw new Error("MongoDB JavaScript execution requires a MongoDB connection.");
+      }
+      if (!mongoScriptRequested && parsedMongoCommands === undefined && conn?.db_type === "mongodb") {
         mongoCommands = splitMongoCommandRanges(sql);
+      }
+      if (conn?.db_type === "mongodb" && !mongoScriptRequested && mongoCommands.length === 0 && sql.trim()) {
+        throw new Error(describeMongoCommandParseFailure(sql));
       }
       const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
       if (tab.autoCommit === false && !supportsTransaction(conn?.db_type)) {
@@ -4613,9 +4628,10 @@ export const useQueryStore = defineStore("query", () => {
       const executionDatabase = dataTabExecutionDatabase(conn, targetDatabase, executionCatalog);
       const useAgentCursor = usesAgentCursorForQuery(conn?.db_type);
       const queryTimeoutSecs = queryTimeoutSecsForConnection(conn, settingsStore.editorSettings.globalQueryTimeoutSecs);
+      const isMongoScriptExecution = conn?.db_type === "mongodb" && mongoScriptRequested;
       if (!batchResume) {
         const statementExecution =
-          tab.mode === "query"
+          tab.mode === "query" && !isMongoScriptExecution
             ? createBatchSqlExecution(executionId, tab.sql, sql, effectiveDbType, options?.sourceOffset, {
                 connectionId: executionConnectionId,
                 catalog: executionCatalog,
@@ -4629,6 +4645,73 @@ export const useQueryStore = defineStore("query", () => {
       queryExecutionLog("info", "previous-session-close:start", { traceId, elapsed: elapsed() });
       await previousResultSessionClose;
       queryExecutionLog("info", "previous-session-close:done", { traceId, elapsed: elapsed() });
+
+      if (isMongoScriptExecution) {
+        queryExecutionLog("info", "mongo-script:start", { traceId, sqlLength: sql.length });
+        const scriptStartedAt = performance.now();
+        executionDispatched = true;
+        const scriptResult = await api.mongoExecuteScript({
+          connectionId: executionConnectionId,
+          database: executionDatabase,
+          source: sql,
+          executionId,
+          maxRows: clampMongoScriptMaxRows(normalizeResultPageSize(settingsStore.editorSettings.pageSize)),
+          timeoutSecs: queryTimeoutSecs,
+          dangerousOperationConfirmed: options?.dangerousMongoScriptConfirmed === true,
+        });
+        const result = markQueryResultRowsRaw(
+          annotateQueryResultSource(
+            mongoScriptResultToQueryResult(scriptResult, performance.now() - scriptStartedAt, {
+              typeColumn: i18n.global.t("mongoScript.typeColumn"),
+              valueColumn: i18n.global.t("mongoScript.valueColumn"),
+              textOutput: i18n.global.t("mongoScript.textOutput"),
+              jsonOutput: i18n.global.t("mongoScript.jsonOutput"),
+              finalValue: i18n.global.t("mongoScript.finalValue"),
+              summary: i18n.global.t("mongoScript.summary"),
+              summaryValue: ({ succeeded, attempted, database }) => i18n.global.t("mongoScript.summaryValue", { succeeded, attempted, database }),
+              outputTruncated: i18n.global.t("mongoScript.outputTruncated"),
+            }),
+            sql,
+            executionDatabase,
+            effectiveDbType,
+            options?.sourceOffset === undefined ? undefined : { from: options.sourceOffset, to: options.sourceOffset + sql.length },
+          ),
+        );
+        const current = findExecutionTab(id);
+        if (current?.executionId === executionId) {
+          if (captureResultRun && current.isCancelling && restorePendingResultRun(current, executionId)) return false;
+          clearResultNavigationState(current);
+          current.results = undefined;
+          current.activeResultIndex = undefined;
+          current.result = result;
+          producedResult = true;
+          touchResult(current);
+          current.queryAnalysis = undefined;
+          current.querySourceColumns = undefined;
+          current.queryEditabilityReason = undefined;
+          current.mongoEditTarget = undefined;
+          current.tableMeta = undefined;
+          current.resultBaseSql = options?.resultBaseSql ?? sql;
+          current.resultSortedSql = undefined;
+          current.resultPageSql = undefined;
+          current.resultPageLimit = undefined;
+          current.resultPageOffset = undefined;
+          current.resultCountSql = undefined;
+          current.resultSessionId = undefined;
+          current.resultClientSessionId = undefined;
+          current.resultTotalRowCount = undefined;
+          current.resultTotalRowCountLoading = false;
+          syncDisplayedResultRun(current, current.resultBaseSql, captureResultRun);
+          if (!usesExternalExecutionTarget && current.database !== scriptResult.currentDatabase) current.database = scriptResult.currentDatabase;
+        }
+        queryExecutionLog("info", "mongo-script:done", {
+          traceId,
+          operationCount: scriptResult.operationCount,
+          succeededOperationCount: scriptResult.succeededOperationCount,
+          elapsed: elapsed(),
+        });
+        return producedResult;
+      }
 
       // Redis command execution — split multi-line input into individual commands
       if (conn?.db_type === "redis") {
@@ -4704,12 +4787,6 @@ export const useQueryStore = defineStore("query", () => {
           void connStore.refreshRedisDbKeyCounts(executionConnectionId);
         }
         return producedResult;
-      }
-
-      if (conn?.db_type === "mongodb" && mongoCommands.length === 0 && sql.trim()) {
-        // Avoid falling through to the SQL executor, which only returns the generic
-        // "Use MongoDB-specific commands" rejection and hides parse/syntax details.
-        throw new Error(describeMongoCommandParseFailure(sql));
       }
 
       if (mongoCommands.length > 0) {

@@ -2296,6 +2296,8 @@ pub fn run() {
             commands::document_cmd::document_delete_gridfs_file,
             commands::mongo_cmd::mongo_find_documents,
             commands::mongo_cmd::mongo_parse_shell_command,
+            #[cfg(feature = "mongo-js-runtime")]
+            commands::mongo_cmd::mongo_execute_script,
             commands::mongo_cmd::mongo_find_one,
             commands::mongo_cmd::mongo_count_documents,
             commands::mongo_cmd::mongo_server_version,

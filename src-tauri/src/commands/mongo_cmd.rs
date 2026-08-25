@@ -10,6 +10,20 @@ pub fn mongo_parse_shell_command(source: String) -> Result<dbx_core::mongo_shell
     dbx_core::mongo_shell::parse(&source)
 }
 
+#[cfg(feature = "mongo-js-runtime")]
+#[tauri::command]
+pub async fn mongo_execute_script(
+    state: State<'_, Arc<AppState>>,
+    request: dbx_core::mongo_script::MongoScriptRequest,
+) -> Result<dbx_core::mongo_script::MongoScriptResult, String> {
+    dbx_core::mongo_script::execute_mongo_script_managed_core(
+        state.inner().clone(),
+        request,
+        dbx_core::mongo_script::MongoScriptLimits::default(),
+    )
+    .await
+}
+
 async fn run_cancellable<T, F>(state: &Arc<AppState>, execution_id: Option<String>, future: F) -> Result<T, String>
 where
     F: Future<Output = Result<T, String>>,

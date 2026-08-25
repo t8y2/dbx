@@ -2101,6 +2101,7 @@ dependencies = [
  "mongodb",
  "mysql_async",
  "mysql_common",
+ "nix",
  "notify",
  "openssl",
  "pageant",

@@ -175,10 +175,15 @@ export function useTabDrag(onDrop: (draggedId: string, targetId: string, positio
     }
   }
 
+  function cancelDrag() {
+    reset();
+  }
+
   return {
     state: readonly(state),
     startDrag,
     updateTarget,
     clearTarget,
+    cancelDrag,
   };
 }

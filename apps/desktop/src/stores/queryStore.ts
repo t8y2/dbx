@@ -9,7 +9,8 @@ import { buildExplainSql, parseExplainResult, parseDamengExplainText, parseOracl
 import { mysqlExplainCompatibilityHint } from "@/lib/diagram/mysqlExplainCompatibility";
 import { allEditableColumnsWriteable, allPrimaryKeysPresent, analyzeEditableQueryEditability, analyzeSelectStructureForDisplay, resolveMetadataColumnName, resolveSourceColumnsByOrdinal, sourceColumnsForResult, type EditableQueryInfo, type EditableQuerySource } from "@/lib/sql/sqlAnalysis";
 import { buildQueryWithHiddenPrimaryKeys, hiddenResultColumnIndexes, type HiddenPrimaryKeyProjection } from "@/lib/sql/editableQueryHiddenKeys";
-import { ACTIVE_TAB_STORAGE_KEY, OPEN_TABS_STORAGE_KEY, restoreOpenTabsPayload, restoreOpenTabsState, serializeOpenTabs } from "@/lib/app/openTabsPersistence";
+import { ACTIVE_TAB_STORAGE_KEY, OPEN_TABS_STORAGE_KEY, restoreOpenTabsPayload, restoreOpenTabsState, serializeOpenTabs, type SavedOpenTab } from "@/lib/app/openTabsPersistence";
+import { isDetachedTabWindow } from "@/lib/tabs/tabWindowTransfer";
 import {
   evaluateMongoAggregateSafety,
   evaluateMongoWriteSafety,
@@ -669,6 +670,7 @@ let persistTimer: ReturnType<typeof setTimeout> | null = null;
 let persistGeneration = 0;
 
 function saveTabs(tabs: QueryTab[], activeTabId: string | null): Promise<void> {
+  if (isDetachedTabWindow()) return Promise.resolve();
   const payload = { tabs: serializeOpenTabs(tabs), activeTabId };
   saveTabsQueue = saveTabsQueue.catch(() => undefined).then(() => api.saveOpenTabsState(payload));
   return saveTabsQueue;
@@ -1652,6 +1654,38 @@ export const useQueryStore = defineStore("query", () => {
     }
   }
 
+  function importTransferredTab(savedTab: SavedOpenTab): string | null {
+    if (tabs.value.some((tab) => tab.id === savedTab.id)) return null;
+    const restored = restoreOpenTabsPayload({ tabs: [savedTab], activeTabId: savedTab.id });
+    const tab = restored.tabs[0];
+    if (!tab) return null;
+
+    const connection = useConnectionStore().getConfig(tab.connectionId);
+    if (tab.mode === "query" && tab.autoCommit === undefined) {
+      tab.autoCommit = defaultAutoCommitForDbType(connection?.db_type);
+    } else if (tab.mode === "data" && connection) {
+      tab.schema = connectionObjectTreeNodeSchema(connection, tab.database, tab.schema);
+    }
+
+    tabs.value = orderPinnedFirst([...tabs.value, tab], (item) => !!item.pinned);
+    activeTabId.value = tab.id;
+    activeTabHistory.value = [...activeTabHistory.value.filter((id) => id !== tab.id), tab.id];
+    return tab.id;
+  }
+
+  function detachTabForTransfer(id: string): SavedOpenTab | null {
+    const index = tabs.value.findIndex((tab) => tab.id === id);
+    if (index < 0) return null;
+    const tab = tabs.value[index];
+    const savedTab = serializeOpenTabs([tab])[0] ?? null;
+    tabs.value.splice(index, 1);
+    activeTabHistory.value = activeTabHistory.value.filter((historyId) => historyId !== id);
+    if (activeTabId.value === id) {
+      activeTabId.value = tabs.value[index]?.id ?? tabs.value[index - 1]?.id ?? null;
+    }
+    return savedTab;
+  }
+
   function scheduleResultCacheMaintenance() {
     const maintain = () => {
       const liveKeys = tabs.value.flatMap((tab) => [tab.resultCacheKey, ...(tab.resultRuns?.map((run) => run.resultCacheKey) ?? [])]).filter((key): key is string => !!key);
@@ -1662,8 +1696,13 @@ export const useQueryStore = defineStore("query", () => {
     else setTimeout(maintain, 0);
   }
 
-  async function initOpenTabs(options: { validConnectionIds?: Iterable<string> } = {}) {
+  async function initOpenTabs(options: { validConnectionIds?: Iterable<string>; skipRestore?: boolean } = {}) {
     if (isOpenTabsLoaded.value) return;
+    if (options.skipRestore) {
+      isOpenTabsLoaded.value = true;
+      scheduleResultCacheMaintenance();
+      return;
+    }
     const saved = await api.loadOpenTabsState().catch(() => null);
     if (saved?.tabs && Array.isArray(saved.tabs)) {
       const restored = restoreSavedTabsFromPayload(saved, options);
@@ -6670,6 +6709,8 @@ export const useQueryStore = defineStore("query", () => {
     forceCloseAllPendingTabs,
     cancelClosePendingTab,
     flushPendingPersist,
+    importTransferredTab,
+    detachTabForTransfer,
     saveAndClosePendingTab,
     suspendCloseConfirm,
     resumeCloseConfirm,

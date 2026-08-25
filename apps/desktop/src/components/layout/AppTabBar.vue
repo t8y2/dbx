@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch, nextTick, onUnmounted } from "vue";
+import { computed, ref, watch, nextTick, onMounted, onUnmounted } from "vue";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
 import { X, Pin, ChevronDown, Search, Table2, Code2, TableProperties, PencilRuler, KeyRound, Pencil, Package, Lock, Copy, AlertTriangle, Network, Minimize2, Maximize2, Settings, CalendarClock, Activity, Gauge, ShieldCheck, Database, GitBranch, Crosshair } from "@lucide/vue";
@@ -21,6 +21,8 @@ import { hexToRgba } from "@/lib/common/color";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { useToast } from "@/composables/useToast";
 import { activeTabSidebarTarget } from "@/lib/sidebar/sidebarActiveTabTarget";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { TAB_WINDOW_TRANSFER_MIME, consumeTabWindowTransferAccepted, createDetachedTabWindow, createTabWindowTransfer, currentTabWindowLabel, decodeTabWindowTransfer, encodeTabWindowTransfer, markTabWindowTransferAccepted, type TabWindowTransferPayload } from "@/lib/tabs/tabWindowTransfer";
 import type { QueryTab } from "@/types/database";
 
 const props = defineProps<{
@@ -53,6 +55,8 @@ const { toast } = useToast();
 const tabDrag = useTabDrag((draggedId, targetId, position) => {
   return queryStore.reorderTab(draggedId, targetId, position);
 });
+const currentWindowLabel = ref("unknown");
+const nativeTabDrag = ref<{ payload: TabWindowTransferPayload; accepted: boolean } | null>(null);
 const editingTabId = ref<string | null>(null);
 const editingTitle = ref("");
 const isClassicLayout = computed(() => settingsStore.editorSettings.appLayout === "classic");
@@ -110,6 +114,12 @@ onUnmounted(() => {
     clearTimeout(closeConfirmListCloseTimer);
     closeConfirmListCloseTimer = null;
   }
+});
+
+onMounted(() => {
+  void currentTabWindowLabel().then((label) => {
+    currentWindowLabel.value = label;
+  });
 });
 
 watch(
@@ -579,12 +589,62 @@ function handleTabClick(tab: QueryTab) {
 function handleTabMouseDown(event: PointerEvent, tabId: string) {
   if (event.button === 0) {
     dispatchBeforeTabSwitch(tabId);
-    // Don't preventDefault touch pointerdowns: that would cancel the tab
-    // strip's native horizontal scroll, which is how touch users browse an
-    // overflowing tab bar.
-    if (event.pointerType !== "touch") event.preventDefault();
+    // Keep the native pointer default so draggable tabs can start an HTML5
+    // drag across separate Tauri webview windows.
   }
   tabDrag.startDrag(event, tabId);
+}
+
+function dragPayloadFromEvent(event: DragEvent): TabWindowTransferPayload | null {
+  const raw = event.dataTransfer?.getData(TAB_WINDOW_TRANSFER_MIME);
+  return decodeTabWindowTransfer(raw);
+}
+
+function handleTabDragStart(event: DragEvent, tab: QueryTab) {
+  const payload = createTabWindowTransfer(tab, currentWindowLabel.value);
+  nativeTabDrag.value = { payload, accepted: false };
+  tabDrag.cancelDrag();
+  if (!event.dataTransfer) return;
+  event.dataTransfer.effectAllowed = "move";
+  event.dataTransfer.setData(TAB_WINDOW_TRANSFER_MIME, encodeTabWindowTransfer(payload));
+  event.dataTransfer.setData("text/plain", tabTitleText(tab));
+}
+
+function handleTabDragOver(event: DragEvent) {
+  if (!dragPayloadFromEvent(event)) return;
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+}
+
+function handleTabDrop(event: DragEvent, targetTab?: QueryTab) {
+  const payload = dragPayloadFromEvent(event);
+  if (!payload) return;
+  event.preventDefault();
+  event.stopPropagation();
+
+  if (payload.sourceWindowLabel === currentWindowLabel.value) {
+    if (nativeTabDrag.value) nativeTabDrag.value.accepted = true;
+    if (!targetTab || targetTab.id === payload.tab.id) return;
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    const position = event.clientX - rect.left < rect.width / 2 ? "before" : "after";
+    queryStore.reorderTab(payload.tab.id, targetTab.id, position);
+    return;
+  }
+
+  const importedTabId = queryStore.importTransferredTab(payload.tab);
+  if (!importedTabId) return;
+  markTabWindowTransferAccepted(payload.transferId);
+}
+
+async function handleTabDragEnd() {
+  const drag = nativeTabDrag.value;
+  nativeTabDrag.value = null;
+  tabDrag.cancelDrag();
+  if (!drag || drag.accepted || consumeTabWindowTransferAccepted(drag.payload.transferId)) return;
+  if (!isTauriRuntime()) return;
+
+  const created = await createDetachedTabWindow(drag.payload);
+  if (created) queryStore.detachTabForTransfer(drag.payload.tab.id);
 }
 
 function handleTabDragTarget(event: MouseEvent, tab: QueryTab) {
@@ -664,7 +724,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
 </script>
 
 <template>
-  <div v-if="queryStore.tabs.length > 0 || driverStoreOpen || settingsPageOpen" class="app-tab-bar relative flex w-full min-w-0 shrink-0 overflow-hidden" :class="tabBarClass">
+  <div v-if="queryStore.tabs.length > 0 || driverStoreOpen || settingsPageOpen" class="app-tab-bar relative flex w-full min-w-0 shrink-0 overflow-hidden" :class="tabBarClass" @dragover="handleTabDragOver" @drop="handleTabDrop">
     <div class="flex w-full min-w-0 shrink-0 overflow-hidden" :class="regularTabRowClass">
       <div class="app-tab-strip relative h-full min-w-0 flex-1 overflow-hidden">
         <div v-if="showRegularTabScrollbar" class="app-tab-scrollbar" :class="{ 'app-tab-scrollbar--dragging': isScrollbarDragging }" @pointerdown="startScrollbarDrag">
@@ -683,6 +743,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
               <Tooltip>
                 <TooltipTrigger as-child>
                   <div
+                    draggable="true"
                     class="app-tab-pill group flex cursor-default items-center gap-1 px-2 text-xs transition-colors whitespace-nowrap select-none"
                     :class="
                       isClassicLayout
@@ -702,6 +763,10 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                     @mouseenter="handleTabDragTarget($event, tab)"
                     @mousemove="handleTabDragTarget($event, tab)"
                     @mouseleave="tabDrag.clearTarget(tab.id)"
+                    @dragstart="handleTabDragStart($event, tab)"
+                    @dragend="handleTabDragEnd"
+                    @dragover="handleTabDragOver"
+                    @drop="handleTabDrop($event, tab)"
                   >
                     <TabExecutionStatus :tab="tab">
                       <span class="shrink-0" :class="tabIconClass(tab)">
@@ -893,6 +958,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
               <Tooltip>
                 <TooltipTrigger as-child>
                   <div
+                    draggable="true"
                     class="app-tab-pill group flex cursor-default items-center gap-1 px-2 text-xs transition-colors whitespace-nowrap select-none"
                     :class="
                       isClassicLayout
@@ -912,6 +978,10 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                     @mouseenter="handleTabDragTarget($event, tab)"
                     @mousemove="handleTabDragTarget($event, tab)"
                     @mouseleave="tabDrag.clearTarget(tab.id)"
+                    @dragstart="handleTabDragStart($event, tab)"
+                    @dragend="handleTabDragEnd"
+                    @dragover="handleTabDragOver"
+                    @drop="handleTabDrop($event, tab)"
                   >
                     <TabExecutionStatus :tab="tab">
                       <span class="shrink-0" :class="tabIconClass(tab)">

@@ -4348,6 +4348,8 @@ export default withEnglishFallback({
     formatJsonDescription: "物件列或陣列列",
     formatExcel: "Excel",
     formatExcelDescription: "XLS、XLSX、XLSM",
+    formatSql: "SQL",
+    formatSqlDescription: "SQL 指令檔中的 INSERT 語句",
     previewRows: "預覽列數",
     delimiter: "分隔符",
     encoding: "檔案編碼",

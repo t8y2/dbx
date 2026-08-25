@@ -94,9 +94,11 @@ export function defaultTableImportEmptyStringAsNull(format: TableImportSourceFor
 
 export function buildTableImportParseOptions(settings: TableImportParseSettings): TableImportParseOptions {
   const isDelimited = settings.format === "csv" || settings.format === "tsv" || settings.format === "delimited";
+  // SQL 脚本与分隔文本一样是纯文本源，需要传递编码供后端解码（支持 GBK 等常见转储编码）
+  const isTextSource = isDelimited || settings.format === "sql";
   return {
     delimiter: settings.format === "tsv" ? "\\t" : settings.format === "csv" ? "," : settings.delimiter,
-    encoding: isDelimited ? settings.textEncoding : null,
+    encoding: isTextSource ? settings.textEncoding : null,
     titleRow: settings.titleRow,
     dataStartRow: settings.dataStartRow,
     lastDataRow: settings.lastDataRow,

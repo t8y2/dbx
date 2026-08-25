@@ -3,7 +3,8 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::io::{BufWriter, Write};
-use std::sync::RwLock;
+use std::pin::Pin;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -1558,10 +1559,10 @@ pub async fn clear_export_cancelled(export_id: &str) {
 /// not accept a cancellation token; polling here keeps the export task
 /// responsive and dropping the pending future follows the same bounded
 /// prefetch cancellation behavior used below.
-async fn await_export_operation<T, F>(export_id: &str, operation: F) -> Result<T, String>
-where
-    F: Future<Output = Result<T, String>>,
-{
+async fn await_export_operation<T>(
+    export_id: &str,
+    operation: Pin<Box<dyn Future<Output = Result<T, String>> + Send + '_>>,
+) -> Result<T, String> {
     tokio::pin!(operation);
     loop {
         if is_export_cancelled_now(export_id) {
@@ -1579,6 +1580,43 @@ where
             _ = tokio::time::sleep(EXPORT_CANCEL_POLL_INTERVAL) => {}
         }
     }
+}
+
+struct AbortExportTaskOnDrop(tokio::task::AbortHandle);
+
+impl Drop for AbortExportTaskOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+async fn get_export_table_ddl_isolated(
+    state: Arc<crate::connection::AppState>,
+    connection_id: String,
+    database: String,
+    schema: String,
+    table: String,
+) -> Result<String, String> {
+    let task = tokio::spawn(async move {
+        crate::schema::get_table_relation_export_ddl_core(&state, &connection_id, &database, &schema, &table, None)
+            .await
+    });
+    let _abort_on_drop = AbortExportTaskOnDrop(task.abort_handle());
+    task.await.map_err(|error| format!("Database export metadata task failed: {error}"))?
+}
+
+async fn get_export_table_columns_isolated(
+    state: Arc<crate::connection::AppState>,
+    connection_id: String,
+    database: String,
+    schema: String,
+    table: String,
+) -> Result<Vec<crate::db::ColumnInfo>, String> {
+    let task = tokio::spawn(async move {
+        crate::schema::get_columns_core(&state, &connection_id, &database, &schema, &table).await
+    });
+    let _abort_on_drop = AbortExportTaskOnDrop(task.abort_handle());
+    task.await.map_err(|error| format!("Database export metadata task failed: {error}"))?
 }
 
 fn snapshot_batch_cancelled(db_type: &DatabaseType, export_id: &str) -> bool {
@@ -2078,7 +2116,7 @@ mod windows_export_destination {
 }
 
 pub async fn export_database_sql_core(
-    state: &crate::connection::AppState,
+    state: &Arc<crate::connection::AppState>,
     request: &DatabaseExportRequest,
     on_progress: impl Fn(ExportProgress) + Sync,
 ) -> Result<(), String> {
@@ -2098,7 +2136,7 @@ pub async fn export_database_sql_core(
 }
 
 async fn export_database_sql_core_inner(
-    state: &crate::connection::AppState,
+    state: &Arc<crate::connection::AppState>,
     request: &DatabaseExportRequest,
     on_progress: impl Fn(ExportProgress) + Sync,
 ) -> Result<(), String> {
@@ -2247,7 +2285,7 @@ async fn export_database_sql_core_inner(
     let postgres_sequences = if request.include_structure && matches!(db_type, DatabaseType::Postgres) {
         match await_export_operation(
             &request.export_id,
-            list_postgres_export_sequences(
+            Box::pin(list_postgres_export_sequences(
                 state,
                 &pool_key,
                 &request.schema,
@@ -2255,7 +2293,7 @@ async fn export_database_sql_core_inner(
                 &request.excluded_tables,
                 request.include_objects,
                 request.fail_on_error,
-            ),
+            )),
         )
         .await
         {
@@ -2388,8 +2426,8 @@ async fn export_database_sql_core_inner(
         use futures::StreamExt;
         let prefetch_targets: Vec<(usize, String)> =
             tables.iter().enumerate().map(|(index, table_info)| (index, table_info.name.clone())).collect();
-        let mut prefetch_stream =
-            futures::stream::iter(prefetch_targets.into_iter().map(|(index, table_name)| async move {
+        let mut prefetch_stream = futures::stream::iter(prefetch_targets.into_iter().map(|(index, table_name)| {
+            Box::pin(async move {
                 if is_export_cancelled_now(&request.export_id) {
                     return (index, PrefetchedTableMetadata { ddl: None, columns: None });
                 }
@@ -2397,14 +2435,13 @@ async fn export_database_sql_core_inner(
                     Some(
                         await_export_operation(
                             &request.export_id,
-                            crate::schema::get_table_relation_export_ddl_core(
-                                state,
-                                &request.connection_id,
-                                &request.database,
-                                &request.schema,
-                                &table_name,
-                                None,
-                            ),
+                            Box::pin(get_export_table_ddl_isolated(
+                                state.clone(),
+                                request.connection_id.clone(),
+                                request.database.clone(),
+                                request.schema.clone(),
+                                table_name.clone(),
+                            )),
                         )
                         .await,
                     )
@@ -2418,13 +2455,13 @@ async fn export_database_sql_core_inner(
                     Some(
                         await_export_operation(
                             &request.export_id,
-                            crate::schema::get_columns_core(
-                                state,
-                                &request.connection_id,
-                                &request.database,
-                                &request.schema,
-                                &table_name,
-                            ),
+                            Box::pin(get_export_table_columns_isolated(
+                                state.clone(),
+                                request.connection_id.clone(),
+                                request.database.clone(),
+                                request.schema.clone(),
+                                table_name.clone(),
+                            )),
                         )
                         .await,
                     )
@@ -2432,8 +2469,9 @@ async fn export_database_sql_core_inner(
                     None
                 };
                 (index, PrefetchedTableMetadata { ddl, columns })
-            }))
-            .buffer_unordered(database_export_metadata_prefetch_concurrency(db_type));
+            })
+        }))
+        .buffer_unordered(database_export_metadata_prefetch_concurrency(db_type));
         while let Some((index, metadata)) = prefetch_stream.next().await {
             if metadata
                 .ddl
@@ -2569,14 +2607,13 @@ async fn export_database_sql_core_inner(
                 None => {
                     await_export_operation(
                         &request.export_id,
-                        crate::schema::get_table_relation_export_ddl_core(
-                            state,
-                            &request.connection_id,
-                            &request.database,
-                            &request.schema,
-                            table_name,
-                            None,
-                        ),
+                        Box::pin(get_export_table_ddl_isolated(
+                            state.clone(),
+                            request.connection_id.clone(),
+                            request.database.clone(),
+                            request.schema.clone(),
+                            table_name.clone(),
+                        )),
                     )
                     .await
                 }
@@ -2617,13 +2654,13 @@ async fn export_database_sql_core_inner(
                 None => {
                     await_export_operation(
                         &request.export_id,
-                        crate::schema::get_columns_core(
-                            state,
-                            &request.connection_id,
-                            &request.database,
-                            &request.schema,
-                            table_name,
-                        ),
+                        Box::pin(get_export_table_columns_isolated(
+                            state.clone(),
+                            request.connection_id.clone(),
+                            request.database.clone(),
+                            request.schema.clone(),
+                            table_name.clone(),
+                        )),
                     )
                     .await
                 }
@@ -3096,10 +3133,13 @@ mod tests {
         clear_export_cancelled(&export_id).await;
         let task_export_id = export_id.clone();
         let task = tokio::spawn(async move {
-            await_export_operation(&task_export_id, async {
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                Ok::<_, String>(())
-            })
+            await_export_operation(
+                &task_export_id,
+                Box::pin(async {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    Ok::<_, String>(())
+                }),
+            )
             .await
         });
 
@@ -3117,7 +3157,7 @@ mod tests {
     async fn await_export_operation_preserves_completed_metadata() {
         let export_id = format!("complete-metadata-{}", uuid::Uuid::new_v4());
         clear_export_cancelled(&export_id).await;
-        let result = await_export_operation(&export_id, async { Ok::<_, String>(42_u32) }).await;
+        let result = await_export_operation(&export_id, Box::pin(async { Ok::<_, String>(42_u32) })).await;
         assert_eq!(result, Ok(42));
     }
 

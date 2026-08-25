@@ -3325,6 +3325,7 @@ impl AppState {
             return false;
         }
 
+        let mut checked_mysql_pool = None;
         let stale = {
             let connections = self.connections.read().await;
             let Some(pool) = connections.get(pool_key) else {
@@ -3333,6 +3334,7 @@ impl AppState {
             match pool {
                 PoolKind::Mysql(pool, _) => {
                     let pool = pool.clone();
+                    checked_mysql_pool = Some(pool.clone());
                     drop(connections);
                     match db::mysql::checkout_mysql_conn(&pool, HEALTH_CHECK_POOL_ACQUIRE_TIMEOUT).await {
                         // Pool saturation means active work, not a dead connection. Removing this pool would
@@ -3624,16 +3626,28 @@ impl AppState {
             return false;
         }
 
+        let removed = if let Some(checked_pool) = checked_mysql_pool {
+            let mut connections = self.connections.write().await;
+            let removed = remove_mysql_pool_if_current(&mut connections, pool_key, &checked_pool);
+            if removed.is_none() {
+                log::debug!(
+                    "MySQL connection pool '{pool_key}' was replaced while its health check was running; keeping the current route"
+                );
+            }
+            removed
+        } else {
+            self.connections.write().await.remove(pool_key)
+        };
+
+        let Some(pool) = removed else {
+            return false;
+        };
+
         self.stop_keepalive_task(pool_key).await;
         self.pool_activity.write().await.remove(pool_key);
         self.postgres_cancel_contexts.write().await.remove(pool_key);
-        let removed = self.connections.write().await.remove(pool_key);
-        if let Some(pool) = removed {
-            self.pool_routing_control().close_pool_with_timeout(pool_key.to_string(), pool).await;
-            true
-        } else {
-            false
-        }
+        self.pool_routing_control().close_pool_with_timeout(pool_key.to_string(), pool).await;
+        true
     }
 
     pub async fn reconnect_pool(&self, connection_id: &str, database: Option<&str>) -> Result<String, String> {
@@ -5302,6 +5316,18 @@ fn clone_pool_kind(pool: &PoolKind) -> PoolKind {
         PoolKind::Mqtt(client) => PoolKind::Mqtt(Arc::clone(client)),
         PoolKind::Redis(_) => panic!("clone_pool_kind not supported for Redis — handled separately"),
     }
+}
+
+fn remove_mysql_pool_if_current(
+    connections: &mut HashMap<String, PoolKind>,
+    pool_key: &str,
+    expected: &db::mysql::MySqlPool,
+) -> Option<PoolKind> {
+    let is_current = matches!(
+        connections.get(pool_key),
+        Some(PoolKind::Mysql(current, _)) if expected.is_same_pool(current)
+    );
+    is_current.then(|| connections.remove(pool_key)).flatten()
 }
 
 async fn close_pool_kind(pool: PoolKind) -> Result<(), String> {
@@ -7331,6 +7357,28 @@ mod tests {
         assert_eq!(super::mysql_pool_max_connections_for_session(None), 10);
         assert_eq!(super::mysql_pool_max_connections_for_session(Some("")), 10);
         assert_eq!(super::mysql_pool_max_connections_for_session(Some("tab-1")), 1);
+    }
+
+    #[test]
+    fn stale_mysql_pool_observation_does_not_remove_replacement_generation() {
+        let checked = crate::db::mysql::MySqlPool::new("mysql://root@127.0.0.1:3306/app", 10);
+        let checked_clone = checked.clone();
+        let replacement = crate::db::mysql::MySqlPool::new("mysql://root@127.0.0.1:3306/app", 10);
+        assert!(checked.is_same_pool(&checked_clone));
+        assert!(!checked.is_same_pool(&replacement));
+
+        let mut connections = std::collections::HashMap::from([(
+            "conn:app".to_string(),
+            PoolKind::Mysql(replacement.clone(), MysqlMode::Normal),
+        )]);
+
+        assert!(super::remove_mysql_pool_if_current(&mut connections, "conn:app", &checked).is_none());
+        assert!(
+            matches!(connections.get("conn:app"), Some(PoolKind::Mysql(current, _)) if replacement.is_same_pool(current))
+        );
+
+        assert!(super::remove_mysql_pool_if_current(&mut connections, "conn:app", &replacement).is_some());
+        assert!(!connections.contains_key("conn:app"));
     }
 
     #[test]

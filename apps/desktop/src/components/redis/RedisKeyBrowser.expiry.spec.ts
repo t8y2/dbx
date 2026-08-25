@@ -1291,10 +1291,7 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
     await submitKeySearch("old");
     await vi.waitFor(() => expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(1));
 
-    const input = requiredElement<HTMLInputElement>("[data-redis-search-input]");
-    input.value = "new";
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-    await settle();
+    await submitKeySearch("new");
     oldPage.resolve({ cursor: 1, keys: [], total_keys: 1_000_000 });
     await settle();
 
@@ -1742,10 +1739,7 @@ describe("RedisKeyBrowser interrupted Fetch All", () => {
 
     requiredElement<HTMLButtonElement>("[data-redis-select-all]").click();
     await vi.waitFor(() => expect(mocks.redisScanKeysBatch.mock.calls.length).toBeGreaterThan(1));
-    const input = requiredElement<HTMLInputElement>("[data-redis-search-input]");
-    input.value = "fresh";
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-    await settle();
+    await submitKeySearch("fresh");
     oldPage.resolve({ cursor: 0, keys: [oldKey], total_keys: 0 });
     await settle();
 

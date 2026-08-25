@@ -221,21 +221,10 @@ const searchPlaceholder = computed(() => {
   if (searchMode.value === "key") return fuzzyKeySearch.value ? t("redis.fuzzyPattern") : t("redis.pattern");
   return searchMode.value === "all" ? t("redis.allSearchPlaceholder") : t("redis.valueSearchPlaceholder");
 });
-const redisKeyTemplates = computed(() =>
-  resolveRedisKeyTemplates(
-    connectionStore.getConfig(props.connectionId)?.redis_key_templates,
-    settingsStore.editorSettings.redisKeyTemplates,
-  ),
-);
-const keyTemplateSuggestions = computed(() =>
-  searchMode.value === "key" ? filterRedisKeyTemplates(redisKeyTemplates.value, searchPattern.value) : [],
-);
-const keyTemplateMenuVisible = computed(
-  () => keyTemplateMenuOpen.value && searchMode.value === "key" && keyTemplateSuggestions.value.length > 0,
-);
-const keyTemplateActiveDescendant = computed(() =>
-  keyTemplateMenuVisible.value ? `${keyTemplateListboxId}-option-${keyTemplateSelectedIndex.value}` : undefined,
-);
+const redisKeyTemplates = computed(() => resolveRedisKeyTemplates(connectionStore.getConfig(props.connectionId)?.redis_key_templates, settingsStore.editorSettings.redisKeyTemplates ?? []));
+const keyTemplateSuggestions = computed(() => (searchMode.value === "key" ? filterRedisKeyTemplates(redisKeyTemplates.value, searchPattern.value) : []));
+const keyTemplateMenuVisible = computed(() => keyTemplateMenuOpen.value && searchMode.value === "key" && keyTemplateSuggestions.value.length > 0);
+const keyTemplateActiveDescendant = computed(() => (keyTemplateMenuVisible.value ? `${keyTemplateListboxId}-option-${keyTemplateSelectedIndex.value}` : undefined));
 const loadingEmptyText = computed(() => (isValueSearchMode.value && valueQuery.value ? t(searchMode.value === "all" ? "redis.searchingAll" : "redis.searchingValues") : t("redis.loadingKeys")));
 const redisKeySeparator = computed(() => connectionStore.getConfig(props.connectionId)?.redis_key_separator ?? ":");
 const redisScanPageSize = computed(() => connectionStore.getConfig(props.connectionId)?.redis_scan_page_size ?? REDIS_SCAN_PAGE_SIZE_DEFAULT);
@@ -1723,6 +1712,15 @@ function onSearchInput() {
   } else {
     dismissKeyTemplateMenu();
   }
+  // Key search is Enter-only so users can finish editing templates / patterns
+  // (including {$placeholders}) without triggering SCAN on every keystroke.
+  if (searchMode.value === "key") {
+    if (searchTimer) {
+      clearTimeout(searchTimer);
+      searchTimer = null;
+    }
+    return;
+  }
   if (searchTimer) clearTimeout(searchTimer);
   // Invalidate in-flight SCAN work as soon as the query changes instead of
   // waiting for the debounce timer to start the replacement search.
@@ -2209,13 +2207,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
                   @focus="onSearchFocus"
                   @blur="onSearchBlur"
                 />
-                <div
-                  v-if="keyTemplateMenuVisible"
-                  :id="keyTemplateListboxId"
-                  role="listbox"
-                  :aria-label="t('redis.keyTemplateSuggestions')"
-                  class="absolute left-0 right-0 top-[calc(100%+0.25rem)] z-30 max-h-60 overflow-y-auto rounded-md border bg-popover py-1 text-popover-foreground shadow-md"
-                >
+                <div v-if="keyTemplateMenuVisible" :id="keyTemplateListboxId" role="listbox" :aria-label="t('redis.keyTemplateSuggestions')" class="absolute left-0 right-0 top-[calc(100%+0.25rem)] z-30 max-h-60 overflow-y-auto rounded-md border bg-popover py-1 text-popover-foreground shadow-md">
                   <button
                     v-for="(template, index) in keyTemplateSuggestions"
                     :id="`${keyTemplateListboxId}-option-${index}`"

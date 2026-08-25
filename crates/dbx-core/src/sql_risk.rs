@@ -684,7 +684,9 @@ pub fn classify_sql_risk(sql: &str, dialect: &str) -> Result<SqlRisk, String> {
 /// Classify SQL risk using both the parser dialect and the concrete database
 /// type so dialect-specific write forms cannot be mistaken for read queries.
 pub fn classify_sql_risk_for_database(sql: &str, database_type: DatabaseType) -> Result<SqlRisk, String> {
-    if let Some(risk) = crate::query_execution_sql::classify_search_engine_query_risk(sql, database_type) {
+    if let Some(risk) = crate::query_execution_sql::classify_search_engine_query_risk(sql, database_type)
+        .or_else(|| crate::query_execution_sql::classify_vector_query_risk(sql, database_type))
+    {
         return Ok(match risk {
             crate::query_execution_sql::SearchEngineQueryRisk::ReadOnly => SqlRisk::ReadOnly,
             crate::query_execution_sql::SearchEngineQueryRisk::Write => SqlRisk::Write,
@@ -701,7 +703,9 @@ pub fn classify_sql_risk_for_database(sql: &str, database_type: DatabaseType) ->
 /// and single-table UPDATE/DELETE statements with an effective predicate;
 /// broader or opaque mutations require central high-risk permission.
 pub fn is_dangerous_sql_for_database(sql: &str, database_type: DatabaseType) -> bool {
-    if let Some(risk) = crate::query_execution_sql::classify_search_engine_query_risk(sql, database_type) {
+    if let Some(risk) = crate::query_execution_sql::classify_search_engine_query_risk(sql, database_type)
+        .or_else(|| crate::query_execution_sql::classify_vector_query_risk(sql, database_type))
+    {
         return risk == crate::query_execution_sql::SearchEngineQueryRisk::Dangerous;
     }
     let database_type_name = format!("{database_type:?}");
@@ -730,7 +734,9 @@ pub fn is_dangerous_sql_for_database(sql: &str, database_type: DatabaseType) -> 
 /// A `USE` statement mutates pooled/session state and could redirect later SQL,
 /// so it is forbidden independently of read/write and high-risk permissions.
 pub fn mcp_sql_has_forbidden_database_switch(sql: &str, database_type: DatabaseType) -> bool {
-    if crate::query_execution_sql::classify_search_engine_query_risk(sql, database_type).is_some() {
+    if crate::query_execution_sql::classify_search_engine_query_risk(sql, database_type).is_some()
+        || crate::query_execution_sql::classify_vector_query_risk(sql, database_type).is_some()
+    {
         return false;
     }
     let database_type_name = format!("{database_type:?}");
@@ -1388,5 +1394,22 @@ mod tests {
             assert_eq!(classify_sql_risk_for_database("DELETE /products", database_type).unwrap(), SqlRisk::Ddl);
             assert!(is_dangerous_sql_for_database("DELETE /products", database_type));
         }
+    }
+
+    #[test]
+    fn classifies_vector_rest_risk_by_method_and_path() {
+        assert_eq!(
+            classify_sql_risk_for_database("POST /v2/vectordb/entities/search\n{}", DatabaseType::Milvus).unwrap(),
+            SqlRisk::ReadOnly,
+        );
+        assert_eq!(
+            classify_sql_risk_for_database("POST /v2/vectordb/entities/upsert\n{}", DatabaseType::Milvus).unwrap(),
+            SqlRisk::Write,
+        );
+        assert_eq!(
+            classify_sql_risk_for_database("POST /v2/vectordb/entities/delete\n{}", DatabaseType::Milvus).unwrap(),
+            SqlRisk::Ddl,
+        );
+        assert!(is_dangerous_sql_for_database("POST /v2/vectordb/collections/drop\n{}", DatabaseType::Milvus,));
     }
 }

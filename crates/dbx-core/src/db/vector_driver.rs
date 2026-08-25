@@ -749,14 +749,21 @@ pub async fn find_documents(
 
 pub async fn execute_rest_query(client: &VectorClient, input: &str) -> Result<QueryResult, String> {
     let start = Instant::now();
+    let flatten_single_milvus_search = client.kind == VectorDbKind::Milvus && is_milvus_entity_search(input);
     let request = parse_rest_query(client, input)?;
     let resp = request.send().await.map_err(|e| format!("{} request failed: {e}", client.kind.label()))?;
     let status = resp.status().as_u16();
     let body = resp.json::<Value>().await.unwrap_or(Value::Null);
-    rest_query_result(client.kind, status, body, start)
+    rest_query_result(client.kind, status, body, start, flatten_single_milvus_search)
 }
 
-fn rest_query_result(kind: VectorDbKind, status: u16, body: Value, start: Instant) -> Result<QueryResult, String> {
+fn rest_query_result(
+    kind: VectorDbKind,
+    status: u16,
+    body: Value,
+    start: Instant,
+    flatten_single_milvus_search: bool,
+) -> Result<QueryResult, String> {
     if !(200..300).contains(&status) {
         let detail = serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string());
         return Err(format!("{} error ({status}): {detail}", kind.label()));
@@ -765,8 +772,30 @@ fn rest_query_result(kind: VectorDbKind, status: u16, body: Value, start: Instan
         if let Some(error) = milvus_business_error(&body) {
             return Err(error);
         }
+        if flatten_single_milvus_search {
+            if let Some(result) = milvus_single_search_to_query_result(&body, start) {
+                return Ok(result);
+            }
+        }
     }
     Ok(json_to_query_result(status, body, start))
+}
+
+fn is_milvus_entity_search(input: &str) -> bool {
+    input
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .and_then(|line| line.split_whitespace().nth(1))
+        .is_some_and(|path| path.split('?').next() == Some("/v2/vectordb/entities/search"))
+}
+
+fn milvus_single_search_to_query_result(body: &Value, start: Instant) -> Option<QueryResult> {
+    let queries = body.get("data")?.as_array()?;
+    if queries.len() != 1 {
+        return None;
+    }
+    let hits = queries.first()?.as_array()?.clone();
+    Some(values_to_query_result(hits, start))
 }
 
 // Milvus REST uses HTTP-style code 200 for success, while some responses use gRPC-style code 0.
@@ -1009,9 +1038,9 @@ fn format_reqwest_error(err: &reqwest::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        chroma_get_response_to_rows, default_collection_query, milvus_collection_schema, milvus_database_names,
-        rename_collection, rest_query_result, starts_with_http_method, test_connection, test_connection_request,
-        values_to_query_result, vector_auth, weaviate_collection_names_from_schema,
+        chroma_get_response_to_rows, default_collection_query, is_milvus_entity_search, milvus_collection_schema,
+        milvus_database_names, rename_collection, rest_query_result, starts_with_http_method, test_connection,
+        test_connection_request, values_to_query_result, vector_auth, weaviate_collection_names_from_schema,
         weaviate_vector_dimension_from_graphql, CollectionInfo, VectorAuth, VectorClient, VectorDbKind,
     };
     use serde_json::{json, Value};
@@ -1097,20 +1126,54 @@ mod tests {
                 VectorDbKind::Milvus,
                 200,
                 json!({ "code": 1100, "message": "field kind does not exist" }),
-                Instant::now()
+                Instant::now(),
+                false
             )
             .unwrap_err(),
             "Milvus error (code 1100): field kind does not exist"
         );
-        assert!(rest_query_result(VectorDbKind::Milvus, 200, json!({ "code": 0 }), Instant::now()).is_ok());
+        assert!(rest_query_result(VectorDbKind::Milvus, 200, json!({ "code": 0 }), Instant::now(), false).is_ok());
         assert!(rest_query_result(
             VectorDbKind::Milvus,
             200,
             json!({ "code": 200, "data": ["kb_vectors"] }),
-            Instant::now()
+            Instant::now(),
+            false
         )
         .is_ok());
-        assert!(rest_query_result(VectorDbKind::Milvus, 200, json!({ "data": [] }), Instant::now()).is_ok());
+        assert!(rest_query_result(VectorDbKind::Milvus, 200, json!({ "data": [] }), Instant::now(), false).is_ok());
+    }
+
+    #[test]
+    fn milvus_single_search_flattens_empty_and_multiple_hits_without_affecting_query() {
+        assert!(is_milvus_entity_search("POST /v2/vectordb/entities/search\n{}"));
+        assert!(!is_milvus_entity_search("POST /v2/vectordb/entities/query\n{}"));
+        let empty =
+            rest_query_result(VectorDbKind::Milvus, 200, json!({ "code": 0, "data": [[]] }), Instant::now(), true)
+                .unwrap();
+        assert!(empty.rows.is_empty());
+
+        let hits = rest_query_result(
+            VectorDbKind::Milvus,
+            200,
+            json!({ "code": 0, "data": [[{"card_id": "a"}, {"card_id": "b"}]] }),
+            Instant::now(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(hits.rows.len(), 2);
+        assert_eq!(hits.columns, vec!["card_id"]);
+
+        let query = rest_query_result(
+            VectorDbKind::Milvus,
+            200,
+            json!({ "code": 0, "data": [[{"card_id": "a"}]] }),
+            Instant::now(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(query.rows.len(), 1);
+        assert_eq!(query.columns, vec!["value"]);
     }
 
     #[tokio::test]

@@ -6,12 +6,12 @@ import { acceptCompletion, autocompletion, completionStatus, currentCompletions,
 import { EditorState, Prec, Transaction } from "@codemirror/state";
 import { insertNewlineKeepIndent } from "@codemirror/commands";
 import { EditorView, keymap, runScopeHandlers } from "@codemirror/view";
-import { describe, expect, it } from "vitest";
-import { acceptSelectedOrFirstCompletion } from "@/lib/editor/queryEditorCompletionAcceptance";
+import { describe, expect, it, vi } from "vitest";
+import { acceptSelectedCompletionWithRetry, acceptSelectedOrFirstCompletion } from "@/lib/editor/queryEditorCompletionAcceptance";
 
 const queryEditorSource = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/editor/QueryEditor.vue"), "utf8");
 
-function createCompletionView(doc = "", selectFirstCompletionOnOpen = false) {
+function createCompletionView(doc = "", selectFirstCompletionOnOpen = false, interactionDelay: number | null = 0) {
   return new EditorView({
     parent: document.createElement("div"),
     state: EditorState.create({
@@ -21,7 +21,7 @@ function createCompletionView(doc = "", selectFirstCompletionOnOpen = false) {
         autocompletion({
           activateOnTyping: true,
           activateOnTypingDelay: 0,
-          interactionDelay: 0,
+          ...(interactionDelay === null ? {} : { interactionDelay }),
           selectOnOpen: selectFirstCompletionOnOpen,
           override: [() => ({ from: 0, options: [{ label: "select" }, { label: "set" }] })],
         }),
@@ -33,7 +33,21 @@ function createCompletionView(doc = "", selectFirstCompletionOnOpen = false) {
             },
             {
               key: "Enter",
-              run: (view) => (selectFirstCompletionOnOpen && acceptCompletion(view)) || insertNewlineKeepIndent(view),
+              run: (view) => {
+                if (selectFirstCompletionOnOpen) {
+                  const result = acceptSelectedCompletionWithRetry(view, {
+                    completionStatus,
+                    acceptCompletion,
+                    selectedCompletionIndex,
+                    selectFirstCompletion: moveCompletionSelection(true),
+                    retryDelayMs: 16,
+                    maxWaitMs: 125,
+                    onUnavailable: () => insertNewlineKeepIndent(view),
+                  });
+                  if (result.handled) return true;
+                }
+                return insertNewlineKeepIndent(view);
+              },
             },
           ]),
         ),
@@ -112,5 +126,26 @@ describe("QueryEditor completion selection", () => {
     expect(press(view, "Enter")).toBe(true);
     expect(view.state.doc.toString()).toBe("select");
     view.destroy();
+  });
+
+  it("waits through CodeMirror's default interaction delay before accepting Enter", async () => {
+    let now = 0;
+    const dateNow = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const view = createCompletionView("", true, null);
+
+    try {
+      expect(startCompletion(view)).toBe(true);
+      await expect.poll(() => completionStatus(view.state), { interval: 1 }).toBe("active");
+      expect(selectedCompletionIndex(view.state)).toBe(0);
+      expect(acceptCompletion(view)).toBe(false);
+      expect(press(view, "Enter")).toBe(true);
+      expect(view.state.doc.toString()).toBe("");
+
+      now = 100;
+      await expect.poll(() => view.state.doc.toString(), { interval: 10 }).toBe("select");
+    } finally {
+      dateNow.mockRestore();
+      view.destroy();
+    }
   });
 });

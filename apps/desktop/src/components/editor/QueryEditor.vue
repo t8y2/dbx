@@ -131,7 +131,7 @@ import { createShellLineCommentHighlight } from "@/lib/editor/codemirrorShellLin
 import { extendQueryEditorSelection, runQueryEditorAltExtendSelection } from "@/lib/editor/queryEditorExtendSelection";
 import { createQueryEditorStringMouseSelection } from "@/lib/editor/queryEditorStringMouseSelection";
 import { createQueryEditorCompletionShortcutBindings } from "@/lib/editor/queryEditorCompletionShortcut";
-import { acceptSelectedOrFirstCompletion } from "@/lib/editor/queryEditorCompletionAcceptance";
+import { acceptSelectedCompletionWithRetry, acceptSelectedOrFirstCompletion } from "@/lib/editor/queryEditorCompletionAcceptance";
 import type { StatementExecutionMarker } from "@/lib/tabs/tabPresentation";
 import { isSchemaAware, isSingleDatabase, supportsDatabaseNameCompletion, supportsDatabaseSchemaQualifier, supportsQueryEditorBlockComments, supportsSqlInListPaste } from "@/lib/database/databaseFeatureSupport";
 import { metadataSchemaForConnection, sqlSnippetDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
@@ -203,6 +203,7 @@ const COMPLETION_REMOTE_LATENCY_BUDGET_MS = 120;
 const COMPLETION_DEBOUNCE_DELAY_MS = 150;
 const COMPLETION_TAB_RETRY_DELAY_MS = 16;
 const COMPLETION_TAB_MAX_WAIT_MS = COMPLETION_DEBOUNCE_DELAY_MS + COMPLETION_REMOTE_LATENCY_BUDGET_MS + 100;
+const COMPLETION_ENTER_MAX_WAIT_MS = 125;
 // Internal rollback switch: flip to false to route completion, diagnostics, and navigation through the legacy SQL context path.
 const SEMANTIC_SQL_COMPLETION_ENABLED = true;
 
@@ -577,6 +578,7 @@ let codeMirrorToggleBlockComment: typeof import("@codemirror/commands").toggleBl
 let codeMirrorDefaultKeymap: readonly import("@codemirror/view").KeyBinding[] | null = null;
 let codeMirrorToggleFold: typeof import("@codemirror/language").toggleFold | null = null;
 let pendingCompletionTabTimer: ReturnType<typeof setTimeout> | null = null;
+let cancelPendingCompletionEnter: (() => void) | null = null;
 let setSqlDiagnosticsEffect: import("@codemirror/state").StateEffectType<SqlSemanticDiagnostic[]> | null = null;
 let setPreviewRangeEffect:
   | import("@codemirror/state").StateEffectType<{
@@ -1999,8 +2001,33 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
 }
 
 function handleEnter(view: EditorViewType): boolean {
-  if (settingsStore.editorSettings.selectFirstCompletionOnOpen && codeMirrorCompletionStatus?.(view.state) === "active" && (codeMirrorAcceptCompletion?.(view) ?? false)) return true;
+  clearPendingCompletionEnter();
+  if (settingsStore.editorSettings.selectFirstCompletionOnOpen && codeMirrorCompletionStatus) {
+    let cancelRetry: (() => void) | null = null;
+    const result = acceptSelectedCompletionWithRetry(view, {
+      completionStatus: codeMirrorCompletionStatus,
+      acceptCompletion: codeMirrorAcceptCompletion,
+      selectedCompletionIndex: codeMirrorSelectedCompletionIndex,
+      selectFirstCompletion: codeMirrorSelectFirstCompletion,
+      retryDelayMs: COMPLETION_TAB_RETRY_DELAY_MS,
+      maxWaitMs: COMPLETION_ENTER_MAX_WAIT_MS,
+      onUnavailable: () => insertNewlineWithoutCompletion(view),
+      onSettled: () => {
+        if (cancelPendingCompletionEnter === cancelRetry) cancelPendingCompletionEnter = null;
+      },
+    });
+    if (result.handled) {
+      cancelRetry = result.cancel ?? null;
+      cancelPendingCompletionEnter = cancelRetry;
+      return true;
+    }
+  }
   return insertNewlineWithoutCompletion(view);
+}
+
+function clearPendingCompletionEnter() {
+  cancelPendingCompletionEnter?.();
+  cancelPendingCompletionEnter = null;
 }
 
 function insertNewlineWithoutCompletion(view: EditorViewType): boolean {
@@ -5889,6 +5916,7 @@ function pauseQueryEditorBackgroundWork() {
   flushEditorViewport();
   flushEditorSelection();
   clearTableNavigationHover();
+  clearPendingCompletionEnter();
   clearPendingCompletionTab();
   executionViewportOwnership.reset();
   editorIsActive = false;

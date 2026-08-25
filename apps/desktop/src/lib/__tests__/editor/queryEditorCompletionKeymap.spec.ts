@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import ts from "typescript";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { acceptSelectedOrFirstCompletion } from "@/lib/editor/queryEditorCompletionAcceptance";
+import { acceptSelectedCompletionWithRetry, acceptSelectedOrFirstCompletion } from "@/lib/editor/queryEditorCompletionAcceptance";
 import { DEFAULT_SHORTCUT_SETTINGS, normalizeShortcutSettings, shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 
 const queryEditorSource = readFileSync(new URL("../../../components/editor/QueryEditor.vue", import.meta.url), "utf8");
@@ -72,7 +72,9 @@ function createHarness(options: {
     extractDeclaration(/const COMPLETION_DEBOUNCE_DELAY_MS = \d+;/, "completion debounce delay"),
     extractDeclaration(/const COMPLETION_TAB_RETRY_DELAY_MS = \d+;/, "completion retry delay"),
     extractDeclaration(/const COMPLETION_TAB_MAX_WAIT_MS = [^;]+;/, "completion wait timeout"),
+    extractDeclaration(/const COMPLETION_ENTER_MAX_WAIT_MS = \d+;/, "completion Enter wait timeout"),
     "let pendingCompletionTabTimer: ReturnType<typeof setTimeout> | null = null;",
+    "let cancelPendingCompletionEnter: (() => void) | null = null;",
     "let suppressNextSqlCompletionAutoStartUntil = 0;",
     extractFunction("editorIndentUnit"),
     extractFunction("handleTab"),
@@ -80,6 +82,7 @@ function createHarness(options: {
     extractFunction("handleTabWithoutAcceptingCompletion"),
     extractFunction("performNormalTab"),
     extractFunction("handleEnter"),
+    extractFunction("clearPendingCompletionEnter"),
     extractFunction("insertNewlineWithoutCompletion"),
     extractFunction("acceptCompletionOrNextSnippetField"),
     extractFunction("clearPendingCompletionTab"),
@@ -94,6 +97,7 @@ function createHarness(options: {
     "codeMirrorAcceptCompletion",
     "codeMirrorSelectedCompletionIndex",
     "codeMirrorSelectFirstCompletion",
+    "acceptSelectedCompletionWithRetry",
     "acceptSelectedOrFirstCompletion",
     "codeMirrorCloseCompletion",
     "codeMirrorInsertNewlineKeepIndent",
@@ -111,6 +115,7 @@ function createHarness(options: {
     options.acceptCompletion ?? (() => false),
     options.selectedCompletionIndex ?? (() => 0),
     options.selectFirstCompletion ?? (() => false),
+    acceptSelectedCompletionWithRetry,
     acceptSelectedOrFirstCompletion,
     options.closeCompletion ?? (() => false),
     options.insertNewlineKeepIndent ?? (() => false),

@@ -430,7 +430,7 @@ export default withEnglishFallback({
     createDuckDbFile: "DuckDB 파일 만들기",
     createSqliteFile: "SQLite 데이터베이스 만들기",
     memoryDatabasePathHint: "인메모리 SQLite 또는 DuckDB 데이터베이스를 만들려면 :memory:를 사용하세요.",
-    sqliteCipherKey: "SQLCipher 키",
+    sqliteCipherKey: "SQLite 암호화 키",
     sqliteCipherKeyPlaceholder: "암호화하지 않은 SQLite는 비워 두세요",
     sqliteExtensions: "SQLite 확장",
     sqliteExtensionsPlaceholder: "/path/to/regexp.dylib\n/path/to/text.dylib|sqlite3_text_init",

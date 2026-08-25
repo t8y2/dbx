@@ -1697,7 +1697,7 @@ async function openDbFilePath(path: string) {
       password: "",
     };
     await connectionStore.addConnection(config);
-    void connectionStore.connect(config);
+    await connectionStore.connect(config);
     toast(t("welcome.fileOpened", { name }));
   } catch (e: any) {
     toast(t("toolbar.sqlOpenFailed", { message: e?.message || String(e) }), 5000);

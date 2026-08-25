@@ -1,7 +1,8 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     ffi::OsStr,
-    io::Read,
+    fs::{File, OpenOptions},
+    io::{Read, Seek, SeekFrom, Write as IoWrite},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -19,6 +20,7 @@ use rmcp::schemars;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use sysinfo::Disks;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime, UtcOffset};
 use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
 use uuid::Uuid;
@@ -41,6 +43,20 @@ const DEFAULT_PLAN_CAPACITY: usize = 512;
 const DEFAULT_JOB_CAPACITY: usize = 256;
 const DEFAULT_TERMINAL_JOB_LIMIT: usize = 128;
 const JOB_TTL_MS: u128 = 24 * 60 * 60 * 1_000;
+const DEFAULT_INSPECTION_CONCURRENCY: usize = 2;
+const DEFAULT_INSPECTION_TIMEOUT_SECS: u64 = 30;
+const DEFAULT_XLSX_ZIP_ENTRY_LIMIT: usize = 4_096;
+const DEFAULT_XLSX_TOTAL_UNCOMPRESSED_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const DEFAULT_XLSX_METADATA_ENTRY_BYTES: u64 = 16 * 1024 * 1024;
+const DEFAULT_XLSX_SHARED_STRINGS_BYTES: u64 = 256 * 1024 * 1024;
+const DEFAULT_XLSX_WORKSHEET_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const DEFAULT_XLSX_WORKSHEET_ROWS: usize = 5_000_000;
+const DEFAULT_XLSX_WORKSHEET_CELLS: usize = 100_000_000;
+const DEFAULT_XLSX_CELL_BYTES: usize = 1024 * 1024;
+const DEFAULT_XLSX_BATCH_MEMORY_BYTES: usize = 32 * 1024 * 1024;
+const DEFAULT_NORMALIZED_OUTPUT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const DEFAULT_IMPORT_DISK_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const ESTIMATED_IMPORT_CELL_BYTES: usize = 512;
 
 const IMPORT_EXTENSIONS: &[&str] = &["xlsx", "xlsm", "xls", "csv", "tsv", "json"];
 const SEMANTIC_EXTENSIONS: &[&str] = &["jsonl"];
@@ -68,6 +84,25 @@ const DEFAULT_VECTOR_OUTPUT_FIELDS: &[&str] = &[
 ];
 const RESERVED_STAGING_COLUMNS: &[&str] =
     &["import_id", "plan_id", "source_sha", "source_row_number", "source_row_hash", "loaded_at"];
+const SEMANTIC_VARCHAR_LIMITS: &[(&str, usize)] = &[
+    ("card_id", 128),
+    ("card_type", 32),
+    ("business_domain", 128),
+    ("dataset_id", 128),
+    ("template_version", 64),
+    ("title", 512),
+    ("content", 8_192),
+    ("approval_status", 32),
+    ("effective_from", 10),
+    ("effective_to", 10),
+    ("source_uri", 2_048),
+    ("source_checksum", 64),
+    ("content_checksum", 64),
+    ("semantic_version", 128),
+    ("semantic_batch_id", 128),
+    ("embedding_model", 128),
+    ("embedding_revision", 64),
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnterpriseToolError {
@@ -269,8 +304,8 @@ pub struct VectorDeleteByBatchRequest {
     pub database: Option<String>,
     pub collection: String,
     pub semantic_batch_id: String,
-    #[schemars(description = "Must be explicitly false; published semantic batches cannot be deleted by this tool")]
-    pub published: bool,
+    #[schemars(extend("type" = "boolean"), description = "Ignored in v1; deletion is disabled server-side")]
+    pub published: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -394,6 +429,7 @@ pub struct ImportJob {
 pub struct EnterpriseRuntime {
     plans: RwLock<HashMap<String, PreparedImportPlan>>,
     jobs: RwLock<HashMap<String, Arc<ImportJob>>>,
+    inspection_slots: Arc<Semaphore>,
     import_slots: Arc<Semaphore>,
     semantic_write_slots: Arc<Semaphore>,
     plan_capacity: usize,
@@ -406,6 +442,9 @@ impl Default for EnterpriseRuntime {
         Self {
             plans: RwLock::new(HashMap::new()),
             jobs: RwLock::new(HashMap::new()),
+            inspection_slots: Arc::new(Semaphore::new(
+                env_usize("DBX_MCP_IMPORT_INSPECTION_CONCURRENCY", DEFAULT_INSPECTION_CONCURRENCY).clamp(1, 8),
+            )),
             import_slots: Arc::new(Semaphore::new(env_usize("DBX_MCP_IMPORT_CONCURRENCY", 2).clamp(1, 16))),
             semantic_write_slots: Arc::new(Semaphore::new(1)),
             plan_capacity: env_usize("DBX_MCP_IMPORT_PLAN_CAPACITY", DEFAULT_PLAN_CAPACITY).clamp(1, 4_096),
@@ -416,6 +455,17 @@ impl Default for EnterpriseRuntime {
 }
 
 impl EnterpriseRuntime {
+    #[cfg(test)]
+    fn with_inspection_concurrency(concurrency: usize) -> Self {
+        Self { inspection_slots: Arc::new(Semaphore::new(concurrency.max(1))), ..Self::default() }
+    }
+
+    pub async fn try_inspection_permit(&self) -> Result<OwnedSemaphorePermit, EnterpriseToolError> {
+        self.inspection_slots.clone().try_acquire_owned().map_err(|_| {
+            EnterpriseToolError::new("IMPORT_INSPECTION_CONCURRENCY_LIMIT", "文件剖析并发已达到上限，请稍后重试。")
+        })
+    }
+
     pub async fn insert_plan(&self, plan: PreparedImportPlan) -> Result<(), EnterpriseToolError> {
         let now = unix_epoch_millis();
         let mut plans = self.plans.write().await;
@@ -603,7 +653,9 @@ pub async fn file_identity(path: PathBuf) -> Result<FileIdentity, EnterpriseTool
 }
 
 fn file_identity_sync(path: &Path) -> Result<FileIdentity, EnterpriseToolError> {
-    let metadata = std::fs::metadata(path)
+    let mut file = open_regular_file_nofollow(path)?;
+    let metadata = file
+        .metadata()
         .map_err(|error| EnterpriseToolError::new("IMPORT_FILE_UNAVAILABLE", format!("无法读取文件元数据：{error}")))?;
     let modified_nanos = metadata
         .modified()
@@ -611,8 +663,6 @@ fn file_identity_sync(path: &Path) -> Result<FileIdentity, EnterpriseToolError> 
         .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
-    let mut file = std::fs::File::open(path)
-        .map_err(|error| EnterpriseToolError::new("IMPORT_HASH_FAILED", format!("无法打开文件：{error}")))?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; 1024 * 1024];
     loop {
@@ -624,12 +674,406 @@ fn file_identity_sync(path: &Path) -> Result<FileIdentity, EnterpriseToolError> 
         }
         hasher.update(&buffer[..read]);
     }
+    let final_metadata = file
+        .metadata()
+        .map_err(|error| EnterpriseToolError::new("IMPORT_FILE_UNAVAILABLE", format!("无法复核文件元数据：{error}")))?;
+    if !same_file_metadata(&metadata, &final_metadata) {
+        return Err(EnterpriseToolError::new(
+            "IMPORT_FILE_CHANGED_DURING_HASH",
+            "文件在计算 SHA-256 期间发生变化；结果已丢弃。",
+        ));
+    }
     Ok(FileIdentity {
         canonical_path: path.to_string_lossy().to_string(),
         size_bytes: metadata.len(),
         modified_nanos,
         sha256: format!("{:x}", hasher.finalize()),
     })
+}
+
+fn open_regular_file_nofollow(path: &Path) -> Result<File, EnterpriseToolError> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    }
+    let file = options
+        .open(path)
+        .map_err(|error| EnterpriseToolError::new("IMPORT_FILE_UNAVAILABLE", format!("无法安全打开文件：{error}")))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| EnterpriseToolError::new("IMPORT_FILE_UNAVAILABLE", format!("无法读取文件描述符：{error}")))?;
+    if !metadata.file_type().is_file() {
+        return Err(EnterpriseToolError::new("IMPORT_NOT_REGULAR_FILE", "导入源必须是普通文件。"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let path_metadata = std::fs::metadata(path).map_err(|error| {
+            EnterpriseToolError::new("IMPORT_FILE_UNAVAILABLE", format!("无法复核文件路径：{error}"))
+        })?;
+        if metadata.dev() != path_metadata.dev() || metadata.ino() != path_metadata.ino() {
+            return Err(EnterpriseToolError::new(
+                "IMPORT_FILE_IDENTITY_RACE",
+                "文件路径在打开期间指向了不同对象；结果已丢弃。",
+            ));
+        }
+    }
+    Ok(file)
+}
+
+fn same_file_metadata(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        before.dev() == after.dev()
+            && before.ino() == after.ino()
+            && before.len() == after.len()
+            && before.mtime() == after.mtime()
+            && before.mtime_nsec() == after.mtime_nsec()
+            && before.ctime() == after.ctime()
+            && before.ctime_nsec() == after.ctime_nsec()
+    }
+    #[cfg(not(unix))]
+    {
+        before.len() == after.len()
+            && before.modified().ok().and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+                == after.modified().ok().and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+    }
+}
+
+pub fn ensure_import_disk_budget(snapshot_root: &Path, source_size: u64) -> Result<(), EnterpriseToolError> {
+    let canonical = std::fs::canonicalize(snapshot_root).map_err(|error| {
+        EnterpriseToolError::new("IMPORT_DISK_BUDGET_UNAVAILABLE", format!("无法解析任务磁盘路径：{error}"))
+    })?;
+    let disks = Disks::new_with_refreshed_list();
+    let disk = disks
+        .list()
+        .iter()
+        .filter(|disk| canonical.starts_with(disk.mount_point()))
+        .max_by_key(|disk| disk.mount_point().as_os_str().len())
+        .ok_or_else(|| EnterpriseToolError::new("IMPORT_DISK_BUDGET_UNAVAILABLE", "无法确定任务磁盘剩余容量。"))?;
+    let reserve = env_u64("DBX_MCP_IMPORT_DISK_RESERVE_BYTES", DEFAULT_IMPORT_DISK_RESERVE_BYTES)
+        .clamp(512 * 1024 * 1024, 16 * 1024 * 1024 * 1024);
+    let required = source_size
+        .checked_add(normalized_output_limit())
+        .and_then(|value| value.checked_add(reserve))
+        .ok_or_else(|| EnterpriseToolError::new("IMPORT_DISK_BUDGET_EXCEEDED", "导入磁盘预算累计溢出。"))?;
+    if disk.available_space() < required {
+        return Err(EnterpriseToolError::new(
+            "IMPORT_DISK_BUDGET_EXCEEDED",
+            format!(
+                "任务磁盘可用 {} 字节，至少需要 {required} 字节（源文件、规范化上限与安全保留空间）。",
+                disk.available_space()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+pub async fn copy_verified_import_source(
+    source: PathBuf,
+    destination: PathBuf,
+    expected_sha256: String,
+    cancelled: Arc<AtomicBool>,
+) -> Result<(), EnterpriseToolError> {
+    tokio::task::spawn_blocking(move || {
+        let result = copy_verified_import_source_sync(&source, &destination, &expected_sha256, &cancelled);
+        if result.is_err() {
+            let _ = std::fs::remove_file(&destination);
+        }
+        result
+    })
+    .await
+    .map_err(|error| EnterpriseToolError::new("IMPORT_COPY_FAILED", error.to_string()))?
+}
+
+fn copy_verified_import_source_sync(
+    source: &Path,
+    destination: &Path,
+    expected_sha256: &str,
+    cancelled: &AtomicBool,
+) -> Result<(), EnterpriseToolError> {
+    if !is_sha256_hex(expected_sha256) {
+        return Err(EnterpriseToolError::new("IMPORT_SOURCE_HASH_REQUIRED", "导入计划缺少合法 SHA-256。"));
+    }
+    let mut input = open_regular_file_nofollow(source)?;
+    let initial = input
+        .metadata()
+        .map_err(|error| EnterpriseToolError::new("IMPORT_COPY_FAILED", format!("无法读取源文件描述符：{error}")))?;
+    let mut output =
+        OpenOptions::new().write(true).create_new(true).open(destination).map_err(|error| {
+            EnterpriseToolError::new("IMPORT_COPY_FAILED", format!("无法创建任务私有快照：{error}"))
+        })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 1024 * 1024];
+    loop {
+        if cancelled.load(Ordering::Acquire) {
+            return Err(EnterpriseToolError::new("IMPORT_CANCELLED", "复制任务私有快照时收到取消请求。"));
+        }
+        let read = input
+            .read(&mut buffer)
+            .map_err(|error| EnterpriseToolError::new("IMPORT_COPY_FAILED", format!("读取源文件失败：{error}")))?;
+        if read == 0 {
+            break;
+        }
+        output.write_all(&buffer[..read]).map_err(|error| {
+            EnterpriseToolError::new("IMPORT_COPY_FAILED", format!("写入任务私有快照失败：{error}"))
+        })?;
+        hasher.update(&buffer[..read]);
+    }
+    output
+        .flush()
+        .and_then(|_| output.sync_all())
+        .map_err(|error| EnterpriseToolError::new("IMPORT_COPY_FAILED", format!("落盘任务私有快照失败：{error}")))?;
+    let final_metadata = input
+        .metadata()
+        .map_err(|error| EnterpriseToolError::new("IMPORT_COPY_FAILED", format!("无法复核源文件描述符：{error}")))?;
+    if !same_file_metadata(&initial, &final_metadata) {
+        return Err(EnterpriseToolError::new(
+            "IMPORT_FILE_CHANGED",
+            "源文件在复制任务私有快照期间发生变化；未访问数据库。",
+        ));
+    }
+    let actual_sha256 = format!("{:x}", hasher.finalize());
+    if actual_sha256 != expected_sha256 {
+        return Err(EnterpriseToolError::new("IMPORT_FILE_CHANGED", "源文件在启动导入时发生变化；未访问数据库。"));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportInspection {
+    pub identity: FileIdentity,
+    pub preview: TableImportPreview,
+    pub source_columns: Vec<McpSourceColumn>,
+}
+
+pub fn inspection_timeout() -> Duration {
+    Duration::from_secs(
+        env_u64("DBX_MCP_IMPORT_INSPECTION_TIMEOUT_SECS", DEFAULT_INSPECTION_TIMEOUT_SECS).clamp(5, 120),
+    )
+}
+
+pub async fn inspect_import_source(
+    path: PathBuf,
+    source_format: Option<TableImportSourceFormat>,
+    parse_options: TableImportParseOptions,
+    preview_rows: usize,
+) -> Result<ImportInspection, EnterpriseToolError> {
+    let limits_path = path.clone();
+    tokio::task::spawn_blocking(move || validate_source_archive_limits(&limits_path, source_format))
+        .await
+        .map_err(|error| EnterpriseToolError::new("IMPORT_INSPECTION_FAILED", error.to_string()))??;
+    let identity = file_identity(path.clone()).await?;
+    let file_path = path.to_string_lossy().to_string();
+    let preview = dbx_core::table_import::preview_table_import_file_with_request(
+        dbx_core::table_import::TableImportPreviewRequest {
+            file_path: file_path.clone(),
+            source_ref: Some(identity.sha256.clone()),
+            source_format,
+            parse_options: parse_options.clone(),
+            preview_limit: Some(preview_rows),
+        },
+    )
+    .await
+    .map_err(|error| EnterpriseToolError::new("IMPORT_PREVIEW_FAILED", error))?;
+    validate_preview_headers(&preview)?;
+    let source_columns =
+        source_columns_for_preview(&file_path, source_format, &parse_options, &preview.columns).await?;
+    let current_identity = file_identity(path).await?;
+    if current_identity != identity {
+        return Err(EnterpriseToolError::new(
+            "IMPORT_FILE_CHANGED_DURING_INSPECTION",
+            "文件在剖析期间发生变化；结果已丢弃。",
+        ));
+    }
+    Ok(ImportInspection { identity, preview, source_columns })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct XlsxArchiveLimits {
+    entry_count: usize,
+    total_uncompressed_bytes: u64,
+    metadata_entry_bytes: u64,
+    shared_strings_bytes: u64,
+    worksheet_bytes: u64,
+}
+
+fn xlsx_archive_limits() -> XlsxArchiveLimits {
+    XlsxArchiveLimits {
+        entry_count: env_usize("DBX_MCP_XLSX_ZIP_ENTRY_LIMIT", DEFAULT_XLSX_ZIP_ENTRY_LIMIT).clamp(16, 16_384),
+        total_uncompressed_bytes: env_u64(
+            "DBX_MCP_XLSX_TOTAL_UNCOMPRESSED_MAX_BYTES",
+            DEFAULT_XLSX_TOTAL_UNCOMPRESSED_BYTES,
+        )
+        .clamp(64 * 1024 * 1024, 8 * 1024 * 1024 * 1024),
+        metadata_entry_bytes: env_u64("DBX_MCP_XLSX_METADATA_ENTRY_MAX_BYTES", DEFAULT_XLSX_METADATA_ENTRY_BYTES)
+            .clamp(1024 * 1024, 64 * 1024 * 1024),
+        shared_strings_bytes: env_u64("DBX_MCP_XLSX_SHARED_STRINGS_MAX_BYTES", DEFAULT_XLSX_SHARED_STRINGS_BYTES)
+            .clamp(8 * 1024 * 1024, 512 * 1024 * 1024),
+        worksheet_bytes: env_u64("DBX_MCP_XLSX_WORKSHEET_MAX_BYTES", DEFAULT_XLSX_WORKSHEET_BYTES)
+            .clamp(64 * 1024 * 1024, 4 * 1024 * 1024 * 1024),
+    }
+}
+
+fn validate_source_archive_limits(
+    path: &Path,
+    source_format: Option<TableImportSourceFormat>,
+) -> Result<(), EnterpriseToolError> {
+    let format = dbx_core::table_import::effective_source_format(&path.to_string_lossy(), source_format)
+        .map_err(|error| EnterpriseToolError::new("IMPORT_SOURCE_FORMAT_INVALID", error))?;
+    let extension = path.extension().and_then(OsStr::to_str).unwrap_or_default();
+    if format != TableImportSourceFormat::Excel
+        || (!extension.eq_ignore_ascii_case("xlsx") && !extension.eq_ignore_ascii_case("xlsm"))
+    {
+        return Ok(());
+    }
+    validate_xlsx_archive_limits(path, xlsx_archive_limits())
+}
+
+fn validate_xlsx_archive_limits(path: &Path, limits: XlsxArchiveLimits) -> Result<(), EnterpriseToolError> {
+    let mut file = open_regular_file_nofollow(path)?;
+    let declared_entries = xlsx_eocd_entry_count(&mut file)?;
+    if declared_entries > limits.entry_count {
+        return Err(EnterpriseToolError::new(
+            "IMPORT_XLSX_ZIP_ENTRY_LIMIT_EXCEEDED",
+            format!("XLSX ZIP 包含 {declared_entries} 个条目，超过 {} 个安全上限。", limits.entry_count),
+        ));
+    }
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| EnterpriseToolError::new("IMPORT_XLSX_ZIP_INVALID", error.to_string()))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|error| EnterpriseToolError::new("IMPORT_XLSX_ZIP_INVALID", error.to_string()))?;
+    if archive.len() != declared_entries {
+        return Err(EnterpriseToolError::new(
+            "IMPORT_XLSX_ZIP_ENTRY_COUNT_MISMATCH",
+            "XLSX ZIP 中央目录条目数不一致。",
+        ));
+    }
+    let mut names = HashSet::new();
+    let mut total_uncompressed = 0u64;
+    for index in 0..archive.len() {
+        let entry = archive
+            .by_index(index)
+            .map_err(|error| EnterpriseToolError::new("IMPORT_XLSX_ZIP_INVALID", error.to_string()))?;
+        let name = entry.name().replace('\\', "/");
+        if !names.insert(name.clone()) {
+            return Err(EnterpriseToolError::new(
+                "IMPORT_XLSX_ZIP_DUPLICATE_ENTRY",
+                format!("XLSX ZIP 包含重复条目 {name}。"),
+            ));
+        }
+        total_uncompressed = total_uncompressed.checked_add(entry.size()).ok_or_else(|| {
+            EnterpriseToolError::new("IMPORT_XLSX_ZIP_BUDGET_EXCEEDED", "XLSX ZIP 解压大小累计溢出。")
+        })?;
+        if total_uncompressed > limits.total_uncompressed_bytes {
+            return Err(EnterpriseToolError::new(
+                "IMPORT_XLSX_ZIP_BUDGET_EXCEEDED",
+                format!("XLSX ZIP 解压总大小超过 {} 字节。", limits.total_uncompressed_bytes),
+            ));
+        }
+        let metadata_entry = matches!(
+            name.as_str(),
+            "xl/workbook.xml" | "xl/_rels/workbook.xml.rels" | "xl/styles.xml" | "[Content_Types].xml"
+        );
+        if metadata_entry && entry.size() > limits.metadata_entry_bytes {
+            return Err(EnterpriseToolError::new(
+                "IMPORT_XLSX_METADATA_BUDGET_EXCEEDED",
+                format!("XLSX 元数据条目 {name} 超过 {} 字节。", limits.metadata_entry_bytes),
+            ));
+        }
+        if name == "xl/sharedStrings.xml" && entry.size() > limits.shared_strings_bytes {
+            return Err(EnterpriseToolError::new(
+                "IMPORT_XLSX_SHARED_STRINGS_BUDGET_EXCEEDED",
+                format!("XLSX sharedStrings 超过 {} 字节。", limits.shared_strings_bytes),
+            ));
+        }
+        if name.starts_with("xl/worksheets/") && name.ends_with(".xml") && entry.size() > limits.worksheet_bytes {
+            return Err(EnterpriseToolError::new(
+                "IMPORT_XLSX_WORKSHEET_BUDGET_EXCEEDED",
+                format!("XLSX 工作表 {name} 超过 {} 字节。", limits.worksheet_bytes),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn xlsx_eocd_entry_count(file: &mut File) -> Result<usize, EnterpriseToolError> {
+    let length =
+        file.metadata().map_err(|error| EnterpriseToolError::new("IMPORT_XLSX_ZIP_INVALID", error.to_string()))?.len();
+    let tail_len = length.min(65_557) as usize;
+    file.seek(SeekFrom::End(-(tail_len as i64)))
+        .map_err(|error| EnterpriseToolError::new("IMPORT_XLSX_ZIP_INVALID", error.to_string()))?;
+    let mut tail = vec![0u8; tail_len];
+    file.read_exact(&mut tail)
+        .map_err(|error| EnterpriseToolError::new("IMPORT_XLSX_ZIP_INVALID", error.to_string()))?;
+    let offset = tail
+        .windows(4)
+        .rposition(|window| window == [0x50, 0x4b, 0x05, 0x06])
+        .ok_or_else(|| EnterpriseToolError::new("IMPORT_XLSX_ZIP_INVALID", "XLSX ZIP 缺少 EOCD。"))?;
+    if tail.len().saturating_sub(offset) < 22 {
+        return Err(EnterpriseToolError::new("IMPORT_XLSX_ZIP_INVALID", "XLSX ZIP EOCD 不完整。"));
+    }
+    let disk = u16::from_le_bytes([tail[offset + 4], tail[offset + 5]]);
+    let central_disk = u16::from_le_bytes([tail[offset + 6], tail[offset + 7]]);
+    let disk_entries = u16::from_le_bytes([tail[offset + 8], tail[offset + 9]]);
+    let total_entries = u16::from_le_bytes([tail[offset + 10], tail[offset + 11]]);
+    if disk != 0 || central_disk != 0 || disk_entries != total_entries {
+        return Err(EnterpriseToolError::new("IMPORT_XLSX_ZIP_MULTIDISK_UNSUPPORTED", "不支持多磁盘 XLSX ZIP。"));
+    }
+    if total_entries == u16::MAX {
+        return Err(EnterpriseToolError::new(
+            "IMPORT_XLSX_ZIP64_ENTRY_COUNT_UNSUPPORTED",
+            "XLSX ZIP64 条目数无法在剖析前安全确定。",
+        ));
+    }
+    Ok(total_entries as usize)
+}
+
+fn governed_xlsx_stream_limits() -> dbx_core::table_import::XlsxStreamLimits {
+    let archive = xlsx_archive_limits();
+    dbx_core::table_import::XlsxStreamLimits {
+        max_shared_strings_bytes: archive.shared_strings_bytes,
+        max_worksheet_bytes: archive.worksheet_bytes,
+        max_worksheet_rows: env_usize("DBX_MCP_XLSX_WORKSHEET_MAX_ROWS", DEFAULT_XLSX_WORKSHEET_ROWS)
+            .clamp(1_000, 10_000_000),
+        max_worksheet_cells: env_usize("DBX_MCP_XLSX_WORKSHEET_MAX_CELLS", DEFAULT_XLSX_WORKSHEET_CELLS)
+            .clamp(1_000, 200_000_000),
+        max_cell_bytes: env_usize("DBX_MCP_XLSX_CELL_MAX_BYTES", DEFAULT_XLSX_CELL_BYTES)
+            .clamp(4 * 1024, 4 * 1024 * 1024),
+        max_batch_bytes: import_batch_memory_bytes(),
+    }
+}
+
+fn import_batch_memory_bytes() -> usize {
+    env_usize("DBX_MCP_IMPORT_BATCH_MEMORY_MAX_BYTES", DEFAULT_XLSX_BATCH_MEMORY_BYTES)
+        .clamp(4 * 1024 * 1024, 128 * 1024 * 1024)
+}
+
+pub fn governed_import_batch_size(
+    requested: Option<usize>,
+    source_column_count: usize,
+) -> Result<usize, EnterpriseToolError> {
+    if source_column_count == 0 {
+        return Err(EnterpriseToolError::new("IMPORT_COLUMN_REQUIRED", "源文件没有可导入字段。"));
+    }
+    let estimated_row_bytes =
+        source_column_count.saturating_mul(ESTIMATED_IMPORT_CELL_BYTES).saturating_add(1024).max(1);
+    let dynamic_max = import_batch_memory_bytes().checked_div(estimated_row_bytes).unwrap_or(1).clamp(1, 5_000);
+    let value = requested.unwrap_or(1_000.min(dynamic_max));
+    if value == 0 || value > dynamic_max {
+        return Err(EnterpriseToolError::new(
+            "IMPORT_BATCH_SIZE_RESOURCE_LIMIT",
+            format!(
+                "当前 {} 列结构的 batch_size 必须在 1 到 {dynamic_max} 之间，以满足批次内存预算。",
+                source_column_count
+            ),
+        ));
+    }
+    Ok(value)
 }
 
 pub fn preview_limit(value: Option<usize>) -> Result<usize, EnterpriseToolError> {
@@ -975,11 +1419,10 @@ pub fn validate_governed_source_v1(
     let source_format = dbx_core::table_import::effective_source_format(file_path, source_format)
         .map_err(|error| EnterpriseToolError::new("IMPORT_SOURCE_FORMAT_INVALID", error))?;
     if source_format.is_delimited() {
-        if !matches!(parse_options.encoding, None | Some(TableImportTextEncoding::Auto | TableImportTextEncoding::Utf8))
-        {
+        if !matches!(parse_options.encoding, Some(TableImportTextEncoding::Utf8)) {
             return Err(EnterpriseToolError::new(
-                "IMPORT_GOVERNED_ENCODING_UNSUPPORTED_V1",
-                "v1 流式治理导入仅支持 UTF-8；其他编码不创建导入计划。",
+                "IMPORT_GOVERNED_EXPLICIT_UTF8_REQUIRED_V1",
+                "v1 流式治理导入要求 prepare 显式指定 utf-8；auto、GBK 与 UTF-16 不创建导入计划。",
             ));
         }
         return Ok(source_format);
@@ -1036,15 +1479,11 @@ async fn build_governed_delimited_snapshot(
         .to_offset(offset)
         .format(&Rfc3339)
         .map_err(|error| EnterpriseToolError::new("IMPORT_LOADED_AT_FAILED", error.to_string()))?;
-    let mut writer = csv::WriterBuilder::new()
-        .has_headers(false)
-        .from_path(output_path)
-        .map_err(|error| EnterpriseToolError::new("IMPORT_SNAPSHOT_WRITE_FAILED", error.to_string()))?;
+    let output = LimitedWriter::create(output_path, normalized_output_limit())?;
+    let mut writer = csv::WriterBuilder::new().has_headers(false).from_writer(output);
     let mut headers = request.mappings.iter().map(|mapping| mapping.target_column.clone()).collect::<Vec<_>>();
     headers.extend(RESERVED_STAGING_COLUMNS.iter().map(|column| column.to_string()));
-    writer
-        .write_record(&headers)
-        .map_err(|error| EnterpriseToolError::new("IMPORT_SNAPSHOT_WRITE_FAILED", error.to_string()))?;
+    writer.write_record(&headers).map_err(snapshot_write_error)?;
     let mut reader = csv::ReaderBuilder::new()
         .delimiter(config.delimiter)
         .has_headers(false)
@@ -1054,6 +1493,7 @@ async fn build_governed_delimited_snapshot(
     let mut source_columns = Vec::new();
     let mut source_indexes: Option<Vec<usize>> = None;
     let mut source_row_count = 0usize;
+    let max_cell_bytes = governed_xlsx_stream_limits().max_cell_bytes;
     for (index, record) in reader.records().enumerate() {
         if cancelled.load(Ordering::Acquire) {
             return Err(EnterpriseToolError::new("IMPORT_CANCELLED", "导入已取消。"));
@@ -1081,6 +1521,24 @@ async fn build_governed_delimited_snapshot(
         if source_columns.is_empty() {
             source_columns = (0..record.len()).map(|index| format!("column_{}", index + 1)).collect();
         }
+        if record.iter().any(|value| value.len() > max_cell_bytes) {
+            return Err(EnterpriseToolError::new(
+                "IMPORT_CELL_BUDGET_EXCEEDED",
+                format!("UTF-8 CSV/TSV 第 {source_row_number} 行包含超过单元格字节上限的字段。"),
+            ));
+        }
+        if record.len() > source_columns.len()
+            && record.iter().skip(source_columns.len()).any(|value| !value.is_empty())
+        {
+            return Err(EnterpriseToolError::new(
+                "IMPORT_SOURCE_ROW_WIDER_THAN_HEADER",
+                format!(
+                    "UTF-8 CSV/TSV 第 {source_row_number} 行包含表头之外的非空字段；表头 {} 列，数据行 {} 列。",
+                    source_columns.len(),
+                    record.len()
+                ),
+            ));
+        }
         if source_indexes.is_none() {
             source_indexes = Some(
                 request
@@ -1100,9 +1558,8 @@ async fn build_governed_delimited_snapshot(
         let indexes = source_indexes
             .as_ref()
             .ok_or_else(|| EnterpriseToolError::new("IMPORT_SOURCE_MAPPING_FAILED", "无法建立源字段位置映射。"))?;
-        let parsed_row = (0..source_columns.len())
-            .map(|column| dbx_core::table_import::csv_value_with_config(record.get(column).unwrap_or_default(), config))
-            .collect::<Vec<_>>();
+        let parsed_row =
+            record.iter().map(|value| dbx_core::table_import::csv_value_with_config(value, config)).collect::<Vec<_>>();
         let mut output = indexes
             .iter()
             .map(|index| staging_text_value(parsed_row.get(*index).unwrap_or(&Value::Null)))
@@ -1117,15 +1574,13 @@ async fn build_governed_delimited_snapshot(
             sha256_bytes(&row_bytes),
             loaded_at.clone(),
         ]);
-        writer
-            .write_record(&output)
-            .map_err(|error| EnterpriseToolError::new("IMPORT_SNAPSHOT_WRITE_FAILED", error.to_string()))?;
+        writer.write_record(&output).map_err(snapshot_write_error)?;
         source_row_count += 1;
     }
     if source_row_count == 0 {
         return Err(EnterpriseToolError::new("IMPORT_SOURCE_EMPTY", "选择的源范围没有数据行；未写入数据库。"));
     }
-    writer.flush().map_err(|error| EnterpriseToolError::new("IMPORT_SNAPSHOT_WRITE_FAILED", error.to_string()))?;
+    writer.flush().map_err(snapshot_write_error)?;
 
     let mut mappings = request
         .mappings
@@ -1172,15 +1627,11 @@ async fn build_governed_xlsx_snapshot(
         .to_offset(offset)
         .format(&Rfc3339)
         .map_err(|error| EnterpriseToolError::new("IMPORT_LOADED_AT_FAILED", error.to_string()))?;
-    let mut writer = csv::WriterBuilder::new()
-        .has_headers(false)
-        .from_path(output_path)
-        .map_err(|error| EnterpriseToolError::new("IMPORT_SNAPSHOT_WRITE_FAILED", error.to_string()))?;
+    let output = LimitedWriter::create(output_path, normalized_output_limit())?;
+    let mut writer = csv::WriterBuilder::new().has_headers(false).from_writer(output);
     let mut headers = request.mappings.iter().map(|mapping| mapping.target_column.clone()).collect::<Vec<_>>();
     headers.extend(RESERVED_STAGING_COLUMNS.iter().map(|column| column.to_string()));
-    writer
-        .write_record(&headers)
-        .map_err(|error| EnterpriseToolError::new("IMPORT_SNAPSHOT_WRITE_FAILED", error.to_string()))?;
+    writer.write_record(&headers).map_err(snapshot_write_error)?;
 
     let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
     let path = request.file_path.clone();
@@ -1191,7 +1642,7 @@ async fn build_governed_xlsx_snapshot(
     let _producer_cancel_guard = CancelOnDrop(producer_cancelled.clone());
     let producer_cancelled_for_task = producer_cancelled.clone();
     let producer = tokio::task::spawn_blocking(move || {
-        dbx_core::table_import::stream_xlsx_rows_to_channel_with_control(
+        dbx_core::table_import::stream_xlsx_rows_to_channel_with_limits(
             &path,
             &options,
             batch_size,
@@ -1200,6 +1651,7 @@ async fn build_governed_xlsx_snapshot(
             true,
             sender,
             producer_cancelled_for_task,
+            governed_xlsx_stream_limits(),
         )
     });
     let user_cancelled = cancelled.clone();
@@ -1271,9 +1723,7 @@ async fn build_governed_xlsx_snapshot(
                         sha256_bytes(&row_bytes),
                         loaded_at.clone(),
                     ]);
-                    writer
-                        .write_record(&output)
-                        .map_err(|error| EnterpriseToolError::new("IMPORT_SNAPSHOT_WRITE_FAILED", error.to_string()))?;
+                    writer.write_record(&output).map_err(snapshot_write_error)?;
                     source_row_count += 1;
                 }
             }
@@ -1296,7 +1746,7 @@ async fn build_governed_xlsx_snapshot(
             "XLSX 流式治理未完整结束；未访问数据库。",
         ));
     }
-    writer.flush().map_err(|error| EnterpriseToolError::new("IMPORT_SNAPSHOT_WRITE_FAILED", error.to_string()))?;
+    writer.flush().map_err(snapshot_write_error)?;
 
     let mut mappings = request
         .mappings
@@ -1341,6 +1791,58 @@ impl Drop for CancelOnDrop {
     fn drop(&mut self) {
         self.0.store(true, Ordering::Release);
     }
+}
+
+struct LimitedWriter {
+    file: File,
+    written: u64,
+    max_bytes: u64,
+}
+
+impl LimitedWriter {
+    fn create(path: &Path, max_bytes: u64) -> Result<Self, EnterpriseToolError> {
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|error| EnterpriseToolError::new("IMPORT_SNAPSHOT_WRITE_FAILED", error.to_string()))?;
+        Ok(Self { file, written: 0, max_bytes })
+    }
+}
+
+impl IoWrite for LimitedWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let next = self.written.checked_add(buffer.len() as u64).ok_or_else(|| {
+            std::io::Error::other("IMPORT_NORMALIZED_OUTPUT_LIMIT_EXCEEDED: 规范化输出大小累计溢出。")
+        })?;
+        if next > self.max_bytes {
+            return Err(std::io::Error::other(format!(
+                "IMPORT_NORMALIZED_OUTPUT_LIMIT_EXCEEDED: 规范化输出超过 {} 字节上限。",
+                self.max_bytes
+            )));
+        }
+        let written = self.file.write(buffer)?;
+        self.written = self.written.saturating_add(written as u64);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
+fn snapshot_write_error(error: impl ToString) -> EnterpriseToolError {
+    let message = error.to_string();
+    if message.contains("IMPORT_NORMALIZED_OUTPUT_LIMIT_EXCEEDED") {
+        EnterpriseToolError::new("IMPORT_NORMALIZED_OUTPUT_LIMIT_EXCEEDED", message)
+    } else {
+        EnterpriseToolError::new("IMPORT_SNAPSHOT_WRITE_FAILED", message)
+    }
+}
+
+fn normalized_output_limit() -> u64 {
+    env_u64("DBX_MCP_IMPORT_NORMALIZED_MAX_BYTES", DEFAULT_NORMALIZED_OUTPUT_BYTES)
+        .clamp(64 * 1024 * 1024, 4 * 1024 * 1024 * 1024)
 }
 
 fn staging_text_value(value: &Value) -> String {
@@ -1460,12 +1962,12 @@ pub fn build_milvus_filter(
 
 pub fn read_semantic_jsonl(path: &Path, semantic_batch_id: &str) -> Result<Vec<Value>, EnterpriseToolError> {
     if semantic_batch_id.trim().is_empty()
-        || semantic_batch_id.len() > 200
+        || semantic_batch_id.len() > 128
         || semantic_batch_id.chars().any(char::is_control)
     {
         return Err(EnterpriseToolError::new(
             "SEMANTIC_BATCH_ID_INVALID",
-            "semantic_batch_id 必须是 1～200 个非控制字符。",
+            "semantic_batch_id 必须是 1～128 个 UTF-8 字节且不能包含控制字符。",
         ));
     }
     let source = std::fs::read_to_string(path)
@@ -1603,12 +2105,6 @@ pub fn read_semantic_jsonl(path: &Path, semantic_batch_id: &str) -> Result<Vec<V
             }
         }
         let content = object.get("content").and_then(Value::as_str).unwrap_or_default();
-        if content.chars().count() > 100_000 {
-            return Err(EnterpriseToolError::new(
-                "VECTOR_JSONL_FIELD_INVALID",
-                format!("JSONL 第 {line_number} 行的 content 超过 100000 字节。"),
-            ));
-        }
         if object.get("content_checksum").and_then(Value::as_str) != Some(sha256_bytes(content.as_bytes()).as_str()) {
             return Err(EnterpriseToolError::new(
                 "VECTOR_CONTENT_CHECKSUM_MISMATCH",
@@ -1671,6 +2167,7 @@ pub fn read_semantic_jsonl(path: &Path, semantic_batch_id: &str) -> Result<Vec<V
         }
         object.insert("semantic_batch_id".to_string(), Value::String(semantic_batch_id.to_string()));
         object.entry("effective_to".to_string()).or_insert_with(|| Value::String(String::new()));
+        validate_semantic_varchar_lengths(object, line_number)?;
         let embedding = object.get("embedding").and_then(Value::as_array).ok_or_else(|| {
             EnterpriseToolError::new(
                 "VECTOR_JSONL_EMBEDDING_INVALID",
@@ -1702,6 +2199,30 @@ pub fn vector_upsert_batch_size(value: Option<usize>) -> Result<usize, Enterpris
         ));
     }
     Ok(value)
+}
+
+fn validate_semantic_varchar_lengths(
+    object: &serde_json::Map<String, Value>,
+    line_number: usize,
+) -> Result<(), EnterpriseToolError> {
+    for (field, max_bytes) in SEMANTIC_VARCHAR_LIMITS {
+        let value = object.get(*field).and_then(Value::as_str).ok_or_else(|| {
+            EnterpriseToolError::new(
+                "VECTOR_JSONL_FIELD_INVALID",
+                format!("JSONL 第 {line_number} 行的 {field} 必须是字符串。"),
+            )
+        })?;
+        if value.len() > *max_bytes {
+            return Err(EnterpriseToolError::new(
+                "VECTOR_VARCHAR_LENGTH_EXCEEDED",
+                format!(
+                    "JSONL 第 {line_number} 行的 {field} 为 {} 个 UTF-8 字节，超过 semantic_cards VARCHAR({max_bytes})。",
+                    value.len()
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub fn milvus_search_query(
@@ -1771,17 +2292,6 @@ pub fn validate_existing_card_ownership(
         }
     }
     Ok(())
-}
-
-pub fn milvus_delete_batch_query(database: &str, collection: &str, semantic_batch_id: &str) -> String {
-    format!(
-        "POST /v2/vectordb/entities/delete\n{}",
-        json!({
-            "dbName": if database.is_empty() { "default" } else { database },
-            "collectionName": collection,
-            "filter": format!("semantic_batch_id == {}", json_string(semantic_batch_id)),
-        })
-    )
 }
 
 pub fn query_result_rows(result: dbx_core::db::QueryResult) -> Vec<Value> {
@@ -1976,7 +2486,7 @@ mod tests {
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
   <dimension ref="A1:A1"/>
   <sheetData>
-    <row r="1"><c r="A1" t="inlineStr"><is><t>报告说明</t></is></c></row>
+    <row r="1"><c r="C1" t="inlineStr"><is><t>报告说明</t></is></c></row>
     <row r="2"><c r="A2" t="inlineStr"><is><t>商家备注</t></is></c><c r="B2" t="inlineStr"><is><t>商家备注</t></is></c><c r="C2" t="inlineStr"><is><t>金额</t></is></c></row>
     <row r="3"><c r="A3" t="inlineStr"><is><t>A</t></is></c><c r="B3" t="inlineStr"><is><t>B</t></is></c><c r="C3"><v>10</v></c></row>
     <row r="4"/>
@@ -2025,6 +2535,89 @@ mod tests {
                 "IMPORT_SYMLINK_REJECTED"
             );
         }
+    }
+
+    #[test]
+    fn xlsx_archive_preflight_enforces_entry_and_uncompressed_budgets() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("budget.xlsx");
+        write_governed_test_xlsx(&source);
+        let permissive = XlsxArchiveLimits {
+            entry_count: 16,
+            total_uncompressed_bytes: 1024 * 1024,
+            metadata_entry_bytes: 1024 * 1024,
+            shared_strings_bytes: 1024 * 1024,
+            worksheet_bytes: 1024 * 1024,
+        };
+        validate_xlsx_archive_limits(&source, permissive).unwrap();
+        assert_eq!(
+            validate_xlsx_archive_limits(&source, XlsxArchiveLimits { entry_count: 4, ..permissive }).unwrap_err().code,
+            "IMPORT_XLSX_ZIP_ENTRY_LIMIT_EXCEEDED"
+        );
+        assert_eq!(
+            validate_xlsx_archive_limits(&source, XlsxArchiveLimits { worksheet_bytes: 16, ..permissive })
+                .unwrap_err()
+                .code,
+            "IMPORT_XLSX_WORKSHEET_BUDGET_EXCEEDED"
+        );
+
+        let shared = directory.path().join("shared.xlsx");
+        let file = std::fs::File::create(&shared).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        write_xlsx_entry(&mut zip, "xl/sharedStrings.xml", &"x".repeat(128));
+        zip.finish().unwrap();
+        assert_eq!(
+            validate_xlsx_archive_limits(&shared, XlsxArchiveLimits { shared_strings_bytes: 64, ..permissive },)
+                .unwrap_err()
+                .code,
+            "IMPORT_XLSX_SHARED_STRINGS_BUDGET_EXCEEDED"
+        );
+    }
+
+    #[test]
+    fn normalized_writer_and_dynamic_batch_are_bounded() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("limited.csv");
+        let mut writer = LimitedWriter::create(&output, 4).unwrap();
+        writer.write_all(b"1234").unwrap();
+        assert!(writer.write_all(b"5").is_err());
+
+        let safe = governed_import_batch_size(None, 145).unwrap();
+        assert!(safe < 1_000);
+        assert_eq!(
+            governed_import_batch_size(Some(safe + 1), 145).unwrap_err().code,
+            "IMPORT_BATCH_SIZE_RESOURCE_LIMIT"
+        );
+    }
+
+    #[tokio::test]
+    async fn private_snapshot_copy_is_hash_verified_and_cancellable() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.csv");
+        let destination = directory.path().join("snapshot.csv");
+        let bytes = b"id,name\n1,Ada\n";
+        std::fs::write(&source, bytes).unwrap();
+        copy_verified_import_source(
+            source.clone(),
+            destination.clone(),
+            sha256_bytes(bytes),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), bytes);
+
+        std::fs::remove_file(&destination).unwrap();
+        let error = copy_verified_import_source(
+            source,
+            destination.clone(),
+            sha256_bytes(bytes),
+            Arc::new(AtomicBool::new(true)),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "IMPORT_CANCELLED");
+        assert!(!destination.exists());
     }
 
     #[test]
@@ -2178,6 +2771,54 @@ mod tests {
             std::fs::write(&path, format!("{}\n", forbidden)).unwrap();
             assert_eq!(read_semantic_jsonl(&path, "semantic-batch-1").unwrap_err().code, "VECTOR_JSONL_UNKNOWN_FIELD");
         }
+
+        for (field, max_bytes) in [
+            ("card_id", 128usize),
+            ("business_domain", 128),
+            ("dataset_id", 128),
+            ("template_version", 64),
+            ("title", 512),
+            ("content", 8_192),
+            ("source_uri", 2_048),
+            ("semantic_version", 128),
+            ("semantic_batch_id", 128),
+            ("embedding_model", 128),
+            ("embedding_revision", 64),
+        ] {
+            let mut boundary = record.clone();
+            let value = "x".repeat(max_bytes);
+            boundary.as_object_mut().unwrap().insert(field.to_string(), json!(value.clone()));
+            if field == "content" {
+                boundary
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("content_checksum".to_string(), json!(sha256_bytes(value.as_bytes())));
+            }
+            let batch = if field == "semantic_batch_id" { value.as_str() } else { "semantic-batch-1" };
+            std::fs::write(&path, format!("{}\n", boundary)).unwrap();
+            read_semantic_jsonl(&path, batch).unwrap();
+
+            let mut overflow = record.clone();
+            let overflow_value = "x".repeat(max_bytes + 1);
+            overflow.as_object_mut().unwrap().insert(field.to_string(), json!(overflow_value.clone()));
+            if field == "content" {
+                overflow
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("content_checksum".to_string(), json!(sha256_bytes(overflow_value.as_bytes())));
+            }
+            let overflow_batch =
+                if field == "semantic_batch_id" { overflow_value.as_str() } else { "semantic-batch-1" };
+            std::fs::write(&path, format!("{}\n", overflow)).unwrap();
+            let error = read_semantic_jsonl(&path, overflow_batch).unwrap_err();
+            assert!(matches!(error.code, "VECTOR_VARCHAR_LENGTH_EXCEEDED" | "SEMANTIC_BATCH_ID_INVALID"));
+        }
+
+        let mut multibyte_title = record.clone();
+        multibyte_title.as_object_mut().unwrap().insert("card_id".to_string(), json!("metric-order-gmv-2"));
+        multibyte_title.as_object_mut().unwrap().insert("title".to_string(), json!("中".repeat(171)));
+        std::fs::write(&path, format!("{}\n{}\n", record, multibyte_title)).unwrap();
+        assert_eq!(read_semantic_jsonl(&path, "semantic-batch-1").unwrap_err().code, "VECTOR_VARCHAR_LENGTH_EXCEEDED");
     }
 
     #[test]
@@ -2241,6 +2882,15 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn inspection_semaphore_fails_closed_at_capacity() {
+        let runtime = EnterpriseRuntime::with_inspection_concurrency(1);
+        let permit = runtime.try_inspection_permit().await.unwrap();
+        assert_eq!(runtime.try_inspection_permit().await.unwrap_err().code, "IMPORT_INSPECTION_CONCURRENCY_LIMIT");
+        drop(permit);
+        let _permit = runtime.try_inspection_permit().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn governed_csv_snapshot_preserves_duplicate_position_and_real_row_number() {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("duplicate.csv");
@@ -2256,6 +2906,7 @@ mod tests {
             source_ref: Some("a".repeat(64)),
             source_format: Some(TableImportSourceFormat::Csv),
             parse_options: TableImportParseOptions {
+                encoding: Some(TableImportTextEncoding::Utf8),
                 title_row: Some(2),
                 data_start_row: Some(3),
                 has_header: Some(true),
@@ -2301,6 +2952,77 @@ mod tests {
         assert_eq!(row.get(1), Some("B"));
         assert_eq!(row.get(5), Some("3"));
         assert_eq!(row.get(6).map(str::len), Some(64));
+    }
+
+    #[tokio::test]
+    async fn governed_csv_distinguishes_short_and_trailing_empty_rows_and_blocks_nonempty_overflow() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("width.csv");
+        let output = directory.path().join("normalized.csv");
+        std::fs::write(&source, "a,b\nshort\nexact,value\ntail,empty,\n").unwrap();
+        let request = TableImportRequest {
+            import_id: "import-width".to_string(),
+            connection_id: "postgres-1".to_string(),
+            database: "enterprise".to_string(),
+            schema: "staging".to_string(),
+            table: "mcp_width".to_string(),
+            file_path: source.to_string_lossy().to_string(),
+            source_ref: Some("d".repeat(64)),
+            source_format: Some(TableImportSourceFormat::Csv),
+            parse_options: TableImportParseOptions {
+                encoding: Some(TableImportTextEncoding::Utf8),
+                ..Default::default()
+            },
+            mappings: vec![
+                TableImportColumnMapping {
+                    source_column: "a".to_string(),
+                    target_column: "a".to_string(),
+                    target_data_type: Some("TEXT".to_string()),
+                },
+                TableImportColumnMapping {
+                    source_column: "b".to_string(),
+                    target_column: "b".to_string(),
+                    target_data_type: Some("TEXT".to_string()),
+                },
+            ],
+            mode: TableImportMode::Append,
+            create_table: true,
+            batch_size: 10,
+            date_time_format: None,
+            prepared_source: None,
+            retain_source: true,
+        };
+        build_governed_import_snapshot(
+            request.clone(),
+            "plan-width",
+            &"d".repeat(64),
+            &output,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
+        let mut reader = csv::Reader::from_path(&output).unwrap();
+        let rows = reader.records().map(Result::unwrap).collect::<Vec<_>>();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].get(5), Some("2"));
+        assert_eq!(rows[2].get(5), Some("4"));
+        assert_ne!(rows[0].get(6), rows[2].get(6));
+        assert!(rows.iter().all(|row| row.get(6).is_some_and(|hash| hash.len() == 64)));
+
+        std::fs::write(&source, "a,b\nwide,value,unexpected\n").unwrap();
+        let overflow_output = directory.path().join("overflow.csv");
+        let error = build_governed_import_snapshot(
+            request,
+            "plan-overflow",
+            &"d".repeat(64),
+            &overflow_output,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "IMPORT_SOURCE_ROW_WIDER_THAN_HEADER");
+        assert!(error.message.contains("第 2 行"));
+        assert!(!overflow_output.exists());
     }
 
     #[tokio::test]
@@ -2365,6 +3087,18 @@ mod tests {
             .code,
             "IMPORT_GOVERNED_FORMAT_UNSUPPORTED_V1"
         );
+        for encoding in [TableImportTextEncoding::Auto, TableImportTextEncoding::Gbk] {
+            assert_eq!(
+                validate_governed_source_v1(
+                    "input.csv",
+                    Some(TableImportSourceFormat::Csv),
+                    &TableImportParseOptions { encoding: Some(encoding), ..Default::default() },
+                )
+                .unwrap_err()
+                .code,
+                "IMPORT_GOVERNED_EXPLICIT_UTF8_REQUIRED_V1"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2476,6 +3210,7 @@ mod tests {
         let source = PathBuf::from(std::env::var("DBX_MCP_REAL_XLSX_FIXTURE").expect("fixture path"));
         let directory = tempfile::tempdir().unwrap();
         let output = directory.path().join("normalized.csv");
+        validate_source_archive_limits(&source, Some(TableImportSourceFormat::Excel)).unwrap();
         let identity = file_identity(source.clone()).await.unwrap();
         let parse_options = TableImportParseOptions::default();
         let preview = dbx_core::table_import::preview_table_import_file_with_request(
@@ -2490,6 +3225,7 @@ mod tests {
         .await
         .unwrap();
         validate_preview_headers(&preview).unwrap();
+        assert_eq!(preview.columns.len(), 145);
         let source_columns = source_columns_for_preview(
             &source.to_string_lossy(),
             Some(TableImportSourceFormat::Excel),
@@ -2498,9 +3234,15 @@ mod tests {
         )
         .await
         .unwrap();
+        assert_eq!(source_columns.len(), 145);
+        let merchant_notes = source_columns
+            .iter()
+            .filter(|column| column.raw_source_name == "商家备注")
+            .map(|column| column.canonical_source_name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(merchant_notes, vec!["商家备注__1", "商家备注__2"]);
         let requested = source_columns
             .iter()
-            .take(2)
             .enumerate()
             .map(|(index, column)| McpImportColumnMapping {
                 source_position: column.source_position,
@@ -2510,6 +3252,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let mappings = validate_mappings(&requested, &source_columns).unwrap();
+        let batch_size = governed_import_batch_size(None, source_columns.len()).unwrap();
         let plan = build_plan(
             "fixture-postgres".to_string(),
             "fixture".to_string(),
@@ -2523,12 +3266,12 @@ mod tests {
             parse_options,
             mappings,
             true,
-            500,
+            batch_size,
             None,
         )
         .unwrap();
         let request = plan.to_import_request("fixture-import".to_string());
-        build_governed_import_snapshot(
+        let governed = build_governed_import_snapshot(
             request,
             &plan.plan_id,
             &identity.sha256,
@@ -2537,11 +3280,43 @@ mod tests {
         )
         .await
         .unwrap();
+        assert!(governed.mappings.iter().all(|mapping| mapping.target_data_type.as_deref() == Some("TEXT")));
         let mut reader = csv::Reader::from_path(output).unwrap();
         let headers = reader.headers().unwrap().clone();
+        assert_eq!(headers.len(), source_columns.len() + RESERVED_STAGING_COLUMNS.len());
         assert!(headers.iter().any(|header| header == "source_row_number"));
         assert!(headers.iter().any(|header| header == "source_row_hash"));
-        let row_count = reader.records().filter_map(Result::ok).count();
+        let mut non_empty_columns = vec![false; source_columns.len()];
+        let mut previous_source_row = 0usize;
+        let mut row_count = 0usize;
+        for record in reader.records() {
+            let record = record.unwrap();
+            assert_eq!(record.len(), source_columns.len() + RESERVED_STAGING_COLUMNS.len());
+            for (index, value) in record.iter().take(source_columns.len()).enumerate() {
+                let normalized = value.trim();
+                non_empty_columns[index] |= !normalized.is_empty() && !matches!(normalized, "-" | "--");
+            }
+            let source_row = record.get(source_columns.len() + 3).unwrap().parse::<usize>().unwrap();
+            assert!(source_row > previous_source_row);
+            previous_source_row = source_row;
+            let row_hash = record.get(source_columns.len() + 4).unwrap();
+            assert!(is_sha256_hex(row_hash));
+            row_count += 1;
+        }
         assert!(row_count > 0);
+        let empty_positions = non_empty_columns
+            .iter()
+            .enumerate()
+            .filter_map(|(index, non_empty)| (!*non_empty).then_some(index + 1))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            empty_positions,
+            vec![
+                2, 3, 8, 9, 13, 14, 20, 22, 25, 26, 28, 29, 30, 31, 36, 37, 38, 39, 40, 41, 42, 46, 47, 48, 53, 54, 58,
+                59, 60, 61, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96,
+                97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117,
+                134, 135, 136, 137, 140, 141, 145,
+            ]
+        );
     }
 }

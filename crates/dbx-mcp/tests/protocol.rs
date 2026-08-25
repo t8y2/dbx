@@ -285,12 +285,14 @@ async fn initializes_lists_tools_and_calls_a_tool() {
     let tools = client.peer().list_tools(None).await.expect("list tools");
     let names = tools.tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
     #[cfg(feature = "mq-admin")]
-    assert_eq!(names.len(), 25);
+    assert_eq!(names.len(), 22);
     #[cfg(not(feature = "mq-admin"))]
-    assert_eq!(names.len(), 24);
+    assert_eq!(names.len(), 21);
     assert!(names.contains(&"dbx_list_connections"));
     assert!(names.contains(&"dbx_list_databases"));
-    assert!(names.contains(&"dbx_duplicate_connection"));
+    assert!(!names.contains(&"dbx_add_connection"));
+    assert!(!names.contains(&"dbx_duplicate_connection"));
+    assert!(!names.contains(&"dbx_remove_connection"));
     assert!(names.contains(&"dbx_execute_redis_command"));
     assert!(names.contains(&"dbx_execute_and_show"));
     assert!(names.contains(&"dbx_open_session"));
@@ -530,7 +532,12 @@ async fn duplicate_connection_rejects_ambiguous_source_names() {
         group_paths: Ok(HashMap::new()),
     };
     let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
-    let server = DbxMcpServer::with_runtime_options(Arc::new(backend), McpScope::default(), false);
+    let server = DbxMcpServer::with_runtime_options_and_connection_management(
+        Arc::new(backend),
+        McpScope::default(),
+        false,
+        true,
+    );
     let server_task = tokio::spawn(async move { server.serve(server_transport).await });
     let client = ().serve(client_transport).await.expect("initialize MCP client");
     let result = client

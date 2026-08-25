@@ -166,9 +166,9 @@ Ask the MCP client to:
 | `dbx_cancel_import` | Request cancellation of a staging import |
 | `dbx_vector_search` | Search approved, active semantic cards in an allowed Milvus collection |
 | `dbx_vector_upsert_file` | Upsert approved semantic cards from an allowed JSONL file |
-| `dbx_vector_delete_by_batch` | Delete one exact unpublished semantic batch with Full access |
+| `dbx_vector_delete_by_batch` | Return `VECTOR_DELETE_DISABLED_V1`; v1 performs no MCP deletion |
 
-When connection scoping is enabled, mutating connection tools and desktop UI tools are hidden.
+Connection management is default-closed. An unscoped installation/maintenance process must temporarily set `DBX_MCP_ENABLE_CONNECTION_MANAGEMENT=1`; any `DBX_MCP_SCOPE_*` setting still disables add, duplicate, and remove. Remove also enforces the global connection allowlist. Scoped sessions hide desktop UI tools too.
 
 `dbx_list_databases` returns only database names allowed by the selected connection's MCP database scope. `dbx_send_message` is available when message-queue support is included in the server build.
 
@@ -190,7 +190,7 @@ DBX connection storage defaults to:
 
 Override the directory with `DBX_DATA_DIR`.
 
-Local file imports additionally require `DBX_MCP_IMPORT_ROOTS`. Preview accepts Excel/JSON/CSV/TSV; v1 governed import streams XLSX/XLSM and UTF-8 CSV/TSV, while legacy `.xls` and JSON remain preview-only. Prepare accepts position+raw+canonical-name mappings and generates a unique `staging.mcp_<uuid>` relation; callers cannot append to an existing table. Start revalidates the source and streams a private snapshot containing absolute row numbers, hashes, and batch lineage before opening a database pool. Import tools support local mode only and return `IMPORT_UNSUPPORTED_IN_WEB_MODE_V1` in Web mode. See the [MCP documentation](../../docs/content/docs/mcp.mdx#local-file-imports-and-milvus-tools) for the full contract.
+Local file imports additionally require `DBX_MCP_IMPORT_ROOTS`. Preview accepts Excel/JSON/CSV/TSV and reports whether row/range counts are exact. V1 governed import streams XLSX/XLSM and CSV/TSV with explicit `utf-8`; legacy `.xls`, JSON, `auto`, GBK, and UTF-16 remain preview-only. Inspection, ZIP expansion, shared strings, worksheets, cells, row batches, normalized output, and task disk all have hard budgets. Prepare accepts position+raw+canonical-name mappings and generates a unique `staging.mcp_<uuid>` relation; callers cannot append to an existing table. Start performs cancellable copy+SHA into a private snapshot, hashes the complete source record with its absolute row number, and opens the database only after normalization succeeds. Semantic VARCHAR lengths are fully prevalidated, Milvus's single-search outer result array is flattened, and v1 batch deletion is disabled. See the [MCP documentation](../../docs/content/docs/mcp.mdx#local-file-imports-and-milvus-tools) for the full contract.
 
 ### Agent/JDBC databases
 
@@ -343,9 +343,14 @@ SQL text is not included in normal MCP errors or logged by default. Enable tempo
 | `DBX_MCP_SCOPE_CONNECTION_IDS` | Compatibility scope for multiple connection IDs |
 | `DBX_MCP_SCOPE_CONNECTION_NAME` | Restrict tools to one connection name |
 | `DBX_MCP_SCOPE_DATABASE` | Restrict tools to one database |
+| `DBX_MCP_ENABLE_CONNECTION_MANAGEMENT` | Set to `1` only for an unscoped installation/maintenance process; default disabled |
 | `DBX_MCP_IMPORT_ROOTS` | Platform-separated allowlist of local import/semantic-file directories |
 | `DBX_MCP_IMPORT_STAGING_SCHEMAS` | Comma-separated PostgreSQL staging schema allowlist (default `staging`) |
 | `DBX_MCP_IMPORT_FILE_MAX_BYTES` | Maximum tabular import source size (default 512 MiB) |
+| `DBX_MCP_IMPORT_INSPECTION_CONCURRENCY` | Concurrent preview/prepare inspections (default `2`) |
+| `DBX_MCP_IMPORT_INSPECTION_TIMEOUT_SECS` | Inspection wait timeout (default `30`) |
+| `DBX_MCP_IMPORT_NORMALIZED_MAX_BYTES` | Maximum normalized governed CSV size (default 2 GiB) |
+| `DBX_MCP_IMPORT_DISK_RESERVE_BYTES` | Required free task-disk reserve (default 2 GiB) |
 | `DBX_MCP_SEMANTIC_FILE_MAX_BYTES` | Maximum semantic JSONL size (default 64 MiB) |
 | `DBX_MCP_VECTOR_COLLECTIONS` | Comma-separated Milvus collection allowlist (default `semantic_cards`) |
 | `DBX_MCP_VECTOR_TOP_K_MAX` | Maximum Milvus Top K (default `20`, hard cap 50) |
@@ -451,7 +456,7 @@ MCP 协议、连接读取、SQL 安全检查、Schema、Redis、MongoDB、Web �
 
 ### 主要能力
 
-- 25 个 MCP 工具，覆盖连接、Schema、SQL、会话、本地受控导入、Milvus 语义、Redis、消息队列和 DBX 桌面操作
+- 定义 25 个 MCP 工具；日常默认注册 22 个，显式无作用域维护模式再开放 3 个连接管理工具
 - 不依赖 `better-sqlite3`，没有 Node 原生模块 ABI 问题
 - 支持本地 DBX、DBX Web 和 Docker
 - 可选 Streamable HTTP 传输，使用 Bearer Token 保护；stdio 仍为默认方式
@@ -555,7 +560,7 @@ MCP 配置：
 | `dbx_cancel_import` | 请求取消 staging 导入 |
 | `dbx_vector_search` | 在允许的 Milvus 集合中检索已批准且生效的语义卡 |
 | `dbx_vector_upsert_file` | 从允许目录中的 JSONL upsert 已批准语义卡 |
-| `dbx_vector_delete_by_batch` | 在完全访问权限下删除一个明确的未发布语义批次 |
+| `dbx_vector_delete_by_batch` | v1 返回 `VECTOR_DELETE_DISABLED_V1`，不执行 MCP 删除 |
 
 `dbx_list_databases` 只返回该连接 MCP 数据库范围内允许访问的名称。`dbx_send_message` 仅在 Server 构建时包含消息队列支持时可用。
 
@@ -567,7 +572,7 @@ MCP 配置：
 
 通过 `DBX_DATA_DIR` 覆盖默认目录。Windows 便携版应指向 `DBX.exe` 同级、包含 `dbx.db` 的 `data` 文件夹。
 
-本地文件导入还必须配置 `DBX_MCP_IMPORT_ROOTS`。preview 支持 Excel/JSON/CSV/TSV；v1 治理入库流式支持 XLSX/XLSM 和 UTF-8 CSV/TSV，旧版 `.xls` 与 JSON 暂为 preview-only。prepare 接受“源位置+raw+canonical 名称”映射并由服务端生成唯一 `staging.mcp_<uuid>`，调用方不能追加已有表。start 在打开数据库连接前复验文件并流式生成包含真实绝对行号、行哈希和批次血缘的任务快照。导入工具仅支持本地模式，Web 模式稳定返回 `IMPORT_UNSUPPORTED_IN_WEB_MODE_V1`。完整契约见 [MCP 中文文档](../../docs/content/docs/mcp.cn.mdx#本地文件导入与-milvus-工具)。
+连接管理默认关闭；仅无作用域安装维护进程临时设置 `DBX_MCP_ENABLE_CONNECTION_MANAGEMENT=1`，任何 `DBX_MCP_SCOPE_*` 都继续禁用新增、复制和删除。本地文件导入还必须配置 `DBX_MCP_IMPORT_ROOTS`。preview 支持 Excel/JSON/CSV/TSV 并标明行数/范围是否精确；v1 治理入库流式支持 XLSX/XLSM 和显式 `utf-8` 的 CSV/TSV，旧版 `.xls`、JSON、`auto`、GBK 与 UTF-16 暂为 preview-only。inspection、ZIP 解压、sharedStrings、worksheet、单元格、批次、规范化输出与任务磁盘均有硬预算。start 以可取消复制+SHA 生成任务私有快照，保留绝对行号和完整源记录哈希，规范化成功后才打开数据库。语义 VARCHAR 会整文件预校验，Milvus 单查询 search 会展开外层数组，v1 批次删除禁用。完整契约见 [MCP 中文文档](../../docs/content/docs/mcp.cn.mdx#本地文件导入与-milvus-工具)。
 
 ### DBX Web / Docker
 
@@ -697,9 +702,14 @@ MongoDB 更新和删除在未启用完全访问时必须提供可验证有效的
 | `DBX_MCP_SCOPE_CONNECTION_IDS` | 兼容旧配置：限制到多个连接 ID |
 | `DBX_MCP_SCOPE_CONNECTION_NAME` | 限制到指定连接名称 |
 | `DBX_MCP_SCOPE_DATABASE` | 限制到指定数据库 |
+| `DBX_MCP_ENABLE_CONNECTION_MANAGEMENT` | 仅无作用域安装维护进程临时设为 `1`；默认禁用 |
 | `DBX_MCP_IMPORT_ROOTS` | 本地导入/语义文件目录 allowlist，使用平台路径分隔符 |
 | `DBX_MCP_IMPORT_STAGING_SCHEMAS` | PostgreSQL staging Schema allowlist，逗号分隔，默认 `staging` |
 | `DBX_MCP_IMPORT_FILE_MAX_BYTES` | 表格导入源最大字节数，默认 512 MiB |
+| `DBX_MCP_IMPORT_INSPECTION_CONCURRENCY` | preview/prepare 剖析并发，默认 `2` |
+| `DBX_MCP_IMPORT_INSPECTION_TIMEOUT_SECS` | 文件剖析等待上限，默认 `30` 秒 |
+| `DBX_MCP_IMPORT_NORMALIZED_MAX_BYTES` | 单个规范化治理 CSV 上限，默认 2 GiB |
+| `DBX_MCP_IMPORT_DISK_RESERVE_BYTES` | 任务磁盘必须额外保留的空间，默认 2 GiB |
 | `DBX_MCP_SEMANTIC_FILE_MAX_BYTES` | 语义 JSONL 最大字节数，默认 64 MiB |
 | `DBX_MCP_VECTOR_COLLECTIONS` | Milvus 集合 allowlist，逗号分隔，默认 `semantic_cards` |
 | `DBX_MCP_VECTOR_TOP_K_MAX` | Milvus Top K 上限，默认 `20`，硬上限 50 |

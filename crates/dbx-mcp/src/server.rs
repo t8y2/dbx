@@ -12,13 +12,13 @@ use uuid::Uuid;
 use crate::backend::{format_query_result, new_connection_config, parse_database_type, ConnectionSummary, DbxBackend};
 use crate::enterprise_tools::{
     build_milvus_filter, build_plan, cell_char_limit, file_identity, generated_staging_relation,
-    milvus_delete_batch_query, milvus_existing_cards_query, milvus_search_query, milvus_upsert_query, preview_limit,
-    query_result_rows, read_semantic_jsonl, revalidate_plan_file, sanitize_preview, source_columns_for_preview,
-    structure_fingerprint, validate_embedding, validate_existing_card_ownership, validate_governed_source_v1,
-    validate_import_file, validate_mappings, validate_preview_headers, validate_vector_collection,
-    vector_output_fields, vector_top_k, vector_upsert_batch_size, EnterpriseRuntime, EnterpriseToolError,
-    ImportStatusRequest, PrepareTableImportRequest, PreviewImportFileRequest, StartTableImportRequest,
-    VectorDeleteByBatchRequest, VectorSearchRequest, VectorUpsertFileRequest, FORMAT_VERSION,
+    governed_import_batch_size, inspect_import_source, inspection_timeout, milvus_existing_cards_query,
+    milvus_search_query, milvus_upsert_query, preview_limit, query_result_rows, read_semantic_jsonl,
+    revalidate_plan_file, sanitize_preview, structure_fingerprint, validate_embedding,
+    validate_existing_card_ownership, validate_governed_source_v1, validate_import_file, validate_mappings,
+    validate_vector_collection, vector_output_fields, vector_top_k, vector_upsert_batch_size, EnterpriseRuntime,
+    EnterpriseToolError, ImportStatusRequest, PrepareTableImportRequest, PreviewImportFileRequest,
+    StartTableImportRequest, VectorDeleteByBatchRequest, VectorSearchRequest, VectorUpsertFileRequest, FORMAT_VERSION,
 };
 use crate::mongo::{self, MongoCommand, MongoSafetyError};
 use crate::session::{McpSession, McpSessionStore};
@@ -287,6 +287,7 @@ pub struct DbxMcpServer {
     sessions: Arc<McpSessionStore>,
     enterprise: Arc<EnterpriseRuntime>,
     web_mode: bool,
+    connection_management_enabled: bool,
     tool_router: ToolRouter<Self>,
 }
 
@@ -353,8 +354,22 @@ impl DbxMcpServer {
         // transitive dependencies. Native MCP runs outside the desktop/web
         // startup paths, so select the same provider before any TLS tool call.
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let connection_management_requested = std::env::var("DBX_MCP_ENABLE_CONNECTION_MANAGEMENT")
+            .ok()
+            .is_some_and(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true"));
+        Self::with_runtime_options_and_connection_management(backend, scope, web_mode, connection_management_requested)
+    }
+
+    /// 构造带显式连接维护权限的服务器；任何作用域仍会强制关闭连接管理。
+    pub fn with_runtime_options_and_connection_management(
+        backend: Arc<dyn DbxBackend>,
+        scope: McpScope,
+        web_mode: bool,
+        connection_management_requested: bool,
+    ) -> Self {
         let mut tool_router = Self::tool_router();
-        if scope.enabled() {
+        let connection_management_enabled = connection_management_requested && !scope.enabled();
+        if !connection_management_enabled {
             tool_router.disable_route("dbx_add_connection");
             tool_router.disable_route("dbx_duplicate_connection");
             tool_router.disable_route("dbx_remove_connection");
@@ -372,8 +387,26 @@ impl DbxMcpServer {
             sessions: McpSessionStore::new(),
             enterprise: Arc::new(EnterpriseRuntime::default()),
             web_mode,
+            connection_management_enabled,
             tool_router,
         }
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn connection_management_guard(&self) -> Result<(), CallToolResult> {
+        if self.scope.enabled() {
+            return Err(tool_error(
+                "CONNECTION_MANAGEMENT_DISABLED_IN_SCOPED_MODE",
+                "设置任何 DBX_MCP_SCOPE_* 后，连接新增、复制和删除都会被禁用。",
+            ));
+        }
+        if !self.connection_management_enabled {
+            return Err(tool_error(
+                "CONNECTION_MANAGEMENT_DISABLED",
+                "连接管理默认关闭；仅安装维护时可临时设置 DBX_MCP_ENABLE_CONNECTION_MANAGEMENT=1。",
+            ));
+        }
+        Ok(())
     }
 
     async fn close_backend_sessions_best_effort(&self, sessions: Vec<McpSession>) {
@@ -565,7 +598,14 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_preview_import_file",
-        description = "Preview an allowed local Excel/CSV/TSV/JSON file without writing data. Returns bounded rows, sheets, hashes, columns, row counts and a structure fingerprint. Local DBX Desktop/MCP mode only."
+        description = "Preview an allowed local Excel/CSV/TSV/JSON file without writing data. Returns bounded rows, sheets, hashes, columns, row counts and a structure fingerprint. Local DBX Desktop/MCP mode only.",
+        annotations(
+            title = "预览本地导入文件",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn preview_import_file(&self, Parameters(request): Parameters<PreviewImportFileRequest>) -> CallToolResult {
         if self.web_mode {
@@ -576,10 +616,6 @@ impl DbxMcpServer {
         }
         let path = match validate_import_file(&request.file_path, false) {
             Ok(path) => path,
-            Err(error) => return enterprise_error(error),
-        };
-        let identity = match file_identity(path.clone()).await {
-            Ok(identity) => identity,
             Err(error) => return enterprise_error(error),
         };
         let parse_options = match request.parse_options.into_core() {
@@ -595,50 +631,46 @@ impl DbxMcpServer {
             Err(error) => return enterprise_error(error),
         };
         let source_format = request.source_format.map(Into::into);
-        let file_path = path.to_string_lossy().to_string();
-        let preview = dbx_core::table_import::preview_table_import_file_with_request(
-            dbx_core::table_import::TableImportPreviewRequest {
-                file_path: file_path.clone(),
-                source_ref: Some(identity.sha256.clone()),
-                source_format,
-                parse_options: parse_options.clone(),
-                preview_limit: Some(preview_rows),
-            },
-        )
-        .await;
-        let preview = match preview {
-            Ok(preview) => preview,
-            Err(error) => {
-                return enterprise_error(EnterpriseToolError::new("IMPORT_PREVIEW_FAILED", error));
-            }
-        };
-        if let Err(error) = validate_preview_headers(&preview) {
-            return enterprise_error(error);
-        }
-        let source_columns =
-            match source_columns_for_preview(&file_path, source_format, &parse_options, &preview.columns).await {
-                Ok(columns) => columns,
-                Err(error) => return enterprise_error(error),
-            };
-        let fingerprint = structure_fingerprint(&preview, &parse_options, &source_columns);
-        let current_identity = match file_identity(path).await {
-            Ok(identity) => identity,
+        let inspection_permit = match self.enterprise.try_inspection_permit().await {
+            Ok(permit) => permit,
             Err(error) => return enterprise_error(error),
         };
-        if current_identity != identity {
-            return enterprise_error(EnterpriseToolError::new(
-                "IMPORT_FILE_CHANGED_DURING_PREVIEW",
-                "文件在预览期间发生变化；结果已丢弃。",
-            ));
-        }
+        let inspection_parse_options = parse_options.clone();
+        let mut inspection_task = tokio::spawn(async move {
+            let _inspection_permit = inspection_permit;
+            inspect_import_source(path, source_format, inspection_parse_options, preview_rows).await
+        });
+        let inspection = match tokio::time::timeout(inspection_timeout(), &mut inspection_task).await {
+            Ok(Ok(Ok(inspection))) => inspection,
+            Ok(Ok(Err(error))) => return enterprise_error(error),
+            Ok(Err(error)) => {
+                return enterprise_error(EnterpriseToolError::new("IMPORT_INSPECTION_FAILED", error.to_string()))
+            }
+            Err(_) => {
+                return enterprise_error(EnterpriseToolError::new(
+                    "IMPORT_INSPECTION_TIMEOUT",
+                    "文件剖析超过时间上限；后台检查会继续占用受控槽位直到安全结束。",
+                ))
+            }
+        };
+        let identity = inspection.identity;
+        let mut preview = inspection.preview;
+        let source_columns = inspection.source_columns;
+        let fingerprint = structure_fingerprint(&preview, &parse_options, &source_columns);
         let used_first_row = preview.source_row_numbers.first().copied();
         let used_last_row = preview.source_row_numbers.last().copied();
-        let preview = sanitize_preview(preview, char_limit);
+        let used_range_exact = preview.total_rows_exact;
+        preview = sanitize_preview(preview, char_limit);
+        let row_summary = if preview.total_rows_exact {
+            format!("精确共 {} 行", preview.total_rows)
+        } else {
+            format!("受限扫描到 {} 行，文件总行数尚未精确统计", preview.total_rows)
+        };
         let summary = format!(
-            "已只读剖析 {}：{} 列，{} 行，返回 {} 行预览。",
+            "已只读剖析 {}：{} 列，{}，返回 {} 行预览。",
             preview.file_name,
             preview.columns.len(),
-            preview.total_rows,
+            row_summary,
             preview.rows.len()
         );
         structured_success(
@@ -652,7 +684,10 @@ impl DbxMcpServer {
                     "lastPreviewDataRow": used_last_row,
                     "firstColumn": if preview.columns.is_empty() { 0 } else { 1 },
                     "lastColumn": preview.columns.len(),
+                    "exact": used_range_exact,
                 },
+                "usedRangeExact": used_range_exact,
+                "totalRowsExact": preview.total_rows_exact,
                 "preview": preview,
             }),
         )
@@ -660,7 +695,14 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_prepare_table_import",
-        description = "Validate a caller-approved template mapping and immutable local source, then generate a unique PostgreSQL staging relation and a single-use plan valid for 30 minutes. This tool performs no database query or write."
+        description = "Validate a caller-approved template mapping and immutable local source, then generate a unique PostgreSQL staging relation and a single-use plan valid for 30 minutes. This tool performs no database query or write.",
+        annotations(
+            title = "准备隔离导入计划",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn prepare_table_import(&self, Parameters(request): Parameters<PrepareTableImportRequest>) -> CallToolResult {
         if self.web_mode {
@@ -687,10 +729,6 @@ impl DbxMcpServer {
             Ok(path) => path,
             Err(error) => return enterprise_error(error),
         };
-        let identity = match file_identity(path.clone()).await {
-            Ok(identity) => identity,
-            Err(error) => return enterprise_error(error),
-        };
         let parse_options = match request.parse_options.into_core() {
             Ok(options) => options,
             Err(error) => return enterprise_error(error),
@@ -699,40 +737,31 @@ impl DbxMcpServer {
         if let Err(error) = validate_governed_source_v1(&path.to_string_lossy(), source_format, &parse_options) {
             return enterprise_error(error);
         }
-        let preview = dbx_core::table_import::preview_table_import_file_with_request(
-            dbx_core::table_import::TableImportPreviewRequest {
-                file_path: path.to_string_lossy().to_string(),
-                source_ref: Some(identity.sha256.clone()),
-                source_format,
-                parse_options: parse_options.clone(),
-                preview_limit: Some(1),
-            },
-        )
-        .await;
-        let preview = match preview {
-            Ok(preview) => preview,
-            Err(error) => return enterprise_error(EnterpriseToolError::new("IMPORT_PREVIEW_FAILED", error)),
-        };
-        if let Err(error) = validate_preview_headers(&preview) {
-            return enterprise_error(error);
-        }
-        let source_columns =
-            match source_columns_for_preview(&path.to_string_lossy(), source_format, &parse_options, &preview.columns)
-                .await
-            {
-                Ok(columns) => columns,
-                Err(error) => return enterprise_error(error),
-            };
-        let current_identity = match file_identity(path).await {
-            Ok(identity) => identity,
+        let inspection_permit = match self.enterprise.try_inspection_permit().await {
+            Ok(permit) => permit,
             Err(error) => return enterprise_error(error),
         };
-        if current_identity != identity {
-            return enterprise_error(EnterpriseToolError::new(
-                "IMPORT_FILE_CHANGED_DURING_PREPARE",
-                "文件在 prepare 剖析期间发生变化；未创建计划。",
-            ));
-        }
+        let inspection_parse_options = parse_options.clone();
+        let mut inspection_task = tokio::spawn(async move {
+            let _inspection_permit = inspection_permit;
+            inspect_import_source(path, source_format, inspection_parse_options, 1).await
+        });
+        let inspection = match tokio::time::timeout(inspection_timeout(), &mut inspection_task).await {
+            Ok(Ok(Ok(inspection))) => inspection,
+            Ok(Ok(Err(error))) => return enterprise_error(error),
+            Ok(Err(error)) => {
+                return enterprise_error(EnterpriseToolError::new("IMPORT_INSPECTION_FAILED", error.to_string()))
+            }
+            Err(_) => {
+                return enterprise_error(EnterpriseToolError::new(
+                    "IMPORT_INSPECTION_TIMEOUT",
+                    "prepare 剖析超过时间上限；后台检查会继续占用受控槽位直到安全结束。",
+                ))
+            }
+        };
+        let identity = inspection.identity;
+        let preview = inspection.preview;
+        let source_columns = inspection.source_columns;
         let mappings = match validate_mappings(&request.mappings, &source_columns) {
             Ok(mappings) => mappings,
             Err(error) => return enterprise_error(error),
@@ -741,13 +770,10 @@ impl DbxMcpServer {
             Ok(relation) => relation,
             Err(error) => return enterprise_error(error),
         };
-        let batch_size = request.batch_size.unwrap_or(1_000);
-        if !(1..=50_000).contains(&batch_size) {
-            return enterprise_error(EnterpriseToolError::new(
-                "IMPORT_BATCH_SIZE_INVALID",
-                "batch_size 必须在 1 到 50000 之间。",
-            ));
-        }
+        let batch_size = match governed_import_batch_size(request.batch_size, source_columns.len()) {
+            Ok(value) => value,
+            Err(error) => return enterprise_error(error),
+        };
         let fingerprint = structure_fingerprint(&preview, &parse_options, &source_columns);
         let plan = match build_plan(
             resolved.connection.id.clone(),
@@ -779,7 +805,14 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_start_table_import",
-        description = "Start a previously prepared single-use PostgreSQL staging import. The file, target, parsing options and mappings are revalidated and cannot be replaced."
+        description = "Start a previously prepared single-use PostgreSQL staging import. The file, target, parsing options and mappings are revalidated and cannot be replaced.",
+        annotations(
+            title = "启动隔离表导入",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn start_table_import(&self, Parameters(request): Parameters<StartTableImportRequest>) -> CallToolResult {
         if self.web_mode {
@@ -833,9 +866,16 @@ impl DbxMcpServer {
                 }
                 progress_job.snapshot.lock().unwrap_or_else(|error| error.into_inner()).apply_progress(update);
             });
-            let result = backend
-                .import_table_file_for_mcp(&connection, import_request, plan_id, task_job.cancelled.clone(), progress)
-                .await;
+            let worker_cancelled = task_job.cancelled.clone();
+            let worker = tokio::spawn(async move {
+                backend
+                    .import_table_file_for_mcp(&connection, import_request, plan_id, worker_cancelled, progress)
+                    .await
+            });
+            let result = match worker.await {
+                Ok(result) => result,
+                Err(error) => Err(format!("IMPORT_TASK_PANICKED: 导入后台任务异常结束：{error}")),
+            };
             let mut snapshot = task_job.snapshot.lock().unwrap_or_else(|error| error.into_inner());
             match result {
                 Ok(summary) => {
@@ -873,7 +913,14 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_get_import_status",
-        description = "Get machine-readable progress, row counts, bytes, elapsed time, errors and final summary for an MCP table import."
+        description = "Get machine-readable progress, row counts, bytes, elapsed time, errors and final summary for an MCP table import.",
+        annotations(
+            title = "查询导入状态",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn get_import_status(&self, Parameters(request): Parameters<ImportStatusRequest>) -> CallToolResult {
         if self.web_mode {
@@ -894,7 +941,14 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_cancel_import",
-        description = "Request cancellation of an MCP staging import. Cancellation stops subsequent batches and never publishes staging data to core or mart."
+        description = "Request cancellation of an MCP staging import. Cancellation stops subsequent batches and never publishes staging data to core or mart.",
+        annotations(
+            title = "取消隔离导入",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn cancel_import(&self, Parameters(request): Parameters<ImportStatusRequest>) -> CallToolResult {
         if self.web_mode {
@@ -924,7 +978,14 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_vector_search",
-        description = "Search an allowed Milvus semantic collection with a bounded vector and safe equality filters. Approval and effective date are always enforced; semantic_version is an optional exact filter."
+        description = "Search an allowed Milvus semantic collection with a bounded vector and safe equality filters. Approval and effective date are always enforced; semantic_version is an optional exact filter.",
+        annotations(
+            title = "检索获批语义卡",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn vector_search(&self, Parameters(request): Parameters<VectorSearchRequest>) -> CallToolResult {
         let resolved = match self.resolve_connection(&request.selector).await {
@@ -983,7 +1044,14 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_vector_upsert_file",
-        description = "Upsert approved semantic cards from one allowed JSONL file into an allowed Milvus collection. Requires MCP safe-write permission."
+        description = "Upsert approved semantic cards from one allowed JSONL file into an allowed Milvus collection. Requires MCP safe-write permission.",
+        annotations(
+            title = "写入获批语义卡",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn vector_upsert_file(&self, Parameters(request): Parameters<VectorUpsertFileRequest>) -> CallToolResult {
         let resolved = match self.resolve_connection(&request.selector).await {
@@ -1080,7 +1148,9 @@ impl DbxMcpServer {
             {
                 return enterprise_error(EnterpriseToolError::new(
                     "VECTOR_UPSERT_FAILED",
-                    format!("已提交 {upserted} 条后失败；语义版本尚未激活，可按 semantic_batch_id 撤销：{error}"),
+                    format!(
+                        "已提交 {upserted} 条后失败；语义版本尚未激活。v1 禁用 MCP 删除，请由管理员按 semantic_batch_id 执行受审计恢复：{error}"
+                    ),
                 ));
             }
             upserted += chunk.len();
@@ -1098,66 +1168,23 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_vector_delete_by_batch",
-        description = "Delete one unpublished Milvus semantic batch by exact semantic_batch_id. Requires high-risk MCP permission; arbitrary filter expressions are never accepted."
+        description = "Disabled in v1 because publication state cannot be authoritatively proven by the MCP server. Always returns VECTOR_DELETE_DISABLED_V1 and performs no connection or Milvus call.",
+        annotations(
+            title = "语义批次删除已禁用",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn vector_delete_by_batch(
         &self,
-        Parameters(request): Parameters<VectorDeleteByBatchRequest>,
+        Parameters(_request): Parameters<VectorDeleteByBatchRequest>,
     ) -> CallToolResult {
-        let resolved = match self.resolve_connection(&request.selector).await {
-            Ok(resolved) => resolved,
-            Err(error) => return error,
-        };
-        if resolved.connection.db_type != DatabaseType::Milvus {
-            return enterprise_error(EnterpriseToolError::new(
-                "VECTOR_REQUIRES_MILVUS",
-                "dbx_vector_delete_by_batch 只接受 Milvus 连接。",
-            ));
-        }
-        let database = match self.resolve_database(request.database, &resolved.connection) {
-            Ok(database) => database,
-            Err(error) => return error,
-        };
-        if let Err(error) = validate_safe_write_connection(&resolved.connection, &resolved.policy, &database) {
-            return error;
-        }
-        if request.published {
-            return enterprise_error(EnterpriseToolError::new(
-                "VECTOR_PUBLISHED_BATCH_DELETE_BLOCKED",
-                "published 必须由调用方显式证明为 false；已发布语义批次不能通过该工具删除。",
-            ));
-        }
-        if !resolved.policy.allow_dangerous_sql {
-            return enterprise_error(EnterpriseToolError::new(
-                "VECTOR_HIGH_RISK_WRITE_BLOCKED",
-                "按批删除语义向量需要开启 DBX MCP 高风险写入权限。",
-            ));
-        }
-        if let Err(error) = validate_vector_collection(&request.collection) {
-            return enterprise_error(error);
-        }
-        let _semantic_write_permit = match self.enterprise.semantic_write_permit().await {
-            Ok(permit) => permit,
-            Err(error) => return enterprise_error(error),
-        };
-        if request.semantic_batch_id.trim().is_empty() || request.semantic_batch_id.len() > 200 {
-            return enterprise_error(EnterpriseToolError::new(
-                "SEMANTIC_BATCH_ID_INVALID",
-                "semantic_batch_id 必须是 1～200 个字符。",
-            ));
-        }
-        let query = milvus_delete_batch_query(&database, &request.collection, &request.semantic_batch_id);
-        match self.backend.execute_query(&resolved.connection, &database, &query, Some(1), Some(30)).await {
-            Ok(_) => structured_success(
-                format!("已删除未发布语义批次 {}。", request.semantic_batch_id),
-                json!({
-                    "collection": request.collection,
-                    "semanticBatchId": request.semantic_batch_id,
-                    "deleted": true,
-                }),
-            ),
-            Err(error) => enterprise_error(EnterpriseToolError::new("VECTOR_DELETE_FAILED", error)),
-        }
+        enterprise_error(EnterpriseToolError::new(
+            "VECTOR_DELETE_DISABLED_V1",
+            "v1 禁用 MCP 语义批次删除：服务端无法权威证明该批次尚未发布。请使用受审计的管理员恢复流程。",
+        ))
     }
 
     #[tool(
@@ -1193,7 +1220,7 @@ impl DbxMcpServer {
         {
             return enterprise_error(EnterpriseToolError::new(
                 "VECTOR_DEDICATED_TOOL_REQUIRED",
-                "向量实体检索、写入和删除只能使用 dbx_vector_search、dbx_vector_upsert_file 或 dbx_vector_delete_by_batch；通用查询仅允许明确的管理诊断端点。",
+                "向量实体检索和写入只能使用 dbx_vector_search 与 dbx_vector_upsert_file；v1 禁止 MCP 删除，通用查询仅允许明确的管理诊断端点。",
             ));
         }
         // Resolve the session before the database so its connection/database
@@ -1576,6 +1603,9 @@ impl DbxMcpServer {
         if let Err(error) = self.ensure_tool_allowed("dbx_add_connection").await {
             return error;
         }
+        if let Err(error) = self.connection_management_guard() {
+            return error;
+        }
         let policy = match self.load_policy().await {
             Ok(policy) => policy,
             Err(error) => return error,
@@ -1631,6 +1661,9 @@ impl DbxMcpServer {
         Parameters(request): Parameters<DuplicateConnectionRequest>,
     ) -> CallToolResult {
         if let Err(error) = self.ensure_tool_allowed("dbx_duplicate_connection").await {
+            return error;
+        }
+        if let Err(error) = self.connection_management_guard() {
             return error;
         }
         let policy = match self.load_policy().await {
@@ -1691,6 +1724,9 @@ impl DbxMcpServer {
         if let Err(error) = self.ensure_tool_allowed("dbx_remove_connection").await {
             return error;
         }
+        if let Err(error) = self.connection_management_guard() {
+            return error;
+        }
         let policy = match self.load_policy().await {
             Ok(policy) => policy,
             Err(error) => return error,
@@ -1705,13 +1741,18 @@ impl DbxMcpServer {
             Ok(connections) => connections,
             Err(error) => return tool_error("CONNECTION_LOAD_ERROR", error),
         };
+        let allowed = connections
+            .iter()
+            .filter(|connection| policy_allows_connection(&policy, connection))
+            .cloned()
+            .collect::<Vec<_>>();
         let target = if let Some(id) = request.connection_id.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
-            connections.iter().find(|connection| connection.id == id).cloned()
+            allowed.iter().find(|connection| connection.id == id).cloned()
         } else {
             let Some(name) = request.connection_name.as_deref().map(str::trim).filter(|name| !name.is_empty()) else {
                 return tool_error("CONNECTION_NOT_FOUND", "Either connection_id or connection_name is required.");
             };
-            let matching = connections
+            let matching = allowed
                 .iter()
                 .filter(|connection| connection.name.eq_ignore_ascii_case(name))
                 .cloned()
@@ -2841,7 +2882,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn vector_batch_delete_requires_explicit_unpublished_attestation() {
+    async fn vector_batch_delete_is_fail_closed_in_v1() {
         let milvus = connection("milvus-1", "运营组语义库", "milvus", "default");
         let server = DbxMcpServer::with_runtime_options(
             Arc::new(FakeBackend { connections: vec![milvus], ..Default::default() }),
@@ -2854,18 +2895,23 @@ mod tests {
                 database: Some("default".to_string()),
                 collection: "semantic_cards".to_string(),
                 semantic_batch_id: "batch-1".to_string(),
-                published: true,
+                published: None,
             }))
             .await;
         assert_eq!(
             result.structured_content.as_ref().and_then(|value| value.pointer("/error/code")),
-            Some(&json!("VECTOR_PUBLISHED_BATCH_DELETE_BLOCKED"))
+            Some(&json!("VECTOR_DELETE_DISABLED_V1"))
         );
     }
 
     #[test]
     fn server_registers_list_connections_tool() {
-        let server = DbxMcpServer::with_runtime_options(Arc::new(FakeBackend::default()), McpScope::default(), false);
+        let server = DbxMcpServer::with_runtime_options_and_connection_management(
+            Arc::new(FakeBackend::default()),
+            McpScope::default(),
+            false,
+            true,
+        );
         let tools = server.tool_router.list_all();
         let names = tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
         #[cfg(feature = "mq-admin")]
@@ -2898,6 +2944,30 @@ mod tests {
         assert!(names.contains(&"dbx_vector_search"));
         assert!(names.contains(&"dbx_vector_upsert_file"));
         assert!(names.contains(&"dbx_vector_delete_by_batch"));
+        for name in [
+            "dbx_preview_import_file",
+            "dbx_prepare_table_import",
+            "dbx_start_table_import",
+            "dbx_get_import_status",
+            "dbx_cancel_import",
+            "dbx_vector_search",
+            "dbx_vector_upsert_file",
+            "dbx_vector_delete_by_batch",
+        ] {
+            let annotations = tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .and_then(|tool| tool.annotations.as_ref())
+                .unwrap_or_else(|| panic!("{name} 必须声明 MCP annotations"));
+            assert_eq!(annotations.open_world_hint, Some(false));
+        }
+        let delete_annotations = tools
+            .iter()
+            .find(|tool| tool.name == "dbx_vector_delete_by_batch")
+            .and_then(|tool| tool.annotations.as_ref())
+            .unwrap();
+        assert_eq!(delete_annotations.read_only_hint, Some(true));
+        assert_eq!(delete_annotations.destructive_hint, Some(false));
     }
 
     #[tokio::test]
@@ -2946,13 +3016,24 @@ mod tests {
             .preview_import_file(Parameters(PreviewImportFileRequest {
                 file_path: source.to_string_lossy().to_string(),
                 source_format: None,
-                parse_options: Default::default(),
+                parse_options: crate::enterprise_tools::McpImportParseOptions {
+                    encoding: Some("utf-8".to_string()),
+                    ..Default::default()
+                },
                 preview_rows: Some(5),
                 cell_char_limit: Some(100),
             }))
             .await;
         assert_eq!(preview.is_error, Some(false));
         assert_eq!(preview.structured_content.as_ref().and_then(|value| value.get("formatVersion")), Some(&json!(1)));
+        assert_eq!(
+            preview.structured_content.as_ref().and_then(|value| value.pointer("/data/usedRangeExact")),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            preview.structured_content.as_ref().and_then(|value| value.pointer("/data/totalRowsExact")),
+            Some(&json!(false))
+        );
 
         let prepared = server
             .prepare_table_import(Parameters(PrepareTableImportRequest {
@@ -2961,7 +3042,10 @@ mod tests {
                 template_version: "orders-v1".to_string(),
                 file_path: source.to_string_lossy().to_string(),
                 source_format: None,
-                parse_options: Default::default(),
+                parse_options: crate::enterprise_tools::McpImportParseOptions {
+                    encoding: Some("utf-8".to_string()),
+                    ..Default::default()
+                },
                 mappings: vec![
                     crate::enterprise_tools::McpImportColumnMapping {
                         source_position: 1,
@@ -3015,7 +3099,12 @@ mod tests {
 
     #[test]
     fn schema_context_tables_schema_is_gemini_compatible() {
-        let server = DbxMcpServer::with_runtime_options(Arc::new(FakeBackend::default()), McpScope::default(), false);
+        let server = DbxMcpServer::with_runtime_options_and_connection_management(
+            Arc::new(FakeBackend::default()),
+            McpScope::default(),
+            false,
+            true,
+        );
         let tool = server
             .tool_router
             .list_all()
@@ -3040,7 +3129,12 @@ mod tests {
 
     #[test]
     fn connection_selector_schema_uses_optional_strings() {
-        let server = DbxMcpServer::with_runtime_options(Arc::new(FakeBackend::default()), McpScope::default(), false);
+        let server = DbxMcpServer::with_runtime_options_and_connection_management(
+            Arc::new(FakeBackend::default()),
+            McpScope::default(),
+            false,
+            true,
+        );
         let tools = server.tool_router.list_all();
 
         for tool_name in [
@@ -3083,7 +3177,12 @@ mod tests {
         // field on these request structs emitting the same union shape. Every optional field
         // must instead publish a single concrete `type`, relying on omission from `required`
         // (not a `"null"` union member) to signal optionality.
-        let server = DbxMcpServer::with_runtime_options(Arc::new(FakeBackend::default()), McpScope::default(), false);
+        let server = DbxMcpServer::with_runtime_options_and_connection_management(
+            Arc::new(FakeBackend::default()),
+            McpScope::default(),
+            false,
+            true,
+        );
         let tools = server.tool_router.list_all();
 
         #[allow(unused_mut)]
@@ -3240,6 +3339,97 @@ mod tests {
         assert!(names.iter().any(|name| name == "dbx_close_session"));
         #[cfg(feature = "mq-admin")]
         assert!(names.iter().any(|name| name == "dbx_send_message"));
+    }
+
+    #[test]
+    fn connection_management_is_default_closed_without_explicit_maintenance_flag() {
+        let server = DbxMcpServer::with_runtime_options_and_connection_management(
+            Arc::new(FakeBackend::default()),
+            McpScope::default(),
+            false,
+            false,
+        );
+        let names = server.tool_router.list_all().into_iter().map(|tool| tool.name).collect::<Vec<_>>();
+        #[cfg(feature = "mq-admin")]
+        assert_eq!(names.len(), 22);
+        #[cfg(not(feature = "mq-admin"))]
+        assert_eq!(names.len(), 21);
+        for name in ["dbx_add_connection", "dbx_duplicate_connection", "dbx_remove_connection"] {
+            assert!(!names.iter().any(|candidate| candidate == name));
+        }
+    }
+
+    #[tokio::test]
+    async fn daily_scope_cannot_add_duplicate_or_remove_connections_even_when_management_is_requested() {
+        let daily = connection("daily", "运营组数据查询", "postgres", "enterprise");
+        let management = connection("management", "运营组数据管理", "postgres", "enterprise");
+        let server = DbxMcpServer::with_runtime_options_and_connection_management(
+            Arc::new(FakeBackend { connections: vec![daily, management], ..Default::default() }),
+            McpScope { connection_ids: vec!["daily".to_string()], ..Default::default() },
+            false,
+            true,
+        );
+        let names = server.tool_router.list_all().into_iter().map(|tool| tool.name).collect::<Vec<_>>();
+        for name in ["dbx_add_connection", "dbx_duplicate_connection", "dbx_remove_connection"] {
+            assert!(!names.iter().any(|candidate| candidate == name));
+        }
+
+        let add = server
+            .add_connection(Parameters(AddConnectionRequest {
+                name: "forbidden".to_string(),
+                db_type: "postgres".to_string(),
+                host: "127.0.0.1".to_string(),
+                port: Some(5432),
+                username: String::new(),
+                password: String::new(),
+                database: Some("enterprise".to_string()),
+                ssl: false,
+                driver_profile: None,
+            }))
+            .await;
+        let duplicate = server
+            .duplicate_connection(Parameters(DuplicateConnectionRequest {
+                selector: ConnectionSelector { connection_id: Some("management".to_string()), connection_name: None },
+                new_name: "forbidden-copy".to_string(),
+            }))
+            .await;
+        let remove = server
+            .remove_connection(Parameters(RemoveConnectionRequest {
+                connection_name: "运营组数据管理".to_string(),
+                connection_id: Some("management".to_string()),
+            }))
+            .await;
+        for result in [add, duplicate, remove] {
+            assert!(result_text(&result).contains("CONNECTION_MANAGEMENT_DISABLED_IN_SCOPED_MODE"));
+        }
+    }
+
+    #[tokio::test]
+    async fn remove_connection_respects_global_allowed_connection_ids() {
+        let daily = connection("daily", "运营组数据查询", "postgres", "enterprise");
+        let management = connection("management", "运营组数据管理", "postgres", "enterprise");
+        let backend = FakeBackend {
+            connections: vec![daily, management],
+            policy: McpGlobalPolicy {
+                read_only: false,
+                allow_dangerous_sql: false,
+                allowed_connection_ids: Some(vec!["daily".to_string()]),
+            },
+            ..Default::default()
+        };
+        let server = DbxMcpServer::with_runtime_options_and_connection_management(
+            Arc::new(backend),
+            McpScope::default(),
+            false,
+            true,
+        );
+        let result = server
+            .remove_connection(Parameters(RemoveConnectionRequest {
+                connection_name: "运营组数据管理".to_string(),
+                connection_id: Some("management".to_string()),
+            }))
+            .await;
+        assert!(result_text(&result).contains("CONNECTION_NOT_FOUND"));
     }
 
     #[test]

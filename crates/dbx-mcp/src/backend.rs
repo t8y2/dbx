@@ -25,6 +25,36 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
 use crate::mongo::MongoCommand;
 
+struct ImportSnapshotCleanup {
+    directory: PathBuf,
+    active: bool,
+}
+
+impl ImportSnapshotCleanup {
+    fn new(directory: PathBuf) -> Self {
+        Self { directory, active: true }
+    }
+
+    fn cleanup(&mut self) -> std::io::Result<()> {
+        if self.active {
+            match std::fs::remove_dir_all(&self.directory) {
+                Ok(()) => self.active = false,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => self.active = false,
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ImportSnapshotCleanup {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ConnectionSummary {
     pub id: String,
@@ -835,21 +865,25 @@ impl DbxBackend for LocalBackend {
             .to_string();
         let snapshot_root = self.data_dir.join("tmp").join("mcp_import");
         tokio::fs::create_dir_all(&snapshot_root).await.map_err(|error| format!("创建导入快照目录失败：{error}"))?;
+        let source_size =
+            std::fs::metadata(&request.file_path).map_err(|error| format!("读取导入源大小失败：{error}"))?.len();
+        crate::enterprise_tools::ensure_import_disk_budget(&snapshot_root, source_size)
+            .map_err(|error| error.to_string())?;
         let snapshot_dir = snapshot_root.join(&request.import_id);
         tokio::fs::create_dir(&snapshot_dir).await.map_err(|error| format!("创建任务快照目录失败：{error}"))?;
+        let mut cleanup_guard = ImportSnapshotCleanup::new(snapshot_dir.clone());
         let extension = Path::new(&request.file_path).extension().and_then(|value| value.to_str()).unwrap_or("data");
         let snapshot_path = snapshot_dir.join(format!("source.{extension}"));
         let normalized_path = snapshot_dir.join("normalized.csv");
         let snapshot_result = async {
-            tokio::fs::copy(&request.file_path, &snapshot_path)
-                .await
-                .map_err(|error| format!("复制导入源快照失败：{error}"))?;
-            let identity = crate::enterprise_tools::file_identity(snapshot_path.clone())
-                .await
-                .map_err(|error| error.to_string())?;
-            if identity.sha256 != expected_sha256 {
-                return Err("IMPORT_FILE_CHANGED: 源文件在启动导入时发生变化；未写入数据库。".to_string());
-            }
+            crate::enterprise_tools::copy_verified_import_source(
+                PathBuf::from(&request.file_path),
+                snapshot_path.clone(),
+                expected_sha256.clone(),
+                cancelled.clone(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
             request.file_path = snapshot_path.to_string_lossy().to_string();
             request = crate::enterprise_tools::build_governed_import_snapshot(
                 request,
@@ -887,10 +921,15 @@ impl DbxBackend for LocalBackend {
             result
         }
         .await;
-        let _ = tokio::fs::remove_file(&normalized_path).await;
-        let _ = tokio::fs::remove_file(&snapshot_path).await;
-        let _ = tokio::fs::remove_dir(&snapshot_dir).await;
-        snapshot_result
+        let cleanup_result = cleanup_guard.cleanup();
+        match (snapshot_result, cleanup_result) {
+            (Ok(summary), Ok(())) => Ok(summary),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(_), Err(error)) => {
+                Err(format!("IMPORT_SNAPSHOT_CLEANUP_FAILED: staging 已完成，但清理任务快照失败：{error}"))
+            }
+            (Err(error), Err(cleanup)) => Err(format!("{error}; IMPORT_SNAPSHOT_CLEANUP_FAILED: {cleanup}")),
+        }
     }
 
     async fn execute_redis_command(
@@ -3375,6 +3414,18 @@ mod tests {
 
         assert_eq!(local_agent_dir(&explicit, data_dir), PathBuf::from("D:/DBX/agents-custom"));
         assert_eq!(local_agent_dir(&legacy, data_dir), PathBuf::from("D:/DBX/drivers/agents"));
+    }
+
+    #[test]
+    fn snapshot_cleanup_guard_removes_directory_during_unwind_or_early_return() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let snapshot = data_dir.path().join("mcp-import-test");
+        std::fs::create_dir(&snapshot).unwrap();
+        std::fs::write(snapshot.join("normalized.csv"), b"partial").unwrap();
+        {
+            let _guard = ImportSnapshotCleanup::new(snapshot.clone());
+        }
+        assert!(!snapshot.exists());
     }
 
     struct StubBackend;

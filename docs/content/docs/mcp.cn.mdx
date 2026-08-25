@@ -87,7 +87,7 @@ DeepSeek Harness 通过 Cordis 插件条目加载 MCP Server，不读取 `mcpSer
 
 ## 工具列表
 
-DBX MCP 当前提供 25 个工具：
+DBX MCP 定义 25 个工具；日常默认注册 22 个，只有显式无作用域维护模式才额外注册 3 个连接管理工具：
 
 | 工具 | 说明 |
 | --- | --- |
@@ -115,17 +115,19 @@ DBX MCP 当前提供 25 个工具：
 | `dbx_cancel_import` | 请求在后续 staging 批次写入前取消任务 |
 | `dbx_vector_search` | 在允许的 Milvus 集合中按批准状态和生效时间检索语义卡 |
 | `dbx_vector_upsert_file` | 从允许目录中的 JSONL upsert 已批准语义卡 |
-| `dbx_vector_delete_by_batch` | 在完全访问权限下删除一个明确的未发布语义批次 |
+| `dbx_vector_delete_by_batch` | v1 稳定返回 `VECTOR_DELETE_DISABLED_V1`，不连接 Milvus、不执行删除 |
 
-启用连接作用域后，修改连接和桌面 UI 工具会被隐藏。
+连接管理默认关闭；只有无任何 `DBX_MCP_SCOPE_*` 且安装维护进程显式设置 `DBX_MCP_ENABLE_CONNECTION_MANAGEMENT=1` 时，新增、复制和删除连接工具才会注册。启用任一作用域后，即使设置该开关也会隐藏并在直接调用时阻断连接管理。删除还会复核全局 `allowed_connection_ids`。桌面 UI 工具在 scoped 模式下同样隐藏。
 
 ## 本地文件导入与 Milvus 工具
 
-导入工具只支持本地 DBX Desktop/MCP 模式；在 Web 模式中会稳定返回 `IMPORT_UNSUPPORTED_IN_WEB_MODE_V1`。必须用平台路径分隔符在 `DBX_MCP_IMPORT_ROOTS` 中配置一个或多个真实目录。文件路径必须是绝对路径，解析后仍位于允许目录内，是普通且非符号链接的文件，扩展名受支持，并且没有超过大小限制。preview 支持 Excel、JSON、CSV 和 TSV；v1 治理入库使用有界流式处理支持 XLSX/XLSM 和 UTF-8 CSV/TSV。旧版 `.xls`、JSON 和非 UTF-8 分隔文件会在创建计划和访问数据库之前返回稳定的不支持错误。
+导入工具只支持本地 DBX Desktop/MCP 模式；在 Web 模式中会稳定返回 `IMPORT_UNSUPPORTED_IN_WEB_MODE_V1`。必须用平台路径分隔符在 `DBX_MCP_IMPORT_ROOTS` 中配置一个或多个真实目录。文件路径必须是绝对路径，解析后仍位于允许目录内，是普通且非符号链接的文件，扩展名受支持，并且没有超过大小限制。preview 支持 Excel、JSON、CSV 和 TSV，并明确返回 `usedRangeExact` 与 `totalRowsExact`；受限预览不会把已扫描行数伪装成全文件总行数。v1 治理入库使用有界流式处理支持 XLSX/XLSM 和显式指定 `utf-8` 的 CSV/TSV。旧版 `.xls`、JSON、`auto`、GBK 和 UTF-16 分隔文件会在创建计划和访问数据库之前返回稳定的不支持错误。
 
-`dbx_prepare_table_import` 会把连接、调用方已批准模板版本、规范路径、大小、修改时间、SHA-256、解析参数和字段映射固化为不可变摘要。preview 对每列返回 1 基 `source_position`、原始 `raw_source_name`、稳定 `canonical_source_name`（重复表头统一为 `名称__1`、`名称__2`）以及兼容旧 DBX 的名称；映射必须复核位置、raw、canonical，并提供 `target_column`。目标不能由调用方指定：服务端生成唯一 `staging.mcp_<uuid>`，强制创建新表，所有业务列固定为 `TEXT`。计划 30 分钟后过期，且只能启动一次。start 复验源文件后，先流式写出有界治理快照，再打开数据库连接；每行增加 `import_id`、`plan_id`、`source_sha`、真实绝对 `source_row_number`、`source_row_hash` 和 `loaded_at`。无法形成精确血缘时会在数据库访问前阻断。status 会返回生成的 relation；发布到业务 Schema 仍是独立治理流程。
+`dbx_preview_import_file` 与 `dbx_prepare_table_import` 共用受控 inspection semaphore 和超时。XLSX 会在解析前核验 ZIP 条目数、总解压大小、元数据、sharedStrings 与 worksheet 解压预算；完整治理流继续限制工作表行数、单元格数、单元格字节数和批次内存。`dbx_prepare_table_import` 会把连接、调用方已批准模板版本、规范路径、大小、修改时间、SHA-256、解析参数和字段映射固化为不可变摘要。preview 对每列返回 1 基 `source_position`、原始 `raw_source_name`、稳定 `canonical_source_name`（重复表头统一为 `名称__1`、`名称__2`）以及兼容旧 DBX 的名称；映射必须复核位置、raw、canonical，并提供 `target_column`。batch 行数上限根据列数和内存预算动态计算。目标不能由调用方指定：服务端生成唯一 `staging.mcp_<uuid>`，强制创建新表，所有业务列固定为 `TEXT`。计划 30 分钟后过期，且只能启动一次。
 
-Milvus 工具只接受 allowlist 中的集合、过滤字段和输出字段。检索必须提供 `active_at`，服务端强制 approved 和生效时间过滤，并可选追加精确 `semantic_version`。upsert 使用严格语义卡 Schema：重算并核对 64 位 `content_checksum`，要求 `embedding_revision`，拒绝 `chunk_index` 与 `embedding_dimension`，文件内 card_id 必须唯一且只能有一个语义版本；写入前还会查询现有 card_id，禁止覆盖其他批次或版本。删除除“完全访问”外还要求调用方显式传入 `published: false`。所有通过 `dbx_execute_query` 提交的向量实体 search/query/mutation 都返回 `VECTOR_DEDICATED_TOOL_REQUIRED`，通用入口只保留明确管理诊断。
+start 复验源文件后，用 `O_NOFOLLOW`/文件描述符元数据打开源文件，在复制任务私有快照时一遍完成可取消复制与 SHA-256；复制期间身份漂移会阻断。服务端先检查任务磁盘是否能容纳源文件、规范化输出上限和保留空间，再流式写出有大小上限的治理快照，成功后才打开数据库连接。CSV/TSV 短行按缺失值处理；超出表头的尾部空字段会保留在完整行哈希中，任一尾部非空字段按真实源行号阻断。每行增加 `import_id`、`plan_id`、`source_sha`、真实绝对 `source_row_number`、覆盖完整规范源记录的 `source_row_hash` 和 `loaded_at`。无法形成精确血缘时会在数据库访问前阻断。status 会返回生成的 relation；发布到业务 Schema 仍是独立治理流程。
+
+Milvus 工具只接受 allowlist 中的集合、过滤字段和输出字段。检索必须提供 `active_at`，服务端强制 approved 和生效时间过滤，并可选追加精确 `semantic_version`。单查询 search 响应会正确展开 Milvus 的外层 query 数组：`data:[[]]` 返回零行，多命中返回语义卡行；query/list 解析不受影响。upsert 使用严格语义卡 Schema：全部 VARCHAR 在任何 Milvus 调用前按当前集合的 UTF-8 字节长度核验，`content` 上限为 8192 字节；重算并核对 64 位 `content_checksum`，要求 `embedding_revision`，拒绝 `chunk_index` 与 `embedding_dimension`，文件内 card_id 必须唯一且只能有一个语义版本。整份 JSONL 和全部已有 card_id 归属检查通过后才开始分批 upsert。v1 不再信任调用方提供的 `published:false`，`dbx_vector_delete_by_batch` 始终返回 `VECTOR_DELETE_DISABLED_V1`；撤销残留批次必须走受审计管理员流程。所有通过 `dbx_execute_query` 提交的向量实体 search/query/mutation 都返回 `VECTOR_DEDICATED_TOOL_REQUIRED`，通用入口只保留明确管理诊断。
 
 向量检索的核心参数形状如下：
 
@@ -284,10 +286,24 @@ DBX 在 **设置 → MCP** 中保存一份权威策略，并在每次请求时�
 | `DBX_MCP_SCOPE_CONNECTION_IDS` | 兼容旧配置：限制为多个连接 ID |
 | `DBX_MCP_SCOPE_CONNECTION_NAME` | 限制为一个连接名称 |
 | `DBX_MCP_SCOPE_DATABASE` | 限制为一个数据库 |
+| `DBX_MCP_ENABLE_CONNECTION_MANAGEMENT` | 仅无作用域安装维护进程临时设置为 `1`；默认关闭连接新增、复制和删除 |
 | `DBX_MCP_IMPORT_ROOTS` | 导入和语义 JSONL 工具可读取的本地目录 allowlist，使用平台路径分隔符 |
 | `DBX_MCP_IMPORT_STAGING_SCHEMAS` | 允许导入的 PostgreSQL staging Schema，逗号分隔，默认 `staging` |
 | `DBX_MCP_IMPORT_FILE_MAX_BYTES` | Excel/CSV/TSV/JSON 最大字节数，默认 512 MiB |
 | `DBX_MCP_IMPORT_CONCURRENCY` | 治理导入并发数，限制为 1～16，默认 `2` |
+| `DBX_MCP_IMPORT_INSPECTION_CONCURRENCY` | preview/prepare 文件剖析并发，限制为 1～8，默认 `2` |
+| `DBX_MCP_IMPORT_INSPECTION_TIMEOUT_SECS` | 单次文件剖析等待上限，限制为 5～120 秒，默认 `30` |
+| `DBX_MCP_IMPORT_BATCH_MEMORY_MAX_BYTES` | XLSX 单个流式行批次近似 JSON 内存上限，默认 32 MiB |
+| `DBX_MCP_IMPORT_NORMALIZED_MAX_BYTES` | 单个规范化治理 CSV 硬上限，默认 2 GiB |
+| `DBX_MCP_IMPORT_DISK_RESERVE_BYTES` | 任务磁盘除源文件和规范化上限外必须保留的空间，默认 2 GiB |
+| `DBX_MCP_XLSX_ZIP_ENTRY_LIMIT` | XLSX ZIP 条目数上限，默认 `4096` |
+| `DBX_MCP_XLSX_TOTAL_UNCOMPRESSED_MAX_BYTES` | XLSX ZIP 解压总字节上限，默认 4 GiB |
+| `DBX_MCP_XLSX_METADATA_ENTRY_MAX_BYTES` | 单个 workbook/rels/styles 元数据条目上限，默认 16 MiB |
+| `DBX_MCP_XLSX_SHARED_STRINGS_MAX_BYTES` | sharedStrings 解压上限，默认 256 MiB |
+| `DBX_MCP_XLSX_WORKSHEET_MAX_BYTES` | 单个 worksheet XML 解压上限，默认 2 GiB |
+| `DBX_MCP_XLSX_WORKSHEET_MAX_ROWS` | 单个 worksheet row 元素上限，默认 500 万 |
+| `DBX_MCP_XLSX_WORKSHEET_MAX_CELLS` | 单个 worksheet cell 元素上限，默认 1 亿 |
+| `DBX_MCP_XLSX_CELL_MAX_BYTES` | 单个解码单元格 UTF-8 字节上限，默认 1 MiB |
 | `DBX_MCP_IMPORT_PLAN_CAPACITY` | 同时保留的待启动计划上限，默认 `512` |
 | `DBX_MCP_IMPORT_JOB_CAPACITY` | 运行中和终态任务总保留上限，默认 `256` |
 | `DBX_MCP_IMPORT_TERMINAL_LIMIT` | 24 小时 TTL 内终态任务保留上限，默认 `128` |

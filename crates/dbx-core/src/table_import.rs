@@ -39,6 +39,7 @@ pub const MAX_LEGACY_XLS_IMPORT_BYTES: u64 = 50 * 1024 * 1024;
 const IMPORT_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 // Keep preview parsing bounded even when an XLSX dimension declares a huge sparse range.
 const MAX_FAST_PREVIEW_CELLS: usize = 100_000;
+const MAX_XLSX_PREVIEW_CELL_BYTES: usize = 1024 * 1024;
 // Shared strings stay in memory for small workbooks and spill to an indexed temp file for large ones.
 const MAX_IN_MEMORY_XLSX_SHARED_STRINGS_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_XLSX_SHARED_STRINGS_BYTES: u64 = 1024 * 1024 * 1024;
@@ -2033,10 +2034,10 @@ fn xlsx_cell_ref_position(reference: &str) -> Option<(usize, usize)> {
         }
         if ch.is_ascii_alphabetic() && !saw_row {
             saw_column = true;
-            column = column * 26 + (ch.to_ascii_uppercase() as u8 - b'A' + 1) as usize;
+            column = column.checked_mul(26)?.checked_add((ch.to_ascii_uppercase() as u8 - b'A' + 1) as usize)?;
         } else if ch.is_ascii_digit() {
             saw_row = true;
-            row = row * 10 + ch.to_digit(10)? as usize;
+            row = row.checked_mul(10)?.checked_add(ch.to_digit(10)? as usize)?;
         } else {
             return None;
         }
@@ -2141,6 +2142,11 @@ fn read_xlsx_shared_strings(
             }
             Ok(Event::Text(text)) if in_item && in_text => {
                 current.push_str(&text.unescape().map_err(|error| error.to_string())?);
+                if current.len() > MAX_XLSX_PREVIEW_CELL_BYTES {
+                    return Err(format!(
+                        "Excel shared string exceeds the {MAX_XLSX_PREVIEW_CELL_BYTES} byte preview cell limit"
+                    ));
+                }
             }
             Ok(Event::End(element)) if xml_local_name_eq(element.name().as_ref(), b"t") => {
                 in_text = false;
@@ -2257,7 +2263,14 @@ fn create_xlsx_spill_file() -> std::io::Result<File> {
 
 #[cfg(test)]
 fn open_xlsx_shared_strings(zip: &mut zip::ZipArchive<File>, memory_limit: u64) -> Result<XlsxSharedStrings, String> {
-    open_xlsx_shared_strings_with_control(zip, memory_limit, &|| false, &mut |_| Ok(()))
+    open_xlsx_shared_strings_with_control(
+        zip,
+        memory_limit,
+        MAX_XLSX_SHARED_STRINGS_BYTES,
+        usize::MAX,
+        &|| false,
+        &mut |_| Ok(()),
+    )
 }
 
 struct XlsxCancellableReader<'a, R> {
@@ -2283,6 +2296,8 @@ impl<R: IoRead> IoRead for XlsxCancellableReader<'_, R> {
 fn open_xlsx_shared_strings_with_control(
     zip: &mut zip::ZipArchive<File>,
     memory_limit: u64,
+    max_uncompressed_bytes: u64,
+    max_cell_bytes: usize,
     is_cancelled: &dyn Fn() -> bool,
     on_progress: &mut dyn FnMut(u64) -> std::io::Result<()>,
 ) -> Result<XlsxSharedStrings, String> {
@@ -2291,9 +2306,9 @@ fn open_xlsx_shared_strings_with_control(
         Err(zip::result::ZipError::FileNotFound) => return Ok(XlsxSharedStrings::Memory(Vec::new())),
         Err(error) => return Err(error.to_string()),
     };
-    if uncompressed_size > MAX_XLSX_SHARED_STRINGS_BYTES {
+    if uncompressed_size > max_uncompressed_bytes {
         return Err(format!(
-            "Excel shared strings are too large: {uncompressed_size} bytes (max {MAX_XLSX_SHARED_STRINGS_BYTES} bytes)"
+            "Excel shared strings are too large: {uncompressed_size} bytes (max {max_uncompressed_bytes} bytes)"
         ));
     }
     // A fixed-width offset/length index lets cell parsing seek individual strings without
@@ -2334,6 +2349,9 @@ fn open_xlsx_shared_strings_with_control(
             }
             Ok(Event::Text(text)) if in_item && in_text => {
                 current.push_str(&text.unescape().map_err(|error| error.to_string())?);
+                if current.len() > max_cell_bytes {
+                    return Err(format!("Excel shared string exceeds the {max_cell_bytes} byte cell limit"));
+                }
             }
             Ok(Event::End(element)) if xml_local_name_eq(element.name().as_ref(), b"t") => {
                 in_text = false;
@@ -2531,9 +2549,15 @@ fn parse_xlsx_preview_file_with_options(
                 }
                 Ok(Event::Text(text)) if in_value => {
                     current_cell.value.push_str(&text.unescape().map_err(|error| error.to_string())?);
+                    if current_cell.value.len() > MAX_XLSX_PREVIEW_CELL_BYTES {
+                        return Err(format!("Excel cell exceeds the {MAX_XLSX_PREVIEW_CELL_BYTES} byte preview limit"));
+                    }
                 }
                 Ok(Event::Text(text)) if in_inline_text => {
                     current_cell.inline_value.push_str(&text.unescape().map_err(|error| error.to_string())?);
+                    if current_cell.inline_value.len() > MAX_XLSX_PREVIEW_CELL_BYTES {
+                        return Err(format!("Excel cell exceeds the {MAX_XLSX_PREVIEW_CELL_BYTES} byte preview limit"));
+                    }
                 }
                 Ok(Event::End(element)) if xml_local_name_eq(element.name().as_ref(), b"v") => {
                     in_value = false;
@@ -2578,8 +2602,14 @@ fn parse_xlsx_preview_file_with_options(
         return Err("Import file has no data rows in the selected row range".to_string());
     }
     let start_row = observed_min_row;
-    let start_column = observed_min_column;
-    let observed_end_column = observed_max_column.max(start_column);
+    let title_column_bounds = row_range.title_row.and_then(|title_row| {
+        let absolute_title_row = start_row.saturating_add(title_row.saturating_sub(1));
+        let mut columns = raw_cells.keys().filter_map(|(row, column)| (*row == absolute_title_row).then_some(*column));
+        let first = columns.next()?;
+        Some(columns.fold((first, first), |(min, max), column| (min.min(column), max.max(column))))
+    });
+    let start_column = title_column_bounds.map_or(observed_min_column, |(start, _)| start);
+    let observed_end_column = title_column_bounds.map_or(observed_max_column.max(start_column), |(_, end)| end);
     let observed_column_count = observed_end_column.saturating_sub(start_column).saturating_add(1);
     let preview_row_count = requested_last_row
         .saturating_sub(row_range.data_start_row)
@@ -2805,6 +2835,36 @@ pub enum XlsxStreamMessage {
     Done,
 }
 
+/// XLSX/XLSM 流式读取的资源上限；企业治理入口使用严格值，普通导入保持兼容默认值。
+#[derive(Debug, Clone, Copy)]
+pub struct XlsxStreamLimits {
+    /// sharedStrings.xml 最大解压字节数。
+    pub max_shared_strings_bytes: u64,
+    /// 选中工作表 XML 最大解压字节数。
+    pub max_worksheet_bytes: u64,
+    /// 工作表最多允许的 row 元素数量。
+    pub max_worksheet_rows: usize,
+    /// 工作表最多允许的 cell 元素数量。
+    pub max_worksheet_cells: usize,
+    /// 单个源单元格解码后的最大 UTF-8 字节数。
+    pub max_cell_bytes: usize,
+    /// 单个待发送行批次的近似 JSON 字节上限。
+    pub max_batch_bytes: usize,
+}
+
+impl Default for XlsxStreamLimits {
+    fn default() -> Self {
+        Self {
+            max_shared_strings_bytes: MAX_XLSX_SHARED_STRINGS_BYTES,
+            max_worksheet_bytes: u64::MAX,
+            max_worksheet_rows: usize::MAX,
+            max_worksheet_cells: usize::MAX,
+            max_cell_bytes: usize::MAX,
+            max_batch_bytes: usize::MAX,
+        }
+    }
+}
+
 fn xlsx_stream_cell_value(
     cell: &XlsxPreviewRawCell,
     shared_strings: &mut XlsxSharedStrings,
@@ -2866,6 +2926,8 @@ struct XlsxStreamRowsState {
     current_row: Option<usize>,
     current_values: Vec<serde_json::Value>,
     batch_size: usize,
+    pending_bytes: usize,
+    max_batch_bytes: usize,
 }
 
 impl XlsxStreamRowsState {
@@ -2875,6 +2937,7 @@ impl XlsxStreamRowsState {
         dimension: Option<((usize, usize), (usize, usize))>,
         expected_columns: Option<Vec<String>>,
         batch_size: usize,
+        max_batch_bytes: usize,
     ) -> Self {
         let batch_size = batch_size.max(1);
         Self {
@@ -2892,11 +2955,16 @@ impl XlsxStreamRowsState {
             current_row: None,
             current_values: Vec::new(),
             batch_size,
+            pending_bytes: 0,
+            max_batch_bytes: max_batch_bytes.max(1),
         }
     }
 
     fn initialize_range(&mut self, first_row: usize, first_column: usize) {
-        if self.start_row.is_some() {
+        let start_row = *self.start_row.get_or_insert(first_row);
+        let relative_row = first_row.saturating_sub(start_row).saturating_add(1);
+        let selected_first_row = self.row_range.title_row.unwrap_or(self.row_range.data_start_row);
+        if relative_row < selected_first_row || self.start_column > 0 {
             return;
         }
         let expected_column_count = (!self.columns.is_empty()).then_some(self.columns.len());
@@ -2911,7 +2979,6 @@ impl XlsxStreamRowsState {
                         expected == column_count
                     })
         });
-        self.start_row = Some(first_row);
         self.start_column = first_column;
         self.declared_column_count = dimension
             .map(|((_, start_column), (_, end_column))| end_column.saturating_sub(start_column).saturating_add(1));
@@ -2934,6 +3001,9 @@ impl XlsxStreamRowsState {
             return true;
         }
         self.initialize_range(absolute_row, absolute_column);
+        if self.start_column == 0 {
+            return false;
+        }
         absolute_column
             .checked_sub(self.start_column)
             .and_then(|offset| self.columns.get(offset))
@@ -2948,6 +3018,9 @@ impl XlsxStreamRowsState {
         progress: u64,
     ) -> Result<(), String> {
         self.initialize_range(absolute_row, absolute_column);
+        if self.start_column == 0 {
+            return Ok(());
+        }
         if self.current_row != Some(absolute_row) {
             self.flush_current_row(progress)?;
             self.current_row = Some(absolute_row);
@@ -3016,8 +3089,19 @@ impl XlsxStreamRowsState {
         }
         values.resize(self.columns.len(), serde_json::Value::Null);
         values.truncate(self.columns.len());
+        let row_bytes = serde_json::to_vec(&values).map_err(|error| error.to_string())?.len();
+        if row_bytes > self.max_batch_bytes {
+            return Err(format!(
+                "Excel row {absolute_row} is {row_bytes} bytes after normalization, exceeding the {} byte batch budget",
+                self.max_batch_bytes
+            ));
+        }
+        if !self.pending_rows.is_empty() && self.pending_bytes.saturating_add(row_bytes) > self.max_batch_bytes {
+            self.emit_rows(progress)?;
+        }
         self.pending_rows.push(values);
         self.pending_source_row_numbers.push(absolute_row);
+        self.pending_bytes = self.pending_bytes.saturating_add(row_bytes);
         self.rows_seen = self.rows_seen.saturating_add(1);
         if self.pending_rows.len() >= self.batch_size {
             self.emit_rows(progress)?;
@@ -3040,6 +3124,7 @@ impl XlsxStreamRowsState {
             .map_err(|_| "Excel import consumer closed before the stream finished".to_string())?;
         self.pending_rows = Vec::with_capacity(self.batch_size);
         self.pending_source_row_numbers = Vec::with_capacity(self.batch_size);
+        self.pending_bytes = 0;
         Ok(())
     }
 
@@ -3089,6 +3174,32 @@ pub fn stream_xlsx_rows_to_channel_with_control(
     scan_full_worksheet: bool,
     sender: tokio::sync::mpsc::Sender<Result<XlsxStreamMessage, String>>,
     cancelled: Arc<AtomicBool>,
+) -> Result<(), String> {
+    stream_xlsx_rows_to_channel_with_limits(
+        path,
+        options,
+        batch_size,
+        expected_columns,
+        text_source_columns,
+        scan_full_worksheet,
+        sender,
+        cancelled,
+        XlsxStreamLimits::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+/// 以调用方提供的资源预算流式读取 XLSX/XLSM；任何预算不足都会在消费者写入前失败。
+pub fn stream_xlsx_rows_to_channel_with_limits(
+    path: &str,
+    options: &TableImportParseOptions,
+    batch_size: usize,
+    expected_columns: Option<Vec<String>>,
+    text_source_columns: HashSet<String>,
+    scan_full_worksheet: bool,
+    sender: tokio::sync::mpsc::Sender<Result<XlsxStreamMessage, String>>,
+    cancelled: Arc<AtomicBool>,
+    limits: XlsxStreamLimits,
 ) -> Result<(), String> {
     // This producer runs on a blocking thread and communicates in bounded batches. The small
     // channel capacity applies backpressure when database writes are slower than XML parsing.
@@ -3140,16 +3251,26 @@ pub fn stream_xlsx_rows_to_channel_with_control(
     let is_cancelled = || cancelled.load(Ordering::Acquire);
     let mut shared_strings = open_xlsx_shared_strings_with_control(
         &mut zip,
-        MAX_IN_MEMORY_XLSX_SHARED_STRINGS_BYTES,
+        MAX_IN_MEMORY_XLSX_SHARED_STRINGS_BYTES.min(limits.max_shared_strings_bytes),
+        limits.max_shared_strings_bytes,
+        limits.max_cell_bytes,
         &is_cancelled,
         &mut on_shared_progress,
     )?;
     let row_range = effective_import_row_range(options)?;
     let sheet = zip.by_name(&sheet_path).map_err(|error| error.to_string())?;
+    if sheet.size() > limits.max_worksheet_bytes {
+        return Err(format!(
+            "Excel worksheet is too large: {} bytes (max {} bytes)",
+            sheet.size(),
+            limits.max_worksheet_bytes
+        ));
+    }
     let uncompressed_sheet_bytes = sheet.size().max(1);
     let mut reader = XmlReader::from_reader(BufReader::new(sheet));
     reader.config_mut().trim_text(false);
-    let mut rows = XlsxStreamRowsState::new(sender, row_range, None, expected_columns, batch_size);
+    let mut rows =
+        XlsxStreamRowsState::new(sender, row_range, None, expected_columns, batch_size, limits.max_batch_bytes);
     let mut buffer = Vec::new();
     let mut current_row = 0usize;
     let mut current_column = 0usize;
@@ -3158,6 +3279,8 @@ pub fn stream_xlsx_rows_to_channel_with_control(
     let mut in_value = false;
     let mut in_inline_text = false;
     let mut inline_phonetic_depth = 0usize;
+    let mut worksheet_rows = 0usize;
+    let mut worksheet_cells = 0usize;
     loop {
         // Convert the uncompressed worksheet offset into an approximate archive-byte offset so
         // progress remains monotonic without scanning the ZIP twice.
@@ -3179,6 +3302,13 @@ pub fn stream_xlsx_rows_to_channel_with_control(
                 rows.dimension = xml_attr_value(&reader, &element, b"ref").as_deref().and_then(xlsx_dimension_bounds);
             }
             Ok(Event::Start(element)) if xml_local_name_eq(element.name().as_ref(), b"row") => {
+                worksheet_rows = worksheet_rows.saturating_add(1);
+                if worksheet_rows > limits.max_worksheet_rows {
+                    return Err(format!(
+                        "Excel worksheet row count exceeds the {} row limit",
+                        limits.max_worksheet_rows
+                    ));
+                }
                 current_row = xml_attr_value(&reader, &element, b"r")
                     .and_then(|value| value.parse::<usize>().ok())
                     .filter(|row| *row > 0)
@@ -3189,6 +3319,13 @@ pub fn stream_xlsx_rows_to_channel_with_control(
                 }
             }
             Ok(Event::Empty(element)) if xml_local_name_eq(element.name().as_ref(), b"c") => {
+                worksheet_cells = worksheet_cells.saturating_add(1);
+                if worksheet_cells > limits.max_worksheet_cells {
+                    return Err(format!(
+                        "Excel worksheet cell count exceeds the {} cell limit",
+                        limits.max_worksheet_cells
+                    ));
+                }
                 let position = xml_attr_value(&reader, &element, b"r")
                     .as_deref()
                     .and_then(xlsx_cell_ref_position)
@@ -3198,6 +3335,13 @@ pub fn stream_xlsx_rows_to_channel_with_control(
                 rows.push_cell(position.0, position.1, serde_json::Value::Null, progress)?;
             }
             Ok(Event::Start(element)) if xml_local_name_eq(element.name().as_ref(), b"c") => {
+                worksheet_cells = worksheet_cells.saturating_add(1);
+                if worksheet_cells > limits.max_worksheet_cells {
+                    return Err(format!(
+                        "Excel worksheet cell count exceeds the {} cell limit",
+                        limits.max_worksheet_cells
+                    ));
+                }
                 let position = xml_attr_value(&reader, &element, b"r")
                     .as_deref()
                     .and_then(xlsx_cell_ref_position)
@@ -3230,9 +3374,15 @@ pub fn stream_xlsx_rows_to_channel_with_control(
             }
             Ok(Event::Text(text)) if in_value => {
                 current_cell.value.push_str(&text.unescape().map_err(|error| error.to_string())?);
+                if current_cell.value.len() > limits.max_cell_bytes {
+                    return Err(format!("Excel cell exceeds the {} byte limit", limits.max_cell_bytes));
+                }
             }
             Ok(Event::Text(text)) if in_inline_text => {
                 current_cell.inline_value.push_str(&text.unescape().map_err(|error| error.to_string())?);
+                if current_cell.inline_value.len() > limits.max_cell_bytes {
+                    return Err(format!("Excel cell exceeds the {} byte limit", limits.max_cell_bytes));
+                }
             }
             Ok(Event::End(element)) if xml_local_name_eq(element.name().as_ref(), b"v") => in_value = false,
             Ok(Event::End(element)) if xml_local_name_eq(element.name().as_ref(), b"t") => in_inline_text = false,
@@ -3250,6 +3400,9 @@ pub fn stream_xlsx_rows_to_channel_with_control(
                         format_as_text,
                         empty_string_as_null,
                     )?;
+                    if value.as_str().is_some_and(|value| value.len() > limits.max_cell_bytes) {
+                        return Err(format!("Excel cell exceeds the {} byte limit", limits.max_cell_bytes));
+                    }
                     rows.push_cell(row, column, value, progress)?;
                     current_cell = XlsxPreviewRawCell::default();
                 }
@@ -9106,6 +9259,35 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error, "Import cancelled");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn streaming_excel_rows_enforce_row_cell_and_batch_budgets() {
+        let path = std::env::temp_dir().join(format!("dbx-table-import-stream-budget-{}.xlsx", uuid::Uuid::new_v4()));
+        std::fs::write(&path, build_styled_test_xlsx(false, &[("A1", 5, 10.0)])).unwrap();
+        let options = TableImportParseOptions { has_header: Some(false), ..TableImportParseOptions::default() };
+
+        for (limits, expected) in [
+            (XlsxStreamLimits { max_worksheet_rows: 0, ..Default::default() }, "row count"),
+            (XlsxStreamLimits { max_worksheet_cells: 0, ..Default::default() }, "cell count"),
+            (XlsxStreamLimits { max_batch_bytes: 1, ..Default::default() }, "batch budget"),
+        ] {
+            let (sender, _receiver) = tokio::sync::mpsc::channel(2);
+            let error = stream_xlsx_rows_to_channel_with_limits(
+                &path.to_string_lossy(),
+                &options,
+                1,
+                None,
+                HashSet::from(["*".to_string()]),
+                true,
+                sender,
+                Arc::new(AtomicBool::new(false)),
+                limits,
+            )
+            .unwrap_err();
+            assert!(error.contains(expected), "unexpected error: {error}");
+        }
         let _ = std::fs::remove_file(path);
     }
 

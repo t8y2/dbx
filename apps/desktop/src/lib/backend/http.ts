@@ -60,6 +60,7 @@ import type {
   AiCompletionRequest,
   AiStreamChunk,
   AiConversation,
+  AiRun,
   AiModelInfo,
   DriverStoreUsage,
   DriverRuntimeSummary,
@@ -1590,13 +1591,16 @@ export async function aiStream(sessionId: string, request: AiCompletionRequest, 
       if (line.startsWith("data:")) {
         const data = line.slice(5).trim();
         if (data && data !== "[DONE]") {
+          let chunk: AiStreamChunk;
           try {
-            const chunk: AiStreamChunk = JSON.parse(data);
-            onChunk(chunk);
-            if (chunk.done) return;
+            chunk = JSON.parse(data);
           } catch {
             // skip malformed JSON
+            continue;
           }
+          if (chunk.error) throw new Error(chunk.error);
+          onChunk(chunk);
+          if (chunk.done) return;
         }
       }
     }
@@ -1687,18 +1691,23 @@ export async function aiAgentStream(
       if (line.startsWith("data:")) {
         const data = line.slice(5).trim();
         if (data && data !== "[DONE]") {
+          let parsed: unknown;
           try {
-            const parsed = JSON.parse(data);
-            if (!isAgentEvent(parsed)) {
-              console.warn("[aiAgentStream] Skipping invalid agent event:", data);
-              continue;
-            }
-            onEvent(parsed);
-            if (parsed.type === "agent_end" || parsed.type === "error") {
-              result = data;
-            }
+            parsed = JSON.parse(data);
           } catch {
             // skip malformed JSON
+            continue;
+          }
+          if (!isAgentEvent(parsed)) {
+            console.warn("[aiAgentStream] Skipping invalid agent event:", data);
+            continue;
+          }
+          onEvent(parsed);
+          if (parsed.type === "error") {
+            throw new Error(parsed.message);
+          }
+          if (parsed.type === "agent_end") {
+            result = data;
           }
         }
       }
@@ -2065,6 +2074,21 @@ export async function loadAiConversations(): Promise<AiConversation[]> {
 
 export async function deleteAiConversation(id: string): Promise<void> {
   return del(`/api/ai/conversation/${id}`);
+}
+
+// Background AI runs are a Desktop-only capability in this release. Keep the
+// symbols for backend-module parity without changing Web's request-bound SSE
+// lifecycle or adding a partially functional persistence API.
+export async function saveAiRun(_run: AiRun): Promise<void> {
+  throw new Error("Background AI runs are only available in DBX Desktop");
+}
+
+export async function saveAiRunState(_conversation: AiConversation, _run: AiRun): Promise<void> {
+  throw new Error("Background AI runs are only available in DBX Desktop");
+}
+
+export async function loadAiRuns(): Promise<AiRun[]> {
+  return [];
 }
 
 // ---------------------------------------------------------------------------

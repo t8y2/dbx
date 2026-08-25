@@ -558,6 +558,131 @@ pub struct AiConversation {
     pub connection_name: String,
     pub database: String,
     pub messages: Vec<AiChatMessage>,
+    /// One editable "send later" input saved while an active run occupies the
+    /// conversation (parent PRD §5). Persisted with the conversation so it
+    /// survives a restart and is restored when the conversation reopens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued_input: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AiRunStatus {
+    Preparing,
+    Queued,
+    Running,
+    AwaitingWriteConfirmation,
+    Completed,
+    Failed,
+    Cancelled,
+    Interrupted,
+    /// A normal-send FIFO item recovered after a process restart. The user's
+    /// input was never actually submitted, so the run is surfaced as an
+    /// editable, unsent pending draft — never as a failure/interruption.
+    /// (Parent PRD §7: "恢复为其会话中可编辑、未发送的待发输入".)
+    PendingRecoverable,
+}
+
+impl AiRunStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Preparing => "preparing",
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::AwaitingWriteConfirmation => "awaiting_write_confirmation",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Interrupted => "interrupted",
+            Self::PendingRecoverable => "pending_recoverable",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "preparing" => Ok(Self::Preparing),
+            "queued" => Ok(Self::Queued),
+            "running" => Ok(Self::Running),
+            "awaiting_write_confirmation" => Ok(Self::AwaitingWriteConfirmation),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
+            "interrupted" => Ok(Self::Interrupted),
+            "pending_recoverable" => Ok(Self::PendingRecoverable),
+            other => Err(format!("Unknown AI run status: {other}")),
+        }
+    }
+
+    pub fn protects_conversation(self) -> bool {
+        matches!(
+            self,
+            Self::Preparing | Self::Queued | Self::Running | Self::AwaitingWriteConfirmation | Self::PendingRecoverable
+        )
+    }
+}
+
+/// Why a run occupies the global FIFO queue. Normal sends and accepted
+/// write-confirmation resumes recover differently after a restart (parent
+/// PRD §3 line 58), so the category must be persisted.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AiRunFifoCategory {
+    /// A user-sent message waiting for a global concurrency slot.
+    NormalSend,
+    /// An accepted write confirmation whose resume segment is queued.
+    WriteConfirmationResume,
+}
+
+impl AiRunFifoCategory {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NormalSend => "normal_send",
+            Self::WriteConfirmationResume => "write_confirmation_resume",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "normal_send" => Ok(Self::NormalSend),
+            "write_confirmation_resume" => Ok(Self::WriteConfirmationResume),
+            other => Err(format!("Unknown AI run FIFO category: {other}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiRun {
+    pub run_id: String,
+    pub conversation_id: String,
+    #[serde(default)]
+    pub session_ids: Vec<String>,
+    pub status: AiRunStatus,
+    #[serde(default)]
+    pub connection_id: String,
+    #[serde(default)]
+    pub database: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_confirmation: Option<serde_json::Value>,
+    /// Which queue category this run occupied. Persisted so restart recovery
+    /// can distinguish a normal send (→ editable pending input) from an
+    /// accepted write-confirmation resume (→ back to awaiting confirmation).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fifo_category: Option<AiRunFifoCategory>,
+    /// The user's input text for a normal-send FIFO item, recovered after
+    /// restart as an editable, unsent pending draft.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_input: Option<String>,
+    /// Highest event `seq` ever assigned to this run, across all its sessions
+    /// (parent PRD §8). Strictly increasing from 1; the run manager persists it
+    /// to drive event dedup, the unread baseline, and the "updates while you
+    /// were away" separator anchor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_seq: Option<u64>,
     pub created_at: String,
     pub updated_at: String,
 }

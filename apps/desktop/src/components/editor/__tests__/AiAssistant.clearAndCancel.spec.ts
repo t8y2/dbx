@@ -33,7 +33,7 @@ function bodyOf(fnSignature: string): string {
   throw new Error(`unbalanced braces reading body of "${fnSignature}"`);
 }
 
-describe("AI assistant clear/switch cancels an in-flight request (issue #5941, PR #6332)", () => {
+describe("AI assistant uses platform-specific conversation lifecycle", () => {
   it("abandonInFlightRequest() invalidates the generation guard before/regardless of the backend RPC", () => {
     const body = bodyOf("function abandonInFlightRequest(alreadyCancelledSessionId?: string)");
     expect(body).toContain("aiGenerationGuard.invalidate();");
@@ -45,17 +45,19 @@ describe("AI assistant clear/switch cancels an in-flight request (issue #5941, P
     expect(body.indexOf("aiGenerationGuard.invalidate();")).toBeLessThan(body.indexOf("if (sessionId && sessionId !== alreadyCancelledSessionId) {"));
   });
 
-  it("clearMessages() abandons a stuck stream before wiping history", () => {
+  it("clearMessages() keeps Web cancellation while Desktop detaches the view", () => {
     const body = bodyOf("function clearMessages()");
-    expect(body).toContain("if (isGenerating.value) abandonInFlightRequest();");
+    expect(body).toContain("if (isGenerating.value && !backgroundAiRunsEnabled) abandonInFlightRequest();");
+    expect(body).toContain("if (isGenerating.value && backgroundAiRunsEnabled) void persistConversation();");
     // The abandon guard must run before the history is actually wiped, not after.
-    expect(body.indexOf("if (isGenerating.value) abandonInFlightRequest();")).toBeLessThan(body.indexOf("messages.value = []"));
+    expect(body.indexOf("!backgroundAiRunsEnabled) abandonInFlightRequest();")).toBeLessThan(body.indexOf("messages.value = []"));
   });
 
-  it("selectConversation() abandons a stuck stream before switching conversations", () => {
+  it("selectConversation() cancels on Web and reattaches to a Desktop run", () => {
     const body = bodyOf("function selectConversation(conv: AiConversation)");
-    expect(body).toContain("if (isGenerating.value) abandonInFlightRequest();");
-    expect(body.indexOf("if (isGenerating.value) abandonInFlightRequest();")).toBeLessThan(body.indexOf("conversationId.value = conv.id;"));
+    expect(body).toContain("if (isGenerating.value && !backgroundAiRunsEnabled) abandonInFlightRequest();");
+    expect(body).toContain("desktopAiRun<ChatMessage>(conv.id)");
+    expect(body.indexOf("!backgroundAiRunsEnabled) abandonInFlightRequest();")).toBeLessThan(body.indexOf("conversationId.value = conv.id;"));
   });
 
   it("cancelStream() delegates live state readers to the tested stop lifecycle", () => {
@@ -67,13 +69,74 @@ describe("AI assistant clear/switch cancels an in-flight request (issue #5941, P
     expect(body).toContain("persistConversation,");
   });
 
-  it("startNewChat() clears through the guarded path and deleteConversation() uses the tested delete lifecycle", () => {
+  it("startNewChat() clears through the guarded path and performDeleteConversation() uses the tested delete lifecycle", () => {
     expect(bodyOf("function startNewChat()")).toContain("clearMessages();");
-    const deleteBody = bodyOf("async function deleteConversation(id: string)");
+    const deleteBody = bodyOf("async function performDeleteConversation(id: string)");
     expect(deleteBody).toContain("await deleteConversationWithCancellation({");
     expect(deleteBody).toContain("abandon: () => abandonInFlightRequest()");
     expect(deleteBody).toContain("deletePersisted: () => deleteAiConversation(id).catch(() => {})");
     expect(deleteBody).toContain("if (conversationId.value === id) clearMessages();");
+  });
+
+  it("deleteConversation() asks for confirmation only when the conversation owns an active task", () => {
+    // Parent PRD §4 line 70: deleting a conversation with a running/queued/
+    // awaiting task must first ask; a conversation without an active task still
+    // deletes directly.
+    const deleteBody = bodyOf("async function deleteConversation(id: string)");
+    expect(deleteBody).toContain("if (backgroundAiRunsEnabled && conversationHasActiveTask(id)) {");
+    expect(deleteBody).toContain("deleteConfirmConversationId.value = id;");
+    expect(deleteBody).toContain("await performDeleteConversation(id);");
+    const taskBody = bodyOf("function conversationHasActiveTask(id: string)");
+    expect(taskBody).toContain('status === "awaiting_write_confirmation"');
+    expect(taskBody).toContain('status === "pending_recoverable"');
+  });
+
+  it("performDeleteConversation() marks desktop runs discardOnFinish so no async write can resurrect them", () => {
+    // Reviewed finding (delete-resurrection, HIGH): a queued/running background
+    // run's snapshot persists fired AFTER deleteAiConversation committed, so the
+    // INSERT OR REPLACE recreated the just-deleted conversation. The delete path
+    // must flag the run so every persist site skips it.
+    const body = bodyOf("async function performDeleteConversation(id: string)");
+    expect(body).toContain("run.discardOnFinish = true;");
+    expect(body).toContain('if (run.status === "queued") cancelQueuedDesktopAiRun(run);');
+    expect(body).toContain('finishDesktopAiRun(run, "cancelled");');
+    // The confirm path must cancel runs in ALL active statuses, including a
+    // pending write confirmation and a recovered draft.
+    expect(body).toContain('run.status === "awaiting_write_confirmation"');
+    expect(body).toContain('run.status === "pending_recoverable"');
+  });
+
+  it("send() guards every snapshot persist behind discardOnFinish so a deleted conversation can't be resurrected", () => {
+    const sendBody = bodyOf("async function send()");
+    // Both queued-persist sites (queued persist + unslotted early-return) must be
+    // guarded — previously they persisted unconditionally.
+    const guardedSites = sendBody.match(/if \(!detachedRun\.discardOnFinish\) void persistDesktopRunSnapshot\(detachedRun\);/g) ?? [];
+    expect(guardedSites.length).toBe(2);
+    // The finally must skip the run snapshot when the run was deleted, and the
+    // Web-only conversation fallback must not fire for a deleted Desktop run.
+    const finallyIdx = sendBody.indexOf("} finally {");
+    const finallyBody = sendBody.slice(finallyIdx);
+    expect(finallyBody).toContain("if (!detachedRun.discardOnFinish) {");
+    expect(finallyBody).not.toContain("else void persistConversationSnapshot(");
+  });
+
+  it("send() tags a queued run's FIFO category so restart recovery can classify it", () => {
+    const sendBody = bodyOf("async function send()");
+    const queueIdx = sendBody.indexOf('if (detachedRun.status === "queued")');
+    expect(queueIdx).toBeGreaterThanOrEqual(0);
+    const queuedBlock = sendBody.slice(queueIdx);
+    expect(queuedBlock).toContain('fifoCategory: resumingConfirmedWrite ? "write_confirmation_resume" : "normal_send"');
+    expect(queuedBlock).toContain("pendingInput: resumingConfirmedWrite ? detachedRun.pendingInput : text");
+  });
+
+  it("send() discards a recovered pending-input run before starting a fresh one", () => {
+    const sendBody = bodyOf("async function send()");
+    const registerIdx = sendBody.indexOf("const resumableRun = desktopAiRun<ChatMessage>(runConversationId);");
+    expect(registerIdx).toBeGreaterThanOrEqual(0);
+    const registerBlock = sendBody.slice(registerIdx);
+    expect(registerBlock).toContain('resumableRun?.status === "pending_recoverable"');
+    expect(registerBlock).toContain("resumableRun.discardOnFinish = true;");
+    expect(registerBlock).toContain("removeDesktopAiRun(resumableRun.conversationId);");
   });
 
   it("send() claims a generation id right after setting isGenerating and re-checks it after the first await", () => {
@@ -85,7 +148,7 @@ describe("AI assistant clear/switch cancels an in-flight request (issue #5941, P
     // anything that touches messages/mentions belonging to whatever conversation
     // is current by the time it resolves.
     const ensureLoadedAwaitIdx = sendBody.indexOf("await promptTemplateStore.ensureLoaded()");
-    const recheckIdx = sendBody.indexOf("if (!aiGenerationGuard.isCurrent(myGeneration))", ensureLoadedAwaitIdx);
+    const recheckIdx = sendBody.indexOf("if (!generationCanContinue())", ensureLoadedAwaitIdx);
     expect(ensureLoadedAwaitIdx).toBeGreaterThan(claimIdx);
     expect(recheckIdx).toBeGreaterThan(ensureLoadedAwaitIdx);
   });
@@ -100,7 +163,7 @@ describe("AI assistant clear/switch cancels an in-flight request (issue #5941, P
     const sendBody = bodyOf("async function send()");
     const ensureLoadedAwaitIdx = sendBody.indexOf("await promptTemplateStore.ensureLoaded()");
     const grantConsumedIdx = sendBody.indexOf("const allowWriteSql = requestedMode", ensureLoadedAwaitIdx);
-    const recheckIdx = sendBody.indexOf("if (!aiGenerationGuard.isCurrent(myGeneration)) {", ensureLoadedAwaitIdx);
+    const recheckIdx = sendBody.indexOf("if (!generationCanContinue()) {", ensureLoadedAwaitIdx);
     expect(recheckIdx).toBeGreaterThan(ensureLoadedAwaitIdx);
     expect(recheckIdx).toBeLessThan(grantConsumedIdx);
     const recheckEnd = sendBody.indexOf("}", recheckIdx);
@@ -113,7 +176,7 @@ describe("AI assistant clear/switch cancels an in-flight request (issue #5941, P
     const sendBody = bodyOf("async function send()");
     const callbackStart = sendBody.indexOf("(event: AgentEvent) => {");
     expect(callbackStart).toBeGreaterThanOrEqual(0);
-    const guardIdx = sendBody.indexOf("if (!aiGenerationGuard.isCurrent(myGeneration)) return;", callbackStart);
+    const guardIdx = sendBody.indexOf("if (!generationCanContinue()) return;", callbackStart);
     const pushIdx = sendBody.indexOf("agentEvents.push(event);", callbackStart);
     expect(guardIdx).toBeGreaterThan(callbackStart);
     expect(guardIdx).toBeLessThan(pushIdx);
@@ -131,8 +194,8 @@ describe("AI assistant clear/switch cancels an in-flight request (issue #5941, P
     // either throw (silently eating the real error) or corrupt a different
     // conversation's transcript.
     expect(catchBody).not.toContain("messages.value[assistantIdx].content =");
-    expect(catchBody).toContain("aiGenerationGuard.isCurrent(myGeneration)");
-    expect(catchBody).toContain("const msg = messages.value[assistantIdx];");
+    expect(catchBody).toContain("generationCanContinue()");
+    expect(catchBody).toContain("const msg = runMessages[assistantIdx];");
     expect(catchBody).toContain("if (msg) msg.content =");
   });
 
@@ -141,7 +204,7 @@ describe("AI assistant clear/switch cancels an in-flight request (issue #5941, P
     const start = sendBody.indexOf("} finally {");
     expect(start).toBeGreaterThanOrEqual(0);
     const finallyBody = sendBody.slice(start);
-    const guardIdx = finallyBody.indexOf("if (aiGenerationGuard.isCurrent(myGeneration)) {");
+    const guardIdx = finallyBody.indexOf("if (detachedRun || aiGenerationGuard.isCurrent(myGeneration)) {");
     expect(guardIdx).toBeGreaterThanOrEqual(0);
     const isGeneratingIdx = finallyBody.indexOf("isGenerating.value = false;");
     const sessionResetIdx = finallyBody.indexOf('currentSessionId.value = "";');
@@ -199,9 +262,9 @@ describe("AI assistant clear/switch cancels an in-flight request (issue #5941, P
   it("send() rechecks the generation after EACH context-preparation await, before ever starting the stream", () => {
     const sendBody = bodyOf("async function send()");
     const sqlFilesIdx = sendBody.indexOf("await loadReferencedSqlFiles(");
-    const firstRecheckIdx = sendBody.indexOf("if (!aiGenerationGuard.isCurrent(myGeneration)) return;", sqlFilesIdx);
+    const firstRecheckIdx = sendBody.indexOf("if (!generationCanContinue()) return;", sqlFilesIdx);
     const contextIdx = sendBody.indexOf("const context = await buildAiContext(");
-    const secondRecheckIdx = sendBody.indexOf("if (!aiGenerationGuard.isCurrent(myGeneration)) return;", contextIdx);
+    const secondRecheckIdx = sendBody.indexOf("if (!generationCanContinue()) return;", contextIdx);
     const runIdx = sendBody.indexOf("await runAgentStream(", contextIdx);
     // A clear/switch/unmount firing during EITHER await invalidates the generation
     // but doesn't touch the backend (no session registered yet) — without a
@@ -221,8 +284,8 @@ describe("AI assistant clear/switch cancels an in-flight request (issue #5941, P
     // "finalizes the stuck placeholder message" test above). Must be set at the
     // same point currentSessionId is, and cleared alongside it too.
     const sendBody = bodyOf("async function send()");
-    const pushIdx = sendBody.indexOf('messages.value.push({ role: "assistant"');
-    const assistantIdxIdx = sendBody.indexOf("const assistantIdx = messages.value.length - 1;", pushIdx);
+    const pushIdx = sendBody.indexOf('runMessages.push({ role: "assistant"');
+    const assistantIdxIdx = sendBody.indexOf("const assistantIdx = runMessages.length - 1;", pushIdx);
     const trackIdx = sendBody.indexOf("currentAssistantMessageIndex = assistantIdx;", assistantIdxIdx);
     const sessionSetIdx = sendBody.indexOf("currentSessionId.value = sessionId;", trackIdx);
     expect(pushIdx).toBeGreaterThanOrEqual(0);
@@ -286,8 +349,33 @@ describe("AI assistant clear/switch cancels an in-flight request (issue #5941, P
     // callback/catch/finally would keep writing into refs this now-unmounted
     // instance's closures still hold. Must go through the same invalidating path as
     // clearMessages()/selectConversation().
-    expect(body).toContain("if (isGenerating.value) abandonInFlightRequest();");
+    expect(body).toContain("if (isGenerating.value && !backgroundAiRunsEnabled) abandonInFlightRequest();");
     expect(body).not.toContain("cancelStream();");
+  });
+
+  it("queues simultaneous background auto-sends instead of overwriting a single pending target", () => {
+    // Several detached runs can settle in the same turn. A single mutable
+    // `pendingAutoSend` slot lost whichever queued input was scheduled first.
+    expect(source).toContain("const pendingAutoSends: PendingAutoSend[] = [];");
+    const sendBody = bodyOf("async function send()");
+    expect(sendBody).toContain("const auto = pendingAutoSends.shift() ?? null;");
+    const scheduleBody = bodyOf("function scheduleAutoSend(");
+    expect(scheduleBody).toContain("pendingAutoSends.push(");
+  });
+
+  it("makes successfully persisted background conversations navigable without reopening the list", () => {
+    const snapshotBody = bodyOf("async function persistDesktopRunSnapshot(");
+    expect(snapshotBody).toContain(".then(() => syncPersistedConversation(conversation))");
+    const syncBody = bodyOf("function syncPersistedConversation(conversation: AiConversation)");
+    expect(syncBody).toContain("conversations.value.unshift(conversation);");
+    expect(syncBody).toContain("conversations.value.sort(");
+  });
+
+  it("does not replace an in-memory desktop run when the AI panel remounts", () => {
+    const mountedBody = bodyOf("onMounted(async () => {");
+    expect(mountedBody).toContain("const liveRun = desktopAiRun<ChatMessage>(persistedRun.conversationId);");
+    expect(mountedBody).toContain("if (liveRun) {");
+    expect(mountedBody).toContain("continue;");
   });
 
   it("agent step cards render a running-tool tail and a computed duration tail", () => {

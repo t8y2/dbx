@@ -369,10 +369,17 @@ pub async fn ai_stream(
         })
         .await;
 
-        if let Err(_e) = result {
-            let error_chunk =
-                AiStreamChunk { session_id: sid.clone(), delta: String::new(), reasoning_delta: None, done: true };
-            let _ = tx.send(serde_json::to_string(&error_chunk).unwrap_or_default());
+        if let Err(error) = result {
+            // Preserve the existing POST/SSE lifecycle, but make failure an
+            // explicit terminal payload so Web cannot mistake it for a
+            // successful empty response.
+            let error_chunk = serde_json::json!({
+                "session_id": sid.clone(),
+                "delta": "",
+                "done": true,
+                "error": error,
+            });
+            let _ = tx.send(error_chunk.to_string());
         }
 
         dbx_core::ai::unregister_stream(&sid).await;

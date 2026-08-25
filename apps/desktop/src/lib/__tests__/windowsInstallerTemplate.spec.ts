@@ -119,8 +119,10 @@ describe("Windows 7 fixed WebView2 runtime bundle", () => {
   it("passes the configured fixed-runtime folder to WebView2 discovery and creation", () => {
     expect(workspaceCargoToml).toContain('wry = { path = "vendor/wry" }');
     expect(wryWebView2Source).toContain('std::env::var_os("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER")');
-    expect(wryWebView2Source).toContain(`CreateCoreWebView2EnvironmentWithOptions(
-        browser_executable_folder_ptr,`);
+    // The webview2_com crate indents this with 8 spaces; assert on the two
+    // adjacent lines loosely so a formatter's re-indent doesn't break the test.
+    expect(wryWebView2Source).toContain("CreateCoreWebView2EnvironmentWithOptions(");
+    expect(wryWebView2Source).toContain("browser_executable_folder_ptr,");
     expect(wryWebView2Source).toContain("GetAvailableCoreWebView2BrowserVersionString(browser_executable_folder_ptr, &mut versioninfo)");
   });
 

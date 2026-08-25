@@ -1357,7 +1357,10 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     const columnIndexes = exportColumns.map((column, index) => ({ column, index })).filter((item): item is { column: string; index: number } => !!item.column);
     const exportColumnTypes = columnTypes.value?.length === result.columns.length ? columnTypes.value : undefined;
     const indexBySource = new Map(columnIndexes.map((item, index) => [item.index, index]));
-    const spatialColumns = result.spatialColumns?.map((column) => ({ column_index: indexBySource.get(column.column_index), srid: column.srid })).filter((column): column is { column_index: number; srid?: number | null } => column.column_index !== undefined);
+    const spatialColumns = result.spatialColumns?.flatMap((column) => {
+      const columnIndex = indexBySource.get(column.column_index);
+      return columnIndex === undefined ? [] : [{ column_index: columnIndex, srid: column.srid }];
+    });
     return {
       columns: columnIndexes.map((item) => item.column),
       columnTypes: exportColumnTypes ? columnIndexes.map((item) => exportColumnTypes[item.index]) : undefined,

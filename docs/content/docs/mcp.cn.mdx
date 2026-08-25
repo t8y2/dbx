@@ -119,6 +119,8 @@ DBX MCP 定义 25 个工具；日常默认注册 22 个，只有显式无作用�
 
 连接管理默认关闭；只有无任何 `DBX_MCP_SCOPE_*` 且安装维护进程显式设置 `DBX_MCP_ENABLE_CONNECTION_MANAGEMENT=1` 时，新增、复制和删除连接工具才会注册。启用任一作用域后，即使设置该开关也会隐藏并在直接调用时阻断连接管理。删除还会复核全局 `allowed_connection_ids`。桌面 UI 工具在 scoped 模式下同样隐藏。
 
+连接解析始终先取运行时 scope 与全局 `allowed_connection_ids` 的交集。`connection_id` 按 ID 精确解析；`connection_name` 可按 ID 精确解析，也可在全部有效候选中按名称大小写不敏感解析。只有交集内恰好一个连接且没有 selector 时才允许隐式使用；多个 `DBX_MCP_SCOPE_CONNECTION_IDS` 同时有效时，省略 selector 会返回 `CONNECTION_SELECTOR_REQUIRED`。scope 或全局 allowlist 之外的连接继续返回 `CONNECTION_OUT_OF_SCOPE`。
+
 ## 本地文件导入与 Milvus 工具
 
 导入工具只支持本地 DBX Desktop/MCP 模式；在 Web 模式中会稳定返回 `IMPORT_UNSUPPORTED_IN_WEB_MODE_V1`。必须用平台路径分隔符在 `DBX_MCP_IMPORT_ROOTS` 中配置一个或多个真实目录。文件路径必须是绝对路径，解析后仍位于允许目录内，是普通且非符号链接的文件，扩展名受支持，并且没有超过大小限制。preview 支持 Excel、JSON、CSV 和 TSV，并明确返回 `usedRangeExact` 与 `totalRowsExact`；受限预览不会把已扫描行数伪装成全文件总行数。v1 治理入库使用有界流式处理支持 XLSX/XLSM 和显式指定 `utf-8` 的 CSV/TSV。旧版 `.xls`、JSON、`auto`、GBK 和 UTF-16 分隔文件会在创建计划和访问数据库之前返回稳定的不支持错误。

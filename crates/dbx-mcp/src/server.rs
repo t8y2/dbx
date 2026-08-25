@@ -2044,48 +2044,69 @@ impl DbxMcpServer {
             }
             return Ok(resolved_connection(policy, connection));
         }
-        if self.scope.connection_scope_enabled() {
-            let connection = connections
-                .into_iter()
-                .find(|connection| self.scope.matches(connection))
-                .ok_or_else(|| tool_error("CONNECTION_NOT_FOUND", "Scoped DBX connection was not found."))?;
-            if let Some(name) = selector.connection_name.as_deref().map(str::trim).filter(|name| !name.is_empty()) {
-                if name != connection.name && name != connection.id {
-                    return Err(tool_error(
-                        "CONNECTION_OUT_OF_SCOPE",
-                        format!("Connection \"{name}\" is outside this DBX AI session scope."),
-                    ));
+        let scoped = connections
+            .iter()
+            .filter(|connection| !self.scope.connection_scope_enabled() || self.scope.matches(connection))
+            .collect::<Vec<_>>();
+        let allowed = scoped
+            .iter()
+            .copied()
+            .filter(|connection| policy_allows_connection(&policy, connection))
+            .collect::<Vec<_>>();
+
+        if let Some(name) = selector.connection_name.as_deref().map(str::trim).filter(|name| !name.is_empty()) {
+            if let Some(exact_id) = connections.iter().find(|connection| connection.id == name) {
+                if allowed.iter().any(|connection| connection.id == exact_id.id) {
+                    return Ok(ResolvedConnection { connection: exact_id.clone(), policy });
                 }
-            }
-            if !policy_allows_connection(&policy, &connection) {
                 return Err(tool_error(
                     "CONNECTION_OUT_OF_SCOPE",
-                    "The DBX AI session scope is outside the global MCP connection allowlist.",
+                    format!("Connection \"{name}\" is outside the effective DBX MCP scope or allowlist."),
                 ));
             }
-            return Ok(resolved_connection(policy, connection));
+            let matching = allowed
+                .iter()
+                .copied()
+                .filter(|connection| connection.name.eq_ignore_ascii_case(name))
+                .cloned()
+                .collect::<Vec<_>>();
+            return match matching.as_slice() {
+                [connection] => Ok(ResolvedConnection { connection: connection.clone(), policy }),
+                [_, _, ..] => Err(tool_error("AMBIGUOUS_CONNECTION", ambiguous_connections(name, &matching))),
+                [] => {
+                    let exists = connections
+                        .iter()
+                        .any(|connection| connection.id == name || connection.name.eq_ignore_ascii_case(name));
+                    if !exists {
+                        Err(tool_error("CONNECTION_NOT_FOUND", format!("Connection \"{name}\" not found.")))
+                    } else {
+                        Err(tool_error(
+                            "CONNECTION_OUT_OF_SCOPE",
+                            format!("Connection \"{name}\" is outside the effective DBX MCP scope or allowlist."),
+                        ))
+                    }
+                }
+            };
         }
-        let Some(name) = selector.connection_name.as_deref().map(str::trim).filter(|name| !name.is_empty()) else {
-            return Err(tool_error("CONNECTION_NOT_FOUND", "Either connection_id or connection_name is required."));
-        };
-        let matching =
-            connections.into_iter().filter(|connection| connection.name.eq_ignore_ascii_case(name)).collect::<Vec<_>>();
-        let allowed = matching
-            .iter()
-            .filter(|connection| policy_allows_connection(&policy, connection))
-            .cloned()
-            .collect::<Vec<_>>();
-        match allowed.as_slice() {
-            [] if matching.is_empty() => {
-                Err(tool_error("CONNECTION_NOT_FOUND", format!("Connection \"{name}\" not found.")))
-            }
-            [] => Err(tool_error(
-                "CONNECTION_OUT_OF_SCOPE",
-                format!("Connection \"{name}\" is not allowed by DBX MCP settings."),
-            )),
-            [connection] => Ok(resolved_connection(policy, connection.clone())),
-            _ => Err(tool_error("AMBIGUOUS_CONNECTION", ambiguous_connections(name, &allowed))),
+
+        if self.scope.connection_scope_enabled() {
+            return match allowed.as_slice() {
+                [connection] => Ok(ResolvedConnection { connection: (*connection).clone(), policy }),
+                [] if scoped.is_empty() => {
+                    Err(tool_error("CONNECTION_NOT_FOUND", "Scoped DBX connection was not found."))
+                }
+                [] => Err(tool_error(
+                    "CONNECTION_OUT_OF_SCOPE",
+                    "The DBX AI session scope is outside the global MCP connection allowlist.",
+                )),
+                _ => Err(tool_error(
+                    "CONNECTION_SELECTOR_REQUIRED",
+                    "Multiple scoped DBX connections are available; provide connection_id or connection_name.",
+                )),
+            };
         }
+
+        Err(tool_error("CONNECTION_NOT_FOUND", "Either connection_id or connection_name is required."))
     }
 }
 
@@ -3466,6 +3487,92 @@ mod tests {
             }))
             .await;
         assert!(result_text(&result).contains("CONNECTION_NOT_FOUND"));
+    }
+
+    #[tokio::test]
+    async fn multi_connection_scope_resolves_all_allowed_selectors_and_fails_closed_without_one() {
+        let query = connection("query-id", "Operations Query", "postgres", "enterprise");
+        let semantic = connection("semantic-id", "Operations Semantics", "milvus", "default");
+        let trace = connection("trace-id", "Operations Trace", "postgres", "enterprise");
+        let scope_only = connection("scope-only", "Scope Only", "postgres", "enterprise");
+        let outside = connection("outside", "Outside", "postgres", "enterprise");
+        let connections = vec![query.clone(), semantic.clone(), trace.clone(), scope_only, outside];
+        let policy = McpGlobalPolicy {
+            read_only: false,
+            allow_dangerous_sql: false,
+            allowed_connection_ids: Some(vec![
+                "query-id".to_string(),
+                "semantic-id".to_string(),
+                "trace-id".to_string(),
+                "outside".to_string(),
+            ]),
+        };
+        let server = DbxMcpServer::with_runtime_options(
+            Arc::new(FakeBackend { connections: connections.clone(), policy: policy.clone(), ..Default::default() }),
+            McpScope {
+                connection_ids: vec![
+                    "query-id".to_string(),
+                    "semantic-id".to_string(),
+                    "trace-id".to_string(),
+                    "scope-only".to_string(),
+                ],
+                ..Default::default()
+            },
+            false,
+        );
+
+        for (selector, expected_id) in [
+            (
+                ConnectionSelector { connection_id: None, connection_name: Some("operations query".to_string()) },
+                "query-id",
+            ),
+            (
+                ConnectionSelector { connection_id: None, connection_name: Some("OPERATIONS SEMANTICS".to_string()) },
+                "semantic-id",
+            ),
+            (
+                ConnectionSelector { connection_id: None, connection_name: Some("semantic-id".to_string()) },
+                "semantic-id",
+            ),
+            (ConnectionSelector { connection_id: Some("trace-id".to_string()), connection_name: None }, "trace-id"),
+        ] {
+            assert_eq!(server.resolve_connection(&selector).await.unwrap().connection.id, expected_id);
+        }
+
+        let empty_selector = ConnectionSelector { connection_id: None, connection_name: None };
+        let missing_selector = match server.resolve_connection(&empty_selector).await {
+            Err(error) => error,
+            Ok(_) => panic!("多个 scoped connection 不得隐式选择"),
+        };
+        assert!(result_text(&missing_selector).contains("CONNECTION_SELECTOR_REQUIRED"));
+        for name in ["Scope Only", "Outside"] {
+            let error = match server
+                .resolve_connection(&ConnectionSelector {
+                    connection_id: None,
+                    connection_name: Some(name.to_string()),
+                })
+                .await
+            {
+                Err(error) => error,
+                Ok(_) => panic!("scope 或 allowlist 外连接不得解析：{name}"),
+            };
+            assert!(result_text(&error).contains("CONNECTION_OUT_OF_SCOPE"));
+        }
+
+        let single_id = DbxMcpServer::with_runtime_options(
+            Arc::new(FakeBackend { connections: connections.clone(), policy: policy.clone(), ..Default::default() }),
+            McpScope { connection_ids: vec!["query-id".to_string()], ..Default::default() },
+            false,
+        );
+        let empty_selector = ConnectionSelector { connection_id: None, connection_name: None };
+        assert_eq!(single_id.resolve_connection(&empty_selector).await.unwrap().connection.id, query.id);
+        let single_name = DbxMcpServer::with_runtime_options(
+            Arc::new(FakeBackend { connections, policy, ..Default::default() }),
+            McpScope { connection_name: Some("Operations Trace".to_string()), ..Default::default() },
+            false,
+        );
+        let empty_selector = ConnectionSelector { connection_id: None, connection_name: None };
+        assert_eq!(single_name.resolve_connection(&empty_selector).await.unwrap().connection.id, trace.id);
     }
 
     #[test]

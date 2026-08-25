@@ -611,3 +611,84 @@ async fn runtime_connection_scope_preserves_group_paths() {
     client.cancel().await.expect("close MCP client");
     server_task.abort();
 }
+
+#[tokio::test]
+async fn multi_connection_runtime_scope_routes_each_name_and_requires_selector() {
+    let backend = PolicyBackend {
+        policy: McpGlobalPolicy {
+            read_only: false,
+            allow_dangerous_sql: false,
+            allowed_connection_ids: Some(vec![
+                "query-id".to_string(),
+                "semantic-id".to_string(),
+                "trace-id".to_string(),
+                "outside".to_string(),
+            ]),
+        },
+        connections: vec![
+            test_connection("query-id", "Operations Query"),
+            test_connection("semantic-id", "Operations Semantics"),
+            test_connection("trace-id", "Operations Trace"),
+            test_connection("scope-only", "Scope Only"),
+            test_connection("outside", "Outside"),
+        ],
+        group_paths: Ok(HashMap::new()),
+    };
+    let (server_transport, client_transport) = tokio::io::duplex(32 * 1024);
+    let server = DbxMcpServer::with_runtime_options(
+        Arc::new(backend),
+        McpScope {
+            connection_ids: vec![
+                "query-id".to_string(),
+                "semantic-id".to_string(),
+                "trace-id".to_string(),
+                "scope-only".to_string(),
+            ],
+            ..Default::default()
+        },
+        false,
+    );
+    let server_task = tokio::spawn(async move { server.serve(server_transport).await });
+    let client = ().serve(client_transport).await.expect("initialize MCP client");
+
+    for name in ["operations query", "OPERATIONS SEMANTICS", "Operations Trace"] {
+        let result = client
+            .peer()
+            .call_tool(CallToolRequestParams::new("dbx_execute_query").with_arguments(
+                json!({ "connection_name": name, "sql": "SELECT 1" }).as_object().cloned().unwrap_or_else(Map::new),
+            ))
+            .await
+            .expect("route scoped connection by name");
+        let text = result.content[0].as_text().expect("query result").text.as_str();
+        assert!(text.contains("query should have been blocked"), "{name} did not reach selected backend: {text}");
+        assert!(!text.contains("CONNECTION_OUT_OF_SCOPE"));
+    }
+
+    let no_selector = client
+        .peer()
+        .call_tool(
+            CallToolRequestParams::new("dbx_execute_query")
+                .with_arguments(json!({ "sql": "SELECT 1" }).as_object().cloned().unwrap_or_else(Map::new)),
+        )
+        .await
+        .expect("reject missing selector");
+    assert!(no_selector.content[0]
+        .as_text()
+        .expect("missing selector result")
+        .text
+        .contains("CONNECTION_SELECTOR_REQUIRED"));
+
+    for name in ["Scope Only", "Outside"] {
+        let result = client
+            .peer()
+            .call_tool(CallToolRequestParams::new("dbx_execute_query").with_arguments(
+                json!({ "connection_name": name, "sql": "SELECT 1" }).as_object().cloned().unwrap_or_else(Map::new),
+            ))
+            .await
+            .expect("reject out-of-scope selector");
+        assert!(result.content[0].as_text().expect("out-of-scope result").text.contains("CONNECTION_OUT_OF_SCOPE"));
+    }
+
+    client.cancel().await.expect("close MCP client");
+    server_task.abort();
+}

@@ -170,7 +170,8 @@ async fn duplicate_connection_preserves_secrets_ssh_and_sidebar_group() {
     let backend = Arc::new(LocalBackend::open(&db_path).await.expect("open local backend"));
     let policy = backend.load_mcp_global_policy().await.expect("load configured policy");
     assert!(!policy.read_only);
-    let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
+    let server =
+        DbxMcpServer::with_runtime_options_and_connection_management(backend, McpScope::default(), false, true);
     let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
     let server_task = tokio::spawn(async move { server.serve(server_transport).await });
     let client = ().serve(client_transport).await.expect("initialize client");

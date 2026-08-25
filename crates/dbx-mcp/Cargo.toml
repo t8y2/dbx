@@ -28,16 +28,20 @@ schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+sysinfo = { version = "0.32", features = ["system"] }
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = "0.7"
 tower-http = { version = "0.6", features = ["cors"] }
 time = { version = "0.3", features = ["formatting"] }
 uuid = { version = "1", features = ["v4"] }
 url = "2"
+zip = { version = "4", default-features = false, features = ["deflate"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 rustls-pemfile = "2.2"
 tempfile = "3"
 tokio = { version = "1", features = ["net", "io-util"] }
 tokio-rustls = "0.26"
-zip = "4"

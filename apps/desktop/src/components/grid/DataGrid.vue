@@ -6950,6 +6950,10 @@ function dataGridSelectionScroller(): HTMLElement | null {
   return canvasScrollerElement();
 }
 
+function canvasMeasurementSurface(): HTMLElement | null {
+  return canvasOverlayRef.value ?? null;
+}
+
 function dataGridCellFromClientPoint(clientX: number, clientY: number): { rowIndex: number; colIndex: number } | null {
   const scroller = dataGridSelectionScroller();
   if (!scroller) return null;
@@ -6996,9 +7000,9 @@ function syncCanvasViewport(entries?: readonly ResizeObserverEntry[]) {
   if (!dataGridIsActive) return;
   const scroller = canvasScrollerElement();
   if (!scroller) return;
-  const canvas = activeCanvasSurface();
-  const canvasEntry = canvas ? entries?.find((entry) => entry.target === canvas) : undefined;
-  if (canvasEntry) canvasMeasuredDevicePixelSize.value = dataGridCanvasDevicePixelSize(canvasEntry);
+  const measurementSurface = canvasMeasurementSurface();
+  const surfaceEntry = measurementSurface ? entries?.find((entry) => entry.target === measurementSurface) : undefined;
+  if (surfaceEntry) canvasMeasuredDevicePixelSize.value = dataGridCanvasDevicePixelSize(surfaceEntry);
   canvasViewportWidth.value = scroller.clientWidth;
   canvasViewportHeight.value = scroller.clientHeight;
   canvasScrollTop.value = scroller.scrollTop;
@@ -7059,7 +7063,7 @@ canvasRuntime = useDataGridCanvasRuntime({
   draw: drawCanvasGrid,
   syncViewport: syncCanvasViewport,
   getViewport: canvasScrollerElement,
-  getSurface: () => activeCanvasSurface(),
+  getSurface: canvasMeasurementSurface,
   refreshPixelRatio: () => {
     const next = currentCanvasDevicePixelRatio();
     if (Math.abs(next - canvasDevicePixelRatio.value) > 0.001) {

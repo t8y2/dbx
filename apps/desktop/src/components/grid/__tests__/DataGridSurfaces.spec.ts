@@ -133,6 +133,16 @@ beforeEach(() => {
   vi.clearAllMocks();
   localStorage.removeItem("dbx-filter-builder-value-shortcut-hint-days");
 });
+describe("DataGrid canvas surfaces", () => {
+  it("uses the stable overlay for viewport and device-pixel measurement", () => {
+    expect(dataGridSource).toContain("function canvasMeasurementSurface(): HTMLElement | null");
+    expect(dataGridSource).toContain("return canvasOverlayRef.value ?? null;");
+    expect(dataGridSource).toContain("const measurementSurface = canvasMeasurementSurface();");
+    expect(dataGridSource).toContain("getSurface: canvasMeasurementSurface,");
+    expect(dataGridSource).toContain("const canvas = inactiveCanvasSurface();");
+    expect(dataGridSource).toContain("canvasUsingBackSurface.value = !canvasUsingBackSurface.value;");
+  });
+});
 
 describe("DataGridSearchBar", () => {
   it("focuses/selects the input and forwards keyboard, navigation, and suggestion interactions", async () => {

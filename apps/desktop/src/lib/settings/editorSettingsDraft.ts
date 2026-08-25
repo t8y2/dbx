@@ -75,6 +75,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "sidebarIndent",
   "sidebarFontSize",
   "sidebarHiddenTablePrefixes",
+  "redisKeyTemplates",
   "exportBatchSize",
   "exportRowLimitEnabled",
   "exportRowLimit",

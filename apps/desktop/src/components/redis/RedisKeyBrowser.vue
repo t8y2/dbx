@@ -1719,6 +1719,14 @@ function onSearchInput() {
       clearTimeout(searchTimer);
       searchTimer = null;
     }
+    searchPending.value = false;
+    invalidateScanRequests();
+    loading.value = false;
+    isFetchingAll.value = false;
+    fetchAllStopRequested.value = true;
+    fetchAllLoadedCount.value = 0;
+    selectedKeyRaw.value = null;
+    resetCheckedKeys();
     return;
   }
   if (searchTimer) clearTimeout(searchTimer);

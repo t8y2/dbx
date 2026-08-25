@@ -381,6 +381,10 @@ fn upper_first_word(s: &str) -> &str {
     trimmed.split_whitespace().next().unwrap_or("")
 }
 
+fn sqlserver_single_statement_batch(batch: &str) -> String {
+    format!("EXEC sys.sp_executesql N'{}';", batch.trim().trim_end_matches(';').replace('\'', "''"))
+}
+
 fn wrap_if_not_exists(sql: &str, db_type: DatabaseType) -> String {
     use crate::sql_dialect::ddl_profile::profile_for;
     let profile = profile_for(db_type);
@@ -474,7 +478,7 @@ fn wrap_conditional_check(sql: &str, db_type: DatabaseType) -> String {
     let upper = trimmed.to_uppercase();
     let first_word = upper_first_word(trimmed);
 
-    if first_word == "CREATE" && upper.contains("TABLE") {
+    if first_word == "CREATE" && (upper.starts_with("CREATE TABLE ") || upper.starts_with("CREATE TEMPORARY TABLE ")) {
         // Prefer native IF NOT EXISTS — never append bare DDL after a SELECT CASE
         // (SELECT does not execute the string payload).
         if profile.create_table_if_not_exists {
@@ -513,10 +517,23 @@ fn wrap_conditional_check(sql: &str, db_type: DatabaseType) -> String {
                     "BEGIN\n  EXECUTE IMMEDIATE '{ddl_literal}';\nEXCEPTION\n  WHEN OTHERS THEN\n    IF SQLCODE != -955 THEN RAISE; END IF;\nEND;"
                 )
             }
+            DatabaseType::SqlServer => sqlserver_single_statement_batch(&format!(
+                "IF OBJECT_ID(N'{}', N'U') IS NULL BEGIN {trimmed}; END;",
+                table_identifier.replace('\'', "''")
+            )),
             _ => {
                 format!("-- ConditionalCheck: run only if table {table_name} does not exist\n{trimmed};")
             }
         };
+    }
+
+    if db_type == DatabaseType::SqlServer && first_word == "CREATE" && upper.contains(" INDEX ") {
+        let index_name = unquote_sqlserver_identifier(extract_object_identifier(trimmed, "INDEX")).replace('\'', "''");
+        let table_identifier = extract_object_identifier(trimmed, "ON");
+        let table_literal = table_identifier.replace('\'', "''");
+        return sqlserver_single_statement_batch(&format!(
+            "IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'{table_literal}') AND name = N'{index_name}') BEGIN {trimmed}; END;"
+        ));
     }
 
     if first_word == "DROP" {
@@ -552,11 +569,30 @@ fn extract_object_identifier<'a>(sql: &'a str, keyword: &str) -> &'a str {
 
         let mut quote = None;
         let mut end = after.len();
-        for (index, ch) in after.char_indices() {
+        let mut chars = after.char_indices().peekable();
+        while let Some((index, ch)) = chars.next() {
             match quote {
-                Some('"') if ch == '"' => quote = None,
-                Some('`') if ch == '`' => quote = None,
-                Some(']') if ch == ']' => quote = None,
+                Some('"') if ch == '"' => {
+                    if chars.peek().is_some_and(|(_, next)| *next == '"') {
+                        chars.next();
+                    } else {
+                        quote = None;
+                    }
+                }
+                Some('`') if ch == '`' => {
+                    if chars.peek().is_some_and(|(_, next)| *next == '`') {
+                        chars.next();
+                    } else {
+                        quote = None;
+                    }
+                }
+                Some(']') if ch == ']' => {
+                    if chars.peek().is_some_and(|(_, next)| *next == ']') {
+                        chars.next();
+                    } else {
+                        quote = None;
+                    }
+                }
                 Some(_) => {}
                 None if ch == '"' || ch == '`' => quote = Some(ch),
                 None if ch == '[' => quote = Some(']'),
@@ -575,6 +611,17 @@ fn extract_object_identifier<'a>(sql: &'a str, keyword: &str) -> &'a str {
 
 fn extract_table_name<'a>(sql: &'a str, keyword: &str) -> &'a str {
     extract_object_identifier(sql, keyword).trim_matches('"').trim_matches('`').trim_matches('[').trim_matches(']')
+}
+
+fn unquote_sqlserver_identifier(identifier: &str) -> String {
+    let trimmed = identifier.trim();
+    if let Some(inner) = trimmed.strip_prefix('[').and_then(|value| value.strip_suffix(']')) {
+        inner.replace("]]", "]")
+    } else if let Some(inner) = trimmed.strip_prefix('"').and_then(|value| value.strip_suffix('"')) {
+        inner.replace("\"\"", "\"")
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn postgres_table_identity(identifier: &str) -> (Option<String>, String) {
@@ -1477,6 +1524,15 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_selects_catalog_based_conditional_strategy() {
+        let descriptor = DialectCapabilityDescriptor::for_dialect(DialectKind::SqlServer);
+        assert_eq!(
+            select_strategy(Some(DialectKind::SqlServer), Some(&descriptor)),
+            IdempotentStrategy::ConditionalCheck
+        );
+    }
+
+    #[test]
     fn select_strategy_conditional() {
         let desc = DialectCapabilityDescriptor { flags: 0, ..Default::default() };
         let strategy = select_strategy(Some(DialectKind::Sqlite), Some(&desc));
@@ -1532,6 +1588,38 @@ mod tests {
         let result = apply_idempotent_strategy(sql, DatabaseType::Postgres, IdempotentStrategy::IfNotExists);
         assert!(result.contains("CREATE UNIQUE INDEX IF NOT EXISTS"), "Got: {result}");
         assert!(!result.contains("CREATE IF NOT EXISTS"), "wrong IF NOT EXISTS placement: {result}");
+    }
+
+    #[test]
+    fn sqlserver_never_emits_create_index_if_not_exists() {
+        let sql = "CREATE UNIQUE NONCLUSTERED INDEX [idx_email] ON [dbo].[users] ([email]);";
+        let direct = apply_idempotent_strategy(sql, DatabaseType::SqlServer, IdempotentStrategy::IfNotExists);
+        assert_eq!(direct, sql);
+        assert!(!direct.contains("INDEX IF NOT EXISTS"));
+
+        let conditional = apply_idempotent_strategy(sql, DatabaseType::SqlServer, IdempotentStrategy::ConditionalCheck);
+        assert!(conditional.starts_with("EXEC sys.sp_executesql N'IF NOT EXISTS"), "Got: {conditional}");
+        assert!(conditional.contains("FROM sys.indexes"), "Got: {conditional}");
+        assert!(conditional.contains("OBJECT_ID(N''[dbo].[users]'')"), "Got: {conditional}");
+        assert!(conditional.contains("name = N''idx_email''"), "Got: {conditional}");
+        assert!(!conditional.contains("INDEX IF NOT EXISTS"), "Got: {conditional}");
+
+        let escaped_name = apply_idempotent_strategy(
+            "CREATE INDEX [ix_owner]] name] ON [dbo].[user]] data] ([id]);",
+            DatabaseType::SqlServer,
+            IdempotentStrategy::ConditionalCheck,
+        );
+        assert!(escaped_name.contains("OBJECT_ID(N''[dbo].[user]] data]'')"), "Got: {escaped_name}");
+        assert!(escaped_name.contains("name = N''ix_owner] name''"), "Got: {escaped_name}");
+    }
+
+    #[test]
+    fn sqlserver_create_table_conditional_uses_object_id() {
+        let sql = "CREATE TABLE [dbo].[users] ([id] INT NOT NULL);";
+        let result = apply_idempotent_strategy(sql, DatabaseType::SqlServer, IdempotentStrategy::ConditionalCheck);
+        assert!(result.starts_with("EXEC sys.sp_executesql N'IF OBJECT_ID"), "Got: {result}");
+        assert!(result.contains("N''[dbo].[users]'', N''U''"), "Got: {result}");
+        assert!(!result.contains("CREATE TABLE IF NOT EXISTS"), "Got: {result}");
     }
 
     #[test]

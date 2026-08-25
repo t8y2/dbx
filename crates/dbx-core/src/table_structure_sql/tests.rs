@@ -2437,7 +2437,7 @@ fn sqlserver_default_changes_drop_old_constraints_with_isolated_batches() {
 
     assert_eq!(
         result.statements[1],
-        "ALTER TABLE [core].[products] ADD CONSTRAINT [DF_products_sku] DEFAULT 'new sku' FOR [sku];"
+        "ALTER TABLE [core].[products] ADD CONSTRAINT [DF_products_sku] DEFAULT N'new sku' FOR [sku];"
     );
     assert_eq!(
         result.statements[3],
@@ -2508,6 +2508,35 @@ fn sqlserver_type_and_default_change_drops_before_alter_and_adds_new_default() {
     assert_eq!(
         result.statements[2],
         "ALTER TABLE [dbo].[inventory] ADD CONSTRAINT [DF_inventory_quantity] DEFAULT 1.5 FOR [quantity];"
+    );
+}
+
+#[test]
+fn sqlserver_generated_default_constraint_escapes_identifiers_and_unicode_values() {
+    let mut owner = column("owner]id");
+    owner.data_type = "nvarchar(40)".to_string();
+    owner.default_value = "中文'值".to_string();
+    owner.original = Some(ColumnInfo {
+        name: "owner]id".to_string(),
+        data_type: "nvarchar(40)".to_string(),
+        is_nullable: true,
+        column_default: Some("N'旧值'".to_string()),
+        ..Default::default()
+    });
+
+    let result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+        database_type: Some(DatabaseType::SqlServer),
+        schema: Some("dbo".to_string()),
+        table_name: "order]s".to_string(),
+        column: owner,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements.len(), 2);
+    assert!(result.statements[0].contains("OBJECT_ID(N'[dbo].[order]]s]')"));
+    assert_eq!(
+        result.statements[1],
+        "ALTER TABLE [dbo].[order]]s] ADD CONSTRAINT [DF_order]]s_owner]]id] DEFAULT N'中文''值' FOR [owner]]id];"
     );
 }
 

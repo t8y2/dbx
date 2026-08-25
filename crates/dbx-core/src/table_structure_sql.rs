@@ -22,6 +22,12 @@ pub use owner::build_table_owner_change_sql;
 pub use sqlite_rebuild::{apply_sqlite_table_structure_change, preview_sqlite_table_structure_change};
 pub use types::*;
 
+pub(crate) use column_alter::{
+    build_sqlserver_alter_column_preserving_default_sql, build_sqlserver_drop_default_constraint_sql,
+};
+pub(crate) use comments::{build_sqlserver_column_comment_sql, build_sqlserver_table_comment_sql};
+pub(crate) use util::sqlserver_unicode_string_literal;
+
 use crate::models::connection::DatabaseType;
 
 use columns::{build_column_sql, validate_primary_key_change_scope};

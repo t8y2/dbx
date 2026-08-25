@@ -87,7 +87,7 @@ Run `dsh web --dump-config` to verify the composed configuration, then restart D
 
 ## Tools
 
-DBX MCP provides the following tools (availability depends on build features and access settings):
+DBX MCP currently provides 25 tools:
 
 | Tool | Description |
 | --- | --- |
@@ -102,53 +102,52 @@ DBX MCP provides the following tools (availability depends on build features and
 | `dbx_get_routine_source` | Return the source of a stored procedure or function by name, with an optional `signature` for overloaded names |
 | `dbx_get_schema_context` | Return compact schema context for an AI model |
 | `dbx_execute_query` | Execute SQL or a supported MongoDB shell command, returning at most 100 rows |
-| `dbx_execute_batch` | Execute a SQL script containing multiple statements in one call, returning a result per statement (or a single merged result with `use_transaction` on a multi-statement script) |
 | `dbx_open_session` | Open a stateful SQL query session pinned to one backend connection |
 | `dbx_close_session` | Close a session and release its pinned connection resources |
 | `dbx_execute_redis_command` | Execute a Redis command |
-| `dbx_peek_messages` | Read Kafka messages without committing consumer offsets |
 | `dbx_send_message` | Send a message to a supported message queue topic or queue |
 | `dbx_open_table` | Open a table in the running DBX desktop app |
 | `dbx_execute_and_show` | Execute a query and display the result in DBX |
+| `dbx_preview_import_file` | Read-only preview and fingerprint of an allowed Excel/CSV/TSV/JSON file |
+| `dbx_prepare_table_import` | Create a 30-minute, immutable, single-use PostgreSQL staging import plan |
+| `dbx_start_table_import` | Start an already prepared staging import |
+| `dbx_get_import_status` | Read import progress, row counts, errors, and final summary |
+| `dbx_cancel_import` | Request cancellation before subsequent staging batches are written |
+| `dbx_vector_search` | Search an allowed Milvus collection with bounded output and enforced approval/effective-time filters |
+| `dbx_vector_upsert_file` | Upsert approved semantic cards from one allowed JSONL file |
+| `dbx_vector_delete_by_batch` | Delete one exact unpublished semantic batch with full-access permission |
 
 Connection-scoped sessions hide connection-mutating and desktop UI tools.
 
-## Read Kafka Messages
+## Local file imports and Milvus tools
 
-`dbx_peek_messages` is available in builds with `mq-admin`, in both local and Web modes. Select a saved Kafka connection by `connection_id` or `connection_name` and provide `topic`. It respects MCP connection scopes and tool allowlists and works with read-only and production connections without committing consumer offsets.
+The import tools are available only in local DBX Desktop/MCP mode. In Web mode they return the stable `IMPORT_UNSUPPORTED_IN_WEB_MODE_V1` code. Configure `DBX_MCP_IMPORT_ROOTS` with one or more directories using the platform path separator. Every file path must be absolute, resolve inside one configured root, be a regular non-symlink file, use an allowed extension, and stay below the configured size limit.
 
-```json
+`dbx_prepare_table_import` binds the connection, approved template version, canonical path, size, modification time, SHA-256, parsing options, mappings, and staging target into an immutable digest. The returned plan expires after 30 minutes and can be started once. `dbx_start_table_import` rechecks the complete file identity before launching a background import. Import targets are limited to PostgreSQL schemas listed in `DBX_MCP_IMPORT_STAGING_SCHEMAS` (default `staging`); publication to business schemas remains the caller's separately governed workflow.
+
+Milvus tools accept only collections, filter fields, and output fields on their corresponding allowlists. Search requires `active_at`, always adds `approval_status == "approved"` plus `effective_from`/`effective_to` activity filters, and optionally applies an exact `semantic_version`. Upsert reads bounded `.jsonl` files and requires Data read/write permission. Delete accepts only an exact `semantic_batch_id` and requires Full access. Generic vector REST passed to `dbx_execute_query` is also classified by endpoint, so write or destructive POST requests cannot bypass MCP policy.
+
+The core vector-search arguments are:
+
+```jsonc
 {
-  "connection_name": "Kafka",
-  "topic": "events",
-  "count": 20,
-  "start_position": "offset",
-  "partition": 0,
-  "offset": 120
+  "connection_name": "Operations semantics",
+  "database": "default",
+  "collection": "semantic_cards",
+  "active_at": "2026-08-25T10:00:00+08:00",
+  "semantic_version": "semantic-v3",
+  "embedding": [/* exactly 1024 finite floating-point values */],
+  "top_k": 12,
+  "filters": { "business_domain": "transactions" },
+  "output_fields": ["card_id", "card_type", "title", "content", "source_uri"]
 }
 ```
 
-- `count`: 1–100, defaults to 20.
-- `start_position`: `latest` (default), `earliest`, or `offset`. Supply a non-negative `offset` only with `offset` mode.
-- `partition`: optional non-negative partition number. If omitted, reads across topic partitions; in offset mode, the offset applies to every partition.
-- The JSON response contains `messages` with base64 payloads, lossless UTF-8 previews when available, message IDs and metadata. `incomplete` means the broker read reached a deadline or scan limit. `outputTruncated` means whole messages were omitted to fit the 256 KiB message output budget. A single oversized message may therefore yield no messages with `outputTruncated: true`; payloads are never silently clipped.
-
-This is a bounded snapshot, not a continuous consumer or a topic-wide text search. Other message queue types are rejected.
-
-## Batch SQL Execution
-
-`dbx_execute_batch` runs a SQL script containing multiple statements in a single call. In auto-commit mode (the default) it returns one result per statement, so callers see exactly which statement failed, how many rows each affected, and what each returned. With `use_transaction` and a script containing multiple statements it returns a single merged transaction outcome instead.
-
-- The script text is split with a database-dialect-aware parser, so semicolons inside string literals, comments, and stored procedures do not break the batch.
-- By default the batch stops at the first failing statement. Pass `continue_on_error` to keep going after a per-statement error (connection-level failures always stop the batch).
-- Pass `use_transaction` to run all statements inside one `BEGIN … COMMIT` so the whole batch either succeeds or rolls back; this requires a script with more than one statement (a single-statement script ignores the option and runs as normal auto-commit). In transaction mode the call returns a single merged result (not one result per statement), and `use_transaction` cannot be combined with `session_id` (a transactional batch runs on a pooled connection and would discard the session's state) or with `continue_on_error` (a transactional batch stops and rolls back at the first failure). DBX rejects the option when the active backend cannot provide a rollbackable transaction. MySQL-family connections reject `use_transaction` for DDL scripts because MySQL DDL implicitly commits and cannot be rolled back.
-- SQL policy (read-only, dangerous-SQL, production protection, database switching) is rechecked against the whole script as a unit before anything runs, exactly as `dbx_execute_query` does. A single write or DDL statement in the batch fails the whole call under a read-only policy.
-- Each batch gets a dedicated connection for its full lifetime, so temporary tables and `SET` state are preserved between its statements. To preserve that state across multiple MCP calls, open a session with `dbx_open_session` and pass its `session_id`.
-- `dbx_execute_batch` is not available for Redis or MongoDB connections.
+Omit `semantic_version` when effective dates alone select the active cards. `active_at` remains required. `embedding` must contain exactly `DBX_MCP_VECTOR_DIMENSION` finite values; the abbreviated comment above is documentation only, not valid tool input.
 
 ## Stateful Query Sessions
 
-Regular `dbx_execute_query` calls are independent. When a workflow must preserve database session state, call `dbx_open_session` first and pass its returned `sessionId` to later `dbx_execute_query` or `dbx_execute_batch` calls. Typical uses include:
+Regular `dbx_execute_query` calls are independent. When a workflow must preserve database session state, call `dbx_open_session` first and pass its returned `sessionId` to later `dbx_execute_query` calls. Typical uses include:
 
 - `USE` or database-context changes
 - Temporary tables
@@ -285,6 +284,15 @@ Updated servers do not let `DBX_MCP_ALLOW_WRITES` or `DBX_MCP_ALLOW_DANGEROUS_SQ
 | `DBX_MCP_SCOPE_CONNECTION_IDS` | Compatibility scope for multiple connection IDs |
 | `DBX_MCP_SCOPE_CONNECTION_NAME` | Restrict the session to one connection name |
 | `DBX_MCP_SCOPE_DATABASE` | Restrict the session to one database |
+| `DBX_MCP_IMPORT_ROOTS` | Platform-separated allowlist of local directories readable by import and semantic JSONL tools |
+| `DBX_MCP_IMPORT_STAGING_SCHEMAS` | Comma-separated PostgreSQL staging schema allowlist (default `staging`) |
+| `DBX_MCP_IMPORT_FILE_MAX_BYTES` | Maximum Excel/CSV/TSV/JSON source size (default 512 MiB) |
+| `DBX_MCP_SEMANTIC_FILE_MAX_BYTES` | Maximum semantic JSONL size (default 64 MiB) |
+| `DBX_MCP_VECTOR_COLLECTIONS` | Comma-separated Milvus collection allowlist (default `semantic_cards`) |
+| `DBX_MCP_VECTOR_DIMENSION` | Required embedding dimension (default `1024`) |
+| `DBX_MCP_VECTOR_TOP_K_MAX` | Maximum Milvus Top K, hard-capped at 50 (default `20`) |
+| `DBX_MCP_VECTOR_FILTER_FIELDS` | Comma-separated additional safe equality-filter fields |
+| `DBX_MCP_VECTOR_OUTPUT_FIELDS` | Comma-separated scalar fields that vector search may return |
 | `DBX_MCP_DEBUG_SQL` | Include SQL in temporary diagnostics |
 
 ## Troubleshooting

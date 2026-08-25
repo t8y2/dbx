@@ -17,7 +17,7 @@ The MCP protocol, connection loading, SQL safety, schema access, Redis support, 
 
 ## Features
 
-- **18 MCP tools** for connection and database discovery, schemas, SQL, Redis, sessions, messages, and DBX UI integration
+- **25 MCP tools** for connections, schemas, SQL, sessions, bounded local imports, Milvus semantics, Redis, messages, and DBX UI integration
 - **Precompiled native binaries** with no local Rust, Cargo, Python, or C/C++ build requirement
 - **No `better-sqlite3` runtime dependency** and no Node native-addon ABI coupling
 - **Local, Web, and Docker modes** using the same tool interface
@@ -153,18 +153,22 @@ Ask the MCP client to:
 | `dbx_get_routine_source` | Return the source of a stored procedure or function by name, with an optional `signature` for overloaded names |
 | `dbx_get_schema_context` | Return compact schema context suitable for an AI model |
 | `dbx_execute_query` | Execute SQL or a supported MongoDB shell command, returning at most 100 rows |
-| `dbx_execute_batch` | Execute a SQL script containing multiple statements in one call, returning a result per statement (or a single merged result with `use_transaction` on a multi-statement script) |
 | `dbx_open_session` | Open a stateful SQL query session pinned to one backend connection |
 | `dbx_close_session` | Close a session and release its pinned connection resources |
 | `dbx_execute_redis_command` | Execute a Redis command |
-| `dbx_peek_messages` | Read Kafka messages without committing consumer offsets |
 | `dbx_send_message` | Send a message to a supported message queue topic |
 | `dbx_open_table` | Open a table in the running DBX desktop application |
 | `dbx_execute_and_show` | Execute a query and display the result in the DBX desktop application |
+| `dbx_preview_import_file` | Preview and fingerprint an allowed local Excel/CSV/TSV/JSON file |
+| `dbx_prepare_table_import` | Create an immutable, 30-minute, single-use PostgreSQL staging import plan |
+| `dbx_start_table_import` | Start an already prepared staging import |
+| `dbx_get_import_status` | Read background import progress and final summary |
+| `dbx_cancel_import` | Request cancellation of a staging import |
+| `dbx_vector_search` | Search approved, active semantic cards in an allowed Milvus collection |
+| `dbx_vector_upsert_file` | Upsert approved semantic cards from an allowed JSONL file |
+| `dbx_vector_delete_by_batch` | Delete one exact unpublished semantic batch with Full access |
 
 When connection scoping is enabled, mutating connection tools and desktop UI tools are hidden.
-
-`dbx_peek_messages` reads a Kafka topic in local or Web mode when `mq-admin` is enabled. Pass `connection_id` or `connection_name`, `topic`, optional `count` (1–100, default 20), `start_position` (`latest` by default, `earliest`, or `offset`), and optional non-negative `partition`. A non-negative `offset` is required only in offset mode; without a partition it applies to all partitions. The JSON response preserves base64 payloads and metadata, reports broker partial reads via `incomplete`, and reports whole-message omissions under a 256 KiB output budget via `outputTruncated`. It respects connection/tool scopes and permits read-only and production reads without committing consumer offsets. It does not support other MQ types or continuous subscriptions.
 
 `dbx_list_databases` returns only database names allowed by the selected connection's MCP database scope. `dbx_send_message` is available when message-queue support is included in the server build.
 
@@ -185,6 +189,8 @@ DBX connection storage defaults to:
 - Windows: `%APPDATA%\com.dbx.app\dbx.db`
 
 Override the directory with `DBX_DATA_DIR`.
+
+Local file imports additionally require `DBX_MCP_IMPORT_ROOTS`. Paths must be absolute regular files inside one configured root. Import plans bind SHA-256, parsing, mapping, template version, connection, and staging target; start revalidates the source and imports from a private task snapshot. Import tools support local mode only and return `IMPORT_UNSUPPORTED_IN_WEB_MODE_V1` in Web mode. See the [MCP documentation](../../docs/content/docs/mcp.mdx#local-file-imports-and-milvus-tools) for the full contract.
 
 ### Agent/JDBC databases
 
@@ -337,6 +343,13 @@ SQL text is not included in normal MCP errors or logged by default. Enable tempo
 | `DBX_MCP_SCOPE_CONNECTION_IDS` | Compatibility scope for multiple connection IDs |
 | `DBX_MCP_SCOPE_CONNECTION_NAME` | Restrict tools to one connection name |
 | `DBX_MCP_SCOPE_DATABASE` | Restrict tools to one database |
+| `DBX_MCP_IMPORT_ROOTS` | Platform-separated allowlist of local import/semantic-file directories |
+| `DBX_MCP_IMPORT_STAGING_SCHEMAS` | Comma-separated PostgreSQL staging schema allowlist (default `staging`) |
+| `DBX_MCP_IMPORT_FILE_MAX_BYTES` | Maximum tabular import source size (default 512 MiB) |
+| `DBX_MCP_SEMANTIC_FILE_MAX_BYTES` | Maximum semantic JSONL size (default 64 MiB) |
+| `DBX_MCP_VECTOR_COLLECTIONS` | Comma-separated Milvus collection allowlist (default `semantic_cards`) |
+| `DBX_MCP_VECTOR_DIMENSION` | Required embedding dimension (default `1024`) |
+| `DBX_MCP_VECTOR_TOP_K_MAX` | Maximum Milvus Top K (default `20`, hard cap 50) |
 | `DBX_MCP_DEBUG_SQL` | Include SQL in temporary diagnostics |
 | `DBX_MCP_BINARY` | Override the native binary used by the npm launcher |
 
@@ -439,7 +452,7 @@ MCP 协议、连接读取、SQL 安全检查、Schema、Redis、MongoDB、Web �
 
 ### 主要能力
 
-- 18 个 MCP 工具，涵盖连接和数据库发现、Schema、SQL、Redis、会话、消息队列和 DBX 桌面集成
+- 25 个 MCP 工具，覆盖连接、Schema、SQL、会话、本地受控导入、Milvus 语义、Redis、消息队列和 DBX 桌面操作
 - 不依赖 `better-sqlite3`，没有 Node 原生模块 ABI 问题
 - 支持本地 DBX、DBX Web 和 Docker
 - 可选 Streamable HTTP 传输，使用 Bearer Token 保护；stdio 仍为默认方式
@@ -530,16 +543,20 @@ MCP 配置：
 | `dbx_describe_table` | 获取字段和表结构 |
 | `dbx_get_schema_context` | 获取适合 AI 使用的紧凑 Schema 上下文 |
 | `dbx_execute_query` | 执行 SQL 或支持的 MongoDB Shell 命令，最多返回 100 行 |
-| `dbx_execute_batch` | 一次执行包含多条语句的 SQL 脚本，按语句返回结果（多语句脚本搭配 `use_transaction` 时返回单个合并结果） |
 | `dbx_open_session` | 为 SQL 连接打开固定后端连接的有状态查询会话 |
 | `dbx_close_session` | 关闭会话并释放固定连接资源 |
 | `dbx_execute_redis_command` | 执行 Redis 命令 |
-| `dbx_peek_messages` | 读取 Kafka 消息，不提交消费位点 |
 | `dbx_send_message` | 向支持的消息队列 Topic 发送消息 |
 | `dbx_open_table` | 在 DBX 桌面端打开表 |
 | `dbx_execute_and_show` | 执行查询并在 DBX 桌面端展示结果 |
-
-启用 `mq-admin` 后，`dbx_peek_messages` 可在本地和 Web 模式下读取 Kafka Topic。参数为 `connection_id` 或 `connection_name`、`topic`、可选 `count`（1–100，默认 20）、`start_position`（默认 `latest`，也支持 `earliest`、`offset`）及可选的非负 `partition`。仅 offset 模式必须且允许指定非负 `offset`，未指定分区时该位点应用于所有分区。JSON 结果保留 base64 消息体和元数据，通过 `incomplete` 标记底层不完整读取，通过 `outputTruncated` 标记因 256 KiB 输出预算而省略整条消息。工具遵守连接和工具范围，允许只读与生产连接读取，不提交消费位点，不支持其他 MQ 类型或持续订阅。
+| `dbx_preview_import_file` | 预览并计算允许目录内 Excel/CSV/TSV/JSON 的指纹 |
+| `dbx_prepare_table_import` | 创建有效 30 分钟、不可变且只能使用一次的 PostgreSQL staging 导入计划 |
+| `dbx_start_table_import` | 启动已经准备并复验的 staging 导入 |
+| `dbx_get_import_status` | 查看后台导入进度和最终摘要 |
+| `dbx_cancel_import` | 请求取消 staging 导入 |
+| `dbx_vector_search` | 在允许的 Milvus 集合中检索已批准且生效的语义卡 |
+| `dbx_vector_upsert_file` | 从允许目录中的 JSONL upsert 已批准语义卡 |
+| `dbx_vector_delete_by_batch` | 在完全访问权限下删除一个明确的未发布语义批次 |
 
 `dbx_list_databases` 只返回该连接 MCP 数据库范围内允许访问的名称。`dbx_send_message` 仅在 Server 构建时包含消息队列支持时可用。
 
@@ -550,6 +567,8 @@ MCP 配置：
 - Windows：`%APPDATA%\com.dbx.app\dbx.db`
 
 通过 `DBX_DATA_DIR` 覆盖默认目录。Windows 便携版应指向 `DBX.exe` 同级、包含 `dbx.db` 的 `data` 文件夹。
+
+本地文件导入还必须配置 `DBX_MCP_IMPORT_ROOTS`。文件必须是允许目录内的绝对路径普通文件。prepare 会固化 SHA-256、解析参数、映射、模板版本、连接和 staging 目标；start 会重新复验，并从任务私有快照执行导入。导入工具仅支持本地模式，Web 模式稳定返回 `IMPORT_UNSUPPORTED_IN_WEB_MODE_V1`。完整契约见 [MCP 中文文档](../../docs/content/docs/mcp.cn.mdx#本地文件导入与-milvus-工具)。
 
 ### DBX Web / Docker
 
@@ -679,6 +698,13 @@ MongoDB 更新和删除在未启用完全访问时必须提供可验证有效的
 | `DBX_MCP_SCOPE_CONNECTION_IDS` | 兼容旧配置：限制到多个连接 ID |
 | `DBX_MCP_SCOPE_CONNECTION_NAME` | 限制到指定连接名称 |
 | `DBX_MCP_SCOPE_DATABASE` | 限制到指定数据库 |
+| `DBX_MCP_IMPORT_ROOTS` | 本地导入/语义文件目录 allowlist，使用平台路径分隔符 |
+| `DBX_MCP_IMPORT_STAGING_SCHEMAS` | PostgreSQL staging Schema allowlist，逗号分隔，默认 `staging` |
+| `DBX_MCP_IMPORT_FILE_MAX_BYTES` | 表格导入源最大字节数，默认 512 MiB |
+| `DBX_MCP_SEMANTIC_FILE_MAX_BYTES` | 语义 JSONL 最大字节数，默认 64 MiB |
+| `DBX_MCP_VECTOR_COLLECTIONS` | Milvus 集合 allowlist，逗号分隔，默认 `semantic_cards` |
+| `DBX_MCP_VECTOR_DIMENSION` | 固定向量维度，默认 `1024` |
+| `DBX_MCP_VECTOR_TOP_K_MAX` | Milvus Top K 上限，默认 `20`，硬上限 50 |
 | `DBX_MCP_DEBUG_SQL` | 临时输出 SQL 诊断信息 |
 | `DBX_MCP_BINARY` | 覆盖 npm 启动器使用的原生文件 |
 

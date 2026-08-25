@@ -2,6 +2,7 @@
 
 pub mod backend;
 pub mod diagnostics;
+mod enterprise_tools;
 pub mod http;
 pub mod http_auth;
 pub mod paths;

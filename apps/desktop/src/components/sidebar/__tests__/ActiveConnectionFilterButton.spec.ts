@@ -71,23 +71,25 @@ afterEach(() => {
 });
 
 describe("ActiveConnectionFilterButton", () => {
-  it("keeps the filter icon stable while the active connection status changes from 0 to 1 to 0", async () => {
+  it("morphs the centered indicator as the active connection status changes from 0 to 1 to 0", async () => {
     const { button, state } = await mountFilter(0);
 
-    expect(button.querySelector("[data-active-connection-filter-icon]")).not.toBeNull();
-    expect(button.querySelector("[data-active-connection-badge]")).toBeNull();
+    const indicator = button.querySelector("[data-active-connection-filter-icon]");
+    expect(indicator).not.toBeNull();
+    expect(indicator?.className).toContain("left-1/2 top-1/2");
+    expect(indicator?.className).toContain("h-3 w-3 border-current bg-transparent");
     expect(describedStatus(button).textContent).toBe("Active connections: 0");
 
     state.activeConnectionCount = 1;
     await nextTick();
-    expect(button.querySelector("[data-active-connection-filter-icon]")).not.toBeNull();
-    expect(button.querySelector("[data-active-connection-badge]")).not.toBeNull();
+    expect(button.querySelector("[data-active-connection-filter-icon]")).toBe(indicator);
+    expect(indicator?.className).toContain("h-1.5 w-1.5 border-green-500 bg-green-500");
     expect(describedStatus(button).textContent).toBe("Active connections: 1");
 
     state.activeConnectionCount = 0;
     await nextTick();
-    expect(button.querySelector("[data-active-connection-filter-icon]")).not.toBeNull();
-    expect(button.querySelector("[data-active-connection-badge]")).toBeNull();
+    expect(button.querySelector("[data-active-connection-filter-icon]")).toBe(indicator);
+    expect(indicator?.className).toContain("h-3 w-3 border-current bg-transparent");
     expect(describedStatus(button).textContent).toBe("Active connections: 0");
   });
 

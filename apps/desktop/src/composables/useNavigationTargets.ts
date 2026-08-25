@@ -1,7 +1,7 @@
 import * as api from "@/lib/backend/api";
 import { connectionObjectTreeNodeSchema, effectiveDatabaseTypeForConnection, metadataSchemaForConnection } from "@/lib/database/jdbcDialect";
 import { invalidateTableMetadataCache, loadTableMetadata } from "@/lib/metadata/tableMetadataCache";
-import { canApplyDataTabMetadata } from "@/lib/sidebar/dataTabOpenPolicy";
+import { canApplyDataTabMetadata, canReuseActiveMongoTab, type DataTabReuseMode } from "@/lib/sidebar/dataTabOpenPolicy";
 import { isNoSnapshotErrorResult, isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
 import { tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
@@ -26,12 +26,20 @@ export type NavigationTarget = {
   whereInput?: string;
 };
 
-function openMongoCollectionTarget(target: NavigationTarget) {
+function openMongoCollectionTarget(target: NavigationTarget, reuseMode: DataTabReuseMode) {
   const connectionStore = useConnectionStore();
   const queryStore = useQueryStore();
   connectionStore.activeConnectionId = target.connectionId;
   const tabTitle = `${target.database}.${target.tableName}`;
-  const tabId = queryStore.createTab(target.connectionId, target.database, tabTitle, "mongo");
+  const sameCollectionTab = reuseMode === "always-new" ? undefined : queryStore.tabs.find((tab) => tab.mode === "mongo" && tab.connectionId === target.connectionId && tab.database === target.database && tab.sql === target.tableName);
+  const activeTab = queryStore.tabs.find((tab) => tab.id === queryStore.activeTabId);
+  const reusableActiveTab = reuseMode === "active-tab" && !sameCollectionTab && canReuseActiveMongoTab(activeTab, target) ? activeTab : undefined;
+  const reusableTab = sameCollectionTab ?? reusableActiveTab;
+  const tabId = reusableTab?.id ?? queryStore.createTab(target.connectionId, target.database, tabTitle, "mongo", undefined, undefined, undefined, { forceNew: true });
+  if (reusableTab) {
+    queryStore.switchTab(tabId);
+    reusableTab.title = tabTitle;
+  }
   queryStore.updateSql(tabId, target.tableName);
   queryStore.setTableMeta(tabId, {
     database: target.database,
@@ -51,7 +59,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
   connectionStore.activeConnectionId = target.connectionId;
   const config = connectionStore.getConfig(target.connectionId);
   if (config?.db_type === "mongodb") {
-    openMongoCollectionTarget(target);
+    openMongoCollectionTarget(target, settingsStore.editorSettings.dataTabReuseMode);
     return;
   }
   const tableSchema = connectionObjectTreeNodeSchema(config, target.database, target.schema);
@@ -308,7 +316,7 @@ export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value:
 
   async function openObjectBrowserTableTarget(target: NavigationTarget) {
     if (connectionStore.getConfig(target.connectionId)?.db_type === "mongodb") {
-      openMongoCollectionTarget(target);
+      openMongoCollectionTarget(target, settingsStore.editorSettings.dataTabReuseMode);
       return;
     }
     if (settingsStore.editorSettings.dataTabReuseMode === "always-new") {

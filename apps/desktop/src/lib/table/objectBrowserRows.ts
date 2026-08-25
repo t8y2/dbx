@@ -194,7 +194,7 @@ export function buildObjectBrowserRows(options: { objects: ObjectInfo[]; databas
 export function buildMongoObjectBrowserRows(options: { collections: Array<{ name: string; kind?: string | null }>; database: string }): ObjectBrowserRow[] {
   const seen = new Map<string, number>();
   return options.collections.flatMap((collection) => {
-    const name = normalizeDatabaseObjectName(collection.name);
+    const name = collection.name;
     if (!name) return [];
     const collectionKind = toMongoCollectionKind(collection.kind);
     const type: ObjectBrowserRow["type"] = collectionKind === "view" ? "VIEW" : "TABLE";

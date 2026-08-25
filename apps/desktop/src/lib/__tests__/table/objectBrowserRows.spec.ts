@@ -137,4 +137,14 @@ describe("buildMongoObjectBrowserRows", () => {
       { name: "metrics", type: "TABLE", collectionKind: "timeseries" },
     ]);
   });
+
+  it("preserves distinct MongoDB collection identifiers verbatim", () => {
+    const rows = buildMongoObjectBrowserRows({
+      collections: [{ name: " users " }, { name: "users" }, { name: " " }, { name: "" }],
+      database: "app",
+    });
+
+    expect(rows.map((row) => row.name)).toEqual([" users ", "users", " "]);
+    expect(new Set(rows.map((row) => row.id))).toHaveLength(3);
+  });
 });

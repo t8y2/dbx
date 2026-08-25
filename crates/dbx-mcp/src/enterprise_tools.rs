@@ -87,7 +87,7 @@ impl std::fmt::Display for EnterpriseToolError {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum McpImportSourceFormat {
     Csv,
@@ -173,8 +173,18 @@ impl McpImportParseOptions {
 pub struct McpImportColumnMapping {
     #[schemars(description = "1-based source column position returned by dbx_preview_import_file")]
     pub source_position: usize,
-    pub source_name: String,
+    pub raw_source_name: String,
+    pub canonical_source_name: String,
     pub target_column: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpSourceColumn {
+    pub source_position: usize,
+    pub raw_source_name: String,
+    pub canonical_source_name: String,
+    pub dbx_source_name: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
@@ -710,14 +720,101 @@ fn truncate_preview_text(value: &str, char_limit: usize) -> String {
     }
 }
 
-pub fn structure_fingerprint(preview: &TableImportPreview, parse_options: &TableImportParseOptions) -> String {
+pub fn structure_fingerprint(
+    preview: &TableImportPreview,
+    parse_options: &TableImportParseOptions,
+    source_columns: &[McpSourceColumn],
+) -> String {
     let value = json!({
         "fileType": preview.file_type,
         "columns": preview.columns,
+        "sourceColumns": source_columns,
         "sheets": preview.sheets,
         "parseOptions": parse_options,
     });
     sha256_bytes(value.to_string().as_bytes())
+}
+
+pub async fn source_columns_for_preview(
+    file_path: &str,
+    source_format: Option<TableImportSourceFormat>,
+    parse_options: &TableImportParseOptions,
+    dbx_columns: &[String],
+) -> Result<Vec<McpSourceColumn>, EnterpriseToolError> {
+    let row_range = dbx_core::table_import::effective_import_row_range(parse_options)
+        .map_err(|error| EnterpriseToolError::new("IMPORT_ROW_RANGE_INVALID", error))?;
+    let raw_names = if let Some(title_row) = row_range.title_row {
+        let header_options = TableImportParseOptions {
+            has_header: Some(false),
+            title_row: Some(0),
+            data_start_row: Some(title_row),
+            last_data_row: Some(title_row),
+            ..parse_options.clone()
+        };
+        let header = dbx_core::table_import::preview_table_import_file_with_request(
+            dbx_core::table_import::TableImportPreviewRequest {
+                file_path: file_path.to_string(),
+                source_ref: None,
+                source_format,
+                parse_options: header_options,
+                preview_limit: Some(1),
+            },
+        )
+        .await
+        .map_err(|error| EnterpriseToolError::new("IMPORT_HEADER_PREVIEW_FAILED", error))?;
+        header.rows.first().cloned().unwrap_or_default().into_iter().map(source_header_text).collect::<Vec<_>>()
+    } else {
+        dbx_columns.to_vec()
+    };
+    let normalized = (0..dbx_columns.len())
+        .map(|index| {
+            let raw = raw_names.get(index).cloned().unwrap_or_default();
+            dbx_core::table_import::normalize_header(raw.trim_start_matches('\u{feff}'), index)
+        })
+        .collect::<Vec<_>>();
+    let canonical = canonical_source_names(&normalized);
+    Ok((0..dbx_columns.len())
+        .map(|index| McpSourceColumn {
+            source_position: index + 1,
+            raw_source_name: raw_names.get(index).cloned().unwrap_or_default(),
+            canonical_source_name: canonical[index].clone(),
+            dbx_source_name: dbx_columns[index].clone(),
+        })
+        .collect())
+}
+
+fn source_header_text(value: Value) -> String {
+    match value {
+        Value::Null => String::new(),
+        Value::String(value) => value,
+        other => other.to_string(),
+    }
+}
+
+fn canonical_source_names(normalized: &[String]) -> Vec<String> {
+    let counts = normalized.iter().fold(HashMap::<String, usize>::new(), |mut counts, name| {
+        *counts.entry(name.to_lowercase()).or_default() += 1;
+        counts
+    });
+    let mut occurrences = HashMap::<String, usize>::new();
+    let mut used = HashSet::new();
+    normalized
+        .iter()
+        .map(|name| {
+            let key = name.to_lowercase();
+            let occurrence = occurrences.entry(key.clone()).or_default();
+            *occurrence += 1;
+            let base =
+                if counts.get(&key).copied().unwrap_or(0) > 1 { format!("{name}__{occurrence}") } else { name.clone() };
+            let mut candidate = base.clone();
+            let mut suffix = 1usize;
+            while !used.insert(candidate.to_lowercase()) {
+                candidate = format!("{base}__{suffix}");
+                suffix += 1;
+            }
+            candidate
+        })
+        .collect()
 }
 
 pub fn generated_staging_relation() -> Result<(String, String), EnterpriseToolError> {
@@ -733,7 +830,7 @@ pub fn generated_staging_relation() -> Result<(String, String), EnterpriseToolEr
 
 pub fn validate_mappings(
     mappings: &[McpImportColumnMapping],
-    source_columns: &[String],
+    source_columns: &[McpSourceColumn],
 ) -> Result<Vec<TableImportColumnMapping>, EnterpriseToolError> {
     if mappings.is_empty() {
         return Err(EnterpriseToolError::new("IMPORT_MAPPING_REQUIRED", "至少需要一个字段映射。"));
@@ -745,18 +842,24 @@ pub fn validate_mappings(
         let source_index = mapping.source_position.checked_sub(1).ok_or_else(|| {
             EnterpriseToolError::new("IMPORT_SOURCE_POSITION_INVALID", "source_position 从 1 开始，不能为 0。")
         })?;
-        let actual_name = source_columns.get(source_index).ok_or_else(|| {
+        let source = source_columns.get(source_index).ok_or_else(|| {
             EnterpriseToolError::new(
                 "IMPORT_SOURCE_POSITION_INVALID",
                 format!("源文件没有第 {} 列。", mapping.source_position),
             )
         })?;
-        if actual_name != &mapping.source_name {
+        if source.raw_source_name != mapping.raw_source_name
+            || source.canonical_source_name != mapping.canonical_source_name
+        {
             return Err(EnterpriseToolError::new(
                 "IMPORT_SOURCE_NAME_MISMATCH",
                 format!(
-                    "第 {} 列当前名称为 {}，与请求中的 {} 不一致。",
-                    mapping.source_position, actual_name, mapping.source_name
+                    "第 {} 列当前 raw/canonical 名称为 {:?}/{:?}，与请求中的 {:?}/{:?} 不一致。",
+                    mapping.source_position,
+                    source.raw_source_name,
+                    source.canonical_source_name,
+                    mapping.raw_source_name,
+                    mapping.canonical_source_name
                 ),
             ));
         }
@@ -780,7 +883,7 @@ pub fn validate_mappings(
             ));
         }
         normalized.push(TableImportColumnMapping {
-            source_column: actual_name.clone(),
+            source_column: source.dbx_source_name.clone(),
             target_column: mapping.target_column.clone(),
             target_data_type: Some("TEXT".to_string()),
         });
@@ -871,28 +974,60 @@ pub fn validate_governed_source_v1(
 ) -> Result<TableImportSourceFormat, EnterpriseToolError> {
     let source_format = dbx_core::table_import::effective_source_format(file_path, source_format)
         .map_err(|error| EnterpriseToolError::new("IMPORT_SOURCE_FORMAT_INVALID", error))?;
-    if !source_format.is_delimited() {
+    if source_format.is_delimited() {
+        if !matches!(parse_options.encoding, None | Some(TableImportTextEncoding::Auto | TableImportTextEncoding::Utf8))
+        {
+            return Err(EnterpriseToolError::new(
+                "IMPORT_GOVERNED_ENCODING_UNSUPPORTED_V1",
+                "v1 流式治理导入仅支持 UTF-8；其他编码不创建导入计划。",
+            ));
+        }
+        return Ok(source_format);
+    }
+    if source_format == TableImportSourceFormat::Excel {
+        let extension =
+            Path::new(file_path).extension().and_then(OsStr::to_str).unwrap_or_default().to_ascii_lowercase();
+        if matches!(extension.as_str(), "xlsx" | "xlsm") {
+            return Ok(source_format);
+        }
         return Err(EnterpriseToolError::new(
-            "IMPORT_GOVERNED_FORMAT_UNSUPPORTED_V1",
-            format!("{} 尚未实现流式有界行血缘转换；v1 治理导入当前仅支持 UTF-8 CSV/TSV。", source_format.label()),
+            "IMPORT_GOVERNED_XLS_UNSUPPORTED_V1",
+            "旧版 .xls 仅支持有界 preview；正式治理导入要求另存为 .xlsx。",
         ));
     }
-    if !matches!(parse_options.encoding, None | Some(TableImportTextEncoding::Auto | TableImportTextEncoding::Utf8)) {
-        return Err(EnterpriseToolError::new(
-            "IMPORT_GOVERNED_ENCODING_UNSUPPORTED_V1",
-            "v1 流式治理导入仅支持 UTF-8；其他编码不创建导入计划。",
-        ));
-    }
-    Ok(source_format)
+    Err(EnterpriseToolError::new(
+        "IMPORT_GOVERNED_FORMAT_UNSUPPORTED_V1",
+        "JSON 尚未实现流式有界治理快照；不创建导入计划。",
+    ))
 }
 
 pub async fn build_governed_import_snapshot(
+    request: TableImportRequest,
+    plan_id: &str,
+    source_sha: &str,
+    output_path: &Path,
+    cancelled: Arc<AtomicBool>,
+) -> Result<TableImportRequest, EnterpriseToolError> {
+    let source_format = validate_governed_source_v1(&request.file_path, request.source_format, &request.parse_options)?;
+    let result = if source_format == TableImportSourceFormat::Excel {
+        build_governed_xlsx_snapshot(request, plan_id, source_sha, output_path, cancelled).await
+    } else {
+        build_governed_delimited_snapshot(request, plan_id, source_sha, output_path, source_format, cancelled).await
+    };
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(output_path).await;
+    }
+    result
+}
+
+async fn build_governed_delimited_snapshot(
     mut request: TableImportRequest,
     plan_id: &str,
     source_sha: &str,
     output_path: &Path,
+    source_format: TableImportSourceFormat,
+    cancelled: Arc<AtomicBool>,
 ) -> Result<TableImportRequest, EnterpriseToolError> {
-    let source_format = validate_governed_source_v1(&request.file_path, request.source_format, &request.parse_options)?;
     let config = dbx_core::table_import::effective_delimited_config(source_format, &request.parse_options)
         .map_err(|error| EnterpriseToolError::new("IMPORT_SOURCE_PARSE_FAILED", error))?;
     let offset = UtcOffset::from_hms(8, 0, 0)
@@ -920,6 +1055,9 @@ pub async fn build_governed_import_snapshot(
     let mut source_indexes: Option<Vec<usize>> = None;
     let mut source_row_count = 0usize;
     for (index, record) in reader.records().enumerate() {
+        if cancelled.load(Ordering::Acquire) {
+            return Err(EnterpriseToolError::new("IMPORT_CANCELLED", "导入已取消。"));
+        }
         let source_row_number = index + 1;
         let record = record.map_err(|error| {
             EnterpriseToolError::new(
@@ -1016,6 +1154,193 @@ pub async fn build_governed_import_snapshot(
     request.create_table = true;
     request.prepared_source = None;
     Ok(request)
+}
+
+async fn build_governed_xlsx_snapshot(
+    mut request: TableImportRequest,
+    plan_id: &str,
+    source_sha: &str,
+    output_path: &Path,
+    cancelled: Arc<AtomicBool>,
+) -> Result<TableImportRequest, EnterpriseToolError> {
+    if cancelled.load(Ordering::Acquire) {
+        return Err(EnterpriseToolError::new("IMPORT_CANCELLED", "导入已取消。"));
+    }
+    let offset = UtcOffset::from_hms(8, 0, 0)
+        .map_err(|error| EnterpriseToolError::new("IMPORT_LOADED_AT_FAILED", error.to_string()))?;
+    let loaded_at = OffsetDateTime::now_utc()
+        .to_offset(offset)
+        .format(&Rfc3339)
+        .map_err(|error| EnterpriseToolError::new("IMPORT_LOADED_AT_FAILED", error.to_string()))?;
+    let mut writer = csv::WriterBuilder::new()
+        .has_headers(false)
+        .from_path(output_path)
+        .map_err(|error| EnterpriseToolError::new("IMPORT_SNAPSHOT_WRITE_FAILED", error.to_string()))?;
+    let mut headers = request.mappings.iter().map(|mapping| mapping.target_column.clone()).collect::<Vec<_>>();
+    headers.extend(RESERVED_STAGING_COLUMNS.iter().map(|column| column.to_string()));
+    writer
+        .write_record(&headers)
+        .map_err(|error| EnterpriseToolError::new("IMPORT_SNAPSHOT_WRITE_FAILED", error.to_string()))?;
+
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
+    let path = request.file_path.clone();
+    let options = request.parse_options.clone();
+    let batch_size = request.batch_size.max(1);
+    let text_source_columns = HashSet::from(["*".to_string()]);
+    let producer_cancelled = Arc::new(AtomicBool::new(cancelled.load(Ordering::Acquire)));
+    let _producer_cancel_guard = CancelOnDrop(producer_cancelled.clone());
+    let producer_cancelled_for_task = producer_cancelled.clone();
+    let producer = tokio::task::spawn_blocking(move || {
+        dbx_core::table_import::stream_xlsx_rows_to_channel_with_control(
+            &path,
+            &options,
+            batch_size,
+            None,
+            text_source_columns,
+            true,
+            sender,
+            producer_cancelled_for_task,
+        )
+    });
+    let user_cancelled = cancelled.clone();
+    let monitor_cancelled = producer_cancelled.clone();
+    let cancellation_monitor = tokio::spawn(async move {
+        while !monitor_cancelled.load(Ordering::Acquire) {
+            if user_cancelled.load(Ordering::Acquire) {
+                monitor_cancelled.store(true, Ordering::Release);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    });
+    let mut header_seen = false;
+    let mut done_seen = false;
+    let mut source_row_count = 0usize;
+    let mut source_indexes: Option<Vec<usize>> = None;
+    while let Some(message) = receiver.recv().await {
+        match message.map_err(|error| xlsx_governed_error(error, cancelled.load(Ordering::Acquire)))? {
+            dbx_core::table_import::XlsxStreamMessage::Header(columns) => {
+                if columns.len() > 1_000 || columns.iter().any(|column| column.chars().count() > MAX_CELL_CHAR_LIMIT) {
+                    return Err(EnterpriseToolError::new(
+                        "IMPORT_XLSX_HEADER_LIMIT_EXCEEDED",
+                        "XLSX 流式表头超过列数或单列表头长度限制。",
+                    ));
+                }
+                source_indexes = Some(
+                    request
+                        .mappings
+                        .iter()
+                        .map(|mapping| {
+                            columns.iter().position(|column| column == &mapping.source_column).ok_or_else(|| {
+                                EnterpriseToolError::new(
+                                    "IMPORT_XLSX_HEADER_CHANGED",
+                                    format!("XLSX 流式读取找不到 prepare 字段 {}。", mapping.source_column),
+                                )
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                );
+                header_seen = true;
+            }
+            dbx_core::table_import::XlsxStreamMessage::Rows { rows, source_row_numbers } => {
+                if rows.len() != source_row_numbers.len() {
+                    return Err(EnterpriseToolError::new(
+                        "IMPORT_SOURCE_ROW_LINEAGE_UNAVAILABLE",
+                        "XLSX 行批次缺少精确绝对源行号；未访问数据库。",
+                    ));
+                }
+                let source_indexes = source_indexes.as_ref().ok_or_else(|| {
+                    EnterpriseToolError::new("IMPORT_XLSX_HEADER_MISSING", "XLSX 数据行先于表头到达。")
+                })?;
+                for (row, source_row_number) in rows.into_iter().zip(source_row_numbers) {
+                    if cancelled.load(Ordering::Acquire) {
+                        return Err(EnterpriseToolError::new("IMPORT_CANCELLED", "导入已取消。"));
+                    }
+                    let mut output = source_indexes
+                        .iter()
+                        .map(|index| staging_text_value(row.get(*index).unwrap_or(&Value::Null)))
+                        .collect::<Vec<_>>();
+                    let row_bytes = serde_json::to_vec(&row).map_err(|error| {
+                        EnterpriseToolError::new("IMPORT_SOURCE_ROW_HASH_FAILED", error.to_string())
+                    })?;
+                    output.extend([
+                        request.import_id.clone(),
+                        plan_id.to_string(),
+                        source_sha.to_string(),
+                        source_row_number.to_string(),
+                        sha256_bytes(&row_bytes),
+                        loaded_at.clone(),
+                    ]);
+                    writer
+                        .write_record(&output)
+                        .map_err(|error| EnterpriseToolError::new("IMPORT_SNAPSHOT_WRITE_FAILED", error.to_string()))?;
+                    source_row_count += 1;
+                }
+            }
+            dbx_core::table_import::XlsxStreamMessage::Progress(_) => {}
+            dbx_core::table_import::XlsxStreamMessage::Done => done_seen = true,
+        }
+    }
+    match producer.await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => return Err(xlsx_governed_error(error, cancelled.load(Ordering::Acquire))),
+        Err(error) => {
+            return Err(EnterpriseToolError::new("IMPORT_XLSX_STREAM_FAILED", error.to_string()));
+        }
+    }
+    producer_cancelled.store(true, Ordering::Release);
+    cancellation_monitor.abort();
+    if !header_seen || !done_seen || source_row_count == 0 {
+        return Err(EnterpriseToolError::new(
+            "IMPORT_XLSX_STREAM_INCOMPLETE",
+            "XLSX 流式治理未完整结束；未访问数据库。",
+        ));
+    }
+    writer.flush().map_err(|error| EnterpriseToolError::new("IMPORT_SNAPSHOT_WRITE_FAILED", error.to_string()))?;
+
+    let mut mappings = request
+        .mappings
+        .iter()
+        .map(|mapping| TableImportColumnMapping {
+            source_column: mapping.target_column.clone(),
+            target_column: mapping.target_column.clone(),
+            target_data_type: Some("TEXT".to_string()),
+        })
+        .collect::<Vec<_>>();
+    mappings.extend(RESERVED_STAGING_COLUMNS.iter().map(|column| TableImportColumnMapping {
+        source_column: column.to_string(),
+        target_column: column.to_string(),
+        target_data_type: Some("TEXT".to_string()),
+    }));
+    request.file_path = output_path.to_string_lossy().to_string();
+    request.source_format = Some(TableImportSourceFormat::Csv);
+    request.parse_options = TableImportParseOptions {
+        has_header: Some(true),
+        trim_values: Some(false),
+        empty_string_as_null: Some(false),
+        ..Default::default()
+    };
+    request.mappings = mappings;
+    request.mode = TableImportMode::Append;
+    request.create_table = true;
+    request.prepared_source = None;
+    Ok(request)
+}
+
+fn xlsx_governed_error(error: String, cancelled: bool) -> EnterpriseToolError {
+    if cancelled || error == "Import cancelled" {
+        EnterpriseToolError::new("IMPORT_CANCELLED", "导入已取消。")
+    } else {
+        EnterpriseToolError::new("IMPORT_XLSX_STREAM_FAILED", error)
+    }
+}
+
+struct CancelOnDrop(Arc<AtomicBool>);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
 }
 
 fn staging_text_value(value: &Value) -> String {
@@ -1595,6 +1920,72 @@ fn comma_list_env(name: &str, defaults: &[&str]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+
+    fn write_xlsx_entry<W: Write + std::io::Seek>(zip: &mut zip::ZipWriter<W>, path: &str, content: &str) {
+        zip.start_file(
+            path,
+            zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored),
+        )
+        .unwrap();
+        zip.write_all(content.as_bytes()).unwrap();
+    }
+
+    fn write_governed_test_xlsx(path: &Path) {
+        let file = std::fs::File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        write_xlsx_entry(
+            &mut zip,
+            "[Content_Types].xml",
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>"#,
+        );
+        write_xlsx_entry(
+            &mut zip,
+            "_rels/.rels",
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"#,
+        );
+        write_xlsx_entry(
+            &mut zip,
+            "xl/workbook.xml",
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets>
+</workbook>"#,
+        );
+        write_xlsx_entry(
+            &mut zip,
+            "xl/_rels/workbook.xml.rels",
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+</Relationships>"#,
+        );
+        write_xlsx_entry(
+            &mut zip,
+            "xl/worksheets/sheet1.xml",
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <dimension ref="A1:A1"/>
+  <sheetData>
+    <row r="1"><c r="A1" t="inlineStr"><is><t>报告说明</t></is></c></row>
+    <row r="2"><c r="A2" t="inlineStr"><is><t>商家备注</t></is></c><c r="B2" t="inlineStr"><is><t>商家备注</t></is></c><c r="C2" t="inlineStr"><is><t>金额</t></is></c></row>
+    <row r="3"><c r="A3" t="inlineStr"><is><t>A</t></is></c><c r="B3" t="inlineStr"><is><t>B</t></is></c><c r="C3"><v>10</v></c></row>
+    <row r="4"/>
+    <row r="5"><c r="A5" t="inlineStr"><is><t>C</t></is></c><c r="B5" t="inlineStr"><is><t>D</t></is></c><c r="C5"><v>20</v></c></row>
+  </sheetData>
+</worksheet>"#,
+        );
+        zip.finish().unwrap();
+    }
 
     #[test]
     fn file_policy_rejects_outside_root_and_symlink() {
@@ -1668,16 +2059,31 @@ mod tests {
 
     #[test]
     fn mappings_reject_missing_and_duplicate_targets() {
-        let source = vec!["订单号".to_string(), "金额".to_string()];
+        let source = vec![
+            McpSourceColumn {
+                source_position: 1,
+                raw_source_name: "订单号".to_string(),
+                canonical_source_name: "订单号".to_string(),
+                dbx_source_name: "订单号".to_string(),
+            },
+            McpSourceColumn {
+                source_position: 2,
+                raw_source_name: "金额".to_string(),
+                canonical_source_name: "金额".to_string(),
+                dbx_source_name: "金额".to_string(),
+            },
+        ];
         let duplicated = vec![
             McpImportColumnMapping {
                 source_position: 1,
-                source_name: "订单号".to_string(),
+                raw_source_name: "订单号".to_string(),
+                canonical_source_name: "订单号".to_string(),
                 target_column: "order_id".to_string(),
             },
             McpImportColumnMapping {
                 source_position: 2,
-                source_name: "金额".to_string(),
+                raw_source_name: "金额".to_string(),
+                canonical_source_name: "金额".to_string(),
                 target_column: "order_id".to_string(),
             },
         ];
@@ -1685,21 +2091,37 @@ mod tests {
 
         let reserved = vec![McpImportColumnMapping {
             source_position: 1,
-            source_name: "订单号".to_string(),
+            raw_source_name: "订单号".to_string(),
+            canonical_source_name: "订单号".to_string(),
             target_column: "source_row_hash".to_string(),
         }];
         assert_eq!(validate_mappings(&reserved, &source).unwrap_err().code, "IMPORT_TARGET_COLUMN_RESERVED");
 
-        let duplicate_headers = vec!["note".to_string(), "note_1".to_string()];
+        let duplicate_headers = vec![
+            McpSourceColumn {
+                source_position: 1,
+                raw_source_name: "note".to_string(),
+                canonical_source_name: "note__1".to_string(),
+                dbx_source_name: "note".to_string(),
+            },
+            McpSourceColumn {
+                source_position: 2,
+                raw_source_name: "note".to_string(),
+                canonical_source_name: "note__2".to_string(),
+                dbx_source_name: "note_1".to_string(),
+            },
+        ];
         let second = vec![McpImportColumnMapping {
             source_position: 2,
-            source_name: "note_1".to_string(),
+            raw_source_name: "note".to_string(),
+            canonical_source_name: "note__2".to_string(),
             target_column: "second_note".to_string(),
         }];
         assert_eq!(validate_mappings(&second, &duplicate_headers).unwrap()[0].source_column, "note_1");
         let wrong_name = vec![McpImportColumnMapping {
             source_position: 2,
-            source_name: "note".to_string(),
+            raw_source_name: "note".to_string(),
+            canonical_source_name: "note__1".to_string(),
             target_column: "second_note".to_string(),
         }];
         assert_eq!(validate_mappings(&wrong_name, &duplicate_headers).unwrap_err().code, "IMPORT_SOURCE_NAME_MISMATCH");
@@ -1859,7 +2281,15 @@ mod tests {
             retain_source: true,
         };
 
-        let governed = build_governed_import_snapshot(request, "plan-1", &"a".repeat(64), &output).await.unwrap();
+        let governed = build_governed_import_snapshot(
+            request,
+            "plan-1",
+            &"a".repeat(64),
+            &output,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
         assert!(governed.create_table);
         assert!(governed.mappings.iter().all(|mapping| mapping.target_data_type.as_deref() == Some("TEXT")));
         let mut reader = csv::Reader::from_path(output).unwrap();
@@ -1874,9 +2304,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn governed_snapshot_blocks_excel_before_database_write() {
+    async fn governed_snapshot_blocks_legacy_xls_before_database_write() {
         let directory = tempfile::tempdir().unwrap();
-        let source = directory.path().join("input.xlsx");
+        let source = directory.path().join("input.xls");
         let output = directory.path().join("normalized.csv");
         std::fs::write(&source, b"not-an-xlsx").unwrap();
         let mut request = TableImportRequest {
@@ -1903,9 +2333,215 @@ mod tests {
             target_data_type: Some("TEXT".to_string()),
         });
         assert_eq!(
-            build_governed_import_snapshot(request, "plan-1", &"b".repeat(64), &output).await.unwrap_err().code,
-            "IMPORT_GOVERNED_FORMAT_UNSUPPORTED_V1"
+            build_governed_import_snapshot(
+                request,
+                "plan-1",
+                &"b".repeat(64),
+                &output,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "IMPORT_GOVERNED_XLS_UNSUPPORTED_V1"
         );
         assert!(!output.exists());
+        assert_eq!(
+            validate_governed_source_v1(
+                "input.xlsm",
+                Some(TableImportSourceFormat::Excel),
+                &TableImportParseOptions::default(),
+            )
+            .unwrap(),
+            TableImportSourceFormat::Excel
+        );
+        assert_eq!(
+            validate_governed_source_v1(
+                "input.json",
+                Some(TableImportSourceFormat::Json),
+                &TableImportParseOptions::default(),
+            )
+            .unwrap_err()
+            .code,
+            "IMPORT_GOVERNED_FORMAT_UNSUPPORTED_V1"
+        );
+    }
+
+    #[tokio::test]
+    async fn governed_xlsx_stream_preserves_absolute_rows_duplicate_positions_and_cancellation() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("input.xlsx");
+        let output = directory.path().join("normalized.csv");
+        write_governed_test_xlsx(&source);
+        let parse_options =
+            TableImportParseOptions { title_row: Some(2), data_start_row: Some(3), ..Default::default() };
+        let preview = dbx_core::table_import::preview_table_import_file_with_request(
+            dbx_core::table_import::TableImportPreviewRequest {
+                file_path: source.to_string_lossy().to_string(),
+                source_ref: None,
+                source_format: Some(TableImportSourceFormat::Excel),
+                parse_options: parse_options.clone(),
+                preview_limit: Some(10),
+            },
+        )
+        .await
+        .unwrap();
+        let source_columns = source_columns_for_preview(
+            &source.to_string_lossy(),
+            Some(TableImportSourceFormat::Excel),
+            &parse_options,
+            &preview.columns,
+        )
+        .await
+        .unwrap();
+        assert_eq!(source_columns[0].raw_source_name, "商家备注");
+        assert_eq!(source_columns[0].canonical_source_name, "商家备注__1");
+        assert_eq!(source_columns[1].raw_source_name, "商家备注");
+        assert_eq!(source_columns[1].canonical_source_name, "商家备注__2");
+        assert_eq!(preview.source_row_numbers, vec![3, 4, 5]);
+        let mappings = validate_mappings(
+            &[
+                McpImportColumnMapping {
+                    source_position: 2,
+                    raw_source_name: "商家备注".to_string(),
+                    canonical_source_name: "商家备注__2".to_string(),
+                    target_column: "second_note".to_string(),
+                },
+                McpImportColumnMapping {
+                    source_position: 3,
+                    raw_source_name: "金额".to_string(),
+                    canonical_source_name: "金额".to_string(),
+                    target_column: "amount".to_string(),
+                },
+            ],
+            &source_columns,
+        )
+        .unwrap();
+        let request = TableImportRequest {
+            import_id: "xlsx-import".to_string(),
+            connection_id: "postgres-1".to_string(),
+            database: "enterprise".to_string(),
+            schema: "staging".to_string(),
+            table: "mcp_xlsx".to_string(),
+            file_path: source.to_string_lossy().to_string(),
+            source_ref: Some("c".repeat(64)),
+            source_format: Some(TableImportSourceFormat::Excel),
+            parse_options,
+            mappings,
+            mode: TableImportMode::Append,
+            create_table: true,
+            batch_size: 1,
+            date_time_format: None,
+            prepared_source: None,
+            retain_source: true,
+        };
+        build_governed_import_snapshot(
+            request.clone(),
+            "plan-xlsx",
+            &"c".repeat(64),
+            &output,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
+        let mut reader = csv::Reader::from_path(&output).unwrap();
+        let rows = reader.records().map(Result::unwrap).collect::<Vec<_>>();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].get(0), Some("B"));
+        assert_eq!(rows[1].get(0), Some("D"));
+        assert_eq!(rows[0].get(5), Some("3"));
+        assert_eq!(rows[1].get(5), Some("5"));
+        assert_eq!(rows[0].get(6).map(str::len), Some(64));
+
+        let cancelled_output = directory.path().join("cancelled.csv");
+        assert_eq!(
+            build_governed_import_snapshot(
+                request,
+                "plan-cancelled",
+                &"c".repeat(64),
+                &cancelled_output,
+                Arc::new(AtomicBool::new(true)),
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "IMPORT_CANCELLED"
+        );
+        assert!(!cancelled_output.exists());
+    }
+
+    #[tokio::test]
+    #[ignore = "需要设置 DBX_MCP_REAL_XLSX_FIXTURE，且只执行本地只读治理快照回归"]
+    async fn real_xlsx_fixture_prepare_and_governed_snapshot_without_database() {
+        let source = PathBuf::from(std::env::var("DBX_MCP_REAL_XLSX_FIXTURE").expect("fixture path"));
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("normalized.csv");
+        let identity = file_identity(source.clone()).await.unwrap();
+        let parse_options = TableImportParseOptions::default();
+        let preview = dbx_core::table_import::preview_table_import_file_with_request(
+            dbx_core::table_import::TableImportPreviewRequest {
+                file_path: source.to_string_lossy().to_string(),
+                source_ref: Some(identity.sha256.clone()),
+                source_format: Some(TableImportSourceFormat::Excel),
+                parse_options: parse_options.clone(),
+                preview_limit: Some(1),
+            },
+        )
+        .await
+        .unwrap();
+        validate_preview_headers(&preview).unwrap();
+        let source_columns = source_columns_for_preview(
+            &source.to_string_lossy(),
+            Some(TableImportSourceFormat::Excel),
+            &parse_options,
+            &preview.columns,
+        )
+        .await
+        .unwrap();
+        let requested = source_columns
+            .iter()
+            .take(2)
+            .enumerate()
+            .map(|(index, column)| McpImportColumnMapping {
+                source_position: column.source_position,
+                raw_source_name: column.raw_source_name.clone(),
+                canonical_source_name: column.canonical_source_name.clone(),
+                target_column: format!("source_column_{}", index + 1),
+            })
+            .collect::<Vec<_>>();
+        let mappings = validate_mappings(&requested, &source_columns).unwrap();
+        let plan = build_plan(
+            "fixture-postgres".to_string(),
+            "fixture".to_string(),
+            "enterprise".to_string(),
+            "staging".to_string(),
+            format!("mcp_{}", Uuid::new_v4().simple()),
+            "fixture-v1".to_string(),
+            identity.clone(),
+            structure_fingerprint(&preview, &parse_options, &source_columns),
+            Some(TableImportSourceFormat::Excel),
+            parse_options,
+            mappings,
+            true,
+            500,
+            None,
+        )
+        .unwrap();
+        let request = plan.to_import_request("fixture-import".to_string());
+        build_governed_import_snapshot(
+            request,
+            &plan.plan_id,
+            &identity.sha256,
+            &output,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
+        let mut reader = csv::Reader::from_path(output).unwrap();
+        let headers = reader.headers().unwrap().clone();
+        assert!(headers.iter().any(|header| header == "source_row_number"));
+        assert!(headers.iter().any(|header| header == "source_row_hash"));
+        let row_count = reader.records().filter_map(Result::ok).count();
+        assert!(row_count > 0);
     }
 }

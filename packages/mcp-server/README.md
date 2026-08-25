@@ -190,7 +190,7 @@ DBX connection storage defaults to:
 
 Override the directory with `DBX_DATA_DIR`.
 
-Local file imports additionally require `DBX_MCP_IMPORT_ROOTS`. Preview accepts Excel/JSON/CSV/TSV, while v1 governed database import is fail-closed to streaming UTF-8 CSV/TSV. Prepare accepts position+name mappings and generates a unique `staging.mcp_<uuid>` relation; callers cannot append to an existing table. Start revalidates the source and streams a private snapshot containing row numbers, hashes, and batch lineage before opening a database pool. Import tools support local mode only and return `IMPORT_UNSUPPORTED_IN_WEB_MODE_V1` in Web mode. See the [MCP documentation](../../docs/content/docs/mcp.mdx#local-file-imports-and-milvus-tools) for the full contract.
+Local file imports additionally require `DBX_MCP_IMPORT_ROOTS`. Preview accepts Excel/JSON/CSV/TSV; v1 governed import streams XLSX/XLSM and UTF-8 CSV/TSV, while legacy `.xls` and JSON remain preview-only. Prepare accepts position+raw+canonical-name mappings and generates a unique `staging.mcp_<uuid>` relation; callers cannot append to an existing table. Start revalidates the source and streams a private snapshot containing absolute row numbers, hashes, and batch lineage before opening a database pool. Import tools support local mode only and return `IMPORT_UNSUPPORTED_IN_WEB_MODE_V1` in Web mode. See the [MCP documentation](../../docs/content/docs/mcp.mdx#local-file-imports-and-milvus-tools) for the full contract.
 
 ### Agent/JDBC databases
 
@@ -567,7 +567,7 @@ MCP 配置：
 
 通过 `DBX_DATA_DIR` 覆盖默认目录。Windows 便携版应指向 `DBX.exe` 同级、包含 `dbx.db` 的 `data` 文件夹。
 
-本地文件导入还必须配置 `DBX_MCP_IMPORT_ROOTS`。preview 支持 Excel/JSON/CSV/TSV，但 v1 治理入库只允许可流式有界转换的 UTF-8 CSV/TSV。prepare 接受“源位置+源名称”映射并由服务端生成唯一 `staging.mcp_<uuid>`，调用方不能追加已有表。start 在打开数据库连接前复验文件并流式生成包含真实行号、行哈希和批次血缘的任务快照。导入工具仅支持本地模式，Web 模式稳定返回 `IMPORT_UNSUPPORTED_IN_WEB_MODE_V1`。完整契约见 [MCP 中文文档](../../docs/content/docs/mcp.cn.mdx#本地文件导入与-milvus-工具)。
+本地文件导入还必须配置 `DBX_MCP_IMPORT_ROOTS`。preview 支持 Excel/JSON/CSV/TSV；v1 治理入库流式支持 XLSX/XLSM 和 UTF-8 CSV/TSV，旧版 `.xls` 与 JSON 暂为 preview-only。prepare 接受“源位置+raw+canonical 名称”映射并由服务端生成唯一 `staging.mcp_<uuid>`，调用方不能追加已有表。start 在打开数据库连接前复验文件并流式生成包含真实绝对行号、行哈希和批次血缘的任务快照。导入工具仅支持本地模式，Web 模式稳定返回 `IMPORT_UNSUPPORTED_IN_WEB_MODE_V1`。完整契约见 [MCP 中文文档](../../docs/content/docs/mcp.cn.mdx#本地文件导入与-milvus-工具)。
 
 ### DBX Web / Docker
 

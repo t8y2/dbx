@@ -856,6 +856,7 @@ impl DbxBackend for LocalBackend {
                 &plan_id,
                 &expected_sha256,
                 &normalized_path,
+                cancelled.clone(),
             )
             .await
             .map_err(|error| error.to_string())?;

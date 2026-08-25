@@ -121,9 +121,9 @@ DBX MCP 当前提供 25 个工具：
 
 ## 本地文件导入与 Milvus 工具
 
-导入工具只支持本地 DBX Desktop/MCP 模式；在 Web 模式中会稳定返回 `IMPORT_UNSUPPORTED_IN_WEB_MODE_V1`。必须用平台路径分隔符在 `DBX_MCP_IMPORT_ROOTS` 中配置一个或多个真实目录。文件路径必须是绝对路径，解析后仍位于允许目录内，是普通且非符号链接的文件，扩展名受支持，并且没有超过大小限制。preview 支持 Excel、JSON、CSV 和 TSV；v1 治理入库有意只开放可流式有界处理的 UTF-8 CSV/TSV。Excel/JSON 或非 UTF-8 文件会在创建计划和访问数据库之前返回稳定的不支持错误。
+导入工具只支持本地 DBX Desktop/MCP 模式；在 Web 模式中会稳定返回 `IMPORT_UNSUPPORTED_IN_WEB_MODE_V1`。必须用平台路径分隔符在 `DBX_MCP_IMPORT_ROOTS` 中配置一个或多个真实目录。文件路径必须是绝对路径，解析后仍位于允许目录内，是普通且非符号链接的文件，扩展名受支持，并且没有超过大小限制。preview 支持 Excel、JSON、CSV 和 TSV；v1 治理入库使用有界流式处理支持 XLSX/XLSM 和 UTF-8 CSV/TSV。旧版 `.xls`、JSON 和非 UTF-8 分隔文件会在创建计划和访问数据库之前返回稳定的不支持错误。
 
-`dbx_prepare_table_import` 会把连接、调用方已批准模板版本、规范路径、大小、修改时间、SHA-256、解析参数和字段映射固化为不可变摘要。每个映射必须提供 preview 返回的 1 基 `source_position`、精确 `source_name` 和 `target_column`。目标不能由调用方指定：服务端生成唯一 `staging.mcp_<uuid>`，强制创建新表，所有业务列固定为 `TEXT`。计划 30 分钟后过期，且只能启动一次。start 复验源文件后，先流式写出有界治理快照，再打开数据库连接；每行增加 `import_id`、`plan_id`、`source_sha`、真实 `source_row_number`、`source_row_hash` 和 `loaded_at`。无法形成精确血缘时会在数据库访问前阻断。status 会返回生成的 relation；发布到业务 Schema 仍是独立治理流程。
+`dbx_prepare_table_import` 会把连接、调用方已批准模板版本、规范路径、大小、修改时间、SHA-256、解析参数和字段映射固化为不可变摘要。preview 对每列返回 1 基 `source_position`、原始 `raw_source_name`、稳定 `canonical_source_name`（重复表头统一为 `名称__1`、`名称__2`）以及兼容旧 DBX 的名称；映射必须复核位置、raw、canonical，并提供 `target_column`。目标不能由调用方指定：服务端生成唯一 `staging.mcp_<uuid>`，强制创建新表，所有业务列固定为 `TEXT`。计划 30 分钟后过期，且只能启动一次。start 复验源文件后，先流式写出有界治理快照，再打开数据库连接；每行增加 `import_id`、`plan_id`、`source_sha`、真实绝对 `source_row_number`、`source_row_hash` 和 `loaded_at`。无法形成精确血缘时会在数据库访问前阻断。status 会返回生成的 relation；发布到业务 Schema 仍是独立治理流程。
 
 Milvus 工具只接受 allowlist 中的集合、过滤字段和输出字段。检索必须提供 `active_at`，服务端强制 approved 和生效时间过滤，并可选追加精确 `semantic_version`。upsert 使用严格语义卡 Schema：重算并核对 64 位 `content_checksum`，要求 `embedding_revision`，拒绝 `chunk_index` 与 `embedding_dimension`，文件内 card_id 必须唯一且只能有一个语义版本；写入前还会查询现有 card_id，禁止覆盖其他批次或版本。删除除“完全访问”外还要求调用方显式传入 `published: false`。所有通过 `dbx_execute_query` 提交的向量实体 search/query/mutation 都返回 `VECTOR_DEDICATED_TOOL_REQUIRED`，通用入口只保留明确管理诊断。
 

@@ -13,12 +13,12 @@ use crate::backend::{format_query_result, new_connection_config, parse_database_
 use crate::enterprise_tools::{
     build_milvus_filter, build_plan, cell_char_limit, file_identity, generated_staging_relation,
     milvus_delete_batch_query, milvus_existing_cards_query, milvus_search_query, milvus_upsert_query, preview_limit,
-    query_result_rows, read_semantic_jsonl, revalidate_plan_file, sanitize_preview, structure_fingerprint,
-    validate_embedding, validate_existing_card_ownership, validate_governed_source_v1, validate_import_file,
-    validate_mappings, validate_preview_headers, validate_vector_collection, vector_output_fields, vector_top_k,
-    vector_upsert_batch_size, EnterpriseRuntime, EnterpriseToolError, ImportStatusRequest, PrepareTableImportRequest,
-    PreviewImportFileRequest, StartTableImportRequest, VectorDeleteByBatchRequest, VectorSearchRequest,
-    VectorUpsertFileRequest, FORMAT_VERSION,
+    query_result_rows, read_semantic_jsonl, revalidate_plan_file, sanitize_preview, source_columns_for_preview,
+    structure_fingerprint, validate_embedding, validate_existing_card_ownership, validate_governed_source_v1,
+    validate_import_file, validate_mappings, validate_preview_headers, validate_vector_collection,
+    vector_output_fields, vector_top_k, vector_upsert_batch_size, EnterpriseRuntime, EnterpriseToolError,
+    ImportStatusRequest, PrepareTableImportRequest, PreviewImportFileRequest, StartTableImportRequest,
+    VectorDeleteByBatchRequest, VectorSearchRequest, VectorUpsertFileRequest, FORMAT_VERSION,
 };
 use crate::mongo::{self, MongoCommand, MongoSafetyError};
 use crate::session::{McpSession, McpSessionStore};
@@ -594,11 +594,13 @@ impl DbxMcpServer {
             Ok(limit) => limit,
             Err(error) => return enterprise_error(error),
         };
+        let source_format = request.source_format.map(Into::into);
+        let file_path = path.to_string_lossy().to_string();
         let preview = dbx_core::table_import::preview_table_import_file_with_request(
             dbx_core::table_import::TableImportPreviewRequest {
-                file_path: path.to_string_lossy().to_string(),
+                file_path: file_path.clone(),
                 source_ref: Some(identity.sha256.clone()),
-                source_format: request.source_format.map(Into::into),
+                source_format,
                 parse_options: parse_options.clone(),
                 preview_limit: Some(preview_rows),
             },
@@ -613,7 +615,12 @@ impl DbxMcpServer {
         if let Err(error) = validate_preview_headers(&preview) {
             return enterprise_error(error);
         }
-        let fingerprint = structure_fingerprint(&preview, &parse_options);
+        let source_columns =
+            match source_columns_for_preview(&file_path, source_format, &parse_options, &preview.columns).await {
+                Ok(columns) => columns,
+                Err(error) => return enterprise_error(error),
+            };
+        let fingerprint = structure_fingerprint(&preview, &parse_options, &source_columns);
         let current_identity = match file_identity(path).await {
             Ok(identity) => identity,
             Err(error) => return enterprise_error(error),
@@ -624,12 +631,6 @@ impl DbxMcpServer {
                 "文件在预览期间发生变化；结果已丢弃。",
             ));
         }
-        let source_columns = preview
-            .columns
-            .iter()
-            .enumerate()
-            .map(|(index, name)| json!({ "position": index + 1, "name": name }))
-            .collect::<Vec<_>>();
         let used_first_row = preview.source_row_numbers.first().copied();
         let used_last_row = preview.source_row_numbers.last().copied();
         let preview = sanitize_preview(preview, char_limit);
@@ -715,6 +716,13 @@ impl DbxMcpServer {
         if let Err(error) = validate_preview_headers(&preview) {
             return enterprise_error(error);
         }
+        let source_columns =
+            match source_columns_for_preview(&path.to_string_lossy(), source_format, &parse_options, &preview.columns)
+                .await
+            {
+                Ok(columns) => columns,
+                Err(error) => return enterprise_error(error),
+            };
         let current_identity = match file_identity(path).await {
             Ok(identity) => identity,
             Err(error) => return enterprise_error(error),
@@ -725,7 +733,7 @@ impl DbxMcpServer {
                 "文件在 prepare 剖析期间发生变化；未创建计划。",
             ));
         }
-        let mappings = match validate_mappings(&request.mappings, &preview.columns) {
+        let mappings = match validate_mappings(&request.mappings, &source_columns) {
             Ok(mappings) => mappings,
             Err(error) => return enterprise_error(error),
         };
@@ -740,7 +748,7 @@ impl DbxMcpServer {
                 "batch_size 必须在 1 到 50000 之间。",
             ));
         }
-        let fingerprint = structure_fingerprint(&preview, &parse_options);
+        let fingerprint = structure_fingerprint(&preview, &parse_options, &source_columns);
         let plan = match build_plan(
             resolved.connection.id.clone(),
             resolved.connection.name.clone(),
@@ -2957,12 +2965,14 @@ mod tests {
                 mappings: vec![
                     crate::enterprise_tools::McpImportColumnMapping {
                         source_position: 1,
-                        source_name: "order_id".to_string(),
+                        raw_source_name: "order_id".to_string(),
+                        canonical_source_name: "order_id".to_string(),
                         target_column: "order_id".to_string(),
                     },
                     crate::enterprise_tools::McpImportColumnMapping {
                         source_position: 2,
-                        source_name: "amount".to_string(),
+                        raw_source_name: "amount".to_string(),
+                        canonical_source_name: "amount".to_string(),
                         target_column: "amount".to_string(),
                     },
                 ],

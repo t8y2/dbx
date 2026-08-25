@@ -7844,6 +7844,8 @@ const {
   columnComments: visibleColumnComments,
   allColumnComments,
   mongoDocuments: computed(() => props.result.mongo_copy_documents ?? props.result.mongo_documents),
+  spatialColumns: computed(() => props.result.spatial_columns),
+  spatialValues: computed(() => props.result.spatial_values),
   columnTypes: visibleColumnTypes,
   allColumnTypes,
   whereInput: computed(() => currentWhereInput()),

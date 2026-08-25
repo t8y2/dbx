@@ -17,7 +17,7 @@ use crate::transfer::{
     is_mysql_generated_column_extra, keyset_pagination_sql_with_identifier_quote, quote_identifier,
     quote_postgres_string_literal, wrap_dameng_identity_insert_sql_for_table,
 };
-use crate::types::ObjectSourceKind;
+use crate::types::{ObjectSourceKind, SpatialColumn};
 
 static EXPORT_CANCELLED: std::sync::LazyLock<RwLock<HashSet<String>>> =
     std::sync::LazyLock::new(|| RwLock::new(HashSet::new()));
@@ -288,6 +288,10 @@ pub struct ExportedTableSql {
     #[serde(default)]
     pub column_extras: Vec<Option<String>>,
     #[serde(default)]
+    pub spatial_columns: Vec<SpatialColumn>,
+    #[serde(default)]
+    pub spatial_values: Vec<Vec<Option<u32>>>,
+    #[serde(default)]
     pub rows: Vec<Vec<Value>>,
     #[serde(default)]
     pub truncated: bool,
@@ -312,6 +316,10 @@ pub struct BuildExportInsertStatementsOptions {
     pub column_types: Vec<Option<String>>,
     #[serde(default)]
     pub column_extras: Vec<Option<String>>,
+    #[serde(default)]
+    pub spatial_columns: Vec<SpatialColumn>,
+    #[serde(default)]
+    pub spatial_values: Vec<Vec<Option<u32>>>,
     #[serde(default)]
     pub rows: Vec<Vec<Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -851,6 +859,15 @@ pub(crate) fn format_xugu_spatial_export_literal(
     database_type: Option<DatabaseType>,
     column_type: Option<&str>,
 ) -> Option<String> {
+    format_xugu_spatial_export_literal_with_srid(value, database_type, column_type, None)
+}
+
+fn format_xugu_spatial_export_literal_with_srid(
+    value: &Value,
+    database_type: Option<DatabaseType>,
+    column_type: Option<&str>,
+    srid: Option<u32>,
+) -> Option<String> {
     if database_type != Some(DatabaseType::Xugu) || !column_type.is_some_and(is_xugu_spatial_export_type) {
         return None;
     }
@@ -861,6 +878,9 @@ pub(crate) fn format_xugu_spatial_export_literal(
     let trimmed = text.trim_start();
     if trimmed.len() > 5 && trimmed[..5].eq_ignore_ascii_case("SRID=") {
         return Some(format!("ST_GeomFromEWKT({})", quote_export_sql_string(&text)));
+    }
+    if let Some(srid) = srid.filter(|srid| *srid != 0) {
+        return Some(format!("ST_GeomFromEWKT({})", quote_export_sql_string(&format!("SRID={srid};{text}"))));
     }
     // Xugu accepts a plain WKT string for both GEOMETRY and GEOGRAPHY. Keep
     // that form for SRID 0/legacy values rather than inventing a constructor.
@@ -961,6 +981,31 @@ fn format_export_numeric_literal(value: &Value) -> Option<String> {
     }
 }
 
+fn export_column_type<'a>(
+    column_types: &'a [Option<String>],
+    index: usize,
+    database_type: Option<DatabaseType>,
+    spatial_columns: &HashMap<usize, Option<u32>>,
+) -> Option<&'a str> {
+    column_types.get(index).and_then(|value| value.as_deref()).filter(|value| !value.trim().is_empty()).or_else(|| {
+        (database_type == Some(DatabaseType::Xugu) && spatial_columns.contains_key(&index)).then_some("GEOMETRY")
+    })
+}
+
+fn format_export_sql_literal_typed_with_spatial(
+    value: &Value,
+    database_type: Option<DatabaseType>,
+    column_type: Option<&str>,
+    sqlserver_unicode_string: bool,
+    spatial_srid: Option<u32>,
+) -> String {
+    if let Some(literal) = format_xugu_spatial_export_literal_with_srid(value, database_type, column_type, spatial_srid)
+    {
+        return literal;
+    }
+    format_export_sql_literal_typed(value, database_type, column_type, sqlserver_unicode_string)
+}
+
 fn is_export_numeric_literal(text: &str) -> bool {
     if text.trim() != text || text.is_empty() {
         return false;
@@ -982,12 +1027,14 @@ pub fn build_export_insert_statements(options: BuildExportInsertStatementsOption
         options.qualified_table_name.as_deref(),
         options.identifier_quote.as_deref(),
     )?;
+    let spatial_columns =
+        options.spatial_columns.iter().map(|column| (column.column_index, column.srid)).collect::<HashMap<_, _>>();
     let insert_columns = options
         .columns
         .iter()
         .enumerate()
         .filter_map(|(index, column)| {
-            let column_type = options.column_types.get(index).and_then(|value| value.as_deref());
+            let column_type = export_column_type(&options.column_types, index, options.database_type, &spatial_columns);
             is_export_insert_column(
                 options.database_type,
                 column,
@@ -1058,7 +1105,7 @@ pub fn build_export_insert_statements(options: BuildExportInsertStatementsOption
             *row_count = 0;
         };
 
-    for row in options.rows {
+    for (row_index, row) in options.rows.into_iter().enumerate() {
         let mut rendered_row = String::with_capacity(insert_columns.len().saturating_mul(16).saturating_add(2));
         rendered_row.push('(');
         for (column_index, (index, _, sqlserver_unicode_string)) in insert_columns.iter().enumerate() {
@@ -1066,11 +1113,21 @@ pub fn build_export_insert_statements(options: BuildExportInsertStatementsOption
                 rendered_row.push_str(", ");
             }
             let value = row.get(*index).unwrap_or(&Value::Null);
-            rendered_row.push_str(&format_export_sql_literal_typed(
+            let column_type =
+                export_column_type(&options.column_types, *index, options.database_type, &spatial_columns);
+            let spatial_srid = options
+                .spatial_values
+                .get(row_index)
+                .and_then(|values| values.get(*index))
+                .copied()
+                .flatten()
+                .or_else(|| spatial_columns.get(index).copied().flatten());
+            rendered_row.push_str(&format_export_sql_literal_typed_with_spatial(
                 value,
                 options.database_type,
-                options.column_types.get(*index).and_then(|value| value.as_deref()),
+                column_type,
                 *sqlserver_unicode_string,
+                spatial_srid,
             ));
         }
         rendered_row.push(')');
@@ -1199,6 +1256,8 @@ pub fn build_database_sql_export(options: BuildDatabaseSqlExportOptions) -> Resu
             columns: table.columns,
             column_types: table.column_types,
             column_extras: table.column_extras,
+            spatial_columns: table.spatial_columns,
+            spatial_values: table.spatial_values,
             rows: table.rows,
             batch_size: Some(insert_batch_size),
         })?;
@@ -1775,6 +1834,8 @@ fn write_database_export_rows<W: Write>(
         columns: insert_columns.to_vec(),
         column_types: insert_column_types.to_vec(),
         column_extras: insert_column_extras.to_vec(),
+        spatial_columns: Vec::new(),
+        spatial_values: Vec::new(),
         rows: insert_rows.to_vec(),
         batch_size: Some(DATABASE_EXPORT_INSERT_BATCH_SIZE),
     })?;
@@ -3020,6 +3081,7 @@ mod tests {
     use crate::connection::AppState;
     use crate::models::connection::DatabaseType;
     use crate::storage::Storage;
+    use crate::types::SpatialColumn;
     use crate::types::{ObjectInfo, ObjectSourceKind, TableInfo};
     use serde_json::{json, Value};
     use std::sync::{
@@ -3482,6 +3544,8 @@ mod tests {
             columns: vec!["location".to_string(), "shape".to_string()],
             column_types: vec![Some("point".to_string()), Some("geometry".to_string())],
             column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
             rows: vec![vec![
                 json!("DBX_WKB:4326:0101000000AE47E17A14AE5C4052B81E85EBF34240"),
                 json!("DBX_WKB:0:0101000000000000000000F03F0000000000000040"),
@@ -3603,6 +3667,32 @@ mod tests {
     }
 
     #[test]
+    fn xugu_spatial_metadata_recovers_missing_type_and_cell_srid() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Xugu),
+            identifier_quote: None,
+            schema: Some("app".to_string()),
+            table_name: Some("places".to_string()),
+            qualified_table_name: None,
+            columns: vec!["shape".to_string()],
+            column_types: vec![None],
+            column_extras: vec![None],
+            spatial_columns: vec![SpatialColumn { column_index: 0, srid: Some(3857) }],
+            spatial_values: vec![vec![Some(3857)]],
+            rows: vec![vec![json!("POINT(1 2)")]],
+            batch_size: None,
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec![
+                r#"INSERT INTO "app"."places" ("shape") VALUES (ST_GeomFromEWKT('SRID=3857;POINT(1 2)'));"#.to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn database_specific_boolean_export_literals() {
         let sqlserver_statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::SqlServer),
@@ -3613,6 +3703,8 @@ mod tests {
             columns: vec!["typed_true".to_string(), "untyped_false".to_string(), "typed_null".to_string()],
             column_types: vec![Some("bit".to_string()), None, Some("bit".to_string())],
             column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
             rows: vec![vec![json!(true), json!(false), Value::Null]],
             batch_size: Some(10),
         })
@@ -3626,6 +3718,8 @@ mod tests {
             columns: vec!["enabled".to_string(), "disabled".to_string(), "unknown".to_string()],
             column_types: Vec::new(),
             column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
             rows: vec![vec![json!(true), json!(false), Value::Null]],
             batch_size: Some(10),
         })
@@ -3668,6 +3762,8 @@ mod tests {
                 Some("nvarchar(20)".to_string()),
             ],
             column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
             rows: vec![vec![
                 json!("张'三"),
                 json!("中文"),
@@ -3699,6 +3795,8 @@ mod tests {
             columns: vec!["body".to_string()],
             column_types: vec![Some("text".to_string())],
             column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
             rows: vec![vec![json!("line1\nline2\tcol\rend\\slash\0\x1aO'Hara")]],
             batch_size: Some(10),
         })
@@ -3722,6 +3820,8 @@ mod tests {
             columns: vec!["payload".to_string()],
             column_types: vec![Some("longtext".to_string())],
             column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
             rows: vec![vec![json!(long_value.clone())], vec![json!(long_value)]],
             batch_size: Some(100),
         })
@@ -3742,6 +3842,8 @@ mod tests {
             columns: vec!["id".to_string()],
             column_types: vec![Some("int".to_string())],
             column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
             rows: (0..1001).map(|id| vec![json!(id)]).collect(),
             batch_size: Some(2000),
         })
@@ -3763,6 +3865,8 @@ mod tests {
             columns: vec!["message".to_string()],
             column_types: vec![Some("varchar(255)".to_string())],
             column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
             rows: vec![vec![json!("first\nsecond\tthird")]],
             batch_size: Some(10),
         })
@@ -3782,6 +3886,8 @@ mod tests {
             columns: vec!["body".to_string()],
             column_types: vec![Some("text".to_string())],
             column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
             rows: vec![vec![json!("line1\nline2\tend")]],
             batch_size: Some(10),
         })
@@ -3806,6 +3912,8 @@ mod tests {
                 Some("text".to_string()),
             ],
             column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
             rows: vec![vec![json!("line1\rline2"), json!("O'Hara"), json!(r"C:\tmp"), json!("plain")]],
             batch_size: Some(10),
         })
@@ -3830,6 +3938,8 @@ mod tests {
             columns: vec!["payload".to_string()],
             column_types: vec![Some("jsonb".to_string())],
             column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
             rows: vec![vec![json!(r#"{"text":"say \"hi\"","path":"C:\\tmp","quote":"O'Hara"}"#)]],
             batch_size: Some(10),
         })
@@ -3864,6 +3974,8 @@ mod tests {
                 Some("text[]".to_string()),
             ],
             column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
             rows: vec![vec![json!(1), json!([1.2, 3.4]), json!(["5", "6"]), json!(["x", "y"])]],
             batch_size: Some(10),
         })
@@ -3888,6 +4000,8 @@ mod tests {
             columns: vec!["id".to_string(), "name".to_string()],
             column_types: Vec::new(),
             column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
             rows: vec![vec![json!(1), json!("Ada")], vec![json!(2), json!("O'Hara")], vec![json!(3), json!("Linus")]],
             batch_size: Some(2),
         })
@@ -3913,6 +4027,8 @@ mod tests {
             columns: vec!["ID".to_string(), "NAME".to_string()],
             column_types: Vec::new(),
             column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
             rows: vec![vec![json!(1), json!("Ada")], vec![json!(2), json!("Linus")]],
             batch_size: Some(100),
         })
@@ -3938,6 +4054,8 @@ mod tests {
             columns: vec!["__DBX_ROWID".to_string(), "ID".to_string(), "NAME".to_string()],
             column_types: vec![Some("VARCHAR2".to_string()), Some("NUMBER".to_string()), Some("VARCHAR2".to_string())],
             column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
             rows: vec![vec![json!("AAAPr9AAEAAAAGfAAA"), json!(1), json!("Ada")]],
             batch_size: Some(100),
         })
@@ -3957,6 +4075,8 @@ mod tests {
             columns: vec!["__DBX_ROWID".to_string(), "ID".to_string(), "NAME".to_string()],
             column_types: vec![Some("VARCHAR2".to_string()), Some("NUMBER".to_string()), Some("VARCHAR2".to_string())],
             column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
             rows: vec![vec![json!("*AAABk1AAEAAAAAgAAA"), json!(1), json!("Ada")]],
             batch_size: Some(100),
         })
@@ -3976,6 +4096,8 @@ mod tests {
             columns: vec!["__DBX_ROWID".to_string(), "name".to_string()],
             column_types: Vec::new(),
             column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
             rows: vec![vec![json!(7), json!("Ada")]],
             batch_size: Some(100),
         })
@@ -3995,6 +4117,8 @@ mod tests {
             columns: vec!["ID".to_string(), "CREATED_ON".to_string(), "RAW_TEXT".to_string()],
             column_types: vec![Some("NUMBER".to_string()), Some("DATE".to_string()), Some("VARCHAR2(64)".to_string())],
             column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
             rows: vec![
                 vec![json!(1), json!("2022-08-25T09:58:43Z"), json!("2022-08-25T09:58:43Z")],
                 vec![json!(2), json!("2022-08-25T00:00:00Z"), json!("2022-08-25T00:00:00Z")],
@@ -4048,6 +4172,8 @@ mod tests {
                     Some("TIMESTAMP".to_string()),
                 ],
                 column_extras: Vec::new(),
+                spatial_columns: Vec::new(),
+                spatial_values: Vec::new(),
                 rows: vec![vec![
                     json!("2022-08-25 09:58:43.123456"),
                     json!("2022-08-26T10:59:44Z"),
@@ -4096,6 +4222,8 @@ mod tests {
             columns: vec!["created_at".to_string(), "recorded_at".to_string()],
             column_types: vec![Some("timestamp".to_string()), Some("timestamp with time zone".to_string())],
             column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
             rows: vec![vec![json!("2022-08-25T09:58:43.123456Z"), json!("2022-08-26T10:59:44+08:00")]],
             batch_size: Some(100),
         })
@@ -4121,6 +4249,8 @@ mod tests {
             columns: vec!["enabled".to_string(), "mask".to_string(), "label".to_string()],
             column_types: vec![Some("bit(1)".to_string()), Some("BIT(4)".to_string()), Some("varchar(20)".to_string())],
             column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
             rows: vec![vec![json!("1"), json!("1010"), json!("1010")], vec![json!(false), json!(3), json!("off")]],
             batch_size: Some(10),
         })
@@ -4143,6 +4273,8 @@ mod tests {
             columns: vec!["ENABLED".to_string(), "DELETED".to_string(), "OPTIONAL".to_string()],
             column_types: vec![Some("BIT".to_string()), Some("bit".to_string()), Some("BIT".to_string())],
             column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
             rows: vec![vec![json!(true), json!(false), Value::Null]],
             batch_size: Some(10),
         })
@@ -4172,6 +4304,8 @@ mod tests {
             ],
             column_types: vec![Some("VARCHAR".to_string()); 6],
             column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
             rows: vec![vec![
                 json!("plain"),
                 json!("eHall\0"),
@@ -4207,6 +4341,8 @@ mod tests {
             columns: vec!["id".to_string(), "f_blob".to_string(), "note".to_string()],
             column_types: vec![Some("int".to_string()), Some("blob".to_string()), Some("varchar(64)".to_string())],
             column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
             rows: vec![
                 vec![json!("1"), json!("0x68656c6c6f"), json!("0x68656c6c6f")],
                 vec![json!("2"), json!("0X"), json!("1")],
@@ -4239,6 +4375,8 @@ mod tests {
                 Some("varchar(64)".to_string()),
             ],
             column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
             rows: vec![vec![
                 json!(1),
                 json!("2026-06-12T10:11:12.123456789Z"),
@@ -4271,6 +4409,8 @@ mod tests {
                 Some("timestamp without time zone".to_string()),
             ],
             column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
             rows: vec![vec![json!("2026-06-12T10:11:12Z"), json!("2026-06-12T18:11:12+08:00")]],
             batch_size: Some(10),
         })
@@ -4295,6 +4435,8 @@ mod tests {
             columns: vec!["row_version".to_string(), "created_at".to_string()],
             column_types: vec![Some("timestamp".to_string()), Some("datetime2(3)".to_string())],
             column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
             rows: vec![vec![json!("2026-06-12T10:11:12Z"), json!("2026-06-12T10:11:12.1234567Z")]],
             batch_size: Some(10),
         })
@@ -4319,6 +4461,8 @@ mod tests {
             columns: vec!["id".to_string(), "title".to_string(), "search_vector".to_string()],
             column_types: vec![Some("integer".to_string()), Some("text".to_string()), Some("tsvector".to_string())],
             column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
             rows: vec![vec![json!(1), json!("Hello"), json!("'hello':1A")]],
             batch_size: Some(10),
         })
@@ -4365,6 +4509,8 @@ mod tests {
                     Some("stored generated".to_string()),
                     Some("DEFAULT_GENERATED".to_string()),
                 ],
+                spatial_columns: Vec::new(),
+                spatial_values: Vec::new(),
                 rows: vec![vec![json!(7), json!(2), json!(3.5), json!(7.0), json!(7.0), json!("2026-07-30 08:00:00")]],
                 truncated: false,
             }],
@@ -4430,6 +4576,8 @@ mod tests {
             columns: vec!["ID".to_string(), "NAME".to_string()],
             column_types: vec![Some("INT".to_string()), Some("VARCHAR(20)".to_string())],
             column_extras: vec![Some("identity".to_string()), None],
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
             rows: vec![vec![json!(1), json!("Ada")]],
             batch_size: Some(10),
         })
@@ -4459,6 +4607,8 @@ mod tests {
                 columns: vec!["id".to_string()],
                 column_types: Vec::new(),
                 column_extras: Vec::new(),
+                spatial_columns: Vec::new(),
+                spatial_values: Vec::new(),
                 rows: vec![vec![json!(1)]],
                 truncated: true,
             }],
@@ -4815,6 +4965,8 @@ mod tests {
             columns: vec!["id".to_string(), "event_type".to_string()],
             column_types: vec![None, None],
             column_extras: vec![None, None],
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
             rows: vec![vec![json!(1), json!("login")]],
             batch_size: Some(100),
         })

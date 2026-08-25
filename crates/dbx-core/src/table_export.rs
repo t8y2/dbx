@@ -1213,6 +1213,8 @@ async fn try_export_native_table_stream(
                         columns: col_names.to_vec(),
                         column_types: column_types.to_vec(),
                         column_extras: column_extras.to_vec(),
+                        spatial_columns: Vec::new(),
+                        spatial_values: Vec::new(),
                         rows: std::mem::take(pending_rows),
                         batch_size: Some(SQL_INSERT_BATCH_SIZE),
                     })?;
@@ -2022,6 +2024,8 @@ async fn export_table_data_core_inner(
                     columns: col_names.clone(),
                     column_types: column_types.clone(),
                     column_extras: column_extras.clone(),
+                    spatial_columns: result.spatial_columns.clone(),
+                    spatial_values: result.spatial_values.clone(),
                     rows: result.rows.clone(),
                     batch_size: Some(100),
                 })?;
@@ -2801,6 +2805,8 @@ mod tests {
             columns,
             column_types,
             column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
             rows: vec![vec![json!(1), json!("Ada")]],
             batch_size: Some(100),
         })

@@ -93,6 +93,7 @@ import {
 import { buildHoverTableSql, ddlForHoverPreview, hoverTableMatchesScope, normalizeAlignedSqlWhitespace, quoteIdentifier, quoteQualifiedName, reformatHoverDdl, scopeHoverTables, type HoverTableScope } from "@/lib/editor/hoverTableSql";
 import { constrainSqlHoverLayout } from "@/lib/editor/sqlHoverLayout";
 import { lineColumnToOffset, sqlErrorDecorationRange as resolveSqlErrorDecorationRange } from "@/lib/sql/sqlDiagnostics";
+import { analyzeMysqlRoutineSyntax } from "@/lib/sql/mysqlRoutineSyntaxDiagnostics";
 import {
   DBX_TABLE_REFERENCE_MIME,
   DBX_TABLE_REFERENCE_DROP_EVENT,
@@ -3046,7 +3047,17 @@ async function refreshSemanticDiagnostics(options: { preserveOutsideRanges?: boo
   }
 
   const nextDiagnostics: SqlSemanticDiagnostic[] = [];
+  const mysqlRoutineAnalysis = props.databaseType === "mysql" ? analyzeMysqlRoutineSyntax(sql) : null;
+  if (mysqlRoutineAnalysis) {
+    nextDiagnostics.push(
+      ...mysqlRoutineAnalysis.diagnostics.filter((diagnostic) => {
+        const diagnosticRange = sqlTextSpanToRange(sql, diagnostic.span);
+        return !!diagnosticRange && diagnosticRanges.some((range) => rangesOverlap(diagnosticRange, range));
+      }),
+    );
+  }
   for (const range of diagnosticRanges) {
+    if (mysqlRoutineAnalysis?.routineRanges.some((routineRange) => rangesOverlap(routineRange, range))) continue;
     try {
       const analysis = await api.analyzeSqlReferences(
         range.sql,

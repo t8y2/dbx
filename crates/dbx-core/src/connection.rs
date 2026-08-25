@@ -7443,7 +7443,13 @@ mod tests {
             .await
             .insert(pool_key.to_string(), PoolKind::Mysql(checked.clone(), MysqlMode::Normal));
         state.pool_activity.write().await.insert(pool_key.to_string(), super::PoolActivity::now());
-        state.start_keepalive_task(pool_key, &PoolKind::Mysql(checked.clone(), MysqlMode::Normal), &config);
+        state.start_keepalive_task(
+            pool_key,
+            &PoolKind::Mysql(checked.clone(), MysqlMode::Normal),
+            &config,
+            #[cfg(feature = "mq-admin")]
+            None,
+        );
         assert_eq!(state.supervised_task_count(), 1);
 
         let route_removed = std::sync::Arc::new(tokio::sync::Barrier::new(2));

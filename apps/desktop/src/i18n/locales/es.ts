@@ -438,7 +438,7 @@ export default withEnglishFallback({
     createDuckDbFile: "Crear archivo DuckDB",
     createSqliteFile: "Crear base de datos SQLite",
     memoryDatabasePathHint: "Usa :memory: para crear una base de datos SQLite o DuckDB en memoria.",
-    sqliteCipherKey: "Clave SQLCipher",
+    sqliteCipherKey: "Clave de cifrado de SQLite",
     sqliteCipherKeyPlaceholder: "Déjalo vacío para SQLite sin cifrar",
     sqliteExtensions: "Extensiones de SQLite",
     sqliteExtensionsPlaceholder: "/ruta/a/regexp.dylib\n/ruta/a/text.dylib|sqlite3_text_init",

@@ -361,7 +361,7 @@ export default withEnglishFallback({
     createDuckDbFile: "新建 DuckDB 文件",
     createSqliteFile: "新建 SQLite 数据库",
     memoryDatabasePathHint: "输入 :memory: 可创建 SQLite 或 DuckDB 内存数据库。",
-    sqliteCipherKey: "SQLCipher 密码（密钥）",
+    sqliteCipherKey: "SQLite 加密密码",
     sqliteCipherKeyPlaceholder: "未加密 SQLite 留空",
     sqliteExtensions: "SQLite 扩展库",
     sqliteExtensionsPlaceholder: "/path/to/regexp.dylib\n/path/to/text.dylib|sqlite3_text_init",

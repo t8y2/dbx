@@ -60,7 +60,7 @@ describe("extractSqlParameters", () => {
     `;
     expect(extractSqlParameters(sql)).toEqual(["quoted", "identifier", "embedded", "partial", "id"]);
     expect(extractSqlParameterDescriptors("select * from t where dt='${date}' and flag=\"#{enabled}\"")).toEqual([
-      { key: "date", name: "date", syntax: "shell", token: "${date}" },
+      { key: "date", name: "date", syntax: "shell", token: "'${date}'" },
       { key: "enabled", name: "enabled", syntax: "mybatis", token: '"#{enabled}"' },
     ]);
   });
@@ -897,6 +897,18 @@ describe("substituteSqlParameters", () => {
         number_value: { kind: "number", value: "42" },
       }),
     ).toBe("select current_date, 'current_date', 42, '42'");
+  });
+
+  it("replaces exact quoted null and empty typed values with SQL NULL", () => {
+    const sql = "select '${null_value}', '${empty_number}', '${empty_raw}', '${empty_string}'";
+    expect(
+      substituteSqlParameters(sql, {
+        null_value: { kind: "null", value: "NULL" },
+        empty_number: { kind: "number", value: "" },
+        empty_raw: { kind: "raw", value: "  " },
+        empty_string: { kind: "string", value: "" },
+      }),
+    ).toBe("select NULL, NULL, NULL, ''");
   });
 
   it("replaces placeholders embedded in ordinary SQL string values", () => {

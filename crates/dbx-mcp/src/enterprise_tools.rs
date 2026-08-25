@@ -271,9 +271,16 @@ pub struct VectorSearchRequest {
     #[schemars(extend("type" = "string"))]
     pub database: Option<String>,
     pub collection: String,
+    #[schemars(
+        pattern(r"^\d{4}-\d{2}-\d{2}$"),
+        description = "Required Asia/Shanghai business date in YYYY-MM-DD format"
+    )]
     pub active_at: String,
-    #[schemars(extend("type" = "string"))]
-    pub semantic_version: Option<String>,
+    #[schemars(
+        length(min = 1, max = 128),
+        description = "Required exact semantic version; UTF-8 byte length must be 1 to 128"
+    )]
+    pub semantic_version: String,
     pub embedding: Vec<f32>,
     #[schemars(extend("type" = "integer"))]
     pub top_k: Option<usize>,
@@ -1931,21 +1938,20 @@ pub fn vector_output_fields(requested: Option<Vec<String>>) -> Result<Vec<String
 
 pub fn build_milvus_filter(
     active_at: &str,
-    semantic_version: Option<&str>,
+    semantic_version: &str,
     filters: &BTreeMap<String, Value>,
 ) -> Result<String, EnterpriseToolError> {
     if active_at.len() != 10 || !valid_effective_timestamp(active_at) {
         return Err(EnterpriseToolError::new("VECTOR_ACTIVE_AT_INVALID", "active_at 必须是合法 YYYY-MM-DD 日期。"));
     }
     let allowed = comma_list_env("DBX_MCP_VECTOR_FILTER_FIELDS", DEFAULT_VECTOR_FILTER_FIELDS);
+    let semantic_version = validate_semantic_version(semantic_version)?;
     let mut clauses = vec![
         format!("approval_status == {}", json_string("approved")),
         format!("effective_from <= {}", json_string(active_at)),
         format!("(effective_to == \"\" or effective_to >= {})", json_string(active_at)),
+        format!("semantic_version == {}", json_string(semantic_version)),
     ];
-    if let Some(semantic_version) = semantic_version.map(str::trim).filter(|value| !value.is_empty()) {
-        clauses.push(format!("semantic_version == {}", json_string(semantic_version)));
-    }
     for (field, value) in filters {
         validate_identifier(field, "filter_field")?;
         if field == "approval_status" || field == "semantic_version" || !allowed.iter().any(|allowed| allowed == field)
@@ -1958,6 +1964,23 @@ pub fn build_milvus_filter(
         clauses.push(filter_clause(field, value)?);
     }
     Ok(clauses.join(" and "))
+}
+
+pub fn validate_semantic_version(value: &str) -> Result<&str, EnterpriseToolError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(EnterpriseToolError::new(
+            "VECTOR_SEMANTIC_VERSION_REQUIRED",
+            "semantic_version 是 v1 必填的精确语义版本。",
+        ));
+    }
+    if value.len() > 128 || value.chars().any(char::is_control) {
+        return Err(EnterpriseToolError::new(
+            "VECTOR_SEMANTIC_VERSION_INVALID",
+            "semantic_version 必须是 1～128 个 UTF-8 字节且不能包含控制字符。",
+        ));
+    }
+    Ok(value)
 }
 
 pub fn read_semantic_jsonl(path: &Path, semantic_batch_id: &str) -> Result<Vec<Value>, EnterpriseToolError> {
@@ -2637,16 +2660,34 @@ mod tests {
     #[test]
     fn milvus_filter_forces_approval_and_semantic_version() {
         let filters = BTreeMap::from([("business_domain".to_string(), json!("交易"))]);
-        let filter = build_milvus_filter("2026-08-25", Some("semantic-v3"), &filters).unwrap();
+        let filter = build_milvus_filter("2026-08-25", "semantic-v3", &filters).unwrap();
         assert!(filter.contains("approval_status == \"approved\""));
         assert!(filter.contains("effective_from <= \"2026-08-25\""));
+        assert!(filter.contains("effective_to == \"\" or effective_to >= \"2026-08-25\""));
         assert!(filter.contains("semantic_version == \"semantic-v3\""));
         assert!(filter.contains("business_domain == \"交易\""));
 
         let forbidden = BTreeMap::from([("approval_status".to_string(), json!("draft"))]);
         assert_eq!(
-            build_milvus_filter("2026-08-25", None, &forbidden).unwrap_err().code,
+            build_milvus_filter("2026-08-25", "semantic-v3", &forbidden).unwrap_err().code,
             "VECTOR_FILTER_FIELD_NOT_ALLOWED"
+        );
+        let forbidden_version = BTreeMap::from([("semantic_version".to_string(), json!("semantic-v2"))]);
+        assert_eq!(
+            build_milvus_filter("2026-08-25", "semantic-v3", &forbidden_version).unwrap_err().code,
+            "VECTOR_FILTER_FIELD_NOT_ALLOWED"
+        );
+        assert_eq!(
+            build_milvus_filter("2026-08-25", "  ", &BTreeMap::new()).unwrap_err().code,
+            "VECTOR_SEMANTIC_VERSION_REQUIRED"
+        );
+        assert_eq!(
+            build_milvus_filter("2026-08-25", &"x".repeat(129), &BTreeMap::new()).unwrap_err().code,
+            "VECTOR_SEMANTIC_VERSION_INVALID"
+        );
+        assert_eq!(
+            build_milvus_filter("2026-08-25T00:00:00+08:00", "semantic-v3", &BTreeMap::new()).unwrap_err().code,
+            "VECTOR_ACTIVE_AT_INVALID"
         );
     }
 

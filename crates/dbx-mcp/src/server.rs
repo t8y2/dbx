@@ -978,7 +978,7 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_vector_search",
-        description = "Search an allowed Milvus semantic collection with a bounded vector and safe equality filters. Approval and effective date are always enforced; semantic_version is an optional exact filter.",
+        description = "Search one exact semantic_version in an allowed Milvus collection. Approval, Asia/Shanghai business date (YYYY-MM-DD), and semantic version are always enforced together.",
         annotations(
             title = "检索获批语义卡",
             read_only_hint = true,
@@ -1012,11 +1012,11 @@ impl DbxMcpServer {
             Ok(fields) => fields,
             Err(error) => return enterprise_error(error),
         };
-        let filter =
-            match build_milvus_filter(&request.active_at, request.semantic_version.as_deref(), &request.filters) {
-                Ok(filter) => filter,
-                Err(error) => return enterprise_error(error),
-            };
+        let semantic_version = request.semantic_version.trim().to_string();
+        let filter = match build_milvus_filter(&request.active_at, &semantic_version, &request.filters) {
+            Ok(filter) => filter,
+            Err(error) => return enterprise_error(error),
+        };
         let database = match self.resolve_database(request.database, &resolved.connection) {
             Ok(database) => database,
             Err(error) => return error,
@@ -1031,7 +1031,7 @@ impl DbxMcpServer {
                     json!({
                         "collection": request.collection,
                         "activeAt": request.active_at,
-                        "semanticVersion": request.semantic_version,
+                        "semanticVersion": semantic_version,
                         "topK": top_k,
                         "filter": filter,
                         "rows": rows,
@@ -3169,6 +3169,45 @@ mod tests {
     }
 
     #[test]
+    fn vector_search_schema_requires_exact_semantic_version_and_shanghai_business_date() {
+        let server = DbxMcpServer::with_runtime_options(Arc::new(FakeBackend::default()), McpScope::default(), false);
+        let tool = server
+            .tool_router
+            .list_all()
+            .into_iter()
+            .find(|tool| tool.name == "dbx_vector_search")
+            .expect("vector search tool should be registered");
+        let required = tool
+            .input_schema
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .expect("vector search should publish required fields");
+        for field in ["active_at", "semantic_version"] {
+            assert!(required.iter().any(|required| required == field), "{field} 必须是 inputSchema 必填字段");
+        }
+        let properties = tool.input_schema.get("properties").and_then(serde_json::Value::as_object).unwrap();
+        assert!(properties
+            .get("active_at")
+            .and_then(|schema| schema.get("description"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|description| description.contains("Asia/Shanghai") && description.contains("YYYY-MM-DD")));
+        assert_eq!(
+            properties.get("active_at").and_then(|schema| schema.get("pattern")),
+            Some(&json!(r"^\d{4}-\d{2}-\d{2}$"))
+        );
+        assert_eq!(properties.get("semantic_version").and_then(|schema| schema.get("minLength")), Some(&json!(1)));
+        assert_eq!(properties.get("semantic_version").and_then(|schema| schema.get("maxLength")), Some(&json!(128)));
+
+        let missing = serde_json::from_value::<VectorSearchRequest>(json!({
+            "collection": "semantic_cards",
+            "active_at": "2026-08-25",
+            "embedding": vec![0.0_f32; 1024]
+        }))
+        .unwrap_err();
+        assert!(missing.to_string().contains("semantic_version"));
+    }
+
+    #[test]
     fn optional_fields_never_publish_nullable_union_types() {
         // Some MCP clients (e.g. OpenCode, see #6344) cannot resolve a JSON Schema
         // `"type": ["string", "null"]` union and fall back to wrapping the argument in a
@@ -3204,10 +3243,7 @@ mod tests {
                 "dbx_prepare_table_import",
                 &["connection_id", "connection_name", "database", "source_format", "batch_size", "date_time_format"],
             ),
-            (
-                "dbx_vector_search",
-                &["connection_id", "connection_name", "database", "semantic_version", "top_k", "output_fields"],
-            ),
+            ("dbx_vector_search", &["connection_id", "connection_name", "database", "top_k", "output_fields"]),
             ("dbx_vector_upsert_file", &["connection_id", "connection_name", "database", "batch_size"]),
             ("dbx_vector_delete_by_batch", &["connection_id", "connection_name", "database"]),
         ];

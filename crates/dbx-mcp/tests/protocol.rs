@@ -307,6 +307,12 @@ async fn initializes_lists_tools_and_calls_a_tool() {
     assert!(names.contains(&"dbx_vector_search"));
     assert!(names.contains(&"dbx_vector_upsert_file"));
     assert!(names.contains(&"dbx_vector_delete_by_batch"));
+    let vector_search =
+        tools.tools.iter().find(|tool| tool.name == "dbx_vector_search").expect("vector search tool schema");
+    let required =
+        vector_search.input_schema.get("required").and_then(Value::as_array).expect("vector search required fields");
+    assert!(required.iter().any(|field| field == "active_at"));
+    assert!(required.iter().any(|field| field == "semantic_version"));
 
     let result = client.peer().call_tool(CallToolRequestParams::new("dbx_list_connections")).await.expect("call tool");
     let response = result.content[0].as_text().expect("text response");

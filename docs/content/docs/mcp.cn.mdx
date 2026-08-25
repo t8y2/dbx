@@ -127,7 +127,7 @@ DBX MCP 定义 25 个工具；日常默认注册 22 个，只有显式无作用�
 
 start 复验源文件后，用 `O_NOFOLLOW`/文件描述符元数据打开源文件，在复制任务私有快照时一遍完成可取消复制与 SHA-256；复制期间身份漂移会阻断。服务端先检查任务磁盘是否能容纳源文件、规范化输出上限和保留空间，再流式写出有大小上限的治理快照，成功后才打开数据库连接。CSV/TSV 短行按缺失值处理；超出表头的尾部空字段会保留在完整行哈希中，任一尾部非空字段按真实源行号阻断。每行增加 `import_id`、`plan_id`、`source_sha`、真实绝对 `source_row_number`、覆盖完整规范源记录的 `source_row_hash` 和 `loaded_at`。无法形成精确血缘时会在数据库访问前阻断。status 会返回生成的 relation；发布到业务 Schema 仍是独立治理流程。
 
-Milvus 工具只接受 allowlist 中的集合、过滤字段和输出字段。检索必须提供 `active_at`，服务端强制 approved 和生效时间过滤，并可选追加精确 `semantic_version`。单查询 search 响应会正确展开 Milvus 的外层 query 数组：`data:[[]]` 返回零行，多命中返回语义卡行；query/list 解析不受影响。upsert 使用严格语义卡 Schema：全部 VARCHAR 在任何 Milvus 调用前按当前集合的 UTF-8 字节长度核验，`content` 上限为 8192 字节；重算并核对 64 位 `content_checksum`，要求 `embedding_revision`，拒绝 `chunk_index` 与 `embedding_dimension`，文件内 card_id 必须唯一且只能有一个语义版本。整份 JSONL 和全部已有 card_id 归属检查通过后才开始分批 upsert。v1 不再信任调用方提供的 `published:false`，`dbx_vector_delete_by_batch` 始终返回 `VECTOR_DELETE_DISABLED_V1`；撤销残留批次必须走受审计管理员流程。所有通过 `dbx_execute_query` 提交的向量实体 search/query/mutation 都返回 `VECTOR_DEDICATED_TOOL_REQUIRED`，通用入口只保留明确管理诊断。
+Milvus 工具只接受 allowlist 中的集合、过滤字段和输出字段。检索必须同时提供 `active_at` 与 `semantic_version`：`active_at` 是将查询时点换算到 `Asia/Shanghai` 后得到的 `YYYY-MM-DD` 业务日期；`semantic_version` 是 1～128 个 UTF-8 字节的非空精确版本。服务端始终组合 `approval_status=approved`、生效日期区间和精确语义版本，`filters` 不能提供或覆盖 `approval_status`/`semantic_version`。单查询 search 响应会正确展开 Milvus 的外层 query 数组：`data:[[]]` 返回零行，多命中返回语义卡行；query/list 解析不受影响。upsert 使用严格语义卡 Schema：全部 VARCHAR 在任何 Milvus 调用前按当前集合的 UTF-8 字节长度核验，`content` 上限为 8192 字节；重算并核对 64 位 `content_checksum`，要求 `embedding_revision`，拒绝 `chunk_index` 与 `embedding_dimension`，文件内 card_id 必须唯一且只能有一个语义版本。整份 JSONL 和全部已有 card_id 归属检查通过后才开始分批 upsert。v1 不再信任调用方提供的 `published:false`，`dbx_vector_delete_by_batch` 始终返回 `VECTOR_DELETE_DISABLED_V1`；撤销残留批次必须走受审计管理员流程。所有通过 `dbx_execute_query` 提交的向量实体 search/query/mutation 都返回 `VECTOR_DEDICATED_TOOL_REQUIRED`，通用入口只保留明确管理诊断。
 
 向量检索的核心参数形状如下：
 
@@ -145,7 +145,7 @@ Milvus 工具只接受 allowlist 中的集合、过滤字段和输出字段。�
 }
 ```
 
-仅依赖生效日期选择活动语义卡时可以省略 `semantic_version`，但 `active_at` 仍为必填。v1 的 `embedding` 必须恰好包含 1024 个有限数值；上面数组内的注释只是文档缩写，不是可直接提交的工具参数。
+`semantic_version` 与 `active_at` 均为必填，不能只依赖生效日期选择版本；调用方应先从已发布的新鲜度目录取得活动 `dataset_id + semantic_version`，再逐对检索。`active_at` 只接受 `Asia/Shanghai` 业务日期 `YYYY-MM-DD`，不接受带时区 datetime。v1 的 `embedding` 必须恰好包含 1024 个有限数值；上面数组内的注释只是文档缩写，不是可直接提交的工具参数。
 
 ## 有状态查询会话
 

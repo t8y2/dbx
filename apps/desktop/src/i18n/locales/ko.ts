@@ -322,6 +322,7 @@ export default withEnglishFallback({
     showMore: "{count}개 더 보기...",
     filterByType: "유형별로 필터",
     showActiveConnectionsOnly: "활성 연결만 표시",
+    activeConnectionsStatus: "활성 연결: {count}",
     disconnectAllActiveConnections: "모든 활성 연결 끊기",
     sortConnections: "연결 정렬",
     sortConnectionsManual: "수동 순서",

@@ -323,6 +323,7 @@ export default withEnglishFallback({
     showMore: "Mostra altri {count}...",
     filterByType: "Filtra per tipo",
     showActiveConnectionsOnly: "Mostra solo connessioni attive",
+    activeConnectionsStatus: "Connessioni attive: {count}",
     disconnectAllActiveConnections: "Disconnetti tutte le connessioni attive",
     sortConnections: "Ordina connessioni",
     sortConnectionsManual: "Ordine manuale",

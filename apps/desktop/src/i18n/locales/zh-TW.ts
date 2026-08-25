@@ -324,6 +324,7 @@ export default withEnglishFallback({
     showMore: "再顯示 {count} 個……",
     filterByType: "依類型篩選",
     showActiveConnectionsOnly: "僅顯示作用中連線",
+    activeConnectionsStatus: "作用中連線：{count}",
     disconnectAllActiveConnections: "關閉所有作用中連線",
     sortConnections: "連線排序",
     sortConnectionsManual: "手動排序",

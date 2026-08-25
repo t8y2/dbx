@@ -324,6 +324,7 @@ export default withEnglishFallback({
     showMore: "Mostrar {count} más...",
     filterByType: "Filtrar por tipo",
     showActiveConnectionsOnly: "Mostrar solo conexiones activas",
+    activeConnectionsStatus: "Conexiones activas: {count}",
     disconnectAllActiveConnections: "Desconectar todas las conexiones activas",
     sortConnections: "Ordenar conexiones",
     sortConnectionsManual: "Orden manual",

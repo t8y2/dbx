@@ -55,6 +55,7 @@ import { createSidebarPasteHandlerRegistry } from "@/lib/sidebar/sidebarPasteHan
 import { insertSidebarTableSearchControls, isSidebarTableSearchControlNode } from "@/lib/sidebar/sidebarTableSearchControl";
 import { createSidebarTableSearchDebouncer, invalidateSidebarTableSearchBuild, loadOrBuildSidebarTableSearchIndex, scheduleExclusiveSidebarTableSearchDebounce } from "@/lib/sidebar/sidebarTableSearchIndex";
 import TreeItem from "./TreeItem.vue";
+import ActiveConnectionFilterButton from "./ActiveConnectionFilterButton.vue";
 import SidebarTreeRuntimeHost from "./SidebarTreeRuntimeHost.vue";
 import SidebarTreeItemDialogs from "./SidebarTreeItemDialogs.vue";
 import InstallExtensionDialog from "@/components/objects/InstallExtensionDialog.vue";
@@ -2454,21 +2455,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
             />
           </span>
         </LightTooltip>
-        <LightTooltip :text="t('sidebar.showActiveConnectionsOnly')" side="top" :delay="300" nowrap>
-          <button
-            type="button"
-            class="relative shrink-0 h-6 w-6 flex items-center justify-center rounded border hover:bg-accent"
-            :class="showConnectedConnectionsOnly ? 'text-primary bg-primary/10 border-primary/30' : 'border-border text-muted-foreground hover:text-foreground'"
-            :aria-label="t('sidebar.showActiveConnectionsOnly')"
-            :aria-pressed="showConnectedConnectionsOnly"
-            @click="showConnectedConnectionsOnly = !showConnectedConnectionsOnly"
-          >
-            <span
-              class="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full border-[1.5px] transition-[width,height,border-color,background-color] duration-200 ease-out"
-              :class="store.connectedIds.size > 0 ? 'h-1.5 w-1.5 border-green-500 bg-green-500' : 'h-3 w-3 border-current bg-transparent'"
-            />
-          </button>
-        </LightTooltip>
+        <ActiveConnectionFilterButton :active-connection-count="store.connectedIds.size" :pressed="showConnectedConnectionsOnly" @toggle="showConnectedConnectionsOnly = !showConnectedConnectionsOnly" />
       </div>
     </div>
     <CustomContextMenu ref="sidebarContextMenuRef" :items="sidebarContextMenuItems" v-slot="contextMenuSlot">

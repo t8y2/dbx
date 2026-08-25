@@ -322,6 +322,7 @@ export default {
     showMore: "Show {count} more...",
     filterByType: "Filter by type",
     showActiveConnectionsOnly: "Show active connections only",
+    activeConnectionsStatus: "Active connections: {count}",
     disconnectAllActiveConnections: "Disconnect all active connections",
     sortConnections: "Sort connections",
     sortConnectionsManual: "Manual order",

@@ -247,6 +247,7 @@ export default withEnglishFallback({
     showMore: "加载更多 ({count})...",
     filterByType: "按类型筛选",
     showActiveConnectionsOnly: "仅显示活跃连接",
+    activeConnectionsStatus: "活跃连接：{count}",
     disconnectAllActiveConnections: "关闭所有活跃连接",
     sortConnections: "连接排序",
     sortConnectionsManual: "手动排序",

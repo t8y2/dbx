@@ -324,6 +324,7 @@ export default withEnglishFallback({
     showMore: "さらに{count}件表示...",
     filterByType: "タイプでフィルター",
     showActiveConnectionsOnly: "アクティブな接続のみを表示",
+    activeConnectionsStatus: "アクティブな接続: {count}",
     disconnectAllActiveConnections: "すべてのアクティブな接続を切断",
     sortConnections: "接続を並べ替え",
     sortConnectionsManual: "手動順",

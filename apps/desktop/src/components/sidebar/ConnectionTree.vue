@@ -75,6 +75,7 @@ import { createSidebarActionTarget, findSidebarActionTarget, matchesSidebarActio
 import { syncSidebarTreeNodeExpansion } from "@/lib/sidebar/sidebarTreeExpansion";
 import type { SidebarDangerDialogOption, SidebarDangerDialogRequest } from "@/lib/sidebar/sidebarDangerDialog";
 import { resetSidebarTreeDialogState, sidebarDangerRunningExecutionId } from "./sidebarTreeDialogState";
+import { detachTabFailureMessage, detachTabToWindow } from "@/lib/detached/detachTabToWindow";
 import { SidebarDangerConfirmDialog, SidebarDdlViewDialog, SidebarObjectSourceDialog, SidebarProcedureExecutionDialog, SidebarVisibleDatabasesDialog, SidebarVisibleNacosNamespacesDialog, SidebarVisibleSchemasDialog } from "./sidebarAsyncDialogs";
 import { sortConnectionListForDisplay } from "@/lib/sidebar/connectionListSort";
 import { sidebarDisplayTableName } from "@/lib/sidebar/sidebarTableNameDisplay";
@@ -133,6 +134,8 @@ const sidebarObjectSourceTarget = ref<{ node: TreeNode; initialEditing: boolean 
 const sidebarObjectSourceOpen = ref(false);
 const sidebarProcedureTarget = ref<TreeNode | null>(null);
 const sidebarProcedureOpen = ref(false);
+/** 「用独立窗口打开 · 执行存储过程」：对话框确认建页签后，把页签分离到独立子窗口。 */
+const sidebarProcedureDetachRequested = ref(false);
 const sidebarVisibleDatabasesTarget = ref<TreeNode | null>(null);
 const sidebarVisibleDatabasesOpen = ref(false);
 const sidebarVisibleSchemasTarget = ref<TreeNode | null>(null);
@@ -1940,11 +1943,49 @@ function openSidebarSettings(initialTab: string) {
   emit("open-settings", initialTab);
 }
 
-function openSidebarProcedure(node: TreeNode) {
+function openSidebarProcedure(node: TreeNode, detached = false) {
   if (node.type !== "procedure" || !node.connectionId || !node.database) return;
   beginSidebarAction();
   sidebarProcedureTarget.value = createSidebarActionTarget(node);
+  sidebarProcedureDetachRequested.value = detached;
   sidebarProcedureOpen.value = true;
+}
+
+/** 主窗口新建页签后分离到独立子窗口；失败时页签保留在主窗口并提示（与对象浏览器同名入口行为一致）。
+ * 页签创建即带 pendingDetach 隐藏标记（直达独立窗口不闪现），失败时复位为可见。 */
+async function detachCreatedSidebarTabToSeparateWindow(tabId: string) {
+  try {
+    const result = await detachTabToWindow(tabId, t);
+    if (!result.ok) {
+      queryStore.revealPendingDetachTab(tabId);
+      toast(detachTabFailureMessage(result.reason, t), 5000);
+    }
+  } catch (error) {
+    queryStore.revealPendingDetachTab(tabId);
+    console.error("[detached-tab] open from sidebar failed", error);
+    toast(error instanceof Error ? error.message : String(error), 5000);
+  }
+}
+
+function openSidebarProcedureSql(sql: string) {
+  const target = sidebarProcedureTarget.value;
+  if (!target?.connectionId || !target.database || !sql) return;
+  const detachRequested = sidebarProcedureDetachRequested.value;
+  sidebarProcedureDetachRequested.value = false;
+  const tabId = queryStore.createTab(target.connectionId, target.database, `Execute - ${target.label}`, "query", target.schema, undefined, target.catalog, detachRequested ? { activate: false, pendingDetach: true } : {});
+  queryStore.updateSql(tabId, sql);
+  if (detachRequested) void detachCreatedSidebarTabToSeparateWindow(tabId);
+}
+
+async function executeSidebarProcedureSql(sql: string) {
+  const target = sidebarProcedureTarget.value;
+  if (!target?.connectionId || !target.database || !sql) return;
+  const detachRequested = sidebarProcedureDetachRequested.value;
+  sidebarProcedureDetachRequested.value = false;
+  const tabId = queryStore.createTab(target.connectionId, target.database, `Execute - ${target.label}`, "query", target.schema, undefined, target.catalog, detachRequested ? { activate: false, pendingDetach: true } : {});
+  queryStore.updateSql(tabId, sql);
+  await queryStore.executeTabSql(tabId, sql);
+  if (detachRequested) await detachCreatedSidebarTabToSeparateWindow(tabId);
 }
 
 function openSidebarData(node: TreeNode, requireSelection: boolean, openMode: "default" | "new-tab", runner: (node: TreeNode, request: SidebarDataOpenRequest) => Promise<void>) {
@@ -2039,21 +2080,6 @@ async function saveSidebarTableNameFilters() {
 function clearSidebarTableNameFilters() {
   tableNameFilterIncludeDraft.value = "";
   tableNameFilterExcludeDraft.value = "";
-}
-
-function openSidebarProcedureSql(sql: string) {
-  const target = sidebarProcedureTarget.value;
-  if (!target?.connectionId || !target.database || !sql) return;
-  const tabId = queryStore.createTab(target.connectionId, target.database, `Execute - ${target.label}`, "query", target.schema, undefined, target.catalog);
-  queryStore.updateSql(tabId, sql);
-}
-
-async function executeSidebarProcedureSql(sql: string) {
-  const target = sidebarProcedureTarget.value;
-  if (!target?.connectionId || !target.database || !sql) return;
-  const tabId = queryStore.createTab(target.connectionId, target.database, `Execute - ${target.label}`, "query", target.schema, undefined, target.catalog);
-  queryStore.updateSql(tabId, sql);
-  await queryStore.executeTabSql(tabId, sql);
 }
 
 async function refreshSidebarActionTarget() {

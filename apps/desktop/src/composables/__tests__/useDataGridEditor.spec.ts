@@ -1,6 +1,6 @@
 import { computed, ref, type Ref } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { clearDataGridPendingSnapshot, DATA_GRID_QUICK_ENTRY_DRAFT_ROW_ID, useDataGridEditor } from "@/composables/useDataGridEditor";
+import { clearDataGridPendingSnapshot, clearDataGridPendingSnapshotsForTab, collectDataGridPendingSnapshotsForTab, DATA_GRID_QUICK_ENTRY_DRAFT_ROW_ID, stageDataGridPendingSnapshotsForTab, useDataGridEditor, type SerializedDataGridPendingSnapshot } from "@/composables/useDataGridEditor";
 import type { CellValue } from "@/lib/dataGrid/cellValue";
 
 const mocks = vi.hoisted(() => ({
@@ -412,6 +412,94 @@ describe("useDataGridEditor appendPastedRowsToNewRow", () => {
     editor.cloneRow(-1, new Map([[1, "full payload"]]));
 
     expect(editor.newRows.value[1]).toEqual(["Ada", "full payload", "Lovelace"]);
+  });
+});
+
+describe("useDataGridEditor pending snapshot transfer (detach/dock)", () => {
+  // 与 createEditor 同参但不覆盖编辑状态的工厂：用于验证从缓存恢复的完整状态。
+  function createBareEditor(cacheKey?: string) {
+    const result = ref<{ columns: string[]; rows: CellValue[][] }>({
+      columns: ["first", "hidden", "last"],
+      rows: [],
+    });
+    return useDataGridEditor({
+      result: computed(() => result.value),
+      editable: computed(() => true),
+      databaseType: computed(() => "postgres"),
+      connectionId: computed(() => "connection-1"),
+      database: computed(() => "app"),
+      tableMeta: computed(() => ({
+        tableName: "people",
+        columns: [
+          { name: "first", data_type: "varchar" },
+          { name: "hidden", data_type: "varchar" },
+          { name: "last", data_type: "varchar" },
+        ],
+        primaryKeys: [],
+      })),
+      sourceColumns: computed(() => undefined),
+      onExecuteSql: computed(() => undefined),
+      sql: computed(() => undefined),
+      searchText: ref(""),
+      whereFilterInput: ref(""),
+      currentWhereInput: computed(() => undefined),
+      orderByInput: ref(""),
+      rowStatusFilter: ref("all"),
+      confirmDangerousRowDeletion: computed(() => true),
+      pageSize: ref(100),
+      currentPage: ref(1),
+      cacheKey: computed(() => cacheKey),
+      getRowItem: () => undefined,
+      emit: vi.fn(),
+    });
+  }
+
+  it("collects a tab's pending snapshots in JSON-safe form and stages them back for restore", () => {
+    const editor = createBareEditor("tab-9");
+    editor.newRows.value = [["Ada", null, "x"]];
+    editor.dirtyRows.value = new Map([[0, new Map([[1, "Grace"]])]]);
+    editor.deletedRows.value = new Set([2]);
+    editor.savePendingSnapshot(true, true);
+
+    const collected = collectDataGridPendingSnapshotsForTab("tab-9");
+    expect(collected).toBeDefined();
+    expect(collected!["tab-9"].newRows).toEqual([["Ada", null, "x"]]);
+    expect(collected!["tab-9"].dirtyRows).toEqual([[0, [[1, "Grace"]]]]);
+    expect(collected!["tab-9"].deletedRows).toEqual([2]);
+    expect(collected!["tab-9"].columnCount).toBe(3);
+    // 转移载体是 registry（localStorage JSON）：序列化往返必须不丢字段。
+    const roundTripped = JSON.parse(JSON.stringify(collected!)) as Record<string, SerializedDataGridPendingSnapshot>;
+
+    // 模拟目标窗口：清掉本窗口缓存，按转移数据回写后新建 grid 实例取回。
+    clearDataGridPendingSnapshotsForTab("tab-9");
+    expect(collectDataGridPendingSnapshotsForTab("tab-9")).toBeUndefined();
+    stageDataGridPendingSnapshotsForTab("tab-9", roundTripped);
+
+    const restored = createBareEditor("tab-9");
+    expect(restored.newRows.value).toEqual([["Ada", null, "x"]]);
+    expect(restored.dirtyRows.value.get(0)?.get(1)).toBe("Grace");
+    expect(restored.deletedRows.value.has(2)).toBe(true);
+    clearDataGridPendingSnapshotsForTab("tab-9");
+  });
+
+  it("collects pending snapshots for result-grid keys belonging to the tab", () => {
+    const editor = createBareEditor("tab-10-current-0");
+    editor.newRows.value = [["Ada", null, null]];
+    editor.savePendingSnapshot(true, true);
+
+    const collected = collectDataGridPendingSnapshotsForTab("tab-10");
+    expect(Object.keys(collected ?? {})).toEqual(["tab-10-current-0"]);
+    expect(collectDataGridPendingSnapshotsForTab("tab-1")).toBeUndefined();
+    clearDataGridPendingSnapshotsForTab("tab-10");
+  });
+
+  it("refuses to stage entries that do not belong to the tab", () => {
+    const foreign: Record<string, SerializedDataGridPendingSnapshot> = {
+      "tab-2": { newRows: [["Ada", null, null]], newRowMeta: [], dirtyRows: [], deletedRows: [], editingCell: null, columnCount: 3, rowCount: 0 },
+    };
+    stageDataGridPendingSnapshotsForTab("tab-1", foreign);
+    expect(collectDataGridPendingSnapshotsForTab("tab-1")).toBeUndefined();
+    expect(collectDataGridPendingSnapshotsForTab("tab-2")).toBeUndefined();
   });
 });
 

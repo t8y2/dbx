@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+      /* 拖动态示意标签：与主窗口内 ghost 样式一致（深色半透明 pill）。 */
+      .tag {
+        display: inline-flex;
+        align-items: center;
+        height: 100%;
+        box-sizing: border-box;
+        padding: 0 10px;
+        border-radius: 6px;
+        font:
+          12px/1 system-ui,
+          -apple-system,
+          "Segoe UI",
+          "Microsoft YaHei",
+          sans-serif;
+        white-space: nowrap;
+        overflow: hidden;
+        color: #e5e5e5;
+        background: rgba(30, 30, 30, 0.92);
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="tag" id="tag"></div>
+    <script>
+      // 标题由创建窗口时通过 URL query 传入。
+      document.getElementById("tag").textContent = new URLSearchParams(location.search).get("title") || "";
+    </script>
+  </body>
+</html>

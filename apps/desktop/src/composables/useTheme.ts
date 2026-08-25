@@ -27,6 +27,12 @@ import {
 } from "@/lib/app/appTheme";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { broadcastDetachedPanelMessage } from "@/lib/detached/detachedPanel";
+
+/** 主题变更后通知分离子窗口重读并应用（fire-and-forget，非 Tauri 环境自动跳过）。 */
+function notifyAppSettingsSync() {
+  void broadcastDetachedPanelMessage({ action: "app-settings-sync" });
+}
 
 function isLinuxTauriRuntime() {
   return isTauriRuntime() && typeof navigator !== "undefined" && /linux/i.test(navigator.userAgent);
@@ -120,12 +126,14 @@ function setThemeMode(mode: AppThemeMode) {
   themeMode.value = mode;
   safeLocalStorageSet(APP_THEME_STORAGE_KEY, mode);
   applyTheme();
+  notifyAppSettingsSync();
 }
 
 function setThemePalette(palette: AppThemePalette) {
   themePalette.value = palette;
   safeLocalStorageSet(APP_THEME_PALETTE_STORAGE_KEY, palette);
   applyTheme();
+  notifyAppSettingsSync();
 }
 
 function applyCustomUiColors() {
@@ -161,6 +169,7 @@ function setCustomUiColors(colors: AppCustomUiColors) {
     safeLocalStorageSet(APP_CUSTOM_UI_STORAGE_KEY, JSON.stringify(next));
   }
   applyCustomUiColors();
+  notifyAppSettingsSync();
 }
 
 function resetCustomUiColors() {
@@ -171,6 +180,17 @@ function setCornerStyle(style: AppCornerStyle) {
   cornerStyle.value = normalizeAppCornerStyle(style);
   safeLocalStorageSet(APP_CORNER_STYLE_STORAGE_KEY, cornerStyle.value);
   applyTheme();
+  notifyAppSettingsSync();
+}
+
+/** 从 localStorage 重读主题相关状态并应用（分离子窗口响应主窗口的设置同步广播）。 */
+function reloadThemeFromStorage() {
+  themeMode.value = normalizeAppThemeMode(safeLocalStorageGet(APP_THEME_STORAGE_KEY));
+  themePalette.value = normalizeAppThemePalette(safeLocalStorageGet(APP_THEME_PALETTE_STORAGE_KEY));
+  customUiColors.value = parseStoredCustomUiColors(safeLocalStorageGet(APP_CUSTOM_UI_STORAGE_KEY)) ?? DEFAULT_APP_CUSTOM_UI_COLORS;
+  customUiColorsDark.value = parseStoredCustomUiColors(safeLocalStorageGet(APP_CUSTOM_UI_DARK_STORAGE_KEY)) ?? DEFAULT_APP_CUSTOM_UI_COLORS_DARK;
+  cornerStyle.value = normalizeAppCornerStyle(safeLocalStorageGet(APP_CORNER_STYLE_STORAGE_KEY));
+  applyTheme();
 }
 
 export function useTheme() {
@@ -180,5 +200,5 @@ export function useTheme() {
     setThemeMode(isDark.value ? "light" : "dark");
   }
 
-  return { isDark, themeMode, themePalette, customUiColors, customUiColorsDark, activeCustomUiColors, cornerStyle, applyTheme, setThemeMode, setThemePalette, setCustomUiColors, resetCustomUiColors, setCornerStyle, toggleTheme };
+  return { isDark, themeMode, themePalette, customUiColors, customUiColorsDark, activeCustomUiColors, cornerStyle, applyTheme, reloadThemeFromStorage, setThemeMode, setThemePalette, setCustomUiColors, resetCustomUiColors, setCornerStyle, toggleTheme };
 }

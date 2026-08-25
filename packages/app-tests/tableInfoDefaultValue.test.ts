@@ -4,7 +4,7 @@ import { test } from "vitest";
 import { compileTemplate, parse } from "vue/compiler-sfc";
 import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPresentation";
 
-const tableInfoSurfaces = ["apps/desktop/src/components/objects/ObjectBrowser.vue", "apps/desktop/src/components/grid/DataGrid.vue"];
+const tableInfoSurfaces = ["apps/desktop/src/components/objects/TableInfoPanel.vue", "apps/desktop/src/components/grid/DataGrid.vue"];
 
 test("table column defaults preserve raw database expressions", () => {
   const values = [null, "''", "0", "CURRENT_TIMESTAMP", "((1))", "('prefix (internal)')", "x".repeat(512)] as const;

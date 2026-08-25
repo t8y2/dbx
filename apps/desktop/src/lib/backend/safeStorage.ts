@@ -30,3 +30,20 @@ export function safeLocalStorageRemove(key: string) {
     storageWarn("remove", key, error);
   }
 }
+
+/** 枚举指定前缀的 localStorage key（快照式收集，枚举期间不读写）。 */
+export function safeLocalStorageKeysWithPrefix(prefix: string): string[] {
+  try {
+    const storage = globalThis.localStorage;
+    if (!storage) return [];
+    const keys: string[] = [];
+    for (let i = 0; i < storage.length; i++) {
+      const key = storage.key(i);
+      if (key?.startsWith(prefix)) keys.push(key);
+    }
+    return keys;
+  } catch (error) {
+    storageWarn("keys", prefix, error);
+    return [];
+  }
+}

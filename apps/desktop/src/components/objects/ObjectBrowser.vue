@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, createApp, nextTick, onActivated, onBeforeUnmount, ref, watch, type Component } from "vue";
+import { computed, createApp, nextTick, onActivated, onBeforeUnmount, ref, watch } from "vue";
 import { RecycleScroller } from "vue-virtual-scroller";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import {
@@ -22,9 +22,7 @@ import {
   FileCode,
   Info,
   GripVertical,
-  KeyRound,
   LayoutGrid,
-  Link2,
   List,
   ListTree,
   Upload,
@@ -33,6 +31,7 @@ import {
   Pencil,
   PencilLine,
   PencilRuler,
+  PictureInPicture2,
   Play,
   Package,
   RefreshCw,
@@ -42,10 +41,8 @@ import {
   ScrollText,
   Square,
   Table2,
-  TableProperties,
   TerminalSquare,
   Trash2,
-  WrapText,
   X,
   Wrench,
 } from "@lucide/vue";
@@ -61,12 +58,11 @@ import ProcedureExecutionDialog from "@/components/objects/ProcedureExecutionDia
 import CustomTypeInfoPanel from "@/components/objects/CustomTypeInfoPanel.vue";
 import XlsxHeaderDialog from "@/components/export/XlsxHeaderDialog.vue";
 import * as api from "@/lib/backend/api";
-import type { ColumnInfo, ConnectionConfig, ForeignKeyInfo, IndexInfo, ObjectBrowserViewMode, ObjectBrowserViewport, ObjectInfo, ObjectSourceKind, ObjectStatistics, TableInfoTab, TreeNode, TriggerInfo } from "@/types/database";
+import type { ColumnInfo, ConnectionConfig, ForeignKeyInfo, ObjectBrowserViewMode, ObjectBrowserViewport, ObjectInfo, ObjectSourceKind, ObjectStatistics, TableInfoTab, TreeNode } from "@/types/database";
 import { sortTablesByFkDependency, type TableWithFk } from "@/lib/table/tableDependencySort";
 import { isSchemaAware, supportsTableVacuum, supportsTransfer } from "@/lib/database/databaseCapabilities";
 import { supportsSchemaDiagram, supportsTableImport, supportsTableStructureEditing, supportsTableTruncate } from "@/lib/database/databaseFeatureSupport";
 import { codeMirrorSqlDialect, connectionObjectTreeNodeSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
-import { getTableMetadataCapabilities, type TableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
 import {
   buildDropObjectSql,
@@ -138,18 +134,18 @@ import {
 import { isSourceOnlyObjectBrowserRow, resolveRowClickAction, shouldDeferSingleClick, type ObjectBrowserRowAction } from "@/lib/table/objectBrowserRowAction";
 import { objectBrowserTableSelectionAnchor, objectBrowserTableSelectionRange } from "@/lib/table/objectBrowserSelection";
 import { customTypeCapabilities, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
-import { filterObjectBrowserTableColumns } from "@/lib/table/objectBrowserTableInfo";
 import { createSidePanelRequestGuard } from "@/lib/table/sidePanelRequestGuard";
 import { runBatchTableTruncate } from "@/lib/table/batchTableTruncate";
-import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPresentation";
-import { gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
 import { cacheObjectBrowserRows, createObjectBrowserRowsCacheWriteToken, getCachedObjectBrowserRows, type ObjectBrowserRowsCacheScope, type ObjectBrowserRowsCacheWriteToken } from "@/lib/table/objectBrowserRowsCache";
 import { createObjectBrowserRowsLoadGuard, type ObjectBrowserRowsLoadHandle } from "@/lib/table/objectBrowserRowsLoadGuard";
-import { loadObjectDdl, type ObjectDdlRequest } from "@/lib/metadata/objectDdlCache";
-import { loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
 import { invalidateObjectMetadataCache } from "@/lib/metadata/objectMetadataCache";
 import { invalidateObjectDdl } from "@/lib/metadata/objectDdlCache";
 import { invalidateObjectBrowserRowsCache } from "@/lib/table/objectBrowserRowsCache";
+import TableInfoPanel from "@/components/objects/TableInfoPanel.vue";
+import { MAIN_WINDOW_LABEL, closeDetachedPanelWindow, detachedPanelWindowLabel, isPanelDetached, openDetachedPanelWindow, sendDetachedPanelMessage, setPanelDetached, type TableInfoContextSnapshot } from "@/lib/detached/detachedPanel";
+import { detachTabFailureMessage, detachTabToWindow } from "@/lib/detached/detachTabToWindow";
+import { publishTableInfoContext, unpublishTableInfoContext } from "@/lib/detached/tableInfoContextRegistry";
+import { uuid } from "@/lib/common/utils";
 
 type ObjectFilter = ObjectBrowserFilter;
 type ObjectBrowserColumnKey = "select" | "name" | "type" | "estimatedRows" | "totalBytes" | "created_at" | "updated_at" | "comment";
@@ -164,10 +160,14 @@ const props = defineProps<{
   initialEventOpenRequestId?: number;
   initialObjectFilter?: "tables" | "events";
   viewport?: ObjectBrowserViewport;
+  /** 独立窗口模式：打开标签页/结构编辑器等动作转发给主窗口执行。 */
+  externalNavigation?: boolean;
+  /** 独立对象浏览器窗口内禁用表信息面板的二次分离，避免嵌套子窗口上下文竞争。 */
+  allowTableInfoDetach?: boolean;
 }>();
 
 const emit = defineEmits<{
-  openTable: [target: { tableName: string; schema?: string; tableType?: string; catalog?: string }];
+  openTable: [target: { tableName: string; schema?: string; tableType?: string; catalog?: string; detached?: boolean }];
   schemaChange: [schema: string | undefined];
   viewportChange: [viewport: ObjectBrowserViewport];
 }>();
@@ -206,25 +206,13 @@ const sidePanelRow = ref<ObjectBrowserRow | null>(null);
 const openedInitialEvent = ref("");
 const isEventEditor = computed(() => sidePanelMode.value === "event-editor");
 const sidePanelMode = ref<"table-info" | "source" | "type-info" | "event-editor">("source");
-// Table info panel state
+// Table info panel state（页签/数据加载在 TableInfoPanel 内部，此处仅跟踪当前页签用于分离快照）
 const tableInfoTab = ref<TableInfoTab>("ddl");
-const tableColumns = ref<ColumnInfo[]>([]);
-const tableColumnsLoading = ref(false);
-const tableColumnsLoaded = ref(false);
-const tableDdlContent = ref("");
-const tableDdlLoading = ref(false);
-const tableDdlLoaded = ref(false);
-const tableIndexes = ref<IndexInfo[]>([]);
-const tableIndexesLoading = ref(false);
-const tableIndexesLoaded = ref(false);
-const tableForeignKeys = ref<ForeignKeyInfo[]>([]);
-const tableForeignKeysLoading = ref(false);
-const tableForeignKeysLoaded = ref(false);
-const tableTriggers = ref<TriggerInfo[]>([]);
-const tableTriggersLoading = ref(false);
-const tableTriggersLoaded = ref(false);
-const tableInfoSearchQuery = ref("");
-const tableInfoDdlPreRef = ref<HTMLPreElement | null>(null);
+const tableInfoPanelRef = ref<InstanceType<typeof TableInfoPanel> | null>(null);
+/** 表信息面板是否已分离为独立窗口（内嵌侧栏隐藏，sidePanelRow 仍跟踪目标表）。 */
+const tableInfoDetached = ref(props.allowTableInfoDetach !== false && isPanelDetached("tableInfo"));
+/** 表信息分离上下文的本实例属主标识。 */
+const tableInfoOwnerId = uuid();
 const SIDE_PANEL_MIN_WIDTH = 280;
 const SIDE_PANEL_MAX_WIDTH = 900;
 const sidePanelWidth = ref(settingsStore.editorSettings.tableInfoDrawerWidth || 420);
@@ -233,24 +221,9 @@ let sidePanelResizeStartWidth = 0;
 const isResizingSidePanel = ref(false);
 const sidePanelGuard = createSidePanelRequestGuard();
 const sidePanelRef = ref<InstanceType<typeof CustomTypeInfoPanel> | null>(null);
-const tableMetadataCapabilities = computed<TableMetadataCapabilities>(() => getTableMetadataCapabilities(effectiveDatabaseType.value));
 const effectiveDatabaseType = computed(() => effectiveDatabaseTypeForConnection(props.connection) ?? props.connection.db_type);
-const isGaussdbM = computed(() => effectiveDatabaseType.value === "gaussdb" && props.connection.driver_profile?.toLowerCase() === "gaussdb-m");
 const isVictoriaMetrics = computed(() => effectiveDatabaseType.value === "victoriametrics");
 const objectRowsLabel = computed(() => t(isVictoriaMetrics.value ? "objects.series" : "objects.rows"));
-
-function toggleTableDdlWordWrap() {
-  settingsStore.updateEditorSettings({
-    tableDdlWordWrap: !settingsStore.editorSettings.tableDdlWordWrap,
-  });
-}
-
-function gaussdbMColumnType(dataType: string): string {
-  if (isGaussdbM.value) {
-    return gaussdbMTypeDisplayName(dataType);
-  }
-  return dataType;
-}
 const tableStructureDatabaseType = computed(() => tableStructureDatabaseTypeForConnection(props.connection) ?? props.connection.db_type);
 const sourceEditableText = ref("");
 const sourceDraft = ref("");
@@ -285,6 +258,8 @@ const duplicateTarget = ref<ObjectBrowserRow | null>(null);
 const duplicateTableName = ref("");
 const showProcedureExecutionConfirm = ref(false);
 const procedureExecutionTarget = ref<ObjectBrowserRow | null>(null);
+/** 「用独立窗口打开 · 执行存储过程」：对话框确认建页签后，把页签分离到独立子窗口。 */
+const procedureExecutionDetachRequested = ref(false);
 const selectedTableIds = ref<Set<string>>(new Set());
 const tableSelectionAnchorId = ref<string | null>(null);
 const expandedPartitionParentIds = ref<Set<string>>(new Set());
@@ -327,6 +302,8 @@ const objectCounts = computed(() => countObjectBrowserRowsByFilter(rows.value));
 // Count direct search matches once; partition parents rendered only for context must not inflate badges.
 const objectSearchSummary = computed(() => summarizeObjectBrowserSearch(rows.value, search.value));
 const canOpenStructureEditor = computed(() => supportsTableStructureEditing(tableStructureDatabaseType.value));
+/** 「用独立窗口打开」入口仅桌面端主窗口可用（Web 模式无多窗口；已分离窗口内不再嵌套开窗）。 */
+const canOpenInSeparateWindow = computed(() => isTauriRuntime() && !props.externalNavigation);
 const canOpenDiagram = computed(() => !!props.database && supportsSchemaDiagram(effectiveDatabaseType.value));
 const canOpenTableImport = computed(() => !!props.database && supportsTableImport(effectiveDatabaseType.value));
 const supportsTruncateTable = computed(() => supportsTableTruncate(effectiveDatabaseType.value));
@@ -458,6 +435,8 @@ watch(
 
 onActivated(() => {
   restoreObjectBrowserViewport();
+  // 重新激活时夺回表信息子窗口的属主身份（子窗口内容跟随主窗口活动标签切换）。
+  publishTableInfoSnapshot();
 });
 
 function setViewMode(mode: "list" | "grid") {
@@ -946,275 +925,87 @@ function onRowClick(row: ObjectBrowserRow, event: MouseEvent) {
   executeRowAction(row, action);
 }
 
-// --- Table info panel (replicates DataGrid table-info-drawer) ---
+// --- Table info panel（TableInfoPanel 组件，主窗口内嵌与分离子窗口共用） ---
 
-type TableInfoTabItem = { id: TableInfoTab; label: string; icon: Component; count?: number };
+/** 当前表信息上下文快照（分离模式下注册为属主并推送给子窗口）。 */
+function tableInfoContextSnapshot(): TableInfoContextSnapshot {
+  const row = sidePanelRow.value;
+  return {
+    connection: props.connection,
+    database: props.database,
+    catalog: props.catalog ?? null,
+    fallbackSchema: selectedSchema.value ?? null,
+    row: row ? { name: row.name, schema: row.schema ?? null, type: row.type } : null,
+    tab: tableInfoTab.value,
+  };
+}
 
-const tableInfoTabs = computed<TableInfoTabItem[]>(() => {
-  const tabs: TableInfoTabItem[] = [];
-  if (tableMetadataCapabilities.value.ddl) {
-    tabs.push({ id: "ddl", label: "DDL", icon: Code2 });
-  }
-  if (tableMetadataCapabilities.value.columns) {
-    tabs.push({ id: "columns", label: t("grid.tableInfoColumns"), icon: ListTree, count: tableColumns.value.length });
-  }
-  if (tableMetadataCapabilities.value.indexes) {
-    tabs.push({ id: "indexes", label: t("grid.tableInfoIndexes"), icon: KeyRound, count: tableIndexes.value.length });
-  }
-  if (tableMetadataCapabilities.value.foreignKeys) {
-    tabs.push({ id: "foreignKeys", label: t("grid.tableInfoForeignKeys"), icon: Link2, count: tableForeignKeys.value.length });
-  }
-  if (tableMetadataCapabilities.value.triggers) {
-    tabs.push({ id: "triggers", label: t("grid.tableInfoTriggers"), icon: RotateCcw, count: tableTriggers.value.length });
-  }
-  return tabs;
-});
-
-const tableInfoTabListStyle = computed(() => ({
-  gridTemplateColumns: `repeat(${tableInfoTabs.value.length}, minmax(0, 1fr))`,
-}));
-
-const filteredTableColumns = computed(() => filterObjectBrowserTableColumns(tableColumns.value, tableInfoSearchQuery.value));
-
-const filteredTableIndexes = computed(() => {
-  if (!tableInfoSearchQuery.value) return tableIndexes.value;
-  const q = tableInfoSearchQuery.value.toLowerCase();
-  return tableIndexes.value.filter((i) => i.name.toLowerCase().includes(q) || i.columns.some((c) => c.toLowerCase().includes(q)));
-});
-
-const filteredTableForeignKeys = computed(() => {
-  if (!tableInfoSearchQuery.value) return tableForeignKeys.value;
-  const q = tableInfoSearchQuery.value.toLowerCase();
-  return tableForeignKeys.value.filter((fk) => fk.name.toLowerCase().includes(q) || fk.column.toLowerCase().includes(q) || fk.ref_table.toLowerCase().includes(q) || fk.ref_column.toLowerCase().includes(q));
-});
-
-const filteredTableTriggers = computed(() => {
-  if (!tableInfoSearchQuery.value) return tableTriggers.value;
-  const q = tableInfoSearchQuery.value.toLowerCase();
-  return tableTriggers.value.filter((tr) => tr.name.toLowerCase().includes(q));
-});
-
-const filteredTableDdlContent = computed(() => {
-  if (!tableDdlContent.value) return "";
-  const html = highlight(tableDdlContent.value);
-  if (!tableInfoSearchQuery.value) return html;
-  const escaped = tableInfoSearchQuery.value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const regex = new RegExp(`(${escaped})`, "gi");
-  return html.replace(/>([^<]*)</g, (_, text) => {
-    return `>${text.replace(regex, "<mark>$1</mark>")}<`;
+/** 发布表信息上下文：注册本实例为属主（dock 回主窗口时重新内嵌打开）并推送子窗口。 */
+function publishTableInfoSnapshot() {
+  if (!tableInfoDetached.value || sidePanelMode.value !== "table-info" || !sidePanelRow.value) return;
+  const snapshot = tableInfoContextSnapshot();
+  publishTableInfoContext({
+    id: tableInfoOwnerId,
+    snapshot,
+    dock: () => {
+      tableInfoDetached.value = false;
+    },
   });
-});
+  void sendDetachedPanelMessage(detachedPanelWindowLabel("tableInfo"), { action: "table-info-context", snapshot });
+}
+
+// 分离模式下目标表/页签/schema 变化时同步子窗口。
+watch([sidePanelRow, sidePanelMode, tableInfoTab, selectedSchema], () => publishTableInfoSnapshot());
+
+/** 分离子窗口的默认尺寸/位置（之后由前端记忆位置恢复）。 */
+function tableInfoDetachedPlacement(position?: { x: number; y: number }) {
+  const width = Math.max(360, sidePanelWidth.value);
+  const height = Math.max(480, Math.round(window.innerHeight * 0.8));
+  if (!position) return { width, height };
+  return { width, height, x: Math.max(0, Math.round(position.x - width / 2)), y: Math.max(0, Math.round(position.y - 16)) };
+}
+
+/** 拖拽/点击面板头部分离为独立窗口：记录状态、发布上下文并在鼠标位置打开子窗口。 */
+async function detachTableInfoPanel(position: { x: number; y: number }) {
+  if (!isTauriRuntime() || sidePanelMode.value !== "table-info" || !sidePanelRow.value) return;
+  tableInfoDetached.value = true;
+  setPanelDetached("tableInfo", true);
+  publishTableInfoSnapshot();
+  const opened = await openDetachedPanelWindow("tableInfo", tableInfoDetachedPlacement(position));
+  if (!opened) {
+    tableInfoDetached.value = false;
+    setPanelDetached("tableInfo", false);
+  }
+}
 
 async function openTableInfo(row: ObjectBrowserRow, initialTab?: TableInfoTab) {
-  // Toggle off if clicking the same table
+  // Toggle off if clicking the same table（分离模式下同时关闭独立子窗口）
   if (sidePanelRow.value?.id === row.id && sidePanelMode.value === "table-info" && !initialTab) {
     closeSidePanel();
     return;
   }
+  if (initialTab) tableInfoTab.value = initialTab;
   sidePanelRow.value = row;
   sidePanelMode.value = "table-info";
   sidePanelGuard.bump();
-  // Reset state
-  tableColumns.value = [];
-  tableDdlContent.value = "";
-  tableIndexes.value = [];
-  tableForeignKeys.value = [];
-  tableTriggers.value = [];
-  tableColumnsLoaded.value = false;
-  tableDdlLoaded.value = false;
-  tableIndexesLoaded.value = false;
-  tableForeignKeysLoaded.value = false;
-  tableTriggersLoaded.value = false;
-  tableInfoSearchQuery.value = "";
-  // Determine initial tab: explicit request > previously activated
-  const firstTab = initialTab ?? tableInfoTab.value;
-  await selectTableInfoTab(firstTab);
-}
-
-async function selectTableInfoTab(tab: TableInfoTab) {
-  const nextTab = tableInfoTabs.value.some((item) => item.id === tab) ? tab : tableInfoTabs.value[0]?.id;
-  if (!nextTab) return;
-  tableInfoTab.value = nextTab;
-  tableInfoSearchQuery.value = "";
-  if (nextTab === "ddl") await fetchTableDdl();
-  else if (nextTab === "columns") await fetchTableColumns();
-  else if (nextTab === "indexes") await fetchTableIndexes();
-  else if (nextTab === "foreignKeys") await fetchTableForeignKeys();
-  else if (nextTab === "triggers") await fetchTableTriggers();
-}
-
-function tableMetadataRequest(row: ObjectBrowserRow): ObjectDdlRequest {
-  return {
-    connectionId: props.connection.id,
-    database: props.database || "",
-    schema: row.schema || selectedSchema.value || props.database,
-    tableName: row.name,
-    objectType: tableDdlObjectType(row.type),
-    catalog: props.catalog,
-  };
-}
-
-async function fetchTableDdl(force = false) {
-  const row = sidePanelRow.value;
-  if (!row || (tableDdlLoaded.value && !force)) return;
-  const epoch = sidePanelGuard.capture();
-  tableDdlLoading.value = true;
-  let loadedSuccessfully = false;
-  try {
-    const { ddl } = await loadObjectDdl(tableMetadataRequest(row), { force });
-    if (sidePanelGuard.isStale(epoch)) return;
-    tableDdlContent.value = ddl;
-    loadedSuccessfully = true;
-  } catch (e: any) {
-    if (sidePanelGuard.isStale(epoch)) return;
-    tableDdlContent.value = `-- Error: ${e?.message || e}`;
-  } finally {
-    if (sidePanelGuard.isFresh(epoch)) {
-      tableDdlLoaded.value = loadedSuccessfully;
-      tableDdlLoading.value = false;
-    }
+  // 分离模式：不内嵌展开，目标表推送给独立子窗口并确保窗口打开。
+  if (tableInfoDetached.value) {
+    publishTableInfoSnapshot();
+    const opened = await openDetachedPanelWindow("tableInfo", tableInfoDetachedPlacement());
+    if (opened) return;
+    tableInfoDetached.value = false;
+    setPanelDetached("tableInfo", false);
   }
-}
-
-async function fetchTableColumns(force = false) {
-  const row = sidePanelRow.value;
-  if (!row || (tableColumnsLoaded.value && !force)) return;
-  const epoch = sidePanelGuard.capture();
-  tableColumnsLoading.value = true;
-  let loadedSuccessfully = false;
-  try {
-    const request = tableMetadataRequest(row);
-    const { value: columns } = await loadObjectMetadataFacet(request, "columns", () => api.getColumns(request.connectionId, request.database, request.schema || request.database, request.tableName, request.catalog), { force });
-    if (sidePanelGuard.isStale(epoch)) return;
-    tableColumns.value = columns;
-    loadedSuccessfully = true;
-  } catch (error) {
-    if (sidePanelGuard.isStale(epoch)) return;
-    tableColumns.value = [];
-    toast(translateBackendError(t, error), 5000);
-  } finally {
-    if (sidePanelGuard.isFresh(epoch)) {
-      tableColumnsLoaded.value = loadedSuccessfully;
-      tableColumnsLoading.value = false;
-    }
-  }
-}
-
-async function fetchTableIndexes(force = false) {
-  const row = sidePanelRow.value;
-  if (!row || (tableIndexesLoaded.value && !force)) return;
-  const epoch = sidePanelGuard.capture();
-  tableIndexesLoading.value = true;
-  let loadedSuccessfully = false;
-  try {
-    const request = tableMetadataRequest(row);
-    const { value: indexes } = await loadObjectMetadataFacet(request, "indexes", () => api.listIndexes(request.connectionId, request.database, request.schema || request.database, request.tableName, request.catalog), { force });
-    if (sidePanelGuard.isStale(epoch)) return;
-    tableIndexes.value = indexes;
-    loadedSuccessfully = true;
-  } catch (error) {
-    if (sidePanelGuard.isStale(epoch)) return;
-    tableIndexes.value = [];
-    toast(translateBackendError(t, error), 5000);
-  } finally {
-    if (sidePanelGuard.isFresh(epoch)) {
-      tableIndexesLoaded.value = loadedSuccessfully;
-      tableIndexesLoading.value = false;
-    }
-  }
-}
-
-async function fetchTableForeignKeys(force = false) {
-  const row = sidePanelRow.value;
-  if (!row || (tableForeignKeysLoaded.value && !force)) return;
-  const epoch = sidePanelGuard.capture();
-  tableForeignKeysLoading.value = true;
-  let loadedSuccessfully = false;
-  try {
-    const request = tableMetadataRequest(row);
-    const { value: fks } = await loadObjectMetadataFacet(request, "foreign-keys", () => api.listForeignKeys(request.connectionId, request.database, request.schema || request.database, request.tableName, request.catalog), { force });
-    if (sidePanelGuard.isStale(epoch)) return;
-    tableForeignKeys.value = fks;
-    loadedSuccessfully = true;
-  } catch (error) {
-    if (sidePanelGuard.isStale(epoch)) return;
-    tableForeignKeys.value = [];
-    toast(translateBackendError(t, error), 5000);
-  } finally {
-    if (sidePanelGuard.isFresh(epoch)) {
-      tableForeignKeysLoaded.value = loadedSuccessfully;
-      tableForeignKeysLoading.value = false;
-    }
-  }
-}
-
-async function fetchTableTriggers(force = false) {
-  const row = sidePanelRow.value;
-  if (!row || (tableTriggersLoaded.value && !force)) return;
-  const epoch = sidePanelGuard.capture();
-  tableTriggersLoading.value = true;
-  let loadedSuccessfully = false;
-  try {
-    const request = tableMetadataRequest(row);
-    const { value: triggers } = await loadObjectMetadataFacet(request, "triggers", () => api.listTriggers(request.connectionId, request.database, request.schema || request.database, request.tableName, request.catalog), { force });
-    if (sidePanelGuard.isStale(epoch)) return;
-    tableTriggers.value = triggers;
-    loadedSuccessfully = true;
-  } catch (error) {
-    if (sidePanelGuard.isStale(epoch)) return;
-    tableTriggers.value = [];
-    toast(translateBackendError(t, error), 5000);
-  } finally {
-    if (sidePanelGuard.isFresh(epoch)) {
-      tableTriggersLoaded.value = loadedSuccessfully;
-      tableTriggersLoading.value = false;
-    }
+  // 面板已挂载时通过 ref 切换页签（未挂载时由 initialTab prop 生效）。
+  if (initialTab) {
+    await nextTick();
+    tableInfoPanelRef.value?.selectTab(initialTab);
   }
 }
 
 async function refreshActiveTableInfo() {
   if (sidePanelMode.value !== "table-info" || !sidePanelRow.value) return;
-  sidePanelGuard.bump();
-
-  if (tableInfoTab.value === "ddl") {
-    tableDdlContent.value = "";
-    tableDdlLoaded.value = false;
-    await fetchTableDdl(true);
-  } else if (tableInfoTab.value === "columns") {
-    tableColumns.value = [];
-    tableColumnsLoaded.value = false;
-    await fetchTableColumns(true);
-  } else if (tableInfoTab.value === "indexes") {
-    tableIndexes.value = [];
-    tableIndexesLoaded.value = false;
-    await fetchTableIndexes(true);
-  } else if (tableInfoTab.value === "foreignKeys") {
-    tableForeignKeys.value = [];
-    tableForeignKeysLoaded.value = false;
-    await fetchTableForeignKeys(true);
-  } else if (tableInfoTab.value === "triggers") {
-    tableTriggers.value = [];
-    tableTriggersLoaded.value = false;
-    await fetchTableTriggers(true);
-  }
-}
-
-function copyTableDdl() {
-  void copyToClipboard(tableDdlContent.value);
-  toast(t("grid.copyDdl"), 2000);
-}
-
-function onTableInfoDdlKeydown(e: KeyboardEvent) {
-  if ((e.ctrlKey || e.metaKey) && e.key === "a") {
-    e.preventDefault();
-    const el = tableInfoDdlPreRef.value;
-    if (!el) return;
-    const range = document.createRange();
-    range.selectNodeContents(el);
-    const sel = window.getSelection();
-    sel?.removeAllRanges();
-    sel?.addRange(range);
-  }
+  await tableInfoPanelRef.value?.refresh?.();
 }
 
 // --- Side panel resize ---
@@ -1241,6 +1032,10 @@ function onSidePanelResizeEnd() {
 }
 
 function closeSidePanel() {
+  // 分离的表信息子窗口随目标清除一并关闭。
+  if (tableInfoDetached.value && sidePanelMode.value === "table-info" && sidePanelRow.value) {
+    void closeDetachedPanelWindow("tableInfo");
+  }
   sidePanelRow.value = null;
   sidePanelMode.value = "source";
   sidePanelGuard.bump();
@@ -1270,10 +1065,29 @@ function openTypeDdl(row: ObjectBrowserRow) {
 
 const canOpenTableStructureEditor = computed(() => sidePanelRow.value?.type === "TABLE" && canOpenStructureEditor.value);
 
-function openTableStructureEditor() {
+/** 打开表结构：独立窗口中转发主窗口，主窗口内嵌时沿用本地 queryStore。 */
+function openTableStructureTarget(row: ObjectBrowserRow, tab?: TableInfoTab) {
+  const schema = row.schema || selectedSchema.value;
+  if (props.externalNavigation) {
+    void sendDetachedPanelMessage(MAIN_WINDOW_LABEL, {
+      action: "object-browser-open-structure",
+      connectionId: props.connection.id,
+      database: props.database,
+      catalog: props.catalog,
+      schema,
+      tableName: row.name,
+      tab,
+    });
+    return;
+  }
+  queryStore.openTableStructure(props.connection.id, props.database, schema, row.name, tab, undefined, props.catalog);
+}
+
+/** 内嵌面板的"编辑结构"入口（子窗口态由 App.vue 经事件总线调 queryStore 打开）。 */
+function openTableStructureEditor(tab: TableInfoTab) {
   const row = sidePanelRow.value;
   if (!row || row.type !== "TABLE" || !canOpenTableStructureEditor.value) return;
-  queryStore.openTableStructure(props.connection.id, props.database, row.schema || selectedSchema.value, row.name, tableInfoTab.value, undefined, props.catalog);
+  openTableStructureTarget(row, tab);
 }
 
 async function openSource(row: ObjectBrowserRow) {
@@ -1353,46 +1167,86 @@ async function onEventSaved(savedName: string) {
   toast(t("objects.sourceSaved"));
 }
 
-async function openNewQuery(row: ObjectBrowserRow) {
+/** 新建查询页签的初始 SQL（SELECT 预览模板），主窗口/独立窗口入口共用。 */
+function buildNewQuerySql(row: ObjectBrowserRow): Promise<string> {
   const schema = row.schema || selectedSchema.value;
-  const tabId = queryStore.createTab(props.connection.id, props.database, row.name, "query", schema, undefined, props.catalog);
-  queryStore.updateSql(
-    tabId,
-    await buildTableSelectSql({
-      databaseType: effectiveDatabaseType.value,
-      driverProfile: props.connection.driver_profile,
-      identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
-      catalog: props.catalog,
-      database: props.database,
-      schema,
-      tableName: row.name,
-      includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
-      limit: 100,
-    }),
-  );
+  return buildTableSelectSql({
+    databaseType: effectiveDatabaseType.value,
+    driverProfile: props.connection.driver_profile,
+    identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
+    catalog: props.catalog,
+    database: props.database,
+    schema,
+    tableName: row.name,
+    includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+    limit: 100,
+  });
 }
 
-function openProcedureExecution(row: ObjectBrowserRow) {
+async function openNewQuery(row: ObjectBrowserRow) {
+  const schema = row.schema || selectedSchema.value;
+  const sql = await buildNewQuerySql(row);
+  if (props.externalNavigation) {
+    void sendDetachedPanelMessage(MAIN_WINDOW_LABEL, {
+      action: "object-browser-open-query",
+      connectionId: props.connection.id,
+      database: props.database,
+      catalog: props.catalog,
+      schema,
+      title: row.name,
+      sql,
+    });
+    return;
+  }
+  const tabId = queryStore.createTab(props.connection.id, props.database, row.name, "query", schema, undefined, props.catalog);
+  queryStore.updateSql(tabId, sql);
+}
+
+/** 打开执行存储过程对话框；detached=true 时确认建页签后分离到独立子窗口。 */
+function openProcedureExecution(row: ObjectBrowserRow, detached = false) {
   if (row.type !== "PROCEDURE") return;
   procedureExecutionTarget.value = row;
+  procedureExecutionDetachRequested.value = detached;
   showProcedureExecutionConfirm.value = true;
+}
+
+/** 过程执行 SQL 统一在主窗口创建标签页；独立窗口只发送可序列化载荷。 */
+async function openProcedureQueryTab(row: ObjectBrowserRow, sql: string, execute: boolean) {
+  const schema = row.schema || selectedSchema.value;
+  const title = `Execute - ${row.name}`;
+  if (props.externalNavigation) {
+    void sendDetachedPanelMessage(MAIN_WINDOW_LABEL, {
+      action: "object-browser-open-query",
+      connectionId: props.connection.id,
+      database: props.database,
+      catalog: props.catalog,
+      schema,
+      title,
+      sql,
+      execute,
+    });
+    return;
+  }
+  const detachRequested = procedureExecutionDetachRequested.value;
+  const tabId = queryStore.createTab(props.connection.id, props.database, title, "query", schema, undefined, props.catalog, detachRequested ? { activate: false, pendingDetach: true } : {});
+  queryStore.updateSql(tabId, sql);
+  if (execute) await queryStore.executeTabSql(tabId, sql);
+  if (detachRequested) {
+    procedureExecutionDetachRequested.value = false;
+    await detachCreatedTabToSeparateWindow(tabId);
+  }
 }
 
 function openProcedureExecutionSql(sql: string) {
   const row = procedureExecutionTarget.value;
   if (!row || !sql) return;
-  const schema = row.schema || selectedSchema.value;
-  const tabId = queryStore.createTab(props.connection.id, props.database, `Execute - ${row.name}`, "query", schema, undefined, props.catalog);
-  queryStore.updateSql(tabId, sql);
+  void openProcedureQueryTab(row, sql, false);
 }
 
 async function executeProcedureSql(sql: string) {
   const row = procedureExecutionTarget.value;
   if (!row || !sql) return;
-  const schema = row.schema || selectedSchema.value;
-  const tabId = queryStore.createTab(props.connection.id, props.database, `Execute - ${row.name}`, "query", schema, undefined, props.catalog);
-  queryStore.updateSql(tabId, sql);
-  await queryStore.executeTabSql(tabId, sql);
+  await openProcedureQueryTab(row, sql, true);
 }
 
 function requestDrop(row: ObjectBrowserRow) {
@@ -1487,7 +1341,7 @@ async function confirmRename() {
     if (sourceRow.value?.id === row.id) closeSource();
     const renamedTarget = { ...oldPinnedNode, label: newName, objectName: newName, tableName: newName };
     await reload();
-    await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, row.schema || selectedSchema.value);
+    await refreshMainObjectTree(row.schema || selectedSchema.value);
     const renamedRow = rows.value.find((candidate) => objectBrowserRowMatchesPinnedTreeNode(candidate, treeNodePinIdentity(renamedTarget), objectBrowserPinnedTreeNodeContext()));
     if (renamedRow) {
       connectionStore.replacePinnedTreeNode(
@@ -1526,7 +1380,7 @@ async function confirmDrop() {
     closeDroppedTableObjectTabsForRow(row);
     removePinnedObjectBrowserRows([row]);
     await reload();
-    await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, row.schema || selectedSchema.value);
+    await refreshMainObjectTree(row.schema || selectedSchema.value);
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
   }
@@ -1620,7 +1474,69 @@ function openViewData(row: ObjectBrowserRow) {
 
 function openStructureEditor(row: ObjectBrowserRow) {
   if (row.type !== "TABLE") return;
-  queryStore.openTableStructure(props.connection.id, props.database, row.schema || selectedSchema.value, row.name, undefined, undefined, props.catalog);
+  openTableStructureTarget(row);
+}
+
+// --- 「用独立窗口打开」：先在主窗口建页签，再分离到独立子窗口（不改动原主窗口入口） ---
+
+/** 主窗口新建页签后分离到独立子窗口；失败时页签保留在主窗口并提示（与页签栏分离行为一致）。
+ * 页签创建即带 pendingDetach 隐藏标记（直达独立窗口不闪现），失败时复位为可见。 */
+async function detachCreatedTabToSeparateWindow(tabId: string | undefined) {
+  if (!tabId) return;
+  try {
+    const result = await detachTabToWindow(tabId, t);
+    if (!result.ok) {
+      queryStore.revealPendingDetachTab(tabId);
+      toast(detachTabFailureMessage(result.reason, t), 5000);
+    }
+  } catch (error) {
+    queryStore.revealPendingDetachTab(tabId);
+    console.error("[detached-tab] open from object browser failed", error);
+    toast(error instanceof Error ? error.message : String(error), 5000);
+  }
+}
+
+/** 查看数据（独立窗口）：表数据页签的创建在 App.vue 完成，经 openTable 事件附带 detached 标记。 */
+function openViewDataInSeparateWindow(row: ObjectBrowserRow) {
+  emit("openTable", { tableName: row.name, schema: row.schema, tableType: row.type, catalog: props.catalog, detached: true });
+}
+
+/** 编辑结构（独立窗口）：复用结构编辑器页签打开逻辑，建页签后分离；创建即隐藏（pendingDetach），主窗口不闪现。 */
+function openStructureEditorInSeparateWindow(row: ObjectBrowserRow) {
+  if (row.type !== "TABLE") return;
+  const schema = row.schema || selectedSchema.value;
+  const tabId = queryStore.openTableStructure(props.connection.id, props.database, schema, row.name, undefined, undefined, props.catalog, { activate: false, pendingDetach: true });
+  void detachCreatedTabToSeparateWindow(tabId);
+}
+
+/** 新建查询（独立窗口）：建查询页签并填入 SELECT 模板后分离；创建即隐藏（pendingDetach），主窗口不闪现。 */
+async function openNewQueryInSeparateWindow(row: ObjectBrowserRow) {
+  const schema = row.schema || selectedSchema.value;
+  const sql = await buildNewQuerySql(row);
+  const tabId = queryStore.createTab(props.connection.id, props.database, row.name, "query", schema, undefined, props.catalog, { activate: false, pendingDetach: true });
+  queryStore.updateSql(tabId, sql);
+  await detachCreatedTabToSeparateWindow(tabId);
+}
+
+/** 「用独立窗口打开」子菜单：对应一级菜单中涉及打开标签页的同名操作，仅新增入口、不改动原操作。 */
+function openInSeparateWindowSubmenu(item: ObjectBrowserRow): ContextMenuItem[] {
+  if (!canOpenInSeparateWindow.value) return [];
+  const children: ContextMenuItem[] = [];
+  const isTableLike = item.type === "TABLE" || item.type === "VIEW" || item.type === "MATERIALIZED_VIEW";
+  if (isTableLike) {
+    children.push({ label: t("contextMenu.viewData"), action: () => openViewDataInSeparateWindow(item), icon: Table2 });
+  }
+  if (item.type === "TABLE" && canOpenStructureEditor.value) {
+    children.push({ label: t("contextMenu.editStructure"), action: () => openStructureEditorInSeparateWindow(item), icon: PencilRuler });
+  }
+  if (isTableLike) {
+    children.push({ label: t("contextMenu.newQuery"), action: () => void openNewQueryInSeparateWindow(item), icon: TerminalSquare });
+  }
+  if (item.type === "PROCEDURE") {
+    children.push({ label: t("contextMenu.executeProcedure"), action: () => openProcedureExecution(item, true), icon: Play });
+  }
+  if (children.length === 0) return [];
+  return [{ label: t("contextMenu.openInSeparateWindow"), icon: PictureInPicture2, children }];
 }
 
 function droppedTableObjectTypeForRow(row: ObjectBrowserRow): "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | null {
@@ -1633,50 +1549,80 @@ function droppedTableObjectTypeForRow(row: ObjectBrowserRow): "TABLE" | "VIEW" |
 function closeDroppedTableObjectTabsForRow(row: ObjectBrowserRow) {
   const objectType = droppedTableObjectTypeForRow(row);
   if (!objectType) return;
+  const schema = row.schema || selectedSchema.value;
+  if (props.externalNavigation) {
+    void sendDetachedPanelMessage(MAIN_WINDOW_LABEL, {
+      action: "object-browser-close-dropped-tabs",
+      connectionId: props.connection.id,
+      database: props.database,
+      catalog: props.catalog,
+      schema,
+      tableName: row.name,
+      objectType,
+    });
+    return;
+  }
   queryStore.closeDroppedTableObjectTabs({
     connectionId: props.connection.id,
     database: props.database,
-    schema: row.schema || selectedSchema.value,
+    schema,
     name: row.name,
     objectType,
   });
 }
 
+/** 刷新主窗口侧边栏对象树；独立窗口通过事件总线转发，避免只刷新子窗口内 store。 */
+async function refreshMainObjectTree(schema?: string) {
+  if (props.externalNavigation) {
+    void sendDetachedPanelMessage(MAIN_WINDOW_LABEL, {
+      action: "object-browser-refresh-tree",
+      connectionId: props.connection.id,
+      database: props.database,
+      schema,
+    });
+    return;
+  }
+  await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, schema);
+}
+
+/** 打开依赖主窗口对话框状态的工具；独立窗口统一转发到主窗口处理。 */
+function openMainWindowTool(tool: "diagram" | "tableImport" | "dataCompare" | "databaseExport", row?: ObjectBrowserRow, tableNames?: string[]) {
+  const schema = row?.schema || selectedSchema.value;
+  const tableName = tableNames?.length ? undefined : row && (row.type === "TABLE" || (tool === "databaseExport" && (row.type === "VIEW" || row.type === "MATERIALIZED_VIEW"))) ? row.name : undefined;
+  if (props.externalNavigation) {
+    void sendDetachedPanelMessage(MAIN_WINDOW_LABEL, {
+      action: "object-browser-open-tool",
+      tool,
+      connectionId: props.connection.id,
+      database: props.database,
+      schema,
+      tableName,
+      tableNames,
+    });
+    return;
+  }
+  const target = { connectionId: props.connection.id, database: props.database, schema, tableName };
+  if (tool === "diagram") connectionStore.diagramSource = target;
+  else if (tool === "tableImport") connectionStore.tableImportSource = target;
+  else if (tool === "dataCompare") connectionStore.dataCompareSource = target;
+  else connectionStore.databaseExportSource = { ...target, tableNames };
+}
+
 function openDiagram(row: ObjectBrowserRow) {
-  connectionStore.diagramSource = {
-    connectionId: props.connection.id,
-    database: props.database,
-    schema: row.schema || selectedSchema.value,
-    tableName: row.type === "TABLE" ? row.name : undefined,
-  };
+  openMainWindowTool("diagram", row);
 }
 
 function openTableImport(row: ObjectBrowserRow) {
   if (row.type !== "TABLE") return;
-  connectionStore.tableImportSource = {
-    connectionId: props.connection.id,
-    database: props.database,
-    schema: row.schema || selectedSchema.value,
-    tableName: row.name,
-  };
+  openMainWindowTool("tableImport", row);
 }
 
 function openDataCompare(row: ObjectBrowserRow) {
-  connectionStore.dataCompareSource = {
-    connectionId: props.connection.id,
-    database: props.database,
-    schema: row.schema || selectedSchema.value,
-    tableName: row.type === "TABLE" ? row.name : undefined,
-  };
+  openMainWindowTool("dataCompare", row);
 }
 
 function openDatabaseExport(row: ObjectBrowserRow) {
-  connectionStore.databaseExportSource = {
-    connectionId: props.connection.id,
-    database: props.database,
-    schema: row.schema || selectedSchema.value,
-    tableName: row.type === "TABLE" || row.type === "VIEW" || row.type === "MATERIALIZED_VIEW" ? row.name : undefined,
-  };
+  openMainWindowTool("databaseExport", row);
 }
 
 function setSelectedTableIds(ids: Set<string>) {
@@ -1711,12 +1657,7 @@ function clearTableSelection() {
 function openBatchDatabaseExport() {
   const selectedTables = selectedTableRows.value.map((row) => row.name);
   if (selectedTables.length === 0) return;
-  connectionStore.databaseExportSource = {
-    connectionId: props.connection.id,
-    database: props.database,
-    schema: selectedTableRows.value[0]?.schema || selectedSchema.value,
-    tableNames: selectedTables,
-  };
+  openMainWindowTool("databaseExport", selectedTableRows.value[0], selectedTables);
 }
 
 async function fetchSortedTableRowsForDrop(): Promise<ObjectBrowserRow[]> {
@@ -1788,7 +1729,7 @@ async function confirmBatchDropTables() {
     if (result.succeeded.length > 0) {
       removePinnedObjectBrowserRows(result.succeeded);
       await reload();
-      await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, selectedSchema.value);
+      await refreshMainObjectTree(selectedSchema.value);
     }
 
     if (result.failed) throw result.failed;
@@ -1835,6 +1776,18 @@ async function refreshMutatedTableDataTabsForRows(rows: readonly ObjectBrowserRo
   for (const row of rows) {
     const target = tableDataRefreshTargetForRow(row);
     try {
+      if (props.externalNavigation) {
+        void sendDetachedPanelMessage(MAIN_WINDOW_LABEL, {
+          action: "object-browser-refresh-data-tabs",
+          connectionId: target.connectionId,
+          database: target.database,
+          catalog: target.catalog,
+          schema: target.schema,
+          schemaCandidates: target.schemaCandidates,
+          tableName: target.name,
+        });
+        continue;
+      }
       await queryStore.refreshDataTabsForTable(target);
     } catch (error) {
       console.warn("[DBX][table-data-refresh-after-mutation:error]", { target, error });
@@ -1868,7 +1821,7 @@ async function confirmBatchTruncateTables() {
     clearTableSelection();
     showBatchTruncateConfirm.value = false;
     await reload();
-    await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, selectedSchema.value);
+    await refreshMainObjectTree(selectedSchema.value);
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
   }
@@ -1925,7 +1878,7 @@ async function confirmBatchEmptyTables() {
   if (result.succeeded.length > 0) {
     clearTableSelection();
     await reload();
-    await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, selectedSchema.value);
+    await refreshMainObjectTree(selectedSchema.value);
   }
 }
 
@@ -2157,7 +2110,7 @@ async function confirmDuplicateStructure() {
     if (!executed) return;
     toast(t("contextMenu.duplicateStructureSuccess", { name: newName }));
     await reload();
-    await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, schema);
+    await refreshMainObjectTree(schema);
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
   }
@@ -2348,7 +2301,7 @@ async function confirmPasteTable() {
     if (hasMutatedTable) {
       try {
         await reload();
-        await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, selectedSchema.value);
+        await refreshMainObjectTree(selectedSchema.value);
         toast(t("contextMenu.pasteTableCancelledAfterPartial"), 5000);
       } catch (e: any) {
         toast(t("contextMenu.pasteTableRefreshFailed", { message: translateBackendError(t, e) }), 5000);
@@ -2366,7 +2319,7 @@ async function confirmPasteTable() {
     toast(`${t("contextMenu.batchPastePartialFail", { success: pasteFeedback.successCount, failed: pasteFeedback.failedCount })}\n${t("contextMenu.tableOperationFailed", { message: translateBackendError(t, pasteFeedback.firstError) })}`, 5000);
   }
   await reload();
-  await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, selectedSchema.value);
+  await refreshMainObjectTree(selectedSchema.value);
 }
 
 function tableAdminSqlOptions(row: ObjectBrowserRow, options?: { cascade?: boolean }): TableAdminSqlOptions {
@@ -2405,7 +2358,7 @@ async function compileXuguObject(row: ObjectBrowserRow) {
     if (!executed) return;
     toast(t("contextMenu.compileObjectSuccess", { name: row.name }));
     await reload();
-    await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, row.schema || selectedSchema.value);
+    await refreshMainObjectTree(row.schema || selectedSchema.value);
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
   }
@@ -2821,6 +2774,7 @@ defineExpose({ focusSearch, refresh });
 onBeforeUnmount(() => {
   objectBrowserRowsLoadGuard.invalidate();
   stopColumnResize?.();
+  unpublishTableInfoContext(tableInfoOwnerId);
 });
 
 watch(
@@ -2902,6 +2856,7 @@ function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     return [
       { label: t("contextMenu.viewData"), action: () => openViewData(item), icon: Table2 },
       { label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: TerminalSquare },
+      ...openInSeparateWindowSubmenu(item),
       { label: "", separator: true },
       exportDataSubmenu(item),
       { label: "", separator: true },
@@ -2945,6 +2900,7 @@ function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     ...(canOpenStructureEditor.value ? [{ label: t("contextMenu.editStructure"), action: () => openStructureEditor(item), icon: PencilRuler }] : []),
     ...(canRename(item) ? [{ label: t("contextMenu.renameObject"), action: () => requestRename(item), icon: Pencil }] : []),
     { label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: TerminalSquare },
+    ...openInSeparateWindowSubmenu(item),
     ...(canOpenDiagram.value ? [{ label: t("diagram.open"), action: () => openDiagram(item), icon: Network }] : []),
     ...(canOpenTableImport.value ? [{ label: t("contextMenu.importData"), action: () => openTableImport(item), icon: Download }] : []),
     { label: t("dataCompare.title"), action: () => openDataCompare(item), icon: ArrowRightLeft },
@@ -2974,6 +2930,7 @@ function getViewMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     },
     ...(canRename(item) ? [{ label: t("contextMenu.renameObject"), action: () => requestRename(item), icon: Pencil }] : []),
     { label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: TerminalSquare },
+    ...openInSeparateWindowSubmenu(item),
     ...(canOpenDiagram.value ? [{ label: t("diagram.open"), action: () => openDiagram(item), icon: Network }] : []),
     { label: "", separator: true },
     exportDataSubmenu(item),
@@ -2994,6 +2951,7 @@ function getViewMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
 function getProcFuncMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   return [
     ...(item.type === "PROCEDURE" ? [{ label: t("contextMenu.executeProcedure"), action: () => openProcedureExecution(item), icon: Play }] : []),
+    ...openInSeparateWindowSubmenu(item),
     ...(effectiveDatabaseType.value === "xugu" && buildXuguCompileSql({ objectType: item.type, schema: item.schema || selectedSchema.value, name: item.name }) ? [{ label: t("contextMenu.compileObject"), action: () => compileXuguObject(item), icon: Wrench }] : []),
     { label: t("contextMenu.viewSource"), action: () => openSource(item), icon: Code2 },
     ...(canRename(item) ? [{ label: t("contextMenu.renameObject"), action: () => requestRename(item), icon: Pencil }] : []),
@@ -3389,167 +3347,27 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
           </RecycleScroller>
         </div>
       </div>
-      <!-- Right-side panel: table info or source -->
-      <div v-if="sidePanelRow" class="object-browser-side-panel relative flex min-h-0 shrink-0 flex-col border-l bg-background" :class="{ 'side-panel-resizing': isResizingSidePanel }" :style="{ width: `${sidePanelWidth}px` }">
+      <!-- Right-side panel: table info or source（表信息分离为独立窗口时内嵌面板隐藏） -->
+      <div v-if="sidePanelRow && !(tableInfoDetached && sidePanelMode === 'table-info')" class="object-browser-side-panel relative flex min-h-0 shrink-0 flex-col border-l bg-background" :class="{ 'side-panel-resizing': isResizingSidePanel }" :style="{ width: `${sidePanelWidth}px` }">
         <div class="absolute left-0 top-0 bottom-0 z-20 w-1.5 -translate-x-1/2 cursor-col-resize hover:bg-primary/30" @mousedown.prevent="onSidePanelResizeStart" />
         <!-- Table info mode -->
-        <template v-if="sidePanelMode === 'table-info'">
-          <div class="flex items-center gap-2 px-3 py-1.5 border-b shrink-0 bg-muted/20 h-9">
-            <TableProperties class="w-3.5 h-3.5 text-muted-foreground" />
-            <span class="text-xs font-medium flex-1 min-w-0 truncate">{{ sidePanelRow?.name }}</span>
-            <div v-if="tableInfoTab === 'ddl' && tableMetadataCapabilities.ddl" class="table-info-actions flex min-w-0 shrink-0 items-center gap-1">
-              <Button variant="ghost" size="sm" class="table-info-action-button h-6 px-2 text-xs" :title="t('grid.copyDdl')" :aria-label="t('grid.copyDdl')" @click="copyTableDdl">
-                <Copy class="w-3 h-3" />
-                <span class="table-info-action-label">{{ t("grid.copyDdl") }}</span>
-              </Button>
-              <Button variant="ghost" size="icon" class="h-6 w-6" :class="{ 'bg-accent': settingsStore.editorSettings.tableDdlWordWrap }" @click="toggleTableDdlWordWrap">
-                <WrapText class="w-3 h-3" />
-              </Button>
-            </div>
-            <Button v-if="canOpenTableStructureEditor" variant="ghost" size="sm" class="table-info-action-button h-6 px-2 text-xs" :title="t('contextMenu.editStructure')" :aria-label="t('contextMenu.editStructure')" @click="openTableStructureEditor">
-              <PencilRuler class="w-3 h-3" />
-              <span class="table-info-action-label">{{ t("contextMenu.editStructure") }}</span>
-            </Button>
-            <Button variant="ghost" size="icon" class="h-5 w-5" @click="closeSidePanel">
-              <X class="w-3 h-3" />
-            </Button>
-          </div>
-          <div class="grid border-b bg-background shrink-0" :style="tableInfoTabListStyle">
-            <button
-              v-for="tab in tableInfoTabs"
-              :key="tab.id"
-              class="h-9 min-w-0 px-1.5 text-[11px] border-b-2 transition-colors"
-              :class="tableInfoTab === tab.id ? 'border-primary bg-gray-300/80 text-foreground dark:bg-gray-700/80' : 'border-transparent text-muted-foreground hover:bg-gray-200 hover:text-foreground dark:hover:bg-gray-800/50'"
-              :title="tab.label"
-              @click="selectTableInfoTab(tab.id)"
-            >
-              <component :is="tab.icon" class="mx-auto h-3.5 w-3.5" />
-              <span class="block truncate">{{ tab.label }}</span>
-            </button>
-          </div>
-          <div class="px-2 py-1.5 border-b shrink-0 bg-background">
-            <div class="relative">
-              <Search class="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
-              <input v-model="tableInfoSearchQuery" :placeholder="t('grid.tableInfoSearch')" class="w-full h-7 pl-7 pr-6 text-xs bg-muted/50 rounded border border-border focus:outline-none focus:border-primary/50" @keydown.escape="tableInfoSearchQuery = ''" />
-              <button v-if="tableInfoSearchQuery" class="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" @click="tableInfoSearchQuery = ''">
-                <X class="w-3 h-3" />
-              </button>
-            </div>
-          </div>
-          <div v-if="tableInfoTab === 'columns'" class="flex-1 min-h-0 overflow-auto">
-            <div v-if="tableColumnsLoading" class="h-full flex items-center justify-center">
-              <Loader2 class="w-4 h-4 animate-spin text-muted-foreground" />
-            </div>
-            <div v-else-if="tableInfoSearchQuery && filteredTableColumns.length === 0" class="p-6 text-center text-xs text-muted-foreground">
-              {{ t("grid.tableInfoNoResults") }}
-            </div>
-            <table v-else class="w-full text-xs">
-              <thead class="sticky top-0 bg-muted text-muted-foreground">
-                <tr class="border-b">
-                  <th class="text-left text-nowrap font-medium px-3 py-2 w-8">#</th>
-                  <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("grid.columnName") }}</th>
-                  <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("grid.columnType") }}</th>
-                  <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("grid.tableInfoNullable") }}</th>
-                  <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("structureEditor.defaultValue") }}</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="(column, index) in filteredTableColumns" :key="column.name" class="border-b hover:bg-gray-200 dark:hover:bg-gray-800/30" :title="column.name">
-                  <td class="px-3 py-2 text-muted-foreground w-8">{{ index + 1 }}</td>
-                  <td class="px-3 py-2 font-medium">
-                    <span class="inline-flex items-center gap-1.5">
-                      <KeyRound v-if="column.is_primary_key" class="h-3 w-3 text-amber-500" />
-                      {{ column.name }}
-                    </span>
-                    <div v-if="column.comment" class="mt-0.5 text-[11px] text-muted-foreground truncate">
-                      {{ column.comment }}
-                    </div>
-                  </td>
-                  <td class="px-3 py-2 font-mono text-[11px] text-muted-foreground">{{ gaussdbMColumnType(column.data_type) }}</td>
-                  <td class="px-3 py-2">{{ column.is_nullable ? "YES" : "NO" }}</td>
-                  <td data-table-info-column-default class="max-w-56 px-3 py-2 font-mono text-[11px]" :class="{ 'text-muted-foreground/70': column.column_default == null }" :title="column.column_default ?? undefined">
-                    <span class="block max-w-56 truncate">{{ tableColumnDefaultDisplayValue(column.column_default) }}</span>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-          <div v-else-if="tableInfoTab === 'indexes'" class="flex-1 min-h-0 overflow-auto">
-            <div v-if="tableIndexesLoading" class="h-full flex items-center justify-center">
-              <Loader2 class="w-4 h-4 animate-spin text-muted-foreground" />
-            </div>
-            <div v-else-if="tableInfoSearchQuery && filteredTableIndexes.length === 0" class="p-6 text-center text-xs text-muted-foreground">
-              {{ t("grid.tableInfoNoResults") }}
-            </div>
-            <div v-else-if="tableIndexes.length === 0" class="p-6 text-center text-xs text-muted-foreground">
-              {{ t("grid.tableInfoEmpty") }}
-            </div>
-            <div v-else class="divide-y">
-              <div v-for="index in filteredTableIndexes" :key="index.name" class="p-3 text-xs">
-                <div class="flex items-start gap-2">
-                  <div class="min-w-0 flex-1">
-                    <div class="font-medium truncate">{{ index.name }}</div>
-                    <div class="mt-1 flex flex-wrap gap-1">
-                      <span v-if="index.is_primary" class="rounded bg-amber-500/10 px-1.5 py-0.5 text-amber-600">PK</span>
-                      <span v-if="index.is_unique" class="rounded bg-emerald-500/10 px-1.5 py-0.5 text-emerald-600">UNIQUE</span>
-                      <span v-if="index.index_type" class="rounded bg-muted px-1.5 py-0.5 text-muted-foreground">{{ index.index_type }}</span>
-                    </div>
-                    <div class="mt-2 font-mono text-[11px] text-muted-foreground break-all">
-                      {{ index.columns.join(", ") }}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-          <div v-else-if="tableInfoTab === 'foreignKeys'" class="flex-1 min-h-0 overflow-auto">
-            <div v-if="tableForeignKeysLoading" class="h-full flex items-center justify-center">
-              <Loader2 class="w-4 h-4 animate-spin text-muted-foreground" />
-            </div>
-            <div v-else-if="tableInfoSearchQuery && filteredTableForeignKeys.length === 0" class="p-6 text-center text-xs text-muted-foreground">
-              {{ t("grid.tableInfoNoResults") }}
-            </div>
-            <div v-else-if="tableForeignKeys.length === 0" class="p-6 text-center text-xs text-muted-foreground">
-              {{ t("grid.tableInfoEmpty") }}
-            </div>
-            <div v-else class="divide-y">
-              <div v-for="fk in filteredTableForeignKeys" :key="`${fk.name}:${fk.column}`" class="p-3 text-xs">
-                <div class="font-medium truncate">{{ fk.name }}</div>
-                <div class="mt-1 font-mono text-[11px] text-muted-foreground break-all">{{ fk.column }} -> {{ fk.ref_table }}.{{ fk.ref_column }}</div>
-              </div>
-            </div>
-          </div>
-          <div v-else-if="tableInfoTab === 'triggers'" class="flex-1 min-h-0 overflow-auto">
-            <div v-if="tableTriggersLoading" class="h-full flex items-center justify-center">
-              <Loader2 class="w-4 h-4 animate-spin text-muted-foreground" />
-            </div>
-            <div v-else-if="tableInfoSearchQuery && filteredTableTriggers.length === 0" class="p-6 text-center text-xs text-muted-foreground">
-              {{ t("grid.tableInfoNoResults") }}
-            </div>
-            <div v-else-if="tableTriggers.length === 0" class="p-6 text-center text-xs text-muted-foreground">
-              {{ t("grid.tableInfoEmpty") }}
-            </div>
-            <div v-else class="divide-y">
-              <div v-for="trigger in filteredTableTriggers" :key="trigger.name" class="p-3 text-xs">
-                <div class="font-medium truncate">{{ trigger.name }}</div>
-                <div class="mt-1 text-[11px] text-muted-foreground">{{ trigger.timing }} {{ trigger.event }}</div>
-              </div>
-            </div>
-          </div>
-          <pre
-            v-else-if="tableInfoTab === 'ddl' && !tableDdlLoading"
-            ref="tableInfoDdlPreRef"
-            data-native-clipboard
-            tabindex="0"
-            class="flex-1 min-w-0 text-xs font-mono p-3 overflow-auto ddl-code leading-5 select-text outline-none"
-            :class="settingsStore.editorSettings.tableDdlWordWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'"
-            v-html="filteredTableDdlContent"
-            @keydown="onTableInfoDdlKeydown"
-          ></pre>
-          <div v-else class="flex-1 flex items-center justify-center">
-            <Loader2 class="w-4 h-4 animate-spin text-muted-foreground" />
-          </div>
-        </template>
+        <TableInfoPanel
+          v-if="sidePanelMode === 'table-info'"
+          ref="tableInfoPanelRef"
+          :connection="props.connection"
+          :database="props.database"
+          :catalog="props.catalog"
+          :fallback-schema="selectedSchema"
+          :table-name="sidePanelRow.name"
+          :table-schema="sidePanelRow.schema"
+          :table-type="sidePanelRow.type"
+          :initial-tab="tableInfoTab"
+          :detachable="allowTableInfoDetach !== false"
+          @close="closeSidePanel"
+          @detach="detachTableInfoPanel"
+          @open-structure="(payload) => openTableStructureEditor(payload.tab)"
+          @tab-change="(tab) => (tableInfoTab = tab)"
+        />
         <!-- Type info mode (read-only user-defined type details) -->
         <template v-else-if="sidePanelMode === 'type-info'">
           <CustomTypeInfoPanel ref="sidePanelRef" :connection="props.connection" :database="props.database" :schema="sidePanelRow?.schema || selectedSchema || props.database" :name="sidePanelRow?.name || ''" :catalog="props.catalog" @close="closeSidePanel" />
@@ -3906,10 +3724,6 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   pointer-events: none;
 }
 
-.ddl-code {
-  container-type: inline-size;
-}
-
 .object-browser-side-panel {
   container-type: inline-size;
 }
@@ -3921,38 +3735,5 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
 .event-editor-layout > .object-browser-side-panel {
   width: 100% !important;
   border-left: 0;
-}
-
-.table-info-action-button {
-  gap: 0.25rem;
-  max-width: 8rem;
-  overflow: hidden;
-  transition:
-    max-width 180ms ease,
-    padding-inline 180ms ease;
-}
-
-.table-info-action-label {
-  min-width: 0;
-  max-width: 6rem;
-  overflow: hidden;
-  white-space: nowrap;
-  opacity: 1;
-  transition:
-    max-width 180ms ease,
-    opacity 120ms ease;
-}
-
-@container (max-width: 360px) {
-  .table-info-action-button {
-    width: 1.5rem;
-    max-width: 1.5rem;
-    padding-inline: 0;
-  }
-
-  .table-info-action-label {
-    max-width: 0;
-    opacity: 0;
-  }
 }
 </style>

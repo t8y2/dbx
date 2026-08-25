@@ -527,7 +527,7 @@ function formatAttachedTextData(context: AiContext, isZh: boolean): string {
 }
 
 export async function buildAiContext(
-  tab: QueryTab,
+  tab: AiContextTabSource,
   connection: ConnectionConfig,
   options: { maxTables?: number; maxColumnsPerTable?: number; maxIndexesPerTable?: number; maxFksPerTable?: number; mentionedTables?: AiTableMention[]; sqlFiles?: AiSqlFileContext[]; csvFiles?: AiCsvFileContext[] } = {},
 ): Promise<AiContext> {
@@ -655,7 +655,8 @@ export async function buildAiContext(
     schema,
     currentSql: currentCollectionName ?? tab.sql,
     lastError: extractLastError(tab.result),
-    lastResultPreview: formatResultPreview(tab.result),
+    // 分离子窗口不持有完整 result，由主窗口预计算预览文本下发。
+    lastResultPreview: tab.resultPreview ?? formatResultPreview(tab.result),
     tables,
     sqlFiles: options.sqlFiles ?? [],
     csvFiles: options.csvFiles ?? [],
@@ -664,7 +665,7 @@ export async function buildAiContext(
   };
 }
 
-async function loadMentionedTableContext(tab: QueryTab, connection: ConnectionConfig, mention: AiTableMention, maxColumnsPerTable: number, maxIndexesPerTable: number, maxFksPerTable: number): Promise<AiSchemaTable | undefined> {
+async function loadMentionedTableContext(tab: AiContextTabSource, connection: ConnectionConfig, mention: AiTableMention, maxColumnsPerTable: number, maxIndexesPerTable: number, maxFksPerTable: number): Promise<AiSchemaTable | undefined> {
   const databaseType = aiDatabaseTypeForConnection(connection);
   const database = aiDatabaseNamespace(tab, connection);
   const schema = await resolveMentionedTableSchema(tab, connection, mention);
@@ -690,7 +691,7 @@ async function loadTableComment(connectionId: string, database: string, schema: 
   return tables.find((table) => table.name.toLowerCase() === tableName.toLowerCase())?.comment?.trim() || undefined;
 }
 
-async function resolveMentionedTableSchema(tab: QueryTab, connection: ConnectionConfig, mention: AiTableMention): Promise<string> {
+async function resolveMentionedTableSchema(tab: AiContextTabSource, connection: ConnectionConfig, mention: AiTableMention): Promise<string> {
   if (mention.schema) return mention.schema;
   if (tab.tableMeta?.tableName.toLowerCase() === mention.table.toLowerCase() && tab.tableMeta.schema) {
     return tab.tableMeta.schema;
@@ -706,7 +707,7 @@ async function resolveMentionedTableSchema(tab: QueryTab, connection: Connection
   return aiDatabaseNamespace(tab, connection);
 }
 
-async function loadCandidateSchemas(tab: QueryTab, connection: ConnectionConfig): Promise<string[]> {
+async function loadCandidateSchemas(tab: AiContextTabSource, connection: ConnectionConfig): Promise<string[]> {
   const { database, schema } = resolveAiDatabaseTarget(tab, connection);
   if (schema) return [schema];
   if (isSchemaAware(aiDatabaseTypeForConnection(connection))) {
@@ -720,11 +721,17 @@ function aiDatabaseTypeForConnection(connection: ConnectionConfig): DatabaseType
   return effectiveDatabaseTypeForConnection(connection) ?? connection.db_type;
 }
 
-function aiDatabaseNamespace(tab: QueryTab, connection: ConnectionConfig): string {
+function aiDatabaseNamespace(tab: AiTabNamespaceSource, connection: ConnectionConfig): string {
   return resolveAiDatabaseTarget(tab, connection).database;
 }
 
-export function resolveAiNamespaceSelection(tab: QueryTab, connection: ConnectionConfig): AiNamespaceSelection {
+/** AI 命名空间解析实际依赖的标签字段子集（分离子窗口可传重建的快照）。 */
+export type AiTabNamespaceSource = Pick<QueryTab, "database" | "schema">;
+
+/** buildAiContext 实际依赖的标签字段子集；resultPreview 供分离子窗口传入主窗口预计算的预览。 */
+export type AiContextTabSource = Pick<QueryTab, "connectionId" | "database" | "schema" | "sql" | "tableMeta" | "result"> & { resultPreview?: string };
+
+export function resolveAiNamespaceSelection(tab: AiTabNamespaceSource, connection: ConnectionConfig): AiNamespaceSelection {
   if (connection.db_type === "dameng") {
     return { kind: "schema", value: tab.schema?.trim() || "" };
   }
@@ -743,7 +750,7 @@ export function resolveDefaultAiSchema(connection: ConnectionConfig, schemaOptio
  * their configured database while the query tab's selection scopes metadata and
  * SQL execution through the schema parameter.
  */
-export function resolveAiDatabaseTarget(tab: QueryTab, connection: ConnectionConfig): { database: string; schema?: string } {
+export function resolveAiDatabaseTarget(tab: AiTabNamespaceSource, connection: ConnectionConfig): { database: string; schema?: string } {
   const database = tab.database || connection.database || "main";
   if (connection.db_type === "dameng") {
     return {
@@ -769,7 +776,7 @@ function extractLastError(result?: QueryResult): string | undefined {
   return result.rows[0]?.[0] == null ? undefined : String(result.rows[0][0]);
 }
 
-function formatResultPreview(result?: QueryResult): string | undefined {
+export function formatResultPreview(result?: QueryResult): string | undefined {
   if (!result || isQueryExecutionErrorResult(result) || !result.rows.length) return undefined;
   const MAX_VALUE_CHARS = 200;
   const rows = result.rows.slice(0, 5).map((row) => {

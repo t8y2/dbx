@@ -26,11 +26,16 @@ export type NavigationTarget = {
   whereInput?: string;
 };
 
-async function openTableTarget(target: NavigationTarget, options: { tableInfoTab?: TableInfoTab } = {}) {
+/** 打开表数据页签；返回创建/接管的页签 id（被更新导航接管等中断场景返回 undefined）。
+ * pendingDetach=true 时页签创建即隐藏且不激活（「用独立窗口打开」直达子窗口，主窗口不闪现）。
+ * 导出供侧边栏「用独立窗口打开 · 查看数据」复用（与 App.vue 对象浏览器 detached 路径同一实现）。 */
+export async function openTableTarget(target: NavigationTarget, options: { tableInfoTab?: TableInfoTab; pendingDetach?: boolean } = {}): Promise<string | undefined> {
   const connectionStore = useConnectionStore();
   const queryStore = useQueryStore();
   const settingsStore = useSettingsStore();
   const pageLimit = tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize);
+  // pendingDetach 页签不激活、不进页签栏（AppTabBar 过滤），分离失败由调用方 revealPendingDetachTab 复位。
+  const detachOptions = options.pendingDetach ? { activate: false, pendingDetach: true } : {};
 
   connectionStore.activeConnectionId = target.connectionId;
   const config = connectionStore.getConfig(target.connectionId);
@@ -38,11 +43,11 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
   const tabTitle = target.catalog ? `${target.catalog}.${tableSchema || target.database}.${target.tableName}` : tableSchema ? `${tableSchema}.${target.tableName}` : target.tableName;
   if (config?.db_type === "qdrant" || config?.db_type === "milvus" || config?.db_type === "weaviate" || config?.db_type === "chromadb") {
     await connectionStore.ensureConnected(target.connectionId);
-    const tabId = queryStore.createTab(target.connectionId, target.database || "default", tabTitle, "vector");
+    const tabId = queryStore.createTab(target.connectionId, target.database || "default", tabTitle, "vector", undefined, undefined, undefined, detachOptions);
     queryStore.updateSql(tabId, target.tableName);
-    return;
+    return tabId;
   }
-  const tabId = queryStore.createTab(target.connectionId, target.database, tabTitle, "data", tableSchema, undefined, undefined, { forceNew: true });
+  const tabId = queryStore.createTab(target.connectionId, target.database, tabTitle, "data", tableSchema, undefined, undefined, { forceNew: true, ...detachOptions });
   const targetTab = queryStore.tabs.find((tab) => tab.id === tabId);
   if (targetTab) targetTab.tableInfoTab = options.tableInfoTab;
   // Stamp the new table identity synchronously so SQL rebuilds (refresh,
@@ -138,7 +143,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
       });
       firstExecuteStarted = true;
       await queryStore.executeTabSql(tabId, sql, { pagination: { limit: pageLimit, offset: 0 } });
-      return;
+      return tabId;
     }
     const eagerMetadata =
       effectiveDbType === "mysql" || effectiveDbType === "postgres"
@@ -272,9 +277,11 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
     } catch (reason) {
       console.error("[DBX] ERROR fetching table metadata:", reason);
     }
+    return tabId;
   } catch (e: any) {
     if (firstExecuteStarted ? !isCurrentTarget() : !isPreparationCurrent()) return;
     queryStore.setErrorResult(tabId, e);
+    return tabId;
   } finally {
     endDataTabNavigation(tabId, navigationToken);
   }

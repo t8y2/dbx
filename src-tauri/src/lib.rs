@@ -1573,6 +1573,9 @@ pub fn run() {
         .plugin(
             tauri_plugin_window_state::Builder::default()
                 .with_state_flags(window_state_guard::persisted_main_window_state_flags())
+                // 只有主窗口交给 window-state 插件恢复；分离面板/标签页子窗口为无边框窗口，
+                // 位置/尺寸由前端 localStorage 在创建时直接传入以消除跳动。
+                .with_filter(|label| label == "main")
                 .build(),
         );
 
@@ -1774,6 +1777,11 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // 只有主窗口走"关闭即隐藏到托盘/关闭确认"流程；
+                // 分离面板等子窗口按默认行为正常关闭。
+                if window.label() != "main" {
+                    return;
+                }
                 if !should_hide_window_on_close(std::env::consts::OS) {
                     return;
                 }

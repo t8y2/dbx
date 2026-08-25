@@ -2,6 +2,7 @@ import { createI18n } from "vue-i18n";
 import en from "./locales/en";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { broadcastDetachedPanelMessage } from "@/lib/detached/detachedPanel";
 
 export type Locale = "en" | "es" | "it" | "ja" | "ko" | "pt-BR" | "zh-CN" | "zh-TW";
 type LocaleMessages = Record<string, unknown>;
@@ -110,6 +111,16 @@ export async function setLocale(locale: Locale) {
   i18nGlobal.locale.value = locale;
   safeLocalStorageSet("dbx-locale", locale);
   void syncLocaleToBackend(locale);
+  // 通知分离子窗口重读并应用新语言。
+  void broadcastDetachedPanelMessage({ action: "app-settings-sync" });
+}
+
+/** 从 localStorage 重读语言并应用（分离子窗口响应主窗口同步；不回写、不广播，避免循环）。 */
+export async function applyLocaleFromStorage() {
+  const locale = normalizeLocale(safeLocalStorageGet("dbx-locale"));
+  if (!locale || locale === i18nGlobal.locale.value) return;
+  await loadLocaleMessages(locale);
+  i18nGlobal.locale.value = locale;
 }
 
 export function currentLocale(): Locale {

@@ -2,7 +2,7 @@
 import { computed, ref, watch, nextTick, onUnmounted } from "vue";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { X, Pin, ChevronDown, Search, Table2, Code2, TableProperties, PencilRuler, KeyRound, Pencil, Package, Lock, Copy, AlertTriangle, Network, Minimize2, Maximize2, Settings, CalendarClock, Activity, Gauge, ShieldCheck, Database, GitBranch, Crosshair } from "@lucide/vue";
+import { Activity, AlertTriangle, CalendarClock, ChevronDown, Code2, Copy, Crosshair, Database, Gauge, GitBranch, KeyRound, Lock, Maximize2, Minimize2, Network, Package, Pencil, PencilRuler, PictureInPicture2, Pin, Search, Settings, ShieldCheck, Table2, TableProperties, X } from "@lucide/vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -19,6 +19,8 @@ import { useTabDrag } from "@/composables/useTabDrag";
 import { connectionColor, isConnectionReadonly, tabDisplayTitle, tabTooltipLines } from "@/lib/tabs/tabPresentation";
 import { hexToRgba } from "@/lib/common/color";
 import { copyToClipboard } from "@/lib/common/clipboard";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { detachTabFailureMessage, detachTabToWindow as detachTabToWindowShared } from "@/lib/detached/detachTabToWindow";
 import { useToast } from "@/composables/useToast";
 import { activeTabSidebarTarget } from "@/lib/sidebar/sidebarActiveTabTarget";
 import type { QueryTab } from "@/types/database";
@@ -57,8 +59,10 @@ const editingTabId = ref<string | null>(null);
 const editingTitle = ref("");
 const isClassicLayout = computed(() => settingsStore.editorSettings.appLayout === "classic");
 const isWrapLayout = computed(() => settingsStore.editorSettings.tabLayout === "wrap");
-const fixedTabs = computed(() => queryStore.tabs.filter((tab) => tab.pinned));
-const regularTabs = computed(() => queryStore.tabs.filter((tab) => !tab.pinned));
+// 待分离（pendingDetach）页签不在页签栏渲染：「用独立窗口打开」直达子窗口，避免先闪现再消失。
+const visibleTabs = computed(() => queryStore.tabs.filter((tab) => !tab.pendingDetach));
+const fixedTabs = computed(() => visibleTabs.value.filter((tab) => tab.pinned));
+const regularTabs = computed(() => visibleTabs.value.filter((tab) => !tab.pinned));
 const hasFixedTabs = computed(() => fixedTabs.value.length > 0);
 const regularSurfaceCount = computed(() => regularTabs.value.length + (props.driverStoreOpen ? 1 : 0) + (props.settingsPageOpen ? 1 : 0));
 const closeConfirmDirtyCount = computed(() => queryStore.closeConfirmDirtyTabIds.length);
@@ -125,6 +129,21 @@ function toggleCompactTabTitle() {
 
 function canRenameTab(tab: QueryTab) {
   return tab.mode === "query";
+}
+
+/**
+ * 将页签移入独立子窗口。prepare（结果写缓存+快照，页签不动）→ 子窗口 adopt 回执
+ * 确认后 finalize 移除；执行中查询/未提交事务等不可迁移状态拒绝分离并明确提示。
+ */
+async function detachTabToWindow(tab: QueryTab) {
+  if (!isTauriRuntime()) return;
+  try {
+    const result = await detachTabToWindowShared(tab.id, t);
+    if (!result.ok) toast(detachTabFailureMessage(result.reason, t), 5000);
+  } catch (error) {
+    console.error("[detached-tab] open failed", error);
+    toast(error instanceof Error ? error.message : String(error), 5000);
+  }
 }
 
 function startRenameTab(tab: QueryTab) {
@@ -333,6 +352,12 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
       action: () => queryStore.togglePinnedTab(tab.id),
       icon: Pin,
       iconClass: tab.pinned ? "fill-current" : "",
+    },
+    {
+      label: t("contextMenu.openInSeparateWindow"),
+      action: () => void detachTabToWindow(tab),
+      icon: PictureInPicture2,
+      visible: isTauriRuntime(),
     },
     { label: "", separator: true },
     { label: closeCurrentLabel, action: () => queryStore.closeTab(tab.id), icon: X },
@@ -664,7 +689,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
 </script>
 
 <template>
-  <div v-if="queryStore.tabs.length > 0 || driverStoreOpen || settingsPageOpen" class="app-tab-bar relative flex w-full min-w-0 shrink-0 overflow-hidden" :class="tabBarClass">
+  <div v-if="visibleTabs.length > 0 || driverStoreOpen || settingsPageOpen" class="app-tab-bar relative flex w-full min-w-0 shrink-0 overflow-hidden" :class="tabBarClass">
     <div class="flex w-full min-w-0 shrink-0 overflow-hidden" :class="regularTabRowClass">
       <div class="app-tab-strip relative h-full min-w-0 flex-1 overflow-hidden">
         <div v-if="showRegularTabScrollbar" class="app-tab-scrollbar" :class="{ 'app-tab-scrollbar--dragging': isScrollbarDragging }" @pointerdown="startScrollbarDrag">

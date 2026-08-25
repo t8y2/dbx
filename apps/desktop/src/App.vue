@@ -25,12 +25,13 @@ import { useMcpUpdateBadge } from "@/composables/useMcpUpdateBadge";
 import { useExportTracker } from "@/composables/useExportTracker";
 import { useFileDrop } from "@/composables/useFileDrop";
 import { usePanelResize } from "@/composables/usePanelResize";
-import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
+import { fetchNamespaceOptionsForConnection, useDatabaseOptions } from "@/composables/useDatabaseOptions";
 import { useSqlExecution } from "@/composables/useSqlExecution";
 import MultiDbExecuteDialog from "@/components/editor/MultiDbExecuteDialog.vue";
 import { useDialogSources } from "@/composables/useDialogSources";
 import { useNavigationTargets } from "@/composables/useNavigationTargets";
 import { useDataGridActions } from "@/composables/useDataGridActions";
+import { stageDataGridPendingSnapshotsForTab } from "@/composables/useDataGridEditor";
 import { useTauriEvents } from "@/composables/useTauriEvents";
 import { useCloseActionPrompt, type AppCloseAction, type AppCloseRequestOptions } from "@/composables/useCloseActionPrompt";
 import { disposeAllSqlServerActivityTraces } from "@/lib/sqlserver/sqlServerActivityTraceRuntime";
@@ -113,7 +114,28 @@ import { APP_FONT_SANS_CSS_VAR, DATA_GRID_FONT_FAMILY_CSS_VAR, DEFAULT_DATA_GRID
 import { DATA_GRID_TYPE_COLOR_KEYS, dataGridTypeColorCssVar, resolveActiveDataGridTypeColors } from "@/lib/dataGrid/dataGridTypeColorScheme";
 import { rankSavedSqlHistory } from "@/lib/savedSql/savedSqlHistory";
 import { savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
-import { savedSqlDefaultTargetForWrite } from "@/lib/savedSql/savedSqlExecutionTarget";
+import { savedSqlDefaultTargetForWrite, savedSqlExecutionTargetFromTab } from "@/lib/savedSql/savedSqlExecutionTarget";
+import {
+  DETACHED_PANEL_IDS,
+  broadcastDetachedPanelMessage,
+  closeDetachedPanelWindow,
+  detachedPanelWindowLabel,
+  isDetachedPanelWindowOpen,
+  isPanelDetached,
+  listenDetachedPanelMessages,
+  openDetachedPanelWindow,
+  resolveDetachedPanelReady,
+  sendDetachedPanelMessage,
+  setPanelDetached,
+  type AiPanelContextSnapshot,
+  type DetachedPanelId,
+  type DetachedPanelMessage,
+  type DetachedWindowPlacement,
+} from "@/lib/detached/detachedPanel";
+import { hideDetachGhost } from "@/lib/detached/detachGhostWindow";
+import { currentTableInfoContext, dockTableInfoToOwner } from "@/lib/detached/tableInfoContextRegistry";
+import { clearDetachedTabsRegistry, closeDetachedTabWindow, ensureWarmDetachedTabShell, listDetachedTabEntries, markWarmShellReady, readDetachedTabEntry, rejectDetachedTabAdoptAck, removeDetachedTabEntry, resolveDetachedTabAdoptAck, restoreDetachedTabSnapshot } from "@/lib/detached/detachedTabs";
+import { detachTabFailureMessage, detachTabToWindow } from "@/lib/detached/detachTabToWindow";
 import { countActiveUpdateBlockingTasks } from "@/lib/app/appUpdateTaskGuard";
 import { initSavedSqlEditorPositions } from "@/lib/app/savedSqlEditorPosition";
 import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
@@ -128,7 +150,10 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import type { HistoryEntry } from "@/lib/backend/tauri";
-import { resolveDefaultAiSchema, type AiAction } from "@/lib/ai/ai";
+import type { AiAction } from "@/lib/ai/ai";
+import { formatResultPreview, resolveAiNamespaceSelection, resolveDefaultAiSchema } from "@/lib/ai/ai";
+import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
+import { decodeSelectableDatabaseValue } from "@/lib/database/defaultDatabase";
 import ExternalSqlFileChangeDialog from "@/components/editor/ExternalSqlFileChangeDialog.vue";
 
 const AiAssistant = defineAsyncComponent(() => import("@/components/editor/AiAssistant.vue"));
@@ -782,6 +807,8 @@ watch(
   () => settingsStore.editorSettings.uiScale,
   (scale) => {
     void applyUiScale(scale);
+    // 通知分离子窗口同步缩放（值随消息携带，子窗口无需等待设置落盘）。
+    void broadcastDetachedPanelMessage({ action: "app-settings-sync", uiScale: scale });
   },
   { immediate: true },
 );
@@ -851,21 +878,435 @@ function setRightSidebarPanelOpen(panelId: RightSidebarPanelId, open: boolean) {
   }
 }
 
+/** 右侧栏中支持分离的面板（tableInfo 面板挂在对象浏览器内，不走右侧栏逻辑）。 */
+type DetachableRightSidebarPanelId = Extract<DetachedPanelId, RightSidebarPanelId>;
+
+function isDetachablePanel(panelId: RightSidebarPanelId): panelId is DetachableRightSidebarPanelId {
+  return (DETACHED_PANEL_IDS as readonly string[]).includes(panelId);
+}
+
+/** 分离面板的默认窗口尺寸（仅首次打开时使用，之后由 window-state 恢复）。 */
+function detachedPanelPlacement(panelId: DetachableRightSidebarPanelId) {
+  const width = panelId === "history" ? historyWidth.value : panelId === "sqlLibrary" ? sqlLibraryWidth.value : panelId === "ai" ? aiPanelWidth.value : sqlFilePanelWidth.value;
+  return { width: Math.max(360, width), height: Math.max(480, Math.round(window.innerHeight * 0.8)) };
+}
+
+/** 打开分离面板；创建或初始化失败时恢复为主窗口内嵌面板。 */
+async function openDetachedRightSidebarPanel(panelId: DetachableRightSidebarPanelId, placement: DetachedWindowPlacement = detachedPanelPlacement(panelId)): Promise<boolean> {
+  const opened = await openDetachedPanelWindow(panelId, placement);
+  if (opened) return true;
+  setPanelDetached(panelId, false);
+  setRightSidebarPanelOpen(panelId, true);
+  return false;
+}
+
 function toggleRightSidebarPanel(panelId: RightSidebarPanelId) {
+  if (isDetachablePanel(panelId) && isPanelDetached(panelId)) {
+    // 分离模式：工具栏按钮切换独立窗口的开关。
+    void (async () => {
+      if (await isDetachedPanelWindowOpen(panelId)) await closeDetachedPanelWindow(panelId);
+      else await openDetachedRightSidebarPanel(panelId);
+    })();
+    return;
+  }
   setRightSidebarPanelOpen(panelId, !rightSidebarPanelRefs[panelId].value);
 }
 
 function openRightSidebarPanel(panelId: RightSidebarPanelId) {
+  if (isDetachablePanel(panelId) && isPanelDetached(panelId)) {
+    void openDetachedRightSidebarPanel(panelId);
+    return;
+  }
   setRightSidebarPanelOpen(panelId, true);
 }
 
 function closeRightSidebarPanel(panelId: RightSidebarPanelId) {
+  if (isDetachablePanel(panelId) && isPanelDetached(panelId)) {
+    void closeDetachedPanelWindow(panelId);
+    return;
+  }
   setRightSidebarPanelOpen(panelId, false);
 }
 
 function toggleAiPanelMaximized() {
   if (!showAiPanel.value) return;
   isAiPanelMaximized.value = !isAiPanelMaximized.value;
+}
+
+/** 拖拽面板头部触发的分离：关闭停靠面板，记录状态，在鼠标位置打开独立窗口。 */
+async function detachPanelToWindow(panelId: DetachableRightSidebarPanelId, position: { x: number; y: number }) {
+  if (!isDesktop || !isDetachablePanel(panelId)) return;
+  const placement = detachedPanelPlacement(panelId);
+  setRightSidebarPanelOpen(panelId, false);
+  setPanelDetached(panelId, true);
+  await openDetachedRightSidebarPanel(panelId, {
+    ...placement,
+    x: Math.max(0, Math.round(position.x - placement.width / 2)),
+    y: Math.max(0, Math.round(position.y - 16)),
+  });
+}
+
+/** 合并回主窗口：关闭子窗口、清除分离标记、重新停靠打开。 */
+async function dockDetachedPanel(panelId: DetachableRightSidebarPanelId) {
+  await closeDetachedPanelWindow(panelId);
+  setPanelDetached(panelId, false);
+  openRightSidebarPanel(panelId);
+}
+
+/** 表信息子窗口合并回主窗口：清除分离标记并通知属主对象浏览器重新内嵌打开。 */
+async function dockDetachedTableInfoPanel() {
+  await closeDetachedPanelWindow("tableInfo");
+  setPanelDetached("tableInfo", false);
+  // 属主对象浏览器已卸载时仅关闭子窗口（下次点表按内嵌模式打开）。
+  dockTableInfoToOwner();
+}
+
+// ---------------------------------------------------------------------------
+// 分离面板子窗口的跨窗口事件
+// ---------------------------------------------------------------------------
+
+let unlistenDetachedPanelMessages: (() => void) | null = null;
+
+/** 合并分离页签回主窗口：从 registry 读最新快照恢复页签，关闭子窗口。 */
+async function handleDetachedTabDock(tabId: string, sourceLabel: string) {
+  const entry = readDetachedTabEntry(tabId);
+  if (!entry) {
+    // 条目缺失（异常清理/存储被清空）：无法恢复页签，但需通知子窗口复位 dockRequested，
+    // 否则子窗口停留在「dock 进行中」状态，标题栏 X 与系统关闭都会被屏蔽。
+    void sendDetachedPanelMessage(sourceLabel, { action: "detached-tab-dock-failed", tabId });
+    return;
+  }
+  const restored = restoreDetachedTabSnapshot(entry.snapshot);
+  removeDetachedTabEntry(tabId);
+  if (restored) {
+    // 连接已删除的页签不恢复（避免悬空引用），仅清理子窗口。
+    // DataGrid 待保存状态先于页签落地（grid 挂载/结果读回后按 cacheKey 取回）。
+    stageDataGridPendingSnapshotsForTab(tabId, entry.snapshot.dataGridPending);
+    queryStore.adoptDetachedTab(restored);
+    // activeTabId watch 会自动 reloadEvictedTab 从 IndexedDB 结果缓存读回结果（含 data 页签）。
+  }
+  await closeDetachedTabWindow(entry.label);
+}
+
+/** 分离页签转发来的导航动作（target 已由子窗口按其页签上下文补全）。 */
+function handleDetachedTabNavigate(message: Extract<DetachedPanelMessage, { action: "detached-tab-navigate" }>) {
+  const target = message.target;
+  if (message.kind === "data") {
+    void openObjectBrowserTableTarget(target).catch((e: any) => toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000));
+    return;
+  }
+  if (message.kind === "ddl") {
+    queryEditorDdlTarget.value = {
+      connectionId: target.connectionId,
+      database: target.database,
+      catalog: target.catalog,
+      schema: target.schema,
+      tableName: target.tableName,
+      objectType: message.objectType as ObjectSourceKind | undefined,
+    };
+    showQueryEditorDdlDialog.value = true;
+    return;
+  }
+  if (message.kind === "structure") {
+    queryStore.openTableStructure(target.connectionId, target.database, target.schema, target.tableName, undefined, undefined, target.catalog);
+    return;
+  }
+  // source：按主窗口规则重新做 Oracle 规范化（子窗口传来的为原始标识）。
+  const databaseType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(target.connectionId));
+  let navigation: SqlObjectNavigationTarget = {
+    name: message.sourceName ?? target.tableName,
+    database: target.database,
+    schema: message.sourceSchema,
+    type: message.objectType as SqlObjectNavigationTarget["type"],
+    signature: message.signature,
+  };
+  if (databaseType === "oracle" || databaseType === "dameng" || databaseType === "oceanbase-oracle" || databaseType === "yashandb" || databaseType === "oscar") {
+    navigation = normalizeOracleNavigationTarget(navigation);
+  }
+  const objectType = sqlObjectNavigationSourceKind(navigation);
+  if (!objectType) return;
+  void openObjectSourceForResolvedTarget(navigation, { ...target, tableName: sqlObjectNavigationSourceName(navigation) }, objectType, message.initialEditing ?? false);
+}
+
+/** 启动时恢复上次退出仍分离中的页签（子窗口随进程退出已销毁，registry 为唯一事实源）。 */
+function restoreDetachedTabsOnStartup() {
+  const entries = listDetachedTabEntries();
+  if (!entries.length) return;
+  const validConnectionIds = new Set(connectionStore.connections.map((connection) => connection.id));
+  for (const entry of entries) {
+    const restored = restoreDetachedTabSnapshot(entry.snapshot);
+    if (!restored) continue;
+    // 连接已删除的页签直接丢弃（与 open-tabs 恢复对非 query 页签的处理一致）。
+    if (restored.mode !== "query" && !validConnectionIds.has(restored.connectionId)) continue;
+    stageDataGridPendingSnapshotsForTab(restored.id, entry.snapshot.dataGridPending);
+    queryStore.adoptDetachedTab(restored, { activate: false });
+  }
+  clearDetachedTabsRegistry();
+}
+
+function handleDetachedPanelMessage(message: DetachedPanelMessage, sourceLabel: string) {
+  switch (message.action) {
+    case "detached-panel-ready":
+      resolveDetachedPanelReady(message.panel, sourceLabel);
+      break;
+    case "detached-tab-shell-ready":
+      markWarmShellReady(message.label);
+      break;
+    case "detached-tab-adopted":
+      // 子窗口已恢复并渲染页签：openDetachedTabWindow 的回执等待据此完成，调用方 finalize。
+      resolveDetachedTabAdoptAck(message.tabId, sourceLabel);
+      break;
+    case "detached-tab-adopt-failed":
+      // 子窗口恢复失败并已自毁：回执等待按失败处理，触发回滚（页签保留在主窗口）。
+      rejectDetachedTabAdoptAck(message.tabId, message.reason ?? "adopt failed", sourceLabel);
+      break;
+    case "detached-tab-dock":
+      void handleDetachedTabDock(message.tabId, sourceLabel);
+      break;
+    case "detached-tab-open-sql-file":
+      void openSqlFile();
+      break;
+    case "detached-tab-import-result-archive":
+      void importResultArchive();
+      break;
+    case "detached-tab-navigate":
+      handleDetachedTabNavigate(message);
+      break;
+    case "detached-tab-structure-saved":
+      void onStructureEditorSaved(onReloadData, toast, { connectionId: message.connectionId, database: message.database, schema: message.schema, catalog: message.catalog, tableName: message.tableName }, message.commentChanged);
+      break;
+    case "detached-tab-ai-fix":
+      fixWithAi(message.errorMessage);
+      break;
+    case "detached-tab-ai-set-prompt":
+      sendSelectionToAi(message.text);
+      break;
+    case "detached-tab-open-settings":
+      openSettings(message.initialTab, message.initialSection);
+      break;
+    case "detached-tab-open-connection-settings":
+      openConnectionSettings(message.connectionId, message.initialTab);
+      break;
+    case "open-saved-sql": {
+      const tabId = queryStore.openSavedSql(message.file, { targetMode: message.targetMode });
+      const connectionId = queryStore.tabs.find((tab) => tab.id === tabId)?.connectionId ?? message.file.connectionId;
+      if (connectionId) connectionStore.activeConnectionId = connectionId;
+      break;
+    }
+    case "open-external-sql-file":
+      queryStore.openExternalSqlFile(message.connectionId, message.database, message.path, message.sql, message.version, message.catalog);
+      break;
+    case "execute-external-sql-file":
+      connectionStore.sqlFileSource = { connectionId: message.connectionId, database: message.database, filePath: message.path };
+      break;
+    case "restore-history":
+      restoreHistorySql(message.sql, message.entry);
+      break;
+    case "analyze-history-ai":
+      analyzeHistoryWithAi(message.entry);
+      break;
+    case "dock-panel":
+      if (message.panel === "tableInfo") void dockDetachedTableInfoPanel();
+      else void dockDetachedPanel(message.panel);
+      break;
+    case "request-table-info-context": {
+      // 表信息子窗口就绪：用注册表中最近发布的上下文应答（可能为 null，子窗口显示空状态）。
+      const snapshot = currentTableInfoContext();
+      if (snapshot) void sendDetachedPanelMessage(detachedPanelWindowLabel("tableInfo"), { action: "table-info-context", snapshot });
+      break;
+    }
+    case "table-info-open-structure":
+      queryStore.openTableStructure(message.connectionId, message.database, message.schema, message.tableName, message.tab, undefined, message.catalog);
+      break;
+    case "object-browser-open-table":
+      void openObjectBrowserTableTarget(message.target);
+      break;
+    case "object-browser-open-query": {
+      const tabId = queryStore.createTab(message.connectionId, message.database, message.title, "query", message.schema, undefined, message.catalog);
+      queryStore.updateSql(tabId, message.sql);
+      if (message.execute) void queryStore.executeTabSql(tabId, message.sql);
+      break;
+    }
+    case "object-browser-open-structure":
+      queryStore.openTableStructure(message.connectionId, message.database, message.schema, message.tableName, message.tab, undefined, message.catalog);
+      break;
+    case "object-browser-open-tool":
+      if (message.tool === "diagram") connectionStore.diagramSource = { connectionId: message.connectionId, database: message.database, schema: message.schema, tableName: message.tableName };
+      else if (message.tool === "tableImport") connectionStore.tableImportSource = { connectionId: message.connectionId, database: message.database, schema: message.schema, tableName: message.tableName };
+      else if (message.tool === "tableDataGenerate" && message.tableName) connectionStore.tableDataGenerateSource = { connectionId: message.connectionId, database: message.database, schema: message.schema, tableName: message.tableName };
+      else if (message.tool === "dataCompare") connectionStore.dataCompareSource = { connectionId: message.connectionId, database: message.database, schema: message.schema, tableName: message.tableName };
+      else connectionStore.databaseExportSource = { connectionId: message.connectionId, database: message.database, schema: message.schema, tableName: message.tableName, tableNames: message.tableNames };
+      break;
+    case "object-browser-refresh-tree":
+      void connectionStore.refreshObjectListTreeNode(message.connectionId, message.database, message.schema).catch((error) => console.error("[detached-object-browser] refresh tree failed", error));
+      break;
+    case "object-browser-close-dropped-tabs":
+      queryStore.closeDroppedTableObjectTabs({ connectionId: message.connectionId, database: message.database, schema: message.schema, name: message.tableName, objectType: message.objectType });
+      break;
+    case "object-browser-refresh-data-tabs":
+      void queryStore
+        .refreshDataTabsForTable({ connectionId: message.connectionId, database: message.database, catalog: message.catalog, schema: message.schema, schemaCandidates: message.schemaCandidates, name: message.tableName })
+        .catch((error) => console.error("[detached-object-browser] refresh data tabs failed", error));
+      break;
+    case "saved-sql-changed":
+      void savedSqlStore.reloadFromStorage().catch((error) => console.error("[detached-panel] reload saved sql failed", error));
+      break;
+    case "request-saved-sql-tabs":
+      pushSavedSqlTabsSnapshot();
+      break;
+    case "ai-sql":
+      if (message.kind === "replace") onAiReplaceSql(message.sql);
+      else if (message.kind === "execute") onAiExecuteSql(message.sql);
+      else if (message.kind === "temp-run") onAiTempRunSql(message.sql);
+      else onAiRequestAutoExecuteSql(message.sql);
+      break;
+    case "ai-redis-command":
+      routeAiRedisCommand(message.command, message.execute);
+      break;
+    case "ai-open-explain-plan":
+      onAiOpenExplainPlan(message.sql);
+      break;
+    case "ai-change-connection":
+      void handleDetachedAiChangeConnection(message.connectionId);
+      break;
+    case "ai-change-namespace":
+      handleDetachedAiChangeNamespace(message.value);
+      break;
+    case "ai-open-table":
+      void openTableTarget(message.target);
+      break;
+    case "request-ai-context":
+      pushAiContextSnapshot();
+      flushPendingDetachedAiActions();
+      break;
+  }
+}
+
+/** 分离 AI 子窗口转发来的连接切换：在主窗口复刻面板的切换逻辑（面板内 changeConnection）。 */
+async function handleDetachedAiChangeConnection(connectionId: string) {
+  const conn = connectionStore.getConfig(connectionId);
+  if (!conn) return;
+  connectionStore.activeConnectionId = connectionId;
+  const tab = activeTab.value;
+  const tabId = tab ? tab.id : queryStore.createTab(connectionId, resolveDefaultDatabase(conn, []));
+  if (tab) {
+    queryStore.updateConnection(tab.id, connectionId, resolveDefaultDatabase(conn, []));
+  }
+  try {
+    await connectionStore.ensureConnected(conn.id);
+    const options = await fetchNamespaceOptionsForConnection(conn.id, conn);
+    if (conn.db_type === "dameng") {
+      queryStore.updateSchema(tabId, resolveDefaultAiSchema(conn, options));
+    } else {
+      queryStore.updateDatabase(tabId, resolveDefaultDatabase(conn, options));
+    }
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
+    toast(t("connection.connectFailed", { message: translateBackendError(t, message) }), 5000);
+  }
+}
+
+/** 分离 AI 子窗口转发来的命名空间切换（面板内 changeNamespace）。 */
+function handleDetachedAiChangeNamespace(value: string) {
+  const tab = activeTab.value;
+  const connection = activeConnection.value;
+  if (!tab || !connection) return;
+  const namespace = decodeSelectableDatabaseValue(connection.db_type, value);
+  if (resolveAiNamespaceSelection(tab, connection).kind === "schema") {
+    queryStore.updateSchema(tab.id, namespace || undefined);
+  } else {
+    queryStore.updateDatabase(tab.id, namespace);
+  }
+}
+
+/** 主窗口标签页快照，广播给分离的 SQL 库面板用于高亮/脏标记。 */
+const savedSqlTabsSnapshotForDetached = computed(() => {
+  const tab = activeTab.value;
+  const target = savedSqlExecutionTargetFromTab(tab);
+  return {
+    activeSavedSqlId: tab?.savedSqlId ?? null,
+    dirtySavedSqlIds: queryStore.tabs.filter((candidate) => candidate.savedSqlId && queryStore.isTabDirty(candidate)).map((candidate) => candidate.savedSqlId as string),
+    activeTargetConnectionId: target?.connectionId ?? null,
+  };
+});
+
+function pushSavedSqlTabsSnapshot() {
+  void sendDetachedPanelMessage(detachedPanelWindowLabel("sqlLibrary"), { action: "saved-sql-tabs", snapshot: savedSqlTabsSnapshotForDetached.value });
+}
+
+// 以 JSON 作为 watch 键，避免编辑输入产生的新对象引用导致无意义广播。
+watch(
+  () => JSON.stringify(savedSqlTabsSnapshotForDetached.value),
+  () => pushSavedSqlTabsSnapshot(),
+);
+
+// ---------------------------------------------------------------------------
+// 分离 AI 子窗口：上下文快照推送与入口动作转发
+// ---------------------------------------------------------------------------
+
+/** 主窗口活动标签/连接快照，推送给分离的 AI 子窗口。 */
+const aiContextSnapshotForDetached = computed<AiPanelContextSnapshot>(() => {
+  const tab = activeTab.value;
+  return {
+    tab: tab
+      ? {
+          id: tab.id,
+          connectionId: tab.connectionId,
+          database: tab.database,
+          schema: tab.schema ?? null,
+          sql: tab.sql,
+          tableMeta: tab.tableMeta ?? null,
+          lastError: tab.result && isQueryExecutionErrorResult(tab.result) ? String(tab.result.rows[0]?.[0] ?? "") : null,
+          resultPreview: formatResultPreview(tab.result) ?? null,
+        }
+      : null,
+    connection: activeConnection.value ?? null,
+  };
+});
+
+function pushAiContextSnapshot() {
+  if (!isPanelDetached("ai")) return;
+  void sendDetachedPanelMessage(detachedPanelWindowLabel("ai"), { action: "ai-context", snapshot: aiContextSnapshotForDetached.value });
+}
+
+// 以 JSON 作为 watch 键，避免结果对象引用变化导致无意义推送。
+watch(
+  () => JSON.stringify(aiContextSnapshotForDetached.value),
+  () => pushAiContextSnapshot(),
+);
+
+type DetachedAiPendingAction = { type: "trigger"; aiAction: AiAction; instruction?: string } | { type: "set-prompt"; text: string };
+
+/** 子窗口尚未就绪时暂存的入口动作，在子窗口 request-ai-context 后冲刷。 */
+const pendingDetachedAiActions: DetachedAiPendingAction[] = [];
+
+function sendDetachedAiAction(action: DetachedAiPendingAction) {
+  if (action.type === "trigger") {
+    void sendDetachedPanelMessage(detachedPanelWindowLabel("ai"), { action: "ai-trigger-action", aiAction: action.aiAction, instruction: action.instruction });
+  } else {
+    void sendDetachedPanelMessage(detachedPanelWindowLabel("ai"), { action: "ai-set-prompt", text: action.text });
+  }
+}
+
+function flushPendingDetachedAiActions() {
+  if (!pendingDetachedAiActions.length) return;
+  for (const action of pendingDetachedAiActions.splice(0)) sendDetachedAiAction(action);
+}
+
+/** AI 面板已分离时，把入口动作（Fix with AI / 历史分析 / 发送选中等）转发给子窗口。 */
+async function dispatchDetachedAiAction(action: DetachedAiPendingAction): Promise<void> {
+  if (await isDetachedPanelWindowOpen("ai")) {
+    sendDetachedAiAction(action);
+    return;
+  }
+  pendingDetachedAiActions.push(action);
+  const opened = await openDetachedRightSidebarPanel("ai");
+  if (!opened) {
+    for (const pending of pendingDetachedAiActions.splice(0)) {
+      if (pending.type === "trigger") invokeWhenAiReady((handle) => handle.triggerAction(pending.aiAction, pending.instruction));
+      else invokeWhenAiReady((handle) => handle.setPrompt(pending.text));
+    }
+  }
 }
 
 function invokeWhenAiReady(invoke: (handle: AiAssistantHandle) => void) {
@@ -884,11 +1325,19 @@ function invokeWhenAiReady(invoke: (handle: AiAssistantHandle) => void) {
 }
 
 function fixWithAi(errorMessage: string) {
+  if (isPanelDetached("ai")) {
+    void dispatchDetachedAiAction({ type: "trigger", aiAction: "fix", instruction: errorMessage });
+    return;
+  }
   openRightSidebarPanel("ai");
   invokeWhenAiReady((handle) => handle.triggerAction("fix", errorMessage));
 }
 
 function sendSelectionToAi(sql: string) {
+  if (isPanelDetached("ai")) {
+    void dispatchDetachedAiAction({ type: "set-prompt", text: sql });
+    return;
+  }
   openRightSidebarPanel("ai");
   invokeWhenAiReady((handle) => handle.setPrompt(sql));
 }
@@ -962,12 +1411,16 @@ function analyzeHistoryWithAi(entry: HistoryEntry) {
     return;
   }
 
-  openAiPanel();
   const storedDatabase = entry.database || activeTab.value?.database || resolveDefaultDatabase(config, []);
   const database = config.db_type === "sqlite" ? normalizeSqliteNamespace(storedDatabase, config) : storedDatabase;
   const title = t("history.aiAnalysisTab");
   const tabId = queryStore.createTab(connectionId, database || "", title, "query");
   queryStore.updateSql(tabId, entry.sql);
+  if (isPanelDetached("ai")) {
+    void dispatchDetachedAiAction({ type: "trigger", aiAction: "explain", instruction: buildHistoryAiAnalysisPrompt(entry) });
+    return;
+  }
+  openAiPanel();
   invokeWhenAiReady((handle) => handle.triggerAction("explain", buildHistoryAiAnalysisPrompt(entry)));
 }
 
@@ -1925,6 +2378,38 @@ async function onViewTableData(table: SqlObjectNavigationTarget) {
   }
 }
 
+/** 对象浏览器「查看数据」：默认在主窗口打开数据页签；detached 时新建页签并分离到独立子窗口。 */
+async function onOpenObjectTable(target: { tableName: string; schema?: string; tableType?: string; catalog?: string; detached?: boolean }) {
+  const currentTab = activeTab.value;
+  if (!currentTab) return;
+  const navigationTarget = {
+    connectionId: currentTab.connectionId,
+    database: currentTab.database,
+    schema: target.schema,
+    catalog: target.catalog,
+    tableName: target.tableName,
+    tableType: target.tableType,
+  };
+  if (!target.detached) {
+    void openObjectBrowserTableTarget(navigationTarget);
+    return;
+  }
+  try {
+    // 独立窗口固定新建数据页签：等首次加载完成再分离，子窗口经结果缓存拿到完整数据。
+    // pendingDetach：创建即隐藏（页签栏/内容区不渲染），直达独立窗口，主窗口不闪现。
+    const tabId = await openTableTarget(navigationTarget, { pendingDetach: true });
+    if (!tabId) return;
+    const detachResult = await detachTabToWindow(tabId, t);
+    if (!detachResult.ok) {
+      queryStore.revealPendingDetachTab(tabId);
+      toast(detachTabFailureMessage(detachResult.reason, t), 5000);
+    }
+  } catch (error) {
+    console.error("[detached-tab] open from object browser failed", error);
+    toast(error instanceof Error ? error.message : String(error), 5000);
+  }
+}
+
 function onViewTableDdl(table: SqlObjectNavigationTarget) {
   const target = tableTargetFromActiveTab(table);
   if (!target) return;
@@ -1939,15 +2424,8 @@ function onEditTableStructure(table: SqlObjectNavigationTarget) {
   queryStore.openTableStructure(target.connectionId, target.database, target.schema, target.tableName, undefined, undefined, target.catalog);
 }
 
-async function onOpenObjectSource(table: SqlObjectNavigationTarget, initialEditing: boolean) {
-  const provisionalTarget = tableTargetFromActiveTab(table);
-  if (!provisionalTarget) return;
-  const databaseType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(provisionalTarget.connectionId));
-  // Oracle-family: unquoted → UPPER; quoted mixed-case keeps written case for ALL_SOURCE lookup.
-  const navigation = databaseType === "oracle" || databaseType === "dameng" || databaseType === "oceanbase-oracle" || databaseType === "yashandb" || databaseType === "oscar" ? normalizeOracleNavigationTarget(table) : table;
-  const target = tableTargetFromActiveTab(navigation);
-  const objectType = sqlObjectNavigationSourceKind(navigation);
-  if (!target || !objectType) return;
+/** 打开对象源码（完整 target 版）：主窗口导航与分离页签转发共用。 */
+async function openObjectSourceForResolvedTarget(navigation: SqlObjectNavigationTarget, target: { connectionId: string; database: string; catalog?: string; schema?: string; tableName: string }, objectType: NonNullable<ReturnType<typeof sqlObjectNavigationSourceKind>>, initialEditing: boolean) {
   const sourceName = sqlObjectNavigationSourceName(navigation);
   const sourceSchema = sqlObjectNavigationSourceSchema(navigation, target.schema || target.database);
   try {
@@ -2000,6 +2478,18 @@ async function onOpenObjectSource(table: SqlObjectNavigationTarget, initialEditi
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
   }
+}
+
+async function onOpenObjectSource(table: SqlObjectNavigationTarget, initialEditing: boolean) {
+  const provisionalTarget = tableTargetFromActiveTab(table);
+  if (!provisionalTarget) return;
+  const databaseType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(provisionalTarget.connectionId));
+  // Oracle-family: unquoted → UPPER; quoted mixed-case keeps written case for ALL_SOURCE lookup.
+  const navigation = databaseType === "oracle" || databaseType === "dameng" || databaseType === "oceanbase-oracle" || databaseType === "yashandb" || databaseType === "oscar" ? normalizeOracleNavigationTarget(table) : table;
+  const target = tableTargetFromActiveTab(navigation);
+  const objectType = sqlObjectNavigationSourceKind(navigation);
+  if (!target || !objectType) return;
+  await openObjectSourceForResolvedTarget(navigation, target, objectType, initialEditing);
 }
 
 function onQueryEditorObjectSourceSaved() {
@@ -2377,16 +2867,19 @@ function activateQueryTab(tabId: string): boolean {
 }
 
 function activateTabByIndex(index: number): boolean {
-  const tab = queryStore.tabs[index];
+  // 跳过待分离的隐藏页签（pendingDetach），索引与用户可见的页签栏保持一致。
+  const tab = queryStore.tabs.filter((item) => !item.pendingDetach)[index];
   return tab ? activateQueryTab(tab.id) : false;
 }
 
 function activateAdjacentTab(direction: -1 | 1): boolean {
-  const count = queryStore.tabs.length;
+  const visibleTabs = queryStore.tabs.filter((item) => !item.pendingDetach);
+  const count = visibleTabs.length;
   if (count < 2) return false;
-  const currentIndex = queryStore.tabs.findIndex((tab) => tab.id === queryStore.activeTabId);
+  const currentIndex = visibleTabs.findIndex((tab) => tab.id === queryStore.activeTabId);
   const nextIndex = currentIndex < 0 ? (direction > 0 ? 0 : count - 1) : (currentIndex + direction + count) % count;
-  return activateTabByIndex(nextIndex);
+  const tab = visibleTabs[nextIndex];
+  return tab ? activateQueryTab(tab.id) : false;
 }
 
 function activateTabFromHistory(direction: -1 | 1): boolean {
@@ -2403,7 +2896,13 @@ function activateTabFromHistory(direction: -1 | 1): boolean {
   return false;
 }
 
-const tabSwitcherTabs = computed(() => tabSwitcherOrder(queryStore.tabs, queryStore.recentTabIds));
+// 跳过待分离的隐藏页签（pendingDetach），与页签栏/索引切换的可见集合保持一致。
+const tabSwitcherTabs = computed(() =>
+  tabSwitcherOrder(
+    queryStore.tabs.filter((tab) => !tab.pendingDetach),
+    queryStore.recentTabIds,
+  ),
+);
 const tabSwitcherShortcutHint = computed(() => formatShortcutDisplay(settingsStore.editorSettings.shortcuts.tabSwitcher));
 
 function handleTabSwitcherShortcut(direction: -1 | 1, e: KeyboardEvent): boolean {
@@ -2645,6 +3144,8 @@ async function initApp() {
     console.log(`[STARTUP]   connectionStore.initFromDisk: ${(performance.now() - t0).toFixed(0)}ms`);
     await queryStore.initOpenTabs({ validConnectionIds: connectionStore.connections.map((connection) => connection.id) });
     console.log(`[STARTUP]   queryStore.initOpenTabs: ${(performance.now() - t0).toFixed(0)}ms`);
+    // 恢复上次退出时仍分离在子窗口的页签（registry 是唯一事实源）。
+    restoreDetachedTabsOnStartup();
   };
 
   try {
@@ -2818,6 +3319,18 @@ onMounted(async () => {
     .catch(() => {});
   setupTauriListeners();
   setupCloseActionPromptListener();
+  void listenDetachedPanelMessages(handleDetachedPanelMessage).then((unlisten) => {
+    unlistenDetachedPanelMessages = unlisten;
+  });
+  // 空闲时预热一个隐藏的分离页签 shell 窗口（提前加载 bundle/初始化 store），
+  // 页签分离时直接分配并显示，消除 webview 冷启动延迟。
+  if (isTauriRuntime()) {
+    const prewarm = () => void ensureWarmDetachedTabShell();
+    if ("requestIdleCallback" in window) window.requestIdleCallback(prewarm, { timeout: 8000 });
+    else setTimeout(prewarm, 4000);
+  }
+  // 兜底关闭上次拖动异常中断残留的跟随标签窗口。
+  void hideDetachGhost();
   void openPendingSqlFiles();
   void openPendingDbFiles();
   void openPendingConnectionLinks();
@@ -2828,6 +3341,8 @@ onMounted(async () => {
 onUnmounted(() => {
   cleanupTauriListeners();
   cleanupCloseActionPromptListener();
+  unlistenDetachedPanelMessages?.();
+  unlistenDetachedPanelMessages = null;
   if (updateCheckTimer) {
     clearInterval(updateCheckTimer);
   }
@@ -3018,18 +3533,7 @@ onUnmounted(() => {
                     @edit-table-structure="onEditTableStructure"
                     @view-table-ddl="onViewTableDdl"
                     @open-object-source="onOpenObjectSource"
-                    @open-object-table="
-                      (target) =>
-                        activeTab &&
-                        openObjectBrowserTableTarget({
-                          connectionId: activeTab.connectionId,
-                          database: activeTab.database,
-                          schema: target.schema,
-                          catalog: target.catalog,
-                          tableName: target.tableName,
-                          tableType: target.tableType,
-                        })
-                    "
+                    @open-object-table="onOpenObjectTable"
                     @object-schema-change="(schema) => activeTab && queryStore.updateSchema(activeTab.id, schema)"
                     @object-browser-viewport-change="(tabId, viewport) => queryStore.updateObjectBrowserViewport(tabId, viewport)"
                     @structure-editor-saved="
@@ -3094,6 +3598,7 @@ onUnmounted(() => {
                 @execute-redis-command="(command: string) => routeAiRedisCommand(command, true)"
                 @open-explain-plan="onAiOpenExplainPlan"
                 @toggle-maximize="toggleAiPanelMaximized"
+                @detach="detachPanelToWindow('ai', $event)"
                 @close="closeRightSidebarPanel('ai')"
               />
             </div>
@@ -3102,21 +3607,21 @@ onUnmounted(() => {
           <div v-if="showHistory" v-show="!isAiPanelMaximized" :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'" :style="{ width: historyWidth + 'px' }">
             <div class="panel-resize-handle panel-resize-handle--left" @mousedown="startHistoryResize" />
             <div class="h-full min-h-0 overflow-hidden rounded-[inherit]">
-              <QueryHistory :current-connection-id="activeTab?.connectionId" :current-database="activeTab?.database" @restore="restoreHistorySql" @analyze-ai="analyzeHistoryWithAi" @close="closeRightSidebarPanel('history')" />
+              <QueryHistory :current-connection-id="activeTab?.connectionId" :current-database="activeTab?.database" @restore="restoreHistorySql" @analyze-ai="analyzeHistoryWithAi" @detach="detachPanelToWindow('history', $event)" @close="closeRightSidebarPanel('history')" />
             </div>
           </div>
 
           <div v-if="showSqlLibraryPanel" v-show="!isAiPanelMaximized" :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'" :style="{ width: sqlLibraryWidth + 'px' }">
             <div class="panel-resize-handle panel-resize-handle--left" @mousedown="startSqlLibraryResize" />
             <div class="h-full min-h-0 overflow-hidden rounded-[inherit]">
-              <SqlLibraryPanel @close="closeRightSidebarPanel('sqlLibrary')" />
+              <SqlLibraryPanel @detach="detachPanelToWindow('sqlLibrary', $event)" @close="closeRightSidebarPanel('sqlLibrary')" />
             </div>
           </div>
 
           <div v-if="showSqlFilePanel" v-show="!isAiPanelMaximized" :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'" :style="{ width: sqlFilePanelWidth + 'px' }">
             <div class="panel-resize-handle panel-resize-handle--left" @mousedown="startSqlFilePanelResize" />
             <div class="h-full min-h-0 overflow-hidden rounded-[inherit]">
-              <SqlFilePanel @close="closeRightSidebarPanel('sqlFile')" />
+              <SqlFilePanel @detach="detachPanelToWindow('sqlFile', $event)" @close="closeRightSidebarPanel('sqlFile')" />
             </div>
           </div>
         </div>

@@ -160,6 +160,7 @@ type PendingChangesHistorySnapshot = Pick<PendingChangesSnapshot, "newRows" | "n
 const pendingChangesCache = new Map<string, PendingChangesSnapshot>();
 const closingPendingSnapshotTabs = new Set<string>();
 const BEFORE_TAB_SWITCH_EVENT = "dbx:before-tab-switch";
+const FLUSH_PENDING_SNAPSHOTS_EVENT = "dbx:flush-data-grid-pending-snapshots";
 const MAX_PENDING_CHANGES_HISTORY = 100;
 
 function dataGridRowsIdentityChanged(previousRows: CellValue[][] | undefined, nextRows: CellValue[][], appendedFromRowCount?: number): boolean {
@@ -199,6 +200,81 @@ export function clearDataGridPendingSnapshotsForTab(tabId: string) {
 
 export function clearDataGridPendingSnapshot(cacheKey: string) {
   pendingChangesCache.delete(cacheKey);
+}
+
+// ---------------------------------------------------------------------------
+// 待保存状态的跨窗口转移（页签分离为独立窗口 / 合并回主窗口）
+// ---------------------------------------------------------------------------
+
+/** PendingChangesSnapshot 的 JSON 可序列化形态（Map/Set 转数组，随分离快照跨窗口携带）。 */
+export interface SerializedDataGridPendingSnapshot {
+  newRows: CellValue[][];
+  newRowMeta: GridNewRowMeta[];
+  quickEntryDraftRow?: CellValue[];
+  dirtyRows: Array<[number, Array<[number, CellValue]>]>;
+  deletedRows: number[];
+  editingCell?: { rowId: number; col: number } | null;
+  editValue?: string;
+  transactionActive?: boolean;
+  scroll?: { top: number; left: number };
+  columnCount: number;
+  rowCount: number;
+}
+
+function cloneNewRowMetaForTransfer(meta: readonly GridNewRowMeta[]): GridNewRowMeta[] {
+  return meta.map((item) => ({ token: item.token, placement: item.placement ? { ...item.placement } : null, sourceIndex: item.sourceIndex, editedColumns: item.editedColumns ? [...item.editedColumns] : undefined }));
+}
+
+/** 请求本窗口所有已挂载的 DataGrid 立即把待保存状态写入 pendingChangesCache（分离/合并前调用）。 */
+export function flushDataGridPendingSnapshots() {
+  if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent(FLUSH_PENDING_SNAPSHOTS_EVENT));
+}
+
+/**
+ * 收集页签的全部 DataGrid 待保存状态（含当前挂载 grid 的内存态，先冲刷再收集）。
+ * 返回 undefined 表示无待保存内容；结果可 JSON 序列化并随分离快照转移。
+ */
+export function collectDataGridPendingSnapshotsForTab(tabId: string): Record<string, SerializedDataGridPendingSnapshot> | undefined {
+  flushDataGridPendingSnapshots();
+  const collected: Record<string, SerializedDataGridPendingSnapshot> = {};
+  for (const [key, snapshot] of pendingChangesCache) {
+    if (!cacheKeyBelongsToTab(key, tabId)) continue;
+    collected[key] = {
+      newRows: snapshot.newRows.map((row) => [...row]),
+      newRowMeta: cloneNewRowMetaForTransfer(snapshot.newRowMeta),
+      ...(snapshot.quickEntryDraftRow ? { quickEntryDraftRow: [...snapshot.quickEntryDraftRow] } : {}),
+      dirtyRows: [...snapshot.dirtyRows].map(([rowIndex, columns]) => [rowIndex, [...columns]] as [number, Array<[number, CellValue]>]),
+      deletedRows: [...snapshot.deletedRows],
+      editingCell: snapshot.editingCell ? { ...snapshot.editingCell } : null,
+      editValue: snapshot.editValue,
+      transactionActive: snapshot.transactionActive,
+      scroll: snapshot.scroll ? { ...snapshot.scroll } : undefined,
+      columnCount: snapshot.columnCount,
+      rowCount: snapshot.rowCount,
+    };
+  }
+  return Object.keys(collected).length > 0 ? collected : undefined;
+}
+
+/** 把随分离快照转移来的待保存状态写入本窗口缓存（DataGrid 挂载时按 cacheKey 取回）。 */
+export function stageDataGridPendingSnapshotsForTab(tabId: string, snapshots: Record<string, SerializedDataGridPendingSnapshot> | undefined): void {
+  if (!snapshots) return;
+  for (const [key, snapshot] of Object.entries(snapshots)) {
+    if (!cacheKeyBelongsToTab(key, tabId)) continue;
+    pendingChangesCache.set(key, {
+      newRows: snapshot.newRows.map((row) => [...row]),
+      newRowMeta: cloneNewRowMetaForTransfer(snapshot.newRowMeta ?? []),
+      quickEntryDraftRow: snapshot.quickEntryDraftRow ? [...snapshot.quickEntryDraftRow] : undefined,
+      dirtyRows: new Map((snapshot.dirtyRows ?? []).map(([rowIndex, columns]) => [rowIndex, new Map(columns)])),
+      deletedRows: new Set(snapshot.deletedRows ?? []),
+      editingCell: snapshot.editingCell ? { ...snapshot.editingCell } : null,
+      editValue: snapshot.editValue,
+      transactionActive: snapshot.transactionActive,
+      scroll: snapshot.scroll ? { ...snapshot.scroll } : undefined,
+      columnCount: snapshot.columnCount,
+      rowCount: snapshot.rowCount,
+    });
+  }
 }
 
 export function useDataGridEditor(options: UseDataGridEditorOptions) {
@@ -1929,9 +2005,16 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     if (editingCell.value) suppressNextBlurCommit = true;
   }
 
+  // 页签分离/合并前的显式冲刷：把内存态写入缓存供跨窗口转移（不影响编辑焦点状态）。
+  function onFlushPendingSnapshots() {
+    if (!componentActive) return;
+    savePendingSnapshot(true, true);
+  }
+
   const componentInstance = getCurrentInstance();
   if (componentInstance && typeof window !== "undefined") {
     window.addEventListener(BEFORE_TAB_SWITCH_EVENT, onBeforeTabSwitch);
+    window.addEventListener(FLUSH_PENDING_SNAPSHOTS_EVENT, onFlushPendingSnapshots);
   }
 
   if (componentInstance) {
@@ -1955,6 +2038,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       savePendingSnapshot(true, true);
       if (typeof window !== "undefined") {
         window.removeEventListener(BEFORE_TAB_SWITCH_EVENT, onBeforeTabSwitch);
+        window.removeEventListener(FLUSH_PENDING_SNAPSHOTS_EVENT, onFlushPendingSnapshots);
       }
     });
   }

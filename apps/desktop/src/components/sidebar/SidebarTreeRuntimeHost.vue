@@ -19,9 +19,11 @@ import {
   TerminalSquare,
   RefreshCw,
   Copy,
+  Table2,
   TableProperties,
   ListTree,
   Pencil,
+  PictureInPicture2,
   Play,
   Plug,
   Unplug,
@@ -176,6 +178,8 @@ import { buildSidebarDdlTemplateSql, sidebarDdlTargetsForExecutionContext } from
 import { sidebarStructureExportTargets } from "@/lib/sidebar/sidebarExportRuntime";
 import { supportsScheduledDatabaseBackup } from "@/lib/backup/scheduledDatabaseBackup";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { detachTabFailureMessage, detachTabToWindow } from "@/lib/detached/detachTabToWindow";
+import { openTableTarget } from "@/composables/useNavigationTargets";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { rankSavedSqlHistory, type SavedSqlHistoryScope } from "@/lib/savedSql/savedSqlHistory";
 import { savedSqlClipboardFileIds, savedSqlPasteTargetForNode } from "@/lib/savedSql/savedSqlClipboard";
@@ -392,7 +396,7 @@ const emit = defineEmits<{
   "context-menu": [event: MouseEvent, node: TreeNode, items: ContextMenuItem[]];
   "open-ddl": [node: TreeNode];
   "open-object-source": [node: TreeNode, initialEditing: boolean];
-  "open-procedure": [node: TreeNode];
+  "open-procedure": [node: TreeNode, detached?: boolean];
   "open-settings": [initialTab: string];
   "open-data": [node: TreeNode, requireSelection: boolean, openMode: DataTabOpenMode, runner: (node: TreeNode, request: SidebarDataOpenRequest) => Promise<void>];
   "open-visible-databases": [node: TreeNode];
@@ -2244,6 +2248,115 @@ function openProcedureExecution() {
   const node = activeNode.value;
   if (node.type !== "procedure" || !node.connectionId || !node.database) return;
   emit("open-procedure", node);
+}
+
+// --- 「用独立窗口打开」：先在主窗口建页签，再分离到独立子窗口（与对象浏览器同名入口行为一致） ---
+
+/** 「用独立窗口打开」入口仅桌面端主窗口可用（Web 模式无多窗口）；侧边栏只在主窗口渲染，无需再排除已分离窗口。 */
+const canOpenInSeparateWindow = computed(() => isTauriRuntime());
+
+/** 主窗口新建页签后分离到独立子窗口；失败时页签保留在主窗口并提示（与对象浏览器/页签栏分离行为一致）。
+ * 页签创建即带 pendingDetach 隐藏标记（直达独立窗口不闪现），失败时复位为可见。 */
+async function detachCreatedTabToSeparateWindow(tabId: string | undefined) {
+  if (!tabId) return;
+  try {
+    const result = await detachTabToWindow(tabId, t);
+    if (!result.ok) {
+      queryStore.revealPendingDetachTab(tabId);
+      toast(detachTabFailureMessage(result.reason, t), 5000);
+    }
+  } catch (error) {
+    queryStore.revealPendingDetachTab(tabId);
+    console.error("[detached-tab] open from sidebar failed", error);
+    toast(error instanceof Error ? error.message : String(error), 5000);
+  }
+}
+
+/** 查看数据（独立窗口）：固定新建数据页签（pendingDetach 直达不闪现），首屏加载完成后分离到独立子窗口。 */
+async function openViewDataInSeparateWindow() {
+  const node = activeNode.value;
+  if (!(node.type === "table" || node.type === "view" || node.type === "materialized_view") || !node.connectionId || !node.database) return;
+  try {
+    const config = connectionStore.getConfig(node.connectionId);
+    if (config?.db_type === "hbase") {
+      // 与 openData 的 hbase 分支一致：hbase 表走专用页签模式，独立窗口固定新建。
+      await connectionStore.ensureConnected(node.connectionId);
+      connectionStore.activeConnectionId = node.connectionId;
+      const tabId = queryStore.createTab(node.connectionId, node.database, node.label, "hbase", undefined, node.label, undefined, { forceNew: true, activate: false, pendingDetach: true });
+      queryStore.updateSql(tabId, node.label);
+      await detachCreatedTabToSeparateWindow(tabId);
+      return;
+    }
+    const tableType = node.type === "view" ? "VIEW" : node.type === "materialized_view" ? "MATERIALIZED_VIEW" : (node.tableType ?? "TABLE");
+    const tabId = await openTableTarget({ connectionId: node.connectionId, database: node.database, schema: node.schema, catalog: node.catalog, tableName: node.label, tableType }, { pendingDetach: true });
+    await detachCreatedTabToSeparateWindow(tabId);
+  } catch (error) {
+    console.error("[detached-tab] open from sidebar failed", error);
+    toast(error instanceof Error ? error.message : String(error), 5000);
+  }
+}
+
+/** 编辑结构（独立窗口）：复用结构编辑器页签打开逻辑，建页签后分离；创建即隐藏（pendingDetach），主窗口不闪现。 */
+function openStructureEditorInSeparateWindow() {
+  const node = activeNode.value;
+  if (node.type !== "table" || !node.connectionId || !node.database) return;
+  const tabId = queryStore.openTableStructure(node.connectionId, node.database, node.schema, node.label, undefined, undefined, node.catalog, { activate: false, pendingDetach: true });
+  void detachCreatedTabToSeparateWindow(tabId);
+}
+
+/** 新建查询（独立窗口）：沿用侧边栏 newQuery 的 SELECT 模板，建查询页签后分离；创建即隐藏（pendingDetach），主窗口不闪现。 */
+async function openNewQueryInSeparateWindow() {
+  const node = activeNode.value;
+  if (!node.connectionId || !node.database) return;
+  try {
+    await connectionStore.ensureConnected(node.connectionId);
+    connectionStore.activeConnectionId = node.connectionId;
+    const config = connectionStore.getConfig(node.connectionId);
+    const dbType = config ? effectiveDatabaseTypeForConnection(config) : undefined;
+    const sql = buildTableSelectTemplate({
+      databaseType: dbType,
+      identifierQuote: connectionStore.connectionIdentifierQuote(node.connectionId),
+      catalog: node.catalog,
+      database: node.database,
+      schema: node.schema,
+      tableName: node.label,
+      columns: [],
+    });
+    const tabId = queryStore.createTab(node.connectionId, node.database, undefined, "query", node.schema, undefined, node.catalog, { forceWordWrap: true, activate: false, pendingDetach: true });
+    queryStore.updateSql(tabId, sql);
+    await detachCreatedTabToSeparateWindow(tabId);
+  } catch (e: any) {
+    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    openDriverStoreForInstallError(e?.message || String(e));
+  }
+}
+
+/** 执行存储过程（独立窗口）：对话框确认建页签后，把页签分离到独立子窗口（detached 标记经 open-procedure 事件传给 ConnectionTree）。 */
+function openProcedureExecutionInSeparateWindow() {
+  const node = activeNode.value;
+  if (node.type !== "procedure" || !node.connectionId || !node.database) return;
+  emit("open-procedure", node, true);
+}
+
+/** 「用独立窗口打开」子菜单：对应一级菜单中涉及打开标签页的同名操作，仅新增入口、不改动原操作。 */
+function openInSeparateWindowSubmenu(node: TreeNode): ContextMenuItem[] {
+  if (!canOpenInSeparateWindow.value) return [];
+  const children: ContextMenuItem[] = [];
+  const isTableLike = node.type === "table" || node.type === "view" || node.type === "materialized_view";
+  if (isTableLike) {
+    children.push({ label: t("contextMenu.viewData"), action: () => void openViewDataInSeparateWindow(), icon: Table2 });
+  }
+  if (node.type === "table" && canOpenStructureEditor.value) {
+    children.push({ label: t("contextMenu.editStructure"), action: openStructureEditorInSeparateWindow, icon: PencilRuler });
+  }
+  if (isTableLike) {
+    children.push({ label: t("contextMenu.newQuery"), action: () => void openNewQueryInSeparateWindow(), icon: TerminalSquare });
+  }
+  if (node.type === "procedure") {
+    children.push({ label: t("contextMenu.executeProcedure"), action: openProcedureExecutionInSeparateWindow, icon: Play });
+  }
+  if (children.length === 0) return [];
+  return [{ label: t("contextMenu.openInSeparateWindow"), icon: PictureInPicture2, children }];
 }
 
 async function compileXuguObject() {
@@ -5370,6 +5483,7 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       if (supportsAiAssistantContext(currentDatabaseType())) {
         items.push({ label: t("contextMenu.addToAi"), action: () => emit("add-to-ai", node), icon: Sparkles });
       }
+      items.push(...openInSeparateWindowSubmenu(node));
       items.push({ label: "", separator: true });
       items.push(exportDataSubmenu(false));
       items.push({ label: t("contextMenu.refreshChildren"), action: refresh, icon: RefreshCw, shortcut: shortcutRefresh });
@@ -5409,6 +5523,7 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     if (canOpenStructureEditor.value) {
       items.push({ label: t("contextMenu.editStructure"), action: openStructureEditor, icon: PencilRuler });
     }
+    items.push(...openInSeparateWindowSubmenu(node));
     if (canRenameObject.value) {
       items.push({
         label: t("contextMenu.renameObject"),
@@ -5568,6 +5683,7 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     const isPackageMember = node.parentType === "package" && !!node.parentName;
     if (node.type === "procedure" && !isPackageMember) {
       items.push({ label: t("contextMenu.executeProcedure"), action: openProcedureExecution, icon: Play });
+      items.push(...openInSeparateWindowSubmenu(node));
     }
     if (!isPackageMember && currentDatabaseType() === "xugu" && buildXuguCompileSql({ objectType: node.type, schema: node.schema, name: node.objectName || node.label })) {
       items.push({ label: t("contextMenu.compileObject"), action: compileXuguObject, icon: Wrench });

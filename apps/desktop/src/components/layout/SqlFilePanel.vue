@@ -1,14 +1,18 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from "vue";
 import { useI18n } from "vue-i18n";
-import { FolderOpen, FileCode, FolderClosed, ChevronRight, ChevronDown, X, Trash2, RefreshCw, FolderSearch, Copy, Play, ChevronsUpDown, ChevronsDownUp } from "@lucide/vue";
+import { FolderOpen, FileCode, FolderClosed, ChevronRight, ChevronDown, PictureInPicture2, X, Trash2, RefreshCw, FolderSearch, Copy, Play, ChevronsUpDown, ChevronsDownUp } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
+import DetachedWindowControls from "@/components/layout/DetachedWindowControls.vue";
 import { useQueryStore } from "@/stores/queryStore";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
+import { usePanelDetachDrag } from "@/composables/usePanelDetachDrag";
+import { MAIN_WINDOW_LABEL, getDetachedPanelFromLocation, sendDetachedPanelMessage } from "@/lib/detached/detachedPanel";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { isMacOS } from "@/lib/backend/platform";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { resolveExternalSqlFileTarget, unassociatedExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
@@ -20,7 +24,39 @@ import { orderedListRangeAnchorIndex, orderedListSelectionIntent, type OrderedLi
 
 const emit = defineEmits<{
   close: [];
+  /** 拖拽面板头部分离为独立窗口（仅主窗口内停靠时触发）。*/
+  detach: [position: { x: number; y: number }];
+  /** 合并回主窗口（仅独立窗口模式显示）。*/
+  dock: [];
 }>();
+
+// 当前是否运行在独立子窗口中。
+const isDetachedWindow = getDetachedPanelFromLocation() !== null;
+const isMac = isMacOS();
+const isDesktop = isTauriRuntime();
+
+/** 点击按钮分离为独立窗口：以点击处的屏幕坐标作为新窗口位置。 */
+function onDetachClick(event: MouseEvent) {
+  emit("detach", { x: event.screenX, y: event.screenY });
+}
+
+/** 独立窗口为无边框，双击面板头部切换最大化（双击按钮时忽略）。*/
+async function onHeaderDblclick(event: MouseEvent) {
+  if (!isDetachedWindow) return;
+  if ((event.target as HTMLElement | null)?.closest("button")) return;
+  try {
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    await getCurrentWindow().toggleMaximize();
+  } catch (error) {
+    console.error("[detached-panel] toggle maximize failed", error);
+  }
+}
+
+const { onHeaderPointerDown } = usePanelDetachDrag({
+  isDetached: () => isDetachedWindow,
+  title: () => t("sqlFileTree.title"),
+  onDetach: (position) => emit("detach", position),
+});
 
 const { t } = useI18n();
 const queryStore = useQueryStore();
@@ -216,6 +252,19 @@ async function openFile(path: string) {
   try {
     const snapshot = await api.readExternalSqlFileSnapshot(path);
     const target = resolveExternalSqlFileTarget(path, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), unassociatedExternalSqlFileTarget());
+    if (isDetachedWindow) {
+      // 独立窗口中没有标签页上下文，转发给主窗口打开。
+      void sendDetachedPanelMessage(MAIN_WINDOW_LABEL, {
+        action: "open-external-sql-file",
+        connectionId: target.connectionId,
+        database: target.database,
+        catalog: target.catalog,
+        path,
+        sql: snapshot.content,
+        version: snapshot.version,
+      });
+      return;
+    }
     queryStore.openExternalSqlFile(target.connectionId, target.database, path, snapshot.content, snapshot.version, target.catalog);
   } catch (e: any) {
     if (isExternalSqlFileTooLargeError(e)) {
@@ -231,6 +280,17 @@ async function openFile(path: string) {
 // the user can review its statements and pick a connection/database before run.
 function executeFile(path: string) {
   const target = resolveExternalSqlFileTarget(path, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), unassociatedExternalSqlFileTarget());
+  if (isDetachedWindow) {
+    // 执行对话框由主窗口弹出。
+    void sendDetachedPanelMessage(MAIN_WINDOW_LABEL, {
+      action: "execute-external-sql-file",
+      connectionId: target.connectionId,
+      database: target.database,
+      catalog: target.catalog,
+      path,
+    });
+    return;
+  }
   connectionStore.sqlFileSource = {
     connectionId: target.connectionId,
     database: target.database,
@@ -414,7 +474,7 @@ function clearContextTarget() {
 
 <template>
   <div class="h-full flex flex-col overflow-hidden">
-    <div class="h-9 flex items-center gap-1 px-2 border-b shrink-0 bg-muted/20">
+    <div class="h-9 flex items-center gap-1 px-2 border-b shrink-0 bg-muted/20" :class="{ 'pl-20': isDetachedWindow && isMac }" :data-tauri-drag-region="isDetachedWindow ? 'deep' : undefined" @pointerdown="onHeaderPointerDown" @dblclick="onHeaderDblclick">
       <span class="text-[13px] font-medium">{{ t("sqlFileTree.title") }}</span>
       <span class="flex-1" />
       <LightTooltip v-if="folders.length > 0" :text="t('sqlFileTree.refreshAll')" side="bottom" :delay="0" :close-delay="0" nowrap>
@@ -425,6 +485,17 @@ function clearContextTarget() {
       <LightTooltip :text="t('sqlFileTree.openFolder')" side="bottom" :delay="0" :close-delay="0" nowrap>
         <Button variant="ghost" size="icon" class="h-5 w-5" @click="pickFolder">
           <FolderOpen class="h-3 w-3" />
+        </Button>
+      </LightTooltip>
+      <DetachedWindowControls v-if="isDetachedWindow && !isMac" />
+      <LightTooltip v-if="isDetachedWindow" :text="t('panelDetach.dock')" side="bottom" :delay="0" :close-delay="0" nowrap>
+        <Button variant="ghost" size="icon" class="h-5 w-5" @click="emit('dock')">
+          <PictureInPicture2 class="h-3 w-3" />
+        </Button>
+      </LightTooltip>
+      <LightTooltip v-else-if="isDesktop" :text="t('panelDetach.detach')" side="bottom" :delay="0" :close-delay="0" nowrap>
+        <Button variant="ghost" size="icon" class="h-5 w-5" @click="onDetachClick">
+          <PictureInPicture2 class="h-3 w-3" />
         </Button>
       </LightTooltip>
       <LightTooltip :text="t('sqlFileTree.closePanel')" side="bottom" :delay="0" :close-delay="0" nowrap>

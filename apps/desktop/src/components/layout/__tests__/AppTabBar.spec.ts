@@ -35,6 +35,35 @@ describe("AppTabBar HBase presentation", () => {
   });
 });
 
+describe("AppTabBar detached tab window", () => {
+  it("places Open in Separate Window directly below Fix Tab and offers it for every tab", () => {
+    const fixPosition = tabBarSource.indexOf('label: tab.pinned ? t("contextMenu.unfixTab") : t("contextMenu.fixTab")');
+    const detachPosition = tabBarSource.indexOf('label: t("contextMenu.openInSeparateWindow")');
+    expect(fixPosition).toBeGreaterThanOrEqual(0);
+    expect(detachPosition).toBeGreaterThan(fixPosition);
+    expect(tabBarSource).toContain("visible: isTauriRuntime()");
+    expect(tabBarSource).toContain("action: () => void detachTabToWindow(tab)");
+  });
+
+  it("detaches through the shared ack-gated flow and surfaces block/failure reasons", () => {
+    // 页签栏分离委托共享实现：prepare → 子窗口 adopt 回执确认后 finalize，
+    // 失败回滚（页签保留）；执行中查询/未提交事务等不可迁移状态拒绝分离并明确提示。
+    expect(tabBarSource).toContain('import { detachTabFailureMessage, detachTabToWindow as detachTabToWindowShared } from "@/lib/detached/detachTabToWindow";');
+    expect(tabBarSource).toContain("const result = await detachTabToWindowShared(tab.id, t);");
+    expect(tabBarSource).toContain("if (!result.ok) toast(detachTabFailureMessage(result.reason, t), 5000);");
+    expect(tabBarSource).toContain('console.error("[detached-tab] open failed", error);');
+  });
+
+  it("hides pendingDetach tabs from every tab-bar surface so separate-window opens do not flicker", () => {
+    // 「用独立窗口打开」创建即隐藏：所有渲染面（固定/常规/溢出列表/空栏判断）都走 visibleTabs。
+    expect(tabBarSource).toContain("const visibleTabs = computed(() => queryStore.tabs.filter((tab) => !tab.pendingDetach));");
+    expect(tabBarSource).toContain("const fixedTabs = computed(() => visibleTabs.value.filter((tab) => tab.pinned));");
+    expect(tabBarSource).toContain("const regularTabs = computed(() => visibleTabs.value.filter((tab) => !tab.pinned));");
+    expect(tabBarSource).toContain('v-if="visibleTabs.length > 0 || driverStoreOpen || settingsPageOpen"');
+    expect(tabBarSource).not.toContain('v-for="tab in queryStore.tabs"');
+  });
+});
+
 describe("AppTabBar object browser presentation", () => {
   it("uses matching icons and colors for object and database browser tabs", () => {
     expect(tabBarSource).toContain('if (tab.mode === "databases" || tab.mode === "objects") return "text-amber-500 dark:text-amber-400";');

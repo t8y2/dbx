@@ -56,7 +56,7 @@ import { agentProtocolQueryResultMaxRows, capQueryResultTotal, effectiveQueryRes
 import { elasticsearchRestRequestRanges, executableStatementRanges, splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import { replaceSqlServerLeadingUseQuery, sqlServerLeadingUseScript, sqlServerUseDatabaseFromStatement } from "@/lib/sql/sqlCompletionLookupTarget";
 import { externalSqlFileDisplayTitles, normalizeExternalSqlPath } from "@/lib/sql/sqlFileOpen";
-import { clearDataGridPendingSnapshot, clearDataGridPendingSnapshotsForTab } from "@/composables/useDataGridEditor";
+import { clearDataGridPendingSnapshot, clearDataGridPendingSnapshotsForTab, collectDataGridPendingSnapshotsForTab } from "@/composables/useDataGridEditor";
 import { buildTabResultSnapshot, deleteTabResultSnapshot, pruneTabResultSnapshots, readTabResultSnapshot, tabResultCacheKey, writeTabResultSnapshot } from "@/lib/tabs/tabResultCache";
 import { estimateQueryResultsBytes, selectInactiveResultEvictions } from "@/lib/tabs/queryResultSize";
 import { queryResultBaseSql, queryResultExecutionSql, resultGridInstanceKey } from "@/lib/tabs/tabPresentation";
@@ -75,6 +75,8 @@ import { createSavedSqlEditorPosition, initSavedSqlEditorPositions, restoreSaved
 import { ensureSqlExtension } from "@/lib/savedSql/savedSqlFileName";
 import { resolveSavedSqlExecutionTarget, savedSqlExecutionTargetFromTab, type SavedSqlExecutionTarget, type SavedSqlOpenTargetMode } from "@/lib/savedSql/savedSqlExecutionTarget";
 import { safeLocalStorageGet, safeLocalStorageRemove } from "@/lib/backend/safeStorage";
+import { isDetachedChildWindow } from "@/lib/detached/detachedWindowContext";
+import { serializeDetachedTab, type DetachedTabSnapshot } from "@/lib/detached/detachedTabs";
 import { sqlTextFingerprint } from "@/lib/sql/sqlTextFingerprint";
 import { disposeAllSqlServerActivityTraces, disposeSqlServerActivityTrace } from "@/lib/sqlserver/sqlServerActivityTraceRuntime";
 import type { SavedSqlFile } from "@/types/database";
@@ -1621,6 +1623,11 @@ export const useQueryStore = defineStore("query", () => {
 
   async function initOpenTabs(options: { validConnectionIds?: Iterable<string> } = {}) {
     if (isOpenTabsLoaded.value) return;
+    // 分离子窗口不加载主窗口的 open-tabs 持久化（页签由 registry 快照恢复）。
+    if (isDetachedChildWindow()) {
+      isOpenTabsLoaded.value = true;
+      return;
+    }
     const saved = await api.loadOpenTabsState().catch(() => null);
     if (saved?.tabs && Array.isArray(saved.tabs)) {
       const restored = restoreSavedTabsFromPayload(saved, options);
@@ -1718,6 +1725,8 @@ export const useQueryStore = defineStore("query", () => {
     [_persistSnapshot, activeTabId],
     () => {
       if (storePersistGeneration !== persistGeneration) return;
+      // 分离子窗口不持久化 open-tabs（其页签所有权在 registry，避免覆盖主窗口状态）。
+      if (isDetachedChildWindow()) return;
       if (persistTimer) clearTimeout(persistTimer);
       persistTimer = setTimeout(() => {
         void saveTabs(tabs.value, activeTabId.value).catch(() => {});
@@ -1739,6 +1748,7 @@ export const useQueryStore = defineStore("query", () => {
   // deterministically instead of racing the debounce timer.
   function flushPendingPersist(): Promise<void> {
     if (storePersistGeneration !== persistGeneration) return Promise.resolve();
+    if (isDetachedChildWindow()) return Promise.resolve();
     if (persistTimer) {
       clearTimeout(persistTimer);
       persistTimer = null;
@@ -1753,7 +1763,16 @@ export const useQueryStore = defineStore("query", () => {
     return tabs.value.find((tab) => tab.connectionId === connectionId && tab.database === database && tab.title === title && tab.mode === mode && (tab.schema || "") === (schema || "") && (tab.catalog || "") === (catalog || ""));
   }
 
-  function createTab(connectionId: string, database: string, title?: string, mode: QueryTab["mode"] = "query", schema?: string, initialSql?: string, catalog?: string, options: { forceNew?: boolean; activate?: boolean; forceWordWrap?: boolean; insertAfterActive?: boolean } = {}) {
+  function createTab(
+    connectionId: string,
+    database: string,
+    title?: string,
+    mode: QueryTab["mode"] = "query",
+    schema?: string,
+    initialSql?: string,
+    catalog?: string,
+    options: { forceNew?: boolean; activate?: boolean; forceWordWrap?: boolean; insertAfterActive?: boolean; pendingDetach?: boolean } = {},
+  ) {
     if (title && !options.forceNew) {
       const existing = findTabByIdentity(connectionId, database, title, mode, schema, catalog);
       if (existing) {
@@ -1779,6 +1798,7 @@ export const useQueryStore = defineStore("query", () => {
       isExplaining: false,
       mode,
       ...(mode === "query" ? { autoCommit: defaultAutoCommitForDbType(dbType) } : {}),
+      ...(options.pendingDetach ? { pendingDetach: true } : {}),
     };
     if (mode === "query") tab.originalSql = initialSql ?? "";
     const activeIndex = options.insertAfterActive ? tabs.value.findIndex((item) => item.id === activeTabId.value) : -1;
@@ -2368,7 +2388,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.structureInitialTabRequestId = (tab.structureInitialTabRequestId ?? 0) + 1;
   }
 
-  function openTableStructure(connectionId: string, database: string, schema?: string, tableName?: string, initialTab?: TableInfoTab, initialTarget?: TableStructureEditorTarget, catalog?: string) {
+  function openTableStructure(connectionId: string, database: string, schema?: string, tableName?: string, initialTab?: TableInfoTab, initialTarget?: TableStructureEditorTarget, catalog?: string, options: { activate?: boolean; pendingDetach?: boolean } = {}) {
     const resolvedTableName = tableName || "";
     if (resolvedTableName) {
       const existing = tabs.value.find((tab) => tab.mode === "structure" && tab.connectionId === connectionId && tab.database === database && (tab.catalog || "") === (catalog || "") && (tab.schema || "") === (schema || "") && (tab.structureTableName || "") === resolvedTableName);
@@ -2397,10 +2417,35 @@ export const useQueryStore = defineStore("query", () => {
       structureInitialTab: initialTab,
       structureInitialTabRequestId: initialTab || initialTarget?.name ? 1 : undefined,
       structureInitialTarget: initialTarget?.name ? initialTarget : undefined,
+      ...(options.pendingDetach ? { pendingDetach: true } : {}),
     };
     tabs.value.push(tab);
-    activeTabId.value = id;
+    if (options.activate !== false) activeTabId.value = id;
     return id;
+  }
+
+  /** 分离失败/取消时复位「待分离」页签：恢复页签栏可见并激活（失败语义=页签保留在主窗口）。 */
+  function revealPendingDetachTab(id: string) {
+    const tab = tabs.value.find((t) => t.id === id);
+    if (!tab?.pendingDetach) return;
+    tab.pendingDetach = undefined;
+    switchTab(id);
+  }
+
+  /**
+   * 分离前置的「隐藏并冻结」：置 pendingDetach 让页签栏不再渲染，激活态让位给最近
+   * 页签（grid/编辑器随失活把待保存状态冲刷进窗口级缓存）。此后到 finalize 期间用户
+   * 无法再编辑该页签，消除慢路径建窗期间主窗口编辑在 finalize 清缓存时丢失的窗口。
+   * 失败/取消时由 revealPendingDetachTab 复位，页签无损失回主窗口。
+   */
+  function concealTabForDetach(id: string) {
+    const tab = tabs.value.find((t) => t.id === id);
+    if (!tab || tab.pendingDetach) return;
+    tab.pendingDetach = true;
+    if (activeTabId.value === id) {
+      const idx = tabs.value.findIndex((t) => t.id === id);
+      activeTabId.value = fallbackActiveTabAfterClose(id, idx);
+    }
   }
 
   function isTabDirty(tab: QueryTab): boolean {
@@ -2646,6 +2691,63 @@ export const useQueryStore = defineStore("query", () => {
   function shouldConfirmTabClose(tab: QueryTab): boolean {
     if (tab.mode === "structure") return isTabDirty(tab);
     return shouldConfirmUnsavedSqlClose.value && isTabDirty(tab);
+  }
+
+  /**
+   * 分离页签第一步（prepare）：结果写入 IndexedDB 缓存并记录 resultCacheKey
+   * （子窗口凭缓存读回；不清内存、不置 evicted，页签 UI 全程无变化），
+   * 生成可序列化快照。不移除页签——子窗口创建失败时页签天然无损，无需回滚。
+   * 必须用 serializeDetachedTab（而非 serializeOpenTabs）：后者按重启恢复语义
+   * 对 data 页签剔除 resultCacheKey、且仅在 resultEvicted 时携带缓存引用，
+   * 会丢失结构草稿/编辑器视口等分离专属字段，导致子窗口拿不到结果。
+   * DataGrid 未保存编辑（newRows/dirtyRows/deletedRows）保存在窗口级缓存，
+   * 最后一步随快照一并转移。调用前应先 concealTabForDetach 隐藏并冻结页签，
+   * 保证收集后页签不再可编辑（慢路径建窗期间的编辑不再可能丢失）。
+   */
+  async function prepareTabDetachSnapshot(id: string): Promise<DetachedTabSnapshot | undefined> {
+    const tab = tabs.value.find((t) => t.id === id);
+    if (!tab) return undefined;
+    if (tab.result || tab.results?.length || tab.resultRuns?.some(resultRunHasPayload)) {
+      const cacheKey = tabResultCacheKey(tab.id);
+      const cached = await writeTabResultSnapshot(cacheKey, buildTabResultSnapshot(tab), tab.connectionId);
+      if (cached) tab.resultCacheKey = cacheKey;
+    }
+    const snapshot = serializeDetachedTab(tab);
+    const dataGridPending = collectDataGridPendingSnapshotsForTab(id);
+    if (dataGridPending) snapshot.dataGridPending = dataGridPending;
+    return snapshot;
+  }
+
+  /**
+   * 分离页签第二步（finalize）：子窗口创建/分配成功后调用。剥离执行/事务等瞬时态，
+   * 从主窗口移除页签。与 closeTab 的差异：不触发脏页签确认、不删除结果缓存。
+   */
+  function finalizeTabDetach(id: string): void {
+    const tab = tabs.value.find((t) => t.id === id);
+    if (!tab) return;
+    if (tab.txnSessionId) void rollbackTransaction(id);
+    if (tab.isExecuting) void cancelTabExecution(id);
+    if (tab.isExplaining) void cancelTabExplain(id);
+    persistSavedSqlEditorPosition(tab);
+    if (tab.mode === "sqlserver-trace") void disposeSqlServerActivityTrace(tab.id);
+    clearDataGridPendingSnapshotsForTab(id);
+    void closeResultSession(tab);
+    void closeClientConnectionSession(tab);
+    const idx = tabs.value.findIndex((t) => t.id === id);
+    if (idx >= 0) tabs.value.splice(idx, 1);
+    if (tab.externalSqlPath) refreshExternalSqlFileTitles();
+    if (activeTabId.value === id) activeTabId.value = fallbackActiveTabAfterClose(id, idx);
+  }
+
+  /**
+   * 恢复分离页签（dock 回主窗口 / 子窗口从快照重建）：已存在同 id 页签则替换，
+   * 否则追加；默认激活。结果缓存（resultCacheKey）由 reloadEvictedTab 按需读回。
+   */
+  function adoptDetachedTab(tab: QueryTab, options: { activate?: boolean } = {}) {
+    const idx = tabs.value.findIndex((t) => t.id === tab.id);
+    if (idx >= 0) tabs.value.splice(idx, 1, tab);
+    else tabs.value.push(tab);
+    if (options.activate !== false) activeTabId.value = tab.id;
   }
 
   function forceClosePendingTab() {
@@ -6724,6 +6826,11 @@ export const useQueryStore = defineStore("query", () => {
     cancelTabExecution,
     cancelTabExplain,
     reloadEvictedTab,
+    prepareTabDetachSnapshot,
+    finalizeTabDetach,
+    adoptDetachedTab,
+    concealTabForDetach,
+    revealPendingDetachTab,
     exportResultArchive,
     importResultArchive,
     fetchTabResultForExport,

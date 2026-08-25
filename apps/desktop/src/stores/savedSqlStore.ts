@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { uuid } from "@/lib/common/utils";
 import * as api from "@/lib/backend/api";
 import { forgetSavedSqlEditorPosition } from "@/lib/app/savedSqlEditorPosition";
@@ -7,6 +7,7 @@ import { ensureSqlExtension } from "@/lib/savedSql/savedSqlFileName";
 import { nextSavedSqlCopyName } from "@/lib/savedSql/savedSqlClipboard";
 import { savedSqlDatabaseScopeKey } from "@/lib/savedSql/savedSqlDatabaseTree";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { broadcastDetachedPanelMessage } from "@/lib/detached/detachedPanel";
 import { useSettingsStore } from "@/stores/settingsStore";
 import type { SavedSqlFile, SavedSqlFolder, SavedSqlLibrary } from "@/types/database";
 
@@ -163,10 +164,26 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
 
   const version = ref(0);
   const treeVersion = ref(0);
+  // reloadFromStorage 引发的 version 变化不再广播，避免分离窗口间事件乒乓。
+  let suppressChangeBroadcast = false;
   function bumpVersion(options: { tree?: boolean } = {}) {
     version.value++;
     if (options.tree) treeVersion.value++;
   }
+
+  // 任何本地变更（bumpVersion）后向其他窗口广播，分离的面板窗口据此刷新数据。
+  // flush: "sync" 保证与 applyLibrary 内的 suppression 标记时序可控。
+  watch(
+    version,
+    () => {
+      if (suppressChangeBroadcast) {
+        suppressChangeBroadcast = false;
+        return;
+      }
+      void broadcastDetachedPanelMessage({ action: "saved-sql-changed" });
+    },
+    { flush: "sync" },
+  );
 
   function applyLibrary(library: SavedSqlLibrary) {
     folders.value = library.folders;
@@ -192,6 +209,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     if (!initFromStoragePromise) {
       initFromStoragePromise = (async () => {
         await migrateLegacyLocalStorage();
+        suppressChangeBroadcast = true;
         applyLibrary(await api.loadSavedSqlLibrary());
         isLoaded.value = true;
       })().finally(() => {
@@ -199,6 +217,24 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
       });
     }
     await initFromStoragePromise;
+  }
+
+  /**
+   * 从后端存储重新加载整个 SQL 库（跨窗口同步用）。
+   * 与 initFromStorage 不同，已加载状态下也会强制刷新；
+   * 刷新触发的 version 变化不会再次广播，避免窗口间事件乒乓。
+   */
+  async function reloadFromStorage() {
+    suppressChangeBroadcast = true;
+    try {
+      applyLibrary(await api.loadSavedSqlLibrary());
+      isLoaded.value = true;
+    } finally {
+      // sync watcher 已在 applyLibrary 内消费了抑制标记；这里兜底清理异常路径。
+      queueMicrotask(() => {
+        suppressChangeBroadcast = false;
+      });
+    }
   }
 
   function listFolders(connectionId: string) {
@@ -821,6 +857,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     version,
     treeVersion,
     initFromStorage,
+    reloadFromStorage,
     listFolders,
     listChildFolders,
     listFiles,

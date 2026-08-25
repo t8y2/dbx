@@ -233,7 +233,7 @@ const emit = defineEmits<{
   viewTableDdl: [target: SqlObjectNavigationTarget];
   editTableStructure: [target: SqlObjectNavigationTarget];
   openObjectSource: [target: SqlObjectNavigationTarget, initialEditing: boolean];
-  openObjectTable: [target: { tableName: string; schema?: string; tableType?: string; catalog?: string }];
+  openObjectTable: [target: { tableName: string; schema?: string; tableType?: string; catalog?: string; detached?: boolean }];
   objectSchemaChange: [schema: string | undefined];
   objectBrowserViewportChange: [tabId: string, viewport: ObjectBrowserViewport];
   structureEditorSaved: [commentChanged: boolean];

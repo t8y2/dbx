@@ -36,7 +36,7 @@ describe("ObjectBrowser table clipboard context menu", () => {
   it("refreshes created tables and retains the clipboard when a later paste step is cancelled", () => {
     expect(objectBrowserSource).toMatch(/let pasteCancelled = false[\s\S]*?let hasMutatedTable = false/);
     expect(objectBrowserSource).toMatch(/if \(!executed\) \{[\s\S]*?pasteCancelled = true;[\s\S]*?break;/);
-    expect(objectBrowserSource).toMatch(/if \(pasteCancelled\) \{[\s\S]*?if \(hasMutatedTable\)[\s\S]*?await reload\(\)[\s\S]*?refreshObjectListTreeNode[\s\S]*?pasteTableCancelledAfterPartial[\s\S]*?return;/);
+    expect(objectBrowserSource).toMatch(/if \(pasteCancelled\) \{[\s\S]*?if \(hasMutatedTable\)[\s\S]*?await reload\(\)[\s\S]*?refreshMainObjectTree[\s\S]*?pasteTableCancelledAfterPartial[\s\S]*?return;/);
   });
 
   it("carries table comments through local copy and paste", () => {

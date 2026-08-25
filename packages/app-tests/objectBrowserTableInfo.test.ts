@@ -55,7 +55,7 @@ test("keeps the data-grid table properties search on the shared column filter", 
 });
 
 test("both table DDL surfaces use the persisted wrapping preference", () => {
-  const sources = ["apps/desktop/src/components/grid/DataGrid.vue", "apps/desktop/src/components/objects/ObjectBrowser.vue"].map((path) => readFileSync(path, "utf8"));
+  const sources = ["apps/desktop/src/components/grid/DataGrid.vue", "apps/desktop/src/components/objects/TableInfoPanel.vue"].map((path) => readFileSync(path, "utf8"));
 
   for (const source of sources) {
     assert.doesNotMatch(source, /const (?:ddlWrap|tableInfoWrap) = ref\(true\)/);

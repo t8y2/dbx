@@ -2,6 +2,7 @@ import { defineStore } from "pinia";
 import { uuid } from "@/lib/common/utils";
 import { ref } from "vue";
 import * as api from "@/lib/backend/api";
+import { broadcastDetachedPanelMessage } from "@/lib/detached/detachedPanel";
 import type { HistoryConnectionOption, HistoryCursor, HistoryEntry, HistorySearchRequest } from "@/lib/backend/api";
 
 const DEFAULT_HISTORY_SEARCH: HistorySearchRequest = {
@@ -152,6 +153,8 @@ export const useHistoryStore = defineStore("history", () => {
     await api.saveHistory(full);
     invalidateConnectionOptionRequests();
     addConnectionOption(full);
+    // 通知分离的历史面板窗口刷新。
+    void broadcastDetachedPanelMessage({ action: "history-changed" });
     if (historyPanelActive) {
       try {
         // Re-query SQLite so eviction, totals, cursors, and text matching stay authoritative.
@@ -169,6 +172,7 @@ export const useHistoryStore = defineStore("history", () => {
     } finally {
       endDestructiveMutation();
     }
+    void broadcastDetachedPanelMessage({ action: "history-changed" });
     const wasVisible = entries.value.some((entry) => entry.id === id);
     entries.value = entries.value.filter((entry) => entry.id !== id);
     if (wasVisible) total.value = Math.max(0, total.value - 1);
@@ -182,6 +186,7 @@ export const useHistoryStore = defineStore("history", () => {
     } finally {
       endDestructiveMutation();
     }
+    void broadcastDetachedPanelMessage({ action: "history-changed" });
     entries.value = [];
     connectionOptions.value = [];
     total.value = 0;

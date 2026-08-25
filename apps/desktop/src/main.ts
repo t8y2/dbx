@@ -6,6 +6,8 @@ import "./styles/globals.css";
 import { installDebugLogCapture } from "@/lib/backend/debugLog";
 import { clearStartupPreloadRetry, retryStartupAfterPreloadFailure } from "@/lib/startup/startupPreloadRecovery";
 import { applyLegacyWebViewClass } from "@/lib/ui/legacyWebView";
+import { getDetachedPanelFromLocation } from "@/lib/detached/detachedPanel";
+import { getDetachedTabModeFromLocation } from "@/lib/detached/detachedTabs";
 
 function startupErrorMessage(error: unknown): string {
   if (error instanceof Error) {
@@ -77,12 +79,15 @@ function installGlobalInputAttrs() {
 
 async function bootstrap() {
   console.log("[STARTUP] frontend bootstrap begin");
-  const [{ default: i18n, loadSavedLocale }, { default: App }] = await Promise.all([import("./i18n"), import("./App.vue")]);
+  // 分离面板/页签的子窗口挂载轻量外壳，跳过主窗口的完整初始化。
+  const detachedPanel = getDetachedPanelFromLocation();
+  const detachedTabMode = getDetachedTabModeFromLocation();
+  const [{ default: i18n, loadSavedLocale }, { default: RootComponent }] = await Promise.all([import("./i18n"), detachedTabMode ? import("./DetachedTabApp.vue") : detachedPanel ? import("./DetachedPanelApp.vue") : import("./App.vue")]);
   console.log("[STARTUP] frontend modules loaded");
   await loadSavedLocale();
   console.log("[STARTUP] locale ready");
 
-  const app = createApp(App);
+  const app = createApp(RootComponent);
   app.use(createPinia());
   app.use(i18n);
   app.use(VueVirtualScroller);

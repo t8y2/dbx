@@ -1,14 +1,18 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from "vue";
+import { computed, inject, nextTick, onBeforeUnmount, reactive, ref, watch } from "vue";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { ArrowDownWideNarrow, Download, FilePlus, FileText, FolderCog, FolderClosed, FolderOpen, FolderPlus, Library, LocateFixed, Pencil, Play, Search, Trash2, Upload, X } from "@lucide/vue";
+import { ArrowDownWideNarrow, Download, FilePlus, FileText, FolderCog, FolderClosed, FolderOpen, FolderPlus, Library, LocateFixed, Pencil, PictureInPicture2, Play, Search, Trash2, Upload, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import CustomContextMenu, { type ContextMenuItem as CtxMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
+import DetachedWindowControls from "@/components/layout/DetachedWindowControls.vue";
 import { useToast } from "@/composables/useToast";
+import { usePanelDetachDrag } from "@/composables/usePanelDetachDrag";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { isMacOS } from "@/lib/backend/platform";
+import { DETACHED_SAVED_SQL_TABS_KEY, MAIN_WINDOW_LABEL, getDetachedPanelFromLocation, sendDetachedPanelMessage } from "@/lib/detached/detachedPanel";
 import * as api from "@/lib/backend/api";
 import { externalSqlFileOpenErrorMessage } from "@/lib/sql/sqlFileOpen";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
@@ -36,7 +40,41 @@ const settingsStore = useSettingsStore();
 
 const emit = defineEmits<{
   close: [];
+  /** 拖拽面板头部分离为独立窗口（仅主窗口内停靠时触发）。*/
+  detach: [position: { x: number; y: number }];
+  /** 合并回主窗口（仅独立窗口模式显示）。*/
+  dock: [];
 }>();
+
+// 当前是否运行在独立子窗口中。
+const isDetachedWindow = getDetachedPanelFromLocation() !== null;
+const isMac = isMacOS();
+const isDesktop = isTauriRuntime();
+
+/** 点击按钮分离为独立窗口：以点击处的屏幕坐标作为新窗口位置。 */
+function onDetachClick(event: MouseEvent) {
+  emit("detach", { x: event.screenX, y: event.screenY });
+}
+
+/** 独立窗口为无边框，双击面板头部切换最大化（双击按钮时忽略）。*/
+async function onHeaderDblclick(event: MouseEvent) {
+  if (!isDetachedWindow) return;
+  if ((event.target as HTMLElement | null)?.closest("button")) return;
+  try {
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    await getCurrentWindow().toggleMaximize();
+  } catch (error) {
+    console.error("[detached-panel] toggle maximize failed", error);
+  }
+}
+// 独立窗口中注入的主窗口标签页快照；主窗口内停靠时为 null，使用本地 queryStore。
+const detachedTabsSnapshot = inject(DETACHED_SAVED_SQL_TABS_KEY, null);
+
+const { onHeaderPointerDown } = usePanelDetachDrag({
+  isDetached: () => isDetachedWindow,
+  title: () => t("sqlLibrary.title"),
+  onDetach: (position) => emit("detach", position),
+});
 
 const UNFILED_DROP_TARGET_ID = "__sql-library-unfiled__";
 const DRAG_THRESHOLD = 5;
@@ -417,6 +455,11 @@ async function openNewQueryInFolder(folder?: SavedSqlFolder) {
       database: "",
       sql: "",
     });
+    if (isDetachedWindow) {
+      // 独立窗口中没有标签页上下文，转发给主窗口打开。
+      void sendDetachedPanelMessage(MAIN_WINDOW_LABEL, { action: "open-saved-sql", file });
+      return;
+    }
     const tabId = queryStore.openSavedSql(file);
     connectionStore.activeConnectionId = queryStore.tabs.find((tab) => tab.id === tabId)?.connectionId ?? file.connectionId;
   } catch (error) {
@@ -432,8 +475,15 @@ const lastClickedItemIndex = ref<number | null>(null); // Unified index for both
 // Active item state (single selection highlight, like left sidebar)
 const activeItemId = ref<string | null>(null);
 const activeItemType = ref<"file" | "folder" | null>(null);
-const activeSavedSqlId = computed(() => queryStore.tabs.find((tab) => tab.id === queryStore.activeTabId)?.savedSqlId ?? null);
+const activeSavedSqlId = computed(() => {
+  if (detachedTabsSnapshot) return detachedTabsSnapshot.value.activeSavedSqlId;
+  return queryStore.tabs.find((tab) => tab.id === queryStore.activeTabId)?.savedSqlId ?? null;
+});
 const hasCurrentSavedSqlExecutionTarget = computed(() => {
+  if (detachedTabsSnapshot) {
+    const connectionId = detachedTabsSnapshot.value.activeTargetConnectionId;
+    return !!connectionId && activeConnectionIds.value.has(connectionId);
+  }
   const activeTab = queryStore.tabs.find((tab) => tab.id === queryStore.activeTabId);
   const target = savedSqlExecutionTargetFromTab(activeTab);
   return !!target && activeConnectionIds.value.has(target.connectionId);
@@ -548,6 +598,7 @@ function fileMetaClass(fileId: string): string {
 }
 
 function isFileDirty(file: SavedSqlFile): boolean {
+  if (detachedTabsSnapshot) return detachedTabsSnapshot.value.dirtySavedSqlIds.includes(file.id);
   return queryStore.tabs.some((tab) => tab.savedSqlId === file.id && queryStore.isTabDirty(tab));
 }
 
@@ -691,6 +742,12 @@ async function openFile(file: SavedSqlFile, targetMode?: SavedSqlOpenTargetMode)
   if (suppressNextRowClick.value) return;
   const loadedFile = await savedSqlStore.ensureFileContent(file.id);
   if (!loadedFile) return;
+  if (isDetachedWindow) {
+    // 独立窗口中没有标签页上下文，转发给主窗口打开。
+    void sendDetachedPanelMessage(MAIN_WINDOW_LABEL, { action: "open-saved-sql", file: loadedFile, targetMode });
+    void savedSqlStore.recordFileUsage(loadedFile.id);
+    return;
+  }
   const tabId = queryStore.openSavedSql(loadedFile, { targetMode });
   const openedConnectionId = queryStore.tabs.find((tab) => tab.id === tabId)?.connectionId ?? loadedFile.connectionId;
   if (openedConnectionId) connectionStore.activeConnectionId = openedConnectionId;
@@ -1119,7 +1176,7 @@ function showDropInside(targetId: string) {
 
 <template>
   <div class="h-full flex flex-col overflow-hidden border-l bg-background select-none">
-    <div class="h-9 flex items-center gap-1 px-2 border-b shrink-0 bg-muted/20">
+    <div class="h-9 flex items-center gap-1 px-2 border-b shrink-0 bg-muted/20" :class="{ 'pl-20': isDetachedWindow && isMac }" :data-tauri-drag-region="isDetachedWindow ? 'deep' : undefined" @pointerdown="onHeaderPointerDown" @dblclick="onHeaderDblclick">
       <span class="text-[13px] font-medium">{{ t("sqlLibrary.title") }}</span>
       <span v-if="hasSelection" class="text-[12px] text-muted-foreground ml-1">({{ selectedCount }})</span>
       <span class="flex-1" />
@@ -1141,6 +1198,17 @@ function showDropInside(targetId: string) {
       <LightTooltip :text="t('sqlLibrary.exportLibrary')" side="bottom" :delay="0" :close-delay="0" nowrap>
         <Button variant="ghost" size="icon" class="h-5 w-5" @click="exportFolderContents()">
           <Upload class="h-3 w-3" />
+        </Button>
+      </LightTooltip>
+      <DetachedWindowControls v-if="isDetachedWindow && !isMac" />
+      <LightTooltip v-if="isDetachedWindow" :text="t('panelDetach.dock')" side="bottom" :delay="0" :close-delay="0" nowrap>
+        <Button variant="ghost" size="icon" class="h-5 w-5" @click="emit('dock')">
+          <PictureInPicture2 class="h-3 w-3" />
+        </Button>
+      </LightTooltip>
+      <LightTooltip v-else-if="isDesktop" :text="t('panelDetach.detach')" side="bottom" :delay="0" :close-delay="0" nowrap>
+        <Button variant="ghost" size="icon" class="h-5 w-5" @click="onDetachClick">
+          <PictureInPicture2 class="h-3 w-3" />
         </Button>
       </LightTooltip>
       <LightTooltip :text="t('common.close')" side="bottom" :delay="0" :close-delay="0" nowrap>

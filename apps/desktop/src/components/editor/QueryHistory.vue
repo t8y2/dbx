@@ -2,15 +2,20 @@
 import { ref, computed, nextTick, onBeforeUnmount, onMounted, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
-import { CalendarClock, Check, Copy, Database, ListFilter, LoaderCircle, Minus, RotateCcw, Search, Sparkles, Trash2, X } from "@lucide/vue";
+import { CalendarClock, Check, Copy, Database, ListFilter, LoaderCircle, Minus, PictureInPicture2, RotateCcw, Search, Sparkles, Trash2, X } from "@lucide/vue";
 import { RecycleScroller } from "vue-virtual-scroller";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
+import DetachedWindowControls from "@/components/layout/DetachedWindowControls.vue";
 import { useHistoryStore } from "@/stores/historyStore";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
+import { usePanelDetachDrag } from "@/composables/usePanelDetachDrag";
+import { getDetachedPanelFromLocation, listenDetachedPanelMessages } from "@/lib/detached/detachedPanel";
+import { isMacOS } from "@/lib/backend/platform";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { resolveHistoryActivityKind } from "@/lib/history/historyActivityKind";
 import { canRollbackHistoryEntry } from "@/lib/history/historyAiAnalysis";
 import { hasHistoryDateRange, historyDateRangeIsValid, type HistoryDateRange } from "@/lib/history/historyTimeRange";
@@ -36,7 +41,39 @@ const emit = defineEmits<{
   restore: [sql: string, entry: HistoryEntry];
   analyzeAi: [entry: HistoryEntry];
   close: [];
+  /** 拖拽面板头部分离为独立窗口（仅主窗口内停靠时触发）。*/
+  detach: [position: { x: number; y: number }];
+  /** 合并回主窗口（仅独立窗口模式显示）。*/
+  dock: [];
 }>();
+
+// 当前是否运行在独立子窗口中。
+const isDetachedWindow = getDetachedPanelFromLocation() !== null;
+const isMac = isMacOS();
+const isDesktop = isTauriRuntime();
+
+/** 点击按钮分离为独立窗口：以点击处的屏幕坐标作为新窗口位置。 */
+function onDetachClick(event: MouseEvent) {
+  emit("detach", { x: event.screenX, y: event.screenY });
+}
+
+/** 独立窗口为无边框，双击面板头部切换最大化（双击按钮时忽略）。*/
+async function onHeaderDblclick(event: MouseEvent) {
+  if (!isDetachedWindow) return;
+  if ((event.target as HTMLElement | null)?.closest("button")) return;
+  try {
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    await getCurrentWindow().toggleMaximize();
+  } catch (error) {
+    console.error("[detached-panel] toggle maximize failed", error);
+  }
+}
+
+const { onHeaderPointerDown } = usePanelDetachDrag({
+  isDetached: () => isDetachedWindow,
+  title: () => t("history.title"),
+  onDetach: (position) => emit("detach", position),
+});
 
 type HistoryFilter = "all" | "query" | "data_change" | "schema_change" | "failed";
 
@@ -60,6 +97,7 @@ const filterScrollRef = ref<HTMLElement | null>(null);
 const filtersScrollable = ref(false);
 let filterScrollResizeObserver: ResizeObserver | null = null;
 let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+let unlistenDetachedMessages: (() => void) | null = null;
 
 const filters: HistoryFilter[] = ["all", "query", "data_change", "schema_change", "failed"];
 const hasDateFilter = computed(() => hasHistoryDateRange(dateRange.value));
@@ -426,6 +464,15 @@ onMounted(() => {
   void runHistorySearch();
   void nextTick(updateFilterScrollability);
 
+  // 其他窗口的历史变更（执行查询/删除/清空）时刷新本面板。
+  void listenDetachedPanelMessages((message) => {
+    if (message.action !== "history-changed") return;
+    void store.loadConnectionOptions().catch(() => {});
+    void runHistorySearch();
+  }).then((unlisten) => {
+    unlistenDetachedMessages = unlisten;
+  });
+
   if (filterScrollRef.value) {
     filterScrollResizeObserver = new ResizeObserver(updateFilterScrollability);
     filterScrollResizeObserver.observe(filterScrollRef.value);
@@ -434,6 +481,8 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   store.setHistoryPanelActive(false);
+  unlistenDetachedMessages?.();
+  unlistenDetachedMessages = null;
   if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
   searchDebounceTimer = null;
   filterScrollResizeObserver?.disconnect();
@@ -443,12 +492,19 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="h-full flex flex-col overflow-hidden border-l">
-    <div class="h-9 flex items-center gap-1 px-2 border-b shrink-0 bg-muted/20">
+    <div class="h-9 flex items-center gap-1 px-2 border-b shrink-0 bg-muted/20" :class="{ 'pl-20': isDetachedWindow && isMac }" :data-tauri-drag-region="isDetachedWindow ? 'deep' : undefined" @pointerdown="onHeaderPointerDown" @dblclick="onHeaderDblclick">
       <span class="text-xs font-medium">{{ t("history.title") }}</span>
       <span v-if="store.total > 0" class="text-[10px] text-muted-foreground">{{ store.total }}</span>
       <span class="flex-1" />
       <Button v-if="store.total > 0 || store.connectionOptions.length > 0" variant="ghost" size="icon" class="h-5 w-5" @click="confirmClearHistory">
         <Trash2 class="h-3 w-3" />
+      </Button>
+      <DetachedWindowControls v-if="isDetachedWindow && !isMac" />
+      <Button v-if="isDetachedWindow" variant="ghost" size="icon" class="h-5 w-5" :title="t('panelDetach.dock')" @click="emit('dock')">
+        <PictureInPicture2 class="h-3 w-3" />
+      </Button>
+      <Button v-else-if="isDesktop" variant="ghost" size="icon" class="h-5 w-5" :title="t('panelDetach.detach')" @click="onDetachClick">
+        <PictureInPicture2 class="h-3 w-3" />
       </Button>
       <Button variant="ghost" size="icon" class="h-5 w-5" @click="emit('close')">
         <X class="h-3 w-3" />

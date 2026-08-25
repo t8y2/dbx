@@ -1100,6 +1100,11 @@ export interface QueryTab {
   resultCacheKey?: string;
   resultCacheState?: "memory" | "disk" | "missing";
   pinned?: boolean;
+  /** 瞬态标记：待分离到独立窗口的页签（「用独立窗口打开」创建即置位）。
+   * 主窗口页签栏/键盘导航不渲染不命中，避免"先闪现页签再消失"的闪烁；
+   * 分离成功后随页签移除，失败时经 revealPendingDetachTab 复位。
+   * 不持久化（serializeOpenTabs 白名单不含此字段），也不进分离快照。 */
+  pendingDetach?: boolean;
   result?: QueryResult;
   results?: QueryResult[];
   activeResultIndex?: number;

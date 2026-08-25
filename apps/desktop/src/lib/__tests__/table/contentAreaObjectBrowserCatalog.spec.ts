@@ -5,7 +5,9 @@ const contentAreaSource = readFileSync(new URL("../../../components/layout/Conte
 const connectionTreeSource = readFileSync(new URL("../../../components/sidebar/ConnectionTree.vue", import.meta.url), "utf8");
 const ddlViewDialogSource = readFileSync(new URL("../../../components/objects/DdlViewDialog.vue", import.meta.url), "utf8");
 const objectBrowserSource = readFileSync(new URL("../../../components/objects/ObjectBrowser.vue", import.meta.url), "utf8");
-const fetchTableDdlSource = objectBrowserSource.match(/async function fetchTableDdl(?:\([^)]*\))?[\s\S]*?(?=\nasync function fetchTableColumns\()/)?.[0] ?? "";
+// 表信息面板的 DDL 加载逻辑已抽取到共享组件（内嵌侧栏与分离子窗口共用）。
+const tableInfoPanelSource = readFileSync(new URL("../../../components/objects/TableInfoPanel.vue", import.meta.url), "utf8");
+const fetchTableDdlSource = tableInfoPanelSource.match(/async function fetchTableDdl(?:\([^)]*\))?[\s\S]*?(?=\nasync function fetchTableColumns\()/)?.[0] ?? "";
 const exportStructureSource = objectBrowserSource.match(/async function exportStructure\([\s\S]*?(?=\nasync function exportDataLegacy\()/)?.[0] ?? "";
 
 function openingTag(source: string, componentName: string): string {
@@ -48,8 +50,9 @@ describe("ContentArea object browser refresh wiring", () => {
 
 describe("ObjectBrowser DDL API boundaries", () => {
   it("uses the cached display DDL boundary for the table information panel", () => {
-    expect(fetchTableDdlSource).toMatch(/loadObjectDdl\(tableMetadataRequest\(row\), \{ force \}\)/);
-    expect(objectBrowserSource).toMatch(/function tableMetadataRequest\([\s\S]*?catalog: props\.catalog/);
+    // tableMetadataRequest 位于共享组件 TableInfoPanel（无参，基于 props 构造）。
+    expect(fetchTableDdlSource).toMatch(/loadObjectDdl\(tableMetadataRequest\(\), \{ force \}\)/);
+    expect(tableInfoPanelSource).toMatch(/function tableMetadataRequest\(\)[\s\S]*?catalog: props\.catalog/);
   });
 
   it("keeps structure exports on the portable base DDL", () => {

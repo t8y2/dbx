@@ -190,7 +190,7 @@ DBX connection storage defaults to:
 
 Override the directory with `DBX_DATA_DIR`.
 
-Local file imports additionally require `DBX_MCP_IMPORT_ROOTS`. Paths must be absolute regular files inside one configured root. Import plans bind SHA-256, parsing, mapping, template version, connection, and staging target; start revalidates the source and imports from a private task snapshot. Import tools support local mode only and return `IMPORT_UNSUPPORTED_IN_WEB_MODE_V1` in Web mode. See the [MCP documentation](../../docs/content/docs/mcp.mdx#local-file-imports-and-milvus-tools) for the full contract.
+Local file imports additionally require `DBX_MCP_IMPORT_ROOTS`. Preview accepts Excel/JSON/CSV/TSV, while v1 governed database import is fail-closed to streaming UTF-8 CSV/TSV. Prepare accepts position+name mappings and generates a unique `staging.mcp_<uuid>` relation; callers cannot append to an existing table. Start revalidates the source and streams a private snapshot containing row numbers, hashes, and batch lineage before opening a database pool. Import tools support local mode only and return `IMPORT_UNSUPPORTED_IN_WEB_MODE_V1` in Web mode. See the [MCP documentation](../../docs/content/docs/mcp.mdx#local-file-imports-and-milvus-tools) for the full contract.
 
 ### Agent/JDBC databases
 
@@ -348,7 +348,6 @@ SQL text is not included in normal MCP errors or logged by default. Enable tempo
 | `DBX_MCP_IMPORT_FILE_MAX_BYTES` | Maximum tabular import source size (default 512 MiB) |
 | `DBX_MCP_SEMANTIC_FILE_MAX_BYTES` | Maximum semantic JSONL size (default 64 MiB) |
 | `DBX_MCP_VECTOR_COLLECTIONS` | Comma-separated Milvus collection allowlist (default `semantic_cards`) |
-| `DBX_MCP_VECTOR_DIMENSION` | Required embedding dimension (default `1024`) |
 | `DBX_MCP_VECTOR_TOP_K_MAX` | Maximum Milvus Top K (default `20`, hard cap 50) |
 | `DBX_MCP_DEBUG_SQL` | Include SQL in temporary diagnostics |
 | `DBX_MCP_BINARY` | Override the native binary used by the npm launcher |
@@ -568,7 +567,7 @@ MCP 配置：
 
 通过 `DBX_DATA_DIR` 覆盖默认目录。Windows 便携版应指向 `DBX.exe` 同级、包含 `dbx.db` 的 `data` 文件夹。
 
-本地文件导入还必须配置 `DBX_MCP_IMPORT_ROOTS`。文件必须是允许目录内的绝对路径普通文件。prepare 会固化 SHA-256、解析参数、映射、模板版本、连接和 staging 目标；start 会重新复验，并从任务私有快照执行导入。导入工具仅支持本地模式，Web 模式稳定返回 `IMPORT_UNSUPPORTED_IN_WEB_MODE_V1`。完整契约见 [MCP 中文文档](../../docs/content/docs/mcp.cn.mdx#本地文件导入与-milvus-工具)。
+本地文件导入还必须配置 `DBX_MCP_IMPORT_ROOTS`。preview 支持 Excel/JSON/CSV/TSV，但 v1 治理入库只允许可流式有界转换的 UTF-8 CSV/TSV。prepare 接受“源位置+源名称”映射并由服务端生成唯一 `staging.mcp_<uuid>`，调用方不能追加已有表。start 在打开数据库连接前复验文件并流式生成包含真实行号、行哈希和批次血缘的任务快照。导入工具仅支持本地模式，Web 模式稳定返回 `IMPORT_UNSUPPORTED_IN_WEB_MODE_V1`。完整契约见 [MCP 中文文档](../../docs/content/docs/mcp.cn.mdx#本地文件导入与-milvus-工具)。
 
 ### DBX Web / Docker
 
@@ -703,7 +702,6 @@ MongoDB 更新和删除在未启用完全访问时必须提供可验证有效的
 | `DBX_MCP_IMPORT_FILE_MAX_BYTES` | 表格导入源最大字节数，默认 512 MiB |
 | `DBX_MCP_SEMANTIC_FILE_MAX_BYTES` | 语义 JSONL 最大字节数，默认 64 MiB |
 | `DBX_MCP_VECTOR_COLLECTIONS` | Milvus 集合 allowlist，逗号分隔，默认 `semantic_cards` |
-| `DBX_MCP_VECTOR_DIMENSION` | 固定向量维度，默认 `1024` |
 | `DBX_MCP_VECTOR_TOP_K_MAX` | Milvus Top K 上限，默认 `20`，硬上限 50 |
 | `DBX_MCP_DEBUG_SQL` | 临时输出 SQL 诊断信息 |
 | `DBX_MCP_BINARY` | 覆盖 npm 启动器使用的原生文件 |

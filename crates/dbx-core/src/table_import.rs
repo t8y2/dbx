@@ -65,6 +65,8 @@ pub fn table_import_client_session_id(import_id: &str) -> String {
 pub struct ParsedImportFile {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<serde_json::Value>>,
+    /// 每个已解析数据行在源文件中的 1 基行号；JSON 使用 1 基记录序号。
+    pub source_row_numbers: Vec<usize>,
     pub total_rows: usize,
     pub effective_encoding: Option<TableImportTextEncoding>,
 }
@@ -282,6 +284,7 @@ pub struct TableImportPreview {
     pub size_bytes: u64,
     pub columns: Vec<String>,
     pub rows: Vec<Vec<serde_json::Value>>,
+    pub source_row_numbers: Vec<usize>,
     pub total_rows: usize,
     pub total_rows_exact: bool,
     pub source_fingerprint: String,
@@ -956,6 +959,7 @@ fn parse_csv_reader_inner<R: IoRead>(
     count_all_rows: bool,
 ) -> Result<ParsedImportFile, String> {
     let mut rows = Vec::new();
+    let mut source_row_numbers = Vec::new();
     let mut total_rows = 0;
     let mut columns = Vec::new();
     let mut record = csv::StringRecord::new();
@@ -984,6 +988,7 @@ fn parse_csv_reader_inner<R: IoRead>(
         total_rows += 1;
         if rows.len() < preview_limit {
             rows.push(delimited_record_to_row(&record, columns.len(), config));
+            source_row_numbers.push(row_number);
         }
         if !count_all_rows && rows.len() >= preview_limit {
             break;
@@ -995,7 +1000,7 @@ fn parse_csv_reader_inner<R: IoRead>(
     if total_rows == 0 {
         return Err("Import file has no data rows in the selected row range".to_string());
     }
-    Ok(ParsedImportFile { columns, rows, total_rows, effective_encoding: Some(effective_encoding) })
+    Ok(ParsedImportFile { columns, rows, source_row_numbers, total_rows, effective_encoding: Some(effective_encoding) })
 }
 
 fn parse_delimited_preview_file_with_options(
@@ -1103,7 +1108,14 @@ pub fn parse_json_bytes_with_options(
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        return Ok(ParsedImportFile { columns, rows, total_rows: items.len(), effective_encoding: None });
+        let source_row_numbers = (1..=rows.len()).collect();
+        return Ok(ParsedImportFile {
+            columns,
+            rows,
+            source_row_numbers,
+            total_rows: items.len(),
+            effective_encoding: None,
+        });
     }
 
     if all_arrays {
@@ -1122,7 +1134,14 @@ pub fn parse_json_bytes_with_options(
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        return Ok(ParsedImportFile { columns, rows, total_rows: items.len(), effective_encoding: None });
+        let source_row_numbers = (1..=rows.len()).collect();
+        return Ok(ParsedImportFile {
+            columns,
+            rows,
+            source_row_numbers,
+            total_rows: items.len(),
+            effective_encoding: None,
+        });
     }
 
     Err("JSON rows must all be objects or all be arrays; mixed row shapes are not supported".to_string())
@@ -2640,6 +2659,7 @@ fn parse_xlsx_preview_file_with_options(
     if last_preview_row < first_preview_row {
         return Err("Import file has no data rows in the selected row range".to_string());
     }
+    let source_row_numbers = (first_preview_row..=last_preview_row).collect::<Vec<_>>();
     let rows = (first_preview_row..=last_preview_row)
         .map(|absolute_row| {
             (0..columns.len())
@@ -2657,7 +2677,10 @@ fn parse_xlsx_preview_file_with_options(
     if rows.is_empty() {
         return Err("Import file has no data rows in the selected row range".to_string());
     }
-    Ok((ParsedImportFile { columns, total_rows: rows.len(), rows, effective_encoding: None }, sheets))
+    Ok((
+        ParsedImportFile { columns, total_rows: rows.len(), rows, source_row_numbers, effective_encoding: None },
+        sheets,
+    ))
 }
 
 fn xlsx_cell_styles(
@@ -3363,6 +3386,7 @@ where
     let empty_string_as_null = options.empty_string_as_null.unwrap_or(true);
     let mut columns = Vec::new();
     let mut rows = Vec::new();
+    let mut source_row_numbers = Vec::new();
     let mut total_rows = 0;
     for (index, source_row) in range.rows().enumerate() {
         // Row options and XLSX style coordinates are worksheet-absolute; Calamine indices are range-relative.
@@ -3414,6 +3438,7 @@ where
             row.push(value);
         }
         rows.push(row);
+        source_row_numbers.push(range_start_row + row_number);
     }
     if columns.is_empty() {
         return Err("Import file has no columns in the selected row range".to_string());
@@ -3421,7 +3446,7 @@ where
     if total_rows == 0 {
         return Err("Import file has no data rows in the selected row range".to_string());
     }
-    Ok(ParsedImportFile { columns, rows, total_rows, effective_encoding: None })
+    Ok(ParsedImportFile { columns, rows, source_row_numbers, total_rows, effective_encoding: None })
 }
 
 pub fn parse_xlsx_file(path: &str, preview_limit: usize) -> Result<ParsedImportFile, String> {
@@ -5308,6 +5333,8 @@ fn validated_prepared_import_source(
     Some(ParsedImportFile {
         columns: prepared.columns.clone(),
         rows: prepared.rows.clone(),
+        // 已准备预览不保存绝对源行位置；宁可明确缺失，也不伪造行号。治理导入不走此路径。
+        source_row_numbers: Vec::new(),
         total_rows: prepared.total_rows,
         effective_encoding: prepared.effective_encoding,
     })
@@ -5339,6 +5366,7 @@ pub async fn preview_table_import_file_with_request(
         size_bytes: metadata.len(),
         columns: parsed.columns,
         rows: parsed.rows,
+        source_row_numbers: parsed.source_row_numbers,
         total_rows: parsed.total_rows,
         total_rows_exact,
         source_fingerprint,
@@ -8215,6 +8243,7 @@ mod tests {
         assert_eq!(preview.total_rows, 2);
         assert!(!preview.total_rows_exact);
         assert_eq!(preview.rows[0], vec![serde_json::json!("1"), serde_json::json!("北京")]);
+        assert_eq!(preview.source_row_numbers, vec![2, 3]);
     }
 
     #[test]
@@ -8231,6 +8260,7 @@ mod tests {
         assert_eq!(preview.columns, vec!["id", "name"]);
         assert_eq!(preview.rows, vec![vec![serde_json::json!("1"), serde_json::json!("Ada")]]);
         assert_eq!(preview.total_rows, 1);
+        assert_eq!(preview.source_row_numbers, vec![2]);
     }
 
     #[test]
@@ -9545,6 +9575,7 @@ mod tests {
         let data = ParsedImportFile {
             columns: target_types.iter().map(|(column, _)| column.to_string()).collect(),
             rows,
+            source_row_numbers: Vec::new(),
             total_rows: 1,
             effective_encoding: None,
         };
@@ -10008,6 +10039,8 @@ mod tests {
         assert_eq!(parsed.total_rows, 2);
         assert_eq!(parsed.rows[0], vec![serde_json::json!(1), serde_json::json!("Ada")]);
         assert_eq!(parsed.rows[1], vec![serde_json::json!(2), serde_json::json!("Grace")]);
+        assert_eq!(parsed.source_row_numbers, vec![3, 4]);
+        assert_eq!(preview.source_row_numbers, vec![3, 4]);
         assert_eq!(preview.rows, parsed.rows);
         let _ = std::fs::remove_file(path);
     }
@@ -10041,6 +10074,7 @@ mod tests {
                     serde_json::json!({ "source": "json" }),
                 ],
             ],
+            source_row_numbers: Vec::new(),
             total_rows: 2,
             effective_encoding: None,
         };
@@ -10079,6 +10113,7 @@ mod tests {
         let data = ParsedImportFile {
             columns: vec!["id".to_string()],
             rows: vec![vec![serde_json::json!(1)]],
+            source_row_numbers: Vec::new(),
             total_rows: 1,
             effective_encoding: None,
         };
@@ -10098,6 +10133,7 @@ mod tests {
         let data = ParsedImportFile {
             columns: vec!["notes".to_string()],
             rows: vec![vec![serde_json::json!("long text")]],
+            source_row_numbers: Vec::new(),
             total_rows: 1,
             effective_encoding: None,
         };
@@ -10129,6 +10165,7 @@ mod tests {
                 serde_json::json!("2026-07-07 08:15:00"),
                 serde_json::json!("invoice"),
             ]],
+            source_row_numbers: Vec::new(),
             total_rows: 1,
             effective_encoding: None,
         };
@@ -10160,6 +10197,7 @@ mod tests {
         let data = ParsedImportFile {
             columns: vec!["code".to_string(), "amount".to_string()],
             rows: vec![vec![serde_json::json!("1001"), serde_json::json!("12.5")]],
+            source_row_numbers: Vec::new(),
             total_rows: 1,
             effective_encoding: None,
         };
@@ -10225,6 +10263,7 @@ mod tests {
         let data = ParsedImportFile {
             columns: vec!["name".to_string()],
             rows: vec![vec![serde_json::json!("Ada")]],
+            source_row_numbers: Vec::new(),
             total_rows: 1,
             effective_encoding: None,
         };
@@ -10260,6 +10299,7 @@ mod tests {
                 vec![serde_json::json!(2), serde_json::json!("O'Hara"), serde_json::json!("y")],
                 vec![serde_json::json!(3), serde_json::Value::Null, serde_json::json!("z")],
             ],
+            source_row_numbers: Vec::new(),
             total_rows: 3,
             effective_encoding: None,
         };
@@ -10289,6 +10329,7 @@ mod tests {
         let data = ParsedImportFile {
             columns: vec!["id".to_string()],
             rows: vec![vec![serde_json::json!(1)], vec![serde_json::json!(2)]],
+            source_row_numbers: Vec::new(),
             total_rows: 2,
             effective_encoding: None,
         };
@@ -11280,6 +11321,7 @@ mod tests {
                 vec![serde_json::json!(2), serde_json::json!("Grace")],
                 vec![serde_json::json!(3), serde_json::Value::Null],
             ],
+            source_row_numbers: Vec::new(),
             total_rows: 3,
             effective_encoding: None,
         };
@@ -11303,6 +11345,7 @@ mod tests {
         let data = ParsedImportFile {
             columns: vec!["payload".to_string()],
             rows: (0..4).map(|index| vec![serde_json::json!(format!("{index}{}", "x".repeat(180 * 1024)))]).collect(),
+            source_row_numbers: Vec::new(),
             total_rows: 4,
             effective_encoding: None,
         };
@@ -11336,6 +11379,7 @@ mod tests {
                 serde_json::json!("2026-05-12T00:00:00+00:00"),
                 serde_json::json!("2026-05-12T00:00:00+00:00"),
             ]],
+            source_row_numbers: Vec::new(),
             total_rows: 1,
             effective_encoding: None,
         };
@@ -11370,6 +11414,7 @@ mod tests {
         let data = ParsedImportFile {
             columns: vec!["created_at".to_string()],
             rows: vec![vec![serde_json::json!("2024/2/25 13:02:15")]],
+            source_row_numbers: Vec::new(),
             total_rows: 1,
             effective_encoding: None,
         };
@@ -11468,6 +11513,7 @@ mod tests {
         let data = ParsedImportFile {
             columns: vec!["created_at".to_string()],
             rows: vec![vec![imported_value]],
+            source_row_numbers: Vec::new(),
             total_rows: 1,
             effective_encoding: None,
         };
@@ -11562,6 +11608,7 @@ mod tests {
         let data = ParsedImportFile {
             columns: vec!["name".to_string()],
             rows: vec![vec![serde_json::json!("Tiếng Việt")]],
+            source_row_numbers: Vec::new(),
             total_rows: 1,
             effective_encoding: None,
         };

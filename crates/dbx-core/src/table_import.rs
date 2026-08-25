@@ -2823,10 +2823,15 @@ fn parse_xlsx_file_with_options_and_text_columns(
 }
 
 #[derive(Debug)]
-enum XlsxStreamMessage {
+/// XLSX/XLSM 有界流式读取消息，供导入与治理快照复用。
+pub enum XlsxStreamMessage {
+    /// 已解析并去重的兼容 DBX 表头。
     Header(Vec<String>),
-    Rows(Vec<Vec<serde_json::Value>>),
+    /// 数据批次及每行对应的工作表绝对 1 基行号。
+    Rows { rows: Vec<Vec<serde_json::Value>>, source_row_numbers: Vec<usize> },
+    /// 已读取的近似字节进度。
     Progress(u64),
+    /// 工作表已完整解析。
     Done,
 }
 
@@ -2886,6 +2891,7 @@ struct XlsxStreamRowsState {
     columns: Vec<String>,
     header_sent: bool,
     pending_rows: Vec<Vec<serde_json::Value>>,
+    pending_source_row_numbers: Vec<usize>,
     rows_seen: usize,
     current_row: Option<usize>,
     current_values: Vec<serde_json::Value>,
@@ -2911,6 +2917,7 @@ impl XlsxStreamRowsState {
             columns: expected_columns.unwrap_or_default(),
             header_sent: false,
             pending_rows: Vec::with_capacity(batch_size),
+            pending_source_row_numbers: Vec::with_capacity(batch_size),
             rows_seen: 0,
             current_row: None,
             current_values: Vec::new(),
@@ -2950,6 +2957,9 @@ impl XlsxStreamRowsState {
         absolute_column: usize,
         text_source_columns: &HashSet<String>,
     ) -> bool {
+        if text_source_columns.contains("*") {
+            return true;
+        }
         self.initialize_range(absolute_row, absolute_column);
         absolute_column
             .checked_sub(self.start_column)
@@ -3033,6 +3043,7 @@ impl XlsxStreamRowsState {
         values.resize(self.columns.len(), serde_json::Value::Null);
         values.truncate(self.columns.len());
         self.pending_rows.push(values);
+        self.pending_source_row_numbers.push(absolute_row);
         self.rows_seen = self.rows_seen.saturating_add(1);
         if self.pending_rows.len() >= self.batch_size {
             self.emit_rows(progress)?;
@@ -3045,12 +3056,16 @@ impl XlsxStreamRowsState {
             return Ok(());
         }
         self.sender
-            .blocking_send(Ok(XlsxStreamMessage::Rows(std::mem::take(&mut self.pending_rows))))
+            .blocking_send(Ok(XlsxStreamMessage::Rows {
+                rows: std::mem::take(&mut self.pending_rows),
+                source_row_numbers: std::mem::take(&mut self.pending_source_row_numbers),
+            }))
             .map_err(|_| "Excel import consumer closed before the stream finished".to_string())?;
         self.sender
             .blocking_send(Ok(XlsxStreamMessage::Progress(progress)))
             .map_err(|_| "Excel import consumer closed before the stream finished".to_string())?;
         self.pending_rows = Vec::with_capacity(self.batch_size);
+        self.pending_source_row_numbers = Vec::with_capacity(self.batch_size);
         Ok(())
     }
 
@@ -3089,7 +3104,9 @@ fn stream_xlsx_rows_to_channel(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn stream_xlsx_rows_to_channel_with_control(
+/// 以有界批次流式读取 XLSX/XLSM，保留绝对源行号并支持外部取消。
+/// 调用方必须消费有界通道；函数不会把整个工作表加载到内存。
+pub fn stream_xlsx_rows_to_channel_with_control(
     path: &str,
     options: &TableImportParseOptions,
     batch_size: usize,
@@ -3347,7 +3364,7 @@ async fn validate_xlsx_worksheet_for_import(
         match message {
             Ok(XlsxStreamMessage::Header(header)) => columns = Some(header),
             Ok(XlsxStreamMessage::Progress(bytes_read)) => on_progress(bytes_read),
-            Ok(XlsxStreamMessage::Rows(_) | XlsxStreamMessage::Done) => {}
+            Ok(XlsxStreamMessage::Rows { .. } | XlsxStreamMessage::Done) => {}
             Err(error) => {
                 producer_cancelled.store(true, Ordering::Release);
                 drop(receiver);
@@ -6704,7 +6721,7 @@ where
             };
             match message {
                 Ok(XlsxStreamMessage::Header(_)) => {}
-                Ok(XlsxStreamMessage::Rows(rows)) => {
+                Ok(XlsxStreamMessage::Rows { rows, .. }) => {
                     if is_cancelled(&request.import_id).await {
                         producer_cancelled.store(true, Ordering::Release);
                         drop(receiver);
@@ -7709,7 +7726,7 @@ mod tests {
         while let Some(message) = receiver.blocking_recv() {
             match message.unwrap() {
                 XlsxStreamMessage::Header(columns) => streamed_columns = columns,
-                XlsxStreamMessage::Rows(rows) => streamed_rows.extend(rows),
+                XlsxStreamMessage::Rows { rows, .. } => streamed_rows.extend(rows),
                 _ => {}
             }
         }
@@ -7810,7 +7827,7 @@ mod tests {
             .unwrap();
         let mut streamed_rows = Vec::new();
         while let Some(message) = receiver.blocking_recv() {
-            if let XlsxStreamMessage::Rows(rows) = message.unwrap() {
+            if let XlsxStreamMessage::Rows { rows, .. } = message.unwrap() {
                 streamed_rows.extend(rows);
             }
         }
@@ -8974,7 +8991,7 @@ mod tests {
         let streamed_rows = messages
             .into_iter()
             .filter_map(|message| match message {
-                XlsxStreamMessage::Rows(rows) => Some(rows),
+                XlsxStreamMessage::Rows { rows, .. } => Some(rows),
                 _ => None,
             })
             .flatten()
@@ -9265,7 +9282,7 @@ mod tests {
 
         let mut streamed_rows = Vec::new();
         while let Some(message) = receiver.blocking_recv() {
-            if let XlsxStreamMessage::Rows(rows) = message.unwrap() {
+            if let XlsxStreamMessage::Rows { rows, .. } = message.unwrap() {
                 streamed_rows.extend(rows);
             }
         }
@@ -9296,11 +9313,32 @@ mod tests {
 
         let mut streamed_rows = Vec::new();
         while let Some(message) = receiver.blocking_recv() {
-            if let XlsxStreamMessage::Rows(rows) = message.unwrap() {
+            if let XlsxStreamMessage::Rows { rows, .. } = message.unwrap() {
                 streamed_rows.extend(rows);
             }
         }
         assert_eq!(streamed_rows, vec![vec![serde_json::json!("10.0")]]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn streaming_excel_rows_honor_preexisting_cancellation() {
+        let path = std::env::temp_dir().join(format!("dbx-table-import-stream-cancel-{}.xlsx", uuid::Uuid::new_v4()));
+        std::fs::write(&path, build_styled_test_xlsx(false, &[("A1", 5, 10.0)])).unwrap();
+        let options = TableImportParseOptions { has_header: Some(false), ..TableImportParseOptions::default() };
+        let (sender, _receiver) = tokio::sync::mpsc::channel(2);
+        let error = stream_xlsx_rows_to_channel_with_control(
+            &path.to_string_lossy(),
+            &options,
+            1,
+            None,
+            HashSet::from(["*".to_string()]),
+            true,
+            sender,
+            Arc::new(AtomicBool::new(true)),
+        )
+        .unwrap_err();
+        assert_eq!(error, "Import cancelled");
         let _ = std::fs::remove_file(path);
     }
 
@@ -9338,7 +9376,7 @@ mod tests {
         while let Some(message) = receiver.blocking_recv() {
             match message.unwrap() {
                 XlsxStreamMessage::Header(header) => columns = header,
-                XlsxStreamMessage::Rows(rows) => streamed_rows.extend(rows),
+                XlsxStreamMessage::Rows { rows, .. } => streamed_rows.extend(rows),
                 _ => {}
             }
         }
@@ -9409,7 +9447,7 @@ mod tests {
 
         let mut streamed_rows = Vec::new();
         while let Some(message) = receiver.blocking_recv() {
-            if let XlsxStreamMessage::Rows(rows) = message.unwrap() {
+            if let XlsxStreamMessage::Rows { rows, .. } = message.unwrap() {
                 streamed_rows.extend(rows);
             }
         }

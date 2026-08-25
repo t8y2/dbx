@@ -2185,6 +2185,7 @@ dependencies = [
  "tower-http",
  "url",
  "uuid",
+ "zip",
 ]
 
 [[package]]

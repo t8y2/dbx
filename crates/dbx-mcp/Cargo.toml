@@ -40,3 +40,4 @@ rustls-pemfile = "2.2"
 tempfile = "3"
 tokio = { version = "1", features = ["net", "io-util"] }
 tokio-rustls = "0.26"
+zip = "4"

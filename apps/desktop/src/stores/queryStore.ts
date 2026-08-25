@@ -57,6 +57,7 @@ import { elasticsearchRestRequestRanges, executableStatementRanges, splitSqlStat
 import { replaceSqlServerLeadingUseQuery, sqlServerLeadingUseScript, sqlServerUseDatabaseFromStatement } from "@/lib/sql/sqlCompletionLookupTarget";
 import { externalSqlFileDisplayTitles, normalizeExternalSqlPath } from "@/lib/sql/sqlFileOpen";
 import { clearDataGridPendingSnapshot, clearDataGridPendingSnapshotsForTab } from "@/composables/useDataGridEditor";
+import { clearDataGridStructuredFilterStatesForTab } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
 import { buildTabResultSnapshot, deleteTabResultSnapshot, pruneTabResultSnapshots, readTabResultSnapshot, tabResultCacheKey, writeTabResultSnapshot } from "@/lib/tabs/tabResultCache";
 import { estimateQueryResultsBytes, selectInactiveResultEvictions } from "@/lib/tabs/queryResultSize";
 import { queryResultBaseSql, queryResultExecutionSql, resultGridInstanceKey } from "@/lib/tabs/tabPresentation";
@@ -257,6 +258,27 @@ function markQueryResultRunsRowsRaw(resultRuns: NonNullable<QueryTab["resultRuns
     if (run.resultLocalSortOriginalMongoCopyDocuments) markRaw(run.resultLocalSortOriginalMongoCopyDocuments);
   }
   return resultRuns;
+}
+
+/** Drop heavyweight fields even when a deactivated DataGrid still retains the result object. */
+function releaseResultObjectPayload(result: QueryResult): void {
+  result.columns = [];
+  result.rows = [];
+  result.column_types = undefined;
+  result.column_sortables = undefined;
+  result.spatial_columns = undefined;
+  result.spatial_values = undefined;
+  result.hidden_column_indexes = undefined;
+  result.local_column_filters = undefined;
+  result.local_hidden_column_keys = undefined;
+  result.mongo_documents = undefined;
+  result.mongo_copy_documents = undefined;
+  result.large_value_cells = undefined;
+  result.elasticsearch_raw_body = undefined;
+  result.messages = undefined;
+  result.error = undefined;
+  result.sourceLabel = undefined;
+  result.sourceStatement = undefined;
 }
 
 function preservedResultIndex(results: QueryResult[], currentIndex: number | undefined, preserve: boolean | undefined): number | undefined {
@@ -1029,7 +1051,26 @@ export const useQueryStore = defineStore("query", () => {
     }
   }
 
+  function releaseTabResultObjectPayloads(tab: QueryTab) {
+    const results = new Set<QueryResult>();
+    if (tab.result) results.add(tab.result);
+    for (const result of tab.results ?? []) results.add(result);
+    for (const run of tab.resultRuns ?? []) {
+      if (run.result) results.add(run.result);
+      for (const result of run.results ?? []) results.add(result);
+    }
+    for (const result of results) releaseResultObjectPayload(result);
+  }
+
+  function clearResultRuns(tab: QueryTab) {
+    for (const run of tab.resultRuns ?? []) clearResultRunPayload(run);
+    tab.resultRuns = undefined;
+    tab.activeResultRunId = undefined;
+  }
+
   function clearResultRunPayload(run: NonNullable<QueryTab["resultRuns"]>[number], options: { evicted?: boolean } = {}) {
+    if (run.result) releaseResultObjectPayload(run.result);
+    for (const result of run.results ?? []) releaseResultObjectPayload(result);
     run.result = undefined;
     run.results = undefined;
     run.resultLocalSortOriginalRows = undefined;
@@ -1224,6 +1265,7 @@ export const useQueryStore = defineStore("query", () => {
     const removedRun = tab.resultRuns[runIndex];
     if (removedRun?.resultSessionId) void closeResultRunSession(tab, removedRun);
     if (removedRun?.resultCacheKey) void deleteTabResultSnapshot(removedRun.resultCacheKey);
+    if (removedRun) clearResultRunPayload(removedRun);
     const wasActive = tab.activeResultRunId === runId;
     const remainingRuns = tab.resultRuns.filter((run) => run.id !== runId);
     tab.resultRuns = remainingRuns;
@@ -1250,6 +1292,7 @@ export const useQueryStore = defineStore("query", () => {
     if (!tab.result && !tab.results?.length && !tab.resultEvicted) return false;
 
     const closeSession = closeResultSession(tab);
+    releaseTabResultObjectPayloads(tab);
     clearResultPayload(tab);
     await closeSession;
     return true;
@@ -1274,8 +1317,8 @@ export const useQueryStore = defineStore("query", () => {
       closeOperations.push(closeResultRunSession(tab, run));
     }
 
-    tab.resultRuns = undefined;
-    tab.activeResultRunId = undefined;
+    releaseTabResultObjectPayloads(tab);
+    clearResultRuns(tab);
     clearResultPayload(tab);
     await Promise.all(closeOperations);
     return true;
@@ -2627,6 +2670,7 @@ export const useQueryStore = defineStore("query", () => {
     persistSavedSqlEditorPosition(tabs.value[idx]);
     if (tab.mode === "sqlserver-trace") void disposeSqlServerActivityTrace(tab.id);
     clearDataGridPendingSnapshotsForTab(id);
+    clearDataGridStructuredFilterStatesForTab(id);
     if (tabs.value[idx].txnSessionId) void rollbackTransaction(id);
     if (tabs.value[idx].isExecuting) void cancelTabExecution(id);
     if (tabs.value[idx].isExplaining) void cancelTabExplain(id);
@@ -2634,6 +2678,8 @@ export const useQueryStore = defineStore("query", () => {
     void closeClientConnectionSession(tabs.value[idx]);
     clearResultRunSnapshots(tabs.value[idx]);
     void deleteTabResultSnapshot(tabResultCacheKey(id));
+    releaseTabResultObjectPayloads(tabs.value[idx]);
+    clearResultRuns(tabs.value[idx]);
     clearResultPayload(tabs.value[idx]);
     tabs.value.splice(idx, 1);
     if (tab.externalSqlPath) refreshExternalSqlFileTitles();
@@ -2922,6 +2968,7 @@ export const useQueryStore = defineStore("query", () => {
       .forEach((tab) => {
         if (tab.mode === "sqlserver-trace") void disposeSqlServerActivityTrace(tab.id);
         clearDataGridPendingSnapshotsForTab(tab.id);
+        clearDataGridStructuredFilterStatesForTab(tab.id);
         if (tab.txnSessionId) void rollbackTransaction(tab.id);
         if (tab.isExecuting) void cancelTabExecution(tab.id);
         if (tab.isExplaining) void cancelTabExplain(tab.id);
@@ -2929,6 +2976,8 @@ export const useQueryStore = defineStore("query", () => {
         void closeClientConnectionSession(tab);
         clearResultRunSnapshots(tab);
         void deleteTabResultSnapshot(tabResultCacheKey(tab.id));
+        releaseTabResultObjectPayloads(tab);
+        clearResultRuns(tab);
         clearResultPayload(tab);
       });
 
@@ -3104,10 +3153,16 @@ export const useQueryStore = defineStore("query", () => {
       .filter((tab) => predicate(tab))
       .forEach((tab) => {
         rollbackTabTransaction(tab, { resetAutoCommit: true });
+        clearDataGridPendingSnapshotsForTab(tab.id);
+        clearDataGridStructuredFilterStatesForTab(tab.id);
         if (tab.isExecuting) void cancelTabExecution(tab.id);
         if (tab.isExplaining) void cancelTabExplain(tab.id);
         void closeResultSession(tab);
         void closeClientConnectionSession(tab);
+        clearResultRunSnapshots(tab);
+        void deleteTabResultSnapshot(tabResultCacheKey(tab.id));
+        releaseTabResultObjectPayloads(tab);
+        clearResultRuns(tab);
         clearResultPayload(tab);
       });
   }

@@ -277,6 +277,7 @@ watch(
 );
 
 watch([deferredSearchQuery, regexMode], ([newQuery, isRegexMode], [oldQuery, wasRegexMode]) => {
+  if (!isRegexMode || !newQuery) regexTableSearchScopes.value = [];
   // The regex source is a client-side projection; the remote tree-loading
   // search state must never carry it, or explicit node expansion would leak
   // the expression as a remote searchFilter.

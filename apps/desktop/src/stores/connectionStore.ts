@@ -134,7 +134,7 @@ import { decorateDatabaseSavedSqlTreeNodes, indexSavedSqlFilesByDatabase, stripD
 import { encodeSqlServerLinkedSchema, parseSqlServerLinkedSchema } from "@/lib/database/sqlServerLinkedServers";
 import { inferMongoCompletionFields, type MongoCompletionField } from "@/lib/mongo/mongoCompletion";
 import { isMongoLegacyDriverProfile } from "@/lib/mongo/mongoCapabilities";
-import { mongoCollectionKindFromNode, toMongoCollectionKind } from "@/lib/sidebar/mongoCollectionMutation";
+import { mongoCollectionKindFromNode, toMongoCollectionKind, visibleMongoCollections } from "@/lib/sidebar/mongoCollectionMutation";
 import { completionSchemasFromTree, completionTablesFromTree } from "@/lib/metadata/completionTreeIndex";
 import { kvRootNodeLabel } from "@/lib/kv/kvRootPresentation";
 import { REDIS_SCAN_PAGE_SIZE_DEFAULT } from "@/lib/redis/redisKeyPattern";
@@ -4842,9 +4842,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const load = beginTreeNodeLoad(node);
     try {
       const collections = await api.mongoListCollections(connectionId, database);
-      const bucketNames = new Set(collections.filter((c) => c.kind === "bucket" && c.bucketName).map((c) => c.bucketName as string));
-      const hiddenCollectionNames = new Set([...bucketNames].flatMap((bucketName) => [`${bucketName}.files`, `${bucketName}.chunks`]));
-      const collectionEntries = collections.filter((c) => c.kind !== "bucket").filter((c) => !hiddenCollectionNames.has(c.name));
+      const collectionEntries = visibleMongoCollections(collections);
       const collectionChildren = [...collectionEntries]
         .sort((left, right) => compareSidebarNames(left.name, right.name))
         .map((col) => ({

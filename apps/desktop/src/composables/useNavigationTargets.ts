@@ -26,6 +26,22 @@ export type NavigationTarget = {
   whereInput?: string;
 };
 
+function openMongoCollectionTarget(target: NavigationTarget) {
+  const connectionStore = useConnectionStore();
+  const queryStore = useQueryStore();
+  connectionStore.activeConnectionId = target.connectionId;
+  const tabTitle = `${target.database}.${target.tableName}`;
+  const tabId = queryStore.createTab(target.connectionId, target.database, tabTitle, "mongo");
+  queryStore.updateSql(tabId, target.tableName);
+  queryStore.setTableMeta(tabId, {
+    database: target.database,
+    tableName: target.tableName,
+    tableType: target.tableType || "TABLE",
+    columns: [],
+    primaryKeys: [],
+  });
+}
+
 async function openTableTarget(target: NavigationTarget, options: { tableInfoTab?: TableInfoTab } = {}) {
   const connectionStore = useConnectionStore();
   const queryStore = useQueryStore();
@@ -34,6 +50,10 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
 
   connectionStore.activeConnectionId = target.connectionId;
   const config = connectionStore.getConfig(target.connectionId);
+  if (config?.db_type === "mongodb") {
+    openMongoCollectionTarget(target);
+    return;
+  }
   const tableSchema = connectionObjectTreeNodeSchema(config, target.database, target.schema);
   const tabTitle = target.catalog ? `${target.catalog}.${tableSchema || target.database}.${target.tableName}` : tableSchema ? `${tableSchema}.${target.tableName}` : target.tableName;
   if (config?.db_type === "qdrant" || config?.db_type === "milvus" || config?.db_type === "weaviate" || config?.db_type === "chromadb") {
@@ -287,6 +307,10 @@ export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value:
   const { openData } = useSidebarDataOpenRuntime();
 
   async function openObjectBrowserTableTarget(target: NavigationTarget) {
+    if (connectionStore.getConfig(target.connectionId)?.db_type === "mongodb") {
+      openMongoCollectionTarget(target);
+      return;
+    }
     if (settingsStore.editorSettings.dataTabReuseMode === "always-new") {
       await openTableTarget(target);
       return;

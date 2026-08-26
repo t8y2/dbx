@@ -5687,6 +5687,8 @@ export default withEnglishFallback({
     autoSelectActiveSidebarNodeDescription: "탭을 전환할 때 사이드바에서 일치하는 표시된 테이블, 컬렉션 또는 SQL 파일을 선택합니다.",
     sidebarOpenDatabaseOnSingleClick: "데이터베이스 클릭 시 객체 탐색",
     sidebarOpenDatabaseOnSingleClickDescription: '활성화하면 데이터베이스 또는 스키마 노드를 한 번 클릭할 때 사이드바를 펼치면서 "객체 탐색" 탭을 엽니다.',
+    sidebarOpenBrowserTabWhenExpanding: "확장할 때 브라우저 탭 열기",
+    sidebarOpenBrowserTabWhenExpandingDescription: '비활성화하면 데이터베이스 또는 스키마 노드를 열 때 사이드바만 확장되고 "객체 탐색" 탭은 생성되지 않습니다.',
     openTabsRestoreMode: "실행 시 탭 복원",
     openTabsRestoreModeDescription: "DBX가 지난번에 열려 있던 탭을 복원하는 방법을 선택하세요.",
     openTabsRestoreModeAll: "모든 탭 유지",

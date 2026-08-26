@@ -5325,6 +5325,8 @@ export default withEnglishFallback({
     autoSelectActiveSidebarNodeDescription: "切換分頁時，在側邊欄選取相符的可見資料表、集合或 SQL 檔案。",
     sidebarOpenDatabaseOnSingleClick: "單擊資料庫時瀏覽物件",
     sidebarOpenDatabaseOnSingleClickDescription: "開啟後，單擊資料庫或結構描述節點時，會同時展開側邊欄並開啟「瀏覽物件」分頁。",
+    sidebarOpenBrowserTabWhenExpanding: "展開資料庫時開啟瀏覽器分頁",
+    sidebarOpenBrowserTabWhenExpandingDescription: "關閉後，開啟資料庫或結構描述節點時只展開側邊欄清單，不建立頂部「瀏覽物件」分頁。",
     openTabsRestoreMode: "啟動時還原分頁",
     openTabsRestoreModeDescription: "選擇 DBX 啟動時如何還原上次開啟的分頁。",
     openTabsRestoreModeAll: "保留所有分頁",

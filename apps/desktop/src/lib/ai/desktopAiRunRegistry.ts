@@ -38,6 +38,13 @@ export interface DesktopAiRunRuntime<TMessage = unknown> {
   cancelRequested: boolean;
   discardOnFinish?: boolean;
   flushPending?: () => void;
+  /** Resolved by the owning send() pipeline once it has fully settled (its
+   *  finally block, or a pre-stream early return). A stop request waits on this
+   *  signal rather than finalizing the run itself, so a cancellation-pending
+   *  run stays visible - and keeps owning its concurrency slot - until the
+   *  real terminal event (or a bounded force-abandon). Runtime-only - never
+   *  serialized. */
+  settled?: Promise<void>;
 }
 
 // This registry deliberately lives outside AiAssistant.vue. Closing the panel
@@ -103,6 +110,14 @@ export function cancelQueuedDesktopAiRun(run: DesktopAiRunRuntime): boolean {
 
 export function activeDesktopAiRuns(): DesktopAiRunRuntime[] {
   return [...runsByConversation.values()].filter((run) => run.status === "preparing" || run.status === "queued" || run.status === "running" || run.status === "awaiting_write_confirmation");
+}
+
+/** Terminal statuses: the run has fully settled and no longer blocks the
+ *  conversation, the quit prompt, or a concurrency slot. `interrupted` is a
+ *  persisted-row-only pseudo status (never a runtime status) and is excluded
+ *  here for that reason. */
+export function isTerminalDesktopAiRunStatus(status: DesktopAiRunStatus): boolean {
+  return status === "completed" || status === "failed" || status === "cancelled";
 }
 
 /** Statuses that block queue-send/auto-send: the conversation already owns a

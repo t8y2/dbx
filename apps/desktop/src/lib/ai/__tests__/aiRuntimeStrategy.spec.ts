@@ -8,6 +8,7 @@ import {
   desktopAiRun,
   finishDesktopAiRun,
   hasActiveDesktopAiRun,
+  isTerminalDesktopAiRunStatus,
   registerDesktopAiRun,
   releaseDesktopAiRunSlot,
   resetDesktopAiRunRegistryForTests,
@@ -155,7 +156,7 @@ describe("AI runtime platform strategy", () => {
   it("treats every non-terminal status as active for queue-send, including pending_recoverable", () => {
     const statuses = ["preparing", "queued", "running", "awaiting_write_confirmation", "pending_recoverable"] as const;
     for (const status of statuses) {
-      const run = registerDesktopAiRun({
+      registerDesktopAiRun({
         runId: `run-${status}`,
         conversationId: `conversation-${status}`,
         sessionIds: [],
@@ -190,6 +191,16 @@ describe("AI runtime platform strategy", () => {
       });
       expect(hasActiveDesktopAiRun(`conversation-${status}`)).toBe(false);
       finishDesktopAiRun(run, "completed");
+    }
+  });
+
+  it("classifies terminal statuses for the stop-wait logic (isTerminalDesktopAiRunStatus)", () => {
+    for (const status of ["completed", "failed", "cancelled"] as const) {
+      expect(isTerminalDesktopAiRunStatus(status)).toBe(true);
+    }
+    // `interrupted` is a persisted-row-only pseudo status, never a runtime one.
+    for (const status of ["preparing", "queued", "running", "awaiting_write_confirmation", "pending_recoverable"] as const) {
+      expect(isTerminalDesktopAiRunStatus(status)).toBe(false);
     }
   });
 });

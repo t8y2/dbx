@@ -2178,6 +2178,42 @@ impl Storage {
 
 // AI Conversations
 
+// Terminal runs beyond this many per conversation are pruned on every AI save.
+// Only the newest terminal run per conversation is ever read at recovery (it
+// drives the history row's status badge after a restart); the older ones are
+// pure, unbounded storage + startup-load growth.
+const KEEP_TERMINAL_AI_RUNS_PER_CONVERSATION: i64 = 2;
+
+/// Caps each conversation's terminal run history. `save_ai_run` /
+/// `save_ai_run_state` persist every run unconditionally and `load_ai_runs`
+/// loads the whole table at startup, so without this cap repeated completed/
+/// failed/cancelled runs grow SQLite storage and recovery work forever. The
+/// frontend recovery loop dedups to the newest run per conversation, so keeping
+/// the newest few terminal runs preserves the row status badge exactly while
+/// bounding the table. Non-terminal statuses (preparing/queued/running/
+/// awaiting_write_confirmation/pending_recoverable) are never touched - they
+/// are the recovery payload.
+fn prune_terminal_ai_runs(tx: &Transaction<'_>) -> Result<(), String> {
+    tx.execute(
+        "DELETE FROM ai_runs
+         WHERE status IN ('completed', 'failed', 'cancelled', 'interrupted')
+           AND run_id NOT IN (
+               SELECT run_id FROM (
+                   SELECT run_id,
+                          ROW_NUMBER() OVER (
+                              PARTITION BY conversation_id
+                              ORDER BY updated_at DESC, run_id DESC
+                          ) AS rn
+                   FROM ai_runs
+                   WHERE status IN ('completed', 'failed', 'cancelled', 'interrupted')
+               ) WHERE rn <= ?1
+           )",
+        params![KEEP_TERMINAL_AI_RUNS_PER_CONVERSATION],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn prune_ai_conversations(tx: &Transaction<'_>) -> Result<(), String> {
     // The 50-row limit is a soft cap: conversations with active or actionable
     // runs remain reachable even when they exceed the cap. Only terminal,
@@ -2205,6 +2241,10 @@ fn prune_ai_conversations(tx: &Transaction<'_>) -> Result<(), String> {
     // Do not depend on a connection-wide foreign_keys pragma for cleanup.
     tx.execute("DELETE FROM ai_runs WHERE conversation_id NOT IN (SELECT id FROM ai_conversations)", [])
         .map_err(|e| e.to_string())?;
+    // Cap terminal run history for the conversations that survive the cap
+    // above (they are deliberately retained), so normal use cannot grow the
+    // ai_runs table without bound.
+    prune_terminal_ai_runs(tx)?;
     Ok(())
 }
 
@@ -4635,7 +4675,7 @@ fn map_from_sql_err(err: serde_json::Error) -> rusqlite::Error {
 mod tests {
     use super::{
         maybe_import_user_data_db, DataDbImportResult, DesktopIconTheme, DesktopSettings, McpGlobalPolicy,
-        McpGlobalPolicyState, Storage, MCP_GLOBAL_POLICY_KEY,
+        McpGlobalPolicyState, Storage, KEEP_TERMINAL_AI_RUNS_PER_CONVERSATION, MCP_GLOBAL_POLICY_KEY,
     };
     use crate::ai::{
         AiActiveModelSelection, AiAssistantMode, AiChatMessage, AiChatSelectionState, AiConversation,
@@ -4855,6 +4895,48 @@ mod tests {
         let runs = storage.load_ai_runs().await.unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].run_id, "upsert-run");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn terminal_ai_runs_are_capped_per_conversation_while_nonterminal_survive() {
+        // Reviewed finding (unbounded terminal run growth): save_ai_run /
+        // save_ai_run_state persist every terminal run and load_ai_runs loads
+        // the whole table at startup, but prune_ai_conversations only caps
+        // conversations and deliberately retains runs for the survivors - so
+        // repeated completed runs grew SQLite storage and recovery work
+        // forever. The storage layer now caps terminal history per
+        // conversation (keeping the newest few, which drive the row status
+        // badge after restart) and never touches recovery-relevant runs.
+        let path = temp_db_path("ai-terminal-runs-capped");
+        let storage = Storage::open(&path).await.unwrap();
+
+        // A non-terminal run must always survive - it is the recovery payload.
+        let conversation = ai_conversation("cap-conv", "0000");
+        storage
+            .save_ai_run_state(&conversation, &ai_run("active-run", "cap-conv", AiRunStatus::Running, "0000"))
+            .await
+            .unwrap();
+        // Repeated completed runs (normal use): older ones must be pruned.
+        for index in 0..5 {
+            let timestamp = format!("{index:04}");
+            storage
+                .save_ai_run(&ai_run(&format!("terminal-{index}"), "cap-conv", AiRunStatus::Completed, &timestamp))
+                .await
+                .unwrap();
+        }
+
+        let runs = storage.load_ai_runs().await.unwrap();
+        assert!(runs.iter().any(|run| run.run_id == "active-run"), "recovery-relevant run must survive");
+        let terminal: Vec<_> = runs.iter().filter(|run| run.status == AiRunStatus::Completed).collect();
+        assert_eq!(
+            terminal.len(),
+            KEEP_TERMINAL_AI_RUNS_PER_CONVERSATION as usize,
+            "only the newest terminal runs per conversation survive"
+        );
+        assert!(terminal.iter().any(|run| run.run_id == "terminal-4"), "the newest terminal run is retained");
+        assert!(!runs.iter().any(|run| run.run_id == "terminal-0"), "the oldest terminal runs are pruned");
 
         let _ = std::fs::remove_file(path);
     }

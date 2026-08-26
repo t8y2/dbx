@@ -116,6 +116,7 @@ import {
   cancelQueuedDesktopAiRun,
   desktopAiRun,
   finishDesktopAiRun,
+  isTerminalDesktopAiRunStatus,
   registerDesktopAiRun,
   releaseDesktopAiRunSlot,
   removeDesktopAiRun,
@@ -124,6 +125,7 @@ import {
   type DesktopAiRunRuntime,
   type DesktopAiRunStatus,
 } from "@/lib/ai/desktopAiRunRegistry";
+import { createDesktopAiRunSnapshotScheduler } from "@/lib/ai/desktopAiRunSnapshotScheduler";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { addConfiguredAiModel, aiModelOptions } from "@/lib/ai/aiConfigList";
 import { orderAiConfigsForDisplay } from "@/lib/ai/aiConfigOrdering";
@@ -512,6 +514,13 @@ const STREAM_RENDER_INTERVAL_MS = 33;
 // uses. See cancelStream() for why the backend RPC alone can't be trusted to
 // unstick a genuinely hung tool call.
 const STOP_FORCE_ABANDON_MS = 5000;
+// Spacing between incremental run-snapshot saves while a detached run streams.
+// Bounds how much streamed output a crash/quit can lose relative to the last
+// durable snapshot - without this, deltas lived only in memory.
+const RUN_SNAPSHOT_PERSIST_INTERVAL_MS = 2000;
+// Retry cadence for a backend cancel RPC that has not been acknowledged yet
+// (the session registers with the backend only once runAgentStream() starts).
+const DESKTOP_CANCEL_ACK_RETRY_MS = 500;
 let assistantDeltaFrame: number | null = null;
 let lastAssistantFlushAt = 0;
 let pendingAssistantDelta = "";
@@ -2677,6 +2686,10 @@ async function send() {
   const runMessages = auto ? auto.messages : messages.value;
   const runCreatedAt = new Date().toISOString();
   let detachedRun: DesktopAiRunRuntime<ChatMessage> | undefined;
+  // Resolves detachedRun.settled below; declared here so every exit path of
+  // send() (the pre-stream early returns and the finally) can wake a stop
+  // request waiting for this pipeline's real terminal state.
+  let resolveDetachedRunSettled: () => void = () => {};
   let desktopSlotAcquired = false;
   let resumingConfirmedWrite = false;
   if (backgroundAiRunsEnabled) {
@@ -2717,6 +2730,15 @@ async function send() {
       pendingConfirmationRejected: resumingConfirmedWrite ? resumableRun!.pendingConfirmationRejected : undefined,
       cancelRequested: false,
     });
+    // Terminal-event signal for stop requests: resolved once this send()
+    // pipeline has fully settled (its finally, or a pre-stream early exit).
+    // A stop waits on it instead of finalizing the run itself, so a hung or
+    // merely cancellation-pending stream cannot go invisible while it still
+    // occupies a concurrency slot (mirrors the foreground
+    // stopAiGenerationWithFallback() contract from issue #5941).
+    detachedRun.settled = new Promise<void>((resolve) => {
+      resolveDetachedRunSettled = resolve;
+    });
   }
   const generationCanContinue = () => (detachedRun ? !detachedRun.cancelRequested : aiGenerationGuard.isCurrent(myGeneration));
   const runIsVisible = () => !detachedRun || (assistantViewMounted && conversationId.value === runConversationId);
@@ -2731,6 +2753,10 @@ async function send() {
       }
       toast(t("ai.customInstructionsLoadFailed"), 5000);
     }
+    // This pipeline is done - wake any stop request waiting on it (the run may
+    // have been left non-terminal above when the stop pre-empted this path; the
+    // waiting stop-side force-abandon finalizes it).
+    resolveDetachedRunSettled();
     return;
   }
   // Superseded (chat cleared/switched, or a newer send() started) while awaiting
@@ -2742,6 +2768,11 @@ async function send() {
   // whatever unrelated send() the next conversation issues.
   if (!generationCanContinue()) {
     clearPendingWriteGrant();
+    // A stop fired while the templates loaded; this pipeline is done. Resolve
+    // settled so the waiting stop-side force-abandon (which owns the finalize
+    // for a run this early exit leaves non-terminal) runs without the full
+    // STOP_FORCE_ABANDON_MS wait.
+    resolveDetachedRunSettled();
     return;
   }
   // Snapshot the selected custom prompts at send time so later async context loading
@@ -2851,7 +2882,7 @@ async function send() {
       // Never re-persist a run the user has already deleted from under the
       // queue: deleteConversation() committed the DELETE first, so this would
       // resurrect the conversation via INSERT OR REPLACE.
-      if (!detachedRun.discardOnFinish) void persistDesktopRunSnapshot(detachedRun);
+      if (!detachedRun.discardOnFinish) void runSnapshotScheduler.save(detachedRun);
     }
     desktopSlotAcquired = await admission;
     if (!desktopSlotAcquired) {
@@ -2860,7 +2891,10 @@ async function send() {
         stopStatusTimer();
         generationStatus.value = createGenerationStatus(Date.now());
       }
-      if (!detachedRun.discardOnFinish) void persistDesktopRunSnapshot(detachedRun);
+      if (!detachedRun.discardOnFinish) void runSnapshotScheduler.save(detachedRun);
+      // A queued run cancelled out of the admission queue resolves this early;
+      // settle any stop request that raced into the preparing->queued window.
+      resolveDetachedRunSettled();
       return;
     }
   }
@@ -2882,14 +2916,23 @@ async function send() {
   const detachedDeltaBuffer = detachedRun
     ? createDetachedAssistantDeltaBuffer(runMessages, () => {
         if (runIsVisible()) scrollToBottom();
+        // Persist streamed output incrementally (throttled + serialized by
+        // runSnapshotScheduler): without this, a crash/quit mid-response lost
+        // everything after the pre-stream snapshot.
+        if (detachedRun) runSnapshotScheduler.schedule(detachedRun);
       })
     : undefined;
   if (detachedRun) detachedRun.flushPending = detachedDeltaBuffer?.flush;
   const agentEvents: AgentEvent[] = [];
   let detachedCompaction: { summary: string; compactedMessages: number } | null = null;
   let writeConfirmationRequired = false;
-  if (detachedRun) void persistDesktopRunSnapshot(detachedRun);
-  else void persistConversationSnapshot(runConversationId, runMessages, connection.name, tab.database || "", runCreatedAt);
+  if (detachedRun) {
+    // Same delete-resurrection guard as the queued sites: a concurrent delete
+    // must not be undone by this snapshot either.
+    if (!detachedRun.discardOnFinish) void runSnapshotScheduler.save(detachedRun);
+  } else {
+    void persistConversationSnapshot(runConversationId, runMessages, connection.name, tab.database || "", runCreatedAt);
+  }
   try {
     const sqlFiles = await loadReferencedSqlFiles(selectedSqlFiles);
     // Superseded while awaiting loadReferencedSqlFiles() above — bail before
@@ -3102,7 +3145,13 @@ async function send() {
           });
         }
       }
-      if (detachedRun) {
+      // A stop-side force-abandon (STOP_FORCE_ABANDON_MS), a conversation
+      // delete, or a replacement send may have finalized and removed this run
+      // from the registry already. Re-running the finish chain would resurrect
+      // it over whatever now owns the conversation's registry slot
+      // (updateDesktopAiRun() re-inserts unconditionally).
+      const runStillOwned = detachedRun ? desktopAiRun(detachedRun.conversationId) === detachedRun : false;
+      if (detachedRun && runStillOwned) {
         if (detachedRun.cancelRequested) finishDesktopAiRun(detachedRun, "cancelled");
         else if (detachedRun.status !== "failed") {
           if (writeConfirmationRequired) updateDesktopAiRun(detachedRun, { status: "awaiting_write_confirmation", currentSessionId: "", flushPending: undefined });
@@ -3141,20 +3190,25 @@ async function send() {
         }
       }
       if (desktopSlotAcquired && detachedRun) releaseDesktopAiRunSlot(detachedRun.runId);
-      if (detachedRun) {
+      if (detachedRun && runStillOwned) {
         // A run the user deleted (discardOnFinish) must never be written back:
         // the DELETE already committed, and INSERT OR REPLACE would resurrect it.
         if (!detachedRun.discardOnFinish) {
-          void persistDesktopRunSnapshot(detachedRun).finally(() => {
+          // Drop the pending throttled save: this ordered final save is
+          // authoritative.
+          runSnapshotScheduler.cancel(detachedRun.runId);
+          void runSnapshotScheduler.save(detachedRun).finally(() => {
             if (detachedRun?.status === "completed" || detachedRun?.status === "failed" || detachedRun?.status === "cancelled") {
               retireDesktopAiRun(detachedRun);
             }
           });
         }
-      } else {
+      } else if (!detachedRun) {
         void persistConversationSnapshot(runConversationId, runMessages, connection.name, tab.database || "", runCreatedAt);
       }
       if (runIsVisible()) scrollToBottom();
+      // Wake any stop request waiting for this pipeline's real terminal state.
+      resolveDetachedRunSettled();
     }
   }
 }
@@ -3201,6 +3255,136 @@ function waitForGenerationToClear(timeoutMs: number): Promise<void> {
   });
 }
 
+/** Waits for a detached run's owning send() pipeline to reach its terminal
+ *  state. Resolves false when STOP_FORCE_ABANDON_MS elapses first - the caller
+ *  must then force-abandon the run so a hung backend stream cannot wedge its
+ *  concurrency slot forever. */
+function waitForDesktopRunSettled(run: DesktopAiRunRuntime<ChatMessage>): Promise<boolean> {
+  if (!run.settled) return Promise.resolve(false);
+  return Promise.race([run.settled.then(() => true), new Promise<false>((resolve) => setTimeout(() => resolve(false), STOP_FORCE_ABANDON_MS))]);
+}
+
+/** Fires the backend cancel RPC for the run's current session until it is
+ *  acknowledged or `deadlineAt` passes. aiCancelStream() resolves true only
+ *  when the session id is already registered with the backend; a stop during
+ *  context preparation RPCs before runAgentStream() has registered the
+ *  session, so a single fire-and-forget call would silently miss the
+ *  cancellation. When the session is not registered yet, the loop waits for it
+ *  to appear and retries. `requireRegistryOwnership` is false for the delete
+ *  path, which removes the run from the registry before this loop runs. */
+async function requestDesktopRunCancellation(run: DesktopAiRunRuntime<ChatMessage>, deadlineAt: number, requireRegistryOwnership = true) {
+  for (;;) {
+    // The run settled (or was replaced) while retrying - nothing left to cancel.
+    if (isTerminalDesktopAiRunStatus(run.status)) return;
+    if (requireRegistryOwnership && desktopAiRun(run.conversationId) !== run) return;
+    if (run.currentSessionId) {
+      const acknowledged = await aiCancelStream(run.currentSessionId).catch(() => false);
+      if (acknowledged) return;
+    }
+    if (Date.now() + DESKTOP_CANCEL_ACK_RETRY_MS > deadlineAt) return;
+    await new Promise((resolve) => setTimeout(resolve, DESKTOP_CANCEL_ACK_RETRY_MS));
+  }
+}
+
+/** Clears the visible generation state once a run the user stopped has fully
+ *  settled (or been force-abandoned). Only safe to call while the stopped
+ *  conversation is still the visible one. */
+function clearVisibleGenerationState() {
+  isGenerating.value = false;
+  currentSessionId.value = "";
+  currentAssistantMessageIndex = -1;
+  stopStatusTimer();
+  generationStatus.value = createGenerationStatus(Date.now());
+  statusNow.value = Date.now();
+}
+
+/** Terminal cleanup for a run whose send() pipeline never settled (hung
+ *  backend stream) or settled through a pre-stream early return that left it
+ *  non-terminal. Mirrors what send()'s finally does on the normal path, plus
+ *  the slot release the old stop path used to skip entirely. */
+async function forceAbandonDesktopAiRun(run: DesktopAiRunRuntime<ChatMessage>) {
+  if (conversationId.value === run.conversationId) clearVisibleGenerationState();
+  finishDesktopAiRun(run, "cancelled");
+  releaseDesktopAiRunSlot(run.runId);
+  conversationRunStatus.set(run.conversationId, "cancelled");
+  if (!run.discardOnFinish) {
+    runSnapshotScheduler.cancel(run.runId);
+    await runSnapshotScheduler.save(run);
+  }
+  retireDesktopAiRun(run);
+}
+
+/** Releases a deleted run's concurrency slot once its owning pipeline settles,
+ *  or after the force-abandon deadline if the backend stream never settles,
+ *  while retrying the backend cancel until the session registers.
+ *  discardOnFinish guarantees nothing is ever persisted. Runs in the
+ *  background so the delete is not blocked by a possibly-hung stream; without
+ *  it, a few deleted-but-hung runs would permanently wedge the global queue
+ *  (admittedRunIds never shrinks). */
+function releaseDeletedRunSlot(run: DesktopAiRunRuntime<ChatMessage>) {
+  // Recovered runs (awaiting_write_confirmation / pending_recoverable) have no
+  // pipeline and hold no slot; only send()-created runs do.
+  if (!run.settled) return;
+  const deadlineAt = Date.now() + STOP_FORCE_ABANDON_MS;
+  void requestDesktopRunCancellation(run, deadlineAt, false);
+  void waitForDesktopRunSettled(run).then(() => releaseDesktopAiRunSlot(run.runId));
+}
+
+/** Stops a background run without lying about its state: the stop path used to
+ *  finish+retire the run before the backend settled, so a hung or merely
+ *  cancellation-pending stream went invisible while still occupying its
+ *  concurrency slot, with no way to see or retry the stop. Mirrors the
+ *  foreground stopAiGenerationWithFallback() contract: reflect the request
+ *  immediately, then wait for the owning send() pipeline's real terminal
+ *  event - bounded by STOP_FORCE_ABANDON_MS, after which the run is
+ *  force-finalized so the queue can never wedge. */
+async function stopDesktopAiRun(run: DesktopAiRunRuntime<ChatMessage>) {
+  run.cancelRequested = true;
+  if (run.status === "queued") {
+    // Never admitted: no backend session and no slot - finalize immediately.
+    cancelQueuedDesktopAiRun(run);
+    if (conversationId.value === run.conversationId) clearVisibleGenerationState();
+    conversationRunStatus.set(run.conversationId, "cancelled");
+    if (!run.discardOnFinish) await runSnapshotScheduler.save(run);
+    retireDesktopAiRun(run);
+    return;
+  }
+  // Show what streamed so far (plus the cancelled placeholder when empty) and
+  // reflect the stop in the status line while the backend settles.
+  run.flushPending?.();
+  const msg = run.messages[run.assistantMessageIndex];
+  if (msg) {
+    msg.isThinking = false;
+    if (!msg.content) msg.content = t("ai.requestCancelled");
+  }
+  if (conversationId.value === run.conversationId && isGenerating.value) {
+    generationStatus.value = markCancelling(generationStatus.value, Date.now());
+    statusNow.value = Date.now();
+  }
+  const deadlineAt = Date.now() + STOP_FORCE_ABANDON_MS;
+  const settled = waitForDesktopRunSettled(run);
+  // Fire-and-forget the backend-cancel retry: it must never gate the bounded
+  // force-abandon below. If the IPC itself hangs, awaiting it here would leave
+  // the stop stuck forever — the STOP_FORCE_ABANDON_MS race would never be
+  // read. The loop is internally bounded by deadlineAt and bails once the run
+  // is retired.
+  void requestDesktopRunCancellation(run, deadlineAt);
+  if (await settled) {
+    // The pipeline settled. Its finally has normally finalized the run
+    // already; a pre-stream early return can leave it a zombie instead - the
+    // conversation would stay busy forever with no stream behind it.
+    if (desktopAiRun(run.conversationId) === run && !isTerminalDesktopAiRunStatus(run.status)) {
+      await forceAbandonDesktopAiRun(run);
+    }
+    return;
+  }
+  // The backend never settled within the timeout - force-finalize so the run
+  // stops occupying its slot and the conversation becomes usable again. If it
+  // was deleted or replaced meanwhile, whoever retired it already owns the
+  // cleanup.
+  if (desktopAiRun(run.conversationId) === run) await forceAbandonDesktopAiRun(run);
+}
+
 async function cancelStream() {
   // User explicitly requested stop — reflect it in the status line (phase=cancelling)
   // so it reads "正在取消…" while the backend cancellation is still settling.
@@ -3211,23 +3395,7 @@ async function cancelStream() {
   if (backgroundAiRunsEnabled) {
     const run = desktopAiRun<ChatMessage>(conversationId.value);
     if (!run || (run.status !== "preparing" && run.status !== "queued" && run.status !== "running")) return;
-    run.cancelRequested = true;
-    if (run.status === "queued") cancelQueuedDesktopAiRun(run);
-    if (run.currentSessionId) await aiCancelStream(run.currentSessionId).catch(() => {});
-    run.flushPending?.();
-    const msg = run.messages[run.assistantMessageIndex];
-    if (msg) {
-      msg.isThinking = false;
-      if (!msg.content) msg.content = t("ai.requestCancelled");
-    }
-    finishDesktopAiRun(run, "cancelled");
-    isGenerating.value = false;
-    currentSessionId.value = "";
-    currentAssistantMessageIndex = -1;
-    stopStatusTimer();
-    generationStatus.value = createGenerationStatus(Date.now());
-    await persistDesktopRunSnapshot(run);
-    retireDesktopAiRun(run);
+    await stopDesktopAiRun(run);
     return;
   }
   await stopAiGenerationWithFallback({
@@ -3481,6 +3649,15 @@ async function persistDesktopRunSnapshot(run: DesktopAiRunRuntime<ChatMessage>) 
     .catch(() => {});
 }
 
+/** Throttled, serialized snapshot persistence for streaming runs: detached
+ *  deltas used to live only in memory, so a crash or quit mid-response lost
+ *  everything after the last pre-stream snapshot. Saves are chained per run so
+ *  a slow write can never let an older snapshot overwrite a newer one. */
+const runSnapshotScheduler = createDesktopAiRunSnapshotScheduler<ChatMessage>({
+  persist: (run) => persistDesktopRunSnapshot(run),
+  intervalMs: RUN_SNAPSHOT_PERSIST_INTERVAL_MS,
+});
+
 function syncPersistedConversation(conversation: AiConversation) {
   const index = conversations.value.findIndex((item) => item.id === conversation.id);
   if (index >= 0) conversations.value.splice(index, 1, conversation);
@@ -3696,8 +3873,12 @@ async function performDeleteConversation(id: string) {
       run.discardOnFinish = true;
       run.cancelRequested = true;
       if (run.status === "queued") cancelQueuedDesktopAiRun(run);
-      if (run.currentSessionId) await aiCancelStream(run.currentSessionId).catch(() => {});
-      finishDesktopAiRun(run, "cancelled");
+      // Bound the backend cancel and guarantee the concurrency slot is freed
+      // when the pipeline settles (or after the force-abandon deadline if the
+      // stream is hung). The old path removed the run immediately without ever
+      // releasing the slot, so a few deleted-but-hung runs wedged the queue
+      // permanently. Never blocks the delete itself.
+      releaseDeletedRunSlot(run);
     }
     removeDesktopAiRun(id);
   }
@@ -3787,25 +3968,7 @@ function editQueuedInput() {
 async function stopConversationRun(convId: string) {
   const run = backgroundAiRunsEnabled ? desktopAiRun<ChatMessage>(convId) : undefined;
   if (!run || (run.status !== "preparing" && run.status !== "queued" && run.status !== "running")) return;
-  run.cancelRequested = true;
-  if (run.status === "queued") cancelQueuedDesktopAiRun(run);
-  if (run.currentSessionId) await aiCancelStream(run.currentSessionId).catch(() => {});
-  run.flushPending?.();
-  const msg = run.messages[run.assistantMessageIndex];
-  if (msg) {
-    msg.isThinking = false;
-    if (!msg.content) msg.content = t("ai.requestCancelled");
-  }
-  finishDesktopAiRun(run, "cancelled");
-  if (conversationId.value === convId) {
-    isGenerating.value = false;
-    currentSessionId.value = "";
-    currentAssistantMessageIndex = -1;
-    stopStatusTimer();
-    generationStatus.value = createGenerationStatus(Date.now());
-  }
-  await persistDesktopRunSnapshot(run);
-  retireDesktopAiRun(run);
+  await stopDesktopAiRun(run);
 }
 
 /** "Retry this round" for a failed/interrupted row: sends a fresh run whose

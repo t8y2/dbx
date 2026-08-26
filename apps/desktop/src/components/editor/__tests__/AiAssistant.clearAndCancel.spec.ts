@@ -99,19 +99,40 @@ describe("AI assistant uses platform-specific conversation lifecycle", () => {
     const body = bodyOf("async function performDeleteConversation(id: string)");
     expect(body).toContain("run.discardOnFinish = true;");
     expect(body).toContain('if (run.status === "queued") cancelQueuedDesktopAiRun(run);');
-    expect(body).toContain('finishDesktopAiRun(run, "cancelled");');
+    // The run is never finished here: the delete removes it from the registry
+    // immediately and the bounded background cleanup owns finalization, so a
+    // finished-but-still-slot-holding run can't wedge the queue.
+    expect(body).not.toContain('finishDesktopAiRun(run, "cancelled");');
+    expect(body).toContain("releaseDeletedRunSlot(run);");
     // The confirm path must cancel runs in ALL active statuses, including a
     // pending write confirmation and a recovered draft.
     expect(body).toContain('run.status === "awaiting_write_confirmation"');
     expect(body).toContain('run.status === "pending_recoverable"');
   });
 
+  it("performDeleteConversation() launches bounded slot release so a deleted-but-hung run cannot wedge the queue", () => {
+    // Reviewed finding (slot leak, HIGH): the delete path removed the run from
+    // the registry immediately but never released its admittedRunIds slot when
+    // the backend stream was hung — after DESKTOP_AI_CONCURRENCY_LIMIT such
+    // deletes the global queue wedges permanently. The bounded release waits
+    // for the pipeline's settled signal (or the force-abandon deadline) and
+    // frees the slot; it also must not block the delete on the cancel RPC.
+    const releaseBody = bodyOf("function releaseDeletedRunSlot(run: DesktopAiRunRuntime<ChatMessage>)");
+    expect(releaseBody).toContain("if (!run.settled) return;");
+    expect(releaseBody).toContain("waitForDesktopRunSettled(run)");
+    expect(releaseBody).toContain("releaseDesktopAiRunSlot(run.runId)");
+    expect(releaseBody).toContain("requestDesktopRunCancellation(run, deadlineAt, false)");
+    const deleteBody = bodyOf("async function performDeleteConversation(id: string)");
+    expect(deleteBody).not.toContain("await aiCancelStream(");
+  });
+
   it("send() guards every snapshot persist behind discardOnFinish so a deleted conversation can't be resurrected", () => {
     const sendBody = bodyOf("async function send()");
-    // Both queued-persist sites (queued persist + unslotted early-return) must be
-    // guarded — previously they persisted unconditionally.
-    const guardedSites = sendBody.match(/if \(!detachedRun\.discardOnFinish\) void persistDesktopRunSnapshot\(detachedRun\);/g) ?? [];
-    expect(guardedSites.length).toBe(2);
+    // All three send()-internal persist sites (queued persist, unslotted
+    // early-return, and the pre-stream snapshot) must be guarded — previously
+    // some persisted unconditionally.
+    const guardedSites = sendBody.match(/if \(!detachedRun\.discardOnFinish\) void runSnapshotScheduler\.save\(detachedRun\);/g) ?? [];
+    expect(guardedSites.length).toBe(3);
     // The finally must skip the run snapshot when the run was deleted, and the
     // Web-only conversation fallback must not fire for a deleted Desktop run.
     const finallyIdx = sendBody.indexOf("} finally {");
@@ -401,5 +422,103 @@ describe("AI assistant uses platform-specific conversation lifecycle", () => {
     expect(statusLineIdx).toBeGreaterThanOrEqual(0);
     const statusBlock = source.slice(statusLineIdx);
     expect(statusBlock).toContain("<Hourglass v-else");
+  });
+
+  // --- Review findings on background AI session tasks (see the two findings
+  // evaluated in this session) ---
+
+  it("persists detached streaming snapshots incrementally from the delta flush path", () => {
+    // Finding 1: detached deltas were flushed only into memory (plus a scroll
+    // callback), so a crash/quit mid-response lost everything after the
+    // pre-stream snapshot. The flush path must now schedule throttled,
+    // serialized snapshot persistence.
+    const sendBody = bodyOf("async function send()");
+    const bufferIdx = sendBody.indexOf("createDetachedAssistantDeltaBuffer(runMessages, () => {");
+    expect(bufferIdx).toBeGreaterThanOrEqual(0);
+    const flushBlock = sendBody.slice(bufferIdx, sendBody.indexOf(": undefined", bufferIdx));
+    expect(flushBlock).toContain("runSnapshotScheduler.schedule(detachedRun);");
+    // The pre-stream snapshot and the finally go through the same serialized
+    // scheduler so a slow write can never reorder around them.
+    expect(sendBody).toContain("void runSnapshotScheduler.save(detachedRun)");
+    // The scheduler itself lives at module scope (the flush callback and the
+    // stop path both use it), configured with the streaming interval.
+    expect(source).toContain("const runSnapshotScheduler = createDesktopAiRunSnapshotScheduler<ChatMessage>({");
+    expect(source).toContain("intervalMs: RUN_SNAPSHOT_PERSIST_INTERVAL_MS");
+  });
+
+  it("send() resolves the run's settled signal on every exit path so a stop can wait for the real terminal event", () => {
+    // Finding 2: the stop path must not finalize the run itself; it waits for
+    // the pipeline's terminal event via the run's `settled` promise. Every
+    // exit path of send() must resolve it (finally + three pre-stream early
+    // returns), or a stop fired there would sit out the full timeout.
+    const sendBody = bodyOf("async function send()");
+    expect(sendBody).toContain("detachedRun.settled = new Promise<void>((resolve) => {");
+    const finallyIdx = sendBody.indexOf("} finally {");
+    const finallyBody = sendBody.slice(finallyIdx);
+    expect(finallyBody).toContain("resolveDetachedRunSettled();");
+    const settledCalls = sendBody.match(/resolveDetachedRunSettled\(\);/g) ?? [];
+    expect(settledCalls.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it("the finally skips finalization for a run that no longer owns its registry slot", () => {
+    // Finding 2: after a stop-side force-abandon (or a delete/replacement send)
+    // retires the run, the old pipeline's finally must not re-run the finish
+    // chain - updateDesktopAiRun() re-inserts unconditionally, which would
+    // resurrect the retired run over whatever now owns the conversation.
+    const sendBody = bodyOf("async function send()");
+    const finallyIdx = sendBody.indexOf("} finally {");
+    const finallyBody = sendBody.slice(finallyIdx);
+    expect(finallyBody).toContain("const runStillOwned = detachedRun ? desktopAiRun(detachedRun.conversationId) === detachedRun : false;");
+    expect(finallyBody).toContain("if (detachedRun && runStillOwned) {");
+    expect(finallyBody).toContain("runSnapshotScheduler.cancel(detachedRun.runId);");
+    expect(finallyBody).toContain("void runSnapshotScheduler.save(detachedRun).finally(");
+    expect(finallyBody).toContain("} else if (!detachedRun) {");
+  });
+
+  it("stopDesktopAiRun keeps a background run active until the pipeline settles, force-abandoning after the timeout", () => {
+    // Finding 2: the old stop path finished+retired immediately, so a hung or
+    // cancellation-pending stream went invisible while still occupying its slot.
+    // The shared helper must reflect the request but defer finalization to the
+    // pipeline's finally or the bounded force-abandon.
+    const body = bodyOf("async function stopDesktopAiRun(");
+    expect(body).toContain("run.cancelRequested = true;");
+    expect(body).toContain("waitForDesktopRunSettled(run)");
+    expect(body).toContain("requestDesktopRunCancellation(run, deadlineAt)");
+    expect(body).toContain("await forceAbandonDesktopAiRun(run);");
+    // Only the never-admitted queued branch finalizes immediately.
+    expect(body).toContain('if (run.status === "queued")');
+    expect(body).toContain("cancelQueuedDesktopAiRun(run);");
+  });
+
+  it("the stop path consumes the aiCancelStream acknowledgement and retries while unacknowledged", () => {
+    // Finding 2: aiCancelStream() returns a boolean (true only when the session
+    // id is registered with the backend) that was discarded. The retry loop
+    // lands the cancellation once the session registers during context
+    // preparation.
+    const body = bodyOf("async function requestDesktopRunCancellation(");
+    expect(body).toContain("const acknowledged = await aiCancelStream(run.currentSessionId).catch(() => false);");
+    expect(body).toContain("if (acknowledged) return;");
+    expect(body).toContain("DESKTOP_CANCEL_ACK_RETRY_MS");
+  });
+
+  it("stopDesktopAiRun fire-and-forgets the cancel retry so a hung IPC cannot block the bounded force-abandon", () => {
+    // Reviewed finding (deadlock, HIGH): stopDesktopAiRun() awaited
+    // requestDesktopRunCancellation(), which awaits aiCancelStream() directly.
+    // If the IPC never returned, the STOP_FORCE_ABANDON_MS race was never read
+    // and the stop never force-abandoned — a hung cancel RPC stranded the run
+    // exactly like the hung stream it was meant to recover from.
+    const body = bodyOf("async function stopDesktopAiRun(");
+    expect(body).toContain("void requestDesktopRunCancellation(run, deadlineAt);");
+    expect(body).not.toContain("await requestDesktopRunCancellation(run, deadlineAt);");
+    // The bounded settle race drives the force-abandon, not the cancel RPC.
+    expect(body).toContain("if (await settled) {");
+  });
+
+  it("both stop entry points delegate to the shared stopDesktopAiRun helper", () => {
+    const cancelBody = bodyOf("async function cancelStream()");
+    expect(cancelBody).toContain("await stopDesktopAiRun(run);");
+    expect(cancelBody).not.toContain('finishDesktopAiRun(run, "cancelled")');
+    const rowBody = bodyOf("async function stopConversationRun(");
+    expect(rowBody).toContain("await stopDesktopAiRun(run);");
   });
 });

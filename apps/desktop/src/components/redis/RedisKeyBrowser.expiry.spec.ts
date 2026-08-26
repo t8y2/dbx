@@ -404,7 +404,14 @@ function mountBrowser(withDeleteDetails = false) {
   const host = document.createElement("div");
   document.body.append(host);
   const app = createApp(RedisKeyBrowser, { connectionId: "connection", db: 0, blockDangerousRedisCommands: false });
-  const messages = { en: { redis: { deleteGroupDetails: withDeleteDetails ? "{target}\n{count} keys" : "redis.deleteGroupDetails" } } };
+  const messages = {
+    en: {
+      redis: {
+        deleteGroupDetails: withDeleteDetails ? "{target}\n{count} keys" : "redis.deleteGroupDetails",
+        keys: "{count} keys",
+      },
+    },
+  };
   app.use(createI18n({ legacy: false, locale: "en", messages, missingWarn: false, fallbackWarn: false }));
   app.mount(host);
   mountedApps.push({ unmount: () => app.unmount(), host });
@@ -1260,6 +1267,7 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
 
     await submitKeySearch("issue5012");
     await vi.waitFor(() => expect(document.body.textContent).toContain("first"));
+    expect(requiredElement<HTMLElement>(".redis-key-count").textContent).toBe("1+ keys");
 
     clickButtonWithText("redis.loadMoreKeys");
     await vi.waitFor(() => expect(continuationBatch).toBe(7));
@@ -1271,6 +1279,7 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
 
     expect(continuationBatch).toBe(8);
     expect(document.body.textContent).toContain("first");
+    expect(requiredElement<HTMLElement>(".redis-key-count").textContent).toBe("2 keys");
   });
 
   it("cancels a sparse scan immediately without searching until Enter", async () => {

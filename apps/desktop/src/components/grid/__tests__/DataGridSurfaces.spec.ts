@@ -152,6 +152,12 @@ describe("DataGrid canvas surfaces", () => {
     const canvasMouseMove = dataGridSource.slice(dataGridSource.indexOf("function onCanvasMouseMove"), dataGridSource.indexOf("function onCanvasMouseLeave"));
     expect(canvasMouseMove).toContain("const cursorSurface = canvasEventSurface(event);");
   });
+
+  it("handles double clicks on the stable canvas container", () => {
+    expect(dataGridSource).toContain('@dblclick="onCanvasDblClick"');
+    expect(dataGridSource.match(/@dblclick="onCanvasDblClick"/g)).toHaveLength(1);
+    expect(dataGridSource).toContain("@dblclick.stop");
+  });
 });
 
 describe("DataGridSearchBar", () => {

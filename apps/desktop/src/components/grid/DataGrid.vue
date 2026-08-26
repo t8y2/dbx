@@ -12953,6 +12953,7 @@ function currentGridContextMenuItems(): ContextMenuItem[] {
                     width: `${totalWidth}px`,
                     height: `${canvasContentHeight}px`,
                   }"
+                  @dblclick="onCanvasDblClick"
                 >
                   <canvas
                     ref="canvasRef"
@@ -12966,7 +12967,6 @@ function currentGridContextMenuItems(): ContextMenuItem[] {
                     @mouseleave="onCanvasMouseLeave"
                     @mousedown="onCanvasMouseDown"
                     @contextmenu="onCanvasContext"
-                    @dblclick="onCanvasDblClick"
                   />
                   <canvas
                     ref="canvasBackRef"
@@ -12980,9 +12980,8 @@ function currentGridContextMenuItems(): ContextMenuItem[] {
                     @mouseleave="onCanvasMouseLeave"
                     @mousedown="onCanvasMouseDown"
                     @contextmenu="onCanvasContext"
-                    @dblclick="onCanvasDblClick"
                   />
-                  <div ref="canvasOverlayRef" class="canvas-grid-overlay dbx-data-grid-font-family sticky left-0 top-0 z-10 overflow-visible" :style="canvasOverlayStyle">
+                  <div ref="canvasOverlayRef" class="canvas-grid-overlay dbx-data-grid-font-family sticky left-0 top-0 z-10 overflow-visible" :style="canvasOverlayStyle" @dblclick.stop>
                     <div v-if="canvasReadonlyTextCell" class="absolute pointer-events-auto z-20 tabular-nums" :style="canvasReadonlyTextCellStyle" @mousedown.stop @click.stop>
                       <DataGridReadonlyTextSelection :value="canvasReadonlyTextCell.value" :expanded="canvasReadonlyTextCell.expanded" @close="closeReadonlyCellTextSelection" @escape="escapeReadonlyCellTextSelection" />
                     </div>

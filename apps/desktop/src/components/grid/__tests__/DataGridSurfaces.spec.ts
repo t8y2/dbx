@@ -142,6 +142,16 @@ describe("DataGrid canvas surfaces", () => {
     expect(dataGridSource).toContain("const canvas = inactiveCanvasSurface();");
     expect(dataGridSource).toContain("canvasUsingBackSurface.value = !canvasUsingBackSurface.value;");
   });
+
+  it("uses the canvas that actually received the event during a surface flip", () => {
+    expect(dataGridSource).toContain("function canvasEventSurface(event: MouseEvent): HTMLCanvasElement | null");
+    expect(dataGridSource).toContain("const currentTarget = event.currentTarget;");
+    expect(dataGridSource).toContain("return currentTarget instanceof HTMLCanvasElement ? currentTarget : activeCanvasSurface();");
+    expect(dataGridSource).toContain("const canvas = canvasEventSurface(event);");
+
+    const canvasMouseMove = dataGridSource.slice(dataGridSource.indexOf("function onCanvasMouseMove"), dataGridSource.indexOf("function onCanvasMouseLeave"));
+    expect(canvasMouseMove).toContain("const cursorSurface = canvasEventSurface(event);");
+  });
 });
 
 describe("DataGridSearchBar", () => {

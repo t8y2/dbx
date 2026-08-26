@@ -7088,8 +7088,13 @@ function canvasColumnAt(contentX: number): number {
   return low;
 }
 
+function canvasEventSurface(event: MouseEvent): HTMLCanvasElement | null {
+  const currentTarget = event.currentTarget;
+  return currentTarget instanceof HTMLCanvasElement ? currentTarget : activeCanvasSurface();
+}
+
 function canvasHitTest(event: MouseEvent): { rowIndex: number; visibleColIdx: number; rowNumber: boolean } | null {
-  const canvas = activeCanvasSurface();
+  const canvas = canvasEventSurface(event);
   const scroller = canvasScrollerElement();
   if (!canvas || !scroller) return null;
   const rect = canvas.getBoundingClientRect();
@@ -7203,8 +7208,8 @@ function onDomGridWheel(event: WheelEvent) {
 
 function onCanvasMouseMove(event: MouseEvent) {
   stopReleasedSelectionGesture(event);
+  const cursorSurface = canvasEventSurface(event);
   if (columnHeaderPointerInteractionActive()) {
-    const cursorSurface = activeCanvasSurface();
     if (cursorSurface) cursorSurface.style.cursor = "default";
     onCanvasMouseLeave();
     return;
@@ -7219,7 +7224,6 @@ function onCanvasMouseMove(event: MouseEvent) {
         }
       : null;
   const actualColIdx = next ? visibleColumnIndexes.value[next.visibleColIdx] : undefined;
-  const cursorSurface = activeCanvasSurface();
   if (cursorSurface) {
     const overBooleanInteractive =
       booleanCellsUseCheckbox.value && hit != null && !hit.rowNumber && hitItem != null && actualColIdx !== undefined && isBooleanGridCell(hitItem, actualColIdx) && canEditCellItem(hitItem, actualColIdx) && booleanInteractiveHitFromCanvasEvent(hitItem, hit, actualColIdx, event);
@@ -7271,7 +7275,7 @@ function clearCanvasDetailHover(event?: MouseEvent) {
 
 function booleanCheckboxHitFromCanvasEvent(item: RowItem, hit: { rowIndex: number; visibleColIdx: number }, actualColIdx: number, event: MouseEvent): boolean {
   if (item.data[actualColIdx] === null) return false;
-  const canvas = activeCanvasSurface();
+  const canvas = canvasEventSurface(event);
   const canvasRect = canvas?.getBoundingClientRect();
   const cellRect = canvasCellViewportRect(hit.rowIndex, hit.visibleColIdx);
   if (!canvasRect || !cellRect) return false;
@@ -7288,7 +7292,7 @@ function booleanCheckboxHitFromCanvasEvent(item: RowItem, hit: { rowIndex: numbe
 
 function booleanNullTextHitFromCanvasEvent(item: RowItem, hit: { rowIndex: number; visibleColIdx: number }, actualColIdx: number, event: MouseEvent): boolean {
   if (item.data[actualColIdx] !== null) return false;
-  const canvas = activeCanvasSurface();
+  const canvas = canvasEventSurface(event);
   const canvasRect = canvas?.getBoundingClientRect();
   const cellRect = canvasCellViewportRect(hit.rowIndex, hit.visibleColIdx);
   if (!canvasRect || !cellRect) return false;

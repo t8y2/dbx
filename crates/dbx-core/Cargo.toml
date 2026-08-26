@@ -11,6 +11,9 @@ dynamodb = ["dep:aws-sdk-dynamodb"]
 mq-admin = ["dep:rumqttc"]
 sqlite-sqlcipher = ["rusqlite/bundled-sqlcipher-vendored-openssl"]
 sqlite-multiple-ciphers = ["dep:libsqlite3-hotbundle"]
+# Keeps bundled SQLite for consumers that enable no other sqlite source
+# (dbx-cli, dbx-mcp); do not combine with the cipher features.
+sqlite-bundled = ["rusqlite/bundled"]
 openapi = ["dep:utoipa"]
 system-fonts = ["font-kit"]
 

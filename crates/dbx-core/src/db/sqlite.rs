@@ -235,7 +235,7 @@ fn ensure_sqlite_encryption_available(_encrypted: bool) -> Result<(), String> {
 #[cfg(not(any(feature = "sqlite-sqlcipher", feature = "sqlite-multiple-ciphers")))]
 fn ensure_sqlite_encryption_available(encrypted: bool) -> Result<(), String> {
     if encrypted {
-        Err("Encrypted SQLite support is not compiled in this build. Rebuild with the sqlite-sqlcipher feature."
+        Err("Encrypted SQLite support is not compiled in this build. Rebuild with the sqlite-sqlcipher or sqlite-multiple-ciphers feature."
             .to_string())
     } else {
         Ok(())

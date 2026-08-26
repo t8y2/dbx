@@ -4337,7 +4337,6 @@ async function openExternalUrl(url: string) {
               </span>
               <span v-else-if="conversationRowDetail(conv).status === 'completed'" class="flex min-w-0 shrink-0 items-center gap-1" :aria-label="t('ai.runStatusCompleted')" :title="conversationRowDetail(conv).summary ?? t('ai.runStatusCompleted')">
                 <Check class="h-3 w-3 shrink-0 text-green-500" />
-                <span v-if="conversationRowDetail(conv).summary" class="hidden truncate text-muted-foreground min-[430px]:inline">{{ conversationRowDetail(conv).summary }}</span>
               </span>
               <span
                 v-else-if="conversationRowDetail(conv).status === 'failed' || conversationRowDetail(conv).status === 'interrupted'"
@@ -4346,7 +4345,6 @@ async function openExternalUrl(url: string) {
                 :title="conversationRowDetail(conv).reason ?? t(conversationRowDetail(conv).status === 'interrupted' ? 'ai.runStatusInterrupted' : 'ai.runStatusFailed')"
               >
                 <AlertTriangle class="h-3 w-3 shrink-0 text-destructive" />
-                <span v-if="conversationRowDetail(conv).reason" class="hidden truncate text-destructive/90 min-[430px]:inline">{{ conversationRowDetail(conv).reason }}</span>
                 <button class="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground" :title="t('ai.retryRound')" :aria-label="t('ai.retryRound')" @click.stop="retryConversationRun(conv.id)">
                   <RefreshCw class="h-3 w-3" />
                 </button>

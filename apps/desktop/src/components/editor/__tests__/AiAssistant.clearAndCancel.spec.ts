@@ -521,4 +521,17 @@ describe("AI assistant uses platform-specific conversation lifecycle", () => {
     const rowBody = bodyOf("async function stopConversationRun(");
     expect(rowBody).toContain("await stopDesktopAiRun(run);");
   });
+
+  it("keeps long task summaries out of the fixed-width history popover", () => {
+    // The history popover is always w-72, but min-[430px] responds to viewport
+    // width. On desktop it displayed long summaries inside the compact row,
+    // squeezing the conversation title and forcing horizontal scrolling. The
+    // status icon still exposes the full text through its title/ARIA metadata.
+    const historyStart = source.indexOf('<PopoverContent align="end" class="w-72 gap-0 p-0"');
+    const history = source.slice(historyStart);
+    expect(history).toContain(":title=\"conversationRowDetail(conv).summary ?? t('ai.runStatusCompleted')\"");
+    expect(history).toContain(":title=\"conversationRowDetail(conv).reason ?? t(conversationRowDetail(conv).status === 'interrupted' ? 'ai.runStatusInterrupted' : 'ai.runStatusFailed')\"");
+    expect(history).not.toContain("conversationRowDetail(conv).summary }}</span>");
+    expect(history).not.toContain("conversationRowDetail(conv).reason }}</span>");
+  });
 });

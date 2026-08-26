@@ -354,7 +354,7 @@ const editShortcuts = ref(normalizeShortcutSettings(settingsStore.editorSettings
 function translateWithExecuteShortcut(key: string): string {
   return t(key, { shortcut: formatShortcutDisplay(editShortcuts.value.executeSql) });
 }
-const executeModeLabel = computed(() => translateWithExecuteShortcut("settings.executeMode"));
+const executeModeLabel = computed(() => t("settings.executeMode"));
 const executeModeDescription = computed(() => translateWithExecuteShortcut("settings.executeModeDescription"));
 const editExecuteAllOnBlankLine = ref(settingsStore.editorSettings.executeAllOnBlankLine);
 const editShowExecutionTargetPicker = ref(settingsStore.editorSettings.showExecutionTargetPicker);

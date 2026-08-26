@@ -6275,6 +6275,8 @@ export default withEnglishFallback({
     autoSelectActiveSidebarNodeDescription: "切换标签页时，在侧边栏选中匹配的可见表、集合或 SQL 文件。",
     sidebarOpenDatabaseOnSingleClick: "单击数据库时浏览对象",
     sidebarOpenDatabaseOnSingleClickDescription: "开启后，单击数据库或模式节点时，会同时展开侧边栏并打开“浏览对象”标签页。",
+    sidebarOpenBrowserTabWhenExpanding: "展开数据库时打开浏览器标签页",
+    sidebarOpenBrowserTabWhenExpandingDescription: "关闭后，打开数据库或模式节点时只展开侧边栏列表，不创建顶部“浏览对象”标签页。",
     openTabsRestoreMode: "启动时恢复标签页",
     openTabsRestoreModeDescription: "选择 DBX 启动时如何恢复上次打开的标签页。",
     openTabsRestoreModeAll: "保留所有标签",

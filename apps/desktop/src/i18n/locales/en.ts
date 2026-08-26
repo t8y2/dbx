@@ -6291,6 +6291,8 @@ export default {
     autoSelectActiveSidebarNodeDescription: "When switching tabs, select the matching visible table, collection, or SQL file in the sidebar.",
     sidebarOpenDatabaseOnSingleClick: "Browse objects on database single click",
     sidebarOpenDatabaseOnSingleClickDescription: 'When enabled, single-clicking a database or schema node also expands the sidebar and opens the "Browse Objects" tab.',
+    sidebarOpenBrowserTabWhenExpanding: "Open browser tab when expanding",
+    sidebarOpenBrowserTabWhenExpandingDescription: 'When disabled, opening a database or schema node only expands the sidebar and does not create the "Browse Objects" tab.',
     openTabsRestoreMode: "Restore tabs on launch",
     openTabsRestoreModeDescription: "Choose how DBX restores tabs that were open last time.",
     openTabsRestoreModeAll: "Keep all tabs",

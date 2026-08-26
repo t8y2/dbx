@@ -447,6 +447,7 @@ const editRoutineSourceOpenMode = ref(settingsStore.editorSettings.routineSource
 const editSidebarTableSearchEnabled = ref(settingsStore.editorSettings.sidebarTableSearchEnabled);
 const editAutoSelectActiveSidebarNode = ref(settingsStore.editorSettings.autoSelectActiveSidebarNode);
 const editSidebarOpenDatabaseOnSingleClick = ref(settingsStore.editorSettings.sidebarOpenDatabaseOnSingleClick);
+const editSidebarOpenBrowserTabWhenExpanding = ref(settingsStore.editorSettings.sidebarOpenBrowserTabWhenExpanding);
 const editOpenTabsRestoreMode = ref<OpenTabsRestoreMode>(settingsStore.editorSettings.openTabsRestoreMode);
 const editDisconnectTabHandlingMode = ref<DisconnectTabHandlingMode>(settingsStore.editorSettings.disconnectTabHandlingMode);
 const editDataTabReuseMode = ref<DataTabReuseMode>(settingsStore.editorSettings.dataTabReuseMode);
@@ -582,6 +583,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     sidebarTableSearchEnabled: editSidebarTableSearchEnabled.value,
     autoSelectActiveSidebarNode: editAutoSelectActiveSidebarNode.value,
     sidebarOpenDatabaseOnSingleClick: editSidebarOpenDatabaseOnSingleClick.value,
+    sidebarOpenBrowserTabWhenExpanding: editSidebarOpenBrowserTabWhenExpanding.value,
     openTabsRestoreMode: editOpenTabsRestoreMode.value,
     disconnectTabHandlingMode: editDisconnectTabHandlingMode.value,
     dataTabReuseMode: editDataTabReuseMode.value,
@@ -875,6 +877,7 @@ function syncEditorSettingsDraftFromStore() {
   editSidebarTableSearchEnabled.value = settingsStore.editorSettings.sidebarTableSearchEnabled;
   editAutoSelectActiveSidebarNode.value = settingsStore.editorSettings.autoSelectActiveSidebarNode;
   editSidebarOpenDatabaseOnSingleClick.value = settingsStore.editorSettings.sidebarOpenDatabaseOnSingleClick;
+  editSidebarOpenBrowserTabWhenExpanding.value = settingsStore.editorSettings.sidebarOpenBrowserTabWhenExpanding;
   editOpenTabsRestoreMode.value = settingsStore.editorSettings.openTabsRestoreMode;
   editDisconnectTabHandlingMode.value = settingsStore.editorSettings.disconnectTabHandlingMode;
   editDataTabReuseMode.value = settingsStore.editorSettings.dataTabReuseMode;
@@ -1127,6 +1130,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editSidebarTableSearchEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled;
     editAutoSelectActiveSidebarNode.value = DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode;
     editSidebarOpenDatabaseOnSingleClick.value = DEFAULT_EDITOR_SETTINGS.sidebarOpenDatabaseOnSingleClick;
+    editSidebarOpenBrowserTabWhenExpanding.value = DEFAULT_EDITOR_SETTINGS.sidebarOpenBrowserTabWhenExpanding;
     editOpenTabsRestoreMode.value = DEFAULT_EDITOR_SETTINGS.openTabsRestoreMode;
     editDisconnectTabHandlingMode.value = DEFAULT_EDITOR_SETTINGS.disconnectTabHandlingMode;
     editDataTabReuseMode.value = DEFAULT_EDITOR_SETTINGS.dataTabReuseMode;
@@ -1256,6 +1260,7 @@ function resetAllDefaults() {
   editSidebarTableSearchEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled;
   editAutoSelectActiveSidebarNode.value = DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode;
   editSidebarOpenDatabaseOnSingleClick.value = DEFAULT_EDITOR_SETTINGS.sidebarOpenDatabaseOnSingleClick;
+  editSidebarOpenBrowserTabWhenExpanding.value = DEFAULT_EDITOR_SETTINGS.sidebarOpenBrowserTabWhenExpanding;
   editOpenTabsRestoreMode.value = DEFAULT_EDITOR_SETTINGS.openTabsRestoreMode;
   editDisconnectTabHandlingMode.value = DEFAULT_EDITOR_SETTINGS.disconnectTabHandlingMode;
   editDataTabReuseMode.value = DEFAULT_EDITOR_SETTINGS.dataTabReuseMode;
@@ -5006,6 +5011,15 @@ onUnmounted(() => {
                   </HelpTooltip>
                 </div>
                 <Switch id="sidebar-open-database-on-single-click" v-model="editSidebarOpenDatabaseOnSingleClick" />
+              </div>
+              <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="flex items-center gap-2">
+                  <Label for="sidebar-open-browser-tab-when-expanding">{{ t("settings.sidebarOpenBrowserTabWhenExpanding") }}</Label>
+                  <HelpTooltip :label="t('settings.sidebarOpenBrowserTabWhenExpanding')">
+                    {{ t("settings.sidebarOpenBrowserTabWhenExpandingDescription") }}
+                  </HelpTooltip>
+                </div>
+                <Switch id="sidebar-open-browser-tab-when-expanding" v-model="editSidebarOpenBrowserTabWhenExpanding" />
               </div>
               <div class="space-y-2 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">

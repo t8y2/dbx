@@ -1000,7 +1000,7 @@ function runRowClickAction(clickDetail: number, requestId: number) {
   } else if (action === "open-object-browser") {
     void openObjectBrowser();
   } else if (action === "open-object-browser-and-expand") {
-    void openObjectBrowser();
+    if (settingsStore.editorSettings.sidebarOpenBrowserTabWhenExpanding !== false) void openObjectBrowser();
     if (!node.isExpanded) void toggle();
   } else if (action === "open-source") {
     openObjectSourceDialog(false);
@@ -1361,7 +1361,7 @@ function onDoubleClick(event: MouseEvent) {
   } else if (action === "open-object-browser") {
     void openObjectBrowser();
   } else if (action === "open-object-browser-and-expand") {
-    void openObjectBrowser();
+    if (settingsStore.editorSettings.sidebarOpenBrowserTabWhenExpanding !== false) void openObjectBrowser();
     if (!activeNode.value.isExpanded) void toggle();
   } else if (action === "open-data") {
     openDataImmediately(activeNode.value);

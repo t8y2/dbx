@@ -856,6 +856,11 @@ impl ConnectionConfig {
             DatabaseType::Highgo => Some("highgo"),
             DatabaseType::Uxdb => Some("uxdb"),
             DatabaseType::Yashandb => Some("yasdb"),
+            DatabaseType::Oracle
+                if !self.oracle_connection_type.as_deref().is_some_and(|mode| mode.eq_ignore_ascii_case("tns")) =>
+            {
+                Some("ORCL")
+            }
             DatabaseType::Oscar => Some("osrdb"),
             DatabaseType::Firebird => Some("employee"),
             DatabaseType::H2 => Some("test"),
@@ -2830,6 +2835,20 @@ mod tests {
 
         config.db_type = DatabaseType::Postgres;
         assert_eq!(config.effective_database(), Some("postgres"));
+    }
+
+    #[test]
+    fn oracle_database_defaults_to_orcl_except_for_tns_aliases() {
+        let mut config = mysql_config("system", "oracle", None);
+        config.db_type = DatabaseType::Oracle;
+
+        for mode in [None, Some("service_name"), Some("sid")] {
+            config.oracle_connection_type = mode.map(str::to_string);
+            assert_eq!(config.effective_database(), Some("ORCL"));
+        }
+
+        config.oracle_connection_type = Some("tns".to_string());
+        assert_eq!(config.effective_database(), None);
     }
 
     fn mongodb_config(username: &str, password: &str, database: Option<&str>) -> ConnectionConfig {

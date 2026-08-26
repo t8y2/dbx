@@ -465,6 +465,7 @@ pub async fn execute_in_manual_transaction(
     table_data_preview: Option<bool>,
     page_size: Option<usize>,
     result_session_id: Option<String>,
+    classification_sql: Option<String>,
 ) -> Result<Vec<dbx_core::query::ExecuteMultiResult>, ManualTransactionCommandError> {
     dbx_core::query::execute_in_manual_transaction_with_options(
         &state,
@@ -477,6 +478,7 @@ pub async fn execute_in_manual_transaction(
             table_data_preview: table_data_preview.unwrap_or(false),
             page_size,
             result_session_id,
+            classification_sql,
         },
     )
     .await

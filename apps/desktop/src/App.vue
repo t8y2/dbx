@@ -341,6 +341,12 @@ const activeConnection = computed(() => {
   return tab ? connectionStore.getConfig(tab.connectionId) : undefined;
 });
 
+// Oracle manual-mode indicator derived from the RESOLVED database type (an
+// Oracle connection uses the agent runtime but reports db_type "oracle"), so
+// the toolbar's Commit/Rollback visibility can apply the Oracle dirty-state rule
+// without inferring Oracle from the raw transport type.
+const isOracleManualTransaction = computed(() => effectiveDatabaseTypeForConnection(activeConnection.value) === "oracle" && (activeTab.value?.autoCommit ?? true) === false);
+
 function updateAgentDriverUpdateCount(count: number) {
   if (!settingsStore.editorSettings.updateNotificationsEnabled) {
     agentDriverUpdateCount.value = 0;
@@ -3039,6 +3045,8 @@ onUnmounted(() => {
                   :auto-commit="activeTab.autoCommit ?? true"
                   :txn-session-id="activeTab?.txnSessionId"
                   :txn-auto-rolled-back="activeTab?.txnAutoRolledBack"
+                  :oracle-txn-possibly-dirty="activeTab?.oracleTxnPossiblyDirty"
+                  :is-oracle-manual-transaction="isOracleManualTransaction"
                   @update:explain-mode="(m: 'explain' | 'autotrace') => (explainMode = m)"
                   @update:block-dangerous-redis-commands="(v: boolean) => (blockDangerousRedisCommands = v)"
                   @update:auto-commit="

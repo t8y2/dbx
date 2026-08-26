@@ -11,6 +11,10 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+// Keep the native SQLite3MC archive linked even though rusqlite owns the FFI calls.
+#[cfg(feature = "sqlite-multiple-ciphers")]
+extern crate libsqlite3_hotbundle;
+
 use super::file_validator::validate_file_path;
 use crate::sql::starts_with_executable_sql_keyword;
 use crate::types::{
@@ -21,6 +25,7 @@ use crate::types::{
 
 const SQLITE_DATABASE_HEADER: &[u8; 16] = b"SQLite format 3\0";
 // Probe the common modern and legacy sizes first, then the remaining supported powers of two.
+#[cfg(feature = "sqlite-multiple-ciphers")]
 const SQLITE_LEGACY_PAGE_SIZES: &[i64] = &[4096, 1024, 512, 2048, 8192, 16384, 32768, 65536];
 
 #[derive(Clone)]
@@ -155,13 +160,18 @@ fn open_sqlite_handle(
     } else if create_if_missing {
         vec![SqliteCipherAttempt::SqlCipher(4)]
     } else {
-        let mut attempts = vec![
+        let attempts = vec![
             SqliteCipherAttempt::SqlCipher(4),
             SqliteCipherAttempt::SqlCipher(3),
             SqliteCipherAttempt::SqlCipher(2),
             SqliteCipherAttempt::SqlCipher(1),
         ];
-        attempts.extend(SQLITE_LEGACY_PAGE_SIZES.iter().copied().map(SqliteCipherAttempt::Rc4Legacy));
+        #[cfg(feature = "sqlite-multiple-ciphers")]
+        let attempts = {
+            let mut attempts = attempts;
+            attempts.extend(SQLITE_LEGACY_PAGE_SIZES.iter().copied().map(SqliteCipherAttempt::Rc4Legacy));
+            attempts
+        };
         attempts
     };
     let mut unlock_error: Option<String> = None;
@@ -183,10 +193,11 @@ fn open_sqlite_handle(
 }
 
 #[derive(Clone, Copy)]
-#[cfg_attr(not(feature = "sqlite-sqlcipher"), allow(dead_code))]
+#[cfg_attr(not(any(feature = "sqlite-sqlcipher", feature = "sqlite-multiple-ciphers")), allow(dead_code))]
 enum SqliteCipherAttempt {
     Plain,
     SqlCipher(i64),
+    #[cfg(feature = "sqlite-multiple-ciphers")]
     Rc4Legacy(i64),
 }
 
@@ -216,12 +227,12 @@ fn sqlite_cipher_key(cipher_key: &str) -> Option<String> {
     }
 }
 
-#[cfg(feature = "sqlite-sqlcipher")]
+#[cfg(any(feature = "sqlite-sqlcipher", feature = "sqlite-multiple-ciphers"))]
 fn ensure_sqlite_encryption_available(_encrypted: bool) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(feature = "sqlite-sqlcipher"))]
+#[cfg(not(any(feature = "sqlite-sqlcipher", feature = "sqlite-multiple-ciphers")))]
 fn ensure_sqlite_encryption_available(encrypted: bool) -> Result<(), String> {
     if encrypted {
         Err("Encrypted SQLite support is not compiled in this build. Rebuild with the sqlite-sqlcipher feature."
@@ -231,7 +242,7 @@ fn ensure_sqlite_encryption_available(encrypted: bool) -> Result<(), String> {
     }
 }
 
-#[cfg(feature = "sqlite-sqlcipher")]
+#[cfg(feature = "sqlite-multiple-ciphers")]
 fn apply_sqlite_cipher_key(
     conn: &Connection,
     cipher_key: Option<&str>,
@@ -261,7 +272,30 @@ fn apply_sqlite_cipher_key(
     Ok(())
 }
 
-#[cfg(not(feature = "sqlite-sqlcipher"))]
+#[cfg(all(feature = "sqlite-sqlcipher", not(feature = "sqlite-multiple-ciphers")))]
+fn apply_sqlite_cipher_key(
+    conn: &Connection,
+    cipher_key: Option<&str>,
+    attempt: SqliteCipherAttempt,
+) -> Result<(), String> {
+    let Some(cipher_key) = cipher_key.filter(|key| !key.is_empty()) else {
+        return Ok(());
+    };
+
+    let SqliteCipherAttempt::SqlCipher(compatibility) = attempt else {
+        return Ok(());
+    };
+    conn.pragma_update(None, "key", cipher_key).map_err(|e| format!("SQLite encryption key setup failed: {e}"))?;
+    if compatibility != 4 {
+        conn.pragma_update(None, "cipher_compatibility", compatibility)
+            .map_err(|e| format!("SQLCipher compatibility setup failed: {e}"))?;
+    }
+    verify_sqlite_encryption_key(conn)
+        .map_err(|e| format!("Encrypted SQLite database unlock failed. Check the password/key and cipher: {e}"))?;
+    Ok(())
+}
+
+#[cfg(not(any(feature = "sqlite-sqlcipher", feature = "sqlite-multiple-ciphers")))]
 fn apply_sqlite_cipher_key(
     _conn: &Connection,
     _cipher_key: Option<&str>,
@@ -270,7 +304,7 @@ fn apply_sqlite_cipher_key(
     Ok(())
 }
 
-#[cfg(feature = "sqlite-sqlcipher")]
+#[cfg(any(feature = "sqlite-sqlcipher", feature = "sqlite-multiple-ciphers"))]
 fn verify_sqlite_encryption_key(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))
 }
@@ -731,7 +765,7 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
-    #[cfg(feature = "sqlite-sqlcipher")]
+    #[cfg(any(feature = "sqlite-sqlcipher", feature = "sqlite-multiple-ciphers"))]
     #[tokio::test]
     async fn sqlcipher_key_creates_and_reopens_encrypted_database() {
         let path = std::env::temp_dir().join(format!("dbx-sqlcipher-{}.db", uuid::Uuid::new_v4()));
@@ -764,7 +798,7 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
-    #[cfg(feature = "sqlite-sqlcipher")]
+    #[cfg(any(feature = "sqlite-sqlcipher", feature = "sqlite-multiple-ciphers"))]
     #[tokio::test]
     async fn sqlcipher_key_opens_legacy_compatible_database() {
         let path = std::env::temp_dir().join(format!("dbx-sqlcipher-legacy-{}.db", uuid::Uuid::new_v4()));
@@ -774,9 +808,14 @@ mod tests {
             let conn =
                 Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE)
                     .expect("create legacy-compatible encrypted sqlite");
-            conn.pragma_update(None, "cipher", "sqlcipher").expect("select SQLCipher");
-            conn.pragma_update(None, "legacy", 3).expect("set SQLCipher compatibility");
+            #[cfg(feature = "sqlite-multiple-ciphers")]
+            {
+                conn.pragma_update(None, "cipher", "sqlcipher").expect("select SQLCipher");
+                conn.pragma_update(None, "legacy", 3).expect("set SQLCipher compatibility");
+            }
             conn.pragma_update(None, "key", key).expect("set SQLCipher key");
+            #[cfg(all(feature = "sqlite-sqlcipher", not(feature = "sqlite-multiple-ciphers")))]
+            conn.pragma_update(None, "cipher_compatibility", 3).expect("set SQLCipher compatibility");
             conn.execute_batch("CREATE TABLE t (name TEXT); INSERT INTO t VALUES ('legacy');")
                 .expect("write legacy-compatible encrypted sqlite");
         }
@@ -791,7 +830,7 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
-    #[cfg(feature = "sqlite-sqlcipher")]
+    #[cfg(feature = "sqlite-multiple-ciphers")]
     #[tokio::test]
     async fn encrypted_sqlite_key_opens_and_updates_1024_page_rc4_legacy_database() {
         let path = std::env::temp_dir().join(format!("dbx-rc4-legacy-{}.db", uuid::Uuid::new_v4()));
@@ -833,7 +872,7 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
-    #[cfg(not(feature = "sqlite-sqlcipher"))]
+    #[cfg(not(any(feature = "sqlite-sqlcipher", feature = "sqlite-multiple-ciphers")))]
     #[tokio::test]
     async fn sqlcipher_key_requires_sqlcipher_feature() {
         let err =

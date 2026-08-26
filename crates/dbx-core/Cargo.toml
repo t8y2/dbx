@@ -9,7 +9,8 @@ default = ["duckdb-sidecar", "dynamodb", "mq-admin", "sqlite-sqlcipher", "system
 duckdb-sidecar = []
 dynamodb = ["dep:aws-sdk-dynamodb"]
 mq-admin = ["dep:rumqttc"]
-sqlite-sqlcipher = []
+sqlite-sqlcipher = ["rusqlite/bundled-sqlcipher-vendored-openssl"]
+sqlite-multiple-ciphers = ["dep:libsqlite3-hotbundle"]
 openapi = ["dep:utoipa"]
 system-fonts = ["font-kit"]
 
@@ -43,7 +44,7 @@ postgres-openssl = "0.5"
 openssl = { version = "0.10", features = ["vendored"] }
 webpki-roots = "0.26"
 rusqlite = { version = "0.32", default-features = false, features = ["load_extension", "backup", "functions", "column_decltype"] }
-libsqlite3-hotbundle = { git = "https://github.com/nikescar/libsqlite3-hotbundle.git", rev = "a208c7ef1447a02bf5ecb8c6a297aca012d41244", features = ["cipher-sqlcipher"] }
+libsqlite3-hotbundle = { git = "https://github.com/nikescar/libsqlite3-hotbundle.git", rev = "a208c7ef1447a02bf5ecb8c6a297aca012d41244", features = ["cipher-sqlcipher"], optional = true }
 mysql_async = { version = "0.37", default-features = false, features = ["default-rustls", "client_ed25519", "chrono", "rust_decimal"] }
 sqlparser = { version = "0.62.0", features = ["visitor"] }
 redis = { version = "0.32.2", features = ["tokio-comp", "tls-rustls", "tls-rustls-insecure", "tokio-rustls-comp", "sentinel", "cluster-async"] }

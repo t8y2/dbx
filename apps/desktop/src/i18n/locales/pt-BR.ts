@@ -6008,6 +6008,8 @@ export default withEnglishFallback({
     autoSelectActiveSidebarNodeDescription: "Ao alternar abas, selecionar a tabela, coleção ou arquivo SQL correspondente visível na barra lateral.",
     sidebarOpenDatabaseOnSingleClick: "Explorar objetos ao clicar no banco de dados",
     sidebarOpenDatabaseOnSingleClickDescription: 'Quando ativado, um clique único em um nó de banco de dados ou esquema expande a barra lateral e abre a aba "Explorar Objetos".',
+    sidebarOpenBrowserTabWhenExpanding: "Abrir a aba do navegador ao expandir",
+    sidebarOpenBrowserTabWhenExpandingDescription: 'Quando desativado, abrir um nó de banco de dados ou esquema apenas expande a barra lateral e não cria a aba "Explorar Objetos".',
     openTabsRestoreMode: "Restaurar abas ao iniciar",
     openTabsRestoreModeDescription: "Escolha como o DBX restaura as abas que estavam abertas na última vez.",
     openTabsRestoreModeAll: "Manter todas as abas",

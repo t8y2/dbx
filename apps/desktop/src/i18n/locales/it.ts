@@ -6006,6 +6006,8 @@ export default withEnglishFallback({
     autoSelectActiveSidebarNodeDescription: "Quando passi da una scheda all'altra, seleziona la tabella, la collezione o il file SQL visibile corrispondente nella barra laterale.",
     sidebarOpenDatabaseOnSingleClick: "Sfoglia oggetti al clic sul database",
     sidebarOpenDatabaseOnSingleClickDescription: 'Se abilitato, un singolo clic su un nodo database o schema espande la barra laterale e apre la scheda "Esplora Oggetti".',
+    sidebarOpenBrowserTabWhenExpanding: "Apri la scheda del browser durante l'espansione",
+    sidebarOpenBrowserTabWhenExpandingDescription: "Se disabilitato, l'apertura di un nodo database o schema espande solo la barra laterale e non crea la scheda Esplora oggetti.",
     openTabsRestoreMode: "Ripristina schede all'avvio",
     openTabsRestoreModeDescription: "Scegli come DBX ripristina le schede aperte l'ultima volta.",
     openTabsRestoreModeAll: "Mantieni tutte le schede",

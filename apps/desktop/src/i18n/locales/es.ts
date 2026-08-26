@@ -6006,6 +6006,8 @@ export default withEnglishFallback({
     autoSelectActiveSidebarNodeDescription: "Al cambiar de pestaña, selecciona la tabla, colección o archivo SQL visible correspondiente en la barra lateral.",
     sidebarOpenDatabaseOnSingleClick: "Explorar objetos al hacer clic en la base de datos",
     sidebarOpenDatabaseOnSingleClickDescription: 'Si está activado, al hacer un solo clic en un nodo de base de datos o esquema se expande la barra lateral y se abre la pestaña "Explorar objetos".',
+    sidebarOpenBrowserTabWhenExpanding: "Abrir la pestaña del explorador al expandir",
+    sidebarOpenBrowserTabWhenExpandingDescription: 'Si se desactiva, abrir un nodo de base de datos o esquema solo expande la barra lateral y no crea la pestaña "Explorar objetos".',
     openTabsRestoreMode: "Restaurar pestañas al iniciar",
     openTabsRestoreModeDescription: "Elige cómo DBX restaura las pestañas que estaban abiertas la última vez.",
     openTabsRestoreModeAll: "Conservar todas las pestañas",

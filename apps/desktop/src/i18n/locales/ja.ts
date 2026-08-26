@@ -6032,6 +6032,8 @@ export default withEnglishFallback({
     autoSelectActiveSidebarNodeDescription: "タブ切替時に、サイドバーで一致する表示中のテーブル、コレクション、またはSQLファイルを選択します。",
     sidebarOpenDatabaseOnSingleClick: "データベースのシングルクリックでオブジェクトを参照",
     sidebarOpenDatabaseOnSingleClickDescription: "有効にすると、データベースまたはスキーマノードをシングルクリックした際に、サイドバーを展開すると同時に「オブジェクトを参照」タブを開きます。",
+    sidebarOpenBrowserTabWhenExpanding: "展開時にブラウザータブを開く",
+    sidebarOpenBrowserTabWhenExpandingDescription: "無効にすると、データベースまたはスキーマノードを開いたときはサイドバーだけを展開し、「オブジェクトを参照」タブを作成しません。",
     openTabsRestoreMode: "起動時にタブを復元",
     openTabsRestoreModeDescription: "DBX 起動時に前回開いていたタブをどのように復元するかを選択します。",
     openTabsRestoreModeAll: "すべてのタブを保持",

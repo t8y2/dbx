@@ -21,6 +21,10 @@ use crate::types::{
     ColumnInfo, ForeignKeyInfo, FunctionInfo, IndexInfo, OwnerInfo, RuleInfo, SequenceInfo, TableInfo, TriggerInfo,
 };
 
+mod sqlserver_dependencies;
+
+use sqlserver_dependencies::build_dependency_aware_alter_column_batch;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ColumnAddPosition {
@@ -3543,37 +3547,329 @@ fn default_literal(default: &str, data_type: &str, source: DialectKind, extra: O
     normalized.to_string()
 }
 
+fn consume_postgres_cast_name(value: &str, start: usize) -> Option<(usize, Option<String>)> {
+    let ch = value[start..].chars().next()?;
+    if ch == '"' {
+        let mut index = start + ch.len_utf8();
+        while index < value.len() {
+            let next = value[index..].chars().next().expect("index is on a character boundary");
+            index += next.len_utf8();
+            if next == '"' {
+                if value[index..].starts_with('"') {
+                    index += 1;
+                } else {
+                    return Some((index, None));
+                }
+            }
+        }
+        return None;
+    }
+    if ch.is_alphabetic() || ch == '_' {
+        let mut index = start + ch.len_utf8();
+        while index < value.len() {
+            let next = value[index..].chars().next().expect("index is on a character boundary");
+            if next.is_alphanumeric() || matches!(next, '_' | '$') {
+                index += next.len_utf8();
+            } else {
+                break;
+            }
+        }
+        return Some((index, Some(value[start..index].to_ascii_lowercase())));
+    }
+    None
+}
+
+fn postgres_cast_whitespace_end(value: &str, start: usize) -> usize {
+    start + value[start..].chars().take_while(|ch| ch.is_ascii_whitespace()).map(char::len_utf8).sum::<usize>()
+}
+
+fn consume_postgres_cast_keyword(value: &str, start: usize, keyword: &str) -> Option<usize> {
+    let token_start = postgres_cast_whitespace_end(value, start);
+    if token_start == start {
+        return None;
+    }
+    let (end, unquoted) = consume_postgres_cast_name(value, token_start)?;
+    unquoted.as_deref().is_some_and(|token| token.eq_ignore_ascii_case(keyword)).then_some(end)
+}
+
+fn postgres_dollar_quote_delimiter_end(value: &str, start: usize) -> Option<usize> {
+    if !value[start..].starts_with('$') {
+        return None;
+    }
+    if value[..start].chars().next_back().is_some_and(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '$')) {
+        return None;
+    }
+    let relative_end = value[start + 1..].find('$')?;
+    let delimiter_end = start + 1 + relative_end + 1;
+    let tag = &value[start + 1..delimiter_end - 1];
+    let mut chars = tag.chars();
+    if let Some(first) = chars.next() {
+        if !(first.is_alphabetic() || first == '_') || !chars.all(|ch| ch.is_alphanumeric() || ch == '_') {
+            return None;
+        }
+    }
+    Some(delimiter_end)
+}
+
+fn consume_postgres_dollar_quoted(value: &str, start: usize) -> Option<usize> {
+    let delimiter_end = postgres_dollar_quote_delimiter_end(value, start)?;
+    let delimiter = &value[start..delimiter_end];
+    value[delimiter_end..].find(delimiter).map(|offset| delimiter_end + offset + delimiter.len())
+}
+
+fn postgres_escape_string_quote(value: &str, quote_index: usize) -> bool {
+    let mut prefix = value[..quote_index].char_indices().rev();
+    let Some((e_index, 'e' | 'E')) = prefix.next() else {
+        return false;
+    };
+    value[..e_index].chars().next_back().is_none_or(|ch| !(ch.is_alphanumeric() || matches!(ch, '_' | '$')))
+}
+
+fn consume_postgres_cast_group(value: &str, start: usize, open: char, close: char) -> Option<usize> {
+    if value[start..].chars().next()? != open {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut index = start;
+    let mut in_single_quote = false;
+    let mut in_escape_single_quote = false;
+    let mut in_double_quote = false;
+    while index < value.len() {
+        let ch = value[index..].chars().next().expect("index is on a character boundary");
+        let next_index = index + ch.len_utf8();
+        if in_single_quote && in_escape_single_quote && ch == '\\' {
+            index = value[next_index..].chars().next().map_or(next_index, |escaped| next_index + escaped.len_utf8());
+            continue;
+        }
+        if ch == '\'' && !in_double_quote {
+            if in_single_quote && value[next_index..].starts_with('\'') {
+                index = next_index + 1;
+                continue;
+            }
+            in_single_quote = !in_single_quote;
+            if in_single_quote {
+                in_escape_single_quote = postgres_escape_string_quote(value, index);
+            } else {
+                in_escape_single_quote = false;
+            }
+        } else if ch == '"' && !in_single_quote {
+            if in_double_quote && value[next_index..].starts_with('"') {
+                index = next_index + 1;
+                continue;
+            }
+            in_double_quote = !in_double_quote;
+        } else if !in_single_quote && !in_double_quote {
+            if postgres_dollar_quote_delimiter_end(value, index).is_some() {
+                index = consume_postgres_dollar_quoted(value, index)?;
+                continue;
+            }
+            if ch == open {
+                depth += 1;
+            } else if ch == close {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(next_index);
+                }
+            }
+        }
+        index = next_index;
+    }
+    None
+}
+
+fn consume_postgres_cast_type(value: &str, start: usize) -> usize {
+    let mut index = postgres_cast_whitespace_end(value, start);
+    let Some((name_end, first_name)) = consume_postgres_cast_name(value, index) else {
+        return start;
+    };
+    index = name_end;
+    let mut qualified = false;
+
+    // A type name may be schema-qualified, with whitespace around the dot. Do
+    // not treat arbitrary whitespace-separated words as part of the type: that
+    // would consume expression operators such as `AND`, `IS`, or `COLLATE`.
+    loop {
+        let dot = postgres_cast_whitespace_end(value, index);
+        if !value[dot..].starts_with('.') {
+            break;
+        }
+        let component_start = postgres_cast_whitespace_end(value, dot + 1);
+        let Some((component_end, _)) = consume_postgres_cast_name(value, component_start) else {
+            return start;
+        };
+        qualified = true;
+        index = component_end;
+    }
+
+    let base_name = (!qualified).then_some(first_name).flatten();
+
+    // PostgreSQL has a small, explicit set of whitespace-separated built-in
+    // type names. Only those phrases may extend across whitespace; accepting an
+    // arbitrary second identifier corrupts expressions such as `x::int IS NULL`.
+    if let Some(base) = base_name.as_deref() {
+        match base {
+            "character" | "char" | "bit" => {
+                if let Some(end) = consume_postgres_cast_keyword(value, index, "varying") {
+                    index = end;
+                }
+            }
+            "double" => {
+                if let Some(end) = consume_postgres_cast_keyword(value, index, "precision") {
+                    index = end;
+                }
+            }
+            "national" => {
+                if let Some(end) = consume_postgres_cast_keyword(value, index, "character")
+                    .or_else(|| consume_postgres_cast_keyword(value, index, "char"))
+                {
+                    index = end;
+                    if let Some(end) = consume_postgres_cast_keyword(value, index, "varying") {
+                        index = end;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let modifier_start = postgres_cast_whitespace_end(value, index);
+    if value[modifier_start..].starts_with('(') {
+        let Some(end) = consume_postgres_cast_group(value, modifier_start, '(', ')') else {
+            return start;
+        };
+        index = end;
+    }
+
+    if matches!(base_name.as_deref(), Some("time" | "timestamp")) {
+        let suffix_start = index;
+        if let Some(with_end) = consume_postgres_cast_keyword(value, suffix_start, "with")
+            .or_else(|| consume_postgres_cast_keyword(value, suffix_start, "without"))
+        {
+            let Some(time_end) = consume_postgres_cast_keyword(value, with_end, "time") else {
+                return start;
+            };
+            let Some(zone_end) = consume_postgres_cast_keyword(value, time_end, "zone") else {
+                return start;
+            };
+            index = zone_end;
+        }
+    }
+
+    if base_name.as_deref() == Some("interval") {
+        const INTERVAL_FIELDS: &[&str] = &["year", "month", "day", "hour", "minute", "second"];
+        let field_start = index;
+        let field = INTERVAL_FIELDS
+            .iter()
+            .find_map(|field| consume_postgres_cast_keyword(value, field_start, field).map(|end| (*field, end)));
+        if let Some((first_field, first_end)) = field {
+            index = first_end;
+            let to_start = index;
+            if let Some(to_end) = consume_postgres_cast_keyword(value, to_start, "to") {
+                let valid_final_fields: &[&str] = match first_field {
+                    "year" => &["month"],
+                    "day" => &["hour", "minute", "second"],
+                    "hour" => &["minute", "second"],
+                    "minute" => &["second"],
+                    _ => &[],
+                };
+                let Some(final_end) =
+                    valid_final_fields.iter().find_map(|field| consume_postgres_cast_keyword(value, to_end, field))
+                else {
+                    return start;
+                };
+                index = final_end;
+            }
+
+            let precision_start = postgres_cast_whitespace_end(value, index);
+            if value[precision_start..].starts_with('(') {
+                let Some(end) = consume_postgres_cast_group(value, precision_start, '(', ')') else {
+                    return start;
+                };
+                index = end;
+            }
+        }
+    }
+
+    loop {
+        let array_start = postgres_cast_whitespace_end(value, index);
+        if !value[array_start..].starts_with('[') {
+            break;
+        }
+        let Some(end) = consume_postgres_cast_group(value, array_start, '[', ']') else {
+            return start;
+        };
+        let bounds = value[array_start + 1..end - 1].trim();
+        if !bounds.is_empty() && !bounds.chars().all(|ch| ch.is_ascii_digit()) {
+            return start;
+        }
+        index = end;
+    }
+
+    if value[index..]
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '$' | '"' | '\'' | '('))
+    {
+        return start;
+    }
+
+    index
+}
+
 fn strip_postgres_default_casts(value: &str) -> String {
     let mut result = String::with_capacity(value.len());
     let mut segment_start = 0;
     let mut index = 0;
     let mut in_single_quote = false;
+    let mut in_escape_single_quote = false;
+    let mut in_double_quote = false;
     while index < value.len() {
         let ch = value[index..].chars().next().expect("index is on a character boundary");
-        if ch == '\'' {
+        if in_single_quote && in_escape_single_quote && ch == '\\' {
+            let next_index = index + ch.len_utf8();
+            index = value[next_index..].chars().next().map_or(next_index, |escaped| next_index + escaped.len_utf8());
+            continue;
+        }
+        if ch == '\'' && !in_double_quote {
             let next_index = index + ch.len_utf8();
             if in_single_quote && value[next_index..].starts_with('\'') {
                 index = next_index + 1;
                 continue;
             }
             in_single_quote = !in_single_quote;
+            if in_single_quote {
+                in_escape_single_quote = postgres_escape_string_quote(value, index);
+            } else {
+                in_escape_single_quote = false;
+            }
             index = next_index;
             continue;
         }
-        if !in_single_quote && value[index..].starts_with("::") {
-            result.push_str(&value[segment_start..index]);
-            index += 2;
-            while index < value.len() {
-                let cast_char = value[index..].chars().next().expect("index is on a character boundary");
-                if cast_char.is_ascii_alphanumeric()
-                    || cast_char.is_ascii_whitespace()
-                    || matches!(cast_char, '_' | '.' | '"' | '[' | ']')
-                {
-                    index += cast_char.len_utf8();
-                } else {
-                    break;
-                }
+        if ch == '"' && !in_single_quote {
+            let next_index = index + ch.len_utf8();
+            if in_double_quote && value[next_index..].starts_with('"') {
+                index = next_index + 1;
+                continue;
             }
+            in_double_quote = !in_double_quote;
+            index = next_index;
+            continue;
+        }
+        if !in_single_quote && !in_double_quote && postgres_dollar_quote_delimiter_end(value, index).is_some() {
+            index = consume_postgres_dollar_quoted(value, index).unwrap_or(value.len());
+            continue;
+        }
+        if !in_single_quote && !in_double_quote && value[index..].starts_with("::") {
+            let type_start = index + 2;
+            let cast_end = consume_postgres_cast_type(value, type_start);
+            if cast_end == type_start {
+                // Cast removal is all-or-nothing. Continuing after a malformed
+                // candidate could peel a nested `::` inside its unclosed
+                // modifier or array suffix and corrupt the original default.
+                return value.to_string();
+            }
+            result.push_str(&value[segment_start..index]);
+            index = cast_end;
             segment_start = index;
             continue;
         }
@@ -3880,25 +4176,49 @@ fn sqlserver_column_change_statements(
     let had_default = sqlserver_has_default(target);
     let mut statements = Vec::new();
 
-    if definition_changed && had_default && !default_changed {
-        let batch =
-            build_sqlserver_alter_column_preserving_default_sql(table, column_name, mapped_type, source.is_nullable);
+    if definition_changed {
+        let mut alter_batch = Vec::new();
+        if had_default && !default_changed {
+            alter_batch.push(build_sqlserver_alter_column_preserving_default_sql(
+                table,
+                column_name,
+                mapped_type,
+                source.is_nullable,
+            ));
+        } else {
+            if had_default {
+                alter_batch.push(build_sqlserver_drop_default_constraint_sql(table, column_name));
+            }
+            let nullability = if source.is_nullable { "NULL" } else { "NOT NULL" };
+            alter_batch.push(format!(
+                "ALTER TABLE {table} ALTER COLUMN {} {mapped_type} {nullability};",
+                quote_id(column_name, DatabaseType::SqlServer)
+            ));
+            if default_changed {
+                if let Some(statement) = sqlserver_add_default_constraint_sql(
+                    table,
+                    column_name,
+                    source,
+                    mapped_type,
+                    source_dialect,
+                    target_schema,
+                ) {
+                    alter_batch.push(statement);
+                }
+            }
+        }
+        let batch = build_dependency_aware_alter_column_batch(table, column_name, &alter_batch.join("\n"));
         statements.push(sqlserver_single_statement_batch(&batch));
         return statements;
     }
 
-    if had_default && (definition_changed || default_changed) {
-        statements
-            .push(sqlserver_single_statement_batch(&build_sqlserver_drop_default_constraint_sql(table, column_name)));
-    }
-    if definition_changed {
-        let nullability = if source.is_nullable { "NULL" } else { "NOT NULL" };
-        statements.push(format!(
-            "ALTER TABLE {table} ALTER COLUMN {} {mapped_type} {nullability};",
-            quote_id(column_name, DatabaseType::SqlServer)
-        ));
-    }
     if default_changed {
+        if had_default {
+            statements.push(sqlserver_single_statement_batch(&build_sqlserver_drop_default_constraint_sql(
+                table,
+                column_name,
+            )));
+        }
         if let Some(statement) =
             sqlserver_add_default_constraint_sql(table, column_name, source, mapped_type, source_dialect, target_schema)
         {
@@ -5729,7 +6049,10 @@ mod tests {
         assert!(!sql.contains("SET DEFAULT"), "SQL Server must not emit SET DEFAULT: {sql}");
 
         let parsed = crate::sql::split_sql_statements_for_database(&sql, DatabaseType::SqlServer);
-        assert!(parsed.iter().any(|statement| statement.contains("EXEC sys.sp_executesql N'DECLARE")), "{parsed:?}");
+        assert!(
+            parsed.iter().any(|statement| statement.contains("EXEC sys.sp_executesql N'SET ANSI_NULLS ON;")),
+            "{parsed:?}"
+        );
         assert!(!parsed.iter().any(|statement| statement.trim_start().starts_with("DECLARE ")), "{parsed:?}");
     }
 
@@ -5751,7 +6074,7 @@ mod tests {
 
         let sql = gen_sql(diff, DatabaseType::SqlServer, Some(DialectKind::SqlServer));
 
-        assert!(sql.contains("EXEC sys.sp_executesql N'DECLARE"), "single executable batch: {sql}");
+        assert!(sql.contains("EXEC sys.sp_executesql N'SET ANSI_NULLS ON;"), "single executable batch: {sql}");
         assert!(sql.contains("dc.definition"), "default expression must be preserved: {sql}");
         assert!(sql.contains("DROP CONSTRAINT"), "old default must be removed before ALTER COLUMN: {sql}");
         assert!(
@@ -6056,6 +6379,345 @@ mod tests {
             sql.matches("DROP INDEX [idx_events_legacy_status] ON [dbo].[events]").count(),
             1,
             "drop once: {sql}"
+        );
+    }
+
+    #[test]
+    fn sqlserver_column_changes_capture_dependencies_omitted_from_the_diff() {
+        let source_column = column("amount", "bigint", None);
+        let target_column = column("amount", "int", None);
+        let unchanged_index = IndexInfo {
+            name: "idx_events_amount".into(),
+            columns: vec!["amount".into()],
+            is_unique: false,
+            is_primary: false,
+            filter: None,
+            index_type: Some("NONCLUSTERED".into()),
+            included_columns: None,
+            comment: None,
+            key_is_expression: Vec::new(),
+        };
+        let unchanged_fk = ForeignKeyInfo {
+            name: "fk_events_parent".into(),
+            column: "amount".into(),
+            ref_schema: Some("dbo".into()),
+            ref_table: "parents".into(),
+            ref_column: "amount".into(),
+            on_update: None,
+            on_delete: None,
+        };
+        let detail = |column: ColumnInfo| TableSchemaDetail {
+            name: "events".into(),
+            columns: vec![column],
+            indexes: vec![unchanged_index.clone()],
+            foreign_keys: vec![unchanged_fk.clone()],
+            triggers: Vec::new(),
+            ddl: None,
+        };
+        let prepared = prepare_schema_diff(SchemaDiffPreparationOptions {
+            source_tables: vec![table_info("events", "BASE TABLE")],
+            target_tables: vec![table_info("events", "BASE TABLE")],
+            source_details: vec![detail(source_column)],
+            target_details: vec![detail(target_column)],
+            database_type: DatabaseType::SqlServer,
+            target_schema: Some("dbo".into()),
+            source_dialect: Some(DialectKind::SqlServer),
+            target_dialect: Some(DialectKind::SqlServer),
+            ..Default::default()
+        });
+
+        assert_eq!(prepared.diffs.len(), 1);
+        assert!(prepared.diffs[0].indexes.is_none(), "unchanged index is intentionally absent from the diff");
+        assert!(prepared.diffs[0].foreign_keys.is_none(), "unchanged FK is intentionally absent from the diff");
+
+        let sql = &prepared.sync_sql;
+        for catalog in [
+            "sys.indexes AS idx",
+            "sys.key_constraints AS key_constraint",
+            "sys.check_constraints AS cc",
+            "sys.foreign_keys AS fk",
+            "sys.stats_columns AS sc",
+        ] {
+            assert!(sql.contains(catalog), "runtime dependency catalog {catalog}: {sql}");
+        }
+        assert!(sql.contains("fkc.referenced_object_id = @dbx_object_id"), "inbound FK predicate: {sql}");
+        assert!(sql.contains("THEN N''PRIMARY KEY '' ELSE N''UNIQUE '' END"), "preserve key object type: {sql}");
+        assert!(sql.contains("ALTER COLUMN [amount] bigint NOT NULL"), "column alter: {sql}");
+        assert!(!sql.contains("idx_events_amount"), "dependency names must come from the live target catalog: {sql}");
+        assert!(!sql.contains("fk_events_parent"), "dependency names must come from the live target catalog: {sql}");
+
+        let executable = crate::sql::split_sql_statements_for_database(sql, DatabaseType::SqlServer);
+        assert_eq!(executable.len(), 1, "the catalog snapshot/drop/alter/recreate flow must stay in one batch: {sql}");
+        assert!(executable[0].contains("EXEC sys.sp_executesql N'"), "single executable batch: {sql}");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_LIVE_SQLSERVER_HOST/PORT/USER/PASSWORD pointing at a writable SQL Server database"]
+    async fn live_sqlserver_alter_column_preserves_unchanged_runtime_dependencies() {
+        let database = std::env::var("DBX_LIVE_SQLSERVER_DATABASE").unwrap_or_else(|_| "tempdb".to_string());
+        let host = std::env::var("DBX_LIVE_SQLSERVER_HOST").expect("DBX_LIVE_SQLSERVER_HOST");
+        let port = std::env::var("DBX_LIVE_SQLSERVER_PORT")
+            .expect("DBX_LIVE_SQLSERVER_PORT")
+            .parse()
+            .expect("valid DBX_LIVE_SQLSERVER_PORT");
+        let user = std::env::var("DBX_LIVE_SQLSERVER_USER").expect("DBX_LIVE_SQLSERVER_USER");
+        let password = std::env::var("DBX_LIVE_SQLSERVER_PASSWORD").expect("DBX_LIVE_SQLSERVER_PASSWORD");
+        let mut client = crate::db::sqlserver::connect(
+            &host,
+            port,
+            &user,
+            &password,
+            Some(&database),
+            None,
+            std::time::Duration::from_secs(10),
+        )
+        .await
+        .expect("connect SQL Server");
+
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let lookup_table = format!("dbx_dep_lookup_{suffix}");
+        let parent_table = format!("dbx_dep_parent_{suffix}");
+        let child_table = format!("dbx_dep_child_{suffix}");
+        let primary_key = format!("PK_dbx_dep_parent_{suffix}");
+        let unique_constraint = format!("UQ_dbx_dep_parent_code_{suffix}");
+        let lookup_unique_constraint = format!("UQ_dbx_dep_lookup_code_{suffix}");
+        let check_constraint = format!("CK_dbx_dep_parent_values_{suffix}");
+        let outbound_foreign_key = format!("FK_dbx_dep_parent_lookup_{suffix}");
+        let inbound_foreign_key = format!("FK_dbx_dep_child_parent_{suffix}");
+        let ordinary_index = format!("IX_dbx_dep_parent_code_{suffix}");
+        let cleanup = format!(
+            "DROP TABLE IF EXISTS [dbo].[{child_table}];\
+             DROP TABLE IF EXISTS [dbo].[{parent_table}];\
+             DROP TABLE IF EXISTS [dbo].[{lookup_table}];"
+        );
+        let _ = crate::db::sqlserver::execute_batch(&mut client, &cleanup).await;
+
+        let exercise = async {
+            let setup = format!(
+                "SET ANSI_NULLS ON;\
+                 SET QUOTED_IDENTIFIER ON;\
+                 SET ANSI_PADDING ON;\
+                 SET ANSI_WARNINGS ON;\
+                 SET CONCAT_NULL_YIELDS_NULL ON;\
+                 SET ARITHABORT ON;\
+                 SET NUMERIC_ROUNDABORT OFF;\
+                 CREATE TABLE [dbo].[{lookup_table}] (\
+                     [code] INT NOT NULL,\
+                     CONSTRAINT [{lookup_unique_constraint}] UNIQUE NONCLUSTERED ([code] ASC)\
+                 );\
+                 CREATE TABLE [dbo].[{parent_table}] (\
+                     [id] INT NOT NULL,\
+                     [code] INT NOT NULL,\
+                     [payload] NVARCHAR(64) NULL,\
+                     CONSTRAINT [{primary_key}] PRIMARY KEY CLUSTERED ([id] ASC),\
+                     CONSTRAINT [{unique_constraint}] UNIQUE NONCLUSTERED ([code] ASC),\
+                     CONSTRAINT [{check_constraint}] CHECK ([id] > 0 AND [code] >= 0),\
+                     CONSTRAINT [{outbound_foreign_key}] FOREIGN KEY ([code])\
+                         REFERENCES [dbo].[{lookup_table}] ([code])\
+                 );\
+                 CREATE TABLE [dbo].[{child_table}] (\
+                     [id] INT NOT NULL,\
+                     [parent_code] INT NULL,\
+                     CONSTRAINT [{inbound_foreign_key}] FOREIGN KEY ([parent_code])\
+                         REFERENCES [dbo].[{parent_table}] ([code])\
+                         ON UPDATE CASCADE ON DELETE SET NULL NOT FOR REPLICATION\
+                 );\
+                 CREATE NONCLUSTERED INDEX [{ordinary_index}]\
+                     ON [dbo].[{parent_table}] ([code] DESC, [id] ASC)\
+                     INCLUDE ([payload])\
+                     WHERE [code] IS NOT NULL\
+                     WITH (PAD_INDEX = ON, FILLFACTOR = 80, STATISTICS_NORECOMPUTE = ON,\
+                           ALLOW_ROW_LOCKS = OFF, ALLOW_PAGE_LOCKS = ON)\
+                     ON [PRIMARY];"
+            );
+            crate::db::sqlserver::execute_batch(&mut client, &setup).await?;
+
+            let target_detail = TableSchemaDetail {
+                name: parent_table.clone(),
+                columns: crate::db::sqlserver::get_columns(&mut client, "dbo", &parent_table).await?,
+                indexes: crate::db::sqlserver::list_indexes(&mut client, "dbo", &parent_table).await?,
+                foreign_keys: crate::db::sqlserver::list_foreign_keys(&mut client, "dbo", &parent_table).await?,
+                triggers: Vec::new(),
+                ddl: None,
+            };
+            let mut source_detail = target_detail.clone();
+            let source_id = source_detail
+                .columns
+                .iter_mut()
+                .find(|column| column.name == "id")
+                .ok_or_else(|| "live target metadata did not contain id".to_string())?;
+            source_id.data_type = "bigint".to_string();
+            source_id.numeric_precision = Some(19);
+            let source_code = source_detail
+                .columns
+                .iter_mut()
+                .find(|column| column.name == "code")
+                .ok_or_else(|| "live target metadata did not contain code".to_string())?;
+            source_code.is_nullable = true;
+
+            let prepared = prepare_schema_diff(SchemaDiffPreparationOptions {
+                source_tables: vec![table_info(&parent_table, "BASE TABLE")],
+                target_tables: vec![table_info(&parent_table, "BASE TABLE")],
+                source_details: vec![source_detail],
+                target_details: vec![target_detail],
+                database_type: DatabaseType::SqlServer,
+                target_schema: Some("dbo".to_string()),
+                source_dialect: Some(DialectKind::SqlServer),
+                target_dialect: Some(DialectKind::SqlServer),
+                ..Default::default()
+            });
+
+            crate::db::sqlserver::execute_batch(&mut client, "SET QUOTED_IDENTIFIER OFF;").await?;
+            crate::db::sqlserver::execute_batch(&mut client, &prepared.sync_sql).await?;
+            let verification_sql = format!(
+                "DECLARE @parent_id int = OBJECT_ID(N'[dbo].[{parent_table}]');\
+                 SELECT\
+                   CONVERT(int, CASE WHEN EXISTS (\
+                     SELECT 1\
+                     FROM sys.indexes AS idx\
+                     JOIN sys.stats AS stats\
+                       ON stats.object_id = idx.object_id AND stats.stats_id = idx.index_id\
+                     JOIN sys.data_spaces AS data_space ON data_space.data_space_id = idx.data_space_id\
+                     JOIN sys.index_columns AS key_ic\
+                       ON key_ic.object_id = idx.object_id AND key_ic.index_id = idx.index_id\
+                     JOIN sys.columns AS key_column\
+                       ON key_column.object_id = key_ic.object_id AND key_column.column_id = key_ic.column_id\
+                     WHERE idx.object_id = @parent_id\
+                       AND idx.name = N'{ordinary_index}'\
+                       AND idx.type_desc = N'NONCLUSTERED'\
+                       AND idx.is_primary_key = 0 AND idx.is_unique_constraint = 0\
+                       AND idx.is_disabled = 0 AND idx.has_filter = 1\
+                       AND idx.is_padded = 1 AND idx.fill_factor = 80\
+                       AND idx.allow_row_locks = 0 AND idx.allow_page_locks = 1\
+                       AND stats.no_recompute = 1 AND data_space.name = N'PRIMARY'\
+                       AND key_column.name = N'code' AND key_ic.key_ordinal = 1\
+                       AND key_ic.is_descending_key = 1\
+                       AND CHARINDEX(N'[code]', idx.filter_definition) > 0\
+                       AND EXISTS (\
+                         SELECT 1\
+                         FROM sys.index_columns AS include_ic\
+                         JOIN sys.columns AS include_column\
+                           ON include_column.object_id = include_ic.object_id\
+                          AND include_column.column_id = include_ic.column_id\
+                         WHERE include_ic.object_id = idx.object_id\
+                           AND include_ic.index_id = idx.index_id\
+                           AND include_ic.is_included_column = 1\
+                           AND include_column.name = N'payload'\
+                       )\
+                   ) THEN 1 ELSE 0 END) AS ordinary_index_ok,\
+                   CONVERT(int, CASE WHEN EXISTS (\
+                     SELECT 1\
+                     FROM sys.key_constraints AS key_constraint\
+                     JOIN sys.indexes AS idx\
+                       ON idx.object_id = key_constraint.parent_object_id\
+                      AND idx.index_id = key_constraint.unique_index_id\
+                     JOIN sys.index_columns AS ic\
+                       ON ic.object_id = idx.object_id AND ic.index_id = idx.index_id\
+                     JOIN sys.columns AS column_info\
+                       ON column_info.object_id = ic.object_id AND column_info.column_id = ic.column_id\
+                     JOIN sys.types AS column_type ON column_type.user_type_id = column_info.user_type_id\
+                     WHERE key_constraint.parent_object_id = @parent_id\
+                       AND key_constraint.name = N'{primary_key}'\
+                       AND key_constraint.type = N'PK'\
+                       AND idx.is_primary_key = 1 AND idx.type_desc = N'CLUSTERED'\
+                       AND ic.key_ordinal = 1 AND column_info.name = N'id'\
+                       AND column_type.name = N'bigint' AND column_info.is_nullable = 0\
+                   ) THEN 1 ELSE 0 END) AS primary_key_ok,\
+                   CONVERT(int, CASE WHEN EXISTS (\
+                     SELECT 1\
+                     FROM sys.check_constraints AS check_constraint\
+                     WHERE check_constraint.parent_object_id = @parent_id\
+                       AND check_constraint.name = N'{check_constraint}'\
+                       AND check_constraint.is_disabled = 0\
+                       AND check_constraint.is_not_trusted = 0\
+                       AND CHARINDEX(N'[id]', check_constraint.definition) > 0\
+                       AND CHARINDEX(N'[code]', check_constraint.definition) > 0\
+                   ) THEN 1 ELSE 0 END) AS check_constraint_ok,\
+                   CONVERT(int, CASE WHEN EXISTS (\
+                     SELECT 1\
+                     FROM sys.foreign_keys AS foreign_key\
+                     JOIN sys.foreign_key_columns AS fkc\
+                       ON fkc.constraint_object_id = foreign_key.object_id\
+                     JOIN sys.columns AS child_column\
+                       ON child_column.object_id = fkc.parent_object_id\
+                      AND child_column.column_id = fkc.parent_column_id\
+                     JOIN sys.columns AS parent_column\
+                       ON parent_column.object_id = fkc.referenced_object_id\
+                      AND parent_column.column_id = fkc.referenced_column_id\
+                     WHERE foreign_key.name = N'{inbound_foreign_key}'\
+                       AND foreign_key.parent_object_id = OBJECT_ID(N'[dbo].[{child_table}]')\
+                       AND foreign_key.referenced_object_id = @parent_id\
+                       AND foreign_key.type = N'F'\
+                       AND foreign_key.is_disabled = 0 AND foreign_key.is_not_trusted = 1\
+                       AND foreign_key.is_not_for_replication = 1\
+                       AND foreign_key.update_referential_action_desc = N'CASCADE'\
+                       AND foreign_key.delete_referential_action_desc = N'SET_NULL'\
+                       AND child_column.name = N'parent_code' AND parent_column.name = N'code'\
+                       AND EXISTS (\
+                         SELECT 1 FROM sys.key_constraints AS uq\
+                         WHERE uq.parent_object_id = @parent_id\
+                           AND uq.name = N'{unique_constraint}' AND uq.type = N'UQ'\
+                       )\
+                   ) THEN 1 ELSE 0 END) AS inbound_foreign_key_ok,\
+                   CONVERT(int, CASE WHEN\
+                     EXISTS (\
+                       SELECT 1 FROM sys.columns AS column_info\
+                       JOIN sys.types AS column_type ON column_type.user_type_id = column_info.user_type_id\
+                       WHERE column_info.object_id = @parent_id AND column_info.name = N'id'\
+                         AND column_type.name = N'bigint' AND column_info.is_nullable = 0\
+                     )\
+                     AND EXISTS (\
+                       SELECT 1 FROM sys.columns AS column_info\
+                       JOIN sys.types AS column_type ON column_type.user_type_id = column_info.user_type_id\
+                       WHERE column_info.object_id = @parent_id AND column_info.name = N'code'\
+                         AND column_type.name = N'int' AND column_info.is_nullable = 1\
+                     )\
+                   THEN 1 ELSE 0 END) AS altered_columns_ok;"
+            );
+            let verification = crate::db::sqlserver::execute_query(&mut client, &verification_sql).await?;
+            Ok::<_, String>((prepared, verification))
+        }
+        .await;
+
+        let cleanup_result = crate::db::sqlserver::execute_batch(&mut client, &cleanup).await;
+        cleanup_result.expect("drop live SQL Server dependency test tables");
+        let (prepared, verification) = exercise.expect("exercise live SQL Server dependency-aware ALTER COLUMN");
+
+        assert_eq!(prepared.diffs.len(), 1, "diffs={:?}", prepared.diffs);
+        let table_diff = &prepared.diffs[0];
+        assert_eq!(table_diff.diff_type, "modified");
+        assert_eq!(table_diff.columns.as_ref().map(Vec::len), Some(2));
+        assert!(table_diff.indexes.is_none(), "unchanged indexes must be absent: {table_diff:?}");
+        assert!(table_diff.foreign_keys.is_none(), "unchanged foreign keys must be absent: {table_diff:?}");
+        assert!(
+            !prepared.sync_sql.contains(&ordinary_index),
+            "index must be discovered at runtime: {}",
+            prepared.sync_sql
+        );
+        assert!(
+            !prepared.sync_sql.contains(&outbound_foreign_key),
+            "foreign keys must be discovered at runtime: {}",
+            prepared.sync_sql
+        );
+        assert!(
+            !prepared.sync_sql.contains(&inbound_foreign_key),
+            "inbound foreign keys are not represented by the table diff: {}",
+            prepared.sync_sql
+        );
+
+        assert_eq!(verification.rows.len(), 1, "verification={verification:?}");
+        assert_eq!(
+            verification.rows[0],
+            vec![
+                serde_json::json!(1),
+                serde_json::json!(1),
+                serde_json::json!(1),
+                serde_json::json!(1),
+                serde_json::json!(1),
+            ],
+            "columns={:?}, sync_sql={} ",
+            verification.columns,
+            prepared.sync_sql
         );
     }
 
@@ -8963,6 +9625,32 @@ mod tests {
             "N'guest'"
         );
         assert_eq!(
+            sqlserver_default_literal("'0.00'::numeric(10,2)", "DECIMAL(10,2)", Some(DialectKind::Postgres), None),
+            "'0.00'"
+        );
+        assert_eq!(
+            sqlserver_default_literal(
+                "'guest'::character varying(20)",
+                "NVARCHAR(20)",
+                Some(DialectKind::Postgres),
+                None
+            ),
+            "N'guest'"
+        );
+        assert_eq!(
+            sqlserver_default_literal("'{a,b}'::text[]", "NVARCHAR(32)", Some(DialectKind::Postgres), None),
+            "N'{a,b}'"
+        );
+        assert_eq!(
+            sqlserver_default_literal(
+                "'guest'::\"public\".\"character varying\"(20)",
+                "NVARCHAR(20)",
+                Some(DialectKind::Postgres),
+                None
+            ),
+            "N'guest'"
+        );
+        assert_eq!(
             sqlserver_default_literal("('中文')::text", "NVARCHAR(64)", Some(DialectKind::Postgres), None),
             "(N'中文')"
         );
@@ -8997,6 +9685,57 @@ mod tests {
             sqlserver_default_literal("((getdate()))", "DATETIME2", Some(DialectKind::SqlServer), None),
             "((getdate()))"
         );
+    }
+
+    #[test]
+    fn strip_postgres_default_casts_consumes_complete_type_syntax() {
+        assert_eq!(strip_postgres_default_casts("'value'::numeric(10,2)"), "'value'");
+        assert_eq!(strip_postgres_default_casts("'value'::character varying(20)"), "'value'");
+        assert_eq!(strip_postgres_default_casts("'value'::public.\"custom_type\"(10,2)[10][]"), "'value'");
+        assert_eq!(strip_postgres_default_casts("'value'::\"sch\"\"ema\".\"ty\"\"pe\"(4)[]"), "'value'");
+        assert_eq!(strip_postgres_default_casts("'value'::timestamp(3) without time zone"), "'value'");
+        assert_eq!(strip_postgres_default_casts("'value'::double precision"), "'value'");
+        assert_eq!(strip_postgres_default_casts("'value'::interval day to second(6)"), "'value'");
+        assert_eq!(strip_postgres_default_casts("nextval('orders.id'::regclass)"), "nextval('orders.id')");
+        assert_eq!(strip_postgres_default_casts("'1'::text::integer"), "'1'");
+    }
+
+    #[test]
+    fn strip_postgres_default_casts_preserves_expression_boundaries() {
+        assert_eq!(strip_postgres_default_casts("(true::boolean AND false)"), "(true AND false)");
+        assert_eq!(strip_postgres_default_casts("1::int IS DISTINCT FROM 2"), "1 IS DISTINCT FROM 2");
+        assert_eq!(
+            strip_postgres_default_casts("CURRENT_TIMESTAMP::timestamp AT TIME ZONE 'UTC'"),
+            "CURRENT_TIMESTAMP AT TIME ZONE 'UTC'"
+        );
+        assert_eq!(strip_postgres_default_casts("'x'::text COLLATE \"C\""), "'x' COLLATE \"C\"");
+        assert_eq!(strip_postgres_default_casts("1::integer IN (1,2)"), "1 IN (1,2)");
+        assert_eq!(strip_postgres_default_casts("\"fn::name\"()::integer"), "\"fn::name\"()");
+        assert_eq!(strip_postgres_default_casts("$$a::int$$::text"), "$$a::int$$");
+        assert_eq!(strip_postgres_default_casts("$tag$a::int$tag$::text"), "$tag$a::int$tag$");
+        assert_eq!(strip_postgres_default_casts(r"E'a\'::int'::text"), r"E'a\'::int'");
+    }
+
+    #[test]
+    fn strip_postgres_default_casts_leaves_malformed_types_unchanged() {
+        for malformed in [
+            "x::",
+            "x::numeric(10",
+            "x::numeric(10::int",
+            "x::numeric(10,2)garbage",
+            "x::numeric(10)(20)",
+            "x::\"unterminated",
+            "x::\"foo\"bar",
+            "x::schema.",
+            "x::text[bad]",
+            "x::text[bad::int]",
+            "x::text[++]]",
+            "x::text[1+2]",
+            "x::text[-1]",
+            "x::text[]garbage",
+        ] {
+            assert_eq!(strip_postgres_default_casts(malformed), malformed);
+        }
     }
 
     #[test]

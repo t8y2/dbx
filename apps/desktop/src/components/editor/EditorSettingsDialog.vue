@@ -4,7 +4,38 @@ import type { Ref } from "vue";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { useI18n } from "vue-i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
-import { AlertTriangle, ArrowLeft, Check, CheckCircle2, CircleHelp, Cloud, Copy, Download, ExternalLink, GripVertical, Loader2, Moon, PackageSearch, Palette, Pencil, Plus, RefreshCw, RotateCcw, Search, Settings, Sun, SunMoon, Terminal, Trash2, Upload, X } from "@lucide/vue";
+import {
+  AlertTriangle,
+  ArrowLeft,
+  Check,
+  CheckCircle2,
+  ChevronDown,
+  ChevronUp,
+  CircleHelp,
+  Cloud,
+  Copy,
+  Download,
+  ExternalLink,
+  Eye,
+  Filter,
+  GripVertical,
+  Loader2,
+  Moon,
+  PackageSearch,
+  Palette,
+  Pencil,
+  Plus,
+  RefreshCw,
+  RotateCcw,
+  Search,
+  Settings,
+  Sun,
+  SunMoon,
+  Terminal,
+  Trash2,
+  Upload,
+  X,
+} from "@lucide/vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -324,6 +355,7 @@ function translateWithExecuteShortcut(key: string): string {
   return t(key, { shortcut: formatShortcutDisplay(editShortcuts.value.executeSql) });
 }
 const executeModeLabel = computed(() => translateWithExecuteShortcut("settings.executeMode"));
+const executeModeDescription = computed(() => translateWithExecuteShortcut("settings.executeModeDescription"));
 const editExecuteAllOnBlankLine = ref(settingsStore.editorSettings.executeAllOnBlankLine);
 const editShowExecutionTargetPicker = ref(settingsStore.editorSettings.showExecutionTargetPicker);
 const editShowStatementRunButtons = ref(settingsStore.editorSettings.showStatementRunButtons);
@@ -335,6 +367,14 @@ const editInsertSpaceAfterCompletion = ref(settingsStore.editorSettings.insertSp
 const editSortCompletionColumnsAlphabetically = ref(settingsStore.editorSettings.sortCompletionColumnsAlphabetically);
 const editSelectFirstCompletionOnOpen = ref(settingsStore.editorSettings.selectFirstCompletionOnOpen);
 const editCompletionTriggerMode = ref<SqlCompletionTriggerMode>(settingsStore.editorSettings.completionTriggerMode);
+const completionTriggerModeDescription = computed(() => {
+  const key = {
+    manual: "settings.completionTriggerModeManualDescription",
+    "require-prefix": "settings.completionTriggerModeRequirePrefixDescription",
+    positional: "settings.completionTriggerModePositionalDescription",
+  }[editCompletionTriggerMode.value];
+  return t(key, { shortcut: formatShortcutDisplay(editShortcuts.value.triggerCompletion) });
+});
 const editWordWrap = ref(settingsStore.editorSettings.wordWrap);
 const editVimModeEnabled = ref(settingsStore.editorSettings.vimModeEnabled);
 const editAutoCloseBrackets = ref(settingsStore.editorSettings.autoCloseBrackets);
@@ -370,6 +410,7 @@ const editShowIndexIndicatorsInHeader = ref(settingsStore.editorSettings.showInd
 const editCompactColumnHeaderActions = ref(settingsStore.editorSettings.compactColumnHeaderActions);
 const editDataGridQuickEntry = ref(settingsStore.editorSettings.dataGridQuickEntry);
 const editDataGridFilterEditorView = ref<DataGridFilterEditorView>(settingsStore.editorSettings.dataGridFilterEditorView);
+const dataGridFilterViewPreviewExpanded = ref(true);
 const editDataGridTextFilterPanelHeight = ref(settingsStore.editorSettings.dataGridTextFilterPanelHeight);
 const editDataGridAutoTransposeSingleRow = ref(settingsStore.editorSettings.dataGridAutoTransposeSingleRow);
 const editDataGridCellDetailButtonVisible = ref(settingsStore.editorSettings.dataGridCellDetailButtonVisible);
@@ -619,14 +660,6 @@ const snippetDialogOpen = ref(false);
 const snippetEditingId = ref<string | null>(null);
 const snippetForm = ref({ label: "", prefix: "", body: "" });
 const snippetFormPrefixError = ref("");
-const iconThemeDescTruncated = {
-  default: ref<boolean>(false),
-  black: ref<boolean>(false),
-};
-const iconThemeDescRef = {
-  default: ref<HTMLElement | null>(null),
-  black: ref<HTMLElement | null>(null),
-};
 const iconThemeBlackDescriptionText = computed(() => (isMacOS() ? t("settings.iconThemeBlackDescriptionMac") : t("settings.iconThemeBlackDescription")));
 const layoutDescTruncated = {
   separated: ref<boolean>(false),
@@ -640,11 +673,6 @@ let layoutDescObservers: Record<InterfaceLayout, ResizeObserver | undefined> = {
   separated: undefined,
   classic: undefined,
 };
-let iconThemeDescObservers: Record<DesktopIconTheme, ResizeObserver | undefined> = {
-  default: undefined,
-  black: undefined,
-};
-
 function observeElementTruncation(el: Ref<HTMLElement | null>, truncated: Ref<boolean>) {
   if (!el.value) return;
 
@@ -659,36 +687,21 @@ function observeElementTruncation(el: Ref<HTMLElement | null>, truncated: Ref<bo
 function initTruncationObservers() {
   layoutDescObservers.separated = observeElementTruncation(layoutDescRefs.separated, layoutDescTruncated.separated);
   layoutDescObservers.classic = observeElementTruncation(layoutDescRefs.classic, layoutDescTruncated.classic);
-  iconThemeDescObservers.default = observeElementTruncation(iconThemeDescRef.default, iconThemeDescTruncated.default);
-  iconThemeDescObservers.black = observeElementTruncation(iconThemeDescRef.black, iconThemeDescTruncated.black);
 }
 
 function cleanupTruncationObservers() {
   layoutDescObservers.separated?.disconnect();
   layoutDescObservers.classic?.disconnect();
-  iconThemeDescObservers.default?.disconnect();
-  iconThemeDescObservers.black?.disconnect();
 }
 
 function setLayoutDescRef(layout: InterfaceLayout, el: unknown) {
   layoutDescRefs[layout].value = el instanceof HTMLElement ? el : null;
 }
 
-function setIconThemeDescRef(theme: DesktopIconTheme, el: unknown) {
-  iconThemeDescRef[theme].value = el instanceof HTMLElement ? el : null;
-}
-
 function checkLayoutDescTruncation() {
   checkTruncationForRefs([
     { el: layoutDescRefs.separated, truncated: layoutDescTruncated.separated },
     { el: layoutDescRefs.classic, truncated: layoutDescTruncated.classic },
-  ]);
-}
-
-function checkIconThemeDescTruncation() {
-  checkTruncationForRefs([
-    { el: iconThemeDescRef.default, truncated: iconThemeDescTruncated.default },
-    { el: iconThemeDescRef.black, truncated: iconThemeDescTruncated.black },
   ]);
 }
 
@@ -2591,7 +2604,6 @@ watch(activeSettingsTab, async (tab) => {
   if (tab === "about" && !appSupportInfo.value) void refreshAppSupportInfo();
   if (tab === "appearance") {
     checkLayoutDescTruncation();
-    checkIconThemeDescTruncation();
   }
   const result = pendingSettingsSearchResult;
   if (result) {
@@ -2620,7 +2632,6 @@ watch(
 onMounted(() => {
   void refreshWebDavPasswordStatus();
   checkLayoutDescTruncation();
-  checkIconThemeDescTruncation();
   initTruncationObservers();
 });
 
@@ -3937,6 +3948,48 @@ onUnmounted(() => {
                 </div>
               </div>
 
+              <div class="grid grid-cols-2 gap-2 lg:grid-cols-4" data-editor-preview-controls>
+                <div class="flex min-w-0 items-center justify-between gap-2 rounded-md border bg-muted/20 px-2 py-1.5">
+                  <div class="flex min-w-0 items-center gap-1">
+                    <Label for="editor-show-statement-run-buttons" class="truncate text-xs">{{ t("settings.showStatementRunButtons") }}</Label>
+                    <HelpTooltip :label="t('settings.showStatementRunButtons')" trigger-class="[&_svg]:h-3 [&_svg]:w-3" content-class="max-w-64">
+                      {{ t("settings.showStatementRunButtonsDescription") }}
+                    </HelpTooltip>
+                  </div>
+                  <Switch id="editor-show-statement-run-buttons" v-model="editShowStatementRunButtons" size="sm" />
+                </div>
+
+                <div class="flex min-w-0 items-center justify-between gap-2 rounded-md border bg-muted/20 px-2 py-1.5">
+                  <div class="flex min-w-0 items-center gap-1">
+                    <Label for="editor-show-line-numbers" class="truncate text-xs">{{ t("settings.showLineNumbers") }}</Label>
+                    <HelpTooltip :label="t('settings.showLineNumbers')" trigger-class="[&_svg]:h-3 [&_svg]:w-3" content-class="max-w-64">
+                      {{ t("settings.showLineNumbersDescription") }}
+                    </HelpTooltip>
+                  </div>
+                  <Switch id="editor-show-line-numbers" v-model="editShowLineNumbers" size="sm" />
+                </div>
+
+                <div class="flex min-w-0 items-center justify-between gap-2 rounded-md border bg-muted/20 px-2 py-1.5">
+                  <div class="flex min-w-0 items-center gap-1">
+                    <Label for="editor-show-current-statement-frame" class="truncate text-xs">{{ t("settings.showCurrentStatementFrame") }}</Label>
+                    <HelpTooltip :label="t('settings.showCurrentStatementFrame')" trigger-class="[&_svg]:h-3 [&_svg]:w-3" content-class="max-w-64">
+                      {{ t("settings.showCurrentStatementFrameDescription") }}
+                    </HelpTooltip>
+                  </div>
+                  <Switch id="editor-show-current-statement-frame" v-model="editShowCurrentStatementFrame" size="sm" />
+                </div>
+
+                <div class="flex min-w-0 items-center justify-between gap-2 rounded-md border bg-muted/20 px-2 py-1.5">
+                  <div class="flex min-w-0 items-center gap-1">
+                    <Label for="editor-sql-semantic-diagnostics" class="truncate text-xs">{{ t("settings.sqlSemanticDiagnosticsEnabled") }}</Label>
+                    <HelpTooltip :label="t('settings.sqlSemanticDiagnosticsEnabled')" trigger-class="[&_svg]:h-3 [&_svg]:w-3" content-class="max-w-64">
+                      {{ t("settings.sqlSemanticDiagnosticsEnabledDescription") }}
+                    </HelpTooltip>
+                  </div>
+                  <Switch id="editor-sql-semantic-diagnostics" :model-value="editSqlSemanticDiagnosticsEnabled" size="sm" @update:model-value="onSqlSemanticDiagnosticsEnabledChange" />
+                </div>
+              </div>
+
               <!-- Live Preview -->
               <div class="space-y-2">
                 <Label>{{ t("settings.preview") }}</Label>
@@ -3947,11 +4000,16 @@ onUnmounted(() => {
 
               <Separator />
 
-              <div class="grid gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-                <div class="space-y-2">
-                  <Label>{{ executeModeLabel }}</Label>
+              <div class="grid gap-4 md:grid-cols-2" data-editor-execution-settings>
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2 md:col-span-2" data-editor-execute-mode>
+                  <div class="min-w-0 space-y-1">
+                    <Label>{{ executeModeLabel }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ executeModeDescription }}
+                    </p>
+                  </div>
                   <Select :model-value="editExecuteMode" @update:model-value="onExecuteModeChange">
-                    <SelectTrigger>
+                    <SelectTrigger class="h-8 w-48 shrink-0">
                       <SelectValue :placeholder="executeModeLabel" />
                     </SelectTrigger>
                     <SelectContent>
@@ -3983,34 +4041,101 @@ onUnmounted(() => {
 
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
-                    <Label for="editor-show-statement-run-buttons">{{ t("settings.showStatementRunButtons") }}</Label>
+                    <Label for="editor-confirm-dangerous-sql">{{ t("settings.confirmDangerousSqlExecution") }}</Label>
                     <p class="text-xs text-muted-foreground">
-                      {{ t("settings.showStatementRunButtonsDescription") }}
+                      {{ t("settings.confirmDangerousSqlExecutionDescription") }}
                     </p>
                   </div>
-                  <Switch id="editor-show-statement-run-buttons" v-model="editShowStatementRunButtons" class="mt-0.5" />
+                  <Switch id="editor-confirm-dangerous-sql" v-model="editConfirmDangerousSqlExecution" class="mt-0.5" />
                 </div>
 
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
-                    <Label for="editor-show-line-numbers">{{ t("settings.showLineNumbers") }}</Label>
+                    <Label for="editor-continue-on-error">{{ t("settings.continueOnErrorOnBatch") }}</Label>
                     <p class="text-xs text-muted-foreground">
-                      {{ t("settings.showLineNumbersDescription") }}
+                      {{ t("settings.continueOnErrorOnBatchDescription") }}
                     </p>
                   </div>
-                  <Switch id="editor-show-line-numbers" v-model="editShowLineNumbers" class="mt-0.5" />
+                  <Switch id="editor-continue-on-error" v-model="editContinueOnErrorOnBatch" class="mt-0.5" />
+                </div>
+              </div>
+
+              <Separator />
+
+              <div class="grid gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]" data-editor-sql-completion-settings>
+                <div class="flex items-start justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2" data-editor-completion-trigger-mode>
+                  <div class="min-w-0 space-y-1">
+                    <Label>{{ t("settings.completionTriggerMode") }}</Label>
+                    <p class="text-xs leading-tight text-muted-foreground">
+                      {{ completionTriggerModeDescription }}
+                    </p>
+                  </div>
+                  <Select :model-value="editCompletionTriggerMode" @update:model-value="onCompletionTriggerModeChange">
+                    <SelectTrigger class="h-8 w-44 shrink-0">
+                      <SelectValue :placeholder="t('settings.completionTriggerMode')" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="manual">{{ t("settings.completionTriggerModeManual") }}</SelectItem>
+                      <SelectItem value="require-prefix">{{ t("settings.completionTriggerModeRequirePrefix") }}</SelectItem>
+                      <SelectItem value="positional">{{ t("settings.completionTriggerModePositional") }}</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
 
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
-                    <Label for="editor-show-current-statement-frame">{{ t("settings.showCurrentStatementFrame") }}</Label>
+                    <Label for="editor-select-first-completion-on-open">{{ t("settings.selectFirstCompletionOnOpen") }}</Label>
                     <p class="text-xs text-muted-foreground">
-                      {{ t("settings.showCurrentStatementFrameDescription") }}
+                      {{ t("settings.selectFirstCompletionOnOpenDescription") }}
                     </p>
                   </div>
-                  <Switch id="editor-show-current-statement-frame" v-model="editShowCurrentStatementFrame" class="mt-0.5" />
+                  <Switch id="editor-select-first-completion-on-open" v-model="editSelectFirstCompletionOnOpen" class="mt-0.5" />
                 </div>
 
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-auto-close-brackets">{{ t("settings.autoCloseBrackets") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.autoCloseBracketsDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="editor-auto-close-brackets" v-model="editAutoCloseBrackets" class="mt-0.5" />
+                </div>
+
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-insert-space-after-completion">{{ t("settings.insertSpaceAfterCompletion") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.insertSpaceAfterCompletionDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="editor-insert-space-after-completion" v-model="editInsertSpaceAfterCompletion" class="mt-0.5" />
+                </div>
+
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-sort-completion-columns-alphabetically">{{ t("settings.sortCompletionColumnsAlphabetically") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.sortCompletionColumnsAlphabeticallyDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="editor-sort-completion-columns-alphabetically" v-model="editSortCompletionColumnsAlphabetically" class="mt-0.5" />
+                </div>
+
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-auto-alias-tables">{{ t("settings.autoAliasTables") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.autoAliasTablesDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="editor-auto-alias-tables" v-model="editAutoAliasTables" class="mt-0.5" />
+                </div>
+              </div>
+
+              <Separator />
+
+              <div class="grid gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]" data-editor-other-settings>
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="editor-show-insert-value-hints">{{ t("settings.showInsertValueHints") }}</Label>
@@ -4060,83 +4185,6 @@ onUnmounted(() => {
 
               <Separator />
 
-              <div class="space-y-3">
-                <div class="text-sm font-medium text-muted-foreground">
-                  {{ t("settings.sqlCompletionSection") }}
-                </div>
-
-                <div class="grid gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-                  <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                    <div class="space-y-1">
-                      <Label for="editor-auto-close-brackets">{{ t("settings.autoCloseBrackets") }}</Label>
-                      <p class="text-xs text-muted-foreground">
-                        {{ t("settings.autoCloseBracketsDescription") }}
-                      </p>
-                    </div>
-                    <Switch id="editor-auto-close-brackets" v-model="editAutoCloseBrackets" class="mt-0.5" />
-                  </div>
-
-                  <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                    <div class="space-y-1">
-                      <Label for="editor-insert-space-after-completion">{{ t("settings.insertSpaceAfterCompletion") }}</Label>
-                      <p class="text-xs text-muted-foreground">
-                        {{ t("settings.insertSpaceAfterCompletionDescription") }}
-                      </p>
-                    </div>
-                    <Switch id="editor-insert-space-after-completion" v-model="editInsertSpaceAfterCompletion" class="mt-0.5" />
-                  </div>
-
-                  <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                    <div class="space-y-1">
-                      <Label for="editor-sort-completion-columns-alphabetically">{{ t("settings.sortCompletionColumnsAlphabetically") }}</Label>
-                      <p class="text-xs text-muted-foreground">
-                        {{ t("settings.sortCompletionColumnsAlphabeticallyDescription") }}
-                      </p>
-                    </div>
-                    <Switch id="editor-sort-completion-columns-alphabetically" v-model="editSortCompletionColumnsAlphabetically" class="mt-0.5" />
-                  </div>
-
-                  <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                    <div class="space-y-1">
-                      <Label for="editor-select-first-completion-on-open">{{ t("settings.selectFirstCompletionOnOpen") }}</Label>
-                      <p class="text-xs text-muted-foreground">
-                        {{ t("settings.selectFirstCompletionOnOpenDescription") }}
-                      </p>
-                    </div>
-                    <Switch id="editor-select-first-completion-on-open" v-model="editSelectFirstCompletionOnOpen" class="mt-0.5" />
-                  </div>
-
-                  <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                    <div class="space-y-1">
-                      <Label for="editor-auto-alias-tables">{{ t("settings.autoAliasTables") }}</Label>
-                      <p class="text-xs text-muted-foreground">
-                        {{ t("settings.autoAliasTablesDescription") }}
-                      </p>
-                    </div>
-                    <Switch id="editor-auto-alias-tables" v-model="editAutoAliasTables" class="mt-0.5" />
-                  </div>
-
-                  <div class="space-y-2">
-                    <Label>{{ t("settings.completionTriggerMode") }}</Label>
-                    <Select :model-value="editCompletionTriggerMode" @update:model-value="onCompletionTriggerModeChange">
-                      <SelectTrigger>
-                        <SelectValue :placeholder="t('settings.completionTriggerMode')" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="manual">{{ t("settings.completionTriggerModeManual") }}</SelectItem>
-                        <SelectItem value="require-prefix">{{ t("settings.completionTriggerModeRequirePrefix") }}</SelectItem>
-                        <SelectItem value="positional">{{ t("settings.completionTriggerModePositional") }}</SelectItem>
-                      </SelectContent>
-                    </Select>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.completionTriggerModeDescription") }}
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              <Separator />
-
               <div class="grid gap-3 md:grid-cols-2">
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2 md:col-span-2">
                   <div class="min-w-0 space-y-1">
@@ -4156,85 +4204,41 @@ onUnmounted(() => {
                   </Select>
                 </div>
 
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
-                    <Label for="editor-sql-semantic-diagnostics">{{ t("settings.sqlSemanticDiagnosticsEnabled") }}</Label>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.sqlSemanticDiagnosticsEnabledDescription") }}
-                    </p>
-                  </div>
-                  <Switch id="editor-sql-semantic-diagnostics" :model-value="editSqlSemanticDiagnosticsEnabled" class="mt-0.5" @update:model-value="onSqlSemanticDiagnosticsEnabledChange" />
-                </div>
+                <div class="rounded-md border bg-muted/20 p-3 md:col-span-2" data-editor-unsaved-sql-settings>
+                  <div class="grid gap-4 md:grid-cols-2">
+                    <div class="flex min-w-0 items-start justify-between gap-4">
+                      <div class="min-w-0 space-y-1">
+                        <Label for="editor-confirm-unsaved-sql-close">{{ t("settings.confirmUnsavedSqlClose") }}</Label>
+                        <p class="text-xs text-muted-foreground">
+                          {{ t("settings.confirmUnsavedSqlCloseDescription") }}
+                        </p>
+                      </div>
+                      <Switch id="editor-confirm-unsaved-sql-close" v-model="editConfirmUnsavedSqlClose" class="mt-0.5" />
+                    </div>
 
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
-                    <Label for="editor-confirm-dangerous-sql">{{ t("settings.confirmDangerousSqlExecution") }}</Label>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.confirmDangerousSqlExecutionDescription") }}
-                    </p>
+                    <div v-if="editConfirmUnsavedSqlClose" class="flex min-w-0 items-start justify-between gap-4 border-t pt-4 md:border-l md:border-t-0 md:pl-4 md:pt-0">
+                      <div class="min-w-0 space-y-1">
+                        <div class="flex items-center gap-2">
+                          <Label for="app-close-unsaved-tabs-mode">{{ t("settings.appCloseUnsavedTabsMode") }}</Label>
+                          <HelpTooltip :label="t('settings.appCloseUnsavedTabsMode')">
+                            {{ t("settings.appCloseUnsavedTabsModeDescription") }}
+                          </HelpTooltip>
+                        </div>
+                        <p class="text-xs text-muted-foreground">
+                          {{ t("settings.appCloseUnsavedTabsModeHint") }}
+                        </p>
+                      </div>
+                      <Select v-model="editAppCloseUnsavedTabsMode">
+                        <SelectTrigger id="app-close-unsaved-tabs-mode" class="h-8 w-44 shrink-0">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="prompt">{{ t("settings.appCloseUnsavedTabsModePrompt") }}</SelectItem>
+                          <SelectItem value="keep-drafts">{{ t("settings.appCloseUnsavedTabsModeKeepDrafts") }}</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
                   </div>
-                  <Switch id="editor-confirm-dangerous-sql" v-model="editConfirmDangerousSqlExecution" class="mt-0.5" />
-                </div>
-
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
-                    <Label for="editor-continue-on-error">{{ t("settings.continueOnErrorOnBatch") }}</Label>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.continueOnErrorOnBatchDescription") }}
-                    </p>
-                  </div>
-                  <Switch id="editor-continue-on-error" v-model="editContinueOnErrorOnBatch" class="mt-0.5" />
-                </div>
-
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
-                    <Label for="editor-confirm-unsaved-sql-close">{{ t("settings.confirmUnsavedSqlClose") }}</Label>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.confirmUnsavedSqlCloseDescription") }}
-                    </p>
-                  </div>
-                  <Switch id="editor-confirm-unsaved-sql-close" v-model="editConfirmUnsavedSqlClose" class="mt-0.5" />
-                </div>
-
-                <div v-if="editConfirmUnsavedSqlClose" class="space-y-2 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="flex items-center gap-2">
-                    <Label for="app-close-unsaved-tabs-mode">{{ t("settings.appCloseUnsavedTabsMode") }}</Label>
-                    <HelpTooltip :label="t('settings.appCloseUnsavedTabsMode')">
-                      {{ t("settings.appCloseUnsavedTabsModeDescription") }}
-                    </HelpTooltip>
-                  </div>
-                  <Select v-model="editAppCloseUnsavedTabsMode">
-                    <SelectTrigger id="app-close-unsaved-tabs-mode" class="w-full">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="prompt">{{ t("settings.appCloseUnsavedTabsModePrompt") }}</SelectItem>
-                      <SelectItem value="keep-drafts">{{ t("settings.appCloseUnsavedTabsModeKeepDrafts") }}</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <p class="text-xs text-muted-foreground">
-                    {{ t("settings.appCloseUnsavedTabsModeHint") }}
-                  </p>
-                </div>
-
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
-                    <Label for="editor-click-table-navigation-ddl">{{ t("settings.clickTableNavigationTarget") }}</Label>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.clickTableNavigationTargetDescription") }}
-                    </p>
-                  </div>
-                  <Switch id="editor-click-table-navigation-ddl" :model-value="editClickTableNavigationTarget === 'ddl'" @update:model-value="editClickTableNavigationTarget = $event ? 'ddl' : 'data'" class="mt-0.5" />
-                </div>
-
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
-                    <Label for="editor-prefill-new-query">{{ t("settings.prefillNewQueryWithSelect") }}</Label>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.prefillNewQueryWithSelectDescription") }}
-                    </p>
-                  </div>
-                  <Switch id="editor-prefill-new-query" v-model="editPrefillNewQueryWithSelect" class="mt-0.5" />
                 </div>
 
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
@@ -4608,6 +4612,38 @@ onUnmounted(() => {
                     </Button>
                   </div>
                 </div>
+
+                <div class="settings-appearance-group min-w-0">
+                  <Label>{{ t("settings.iconTheme") }}</Label>
+                  <div class="settings-appearance-button-row flex flex-wrap gap-2">
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger as-child>
+                          <Button type="button" variant="outline" size="sm" class="settings-choice-button h-8 gap-1.5 px-3" :class="editIconTheme === 'default' ? 'dbx-choice-selected' : 'text-foreground'" @click="setIconTheme('default')">
+                            <img :src="webPath('/icon-preview-default.png')" alt="DBX" class="h-7 w-7 shrink-0" />
+                            {{ t("settings.iconThemeDefault") }}
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent class="max-w-[320px] text-xs leading-relaxed">
+                          {{ t("settings.iconThemeDefaultDescription") }}
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger as-child>
+                          <Button type="button" variant="outline" size="sm" class="settings-choice-button h-8 gap-1.5 px-3" :class="editIconTheme === 'black' ? 'dbx-choice-selected' : 'text-foreground'" @click="setIconTheme('black')">
+                            <img :src="webPath('/icon-preview-black.png')" alt="DBX" class="h-7 w-7 shrink-0" />
+                            {{ t("settings.iconThemeBlack") }}
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent class="max-w-[320px] text-xs leading-relaxed">
+                          {{ iconThemeBlackDescriptionText }}
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                  </div>
+                </div>
               </div>
 
               <Separator />
@@ -4679,57 +4715,6 @@ onUnmounted(() => {
                       <div class="break-words whitespace-normal text-xs text-muted-foreground">
                         {{ t("settings.tabLayoutWrapDescription") }}
                       </div>
-                    </div>
-                  </Button>
-                </div>
-              </div>
-
-              <!-- <div v-if="!isWeb" class="space-y-2"> -->
-              <div class="settings-appearance-group">
-                <Label>{{ t("settings.iconTheme") }}</Label>
-                <div class="settings-appearance-choice-grid">
-                  <Button type="button" variant="outline" class="settings-choice-card h-auto justify-start border p-3" :class="editIconTheme === 'default' ? 'dbx-choice-selected' : ''" @click="setIconTheme('default')">
-                    <div class="flex items-center gap-3 text-left w-full min-w-0">
-                      <img :src="webPath('/icon-preview-default.png')" alt="DBX" class="h-12 w-12 shrink-0" />
-                      <TooltipProvider>
-                        <Tooltip>
-                          <TooltipTrigger as-child>
-                            <div class="w-full min-w-0 text-left">
-                              <div class="text-sm font-medium">
-                                {{ t("settings.iconThemeDefault") }}
-                              </div>
-                              <div :ref="(el) => setIconThemeDescRef('default', el)" class="text-xs text-muted-foreground truncate">
-                                {{ t("settings.iconThemeDefaultDescription") }}
-                              </div>
-                            </div>
-                          </TooltipTrigger>
-                          <TooltipContent v-if="iconThemeDescTruncated.default.value" class="max-w-[320px] text-xs leading-relaxed">
-                            {{ t("settings.iconThemeDefaultDescription") }}
-                          </TooltipContent>
-                        </Tooltip>
-                      </TooltipProvider>
-                    </div>
-                  </Button>
-                  <Button type="button" variant="outline" class="settings-choice-card h-auto justify-start border p-3" :class="editIconTheme === 'black' ? 'dbx-choice-selected' : ''" @click="setIconTheme('black')">
-                    <div class="flex items-center gap-3 text-left w-full min-w-0">
-                      <img :src="webPath('/icon-preview-black.png')" alt="DBX" class="h-12 w-12 shrink-0" />
-                      <TooltipProvider>
-                        <Tooltip>
-                          <TooltipTrigger as-child>
-                            <div class="w-full min-w-0 text-left">
-                              <div class="text-sm font-medium">
-                                {{ t("settings.iconThemeBlack") }}
-                              </div>
-                              <div :ref="(el) => setIconThemeDescRef('black', el)" class="text-xs text-muted-foreground truncate">
-                                {{ iconThemeBlackDescriptionText }}
-                              </div>
-                            </div>
-                          </TooltipTrigger>
-                          <TooltipContent v-if="iconThemeDescTruncated.black.value" class="max-w-[320px] text-xs leading-relaxed">
-                            {{ iconThemeBlackDescriptionText }}
-                          </TooltipContent>
-                        </Tooltip>
-                      </TooltipProvider>
                     </div>
                   </Button>
                 </div>
@@ -4980,6 +4965,36 @@ onUnmounted(() => {
                   </Button>
                 </div>
               </div>
+              <div class="grid gap-3 md:grid-cols-2">
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-click-table-navigation-ddl">{{ t("settings.clickTableNavigationTarget") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.clickTableNavigationTargetDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="editor-click-table-navigation-ddl" :model-value="editClickTableNavigationTarget === 'ddl'" @update:model-value="editClickTableNavigationTarget = $event ? 'ddl' : 'data'" class="mt-0.5" />
+                </div>
+
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-prefill-new-query">{{ t("settings.prefillNewQueryWithSelect") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.prefillNewQueryWithSelectDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="editor-prefill-new-query" v-model="editPrefillNewQueryWithSelect" class="mt-0.5" />
+                </div>
+              </div>
+              <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="flex items-center gap-2">
+                  <Label for="sidebar-open-database-on-single-click">{{ t("settings.sidebarOpenDatabaseOnSingleClick") }}</Label>
+                  <HelpTooltip :label="t('settings.sidebarOpenDatabaseOnSingleClick')">
+                    {{ t("settings.sidebarOpenDatabaseOnSingleClickDescription") }}
+                  </HelpTooltip>
+                </div>
+                <Switch id="sidebar-open-database-on-single-click" v-model="editSidebarOpenDatabaseOnSingleClick" />
+              </div>
               <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">
                   <Label for="sidebar-table-search-enabled">{{ t("settings.sidebarTableSearchEnabled") }}</Label>
@@ -4997,15 +5012,6 @@ onUnmounted(() => {
                   </HelpTooltip>
                 </div>
                 <Switch id="auto-select-active-sidebar-node" v-model="editAutoSelectActiveSidebarNode" />
-              </div>
-              <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                <div class="flex items-center gap-2">
-                  <Label for="sidebar-open-database-on-single-click">{{ t("settings.sidebarOpenDatabaseOnSingleClick") }}</Label>
-                  <HelpTooltip :label="t('settings.sidebarOpenDatabaseOnSingleClick')">
-                    {{ t("settings.sidebarOpenDatabaseOnSingleClickDescription") }}
-                  </HelpTooltip>
-                </div>
-                <Switch id="sidebar-open-database-on-single-click" v-model="editSidebarOpenDatabaseOnSingleClick" />
               </div>
               <div class="space-y-2 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">
@@ -5169,6 +5175,136 @@ onUnmounted(() => {
 
             <!-- Data Tab -->
             <section v-else-if="activeSettingsTab === 'data'" data-settings-search-id="data" :class="['flex flex-col gap-5 py-2', settingsSearchTargetClass('data')]">
+              <div data-settings-search-id="data-grid-filter-view" :class="['overflow-hidden rounded-md border bg-muted/20', settingsSearchTargetClass('data-grid-filter-view')]">
+                <div class="space-y-3 p-3">
+                  <div class="flex items-start justify-between gap-4">
+                    <div class="min-w-0 space-y-1">
+                      <Label>{{ t("settings.dataGridFilterView") }}</Label>
+                      <p class="text-xs text-muted-foreground">
+                        {{ t("settings.dataGridFilterViewDescription") }}
+                      </p>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      class="h-7 shrink-0 gap-1.5 px-2 text-xs text-muted-foreground"
+                      :aria-expanded="dataGridFilterViewPreviewExpanded"
+                      :aria-label="t(dataGridFilterViewPreviewExpanded ? 'settings.dataGridFilterViewPreviewCollapse' : 'settings.dataGridFilterViewPreviewExpand')"
+                      data-data-grid-filter-view-preview-toggle
+                      @click="dataGridFilterViewPreviewExpanded = !dataGridFilterViewPreviewExpanded"
+                    >
+                      <Eye class="h-3.5 w-3.5" />
+                      <span>{{ t("settings.dataGridFilterViewPreview") }}</span>
+                      <ChevronUp v-if="dataGridFilterViewPreviewExpanded" class="h-3.5 w-3.5" />
+                      <ChevronDown v-else class="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+
+                  <div class="grid grid-cols-3 gap-2" data-data-grid-filter-view-options>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      class="settings-choice-card h-10 min-w-0 justify-start overflow-hidden whitespace-normal border px-3"
+                      :class="editDataGridFilterEditorView === 'quick' ? 'dbx-choice-selected' : ''"
+                      :aria-pressed="editDataGridFilterEditorView === 'quick'"
+                      @click="editDataGridFilterEditorView = 'quick'"
+                    >
+                      <span class="truncate">{{ t("grid.filterQuickView") }}</span>
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      class="settings-choice-card h-10 min-w-0 justify-start overflow-hidden whitespace-normal border px-3"
+                      :class="editDataGridFilterEditorView === 'conditions' ? 'dbx-choice-selected' : ''"
+                      :aria-pressed="editDataGridFilterEditorView === 'conditions'"
+                      @click="editDataGridFilterEditorView = 'conditions'"
+                    >
+                      <span class="truncate">{{ t("grid.filterConditionView") }}</span>
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      class="settings-choice-card h-10 min-w-0 justify-start overflow-hidden whitespace-normal border px-3"
+                      :class="editDataGridFilterEditorView === 'text' ? 'dbx-choice-selected' : ''"
+                      :aria-pressed="editDataGridFilterEditorView === 'text'"
+                      @click="editDataGridFilterEditorView = 'text'"
+                    >
+                      <span class="truncate">{{ t("grid.filterTextView") }}</span>
+                    </Button>
+                  </div>
+                </div>
+
+                <div v-if="dataGridFilterViewPreviewExpanded" class="pointer-events-none select-none overflow-hidden border-t bg-background" data-data-grid-filter-view-preview>
+                  <div class="flex h-8 min-w-0 items-center border-b bg-muted/20 text-[11px]">
+                    <div class="flex h-full shrink-0 items-center border-r px-2">
+                      <span class="flex h-5 w-5 items-center justify-center rounded border" :class="editDataGridFilterEditorView === 'quick' ? 'border-primary/40 bg-primary/10 text-primary' : 'border-border/70 text-muted-foreground'">
+                        <Filter class="h-3 w-3" />
+                      </span>
+                    </div>
+                    <div class="flex min-w-0 flex-1 items-center gap-1.5 border-r px-2">
+                      <span class="shrink-0 text-muted-foreground">WHERE</span>
+                      <code class="truncate text-foreground">status = 'ACTIVE'</code>
+                    </div>
+                    <div class="flex min-w-0 flex-1 items-center gap-1.5 px-2">
+                      <span class="shrink-0 text-muted-foreground">ORDER BY</span>
+                      <code class="truncate text-foreground">id</code>
+                    </div>
+                  </div>
+
+                  <div v-if="editDataGridFilterEditorView === 'quick'" class="h-[104px] bg-muted/5 p-2" data-data-grid-filter-preview-quick>
+                    <div class="w-[360px] max-w-full space-y-2 rounded-md border bg-background p-2 shadow-sm">
+                      <div class="flex items-center justify-between text-xs font-medium">
+                        <span>{{ t("grid.filter") }}</span>
+                        <Trash2 class="h-3.5 w-3.5 text-muted-foreground" />
+                      </div>
+                      <div class="grid grid-cols-[minmax(0,1fr)_72px_minmax(0,1fr)] gap-1.5 text-[11px]">
+                        <span class="truncate rounded border px-2 py-1">status</span>
+                        <span class="truncate rounded border px-2 py-1">=</span>
+                        <span class="truncate rounded border px-2 py-1">ACTIVE</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div v-else-if="editDataGridFilterEditorView === 'conditions'" class="flex h-[104px] flex-col bg-muted/5" data-data-grid-filter-preview-conditions>
+                    <div class="flex-1 p-2">
+                      <div class="grid grid-cols-[18px_minmax(0,1fr)_92px_minmax(0,1.2fr)_24px] items-center gap-1.5 text-[11px]">
+                        <GripVertical class="h-3.5 w-3.5 text-muted-foreground" />
+                        <span class="truncate rounded border bg-background px-2 py-1">status</span>
+                        <span class="truncate rounded border bg-background px-2 py-1">=</span>
+                        <span class="truncate rounded border bg-background px-2 py-1">ACTIVE</span>
+                        <X class="h-3.5 w-3.5 justify-self-center text-muted-foreground" />
+                      </div>
+                    </div>
+                    <div class="flex h-8 min-w-0 items-center gap-2 border-t bg-background/35 px-2 text-[11px]">
+                      <span class="shrink-0 text-muted-foreground">{{ t("grid.filterSqlPreview") }}</span>
+                      <code class="min-w-0 flex-1 truncate rounded bg-muted/35 px-1.5 py-0.5">WHERE status = 'ACTIVE'</code>
+                      <span class="shrink-0 rounded bg-primary px-2 py-1 text-primary-foreground">{{ t("grid.applyFilter") }}</span>
+                    </div>
+                  </div>
+
+                  <div v-else class="flex h-[104px] flex-col bg-muted/5" data-data-grid-filter-preview-text>
+                    <div class="flex-1 px-2 py-1.5 text-[11px]">
+                      <div class="grid min-h-7 grid-cols-[18px_18px_minmax(0,1fr)_72px_minmax(0,1.2fr)_36px] items-center gap-1 border-b border-border/45">
+                        <GripVertical class="h-3.5 w-3.5 text-muted-foreground" />
+                        <span class="flex h-3.5 w-3.5 items-center justify-center border border-primary bg-primary/10 text-primary"><Check class="h-3 w-3" /></span>
+                        <span class="truncate px-1">status</span>
+                        <span class="truncate px-1">=</span>
+                        <span class="truncate px-1">ACTIVE</span>
+                        <Plus class="h-3.5 w-3.5 justify-self-center text-muted-foreground" />
+                      </div>
+                    </div>
+                    <div class="flex h-8 min-w-0 items-center gap-2 border-t bg-background/45 px-2 text-[11px]">
+                      <span class="shrink-0 text-muted-foreground">{{ t("grid.filterSqlPreview") }}</span>
+                      <code class="min-w-0 flex-1 truncate">WHERE status = 'ACTIVE'</code>
+                      <span class="shrink-0 rounded bg-primary px-2 py-1 text-primary-foreground">{{ t("grid.applyFilter") }}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <Separator />
+
               <div class="space-y-3">
                 <div class="text-sm font-medium text-muted-foreground">
                   {{ t("settings.dataGridDisplay") }}
@@ -5187,26 +5323,6 @@ onUnmounted(() => {
                       {{ t("settings.dataGridTypeColorSchemeConfigure") }}
                     </Button>
                   </div>
-                </div>
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
-                    <Label for="data-grid-filter-view">
-                      {{ t("settings.dataGridFilterView") }}
-                    </Label>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.dataGridFilterViewDescription") }}
-                    </p>
-                  </div>
-                  <Select v-model="editDataGridFilterEditorView">
-                    <SelectTrigger id="data-grid-filter-view" class="h-8 w-44 shrink-0">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="quick">{{ t("grid.filterQuickView") }}</SelectItem>
-                      <SelectItem value="conditions">{{ t("grid.filterConditionView") }}</SelectItem>
-                      <SelectItem value="text">{{ t("grid.filterTextView") }}</SelectItem>
-                    </SelectContent>
-                  </Select>
                 </div>
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
@@ -7429,7 +7545,7 @@ onUnmounted(() => {
 
 .settings-appearance-theme-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 0.75rem;
 }
 

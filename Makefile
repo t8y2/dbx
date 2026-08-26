@@ -80,7 +80,7 @@ dev: node_modules/.modules.yaml check-tauri-dev-port
 	$(PNPM) dev:tauri
 
 dev-fast: node_modules/.modules.yaml check-tauri-dev-port
-	$(PNPM) tauri dev -- --no-default-features --features duckdb-sidecar,dynamodb
+	$(PNPM) tauri dev -- --no-default-features --features duckdb-sidecar,dynamodb,sqlite-bundled
 
 dev-web: node_modules/.modules.yaml
 	$(PNPM) dev:web
@@ -110,10 +110,10 @@ test: node_modules/.modules.yaml
 	$(PNPM) test
 
 cargo-check-fast:
-	cargo check --no-default-features
+	cargo check --no-default-features --features sqlite-bundled
 
 cargo-test-fast:
-	cargo test --no-default-features
+	cargo test --no-default-features --features sqlite-bundled
 
 db-list:
 	@$(PNPM) db:env -- list

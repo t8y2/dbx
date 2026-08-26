@@ -111,7 +111,7 @@ pub async fn connect_with_oidc(
         // set discovery. This is essential when connecting through a TCP proxy
         // or NAT where the driver would otherwise receive internal IPs from
         // the replica set handshake and fail to connect.
-        if !is_multi_host {
+        if !is_multi_host && options.load_balanced != Some(true) && options.direct_connection.is_none() {
             options.direct_connection = Some(true);
         }
         Client::with_options(options).map_err(|e| format!("MongoDB connection failed: {e}"))

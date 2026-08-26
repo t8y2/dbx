@@ -4615,7 +4615,7 @@ dependencies = [
 [[package]]
 name = "libsqlite3-hotbundle"
 version = "1.510300.0"
-source = "git+https://github.com/nikescar/libsqlite3-hotbundle.git?rev=a208c7ef1447a02bf5ecb8c6a297aca012d41244#a208c7ef1447a02bf5ecb8c6a297aca012d41244"
+source = "git+https://github.com/zipg/libsqlite3-hotbundle.git?rev=7f12f203b4f4694a273410bd9b02d77f82b6114e#7f12f203b4f4694a273410bd9b02d77f82b6114e"
 dependencies = [
  "cc",
 ]
@@ -8958,7 +8958,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

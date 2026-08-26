@@ -200,6 +200,11 @@ const loadedKeyRaws = new Set<string>();
 let treeIndex: RedisKeyTreeIndex | null = null;
 // 展开分组时已定向补扫过的子树（见 fillGroupSubtree）；在 loadKeys 重置。
 const subtreeFilledGroupIds = new Set<string>();
+// 刷新前已展开分组的快照（#7173）：刷新首屏重建树时，本轮尚未扫到的分组会被
+// rebuildTree 从 expandedGroupIds 中裁掉；后续 load-more 页面让这些分组重新
+// 出现时，用该快照恢复展开状态。SCAN 游标归零（本轮已扫尽，仍未出现的分组
+// 确实不存在）或连接/db 切换（resetLoadedKeys）时清除，避免过期 id 累积。
+const refreshExpandedGroupIds = new Set<string>();
 const REDIS_COMMAND_COMPLETION_MENU_LIMIT = 12;
 let commandCompletionRequestId = 0;
 let commandDocumentationConnectionId: string | null = null;
@@ -611,6 +616,10 @@ function mergeTree(newKeys: RedisKeyInfo[]) {
   for (const id of expandedGroupIds.value) {
     if (treeIndex.groupById.has(id)) nextExpanded.add(id);
   }
+  // 刷新快照恢复（#7173）：首屏重建时被裁掉、后续页面重新出现的分组保持展开
+  for (const id of refreshExpandedGroupIds) {
+    if (treeIndex.groupById.has(id)) nextExpanded.add(id);
+  }
   if (isFuzzyHierarchyView.value) {
     for (const id of addedGroupIds) nextExpanded.add(id);
   }
@@ -712,6 +721,9 @@ function appendScanResult(result: RedisScanResult, options: { updateTree?: boole
       mergeTree(newKeys);
     }
   }
+  // 本轮 SCAN 已扫尽：上方树已并入本页数据（mergeTree 先完成快照恢复），快照
+  // 中仍未恢复的分组确实已不存在，丢弃避免过期累积
+  if (!hasMore.value) refreshExpandedGroupIds.clear();
 
   connectionStore.updateRedisDbKeyStats(props.connectionId, props.db, {
     loaded: isSearchMode.value ? undefined : loadedCount,
@@ -753,7 +765,11 @@ async function loadKeys() {
   treeIndex = null;
   selectedKeyRaw.value = null;
   resetCheckedKeys();
-  expandedGroupIds.value = new Set();
+  // 刷新/重载不清空展开状态（#7173）：首屏重建树时由 rebuildTree 裁掉已消失
+  // 的分组；这里快照一份，供后续页面让分组重新出现时恢复展开。连接/db 切换
+  // 先走 resetLoadedKeys 清空快照与展开集，仍保持从折叠开始。
+  refreshExpandedGroupIds.clear();
+  for (const id of expandedGroupIds.value) refreshExpandedGroupIds.add(id);
   scanCursor.value = 0;
   lastTotalKeys.value = 0;
   // Only chain the automatic continuation after a page actually applied. A
@@ -1157,6 +1173,7 @@ function resetLoadedKeys() {
   selectedKeyRaw.value = null;
   resetCheckedKeys();
   expandedGroupIds.value = new Set();
+  refreshExpandedGroupIds.clear();
   hasMore.value = false;
   lastTotalKeys.value = 0;
 }

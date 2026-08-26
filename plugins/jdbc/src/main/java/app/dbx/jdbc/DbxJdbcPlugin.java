@@ -3389,6 +3389,7 @@ public final class DbxJdbcPlugin {
                     return rs.getString(1);
                 }
             }
+        } catch (SQLException ignored) {
         }
         return null;
     }
@@ -3402,6 +3403,7 @@ public final class DbxJdbcPlugin {
                     return rs.getString(1);
                 }
             }
+        } catch (SQLException ignored) {
         }
         return null;
     }
@@ -3416,8 +3418,18 @@ public final class DbxJdbcPlugin {
                     result.add(name);
                 }
             }
+            return result;
+        } catch (SQLException e) {
+            try (ResultSet rs = conn.getMetaData().getSchemas()) {
+                while (rs.next()) {
+                    String schema = rs.getString("TABLE_SCHEM");
+                    if (schema != null && !schema.isBlank()) {
+                        result.add(schema);
+                    }
+                }
+            }
+            return result;
         }
-        return result;
     }
 
     private static JsonNode oracleListTables(Connection conn, String owner) throws SQLException {

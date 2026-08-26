@@ -2731,6 +2731,28 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
+    void oracleListSchemasFallsBackToJdbcSchemasWhenAllUsersIsMissing() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod("oracleListSchemas", Connection.class);
+        method.setAccessible(true);
+
+        try (Connection conn = DriverManager.getConnection("jdbc:h2:mem:dbx_oracle_no_all_users;DB_CLOSE_DELAY=-1", "sa", "")) {
+            conn.createStatement().execute("CREATE SCHEMA DM6_TEST_SCHEMA");
+
+            JsonNode result = (JsonNode) method.invoke(null, conn);
+            assertFalse(result.isNull());
+            assertEquals(true, result.isArray());
+            boolean found = false;
+            for (JsonNode node : result) {
+                if ("DM6_TEST_SCHEMA".equalsIgnoreCase(node.asText())) {
+                    found = true;
+                    break;
+                }
+            }
+            assertEquals(true, found);
+        }
+    }
+
+    @Test
     void oracleEffectiveSchemaUsesExactOwnerBeforeUppercaseFallback() throws Exception {
         Method method = DbxJdbcPlugin.class.getDeclaredMethod("oracleEffectiveSchema", Connection.class, String.class);
         method.setAccessible(true);

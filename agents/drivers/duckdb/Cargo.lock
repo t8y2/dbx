@@ -1252,7 +1252,6 @@ dependencies = [
  "insta",
  "json5",
  "jsonwebtoken",
- "libsqlite3-hotbundle",
  "log",
  "minijinja",
  "mongodb",
@@ -2833,14 +2832,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c943259e342f1e06ff2da7a83eabdfe7f92ce10262688dbf1895ff0b3e6e4652"
 dependencies = [
  "libc",
-]
-
-[[package]]
-name = "libsqlite3-hotbundle"
-version = "1.510300.0"
-source = "git+https://github.com/nikescar/libsqlite3-hotbundle.git?rev=a208c7ef1447a02bf5ecb8c6a297aca012d41244#a208c7ef1447a02bf5ecb8c6a297aca012d41244"
-dependencies = [
- "cc",
 ]
 
 [[package]]

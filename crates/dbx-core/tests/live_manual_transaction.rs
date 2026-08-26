@@ -44,10 +44,10 @@ fn live_config(prefix: &str, db_type: DatabaseType, default_port: u16) -> Connec
     .expect("live connection config should deserialize")
 }
 
-async fn app_state_with_config(config: ConnectionConfig) -> (AppState, std::path::PathBuf) {
+async fn app_state_with_config(config: ConnectionConfig) -> (Arc<AppState>, std::path::PathBuf) {
     let db_path = std::env::temp_dir().join(format!("dbx-live-manual-txn-{}.db", uuid::Uuid::new_v4().simple()));
     let storage = Storage::open(&db_path).await.expect("open temp storage");
-    let state = AppState::new(storage);
+    let state = Arc::new(AppState::new(storage));
     state.configs.write().await.insert(config.id.clone(), config);
     (state, db_path)
 }

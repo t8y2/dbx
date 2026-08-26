@@ -52,6 +52,7 @@ import { copyToClipboard } from "@/lib/common/clipboard";
 import { useEditorFontFamilyStyle } from "@/composables/useEditorFontFamilyStyle";
 import { useToast } from "@/composables/useToast";
 import { redisKeySearchPattern } from "@/lib/redis/redisKeyPattern";
+import { filterRedisKeyTemplates, resolveRedisKeyTemplates } from "@/lib/redis/redisKeyTemplates";
 import { REDIS_SCAN_PAGE_SIZE_DEFAULT } from "@/lib/redis/redisKeyPattern";
 import { chunkRedisKeyRaws, collectUniqueRedisKeys } from "@/lib/redis/redisKeyBatch";
 import { getRedisCreateKeyTypeHelp, redisCreateKeyTypeHelpOptionOnOpen, shouldActivateRedisCreateKeyTypeHelpOnFocus } from "@/lib/redis/redisCreateKeyTypeHelp";
@@ -112,6 +113,10 @@ const commandTerminalRef = ref<HTMLElement>();
 const searchPattern = ref("");
 const searchMode = ref<RedisSearchMode>("key");
 const fuzzyKeySearch = ref(false);
+const keyTemplateMenuOpen = ref(false);
+const keyTemplateSelectedIndex = ref(0);
+const keyTemplateListboxId = `redis-key-template-suggestions-${uuid()}`;
+let keyTemplateBlurTimer: ReturnType<typeof setTimeout> | null = null;
 const selectedKeyRaw = ref<string | null>(null);
 const hasMore = ref(false);
 const scanCursor = ref(0);
@@ -216,6 +221,10 @@ const searchPlaceholder = computed(() => {
   if (searchMode.value === "key") return fuzzyKeySearch.value ? t("redis.fuzzyPattern") : t("redis.pattern");
   return searchMode.value === "all" ? t("redis.allSearchPlaceholder") : t("redis.valueSearchPlaceholder");
 });
+const redisKeyTemplates = computed(() => resolveRedisKeyTemplates(connectionStore.getConfig(props.connectionId)?.redis_key_templates, settingsStore.editorSettings.redisKeyTemplates ?? []));
+const keyTemplateSuggestions = computed(() => (searchMode.value === "key" ? filterRedisKeyTemplates(redisKeyTemplates.value, searchPattern.value) : []));
+const keyTemplateMenuVisible = computed(() => keyTemplateMenuOpen.value && searchMode.value === "key" && keyTemplateSuggestions.value.length > 0);
+const keyTemplateActiveDescendant = computed(() => (keyTemplateMenuVisible.value ? `${keyTemplateListboxId}-option-${keyTemplateSelectedIndex.value}` : undefined));
 const loadingEmptyText = computed(() => (isValueSearchMode.value && valueQuery.value ? t(searchMode.value === "all" ? "redis.searchingAll" : "redis.searchingValues") : t("redis.loadingKeys")));
 const redisKeySeparator = computed(() => connectionStore.getConfig(props.connectionId)?.redis_key_separator ?? ":");
 const redisScanPageSize = computed(() => connectionStore.getConfig(props.connectionId)?.redis_scan_page_size ?? REDIS_SCAN_PAGE_SIZE_DEFAULT);
@@ -1636,7 +1645,90 @@ function typeColor(type: string): string {
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
 let hasAutoFocusedSearch = false;
 
+function dismissKeyTemplateMenu() {
+  keyTemplateMenuOpen.value = false;
+  keyTemplateSelectedIndex.value = 0;
+  if (keyTemplateBlurTimer) {
+    clearTimeout(keyTemplateBlurTimer);
+    keyTemplateBlurTimer = null;
+  }
+}
+
+function openKeyTemplateMenu() {
+  if (searchMode.value !== "key" || redisKeyTemplates.value.length === 0) {
+    dismissKeyTemplateMenu();
+    return;
+  }
+  keyTemplateMenuOpen.value = true;
+  keyTemplateSelectedIndex.value = 0;
+}
+
+function clampKeyTemplateSelection() {
+  const max = Math.max(keyTemplateSuggestions.value.length - 1, 0);
+  if (keyTemplateSelectedIndex.value > max) keyTemplateSelectedIndex.value = max;
+}
+
+function selectKeyTemplate(index: number) {
+  const template = keyTemplateSuggestions.value[index];
+  if (!template) return;
+  if (searchTimer) {
+    clearTimeout(searchTimer);
+    searchTimer = null;
+  }
+  searchPending.value = false;
+  searchPattern.value = template;
+  dismissKeyTemplateMenu();
+  void nextTick(() => getSearchInput()?.focus());
+}
+
+function moveKeyTemplateSelection(direction: number): boolean {
+  if (!keyTemplateMenuVisible.value) return false;
+  const count = keyTemplateSuggestions.value.length;
+  if (count === 0) return false;
+  keyTemplateSelectedIndex.value = Math.min(Math.max(keyTemplateSelectedIndex.value + direction, 0), count - 1);
+  void nextTick(() => {
+    document.getElementById(`${keyTemplateListboxId}-option-${keyTemplateSelectedIndex.value}`)?.scrollIntoView({ block: "nearest" });
+  });
+  return true;
+}
+
+function onSearchFocus() {
+  openKeyTemplateMenu();
+}
+
+function onSearchBlur() {
+  if (keyTemplateBlurTimer) clearTimeout(keyTemplateBlurTimer);
+  keyTemplateBlurTimer = setTimeout(() => {
+    dismissKeyTemplateMenu();
+    keyTemplateBlurTimer = null;
+  }, 150);
+}
+
 function onSearchInput() {
+  if (searchMode.value === "key" && redisKeyTemplates.value.length > 0) {
+    keyTemplateMenuOpen.value = true;
+    keyTemplateSelectedIndex.value = 0;
+    clampKeyTemplateSelection();
+  } else {
+    dismissKeyTemplateMenu();
+  }
+  // Key search is Enter-only so users can finish editing templates / patterns
+  // (including {$placeholders}) without triggering SCAN on every keystroke.
+  if (searchMode.value === "key") {
+    if (searchTimer) {
+      clearTimeout(searchTimer);
+      searchTimer = null;
+    }
+    searchPending.value = false;
+    invalidateScanRequests();
+    loading.value = false;
+    isFetchingAll.value = false;
+    fetchAllStopRequested.value = true;
+    fetchAllLoadedCount.value = 0;
+    selectedKeyRaw.value = null;
+    resetCheckedKeys();
+    return;
+  }
   if (searchTimer) clearTimeout(searchTimer);
   // Invalidate in-flight SCAN work as soon as the query changes instead of
   // waiting for the debounce timer to start the replacement search.
@@ -1654,6 +1746,7 @@ function onSearchInput() {
 function setSearchMode(mode: RedisSearchMode) {
   if (searchMode.value === mode) return;
   searchMode.value = mode;
+  if (mode !== "key") dismissKeyTemplateMenu();
   void loadKeys();
 }
 
@@ -1834,6 +1927,28 @@ function focusSearch(): boolean {
 }
 
 function onSearchKeydown(event: KeyboardEvent) {
+  if (keyTemplateMenuVisible.value) {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      moveKeyTemplateSelection(1);
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      moveKeyTemplateSelection(-1);
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      selectKeyTemplate(keyTemplateSelectedIndex.value);
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      dismissKeyTemplateMenu();
+      return;
+    }
+  }
   if (event.key === "Enter") {
     void loadKeys();
     return;
@@ -1841,6 +1956,7 @@ function onSearchKeydown(event: KeyboardEvent) {
   if (!isCancelSearchShortcut(event)) return;
   event.preventDefault();
   searchPattern.value = "";
+  dismissKeyTemplateMenu();
   void loadKeys();
 }
 
@@ -2083,15 +2199,37 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
             </div>
             <div class="redis-key-search-row mt-2">
               <div class="relative min-w-0">
-                <Search class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground/80" />
+                <Search class="pointer-events-none absolute left-2.5 top-1/2 z-[1] h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground/80" />
                 <Input
                   v-model="searchPattern"
                   data-redis-search-input
+                  role="combobox"
                   class="h-8 border-border/70 bg-background pl-8 pr-3 text-xs shadow-sm caret-primary placeholder:text-muted-foreground/80 focus-visible:border-primary/60 focus-visible:ring-2 focus-visible:ring-primary/20"
                   :placeholder="searchPlaceholder"
+                  :aria-expanded="keyTemplateMenuVisible"
+                  :aria-controls="keyTemplateMenuVisible ? keyTemplateListboxId : undefined"
+                  :aria-activedescendant="keyTemplateActiveDescendant"
+                  autocomplete="off"
                   @input="onSearchInput"
                   @keydown="onSearchKeydown"
+                  @focus="onSearchFocus"
+                  @blur="onSearchBlur"
                 />
+                <div v-if="keyTemplateMenuVisible" :id="keyTemplateListboxId" role="listbox" :aria-label="t('redis.keyTemplateSuggestions')" class="absolute left-0 right-0 top-[calc(100%+0.25rem)] z-30 max-h-60 overflow-y-auto rounded-md border bg-popover py-1 text-popover-foreground shadow-md">
+                  <button
+                    v-for="(template, index) in keyTemplateSuggestions"
+                    :id="`${keyTemplateListboxId}-option-${index}`"
+                    :key="template"
+                    type="button"
+                    role="option"
+                    class="dbx-editor-font-family flex w-full items-center px-3 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
+                    :class="keyTemplateSelectedIndex === index ? 'bg-accent text-accent-foreground' : ''"
+                    :aria-selected="keyTemplateSelectedIndex === index"
+                    @mousedown.prevent="selectKeyTemplate(index)"
+                  >
+                    <span class="truncate">{{ template }}</span>
+                  </button>
+                </div>
               </div>
               <div class="flex shrink-0 items-center gap-1">
                 <Button

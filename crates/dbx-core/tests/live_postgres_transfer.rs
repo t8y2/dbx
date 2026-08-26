@@ -52,6 +52,7 @@ fn postgres_test_config(id: &str, database: &str) -> ConnectionConfig {
         redis_key_separator: dbx_core::models::connection::default_redis_key_separator(),
         redis_scan_page_size: None,
         redis_database_aliases: Default::default(),
+        redis_key_templates: Vec::new(),
         etcd_endpoints: String::new(),
         gbase_server: String::new(),
         informix_server: String::new(),

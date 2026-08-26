@@ -122,9 +122,8 @@ mod tests {
     }
 
     #[test]
-    fn test_tilde_without_slash_not_expanded() {
-        // ~user form is not expanded, treated literally
-        let result = validate_file_path("~nonexistentuser", is_network_path_test);
+    fn test_unknown_named_user_path_remains_literal() {
+        let result = validate_file_path("~dbx-user-that-must-not-exist-7088", is_network_path_test);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains('~'));
     }

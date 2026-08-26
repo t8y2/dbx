@@ -60,7 +60,6 @@ ${StrLoc}
 !define UNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCTNAME}"
 !define MANUKEY "Software\${MANUFACTURER}"
 !define MANUPRODUCTKEY "${MANUKEY}\${PRODUCTNAME}"
-!define UNINSTALLERSIGNCOMMAND "{{uninstaller_sign_cmd}}"
 !define ESTIMATEDSIZE "{{estimated_size}}"
 !define STARTMENUFOLDER "{{start_menu_folder}}"
 !searchreplace WEBVIEW2LOADERSRCPATH "${MAINBINARYSRCPATH}" "\${MAINBINARYNAME}.exe" "\WebView2Loader.dll"
@@ -113,11 +112,6 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
 
 # additional plugins
 !addplugindir "${ADDITIONALPLUGINSPATH}"
-
-; Uninstaller signing command
-!if "${UNINSTALLERSIGNCOMMAND}" != ""
-  !uninstfinalize '${UNINSTALLERSIGNCOMMAND}'
-!endif
 
 ; Handle install mode, `perUser`, `perMachine` or `both`
 !if "${INSTALLMODE}" == "perMachine"

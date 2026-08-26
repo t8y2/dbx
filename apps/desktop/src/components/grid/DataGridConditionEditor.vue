@@ -528,6 +528,7 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
           @compositionstart="onCompositionStart"
           @compositionend="onCompositionEnd"
           @input="onInput"
+          @contextmenu.stop
           @keydown="onKeydown"
         />
       </div>
@@ -562,6 +563,7 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
           @compositionstart="onCompositionStart"
           @compositionend="onCompositionEnd"
           @input="onInput"
+          @contextmenu.stop
           @keydown="onKeydown"
         />
         <div class="data-grid-topbar-condition-floating-controls pointer-events-none absolute inset-x-2 z-[2] flex h-6 min-w-0 items-center gap-1">

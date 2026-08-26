@@ -41,6 +41,13 @@ describe("keyboard shortcut matching", () => {
     expect(eventToShortcut({ key: "+", ctrlKey: true, shiftKey: true }, "Win32")).toBe("Shift+Mod+Plus");
   });
 
+  it.each([
+    ["¨", "KeyU", "Shift+Alt+U"],
+    ["Ò", "KeyL", "Shift+Alt+L"],
+  ])("records macOS Option-modified %s by physical letter", (key, code, expected) => {
+    expect(eventToShortcut({ key, code, altKey: true, shiftKey: true }, "MacIntel")).toBe(expected);
+  });
+
   it("keeps Control distinct from Command when recording macOS shortcuts", () => {
     const controlShortcut = eventToShortcut({ key: "b", ctrlKey: true }, "MacIntel");
 

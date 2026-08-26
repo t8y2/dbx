@@ -90,6 +90,9 @@ iana-time-zone = "0.1"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security"] }
 
+[target.'cfg(all(unix, not(target_os = "redox")))'.dependencies]
+nix = { version = "0.31.3", features = ["user"] }
+
 [dev-dependencies]
 mysql_common = { git = "https://github.com/t8y2/rust_mysql_common.git", rev = "47740d85a8277167a5717afac785d37b46a36296", default-features = false }
 tokio = { version = "1", features = ["test-util"] }

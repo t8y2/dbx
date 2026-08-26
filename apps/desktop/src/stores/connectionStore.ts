@@ -3566,6 +3566,8 @@ export const useConnectionStore = defineStore("connection", () => {
       await loadZooKeeperRoot(connectionId);
     } else if (config.db_type === "consul") {
       await loadConsulRoot(connectionId);
+    } else if (config.db_type === "ldap") {
+      await loadLdapRoot(connectionId);
     } else if (config.db_type === "mongodb") {
       await loadMongoDatabases(connectionId);
     } else if (config.db_type === "dynamodb") {
@@ -4488,6 +4490,70 @@ export const useConnectionStore = defineStore("connection", () => {
       throw e;
     } finally {
       finishTreeNodeLoad(load);
+    }
+  }
+
+  async function loadLdapRoot(connectionId: string) {
+    const node = findConnectionNode(connectionId);
+    if (!node) return;
+
+    node.isLoading = true;
+    try {
+      await ensureConnected(connectionId);
+      const config = getConfig(connectionId);
+      const baseDn = (config as any)?.ldap_base_dn || "";
+      const result = await withMetadataLoadTimeout(connectionId, api.ldapSearch(connectionId, baseDn, "(objectClass=*)", "one", ["objectClass"]), "LDAP entries");
+      setChildren(
+        node,
+        withSavedSqlRoot(
+          connectionId,
+          result.entries.map((entry) => ({
+            id: `${connectionId}:ldap:${entry.dn}`,
+            label: entry.dn.split(",")[0],
+            type: "ldap-entry" as const,
+            connectionId,
+            database: entry.dn,
+            isExpanded: false,
+            children: [],
+          })),
+          node,
+        ),
+      );
+      node.isExpanded = true;
+    } catch (e) {
+      recordMetadataLoadError(connectionId, e);
+      throw e;
+    } finally {
+      node.isLoading = false;
+    }
+  }
+
+  async function loadLdapEntryChildren(connectionId: string, baseDn: string) {
+    const nodeId = `${connectionId}:ldap:${baseDn}`;
+    const node = findNodeById(nodeId);
+    if (!node) return;
+
+    node.isLoading = true;
+    try {
+      const result = await api.ldapSearch(connectionId, baseDn, "(objectClass=*)", "one", ["objectClass"]);
+      setChildren(
+        node,
+        result.entries.map((entry) => ({
+          id: `${connectionId}:ldap:${entry.dn}`,
+          label: entry.dn.split(",")[0],
+          type: "ldap-entry" as const,
+          connectionId,
+          database: entry.dn,
+          isExpanded: false,
+          children: [],
+        })),
+      );
+      node.isExpanded = true;
+    } catch (e) {
+      recordMetadataLoadError(connectionId, e);
+      throw e;
+    } finally {
+      node.isLoading = false;
     }
   }
 
@@ -6461,6 +6527,8 @@ export const useConnectionStore = defineStore("connection", () => {
         await loadZooKeeperRoot(node.connectionId);
       } else if (config?.db_type === "consul") {
         await loadConsulRoot(node.connectionId);
+      } else if (config?.db_type === "ldap") {
+        await loadLdapRoot(node.connectionId);
       } else if (config?.db_type === "mongodb") {
         await loadMongoDatabases(node.connectionId);
       } else if (config?.db_type === "dynamodb") {
@@ -7954,6 +8022,17 @@ export const useConnectionStore = defineStore("connection", () => {
     return null;
   }
 
+  function findNodeById(id: string, nodes: TreeNode[] = treeNodes.value): TreeNode | null {
+    for (const node of nodes) {
+      if (node.id === id) return node;
+      if (node.children) {
+        const found = findNodeById(id, node.children);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+
   async function persistConnections(nextConnections: ConnectionConfig[] = connections.value) {
     await api.saveConnections(nextConnections.filter((connection) => connection.one_time !== true));
   }
@@ -8776,6 +8855,8 @@ export const useConnectionStore = defineStore("connection", () => {
     loadRedisDatabases,
     refreshRedisDbKeyCounts,
     loadEtcdRoot,
+    loadLdapRoot,
+    loadLdapEntryChildren,
     loadZooKeeperRoot,
     loadConsulRoot,
     loadMqTenants,

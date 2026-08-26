@@ -9,7 +9,9 @@ use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::backend::{format_query_result, new_connection_config, parse_database_type, ConnectionSummary, DbxBackend};
+use crate::backend::{
+    format_query_result, new_connection_config_with_ldap, parse_database_type, ConnectionSummary, DbxBackend,
+};
 use crate::mongo::{self, MongoCommand, MongoSafetyError};
 use crate::session::{McpSession, McpSessionStore};
 use dbx_core::{
@@ -124,6 +126,21 @@ pub struct AddConnectionRequest {
     pub ssl: bool,
     #[schemars(extend("type" = "string"))]
     pub driver_profile: Option<String>,
+    /// LDAP security protocol (`simple` or `gssapi`). Only used for `ldap` connections.
+    #[serde(default)]
+    pub ldap_security_protocol: String,
+    /// Kerberos principal for `gssapi` LDAP connections (e.g. `svc@REALM.COM`).
+    #[serde(default)]
+    pub ldap_principal: String,
+    /// Path to the Kerberos keytab for `gssapi` LDAP connections.
+    #[serde(default)]
+    pub ldap_keytab_path: String,
+    /// krb5.conf contents for `gssapi` LDAP connections.
+    #[serde(default)]
+    pub ldap_krb5_conf: String,
+    /// Base DN used to scope LDAP searches (e.g. `DC=corp,DC=com`).
+    #[serde(default)]
+    pub ldap_base_dn: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -150,6 +167,28 @@ pub struct ExecuteRedisCommandRequest {
     pub db: Option<u32>,
     #[schemars(description = "Redis command to execute, for example GET mykey or INFO")]
     pub command: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct LdapSearchRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+    #[schemars(description = "Distinguished Name to start the search from. Empty string searches from the root DSE.")]
+    pub base_dn: String,
+    #[schemars(
+        description = "LDAP search filter (RFC 4515), e.g. `(sAMAccountName=alice)` or `(&(objectClass=user)(memberOf=CN=admins,DC=corp,DC=com))`."
+    )]
+    pub filter: String,
+    #[schemars(
+        description = "Search scope. One of `base` (single object), `one` (immediate children), or `sub` (whole subtree). Defaults to `sub`."
+    )]
+    pub scope: Option<String>,
+    #[schemars(
+        description = "Attribute names to return (e.g. `[\"cn\", \"mail\", \"memberOf\"]`). Empty/missing returns all attributes the server is willing to expose."
+    )]
+    pub attributes: Option<Vec<String>>,
+    #[schemars(description = "Maximum number of entries to return. Defaults to 100. Server-side limits still apply.")]
+    pub size_limit: Option<i32>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -585,6 +624,49 @@ impl DbxMcpServer {
         }
     }
 
+    #[tool(
+        name = "dbx_execute_ldap_search",
+        description = "Run an LDAP search on an LDAP connection. Returns matching entries (DN + attributes). Use this whenever the user asks about directory contents, group membership, user attributes, or any other LDAP lookup. LDAP search is read-only."
+    )]
+    async fn execute_ldap_search(&self, Parameters(request): Parameters<LdapSearchRequest>) -> CallToolResult {
+        let resolved = match self.resolve_connection(&request.selector).await {
+            Ok(resolved) => resolved,
+            Err(error) => return error,
+        };
+        let connection = &resolved.connection;
+        if connection.db_type != DatabaseType::Ldap {
+            return tool_error(
+                "INVALID_CONNECTION_TYPE",
+                format!(
+                    "dbx_execute_ldap_search is only available on LDAP connections (current: {:?}).",
+                    connection.db_type
+                ),
+            );
+        }
+        let scope = request.scope.as_deref().unwrap_or("sub").trim().to_string();
+        if !matches!(scope.as_str(), "base" | "one" | "sub") {
+            return tool_error("INVALID_SCOPE", format!("`scope` must be one of base/one/sub, got {scope}"));
+        }
+        let mut arguments = json!({
+            "base_dn": request.base_dn,
+            "scope": scope,
+            "filter": request.filter,
+        });
+        if let Some(attributes) = &request.attributes {
+            let attributes = attributes.iter().filter(|value| !value.trim().is_empty()).cloned().collect::<Vec<_>>();
+            if !attributes.is_empty() {
+                arguments["attributes"] = json!(attributes);
+            }
+        }
+        if let Some(size_limit) = request.size_limit {
+            arguments["size_limit"] = json!(size_limit.clamp(1, 100));
+        }
+        let permissions = dbx_core::agent_tools::AgentSqlPermissions::default();
+        let result =
+            self.backend.execute_agent_tool(connection, "", "dbx_execute_ldap_search", arguments, permissions).await;
+        agent_result(result)
+    }
+
     #[tool(name = "dbx_get_schema_context", description = "Get compact table and column context for writing SQL")]
     async fn get_schema_context(&self, Parameters(request): Parameters<SchemaContextRequest>) -> CallToolResult {
         let resolved = match self.resolve_connection(&request.selector).await {
@@ -660,7 +742,7 @@ impl DbxMcpServer {
             Some(port) => port,
             None => return text("Port is required for this database type."),
         };
-        let config = match new_connection_config(
+        let config = match new_connection_config_with_ldap(
             Uuid::new_v4().to_string(),
             request.name,
             db_type,
@@ -671,6 +753,13 @@ impl DbxMcpServer {
             request.database,
             request.ssl,
             request.driver_profile,
+            crate::backend::LdapConnectionOptions {
+                security_protocol: request.ldap_security_protocol,
+                principal: request.ldap_principal,
+                keytab_path: request.ldap_keytab_path,
+                krb5_conf: request.ldap_krb5_conf,
+                base_dn: request.ldap_base_dn,
+            },
         ) {
             Ok(config) => config,
             Err(error) => return tool_error("INVALID_CONNECTION", error),
@@ -1471,7 +1560,7 @@ mod tests {
         let server = DbxMcpServer::with_runtime_options(Arc::new(FakeBackend::default()), McpScope::default(), false);
         let tools = server.tool_router.list_all();
         let names = tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
-        assert_eq!(tools.len(), 13);
+        assert_eq!(tools.len(), 14);
         assert!(names.contains(&"dbx_list_connections"));
         assert!(names.contains(&"dbx_list_tables"));
         assert!(names.contains(&"dbx_describe_table"));
@@ -1480,6 +1569,7 @@ mod tests {
         assert!(names.contains(&"dbx_duplicate_connection"));
         assert!(names.contains(&"dbx_remove_connection"));
         assert!(names.contains(&"dbx_execute_redis_command"));
+        assert!(names.contains(&"dbx_execute_ldap_search"));
         assert!(names.contains(&"dbx_get_schema_context"));
         assert!(names.contains(&"dbx_open_table"));
         assert!(names.contains(&"dbx_execute_and_show"));
@@ -1640,12 +1730,13 @@ mod tests {
             false,
         );
         let names = server.tool_router.list_all().into_iter().map(|tool| tool.name).collect::<Vec<_>>();
-        assert_eq!(names.len(), 8);
+        assert_eq!(names.len(), 9);
         assert!(!names.iter().any(|name| name == "dbx_add_connection"));
         assert!(!names.iter().any(|name| name == "dbx_duplicate_connection"));
         assert!(!names.iter().any(|name| name == "dbx_remove_connection"));
         assert!(!names.iter().any(|name| name == "dbx_open_table"));
         assert!(!names.iter().any(|name| name == "dbx_execute_and_show"));
+        assert!(names.iter().any(|name| name == "dbx_execute_ldap_search"));
         assert!(names.iter().any(|name| name == "dbx_open_session"));
         assert!(names.iter().any(|name| name == "dbx_close_session"));
     }

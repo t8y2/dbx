@@ -555,6 +555,7 @@ watch(fixedTabOverflowOpen, (open) => {
 function tabMenuIcon(tab: QueryTab) {
   if (tab.externalSqlFileMissing) return AlertTriangle;
   if (tab.mode === "data" || tab.mode === "mongo" || tab.mode === "redis" || tab.mode === "hbase") return Table2;
+  if (tab.mode === "ldap") return Table2;
   if (tab.mode === "vector") return TableProperties;
   if (tab.mode === "etcd" || tab.mode === "zookeeper" || tab.mode === "consul") return KeyRound;
   if (tab.mode === "consul-overview") return Gauge;

@@ -92,6 +92,8 @@ const EtcdAccessControl = defineAsyncComponent(() => import("@/components/etcd/E
 const ZooKeeperKeyBrowser = defineAsyncComponent(() => import("@/components/zookeeper/ZooKeeperKeyBrowser.vue"));
 const ConsulOverview = defineAsyncComponent(() => import("@/components/consul/ConsulOverview.vue"));
 const ConsulWorkspace = defineAsyncComponent(() => import("@/components/consul/ConsulWorkspace.vue"));
+const LdapBrowser = defineAsyncComponent(() => import("@/components/ldap/LdapBrowser.vue"));
+const LdapSearch = defineAsyncComponent(() => import("@/components/ldap/LdapSearch.vue"));
 const DocumentBrowser = defineAsyncComponent(() => import("@/components/document/DocumentBrowser.vue"));
 const MeilisearchIndexView = defineAsyncComponent(() => import("@/components/meilisearch/MeilisearchIndexView.vue"));
 const MeilisearchSystemWorkspace = defineAsyncComponent(() => import("@/components/meilisearch/MeilisearchSystemWorkspace.vue"));
@@ -2247,6 +2249,20 @@ defineExpose({
     <template v-else-if="activeTab.mode === 'consul'">
       <div class="flex-1 min-h-0">
         <ConsulWorkspace ref="consulWorkspaceRef" :key="activeTab.id" :connection-id="activeTab.connectionId" />
+      </div>
+    </template>
+
+    <!-- LDAP mode: entry browser -->
+    <template v-else-if="activeTab.mode === 'ldap'">
+      <div class="flex-1 min-h-0">
+        <LdapBrowser :key="activeTab.id" :connection-id="activeTab.connectionId" :base-dn="activeTab.database" />
+      </div>
+    </template>
+
+    <!-- LDAP Search mode -->
+    <template v-else-if="activeTab.mode === 'ldap-search'">
+      <div class="flex-1 min-h-0">
+        <LdapSearch :key="activeTab.id" :connection-id="activeTab.connectionId" />
       </div>
     </template>
 

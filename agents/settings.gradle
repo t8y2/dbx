@@ -6,7 +6,7 @@ def driverModules = [
     'teradata', 'vertica', 'firebird', 'exasol', 'oceanbase-oracle', 'gbase8a', 'gbase8s',
     'bigquery', 'kylin', 'ignite', 'ignite3', 'spanner', 'sundb', 'h2', 'h2-legacy', 'snowflake', 'trino', 'spark',
     'db2', 'informix', 'mongodb', 'highgo', 'uxdb', 'yashandb', 'oscar',
-    'iris', 'etcd', 'kafka', 'sqlserver-legacy'
+    'iris', 'etcd', 'kafka', 'sqlserver-legacy', 'ldap'
 ]
 
 include(*(infrastructureModules + driverModules))

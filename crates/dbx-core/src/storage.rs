@@ -37,6 +37,7 @@ const APP_STATE_SAVED_SQL_EDITOR_POSITIONS_KEY: &str = "saved_sql_editor_positio
 const APP_STATE_TRANSFER_TASK_LIBRARY_KEY: &str = "transfer_task_library";
 const MCP_GLOBAL_POLICY_KEY: &str = "mcp_global_policy";
 const MAX_RETRIES_KEY: &str = "max_retries";
+const LDAP_LOGIN_SETTINGS_KEY: &str = "ldap_login_settings";
 const APP_STATE_AI_GLOBAL_INSTRUCTIONS_KEY: &str = "ai_global_custom_instructions";
 const APP_STATE_AI_CHAT_SELECTION_KEY: &str = "ai_chat_selection_v1";
 const SNIPPET_SYNC_IDS_KEY: &str = "snippet_sync_ids";
@@ -1593,7 +1594,7 @@ impl Storage {
                 .query_row("SELECT settings_json FROM app_settings WHERE id = 1", [], |row| row.get(0))
                 .optional()
                 .map_err(|e| e.to_string())?;
-            let dedicated_keys = [MCP_GLOBAL_POLICY_KEY, MAX_RETRIES_KEY];
+            let dedicated_keys = [MCP_GLOBAL_POLICY_KEY, MAX_RETRIES_KEY, LDAP_LOGIN_SETTINGS_KEY];
             for key in dedicated_keys {
                 settings.remove(key);
             }
@@ -1623,6 +1624,37 @@ impl Storage {
     pub async fn load_password_hash(&self) -> Result<Option<String>, String> {
         let settings = self.load_app_settings_json().await?;
         Ok(settings.get("password_hash").and_then(|v| v.as_str()).map(|s| s.to_string()))
+    }
+
+    pub async fn save_ldap_login_settings(
+        &self,
+        settings: &crate::ldap_login::LdapLoginSettings,
+    ) -> Result<(), String> {
+        let value = serde_json::to_value(settings).map_err(|e| e.to_string())?;
+        self.with_conn(move |conn| {
+            let current: Option<String> = conn
+                .query_row("SELECT settings_json FROM app_settings WHERE id = 1", [], |row| row.get(0))
+                .optional()
+                .map_err(|e| e.to_string())?;
+            let mut map = match current {
+                Some(json) => serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json)
+                    .map_err(|e| format!("invalid app settings JSON: {e}"))?,
+                None => serde_json::Map::new(),
+            };
+            map.insert(LDAP_LOGIN_SETTINGS_KEY.to_string(), value);
+            let json = serde_json::Value::Object(map).to_string();
+            conn.execute("INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)", [json])
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    pub async fn load_ldap_login_settings(&self) -> Result<Option<crate::ldap_login::LdapLoginSettings>, String> {
+        let settings = self.load_app_settings_json().await?;
+        Ok(settings
+            .get(LDAP_LOGIN_SETTINGS_KEY)
+            .and_then(|v| serde_json::from_value::<crate::ldap_login::LdapLoginSettings>(v.clone()).ok()))
     }
 
     pub async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicyState, String> {
@@ -5325,6 +5357,11 @@ mod tests {
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
             etcd_endpoints: String::new(),
+            ldap_security_protocol: String::new(),
+            ldap_principal: String::new(),
+            ldap_keytab_path: String::new(),
+            ldap_krb5_conf: String::new(),
+            ldap_base_dn: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),
             external_config: Some(serde_json::json!({
@@ -5393,6 +5430,11 @@ mod tests {
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
             etcd_endpoints: String::new(),
+            ldap_security_protocol: String::new(),
+            ldap_principal: String::new(),
+            ldap_keytab_path: String::new(),
+            ldap_krb5_conf: String::new(),
+            ldap_base_dn: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),
             external_config: Some(serde_json::json!({
@@ -6574,6 +6616,35 @@ mod tests {
             vec!["conn-1".to_string(), "conn-1:db:main".to_string()]
         );
         assert_eq!(storage.load_password_hash().await.unwrap(), Some("hash-3".to_string()));
+    }
+
+    #[tokio::test]
+    async fn ldap_login_settings_roundtrip_and_preserve_password_hash() {
+        let path = temp_db_path("ldap-login-settings-roundtrip");
+        let storage = Storage::open(&path).await.unwrap();
+
+        storage.save_password_hash("hash-ldap").await.unwrap();
+        let settings = crate::ldap_login::LdapLoginSettings {
+            enabled: true,
+            name: "Corp AD".into(),
+            host: "ldap.example.com".into(),
+            port: 636,
+            use_tls: true,
+            base_dn: "DC=corp,DC=example,DC=com".into(),
+            require_service_account: true,
+            service_account_dn: "CN=svc,OU=Service,DC=corp,DC=example,DC=com".into(),
+            service_account_password: "s3cret".into(),
+            search_base: "OU=Users,DC=corp,DC=example,DC=com".into(),
+            search_filter: "(sAMAccountName={user})".into(),
+            connect_timeout_secs: 12,
+        };
+        storage.save_ldap_login_settings(&settings).await.unwrap();
+
+        let loaded = storage.load_ldap_login_settings().await.unwrap().unwrap();
+        assert_eq!(loaded, settings);
+        assert!(loaded.has_service_account_password());
+        assert_eq!(loaded.redacted().service_account_password, "");
+        assert_eq!(storage.load_password_hash().await.unwrap(), Some("hash-ldap".to_string()));
     }
 
     #[tokio::test]

@@ -136,6 +136,13 @@ pub fn agent_connect_params_with_role(
             (config.effective_connect_timeout_secs() * 1000).max(ZOOKEEPER_MIN_CONNECTION_TIMEOUT_MS)
         );
     }
+    if config.db_type == DatabaseType::Ldap {
+        params["security_protocol"] = serde_json::Value::String(config.ldap_security_protocol.clone());
+        params["principal"] = serde_json::Value::String(config.ldap_principal.clone());
+        params["keytab_path"] = serde_json::Value::String(config.ldap_keytab_path.clone());
+        params["krb5_conf"] = serde_json::Value::String(config.ldap_krb5_conf.clone());
+        params["base_dn"] = serde_json::Value::String(config.ldap_base_dn.clone());
+    }
     Ok(params)
 }
 
@@ -740,6 +747,11 @@ mod tests {
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
             etcd_endpoints: String::new(),
+            ldap_security_protocol: String::new(),
+            ldap_principal: String::new(),
+            ldap_keytab_path: String::new(),
+            ldap_krb5_conf: String::new(),
+            ldap_base_dn: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),
             external_config: None,

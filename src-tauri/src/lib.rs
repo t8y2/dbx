@@ -2106,6 +2106,8 @@ pub fn run() {
             commands::zookeeper_cmd::zookeeper_get,
             commands::zookeeper_cmd::zookeeper_put,
             commands::zookeeper_cmd::zookeeper_delete,
+            commands::ldap_cmd::ldap_search,
+            commands::ldap_cmd::ldap_list_children,
             commands::consul_cmd::consul_capabilities,
             commands::consul_cmd::consul_txn,
             commands::consul_cmd::consul_rename_key,

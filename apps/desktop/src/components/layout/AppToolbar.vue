@@ -43,6 +43,7 @@ const props = defineProps<{
   hasMcpUpdateAvailable: boolean;
   hasConnections: boolean;
   hasSqlFileConnections: boolean;
+  activeConnectionDbType?: string;
 }>();
 
 const emit = defineEmits<{
@@ -67,6 +68,8 @@ const { t } = useI18n();
 const { toast } = useToast();
 const settingsStore = useSettingsStore();
 const toolbarItems = computed(() => settingsStore.editorSettings.toolbarItems);
+
+const isLdapConnection = computed(() => props.activeConnectionDbType === "ldap");
 const { isMac, isDesktop, showControls, isMaximized, isFullscreen, minimize, toggleMaximize, close } = useWindowControls();
 const checkingUpdates = computed(() => props.checkingUpdates);
 const sqlLibrarySaveFeedbackActive = ref(false);
@@ -528,7 +531,7 @@ const toolbarStyle = computed(() => {
       </span>
     </Button>
 
-    <Button variant="ghost" size="sm" :class="toolbarTextButtonClass" @click="emit('new-query')" :disabled="!hasConnections">
+    <Button variant="ghost" size="sm" :class="toolbarTextButtonClass" @click="emit('new-query')" :disabled="!hasConnections || isLdapConnection">
       <FilePlus2 class="h-3.5 w-3.5" />
       <span :class="toolbarTextLabelClass">{{ t("toolbar.newQuery") }}</span>
     </Button>
@@ -637,7 +640,7 @@ const toolbarStyle = computed(() => {
 
       <Tooltip v-if="toolbarItems.history">
         <TooltipTrigger as-child>
-          <Button v-show="isRightItemVisible('history')" variant="ghost" size="icon" class="h-8 w-8 shrink-0" :class="{ 'bg-accent': showHistory }" @click="emit('toggle-history')">
+          <Button v-show="isRightItemVisible('history')" variant="ghost" size="icon" class="h-8 w-8 shrink-0" :class="{ 'bg-accent': showHistory }" @click="emit('toggle-history')" :disabled="isLdapConnection">
             <History class="h-4 w-4" />
           </Button>
         </TooltipTrigger>

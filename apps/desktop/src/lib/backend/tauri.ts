@@ -2493,6 +2493,61 @@ export async function redisListDatabases(connectionId: string): Promise<RedisDat
   return invoke("redis_list_databases", { connectionId });
 }
 
+// LDAP (Tauri stub — falls back to HTTP in dev mode)
+export interface LdapSearchEntry {
+  dn: string;
+  attributes: Record<string, string | string[]>;
+}
+export interface LdapSearchResult {
+  entries: LdapSearchEntry[];
+  count: number;
+  truncated: boolean;
+}
+
+export async function ldapSearch(connectionId: string, baseDn: string, filter?: string, scope?: string, attributes?: string[], sizeLimit?: number): Promise<LdapSearchResult> {
+  return invokeBackend("ldap_search", {
+    connectionId,
+    baseDn,
+    scope: scope ?? "sub",
+    filter: filter ?? "(objectClass=*)",
+    attributes: attributes ?? null,
+    sizeLimit: sizeLimit ?? null,
+  });
+}
+
+// LDAP login is web-only (the desktop app does not gate itself behind a
+// password). These stubs satisfy the `api.ts` forward type so the desktop
+// build compiles; they are never reached in practice.
+export interface LdapLoginSettings {
+  enabled: boolean;
+  name: string;
+  host: string;
+  port: number;
+  useTls: boolean;
+  baseDn: string;
+  requireServiceAccount: boolean;
+  serviceAccountDn: string;
+  serviceAccountPassword: string;
+  searchFilter: string;
+  connectTimeoutSecs: number;
+}
+
+export async function ldapAuthLogin(_username: string, _password: string): Promise<any> {
+  throw new Error("LDAP login is not used in the Tauri desktop app. Use the HTTP backend.");
+}
+
+export async function loadLdapLoginConfig(): Promise<any> {
+  throw new Error("LDAP login settings are web-only. Use the HTTP backend.");
+}
+
+export async function saveLdapLoginConfig(_settings: any): Promise<any> {
+  throw new Error("LDAP login settings are web-only. Use the HTTP backend.");
+}
+
+export async function testLdapLoginConfig(_settings: any): Promise<any> {
+  throw new Error("LDAP login settings are web-only. Use the HTTP backend.");
+}
+
 export async function redisScanKeys(connectionId: string, db: number, cursor: number, pattern: string, count: number): Promise<RedisScanResult> {
   return invoke("redis_scan_keys", {
     connectionId,

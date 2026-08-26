@@ -50,6 +50,8 @@ pub mod external;
 pub mod hbase_ops;
 pub mod history;
 pub mod jdbc;
+pub mod ldap_login;
+pub mod ldap_ops;
 pub mod models;
 pub mod mongo_oidc;
 pub mod mongo_ops;

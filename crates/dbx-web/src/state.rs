@@ -1,4 +1,5 @@
 use dbx_core::connection::AppState;
+use dbx_core::ldap_login::{LdapLogin, LdapSupportMode};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -27,6 +28,16 @@ pub struct NacosImportContext {
     pub plan_hash: String,
 }
 
+/// One configured LDAP login backend. Configuration comes from the
+/// app-level auth settings (stored by `dbx-core::Storage`) and is edited
+/// from the app settings page.
+#[derive(Clone, Debug)]
+pub struct LdapLoginBackend {
+    pub name: String,
+    pub mode: LdapSupportMode,
+    pub config: Arc<LdapLogin>,
+}
+
 pub struct WebState {
     pub app: Arc<AppState>,
     pub data_dir: PathBuf,
@@ -43,11 +54,15 @@ pub struct WebState {
     /// Completed Web export temp files waiting for the browser download.
     pub export_files: RwLock<HashMap<String, WebExportFile>>,
     pub ssh_prompts: Arc<crate::ssh_prompt::SshPromptHub>,
+    /// The single app-level LDAP login backend, loaded from the app settings
+    /// at startup and reloaded whenever the settings page saves a new config.
+    /// `None` when LDAP login is disabled or the config is invalid.
+    pub ldap_login: RwLock<Option<LdapLoginBackend>>,
 }
 
 impl WebState {
     pub async fn remove_sse_channel(&self, id: &str) {
-        self.sse_channels.write().await.remove(id);
+        self.sse_channels.write().await.remove(&id.to_string());
     }
 
     /// Test helper: full field set so new WebState fields don't break scattered test fixtures.
@@ -68,6 +83,7 @@ impl WebState {
             login_rate_limit: Mutex::new(LoginRateLimit { fail_count: 0, locked_until: None }),
             export_files: RwLock::new(HashMap::new()),
             ssh_prompts: Arc::new(crate::ssh_prompt::SshPromptHub::new()),
+            ldap_login: RwLock::new(None),
         }
     }
 }

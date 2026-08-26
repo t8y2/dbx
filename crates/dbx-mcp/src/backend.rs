@@ -1784,6 +1784,17 @@ struct NewConnectionConfig {
     driver_profile: Option<String>,
 }
 
+/// LDAP-specific fields carried by `AddConnectionRequest` and applied to the
+/// resulting [`ConnectionConfig`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LdapConnectionOptions {
+    pub security_protocol: String,
+    pub principal: String,
+    pub keytab_path: String,
+    pub krb5_conf: String,
+    pub base_dn: String,
+}
+
 pub fn new_connection_config(
     id: String,
     name: String,
@@ -1796,10 +1807,48 @@ pub fn new_connection_config(
     ssl: bool,
     driver_profile: Option<String>,
 ) -> Result<ConnectionConfig, String> {
+    new_connection_config_with_ldap(
+        id,
+        name,
+        db_type,
+        host,
+        port,
+        username,
+        password,
+        database,
+        ssl,
+        driver_profile,
+        LdapConnectionOptions::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn new_connection_config_with_ldap(
+    id: String,
+    name: String,
+    db_type: DatabaseType,
+    host: String,
+    port: u16,
+    username: String,
+    password: String,
+    database: Option<String>,
+    ssl: bool,
+    driver_profile: Option<String>,
+    ldap: LdapConnectionOptions,
+) -> Result<ConnectionConfig, String> {
     let minimal =
         NewConnectionConfig { id, name, db_type, host, port, username, password, database, ssl, driver_profile };
-    serde_json::from_value(serde_json::to_value(minimal).map_err(|error| error.to_string())?)
-        .map_err(|error| error.to_string())
+    let mut config: ConnectionConfig =
+        serde_json::from_value(serde_json::to_value(minimal).map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+    if config.db_type == DatabaseType::Ldap {
+        config.ldap_security_protocol = ldap.security_protocol;
+        config.ldap_principal = ldap.principal;
+        config.ldap_keytab_path = ldap.keytab_path;
+        config.ldap_krb5_conf = ldap.krb5_conf;
+        config.ldap_base_dn = ldap.base_dn;
+    }
+    Ok(config)
 }
 
 #[cfg(test)]

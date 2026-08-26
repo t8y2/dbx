@@ -15,6 +15,7 @@ pub mod hbase;
 pub mod history;
 pub mod jdbc;
 pub mod layout;
+pub mod ldap;
 pub mod mcp_policy;
 pub mod mongo;
 #[cfg(feature = "mq-admin")]

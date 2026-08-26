@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+  <!-- Folder body -->
+  <path fill="#7B61FF" d="M40 50h50l15 15h65c8 0 15 7 15 15v75c0 8-7 15-15 15H40c-8 0-15-7-15-15V65c0-8 7-15 15-15z"/>
+  <!-- Folder tab -->
+  <path fill="#6B4FDB" d="M40 50h50l15 15H40c-8 0-15 7-15 15V65c0-8 7-15 15-15z"/>
+  <!-- Tree nodes inside -->
+  <circle cx="75" cy="95" r="8" fill="#C4B5FF"/>
+  <line x1="75" y1="103" x2="75" y2="130" stroke="#C4B5FF" stroke-width="2"/>
+  <circle cx="115" cy="95" r="8" fill="#C4B5FF"/>
+  <line x1="75" y1="115" x2="95" y2="115" stroke="#C4B5FF" stroke-width="2"/>
+  <line x1="95" y1="115" x2="95" y2="130" stroke="#C4B5FF" stroke-width="2"/>
+  <circle cx="95" cy="130" r="5" fill="#A895FF"/>
+  <circle cx="75" cy="130" r="5" fill="#A895FF"/>
+</svg>

@@ -94,6 +94,7 @@ export const DATABASE_PROPERTY_EDITING_MATRIX = {
   nacos: { deferred: "Nacos namespace editing already uses the Nacos admin flow" },
   consul: { deferred: "Consul KV scopes are configured on the connection" },
   mqtt: { deferred: "MQTT topics are managed via the MQTT console" },
+  ldap: { deferred: "LDAP directory entries are read-only in DBX (search/browse only)" },
 } satisfies Record<DatabaseType, DatabasePropertyEditingEntry>;
 
 function entryFor(connection: PropertyEditConnection): DatabasePropertyEditingEntry | null {

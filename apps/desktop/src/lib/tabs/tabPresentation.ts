@@ -142,6 +142,10 @@ export function tabDisplayTitle(tab: QueryTab, t: Translate): string {
     if (compact) return t("tabs.databases");
     return `${t("tabs.databases")}@${connectionDisplayName(tab.connectionId)}`;
   }
+  if (tab.mode === "ldap") {
+    if (compact) return connectionDisplayName(tab.connectionId);
+    return `${connectionDisplayName(tab.connectionId)}@ldap`;
+  }
   if (tab.mode === "objects") {
     const schema = tab.objectBrowser?.schema;
     if (compact) return schema || tab.title;
@@ -457,6 +461,7 @@ export function tabModeLabel(tab: QueryTab, t: Translate): string {
   if (tab.mode === "zookeeper") return t("tabs.zookeeper");
   if (tab.mode === "consul") return t("tabs.consul");
   if (tab.mode === "consul-overview") return t("consul.ui.overview");
+  if (tab.mode === "ldap") return "LDAP";
   if (tab.mode === "nacos") return "Nacos";
   if (tab.mode === "databases") return t("tabs.databases");
   if (tab.mode === "objects") return t("tabs.objects");

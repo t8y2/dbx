@@ -101,6 +101,7 @@ pub enum PoolKind {
     HBase(db::hbase_driver::HBaseClient),
     VectorDb(db::vector_driver::VectorClient),
     InfluxDb(db::influxdb_driver::InfluxdbClient),
+    Ldap(Arc<db::ldap_driver::LdapClient>),
     VictoriaMetrics(db::victoriametrics_driver::VictoriaMetricsClient),
     Agent(Arc<db::agent_driver::PooledAgentClient>),
     ExternalDriver {
@@ -252,6 +253,7 @@ macro_rules! agent_connection_pool_database_type {
             | DatabaseType::Iotdb
             | DatabaseType::Etcd
             | DatabaseType::ZooKeeper
+            | DatabaseType::Ldap
             | DatabaseType::Iris
             | DatabaseType::Access
     };
@@ -2397,7 +2399,16 @@ impl AppState {
                     db_config.effective_database().unwrap_or(""),
                     session_role,
                 )?;
-                if db_config.db_type != DatabaseType::ZooKeeper {
+                // Simple bind and anonymous (no auth) use the native ldap3
+                // driver; GSSAPI connections are routed to the Java LDAP agent
+                // below (JNDI + JAAS).
+                if db_config.db_type == DatabaseType::Ldap
+                    && !db_config.ldap_security_protocol.trim().eq_ignore_ascii_case("gssapi")
+                {
+                    let client = db::ldap_driver::connect(&db_config, &host, port, connect_timeout).await?;
+                    db::ldap_driver::test_connection(&client, connect_timeout).await?;
+                    PoolKind::Ldap(client)
+                } else if db_config.db_type != DatabaseType::ZooKeeper {
                     let agent_session_id = uuid::Uuid::new_v4().simple().to_string();
                     let mut initial_result = self
                         .spawn_routed_shared_agent_client(
@@ -3613,6 +3624,7 @@ impl AppState {
                 }
                 PoolKind::Sqlite(_)
                 | PoolKind::DuckDbWorker(_)
+                | PoolKind::Ldap(_)
                 | PoolKind::ExternalDriver { .. }
                 | PoolKind::MessageQueue
                 | PoolKind::Nacos
@@ -4555,6 +4567,13 @@ impl AppState {
                         }
                     }
                 }
+                PoolKind::Ldap(client) => match db::ldap_driver::test_connection(client, timeout).await {
+                    Ok(()) => true,
+                    Err(e) => {
+                        log::warn!("LDAP connection pool '{key}' is unhealthy: {e}");
+                        false
+                    }
+                },
                 PoolKind::Rqlite(client) => match db::rqlite_driver::test_connection(client, timeout).await {
                     Ok(()) => true,
                     Err(e) => {
@@ -4846,6 +4865,7 @@ enum KeepaliveTarget {
     HBase(db::hbase_driver::HBaseClient),
     VectorDb(db::vector_driver::VectorClient),
     InfluxDb(db::influxdb_driver::InfluxdbClient),
+    Ldap(Arc<db::ldap_driver::LdapClient>),
     VictoriaMetrics(db::victoriametrics_driver::VictoriaMetricsClient),
     Agent(Arc<db::agent_driver::PooledAgentClient>),
     #[cfg(feature = "mq-admin")]
@@ -4946,6 +4966,7 @@ fn keepalive_target_from_pool(pool: &PoolKind, config: &ConnectionConfig) -> Opt
         PoolKind::HBase(client) => Some(KeepaliveTarget::HBase(client.clone())),
         PoolKind::VectorDb(client) => Some(KeepaliveTarget::VectorDb(client.clone())),
         PoolKind::InfluxDb(client) => Some(KeepaliveTarget::InfluxDb(client.clone())),
+        PoolKind::Ldap(client) => Some(KeepaliveTarget::Ldap(client.clone())),
         PoolKind::VictoriaMetrics(client) => Some(KeepaliveTarget::VictoriaMetrics(client.clone())),
         PoolKind::Agent(client) => Some(KeepaliveTarget::Agent(client.clone())),
         _ => None,
@@ -4996,6 +5017,7 @@ async fn ping_keepalive_target(target: &mut KeepaliveTarget, timeout: Duration) 
         KeepaliveTarget::VictoriaMetrics(client) => {
             db::victoriametrics_driver::test_connection(client, timeout).await.map_err(Into::into)
         }
+        KeepaliveTarget::Ldap(client) => db::ldap_driver::test_connection(client, timeout).await.map_err(Into::into),
         KeepaliveTarget::Agent(client) => {
             let Ok(mut client) = client.try_lock() else {
                 return Ok(());
@@ -5351,6 +5373,7 @@ fn clone_pool_kind(pool: &PoolKind) -> PoolKind {
         PoolKind::HBase(client) => PoolKind::HBase(client.clone()),
         PoolKind::VectorDb(client) => PoolKind::VectorDb(client.clone()),
         PoolKind::InfluxDb(client) => PoolKind::InfluxDb(client.clone()),
+        PoolKind::Ldap(client) => PoolKind::Ldap(client.clone()),
         PoolKind::VictoriaMetrics(client) => PoolKind::VictoriaMetrics(client.clone()),
         PoolKind::Agent(client) => PoolKind::Agent(client.clone()),
         PoolKind::ExternalDriver { driver_id, config, session } => {
@@ -5428,6 +5451,9 @@ async fn close_pool_kind(pool: PoolKind) -> Result<(), String> {
         }
         PoolKind::VictoriaMetrics(client) => {
             drop(client);
+        }
+        PoolKind::Ldap(client) => {
+            db::ldap_driver::close(client).await;
         }
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
@@ -5847,6 +5873,11 @@ mod tests {
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
             etcd_endpoints: String::new(),
+            ldap_security_protocol: String::new(),
+            ldap_principal: String::new(),
+            ldap_keytab_path: String::new(),
+            ldap_krb5_conf: String::new(),
+            ldap_base_dn: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),
             external_config: None,

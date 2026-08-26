@@ -367,6 +367,11 @@ const defaultForm = (): ConnectionForm => ({
   redis_scan_page_size: REDIS_SCAN_PAGE_SIZE_DEFAULT,
   redis_key_templates: [],
   etcd_endpoints: "",
+  ldap_security_protocol: "simple" as "simple" | "gssapi" | "none",
+  ldap_principal: "",
+  ldap_keytab_path: "",
+  ldap_krb5_conf: "",
+  ldap_base_dn: "",
   gbase_server: "",
   informix_server: "",
   external_config: undefined,
@@ -2497,6 +2502,11 @@ watch(
         redis_scan_page_size: config.redis_scan_page_size ?? REDIS_SCAN_PAGE_SIZE_DEFAULT,
         redis_key_templates: normalizeRedisKeyTemplates(config.redis_key_templates),
         etcd_endpoints: config.etcd_endpoints || "",
+        ldap_security_protocol: (config.ldap_security_protocol as "simple" | "gssapi" | "none") || "simple",
+        ldap_principal: config.ldap_principal || "",
+        ldap_keytab_path: config.ldap_keytab_path || "",
+        ldap_krb5_conf: config.ldap_krb5_conf || "",
+        ldap_base_dn: config.ldap_base_dn || "",
         gbase_server: config.gbase_server || "",
         informix_server: config.informix_server || "",
         external_config: config.external_config,
@@ -5321,6 +5331,23 @@ async function browseDamengSslFilesPath() {
   }
 }
 
+async function selectLdapKeytabFile() {
+  if (isTauriRuntime()) {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selected = await open({
+      title: "Select Kerberos Keytab File",
+      multiple: false,
+      filters: [
+        { name: "Keytab", extensions: ["keytab", "kt"] },
+        { name: "All Files", extensions: ["*"] },
+      ],
+    });
+    if (selected && typeof selected === "string") {
+      form.value.ldap_keytab_path = selected;
+    }
+  }
+}
+
 async function browseMysqlTlsFile(target: "cert" | "key") {
   if (isTauriRuntime()) {
     const { open } = await import("@tauri-apps/plugin-dialog");
@@ -6766,6 +6793,86 @@ function openExternalUrl(url: string) {
                     <Label :class="connectionLabelSmallClass">{{ t("connection.dynamodbSessionToken") }}</Label>
                     <PasswordInput v-model="form.connection_string" class="col-span-3" :placeholder="t('connection.dynamodbSessionTokenPlaceholder')" />
                   </div>
+                </template>
+
+                <!-- LDAP: host, port, base DN, auth method, credentials -->
+                <template v-else-if="form.db_type === 'ldap'">
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.host") }}</Label>
+                    <Input v-model="form.host" class="col-span-2" placeholder="ldap.example.com" />
+                    <Input v-model.number="form.port" type="number" class="col-span-1" />
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.ldapBaseDn") }}</Label>
+                    <Input v-model="form.ldap_base_dn" class="col-span-3" placeholder="OU=Users,DC=example,DC=com" />
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <span />
+                    <label class="col-span-3 flex items-center gap-2 text-sm">
+                      <input type="checkbox" v-model="form.ssl" />
+                      <span>{{ t("connection.sslEnable") }}</span>
+                    </label>
+                  </div>
+
+                  <!-- Auth method selector -->
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.authMethod") }}</Label>
+                    <div class="col-span-3 flex gap-2">
+                      <Button size="sm" :variant="form.ldap_security_protocol === 'simple' ? 'default' : 'outline'" @click="form.ldap_security_protocol = 'simple'">Simple</Button>
+                      <Button size="sm" :variant="form.ldap_security_protocol === 'gssapi' ? 'default' : 'outline'" @click="form.ldap_security_protocol = 'gssapi'">GSSAPI (Kerberos)</Button>
+                      <Button size="sm" :variant="form.ldap_security_protocol === 'none' ? 'default' : 'outline'" @click="form.ldap_security_protocol = 'none'">None</Button>
+                    </div>
+                  </div>
+
+                  <!-- Simple bind credentials -->
+                  <template v-if="form.ldap_security_protocol === 'simple'">
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">{{ t("connection.user") }}</Label>
+                      <Input v-model="form.username" class="col-span-3" placeholder="cn=admin,dc=example,dc=com" />
+                    </div>
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">{{ t("connection.password") }}</Label>
+                      <PasswordInput v-model="form.password" class="col-span-3" />
+                    </div>
+                  </template>
+
+                  <!-- GSSAPI credentials -->
+                  <template v-if="form.ldap_security_protocol === 'gssapi'">
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">Principal</Label>
+                      <Input v-model="form.ldap_principal" class="col-span-3" placeholder="user@REALM.COM" />
+                    </div>
+
+                    <!-- GSSAPI: keytab file selector -->
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">Keytab</Label>
+                      <div class="col-span-3 flex gap-2">
+                        <Input v-model="form.ldap_keytab_path" class="flex-1" placeholder="C:\path\to\krb5.keytab" />
+                        <Button size="sm" variant="outline" @click="selectLdapKeytabFile">Browse</Button>
+                      </div>
+                    </div>
+                    <p v-if="form.ldap_keytab_path" class="text-xs text-muted-foreground ml-[25%] -mt-3 mb-2">Keytab file selected</p>
+
+                    <!-- GSSAPI: password (optional, used if no keytab) -->
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">Password</Label>
+                      <PasswordInput v-model="form.password" class="col-span-3" :placeholder="form.ldap_keytab_path ? 'Optional with keytab' : 'Required'" />
+                    </div>
+
+                    <!-- krb5.conf content -->
+                    <div class="grid grid-cols-4 items-start gap-4">
+                      <Label :class="connectionLabelTopClass">krb5.conf</Label>
+                      <div class="col-span-3 space-y-1">
+                        <textarea
+                          v-model="form.ldap_krb5_conf"
+                          class="flex min-h-[120px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm font-mono shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                          placeholder="[libdefaults]\n    default_realm = EXAMPLE.COM\n\n[realms]\n    EXAMPLE.COM = {\n        kdc = kdc.example.com:88\n    }"
+                          spellcheck="false"
+                        />
+                        <p class="text-xs text-muted-foreground">Paste your krb5.conf content here</p>
+                      </div>
+                    </div>
+                  </template>
                 </template>
 
                 <!-- MongoDB: URL or form -->

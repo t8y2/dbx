@@ -454,6 +454,13 @@ export const cancelQueryResultExport = forward("cancelQueryResultExport");
 
 // Redis
 export const redisListDatabases = forward("redisListDatabases");
+
+// LDAP
+export const ldapSearch = forward("ldapSearch");
+export const ldapAuthLogin = forward("ldapAuthLogin");
+export const loadLdapLoginConfig = forward("loadLdapLoginConfig");
+export const saveLdapLoginConfig = forward("saveLdapLoginConfig");
+export const testLdapLoginConfig = forward("testLdapLoginConfig");
 export const redisScanKeys = forward("redisScanKeys");
 export const redisScanKeysBatch = forward("redisScanKeysBatch");
 export const redisScanValues = forward("redisScanValues");

@@ -2898,7 +2898,8 @@ mod tests {
         )
         .await;
 
-        let progress = run_external_driver_export(&fixture).await.expect("multi-page JDBC export should succeed");
+        let progress =
+            Box::pin(run_external_driver_export(&fixture)).await.expect("multi-page JDBC export should succeed");
         let csv = std::fs::read_to_string(&fixture.output).unwrap();
         assert!(csv.contains("\"1\",\"Ada\""));
         assert!(csv.contains("\"2\",\"Grace\""));
@@ -2935,7 +2936,7 @@ mod tests {
         )
         .await;
 
-        run_external_driver_export(&fixture).await.expect("legacy JDBC export should succeed");
+        Box::pin(run_external_driver_export(&fixture)).await.expect("legacy JDBC export should succeed");
         let csv = std::fs::read_to_string(&fixture.output).unwrap();
         assert_eq!(csv.matches("\"Ada\"").count(), 1);
         assert_eq!(csv.matches("\"Grace\"").count(), 1);
@@ -2965,7 +2966,7 @@ mod tests {
         )
         .await;
 
-        run_external_driver_export(&fixture).await.expect("row-limited JDBC export should succeed");
+        Box::pin(run_external_driver_export(&fixture)).await.expect("row-limited JDBC export should succeed");
         assert_eq!(std::fs::read_to_string(&fixture.calls).unwrap(), "executeQueryPage\ncloseQuerySession\n");
         assert!(fixture.state.connections.read().await.is_empty());
 
@@ -2996,7 +2997,8 @@ mod tests {
         )
         .await;
 
-        let error = run_external_driver_export(&fixture).await.expect_err("fetch errors must fail the export");
+        let error =
+            Box::pin(run_external_driver_export(&fixture)).await.expect_err("fetch errors must fail the export");
         assert!(error.starts_with("simulated fetch failure"));
         assert_eq!(
             std::fs::read_to_string(&fixture.calls).unwrap(),

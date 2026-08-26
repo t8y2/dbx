@@ -1,0 +1,30 @@
+schemaVersion: 1
+order: 790
+dbType: ldap
+rustVariant: Ldap
+label: LDAP
+runtimeMode: agent
+mcpMode: bridge
+agentKey: ldap
+singleConnectionPool: true
+metadataConnectionScoped: false
+skipTcpProbe: true
+defaultPort: 389
+supportLevel: connect
+capabilities:
+  queryExecution: false
+  metadataBrowse: true
+  objectBrowser: false
+  objectSource: false
+  schemaSearch: true
+  diagram: false
+  tableDataEdit: false
+  tableStructureEdit: false
+  tableImport: false
+  dataTransfer: false
+  sqlFileExecution: false
+  databaseCreate: false
+  fieldLineage: false
+  sqlExplain: false
+  userAdmin: false
+  driverManagement: true

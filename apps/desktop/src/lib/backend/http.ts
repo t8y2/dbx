@@ -2600,6 +2600,75 @@ export async function redisListDatabases(connectionId: string): Promise<RedisDat
   return post("/api/redis/list-databases", { connectionId });
 }
 
+// ---------------------------------------------------------------------------
+// LDAP
+// ---------------------------------------------------------------------------
+
+export interface LdapEntry {
+  dn: string;
+  attributes: Record<string, string | string[]>;
+}
+
+export interface LdapSearchResult {
+  entries: LdapEntry[];
+  count: number;
+  truncated: boolean;
+}
+
+export async function ldapSearch(connectionId: string, baseDn: string, filter?: string, scope?: string, attributes?: string[], sizeLimit?: number): Promise<LdapSearchResult> {
+  return post("/api/ldap/search", {
+    connection_id: connectionId,
+    base_dn: baseDn,
+    scope: scope ?? "sub",
+    filter: filter ?? "(objectClass=*)",
+    attributes: attributes ?? null,
+    size_limit: sizeLimit ?? null,
+  });
+}
+
+export interface LdapLoginSettings {
+  enabled: boolean;
+  name: string;
+  host: string;
+  port: number;
+  useTls: boolean;
+  baseDn: string;
+  requireServiceAccount: boolean;
+  serviceAccountDn: string;
+  serviceAccountPassword: string;
+  searchFilter: string;
+  connectTimeoutSecs: number;
+}
+
+export interface LdapLoginConfigResponse extends LdapLoginSettings {
+  serviceAccountPasswordSet: boolean;
+}
+
+export async function ldapAuthLogin(username: string, password: string): Promise<void> {
+  await post("/api/auth/ldap-login", {
+    username,
+    password,
+  });
+}
+
+export async function loadLdapLoginConfig(): Promise<LdapLoginConfigResponse> {
+  return get("/api/app-settings/ldap-login");
+}
+
+export async function saveLdapLoginConfig(settings: LdapLoginSettings): Promise<void> {
+  await post("/api/app-settings/ldap-login", settings);
+}
+
+export async function testLdapLoginConfig(settings: LdapLoginSettings): Promise<{ ok: boolean; message?: string; error?: string }> {
+  const res = await fetch(apiUrl("/api/app-settings/ldap-login/test"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(settings),
+  });
+  const data = (await res.json().catch(() => ({}))) as { ok?: boolean; message?: string; error?: string };
+  return { ok: res.ok && data.ok !== false, message: data.message, error: data.error };
+}
+
 export async function redisScanKeys(connectionId: string, db: number, cursor: number, pattern: string, count: number): Promise<RedisScanResult> {
   return post("/api/redis/scan-keys", {
     connectionId,

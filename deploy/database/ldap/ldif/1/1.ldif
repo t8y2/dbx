@@ -1,0 +1,70 @@
+# 基础域
+dn: dc=example,dc=com
+objectClass: top
+objectClass: dcObject
+objectClass: organization
+o: Example Corp
+dc: example
+
+# 组织单元：用户
+dn: ou=users,dc=example,dc=com
+objectClass: organizationalUnit
+objectClass: top
+ou: users
+
+# 组织单元：组
+dn: ou=groups,dc=example,dc=com
+objectClass: organizationalUnit
+objectClass: top
+ou: groups
+
+# 测试用户：alice
+dn: uid=alice,ou=users,dc=example,dc=com
+objectClass: inetOrgPerson
+objectClass: top
+cn: Alice Johnson
+sn: Johnson
+uid: alice
+mail: alice@example.com
+userPassword: {SSHA}SbgYWaJ28NmiCbdDOvyyIx00m61yqN21
+title: Software Engineer
+departmentNumber: Engineering
+
+# 测试用户：bob
+dn: uid=bob,ou=users,dc=example,dc=com
+objectClass: inetOrgPerson
+objectClass: top
+cn: Bob Smith
+sn: Smith
+uid: bob
+mail: bob@example.com
+userPassword: {SSHA}SbgYWaJ28NmiCbdDOvyyIx00m61yqN21
+title: DevOps Engineer
+departmentNumber: Operations
+
+# 测试用户：charlie
+dn: uid=charlie,ou=users,dc=example,dc=com
+objectClass: inetOrgPerson
+objectClass: top
+cn: Charlie Brown
+sn: Brown
+uid: charlie
+mail: charlie@example.com
+userPassword: {SSHA}SbgYWaJ28NmiCbdDOvyyIx00m61yqN21
+title: Product Manager
+departmentNumber: Product
+
+# 组：developers (包含 alice 和 bob)
+dn: cn=developers,ou=groups,dc=example,dc=com
+objectClass: groupOfNames
+objectClass: top
+cn: developers
+member: uid=alice,ou=users,dc=example,dc=com
+member: uid=bob,ou=users,dc=example,dc=com
+
+# 组：managers (包含 charlie)
+dn: cn=managers,ou=groups,dc=example,dc=com
+objectClass: groupOfNames
+objectClass: top
+cn: managers
+member: uid=charlie,ou=users,dc=example,dc=com

@@ -956,6 +956,24 @@ async fn run_agent_loop_text_only(
 async fn build_schema_prompt(agent_ctx: &AgentLoopContext, system_prompt: &str) -> String {
     let mut enriched = system_prompt.to_string();
 
+    if agent_ctx.db_type == DatabaseType::Ldap {
+        // LDAP has no SQL schema; surface base-DN and search conventions
+        // so the model knows how to call `dbx_execute_ldap_search`.
+        enriched.push_str("\n\n## LDAP Connection Context\n");
+        enriched.push_str("This connection is an LDAP directory (not a SQL database).\n");
+        enriched.push_str(&format!("Configured base DN: `{}`\n", agent_ctx.database));
+        enriched.push_str(
+            "Attribute names are case-insensitive. AD down-level logon names (`DOMAIN\\user`) \
+             and `sAMAccountName` are interchangeable when looking up users.\n",
+        );
+        enriched.push_str(
+            "Use the `dbx_execute_ldap_search` tool with an RFC 4515 filter. \
+             Do not invent attribute names; prefer well-known ones (`cn`, `sAMAccountName`, \
+             `mail`, `memberOf`, `objectClass`, `distinguishedName`).\n",
+        );
+        return enriched;
+    }
+
     // Fetch real schema data using the same core functions the tools would use
     let tables_result = crate::schema::list_tables_core(
         &agent_ctx.state,
@@ -980,7 +998,7 @@ async fn build_schema_prompt(agent_ctx: &AgentLoopContext, system_prompt: &str) 
             enriched.push_str("Tables:\n");
             for t in &tables {
                 enriched.push_str(&format!("  - {} ({})", t.name, t.table_type));
-                if let Some(ref comment) = t.comment {
+                if let Some(ref comment) = &t.comment {
                     if !comment.trim().is_empty() {
                         enriched.push_str(&format!(" — {}", comment.trim()));
                     }

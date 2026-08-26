@@ -669,6 +669,13 @@ profiles:
     user: ""
     host: 127.0.0.1
     category: registry_config
+  - id: ldap
+    dbType: ldap
+    label: LDAP
+    icon: ldap
+    port: 389
+    user: ""
+    category: registry_config
   - id: mqtt
     dbType: mqtt
     label: MQTT

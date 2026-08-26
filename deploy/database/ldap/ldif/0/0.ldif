@@ -1,0 +1,138 @@
+#
+# See slapd-config(5) for details on configuration options.
+# This file should NOT be world readable.
+#
+dn: cn=config
+objectClass: olcGlobal
+cn: config
+olcArgsFile: /var/run/openldap/slapd.args
+olcPidFile: /var/run/openldap/slapd.pid
+#
+# TLS (LDAPS / ldaps://) support.
+# Self-signed CA + server cert generated for the local test container; see
+# deploy/database/ldap/certs/. No blank lines between these attributes —
+# a blank line would terminate the cn=config entry and orphan them.
+#
+olcTLSCertificateFile: /etc/openldap/certs/server.crt
+olcTLSCertificateKeyFile: /etc/openldap/certs/server.key
+olcTLSCACertificateFile: /etc/openldap/certs/ca.crt
+olcTLSVerifyClient: never
+
+#
+# Load dynamic backend modules
+#
+
+dn: cn=module,cn=config
+objectClass: olcModuleList
+cn: module
+olcModulepath: /usr/lib/openldap
+olcModuleLoad: back_mdb
+olcModuleLoad: memberof
+olcModuleLoad: refint
+
+#
+# Load schema
+#
+
+dn: cn=schema,cn=config
+objectClass: olcSchemaConfig
+cn: schema
+
+include: file:///etc/openldap/schema/core.ldif
+include: file:///etc/openldap/schema/cosine.ldif
+include: file:///etc/openldap/schema/inetorgperson.ldif
+include: file:///etc/openldap/schema/nis.ldif
+
+#
+# Frontend database
+#
+
+dn: olcDatabase=frontend,cn=config
+objectClass: olcDatabaseConfig
+objectClass: olcFrontendConfig
+olcDatabase: frontend
+#
+# Sample global access control policy:
+#	Root DSE: allow anyone to read it
+#	Subschema (sub)entry DSE: allow anyone to read it
+#	Other DSEs:
+#		Allow self write access
+#		Allow authenticated users read access
+#		Allow anonymous users to authenticate
+#
+olcAccess: to dn.base="" by * read
+olcAccess: to dn.base="cn=Subschema" by * read
+olcAccess: to * by dn.exact=gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth manage by * break
+#olcAccess: to * by self write by users read by anonymous auth
+#
+# if no access controls are present, the default policy
+# allows anyone and everyone to read anything but restricts
+# updates to rootdn.  (e.g., "access to * by * read")
+#
+# rootdn can always read and write EVERYTHING!
+#
+
+#
+# Config database
+#
+
+dn: olcDatabase=config,cn=config
+objectClass: olcDatabaseConfig
+olcDatabase: config
+#
+# Allow unlimited access to local connection from the local root user
+olcAccess: to * by dn.exact=gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth manage by * none
+
+
+#
+# LMDB backend database
+#
+
+dn: olcDatabase=mdb,cn=config
+objectClass: olcDatabaseConfig
+objectClass: olcMdbConfig
+olcDatabase: mdb
+olcSuffix: dc=example,dc=com
+olcRootDN: cn=admin,dc=example,dc=com
+# Cleartext passwords, especially for the rootdn, should
+# be avoided.  See slappasswd(8) and slapd-config(5) for details.
+# Use of strong authentication encouraged.
+olcRootPW: secret
+# The database directory MUST exist prior to running slapd AND 
+# should only be accessible by the slapd and slap tools.
+# Mode 700 recommended.
+olcDbDirectory:	/var/lib/openldap/openldap-data
+# Indices to maintain
+olcDbIndex: objectClass eq
+# Database maxsize in bytes. Using 1Gb. The default is 10Mb.
+olcDbMaxSize: 1073741824
+# access
+olcAccess: to attrs=userPassword by self write by anonymous auth by * none
+olcAccess: to attrs=shadowLastChange by self write by * read
+olcAccess: to * by dn.exact=gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth manage by self write by * read
+
+# backend memberof overlay
+dn: olcOverlay={0}memberof,olcDatabase={1}mdb,cn=config
+objectClass: olcConfig
+objectClass: olcMemberOf
+objectClass: olcOverlayConfig
+objectClass: top
+olcOverlay: {0}memberof
+olcMemberOfDangling: ignore
+olcMemberOfRefInt: TRUE
+olcMemberOfGroupOC: groupOfNames
+olcMemberOfMemberAD: member
+olcMemberOfMemberOfAD: memberOf
+structuralObjectClass: olcMemberOf
+
+# backend refint overlay
+dn: olcOverlay={1}refint,olcDatabase={1}mdb,cn=config
+objectClass: olcConfig
+objectClass: olcOverlayConfig
+objectClass: olcRefintConfig
+objectClass: top
+olcOverlay: {1}refint
+olcRefintAttribute: memberof
+olcRefintAttribute: member
+olcRefintAttribute: manager
+olcRefintAttribute: owner

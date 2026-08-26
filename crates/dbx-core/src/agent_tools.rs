@@ -286,10 +286,13 @@ fn execute_get_current_time(tool_call: &ToolCall) -> Result<String, String> {
 }
 
 /// Get read-only tool definitions for the given database type.
-/// Returns vector tools for vector DBs, SQL tools otherwise.
+/// Returns vector tools for vector DBs, SQL tools otherwise. LDAP gets a
+/// dedicated search tool.
 pub fn read_only_tools(db_type: DatabaseType) -> Vec<ToolDefinition> {
     if is_vector_db(db_type) {
         vec![list_collections_tool(), get_current_time_tool()]
+    } else if db_type == DatabaseType::Ldap {
+        ldap_only_tools()
     } else {
         vec![list_tables_tool(), get_columns_tool(), get_current_time_tool()]
     }
@@ -301,6 +304,9 @@ pub fn read_only_tools(db_type: DatabaseType) -> Vec<ToolDefinition> {
 pub fn all_tools(db_type: DatabaseType, sql_permissions: AgentSqlPermissions) -> Vec<ToolDefinition> {
     if is_vector_db(db_type) {
         return vec![list_collections_tool(), browse_collection_tool(), get_current_time_tool()];
+    }
+    if db_type == DatabaseType::Ldap {
+        return ldap_only_tools();
     }
     let mut tools = vec![list_tables_tool(), get_columns_tool(), get_current_time_tool()];
     if db_type == DatabaseType::MongoDb {
@@ -523,6 +529,51 @@ fn browse_collection_tool() -> ToolDefinition {
     }
 }
 
+/// LDAP has no SQL surface; the only tool exposed is the dedicated search.
+fn ldap_only_tools() -> Vec<ToolDefinition> {
+    vec![ldap_search_tool()]
+}
+
+/// LDAP search tool definition.
+fn ldap_search_tool() -> ToolDefinition {
+    ToolDefinition {
+        name: "dbx_execute_ldap_search",
+        description: "Run an LDAP search on the current connection. Returns matching entries (DN + attributes). Use this tool whenever the user asks about directory contents, group membership, user attributes, or any other LDAP lookup. Do NOT use this to run SQL or to write to the directory — LDAP search is read-only.",
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "base_dn": {
+                    "type": "string",
+                    "description": "Distinguished Name to start the search from. Pass an empty string to search from the root DSE."
+                },
+                "scope": {
+                    "type": "string",
+                    "description": "Search scope. One of `base` (single object), `one` (immediate children), or `sub` (whole subtree). Defaults to `sub`.",
+                    "enum": ["base", "one", "sub"]
+                },
+                "filter": {
+                    "type": "string",
+                    "description": "LDAP search filter (RFC 4515), e.g. `(sAMAccountName=alice)` or `(&(objectClass=user)(memberOf=CN=admins,DC=corp,DC=com))`."
+                },
+                "attributes": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "List of attribute names to return (e.g. `[\"cn\", \"mail\", \"memberOf\"]`). Empty/missing returns all attributes the server is willing to expose."
+                },
+                "size_limit": {
+                    "type": "integer",
+                    "description": "Maximum number of entries to return. Defaults to 100. Server-side limits still apply.",
+                    "minimum": 1,
+                    "maximum": 1000
+                }
+            },
+            "required": ["base_dn", "filter"]
+        }),
+        read_only: true,
+        parallel_ok: true,
+    }
+}
+
 /// Execute a tool call and return the result.
 pub async fn execute_tool(
     tool_call: &ToolCall,
@@ -554,6 +605,7 @@ pub async fn execute_tool(
         }
         "list_collections" => execute_list_collections(tool_call, state, connection_id, database, db_type).await,
         "browse_collection" => execute_browse_collection(tool_call, state, connection_id, database, db_type).await,
+        "dbx_execute_ldap_search" => execute_ldap_search(tool_call, state, connection_id, db_type).await,
         "explain_query" => {
             let (text_result, explain_data) =
                 execute_explain_query(tool_call, state, connection_id, database, default_schema, db_type).await;
@@ -1276,6 +1328,98 @@ async fn resolve_chroma_collection_uuid(
         .ok_or_else(|| format!("Collection '{name}' not found"))
 }
 
+/// Execute an LDAP search against the current connection. The result is a
+/// readable plain-text summary of the matching entries; the full payload is
+/// available via `ldap_ops::ldap_search_core` for callers that need JSON.
+async fn execute_ldap_search(
+    tool_call: &ToolCall,
+    state: &Arc<AppState>,
+    connection_id: &str,
+    db_type: &DatabaseType,
+) -> Result<String, String> {
+    if *db_type != DatabaseType::Ldap {
+        return Err(format!("dbx_execute_ldap_search is only available on LDAP connections (current: {db_type:?})"));
+    }
+
+    let arguments = &tool_call.arguments;
+    let base_dn = arguments.get("base_dn").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let filter = arguments.get("filter").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    if filter.is_empty() {
+        return Err("`filter` is required for LDAP search".to_string());
+    }
+    let scope = arguments.get("scope").and_then(|v| v.as_str()).unwrap_or("sub").to_string();
+    if !matches!(scope.as_str(), "base" | "one" | "sub") {
+        return Err(format!("`scope` must be one of base/one/sub, got {scope}"));
+    }
+    let attributes: Option<Vec<String>> = arguments
+        .get("attributes")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|value| value.as_str().map(|s| s.to_string()))
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .filter(|v: &Vec<String>| !v.is_empty());
+    let size_limit = arguments.get("size_limit").and_then(|v| v.as_i64()).map(|v| v.clamp(1, 1000) as i32);
+
+    let value = crate::ldap_ops::ldap_search_core(
+        state,
+        connection_id,
+        &base_dn,
+        &scope,
+        &filter,
+        attributes.as_deref(),
+        size_limit,
+    )
+    .await
+    .map_err(|e| format!("LDAP search failed: {e}"))?;
+
+    let entries = value.get("entries").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let count = value.get("count").and_then(|v| v.as_u64()).unwrap_or(entries.len() as u64);
+    let truncated = value.get("truncated").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    if entries.is_empty() {
+        return Ok(format!("LDAP search returned 0 entries.\nscope: {scope}\nbase_dn: {base_dn}\nfilter: {filter}"));
+    }
+
+    let mut lines = Vec::with_capacity(entries.len() + 1);
+    lines.push(format!(
+        "LDAP search: {count} entr{}, truncated={truncated}\n  scope: {scope}\n  base_dn: {base_dn}\n  filter: {filter}",
+        if count == 1 { "y" } else { "ies" }
+    ));
+    for entry in entries.iter().take(50) {
+        let dn = entry.get("dn").and_then(|v| v.as_str()).unwrap_or("");
+        lines.push(format!("\nDN: {dn}"));
+        if let Some(attrs) = entry.get("attributes").and_then(|v| v.as_object()) {
+            for (name, value) in attrs {
+                let rendered = render_attribute_value(value);
+                lines.push(format!("  {name}: {rendered}"));
+            }
+        }
+    }
+    if entries.len() > 50 {
+        lines.push(format!("\n... (showing first 50 of {} entries)", entries.len()));
+    }
+
+    Ok(lines.join("\n"))
+}
+
+fn render_attribute_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .map(|item| match item {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+        other => other.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1396,6 +1540,11 @@ for line in sys.stdin:
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
             etcd_endpoints: String::new(),
+            ldap_security_protocol: String::new(),
+            ldap_principal: String::new(),
+            ldap_keytab_path: String::new(),
+            ldap_krb5_conf: String::new(),
+            ldap_base_dn: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),
             external_config: None,
@@ -1737,6 +1886,45 @@ for line in sys.stdin:
             format_query_result_as_text(&result, 50, QueryCellWindow::default()).unwrap(),
             "| id |\n|---|\n| 1 |\n(1 rows, 1ms)\n\nServer messages:\n- INFO: print output"
         );
+    }
+
+    #[test]
+    fn ldap_agent_tools_expose_only_ldap_search() {
+        let full = all_tools(DatabaseType::Ldap, AgentSqlPermissions::default());
+        let readonly = read_only_tools(DatabaseType::Ldap);
+        let full_names: Vec<&str> = full.iter().map(|tool| tool.name).collect();
+        let readonly_names: Vec<&str> = readonly.iter().map(|tool| tool.name).collect();
+
+        assert_eq!(full_names, vec!["dbx_execute_ldap_search"]);
+        assert_eq!(readonly_names, vec!["dbx_execute_ldap_search"]);
+
+        let tool = &full[0];
+        assert!(tool.read_only, "LDAP search must be read-only");
+        assert!(tool.parallel_ok, "LDAP search must be parallel-safe");
+
+        // Parameter schema must declare `base_dn` + `filter` as required and
+        // accept the documented optional fields.
+        let params = tool.parameters.as_object().expect("parameters object");
+        let required = params.get("required").and_then(|v| v.as_array()).expect("required array");
+        let required_names: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+        assert!(required_names.contains(&"base_dn"));
+        assert!(required_names.contains(&"filter"));
+        let props = params.get("properties").and_then(|v| v.as_object()).expect("properties object");
+        for key in ["base_dn", "scope", "filter", "attributes", "size_limit"] {
+            assert!(props.contains_key(key), "missing property {key}");
+        }
+        // Scope must be an enum with the three valid values.
+        let scope = props.get("scope").and_then(|v| v.as_object()).expect("scope object");
+        let scope_enum = scope.get("enum").and_then(|v| v.as_array()).expect("scope enum");
+        let scope_values: Vec<&str> = scope_enum.iter().filter_map(|v| v.as_str()).collect();
+        assert_eq!(scope_values, vec!["base", "one", "sub"]);
+    }
+
+    #[test]
+    fn render_attribute_value_handles_string_and_array() {
+        assert_eq!(render_attribute_value(&serde_json::json!("alice")), "alice");
+        assert_eq!(render_attribute_value(&serde_json::json!(["alice", "bob"])), "alice, bob");
+        assert_eq!(render_attribute_value(&serde_json::json!(42)), "42");
     }
 
     #[test]

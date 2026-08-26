@@ -147,6 +147,40 @@ fn mount_public_base_path(mut app: Router, public_base_path: &str, static_dir: O
     app
 }
 
+/// Load the app-level LDAP login configuration from the app settings and
+/// turn it into the single `LdapLoginBackend` used by the auth handler.
+/// Configuration errors are logged and result in LDAP login being disabled
+/// (a broken config must not take the whole web server down).
+async fn load_ldap_login_backend(app: &AppState) -> Option<state::LdapLoginBackend> {
+    let settings = match app.storage.load_ldap_login_settings().await {
+        Ok(Some(settings)) if settings.enabled => settings,
+        Ok(Some(_)) => {
+            tracing::info!("LDAP login disabled (not enabled in app settings)");
+            return None;
+        }
+        Ok(None) => {
+            tracing::info!("LDAP login disabled (no LDAP login configuration found)");
+            return None;
+        }
+        Err(err) => {
+            tracing::error!("Failed to load LDAP login configuration: {err}");
+            return None;
+        }
+    };
+    match settings.build_login() {
+        Ok((mode, login)) => {
+            let name =
+                if settings.name.trim().is_empty() { "LDAP".to_string() } else { settings.name.trim().to_string() };
+            tracing::info!("LDAP login enabled via `{name}` ({mode:?})");
+            Some(state::LdapLoginBackend { name, mode, config: Arc::new(login) })
+        }
+        Err(err) => {
+            tracing::warn!("LDAP login disabled ({err})");
+            None
+        }
+    }
+}
+
 #[cfg(feature = "mq-admin")]
 fn add_mq_routes(router: Router<Arc<WebState>>) -> Router<Arc<WebState>> {
     router
@@ -288,6 +322,7 @@ async fn main() {
         .unwrap_or(false);
 
     let password_hash = if password_disabled {
+        tracing::info!("Password login disabled");
         None
     } else if let Ok(pw) = std::env::var("DBX_PASSWORD") {
         let salt = SaltString::generate(&mut OsRng);
@@ -297,6 +332,9 @@ async fn main() {
     };
 
     let public_base_path = normalize_public_base_path(std::env::var("DBX_PUBLIC_BASE_PATH").ok());
+
+    // LDAP login: load the app-level configuration from the app settings.
+    let ldap_login_backend = load_ldap_login_backend(&app_state).await;
 
     let web_state = Arc::new(WebState {
         app: app_state,
@@ -313,6 +351,7 @@ async fn main() {
         login_rate_limit: tokio::sync::Mutex::new(state::LoginRateLimit { fail_count: 0, locked_until: None }),
         export_files: RwLock::new(HashMap::new()),
         ssh_prompts: Arc::new(ssh_prompt::SshPromptHub::new()),
+        ldap_login: RwLock::new(ldap_login_backend),
     });
 
     ssh_prompt::install_web_ssh_prompt_bridge(web_state.ssh_prompts.clone());
@@ -321,6 +360,7 @@ async fn main() {
     let api = Router::new()
         // Auth
         .route("/auth/login", post(auth::login))
+        .route("/auth/ldap-login", post(auth::ldap_login))
         .route("/auth/check", get(auth::check))
         .route("/auth/setup", post(auth::setup))
         .route("/auth/change-password", post(auth::change_password))
@@ -573,6 +613,9 @@ async fn main() {
         .route("/export/query-result-markdown", post(routes::text_export::export_query_result_markdown))
         // Redis
         .route("/redis/list-databases", post(routes::redis::list_databases))
+        // LDAP
+        .route("/ldap/search", post(routes::ldap::search))
+        .route("/ldap/list-child", post(routes::ldap::list_children))
         .route("/redis/scan-keys", post(routes::redis::scan_keys))
         .route("/redis/scan-keys-batch", post(routes::redis::scan_keys_batch))
         .route("/redis/scan-values", post(routes::redis::scan_values))
@@ -988,6 +1031,11 @@ async fn main() {
             "/app-settings/max-retries",
             get(routes::app_settings::load_max_retries).put(routes::app_settings::save_max_retries),
         )
+        .route(
+            "/app-settings/ldap-login",
+            get(routes::app_settings::get_ldap_login_config).post(routes::app_settings::save_ldap_login_config),
+        )
+        .route("/app-settings/ldap-login/test", post(routes::app_settings::test_ldap_login_config))
         .route("/app-settings/config/decrypt", post(routes::app_settings::decrypt_config))
         // Cloud sync
         .route("/cloud-sync/webdav/test", post(routes::cloud_sync::webdav_sync_test))

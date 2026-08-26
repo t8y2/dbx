@@ -1,0 +1,30 @@
+services:
+  openldap:
+    image: mlan/openldap:latest
+    container_name: openldap
+    restart: unless-stopped
+    environment:
+      - LDAPBASE=dc=example,dc=com
+      - LDAPROOT_CN=admin
+      - LDAPROOT_PW=123456
+      # 同时监听 ldaps:/// (636)。TLS 证书由 ./ldif/0/0.ldif 的 cn=config 配置
+      # 指向 /etc/openldap/certs/（自签名 CA + 服务端证书，见 ./certs/）。
+      - LDAPURI=ldapi:/// ldap:/// ldaps:///
+    ports:
+      - "389:389"
+      - "636:636"  # LDAPS
+    volumes:
+      # 挂载 LDIF 目录，容器启动时会自动导入 /ldif/1.ldif（只读导入）
+      - ./ldif:/ldif:ro
+      # TLS 证书（自签名 CA + 服务端证书）
+      - ./certs:/etc/openldap/certs:ro
+      # 数据持久化用命名卷（Windows 9p 挂载不适合 mdb 锁文件）
+      - ldap-data:/srv/data
+    healthcheck:
+      test: ["CMD", "ldapsearch", "-x", "-H", "ldap://localhost:389", "-D", "cn=admin,dc=example,dc=com", "-w", "123456", "-b", "dc=example,dc=com"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  ldap-data:

@@ -148,7 +148,7 @@ pub fn is_safe_explain_sql_for_database(sql: &str, database_type: Option<Databas
 }
 
 /// Returns true for databases that support SQL query execution (execute_query / get_sample_data).
-/// Non-SQL databases (Redis, MongoDB, Elasticsearch, InfluxDB, VictoriaMetrics, Neo4j, etcd) are excluded.
+/// Non-SQL databases (Redis, MongoDB, Elasticsearch, InfluxDB, VictoriaMetrics, Neo4j, etcd, LDAP) are excluded.
 pub fn supports_sql_query(database_type: DatabaseType) -> bool {
     !matches!(
         database_type,
@@ -164,6 +164,7 @@ pub fn supports_sql_query(database_type: DatabaseType) -> bool {
             | DatabaseType::VictoriaMetrics
             | DatabaseType::Neo4j
             | DatabaseType::Etcd
+            | DatabaseType::Ldap
     )
 }
 

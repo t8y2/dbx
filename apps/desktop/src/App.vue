@@ -341,6 +341,8 @@ const activeConnection = computed(() => {
   return tab ? connectionStore.getConfig(tab.connectionId) : undefined;
 });
 
+const activeConnectionDbType = computed(() => activeConnection.value?.db_type);
+
 function updateAgentDriverUpdateCount(count: number) {
   if (!settingsStore.editorSettings.updateNotificationsEnabled) {
     agentDriverUpdateCount.value = 0;
@@ -878,6 +880,14 @@ function closeRightSidebarPanel(panelId: RightSidebarPanelId) {
   setRightSidebarPanelOpen(panelId, false);
 }
 
+// LDAP connections do not have a SQL history; if the user switches into one
+// while the history panel is open, close it so the panel does not appear
+// empty.
+watch(activeConnectionDbType, (dbType) => {
+  if (dbType === "ldap" && showHistory.value) {
+    closeRightSidebarPanel("history");
+  }
+});
 function toggleAiPanelMaximized() {
   if (!showAiPanel.value) return;
   isAiPanelMaximized.value = !isAiPanelMaximized.value;
@@ -1812,6 +1822,15 @@ async function newQuery() {
       } else if (connectionTarget.kind === "nacos-admin") {
         await connectionStore.loadNacosNamespaces(target.connectionId);
         queryStore.openNacosAdmin(target.connectionId);
+      } else if (connectionTarget.kind === "ldap") {
+        // LDAP has no SQL editor — open the LDAP browser tab instead.
+        const tabTitle = `${conn.name}:LDAP`;
+        const existing = queryStore.tabs.find((t) => t.connectionId === target.connectionId && t.mode === "ldap");
+        if (existing) {
+          queryStore.activeTabId = existing.id;
+        } else {
+          queryStore.createTab(target.connectionId, "", tabTitle, "ldap");
+        }
       } else {
         queryStore.createTab(target.connectionId, "", `${conn.name}:keys`, connectionTarget.kind);
       }
@@ -1898,6 +1917,16 @@ async function openConnectionQuery(connectionId: string) {
         }),
         5000,
       );
+    }
+    return;
+  }
+  if (initialTarget.kind === "ldap") {
+    const tabTitle = `${connection.name}:LDAP`;
+    const existing = queryStore.tabs.find((t) => t.connectionId === connectionId && t.mode === "ldap");
+    if (existing) {
+      queryStore.activeTabId = existing.id;
+    } else {
+      queryStore.createTab(connectionId, "", tabTitle, "ldap");
     }
     return;
   }
@@ -2952,6 +2981,7 @@ onUnmounted(() => {
           :has-mcp-update-available="toolbarMcpUpdateAvailable"
           :has-connections="connectionStore.connections.length > 0"
           :has-sql-file-connections="hasSqlFileConnections"
+          :active-connection-db-type="activeConnectionDbType"
           @new-connection="showConnectionDialog = true"
           @new-query="newQuery"
           @set-theme-mode="setThemeMode"
@@ -3184,7 +3214,12 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <div v-if="showHistory" v-show="!isAiPanelMaximized" :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'" :style="{ width: historyWidth + 'px' }">
+          <div
+            v-if="showHistory && activeConnectionDbType !== 'ldap'"
+            v-show="!isAiPanelMaximized"
+            :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'"
+            :style="{ width: historyWidth + 'px' }"
+          >
             <div class="panel-resize-handle panel-resize-handle--left" @mousedown="startHistoryResize" />
             <div class="h-full min-h-0 overflow-hidden rounded-[inherit]">
               <QueryHistory :current-connection-id="activeTab?.connectionId" :current-database="activeTab?.database" @restore="restoreHistorySql" @analyze-ai="analyzeHistoryWithAi" @close="closeRightSidebarPanel('history')" />

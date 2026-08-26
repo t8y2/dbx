@@ -25,6 +25,7 @@ pub mod file_validator;
 pub mod hbase_driver;
 pub mod http_tunnel;
 pub mod influxdb_driver;
+pub mod ldap_driver;
 pub mod manticoresearch;
 pub mod meilisearch_driver;
 pub mod mongo_driver;

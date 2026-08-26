@@ -134,9 +134,10 @@ describe("NacosAdminConsole config workbench layout", () => {
 
   it("keeps the configuration editor zoom behavior aligned with the SQL editor", () => {
     expect(source).toContain("createEditorZoomCommitScheduler");
+    expect(source).toContain("createEditorWheelZoomGestureGuard");
     expect(source).toContain("EditorView.domEventHandlers");
     expect(source).toContain("fontSizeFromWheelDelta(configEditorFontSize.value, event.deltaY)");
-    expect(source).toContain("if (!event.metaKey && !event.ctrlKey) return false;");
+    expect(source).toContain("if (!configEditorWheelZoomGestureGuard.accepts(event)) return false;");
     expect(source).toContain("configEditorZoomCommitScheduler.dispose()");
   });
 

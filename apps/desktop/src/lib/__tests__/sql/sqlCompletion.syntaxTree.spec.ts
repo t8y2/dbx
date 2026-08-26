@@ -3,15 +3,16 @@ import { ensureSyntaxTree } from "@codemirror/language";
 import { EditorState } from "@codemirror/state";
 import { describe, expect, it } from "vitest";
 import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
-import { isSqlCompletionSuppressedContext, isSqlLikeCompletionStatement } from "@/lib/sql/sqlCompletion";
+import { isSqlCompletionSuppressedContext, isSqlLikeCompletionStatement, shouldAutoOpenSqlCompletion } from "@/lib/sql/sqlCompletion";
 import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
+import type { DatabaseType } from "@/types/database";
 
 // Forces CM6's background parse to completion so tests are deterministic. Production code never
 // does this -- see sqlSyntaxTreeWindow.ts's doc comment.
-function stateFor(doc: string): EditorState {
+function stateFor(doc: string, dialectName: "mysql" | "postgres" | "sqlserver" = "postgres", databaseType: DatabaseType = "postgres"): EditorState {
   const state = EditorState.create({
     doc,
-    extensions: [langSql.sql({ dialect: createDbxCodeMirrorSqlDialect(langSql, "postgres", "postgres") })],
+    extensions: [langSql.sql({ dialect: createDbxCodeMirrorSqlDialect(langSql, dialectName, databaseType) })],
   });
   ensureSyntaxTree(state, doc.length, 5_000);
   return state;
@@ -45,6 +46,21 @@ describe("isSqlCompletionSuppressedContext with a live EditorState", () => {
     const state = stateFor(sql);
 
     expect(isSqlCompletionSuppressedContext(sql, cursor, { databaseType: "postgres", editorState: state })).toBe(false);
+  });
+
+  it("auto-opens table completion while editing double-quoted Oracle-family names", () => {
+    const databaseTypes: DatabaseType[] = ["oracle", "dameng", "yashandb", "oscar", "oceanbase-oracle"];
+
+    for (const databaseType of databaseTypes) {
+      for (const sql of ['SELECT * FROM "fo"', 'SELECT * FROM "fo']) {
+        const cursor = sql.endsWith('"') ? sql.length - 1 : sql.length;
+        const state = stateFor(sql, "mysql", databaseType);
+        const options = { databaseType, dialect: "mysql" as const, editorState: state };
+
+        expect(isSqlCompletionSuppressedContext(sql, cursor, options), `${databaseType}: ${sql}`).toBe(false);
+        expect(shouldAutoOpenSqlCompletion(sql, cursor, options), `${databaseType}: ${sql}`).toBe(true);
+      }
+    }
   });
 });
 

@@ -725,7 +725,17 @@ pub async fn execute_script_with_2pc(
         req.destructive_confirmed.unwrap_or(false),
     )
     .await;
+    if schema_diff_deploy_may_have_changed_schema(&result) {
+        let prefix = super::schema::object_metadata_cache_prefix(&req.connection_id, &req.database);
+        if let Err(error) = state.app.storage.delete_schema_cache_prefix(&prefix).await {
+            tracing::warn!(connection_id = %req.connection_id, database = %req.database, %error, "failed to invalidate schema metadata cache after deploy");
+        }
+    }
     Ok(Json(result))
+}
+
+fn schema_diff_deploy_may_have_changed_schema(result: &dbx_core::query::SchemaDiffDeployResult) -> bool {
+    result.statement_count > 0 && matches!(result.status.as_str(), "committed" | "mixed")
 }
 
 pub async fn analyze_sql_references(
@@ -1156,6 +1166,28 @@ mod tests {
         let app = Arc::new(AppState::new_with_plugin_dir(storage, dir.join("plugins")));
         let state = Arc::new(WebState::for_tests(app, dir.clone()));
         (state, dir)
+    }
+
+    fn deploy_result(status: &str, statement_count: usize) -> dbx_core::query::SchemaDiffDeployResult {
+        dbx_core::query::SchemaDiffDeployResult {
+            transaction_id: "deploy-test".to_string(),
+            status: status.to_string(),
+            participants: Vec::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            executed_count: 0,
+            statement_count,
+            error: None,
+            metadata: serde_json::Value::Null,
+        }
+    }
+
+    #[test]
+    fn schema_diff_cache_invalidation_covers_committed_and_partial_deploys() {
+        assert!(schema_diff_deploy_may_have_changed_schema(&deploy_result("committed", 1)));
+        assert!(schema_diff_deploy_may_have_changed_schema(&deploy_result("mixed", 1)));
+        assert!(!schema_diff_deploy_may_have_changed_schema(&deploy_result("rolled_back", 1)));
+        assert!(!schema_diff_deploy_may_have_changed_schema(&deploy_result("committed", 0)));
     }
 
     #[tokio::test]

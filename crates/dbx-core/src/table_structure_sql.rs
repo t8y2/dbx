@@ -6,6 +6,7 @@ mod create_table;
 mod dialect;
 mod foreign_keys;
 mod indexes;
+mod mysql_engine;
 mod owner;
 mod sqlite_rebuild;
 mod triggers;
@@ -34,10 +35,15 @@ use columns::{build_column_sql, validate_primary_key_change_scope};
 use comments::build_table_comment_sql;
 use foreign_keys::build_foreign_key_sql;
 use indexes::build_index_sql;
+use mysql_engine::{build_mysql_engine_change_sql, validate_mysql_engine};
 use triggers::build_trigger_sql;
 use validation::{validate_concurrent_index_scope, validate_draft};
 
 pub fn build_table_structure_change_sql(mut options: TableStructureSqlOptions) -> TableStructureSqlResult {
+    let mysql_engine_errors = validate_mysql_engine(&options);
+    if !mysql_engine_errors.is_empty() {
+        return TableStructureSqlResult { statements: Vec::new(), warnings: mysql_engine_errors };
+    }
     // GaussDB M-mode uses MySQL-compatible SQL dialect with backtick quoting.
     // Map to StructureDialect::Mysql so DDL is generated correctly.
     if options.is_gaussdb_m_mode {
@@ -60,6 +66,7 @@ pub fn build_table_structure_change_sql(mut options: TableStructureSqlOptions) -
     statements.extend(build_foreign_key_sql(&options, &mut warnings));
     statements.extend(build_trigger_sql(&options, &mut warnings));
     statements.extend(build_table_comment_sql(&options, &mut warnings));
+    statements.extend(build_mysql_engine_change_sql(&options));
     TableStructureSqlResult { statements, warnings }
 }
 

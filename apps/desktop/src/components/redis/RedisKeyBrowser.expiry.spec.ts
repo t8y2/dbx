@@ -1273,7 +1273,7 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
     expect(document.body.textContent).toContain("first");
   });
 
-  it("cancels a sparse scan immediately when the search text changes", async () => {
+  it("cancels a sparse scan immediately without searching until Enter", async () => {
     mocks.redisScanPageSize = 1_000;
     mountBrowser();
     await settle();
@@ -1281,6 +1281,7 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
     await settle();
 
     const oldPage = deferred<{ cursor: number; keys: RedisKeyInfo[]; total_keys: number }>();
+    const stale = { key_display: "old:result", key_raw: "b2xkOnJlc3VsdA==", key_type: "string", ttl: -1 };
     const fresh = { key_display: "new:result", key_raw: "bmV3OnJlc3VsdA==", key_type: "string", ttl: -1 };
     mocks.redisScanKeysBatch.mockReset();
     mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, _cursor: number, pattern: string) => {
@@ -1291,14 +1292,22 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
     await submitKeySearch("old");
     await vi.waitFor(() => expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(1));
 
-    const input = requiredElement<HTMLInputElement>("[data-redis-search-input]");
-    input.value = "new";
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-    await settle();
-    oldPage.resolve({ cursor: 1, keys: [], total_keys: 1_000_000 });
+    await setInput("[data-redis-search-input]", "new");
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(1);
+    mocks.updateRedisDbKeyStats.mockClear();
+
+    oldPage.resolve({ cursor: 0, keys: [stale], total_keys: 1 });
     await settle();
 
+    expect(mocks.updateRedisDbKeyStats).not.toHaveBeenCalled();
+    expect(document.body.textContent).not.toContain("old:result");
+    expect(document.body.textContent).not.toContain("new:result");
     expect(mocks.redisScanKeysBatch.mock.calls.filter((call) => call[3] === "*old*")).toHaveLength(1);
+    expect(mocks.redisScanKeysBatch.mock.calls.map((call) => call[3])).toEqual(["*old*"]);
+
+    requiredElement<HTMLInputElement>("[data-redis-search-input]").dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await settle();
+
     await vi.waitFor(() => expect(document.body.textContent).toContain("result"));
     expect(mocks.redisScanKeysBatch.mock.calls.map((call) => call[3])).toEqual(["*old*", "*new*"]);
   });
@@ -1731,6 +1740,7 @@ describe("RedisKeyBrowser interrupted Fetch All", () => {
   it("does not select stale keys when a search changes during select-all scanning", async () => {
     const oldPage = deferred<{ cursor: number; keys: RedisKeyInfo[]; total_keys: number }>();
     const oldKey = { key_display: "old", key_raw: "b2xk", key_type: "string", ttl: -1 };
+    const lateOldKey = { key_display: "late-old", key_raw: "bGF0ZS1vbGQ=", key_type: "string", ttl: -1 };
     const freshKey = { key_display: "fresh", key_raw: "ZnJlc2g=", key_type: "string", ttl: -1 };
     mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, cursor: number, pattern: string) => {
       if (pattern === "*" && cursor === 0) return Promise.resolve({ cursor: 1, keys: [oldKey], total_keys: 2 });
@@ -1742,11 +1752,16 @@ describe("RedisKeyBrowser interrupted Fetch All", () => {
 
     requiredElement<HTMLButtonElement>("[data-redis-select-all]").click();
     await vi.waitFor(() => expect(mocks.redisScanKeysBatch.mock.calls.length).toBeGreaterThan(1));
-    const input = requiredElement<HTMLInputElement>("[data-redis-search-input]");
-    input.value = "fresh";
-    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await setInput("[data-redis-search-input]", "fresh");
+    oldPage.resolve({ cursor: 0, keys: [lateOldKey], total_keys: 0 });
     await settle();
-    oldPage.resolve({ cursor: 0, keys: [oldKey], total_keys: 0 });
+
+    expect(document.body.textContent).not.toContain("late-old");
+    expect(document.body.textContent).not.toContain("redis.stopFetchAll");
+    expect(mocks.redisScanKeysBatch.mock.calls.every((call) => call[3] === "*")).toBe(true);
+    expect(document.querySelector("[data-redis-batch-delete]")).toBeNull();
+
+    requiredElement<HTMLInputElement>("[data-redis-search-input]").dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     await settle();
 
     await vi.waitFor(() => expect(document.body.textContent).toContain("fresh"));

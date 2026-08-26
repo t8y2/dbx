@@ -4,14 +4,15 @@ import { EditorState } from "@codemirror/state";
 import { describe, expect, it } from "vitest";
 import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
 import { resolveLexicalLeafFromSyntaxTree, resolveStatementWindowFromSyntaxTree } from "@/lib/sql/sqlSyntaxTreeWindow";
+import type { DatabaseType } from "@/types/database";
 
 // Forces CM6's background parse to completion so tests are deterministic instead of racing the
 // idle-time parse scheduler. Production code never does this (see sqlSyntaxTreeWindow.ts's doc
 // comment on why it only ever consults syntaxTree/syntaxTreeAvailable, never ensureSyntaxTree).
-function stateFor(doc: string, dialectName: "mysql" | "postgres" | "sqlserver" = "postgres", databaseType?: string): EditorState {
+function stateFor(doc: string, dialectName: "mysql" | "postgres" | "sqlserver" = "postgres", databaseType?: DatabaseType): EditorState {
   const state = EditorState.create({
     doc,
-    extensions: [langSql.sql({ dialect: createDbxCodeMirrorSqlDialect(langSql, dialectName, databaseType as never) })],
+    extensions: [langSql.sql({ dialect: createDbxCodeMirrorSqlDialect(langSql, dialectName, databaseType) })],
   });
   ensureSyntaxTree(state, doc.length, 5_000);
   return state;
@@ -127,6 +128,22 @@ describe("resolveLexicalLeafFromSyntaxTree", () => {
     const backtickQuoted = "select `user_name` from users";
     const backtickState = stateFor(backtickQuoted, "mysql", "mysql");
     expect(resolveLexicalLeafFromSyntaxTree(backtickState, backtickQuoted.indexOf("user_name"))?.inStringLiteral).toBe(false);
+  });
+
+  it("does not treat edited Oracle-family table identifiers as string literals", () => {
+    const databaseTypes: DatabaseType[] = ["oracle", "dameng", "yashandb", "oscar", "oceanbase-oracle"];
+
+    for (const databaseType of databaseTypes) {
+      const paired = 'SELECT * FROM "fo"';
+      const pairedCursor = paired.length - 1;
+      expect(resolveLexicalLeafFromSyntaxTree(stateFor(paired, "mysql", databaseType), pairedCursor)?.inStringLiteral, `${databaseType} paired`).toBe(false);
+
+      const unclosed = 'SELECT * FROM "fo';
+      expect(resolveLexicalLeafFromSyntaxTree(stateFor(unclosed, "mysql", databaseType), unclosed.length)?.inStringLiteral, `${databaseType} unclosed`).toBe(false);
+
+      const stringLiteral = "SELECT * FROM users WHERE name = 'fo'";
+      expect(resolveLexicalLeafFromSyntaxTree(stateFor(stringLiteral, "mysql", databaseType), stringLiteral.indexOf("fo"))?.inStringLiteral, `${databaseType} string`).toBe(true);
+    }
   });
 
   it("classifies plain code as neither a comment nor a string literal", () => {

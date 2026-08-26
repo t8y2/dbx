@@ -507,16 +507,9 @@ public final class KafkaAgent {
             }
         }
 
+        // TLS properties
         JsonObject tls = conn.has("tls") && conn.get("tls").isJsonObject()
             ? conn.getAsJsonObject("tls") : null;
-        boolean skipVerify = boolOrDefault(conn, "tls_skip_verify", false)
-            || boolOrDefault(conn, "tlsSkipVerify", false)
-            || (tls != null && boolOrDefault(tls, "skip_verify", false));
-        if (skipVerify) {
-            props.put("ssl.endpoint.identification.algorithm", "");
-        }
-
-        // TLS properties
         if (tls != null) {
             String truststorePath = stringOrEmpty(tls, "truststore_path");
             if (!truststorePath.isBlank()) {
@@ -540,6 +533,20 @@ public final class KafkaAgent {
     static void applyConnectionProperties(JsonObject conn, Properties props) {
         applySecurityProperties(conn, props);
         applyExtraProperties(conn, props);
+        applyTlsSkipVerification(conn, props);
+    }
+
+    private static void applyTlsSkipVerification(JsonObject conn, Properties props) {
+        JsonObject tls = conn.has("tls") && conn.get("tls").isJsonObject()
+            ? conn.getAsJsonObject("tls") : null;
+        boolean skipVerify = boolOrDefault(conn, "tls_skip_verify", false)
+            || boolOrDefault(conn, "tlsSkipVerify", false)
+            || (tls != null && boolOrDefault(tls, "skip_verify", false));
+        if (!skipVerify) return;
+
+        DbxInsecureTrustManagerFactory.ensureRegistered();
+        props.put("ssl.endpoint.identification.algorithm", "");
+        props.put("ssl.trustmanager.algorithm", DbxInsecureTrustManagerFactory.ALGORITHM);
     }
 
     static String jaasValue(String value) {

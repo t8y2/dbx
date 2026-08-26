@@ -295,6 +295,77 @@ describe("DataGrid context menu target lifecycle", () => {
     expect(contextMenuLabels()).toContain("Freeze Selected Columns");
   });
 
+  it.each(["WHERE", "ORDER BY"] as const)("keeps the native context menu for the %s condition editor", async (placeholder) => {
+    const { host } = mountGrid(hydratedResult(1, "value"));
+    await settle();
+
+    const input = host.querySelector<HTMLTextAreaElement>(`textarea[placeholder="${placeholder}"]`);
+    expect(input).not.toBeNull();
+
+    const event = new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 12, clientY: 12 });
+    input!.dispatchEvent(event);
+    await settle();
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.querySelector("[data-dbx-context-menu]")).toBeNull();
+  });
+
+  it("keeps the DataGrid context menu for a regular cell", async () => {
+    const { host } = mountGrid(hydratedResult(1, "value"));
+    await settle();
+
+    openContextMenu(gridCell(host));
+    await settle();
+
+    expect(contextMenuLabels()).toContain("Filter");
+  });
+
+  it("keeps the native context menu for the expanded condition editor", async () => {
+    const { host } = mountGrid(hydratedResult(1, "abcdefghijklmnopqrstuvwxyz"));
+    await settle();
+
+    const input = host.querySelector<HTMLTextAreaElement>('textarea[placeholder="WHERE"]');
+    expect(input).not.toBeNull();
+    input!.value = "abcdefghijklmnopqrstuvwxyz";
+    input!.setSelectionRange(input!.value.length, input!.value.length);
+    Object.defineProperties(input!, {
+      clientWidth: { configurable: true, value: 80 },
+      scrollWidth: { configurable: true, value: 320 },
+      clientHeight: { configurable: true, value: 24 },
+      scrollHeight: { configurable: true, value: 24 },
+    });
+
+    const originalGetBoundingClientRect = HTMLElement.prototype.getBoundingClientRect;
+    const rectSpy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this === input) return { x: 0, y: 0, left: 0, top: 0, right: 80, bottom: 24, width: 80, height: 24, toJSON: () => ({}) } as DOMRect;
+      if (this instanceof HTMLSpanElement && this.style.position === "fixed") return { x: 0, y: 0, left: 0, top: 0, right: 320, bottom: 24, width: 320, height: 24, toJSON: () => ({}) } as DOMRect;
+      return originalGetBoundingClientRect.call(this);
+    });
+
+    try {
+      input!.focus();
+      input!.dispatchEvent(new FocusEvent("focus", { bubbles: true }));
+      await settle();
+
+      const expanded = document.body.querySelector<HTMLTextAreaElement>('.data-grid-topbar-condition-input--expanded[placeholder="WHERE"]');
+      expect(expanded).not.toBeNull();
+
+      const documentContextMenu = vi.fn((event: MouseEvent) => event.preventDefault());
+      document.addEventListener("contextmenu", documentContextMenu);
+      try {
+        const event = new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 12, clientY: 12 });
+        expanded!.dispatchEvent(event);
+
+        expect(event.defaultPrevented).toBe(false);
+        expect(documentContextMenu).not.toHaveBeenCalled();
+      } finally {
+        document.removeEventListener("contextmenu", documentContextMenu);
+      }
+    } finally {
+      rectSpy.mockRestore();
+    }
+  });
+
   it("preserves a newly opened header target and same-turn menu actions", async () => {
     const { host } = mountGrid(hydratedResult(1, "value"));
     await settle();

@@ -83,6 +83,7 @@ export interface BuildTableStructureChangeSqlOptions {
   triggers?: EditableStructureTrigger[];
   tableComment?: string;
   originalTableComment?: string;
+  mysqlEngine?: string;
   /** The target table is a PostgreSQL partitioned parent (`relkind = 'p'`);
    * the backend rejects `CREATE INDEX CONCURRENTLY` on such tables (fail
    * closed) instead of downgrading to a blocking `CREATE INDEX`. */

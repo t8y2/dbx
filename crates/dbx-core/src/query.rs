@@ -2625,10 +2625,12 @@ pub async fn execute_multi_core_with_options_for_client_and_progress_typed(
         );
     }
 
-    let statements = db_type.map_or_else(
-        || split_sql_statements(sql),
-        |db_type| crate::sql::split_sql_statements_for_database(sql, db_type),
+    let execution_plan = db_type.map_or_else(
+        || crate::sql::SqlExecutionPlan { statements: split_sql_statements(sql), stop_on_error: false },
+        |db_type| crate::sql::sql_execution_plan_for_database(sql, db_type),
     );
+    let continue_on_error = options.continue_on_error && !execution_plan.stop_on_error;
+    let statements = execution_plan.statements;
     if statements.is_empty() {
         return Ok(vec![empty_query_result(0).into()]);
     }
@@ -2756,7 +2758,7 @@ pub async fn execute_multi_core_with_options_for_client_and_progress_typed(
                     Some(statement_index),
                     backend_error,
                 ));
-                if !should_continue_batch_after_error(options.continue_on_error, action) {
+                if !should_continue_batch_after_error(continue_on_error, action) {
                     break;
                 }
             }
@@ -5658,6 +5660,7 @@ for line in sys.stdin:
             redis_key_separator: default_redis_key_separator(),
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
+            redis_key_templates: Vec::new(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),
@@ -6095,6 +6098,47 @@ for line in sys.stdin:
     #[tokio::test]
     async fn sqlite_batch_continues_when_a_middle_statement_fails_and_enabled() {
         assert_sqlite_batch_error_behavior(false, true).await;
+    }
+
+    #[tokio::test]
+    async fn gaussdb_on_error_stop_overrides_continue_on_error() {
+        let dir = std::env::temp_dir().join(format!("dbx-query-gaussdb-on-error-stop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+        let connection_id = "gaussdb-on-error-stop";
+        let sqlite = db::sqlite::connect_path_create_if_missing(dir.join("query.db").to_str().unwrap()).await.unwrap();
+        state.connections.write().await.insert(connection_id.to_string(), PoolKind::Sqlite(sqlite));
+        state.configs.write().await.insert(connection_id.to_string(), test_connection_config(DatabaseType::Gaussdb));
+
+        let results = execute_multi_core_with_options(
+            &state,
+            connection_id,
+            "",
+            "\\set ON_ERROR_STOP on\nINSERT INTO missing_table VALUES (1); CREATE TABLE must_not_run (id INTEGER);",
+            None,
+            None,
+            QueryExecutionOptions { continue_on_error: true, ..Default::default() },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].columns, vec!["Error"]);
+        let table_check = execute_sql_statement(
+            &state,
+            connection_id,
+            "",
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'must_not_run'",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(table_check.rows.is_empty());
+
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
@@ -7648,6 +7692,7 @@ for line in sys.stdin:
             redis_key_separator: default_redis_key_separator(),
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
+            redis_key_templates: Vec::new(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),

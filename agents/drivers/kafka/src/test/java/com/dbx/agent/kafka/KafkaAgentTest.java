@@ -13,6 +13,8 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.KeyStore;
+import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -27,6 +29,8 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import javax.net.ssl.TrustManagerFactory;
+import javax.net.ssl.X509TrustManager;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
@@ -1290,6 +1294,46 @@ class KafkaAgentTest {
             "com.sun.security.auth.module.Krb5LoginModule required useKeyTab=true keyTab=\"/tmp/user.keytab\" principal=\"user@EXAMPLE.COM\";",
             props.getProperty("sasl.jaas.config")
         );
+    }
+
+    @Test
+    void skipTlsVerificationDisablesHostnameAndCertificateChainValidation() throws Exception {
+        Properties props = new Properties();
+        KafkaAgent.applyConnectionProperties(JsonParser.parseString("""
+            {
+              "security_protocol": "SASL_SSL",
+              "tls_skip_verify": true,
+              "properties": {
+                "ssl.endpoint.identification.algorithm": "https",
+                "ssl.trustmanager.algorithm": "PKIX"
+              }
+            }
+            """).getAsJsonObject(), props);
+
+        assertEquals("", props.getProperty("ssl.endpoint.identification.algorithm"));
+        assertEquals(
+            DbxInsecureTrustManagerFactory.ALGORITHM,
+            props.getProperty("ssl.trustmanager.algorithm")
+        );
+
+        TrustManagerFactory factory = TrustManagerFactory.getInstance(DbxInsecureTrustManagerFactory.ALGORITHM);
+        factory.init((KeyStore) null);
+        X509TrustManager trustManager = (X509TrustManager) factory.getTrustManagers()[0];
+        assertDoesNotThrow(() -> trustManager.checkServerTrusted(new X509Certificate[0], "RSA"));
+    }
+
+    @Test
+    void verifiedTlsKeepsKafkaDefaultTrustAndHostnameValidation() {
+        Properties props = new Properties();
+        KafkaAgent.applyConnectionProperties(JsonParser.parseString("""
+            {
+              "security_protocol": "SASL_SSL",
+              "tls_skip_verify": false
+            }
+            """).getAsJsonObject(), props);
+
+        assertNull(props.getProperty("ssl.endpoint.identification.algorithm"));
+        assertNull(props.getProperty("ssl.trustmanager.algorithm"));
     }
 
     @Test

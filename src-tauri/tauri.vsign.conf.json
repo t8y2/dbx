@@ -1,0 +1,19 @@
+{
+  "bundle": {
+    "windows": {
+      "signCommand": {
+        "cmd": "pwsh",
+        "args": [
+          "-NoLogo",
+          "-NoProfile",
+          "-NonInteractive",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          "../.github/scripts/vsign-sign.ps1",
+          "%1"
+        ]
+      }
+    }
+  }
+}

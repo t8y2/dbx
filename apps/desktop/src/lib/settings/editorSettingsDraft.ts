@@ -2,6 +2,7 @@ import type { EditorSettings } from "@/stores/settingsStore";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { normalizeQueryResultMaxRows } from "@/lib/dataGrid/queryResultRowLimit";
 import { normalizeCompletionTriggerMode } from "@/lib/sql/sqlCompletionTriggerPolicy";
+import { normalizeRedisKeyTemplates } from "@/lib/redis/redisKeyTemplates";
 
 export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "fontFamily",
@@ -22,6 +23,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "autoAliasTables",
   "insertSpaceAfterCompletion",
   "sortCompletionColumnsAlphabetically",
+  "selectFirstCompletionOnOpen",
   "wordWrap",
   "vimModeEnabled",
   "autoCloseBrackets",
@@ -75,6 +77,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "sidebarIndent",
   "sidebarFontSize",
   "sidebarHiddenTablePrefixes",
+  "redisKeyTemplates",
   "exportBatchSize",
   "exportRowLimitEnabled",
   "exportRowLimit",
@@ -113,6 +116,7 @@ function normalizedDraftValue(key: EditorSettingsDraftKey, value: unknown): unkn
   if (key === "pageSize" || key === "tableOpenPageSize") return normalizeTableOpenPageSizeDraft(value);
   if (key === "queryResultMaxRows") return normalizeQueryResultMaxRowsDraft(value);
   if (key === "completionTriggerMode") return normalizeCompletionTriggerMode(value);
+  if (key === "redisKeyTemplates") return normalizeRedisKeyTemplates(value);
   return value;
 }
 

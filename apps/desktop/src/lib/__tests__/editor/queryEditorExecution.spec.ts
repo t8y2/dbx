@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { createQueryEditorExecutionViewportOwnership, isQueryEditorPositionVisible } from "@/lib/editor/queryEditorExecutionViewport";
+import { createQueryEditorExecutionViewportOwnership, isQueryEditorPositionVisible } from "../../editor/queryEditorExecutionViewport";
 
 const queryEditorSource = readFileSync(new URL("../../../components/editor/QueryEditor.vue", import.meta.url), "utf8");
 const contentAreaSource = readFileSync(new URL("../../../components/layout/ContentArea.vue", import.meta.url), "utf8");
@@ -10,12 +10,31 @@ const queryStoreSource = readFileSync(new URL("../../../stores/queryStore.ts", i
 
 describe("QueryEditor execution routing", () => {
   it("routes the execution shortcut through the shared execution-mode contract while bypassing the picker", () => {
-    expect(queryEditorSource).toContain("binding(shortcuts.executeSql, () => requestExecute({ bypassPicker: true }))");
+    expect(queryEditorSource).toContain("createQueryEditorExecutionShortcutBindings(shortcuts.executeSql");
     expect(queryEditorSource).not.toContain("forceCurrent");
   });
 
+  it("guards both CodeMirror execution bindings and the app-level fallback during IME composition", () => {
+    expect(queryEditorSource).toContain("createQueryEditorExecutionShortcutBindings(shortcuts.executeSql");
+    expect(queryEditorSource).toContain("createQueryEditorExecutionShortcutBindings(shortcuts.executeSqlInNewResultTab");
+    expect(queryEditorSource).toContain("isEditorComposing");
+    expect(queryEditorSource).toContain("function shouldBlockExecutionShortcut(event?: KeyboardEvent");
+    expect(queryEditorSource).toContain("postCompositionKeyGuard.blocks(event)");
+    expect(contentAreaSource).toContain("function shouldBlockQueryEditorExecutionShortcut(event: KeyboardEvent)");
+    expect(contentAreaSource).toContain("queryEditorRef.value?.shouldBlockExecutionShortcut?.(event)");
+    expect(appSource).toContain("if (!contentAreaRef.value?.shouldBlockQueryEditorExecutionShortcut?.(e)) requestActiveEditorExecuteInNewResultTab();");
+    expect(appSource).toContain("if (!contentAreaRef.value?.shouldBlockQueryEditorExecutionShortcut?.(e)) requestActiveEditorExecute();");
+  });
+
+  it("keeps toolbar, context-menu, and gutter execution outside the shortcut guard", () => {
+    expect(queryEditorSource).toContain("function executeFromContextMenu()");
+    expect(queryEditorSource).toContain("requestExecute();\n  focusEditor();");
+    expect(queryEditorSource).toContain("function executeSqlStatementFromGutter");
+    expect(queryEditorSource).toContain("emitExecutionRequest({ ...sqlExecutionSnapshotForRange(currentView, statementRange), editorViewportRequestId })");
+  });
+
   it("routes the new-result-tab shortcut through the same target selection contract", () => {
-    expect(queryEditorSource).toContain("binding(shortcuts.executeSqlInNewResultTab, requestExecuteInNewResultTab)");
+    expect(queryEditorSource).toContain("createQueryEditorExecutionShortcutBindings(shortcuts.executeSqlInNewResultTab");
     expect(queryEditorSource).toContain('emit("executeInNewResultTab", source)');
     expect(queryEditorSource).toContain("requestExecute({ bypassPicker: true, openInNewResultTab: true })");
     expect(contentAreaSource).toContain('const showResultRunTabs = computed(() => resultRuns.value.length > 0 && resultRunDisplayMode.value === "tabs")');

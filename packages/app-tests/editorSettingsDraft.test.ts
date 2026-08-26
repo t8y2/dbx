@@ -48,3 +48,11 @@ test("round-trips completion column ordering through the editor settings draft",
   assert.deepEqual(patch, { sortCompletionColumnsAlphabetically: false });
   assert.equal(editorSettingsDraftFromSettings({ ...DEFAULT_EDITOR_SETTINGS, ...patch }).sortCompletionColumnsAlphabetically, false);
 });
+
+test("round-trips completion selection behavior through the editor settings draft", () => {
+  const base = editorSettingsDraftFromSettings(DEFAULT_EDITOR_SETTINGS);
+  const patch = editorSettingsPatchFromDraft({ ...base, selectFirstCompletionOnOpen: true }, base);
+
+  assert.deepEqual(patch, { selectFirstCompletionOnOpen: true });
+  assert.equal(editorSettingsDraftFromSettings({ ...DEFAULT_EDITOR_SETTINGS, ...patch }).selectFirstCompletionOnOpen, true);
+});

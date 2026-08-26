@@ -3795,9 +3795,20 @@ pub async fn list_foreign_keys_for_relations(
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
     let schemas: Vec<&str> = relations.iter().map(|(schema, _)| schema.as_str()).collect();
     let tables: Vec<&str> = relations.iter().map(|(_, table)| table.as_str()).collect();
-    let rows = postgres_query_cached(&client, postgres_foreign_keys_for_relations_sql(), &[&schemas, &tables])
-        .await
-        .map_err(|e| e.to_string())?;
+    let tiers = postgres_foreign_keys_for_relations_query_tiers();
+    query_with_compat_fallback("list_foreign_keys_for_relations", &tiers, |sql| {
+        list_foreign_keys_for_relations_with_sql(&client, sql, &schemas, &tables)
+    })
+    .await
+}
+
+async fn list_foreign_keys_for_relations_with_sql(
+    client: &deadpool_postgres::Client,
+    sql: &str,
+    schemas: &[&str],
+    tables: &[&str],
+) -> Result<HashMap<(String, String), Vec<ForeignKeyInfo>>, tokio_postgres::Error> {
+    let rows = postgres_query_cached(client, sql, &[&schemas, &tables]).await?;
     let mut result: HashMap<(String, String), Vec<ForeignKeyInfo>> = HashMap::new();
     for row in &rows {
         let key = (pg_row_try_string(row, 0), pg_row_try_string(row, 1));
@@ -3814,12 +3825,46 @@ pub async fn list_foreign_keys_for_relations(
     Ok(result)
 }
 
+fn postgres_foreign_keys_for_relations_query_tiers() -> [&'static str; 2] {
+    [postgres_foreign_keys_for_relations_sql(), postgres_foreign_keys_for_relations_compat_sql()]
+}
+
 fn postgres_foreign_keys_for_relations_sql() -> &'static str {
     "SELECT rel.rel_schema, rel.rel_table, \
      fk.constraint_name, fk.column_name, \
      pk.table_schema AS ref_schema, pk.table_name AS ref_table, pk.column_name AS ref_column, \
      rc.update_rule AS on_update, rc.delete_rule AS on_delete \
      FROM unnest($1::text[], $2::text[]) AS rel(rel_schema, rel_table) \
+     JOIN information_schema.table_constraints tc \
+       ON tc.table_schema = rel.rel_schema AND tc.table_name = rel.rel_table \
+     JOIN information_schema.key_column_usage fk \
+       ON fk.constraint_name = tc.constraint_name \
+       AND fk.constraint_schema = tc.constraint_schema \
+       AND fk.table_schema = tc.table_schema \
+       AND fk.table_name = tc.table_name \
+     JOIN information_schema.referential_constraints rc \
+       ON rc.constraint_name = tc.constraint_name \
+       AND rc.constraint_schema = tc.constraint_schema \
+     JOIN information_schema.key_column_usage pk \
+       ON pk.constraint_name = rc.unique_constraint_name \
+       AND pk.constraint_schema = rc.unique_constraint_schema \
+       AND pk.ordinal_position = fk.position_in_unique_constraint \
+     WHERE tc.constraint_type = 'FOREIGN KEY' \
+     ORDER BY rel.rel_schema, rel.rel_table, fk.constraint_name, fk.ordinal_position"
+}
+
+// PostgreSQL 9.3 and older only accept one array argument to unnest(). Pair
+// the schema/table arrays through their shared subscript so the fallback stays
+// one bounded query and preserves each relation tuple's position.
+fn postgres_foreign_keys_for_relations_compat_sql() -> &'static str {
+    "SELECT rel.rel_schema, rel.rel_table, \
+     fk.constraint_name, fk.column_name, \
+     pk.table_schema AS ref_schema, pk.table_name AS ref_table, pk.column_name AS ref_column, \
+     rc.update_rule AS on_update, rc.delete_rule AS on_delete \
+     FROM ( \
+       SELECT ($1::text[])[rel.i] AS rel_schema, ($2::text[])[rel.i] AS rel_table \
+       FROM generate_subscripts($1::text[], 1) AS rel(i) \
+     ) AS rel \
      JOIN information_schema.table_constraints tc \
        ON tc.table_schema = rel.rel_schema AND tc.table_name = rel.rel_table \
      JOIN information_schema.key_column_usage fk \
@@ -3933,9 +3978,19 @@ pub async fn get_table_partition_local_objects_for_relations(
     oids: &[i64],
 ) -> Result<HashMap<i64, PostgresTablePartitionLocalObjects>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let rows = postgres_query_cached(&client, postgres_table_partition_local_objects_for_relations_sql(), &[&oids])
-        .await
-        .map_err(|e| e.to_string())?;
+    let tiers = postgres_table_partition_local_objects_for_relations_query_tiers();
+    query_with_compat_fallback("get_table_partition_local_objects_for_relations", &tiers, |sql| {
+        get_table_partition_local_objects_for_relations_with_sql(&client, sql, oids)
+    })
+    .await
+}
+
+async fn get_table_partition_local_objects_for_relations_with_sql(
+    client: &deadpool_postgres::Client,
+    sql: &str,
+    oids: &[i64],
+) -> Result<HashMap<i64, PostgresTablePartitionLocalObjects>, tokio_postgres::Error> {
+    let rows = postgres_query_cached(client, sql, &[&oids]).await?;
     let mut result: HashMap<i64, PostgresTablePartitionLocalObjects> = HashMap::new();
     for row in &rows {
         let Ok(relid) = row.try_get::<_, i64>(0) else { continue };
@@ -3947,11 +4002,56 @@ pub async fn get_table_partition_local_objects_for_relations(
     Ok(result)
 }
 
+fn postgres_table_partition_local_objects_for_relations_query_tiers() -> [&'static str; 2] {
+    [
+        postgres_table_partition_local_objects_for_relations_sql(),
+        postgres_table_partition_local_objects_for_relations_compat_sql(),
+    ]
+}
+
 fn postgres_table_partition_local_objects_for_relations_sql() -> &'static str {
     "SELECT con.conrelid::bigint AS relid, 'constraint'::text AS object_kind, con.conname AS object_name, con.contype::text AS object_type \
      FROM pg_catalog.pg_constraint con \
      WHERE con.conrelid = ANY($1::bigint[]) AND con.contype IN ('p','f') \
        AND COALESCE(NULLIF(pg_catalog.row_to_json(con)->>'conparentid', '')::oid, 0) = 0 \
+     UNION ALL \
+     SELECT con.conrelid::bigint, 'check'::text AS object_kind, con.conname AS object_name, NULL::text AS object_type \
+     FROM pg_catalog.pg_constraint con \
+     WHERE con.conrelid = ANY($1::bigint[]) AND con.contype = 'c' AND con.conislocal \
+     UNION ALL \
+     SELECT ix.indrelid::bigint, 'index'::text AS object_kind, idx.relname AS object_name, NULL::text AS object_type \
+     FROM pg_catalog.pg_index ix \
+     JOIN pg_catalog.pg_class idx ON idx.oid = ix.indexrelid \
+     WHERE ix.indrelid = ANY($1::bigint[]) \
+       AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits i WHERE i.inhrelid = idx.oid) \
+     UNION ALL \
+     SELECT a.attrelid::bigint, 'column_default'::text AS object_kind, a.attname AS object_name, \
+            CASE WHEN ad.oid IS NOT NULL THEN 'overridden' ELSE 'dropped' END AS object_type \
+     FROM pg_catalog.pg_attribute a \
+     JOIN pg_catalog.pg_inherits i ON i.inhrelid = a.attrelid \
+     JOIN pg_catalog.pg_attribute pa \
+       ON pa.attrelid = i.inhparent AND pa.attname = a.attname AND pa.attnum > 0 AND NOT pa.attisdropped \
+     LEFT JOIN pg_catalog.pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum \
+     LEFT JOIN pg_catalog.pg_attrdef pad ON pad.adrelid = pa.attrelid AND pad.adnum = pa.attnum \
+     WHERE a.attrelid = ANY($1::bigint[]) AND a.attnum > 0 AND NOT a.attisdropped \
+       AND ( \
+         (ad.oid IS NOT NULL AND (pad.oid IS NULL \
+              OR pg_catalog.pg_get_expr(ad.adbin, ad.adrelid) \
+                 IS DISTINCT FROM pg_catalog.pg_get_expr(pad.adbin, pad.adrelid))) \
+         OR (ad.oid IS NULL AND pad.oid IS NOT NULL) \
+       ) \
+     ORDER BY relid, object_kind, object_name"
+}
+
+// PostgreSQL 9.2 has row_to_json(), but not the JSON ->> operator used above
+// to probe conparentid without directly referencing that newer catalog
+// column. Pre-11 servers do not have parent-linked constraint clones, so the
+// compatibility tier can omit only that filter and keep the same batched
+// result shape.
+fn postgres_table_partition_local_objects_for_relations_compat_sql() -> &'static str {
+    "SELECT con.conrelid::bigint AS relid, 'constraint'::text AS object_kind, con.conname AS object_name, con.contype::text AS object_type \
+     FROM pg_catalog.pg_constraint con \
+     WHERE con.conrelid = ANY($1::bigint[]) AND con.contype IN ('p','f') \
      UNION ALL \
      SELECT con.conrelid::bigint, 'check'::text AS object_kind, con.conname AS object_name, NULL::text AS object_type \
      FROM pg_catalog.pg_constraint con \
@@ -10156,6 +10256,32 @@ mod tests {
         assert!(index_tiers[0].contains("ix.indnkeyatts"));
         assert!(!index_tiers[1].contains("ix.indnkeyatts"));
         assert!(index_tiers[1].contains("string_to_array(ix.indkey::text, ' ')"));
+
+        let local_object_tiers = postgres_table_partition_local_objects_for_relations_query_tiers();
+        assert_eq!(local_object_tiers.len(), 2);
+        assert!(local_object_tiers[0].contains("row_to_json(con)->>'conparentid'"));
+        assert!(!local_object_tiers[1].contains("row_to_json"));
+        assert!(!local_object_tiers[1].contains("conparentid"));
+        assert!(local_object_tiers.iter().all(|sql| sql.contains("con.conrelid = ANY($1::bigint[])")));
+    }
+
+    #[test]
+    fn postgres_partition_batch_foreign_keys_keep_ordered_paired_compat_tier() {
+        let tiers = postgres_foreign_keys_for_relations_query_tiers();
+        assert_eq!(tiers.len(), 2);
+
+        let modern_sql = tiers[0];
+        assert_eq!(modern_sql, postgres_foreign_keys_for_relations_sql());
+        assert!(modern_sql.contains("unnest($1::text[], $2::text[])"));
+        assert!(!modern_sql.contains("generate_subscripts"));
+
+        let compat_sql = tiers[1];
+        assert_eq!(compat_sql, postgres_foreign_keys_for_relations_compat_sql());
+        assert!(!compat_sql.contains("unnest("));
+        assert!(compat_sql.contains("generate_subscripts($1::text[], 1)"));
+        assert!(compat_sql.contains("($1::text[])[rel.i] AS rel_schema"));
+        assert!(compat_sql.contains("($2::text[])[rel.i] AS rel_table"));
+        assert!(compat_sql.contains("ORDER BY rel.rel_schema, rel.rel_table, fk.constraint_name, fk.ordinal_position"));
     }
 
     #[test]
@@ -10664,6 +10790,152 @@ mod tests {
         // 9.x 没有声明式分区：父表的分区树只含父表自身（子表按普通表）。
         assert_eq!(parent_ddl.matches("CREATE TABLE").count(), 1, "parent_ddl: {parent_ddl}");
         assert!(!parent_ddl.contains("PARTITION OF"), "parent_ddl: {parent_ddl}");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a writable PostgreSQL database"]
+    async fn postgres_legacy_batched_ddl_metadata_preserves_relation_pairs_across_compat_tiers() {
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let pool = connect(&url, Duration::from_secs(5)).await.expect("connect postgres");
+        let schema = format!("dbx_batch_fkeys_{}", uuid::Uuid::new_v4().simple());
+        let schema_ident = pg_quote_ident(&schema);
+        let client = pool.get().await.expect("get postgres client");
+        client
+            .batch_execute(&format!(
+                "CREATE SCHEMA {schema_ident}; \
+                 CREATE TABLE {schema_ident}.parent_a (id integer PRIMARY KEY); \
+                 CREATE TABLE {schema_ident}.parent_b (id integer PRIMARY KEY); \
+                 CREATE TABLE {schema_ident}.child_a ( \
+                   id integer PRIMARY KEY, parent_id integer, \
+                   CONSTRAINT child_a_parent_fk FOREIGN KEY (parent_id) REFERENCES {schema_ident}.parent_a(id) \
+                 ); \
+                 CREATE TABLE {schema_ident}.child_b ( \
+                   id integer PRIMARY KEY, parent_id integer, \
+                   CONSTRAINT child_b_parent_fk FOREIGN KEY (parent_id) REFERENCES {schema_ident}.parent_b(id) \
+                 ); \
+                 CREATE TABLE {schema_ident}.without_fk (id integer PRIMARY KEY)"
+            ))
+            .await
+            .expect("create batched foreign-key fixtures");
+
+        let version_num = client
+            .query_one("SHOW server_version_num", &[])
+            .await
+            .expect("query PostgreSQL version")
+            .get::<_, String>(0)
+            .parse::<u32>()
+            .expect("server_version_num should be numeric");
+        let has_conparentid = client
+            .query_one(
+                "SELECT EXISTS ( \
+                   SELECT 1 FROM pg_catalog.pg_attribute \
+                   WHERE attrelid = 'pg_catalog.pg_constraint'::pg_catalog.regclass \
+                     AND attname = 'conparentid' AND NOT attisdropped \
+                 )",
+                &[],
+            )
+            .await
+            .expect("probe pg_constraint.conparentid")
+            .get::<_, bool>(0);
+        if version_num < 110000 {
+            assert!(!has_conparentid, "pre-11 PostgreSQL must not have parent-linked constraint clones");
+        }
+
+        let empty = list_foreign_keys_for_relations(&pool, &[]).await.expect("empty relation batch");
+        assert!(empty.is_empty());
+
+        let single_relations = vec![(schema.clone(), "child_a".to_string())];
+        let single = list_foreign_keys_for_relations(&pool, &single_relations).await.expect("single relation batch");
+        let single_fk = &single[&(schema.clone(), "child_a".to_string())][0];
+        assert_eq!(single_fk.name, "child_a_parent_fk");
+        assert_eq!(single_fk.ref_table, "parent_a");
+
+        // Keep the pairs deliberately out of name order. A cross product or
+        // independently unnested array would duplicate or misattribute keys.
+        let relations = vec![
+            (schema.clone(), "child_b".to_string()),
+            (schema.clone(), "without_fk".to_string()),
+            (schema.clone(), "child_a".to_string()),
+        ];
+        let batched = list_foreign_keys_for_relations(&pool, &relations).await.expect("multi-relation batch");
+        assert_eq!(batched.len(), 2, "batched keys: {batched:?}");
+        assert!(!batched.contains_key(&(schema.clone(), "without_fk".to_string())));
+        assert_eq!(batched[&(schema.clone(), "child_a".to_string())][0].ref_table, "parent_a");
+        assert_eq!(batched[&(schema.clone(), "child_b".to_string())][0].ref_table, "parent_b");
+
+        let schemas: Vec<&str> = relations.iter().map(|(schema, _)| schema.as_str()).collect();
+        let tables: Vec<&str> = relations.iter().map(|(_, table)| table.as_str()).collect();
+        let compat = list_foreign_keys_for_relations_with_sql(
+            &client,
+            postgres_foreign_keys_for_relations_compat_sql(),
+            &schemas,
+            &tables,
+        )
+        .await
+        .expect("subscript-paired compatibility query");
+        assert_eq!(compat[&(schema.clone(), "child_a".to_string())][0].ref_table, "parent_a");
+        assert_eq!(compat[&(schema.clone(), "child_b".to_string())][0].ref_table, "parent_b");
+
+        let modern = list_foreign_keys_for_relations_with_sql(
+            &client,
+            postgres_foreign_keys_for_relations_sql(),
+            &schemas,
+            &tables,
+        )
+        .await;
+        if version_num >= 90400 {
+            let modern = modern.expect("multi-array unnest primary query");
+            assert_eq!(modern[&(schema.clone(), "child_a".to_string())][0].ref_table, "parent_a");
+            assert_eq!(modern[&(schema.clone(), "child_b".to_string())][0].ref_table, "parent_b");
+        } else {
+            modern.expect_err("pre-9.4 server must reject multi-array unnest");
+        }
+
+        let relation_oids: Vec<i64> = client
+            .query(
+                "SELECT c.oid::bigint \
+                 FROM pg_catalog.pg_class c \
+                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE n.nspname = $1 ORDER BY c.relname",
+                &[&schema],
+            )
+            .await
+            .expect("query fixture relation oids")
+            .into_iter()
+            .map(|row| row.get(0))
+            .collect();
+        get_table_partition_local_objects_for_relations_with_sql(
+            &client,
+            postgres_table_partition_local_objects_for_relations_compat_sql(),
+            &relation_oids,
+        )
+        .await
+        .expect("pre-parent-clone local-object query");
+        let modern_local_objects = get_table_partition_local_objects_for_relations_with_sql(
+            &client,
+            postgres_table_partition_local_objects_for_relations_sql(),
+            &relation_oids,
+        )
+        .await;
+        if version_num >= 90300 {
+            modern_local_objects.expect("JSON-extraction local-object query");
+        } else {
+            modern_local_objects.expect_err("PostgreSQL 9.2 must reject the JSON ->> operator");
+        }
+        drop(client);
+
+        let child_ddl = crate::schema::pg_ddl_with_partitions(&pool, &schema, "child_a")
+            .await
+            .expect("display DDL with foreign key");
+        let without_fk_ddl = crate::schema::pg_ddl_with_partitions(&pool, &schema, "without_fk")
+            .await
+            .expect("display DDL without foreign key");
+        execute_query(&pool, &format!("DROP SCHEMA {schema_ident} CASCADE"))
+            .await
+            .expect("drop batched foreign-key fixtures");
+
+        assert!(child_ddl.contains("FOREIGN KEY"), "child ddl: {child_ddl}");
+        assert!(!without_fk_ddl.contains("FOREIGN KEY"), "without-fk ddl: {without_fk_ddl}");
     }
 
     #[tokio::test]

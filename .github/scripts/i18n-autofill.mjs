@@ -6,7 +6,7 @@ import { dirname, join, resolve } from "node:path";
 
 const LOCALES_DIR = "apps/desktop/src/i18n/locales";
 const SOURCE_LOCALE = "zh-CN";
-const TARGET_LOCALES = ["en", "es", "it", "ja", "pt-BR", "zh-TW"];
+const TARGET_LOCALES = ["en", "es", "it", "ja", "ko", "pt-BR", "zh-TW"];
 // `git show <ref>:<path>` needs forward slashes even on Windows, where
 // `path.join()` yields backslashes. Allow an override (CI keeps the default).
 const refPath = (path) => path.replaceAll("\\", "/");
@@ -15,6 +15,7 @@ const TARGET_LABELS = {
   es: "Spanish",
   it: "Italian",
   ja: "Japanese",
+  ko: "Korean",
   "pt-BR": "Brazilian Portuguese",
   "zh-TW": "Traditional Chinese used in Taiwan",
 };

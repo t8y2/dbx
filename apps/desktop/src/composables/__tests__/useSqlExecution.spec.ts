@@ -7,6 +7,7 @@ import { useHistoryStore } from "@/stores/historyStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
+import * as objectMetadataCache from "@/lib/metadata/objectMetadataCache";
 import type { ConnectionConfig, QueryTab } from "@/types/database";
 
 vi.mock("vue-i18n", () => ({
@@ -18,6 +19,11 @@ vi.mock("@/lib/backend/api", () => ({
   saveEditorSettings: vi.fn(),
   saveHistory: vi.fn(),
 }));
+
+vi.mock("@/lib/metadata/objectMetadataCache", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/metadata/objectMetadataCache")>();
+  return { ...actual, invalidateObjectMetadataCache: vi.fn() };
+});
 
 function installLocalStorage() {
   const data = new Map<string, string>();
@@ -126,6 +132,7 @@ describe("useSqlExecution", () => {
   beforeEach(() => {
     installLocalStorage();
     setActivePinia(createPinia());
+    vi.mocked(objectMetadataCache.invalidateObjectMetadataCache).mockClear();
   });
 
   it("invalidates object metadata after successful connection-level DDL", async () => {
@@ -153,6 +160,35 @@ describe("useSqlExecution", () => {
 
     expect(invalidateMetadata).toHaveBeenCalledWith("conn-1");
     expect(loadDatabases).toHaveBeenCalledWith("conn-1", { force: true });
+  });
+
+  it("invalidates table facets after successful Kingbase constraint DDL", async () => {
+    const sql = "ALTER TABLE public.orders DISABLE CONSTRAINT orders_check";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), schema: "public", sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("kingbase"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const connectionStore = useConnectionStore();
+    useSettingsStore().editorSettings.confirmDangerousSqlExecution = false;
+    vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (activeTab.value) activeTab.value.result = { columns: [], rows: [], affected_rows: 0, execution_time_ms: 1 };
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+    const invalidateObjectMetadata = vi.mocked(objectMetadataCache.invalidateObjectMetadataCache).mockResolvedValue(undefined);
+    const refreshObjects = vi.spyOn(connectionStore, "refreshObjectListTreeNode").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+      requestDangerConfirmation: async () => true,
+    });
+
+    await execution.tryExecute();
+
+    expect(invalidateObjectMetadata).toHaveBeenCalledWith({ connectionId: "conn-1", database: "app", schema: "public" });
+    expect(refreshObjects).toHaveBeenCalledWith("conn-1", "app", "public");
   });
 
   it("sends every placeholder syntax and @set unchanged when substitution is disabled", async () => {

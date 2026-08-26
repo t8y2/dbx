@@ -129,27 +129,30 @@ type querySession struct {
 }
 
 type server struct {
-	db                         *sql.DB
-	openDatabase               kingbaseDBOpener
-	params                     connectParams
-	mode                       kingbaseMode
-	usePgDefaultExpression     bool
-	usePgViewDefinition        bool
-	usePgFunctionDefinition    bool
-	useLegacyRoutineDefinition bool
-	catalogIdentityUnsupported bool
-	catalogOIDUnsupported      bool
-	infoColumnTypeUnsupported  bool
-	infoUdtNameUnsupported     bool
-	indexOrdinalityUnsupported bool
-	triggerPrettyUnsupported   bool
-	triggerInternalUnsupported bool
-	currentSchema              string
-	schemaSet                  bool
-	sessions                   map[string]*querySession
-	nextSessionID              uint64
-	activeCancelMu             sync.Mutex
-	activeCancel               context.CancelFunc
+	db                              *sql.DB
+	openDatabase                    kingbaseDBOpener
+	params                          connectParams
+	mode                            kingbaseMode
+	usePgDefaultExpression          bool
+	usePgViewDefinition             bool
+	usePgFunctionDefinition         bool
+	useLegacyRoutineDefinition      bool
+	catalogIdentityUnsupported      bool
+	catalogOIDUnsupported           bool
+	infoColumnTypeUnsupported       bool
+	infoUdtNameUnsupported          bool
+	indexOrdinalityUnsupported      bool
+	triggerPrettyUnsupported        bool
+	triggerInternalUnsupported      bool
+	constraintDefinitionUnsupported bool
+	constraintValidatedUnsupported  bool
+	constraintStatusUnsupported     bool
+	currentSchema                   string
+	schemaSet                       bool
+	sessions                        map[string]*querySession
+	nextSessionID                   uint64
+	activeCancelMu                  sync.Mutex
+	activeCancel                    context.CancelFunc
 }
 
 type agentSession struct {
@@ -407,6 +410,9 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 	case "list_foreign_keys":
 		result, err := s.listForeignKeys(stringParam(params, "schema"), stringParam(params, "table"))
 		return result, false, err
+	case "list_constraints":
+		result, err := s.listConstraints(stringParam(params, "schema"), stringParam(params, "table"))
+		return result, false, err
 	case "list_triggers":
 		result, err := s.listTriggers(stringParam(params, "schema"), stringParam(params, "table"))
 		return result, false, err
@@ -477,6 +483,9 @@ func (s *server) connect(cp connectParams) error {
 	s.indexOrdinalityUnsupported = false
 	s.triggerPrettyUnsupported = false
 	s.triggerInternalUnsupported = false
+	s.constraintDefinitionUnsupported = false
+	s.constraintValidatedUnsupported = false
+	s.constraintStatusUnsupported = false
 	return nil
 }
 
@@ -561,6 +570,9 @@ func (s *server) disconnect() error {
 	s.indexOrdinalityUnsupported = false
 	s.triggerPrettyUnsupported = false
 	s.triggerInternalUnsupported = false
+	s.constraintDefinitionUnsupported = false
+	s.constraintValidatedUnsupported = false
+	s.constraintStatusUnsupported = false
 	s.currentSchema = ""
 	s.schemaSet = false
 	if s.db == nil {

@@ -6,14 +6,24 @@ import { uuid } from "@/lib/common/utils";
 import type { QueryTab } from "@/types/database";
 
 export const TAB_WINDOW_TRANSFER_MIME = "application/x-dbx-tab";
+export const TAB_WINDOW_TRANSFER_TEXT_PREFIX = "dbx-tab-transfer:";
+export const TAB_WINDOW_TRANSFER_EVENT = "dbx:tab-window-transfer";
 const DETACHED_TAB_QUERY = "dbxTransfer";
 const TRANSFER_STORAGE_PREFIX = "dbx-tab-window-transfer:";
 const ACCEPTED_STORAGE_PREFIX = "dbx-tab-window-transfer-accepted:";
+const ACTIVE_TRANSFER_STORAGE_KEY = "dbx-active-tab-window-transfer";
+const ACTIVE_TRANSFER_MAX_AGE_MS = 20_000;
 
 export interface TabWindowTransferPayload {
   transferId: string;
   sourceWindowLabel: string;
   tab: SavedOpenTab;
+  /** Live state is kept separately from persisted tab state so results and editor context survive a move. */
+  liveTab?: QueryTab;
+}
+
+function jsonSafeReplacer(_key: string, value: unknown): unknown {
+  return typeof value === "bigint" ? value.toString() : value;
 }
 
 function transferStorageKey(transferId: string): string {
@@ -22,6 +32,10 @@ function transferStorageKey(transferId: string): string {
 
 function acceptedStorageKey(transferId: string): string {
   return `${ACCEPTED_STORAGE_PREFIX}${transferId}`;
+}
+
+function activeTransferStorageValue(transferId: string): string {
+  return JSON.stringify({ transferId, startedAt: Date.now() });
 }
 
 export function isDetachedTabWindow(): boolean {
@@ -39,11 +53,22 @@ export function createTabWindowTransfer(tab: QueryTab, sourceWindowLabel: string
     transferId: uuid(),
     sourceWindowLabel,
     tab: serializeOpenTabs([tab])[0]!,
+    liveTab: JSON.parse(JSON.stringify(tab, jsonSafeReplacer)) as QueryTab,
   };
 }
 
 export function encodeTabWindowTransfer(payload: TabWindowTransferPayload): string {
-  return JSON.stringify(payload);
+  return JSON.stringify(payload, jsonSafeReplacer);
+}
+
+export function encodeTabWindowTransferToken(transferId: string): string {
+  return `${TAB_WINDOW_TRANSFER_TEXT_PREFIX}${transferId}`;
+}
+
+export function decodeTabWindowTransferToken(value: string | null | undefined): string | null {
+  if (!value?.startsWith(TAB_WINDOW_TRANSFER_TEXT_PREFIX)) return null;
+  const transferId = value.slice(TAB_WINDOW_TRANSFER_TEXT_PREFIX.length).trim();
+  return transferId || null;
 }
 
 export function decodeTabWindowTransfer(value: string | null | undefined): TabWindowTransferPayload | null {
@@ -51,6 +76,7 @@ export function decodeTabWindowTransfer(value: string | null | undefined): TabWi
   try {
     const parsed = JSON.parse(value) as Partial<TabWindowTransferPayload>;
     if (!parsed.transferId || !parsed.sourceWindowLabel || !parsed.tab || typeof parsed.tab.id !== "string") return null;
+    if (parsed.liveTab !== undefined && (!parsed.liveTab || typeof parsed.liveTab.id !== "string")) return null;
     return parsed as TabWindowTransferPayload;
   } catch {
     return null;
@@ -59,13 +85,49 @@ export function decodeTabWindowTransfer(value: string | null | undefined): TabWi
 
 export function storeDetachedTabTransfer(payload: TabWindowTransferPayload): void {
   safeLocalStorageSet(transferStorageKey(payload.transferId), encodeTabWindowTransfer(payload));
+  // Chromium does not consistently expose drag DataTransfer data to a separate
+  // WebView during `dragover`. Publish the active transfer so every DBX window
+  // can still recognize the drop before the browser reveals `getData()`.
+  safeLocalStorageSet(ACTIVE_TRANSFER_STORAGE_KEY, activeTransferStorageValue(payload.transferId));
+}
+
+export function readTabWindowTransfer(transferId: string): TabWindowTransferPayload | null {
+  return decodeTabWindowTransfer(safeLocalStorageGet(transferStorageKey(transferId)));
+}
+
+export function readActiveTabWindowTransfer(): TabWindowTransferPayload | null {
+  const raw = safeLocalStorageGet(ACTIVE_TRANSFER_STORAGE_KEY);
+  if (!raw) return null;
+  try {
+    const active = JSON.parse(raw) as { transferId?: unknown; startedAt?: unknown };
+    if (typeof active.transferId !== "string" || typeof active.startedAt !== "number" || Date.now() - active.startedAt > ACTIVE_TRANSFER_MAX_AGE_MS) {
+      safeLocalStorageRemove(ACTIVE_TRANSFER_STORAGE_KEY);
+      return null;
+    }
+    const payload = readTabWindowTransfer(active.transferId);
+    if (!payload) safeLocalStorageRemove(ACTIVE_TRANSFER_STORAGE_KEY);
+    return payload;
+  } catch {
+    safeLocalStorageRemove(ACTIVE_TRANSFER_STORAGE_KEY);
+    return null;
+  }
+}
+
+export function clearTabWindowTransfer(transferId: string): void {
+  safeLocalStorageRemove(transferStorageKey(transferId));
+  try {
+    const active = JSON.parse(safeLocalStorageGet(ACTIVE_TRANSFER_STORAGE_KEY) ?? "null") as { transferId?: unknown } | null;
+    if (active?.transferId === transferId) safeLocalStorageRemove(ACTIVE_TRANSFER_STORAGE_KEY);
+  } catch {
+    safeLocalStorageRemove(ACTIVE_TRANSFER_STORAGE_KEY);
+  }
 }
 
 export function consumeDetachedTabTransfer(): TabWindowTransferPayload | null {
   const token = detachedTabTransferToken();
   if (!token) return null;
-  const payload = decodeTabWindowTransfer(safeLocalStorageGet(transferStorageKey(token)));
-  safeLocalStorageRemove(transferStorageKey(token));
+  const payload = readTabWindowTransfer(token);
+  clearTabWindowTransfer(token);
   if (typeof window !== "undefined") {
     const url = new URL(window.location.href);
     url.searchParams.delete(DETACHED_TAB_QUERY);
@@ -83,6 +145,61 @@ export function consumeTabWindowTransferAccepted(transferId: string): boolean {
   const accepted = safeLocalStorageGet(key) !== null;
   if (accepted) safeLocalStorageRemove(key);
   return accepted;
+}
+
+export async function waitForTabWindowTransferAccepted(transferId: string, timeoutMs = 350): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (consumeTabWindowTransferAccepted(transferId)) return true;
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+  }
+  return consumeTabWindowTransferAccepted(transferId);
+}
+
+/**
+ * Finds the DBX window physically below the pointer when a native drag ends.
+ * WebView2 does not reliably deliver DOM `drop` events between WebViews, so
+ * this source-side hit test is the authoritative cross-window destination.
+ */
+export async function tabWindowAtCursor(): Promise<string | null> {
+  if (!isTauriRuntime()) return null;
+  const { cursorPosition, getAllWindows, getCurrentWindow } = await import("@tauri-apps/api/window");
+  const cursor = await cursorPosition();
+  const sourceWindowLabel = getCurrentWindow().label;
+  const windows = await getAllWindows();
+  const candidates = await Promise.all(
+    windows
+      .filter((window) => window.label !== sourceWindowLabel)
+      .map(async (window) => {
+        try {
+          const [position, size, focused] = await Promise.all([window.outerPosition(), window.outerSize(), window.isFocused()]);
+          const containsCursor = cursor.x >= position.x && cursor.x < position.x + size.width && cursor.y >= position.y && cursor.y < position.y + size.height;
+          return containsCursor ? { label: window.label, focused } : null;
+        } catch {
+          return null;
+        }
+      }),
+  );
+  // A drop focuses its target on Windows. Prefer that window if native window
+  // rectangles overlap, while preserving deterministic behavior otherwise.
+  return candidates.filter((candidate): candidate is { label: string; focused: boolean } => !!candidate).sort((a, b) => Number(b.focused) - Number(a.focused))[0]?.label ?? null;
+}
+
+export async function sendTabWindowTransfer(targetWindowLabel: string, payload: TabWindowTransferPayload): Promise<boolean> {
+  if (!isTauriRuntime()) return false;
+  try {
+    const { emitTo } = await import("@tauri-apps/api/event");
+    await emitTo({ kind: "WebviewWindow", label: targetWindowLabel }, TAB_WINDOW_TRANSFER_EVENT, payload);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function listenForTabWindowTransfer(handler: (payload: TabWindowTransferPayload) => void): Promise<() => void> {
+  if (!isTauriRuntime()) return () => {};
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<TabWindowTransferPayload>(TAB_WINDOW_TRANSFER_EVENT, (event) => handler(event.payload));
 }
 
 export async function currentTabWindowLabel(): Promise<string> {
@@ -118,7 +235,7 @@ export async function createDetachedTabWindow(payload: TabWindowTransferPayload)
     const settle = (created: boolean) => {
       if (settled) return;
       settled = true;
-      if (!created) safeLocalStorageRemove(transferStorageKey(payload.transferId));
+      if (!created) clearTabWindowTransfer(payload.transferId);
       resolve(created);
     };
     void child.once("tauri://created", () => settle(true));

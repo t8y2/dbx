@@ -22,7 +22,26 @@ import { copyToClipboard } from "@/lib/common/clipboard";
 import { useToast } from "@/composables/useToast";
 import { activeTabSidebarTarget } from "@/lib/sidebar/sidebarActiveTabTarget";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
-import { TAB_WINDOW_TRANSFER_MIME, consumeTabWindowTransferAccepted, createDetachedTabWindow, createTabWindowTransfer, currentTabWindowLabel, decodeTabWindowTransfer, encodeTabWindowTransfer, markTabWindowTransferAccepted, type TabWindowTransferPayload } from "@/lib/tabs/tabWindowTransfer";
+import {
+  TAB_WINDOW_TRANSFER_MIME,
+  createDetachedTabWindow,
+  createTabWindowTransfer,
+  currentTabWindowLabel,
+  decodeTabWindowTransfer,
+  decodeTabWindowTransferToken,
+  encodeTabWindowTransfer,
+  encodeTabWindowTransferToken,
+  markTabWindowTransferAccepted,
+  readActiveTabWindowTransfer,
+  readTabWindowTransfer,
+  storeDetachedTabTransfer,
+  clearTabWindowTransfer,
+  listenForTabWindowTransfer,
+  sendTabWindowTransfer,
+  tabWindowAtCursor,
+  waitForTabWindowTransferAccepted,
+  type TabWindowTransferPayload,
+} from "@/lib/tabs/tabWindowTransfer";
 import type { QueryTab } from "@/types/database";
 
 const props = defineProps<{
@@ -55,8 +74,14 @@ const { toast } = useToast();
 const tabDrag = useTabDrag((draggedId, targetId, position) => {
   return queryStore.reorderTab(draggedId, targetId, position);
 });
-const currentWindowLabel = ref("unknown");
-const nativeTabDrag = ref<{ payload: TabWindowTransferPayload; accepted: boolean } | null>(null);
+// Tauri resolves the permanent label asynchronously. A per-WebView fallback
+// keeps early drags from mistaking two newly opened windows for the same one.
+const currentWindowLabel = ref(`dbx-webview-${Math.random().toString(36).slice(2)}`);
+const nativeTabDrag = ref<{ payload: TabWindowTransferPayload; accepted: boolean; dragImage: HTMLElement | null } | null>(null);
+const nativeTabDropTarget = ref<{ tabId: string; position: "before" | "after" } | null>(null);
+const nativeTabPreview = ref<{ title: string; left: number; top: number } | null>(null);
+let removeTabWindowTransferListener: (() => void) | null = null;
+let tabWindowTransferListenerUnmounted = false;
 const editingTabId = ref<string | null>(null);
 const editingTitle = ref("");
 const isClassicLayout = computed(() => settingsStore.editorSettings.appLayout === "classic");
@@ -110,16 +135,32 @@ function scheduleCloseConfirmListClose() {
 }
 
 onUnmounted(() => {
+  tabWindowTransferListenerUnmounted = true;
+  removeTabWindowTransferListener?.();
+  removeTabWindowTransferListener = null;
   if (closeConfirmListCloseTimer) {
     clearTimeout(closeConfirmListCloseTimer);
     closeConfirmListCloseTimer = null;
   }
+  window.removeEventListener("dragover", handleWindowTabDragOver);
+  window.removeEventListener("dragleave", handleWindowTabDragLeave);
+  window.removeEventListener("drop", handleWindowTabDrop);
 });
 
 onMounted(() => {
+  tabWindowTransferListenerUnmounted = false;
   void currentTabWindowLabel().then((label) => {
     currentWindowLabel.value = label;
   });
+  void listenForTabWindowTransfer(handleIncomingTabWindowTransfer)
+    .then((unlisten) => {
+      if (tabWindowTransferListenerUnmounted) unlisten();
+      else removeTabWindowTransferListener = unlisten;
+    })
+    .catch((error) => console.warn("[DBX][tab-window-transfer:listen:error]", error));
+  window.addEventListener("dragover", handleWindowTabDragOver);
+  window.addEventListener("dragleave", handleWindowTabDragLeave);
+  window.addEventListener("drop", handleWindowTabDrop);
 });
 
 watch(
@@ -597,51 +638,207 @@ function handleTabMouseDown(event: PointerEvent, tabId: string) {
 
 function dragPayloadFromEvent(event: DragEvent): TabWindowTransferPayload | null {
   const raw = event.dataTransfer?.getData(TAB_WINDOW_TRANSFER_MIME);
-  return decodeTabWindowTransfer(raw);
+  const payload = decodeTabWindowTransfer(raw);
+  if (payload) return readTabWindowTransfer(payload.transferId) ?? payload;
+  const transferId = decodeTabWindowTransferToken(event.dataTransfer?.getData("text/plain"));
+  return (transferId ? readTabWindowTransfer(transferId) : null) ?? readActiveTabWindowTransfer();
+}
+
+function clearNativeTabDropTarget() {
+  nativeTabDropTarget.value = null;
+}
+
+function clearNativeTabPreview() {
+  nativeTabPreview.value = null;
+}
+
+function updateNativeTabPreview(event: DragEvent, payload?: TabWindowTransferPayload | null) {
+  const transfer = payload ?? dragPayloadFromEvent(event) ?? nativeTabDrag.value?.payload;
+  if (!transfer) return;
+  nativeTabPreview.value = {
+    title: transfer?.liveTab?.title ?? transfer?.tab.title ?? "移动标签页",
+    left: Math.max(8, event.clientX + 14),
+    top: Math.max(8, event.clientY + 14),
+  };
+}
+
+function updateNativeTabDropTarget(event: DragEvent) {
+  const target = event.target instanceof Element ? event.target.closest<HTMLElement>("[data-tab-id]") : null;
+  if (!target?.dataset.tabId) {
+    clearNativeTabDropTarget();
+    return;
+  }
+  const rect = target.getBoundingClientRect();
+  nativeTabDropTarget.value = {
+    tabId: target.dataset.tabId,
+    position: event.clientX - rect.left < rect.width / 2 ? "before" : "after",
+  };
+}
+
+function createTabDragImage(tab: QueryTab): HTMLElement {
+  const preview = document.createElement("div");
+  preview.textContent = tabTitleText(tab);
+  preview.style.cssText = [
+    "position: fixed",
+    "top: -1000px",
+    "left: -1000px",
+    "z-index: 99999",
+    "max-width: 260px",
+    "padding: 7px 12px",
+    "border: 1px solid color-mix(in srgb, var(--border) 80%, transparent)",
+    "border-radius: 7px",
+    "background: var(--background)",
+    "color: var(--foreground)",
+    "box-shadow: 0 8px 24px rgb(0 0 0 / 24%)",
+    "font: 12px/18px sans-serif",
+    "white-space: nowrap",
+    "overflow: hidden",
+    "text-overflow: ellipsis",
+    "pointer-events: none",
+  ].join(";");
+  document.body.appendChild(preview);
+  return preview;
 }
 
 function handleTabDragStart(event: DragEvent, tab: QueryTab) {
   const payload = createTabWindowTransfer(tab, currentWindowLabel.value);
-  nativeTabDrag.value = { payload, accepted: false };
-  tabDrag.cancelDrag();
+  const dragImage = createTabDragImage(tab);
+  nativeTabDrag.value = { payload, accepted: false, dragImage };
+  nativeTabPreview.value = { title: tab.title, left: 14, top: 14 };
   if (!event.dataTransfer) return;
   event.dataTransfer.effectAllowed = "move";
+  event.dataTransfer.setDragImage(dragImage, 18, 16);
   event.dataTransfer.setData(TAB_WINDOW_TRANSFER_MIME, encodeTabWindowTransfer(payload));
-  event.dataTransfer.setData("text/plain", tabTitleText(tab));
+  // Windows/Tauri webviews may not expose custom MIME types across windows.
+  // Keep the full payload in shared storage and use a small text token as fallback.
+  event.dataTransfer.setData("text/plain", encodeTabWindowTransferToken(payload.transferId));
+  storeDetachedTabTransfer(payload);
+}
+
+function handleTabDrag(event: DragEvent) {
+  updateNativeTabPreview(event);
 }
 
 function handleTabDragOver(event: DragEvent) {
-  if (!dragPayloadFromEvent(event)) return;
+  const payload = dragPayloadFromEvent(event) ?? nativeTabDrag.value?.payload;
+  if (!payload) return;
   event.preventDefault();
+  updateNativeTabPreview(event, payload);
+  updateNativeTabDropTarget(event);
   if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+}
+
+function handleWindowTabDragOver(event: DragEvent) {
+  const payload = dragPayloadFromEvent(event) ?? nativeTabDrag.value?.payload;
+  if (!payload) return;
+  // Keep every DBX window, including one whose last tab was moved away, a
+  // valid destination. Child tab targets still stop the final drop so they can
+  // calculate an insertion position.
+  event.preventDefault();
+  updateNativeTabPreview(event, payload);
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+}
+
+function handleWindowTabDragLeave(event: DragEvent) {
+  // `dragleave` fires for every child transition. Clear the target visual only
+  // after leaving the WebView, otherwise the next window-level `dragover`
+  // would visibly flicker the preview.
+  if (!(event.relatedTarget instanceof Node)) {
+    clearNativeTabDropTarget();
+    clearNativeTabPreview();
+  }
+}
+
+function acceptTabWindowTransfer(payload: TabWindowTransferPayload): boolean {
+  if (payload.sourceWindowLabel === currentWindowLabel.value) return false;
+  const importedTabId = queryStore.importTransferredTab(payload.tab, payload.liveTab);
+  if (!importedTabId) {
+    // A retried native event can arrive after the first delivery succeeded.
+    // Treat the existing tab as an acknowledged idempotent move.
+    if (!queryStore.tabs.some((tab) => tab.id === payload.tab.id)) return false;
+    queryStore.switchTab(payload.tab.id);
+  }
+  markTabWindowTransferAccepted(payload.transferId);
+  clearTabWindowTransfer(payload.transferId);
+  clearNativeTabDropTarget();
+  clearNativeTabPreview();
+  return true;
+}
+
+function handleIncomingTabWindowTransfer(payload: TabWindowTransferPayload) {
+  acceptTabWindowTransfer(payload);
 }
 
 function handleTabDrop(event: DragEvent, targetTab?: QueryTab) {
   const payload = dragPayloadFromEvent(event);
-  if (!payload) return;
+  if (!payload) {
+    clearNativeTabDropTarget();
+    return;
+  }
   event.preventDefault();
   event.stopPropagation();
 
   if (payload.sourceWindowLabel === currentWindowLabel.value) {
     if (nativeTabDrag.value) nativeTabDrag.value.accepted = true;
-    if (!targetTab || targetTab.id === payload.tab.id) return;
+    if (!targetTab || targetTab.id === payload.tab.id) {
+      clearNativeTabDropTarget();
+      return;
+    }
     const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
     const position = event.clientX - rect.left < rect.width / 2 ? "before" : "after";
     queryStore.reorderTab(payload.tab.id, targetTab.id, position);
+    clearNativeTabDropTarget();
     return;
   }
 
-  const importedTabId = queryStore.importTransferredTab(payload.tab);
-  if (!importedTabId) return;
-  markTabWindowTransferAccepted(payload.transferId);
+  acceptTabWindowTransfer(payload);
+}
+
+function handleWindowTabDrop(event: DragEvent) {
+  handleTabDrop(event);
 }
 
 async function handleTabDragEnd() {
   const drag = nativeTabDrag.value;
   nativeTabDrag.value = null;
+  drag?.dragImage?.remove();
+  clearNativeTabDropTarget();
+  clearNativeTabPreview();
   tabDrag.cancelDrag();
-  if (!drag || drag.accepted || consumeTabWindowTransferAccepted(drag.payload.transferId)) return;
-  if (!isTauriRuntime()) return;
+  if (!drag) return;
+  // A same-window drop keeps the existing tab. A different window writes an
+  // explicit acknowledgement only after it has imported the tab, which avoids
+  // treating an arbitrary `dropEffect` as a successful cross-window move.
+  if (drag.accepted) {
+    clearTabWindowTransfer(drag.payload.transferId);
+    return;
+  }
+  // DOM drag events do not reliably cross native WebView windows on Windows.
+  // Resolve the destination from the OS cursor position and deliver the tab via
+  // Tauri's window event channel before considering the new-window fallback.
+  const targetWindowLabel = await tabWindowAtCursor();
+  if (targetWindowLabel) {
+    const delivered = await sendTabWindowTransfer(targetWindowLabel, drag.payload);
+    if (delivered && (await waitForTabWindowTransferAccepted(drag.payload.transferId))) {
+      queryStore.detachTabForTransfer(drag.payload.tab.id);
+      clearTabWindowTransfer(drag.payload.transferId);
+      return;
+    }
+    // The pointer was inside a DBX window. Preserve the source tab rather than
+    // creating an unexpected third window if its receiver is not ready.
+    clearTabWindowTransfer(drag.payload.transferId);
+    return;
+  }
+  const acceptedByTarget = await waitForTabWindowTransferAccepted(drag.payload.transferId);
+  if (acceptedByTarget) {
+    queryStore.detachTabForTransfer(drag.payload.tab.id);
+    clearTabWindowTransfer(drag.payload.transferId);
+    return;
+  }
+  if (!isTauriRuntime()) {
+    clearTabWindowTransfer(drag.payload.transferId);
+    return;
+  }
 
   const created = await createDetachedTabWindow(drag.payload);
   if (created) queryStore.detachTabForTransfer(drag.payload.tab.id);
@@ -657,6 +854,14 @@ function handleTabDragTarget(event: MouseEvent, tab: QueryTab) {
 }
 
 function tabDropStyle(tabId: string) {
+  const nativeDrop = nativeTabDropTarget.value;
+  if (nativeDrop?.tabId === tabId) {
+    const dropColor = "var(--ring)";
+    return {
+      boxShadow: nativeDrop.position === "before" ? `inset 3px 0 0 0 ${dropColor}` : `inset -3px 0 0 0 ${dropColor}`,
+      backgroundColor: "color-mix(in oklch, var(--ring) 10%, var(--app-tab-background))",
+    };
+  }
   if (!tabDrag.state.active) return {};
   if (tabDrag.state.draggedId === tabId) return { opacity: 0.4 };
   if (tabDrag.state.targetId !== tabId) return {};
@@ -744,6 +949,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                 <TooltipTrigger as-child>
                   <div
                     draggable="true"
+                    :data-tab-id="tab.id"
                     class="app-tab-pill group flex cursor-default items-center gap-1 px-2 text-xs transition-colors whitespace-nowrap select-none"
                     :class="
                       isClassicLayout
@@ -764,6 +970,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                     @mousemove="handleTabDragTarget($event, tab)"
                     @mouseleave="tabDrag.clearTarget(tab.id)"
                     @dragstart="handleTabDragStart($event, tab)"
+                    @drag="handleTabDrag"
                     @dragend="handleTabDragEnd"
                     @dragover="handleTabDragOver"
                     @drop="handleTabDrop($event, tab)"
@@ -959,6 +1166,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                 <TooltipTrigger as-child>
                   <div
                     draggable="true"
+                    :data-tab-id="tab.id"
                     class="app-tab-pill group flex cursor-default items-center gap-1 px-2 text-xs transition-colors whitespace-nowrap select-none"
                     :class="
                       isClassicLayout
@@ -979,6 +1187,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                     @mousemove="handleTabDragTarget($event, tab)"
                     @mouseleave="tabDrag.clearTarget(tab.id)"
                     @dragstart="handleTabDragStart($event, tab)"
+                    @drag="handleTabDrag"
                     @dragend="handleTabDragEnd"
                     @dragover="handleTabDragOver"
                     @drop="handleTabDrop($event, tab)"
@@ -1101,6 +1310,12 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
       </div>
     </div>
   </div>
+
+  <Teleport to="body">
+    <div v-if="nativeTabPreview" class="pointer-events-none fixed z-[99999] max-w-64 truncate rounded-md border border-border/80 bg-background px-3 py-1.5 text-xs text-foreground shadow-xl" :style="{ left: `${nativeTabPreview.left}px`, top: `${nativeTabPreview.top}px` }">
+      {{ nativeTabPreview.title }}
+    </div>
+  </Teleport>
 
   <Dialog
     :open="queryStore.showCloseConfirm"

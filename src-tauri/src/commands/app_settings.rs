@@ -106,7 +106,12 @@ pub fn mark_frontend_ready(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn request_app_close_from_window_controls(app: AppHandle) -> Result<(), String> {
+pub async fn request_app_close_from_window_controls(app: AppHandle, window: Window) -> Result<(), String> {
+    // Frameless detached windows use the shared custom titlebar controls. Their
+    // close action must only close the current workspace, not the whole app.
+    if window.label() != "main" {
+        return window.close().map_err(|err| format!("failed to close detached window: {err}"));
+    }
     request_app_close(&app, "settings");
     Ok(())
 }

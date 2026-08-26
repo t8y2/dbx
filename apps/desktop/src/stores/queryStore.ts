@@ -1654,11 +1654,23 @@ export const useQueryStore = defineStore("query", () => {
     }
   }
 
-  function importTransferredTab(savedTab: SavedOpenTab): string | null {
+  function importTransferredTab(savedTab: SavedOpenTab, liveTab?: QueryTab): string | null {
     if (tabs.value.some((tab) => tab.id === savedTab.id)) return null;
     const restored = restoreOpenTabsPayload({ tabs: [savedTab], activeTabId: savedTab.id });
     const tab = restored.tabs[0];
     if (!tab) return null;
+
+    // Window transfer should preserve the current editor/result state instead of
+    // reducing the tab to the restart-safe persisted representation.
+    if (liveTab?.id === tab.id) {
+      Object.assign(tab, liveTab);
+      tab.isExecuting = false;
+      tab.isCancelling = false;
+      tab.queryExecutionStartedAt = undefined;
+      tab.executionId = undefined;
+      tab.isExplaining = false;
+      tab.explainExecutionId = undefined;
+    }
 
     const connection = useConnectionStore().getConfig(tab.connectionId);
     if (tab.mode === "query" && tab.autoCommit === undefined) {

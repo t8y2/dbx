@@ -2689,7 +2689,7 @@ async function initApp() {
     await connectionStore.initFromDisk();
     console.log(`[STARTUP]   connectionStore.initFromDisk: ${(performance.now() - t0).toFixed(0)}ms`);
     await queryStore.initOpenTabs({ validConnectionIds: connectionStore.connections.map((connection) => connection.id), skipRestore: !!detachedTransfer });
-    if (detachedTransfer) queryStore.importTransferredTab(detachedTransfer.tab);
+    if (detachedTransfer) queryStore.importTransferredTab(detachedTransfer.tab, detachedTransfer.liveTab);
     console.log(`[STARTUP]   queryStore.initOpenTabs: ${(performance.now() - t0).toFixed(0)}ms`);
   };
 

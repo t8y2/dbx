@@ -1774,6 +1774,11 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // Detached windows are independent workspaces. Closing one must not
+                // enter the main window's app-wide close flow.
+                if window.label() != "main" {
+                    return;
+                }
                 if !should_hide_window_on_close(std::env::consts::OS) {
                     return;
                 }

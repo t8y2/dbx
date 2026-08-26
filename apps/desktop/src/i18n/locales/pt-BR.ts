@@ -4977,6 +4977,7 @@ export default withEnglishFallback({
     sourceConnection: "Conexão de origem",
     sourceDatabase: "Banco de dados de origem",
     sourceSchema: "Schema de origem",
+    swap: "Trocar origem e destino",
     targetConnection: "Conexão de destino",
     targetDatabase: "Banco de dados de destino",
     targetSchema: "Schema de destino",

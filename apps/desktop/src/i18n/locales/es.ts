@@ -5012,6 +5012,7 @@ export default withEnglishFallback({
     overallProgress: "Progreso general",
     dataTransfer: "Transferencia de datos",
     sourceSchema: "Esquema de origen",
+    swap: "Intercambiar origen y destino",
     targetSchema: "Esquema de destino",
     runInBackground: "Ejecutar en segundo plano",
     newTask: "Nueva transferencia",

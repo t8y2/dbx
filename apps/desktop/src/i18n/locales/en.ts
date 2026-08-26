@@ -5217,6 +5217,7 @@ export default {
     searchCatalog: "Search catalog...",
     sourceDatabase: "Source Database",
     sourceSchema: "Source Schema",
+    swap: "Swap source and target",
     targetConnection: "Target Connection",
     targetDatabase: "Target Database",
     targetSchema: "Target Schema",

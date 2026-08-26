@@ -5004,6 +5004,7 @@ export default withEnglishFallback({
     sourceConnection: "ソース接続",
     sourceDatabase: "ソースデータベース",
     sourceSchema: "ソーススキーマ",
+    swap: "ソースとターゲットを入れ替え",
     targetConnection: "ターゲット接続",
     targetDatabase: "ターゲットデータベース",
     targetSchema: "ターゲットスキーマ",

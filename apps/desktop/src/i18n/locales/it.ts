@@ -4975,6 +4975,7 @@ export default withEnglishFallback({
     sourceConnection: "Connessione Sorgente",
     sourceDatabase: "Database Sorgente",
     sourceSchema: "Schema Sorgente",
+    swap: "Inverti sorgente e destinazione",
     targetConnection: "Connessione Destinazione",
     targetDatabase: "Database Destinazione",
     targetSchema: "Schema Destinazione",

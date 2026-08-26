@@ -4642,6 +4642,7 @@ export default withEnglishFallback({
     sourceConnection: "소스 연결",
     sourceDatabase: "소스 데이터베이스",
     sourceSchema: "소스 스키마",
+    swap: "소스와 대상 교체",
     targetConnection: "대상 연결",
     targetDatabase: "대상 데이터베이스",
     targetSchema: "대상 스키마",

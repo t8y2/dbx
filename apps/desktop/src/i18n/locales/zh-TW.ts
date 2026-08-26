@@ -4301,6 +4301,7 @@ export default withEnglishFallback({
     sourceConnection: "來源連線",
     sourceDatabase: "來源資料庫",
     sourceSchema: "來源 Schema",
+    swap: "交換來源與目標",
     targetConnection: "目標連線",
     targetDatabase: "目標資料庫",
     targetSchema: "目標 Schema",

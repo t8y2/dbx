@@ -5202,6 +5202,7 @@ export default withEnglishFallback({
     searchCatalog: "搜索 Catalog...",
     sourceDatabase: "源数据库",
     sourceSchema: "源 Schema",
+    swap: "交换源和目标",
     targetConnection: "目标连接",
     targetDatabase: "目标数据库",
     targetSchema: "目标 Schema",

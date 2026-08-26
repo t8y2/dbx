@@ -5070,12 +5070,20 @@ function computeBoost(candidate: string, prefix: string): number {
 }
 
 // --- History-based ranking ---
+const COMPLETION_STATS_MAX_ENTRIES = 512;
 const completionStats = new Map<string, number>();
 
 /** Record a user selection to boost future rankings. */
 export function recordCompletionSelection(label: string, type: string): void {
   const key = `${type}:${label}`;
-  completionStats.set(key, (completionStats.get(key) || 0) + 1);
+  const count = completionStats.get(key) || 0;
+  completionStats.delete(key);
+  completionStats.set(key, count + 1);
+  while (completionStats.size > COMPLETION_STATS_MAX_ENTRIES) {
+    const oldest = completionStats.keys().next().value;
+    if (oldest === undefined) break;
+    completionStats.delete(oldest);
+  }
 }
 
 function getHistoryBoost(label: string, type: string): number {

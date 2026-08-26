@@ -387,6 +387,42 @@ describe("queryStore hidden primary key editing", () => {
     expect(tab.tableMeta?.schema).toBe("reporting");
   });
 
+  it("executes a constant projection without waiting for Oracle table metadata", async () => {
+    getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", query_timeout_secs: 30 });
+    getColumns.mockResolvedValue([{ name: "DUMMY", data_type: "VARCHAR2(1)", is_nullable: true, column_default: null, is_primary_key: false, extra: null }]);
+    listIndexes.mockResolvedValue([]);
+    listTables.mockReturnValue(new Promise(() => undefined));
+    analyzeEditableQueryEditability.mockResolvedValue({
+      editable: true,
+      analysis: {
+        schema: undefined,
+        tableName: "DUAL",
+        selectStar: false,
+        columns: [{ resultName: "1", expression: "1" }],
+      },
+    });
+    const result = [{ columns: ["1"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }];
+    const executionGate = deferred<typeof result>();
+    executeMulti.mockReturnValue(executionGate.promise);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "ORCL", "Query");
+    store.setAutoCommit(tabId, true);
+    const sql = "SELECT 1 FROM DUAL";
+
+    const execution = store.executeTabSql(tabId, sql);
+    await vi.waitFor(() => expect(executeMulti).toHaveBeenCalled(), { timeout: 250 });
+
+    expect(executeMulti).toHaveBeenCalledWith("oracle-1", "ORCL", sql, undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
+    expect(getColumns).not.toHaveBeenCalled();
+    expect(listIndexes).not.toHaveBeenCalled();
+    expect(listTables).not.toHaveBeenCalled();
+
+    executionGate.resolve(result);
+    await execution;
+  });
+
   it("uses a hidden Oracle ROWID to keep keyless base-table query results editable", async () => {
     getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", query_timeout_secs: 30 });
     getColumns.mockResolvedValue([

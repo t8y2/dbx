@@ -193,6 +193,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
+          token: ${{ secrets.MCP_RELEASE_TOKEN }}
 
       - name: Download package release patch
         uses: actions/download-artifact@v4
@@ -200,15 +201,10 @@ jobs:
           name: package-release-patch
 
       - name: Apply package release patch and push
-        env:
-          RELEASE_TOKEN: ${{ secrets.MCP_RELEASE_TOKEN }}
         run: |
           set -euo pipefail
           TAG="${{ needs.prepare.outputs.tag }}"
           VERSION="${{ needs.prepare.outputs.version }}"
-          if [ -n "${RELEASE_TOKEN}" ]; then
-            git remote set-url origin "https://x-access-token:${RELEASE_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          fi
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git fetch origin main --no-tags

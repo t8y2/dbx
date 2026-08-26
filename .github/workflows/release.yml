@@ -62,6 +62,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
+          token: ${{ secrets.MCP_RELEASE_TOKEN }}
 
       - name: Find previous release tag
         id: prev-tag
@@ -89,6 +90,7 @@ jobs:
           TMP_DIR="$(mktemp -d)"
           cp plugins/jdbc/build.gradle "$TMP_DIR/build.gradle"
           cp plugins/jdbc/manifest.json "$TMP_DIR/manifest.json"
+          git restore plugins/jdbc/build.gradle plugins/jdbc/manifest.json
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -128,12 +130,6 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - platform: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
-          - platform: windows-2022
-            target: x86_64-pc-windows-msvc
-            arch: x64
-          - platform: windows-2022
-            target: aarch64-pc-windows-msvc
-            arch: arm64
 
     runs-on: ${{ matrix.platform }}
     env:
@@ -261,12 +257,207 @@ jobs:
         shell: bash
         run: ${SCCACHE_PATH} --show-stats
 
+  build-windows:
+    needs: release-ready
+    environment: release-signing
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            arch: x64
+            sign_windows: true
+          - target: aarch64-pc-windows-msvc
+            arch: arm64
+            sign_windows: false
+    runs-on: windows-2022
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
+      VSIGN_CERT_HASH: ${{ vars.VSIGN_CERT_HASH }}
+      VSIGN_OPERATOR_SHA1: ${{ vars.VSIGN_OPERATOR_SHA1 }}
+      VSIGN_SERVER: ${{ vars.VSIGN_SERVER }}
+      VSIGN_TOOL_SHA256: ${{ vars.VSIGN_TOOL_SHA256 }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Install frontend dependencies
+        run: pnpm install
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        with:
+          version: "v0.10.0"
+
+      - name: Configure S3 sccache
+        if: env.SCCACHE_GHA_ENABLED != 'true'
+        shell: bash
+        env:
+          CACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
+          CACHE_ENDPOINT: ${{ secrets.SCCACHE_S3_ENDPOINT }}
+          CACHE_REGION: ${{ secrets.SCCACHE_S3_REGION }}
+          CACHE_KEY_PREFIX: ${{ secrets.SCCACHE_S3_KEY_PREFIX }}
+          CACHE_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
+          CACHE_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
+        run: |
+          {
+            echo "SCCACHE_BUCKET=${CACHE_BUCKET}"
+            echo "SCCACHE_ENDPOINT=${CACHE_ENDPOINT}"
+            echo "SCCACHE_REGION=${CACHE_REGION}"
+            echo "SCCACHE_S3_KEY_PREFIX=${CACHE_KEY_PREFIX}"
+            echo "SCCACHE_S3_USE_SSL=true"
+            echo "AWS_ACCESS_KEY_ID=${CACHE_ACCESS_KEY_ID}"
+            echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
+          } >> "$GITHUB_ENV"
+
+      - name: Compute Rust dependency hash
+        id: deps-hash
+        shell: bash
+        run: |
+          {
+            find . -name Cargo.toml -not -path './target/*' -print0 \
+              | sort -z \
+              | xargs -0 sed -E '/^version = /d'
+            grep -v '^version = ' Cargo.lock
+          } | sha256sum | cut -d' ' -f1 | {
+            read -r hash
+            echo "hash=${hash:0:20}" >> "$GITHUB_OUTPUT"
+          }
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./ -> target"
+          shared-key: release-${{ matrix.target }}-${{ steps.deps-hash.outputs.hash }}
+          add-rust-environment-hash-key: false
+          cache-targets: false
+          cache-on-failure: true
+
+      - name: Setup Tauri signing key
+        shell: bash
+        run: |
+          echo "${{ secrets.TAURI_SIGNING_PRIVATE_KEY_BASE64 }}" | base64 --decode > "$RUNNER_TEMP/updater.key"
+          KEY_B64=$(base64 < "$RUNNER_TEMP/updater.key" | tr -d '\r\n')
+          echo "TAURI_SIGNING_PRIVATE_KEY=$KEY_B64" >> "$GITHUB_ENV"
+          if [ -n "${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" ]; then
+            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Setup TrustAsia VSign
+        if: matrix.sign_windows
+        shell: pwsh
+        env:
+          VSIGN_OPERATOR_PFX_B64: ${{ secrets.VSIGN_OPERATOR_PFX_B64 }}
+          VSIGN_OPERATOR_PWD: ${{ secrets.VSIGN_OPERATOR_PWD }}
+        run: ./.github/scripts/setup-vsign.ps1
+
+      - name: Build and sign Tauri app
+        if: matrix.sign_windows
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SSIGNCODE_OPERATOR_PWD: ${{ secrets.VSIGN_OPERATOR_PWD }}
+          VSIGN_KEY_PIN: ${{ secrets.VSIGN_KEY_PIN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseDraft: true
+          args: --target ${{ matrix.target }} --config src-tauri/tauri.vsign.conf.json
+
+      - name: Build unsigned Tauri app
+        if: ${{ !matrix.sign_windows }}
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseDraft: true
+          args: --target ${{ matrix.target }}
+
+      - name: Verify Windows bundles
+        shell: pwsh
+        run: |
+          $bundleRoot = "target/${{ matrix.target }}/release/bundle"
+          $nsisInstallers = @(
+            Get-ChildItem (Join-Path $bundleRoot "nsis") -Filter "*.exe" -File -ErrorAction SilentlyContinue
+          )
+          $msiInstallers = @(
+            Get-ChildItem (Join-Path $bundleRoot "msi") -Filter "*.msi" -File -ErrorAction SilentlyContinue
+          )
+          if ($nsisInstallers.Count -eq 0) {
+            throw "No NSIS installer was produced for ${{ matrix.target }}"
+          }
+          if ($msiInstallers.Count -eq 0) {
+            throw "No MSI installer was produced for ${{ matrix.target }}"
+          }
+          if ("${{ matrix.sign_windows }}" -eq "true") {
+            ./.github/scripts/assert-authenticode.ps1 -Path @(
+              $nsisInstallers.FullName
+              $msiInstallers.FullName
+            )
+          }
+
+      - name: Upload Windows WebView2 offline installer
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SSIGNCODE_OPERATOR_PWD: ${{ matrix.sign_windows && secrets.VSIGN_OPERATOR_PWD || '' }}
+          VSIGN_KEY_PIN: ${{ matrix.sign_windows && secrets.VSIGN_KEY_PIN || '' }}
+        run: |
+          $version = "${env:GITHUB_REF_NAME}".TrimStart("v")
+          $arch = "${{ matrix.arch }}"
+          $bundleDir = "target/${{ matrix.target }}/release/bundle/nsis"
+          $offlineName = "DBX_${version}_${arch}-webview2-offline-setup.exe"
+          $before = @{}
+
+          if (Test-Path $bundleDir) {
+            Get-ChildItem $bundleDir -Filter "*.exe" | ForEach-Object { $before[$_.FullName] = $_.LastWriteTimeUtc }
+          }
+
+          if ("${{ matrix.sign_windows }}" -eq "true") {
+            pnpm tauri bundle --bundles nsis --target ${{ matrix.target }} `
+              --config src-tauri/tauri.webview2-offline.conf.json `
+              --config src-tauri/tauri.vsign.conf.json
+          } else {
+            pnpm tauri bundle --bundles nsis --target ${{ matrix.target }} `
+              --config src-tauri/tauri.webview2-offline.conf.json
+          }
+
+          $installer = Get-ChildItem $bundleDir -Filter "*.exe" |
+            Where-Object { !$before.ContainsKey($_.FullName) -or $_.LastWriteTimeUtc -gt $before[$_.FullName] } |
+            Sort-Object LastWriteTimeUtc -Descending |
+            Select-Object -First 1
+
+          if (!$installer) {
+            throw "Missing WebView2 offline installer in ${bundleDir}"
+          }
+
+          if ("${{ matrix.sign_windows }}" -eq "true") {
+            ./.github/scripts/assert-authenticode.ps1 -Path $installer.FullName
+          }
+          Copy-Item $installer.FullName $offlineName -Force
+          gh release upload "${env:GITHUB_REF_NAME}" $offlineName --repo "${env:GITHUB_REPOSITORY}" --clobber
+
       - name: Upload Windows portable ZIP
-        if: matrix.arch == 'x64' || matrix.arch == 'arm64'
         timeout-minutes: 20
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SSIGNCODE_OPERATOR_PWD: ${{ matrix.sign_windows && secrets.VSIGN_OPERATOR_PWD || '' }}
+          VSIGN_KEY_PIN: ${{ matrix.sign_windows && secrets.VSIGN_KEY_PIN || '' }}
         run: |
           $version = "${env:GITHUB_REF_NAME}".TrimStart("v")
           $arch = "${{ matrix.arch }}"
@@ -278,12 +469,15 @@ jobs:
           $appVersion = ($cargoMetadata.packages | Where-Object { $_.name -eq "dbx" } | Select-Object -First 1).version
 
           if (!(Test-Path $exePath)) {
-            Write-Error "Missing Windows executable: $exePath"
-            exit 1
+            throw "Missing Windows executable: $exePath"
           }
           if (!$appVersion -or $appVersion -ne $version) {
-            Write-Error "Release tag version $version does not match the built DBX package version $appVersion"
-            exit 1
+            throw "Release tag version $version does not match the built DBX package version $appVersion"
+          }
+
+          if ("${{ matrix.sign_windows }}" -eq "true") {
+            ./.github/scripts/vsign-sign.ps1 -FilePath $exePath
+            ./.github/scripts/assert-authenticode.ps1 -Path $exePath
           }
 
           New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
@@ -313,51 +507,41 @@ jobs:
 
           $signatureName = "${zipName}.sig"
           if (!(Test-Path $signatureName)) {
-            Write-Error "Missing portable update signature: $signatureName"
-            exit 1
+            throw "Missing portable update signature: $signatureName"
           }
 
           gh release upload "${env:GITHUB_REF_NAME}" $zipName $signatureName --repo "${env:GITHUB_REPOSITORY}" --clobber
 
-      - name: Upload Windows WebView2 offline installer
-        if: matrix.arch == 'x64' || matrix.arch == 'arm64'
+      - name: Show sccache stats
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: ${SCCACHE_PATH} --show-stats
+
+      - name: Remove temporary VSign files
+        if: ${{ always() && matrix.sign_windows }}
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $version = "${env:GITHUB_REF_NAME}".TrimStart("v")
-          $arch = "${{ matrix.arch }}"
-          $bundleDir = "target/${{ matrix.target }}/release/bundle/nsis"
-          $offlineName = "DBX_${version}_${arch}-webview2-offline-setup.exe"
-          $before = @{}
-
-          if (Test-Path $bundleDir) {
-            Get-ChildItem $bundleDir -Filter "*.exe" | ForEach-Object { $before[$_.FullName] = $_.LastWriteTimeUtc }
+          $workDir = if ([string]::IsNullOrWhiteSpace($env:VSIGN_WORK_DIR)) {
+            Join-Path $env:RUNNER_TEMP "vsign-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          } else {
+            $env:VSIGN_WORK_DIR
           }
-
-          pnpm tauri bundle --bundles nsis --target ${{ matrix.target }} --config src-tauri/tauri.webview2-offline.conf.json
-
-          $installer = Get-ChildItem $bundleDir -Filter "*.exe" |
-            Where-Object { !$before.ContainsKey($_.FullName) -or $_.LastWriteTimeUtc -gt $before[$_.FullName] } |
-            Sort-Object LastWriteTimeUtc -Descending |
-            Select-Object -First 1
-
-          if (!$installer) {
-            Write-Error "Missing WebView2 offline installer in ${bundleDir}"
-            exit 1
+          if (Test-Path -LiteralPath $workDir) {
+            Remove-Item -LiteralPath $workDir -Recurse -Force
           }
-
-          Copy-Item $installer.FullName $offlineName -Force
-          gh release upload "${env:GITHUB_REF_NAME}" $offlineName --repo "${env:GITHUB_REPOSITORY}" --clobber
 
   build-windows-7-offline:
     needs: release-ready
     runs-on: windows-2022
+    environment: release-signing
     env:
       CARGO_INCREMENTAL: "0"
-      RUSTC_WRAPPER: sccache
-      SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
       RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
+      VSIGN_CERT_HASH: ${{ vars.VSIGN_CERT_HASH }}
+      VSIGN_OPERATOR_SHA1: ${{ vars.VSIGN_OPERATOR_SHA1 }}
+      VSIGN_SERVER: ${{ vars.VSIGN_SERVER }}
+      VSIGN_TOOL_SHA256: ${{ vars.VSIGN_TOOL_SHA256 }}
     steps:
       - uses: actions/checkout@v5
 
@@ -377,35 +561,6 @@ jobs:
         with:
           toolchain: nightly-2026-07-22
           components: rust-src
-
-      # sccache must be set up before the WebView2 loader/runtime scripts: they
-      # run `cargo fetch` under the job-wide RUSTC_WRAPPER=sccache, so installing
-      # sccache only after them made cargo abort with "program not found".
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
-        with:
-          version: "v0.10.0"
-
-      - name: Configure S3 sccache
-        if: env.SCCACHE_GHA_ENABLED != 'true'
-        shell: bash
-        env:
-          CACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
-          CACHE_ENDPOINT: ${{ secrets.SCCACHE_S3_ENDPOINT }}
-          CACHE_REGION: ${{ secrets.SCCACHE_S3_REGION }}
-          CACHE_KEY_PREFIX: ${{ secrets.SCCACHE_S3_KEY_PREFIX }}
-          CACHE_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
-          CACHE_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
-        run: |
-          {
-            echo "SCCACHE_BUCKET=${CACHE_BUCKET}"
-            echo "SCCACHE_ENDPOINT=${CACHE_ENDPOINT}"
-            echo "SCCACHE_REGION=${CACHE_REGION}"
-            echo "SCCACHE_S3_KEY_PREFIX=${CACHE_KEY_PREFIX}"
-            echo "SCCACHE_S3_USE_SSL=true"
-            echo "AWS_ACCESS_KEY_ID=${CACHE_ACCESS_KEY_ID}"
-            echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
-          } >> "$GITHUB_ENV"
 
       - name: Prepare Win7-compatible WebView2 loader
         shell: pwsh
@@ -441,10 +596,19 @@ jobs:
         shell: pwsh
         run: ./.github/scripts/assert-win7-pe-compat.ps1 -BinaryPath target/x86_64-win7-windows-msvc/release/dbx.exe
 
+      - name: Setup TrustAsia VSign
+        shell: pwsh
+        env:
+          VSIGN_OPERATOR_PFX_B64: ${{ secrets.VSIGN_OPERATOR_PFX_B64 }}
+          VSIGN_OPERATOR_PWD: ${{ secrets.VSIGN_OPERATOR_PWD }}
+        run: ./.github/scripts/setup-vsign.ps1
+
       - name: Bundle and upload Windows 7 fixed-runtime installer
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SSIGNCODE_OPERATOR_PWD: ${{ secrets.VSIGN_OPERATOR_PWD }}
+          VSIGN_KEY_PIN: ${{ secrets.VSIGN_KEY_PIN }}
         run: |
           $version = "${env:GITHUB_REF_NAME}".TrimStart("v")
           $bundleDir = "target/x86_64-win7-windows-msvc/release/bundle/nsis"
@@ -457,7 +621,9 @@ jobs:
             exit 1
           }
 
-          pnpm tauri bundle --bundles nsis --target x86_64-win7-windows-msvc --config src-tauri/tauri.webview2-win7-fixed.conf.json
+          pnpm tauri bundle --bundles nsis --target x86_64-win7-windows-msvc `
+            --config src-tauri/tauri.webview2-win7-fixed.conf.json `
+            --config src-tauri/tauri.vsign.conf.json
 
           $installer = Get-ChildItem $bundleDir -Filter "*.exe" |
             Sort-Object LastWriteTimeUtc -Descending |
@@ -468,15 +634,23 @@ jobs:
           }
 
           ./.github/scripts/assert-win7-installer-content.ps1 -InstallerPath $installer.FullName
+          ./.github/scripts/assert-authenticode.ps1 -Path $installer.FullName
 
           Copy-Item $installer.FullName $offlineName -Force
           gh release upload "${env:GITHUB_REF_NAME}" $offlineName --repo "${env:GITHUB_REPOSITORY}" --clobber
 
-      - name: Show sccache stats
+      - name: Remove temporary VSign files
         if: always()
-        continue-on-error: true
-        shell: bash
-        run: ${SCCACHE_PATH} --show-stats
+        shell: pwsh
+        run: |
+          $workDir = if ([string]::IsNullOrWhiteSpace($env:VSIGN_WORK_DIR)) {
+            Join-Path $env:RUNNER_TEMP "vsign-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          } else {
+            $env:VSIGN_WORK_DIR
+          }
+          if (Test-Path -LiteralPath $workDir) {
+            Remove-Item -LiteralPath $workDir -Recurse -Force
+          }
 
   static-browser:
     # Fully static musl builds of the browser (dbx-web) variant. No glibc
@@ -581,7 +755,7 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" --clobber
 
   cleanup-release-signatures:
-    needs: [build, build-windows-7-offline]
+    needs: [build, build-windows, build-windows-7-offline]
     runs-on: ubuntu-latest
     steps:
       - name: Remove standalone updater signature assets

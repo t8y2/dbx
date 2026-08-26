@@ -686,6 +686,7 @@ mod tests {
             redis_key_separator: ":".to_string(),
             redis_scan_page_size: Some(1000),
             redis_database_aliases: Default::default(),
+            redis_key_templates: Vec::new(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),

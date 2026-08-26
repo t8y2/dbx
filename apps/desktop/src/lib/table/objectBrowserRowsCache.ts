@@ -4,6 +4,7 @@ import type { ObjectBrowserRow } from "@/lib/table/objectBrowserRows";
 
 const OBJECT_BROWSER_ROWS_CACHE_TTL_MS = 30_000;
 const OBJECT_BROWSER_ROWS_CACHE_MAX_ENTRIES = 24;
+const OBJECT_BROWSER_ROWS_GENERATION_MAX_ENTRIES = 128;
 
 export interface ObjectBrowserRowsCacheScope {
   connectionId: string;
@@ -28,6 +29,7 @@ const objectBrowserRowsCache = new MetadataResultCache<ObjectBrowserRow[]>({
   now: () => Date.now(),
 });
 const objectBrowserRowsCacheGenerations = new Map<string, ObjectBrowserRowsCacheGeneration>();
+let nextObjectBrowserRowsCacheGeneration = 0;
 
 function objectBrowserRowsScope(scope: ObjectBrowserRowsCacheScope): MetadataScopeInput {
   return {
@@ -48,7 +50,15 @@ function objectBrowserRowsCacheGeneration(scope: ObjectBrowserRowsCacheScope): O
   const key = metadataScopeKey(cacheScope);
   let state = objectBrowserRowsCacheGenerations.get(key);
   if (!state) {
-    state = { generation: 0, scope: metadataScopeParts(cacheScope) };
+    state = { generation: ++nextObjectBrowserRowsCacheGeneration, scope: metadataScopeParts(cacheScope) };
+    objectBrowserRowsCacheGenerations.set(key, state);
+    while (objectBrowserRowsCacheGenerations.size > OBJECT_BROWSER_ROWS_GENERATION_MAX_ENTRIES) {
+      const oldest = objectBrowserRowsCacheGenerations.keys().next().value;
+      if (oldest === undefined) break;
+      objectBrowserRowsCacheGenerations.delete(oldest);
+    }
+  } else {
+    objectBrowserRowsCacheGenerations.delete(key);
     objectBrowserRowsCacheGenerations.set(key, state);
   }
   return state;
@@ -83,13 +93,13 @@ export function cacheObjectBrowserRows(token: ObjectBrowserRowsCacheWriteToken, 
 export function invalidateObjectBrowserRowsCache(match: MetadataCacheInvalidation): number {
   const projected = objectBrowserRowsCacheInvalidation(match);
   const matches = metadataCacheInvalidationMatcher(projected);
-  for (const state of objectBrowserRowsCacheGenerations.values()) {
-    if (matches(state.scope)) state.generation++;
+  for (const [key, state] of objectBrowserRowsCacheGenerations) {
+    if (matches(state.scope)) objectBrowserRowsCacheGenerations.delete(key);
   }
   return objectBrowserRowsCache.invalidate(projected);
 }
 
 export function clearObjectBrowserRowsCache(): void {
   objectBrowserRowsCache.clear();
-  for (const state of objectBrowserRowsCacheGenerations.values()) state.generation++;
+  objectBrowserRowsCacheGenerations.clear();
 }

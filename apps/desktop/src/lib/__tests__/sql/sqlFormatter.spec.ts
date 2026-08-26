@@ -36,6 +36,42 @@ describe("sqlFormatter", () => {
     expect(sqlFormatDialectForDbType("duckdb")).toBe("duckdb");
   });
 
+  it("maps only Oracle to the PL/SQL formatter dialect", () => {
+    expect(sqlFormatDialectForDbType("oracle")).toBe("oracle");
+    expect(sqlFormatDialectForDbType("oceanbase-oracle")).toBe("generic");
+  });
+
+  it("keeps issue #7138 Oracle hierarchy clauses intact", async () => {
+    const sql = "SELECT ctt.U_DM FROM cte_test ctt START WITH ctt.SU_DM IN ('16','17','18','19') CONNECT BY PRIOR ctt.U_DM = HY.SU_DM;";
+
+    await expect(formatSqlForEditing(sql, sqlFormatDialectForDbType("oracle"))).resolves.toBe(`SELECT
+  ctt.U_DM
+FROM
+  cte_test ctt
+START WITH ctt.SU_DM IN ('16', '17', '18', '19')
+CONNECT BY PRIOR ctt.U_DM = HY.SU_DM;`);
+  });
+
+  it("formats valid Oracle hierarchy clauses with the same alias", async () => {
+    const sql = "SELECT ctt.U_DM FROM cte_test ctt START WITH ctt.SU_DM = '16' CONNECT BY PRIOR ctt.U_DM = ctt.SU_DM;";
+
+    const formatted = await formatSqlForEditing(sql, sqlFormatDialectForDbType("oracle"));
+
+    expect(formatted).toContain("FROM\n  cte_test ctt\nSTART WITH ctt.SU_DM = '16'");
+    expect(formatted).toContain("\nCONNECT BY PRIOR ctt.U_DM = ctt.SU_DM;");
+  });
+
+  it("formats ordinary Oracle SQL and anonymous PL/SQL", async () => {
+    await expect(formatSqlForEditing("select employee_id from employees where department_id = 10;", sqlFormatDialectForDbType("oracle"))).resolves.toBe("SELECT\n  employee_id\nFROM\n  employees\nWHERE\n  department_id = 10;");
+    await expect(formatSqlForEditing("declare v_count number := 1; begin v_count := v_count + 1; end;", sqlFormatDialectForDbType("oracle"))).resolves.toBe("DECLARE v_count number := 1;\n\nBEGIN v_count := v_count + 1;\n\nEND;");
+  });
+
+  it("keeps incomplete Oracle editor SQL unchanged", async () => {
+    const sql = "select *\nfrom dbname.\n;";
+
+    await expect(formatSqlForEditing(sql, sqlFormatDialectForDbType("oracle"))).resolves.toBe(sql);
+  });
+
   it("keeps DuckDB prefix aliases out of formatted named parameters", async () => {
     const cases = [
       ["select 日期:date(订单日期) from 订单;", []],

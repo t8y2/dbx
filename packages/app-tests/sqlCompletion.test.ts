@@ -948,6 +948,38 @@ test("replaces partially typed quoted identifiers without duplicating quotes", (
   }
 });
 
+test("suggests same-prefix tables while editing double-quoted Oracle-family identifiers", () => {
+  for (const databaseType of ["oracle", "dameng"] as const) {
+    const markedSql = 'SELECT * FROM "Fo|"';
+    const cursor = markedSql.indexOf("|");
+    const sql = markedSql.replace("|", "");
+    const options = { databaseType, dialect: "mysql" as const };
+    const context = sqlCompletionContextFromSemantic(buildSqlSemanticModel(sql, cursor, options), getSqlCompletionContext(sql, cursor, options));
+    const items = buildSqlCompletionItemsFromContext(context, {
+      tables: [
+        { name: "FormAlpha", schema: "APP", type: "table" },
+        { name: "FormArchive", schema: "APP", type: "table" },
+      ],
+      columnsByTable: new Map(),
+      ...options,
+    });
+    const replacement = prepareSqlCompletionReplacement(sql, cursor, context, items);
+    const tableItems = replacement.items.filter((item) => item.type === "table");
+
+    assert.deepEqual(
+      tableItems.map((item) => item.label),
+      ["FormAlpha", "FormArchive"],
+      databaseType,
+    );
+    assert.equal(replacement.from, sql.indexOf('"'), databaseType);
+    assert.equal(
+      tableItems.every((item) => item.replaceClosingQuote === '"'),
+      true,
+      databaseType,
+    );
+  }
+});
+
 test("uses PostgreSQL-style double quotes for PostgreSQL-family completion identifiers", () => {
   const databaseTypes: DatabaseType[] = ["kingbase", "vastbase", "highgo", "uxdb"];
 

@@ -253,6 +253,30 @@ test("concurrent reads of the same index cache key hit the storage once", async 
   }
 });
 
+test("bounds in-memory regex indexes while keeping persisted scopes reloadable", async () => {
+  const restoreStorage = installMemoryStorage();
+  try {
+    setActivePinia(createPinia());
+    const store = useConnectionStore();
+    store.addEphemeralConnection(conn("conn-1"));
+    const scopes = Array.from({ length: 33 }, (_, index) => manifestScope(`index-${index}`, `parent-${index}`, { database: `db-${index}` }));
+    persistedCache.set(MANIFEST_CACHE_KEY, encodeTableSearchIndexManifest(scopes));
+    for (let index = 0; index < scopes.length; index += 1) {
+      persistedCache.set(`index-${index}`, indexEnvelope([{ name: `table_${index}`, tableType: "TABLE" }]));
+    }
+
+    assert.equal((await store.loadSidebarTableSearchIndexScopes()).length, 33);
+    loadSchemaCacheMock.mockClear();
+
+    // Iterating again from the oldest scope reloads each persisted entry because
+    // only the most recent 32 indexes are kept in memory.
+    assert.equal((await store.loadSidebarTableSearchIndexScopes()).length, 33);
+    assert.equal(loadSchemaCacheMock.mock.calls.length, 33);
+  } finally {
+    restoreStorage();
+  }
+});
+
 test("resolves the index parent by composite identity when ids collide", async () => {
   const restoreStorage = installMemoryStorage();
   try {

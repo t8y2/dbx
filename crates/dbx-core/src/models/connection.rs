@@ -153,6 +153,10 @@ pub struct ConnectionConfig {
     pub redis_scan_page_size: Option<u64>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub redis_database_aliases: HashMap<String, String>,
+    /// Optional key-search templates for the Redis key browser (one pattern per entry).
+    /// Empty means inherit the global editor setting.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub redis_key_templates: Vec<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub etcd_endpoints: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -577,6 +581,8 @@ struct ConnectionConfigData {
     #[serde(default)]
     pub redis_database_aliases: HashMap<String, String>,
     #[serde(default)]
+    pub redis_key_templates: Vec<String>,
+    #[serde(default)]
     pub etcd_endpoints: String,
     #[serde(default)]
     pub gbase_server: String,
@@ -648,6 +654,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             redis_key_separator: data.redis_key_separator,
             redis_scan_page_size: data.redis_scan_page_size,
             redis_database_aliases: data.redis_database_aliases,
+            redis_key_templates: data.redis_key_templates,
             etcd_endpoints: data.etcd_endpoints,
             gbase_server: data.gbase_server,
             informix_server: data.informix_server,
@@ -2631,6 +2638,7 @@ mod tests {
             redis_key_separator: default_redis_key_separator(),
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
+            redis_key_templates: Vec::new(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),

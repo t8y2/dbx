@@ -9,3 +9,9 @@ describe("ContentArea completed query output", () => {
     expect(contentAreaSource).toContain('emit("update:activeOutputView", result ? defaultViewForResult(result) : "summary")');
   });
 });
+
+describe("ContentArea Mongo tab reuse", () => {
+  it("remounts the document browser when the active tab changes collections", () => {
+    expect(contentAreaSource).toContain(':key="`${activeTab.id}:${activeTab.sql}`"');
+  });
+});

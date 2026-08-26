@@ -133,6 +133,32 @@ beforeEach(() => {
   vi.clearAllMocks();
   localStorage.removeItem("dbx-filter-builder-value-shortcut-hint-days");
 });
+describe("DataGrid canvas surfaces", () => {
+  it("uses the stable overlay for viewport and device-pixel measurement", () => {
+    expect(dataGridSource).toContain("function canvasMeasurementSurface(): HTMLElement | null");
+    expect(dataGridSource).toContain("return canvasOverlayRef.value ?? null;");
+    expect(dataGridSource).toContain("const measurementSurface = canvasMeasurementSurface();");
+    expect(dataGridSource).toContain("getSurface: canvasMeasurementSurface,");
+    expect(dataGridSource).toContain("const canvas = inactiveCanvasSurface();");
+    expect(dataGridSource).toContain("canvasUsingBackSurface.value = !canvasUsingBackSurface.value;");
+  });
+
+  it("uses the canvas that actually received the event during a surface flip", () => {
+    expect(dataGridSource).toContain("function canvasEventSurface(event: MouseEvent): HTMLCanvasElement | null");
+    expect(dataGridSource).toContain("const currentTarget = event.currentTarget;");
+    expect(dataGridSource).toContain("return currentTarget instanceof HTMLCanvasElement ? currentTarget : activeCanvasSurface();");
+    expect(dataGridSource).toContain("const canvas = canvasEventSurface(event);");
+
+    const canvasMouseMove = dataGridSource.slice(dataGridSource.indexOf("function onCanvasMouseMove"), dataGridSource.indexOf("function onCanvasMouseLeave"));
+    expect(canvasMouseMove).toContain("const cursorSurface = canvasEventSurface(event);");
+  });
+
+  it("handles double clicks on the stable canvas container", () => {
+    expect(dataGridSource).toContain('@dblclick="onCanvasDblClick"');
+    expect(dataGridSource.match(/@dblclick="onCanvasDblClick"/g)).toHaveLength(1);
+    expect(dataGridSource).toContain("@dblclick.stop");
+  });
+});
 
 describe("DataGridSearchBar", () => {
   it("focuses/selects the input and forwards keyboard, navigation, and suggestion interactions", async () => {

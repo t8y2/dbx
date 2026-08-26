@@ -4265,7 +4265,7 @@ function cellTextOverflowsElement(text: string, target: EventTarget | null): boo
 }
 
 function measureCellTextWidth(text: string, font: string): number {
-  const canvas = canvasRef.value ?? document.createElement("canvas");
+  const canvas = activeCanvasSurface() ?? document.createElement("canvas");
   const context = canvas.getContext("2d");
   if (!context) return 0;
   context.save();
@@ -6878,6 +6878,17 @@ function dataGridRowStyle(item: RowItem): CSSProperties {
 }
 
 const canvasRef = ref<HTMLCanvasElement>();
+const canvasBackRef = ref<HTMLCanvasElement>();
+// WKWebView（macOS）会为 canvas 元素滞留幽灵合成层：屏幕显示旧帧位图，2D 缓冲重绘
+// （甚至改尺寸）都无法清除，只有把显示元素换掉才有效。双 canvas 交替翻转：绘制进
+// 隐藏的那一张，画完移交可见性，幽灵层随旧元素的 display:none 一并废弃。
+const canvasUsingBackSurface = ref(false);
+function activeCanvasSurface(): HTMLCanvasElement | null {
+  return (canvasUsingBackSurface.value ? canvasBackRef.value : canvasRef.value) ?? null;
+}
+function inactiveCanvasSurface(): HTMLCanvasElement | null {
+  return (canvasUsingBackSurface.value ? canvasRef.value : canvasBackRef.value) ?? null;
+}
 const canvasOverlayRef = ref<HTMLElement>();
 const canvasViewportWidth = ref(0);
 const canvasViewportHeight = ref(0);
@@ -6939,6 +6950,10 @@ function dataGridSelectionScroller(): HTMLElement | null {
   return canvasScrollerElement();
 }
 
+function canvasMeasurementSurface(): HTMLElement | null {
+  return canvasOverlayRef.value ?? null;
+}
+
 function dataGridCellFromClientPoint(clientX: number, clientY: number): { rowIndex: number; colIndex: number } | null {
   const scroller = dataGridSelectionScroller();
   if (!scroller) return null;
@@ -6985,9 +7000,9 @@ function syncCanvasViewport(entries?: readonly ResizeObserverEntry[]) {
   if (!dataGridIsActive) return;
   const scroller = canvasScrollerElement();
   if (!scroller) return;
-  const canvas = canvasRef.value;
-  const canvasEntry = canvas ? entries?.find((entry) => entry.target === canvas) : undefined;
-  if (canvasEntry) canvasMeasuredDevicePixelSize.value = dataGridCanvasDevicePixelSize(canvasEntry);
+  const measurementSurface = canvasMeasurementSurface();
+  const surfaceEntry = measurementSurface ? entries?.find((entry) => entry.target === measurementSurface) : undefined;
+  if (surfaceEntry) canvasMeasuredDevicePixelSize.value = dataGridCanvasDevicePixelSize(surfaceEntry);
   canvasViewportWidth.value = scroller.clientWidth;
   canvasViewportHeight.value = scroller.clientHeight;
   canvasScrollTop.value = scroller.scrollTop;
@@ -7048,7 +7063,7 @@ canvasRuntime = useDataGridCanvasRuntime({
   draw: drawCanvasGrid,
   syncViewport: syncCanvasViewport,
   getViewport: canvasScrollerElement,
-  getSurface: () => canvasRef.value ?? null,
+  getSurface: canvasMeasurementSurface,
   refreshPixelRatio: () => {
     const next = currentCanvasDevicePixelRatio();
     if (Math.abs(next - canvasDevicePixelRatio.value) > 0.001) {
@@ -7073,8 +7088,13 @@ function canvasColumnAt(contentX: number): number {
   return low;
 }
 
+function canvasEventSurface(event: MouseEvent): HTMLCanvasElement | null {
+  const currentTarget = event.currentTarget;
+  return currentTarget instanceof HTMLCanvasElement ? currentTarget : activeCanvasSurface();
+}
+
 function canvasHitTest(event: MouseEvent): { rowIndex: number; visibleColIdx: number; rowNumber: boolean } | null {
-  const canvas = canvasRef.value;
+  const canvas = canvasEventSurface(event);
   const scroller = canvasScrollerElement();
   if (!canvas || !scroller) return null;
   const rect = canvas.getBoundingClientRect();
@@ -7188,8 +7208,9 @@ function onDomGridWheel(event: WheelEvent) {
 
 function onCanvasMouseMove(event: MouseEvent) {
   stopReleasedSelectionGesture(event);
+  const cursorSurface = canvasEventSurface(event);
   if (columnHeaderPointerInteractionActive()) {
-    if (canvasRef.value) canvasRef.value.style.cursor = "default";
+    if (cursorSurface) cursorSurface.style.cursor = "default";
     onCanvasMouseLeave();
     return;
   }
@@ -7203,10 +7224,10 @@ function onCanvasMouseMove(event: MouseEvent) {
         }
       : null;
   const actualColIdx = next ? visibleColumnIndexes.value[next.visibleColIdx] : undefined;
-  if (canvasRef.value) {
+  if (cursorSurface) {
     const overBooleanInteractive =
       booleanCellsUseCheckbox.value && hit != null && !hit.rowNumber && hitItem != null && actualColIdx !== undefined && isBooleanGridCell(hitItem, actualColIdx) && canEditCellItem(hitItem, actualColIdx) && booleanInteractiveHitFromCanvasEvent(hitItem, hit, actualColIdx, event);
-    canvasRef.value.style.cursor = hit?.rowNumber ? "default" : overBooleanInteractive ? "pointer" : hitItem && actualColIdx !== undefined ? "text" : "cell";
+    cursorSurface.style.cursor = hit?.rowNumber ? "default" : overBooleanInteractive ? "pointer" : hitItem && actualColIdx !== undefined ? "text" : "cell";
   }
   if (next?.rowIndex === canvasHoverCell.value?.rowIndex && next?.visibleColIdx === canvasHoverCell.value?.visibleColIdx) {
     return;
@@ -7246,7 +7267,7 @@ function keepCanvasDetailHover() {
 
 function clearCanvasDetailHover(event?: MouseEvent) {
   const relatedTarget = event?.relatedTarget;
-  if (relatedTarget instanceof Node && (canvasOverlayRef.value?.contains(relatedTarget) || canvasRef.value?.contains(relatedTarget))) {
+  if (relatedTarget instanceof Node && (canvasOverlayRef.value?.contains(relatedTarget) || activeCanvasSurface()?.contains(relatedTarget) || canvasBackRef.value?.contains(relatedTarget))) {
     return;
   }
   onCanvasMouseLeave();
@@ -7254,7 +7275,7 @@ function clearCanvasDetailHover(event?: MouseEvent) {
 
 function booleanCheckboxHitFromCanvasEvent(item: RowItem, hit: { rowIndex: number; visibleColIdx: number }, actualColIdx: number, event: MouseEvent): boolean {
   if (item.data[actualColIdx] === null) return false;
-  const canvas = canvasRef.value;
+  const canvas = canvasEventSurface(event);
   const canvasRect = canvas?.getBoundingClientRect();
   const cellRect = canvasCellViewportRect(hit.rowIndex, hit.visibleColIdx);
   if (!canvasRect || !cellRect) return false;
@@ -7271,7 +7292,7 @@ function booleanCheckboxHitFromCanvasEvent(item: RowItem, hit: { rowIndex: numbe
 
 function booleanNullTextHitFromCanvasEvent(item: RowItem, hit: { rowIndex: number; visibleColIdx: number }, actualColIdx: number, event: MouseEvent): boolean {
   if (item.data[actualColIdx] !== null) return false;
-  const canvas = canvasRef.value;
+  const canvas = canvasEventSurface(event);
   const canvasRect = canvas?.getBoundingClientRect();
   const cellRect = canvasCellViewportRect(hit.rowIndex, hit.visibleColIdx);
   if (!canvasRect || !cellRect) return false;
@@ -7527,7 +7548,7 @@ const canvasRightAlignedActionCell = computed(() => {
 });
 
 function drawCanvasGrid() {
-  const canvas = canvasRef.value;
+  const canvas = inactiveCanvasSurface();
   const scroller = canvasScrollerElement();
   if (!canvas || !scroller || !useCanvasGridRows.value) return;
 
@@ -7571,6 +7592,12 @@ function drawCanvasGrid() {
     booleanDisplayMode: booleanDisplayMode.value,
     flatteningMultiLineEnabled: flatteningMultiLineEnabled.value,
   });
+  flipCanvasSurface();
+}
+
+function flipCanvasSurface() {
+  // 双 canvas 翻转：刚绘制的帧离开前景层，幽灵层随隐藏一并废弃，新显画布接到下一帧
+  canvasUsingBackSurface.value = !canvasUsingBackSurface.value;
 }
 
 watch(
@@ -7844,6 +7871,8 @@ const {
   columnComments: visibleColumnComments,
   allColumnComments,
   mongoDocuments: computed(() => props.result.mongo_copy_documents ?? props.result.mongo_documents),
+  spatialColumns: computed(() => props.result.spatial_columns),
+  spatialValues: computed(() => props.result.spatial_values),
   columnTypes: visibleColumnTypes,
   allColumnTypes,
   whereInput: computed(() => currentWhereInput()),
@@ -10154,6 +10183,7 @@ function onCellContext(rowId: number, rowIndex: number, colIdx: number, visibleC
   }
   clearRowSelection();
   if (!cellIsSelected(rowIndex, visibleColIdx)) {
+    clearCellSelection();
     selectSingleCell(rowIndex, visibleColIdx);
     contextSelectionIsSynthetic.value = true;
   } else {
@@ -12923,6 +12953,7 @@ function currentGridContextMenuItems(): ContextMenuItem[] {
                     width: `${totalWidth}px`,
                     height: `${canvasContentHeight}px`,
                   }"
+                  @dblclick="onCanvasDblClick"
                 >
                   <canvas
                     ref="canvasRef"
@@ -12930,14 +12961,27 @@ function currentGridContextMenuItems(): ContextMenuItem[] {
                     :style="{
                       width: `${canvasSurfaceWidth}px`,
                       height: `${canvasViewportHeight}px`,
+                      display: canvasUsingBackSurface ? 'none' : '',
                     }"
                     @mousemove="onCanvasMouseMove"
                     @mouseleave="onCanvasMouseLeave"
                     @mousedown="onCanvasMouseDown"
                     @contextmenu="onCanvasContext"
-                    @dblclick="onCanvasDblClick"
                   />
-                  <div ref="canvasOverlayRef" class="canvas-grid-overlay dbx-data-grid-font-family sticky left-0 top-0 z-10 overflow-visible" :style="canvasOverlayStyle">
+                  <canvas
+                    ref="canvasBackRef"
+                    class="canvas-grid-surface dbx-data-grid-font-family sticky left-0 top-0 z-0 block font-normal"
+                    :style="{
+                      width: `${canvasSurfaceWidth}px`,
+                      height: `${canvasViewportHeight}px`,
+                      display: canvasUsingBackSurface ? '' : 'none',
+                    }"
+                    @mousemove="onCanvasMouseMove"
+                    @mouseleave="onCanvasMouseLeave"
+                    @mousedown="onCanvasMouseDown"
+                    @contextmenu="onCanvasContext"
+                  />
+                  <div ref="canvasOverlayRef" class="canvas-grid-overlay dbx-data-grid-font-family sticky left-0 top-0 z-10 overflow-visible" :style="canvasOverlayStyle" @dblclick.stop>
                     <div v-if="canvasReadonlyTextCell" class="absolute pointer-events-auto z-20 tabular-nums" :style="canvasReadonlyTextCellStyle" @mousedown.stop @click.stop>
                       <DataGridReadonlyTextSelection :value="canvasReadonlyTextCell.value" :expanded="canvasReadonlyTextCell.expanded" @close="closeReadonlyCellTextSelection" @escape="escapeReadonlyCellTextSelection" />
                     </div>

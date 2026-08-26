@@ -49,7 +49,7 @@ export function isRepeatableNavigationTreeNode(type: TreeNodeType): boolean {
 export function shouldActivateTreeNodeOnSingleClick(type: TreeNodeType, activation: SidebarActivation = "single"): boolean {
   return activation !== "double" || isDirectNavigationTreeNode(type);
 }
-const objectBrowserNodeTypes = new Set<TreeNodeType>(["database", "schema", "object-browser"]);
+const objectBrowserNodeTypes = new Set<TreeNodeType>(["database", "schema", "object-browser", "mongo-db"]);
 
 /** 开关“单击数据库同时打开数据库项目”命中时，单击数据库类节点直接打开对象浏览器标签页。 */
 export function shouldOpenObjectBrowserOnSingleClick(type: TreeNodeType, enabled: boolean): boolean {

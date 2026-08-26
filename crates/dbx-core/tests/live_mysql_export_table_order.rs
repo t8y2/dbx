@@ -3,6 +3,7 @@ use dbx_core::database_export::{export_database_sql_core, DatabaseExportRequest}
 use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
 use dbx_core::query::execute_sql_statement;
 use dbx_core::storage::Storage;
+use std::sync::Arc;
 
 fn live_mysql_config(id: &str) -> ConnectionConfig {
     let host = std::env::var("DBX_LIVE_SQL_FILE_MYSQL_HOST").expect("DBX_LIVE_SQL_FILE_MYSQL_HOST");
@@ -54,7 +55,7 @@ async fn live_mysql_database_export_table_order_is_not_alphabetical_when_fk_reor
     let dir = std::env::temp_dir().join(format!("dbx-live-mysql-export-order-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
     let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
-    let state = AppState::new(storage);
+    let state = Arc::new(AppState::new(storage));
     state.configs.write().await.insert(connection_id.clone(), live_mysql_config(&connection_id));
 
     for sql in [

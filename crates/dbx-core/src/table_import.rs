@@ -1588,7 +1588,14 @@ pub fn parse_sql_bytes_with_options(
     }
 
     let target = target.ok_or_else(|| "No INSERT statements found in SQL file".to_string())?;
-    Ok(ParsedImportFile { columns: target.columns, rows, total_rows, effective_encoding: Some(encoding) })
+    let source_row_numbers = (1..=rows.len()).collect();
+    Ok(ParsedImportFile {
+        columns: target.columns,
+        rows,
+        source_row_numbers,
+        total_rows,
+        effective_encoding: Some(encoding),
+    })
 }
 
 pub fn parse_sql_bytes(bytes: &[u8], preview_limit: usize) -> Result<ParsedImportFile, String> {
@@ -8404,6 +8411,7 @@ mod tests {
 
         assert_eq!(parsed.columns, vec!["id", "name"]);
         assert_eq!(parsed.total_rows, 3);
+        assert_eq!(parsed.source_row_numbers, vec![1, 2, 3]);
         assert_eq!(parsed.rows[0], vec![serde_json::json!(1), serde_json::json!("Ada")]);
         assert_eq!(parsed.rows[2], vec![serde_json::json!(3), serde_json::json!("Cathy")]);
     }
@@ -8577,6 +8585,7 @@ mod tests {
 
         assert_eq!(parsed.total_rows, 5);
         assert_eq!(parsed.rows.len(), 2);
+        assert_eq!(parsed.source_row_numbers, vec![1, 2]);
     }
 
     #[test]
@@ -10158,6 +10167,7 @@ mod tests {
         let data = ParsedImportFile {
             columns: vec!["name".to_string()],
             rows: vec![vec![serde_json::json!("Ada")]],
+            source_row_numbers: Vec::new(),
             total_rows: 1,
             effective_encoding: None,
         };

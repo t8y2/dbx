@@ -3059,12 +3059,12 @@ mod tests {
         oracle_table_comment_from_query_result, oracle_table_comment_sql, oracle_table_comments_sql,
         presto_like_columns_from_query_result, presto_like_information_schema_columns_sql,
         presto_like_information_schema_tables_sql, presto_like_tables_from_query_result,
-        reference_key_columns_from_indexes, replace_metadata_runtime, should_query_oracle_columns_via_sql_first,
-        table_comments_from_query_result, table_name_filter_matches, tdengine_table_comment_like_pattern,
-        tdengine_table_comment_sql, tdengine_table_comments_sql, uses_mongodb_agent_collection_listing,
-        visible_schema_filter, MetadataErrorAction, MysqlTableListSource, OracleObjectRef, OracleSynonymResolver,
-        TableNameFilter, ORACLE_CURRENT_SCHEMA_SQL, ORACLE_SYNONYM_MAX_DEPTH, TDENGINE_COMMENT_SEARCH_TIMEOUT,
-        TDENGINE_LIKE_PATTERN_MAX_BYTES,
+        reference_key_columns_from_indexes, reference_keys_from_indexes, replace_metadata_runtime,
+        should_query_oracle_columns_via_sql_first, table_comments_from_query_result, table_name_filter_matches,
+        tdengine_table_comment_like_pattern, tdengine_table_comment_sql, tdengine_table_comments_sql,
+        uses_mongodb_agent_collection_listing, visible_schema_filter, MetadataErrorAction, MysqlTableListSource,
+        OracleObjectRef, OracleSynonymResolver, ReferenceKeyInfo, TableNameFilter, ORACLE_CURRENT_SCHEMA_SQL,
+        ORACLE_SYNONYM_MAX_DEPTH, TDENGINE_COMMENT_SEARCH_TIMEOUT, TDENGINE_LIKE_PATTERN_MAX_BYTES,
     };
     use super::{list_databases_core, list_tables_core};
     use super::{
@@ -3079,7 +3079,7 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn reference_key_columns_require_effective_unfiltered_single_column_uniqueness() {
+    fn reference_keys_require_effective_unfiltered_plain_unique_columns() {
         let index = |name: &str, columns: &[&str], is_unique: bool, is_primary: bool| db::IndexInfo {
             name: name.to_string(),
             columns: columns.iter().map(|column| (*column).to_string()).collect(),
@@ -3095,15 +3095,29 @@ mod tests {
         filtered.filter = Some("active = true".to_string());
         let mut expression = index("uq_lower_email", &["lower(email)"], true, false);
         expression.key_is_expression = vec![true];
+        let mut composite_expression = index("uq_tenant_lower_code", &["tenant_id", "lower(code)"], true, false);
+        composite_expression.key_is_expression = vec![false, true];
         let indexes = vec![
             index("clickhouse_primary", &["event_id"], false, true),
             index("uq_code", &["code"], true, false),
             index("uq_Code", &["Code"], true, false),
             index("uq_tenant_code", &["tenant_id", "code"], true, false),
+            index("uq_tenant_code_duplicate", &["tenant_id", "code"], true, false),
+            index("uq_empty", &[""], true, false),
+            index("uq_repeated", &["tenant_id", "tenant_id"], true, false),
             filtered,
             expression,
+            composite_expression,
         ];
 
+        assert_eq!(
+            reference_keys_from_indexes(&indexes),
+            vec![
+                ReferenceKeyInfo { columns: vec!["code".to_string()] },
+                ReferenceKeyInfo { columns: vec!["Code".to_string()] },
+                ReferenceKeyInfo { columns: vec!["tenant_id".to_string(), "code".to_string()] },
+            ]
+        );
         assert_eq!(reference_key_columns_from_indexes(&indexes), vec!["code", "Code"]);
     }
 
@@ -6782,22 +6796,51 @@ pub async fn list_indexes_core(
     result
 }
 
-pub fn reference_key_columns_from_indexes(indexes: &[db::IndexInfo]) -> Vec<String> {
-    let mut columns = Vec::new();
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReferenceKeyInfo {
+    pub columns: Vec<String>,
+}
+
+pub fn reference_keys_from_indexes(indexes: &[db::IndexInfo]) -> Vec<ReferenceKeyInfo> {
+    let mut keys = Vec::new();
     for index in indexes {
         if !index.is_unique
             || index.filter.as_deref().is_some_and(|filter| !filter.trim().is_empty())
-            || index.columns.len() != 1
-            || index.key_is_expression.first().copied().unwrap_or(false)
+            || index.columns.is_empty()
+            || index.key_is_expression.iter().any(|is_expression| *is_expression)
         {
             continue;
         }
-        let column = index.columns[0].trim();
-        if !column.is_empty() && !columns.iter().any(|existing| existing == column) {
-            columns.push(column.to_string());
+        let columns = index.columns.iter().map(|column| column.trim().to_string()).collect::<Vec<_>>();
+        let mut seen = HashSet::new();
+        if columns.iter().any(|column| column.is_empty() || !seen.insert(column.as_str())) {
+            continue;
+        }
+        let key = ReferenceKeyInfo { columns };
+        if !keys.contains(&key) {
+            keys.push(key);
         }
     }
-    columns
+    keys
+}
+
+pub fn reference_key_columns_from_indexes(indexes: &[db::IndexInfo]) -> Vec<String> {
+    reference_keys_from_indexes(indexes)
+        .into_iter()
+        .filter_map(|key| (key.columns.len() == 1).then(|| key.columns[0].clone()))
+        .collect()
+}
+
+pub async fn list_reference_keys_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<ReferenceKeyInfo>, String> {
+    let indexes = list_indexes_core(state, connection_id, database, schema, table).await?;
+    Ok(reference_keys_from_indexes(&indexes))
 }
 
 pub async fn list_reference_key_columns_core(

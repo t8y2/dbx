@@ -77,7 +77,7 @@ import TemporalCellEditor from "@/components/grid/TemporalCellEditor.vue";
 import EnumCellEditor from "@/components/grid/EnumCellEditor.vue";
 import DataGridReadonlyTextSelection from "@/components/grid/DataGridReadonlyTextSelection.vue";
 import GridSnapshotDialog from "@/components/grid/GridSnapshotDialog.vue";
-import type { QueryResult, ColumnInfo, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo, TableInfoTab, QueryResultSourceColumnRef } from "@/types/database";
+import type { QueryResult, ColumnInfo, DatabaseType, ForeignKeyInfo, IndexInfo, ReferenceKeyInfo, TriggerInfo, TableInfoTab, QueryResultSourceColumnRef } from "@/types/database";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import { tableObjectSourceKind } from "@/lib/table/tableObjectSourceKind";
 import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPresentation";
@@ -180,6 +180,7 @@ import {
   resolveColumnFormatter,
   type ColumnFormatterConfig,
   type DateTimeFormatterUnit,
+  type ForeignKeyDisplayFilterConfig,
   DateTimePatterns,
 } from "@/lib/dataGrid/columnFormatter";
 import { temporalCellEditorConfig, type TemporalCellEditorConfig } from "@/lib/dataGrid/dataGridTemporalEditor";
@@ -1163,7 +1164,7 @@ const formatterForeignKeyManual = ref(false);
 const formatterForeignKeySchemas = ref<string[]>([]);
 const formatterForeignKeyTables = ref<string[]>([]);
 const formatterForeignKeyColumns = ref<ColumnInfo[]>([]);
-const formatterForeignKeyReferenceKeyColumns = ref<string[]>([]);
+const formatterForeignKeyReferenceKeys = ref<ReferenceKeyInfo[]>([]);
 const formatterForeignKeyReferenceMetadataStatus = ref<ManualReferenceMetadataStatus>("loading");
 const formatterForeignKeySchemasLoading = ref(false);
 const formatterForeignKeyTablesLoading = ref(false);
@@ -1183,8 +1184,18 @@ interface ForeignKeyDisplayLabelState {
   labels: Map<string, string>;
 }
 
-const formatterForeignKeyReferenceColumns = computed(() => (formatterForeignKeyManual.value ? manualReferenceKeyColumns(formatterForeignKeyColumns.value, formatterForeignKeyReferenceKeyColumns.value) : formatterForeignKeyColumns.value));
-const formatterForeignKeyReferenceValidation = computed(() => manualReferenceColumnValidation(formatterForeignKeyColumns.value, formatterForeignKeyReferenceKeyColumns.value, formatterForeignKeyRefColumn.value, formatterForeignKeyReferenceMetadataStatus.value));
+const formatterForeignKeyReferenceFilter = computed<ForeignKeyDisplayFilterConfig | undefined>(() =>
+  formatterForeignKeyFilterEnabled.value
+    ? {
+        column: formatterForeignKeyFilterColumn.value,
+        mode: formatterForeignKeyFilterMode.value,
+        value: formatterForeignKeyFilterValue.value,
+        endValue: formatterForeignKeyFilterEndValue.value,
+      }
+    : undefined,
+);
+const formatterForeignKeyReferenceColumns = computed(() => (formatterForeignKeyManual.value ? manualReferenceKeyColumns(formatterForeignKeyColumns.value, formatterForeignKeyReferenceKeys.value, formatterForeignKeyReferenceFilter.value) : formatterForeignKeyColumns.value));
+const formatterForeignKeyReferenceValidation = computed(() => manualReferenceColumnValidation(formatterForeignKeyColumns.value, formatterForeignKeyReferenceKeys.value, formatterForeignKeyRefColumn.value, formatterForeignKeyReferenceMetadataStatus.value, formatterForeignKeyReferenceFilter.value));
 const foreignKeyDisplayLabels = shallowRef(new Map<number, ForeignKeyDisplayLabelState>());
 const foreignKeyDisplayRequests = createForeignKeyDisplayRequestCoordinator();
 
@@ -1606,7 +1617,7 @@ function loadFormatterDraft(formatter: ColumnFormatterConfig | undefined) {
   formatterForeignKeySchemas.value = [];
   formatterForeignKeyTables.value = [];
   formatterForeignKeyColumns.value = [];
-  formatterForeignKeyReferenceKeyColumns.value = [];
+  formatterForeignKeyReferenceKeys.value = [];
   formatterForeignKeyReferenceMetadataStatus.value = "loading";
   formatterForeignKeyTargetError.value = "";
   formatterForeignKeyColumnsError.value = "";
@@ -1668,7 +1679,7 @@ function formatterForeignKeyForColumn(columnIndex: number): ForeignKeyInfo | und
 async function loadFormatterForeignKeyColumns(columnIndex: number) {
   const request = ++formatterForeignKeyColumnsRequest;
   formatterForeignKeyColumns.value = [];
-  formatterForeignKeyReferenceKeyColumns.value = [];
+  formatterForeignKeyReferenceKeys.value = [];
   formatterForeignKeyReferenceMetadataStatus.value = "loading";
   formatterForeignKeyColumnsError.value = "";
   formatterForeignKeyReferenceMetadataError.value = "";
@@ -1679,7 +1690,7 @@ async function loadFormatterForeignKeyColumns(columnIndex: number) {
     const manual = formatterForeignKeyManual.value;
     const [columnsResult, referenceKeysResult] = await Promise.allSettled([
       api.getColumns(props.connectionId, props.database || "", schema, formatterForeignKeyRefTable.value, props.tableMeta?.catalog),
-      manual ? api.listReferenceKeyColumns(props.connectionId, props.database || "", schema, formatterForeignKeyRefTable.value, props.tableMeta?.catalog) : Promise.resolve([] as string[]),
+      manual ? api.listReferenceKeys(props.connectionId, props.database || "", schema, formatterForeignKeyRefTable.value, props.tableMeta?.catalog) : Promise.resolve([] as ReferenceKeyInfo[]),
     ]);
     if (request !== formatterForeignKeyColumnsRequest || formatterOpenColumn.value !== columnIndex) return;
     if (columnsResult.status === "rejected") throw columnsResult.reason;
@@ -1689,10 +1700,10 @@ async function loadFormatterForeignKeyColumns(columnIndex: number) {
       formatterForeignKeyReferenceMetadataStatus.value = "unavailable";
       formatterForeignKeyReferenceMetadataError.value = String(referenceKeysResult.reason?.message || referenceKeysResult.reason);
     } else {
-      formatterForeignKeyReferenceKeyColumns.value = referenceKeysResult.status === "fulfilled" ? referenceKeysResult.value : [];
+      formatterForeignKeyReferenceKeys.value = referenceKeysResult.status === "fulfilled" ? referenceKeysResult.value : [];
       formatterForeignKeyReferenceMetadataStatus.value = "available";
     }
-    const referenceColumns = manualReferenceKeyColumns(columns, formatterForeignKeyReferenceKeyColumns.value);
+    const referenceColumns = manualReferenceKeyColumns(columns, formatterForeignKeyReferenceKeys.value, formatterForeignKeyReferenceFilter.value);
     const foreignKey = formatterForeignKeyForColumn(columnIndex);
     if (manual) {
       formatterForeignKeyRefColumn.value = reconcileManualReferenceColumn(formatterForeignKeyRefColumn.value, referenceColumns, formatterForeignKeyReferenceMetadataStatus.value);
@@ -1763,7 +1774,7 @@ function selectFormatterForeignKeySchema(value: string, columnIndex: number) {
   formatterForeignKeyDisplayColumn.value = "";
   formatterForeignKeyFilterColumn.value = "";
   formatterForeignKeyColumns.value = [];
-  formatterForeignKeyReferenceKeyColumns.value = [];
+  formatterForeignKeyReferenceKeys.value = [];
   formatterForeignKeyReferenceMetadataStatus.value = "loading";
   formatterForeignKeyReferenceMetadataError.value = "";
   void loadFormatterManualReferenceTables(columnIndex);
@@ -1775,7 +1786,7 @@ function selectFormatterForeignKeyTable(value: string, columnIndex: number) {
   formatterForeignKeyRefColumn.value = "";
   formatterForeignKeyDisplayColumn.value = "";
   formatterForeignKeyFilterColumn.value = "";
-  formatterForeignKeyReferenceKeyColumns.value = [];
+  formatterForeignKeyReferenceKeys.value = [];
   formatterForeignKeyReferenceMetadataStatus.value = "loading";
   formatterForeignKeyReferenceMetadataError.value = "";
   void loadFormatterForeignKeyColumns(columnIndex);
@@ -10925,12 +10936,12 @@ async function loadForeignKeyDisplayLabels() {
         const refColumnInfo = columns.find((column) => column.name === config.refColumn);
         if (!refColumnInfo) return;
         if (config.referenceMode === "manual") {
-          const referenceKeyColumns = await foreignKeyDisplayRequests.request(requestGeneration, JSON.stringify(["reference-key-columns", props.connectionId, props.database || "", props.tableMeta?.catalog || "", schema, config.refTable]), () =>
-            api.listReferenceKeyColumns(props.connectionId!, props.database || "", schema, config.refTable, props.tableMeta?.catalog),
+          const referenceKeys = await foreignKeyDisplayRequests.request(requestGeneration, JSON.stringify(["reference-keys", props.connectionId, props.database || "", props.tableMeta?.catalog || "", schema, config.refTable]), () =>
+            api.listReferenceKeys(props.connectionId!, props.database || "", schema, config.refTable, props.tableMeta?.catalog),
           );
-          if (!referenceKeyColumns || !foreignKeyDisplayRequests.isCurrent(requestGeneration)) return;
-          if (!manualReferenceKeyColumnIsUnique(columns, referenceKeyColumns, config.refColumn)) {
-            appendDebugLog("warn", "[DBX][DataGrid:foreign-key-display:non-unique-manual-reference]", {
+          if (!referenceKeys || !foreignKeyDisplayRequests.isCurrent(requestGeneration)) return;
+          if (!manualReferenceKeyColumnIsUnique(columns, referenceKeys, config.refColumn, config.filter)) {
+            appendDebugLog("warn", "[DBX][DataGrid:foreign-key-display:unsafe-manual-reference]", {
               column: props.result.columns[columnIndex],
               reference: `${schema}.${config.refTable}.${config.refColumn}`,
             });

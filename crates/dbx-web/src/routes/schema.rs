@@ -590,6 +590,26 @@ pub async fn list_reference_key_columns(
     Ok(Json(dbx_core::schema::reference_key_columns_from_indexes(&indexes)))
 }
 
+pub async fn list_reference_keys(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SchemaQuery>,
+) -> Result<Json<Vec<dbx_core::schema::ReferenceKeyInfo>>, AppError> {
+    let database = q.database.as_deref().unwrap_or("");
+    let schema = q.schema.as_deref().unwrap_or("");
+    let table = q.table.as_deref().unwrap_or("");
+    let catalog = external_doris_catalog(&state, &q.connection_id, q.catalog.as_deref()).await;
+    let indexes = if let Some(catalog) = catalog.as_deref() {
+        dbx_core::schema::list_doris_catalog_indexes_core(&state.app, &q.connection_id, catalog, database, table)
+            .await
+            .map_err(AppError::from)?
+    } else {
+        dbx_core::schema::list_indexes_core(&state.app, &q.connection_id, database, schema, table)
+            .await
+            .map_err(AppError::from)?
+    };
+    Ok(Json(dbx_core::schema::reference_keys_from_indexes(&indexes)))
+}
+
 pub async fn list_foreign_keys(
     State(state): State<Arc<WebState>>,
     Query(q): Query<SchemaQuery>,

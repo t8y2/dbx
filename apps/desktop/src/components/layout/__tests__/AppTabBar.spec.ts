@@ -95,6 +95,15 @@ describe("AppTabBar right-side close action", () => {
   });
 });
 
+describe("AppTabBar special page selection", () => {
+  it("shows the active settings or driver-manager tab with the same ring used by regular tabs", () => {
+    expect(tabBarSource).toContain("function specialTabActiveStyle(active: boolean | undefined)");
+    expect(tabBarSource).toContain('return isClassicLayout.value ? { boxShadow: "inset 0 -2px 0 var(--ring)" } : { borderColor: "var(--ring)" };');
+    expect(tabBarSource).toContain(':style="specialTabActiveStyle(settingsPageActive)"');
+    expect(tabBarSource).toContain(':style="specialTabActiveStyle(driverStoreActive)"');
+  });
+});
+
 describe("AppTabBar overflow search", () => {
   it("filters every open tab by its display and source titles", () => {
     expect(tabBarSource).toContain('const tabSearchQuery = ref("");');
@@ -108,5 +117,13 @@ describe("AppTabBar overflow search", () => {
     expect(tabBarSource.match(/tabs\.noMatchingTabs/g)).toHaveLength(2);
     expect(tabBarSource).toContain('[data-tab-search-input="regular"]');
     expect(tabBarSource).toContain('[data-tab-search-input="fixed"]');
+  });
+});
+
+describe("AppTabBar query execution status", () => {
+  it("replaces the icon through one shared status component in every tab surface", () => {
+    expect(tabBarSource).toContain('import TabExecutionStatus from "@/components/layout/TabExecutionStatus.vue";');
+    expect(tabBarSource.match(/<TabExecutionStatus :tab="tab">/g)).toHaveLength(4);
+    expect(tabBarSource.match(/<\/TabExecutionStatus>/g)).toHaveLength(4);
   });
 });

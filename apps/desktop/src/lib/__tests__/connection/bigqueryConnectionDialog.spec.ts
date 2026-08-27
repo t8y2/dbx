@@ -10,7 +10,7 @@ describe("BigQuery connection dialog", () => {
 
     expect(nativeAgentDriverSupport).toContain('dbType === "bigquery"');
     expect(jdbcBackedDatabaseTypes).toContain('"bigquery"');
-    expect(dialogSource).toContain("const supportsNativeAgentJdbcDriverConfig = computed(() => supportsNativeAgentJdbcDriverConfigType(form.value.db_type));");
+    expect(dialogSource).toContain("const supportsNativeAgentJdbcDriverConfig = computed(() => supportsNativeAgentJdbcDriverConfigType(form.value.db_type)");
     expect(dialogSource).toContain('<template v-if="supportsNativeAgentJdbcDriverConfig">');
     expect(dialogSource).toContain('if (profile.type === "bigquery") {');
     expect(dialogSource).toContain("jdbcManualClasspathOpen.value = true;");

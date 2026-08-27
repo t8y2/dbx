@@ -421,6 +421,15 @@ fn metadata_cache_key(
     .join(":")
 }
 
+pub(crate) fn object_metadata_cache_prefix(connection_id: &str, database: &str) -> String {
+    format!(
+        "{}:{}:{}:",
+        OBJECT_METADATA_CACHE_PREFIX,
+        metadata_cache_segment(connection_id),
+        metadata_cache_segment(database)
+    )
+}
+
 fn decode_metadata_cache<T: DeserializeOwned>(value: serde_json::Value) -> Option<T> {
     serde_json::from_value(value).ok()
 }
@@ -854,6 +863,15 @@ mod tests {
             "object-meta:v1:conn%3A1:db%25%20name:sch%2Fema:%E8%A1%A8%3A%E5%90%8D:ice%3Aberg:backend-columns:"
         );
         assert!(key.starts_with("object-meta:v1:conn%3A1:db%25%20name:sch%2Fema:%E8%A1%A8%3A%E5%90%8D:"));
+    }
+
+    #[test]
+    fn database_metadata_cache_prefix_covers_backend_object_facets() {
+        let prefix = object_metadata_cache_prefix("conn:1", "db% name");
+        let key = metadata_cache_key("conn:1", "db% name", "public", "users", None, "backend-columns");
+
+        assert_eq!(prefix, "object-meta:v1:conn%3A1:db%25%20name:");
+        assert!(key.starts_with(&prefix));
     }
 
     #[test]

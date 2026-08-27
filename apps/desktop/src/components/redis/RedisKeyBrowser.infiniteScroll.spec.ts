@@ -611,3 +611,94 @@ describe("RedisKeyBrowser group key counts reflect incomplete loading (issue #63
     expect(countBadge?.getAttribute("title")).toBeFalsy();
   });
 });
+
+describe("RedisKeyBrowser group subtree fill on expand (issue #7162)", () => {
+  beforeEach(() => {
+    mocks.redisScanPageSize = 100;
+  });
+
+  function scanCallsWithPattern(pattern: string): number {
+    return mocks.redisScanKeysBatch.mock.calls.filter((call: unknown[]) => call[3] === pattern).length;
+  }
+
+  // Clicks the group row itself. `[data-redis-group]` marks the group's
+  // selection checkbox: it carries `cursor-pointer` itself and consumes the
+  // click, so a `closest()` from it can never reach the expanding row — walk
+  // up to the checkbox's row container (the div with the row click handler)
+  // instead.
+  function expandFirstGroupRow(host: HTMLElement) {
+    const checkbox = host.querySelector<HTMLElement>("[data-redis-group]");
+    const row = checkbox?.parentElement?.parentElement;
+    expect(row?.className).toContain("cursor-pointer");
+    row!.click();
+  }
+
+  // Overflowing viewport: rows render (RecycleScroller buffer 600) while the
+  // bounded auto-fill stays off, reproducing the stranded state from the
+  // issue — the main scan is still open (hasMore), so the tree is silently
+  // partial and a key that search finds may not exist in the tree at all.
+  function stubOverflowingViewport() {
+    stubNonOverflowingViewport();
+    Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.classList.contains("redis-key-scroller") ? 5000 : 100;
+      },
+    });
+  }
+
+  it("fills the expanded group's subtree via a dedicated prefix scan without advancing the main scan", async () => {
+    stubOverflowingViewport();
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, cursor: number, pattern: string) => {
+      if (pattern === "grp:*") {
+        return Promise.resolve({ cursor: 0, keys: [keyInfo("grp:hidden"), keyInfo("grp:sub:x")], total_keys: 0 });
+      }
+      if (cursor === 0) return Promise.resolve({ cursor: 9, keys: [keyInfo("grp:a")], total_keys: 10_000 });
+      return Promise.resolve({ cursor: 9, keys: [], total_keys: 0 });
+    });
+
+    const host = mountBrowser();
+    await settleThoroughly();
+
+    // Only the first browse page ran: the tree holds `grp:a` alone and the
+    // main scan is still open.
+    expect(scanCallsWithPattern("*")).toBe(1);
+    expect(scanCallsWithPattern("grp:*")).toBe(0);
+    expect(host.textContent).toContain("grp");
+
+    expandFirstGroupRow(host);
+    await settleThoroughly();
+
+    // Expanding the group scanned its subtree with a fresh cursor; the main
+    // browse cursor was not advanced (no extra `*` pages).
+    expect(scanCallsWithPattern("grp:*")).toBe(1);
+    expect(scanCallsWithPattern("*")).toBe(1);
+    expect(host.textContent).toContain("hidden");
+    expect(host.textContent).toContain("sub");
+
+    // Re-collapse + re-expand must not rescan the already-completed subtree.
+    expandFirstGroupRow(host);
+    await settleThoroughly();
+    expandFirstGroupRow(host);
+    await settleThoroughly();
+    expect(scanCallsWithPattern("grp:*")).toBe(1);
+  });
+
+  it("skips the subtree scan when the main scan already completed", async () => {
+    stubOverflowingViewport();
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, cursor: number, pattern: string) => {
+      expect(pattern).toBe("*");
+      if (cursor === 0) return Promise.resolve({ cursor: 0, keys: [keyInfo("grp:a"), keyInfo("grp:b")], total_keys: 2 });
+      return Promise.resolve({ cursor: 0, keys: [], total_keys: 0 });
+    });
+
+    const host = mountBrowser();
+    await settleThoroughly();
+
+    expandFirstGroupRow(host);
+    await settleThoroughly();
+
+    expect(scanCallsWithPattern("grp:*")).toBe(0);
+    expect(host.textContent).toContain("b");
+  });
+});

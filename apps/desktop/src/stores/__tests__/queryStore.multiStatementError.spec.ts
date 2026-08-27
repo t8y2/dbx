@@ -534,7 +534,7 @@ describe("queryStore multi-statement errors", () => {
     const store = useQueryStore();
     const tabA = store.createTab("oracle-1", "ORCL", "Tab A");
     const tabB = store.createTab("oracle-1", "ORCL", "Tab B");
-    // Exercise auto-commit execute-multi path (Oracle tabs default to manual TX).
+    // Exercise the explicit auto-commit execute-multi path.
     store.setAutoCommit(tabA, true);
     store.setAutoCommit(tabB, true);
 

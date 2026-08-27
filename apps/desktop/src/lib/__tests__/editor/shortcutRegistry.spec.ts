@@ -25,6 +25,90 @@ describe("shortcutRegistry editor actions", () => {
   ];
   const sidebarShortcutActionIds: ShortcutActionId[] = ["copySidebarSelection", "pasteSidebarSelection", "editSidebarConnection", "viewTableDdl"];
 
+  it("registers pagination navigation as unassigned grid shortcuts", () => {
+    const paginationActions = [
+      ["goToFirstPage", "settings.shortcutGoToFirstPage"],
+      ["goToPreviousPage", "settings.shortcutGoToPreviousPage"],
+      ["goToNextPage", "settings.shortcutGoToNextPage"],
+      ["goToLastPage", "settings.shortcutGoToLastPage"],
+    ] as const;
+
+    for (const [id, labelKey] of paginationActions) {
+      expect(SHORTCUT_DEFINITIONS.find((item) => item.id === id)).toMatchObject({ id, labelKey, scope: "grid", defaultShortcut: "" });
+      expect(DEFAULT_SHORTCUT_SETTINGS[id]).toBe("");
+    }
+  });
+
+  it("normalizes missing, legacy, cleared, and configured pagination shortcuts", () => {
+    const missing = normalizeShortcutSettings();
+    const legacy = normalizeShortcutSettings({ goToColumn: "Mod+G" });
+    const configured = normalizeShortcutSettings({ goToFirstPage: "Alt+F1", goToPreviousPage: "Alt+F2", goToNextPage: "Alt+F3", goToLastPage: "Alt+F4" });
+
+    for (const actionId of ["goToFirstPage", "goToPreviousPage", "goToNextPage", "goToLastPage"] as const) {
+      expect(missing[actionId]).toBe("");
+      expect(legacy[actionId]).toBe("");
+    }
+    expect(configured.goToFirstPage).toBe("Alt+F1");
+    expect(configured.goToPreviousPage).toBe("Alt+F2");
+    expect(configured.goToNextPage).toBe("Alt+F3");
+    expect(configured.goToLastPage).toBe("Alt+F4");
+    expect(configured.goToColumn).toBe("");
+  });
+
+  it("detects pagination shortcut conflicts in the grid scope", () => {
+    const shortcuts = normalizeShortcutSettings({ goToFirstPage: "Alt+F1", goToPreviousPage: "Alt+F1" });
+
+    expect(findShortcutConflict("goToFirstPage", shortcuts.goToFirstPage, shortcuts)).toBe("goToPreviousPage");
+    expect(findShortcutConflict("goToFirstPage", "Mod+F", shortcuts)).toBeNull();
+  });
+
+  it("registers go to column as an unassigned grid shortcut", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "goToColumn");
+
+    expect(definition).toMatchObject({
+      labelKey: "settings.shortcutGoToColumn",
+      scope: "grid",
+      defaultShortcut: "",
+    });
+    expect(DEFAULT_SHORTCUT_SETTINGS.goToColumn).toBe("");
+  });
+
+  it("normalizes missing, legacy, cleared, and configured go-to-column settings", () => {
+    expect(normalizeShortcutSettings().goToColumn).toBe("");
+    expect(normalizeShortcutSettings({ executeSql: "Mod+Shift+Enter" }).goToColumn).toBe("");
+    expect(normalizeShortcutSettings({ goToColumn: "" }).goToColumn).toBe("");
+    expect(normalizeShortcutSettings({ goToColumn: "Mod+G" }).goToColumn).toBe("Mod+G");
+  });
+
+  it("detects go-to-column conflicts only within the grid scope", () => {
+    const shortcuts = normalizeShortcutSettings({ goToColumn: "Mod+D" });
+
+    expect(findShortcutConflict("goToColumn", shortcuts.goToColumn, shortcuts)).toBe("editTableStructure");
+    expect(findShortcutConflict("goToColumn", "Mod+F", shortcuts)).toBeNull();
+  });
+
+  it("registers edit table structure as the conflict-free default Mod+D grid action", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "editTableStructure");
+
+    expect(definition).toMatchObject({
+      labelKey: "settings.shortcutEditTableStructure",
+      scope: "grid",
+      defaultShortcut: "Mod+D",
+    });
+    expect(DEFAULT_SHORTCUT_SETTINGS.editTableStructure).toBe("Mod+D");
+    expect(DEFAULT_SHORTCUT_SETTINGS.copyCurrentRow).toBe("");
+    expect(findShortcutConflict("editTableStructure", DEFAULT_SHORTCUT_SETTINGS.editTableStructure, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
+    expect(findShortcutConflict("duplicateLine", DEFAULT_SHORTCUT_SETTINGS.duplicateLine, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
+  });
+
+  it("migrates the legacy copy-row Mod+D default without overwriting explicit shortcuts", () => {
+    expect(normalizeShortcutSettings()).toMatchObject({ editTableStructure: "Mod+D", copyCurrentRow: "" });
+    expect(normalizeShortcutSettings({ copyCurrentRow: "Mod+D" })).toMatchObject({ editTableStructure: "Mod+D", copyCurrentRow: "" });
+    expect(normalizeShortcutSettings({ copyCurrentRow: "Shift+Mod+C" })).toMatchObject({ editTableStructure: "Mod+D", copyCurrentRow: "Shift+Mod+C" });
+    expect(normalizeShortcutSettings({ editTableStructure: "", copyCurrentRow: "Mod+D" })).toMatchObject({ editTableStructure: "", copyCurrentRow: "Mod+D" });
+    expect(normalizeShortcutSettings({ editTableStructure: "Shift+Mod+D", copyCurrentRow: "Mod+D" })).toMatchObject({ editTableStructure: "Shift+Mod+D", copyCurrentRow: "Mod+D" });
+  });
+
   it("registers the new-data-tab mouse modifier as a configurable sidebar shortcut", () => {
     const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "openDataInNewTab");
 

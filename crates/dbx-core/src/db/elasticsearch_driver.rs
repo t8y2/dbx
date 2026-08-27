@@ -170,7 +170,8 @@ impl EsClient {
                 .http
                 .post(format!("{}/api/console/proxy", self.base_url))
                 .query(&[("path", path), ("method", method.as_str())])
-                .header("kbn-xsrf", "true"),
+                .header("kbn-xsrf", "true")
+                .header("osd-xsrf", "true"),
         };
         self.with_auth(req)
     }
@@ -3358,6 +3359,7 @@ mod tests {
             assert_eq!(query.get("path").map(String::as_str), Some("/missing/_doc/1?refresh=true"));
             assert_eq!(query.get("method").map(String::as_str), Some("DELETE"));
             assert!(headers.lines().any(|line| line.eq_ignore_ascii_case("kbn-xsrf: true")), "{headers}");
+            assert!(headers.lines().any(|line| line.eq_ignore_ascii_case("osd-xsrf: true")), "{headers}");
             assert!(headers.lines().any(|line| line.eq_ignore_ascii_case("authorization: Basic ZWxhc3RpYzpzZWNyZXQ=")));
             assert_eq!(serde_json::from_str::<serde_json::Value>(body).unwrap(), json!({ "reason": "cleanup" }));
 
@@ -3387,6 +3389,15 @@ mod tests {
 
         assert_eq!(result.rows[0][0], json!(404));
         assert_eq!(result.rows[0][1], json!(response_body));
+    }
+
+    #[test]
+    fn direct_transport_omits_proxy_xsrf_headers() {
+        let client = EsClient::new("http://localhost:9200", None, None, false, Duration::from_secs(1));
+        let request = client.get("/").build().unwrap();
+
+        assert!(!request.headers().contains_key("kbn-xsrf"));
+        assert!(!request.headers().contains_key("osd-xsrf"));
     }
 
     #[tokio::test]

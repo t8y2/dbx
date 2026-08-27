@@ -17,6 +17,8 @@ const i18n = {
     easysearchSponsorAction: "Visit Easysearch",
     atlasCloudSponsorDesc: "Atlas Cloud gives developers one unified API for 400+ AI models across chat, image, video, and audio.",
     atlasCloudSponsorAction: "Visit Atlas Cloud",
+    trustasiaSponsorDesc: "TrustAsia provides cloud-based code signing service for DBX, enabling trusted software through automated CI/CD builds.",
+    trustasiaSponsorAction: "Visit TrustAsia",
     becomeTitle: "Sponsorship inquiries",
     becomeDesc: "If you would like to support DBX with funding, infrastructure, developer tools, or services, tell us about the idea and how to reach you.",
   },
@@ -31,6 +33,8 @@ const i18n = {
     easysearchSponsorAction: "访问 Easysearch",
     atlasCloudSponsorDesc: "Atlas Cloud 为开发者提供统一的多模态 AI API，可通过一个接口访问聊天、图像、视频和音频等 400+ 模型。",
     atlasCloudSponsorAction: "访问 Atlas Cloud",
+    trustasiaSponsorDesc: "由 TrustAsia 提供代码签名云签服务，实现 CICD 自动化构建可信软件。",
+    trustasiaSponsorAction: "访问 TrustAsia",
     becomeTitle: "赞助合作",
     becomeDesc: "如果你愿意通过资金、基础设施、开发工具或服务资源支持 DBX，请留下联系方式和合作说明。",
   },
@@ -86,10 +90,18 @@ export default async function SponsorsPage({ params }: { params: Promise<{ lang:
       description: t.atlasCloudSponsorDesc,
       action: t.atlasCloudSponsorAction,
     },
+    {
+      name: "TrustAsia",
+      href: "https://www.trustasia.com/ssl/trustasia/code-signing",
+      logo: "/sponsors/trustasia.png",
+      logoClass: "w-full max-w-[160px] object-contain",
+      description: t.trustasiaSponsorDesc,
+      action: t.trustasiaSponsorAction,
+    },
   ];
 
   return (
-    <main className="min-h-screen bg-[#0b1120] text-landing-ink">
+    <main className="min-h-screen bg-[#08080a] text-landing-ink">
       <LandingNav lang={locale} active="sponsors" />
 
       <section className="max-w-[1180px] mx-auto px-6 pt-32 pb-24">

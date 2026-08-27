@@ -26,6 +26,8 @@ struct CachedAgentQuery {
 
 pub struct AgentRuntimeClient {
     child: Arc<Mutex<Child>>,
+    child_reaper_started: Arc<AtomicBool>,
+    child_reaped: Arc<AtomicBool>,
     stdin: Arc<Mutex<BufWriter<ChildStdin>>>,
     pending: Arc<Mutex<HashMap<u64, PendingAgentResponse>>>,
     stderr_tail: Arc<Mutex<StderrTail>>,
@@ -66,6 +68,8 @@ impl AgentRuntimeClient {
 
         let runtime = Arc::new(Self {
             child: Arc::new(Mutex::new(child)),
+            child_reaper_started: Arc::new(AtomicBool::new(false)),
+            child_reaped: Arc::new(AtomicBool::new(false)),
             stdin: Arc::new(Mutex::new(BufWriter::new(child_stdin))),
             pending: Arc::new(Mutex::new(HashMap::new())),
             stderr_tail,
@@ -106,20 +110,16 @@ impl AgentRuntimeClient {
     fn start_response_reader(self: &Arc<Self>, mut stdout: BufReader<ChildStdout>) {
         let pending = self.pending.clone();
         let failed = self.failed.clone();
+        let child = self.child.clone();
+        let child_reaper_started = self.child_reaper_started.clone();
+        let child_reaped = self.child_reaped.clone();
         std::thread::spawn(move || loop {
-            let line = match read_agent_line(&mut stdout, "response") {
-                Ok(line) => line,
+            let response = match read_agent_json_response(&mut stdout) {
+                Ok((_, response)) => response,
                 Err(err) => {
                     failed.store(true, Ordering::Release);
                     fail_pending_requests(&pending, err);
-                    return;
-                }
-            };
-            let response: Value = match serde_json::from_str(line.trim()) {
-                Ok(response) => response,
-                Err(err) => {
-                    failed.store(true, Ordering::Release);
-                    fail_pending_requests(&pending, format!("Invalid JSON response from agent: {err}"));
+                    terminate_and_reap_shared_agent(child, child_reaper_started, child_reaped);
                     return;
                 }
             };
@@ -293,24 +293,72 @@ impl AgentRuntimeClient {
         if let Ok(mut child) = self.child.lock() {
             let _ = child.kill();
         }
+        start_shared_agent_reaper(self.child.clone(), self.child_reaper_started.clone(), self.child_reaped.clone());
         fail_pending_requests(&self.pending, "Agent runtime terminated".to_string());
     }
 
     pub async fn kill_and_wait(&self) {
         self.failed.store(true, Ordering::Release);
         fail_pending_requests(&self.pending, "Agent runtime terminated".to_string());
+        if self.child_reaper_started.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+            wait_for_shared_agent_reaper(self.child_reaped.clone()).await;
+            return;
+        }
         let child = self.child.clone();
-        match tokio::task::spawn_blocking(move || {
-            let mut child = child.lock().map_err(|_| "Shared agent process lock poisoned".to_string())?;
-            let _ = child.kill();
-            child.wait().map(|_| ()).map_err(|err| format!("Failed to wait for shared agent runtime: {err}"))
+        let child_reaped = self.child_reaped.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let result =
+                child.lock().map_err(|_| "Shared agent process lock poisoned".to_string()).and_then(|mut child| {
+                    let _ = child.kill();
+                    child.wait().map(|_| ()).map_err(|err| format!("Failed to wait for shared agent runtime: {err}"))
+                });
+            child_reaped.store(true, Ordering::Release);
+            result
         })
-        .await
-        {
+        .await;
+        match result {
             Ok(Ok(())) => {}
             Ok(Err(err)) => log::warn!("{err}"),
             Err(err) => log::warn!("Failed to join shared agent shutdown task: {err}"),
         }
+    }
+}
+
+fn terminate_and_reap_shared_agent(
+    child: Arc<Mutex<Child>>,
+    child_reaper_started: Arc<AtomicBool>,
+    child_reaped: Arc<AtomicBool>,
+) {
+    if let Ok(mut child) = child.lock() {
+        let _ = child.kill();
+    }
+    start_shared_agent_reaper(child, child_reaper_started, child_reaped);
+}
+
+fn start_shared_agent_reaper(
+    child: Arc<Mutex<Child>>,
+    child_reaper_started: Arc<AtomicBool>,
+    child_reaped: Arc<AtomicBool>,
+) {
+    if child_reaper_started.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+        return;
+    }
+    std::thread::spawn(move || {
+        let result =
+            child.lock().map_err(|_| "Shared agent process lock poisoned".to_string()).and_then(|mut child| {
+                child.wait().map(|_| ()).map_err(|err| format!("Failed to wait for shared agent runtime: {err}"))
+            });
+        child_reaped.store(true, Ordering::Release);
+        match result {
+            Ok(()) => {}
+            Err(err) => log::warn!("{err}"),
+        }
+    });
+}
+
+async fn wait_for_shared_agent_reaper(child_reaped: Arc<AtomicBool>) {
+    while !child_reaped.load(Ordering::Acquire) {
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
@@ -818,6 +866,10 @@ pub const AGENT_PROTOCOL_VERSION: u32 = 2;
 const RPC_TIMEOUT_SECS: u64 = 30;
 const STARTUP_TIMEOUT_SECS: u64 = 15;
 const STDERR_TAIL_LINES: usize = 20;
+const MAX_CONSECUTIVE_AGENT_STDOUT_NOISE_LINES: usize = 8;
+const AGENT_STDOUT_NOISE_SAMPLE_LINES: usize = 3;
+const AGENT_STDOUT_NOISE_SAMPLE_CHARS: usize = 160;
+const MAX_AGENT_RESPONSE_BYTES: usize = 512 * 1024 * 1024;
 const AGENT_EXIT_DIAGNOSTIC_WAIT_MS: u64 = 1_000;
 const AGENT_EXIT_DIAGNOSTIC_POLL_MS: u64 = 10;
 const SHARED_RUNTIME_IDLE_GRACE_SECS: u64 = 30;
@@ -1712,16 +1764,9 @@ impl AgentDriverClient {
         let mut reader = self.stdout.take().ok_or("Agent stdout not available")?;
 
         let response_task = tokio::task::spawn_blocking(move || {
-            let line = match read_agent_line(&mut reader, "response") {
-                Ok(line) => line,
+            let (line, resp) = match read_agent_json_response(&mut reader) {
+                Ok(response) => response,
                 Err(e) => return (reader, Err(e)),
-            };
-
-            let resp: Value = match serde_json::from_str(line.trim()) {
-                Ok(v) => v,
-                Err(e) => {
-                    return (reader, Err(format!("Invalid JSON response from agent: {e}")));
-                }
             };
 
             let result = if let Some(err) = resp.get("error") {
@@ -3115,7 +3160,14 @@ fn agent_proxy_env_vars() -> &'static [&'static str] {
 }
 
 fn read_agent_line<R: BufRead>(reader: &mut R, context: &str) -> Result<String, String> {
-    const MAX_RESPONSE_BYTES: usize = 512 * 1024 * 1024;
+    read_agent_line_with_limit(reader, context, MAX_AGENT_RESPONSE_BYTES)
+}
+
+fn read_agent_line_with_limit<R: BufRead>(
+    reader: &mut R,
+    context: &str,
+    maximum_bytes: usize,
+) -> Result<String, String> {
     let mut bytes = Vec::new();
     loop {
         let available = reader.fill_buf().map_err(|e| format!("Failed to read {context} from agent: {e}"))?;
@@ -3130,14 +3182,58 @@ fn read_agent_line<R: BufRead>(reader: &mut R, context: &str) -> Result<String, 
         bytes.extend_from_slice(available);
         let len = available.len();
         reader.consume(len);
-        if bytes.len() > MAX_RESPONSE_BYTES {
-            return Err(format!("Agent {context} exceeded maximum size ({} bytes)", MAX_RESPONSE_BYTES));
+        if bytes.len() > maximum_bytes {
+            return Err(format!("Agent {context} exceeded maximum size ({maximum_bytes} bytes)"));
         }
     }
     if bytes.is_empty() {
         return Err(format!("Failed to read {context} from agent: end of stream"));
     }
     Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn read_agent_json_response<R: BufRead>(reader: &mut R) -> Result<(String, Value), String> {
+    let mut noise_lines = 0;
+    let mut noise_samples = Vec::with_capacity(AGENT_STDOUT_NOISE_SAMPLE_LINES);
+    loop {
+        let line = read_agent_line(reader, "response").map_err(|error| {
+            if noise_samples.is_empty() {
+                error
+            } else {
+                format!("{error}; sampled agent stdout noise: {}", noise_samples.join(" | "))
+            }
+        })?;
+        match serde_json::from_str::<Value>(line.trim()) {
+            Ok(response) => return Ok((line, response)),
+            Err(parse_error) => {
+                noise_lines += 1;
+                let sample = sample_agent_stdout_noise(&line);
+                log::warn!("[agent:stdout] ignoring non-JSON response line: {sample}");
+                if noise_samples.len() < AGENT_STDOUT_NOISE_SAMPLE_LINES {
+                    noise_samples.push(sample);
+                }
+                if noise_lines > MAX_CONSECUTIVE_AGENT_STDOUT_NOISE_LINES {
+                    return Err(format!(
+                        "Agent response exceeded maximum consecutive stdout noise lines ({MAX_CONSECUTIVE_AGENT_STDOUT_NOISE_LINES}); last JSON error: {parse_error}; sampled agent stdout noise: {}",
+                        noise_samples.join(" | ")
+                    ));
+                }
+            }
+        }
+    }
+}
+
+fn sample_agent_stdout_noise(line: &str) -> String {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return "<blank>".to_string();
+    }
+    let mut chars = trimmed.chars();
+    let mut sample = chars.by_ref().take(AGENT_STDOUT_NOISE_SAMPLE_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        sample.push('…');
+    }
+    format!("{sample:?}")
 }
 
 fn start_stderr_collector(stderr: ChildStderr, stderr_tail: Arc<Mutex<StderrTail>>) {
@@ -3276,16 +3372,19 @@ mod tests {
         agent_supports_capability, agent_transaction_params, append_legacy_error_context, decode_agent_response,
         format_agent_process_error, format_agent_startup_error, is_agent_rpc_response_error,
         is_unsupported_handshake_error, legacy_agent_call_error, mongo_collection_params, mongo_database_params,
-        mongo_document_id_params, parse_agent_java_opts, read_agent_line, start_stderr_collector,
-        validate_dameng_java_system_properties, AgentCallError, AgentCapability, AgentDriverClient, AgentErrorCategory,
-        AgentErrorContext, AgentErrorStage, AgentHandshake, AgentKvMethod, AgentLaunchSpec, AgentMethod,
-        AgentOperationOutcome, AgentRuntimeClient, AgentSessionDisposition, AgentTableReadCloseParams,
-        AgentTableReadPageParams, AgentTableReadStartParams, MongoAgentMethod, StderrTail, AGENT_PROTOCOL_VERSION,
+        mongo_document_id_params, parse_agent_java_opts, read_agent_json_response, read_agent_line,
+        read_agent_line_with_limit, start_stderr_collector, validate_dameng_java_system_properties, AgentCallError,
+        AgentCapability, AgentDriverClient, AgentErrorCategory, AgentErrorContext, AgentErrorStage, AgentHandshake,
+        AgentKvMethod, AgentLaunchSpec, AgentMethod, AgentOperationOutcome, AgentRuntimeClient,
+        AgentSessionDisposition, AgentTableReadCloseParams, AgentTableReadPageParams, AgentTableReadStartParams,
+        MongoAgentMethod, StderrTail, AGENT_PROTOCOL_VERSION, AGENT_STDOUT_NOISE_SAMPLE_CHARS,
+        MAX_CONSECUTIVE_AGENT_STDOUT_NOISE_LINES,
     };
     use crate::agent_recovery::{RecoveryDecision, RecoveryPolicy, RecoveryScope};
     use std::io::Cursor;
     use std::io::Write;
     use std::process::{Command, Stdio};
+    use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
     use tokio_util::sync::CancellationToken;
@@ -3825,6 +3924,63 @@ mod tests {
     }
 
     #[test]
+    fn reads_agent_json_responses_after_bounded_noise_and_resets_the_limit() {
+        let mut input = String::new();
+        for _ in 0..MAX_CONSECUTIVE_AGENT_STDOUT_NOISE_LINES {
+            input.push_str("driver banner\n");
+        }
+        input.push_str("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":true}\n");
+        for index in 0..MAX_CONSECUTIVE_AGENT_STDOUT_NOISE_LINES {
+            if index % 2 == 0 {
+                input.push('\n');
+            } else {
+                input.push_str("more driver chatter\n");
+            }
+        }
+        input.push_str("{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":false}\n");
+        let mut reader = Cursor::new(input.into_bytes());
+
+        let (_, first) = read_agent_json_response(&mut reader).unwrap();
+        let (_, second) = read_agent_json_response(&mut reader).unwrap();
+
+        assert_eq!(first["id"], 1);
+        assert_eq!(second["id"], 2);
+    }
+
+    #[test]
+    fn reads_immediate_agent_json_response_without_noise() {
+        let mut reader = Cursor::new(b"{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":true}\n".to_vec());
+
+        let (line, response) = read_agent_json_response(&mut reader).unwrap();
+
+        assert_eq!(line, "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":true}\n");
+        assert_eq!(response["id"], 7);
+    }
+
+    #[test]
+    fn rejects_unbounded_agent_stdout_noise_with_bounded_diagnostics() {
+        let long_noise = "x".repeat(AGENT_STDOUT_NOISE_SAMPLE_CHARS + 40);
+        let input = format!("{long_noise}\n").repeat(MAX_CONSECUTIVE_AGENT_STDOUT_NOISE_LINES + 1);
+        let mut reader = Cursor::new(input.into_bytes());
+
+        let error = read_agent_json_response(&mut reader).unwrap_err();
+
+        assert!(error.contains("exceeded maximum consecutive stdout noise lines (8)"));
+        assert!(error.contains("sampled agent stdout noise:"));
+        assert!(error.contains('…'));
+        assert!(error.len() < 700, "diagnostic was not bounded: {} bytes", error.len());
+    }
+
+    #[test]
+    fn preserves_agent_response_line_size_limit() {
+        let mut reader = Cursor::new(b"123456789".to_vec());
+
+        let error = read_agent_line_with_limit(&mut reader, "response", 8).unwrap_err();
+
+        assert_eq!(error, "Agent response exceeded maximum size (8 bytes)");
+    }
+
+    #[test]
     fn formats_agent_process_error_with_exit_status_and_stderr_tail() {
         let mut stderr_tail = StderrTail::default();
         stderr_tail.push_line("java.lang.NoClassDefFoundError: org/apache/hive/jdbc/HiveDriver".to_string());
@@ -4002,6 +4158,39 @@ for line in sys.stdin:
 
     async fn runtime_counter(runtime: &Arc<AgentRuntimeClient>, method: &str) -> u64 {
         runtime.call(method, serde_json::json!({}), Some(Duration::from_secs(2)), None).await.unwrap()
+    }
+
+    async fn wait_for_runtime_reap(runtime: &AgentRuntimeClient) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !runtime.child_reaped.load(Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("shared Agent child should be reaped");
+    }
+
+    #[tokio::test]
+    async fn shared_runtime_kill_reaps_child_process() {
+        let (runtime, script_path) = spawn_stateful_test_runtime("kill-reap-test").await;
+
+        runtime.kill();
+        wait_for_runtime_reap(&runtime).await;
+
+        assert!(runtime.child.lock().unwrap().try_wait().unwrap().is_some());
+        let _ = std::fs::remove_file(script_path);
+    }
+
+    #[tokio::test]
+    async fn shared_runtime_kill_and_wait_joins_existing_reaper() {
+        let (runtime, script_path) = spawn_stateful_test_runtime("kill-and-wait-reap-test").await;
+
+        runtime.kill();
+        runtime.kill_and_wait().await;
+
+        assert!(runtime.child_reaped.load(Ordering::Acquire));
+        assert!(runtime.child.lock().unwrap().try_wait().unwrap().is_some());
+        let _ = std::fs::remove_file(script_path);
     }
 
     #[tokio::test]
@@ -4202,6 +4391,149 @@ for line in sys.stdin:
         assert!(client.cached_query.is_none());
 
         runtime.kill();
+        let _ = std::fs::remove_file(script_path);
+    }
+
+    #[tokio::test]
+    async fn shared_runtime_tolerates_post_startup_driver_stdout_noise() {
+        let script_path =
+            std::env::temp_dir().join(format!("dbx-agent-runtime-stdout-noise-{}.py", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &script_path,
+            r#"import json, sys
+print(json.dumps({'ready': True}), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    if req['method'] == 'handshake':
+        result = {'protocolVersion': 2, 'agentProtocolVersion': 2, 'capabilities': ['multi_session']}
+        response = {'jsonrpc': '2.0', 'id': req['id'], 'result': result}
+    elif req['method'] == 'fail':
+        print('Log4j class not found, fallback to sl4j', flush=True)
+        response = {'jsonrpc': '2.0', 'id': req['id'], 'error': {'code': -42, 'message': 'synthetic agent error'}}
+    else:
+        print('Log4j class not found, fallback to sl4j', flush=True)
+        response = {'jsonrpc': '2.0', 'id': req['id'], 'result': {'ok': True}}
+    print(json.dumps(response), flush=True)
+"#,
+        )
+        .unwrap();
+
+        let runtime = AgentRuntimeClient::spawn(
+            AgentLaunchSpec::new(test_python()).with_args([script_path.to_string_lossy().to_string()]),
+            "test",
+        )
+        .await
+        .unwrap();
+
+        let result = runtime
+            .call::<serde_json::Value>(
+                AgentMethod::TestConnection.as_str(),
+                serde_json::json!({}),
+                Some(Duration::from_secs(2)),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result, serde_json::json!({"ok": true}));
+
+        let error = runtime
+            .call_typed::<serde_json::Value>("fail", serde_json::json!({}), Some(Duration::from_secs(2)), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            AgentCallError::Legacy { rpc_code: Some(-42), ref message, .. }
+                if message == "synthetic agent error"
+        ));
+        assert!(!runtime.is_failed());
+
+        runtime.kill();
+        let _ = std::fs::remove_file(script_path);
+    }
+
+    #[tokio::test]
+    async fn shared_runtime_fails_all_pending_requests_after_stdout_noise_limit() {
+        let script_path =
+            std::env::temp_dir().join(format!("dbx-agent-runtime-stdout-noise-limit-{}.py", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &script_path,
+            format!(
+                r#"import json, sys
+pending = []
+print(json.dumps({{'ready': True}}), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    if req['method'] == 'handshake':
+        result = {{'protocolVersion': 2, 'agentProtocolVersion': 2, 'capabilities': ['multi_session']}}
+        print(json.dumps({{'jsonrpc': '2.0', 'id': req['id'], 'result': result}}), flush=True)
+    else:
+        pending.append(req)
+        if len(pending) == 2:
+            for index in range({}):
+                print('driver-noise-' + str(index), flush=True)
+"#,
+                MAX_CONSECUTIVE_AGENT_STDOUT_NOISE_LINES + 1
+            ),
+        )
+        .unwrap();
+
+        let runtime = AgentRuntimeClient::spawn(
+            AgentLaunchSpec::new(test_python()).with_args([script_path.to_string_lossy().to_string()]),
+            "test",
+        )
+        .await
+        .unwrap();
+        let first =
+            runtime.call::<serde_json::Value>("first", serde_json::json!({}), Some(Duration::from_secs(2)), None);
+        let second =
+            runtime.call::<serde_json::Value>("second", serde_json::json!({}), Some(Duration::from_secs(2)), None);
+
+        let (first, second) = tokio::join!(first, second);
+
+        for error in [first.unwrap_err(), second.unwrap_err()] {
+            assert!(error.contains("exceeded maximum consecutive stdout noise lines (8)"));
+            assert!(error.contains("driver-noise-0"));
+        }
+        assert!(runtime.is_failed());
+
+        runtime.kill();
+        let _ = std::fs::remove_file(script_path);
+    }
+
+    #[tokio::test]
+    async fn legacy_client_tolerates_post_startup_driver_stdout_noise() {
+        let script_path =
+            std::env::temp_dir().join(format!("dbx-agent-legacy-stdout-noise-{}.py", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &script_path,
+            r#"import json, sys
+print(json.dumps({'ready': True}), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    print('', flush=True)
+    print('Log4j class not found, fallback to sl4j', flush=True)
+    if req['method'] == 'fail':
+        response = {'jsonrpc': '2.0', 'id': req['id'], 'error': {'code': -42, 'message': 'synthetic agent error'}}
+    else:
+        response = {'jsonrpc': '2.0', 'id': req['id'], 'result': {'ok': True}}
+    print(json.dumps(response), flush=True)
+"#,
+        )
+        .unwrap();
+
+        let mut client = AgentDriverClient::spawn(
+            AgentLaunchSpec::new(test_python()).with_args([script_path.to_string_lossy().to_string()]),
+        )
+        .await
+        .unwrap();
+
+        let result = client.call::<serde_json::Value>("echo", serde_json::json!({})).await.unwrap();
+        assert_eq!(result, serde_json::json!({"ok": true}));
+
+        let error = client.call::<serde_json::Value>("fail", serde_json::json!({})).await.unwrap_err();
+        assert!(error.contains("Agent RPC error (-42): synthetic agent error"));
+
+        client.kill();
         let _ = std::fs::remove_file(script_path);
     }
 
@@ -4421,6 +4753,7 @@ for line in sys.stdin:
             .unwrap_err();
         assert!(error.contains("end of stream") || error.contains("response channel closed"));
         assert!(runtime.is_failed());
+        wait_for_runtime_reap(&runtime).await;
         let _ = std::fs::remove_file(script_path);
     }
 

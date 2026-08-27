@@ -609,6 +609,11 @@ enum AgentAuthenticationOutcome {
     KeyboardInteractiveRequired,
 }
 
+#[cfg(unix)]
+fn resolve_ssh_agent_socket_path(path: &str) -> String {
+    expand_tilde(path)
+}
+
 /// Try to authenticate using ssh-agent identities. A key may be only the first
 /// successful factor, so preserve a server request to continue with
 /// keyboard-interactive instead of discarding it and trying the next identity.
@@ -627,12 +632,13 @@ async fn try_authenticate_with_agent(
             }
         }
     } else {
-        match AgentClient::connect_uds(ssh_agent_sock_path).await {
+        let resolved_path = resolve_ssh_agent_socket_path(ssh_agent_sock_path);
+        match AgentClient::connect_uds(&resolved_path).await {
             Ok(a) => a,
             Err(e) => {
                 return Err(format!(
                     "No SSH password or key provided, and ssh-agent at '{}' is unavailable: {e}",
-                    ssh_agent_sock_path
+                    resolved_path
                 ));
             }
         }
@@ -1863,6 +1869,8 @@ fn plan_chain(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::resolve_ssh_agent_socket_path;
     use super::SshClient;
     use super::PROMPT_TEST_LOCK;
     use super::{
@@ -1890,6 +1898,34 @@ mod tests {
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::mpsc;
     use tokio::time::{Duration, Instant};
+
+    #[cfg(unix)]
+    #[test]
+    fn ssh_agent_socket_path_expands_current_user_home() {
+        let home = std::env::var("HOME").expect("HOME should be set on Unix test environments");
+
+        assert_eq!(resolve_ssh_agent_socket_path("~/.ssh/agent.sock"), format!("{home}/.ssh/agent.sock"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ssh_agent_socket_path_preserves_absolute_path() {
+        assert_eq!(resolve_ssh_agent_socket_path("/tmp/agent.sock"), "/tmp/agent.sock");
+    }
+
+    #[cfg(all(unix, not(target_os = "redox")))]
+    #[test]
+    fn ssh_agent_socket_path_expands_named_user_home() {
+        let user = nix::unistd::User::from_uid(nix::unistd::getuid())
+            .expect("current Unix user lookup should succeed")
+            .expect("current Unix user should exist in the account database");
+        let home = user.dir.into_os_string().into_string().expect("current Unix user home should be valid UTF-8");
+
+        assert_eq!(
+            resolve_ssh_agent_socket_path(&format!("~{}/.ssh/agent.sock", user.name)),
+            format!("{home}/.ssh/agent.sock")
+        );
+    }
 
     #[test]
     fn tofu_prompt_deadline_uses_the_actual_prompt_start() {

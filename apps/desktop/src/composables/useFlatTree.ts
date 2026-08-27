@@ -4,6 +4,25 @@ export const SIDEBAR_TREE_ROW_HEIGHT = 28;
 export const SIDEBAR_TREE_SCROLL_BUFFER = 600;
 export const SIDEBAR_TREE_PRERENDER_COUNT = 48;
 
+/**
+ * Sidebar trees at or above this many rows use the virtualized renderer.
+ * Smaller trees render plainly (all rows in the DOM). Virtualized rendering
+ * has a failure mode where the view pool stops matching the viewport when the
+ * tree mutates while scrolled (observed with the Dameng connection, whose
+ * subtree keeps streaming in new nodes) — a blank band appears below the last
+ * materialized row. Plain rendering cannot exhibit that failure, so keep
+ * small/medium trees off the virtual path.
+ */
+export const SIDEBAR_TREE_VIRTUALIZE_THRESHOLD = 500;
+
+/**
+ * Once a tree is virtualized it stays virtualized until the row count drops
+ * below THRESHOLD - HYSTERESIS. Switching renderers remounts the whole tree,
+ * so the hysteresis prevents search/filter oscillation around the threshold
+ * from thrashing between the two branches.
+ */
+export const SIDEBAR_TREE_VIRTUALIZE_HYSTERESIS = 50;
+
 export interface FlatTreeNode {
   node: TreeNode;
   depth: number;
@@ -108,7 +127,7 @@ export function flatTreeRowsChanged(nodes: readonly FlatTreeNode[], previousNode
 }
 
 export function shouldVirtualizeFlatTree(count: number): boolean {
-  return count > 0;
+  return count >= SIDEBAR_TREE_VIRTUALIZE_THRESHOLD;
 }
 
 export function createFlatTreeIndex(nodes: readonly FlatTreeNode[], options: FlatTreeIndexOptions): FlatTreeIndex {

@@ -71,7 +71,7 @@ export function getTreeNodeIconInfo(node: TreeNode): TreeNodeIconInfo | null {
     case "group-events":
       return { icon: Clock, colorClass: "text-orange-400" };
     case "event":
-      return { icon: Clock, colorClass: "text-orange-300" };
+      return { icon: Clock, colorClass: "text-orange-400" };
     case "group-constraints":
     case "constraint":
       return { icon: Key, colorClass: "text-amber-500" };

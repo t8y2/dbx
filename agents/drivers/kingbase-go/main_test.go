@@ -228,8 +228,8 @@ func (connection *fallbackConn) QueryContext(_ context.Context, query string, _ 
 			identity = nil
 		}
 		return &valueRows{
-			columns: []string{"column_name", "data_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length", "attidentity"},
-			rows:    [][]driver.Value{{"id", "integer", false, nil, nil, int64(32), int64(0), nil, identity}},
+			columns: []string{"resolved_schema", "column_name", "data_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length", "attidentity"},
+			rows:    [][]driver.Value{{"public", "id", "integer", false, nil, nil, int64(32), int64(0), nil, identity}},
 		}, nil
 	}
 	return nil, errors.New("unexpected query: " + query)
@@ -1075,6 +1075,74 @@ func TestListIndexesFallsBackWhenWithOrdinalityIsUnsupported(t *testing.T) {
 	}
 	if ordinalityQueries != 1 || !server.indexOrdinalityUnsupported {
 		t.Fatalf("unsupported capability was not cached: queries=%v", state.snapshotQueries())
+	}
+}
+
+func TestGetColumnsUsesResolvedSchemaAcrossCatalogMetadata(t *testing.T) {
+	tests := []struct {
+		name               string
+		postgresCatalog    bool
+		requestedSchema    string
+		resolvedSchema     string
+		visibilityFunction string
+		sqlServerIdentity  bool
+	}{
+		{name: "sys catalog search path", resolvedSchema: "tenant_visible", visibilityFunction: "sys_catalog.sys_table_is_visible(c.oid)", sqlServerIdentity: true},
+		{name: "postgres catalog search path", postgresCatalog: true, resolvedSchema: "tenant_pg", visibilityFunction: "pg_catalog.pg_table_is_visible(c.oid)"},
+		{name: "explicit schema", requestedSchema: "tenant_explicit", resolvedSchema: "tenant_explicit"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			catalog := "sys_catalog"
+			prefix := "sys"
+			if test.postgresCatalog {
+				catalog = "pg_catalog"
+				prefix = "pg"
+			}
+			state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+				switch {
+				case strings.Contains(query, "FROM "+catalog+"."+prefix+"_attribute a"):
+					if test.visibilityFunction != "" {
+						if !strings.Contains(query, test.visibilityFunction) {
+							return nil, fmt.Errorf("unqualified columns query did not use the catalog visibility function: %s", query)
+						}
+					} else if strings.Contains(query, "table_is_visible") || !strings.Contains(query, "n.nspname = '"+test.requestedSchema+"'") {
+						return nil, fmt.Errorf("explicit-schema columns query changed resolution behavior: %s", query)
+					}
+					return &valueRows{
+						columns: []string{"nspname", "attname", "format_type", "nullable", "default", "comment", "precision", "scale", "length", "identity"},
+						rows:    [][]driver.Value{{test.resolvedSchema, "feearea", "character varying", false, nil, nil, nil, nil, nil, nil}},
+					}, nil
+				case strings.Contains(query, "FROM information_schema.table_constraints"):
+					if !strings.Contains(query, "tc.table_schema='"+test.resolvedSchema+"'") {
+						return nil, fmt.Errorf("primary-key lookup did not use resolved schema: %s", query)
+					}
+					return &valueRows{columns: []string{"column_name"}, rows: [][]driver.Value{{"feearea"}}}, nil
+				case strings.Contains(query, "FROM sys.identity_columns"):
+					if !strings.Contains(query, "n.nspname='"+test.resolvedSchema+"'") {
+						return nil, fmt.Errorf("identity lookup did not use resolved schema: %s", query)
+					}
+					return &valueRows{columns: []string{"attname", "seed_value", "increment_value"}, rows: [][]driver.Value{{"feearea", "1", "1"}}}, nil
+				default:
+					return nil, fmt.Errorf("unexpected query: %s", query)
+				}
+			}}
+			server := newServer()
+			server.db = openMetadataDB(t, state)
+			server.mode.postgresCatalog = test.postgresCatalog
+			server.mode.sqlServerIdentity = test.sqlServerIdentity
+
+			columns, err := server.getColumns(test.requestedSchema, "m_workflow")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(columns) != 1 || columns[0].ResolvedSchema == nil || *columns[0].ResolvedSchema != test.resolvedSchema || !columns[0].IsPrimaryKey {
+				t.Fatalf("resolved relation metadata was lost: %#v", columns)
+			}
+			if test.sqlServerIdentity && (columns[0].Extra == nil || *columns[0].Extra != "IDENTITY(1,1)") {
+				t.Fatalf("identity metadata did not use the resolved relation: %#v", columns)
+			}
+		})
 	}
 }
 
@@ -3285,6 +3353,9 @@ func TestMySQLCompatColumnsUsePostgresColumnComments(t *testing.T) {
 	}
 	if columns[0].Extra != nil {
 		t.Fatalf("MySQL-compatible metadata must not infer PostgreSQL identity: %#v", columns[0].Extra)
+	}
+	if columns[0].ResolvedSchema == nil || *columns[0].ResolvedSchema != "public" {
+		t.Fatalf("MySQL-compatible metadata must keep its effective schema: %#v", columns[0])
 	}
 
 	state.mu.Lock()

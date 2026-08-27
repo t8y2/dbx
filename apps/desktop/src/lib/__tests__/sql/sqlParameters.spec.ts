@@ -877,7 +877,7 @@ describe("substituteSqlParameters", () => {
     ).toBe("select * from t where dt >= '2026-06-26' and amount > 100.50 and enabled = TRUE");
   });
 
-  it("replaces exact quoted braced placeholders as whole tokens without double-quoting", () => {
+  it("preserves single-quoted string contexts for exact braced placeholders", () => {
     const sql = "select * from t where dt = '${date}' and name = \"${name}\" and flag = '#{enabled}' and id = ${id}";
     expect(
       substituteSqlParameters(sql, {
@@ -886,7 +886,29 @@ describe("substituteSqlParameters", () => {
         enabled: { kind: "boolean", value: "true" },
         id: { kind: "number", value: "7" },
       }),
-    ).toBe("select * from t where dt = '2026-06-26' and name = 'O''Reilly' and flag = TRUE and id = 7");
+    ).toBe("select * from t where dt = '2026-06-26' and name = 'O''Reilly' and flag = 'true' and id = 7");
+  });
+
+  it("keeps explicit quotes around raw and numeric parameter values", () => {
+    const sql = "select ${raw_value}, '${raw_value}', ${number_value}, '${number_value}'";
+    expect(
+      substituteSqlParameters(sql, {
+        raw_value: { kind: "raw", value: "current_date" },
+        number_value: { kind: "number", value: "42" },
+      }),
+    ).toBe("select current_date, 'current_date', 42, '42'");
+  });
+
+  it("replaces exact quoted null and empty typed values with SQL NULL", () => {
+    const sql = "select '${null_value}', '${empty_number}', '${empty_raw}', '${empty_string}'";
+    expect(
+      substituteSqlParameters(sql, {
+        null_value: { kind: "null", value: "NULL" },
+        empty_number: { kind: "number", value: "" },
+        empty_raw: { kind: "raw", value: "  " },
+        empty_string: { kind: "string", value: "" },
+      }),
+    ).toBe("select NULL, NULL, NULL, ''");
   });
 
   it("replaces placeholders embedded in ordinary SQL string values", () => {

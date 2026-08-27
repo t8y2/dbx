@@ -72,6 +72,11 @@ export function isMysqlMissingPasswordFailure(config: ConnectionConfig, message:
   return /access denied for user[\s\S]*using password:\s*no/i.test(message);
 }
 
+export function isSqliteMissingEncryptionPasswordFailure(config: ConnectionConfig, message: string): boolean {
+  if (config.db_type !== "sqlite" || config.password) return false;
+  return /Selected file is not a valid SQLite database file/i.test(message);
+}
+
 export function isJdbcMissingRuntimeDependencyError(message: string): boolean {
   return /Missing Java class|NoClassDefFoundError|ClassNotFoundException/i.test(message);
 }

@@ -83,7 +83,7 @@ export function InstallTabs({ lang, version }: InstallTabsProps) {
       <PlatformIcon id={primary?.iconId ?? fallbackIconId} size={30} variant="dark" />
       <span className="grid gap-0.5 min-w-0 text-left">
         <strong className="overflow-hidden text-[15px] font-[780] leading-[1.2] truncate">{downloadLabel[lang]}</strong>
-        <small className="overflow-hidden text-xs font-[520] leading-tight truncate text-[color-mix(in_srgb,#0f172a_48%,#94a3b8)]">{primary?.label ?? fallbackLabel}</small>
+        <small className="overflow-hidden text-xs font-[520] leading-tight truncate text-[color-mix(in_srgb,#121315_48%,#9aa0a8)]">{primary?.label ?? fallbackLabel}</small>
       </span>
     </>
   );
@@ -122,14 +122,14 @@ export function InstallTabs({ lang, version }: InstallTabsProps) {
             aria-expanded={open}
             aria-haspopup="menu"
             aria-label={lang === "cn" ? "显示其他下载选项" : "Show other download options"}
-            className="landing-install-toggle grid place-items-center border-0 border-l border-l-[rgba(15,23,42,0.12)] bg-transparent text-[#5f6876] cursor-pointer"
+            className="landing-install-toggle grid place-items-center border-0 border-l border-l-[rgba(10,11,13,0.12)] bg-transparent text-[#6a6f78] cursor-pointer"
             onClick={() => setOpen((current) => !current)}
           >
             <ChevronDown size={18} />
           </button>
         </div>
         <div
-          className="landing-install-menu absolute z-30 top-[calc(100%+12px)] left-1/2 -translate-x-1/2 grid w-[min(380px,calc(100vw-32px))] border border-[rgba(155,176,205,0.17)] rounded-xl py-1.5 max-[760px]:left-auto max-[760px]:translate-x-0"
+          className="landing-install-menu absolute z-30 top-[calc(100%+12px)] left-1/2 -translate-x-1/2 grid w-[min(380px,calc(100vw-32px))] border border-[rgba(173,176,182,0.17)] rounded-xl py-1.5 max-[760px]:left-auto max-[760px]:translate-x-0"
           id="landing-install-menu"
           role="menu"
           aria-label={lang === "cn" ? "下载选项" : "Download options"}

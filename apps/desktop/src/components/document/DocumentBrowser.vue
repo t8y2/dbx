@@ -22,7 +22,7 @@ import type { DynamoDbIndexInfo, DynamoDbTableDescription } from "@/lib/backend/
 import { useConnectionStore } from "@/stores/connectionStore";
 import { clampSearchSplitWidth } from "@/lib/dataGrid/dataGridSearchSplit";
 import { documentViewerFontStyle } from "@/lib/document/documentViewerFontStyle";
-import { clampDocumentPage, documentPageRequestLimit, resetElasticsearchDocumentTotals, resolveElasticsearchDocumentTotals } from "@/lib/document/elasticsearchDocumentTotals";
+import { clampDocumentPage, clampElasticsearchRequestLimit, documentPageRequestLimit, resetElasticsearchDocumentTotals, resolveElasticsearchDocumentTotals } from "@/lib/document/elasticsearchDocumentTotals";
 import { canGoNextDocumentPage, isSameDocumentQueryTotalCountRequest, resolveDocumentQueryTotals, type DocumentQueryTotalCountRequest } from "@/lib/document/documentQueryTotals";
 import {
   arrayObjectAncestorPathForDocumentField,
@@ -246,7 +246,7 @@ const canGoNextPage = computed(() => {
   });
 });
 const documentRequestLimit = computed(() => {
-  if (documentStoreProvider.value.kind !== "elasticsearch" || paginationTotal.value === undefined) return pageSize.value;
+  if (documentStoreProvider.value.kind !== "elasticsearch") return pageSize.value;
   return documentPageRequestLimit(page.value, pageSize.value, paginationTotal.value);
 });
 
@@ -1357,7 +1357,10 @@ async function load(options: { page?: number; append?: boolean; offset?: number;
       throw new Error(t("dynamodb.pageCursorUnavailable"));
     }
     const skip = storeKind === "dynamodb" ? 0 : (options.offset ?? requestPage * pageSize.value);
-    const requestLimit = options.limit ?? (storeKind === "elasticsearch" && paginationTotal.value !== undefined ? documentPageRequestLimit(requestPage, pageSize.value, paginationTotal.value) : pageSize.value);
+    const requestedLimit = options.limit ?? (storeKind === "elasticsearch" ? documentPageRequestLimit(requestPage, pageSize.value, paginationTotal.value) : pageSize.value);
+    // Elasticsearch rejects from+size beyond index.max_result_window even when an explicit limit
+    // (e.g. from the per-tab page size control) bypassed the default-path clamp above.
+    const requestLimit = storeKind === "elasticsearch" ? clampElasticsearchRequestLimit(skip, requestedLimit) : requestedLimit;
     const result = await api.documentFindDocuments(connectionId, database, collection, skip, requestLimit, filter, undefined, sort, undefined, executionId, cursor);
     if (documentLoadExecutionId.value !== executionId) return;
     if (connectionId !== props.connectionId || database !== props.database || collection !== props.collection || storeKind !== documentStoreProvider.value.kind) return;

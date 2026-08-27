@@ -60,6 +60,7 @@ import type {
   AiCompletionRequest,
   AiStreamChunk,
   AiConversation,
+  AiRun,
   AiModelInfo,
   DriverStoreUsage,
   DriverRuntimeSummary,
@@ -831,6 +832,10 @@ export async function getTableComment(_connectionId: string, _database: string, 
   throw new Error("Table comment lookup is not available in the web backend");
 }
 
+export async function getMysqlTableAutoIncrement(_connectionId: string, _database: string, _table: string): Promise<string | null> {
+  throw new Error("MySQL AUTO_INCREMENT metadata is not available in the web backend");
+}
+
 export async function listObjects(connectionId: string, database: string, schema: string, objectTypes?: (SidebarObjectKind | "EVENT")[], filter?: string, limit?: number, offset?: number, catalog?: string, tableNameFilter?: TableNameFilter): Promise<ObjectInfo[]> {
   return get(
     `/api/schema/objects?${qs({
@@ -1248,7 +1253,7 @@ export async function beginManualTransaction(_connectionId: string, _database: s
   throw new Error("Manual transaction management is only available in the desktop app.");
 }
 
-export async function executeInManualTransaction(_txnSessionId: string, _sql: string, _database: string, _schema?: string, _maxRows?: number, _tableDataPreview?: boolean): Promise<QueryResult[]> {
+export async function executeInManualTransaction(_txnSessionId: string, _sql: string, _database: string, _schema?: string, _maxRows?: number, _tableDataPreview?: boolean, _pageSize?: number, _resultSessionId?: string, _classificationSql?: string): Promise<QueryResult[]> {
   throw new Error("Manual transaction management is only available in the desktop app.");
 }
 
@@ -1586,13 +1591,16 @@ export async function aiStream(sessionId: string, request: AiCompletionRequest, 
       if (line.startsWith("data:")) {
         const data = line.slice(5).trim();
         if (data && data !== "[DONE]") {
+          let chunk: AiStreamChunk;
           try {
-            const chunk: AiStreamChunk = JSON.parse(data);
-            onChunk(chunk);
-            if (chunk.done) return;
+            chunk = JSON.parse(data);
           } catch {
             // skip malformed JSON
+            continue;
           }
+          if (chunk.error) throw new Error(chunk.error);
+          onChunk(chunk);
+          if (chunk.done) return;
         }
       }
     }
@@ -1683,18 +1691,23 @@ export async function aiAgentStream(
       if (line.startsWith("data:")) {
         const data = line.slice(5).trim();
         if (data && data !== "[DONE]") {
+          let parsed: unknown;
           try {
-            const parsed = JSON.parse(data);
-            if (!isAgentEvent(parsed)) {
-              console.warn("[aiAgentStream] Skipping invalid agent event:", data);
-              continue;
-            }
-            onEvent(parsed);
-            if (parsed.type === "agent_end" || parsed.type === "error") {
-              result = data;
-            }
+            parsed = JSON.parse(data);
           } catch {
             // skip malformed JSON
+            continue;
+          }
+          if (!isAgentEvent(parsed)) {
+            console.warn("[aiAgentStream] Skipping invalid agent event:", data);
+            continue;
+          }
+          onEvent(parsed);
+          if (parsed.type === "error") {
+            throw new Error(parsed.message);
+          }
+          if (parsed.type === "agent_end") {
+            result = data;
           }
         }
       }
@@ -2061,6 +2074,21 @@ export async function loadAiConversations(): Promise<AiConversation[]> {
 
 export async function deleteAiConversation(id: string): Promise<void> {
   return del(`/api/ai/conversation/${id}`);
+}
+
+// Background AI runs are a Desktop-only capability in this release. Keep the
+// symbols for backend-module parity without changing Web's request-bound SSE
+// lifecycle or adding a partially functional persistence API.
+export async function saveAiRun(_run: AiRun): Promise<void> {
+  throw new Error("Background AI runs are only available in DBX Desktop");
+}
+
+export async function saveAiRunState(_conversation: AiConversation, _run: AiRun): Promise<void> {
+  throw new Error("Background AI runs are only available in DBX Desktop");
+}
+
+export async function loadAiRuns(): Promise<AiRun[]> {
+  return [];
 }
 
 // ---------------------------------------------------------------------------
@@ -2507,7 +2535,16 @@ function downloadTextFile(filePath: string, fallbackFileName: string, content: s
   URL.revokeObjectURL(url);
 }
 
-export async function exportQueryResultXlsx(filePath: string, sheetName: string | undefined, columns: string[], columnTypes: string[], columnComments: readonly (string | null)[] | undefined, rows: readonly (readonly XlsxCellValue[])[], numericColumnRightAlign?: boolean): Promise<void> {
+export async function exportQueryResultXlsx(
+  filePath: string,
+  sheetName: string | undefined,
+  columns: string[],
+  columnTypes: string[],
+  columnComments: readonly (string | null)[] | undefined,
+  rows: readonly (readonly XlsxCellValue[])[],
+  numericColumnRightAlign?: boolean,
+  autoFilter?: boolean,
+): Promise<void> {
   const { buildXlsxWorkbook } = await import("@/lib/export/xlsxExport");
   const workbook = buildXlsxWorkbook({
     sheetName: sheetName || "Export",
@@ -2516,6 +2553,7 @@ export async function exportQueryResultXlsx(filePath: string, sheetName: string 
     columnComments,
     rows,
     numericColumnRightAlign,
+    autoFilter,
   });
   const fileName = filePath.split(/[\\/]/).pop() || "export.xlsx";
   const blob = new Blob([new Uint8Array(workbook)], {
@@ -2538,10 +2576,12 @@ export async function exportQueryResultsXlsx(
     columnComments?: readonly (string | null)[];
     rows: readonly (readonly XlsxCellValue[])[];
     numericColumnRightAlign?: boolean;
+    autoFilter?: boolean;
   }[],
+  autoFilter?: boolean,
 ): Promise<void> {
   const { buildXlsxWorkbookMulti } = await import("@/lib/export/xlsxExport");
-  const workbook = buildXlsxWorkbookMulti(worksheets);
+  const workbook = buildXlsxWorkbookMulti(autoFilter === undefined ? worksheets : worksheets.map((worksheet) => ({ ...worksheet, autoFilter })));
   const fileName = filePath.split(/[\\/]/).pop() || "export.xlsx";
   const blob = new Blob([new Uint8Array(workbook)], {
     type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -2673,6 +2713,17 @@ export async function redisHashSet(connectionId: string, db: number, keyRaw: str
 
 export async function redisHashDel(connectionId: string, db: number, keyRaw: string, field: string): Promise<void> {
   return post("/api/redis/hash-del", { connectionId, db, keyRaw, field });
+}
+
+export async function redisHashFieldUpdate(connectionId: string, db: number, keyRaw: string, oldField: string, newField: string, value: string): Promise<void> {
+  return post("/api/redis/hash-field-update", {
+    connectionId,
+    db,
+    keyRaw,
+    oldField,
+    newField,
+    value,
+  });
 }
 
 export async function redisHashFieldSetTtl(connectionId: string, db: number, keyRaw: string, field: string, ttl: number): Promise<void> {

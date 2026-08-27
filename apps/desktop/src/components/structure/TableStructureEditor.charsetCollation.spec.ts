@@ -8,12 +8,16 @@ const mocks = vi.hoisted(() => ({
     id: "structure-charset-test",
     name: "MySQL",
     db_type: "mysql",
+    driver_profile: "mysql",
     driver_label: "MySQL",
   },
   ensureConnected: vi.fn(),
   executeQuery: vi.fn(),
   listDataTypes: vi.fn(),
   buildTableStructureChangeSql: vi.fn(),
+  buildMysqlAutoIncrementSql: vi.fn(),
+  getMysqlTableAutoIncrement: vi.fn(),
+  executeBatch: vi.fn(),
   updateEditorSettings: vi.fn(),
   loadObjectDdl: vi.fn(),
   invalidateObjectDdl: vi.fn(),
@@ -36,6 +40,7 @@ vi.mock("@lucide/vue", async () => {
     Copy: Icon,
     Database: Icon,
     Info: Icon,
+    Keyboard: Icon,
     KeyRound: Icon,
     ListChevronsUpDown: Icon,
     Loader2: Icon,
@@ -222,19 +227,25 @@ vi.mock("@/lib/backend/api", () => ({
   executeQuery: mocks.executeQuery,
   listDataTypes: mocks.listDataTypes,
   buildTableStructureChangeSql: mocks.buildTableStructureChangeSql,
+  buildMysqlAutoIncrementSql: mocks.buildMysqlAutoIncrementSql,
+  getMysqlTableAutoIncrement: mocks.getMysqlTableAutoIncrement,
+  executeBatch: mocks.executeBatch,
 }));
 
 import TableStructureEditor from "@/components/structure/TableStructureEditor.vue";
 
 const mountedApps: App[] = [];
+let mountedEditor: { applyChanges: () => Promise<boolean> } | undefined;
 
-function draft() {
+function draft(autoIncrement = false, counter?: { value?: string; originalValue?: string }) {
   return {
     initialized: true,
     activeTab: "columns" as const,
     newTableName: "",
     tableComment: "",
     originalTableComment: "",
+    mysqlAutoIncrementValue: counter?.value,
+    originalMysqlAutoIncrementValue: counter?.originalValue,
     columns: [
       {
         id: "existing:id",
@@ -246,14 +257,14 @@ function draft() {
         isPrimaryKey: false,
         characterSet: "utf8mb3",
         collation: "utf8mb3_uca1400_ai_ci",
-        extra: "",
+        extra: { autoIncrement },
         original: {
           name: "id",
           data_type: "VARCHAR",
           is_nullable: true,
           column_default: null,
           is_primary_key: false,
-          extra: null,
+          extra: autoIncrement ? "auto_increment" : null,
           comment: null,
         },
         originalPosition: 0,
@@ -266,7 +277,7 @@ function draft() {
   };
 }
 
-async function mountEditor() {
+async function mountEditor(autoIncrement = false, counter?: { value?: string; originalValue?: string }) {
   mocks.ensureConnected.mockResolvedValue(undefined);
   mocks.listDataTypes.mockResolvedValue([]);
   mocks.buildTableStructureChangeSql.mockResolvedValue({ statements: [], warnings: [] });
@@ -278,10 +289,10 @@ async function mountEditor() {
     database: "test",
     schema: "test",
     tableName: "users",
-    draft: draft(),
+    draft: draft(autoIncrement, counter),
   });
   mountedApps.push(app);
-  app.mount(root);
+  mountedEditor = app.mount(root) as unknown as { applyChanges: () => Promise<boolean> };
   await nextTick();
   await Promise.resolve();
   await nextTick();
@@ -303,9 +314,13 @@ beforeEach(() => {
   mocks.connection.db_type = "mysql";
   mocks.connection.name = "MySQL";
   mocks.connection.driver_label = "MySQL";
+  mocks.connection.driver_profile = "mysql";
   mocks.loadObjectDdl.mockResolvedValue({ ddl: "CREATE TABLE users (id varchar(255))", cacheStatus: "remote" });
   mocks.invalidateObjectDdl.mockResolvedValue(undefined);
   mocks.loadObjectMetadataFacet.mockResolvedValue({ value: [], cacheStatus: "remote" });
+  mocks.getMysqlTableAutoIncrement.mockResolvedValue("10");
+  mocks.buildMysqlAutoIncrementSql.mockImplementation(async ({ value }: { value: string }) => `ALTER TABLE \`test\`.\`users\` AUTO_INCREMENT = ${value};`);
+  mocks.executeBatch.mockResolvedValue({ affected_rows: 0 });
 });
 
 afterEach(() => {
@@ -331,5 +346,100 @@ describe("TableStructureEditor charset/collation column width", () => {
     const triggerClass = collationSelect.getAttribute("trigger-class") ?? "";
     expect(triggerClass.split(",")).toContain("w-full");
     expect(triggerClass.split(",")).not.toEqual(expect.arrayContaining(["w-28"]));
+  });
+});
+
+describe("TableStructureEditor MySQL AUTO_INCREMENT counter", () => {
+  it("loads and renders the server value as a decimal string only for an existing auto-increment column", async () => {
+    const root = await mountEditor(true);
+    await vi.waitFor(() => expect(mocks.getMysqlTableAutoIncrement).toHaveBeenCalledWith("structure-charset-test", "test", "users"));
+
+    const input = root.querySelector<HTMLInputElement>("[data-mysql-auto-increment-counter]");
+    expect(input?.value).toBe("10");
+    expect(input?.disabled).toBe(false);
+  });
+
+  it("refreshes a restored clean counter draft from the server", async () => {
+    mocks.getMysqlTableAutoIncrement.mockResolvedValueOnce("30");
+    const root = await mountEditor(true, { value: "10", originalValue: "10" });
+
+    await vi.waitFor(() => expect(root.querySelector<HTMLInputElement>("[data-mysql-auto-increment-counter]")?.value).toBe("30"));
+    expect(mocks.buildMysqlAutoIncrementSql).not.toHaveBeenCalled();
+  });
+
+  it("keeps a restored dirty value while rebasing its server baseline", async () => {
+    mocks.getMysqlTableAutoIncrement.mockResolvedValueOnce("15");
+    const root = await mountEditor(true, { value: "20", originalValue: "10" });
+    const input = root.querySelector<HTMLInputElement>("[data-mysql-auto-increment-counter]")!;
+
+    await vi.waitFor(() => expect(input.value).toBe("20"));
+    await vi.waitFor(() => expect(mocks.buildMysqlAutoIncrementSql).toHaveBeenCalledWith(expect.objectContaining({ value: "20" })));
+    mocks.buildMysqlAutoIncrementSql.mockClear();
+    input.value = "15";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(mocks.buildMysqlAutoIncrementSql).not.toHaveBeenCalled();
+  });
+
+  it("keeps NULL or failed optional metadata from enabling a counter edit", async () => {
+    mocks.getMysqlTableAutoIncrement.mockResolvedValueOnce(null);
+    const nullRoot = await mountEditor(true);
+    await vi.waitFor(() => expect(mocks.getMysqlTableAutoIncrement).toHaveBeenCalled());
+    expect(nullRoot.querySelector<HTMLInputElement>("[data-mysql-auto-increment-counter]")?.disabled).toBe(true);
+
+    for (const app of mountedApps.splice(0)) app.unmount();
+    document.body.innerHTML = "";
+    mocks.getMysqlTableAutoIncrement.mockRejectedValueOnce(new Error("permission denied"));
+    const errorRoot = await mountEditor(true);
+    await vi.waitFor(() => expect(errorRoot.querySelector<HTMLInputElement>("[data-mysql-auto-increment-counter]")?.title).toBe("permission denied"));
+    expect(mocks.buildMysqlAutoIncrementSql).not.toHaveBeenCalled();
+
+    const structureStatement = "ALTER TABLE `test`.`users` COMMENT = 'ordinary edit';";
+    mocks.buildTableStructureChangeSql.mockResolvedValue({ statements: [structureStatement], warnings: [] });
+    const commentInput = Array.from(errorRoot.querySelectorAll<HTMLInputElement>("input")).find((input) => !input.hasAttribute("data-mysql-auto-increment-counter"))!;
+    commentInput.value = "ordinary edit";
+    commentInput.dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.waitFor(() => expect(mocks.buildTableStructureChangeSql).toHaveBeenCalled());
+    await vi.waitFor(() => expect(Array.from(errorRoot.querySelectorAll("button")).find((button) => button.textContent?.includes("structureEditor.apply"))?.disabled).toBe(false));
+    await expect(mountedEditor?.applyChanges()).resolves.toBe(true);
+    expect(mocks.executeBatch.mock.calls[mocks.executeBatch.mock.calls.length - 1]?.[2]).toEqual([structureStatement]);
+    expect(mocks.buildMysqlAutoIncrementSql).not.toHaveBeenCalled();
+  });
+
+  it("appends validated counter DDL and preserves the draft when execution fails", async () => {
+    const root = await mountEditor(true);
+    await vi.waitFor(() => expect(root.querySelector<HTMLInputElement>("[data-mysql-auto-increment-counter]")?.value).toBe("10"));
+    const input = root.querySelector<HTMLInputElement>("[data-mysql-auto-increment-counter]")!;
+    input.value = "9007199254740993";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.waitFor(() => expect(mocks.buildMysqlAutoIncrementSql).toHaveBeenCalledWith(expect.objectContaining({ value: "9007199254740993" })));
+
+    mocks.executeBatch.mockRejectedValueOnce(new Error("ALTER command denied"));
+    await expect(mountedEditor?.applyChanges()).resolves.toBe(false);
+    await vi.waitFor(() => expect(root.textContent).toContain("ALTER command denied"));
+    expect(input.value).toBe("9007199254740993");
+  });
+
+  it("does not treat the requested value as persisted when the post-save metadata refresh fails", async () => {
+    const persistedColumn = draft(true).columns[0]!.original;
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet: string) => ({
+      value: facet === "columns" ? [persistedColumn] : [],
+      cacheStatus: "remote",
+    }));
+    const root = await mountEditor(true);
+    await vi.waitFor(() => expect(root.querySelector<HTMLInputElement>("[data-mysql-auto-increment-counter]")?.value).toBe("10"));
+    const input = root.querySelector<HTMLInputElement>("[data-mysql-auto-increment-counter]")!;
+    input.value = "20";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.waitFor(() => expect(mocks.buildMysqlAutoIncrementSql).toHaveBeenCalledWith(expect.objectContaining({ value: "20" })));
+    const metadataCallsBeforeSave = mocks.getMysqlTableAutoIncrement.mock.calls.length;
+    mocks.getMysqlTableAutoIncrement.mockRejectedValueOnce(new Error("refresh denied"));
+    mocks.buildMysqlAutoIncrementSql.mockClear();
+
+    await expect(mountedEditor?.applyChanges()).resolves.toBe(true);
+    await vi.waitFor(() => expect(mocks.getMysqlTableAutoIncrement.mock.calls.length).toBeGreaterThan(metadataCallsBeforeSave));
+    await vi.waitFor(() => expect(root.querySelector<HTMLInputElement>("[data-mysql-auto-increment-counter]")?.title).toBe("refresh denied"));
+    expect(root.querySelector<HTMLInputElement>("[data-mysql-auto-increment-counter]")?.value).toBe("20");
+    expect(mocks.buildMysqlAutoIncrementSql).not.toHaveBeenCalled();
   });
 });

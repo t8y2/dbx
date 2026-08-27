@@ -263,6 +263,128 @@ describe("MessageBrowser", () => {
     expect(browser.textContent).toContain("partial message");
   });
 
+  it("filters loaded Kafka messages and shows the matching count", async () => {
+    backend.mqPeekMessages.mockResolvedValueOnce([
+      {
+        position: 1,
+        messageId: "11",
+        key: "order-alpha",
+        payloadBase64: "",
+        payloadText: "first payload",
+        properties: { partition: "0" },
+        headers: {},
+      },
+      {
+        position: 2,
+        messageId: "12",
+        key: "order-beta",
+        payloadBase64: "",
+        payloadText: "second payload",
+        properties: { partition: "1" },
+        headers: { TraceId: "REQUEST-99" },
+      },
+    ]);
+    const browser = await mountBrowser();
+
+    await loadMessages(browser);
+    const filter = browser.querySelector<HTMLInputElement>('[data-testid="kafka-message-filter-input"]');
+    if (!filter) throw new Error("Kafka message filter input not found");
+    expect(filter.getAttribute("aria-label")).toBe("mqMessages.filterLoadedPlaceholder");
+    expect(browser.querySelector('[data-testid="kafka-message-filter-count"]')?.textContent).toContain('mqMessages.filterLoadedCount:{"matched":2,"loaded":2}');
+
+    await setInputValue(filter, "request-99");
+
+    expect(browser.textContent).not.toContain("first payload");
+    expect(browser.textContent).toContain("second payload");
+    expect(browser.querySelector('[data-testid="kafka-message-filter-count"]')?.textContent).toContain('mqMessages.filterLoadedCount:{"matched":1,"loaded":2}');
+  });
+
+  it("shows a dedicated empty state without hiding an incomplete warning", async () => {
+    backend.mqPeekMessages.mockResolvedValueOnce({
+      messages: [
+        {
+          position: 1,
+          messageId: "partial",
+          payloadBase64: "",
+          payloadText: "partial message",
+          properties: {},
+          headers: {},
+        },
+      ],
+      incomplete: true,
+    });
+    const browser = await mountBrowser();
+
+    await loadMessages(browser);
+    const filter = browser.querySelector<HTMLInputElement>('[data-testid="kafka-message-filter-input"]');
+    if (!filter) throw new Error("Kafka message filter input not found");
+    await setInputValue(filter, "missing value");
+
+    expect(browser.querySelector('[data-testid="peek-incomplete"]')).not.toBeNull();
+    expect(browser.querySelector('[data-testid="kafka-message-filter-empty"]')?.textContent).toContain("mqMessages.noMatchingMessages");
+    expect(browser.textContent).not.toContain("partial message");
+  });
+
+  it("keeps a filter across reloads and Kafka start-position changes", async () => {
+    backend.mqPeekMessages.mockResolvedValue([
+      {
+        position: 1,
+        messageId: "17",
+        payloadBase64: "",
+        payloadText: "keep this message",
+        properties: {},
+        headers: {},
+      },
+    ]);
+    const browser = await mountBrowser();
+
+    await loadMessages(browser);
+    const filter = browser.querySelector<HTMLInputElement>('[data-testid="kafka-message-filter-input"]');
+    const startPosition = browser.querySelector<HTMLElement>('[data-testid="kafka-peek-start-position"]');
+    if (!filter || !startPosition) throw new Error("Kafka message filter controls not found");
+    await setInputValue(filter, "keep");
+    await loadMessages(browser);
+    expect(browser.querySelector<HTMLInputElement>('[data-testid="kafka-message-filter-input"]')?.value).toBe("keep");
+
+    await setSelectValue(startPosition, "earliest");
+    await loadMessages(browser);
+
+    expect(browser.querySelector<HTMLInputElement>('[data-testid="kafka-message-filter-input"]')?.value).toBe("keep");
+    expect(browser.textContent).toContain("keep this message");
+  });
+
+  it("clears the filter when the topic or connection context changes", async () => {
+    const { browser, topic, connectionId } = await mountBrowserWithMutableTopic();
+
+    await loadMessages(browser);
+    const filter = browser.querySelector<HTMLInputElement>('[data-testid="kafka-message-filter-input"]');
+    if (!filter) throw new Error("Kafka message filter input not found");
+    await setInputValue(filter, "existing");
+
+    topic.value = { ...TOPIC, topic: "payments" };
+    await flushUi();
+    await loadMessages(browser);
+
+    expect(browser.querySelector<HTMLInputElement>('[data-testid="kafka-message-filter-input"]')?.value).toBe("");
+
+    const reloadedFilter = browser.querySelector<HTMLInputElement>('[data-testid="kafka-message-filter-input"]');
+    if (!reloadedFilter) throw new Error("Reloaded Kafka message filter input not found");
+    await setInputValue(reloadedFilter, "existing");
+    connectionId.value = "mq-2";
+    await flushUi();
+    await loadMessages(browser);
+
+    expect(browser.querySelector<HTMLInputElement>('[data-testid="kafka-message-filter-input"]')?.value).toBe("");
+  });
+
+  it("does not expose the loaded-message filter for non-Kafka browsers", async () => {
+    const browser = await mountBrowser("rabbitmq");
+
+    await loadMessages(browser);
+
+    expect(browser.querySelector('[data-testid="kafka-message-filter"]')).toBeNull();
+  });
+
   it("sends explicit earliest and offset read positions", async () => {
     const browser = await mountBrowser();
     const startPosition = browser.querySelector<HTMLElement>('[data-testid="kafka-peek-start-position"]');

@@ -25,7 +25,7 @@ export interface SqlBracedParameter extends SqlParameterDescriptor {
 interface ParameterOccurrence extends SqlParameterDescriptor {
   start: number;
   end: number;
-  replacement?: "string-fragment" | "mybatis-foreach" | "mybatis-where";
+  replacement?: "string-fragment" | "quoted-string" | "mybatis-foreach" | "mybatis-where";
   foreach?: MyBatisForeach;
   where?: MyBatisWhere;
 }
@@ -223,7 +223,7 @@ export function substituteSqlParameters(sql: string, values: Record<string, SqlP
     }
     // Embedded placeholders stay inside the surrounding SQL string, so their value
     // must be escaped as text instead of being wrapped in a second SQL literal.
-    result += occurrence.replacement === "string-fragment" ? sqlParameterStringFragment(input) : sqlParameterLiteral(input);
+    result += occurrence.replacement === "string-fragment" ? sqlParameterStringFragment(input) : occurrence.replacement === "quoted-string" ? sqlParameterQuotedString(input) : sqlParameterLiteral(input);
     cursor = occurrence.end;
   }
   result += sql.slice(cursor);
@@ -428,9 +428,7 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
     }
 
     if (ch === "'" || ch === '"') {
-      // Exact quoted placeholders use SQL-literal replacement; embedded placeholders
-      // in ordinary single-quoted values use escaped text replacement below.
-      const quoted = tryReadQuotedBracedPlaceholder(sql, i, ch as "'" | '"', isSyntaxEnabled);
+      const quoted = tryReadQuotedBracedPlaceholder(sql, i, ch, isSyntaxEnabled);
       if (quoted) {
         occurrences.push(quoted);
         i = quoted.end;
@@ -1583,6 +1581,7 @@ function tryReadQuotedBracedPlaceholder(sql: string, start: number, quote: "'" |
     name,
     syntax,
     token: sql.slice(start, end),
+    ...(quote === "\'" ? { replacement: "quoted-string" as const } : {}),
     start,
     end,
   };
@@ -1743,6 +1742,11 @@ function quoteSqlString(value: string): string {
 
 function sqlParameterStringFragment(input: SqlParameterInput): string {
   return input.value.replace(/'/g, "''");
+}
+
+function sqlParameterQuotedString(input: SqlParameterInput): string {
+  if (input.kind === "null" || ((input.kind === "number" || input.kind === "raw") && !input.value.trim())) return "NULL";
+  return quoteSqlString(input.value);
 }
 
 function normalizeBooleanLiteral(value: string): string {

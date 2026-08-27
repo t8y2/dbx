@@ -8,8 +8,8 @@ import type { ConnectionConfig } from "@/types/database";
 vi.mock("@/components/ui/dialog", async () => {
   const { defineComponent, h } = await import("vue");
   const passthrough = defineComponent({
-    setup(_props, { slots }) {
-      return () => h("div", slots.default?.());
+    setup(_props, { slots, attrs }) {
+      return () => h("div", attrs, slots.default?.());
     },
   });
   return { Dialog: passthrough, DialogContent: passthrough, DialogHeader: passthrough, DialogTitle: passthrough, DialogFooter: passthrough };
@@ -39,8 +39,8 @@ vi.mock("@/components/ui/scroll-area", async () => {
   const { defineComponent, h } = await import("vue");
   return {
     ScrollArea: defineComponent({
-      setup(_props, { slots }) {
-        return () => h("div", slots.default?.());
+      setup(_props, { slots, attrs }) {
+        return () => h("div", { "data-slot": "scroll-area", ...attrs }, slots.default?.());
       },
     }),
   };
@@ -66,8 +66,8 @@ afterEach(() => {
   while (document.body.firstChild) document.body.removeChild(document.body.firstChild);
 });
 
-function conn(id: string, name: string): ConnectionConfig {
-  return { id, name, db_type: "mysql", host: "127.0.0.1", port: 3306, username: "root", password: "secret" };
+function conn(id: string, name: string, overrides: Partial<ConnectionConfig> = {}): ConnectionConfig {
+  return { id, name, db_type: "mysql", host: "127.0.0.1", port: 3306, username: "root", password: "secret", ...overrides };
 }
 
 async function mountDialog(props: Record<string, unknown>, onConfirm = vi.fn()) {
@@ -137,5 +137,43 @@ describe("ConfigConnectionSelectDialog", () => {
     expect(document.body.querySelector("input[type='checkbox']")?.hasAttribute("disabled")).toBe(true);
     confirm?.click();
     expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it.each(["export", "import"] as const)("keeps long connection text in a shrinkable list for %s mode", async (mode) => {
+    i18n.global.locale.value = "en";
+    const longName = "very-long-connection-name-" + "x".repeat(96);
+    const longHost = "very-long-hostname-or-endpoint-" + "x".repeat(76) + ".internal.example.com";
+    await mountDialog({
+      open: true,
+      mode,
+      connections: [conn("short", "Short connection"), conn("long-name", longName), conn("long-endpoint", "Long endpoint", { host: longHost, database: "long_database_name_" + "y".repeat(48) })],
+    });
+
+    const scrollArea = document.querySelector('[data-slot="scroll-area"]');
+    expect(scrollArea?.classList).toContain("min-w-0");
+    expect(document.querySelectorAll("label")).toHaveLength(3);
+    expect(document.querySelectorAll("label > span.min-w-0.flex-1")).toHaveLength(3);
+    expect(document.querySelectorAll("label .truncate")).toHaveLength(6);
+    expect(document.body.textContent).toContain("3 / 3");
+    expect(document.body.textContent).toContain(longName);
+    expect(document.body.textContent).toContain(longHost);
+    const confirm = [...document.body.querySelectorAll("button")].find((button) => (mode === "export" ? button.textContent?.includes("Next") : button.textContent?.includes("Import")));
+    expect(confirm).toBeTruthy();
+    expect(confirm?.disabled).toBe(false);
+  });
+
+  it("keeps the confirm action alongside many connections with long metadata", async () => {
+    i18n.global.locale.value = "en";
+    const longName = "many-connection-long-name-" + "x".repeat(96);
+    const longHost = "many-connection-long-host-" + "y".repeat(76) + ".internal.example.com";
+    const connections = Array.from({ length: 60 }, (_, index) => conn(`connection-${index}`, index === 31 ? longName : `Connection ${index + 1}`, index === 44 ? { host: longHost } : {}));
+    await mountDialog({ open: true, mode: "export", connections });
+
+    const scrollArea = document.querySelector('[data-slot="scroll-area"]');
+    expect(scrollArea?.classList).toContain("min-w-0");
+    expect(document.querySelectorAll("label")).toHaveLength(60);
+    expect(document.body.textContent).toContain(longName);
+    expect(document.body.textContent).toContain(longHost);
+    expect([...document.body.querySelectorAll("button")].some((button) => button.textContent?.includes("Next"))).toBe(true);
   });
 });

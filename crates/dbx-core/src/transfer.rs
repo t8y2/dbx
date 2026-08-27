@@ -2015,6 +2015,29 @@ fn generate_postgres_foreign_key_ddl(
     statements
 }
 
+async fn restore_postgres_table_schema_objects(
+    state: &AppState,
+    target_pool_key: &str,
+    target_table: &str,
+    source_schema: &str,
+    target_schema: &str,
+    source_indexes: &[db::IndexInfo],
+    source_foreign_keys: &[db::ForeignKeyInfo],
+) -> Result<(), String> {
+    for statement in generate_postgres_index_ddl(source_indexes, target_table, target_schema) {
+        execute_on_pool(state, target_pool_key, &statement)
+            .await
+            .map_err(|e| format!("Failed to create PostgreSQL index for {target_table}: {e}"))?;
+    }
+    for statement in generate_postgres_foreign_key_ddl(source_foreign_keys, target_table, source_schema, target_schema)
+    {
+        execute_on_pool(state, target_pool_key, &statement)
+            .await
+            .map_err(|e| format!("Failed to create PostgreSQL foreign key for {target_table}: {e}"))?;
+    }
+    Ok(())
+}
+
 /// Builds deferred `ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY` statements for a
 /// MySQL-family target table from structured source foreign key metadata.
 ///
@@ -6910,7 +6933,9 @@ where
     let col_names: Vec<String> = writable_columns.iter().map(|c| c.name.clone()).collect();
     let col_types: Vec<Option<String>> = writable_columns.iter().map(|c| Some(c.data_type.clone())).collect();
     let primary_key_columns = transfer_key_columns(&writable_columns, source_db_type);
-    log::info!("[transfer] {} has {} columns, counting rows...", table, columns.len());
+    if should_copy_data(&request.content) {
+        log::info!("[transfer] {} has {} columns, counting rows...", table, columns.len());
+    }
 
     // Fetch source table comment
     // Route through the catalog-aware path for Doris/StarRocks external catalogs
@@ -6979,8 +7004,8 @@ where
             Vec::new()
         };
 
-    // Count source rows
-    let total_rows = {
+    let total_rows = if should_copy_data(&request.content) {
+        // Count source rows only for data-bearing transfers.
         let sql = count_sql(table, &request.source_schema, source_db_type, request.source_catalog.as_deref());
         match execute_on_pool(state, source_pool_key, &sql).await {
             Ok(result) => result.rows.first().and_then(|r| r.first()).and_then(|v| match v {
@@ -6993,6 +7018,8 @@ where
                 None
             }
         }
+    } else {
+        None
     };
     log::info!("[transfer] {} total_rows={:?}", table, total_rows);
 
@@ -7220,9 +7247,24 @@ where
         }
     }
 
-    // Structure-only transfer: DDL work (create table, indexes, comments) is
-    // done above; skip everything data-related.
+    let should_restore_postgres_table_schema =
+        request.create_table && pg_compat_transfer && preserves_target_table_name && !target_table_preexisting;
+
+    // Structure-only transfer: complete the table's post-create schema DDL,
+    // then skip everything data-related.
     if !should_copy_data(&request.content) {
+        if should_restore_postgres_table_schema {
+            restore_postgres_table_schema_objects(
+                state,
+                target_pool_key,
+                &target_table,
+                &request.source_schema,
+                &request.target_schema,
+                &source_indexes,
+                &source_foreign_keys,
+            )
+            .await?;
+        }
         return Ok(0);
     }
 
@@ -7452,22 +7494,17 @@ where
         }
     }
 
-    if request.create_table && pg_compat_transfer && preserves_target_table_name && !target_table_preexisting {
-        for statement in generate_postgres_index_ddl(&source_indexes, &target_table, &request.target_schema) {
-            execute_on_pool(state, target_pool_key, &statement)
-                .await
-                .map_err(|e| format!("Failed to create PostgreSQL index for {target_table}: {e}"))?;
-        }
-        for statement in generate_postgres_foreign_key_ddl(
-            &source_foreign_keys,
+    if should_restore_postgres_table_schema {
+        restore_postgres_table_schema_objects(
+            state,
+            target_pool_key,
             &target_table,
             &request.source_schema,
             &request.target_schema,
-        ) {
-            execute_on_pool(state, target_pool_key, &statement)
-                .await
-                .map_err(|e| format!("Failed to create PostgreSQL foreign key for {target_table}: {e}"))?;
-        }
+            &source_indexes,
+            &source_foreign_keys,
+        )
+        .await?;
     }
 
     Ok(total_transferred)
@@ -11848,6 +11885,7 @@ SELECT 1 FROM dual"#
             database: None,
             default_schema: None,
             visible_databases: None,
+            visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
             attached_databases: Vec::new(),
@@ -11875,6 +11913,7 @@ SELECT 1 FROM dual"#
             redis_key_separator: crate::models::connection::default_redis_key_separator(),
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
+            redis_key_templates: Vec::new(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),

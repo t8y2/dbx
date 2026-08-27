@@ -1761,19 +1761,22 @@ mod tests {
 
     #[test]
     fn builds_mysql_auto_increment_sql_and_rejects_invalid_values() {
-        let options = MysqlAutoIncrementSqlOptions {
-            database_type: Some(DatabaseType::Mysql),
-            driver_profile: Some("mysql".to_string()),
-            schema: Some("sales`archive".to_string()),
-            table_name: "order`items".to_string(),
-            value: "18446744073709551615".to_string(),
-        };
-        assert_eq!(
-            build_mysql_auto_increment_sql(options),
-            Ok("ALTER TABLE `sales``archive`.`order``items` AUTO_INCREMENT = 18446744073709551615;".to_string())
-        );
+        for value in ["1", "9007199254740993", "18446744073709551615"] {
+            assert_eq!(
+                build_mysql_auto_increment_sql(MysqlAutoIncrementSqlOptions {
+                    database_type: Some(DatabaseType::Mysql),
+                    driver_profile: Some("mysql".to_string()),
+                    schema: Some("sales`archive".to_string()),
+                    table_name: "order`items".to_string(),
+                    value: value.to_string(),
+                }),
+                Ok(format!("ALTER TABLE `sales``archive`.`order``items` AUTO_INCREMENT = {value};"))
+            );
+        }
 
-        for value in ["", "0", "01", " 1", "1 ", "+1", "-1", "1; DROP TABLE users", "18446744073709551616"] {
+        for value in
+            ["", "0", "01", " 1", "1 ", "+1", "-1", "1.0", "1e3", "1; DROP TABLE users", "18446744073709551616"]
+        {
             assert!(
                 build_mysql_auto_increment_sql(MysqlAutoIncrementSqlOptions {
                     database_type: Some(DatabaseType::Mysql),

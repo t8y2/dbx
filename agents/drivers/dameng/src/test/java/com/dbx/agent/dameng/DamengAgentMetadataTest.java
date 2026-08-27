@@ -1,6 +1,7 @@
 package com.dbx.agent.dameng;
 
 import com.dbx.agent.ColumnInfo;
+import com.dbx.agent.DatabaseInfo;
 import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
@@ -25,6 +26,31 @@ import java.util.Arrays;
 import java.util.List;
 
 class DamengAgentMetadataTest {
+    @Test
+    void detectsLegacyDamengMetadataFromDatabaseVersion() {
+        Assertions.assertTrue(DamengAgent.usesLegacyJdbcMetadata(versionConnection(6, "6.0.2.79")));
+        Assertions.assertFalse(DamengAgent.usesLegacyJdbcMetadata(versionConnection(8, "8.1.5.45")));
+        Assertions.assertTrue(DamengAgent.usesLegacyJdbcMetadata(versionConnection(0, "DM Database Server x64 V6.0.2.79")));
+    }
+
+    @Test
+    void legacyDamengUsesJdbcMetadataWithoutQueryingDm8CatalogViews() {
+        DamengAgent agent = new DamengAgent();
+        List<String> metadataCalls = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, legacyMetadataConnection(metadataCalls));
+        setLegacyJdbcMetadata(agent, true);
+
+        List<DatabaseInfo> databases = agent.listDatabases();
+        List<String> schemas = agent.listSchemas();
+        List<TableInfo> tables = agent.listTables("DBX_TEST");
+
+        Assertions.assertEquals(List.of("DBX_TEST", "SYSDBA"), databases.stream().map(DatabaseInfo::getName).toList());
+        Assertions.assertEquals(List.of("DBX_TEST", "SYSDBA"), schemas);
+        Assertions.assertEquals(List.of("CONNECTION_SMOKE"), tables.stream().map(TableInfo::getName).toList());
+        Assertions.assertTrue(metadataCalls.contains("getSchemas"), metadataCalls.toString());
+        Assertions.assertTrue(metadataCalls.contains("getTables:DBX\\_TEST"), metadataCalls.toString());
+    }
+
     @Test
     void usesColumnCommentsMetadataQuery() {
         DamengAgent agent = new DamengAgent();
@@ -1333,6 +1359,56 @@ class DamengAgentMetadataTest {
         } catch (ReflectiveOperationException e) {
             throw new IllegalStateException("Unable to set connected username", e);
         }
+    }
+
+    private static void setLegacyJdbcMetadata(DamengAgent agent, boolean value) {
+        try {
+            Field field = DamengAgent.class.getDeclaredField("legacyJdbcMetadata");
+            field.setAccessible(true);
+            field.set(agent, value);
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("Unable to set legacy JDBC metadata mode", e);
+        }
+    }
+
+    private static Connection versionConnection(int majorVersion, String productVersion) {
+        DatabaseMetaData metadata = proxy(DatabaseMetaData.class, (method, args) -> switch (method.getName()) {
+            case "getDatabaseMajorVersion" -> majorVersion;
+            case "getDatabaseProductVersion" -> productVersion;
+            default -> defaultValue(method.getReturnType());
+        });
+        return proxy(Connection.class, (method, args) ->
+            "getMetaData".equals(method.getName()) ? metadata : defaultValue(method.getReturnType())
+        );
+    }
+
+    private static Connection legacyMetadataConnection(List<String> calls) {
+        DatabaseMetaData metadata = proxy(DatabaseMetaData.class, (method, args) -> {
+            switch (method.getName()) {
+                case "getSchemas":
+                    calls.add("getSchemas");
+                    return metadataResultSet(List.of(List.of("SYSDBA"), List.of("DBX_TEST")));
+                case "getTableTypes":
+                    return metadataResultSet(List.of(List.of("", "TABLE", "")));
+                case "getTables":
+                    Assertions.assertNull(args[3], "DM6 JDBC rejects non-null getTables types");
+                    calls.add("getTables:" + args[1]);
+                    return metadataResultSet(List.of(List.of("CONNECTION_SMOKE", "TABLE", "smoke table")));
+                case "getSearchStringEscape":
+                    return "\\";
+                default:
+                    return defaultValue(method.getReturnType());
+            }
+        });
+        return proxy(Connection.class, (method, args) -> {
+            if ("getMetaData".equals(method.getName())) {
+                return metadata;
+            }
+            if ("prepareStatement".equals(method.getName())) {
+                throw new AssertionError("Legacy metadata mode must not query DM8 catalog views: " + args[0]);
+            }
+            return defaultValue(method.getReturnType());
+        });
     }
 
     private static Connection objectSourceConnection(List<String> params, String source) {

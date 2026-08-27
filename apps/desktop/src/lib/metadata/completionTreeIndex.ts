@@ -4,6 +4,11 @@ import { isTdengineStableTableType } from "@/lib/table/tableEditing";
 
 const TABLE_NODE_TYPES = new Set(["table", "view", "materialized_view"]);
 
+function completionTableDetail(comment: string | null | undefined): string | undefined {
+  const normalized = comment?.trim();
+  return normalized ? `→ ${normalized}` : undefined;
+}
+
 export function completionSchemasFromTree(nodes: readonly TreeNode[], connectionId: string, database: string): string[] {
   const seen = new Set<string>();
   const schemas: string[] = [];
@@ -27,11 +32,13 @@ export function completionTablesFromTree(nodes: readonly TreeNode[], connectionI
     // the internal catalog. Keep the two metadata scopes isolated.
     if ((node.catalog?.toLowerCase() ?? undefined) !== preferredCatalog) return;
     if (preferredSchema && node.schema?.toLowerCase() !== preferredSchema) return;
+    const detail = completionTableDetail(node.comment);
     tables.push({
       name: node.tableName || node.label,
       catalog: node.catalog,
       schema: node.schema,
       type: node.type === "materialized_view" ? "materialized_view" : node.type === "view" ? "view" : "table",
+      ...(detail ? { detail } : {}),
       ...(isTdengineStableTableType(node.tableType) ? { tableType: node.tableType } : {}),
     });
   });

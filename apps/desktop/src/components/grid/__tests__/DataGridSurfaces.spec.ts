@@ -1,5 +1,6 @@
 // @vitest-environment happy-dom
 
+import { readFileSync } from "node:fs";
 import { nextTick } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { dispatch, findAll, findOne, hostText, mountComponent } from "./vueHostHarness";
@@ -27,6 +28,7 @@ vi.mock("@lucide/vue", async () => {
     ChevronsRight: icon,
     Download: icon,
     Filter: icon,
+    FileDiff: icon,
     Loader2: icon,
     FileUp: icon,
     Upload: icon,
@@ -98,6 +100,8 @@ import DataGridPagination from "@/components/grid/DataGridPagination.vue";
 import DataGridQueryControls from "@/components/grid/DataGridQueryControls.vue";
 import DataGridSearchBar from "@/components/grid/DataGridSearchBar.vue";
 
+const dataGridSource = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
+
 function detail(patch: Partial<DataGridCellDetail> = {}): DataGridCellDetail {
   return {
     rowNumber: 1,
@@ -128,6 +132,32 @@ function localDateKey() {
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.removeItem("dbx-filter-builder-value-shortcut-hint-days");
+});
+describe("DataGrid canvas surfaces", () => {
+  it("uses the stable overlay for viewport and device-pixel measurement", () => {
+    expect(dataGridSource).toContain("function canvasMeasurementSurface(): HTMLElement | null");
+    expect(dataGridSource).toContain("return canvasOverlayRef.value ?? null;");
+    expect(dataGridSource).toContain("const measurementSurface = canvasMeasurementSurface();");
+    expect(dataGridSource).toContain("getSurface: canvasMeasurementSurface,");
+    expect(dataGridSource).toContain("const canvas = inactiveCanvasSurface();");
+    expect(dataGridSource).toContain("canvasUsingBackSurface.value = !canvasUsingBackSurface.value;");
+  });
+
+  it("uses the canvas that actually received the event during a surface flip", () => {
+    expect(dataGridSource).toContain("function canvasEventSurface(event: MouseEvent): HTMLCanvasElement | null");
+    expect(dataGridSource).toContain("const currentTarget = event.currentTarget;");
+    expect(dataGridSource).toContain("return currentTarget instanceof HTMLCanvasElement ? currentTarget : activeCanvasSurface();");
+    expect(dataGridSource).toContain("const canvas = canvasEventSurface(event);");
+
+    const canvasMouseMove = dataGridSource.slice(dataGridSource.indexOf("function onCanvasMouseMove"), dataGridSource.indexOf("function onCanvasMouseLeave"));
+    expect(canvasMouseMove).toContain("const cursorSurface = canvasEventSurface(event);");
+  });
+
+  it("handles double clicks on the stable canvas container", () => {
+    expect(dataGridSource).toContain('@dblclick="onCanvasDblClick"');
+    expect(dataGridSource.match(/@dblclick="onCanvasDblClick"/g)).toHaveLength(1);
+    expect(dataGridSource).toContain("@dblclick.stop");
+  });
 });
 
 describe("DataGridSearchBar", () => {
@@ -184,6 +214,42 @@ describe("DataGridSearchBar", () => {
 });
 
 describe("DataGridPagination", () => {
+  it("keeps drag summaries count-only and wires the derived average without materializing selected cells", () => {
+    const summaryStart = dataGridSource.indexOf("const selectionSummary = computed");
+    const pendingSummary = dataGridSource.indexOf("createPendingSelectionSummary(selectedCellCount.value, multiRowCount.value)", summaryStart);
+    const materializedSummary = dataGridSource.indexOf("summarizeSelection(selectedCells.value)", summaryStart);
+
+    expect(summaryStart).toBeGreaterThan(-1);
+    expect(pendingSummary).toBeGreaterThan(summaryStart);
+    expect(materializedSummary).toBeGreaterThan(pendingSummary);
+    expect(dataGridSource).toContain('const selectionSummaryAverageText = computed(() => {\n  if (isSelectingCells.value) return "…";');
+    expect(dataGridSource).toContain(':selection-summary-average-text="selectionSummaryAverageText"');
+  });
+
+  it("shows average beside the existing selection summary values", () => {
+    const mounted = mountComponent(DataGridPagination, {
+      selectionSummary: { cellCount: 4, rowCount: 2 },
+      selectionSummarySumText: "10",
+      selectionSummaryAverageText: "2.5",
+      loading: false,
+      infiniteScrollEnabled: false,
+      infiniteScrollAllLoaded: false,
+      pageSize: 100,
+      customPageSizeInput: "",
+      pageSizeMenuItems: [],
+      exportMenuItems: [],
+      currentPage: 1,
+      canGoNextPage: false,
+      canJumpLastPage: false,
+    });
+
+    const summaryText = hostText(mounted.root);
+    expect(summaryText).toContain("grid.selectionSum");
+    expect(summaryText).toContain("grid.selectionAverage");
+    expect(summaryText).toContain("grid.selectionCells");
+    expect(summaryText).toContain("grid.rows");
+  });
+
   it("enforces first/previous/next/last disabled boundaries", async () => {
     const firstPage = vi.fn();
     const previousPage = vi.fn();
@@ -192,6 +258,7 @@ describe("DataGridPagination", () => {
     const mounted = mountComponent(DataGridPagination, {
       selectionSummary: null,
       selectionSummarySumText: "",
+      selectionSummaryAverageText: "",
       loading: false,
       infiniteScrollEnabled: false,
       infiniteScrollAllLoaded: false,
@@ -236,6 +303,7 @@ describe("DataGridPagination", () => {
     const mounted = mountComponent(DataGridPagination, {
       selectionSummary: null,
       selectionSummarySumText: "",
+      selectionSummaryAverageText: "",
       loading: false,
       infiniteScrollEnabled: false,
       infiniteScrollAllLoaded: false,
@@ -278,6 +346,7 @@ describe("DataGridPagination", () => {
       paginationEnabled: false,
       selectionSummary: null,
       selectionSummarySumText: "",
+      selectionSummaryAverageText: "",
       loading: false,
       infiniteScrollEnabled: false,
       infiniteScrollAllLoaded: false,
@@ -1184,6 +1253,105 @@ describe("DataGridTextFilterWorkbench", () => {
 });
 
 describe("cell detail surfaces", () => {
+  it("presents printable LONG BLOB bytes as text and copies the presented value", async () => {
+    const copyText = vi.fn();
+    const blobDetail = detail({
+      type: "LONGBLOB",
+      value: "0x2332303035383035",
+      rawValue: "0x2332303035383035",
+      rawValuePreview: "0x2332303035383035",
+      displayValue: "#2005805",
+      displayValuePreview: "#2005",
+      formattedJson: "",
+    });
+    const dialog = mountComponent(DataGridCellDetailDialog, {
+      open: true,
+      detail: blobDetail,
+      typeColorClass: () => "",
+      openImagePreview: vi.fn(),
+      copyText,
+      canDownloadBinaryValue: () => true,
+      downloadBinaryValue: vi.fn(),
+      canImportBinaryValue: () => false,
+      importBinaryValue: vi.fn(),
+      databaseType: "mysql",
+    });
+    const panel = mountComponent(DataGridCellDetailPanel, {
+      detail: blobDetail,
+      panelIsBottom: true,
+      metadataCollapsed: false,
+      valueFillsHeight: false,
+      editing: false,
+      sideJsonView: false,
+      showCompactJson: false,
+      canCompactJson: false,
+      typeColorClass: () => "",
+      canDownloadBinaryValue: () => true,
+      downloadBinaryValue: vi.fn(),
+      canImportBinaryValue: () => false,
+      importBinaryValue: vi.fn(),
+      openImagePreview: vi.fn(),
+      canCopySqlCondition: () => true,
+      databaseType: "mysql",
+    });
+
+    expect(hostText(dialog.root)).toContain("#2005");
+    expect(hostText(dialog.root)).not.toContain("#2005805");
+    expect(hostText(panel.root)).toContain("#2005");
+    expect(hostText(panel.root)).not.toContain("#2005805");
+    dispatch(
+      findOne(dialog.root, (node) => node.props.title === "grid.copyValue"),
+      "click",
+    );
+    expect(copyText).toHaveBeenCalledWith("#2005805");
+  });
+
+  it("keeps non-MySQL BLOB detail previews in hex", () => {
+    const panel = mountComponent(DataGridCellDetailPanel, {
+      detail: detail({ type: "BLOB", value: "0x2332303035383035", rawValue: "0x2332303035383035", rawValuePreview: "0x2332303035383035", displayValue: "BLOB [8 bytes]", displayValuePreview: "BLOB [8 bytes]", formattedJson: "" }),
+      panelIsBottom: true,
+      metadataCollapsed: false,
+      valueFillsHeight: false,
+      editing: false,
+      sideJsonView: false,
+      showCompactJson: false,
+      canCompactJson: false,
+      typeColorClass: () => "",
+      canDownloadBinaryValue: () => true,
+      downloadBinaryValue: vi.fn(),
+      canImportBinaryValue: () => false,
+      importBinaryValue: vi.fn(),
+      openImagePreview: vi.fn(),
+      canCopySqlCondition: () => true,
+      databaseType: "sqlite",
+    });
+
+    expect(hostText(panel.root)).toContain("0x2332303035383035");
+  });
+
+  it("keeps non-text LONG BLOB values in hex", () => {
+    const panel = mountComponent(DataGridCellDetailPanel, {
+      detail: detail({ type: "LONGBLOB", value: "0x89504e470d0a1a0a", rawValue: "0x89504e470d0a1a0a", rawValuePreview: "0x89504e470d0a1a0a", formattedJson: "" }),
+      panelIsBottom: true,
+      metadataCollapsed: false,
+      valueFillsHeight: false,
+      editing: false,
+      sideJsonView: false,
+      showCompactJson: false,
+      canCompactJson: false,
+      typeColorClass: () => "",
+      canDownloadBinaryValue: () => true,
+      downloadBinaryValue: vi.fn(),
+      canImportBinaryValue: () => false,
+      importBinaryValue: vi.fn(),
+      openImagePreview: vi.fn(),
+      canCopySqlCondition: () => true,
+      databaseType: "mysql",
+    });
+
+    expect(hostText(panel.root)).toContain("0x89504e470d0a1a0a");
+  });
+
   it("copies the presented value, emits edit, closes, and replaces the JSON result", async () => {
     const copyText = vi.fn();
     const edit = vi.fn();
@@ -1292,6 +1460,49 @@ describe("cell detail surfaces", () => {
     doubleClickCapture({ target: lineTarget, clientX: 160, clientY: 30 });
     doubleClickCapture({ target: { closest: () => null }, clientX: 60, clientY: 80 });
     expect(startEdit).toHaveBeenCalledTimes(4);
+  });
+
+  it("only enables JSON comparison for changed drafts and prevents editor blur on pointer down", async () => {
+    const compareJson = vi.fn();
+    const mounted = mountComponent(DataGridCellDetailPanel, {
+      detail: detail(),
+      panelIsBottom: true,
+      metadataCollapsed: false,
+      valueFillsHeight: true,
+      editing: true,
+      sideJsonView: false,
+      showCompactJson: true,
+      canCompactJson: true,
+      showCompareJson: true,
+      canCompareJson: false,
+      typeColorClass: () => "",
+      canDownloadBinaryValue: () => false,
+      downloadBinaryValue: vi.fn(),
+      canImportBinaryValue: () => false,
+      importBinaryValue: vi.fn(),
+      openImagePreview: vi.fn(),
+      canCopySqlCondition: () => true,
+      onCompareJson: compareJson,
+    });
+
+    const disabledCompare = findOne(mounted.root, (node) => node.props.title === "grid.compareJson");
+    expect(disabledCompare.props.disabled).toBe(true);
+    dispatch(disabledCompare, "click");
+    expect(compareJson).not.toHaveBeenCalled();
+
+    await mounted.setProps({ canCompareJson: true });
+    const enabledCompare = findOne(mounted.root, (node) => node.props.title === "grid.compareJson");
+    expect(dispatch(enabledCompare, "mousedown").defaultPrevented).toBe(true);
+    dispatch(enabledCompare, "click");
+    expect(compareJson).toHaveBeenCalledOnce();
+  });
+
+  it("snapshots comparison values before opening and suppresses modal-induced blur commits", () => {
+    expect(dataGridSource).toContain("detailValueDiffSnapshot.value = snapshot;");
+    expect(dataGridSource).toContain("detailValueDiffOpen.value = true;");
+    expect(dataGridSource).toContain("if (!detailValueDiffOpen.value) commitValueEditorEdit();");
+    expect(dataGridSource).toContain(':disabled="!canCompareDetailJson" @mousedown.prevent @click="openDetailJsonCompare"');
+    expect(dataGridSource).toContain('v-model:open="detailValueDiffOpen" :snapshot="detailValueDiffSnapshot"');
   });
 });
 

@@ -1,6 +1,9 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { EDITOR_SETTINGS_DRAFT_KEYS, editorSettingsDraftFromSettings, editorSettingsDraftChanged, editorSettingsPatchFromDraft, normalizeQueryResultMaxRowsDraft, normalizeTableOpenPageSizeDraft, shouldConfirmEditorSettingsDialogClose } from "../editorSettingsDraft";
 import type { EditorSettings } from "@/stores/settingsStore";
+
+const settingsDialogSource = readFileSync(new URL("../../../components/editor/EditorSettingsDialog.vue", import.meta.url), "utf8");
 
 function makeSettings(overrides: Partial<EditorSettings> = {}): EditorSettings {
   return {
@@ -36,6 +39,10 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
   it("keeps connection and query timeout ownership outside editor settings", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).not.toContain("globalConnectTimeoutSecs");
     expect(EDITOR_SETTINGS_DRAFT_KEYS).not.toContain("globalQueryTimeoutSecs");
+  });
+
+  it("includes showLineNumbers", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("showLineNumbers");
   });
 
   it("includes continueOnErrorOnBatch", () => {
@@ -93,6 +100,10 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridTextFilterPanelHeight");
   });
 
+  it("includes the cell detail button visibility", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridCellDetailButtonVisible");
+  });
+
   it("includes completionTriggerMode", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("completionTriggerMode");
   });
@@ -102,7 +113,27 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
   });
 });
 
+describe("cell detail button settings control", () => {
+  it("binds the switch through apply and both reset paths", () => {
+    expect(settingsDialogSource).toContain("const editDataGridCellDetailButtonVisible = ref(settingsStore.editorSettings.dataGridCellDetailButtonVisible)");
+    expect(settingsDialogSource).toContain("dataGridCellDetailButtonVisible: editDataGridCellDetailButtonVisible.value");
+    expect(settingsDialogSource).toContain("editDataGridCellDetailButtonVisible.value = settingsStore.editorSettings.dataGridCellDetailButtonVisible");
+    expect(settingsDialogSource.match(/editDataGridCellDetailButtonVisible\.value = DEFAULT_EDITOR_SETTINGS\.dataGridCellDetailButtonVisible/g)).toHaveLength(2);
+    expect(settingsDialogSource).toContain('id="data-grid-cell-detail-button-visible" v-model="editDataGridCellDetailButtonVisible"');
+  });
+});
+
 describe("editorSettingsDraftFromSettings", () => {
+  it("round-trips a hidden line-number preference through the draft patch", () => {
+    const settings = makeSettings({ showLineNumbers: true });
+    const draft = editorSettingsDraftFromSettings(settings);
+    const base = editorSettingsDraftFromSettings(settings);
+
+    draft.showLineNumbers = false;
+
+    expect(editorSettingsPatchFromDraft(draft, base)).toEqual({ showLineNumbers: false });
+  });
+
   it("toggles substitution without discarding per-database overrides", () => {
     const base = editorSettingsDraftFromSettings(
       makeSettings({
@@ -267,6 +298,15 @@ describe("editorSettingsDraftChanged", () => {
 });
 
 describe("editorSettingsPatchFromDraft", () => {
+  it("applies, cancels, and re-enables the cell detail button visibility", () => {
+    const visible = editorSettingsDraftFromSettings(makeSettings({ dataGridCellDetailButtonVisible: true }));
+    const hidden = editorSettingsDraftFromSettings(makeSettings({ dataGridCellDetailButtonVisible: false }));
+
+    expect(editorSettingsPatchFromDraft(hidden, visible)).toEqual({ dataGridCellDetailButtonVisible: false });
+    expect(editorSettingsPatchFromDraft(visible, visible)).toEqual({});
+    expect(editorSettingsPatchFromDraft(visible, hidden)).toEqual({ dataGridCellDetailButtonVisible: true });
+  });
+
   it("includes continueOnErrorOnBatch in patch when changed", () => {
     const settings = makeSettings({ continueOnErrorOnBatch: false });
     const draft = editorSettingsDraftFromSettings(settings);

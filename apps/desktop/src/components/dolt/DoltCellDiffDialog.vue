@@ -1,13 +1,13 @@
 <script setup lang="ts">
-import { computed, nextTick, onUnmounted, ref, watch, type CSSProperties } from "vue";
-import { AlertCircle, Copy, FileDiff } from "@lucide/vue";
+import { computed, ref, watch } from "vue";
+import { AlertCircle, FileDiff } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import DoltScrollArea from "@/components/dolt/DoltScrollArea.vue";
+import SideBySideTextDiff, { type TextDiffSide } from "@/components/common/SideBySideTextDiff.vue";
 import { useToast } from "@/composables/useToast";
 import { copyToClipboard } from "@/lib/common/clipboard";
-import { buildDoltTextDiff, detectDoltCellFormat, doltCellCopyText, doltCellDisplayValue, formatDoltCellText, type DoltCellFormat, type DoltCellFormatMode, type DoltCellSide, type DoltDiffCellTarget, type DoltTextDiffKind } from "@/lib/dolt/doltCellDiff";
+import { detectDoltCellFormat, doltCellCopyText, doltCellDisplayValue, formatDoltCellText, type DoltCellFormat, type DoltCellFormatMode, type DoltDiffCellTarget } from "@/lib/dolt/doltCellDiff";
 
 const props = defineProps<{
   target: DoltDiffCellTarget | null;
@@ -20,15 +20,6 @@ const open = defineModel<boolean>("open", { default: false });
 const { t } = useI18n();
 const { toast } = useToast();
 const formatMode = ref<DoltCellFormatMode>("auto");
-const beforeScrollArea = ref<InstanceType<typeof DoltScrollArea> | null>(null);
-const afterScrollArea = ref<InstanceType<typeof DoltScrollArea> | null>(null);
-const scrollTop = ref(0);
-const viewportHeight = ref(0);
-let scrollSyncing = false;
-let scrollSyncFrame = 0;
-
-const ROW_HEIGHT = 22;
-const ROW_BUFFER = 12;
 
 const displayLabels = computed(() => ({
   nullValue: t("doltVersionControl.cellNullValue"),
@@ -41,24 +32,6 @@ const detectedFormat = computed<DoltCellFormat>(() => detectDoltCellFormat([befo
 const effectiveFormat = computed<DoltCellFormat>(() => (formatMode.value === "auto" ? detectedFormat.value : formatMode.value));
 const beforeFormatted = computed(() => (beforeDisplay.value ? formatDoltCellText(beforeDisplay.value, effectiveFormat.value) : { text: "", error: null }));
 const afterFormatted = computed(() => (afterDisplay.value ? formatDoltCellText(afterDisplay.value, effectiveFormat.value) : { text: "", error: null }));
-const diffRows = computed(() => {
-  const rows = buildDoltTextDiff(beforeFormatted.value.text, afterFormatted.value.text);
-  if (beforeDisplay.value?.state !== "value" && afterDisplay.value?.state === "value") return rows.map((row) => ({ ...row, kind: "added" as const }));
-  if (afterDisplay.value?.state !== "value" && beforeDisplay.value?.state === "value") return rows.map((row) => ({ ...row, kind: "removed" as const }));
-  return rows;
-});
-const visibleStart = computed(() => Math.max(0, Math.floor(scrollTop.value / ROW_HEIGHT) - ROW_BUFFER));
-const visibleEnd = computed(() => Math.min(diffRows.value.length, Math.ceil((scrollTop.value + viewportHeight.value) / ROW_HEIGHT) + ROW_BUFFER));
-const visibleRows = computed(() => diffRows.value.slice(visibleStart.value, visibleEnd.value).map((row, offset) => ({ row, index: visibleStart.value + offset })));
-const longestLineLength = computed(() => {
-  let maximum = 0;
-  for (const row of diffRows.value) maximum = Math.max(maximum, row.beforeText.length, row.afterText.length);
-  return Math.min(20_000, maximum);
-});
-const textContentStyle = computed<CSSProperties>(() => ({
-  height: `${Math.max(1, diffRows.value.length * ROW_HEIGHT)}px`,
-  width: `max(100%, ${Math.max(40, longestLineLength.value + 8)}ch)`,
-}));
 const formatOptions = computed<Array<{ value: DoltCellFormatMode; label: string }>>(() => [
   { value: "auto", label: t("doltVersionControl.cellDiffFormatAuto") },
   { value: "raw", label: t("doltVersionControl.cellDiffFormatRaw") },
@@ -66,38 +39,7 @@ const formatOptions = computed<Array<{ value: DoltCellFormatMode; label: string 
   { value: "xml", label: "XML" },
 ]);
 
-function rowClass(kind: DoltTextDiffKind, side: DoltCellSide): string {
-  if (kind === "modified") return "dolt-cell-text-row-modified";
-  if (kind === "added" && side === "after") return "dolt-cell-text-row-added";
-  if (kind === "removed" && side === "before") return "dolt-cell-text-row-removed";
-  return "";
-}
-
-function updateViewport(element: HTMLElement) {
-  scrollTop.value = element.scrollTop;
-  viewportHeight.value = element.clientHeight;
-}
-
-function syncScroll(side: DoltCellSide, source: HTMLElement) {
-  updateViewport(source);
-  if (scrollSyncing) return;
-  const target = side === "before" ? afterScrollArea.value?.scrollerElement() : beforeScrollArea.value?.scrollerElement();
-  if (!target) return;
-  scrollSyncing = true;
-  target.scrollTop = source.scrollTop;
-  target.scrollLeft = source.scrollLeft;
-  if (scrollSyncFrame) cancelAnimationFrame(scrollSyncFrame);
-  scrollSyncFrame = requestAnimationFrame(() => {
-    scrollSyncFrame = 0;
-    scrollSyncing = false;
-  });
-}
-
-function onResize(element: HTMLElement) {
-  viewportHeight.value = Math.max(viewportHeight.value, element.clientHeight);
-}
-
-async function copyValue(side: DoltCellSide) {
+async function copyValue(side: TextDiffSide) {
   if (!props.target) return;
   const value = doltCellCopyText(props.target, side);
   if (value === null) return;
@@ -111,28 +53,11 @@ async function copyValue(side: DoltCellSide) {
 
 watch(
   () => [open.value, props.target?.rowIndex, props.target?.columnIndex, props.target?.side],
-  async ([isOpen]) => {
+  ([isOpen]) => {
     if (!isOpen) return;
     formatMode.value = "auto";
-    scrollTop.value = 0;
-    await nextTick();
-    const before = beforeScrollArea.value?.scrollerElement();
-    const after = afterScrollArea.value?.scrollerElement();
-    if (before) before.scrollTo({ top: 0, left: 0 });
-    if (after) after.scrollTo({ top: 0, left: 0 });
   },
 );
-
-watch(effectiveFormat, async () => {
-  scrollTop.value = 0;
-  await nextTick();
-  beforeScrollArea.value?.scrollerElement()?.scrollTo({ top: 0, left: 0 });
-  afterScrollArea.value?.scrollerElement()?.scrollTo({ top: 0, left: 0 });
-});
-
-onUnmounted(() => {
-  if (scrollSyncFrame) cancelAnimationFrame(scrollSyncFrame);
-});
 </script>
 
 <template>
@@ -167,104 +92,17 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <div class="grid min-h-0 flex-1 grid-cols-2 overflow-hidden">
-        <section class="flex min-w-0 min-h-0 flex-col border-r">
-          <div class="flex h-8 shrink-0 items-center gap-2 border-b bg-muted/20 px-2 text-[11px]">
-            <span class="min-w-0 flex-1 truncate font-mono text-muted-foreground" :title="fromRevision">{{ fromRevision }}</span>
-            <Button variant="ghost" size="icon" class="h-6 w-6" :disabled="doltCellCopyText(target, 'before') === null" :title="t('doltVersionControl.copyBeforeValue')" @click="copyValue('before')"><Copy class="h-3 w-3" /></Button>
-          </div>
-          <DoltScrollArea ref="beforeScrollArea" class="min-h-0 flex-1" scroller-class="dolt-cell-diff-before-scroller" @scroll="syncScroll('before', $event)" @resize="onResize">
-            <div class="dolt-cell-text-content" :style="textContentStyle">
-              <div v-for="visible in visibleRows" :key="`before-${visible.index}`" class="dolt-cell-text-row" :class="rowClass(visible.row.kind, 'before')" :style="{ top: `${visible.index * ROW_HEIGHT}px`, height: `${ROW_HEIGHT}px` }">
-                <span class="dolt-cell-text-line-number">{{ visible.row.beforeLineNumber ?? "" }}</span>
-                <code class="dolt-cell-text-code"
-                  ><template v-for="(segment, index) in visible.row.beforeSegments" :key="index"
-                    ><span :class="{ 'dolt-cell-text-segment-changed': segment.changed }">{{ segment.text }}</span></template
-                  >&nbsp;</code
-                >
-              </div>
-            </div>
-          </DoltScrollArea>
-        </section>
-
-        <section class="flex min-w-0 min-h-0 flex-col">
-          <div class="flex h-8 shrink-0 items-center gap-2 border-b bg-muted/20 px-2 text-[11px]">
-            <span class="min-w-0 flex-1 truncate font-mono text-muted-foreground" :title="toRevision">{{ toRevision }}</span>
-            <Button variant="ghost" size="icon" class="h-6 w-6" :disabled="doltCellCopyText(target, 'after') === null" :title="t('doltVersionControl.copyAfterValue')" @click="copyValue('after')"><Copy class="h-3 w-3" /></Button>
-          </div>
-          <DoltScrollArea ref="afterScrollArea" class="min-h-0 flex-1" scroller-class="dolt-cell-diff-after-scroller" @scroll="syncScroll('after', $event)" @resize="onResize">
-            <div class="dolt-cell-text-content" :style="textContentStyle">
-              <div v-for="visible in visibleRows" :key="`after-${visible.index}`" class="dolt-cell-text-row" :class="rowClass(visible.row.kind, 'after')" :style="{ top: `${visible.index * ROW_HEIGHT}px`, height: `${ROW_HEIGHT}px` }">
-                <span class="dolt-cell-text-line-number">{{ visible.row.afterLineNumber ?? "" }}</span>
-                <code class="dolt-cell-text-code"
-                  ><template v-for="(segment, index) in visible.row.afterSegments" :key="index"
-                    ><span :class="{ 'dolt-cell-text-segment-changed': segment.changed }">{{ segment.text }}</span></template
-                  >&nbsp;</code
-                >
-              </div>
-            </div>
-          </DoltScrollArea>
-        </section>
-      </div>
+      <SideBySideTextDiff
+        :before-text="beforeFormatted.text"
+        :after-text="afterFormatted.text"
+        :before-label="fromRevision"
+        :after-label="toRevision"
+        :copy-before-title="t('doltVersionControl.copyBeforeValue')"
+        :copy-after-title="t('doltVersionControl.copyAfterValue')"
+        :before-available="beforeDisplay?.state === 'value'"
+        :after-available="afterDisplay?.state === 'value'"
+        @copy="copyValue"
+      />
     </DialogContent>
   </Dialog>
 </template>
-
-<style scoped>
-.dolt-cell-text-content {
-  position: relative;
-  min-width: 100%;
-  font-family: var(--font-mono);
-  font-size: 12px;
-}
-
-.dolt-cell-text-row {
-  position: absolute;
-  left: 0;
-  display: flex;
-  width: 100%;
-  min-width: 100%;
-  align-items: center;
-  border-bottom: 1px solid color-mix(in srgb, var(--border) 45%, transparent);
-  line-height: 21px;
-}
-
-.dolt-cell-text-line-number {
-  position: sticky;
-  left: 0;
-  z-index: 1;
-  width: 48px;
-  height: 100%;
-  flex: 0 0 48px;
-  border-right: 1px solid var(--border);
-  background: var(--background);
-  padding-right: 8px;
-  text-align: right;
-  color: var(--muted-foreground);
-  user-select: none;
-}
-
-.dolt-cell-text-code {
-  display: block;
-  min-width: 0;
-  padding: 0 8px;
-  white-space: pre;
-  font-family: inherit;
-}
-
-.dolt-cell-text-row-modified {
-  background: rgb(217 119 6 / 0.11);
-}
-
-.dolt-cell-text-row-added {
-  background: rgb(22 163 74 / 0.11);
-}
-
-.dolt-cell-text-row-removed {
-  background: rgb(220 38 38 / 0.1);
-}
-
-.dolt-cell-text-row-modified .dolt-cell-text-segment-changed {
-  background: rgb(217 119 6 / 0.32);
-}
-</style>

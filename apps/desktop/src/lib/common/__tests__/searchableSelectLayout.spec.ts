@@ -18,12 +18,12 @@ describe("SearchableSelect layout", () => {
     expect(searchableSelectSource).toContain("props.trimCustom ? searchText.value.trim() : searchText.value");
   });
 
-  it("truncates long data transfer connection labels without shrinking their icons", () => {
-    const truncatedConnectionLabels = dataTransferDialogSource.match(/<span class="min-w-0 flex-1 truncate">\{\{ label \}\}<\/span>/g) ?? [];
-    const fixedConnectionIcons = dataTransferDialogSource.match(/class="h-3\.5 w-3\.5 shrink-0"/g) ?? [];
+  it("renders data transfer connection pickers as sidebar-like trees", () => {
+    const treeSelects = dataTransferDialogSource.match(/<ConnectionTreeSelect/g) ?? [];
 
-    expect(truncatedConnectionLabels).toHaveLength(2);
-    expect(fixedConnectionIcons).toHaveLength(2);
+    expect(treeSelects).toHaveLength(2);
+    expect(dataTransferDialogSource).toContain(':layout="store.sidebarLayout"');
+    expect(dataTransferDialogSource).not.toContain("ConnectionGroupBadge");
   });
 
   it("renders the toolbar connection picker as a sidebar-like tree", () => {

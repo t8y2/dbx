@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { DATA_GRID_COL_AUTO_FIT_MAX_WIDTH, DATA_GRID_COL_MIN_WIDTH, sampleDataGridColumnValues } from "@/lib/dataGrid/dataGridColumnWidth";
 import { clearDataGridColumnWidthStates, createDataGridColumnMeasurementSignature, createDataGridColumnStructureSignature, DATA_GRID_COLUMN_WIDTH_STATE_LIMIT, dataGridColumnWidthStateCount, loadDataGridColumnWidthState, saveDataGridColumnWidthState } from "@/lib/dataGrid/dataGridColumnWidthState";
 import { DATA_GRID_ROW_NUM_WIDTH, dataGridRowNumberColumnWidth, resizeDataGridColumnWidth, useDataGridColumnResize } from "@/composables/useDataGridColumnResize";
+import { resultGridColumnWidthCacheKey } from "@/lib/tabs/tabPresentation";
 
 function createResizeState(options: {
   columns: string[];
@@ -172,6 +173,32 @@ describe("useDataGridColumnResize", () => {
       columns: ["id", "name"],
       rows: [[1, "Alice"]],
       cacheKey: "result-a",
+    });
+    remounted.initColumnWidths();
+
+    expect(remounted.columnWidths.value).toEqual(first.columnWidths.value);
+  });
+
+  it("restores manually resized widths when the active result run changes", () => {
+    const firstResult = { id: "tab-1", activeResultRunId: "run-1", activeResultIndex: 2 };
+    const rerunResult = { ...firstResult, activeResultRunId: "run-2" };
+    const firstCacheKey = resultGridColumnWidthCacheKey(firstResult);
+
+    expect(resultGridColumnWidthCacheKey(rerunResult)).toBe(firstCacheKey);
+
+    const first = createResizeState({
+      columns: ["id", "resource"],
+      rows: [[1, "lock"]],
+      cacheKey: firstCacheKey,
+    });
+    first.initColumnWidths();
+    first.onResizeStart(1, new MouseEvent("mousedown", { clientX: 100, cancelable: true }));
+    document.dispatchEvent(new MouseEvent("mouseup", { clientX: 260 }));
+
+    const remounted = createResizeState({
+      columns: ["id", "resource"],
+      rows: [[1, "lock"]],
+      cacheKey: resultGridColumnWidthCacheKey(rerunResult),
     });
     remounted.initColumnWidths();
 

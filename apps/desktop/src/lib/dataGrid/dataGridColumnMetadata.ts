@@ -14,7 +14,7 @@ export function resolveDataGridColumnsByResultIndex(options: { resultColumns: re
     if (!columnsByName.has(key)) columnsByName.set(key, column);
   }
   return options.resultColumns.map((resultColumn, index) => {
-    const columnName = options.sourceColumns?.[index] ?? resultColumn;
+    const columnName = options.sourceColumns ? options.sourceColumns[index] : resultColumn;
     return columnName ? columnsByName.get(columnName.toLowerCase()) : undefined;
   });
 }

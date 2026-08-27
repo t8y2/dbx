@@ -214,6 +214,29 @@ pub async fn redis_hash_del(
 }
 
 #[tauri::command]
+pub async fn redis_hash_field_update(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    db: u32,
+    key_raw: String,
+    old_field: String,
+    new_field: String,
+    value: String,
+) -> Result<(), String> {
+    ensure_connection_writable(&state, &connection_id, "Atomic hash field update").await?;
+    dbx_core::redis_ops::redis_hash_field_update_in_db_core(
+        &state,
+        &connection_id,
+        db,
+        &key_raw,
+        &old_field,
+        &new_field,
+        &value,
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn redis_hash_field_set_ttl(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

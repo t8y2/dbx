@@ -176,6 +176,10 @@ const props = defineProps<{
   pendingRename?: boolean;
   highlighted?: boolean;
   commentLabelWidth?: number;
+  /** Plain (non-virtualized) renderer: make database/schema container rows
+   * stick to the top of the tree scroller while their children scroll under
+   * them (mirrors the overlay sticky header of the virtual renderer). */
+  stickyHeader?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -290,7 +294,7 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
     case "trigger":
       return { icon: Zap, colorClass: "text-orange-300" };
     case "event":
-      return { icon: Clock, colorClass: "text-orange-300" };
+      return { icon: Clock, colorClass: "text-orange-400" };
     case "redis-db":
       return { icon: Database, colorClass: "text-red-400" };
     case "mq-tenant":
@@ -1376,7 +1380,7 @@ function onKeydown(event: KeyboardEvent) {
     </LightTooltip>
   </div>
 
-  <div v-else @contextmenu="onTreeItemContextMenu">
+  <div v-else :class="{ 'sidebar-tree-item--sticky': stickyHeader }" @contextmenu="onTreeItemContextMenu">
     <LightTooltip :text="visibleLabel(node)" :disabled="isTooltipDisabled()" side="right" :side-offset="8" :delay="0" :close-delay="30" :surface="detailTooltip ? 'popover' : 'foreground'">
       <div
         ref="rowRef"
@@ -1618,6 +1622,18 @@ function onKeydown(event: KeyboardEvent) {
 .tree-item-connection-tint.tree-item-active,
 .tree-item-connection-tint.tree-item-active:focus {
   background-color: transparent !important;
+}
+
+/* Plain (non-virtualized) renderer: database/schema container rows stick to
+   the top of the tree scroller while their children scroll under them,
+   mirroring the overlay sticky header the virtual renderer uses. The row is
+   min-h-7, so a solid background guarantees no content shows through while
+   rows slide underneath. */
+.sidebar-tree-item--sticky {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background-color: var(--background);
 }
 
 .tree-item-connection-tint:hover::before {

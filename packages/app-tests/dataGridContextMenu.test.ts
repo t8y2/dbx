@@ -51,6 +51,15 @@ test("select-all context menus invalidate a stale specialized target", () => {
   assert.match(header, /@contextmenu="invalidateContextMenuTarget"/);
 });
 
+test("right-clicking outside the old cell or column selection resets it before selecting the target", () => {
+  const handler = dataGridSource.match(/function onCellContext\([^]*?\n\}/)?.[0] ?? "";
+  const clear = handler.indexOf("clearCellSelection();");
+  const select = handler.indexOf("selectSingleCell(rowIndex, visibleColIdx);");
+
+  assert.ok(clear >= 0);
+  assert.ok(clear < select);
+});
+
 test("menu-close invalidation is deferred and guarded from a newer open", () => {
   const handler = dataGridSource.match(/function onGridContextMenuClose\(\) \{[^]*?\n\}/)?.[0] ?? "";
 

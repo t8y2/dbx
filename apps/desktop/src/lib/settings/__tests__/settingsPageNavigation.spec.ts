@@ -5,6 +5,14 @@ const appSource = readFileSync(new URL("../../../App.vue", import.meta.url), "ut
 const settingsDialogSource = readFileSync(new URL("../../../components/editor/EditorSettingsDialog.vue", import.meta.url), "utf8");
 
 describe("settings page navigation", () => {
+  it("keeps query, settings, and driver-manager surfaces mutually exclusive", () => {
+    expect(appSource).toContain('type MainContentSurface = "query" | "settings" | "driverStore";');
+    expect(appSource).toMatch(/function activateMainContentSurface\(surface: MainContentSurface\) \{\s*settingsStore\.settingsPageActive = surface === "settings";\s*driverStoreActive\.value = surface === "driverStore";/);
+    expect(appSource).toMatch(/function activateSettingsPage\(\) \{\s*settingsPageTabOpen\.value = true;\s*activateMainContentSurface\("settings"\);/);
+    expect(appSource).toMatch(/function activateQuerySurface\(\) \{\s*activateMainContentSurface\("query"\);/);
+    expect(appSource).toMatch(/driverStoreTabOpen\.value = true;\s*activateMainContentSurface\("driverStore"\);/);
+  });
+
   it("replays repeated navigation requests for the same tab", () => {
     expect(appSource).toContain("settingsNavigationRequestId.value += 1");
     expect(appSource).toContain(':navigation-request-id="settingsNavigationRequestId"');

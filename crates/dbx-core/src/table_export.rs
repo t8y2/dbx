@@ -68,6 +68,8 @@ pub struct TableExportRequest {
     pub numeric_column_right_align: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub column_comments: Option<Vec<Option<String>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_filter: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1050,6 +1052,7 @@ async fn try_export_native_table_stream(
                 &[],
                 request.date_time_format.as_deref(),
                 request.numeric_column_right_align,
+                request.auto_filter.unwrap_or(true),
             )?;
             let result = stream_native_table_rows(
                 state,
@@ -1213,6 +1216,8 @@ async fn try_export_native_table_stream(
                         columns: col_names.to_vec(),
                         column_types: column_types.to_vec(),
                         column_extras: column_extras.to_vec(),
+                        spatial_columns: Vec::new(),
+                        spatial_values: Vec::new(),
                         rows: std::mem::take(pending_rows),
                         batch_size: Some(SQL_INSERT_BATCH_SIZE),
                     })?;
@@ -1703,6 +1708,7 @@ async fn export_table_data_core_inner(
                 &[],
                 request.date_time_format.as_deref(),
                 request.numeric_column_right_align,
+                request.auto_filter.unwrap_or(true),
             )?;
 
             loop {
@@ -2022,6 +2028,8 @@ async fn export_table_data_core_inner(
                     columns: col_names.clone(),
                     column_types: column_types.clone(),
                     column_extras: column_extras.clone(),
+                    spatial_columns: result.spatial_columns.clone(),
+                    spatial_values: result.spatial_values.clone(),
                     rows: result.rows.clone(),
                     batch_size: Some(100),
                 })?;
@@ -2196,6 +2204,7 @@ mod tests {
             date_time_format: None,
             numeric_column_right_align: false,
             column_comments: None,
+            auto_filter: None,
         };
 
         ExternalDriverExportFixture { state, request, calls, output, dir }
@@ -2369,6 +2378,7 @@ mod tests {
             date_time_format: None,
             numeric_column_right_align: false,
             column_comments: None,
+            auto_filter: None,
         };
         let context = table_export_sql_context(DatabaseType::Iotdb, None, request.schema.as_deref());
         let columns = vec!["Time".to_string(), "root.test.device2.temperature".to_string()];
@@ -2424,6 +2434,7 @@ mod tests {
             date_time_format: None,
             numeric_column_right_align: false,
             column_comments: None,
+            auto_filter: None,
         };
         let context = table_export_sql_context(DatabaseType::Iotdb, None, request.schema.as_deref());
         let columns = vec!["tImE".to_string(), "temperature".to_string()];
@@ -2457,6 +2468,7 @@ mod tests {
             date_time_format: None,
             numeric_column_right_align: false,
             column_comments: None,
+            auto_filter: None,
         };
         let context = table_export_sql_context(DatabaseType::Iotdb, None, request.schema.as_deref());
         let error = table_export_query_columns(&request, &context, &["TIME".to_string()]).unwrap_err();
@@ -2485,6 +2497,7 @@ mod tests {
             date_time_format: None,
             numeric_column_right_align: false,
             column_comments: None,
+            auto_filter: None,
         };
         let context = table_export_sql_context(DatabaseType::Iotdb, None, request.schema.as_deref());
         let columns = vec![
@@ -2521,6 +2534,7 @@ mod tests {
             date_time_format: None,
             numeric_column_right_align: false,
             column_comments: None,
+            auto_filter: None,
         };
         let columns = vec!["Time".to_string(), "value".to_string()];
 
@@ -2569,6 +2583,7 @@ mod tests {
             date_time_format: None,
             numeric_column_right_align: false,
             column_comments: None,
+            auto_filter: None,
         };
         let context = table_export_sql_context(DatabaseType::Oracle, None, request.schema.as_deref());
 
@@ -2611,6 +2626,7 @@ mod tests {
             date_time_format: None,
             numeric_column_right_align: false,
             column_comments: None,
+            auto_filter: None,
         };
         let columns = vec!["id".to_string(), "payload".to_string()];
         let primary_keys = vec!["id".to_string()];
@@ -2681,6 +2697,7 @@ mod tests {
             date_time_format: None,
             numeric_column_right_align: false,
             column_comments: None,
+            auto_filter: None,
         };
         let columns = vec!["id".to_string(), "DisplayName".to_string()];
         let primary_keys = vec!["id".to_string()];
@@ -2733,6 +2750,7 @@ mod tests {
             date_time_format: None,
             numeric_column_right_align: false,
             column_comments: None,
+            auto_filter: None,
         };
         let columns = vec!["id".to_string(), "geom".to_string(), "name".to_string()];
         let column_types = vec![Some("int".to_string()), Some("geometry".to_string()), Some("varchar".to_string())];
@@ -2787,6 +2805,7 @@ mod tests {
             date_time_format: None,
             numeric_column_right_align: false,
             column_comments: None,
+            auto_filter: None,
         };
         let context = table_export_sql_context(DatabaseType::Oracle, None, request.schema.as_deref());
         let sql = table_cursor_sql(&request, &context, &columns, &[], &primary_keys);
@@ -2801,6 +2820,8 @@ mod tests {
             columns,
             column_types,
             column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
             rows: vec![vec![json!(1), json!("Ada")]],
             batch_size: Some(100),
         })

@@ -19,6 +19,7 @@ export interface SqlSemanticToken {
   span: SqlSemanticSpan;
   depth: number;
   quote?: string;
+  closed?: boolean;
 }
 
 export interface SqlSemanticIdentifierPart {

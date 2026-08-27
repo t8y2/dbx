@@ -14,7 +14,7 @@ use crate::query::{
 use crate::sql::{
     optimize_sql_file_import_statements, prepare_sql_file_statement, split_sql_batches, statement_summary,
     SqlFileImportStatement, SqlFileImportStatementKind, SqlFileProgress, SqlFileRequest, SqlFileStatementAction,
-    SqlFileStatus, SqlParsingOptions, SqlStatementSplitter,
+    SqlFileStatus, SqlParsingOptions, SqlStatementSplitter, SqlStatementWithControl,
 };
 use crate::types::QueryResult;
 
@@ -29,6 +29,12 @@ struct StatementErrorDecision {
     progress: Vec<SqlFileProgress>,
     failure_count: usize,
     result: Result<bool, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ControlledSqlFileImportStatement {
+    statement: SqlFileImportStatement,
+    stop_on_error: bool,
 }
 
 const SQL_FILE_READ_CHUNK_BYTES: usize = 256 * 1024;
@@ -325,10 +331,12 @@ pub async fn execute_sql_file_content(
     mut emit: impl FnMut(SqlFileProgress),
 ) -> Result<(), String> {
     let import_target = sql_file_import_target(state, &request.connection_id).await;
-    let statements =
-        split_sql_file_import_statements(file_content, import_target.as_ref().map(|target| target.db_type));
+    let statements = split_sql_file_import_statements_with_control(
+        file_content,
+        import_target.as_ref().map(|target| target.db_type),
+    );
 
-    let planned_statements = optimize_sql_file_import_statements(
+    let planned_statements = optimize_controlled_sql_file_import_statements(
         &statements,
         import_target.as_ref().map(|target| target.db_type),
         import_target.as_ref().and_then(|target| target.driver_profile.as_deref()),
@@ -652,17 +660,23 @@ impl StreamingSqlFileSplitter {
         }
     }
 
-    fn push_chunk(&mut self, chunk: &str) -> Vec<String> {
+    fn push_chunk(&mut self, chunk: &str) -> Vec<SqlStatementWithControl> {
         match self {
-            Self::Statements(splitter) => splitter.push_chunk(chunk),
-            Self::SqlServerBatches(splitter) => splitter.push_chunk(chunk),
+            Self::Statements(splitter) => splitter.push_chunk_with_control(chunk),
+            Self::SqlServerBatches(splitter) => splitter
+                .push_chunk(chunk)
+                .into_iter()
+                .map(|sql| SqlStatementWithControl { sql, stop_on_error: false })
+                .collect(),
         }
     }
 
-    fn finish(self) -> Vec<String> {
+    fn finish(self) -> Vec<SqlStatementWithControl> {
         match self {
-            Self::Statements(splitter) => splitter.finish(),
-            Self::SqlServerBatches(splitter) => splitter.finish(),
+            Self::Statements(splitter) => splitter.finish_with_control(),
+            Self::SqlServerBatches(splitter) => {
+                splitter.finish().into_iter().map(|sql| SqlStatementWithControl { sql, stop_on_error: false }).collect()
+            }
         }
     }
 }
@@ -719,7 +733,7 @@ async fn execute_sql_file_statement_batch(
     request: &SqlFileRequest,
     token: &CancellationToken,
     started_at: Instant,
-    statements: &mut Vec<String>,
+    statements: &mut Vec<SqlStatementWithControl>,
     import_target: Option<&SqlFileImportTarget>,
     mysql_executor: Option<&mut MySqlSqlFileExecutor>,
     progress: &mut SqlFileExecutionProgress,
@@ -729,7 +743,7 @@ async fn execute_sql_file_statement_batch(
         return Ok(());
     }
     let statements = std::mem::take(statements);
-    let planned_statements = optimize_sql_file_import_statements(
+    let planned_statements = optimize_controlled_sql_file_import_statements(
         &statements,
         import_target.map(|target| target.db_type),
         import_target.and_then(|target| target.driver_profile.as_deref()),
@@ -767,18 +781,56 @@ fn emit_sql_file_terminal_progress(
     ));
 }
 
+#[cfg(test)]
 fn split_sql_file_import_statements(file_content: &str, db_type: Option<DatabaseType>) -> Vec<String> {
+    split_sql_file_import_statements_with_control(file_content, db_type)
+        .into_iter()
+        .map(|statement| statement.sql)
+        .collect()
+}
+
+fn split_sql_file_import_statements_with_control(
+    file_content: &str,
+    db_type: Option<DatabaseType>,
+) -> Vec<SqlStatementWithControl> {
     if db_type == Some(DatabaseType::SqlServer) {
         // GO is a client-side batch delimiter, not T-SQL. SQL Server module DDL
         // must also remain a complete batch because procedure bodies contain semicolons.
-        return split_sql_batches(file_content);
+        return split_sql_batches(file_content)
+            .into_iter()
+            .map(|sql| SqlStatementWithControl { sql, stop_on_error: false })
+            .collect();
     }
 
     let options = db_type.map(SqlParsingOptions::for_database_type).unwrap_or_default();
     let mut splitter = SqlStatementSplitter::with_options(options);
-    let mut statements = splitter.push_chunk(file_content);
-    statements.extend(splitter.finish());
+    let mut statements = splitter.push_chunk_with_control(file_content);
+    statements.extend(splitter.finish_with_control());
     statements
+}
+
+fn optimize_controlled_sql_file_import_statements(
+    statements: &[SqlStatementWithControl],
+    db_type: Option<DatabaseType>,
+    driver_profile: Option<&str>,
+) -> Vec<ControlledSqlFileImportStatement> {
+    let mut controlled = Vec::new();
+    let mut start = 0;
+    while start < statements.len() {
+        let stop_on_error = statements[start].stop_on_error;
+        let mut end = start + 1;
+        while end < statements.len() && statements[end].stop_on_error == stop_on_error {
+            end += 1;
+        }
+        let sql = statements[start..end].iter().map(|statement| statement.sql.clone()).collect::<Vec<_>>();
+        controlled.extend(
+            optimize_sql_file_import_statements(&sql, db_type, driver_profile)
+                .into_iter()
+                .map(|statement| ControlledSqlFileImportStatement { statement, stop_on_error }),
+        );
+        start = end;
+    }
+    controlled
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1056,7 +1108,7 @@ async fn execute_planned_statements_with_progress(
     request: &SqlFileRequest,
     token: &CancellationToken,
     started_at: Instant,
-    planned_statements: &[SqlFileImportStatement],
+    planned_statements: &[ControlledSqlFileImportStatement],
     mut mysql_executor: Option<&mut MySqlSqlFileExecutor>,
     progress: &mut SqlFileExecutionProgress,
     emit: &mut impl FnMut(SqlFileProgress),
@@ -1066,7 +1118,7 @@ async fn execute_planned_statements_with_progress(
             return Ok(());
         }
 
-        let next_statement_index = progress.statement_index + planned_statement.source_statement_count;
+        let next_statement_index = progress.statement_index + planned_statement.statement.source_statement_count;
         if execute_statement_with_progress(
             state,
             request,
@@ -1096,13 +1148,15 @@ async fn execute_statement_with_progress(
     token: &CancellationToken,
     started_at: Instant,
     statement_index: usize,
-    statement: &SqlFileImportStatement,
+    controlled_statement: &ControlledSqlFileImportStatement,
     success_count: &mut usize,
     failure_count: &mut usize,
     affected_rows: &mut u64,
     mut mysql_executor: Option<&mut MySqlSqlFileExecutor>,
     emit: &mut impl FnMut(SqlFileProgress),
 ) -> Result<bool, String> {
+    let statement = &controlled_statement.statement;
+    let continue_on_error = request.continue_on_error && !controlled_statement.stop_on_error;
     if token.is_cancelled() {
         let summary = statement_summary(&statement.sql);
         emit(sql_file_progress(
@@ -1192,6 +1246,7 @@ async fn execute_statement_with_progress(
                     started_at,
                     statement_index + 1 - statement.source_statement_count,
                     statement,
+                    continue_on_error,
                     success_count,
                     failure_count,
                     affected_rows,
@@ -1204,7 +1259,7 @@ async fn execute_statement_with_progress(
             let decision = statement_error_decision(
                 &request.execution_id,
                 token,
-                request.continue_on_error,
+                continue_on_error,
                 started_at,
                 statement_index,
                 *success_count,
@@ -1231,6 +1286,7 @@ async fn execute_merged_statement_fallback_with_progress(
     started_at: Instant,
     first_statement_index: usize,
     statement: &SqlFileImportStatement,
+    continue_on_error: bool,
     success_count: &mut usize,
     failure_count: &mut usize,
     affected_rows: &mut u64,
@@ -1296,7 +1352,7 @@ async fn execute_merged_statement_fallback_with_progress(
                 let decision = statement_error_decision(
                     &request.execution_id,
                     token,
-                    request.continue_on_error,
+                    continue_on_error,
                     started_at,
                     statement_index,
                     *success_count,
@@ -1657,6 +1713,63 @@ mod tests {
             split_sql_file_import_statements("SELECT 1; SELECT 2;", Some(DatabaseType::Postgres)),
             vec!["SELECT 1", "SELECT 2"]
         );
+    }
+
+    #[tokio::test]
+    async fn streaming_gaussdb_on_error_stop_overrides_continue_on_error_at_script_position() {
+        let dir = std::env::temp_dir().join(format!("dbx-sql-file-stop-on-error-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = crate::storage::Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = crate::connection::AppState::new(storage);
+        let config: crate::models::connection::ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "gauss-stream",
+            "name": "GaussDB stream test",
+            "db_type": "gaussdb",
+            "host": "localhost",
+            "port": 5432,
+            "username": "",
+            "password": "",
+            "database": null
+        }))
+        .unwrap();
+        state.configs.write().await.insert(config.id.clone(), config);
+
+        let pool = crate::db::sqlite::connect_path(":memory:").await.unwrap();
+        state
+            .connections
+            .write()
+            .await
+            .insert("gauss-stream".to_string(), crate::connection::PoolKind::Sqlite(pool.clone()));
+
+        let path = temporary_sql_file(
+            b"CREATE TABLE side_effects(value INTEGER);\nINSERT INTO missing_before_control VALUES (1);\nINSERT INTO side_effects VALUES (1);\n\\set ON_ERROR_STOP on\nINSERT INTO missing_after_control VALUES (1);\nINSERT INTO side_effects VALUES (2);",
+        )
+        .await;
+        let request = SqlFileRequest {
+            execution_id: "gauss-stop-on-error".to_string(),
+            connection_id: "gauss-stream".to_string(),
+            database: String::new(),
+            file_path: path.to_string_lossy().to_string(),
+            continue_on_error: true,
+        };
+        let mut progress = Vec::new();
+
+        let result =
+            execute_sql_file_path(&state, &request, &path, CancellationToken::new(), Instant::now(), |event| {
+                progress.push(event)
+            })
+            .await;
+
+        assert!(result.is_err());
+        let count = crate::db::sqlite::execute_query(&pool, "SELECT COUNT(*) FROM side_effects").await.unwrap().rows[0]
+            [0]
+        .as_i64();
+        assert_eq!(count, Some(1));
+        assert!(progress.iter().any(|event| event.status == SqlFileStatus::Error));
+        assert!(!progress.iter().any(|event| event.status == SqlFileStatus::Done));
+
+        let _ = tokio::fs::remove_file(path).await;
+        let _ = tokio::fs::remove_dir_all(dir).await;
     }
 
     #[test]

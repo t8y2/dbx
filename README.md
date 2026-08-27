@@ -63,6 +63,78 @@
   </p>
 </div>
 
+## Sponsors & Partners
+
+<table>
+  <tr>
+    <td align="center" valign="middle" width="220">
+      <a href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank">
+        <picture>
+          <source media="(prefers-color-scheme: dark)" srcset="docs/public/sponsors/rainyun-dark.png" />
+          <img src="https://www.rainyun.com/img/logo.d193755d.png" alt="RainYun" height="48" />
+        </picture>
+      </a>
+    </td>
+    <td>
+      RainYun is a cloud service provider offering cloud servers, physical servers, game hosting, and developer-friendly infrastructure services.
+      <a href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank">Visit RainYun</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="220">
+      <a href="https://www.qiniu.com/" target="_blank">
+        <img src="https://www-static.qbox.me/_next/static/media/logo.0fc18feaa621d2068a7180631f742256.jpg" alt="Qiniu Cloud" height="64" />
+      </a>
+    </td>
+    <td>
+      Qiniu Cloud provides DBX with object storage, CDN, and other cloud infrastructure resources.
+      <a href="https://www.qiniu.com/" target="_blank">Visit Qiniu Cloud</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="220">
+      <a href="https://easysearch.cn" target="_blank">
+        <picture>
+          <source media="(prefers-color-scheme: dark)" srcset="docs/public/sponsors/easysearch-dark.png" />
+          <img src="docs/public/sponsors/easysearch.png" alt="Easysearch" width="150" />
+        </picture>
+      </a>
+    </td>
+    <td>
+      Easysearch is an enterprise-grade distributed search engine compatible with Elasticsearch APIs, combining full-text, vector, geospatial search, real-time analytics, and AI capabilities in one platform.
+      <a href="https://easysearch.cn" target="_blank">Visit Easysearch</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="220">
+      <a href="https://www.atlascloud.ai/?ref=6YYXWA" target="_blank">
+        <picture>
+          <source media="(prefers-color-scheme: dark)" srcset="docs/public/sponsors/atlas-dark.svg" />
+          <img src="https://www.atlascloud.ai/logo.svg" alt="Atlas Cloud" width="150" />
+        </picture>
+      </a>
+    </td>
+    <td>
+      Atlas Cloud gives developers one unified API for 400+ AI models across chat, image, video, and audio.
+      <a href="https://www.atlascloud.ai/?ref=6YYXWA" target="_blank">Visit Atlas Cloud</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="220">
+      <a href="https://www.trustasia.com/ssl/trustasia/code-signing" target="_blank">
+        <picture>
+          <source media="(prefers-color-scheme: dark)" srcset="docs/public/sponsors/trustasia-dark.svg" />
+          <img src="docs/public/sponsors/trustasia.png" alt="TrustAsia" height="44" />
+        </picture>
+      </a>
+    </td>
+    <td>
+      TrustAsia provides cloud-based code signing service for DBX, enabling trusted software through automated CI/CD builds.
+      <a href="https://www.trustasia.com/ssl/trustasia/code-signing" target="_blank">Visit TrustAsia</a>
+    </td>
+  </tr>
+</table>
+
 ## Why DBX?
 
 <table>
@@ -393,63 +465,6 @@ The installer will be in `src-tauri/target/release/bundle/`.
 ## Support DBX
 
 DBX is free and open source, but ongoing maintenance, database compatibility testing, infrastructure, and release work require sustained time and resources.
-
-### Sponsors & Partners
-
-<table>
-  <tr>
-    <td align="center" width="180">
-      <a href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank">
-        <img src="https://www.rainyun.com/img/logo.d193755d.png" alt="RainYun" height="48" />
-      </a>
-    </td>
-    <td>
-      RainYun is a cloud service provider offering cloud servers, physical servers, game hosting, and developer-friendly infrastructure services.
-    </td>
-    <td align="center" width="140">
-      <a href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank">Visit RainYun</a>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" width="180">
-      <a href="https://www.qiniu.com/" target="_blank">
-        <img src="https://www-static.qbox.me/_next/static/media/logo.0fc18feaa621d2068a7180631f742256.jpg" alt="Qiniu Cloud" height="64" />
-      </a>
-    </td>
-    <td>
-      Qiniu Cloud provides DBX with object storage, CDN, and other cloud infrastructure resources.
-    </td>
-    <td align="center" width="140">
-      <a href="https://www.qiniu.com/" target="_blank">Visit Qiniu Cloud</a>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" width="180">
-      <a href="https://easysearch.cn" target="_blank">
-        <img src="docs/public/sponsors/easysearch.png" alt="Easysearch" width="150" />
-      </a>
-    </td>
-    <td>
-      Easysearch is an enterprise-grade distributed search engine compatible with Elasticsearch APIs, combining full-text, vector, geospatial search, real-time analytics, and AI capabilities in one platform.
-    </td>
-    <td align="center" width="140">
-      <a href="https://easysearch.cn" target="_blank">Visit Easysearch</a>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" width="180">
-      <a href="https://www.atlascloud.ai/?ref=6YYXWA" target="_blank">
-        <img src="https://www.atlascloud.ai/logo.svg" alt="Atlas Cloud" width="150" />
-      </a>
-    </td>
-    <td>
-      Atlas Cloud gives developers one unified API for 400+ AI models across chat, image, video, and audio.
-    </td>
-    <td align="center" width="140">
-      <a href="https://www.atlascloud.ai/?ref=6YYXWA" target="_blank">Visit Atlas Cloud</a>
-    </td>
-  </tr>
-</table>
 
 - [Support DBX](https://my.feishu.cn/wiki/WMTkwdATDiiu4rk14JMcoyhTnoh) — voluntary donations via WeChat or Alipay
 - [Sponsors & Partners](https://my.feishu.cn/wiki/CgOWwwTzzify79k9Oq8cXpUNn6e) — sponsorship, infrastructure, tools, and community collaboration

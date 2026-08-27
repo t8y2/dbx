@@ -17,16 +17,23 @@ const emit = defineEmits<{
   edit: [edit: DocsEdit];
 }>();
 
-/** Rebuild the declared type from the parts the snapshot reports separately. */
+/** Rebuild bare types from the parts the snapshot reports separately. */
 function typeLabel(column: ColumnInfo): string {
+  const base = column.data_type.trim();
+  // MySQL's COLUMN_TYPE and PostgreSQL's format_type already include type
+  // modifiers. The snapshot still carries the raw precision fields for
+  // engines that report a bare type, so only synthesize them in that case.
+  if (base.includes("(")) {
+    return base;
+  }
   if (column.character_maximum_length !== null) {
-    return `${column.data_type}(${column.character_maximum_length})`;
+    return `${base}(${column.character_maximum_length})`;
   }
   if (column.numeric_precision !== null) {
     const scale = column.numeric_scale === null ? "" : `,${column.numeric_scale}`;
-    return `${column.data_type}(${column.numeric_precision}${scale})`;
+    return `${base}(${column.numeric_precision}${scale})`;
   }
-  return column.data_type;
+  return base;
 }
 
 function settings(column: ColumnInfo): string[] {

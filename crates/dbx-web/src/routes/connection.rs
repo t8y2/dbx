@@ -260,11 +260,15 @@ async fn run_temporary_connection_test(
 ) -> Result<ConnectionTestResult, String> {
     let temp_id = format!("{TEST_PROBE_ID_PREFIX}{}", uuid::Uuid::new_v4());
     app.configs.write().await.insert(temp_id.clone(), config.clone());
+    let mut nacos_database_info = None;
 
     let pool_result = if config.db_type == DatabaseType::Nacos {
         match app.nacos_admin_config_for_connection(&temp_id, &config).await {
             Ok(admin_config) => match app.nacos_registry.build_transient_config(admin_config).await {
-                Ok(adapter) => adapter.test_connection_with_scope_validation().await.map(|_| temp_id.clone()),
+                Ok(adapter) => adapter.test_connection_with_scope_validation().await.map(|info| {
+                    nacos_database_info = dbx_core::nacos::service::database_info_from_connection(&info);
+                    temp_id.clone()
+                }),
                 Err(error) => Err(error),
             },
             Err(error) => Err(error),
@@ -272,7 +276,9 @@ async fn run_temporary_connection_test(
     } else {
         app.get_or_create_pool(&temp_id, config.database.as_deref()).await
     };
-    let database_info = if include_database_info && config.db_type != DatabaseType::Nacos {
+    let database_info = if include_database_info && config.db_type == DatabaseType::Nacos {
+        nacos_database_info
+    } else if include_database_info {
         match &pool_result {
             Ok(_) => match app.connection_database_info(&temp_id, config.database.as_deref()).await {
                 Ok(info) => info,
@@ -786,6 +792,7 @@ mod tests {
             database: None,
             default_schema: None,
             visible_databases: None,
+            visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
             attached_databases: Vec::new(),
@@ -813,6 +820,7 @@ mod tests {
             redis_key_separator: dbx_core::models::connection::default_redis_key_separator(),
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
+            redis_key_templates: Vec::new(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),

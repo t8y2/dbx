@@ -83,6 +83,7 @@ export function dataGridHorizontalColumnWindow(options: { widths: readonly numbe
 export function useDataGridColumnLayoutState(options: {
   columns: MaybeRefOrGetter<readonly string[]>;
   sourceColumns?: MaybeRefOrGetter<readonly (string | undefined)[] | undefined>;
+  columnComments?: MaybeRefOrGetter<readonly (string | undefined)[] | undefined>;
   commentByColumn?: MaybeRefOrGetter<ReadonlyMap<string, string>>;
   displayableColumnIndexes: MaybeRefOrGetter<readonly number[]>;
   allNullColumnIndexes: MaybeRefOrGetter<readonly number[]>;
@@ -116,6 +117,7 @@ export function useDataGridColumnLayoutState(options: {
     buildDataGridColumnLookupItems({
       columns: toValue(options.columns),
       sourceColumns: toValue(options.sourceColumns),
+      columnComments: toValue(options.columnComments),
       displayableIndexes: toValue(options.displayableColumnIndexes),
       commentByColumn: toValue(options.commentByColumn),
     }),

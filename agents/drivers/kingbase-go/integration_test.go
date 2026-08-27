@@ -58,7 +58,7 @@ func TestKingbaseIntegration(t *testing.T) {
 		}
 	})
 
-	mustExecute(t, server, "CREATE TABLE "+qualifiedSchema+"."+quoteIdentifier(parent)+" (id integer PRIMARY KEY, name varchar(64) NOT NULL)")
+	mustExecute(t, server, "CREATE TABLE "+qualifiedSchema+"."+quoteIdentifier(parent)+" (id integer PRIMARY KEY, name varchar(64) NOT NULL, code character(32))")
 	mustExecute(t, server, "COMMENT ON TABLE "+qualifiedSchema+"."+quoteIdentifier(parent)+" IS '订单父表'")
 	mustExecute(t, server, "COMMENT ON COLUMN "+qualifiedSchema+"."+quoteIdentifier(parent)+".id IS '主键编号'")
 	mustExecute(t, server, "COMMENT ON COLUMN "+qualifiedSchema+"."+quoteIdentifier(parent)+".name IS '客户''名称'")
@@ -76,8 +76,14 @@ func TestKingbaseIntegration(t *testing.T) {
 		t.Fatalf("get columns failed: columns=%v err=%v", columns, err)
 	}
 	parentColumns, err := server.getColumns(schema, parent)
-	if err != nil || len(parentColumns) != 2 || parentColumns[0].Comment == nil || *parentColumns[0].Comment != "主键编号" || parentColumns[1].Comment == nil || *parentColumns[1].Comment != "客户'名称" {
+	if err != nil || len(parentColumns) != 3 || parentColumns[0].Comment == nil || *parentColumns[0].Comment != "主键编号" || parentColumns[1].Comment == nil || *parentColumns[1].Comment != "客户'名称" {
 		t.Fatalf("get commented columns failed: columns=%v err=%v", parentColumns, err)
+	}
+	if parentColumns[1].DataType != "character varying(64)" || parentColumns[1].CharacterMaximumLength == nil || *parentColumns[1].CharacterMaximumLength != 64 {
+		t.Fatalf("varchar length metadata mismatch: column=%+v", parentColumns[1])
+	}
+	if parentColumns[2].DataType != "character(32)" || parentColumns[2].CharacterMaximumLength == nil || *parentColumns[2].CharacterMaximumLength != 32 {
+		t.Fatalf("character length metadata mismatch: column=%+v", parentColumns[2])
 	}
 	ddl, err := server.getTableDDL(schema, parent)
 	if err != nil {

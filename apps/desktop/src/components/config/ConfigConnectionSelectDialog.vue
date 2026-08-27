@@ -91,7 +91,7 @@ function connectionMeta(connection: ConnectionConfig) {
           <Button type="button" variant="outline" size="sm" :disabled="busy" @click="deselectAll">{{ t("configExport.deselectAll") }}</Button>
         </div>
 
-        <ScrollArea class="h-72 rounded-md border">
+        <ScrollArea class="h-72 min-w-0 rounded-md border">
           <div v-if="connections.length === 0" class="px-3 py-8 text-center text-sm text-muted-foreground">
             {{ t("configExport.noConnections") }}
           </div>

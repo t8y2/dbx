@@ -2066,7 +2066,33 @@ pub async fn list_tables(
     limit: Option<usize>,
     offset: Option<usize>,
 ) -> Result<Vec<TableInfo>, String> {
-    let sql = sqlserver_list_tables_sql(schema, filter, limit, offset);
+    list_tables_by_kind(client, schema, filter, limit, offset, false).await
+}
+
+/// Lists user tables only, preserving server-side filtering and pagination.
+pub async fn list_table_objects(
+    client: &mut SqlServerClient,
+    schema: &str,
+    filter: Option<&str>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Result<Vec<TableInfo>, String> {
+    list_tables_by_kind(client, schema, filter, limit, offset, true).await
+}
+
+async fn list_tables_by_kind(
+    client: &mut SqlServerClient,
+    schema: &str,
+    filter: Option<&str>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    table_objects_only: bool,
+) -> Result<Vec<TableInfo>, String> {
+    let sql = if table_objects_only {
+        sqlserver_table_objects_sql(schema, filter, limit, offset)
+    } else {
+        sqlserver_list_tables_sql(schema, filter, limit, offset)
+    };
     let stream = client.query(&*sql, &[]).await.map_err(|e| e.to_string())?;
     let rows = stream.into_first_result().await.map_err(|e| e.to_string())?;
     Ok(rows
@@ -2285,6 +2311,25 @@ fn sqlserver_list_tables_sql(
     limit: Option<usize>,
     offset: Option<usize>,
 ) -> String {
+    sqlserver_list_tables_sql_with_kind(schema, filter, limit, offset, false)
+}
+
+fn sqlserver_table_objects_sql(
+    schema: &str,
+    filter: Option<&str>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> String {
+    sqlserver_list_tables_sql_with_kind(schema, filter, limit, offset, true)
+}
+
+fn sqlserver_list_tables_sql_with_kind(
+    schema: &str,
+    filter: Option<&str>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    table_objects_only: bool,
+) -> String {
     let filter_clause = filter
         .filter(|value| !value.trim().is_empty())
         .map(|value| {
@@ -2307,7 +2352,9 @@ fn sqlserver_list_tables_sql(
            WHERE ep.major_id = o.object_id AND ep.minor_id = 0 AND ep.name = N'MS_Description') ep";
     let object_visibility = sqlserver_visible_object_predicate();
     let schema_filter = sqlserver_schema_name_predicate(schema, "s.name");
-    let base_where = format!("WHERE {schema_filter} AND o.type IN ('U','V') AND {object_visibility} {filter_clause}");
+    let object_type_predicate = if table_objects_only { "o.type = 'U'" } else { "o.type IN ('U','V')" };
+    let base_where =
+        format!("WHERE {schema_filter} AND {object_type_predicate} AND {object_visibility} {filter_clause}");
     let order_by = "ORDER BY o.name";
 
     // Use SELECT TOP for broad SQL Server version compatibility.
@@ -3317,10 +3364,10 @@ mod tests {
         sqlserver_legacy_wildcard_metadata_query, sqlserver_list_objects_sql, sqlserver_list_schemas_sql,
         sqlserver_list_tables_sql, sqlserver_probe_explicit_alias, sqlserver_query_messages,
         sqlserver_schema_name_predicate, sqlserver_spatial_marker, sqlserver_supports_session_database_switch,
-        sqlserver_table_comment_sql, sqlserver_triggers_sql, sqlserver_visible_object_predicate,
-        strip_dbx_sqlserver_row_number_column, SqlServerDescribedColumn, SqlServerProbeOutputNameOverride,
-        SqlServerRestoredColumn, SqlServerResultSet, SqlServerSpatialColumn, SqlServerTdsEvent,
-        SQLSERVER_COMPLETION_CONTEXT_SQL, SQLSERVER_RESULT_TYPE_PROBE_SQL,
+        sqlserver_table_comment_sql, sqlserver_table_objects_sql, sqlserver_triggers_sql,
+        sqlserver_visible_object_predicate, strip_dbx_sqlserver_row_number_column, SqlServerDescribedColumn,
+        SqlServerProbeOutputNameOverride, SqlServerRestoredColumn, SqlServerResultSet, SqlServerSpatialColumn,
+        SqlServerTdsEvent, SQLSERVER_COMPLETION_CONTEXT_SQL, SQLSERVER_RESULT_TYPE_PROBE_SQL,
     };
     use crate::types::{
         CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest, QueryResult,
@@ -4173,6 +4220,16 @@ mod tests {
         assert!(sql.contains("LOWER(o.name) LIKE LOWER('%temp%') ESCAPE '\\'"));
         assert!(sql.contains("LOWER(o.name) LIKE LOWER('%t%e%m%p%') ESCAPE '\\'"));
         assert!(sql.contains("SELECT TOP (200)"));
+    }
+
+    #[test]
+    fn sqlserver_table_objects_sql_excludes_views_before_pagination() {
+        let sql = sqlserver_table_objects_sql("dbo", Some("orders"), Some(101), Some(100));
+
+        assert!(sql.contains("o.type = 'U'"));
+        assert!(!sql.contains("o.type IN ('U','V')"));
+        assert!(sql.contains("ROW_NUMBER() OVER (ORDER BY o.name)"));
+        assert!(sql.contains("__dbx_rn > 100 AND __dbx_rn <= 201"));
     }
 
     #[test]

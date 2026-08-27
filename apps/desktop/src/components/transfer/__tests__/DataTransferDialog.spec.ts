@@ -4,6 +4,25 @@ import { describe, expect, it } from "vitest";
 const dialogSource = readFileSync(new URL("../DataTransferDialog.vue", import.meta.url), "utf8");
 
 describe("DataTransferDialog layout", () => {
+  it("keeps only the main dialog resizable within safe viewport bounds", () => {
+    const dialogContentTags = dialogSource.match(/<DialogContent\b[^>]*>/g) ?? [];
+    const resizableDialogs = dialogContentTags.filter((tag) => tag.includes(" resize"));
+
+    expect(resizableDialogs).toHaveLength(1);
+    expect(resizableDialogs[0]).toContain('class="dbx-transfer-dialog sm:max-w-[1120px] max-h-[80vh] flex flex-col overflow-hidden resize"');
+    expect(resizableDialogs[0]).toContain(':style="transferDialogStyle"');
+    expect(dialogSource).toContain('width: "min(1120px, calc(100vw - 2rem))"');
+    expect(dialogSource).toContain('height: "min(80vh, calc(var(--dbx-viewport-height) - 2rem))"');
+    expect(dialogSource).toContain('minWidth: "min(780px, calc(100vw - 2rem))"');
+    expect(dialogSource).toContain('minHeight: "min(480px, calc(var(--dbx-viewport-height) - 2rem))"');
+    expect(dialogSource).toContain('maxWidth: "calc(100vw - 2rem)"');
+    expect(dialogSource).toContain('maxHeight: "calc(var(--dbx-viewport-height) - 2rem)"');
+  });
+
+  it("keeps source and target side by side while the dialog changes size", () => {
+    expect(dialogSource).toContain('class="grid grid-cols-[1fr_auto_1fr] gap-4 items-start"');
+  });
+
   it("keeps the header and footer outside the shrinking content region", () => {
     expect(dialogSource).toContain('<DialogHeader class="shrink-0">');
     expect(dialogSource).toContain('<DialogFooter class="shrink-0">');
@@ -78,6 +97,15 @@ describe("DataTransferDialog transfer prefill", () => {
   it("keeps catalog filtering and completion refresh catalog-aware", () => {
     expect(dialogSource).toContain("fetchCatalogNamespaceOptions(connectionId, catalog, config)");
     expect(dialogSource).toContain("store.refreshObjectListTreeNode(request.targetConnectionId, request.targetDatabase, request.targetSchema, request.targetCatalog)");
+  });
+
+  it("keeps default tree-schema databases selectable without leaking sentinels", () => {
+    expect(dialogSource).toContain("const sourceDatabaseName = computed(() => decodedDatabase(sourceConnectionId.value, sourceDatabase.value))");
+    expect(dialogSource).toContain("const targetDatabaseName = computed(() => decodedDatabase(targetConnectionId.value, targetDatabase.value))");
+    expect(dialogSource).toContain("sourceDatabase: sourceDatabaseName.value");
+    expect(dialogSource).toContain("targetDatabase: targetDatabaseName.value");
+    expect(dialogSource).toContain(':display-name="(option) => databaseOptionLabel(sourceConnectionId, option)"');
+    expect(dialogSource).toContain(':display-name="(option) => databaseOptionLabel(targetConnectionId, option)"');
   });
 
   it("discards stale async results after the connection changes", () => {

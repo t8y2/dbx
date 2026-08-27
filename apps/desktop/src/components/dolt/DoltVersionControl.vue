@@ -14,7 +14,7 @@ import DoltDiffPagination from "@/components/dolt/DoltDiffPagination.vue";
 import DoltDiffTable from "@/components/dolt/DoltDiffTable.vue";
 import DoltCellDiffDialog from "@/components/dolt/DoltCellDiffDialog.vue";
 import DoltRevisionSelector from "@/components/dolt/DoltRevisionSelector.vue";
-import DoltScrollArea from "@/components/dolt/DoltScrollArea.vue";
+import VirtualScrollArea from "@/components/common/VirtualScrollArea.vue";
 import * as api from "@/lib/backend/api";
 import { filterDatabaseNamesForVisiblePicker } from "@/lib/database/visibleDatabases";
 import type { QueryResult } from "@/types/database";
@@ -1264,7 +1264,7 @@ onUnmounted(() => {
                 <span class="truncate">{{ t("doltVersionControl.changedTables") }}</span>
                 <span v-if="changes.length" class="ml-auto text-[11px] text-muted-foreground">{{ changes.length }}</span>
               </div>
-              <DoltScrollArea class="min-h-0 flex-1">
+              <VirtualScrollArea class="min-h-0 flex-1">
                 <div v-if="comparisonLoading && changes.length === 0" class="flex h-24 items-center justify-center gap-2 text-xs text-muted-foreground"><Loader2 class="h-4 w-4 animate-spin" />{{ t("doltVersionControl.loadingDiff") }}</div>
                 <div v-else-if="comparisonError" class="p-3 text-xs text-destructive">{{ comparisonError }}</div>
                 <div v-else-if="changes.length === 0" class="flex h-24 items-center justify-center px-3 text-center text-xs text-muted-foreground">{{ t("doltVersionControl.noChanges") }}</div>
@@ -1276,7 +1276,7 @@ onUnmounted(() => {
                     <span v-for="flag in changeFlags(change)" :key="flag" class="dolt-change-flag">{{ changeFlagSymbol(flag) }}</span>
                   </span>
                 </button>
-              </DoltScrollArea>
+              </VirtualScrollArea>
             </section>
           </Pane>
 
@@ -1376,7 +1376,7 @@ onUnmounted(() => {
                   </TabsList>
                 </div>
                 <TabsContent value="branches" class="m-0 min-h-0 flex-1 overflow-hidden">
-                  <DoltScrollArea class="h-full min-h-0" scroller-class="py-1 text-xs">
+                  <VirtualScrollArea class="h-full min-h-0" scroller-class="py-1 text-xs">
                     <template v-if="branchTreeView">
                       <CustomContextMenu v-for="row in branchTreeRows" :key="`branch-tree-${row.key}`" :items="() => branchTreeRowContextMenuItems(row)" v-slot="{ onContextMenu, isOpen }">
                         <button
@@ -1419,10 +1419,10 @@ onUnmounted(() => {
                       </CustomContextMenu>
                     </template>
                     <div v-if="visibleBranches.length === 0" class="px-7 py-2 text-muted-foreground">{{ t("doltVersionControl.noBranches") }}</div>
-                  </DoltScrollArea>
+                  </VirtualScrollArea>
                 </TabsContent>
                 <TabsContent value="tags" class="m-0 min-h-0 flex-1 overflow-hidden">
-                  <DoltScrollArea class="h-full min-h-0" scroller-class="py-1 text-xs">
+                  <VirtualScrollArea class="h-full min-h-0" scroller-class="py-1 text-xs">
                     <CustomContextMenu v-for="item in visibleTags" :key="`tag-${item.name}`" :items="() => refContextMenuItems(item)" v-slot="{ onContextMenu, isOpen }">
                       <button
                         type="button"
@@ -1436,14 +1436,14 @@ onUnmounted(() => {
                       </button>
                     </CustomContextMenu>
                     <div v-if="visibleTags.length === 0" class="px-7 py-2 text-muted-foreground">{{ t("doltVersionControl.noTags") }}</div>
-                  </DoltScrollArea>
+                  </VirtualScrollArea>
                 </TabsContent>
               </Tabs>
             </aside>
           </Pane>
 
           <Pane :size="100 - doltLeftPaneSize" :min-size="100 - DOLT_LEFT_PANE_MAX_SIZE">
-            <DoltScrollArea class="relative h-full min-h-0">
+            <VirtualScrollArea class="relative h-full min-h-0">
               <div class="dolt-commit-header sticky top-0 z-20 grid h-7 items-center border-b bg-muted/80 text-[11px] font-medium text-muted-foreground backdrop-blur" :style="{ gridTemplateColumns: `${graphWidth}px minmax(240px, 1fr) 150px 155px` }">
                 <span class="px-2">{{ t("doltVersionControl.graph") }}</span>
                 <span class="px-2">{{ t("doltVersionControl.commit") }}</span>
@@ -1512,7 +1512,7 @@ onUnmounted(() => {
                   </button>
                 </CustomContextMenu>
               </div>
-            </DoltScrollArea>
+            </VirtualScrollArea>
           </Pane>
         </Splitpanes>
       </Pane>

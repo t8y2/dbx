@@ -10,6 +10,7 @@ export interface DataGridColumnLookupItem {
 export interface DataGridColumnLookupOptions {
   columns: readonly string[];
   sourceColumns?: readonly (string | undefined)[];
+  columnComments?: readonly (string | undefined)[];
   displayableIndexes?: readonly number[];
   commentByColumn?: ReadonlyMap<string, string>;
 }
@@ -38,7 +39,9 @@ export function buildDataGridColumnLookupItems(options: DataGridColumnLookupOpti
   return indexes.map((index) => {
     const name = options.columns[index] ?? `#${index + 1}`;
     const sourceName = options.sourceColumns?.[index];
-    const comment = dataGridColumnCommentFor(options.commentByColumn, name, sourceName);
+    // A present ordinal array owns unresolved entries too; falling back by
+    // name there could leak another source's comment onto an aggregate/alias.
+    const comment = options.columnComments === undefined ? dataGridColumnCommentFor(options.commentByColumn, name, sourceName) : nonEmptyComment(options.columnComments[index]);
     return {
       index,
       name,

@@ -211,6 +211,16 @@ pub async fn get_table_comment(
 }
 
 #[tauri::command]
+pub async fn get_mysql_table_auto_increment(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    table: String,
+) -> Result<Option<String>, String> {
+    dbx_core::schema::get_mysql_table_auto_increment_core(&state, &connection_id, &database, &table).await
+}
+
+#[tauri::command]
 pub async fn list_objects(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

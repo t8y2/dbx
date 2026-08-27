@@ -255,6 +255,28 @@ describe("useDataGridColumnLayout", () => {
     scope.stop();
   });
 
+  it("uses grouped result comments in field filtering without name-map fallback", () => {
+    const scope = effectScope();
+    const state = scope.run(() =>
+      useDataGridColumnLayoutState({
+        columns: ref(["asin_url", "total"]),
+        sourceColumns: ref(undefined),
+        columnComments: ref(["asin亚马逊前台地址", undefined]),
+        commentByColumn: ref(new Map([["total", "Wrong aggregate comment"]])),
+        displayableColumnIndexes: ref([0, 1]),
+        allNullColumnIndexes: ref([]),
+        columnOrderKeys: ref(["asin_url\0\0", "total\0\0"]),
+        layoutScopeKey: ref("grouped-result-comments"),
+        tableScopeKey: ref(""),
+      }),
+    )!;
+
+    expect(state.orderedColumnLayoutOptions.value.map((option) => option.comment)).toEqual(["asin亚马逊前台地址", undefined]);
+    expect(state.filteredColumnLayoutOptions("亚马逊").map((option) => option.column)).toEqual(["asin_url"]);
+    expect(state.filteredColumnLayoutOptions("wrong")).toEqual([]);
+    scope.stop();
+  });
+
   it("keeps a new resize active when the previous resize completion frame is pending", () => {
     const frames = new Map<number, FrameRequestCallback>();
     let nextFrame = 1;

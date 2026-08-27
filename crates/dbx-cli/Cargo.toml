@@ -1,6 +1,6 @@
 [package]
 name = "dbx-cli"
-version = "0.4.70"
+version = "0.4.74"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -9,7 +9,7 @@ name = "dbx"
 path = "src/main.rs"
 
 [dependencies]
-dbx-core = { path = "../dbx-core", default-features = false }
+dbx-core = { path = "../dbx-core", default-features = false, features = ["sqlite-bundled"] }
 dbx-mcp = { path = "../dbx-mcp" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

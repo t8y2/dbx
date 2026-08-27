@@ -22,6 +22,7 @@ import {
   snapshotMongoIndexSpec,
   toMongoCollectionKind,
   toMongoIndexRow,
+  visibleMongoCollections,
   type MongoCreateIndexForm,
   type MongoIndexSpecSource,
 } from "../mongoCollectionMutation";
@@ -91,6 +92,20 @@ describe("toMongoCollectionKind", () => {
     expect(toMongoCollectionKind("timeseries")).toBe("timeseries");
     expect(toMongoCollectionKind("bucket")).toBe("collection");
     expect(toMongoCollectionKind(undefined)).toBe("collection");
+  });
+});
+
+describe("visibleMongoCollections", () => {
+  it("hides GridFS buckets and their backing collections", () => {
+    expect(
+      visibleMongoCollections([
+        { name: "users", kind: "collection" },
+        { name: "fs", kind: "bucket", bucketName: "fs" },
+        { name: "fs.files", kind: "collection" },
+        { name: "fs.chunks", kind: "collection" },
+        { name: "reports", kind: "view" },
+      ]).map((collection) => collection.name),
+    ).toEqual(["users", "reports"]);
   });
 });
 

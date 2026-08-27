@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, toRaw, watch, type Component } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, toRaw, watch, type Component } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -13,6 +13,8 @@ import {
   Check,
   ChevronLeft,
   ChevronRight,
+  Clock,
+  Hourglass,
   CircleSlash,
   Copy,
   Database,
@@ -28,6 +30,7 @@ import {
   Minimize2,
   Pencil,
   Plus,
+  RefreshCw,
   Replace,
   Server,
   ShieldCheck,
@@ -48,7 +51,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useTheme } from "@/composables/useTheme";
 import CodeSnapshotDialog from "@/components/codeSnapshot/CodeSnapshotDialog.vue";
 import type { CodeSnapshotSource } from "@/lib/codeSnapshot/codeSnapshot";
@@ -104,6 +107,25 @@ import {
 import { isAiConfigModelCandidate } from "@/lib/ai/aiConfigCandidates";
 import { deleteConversationWithCancellation, stopAiGenerationWithFallback } from "@/lib/ai/aiConversationLifecycle";
 import { AiGenerationGuard } from "@/lib/ai/aiGenerationGuard";
+import { applyStatusEvent, createGenerationStatus, createStatusTicker, liveAnnouncementText, markCancelling, shouldShowLongRunningHint, statusText, toolLabel, STATUS_IDLE_THRESHOLD_MS, type AiGenerationStatus } from "@/lib/ai/aiGenerationStatus";
+import { supportsBackgroundAiRuns } from "@/lib/ai/aiRuntimeStrategy";
+import {
+  acquireDesktopAiRunSlot,
+  activeDesktopAiRuns,
+  bumpDesktopAiRunSeq,
+  cancelQueuedDesktopAiRun,
+  desktopAiRun,
+  finishDesktopAiRun,
+  isTerminalDesktopAiRunStatus,
+  registerDesktopAiRun,
+  releaseDesktopAiRunSlot,
+  removeDesktopAiRun,
+  retireDesktopAiRun,
+  updateDesktopAiRun,
+  type DesktopAiRunRuntime,
+  type DesktopAiRunStatus,
+} from "@/lib/ai/desktopAiRunRegistry";
+import { createDesktopAiRunSnapshotScheduler } from "@/lib/ai/desktopAiRunSnapshotScheduler";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { addConfiguredAiModel, aiModelOptions } from "@/lib/ai/aiConfigList";
 import { orderAiConfigsForDisplay } from "@/lib/ai/aiConfigOrdering";
@@ -116,11 +138,11 @@ import { buildAiAgentPlan } from "@/lib/ai/aiAgentPlan";
 import { extractFirstSqlCodeBlock, extractSingleSqlCodeBlock } from "@/lib/ai/aiSqlExecutionPolicy";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
-import { buildAiAgentStepItems, toolCallStepKey, upsertAgentStep, type AiAgentStepItem, type AiAgentStepTone } from "@/lib/ai/aiAgentStepPresentation";
+import { buildAiAgentStepItems, formatToolDurationMs, toolCallStepKey, upsertAgentStep, type AiAgentStepItem, type AiAgentStepTone } from "@/lib/ai/aiAgentStepPresentation";
 import { createAiShikiCodeHighlighter, type AiCodeHighlighter } from "@/lib/ai/aiCodeHighlighter";
 import { createAiMessageRenderer } from "@/lib/ai/aiMessageRender";
 import { formatAiInlineMarkdown, handleAiMarkdownLinkClick } from "@/lib/ai/aiMarkdown";
-import { aiCancelStream, saveAiConversation, loadAiConversations, deleteAiConversation, listSchemas, listTables, type AiConversation } from "@/lib/backend/api";
+import { aiCancelStream, saveAiConversation, saveAiRun, saveAiRunState, loadAiConversations, loadAiRuns, deleteAiConversation, listSchemas, listTables, type AiConversation, type AiRun, type AiRunStatus } from "@/lib/backend/api";
 import type { AiMessage } from "@/lib/backend/api";
 import type { AiConfigItem, AiEffortCapability, AiEffortOption, AiEffortSelection } from "@/types/ai";
 import type { ConnectionConfig, QueryTab, SavedSqlFile, TableInfo } from "@/types/database";
@@ -159,6 +181,7 @@ const { openTableTarget } = useNavigationTargets({
 const { toast } = useToast();
 const { isDark } = useTheme();
 const supportsCliProviders = isTauriRuntime();
+const backgroundAiRunsEnabled = supportsBackgroundAiRuns();
 
 type AiMessageMention =
   | {
@@ -259,6 +282,143 @@ const filteredConversations = computed(() => filterAiConversationSearchIndex(con
 const showConversationList = ref(false);
 const showTemplateSelector = ref(false);
 const modeActionOpen = ref(false);
+let assistantViewMounted = false;
+// A normal-send FIFO run recovered at startup as an editable pending draft.
+// When the user opens that conversation, the draft is loaded into the input
+// box and this banner explains it is an unsent, resendable request.
+const recoveredDraftActive = ref(false);
+const recoveredDraftLoadedFor = new Set<string>();
+// Per-conversation run status for the history rows. Active registry runs take
+// precedence; terminal statuses from persisted runs (e.g. `interrupted` after a
+// restart) are tracked here. Unread marks conversations that reached a terminal
+// or awaiting-confirmation state while the user was looking elsewhere.
+const conversationRunStatus = reactive(new Map<string, AiRunStatus>());
+const unreadConversations = reactive(new Set<string>());
+
+// --- Phase 2: queue-send, auto-send, seq baseline, away-updates (parent PRD §5/§8) ---
+
+/** One editable "send later" input per conversation, saved while an active run
+ *  occupies it. Persisted via `AiConversation.queuedInput` and restored after a
+ *  restart. The mode/action are in-memory only (they default to the current
+ *  view after a restart). */
+type QueuedConversationInput = { text: string; mode: AiAssistantMode; action: AiAction };
+const queuedInputs = reactive(new Map<string, QueuedConversationInput>());
+
+/** Auto-send/retry work waiting to enter the normal send pipeline. More than
+ * one background run can settle in the same event turn; this must be FIFO, not
+ * a single "next send" slot, or the later completion silently drops the first
+ * conversation's queued input. */
+type PendingAutoSend = { conversationId: string; text: string; messages: ChatMessage[]; mode: AiAssistantMode; action: AiAction };
+const pendingAutoSends: PendingAutoSend[] = [];
+
+/** Highest event `seq` the user has read per conversation (parent PRD §8). Set
+ *  when the conversation is opened; unread is driven by new events exceeding it.
+ *  In-memory only — a fresh session starts with an empty baseline, which is the
+ *  correct "everything since the last restart is new" default for a recovered
+ *  run that resumed in the background. */
+const conversationReadSeq = reactive(new Map<string, number>());
+
+/** Number of messages visible when the user last left the conversation. Used to
+ *  anchor the "updates while you were away" separator when the conversation
+ *  gained content during the departure. */
+const conversationReadMessageCount = reactive(new Map<string, number>());
+const conversationHasAwayUpdates = reactive(new Map<string, boolean>());
+
+interface ConversationRowDetail {
+  status?: AiRunStatus;
+  unread: boolean;
+  /** Live elapsed seconds for preparing/running rows, from run start. */
+  elapsedSeconds: number | null;
+  /** Dynamic phase text for preparing/running rows (e.g. "正在执行 xxx"). */
+  phaseText: string | null;
+  /** Truncated one-line summary of the run's last assistant output. */
+  summary: string | null;
+  /** Readable reason for failed/interrupted rows. */
+  reason: string | null;
+  canRetry: boolean;
+  hasQueuedInput: boolean;
+}
+
+function runPhaseText(run: DesktopAiRunRuntime<ChatMessage>, t: (key: string, params?: Record<string, unknown>) => string): string {
+  const lastAssistant = run.messages[run.assistantMessageIndex];
+  const steps: AiAgentStepItem[] | undefined = lastAssistant?.agentSteps;
+  if (steps && steps.length) {
+    for (let i = steps.length - 1; i >= 0; i--) {
+      const step = steps[i];
+      if (step.tone === "active" && step.toolName) {
+        return t("ai.runRowPhaseTool", { tool: toolLabel(step.toolName, t) });
+      }
+    }
+  }
+  return t("ai.runRowPhaseThinking");
+}
+
+function truncateToOneLine(content: string, maxChars: number): string {
+  const normalized = content.replace(/\s+/g, " ").trim();
+  return normalized.length > maxChars ? `${normalized.slice(0, maxChars)}…` : normalized;
+}
+
+/** Formats a run's elapsed seconds for the history row ("42s", "2m 3s").
+ *  Returns "" for a run without a live elapsed value. */
+function formatRunElapsed(seconds: number | null): string {
+  if (seconds === null || seconds < 0) return "";
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remaining = seconds % 60;
+  return remaining > 0 ? `${minutes}m ${remaining}s` : `${minutes}m`;
+}
+
+function conversationRowDetail(conv: AiConversation): ConversationRowDetail {
+  const run = backgroundAiRunsEnabled ? desktopAiRun<ChatMessage>(conv.id) : undefined;
+  const status = run?.status ?? conversationRunStatus.get(conv.id);
+  const messages = run?.messages ?? chatMessagesFromConversation(conv);
+  const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant" && m.content);
+  const summary = lastAssistant ? truncateToOneLine(lastAssistant.content, 48) : null;
+  const reason = status === "failed" || status === "interrupted" ? (lastAssistant ? truncateToOneLine(lastAssistant.content, 64) : t("ai.runStatusInterrupted")) : null;
+  let elapsedSeconds: number | null = null;
+  let phaseText: string | null = null;
+  if (run && (status === "running" || status === "preparing")) {
+    elapsedSeconds = Math.max(0, Math.floor((statusNow.value - new Date(run.createdAt).getTime()) / 1000));
+    phaseText = runPhaseText(run, t);
+  }
+  return {
+    status,
+    unread: unreadConversations.has(conv.id),
+    elapsedSeconds,
+    phaseText,
+    summary,
+    reason,
+    canRetry: status === "failed" || status === "interrupted",
+    hasQueuedInput: queuedInputs.has(conv.id),
+  };
+}
+
+/** Keep the elapsed-time ticker alive whenever any desktop run is live, so the
+ *  history rows show a moving elapsed counter even when the visible conversation
+ *  has no active run (parent PRD §7). */
+const hasLiveDesktopRuns = computed(() => backgroundAiRunsEnabled && activeDesktopAiRuns().length > 0);
+watch(hasLiveDesktopRuns, (live) => {
+  if (live) startStatusTimer();
+  else if (!isGenerating.value) stopStatusTimer();
+});
+
+/** The currently-viewed conversation's row detail, for the queue-send affordance. */
+const currentQueuedInput = computed(() => (conversationId.value ? (queuedInputs.get(conversationId.value) ?? null) : null));
+/** Whether the visible conversation is busy with a run the user cannot send
+ *  through (parent PRD §5): the send button becomes "queue send". A recovered
+ *  `pending_recoverable` draft is intentionally NOT busy — §2 recovery lets the
+ *  user edit and re-send it, which discards the stale run. */
+const hasActiveRunForCurrentConversation = computed(() => {
+  if (!backgroundAiRunsEnabled || !conversationId.value) return isGenerating.value;
+  const run = desktopAiRun<ChatMessage>(conversationId.value);
+  if (!run) return false;
+  return run.status === "preparing" || run.status === "queued" || run.status === "running" || run.status === "awaiting_write_confirmation";
+});
+const awayUpdatesBaselineIndex = computed(() => {
+  const convId = conversationId.value;
+  if (!convId || !conversationHasAwayUpdates.get(convId)) return -1;
+  return conversationReadMessageCount.get(convId) ?? -1;
+});
 
 // Prompt template selection (panel-session scope)
 const activeTemplateIds = ref<string[]>([]);
@@ -354,6 +514,13 @@ const STREAM_RENDER_INTERVAL_MS = 33;
 // uses. See cancelStream() for why the backend RPC alone can't be trusted to
 // unstick a genuinely hung tool call.
 const STOP_FORCE_ABANDON_MS = 5000;
+// Spacing between incremental run-snapshot saves while a detached run streams.
+// Bounds how much streamed output a crash/quit can lose relative to the last
+// durable snapshot - without this, deltas lived only in memory.
+const RUN_SNAPSHOT_PERSIST_INTERVAL_MS = 2000;
+// Retry cadence for a backend cancel RPC that has not been acknowledged yet
+// (the session registers with the backend only once runAgentStream() starts).
+const DESKTOP_CANCEL_ACK_RETRY_MS = 500;
 let assistantDeltaFrame: number | null = null;
 let lastAssistantFlushAt = 0;
 let pendingAssistantDelta = "";
@@ -374,6 +541,72 @@ let currentAssistantMessageIndex = -1;
 // to a different conversation. See lib/ai/aiGenerationGuard.ts for why this exists
 // instead of relying on isGenerating/currentSessionId alone.
 const aiGenerationGuard = new AiGenerationGuard();
+
+// Live generation-status line (Issue #6743 feature 1). `generationStatus` is the
+// per-request state machine fed by every `ai-agent-event`; `statusNow` is bumped
+// by the whole-second ticker (`createStatusTicker`, lib/ai/aiGenerationStatus.ts)
+// only when the displayed whole second changes, so `statusText` recomputes
+// elapsed/idle at each real second boundary instead of a fixed 1s interval (a
+// delayed interval tick used to skip values — Math.ceil of a late wall-clock
+// sample — and freeze the display in between). The wall-clock `setTimeout`
+// replaces a per-frame rAF loop that rescheduled ~60×/s while only updating once
+// per second, and keeps ticking while the document is hidden (rAF pauses then).
+// Both refs are per-request transient state and MUST be reset on both the normal
+// `finally` path and `resetPendingRequestState()` (abandon path) — see the
+// dual-path note next to `resetPendingRequestState`.
+const generationStatus = ref<AiGenerationStatus>(createGenerationStatus(Date.now()));
+const statusNow = ref(Date.now());
+/** Last displayed whole second (`Math.ceil((statusNow - startedAt) / 1000)`). */
+let lastStatusSecond = -1;
+
+// Aligned-to-the-next-second ticker. The callback mirrors the old
+// requestAnimationFrame body: write `statusNow` only when the displayed whole
+// second changes, so the display rolls +1s at each real boundary.
+const statusTicker = createStatusTicker((now: number) => {
+  const second = Math.ceil((now - generationStatus.value.startedAt) / 1000);
+  if (second !== lastStatusSecond) {
+    lastStatusSecond = second;
+    statusNow.value = now;
+  }
+});
+
+function startStatusTimer() {
+  const now = Date.now();
+  statusNow.value = now;
+  // Seed the boundary so the ticker writes only when the displayed whole second
+  // changes — the display then rolls +1s within ~a frame of each real boundary
+  // instead of skipping values when a tick is delayed.
+  lastStatusSecond = Math.ceil((now - generationStatus.value.startedAt) / 1000);
+  statusTicker.start(now);
+}
+
+function stopStatusTimer() {
+  statusTicker.stop();
+}
+
+const generationStatusText = computed(() => statusText(generationStatus.value, statusNow.value, t));
+const statusElapsedSeconds = computed(() => Math.max(0, Math.ceil((statusNow.value - generationStatus.value.startedAt) / 1000)));
+const statusIdleSeconds = computed(() => (generationStatus.value.lastEventAt !== undefined ? Math.max(0, Math.ceil((statusNow.value - generationStatus.value.lastEventAt) / 1000)) : 0));
+/** Idle copy branch: an event was seen, but nothing has arrived for over 20s. */
+const generationStatusIdle = computed(() => {
+  const last = generationStatus.value.lastEventAt;
+  return last !== undefined && statusNow.value - last > STATUS_IDLE_THRESHOLD_MS;
+});
+const generationStatusRunningTool = computed(() => generationStatus.value.phase === "running_tool" && !!generationStatus.value.activeTool);
+const statusToolLabel = computed(() => {
+  const tool = generationStatus.value.activeTool;
+  return tool ? toolLabel(tool.name, t) : "";
+});
+const statusTurnBadge = computed(() => (generationStatus.value.turn !== undefined ? t("ai.status.turnBadge", { turn: generationStatus.value.turn + 1 }) : ""));
+/** Gentle >60s hint, hidden while the user is cancelling (they already decided to stop). */
+const statusLongRunningHintVisible = computed(() => generationStatus.value.phase !== "cancelling" && generationStatus.value.phase !== "finalizing" && generationStatus.value.phase !== "finished" && shouldShowLongRunningHint(generationStatus.value, statusNow.value));
+/**
+ * Stable screen-reader announcement for the status line. Fed into a
+ * `role="status"` live region; unlike `generationStatusText` it excludes the
+ * per-second elapsed/idle numerals so screen readers hear discrete state
+ * changes (phase / tool / turn / idle crossing), not a new number every tick.
+ */
+const statusLiveAnnouncement = computed(() => liveAnnouncementText(generationStatus.value, statusNow.value, t));
 
 function startEditMessage(visibleIndex: number) {
   if (isGenerating.value) return;
@@ -906,11 +1139,6 @@ function messageTitle(message: ChatMessage): string {
   return [messageMentionLabels(message).join(" "), message.content].filter(Boolean).join(" ") || t("ai.newChat");
 }
 
-const isWaitingForFirstDelta = computed(() => {
-  const last = messages.value[messages.value.length - 1];
-  return isGenerating.value && last?.role === "assistant" && !last.content && !last.reasoning;
-});
-
 /**
  * The last assistant message whose final line looks like an action
  * proposal question. Used to render an inline "Yes / No" confirmation bar
@@ -976,6 +1204,13 @@ function sendProposalReply(positive: boolean) {
   // Write confirmations carry the exact-SQL reply; other action proposals keep
   // the generic wording so the model does not receive SQL-specific instructions.
   prompt.value = positive ? (isWriteConfirmation ? t("ai.writeSqlConfirmationReplyYes") : t("ai.proposalConfirmReplyYes")) : isWriteConfirmation ? t("ai.writeSqlConfirmationReplyNo") : t("ai.proposalConfirmReplyNo");
+  // A rejected write confirmation must not auto-send the conversation's queued
+  // input when this run ends (parent PRD §5): tag the run so the finally block
+  // can suppress the auto-send and leave the "send queued message" button.
+  if (!positive && isWriteConfirmation && backgroundAiRunsEnabled) {
+    const run = desktopAiRun<ChatMessage>(conversationId.value);
+    if (run) run.pendingConfirmationRejected = true;
+  }
   if (positive && assistantMode.value === "agent" && isWriteConfirmation) {
     confirmedWriteSqlText = extractSingleSqlCodeBlock(target.content);
     if (confirmedWriteSqlText) {
@@ -1197,6 +1432,74 @@ function appendAssistantReasoning(assistantIdx: number, delta: string) {
   scheduleAssistantDeltaFlush(assistantIdx);
 }
 
+function createDetachedAssistantDeltaBuffer(targetMessages: ChatMessage[], onFlush: () => void) {
+  let frame: number | null = null;
+  let lastFlushAt = 0;
+  let pendingDelta = "";
+  let pendingReasoning = "";
+  let pendingIndex = -1;
+
+  const flush = () => {
+    frame = null;
+    lastFlushAt = performance.now();
+    const msg = targetMessages[pendingIndex];
+    if (!msg) return;
+    if (pendingReasoning) {
+      msg.reasoning = (msg.reasoning || "") + pendingReasoning;
+      msg.isThinking = true;
+    }
+    if (pendingDelta) {
+      msg.isThinking = false;
+      msg.content += pendingDelta;
+    }
+    pendingDelta = "";
+    pendingReasoning = "";
+    onFlush();
+  };
+
+  const runFrame = () => {
+    if (performance.now() - lastFlushAt < STREAM_RENDER_INTERVAL_MS) {
+      frame = requestAnimationFrame(runFrame);
+      return;
+    }
+    flush();
+  };
+
+  const schedule = (assistantIdx: number) => {
+    pendingIndex = assistantIdx;
+    if (frame === null) frame = requestAnimationFrame(runFrame);
+  };
+
+  return {
+    appendText(assistantIdx: number, delta: string) {
+      const msg = targetMessages[assistantIdx];
+      if (msg?.isThinking) msg.isThinking = false;
+      pendingDelta += delta;
+      schedule(assistantIdx);
+    },
+    appendReasoning(assistantIdx: number, delta: string) {
+      pendingReasoning += delta;
+      schedule(assistantIdx);
+    },
+    replaceText(assistantIdx: number, content: string) {
+      if (frame !== null) cancelAnimationFrame(frame);
+      frame = null;
+      pendingDelta = "";
+      pendingReasoning = "";
+      pendingIndex = -1;
+      const msg = targetMessages[assistantIdx];
+      if (!msg) return;
+      msg.content = content;
+      msg.reasoning = undefined;
+      msg.isThinking = false;
+    },
+    flush() {
+      if (frame !== null) cancelAnimationFrame(frame);
+      flush();
+    },
+  };
+}
+
 const reasoningExpanded = ref(false);
 const expandedSteps = ref<Set<string>>(new Set());
 
@@ -1228,6 +1531,12 @@ function agentStepClass(tone: AiAgentStepTone): string {
     default:
       return `border-border bg-background/60 text-muted-foreground ${base}`;
   }
+}
+
+/** True when a step renders a right-aligned tail: a running tool step
+ *  (spinner + "executing") or a completed tool step with a computed duration. */
+function agentStepHasTail(step: AiAgentStepItem): boolean {
+  return (step.tone === "active" && !!step.toolName) || step.durationMs !== undefined;
 }
 
 /** Extract tool result content from the AgentEvent result value */
@@ -1273,7 +1582,7 @@ function parseExplainFromData(explainData: unknown, dbType: string): ParsedExpla
   }
 }
 
-function agentEventToStep(event: AgentEvent, index: number): AiAgentStepItem | undefined {
+function agentEventToStep(event: AgentEvent, index: number, now: number): AiAgentStepItem | undefined {
   if (event.type === "context_compacted") {
     return {
       key: `compact-${index}`,
@@ -1296,6 +1605,7 @@ function agentEventToStep(event: AgentEvent, index: number): AiAgentStepItem | u
       tone: "active",
       toolName: event.tool_name,
       toolArgs: event.args as Record<string, unknown>,
+      startedAtMs: now,
     };
   }
 
@@ -1312,6 +1622,7 @@ function agentEventToStep(event: AgentEvent, index: number): AiAgentStepItem | u
     toolResult: extractToolResultContent(event.result),
     explainData: extractExplainData(event.result),
     isError: event.is_error,
+    endedAtMs: now,
   };
 }
 
@@ -2318,8 +2629,20 @@ function onTableReferenceDropEvent(event: Event) {
 }
 
 async function send() {
-  const text = prompt.value.trim();
-  if ((!text && !selectedMentions.value.length && !selectedSqlFileMentions.value.length && !selectedCsvAttachments.value.length && !selectedImageAttachments.value.length) || isGenerating.value) return;
+  // Auto-send (queued input / retry) overrides the view: the send runs against
+  // the target conversation's own history instead of the visible chat. Consumed
+  // once so a second unrelated send() cannot inherit a stale target.
+  const auto = pendingAutoSends.shift() ?? null;
+  const text = auto ? auto.text : prompt.value.trim();
+  // A background auto-send must not flip the visible conversation's send button
+  // into "stop": only the run actually shown here owns `isGenerating`.
+  const autoSendVisible = auto ? assistantViewMounted && conversationId.value === auto.conversationId : true;
+  if (auto) {
+    // A background auto-send must not be blocked by a concurrent visible run's
+    // `isGenerating` (slots arbitrate concurrency); only block when it would
+    // stream into the visible conversation that is busy.
+    if (autoSendVisible && isGenerating.value) return;
+  } else if ((!text && !selectedMentions.value.length && !selectedSqlFileMentions.value.length && !selectedCsvAttachments.value.length && !selectedImageAttachments.value.length) || isGenerating.value) return;
   if (isAttachmentProcessing.value) return;
 
   // Snapshot the target connection/database before any async work so that
@@ -2336,14 +2659,15 @@ async function send() {
     toast(t("ai.noConfig"));
     return;
   }
-  const imageError = imageAttachmentSupportError(
-    activeConfig.provider,
-    selectedImageAttachments.value.map((attachment) => attachment.mediaType),
-  );
+  const imageError = imageAttachmentSupportError(activeConfig.provider, auto ? [] : selectedImageAttachments.value.map((attachment) => attachment.mediaType));
   if (imageError) {
     toast(imageAttachmentSupportErrorMessage(imageError), 5000);
     return;
   }
+  // The queued input is consumed only now that the send is actually proceeding
+  // (config + connection valid). Consuming it here also guarantees a terminal
+  // run can never chain into an infinite auto-send loop.
+  if (auto) queuedInputs.delete(auto.conversationId);
   // Acquire the send guard before the first async operation so two rapid
   // submissions cannot both pass the initial isGenerating check and then
   // resume into concurrent agent runs. `myGeneration` is this call's identity:
@@ -2351,14 +2675,88 @@ async function send() {
   // resumed at least once, must check `aiGenerationGuard.isCurrent(myGeneration)`
   // first, since clearMessages()/selectConversation() can invalidate it out from
   // under an in-flight send().
-  isGenerating.value = true;
+  if (autoSendVisible) {
+    isGenerating.value = true;
+    generationStatus.value = createGenerationStatus(Date.now());
+    startStatusTimer();
+  }
   const myGeneration = aiGenerationGuard.begin();
+  if (!auto && !conversationId.value) conversationId.value = uuid();
+  const runConversationId = auto ? auto.conversationId : conversationId.value;
+  const runMessages = auto ? auto.messages : messages.value;
+  const runCreatedAt = new Date().toISOString();
+  let detachedRun: DesktopAiRunRuntime<ChatMessage> | undefined;
+  // Resolves detachedRun.settled below; declared here so every exit path of
+  // send() (the pre-stream early returns and the finally) can wake a stop
+  // request waiting for this pipeline's real terminal state.
+  let resolveDetachedRunSettled: () => void = () => {};
+  let desktopSlotAcquired = false;
+  let resumingConfirmedWrite = false;
+  if (backgroundAiRunsEnabled) {
+    const resumableRun = desktopAiRun<ChatMessage>(runConversationId);
+    resumingConfirmedWrite = resumableRun?.status === "awaiting_write_confirmation";
+    // A recovered pending-input run is not resumable: the user just re-sent
+    // the draft (possibly edited). Discard it so it can never be persisted
+    // alongside the fresh run — one conversation, one active AiRun.
+    if (resumableRun?.status === "pending_recoverable") {
+      resumableRun.discardOnFinish = true;
+      finishDesktopAiRun(resumableRun, "cancelled");
+      removeDesktopAiRun(resumableRun.conversationId);
+      recoveredDraftActive.value = false;
+    }
+    detachedRun = registerDesktopAiRun({
+      // A confirmed write starts a new backend session, but remains a segment
+      // of the same logical run. Session ids are append-only and never rebound.
+      runId: resumingConfirmedWrite ? resumableRun!.runId : uuid(),
+      conversationId: runConversationId,
+      sessionIds: resumingConfirmedWrite ? [...resumableRun!.sessionIds] : [],
+      currentSessionId: "",
+      status: "preparing",
+      messages: runMessages,
+      assistantMessageIndex: -1,
+      connectionId: connection.id,
+      connectionName: connection.name,
+      database: tab.database || "",
+      schema: resolveAiDatabaseTarget(tab, connection).schema,
+      createdAt: resumingConfirmedWrite ? resumableRun!.createdAt : runCreatedAt,
+      updatedAt: runCreatedAt,
+      // Carry the proposal snapshot across a confirmed-write resume so a queued
+      // resume that is persisted and restarted can fall back to the original
+      // confirmation card (the grant itself is never serialized).
+      pendingConfirmation: resumingConfirmedWrite ? resumableRun!.pendingConfirmation : undefined,
+      // A rejection initiated on the awaiting run belongs to the same logical
+      // run; carry it so the resume segment can suppress the queued-input
+      // auto-send when the agent ends the run cancelled (parent PRD §5).
+      pendingConfirmationRejected: resumingConfirmedWrite ? resumableRun!.pendingConfirmationRejected : undefined,
+      cancelRequested: false,
+    });
+    // Terminal-event signal for stop requests: resolved once this send()
+    // pipeline has fully settled (its finally, or a pre-stream early exit).
+    // A stop waits on it instead of finalizing the run itself, so a hung or
+    // merely cancellation-pending stream cannot go invisible while it still
+    // occupies a concurrency slot (mirrors the foreground
+    // stopAiGenerationWithFallback() contract from issue #5941).
+    detachedRun.settled = new Promise<void>((resolve) => {
+      resolveDetachedRunSettled = resolve;
+    });
+  }
+  const generationCanContinue = () => (detachedRun ? !detachedRun.cancelRequested : aiGenerationGuard.isCurrent(myGeneration));
+  const runIsVisible = () => !detachedRun || (assistantViewMounted && conversationId.value === runConversationId);
   if (!(await promptTemplateStore.ensureLoaded())) {
     clearPendingWriteGrant();
-    if (aiGenerationGuard.isCurrent(myGeneration)) {
-      isGenerating.value = false;
+    if (generationCanContinue()) {
+      if (detachedRun) finishDesktopAiRun(detachedRun, "failed");
+      if (runIsVisible()) {
+        isGenerating.value = false;
+        stopStatusTimer();
+        generationStatus.value = createGenerationStatus(Date.now());
+      }
       toast(t("ai.customInstructionsLoadFailed"), 5000);
     }
+    // This pipeline is done - wake any stop request waiting on it (the run may
+    // have been left non-terminal above when the stop pre-empted this path; the
+    // waiting stop-side force-abandon finalizes it).
+    resolveDetachedRunSettled();
     return;
   }
   // Superseded (chat cleared/switched, or a newer send() started) while awaiting
@@ -2368,8 +2766,13 @@ async function send() {
   // runAgentStream()), so a bare return here would leave a previously-confirmed
   // write grant sitting in the module-scope vars, live to be replayed against
   // whatever unrelated send() the next conversation issues.
-  if (!aiGenerationGuard.isCurrent(myGeneration)) {
+  if (!generationCanContinue()) {
     clearPendingWriteGrant();
+    // A stop fired while the templates loaded; this pipeline is done. Resolve
+    // settled so the waiting stop-side force-abandon (which owns the finalize
+    // for a run this early exit leaves non-terminal) runs without the full
+    // STOP_FORCE_ABANDON_MS wait.
+    resolveDetachedRunSettled();
     return;
   }
   // Snapshot the selected custom prompts at send time so later async context loading
@@ -2379,10 +2782,10 @@ async function send() {
     activeTemplates: [...activeTemplates.value],
   };
 
-  const selectedTableMentions = [...selectedMentions.value];
-  const selectedSqlFiles = [...selectedSqlFileMentions.value];
-  const csvAttachments = [...selectedCsvAttachments.value];
-  const imageAttachments = [...selectedImageAttachments.value];
+  const selectedTableMentions = auto ? [] : [...selectedMentions.value];
+  const selectedSqlFiles = auto ? [] : [...selectedSqlFileMentions.value];
+  const csvAttachments = auto ? [] : [...selectedCsvAttachments.value];
+  const imageAttachments = auto ? [] : [...selectedImageAttachments.value];
   const mentionedTables = [...selectedTableMentions, ...parseAiTableMentions(text)];
   const modelInstruction = buildAiModelInstruction({
     tableMentionRaws: selectedTableMentions.map((mention) => mention.raw),
@@ -2390,23 +2793,25 @@ async function send() {
     userText: text,
   });
 
-  messages.value.push({ role: "user", content: text, mentions: selectedMessageMentions(selectedTableMentions, selectedSqlFiles, csvAttachments, imageAttachments), csvAttachments, imageAttachments });
-  // Save to prompt history (deduplicate consecutive duplicates)
-  if (text && promptHistory.value[0] !== text) {
-    promptHistory.value.unshift(text);
-    if (promptHistory.value.length > 100) promptHistory.value.length = 100;
+  runMessages.push({ role: "user", content: text, mentions: selectedMessageMentions(selectedTableMentions, selectedSqlFiles, csvAttachments, imageAttachments), csvAttachments, imageAttachments });
+  if (!auto) {
+    // Save to prompt history (deduplicate consecutive duplicates)
+    if (text && promptHistory.value[0] !== text) {
+      promptHistory.value.unshift(text);
+      if (promptHistory.value.length > 100) promptHistory.value.length = 100;
+    }
+    historyIndex.value = -1;
+    draftBeforeHistory.value = "";
+    prompt.value = "";
+    selectedMentions.value = [];
+    selectedSqlFileMentions.value = [];
+    selectedCsvAttachments.value = [];
+    selectedImageAttachments.value = [];
   }
-  historyIndex.value = -1;
-  draftBeforeHistory.value = "";
-  prompt.value = "";
-  selectedMentions.value = [];
-  selectedSqlFileMentions.value = [];
-  selectedCsvAttachments.value = [];
-  selectedImageAttachments.value = [];
-  scrollToBottom({ force: true });
+  if (autoSendVisible) scrollToBottom({ force: true });
 
-  const requestedAction = activeAction.value;
-  const requestedMode = assistantMode.value;
+  const requestedAction = auto ? auto.action : activeAction.value;
+  const requestedMode = auto ? auto.mode : assistantMode.value;
   // Detect user-typed short confirmation (e.g. "可以"/"go ahead") as an alternative
   // path to the proposal ✅ button. Delegates to the shared pure function so the
   // component and its unit tests share the same gating logic.
@@ -2417,14 +2822,14 @@ async function send() {
       isProduction: productionContext.value.active,
       userText: text,
       // Pass the history BEFORE the just-pushed user message so the function skips it.
-      messages: messages.value.slice(0, -1),
+      messages: runMessages.slice(0, -1),
     });
     if (allowWriteSqlForNextRun) {
       // Extract the confirmed SQL from the assistant's proposal message.
       // If no SQL code block is found, treat the confirmation as rejected —
       // we cannot bind the agent to a specific SQL statement.
-      for (let i = messages.value.length - 2; i >= 0; i--) {
-        const msg = messages.value[i];
+      for (let i = runMessages.length - 2; i >= 0; i--) {
+        const msg = runMessages[i];
         if (msg.kind === "contextSummary") continue;
         if (msg.role === "assistant" && msg.content) {
           confirmedWriteSqlText = extractSingleSqlCodeBlock(msg.content);
@@ -2464,18 +2869,76 @@ async function send() {
   confirmedConnectionId = undefined;
   confirmedDatabase = undefined;
   confirmedSchema = undefined;
-  messages.value.push({ role: "assistant", content: "", sourceConnectionName: connection.name });
-  const assistantIdx = messages.value.length - 1;
-  currentAssistantMessageIndex = assistantIdx;
+  if (detachedRun) {
+    const admission = acquireDesktopAiRunSlot(detachedRun);
+    if (detachedRun.status === "queued") {
+      // Tag how this run occupies the global FIFO so restart recovery knows
+      // whether to recover a pending input (normal send) or fall back to the
+      // confirmation card (accepted write-confirmation resume, PRD §3).
+      updateDesktopAiRun(detachedRun, {
+        fifoCategory: resumingConfirmedWrite ? "write_confirmation_resume" : "normal_send",
+        pendingInput: resumingConfirmedWrite ? detachedRun.pendingInput : text,
+      });
+      // Never re-persist a run the user has already deleted from under the
+      // queue: deleteConversation() committed the DELETE first, so this would
+      // resurrect the conversation via INSERT OR REPLACE.
+      if (!detachedRun.discardOnFinish) void runSnapshotScheduler.save(detachedRun);
+    }
+    desktopSlotAcquired = await admission;
+    if (!desktopSlotAcquired) {
+      if (runIsVisible()) {
+        isGenerating.value = false;
+        stopStatusTimer();
+        generationStatus.value = createGenerationStatus(Date.now());
+      }
+      if (!detachedRun.discardOnFinish) void runSnapshotScheduler.save(detachedRun);
+      // A queued run cancelled out of the admission queue resolves this early;
+      // settle any stop request that raced into the preparing->queued window.
+      resolveDetachedRunSettled();
+      return;
+    }
+  }
+  runMessages.push({ role: "assistant", content: "", sourceConnectionName: connection.name });
+  const assistantIdx = runMessages.length - 1;
   const sessionId = uuid();
-  currentSessionId.value = sessionId;
+  if (runIsVisible()) {
+    currentAssistantMessageIndex = assistantIdx;
+    currentSessionId.value = sessionId;
+  }
+  if (detachedRun) {
+    updateDesktopAiRun(detachedRun, {
+      status: "running",
+      sessionIds: [...detachedRun.sessionIds, sessionId],
+      currentSessionId: sessionId,
+      assistantMessageIndex: assistantIdx,
+    });
+  }
+  const detachedDeltaBuffer = detachedRun
+    ? createDetachedAssistantDeltaBuffer(runMessages, () => {
+        if (runIsVisible()) scrollToBottom();
+        // Persist streamed output incrementally (throttled + serialized by
+        // runSnapshotScheduler): without this, a crash/quit mid-response lost
+        // everything after the pre-stream snapshot.
+        if (detachedRun) runSnapshotScheduler.schedule(detachedRun);
+      })
+    : undefined;
+  if (detachedRun) detachedRun.flushPending = detachedDeltaBuffer?.flush;
   const agentEvents: AgentEvent[] = [];
+  let detachedCompaction: { summary: string; compactedMessages: number } | null = null;
+  let writeConfirmationRequired = false;
+  if (detachedRun) {
+    // Same delete-resurrection guard as the queued sites: a concurrent delete
+    // must not be undone by this snapshot either.
+    if (!detachedRun.discardOnFinish) void runSnapshotScheduler.save(detachedRun);
+  } else {
+    void persistConversationSnapshot(runConversationId, runMessages, connection.name, tab.database || "", runCreatedAt);
+  }
   try {
     const sqlFiles = await loadReferencedSqlFiles(selectedSqlFiles);
     // Superseded while awaiting loadReferencedSqlFiles() above — bail before
     // paying for buildAiContext() too; it can do real backend/schema work that
     // would be entirely wasted on an already-abandoned request.
-    if (!aiGenerationGuard.isCurrent(myGeneration)) return;
+    if (!generationCanContinue()) return;
     const context = await buildAiContext(tab, connection, {
       mentionedTables,
       sqlFiles,
@@ -2489,8 +2952,12 @@ async function send() {
     // fired by abandonInFlightRequest() is a no-op here since no session has
     // been registered with the backend yet (registration happens inside
     // runAgentStream() itself).
-    if (!aiGenerationGuard.isCurrent(myGeneration)) return;
-    const history: AiMessage[] = messagesForAgentHistory(messages.value.slice(0, -2));
+    if (!generationCanContinue()) return;
+    // The stream is about to reach the backend — transition the status line from
+    // `preparing` to `waiting_model` so it reads "等待模型响应" while no events have
+    // arrived yet (slow CLI first token included).
+    if (runIsVisible()) generationStatus.value = { ...generationStatus.value, phase: "waiting_model" };
+    const history: AiMessage[] = messagesForAgentHistory(runMessages.slice(0, -2));
     await runAgentStream(
       {
         config: activeConfig,
@@ -2511,49 +2978,89 @@ async function send() {
         // Superseded by a clear/switch/new-chat (or a newer send()) — the backend
         // stream may still be running, but this generation no longer owns any
         // shared state to write into.
-        if (!aiGenerationGuard.isCurrent(myGeneration)) return;
+        if (!generationCanContinue()) return;
         agentEvents.push(event);
+        // Every desktop agent event takes the next seq for its run (parent PRD
+        // §8: strictly increasing from 1, across all sessions). Mark the
+        // conversation unread when a new event arrives beyond the user's read
+        // baseline while they are looking elsewhere.
+        if (detachedRun) {
+          const seq = bumpDesktopAiRunSeq(detachedRun);
+          if (!runIsVisible() && seq > (conversationReadSeq.get(runConversationId) ?? 0)) unreadConversations.add(runConversationId);
+        }
+        // Feed every agent event into the generation-status state machine (Issue
+        // #6743 feature 1). `applyStatusEvent` refreshes lastEventAt, tracks the
+        // active tool / turn, and derives the phase purely from the event stream.
+        if (runIsVisible()) generationStatus.value = applyStatusEvent(generationStatus.value, event, Date.now());
+        // Terminal event (agent_end / error) hides the status line immediately —
+        // the backend promise may still be settling (CLI teardown / SSE close), so
+        // stop the ticker now instead of letting it idle through that gap. The
+        // non-terminal `response_complete` (phase=finalizing) hides the line the
+        // same way, but the listener stays alive for the real agent_end/error.
+        if (runIsVisible() && (generationStatus.value.phase === "finished" || generationStatus.value.phase === "finalizing")) {
+          stopStatusTimer();
+        }
         if (event.type === "text_delta" && event.delta) {
-          appendAssistantDelta(assistantIdx, event.delta);
+          if (detachedDeltaBuffer) detachedDeltaBuffer.appendText(assistantIdx, event.delta);
+          else appendAssistantDelta(assistantIdx, event.delta);
         }
         if (event.type === "write_sql_confirmation_required") {
-          replaceAssistantText(assistantIdx, writeSqlConfirmationText(event.sql));
-          const msg = messages.value[assistantIdx];
+          writeConfirmationRequired = true;
+          if (detachedRun) {
+            updateDesktopAiRun(detachedRun, {
+              pendingConfirmation: {
+                sql: event.sql,
+                connectionId: detachedRun.connectionId,
+                database: detachedRun.database,
+                schema: detachedRun.schema,
+              },
+            });
+          }
+          if (detachedDeltaBuffer) detachedDeltaBuffer.replaceText(assistantIdx, writeSqlConfirmationText(event.sql));
+          else replaceAssistantText(assistantIdx, writeSqlConfirmationText(event.sql));
+          const msg = runMessages[assistantIdx];
           if (msg) msg.kind = "writeSqlConfirmation";
         }
         if (event.type === "production_write_blocked") {
-          replaceAssistantText(assistantIdx, productionWriteBlockedText(event.sql));
-          const msg = messages.value[assistantIdx];
+          if (detachedDeltaBuffer) detachedDeltaBuffer.replaceText(assistantIdx, productionWriteBlockedText(event.sql));
+          else replaceAssistantText(assistantIdx, productionWriteBlockedText(event.sql));
+          const msg = runMessages[assistantIdx];
           if (msg) msg.kind = "productionWriteBlocked";
         }
         if (event.type === "reasoning_delta" && event.delta) {
-          appendAssistantReasoning(assistantIdx, event.delta);
+          if (detachedDeltaBuffer) detachedDeltaBuffer.appendReasoning(assistantIdx, event.delta);
+          else appendAssistantReasoning(assistantIdx, event.delta);
         }
         if (event.type === "agent_end") {
+          // End the card's "思考过程" spinner at the terminal event rather than
+          // waiting for send()'s finally (which can lag behind CLI teardown).
+          const msg = runMessages[assistantIdx];
+          if (msg) msg.isThinking = false;
           if (event.input_tokens || event.output_tokens) {
-            const msg = messages.value[assistantIdx];
             if (msg) msg.tokens = { input: event.input_tokens ?? 0, output: event.output_tokens ?? 0 };
           }
         }
         if (event.type === "context_compacted") {
-          const msg = messages.value[assistantIdx];
+          const msg = runMessages[assistantIdx];
           if (msg) {
             if (!msg.agentSteps) msg.agentSteps = [];
-            const step = agentEventToStep(event, agentEvents.length - 1);
+            const step = agentEventToStep(event, agentEvents.length - 1, Date.now());
             if (step) upsertAgentStep(msg.agentSteps, step);
           }
-          pendingCompaction.value = { summary: event.summary, compactedMessages: event.compacted_messages };
+          const compaction = { summary: event.summary, compactedMessages: event.compacted_messages };
+          if (detachedRun) detachedCompaction = compaction;
+          else pendingCompaction.value = compaction;
         }
         // Real-time agent step rendering
         if (event.type === "tool_call_start" || event.type === "tool_call_end") {
-          const msg = messages.value[assistantIdx];
+          const msg = runMessages[assistantIdx];
           if (msg) {
             if (!msg.agentSteps) msg.agentSteps = [];
-            const step = agentEventToStep(event, agentEvents.length - 1);
+            const step = agentEventToStep(event, agentEvents.length - 1, Date.now());
             if (step) upsertAgentStep(msg.agentSteps, step);
           }
         }
-        scrollToBottom();
+        if (runIsVisible()) scrollToBottom();
       },
       sessionId,
       customPromptContext,
@@ -2563,10 +3070,11 @@ async function send() {
     // abandonInFlightRequest()-triggered cancellation) must not overwrite a
     // message that now belongs to a different conversation, or one that no
     // longer exists in `messages.value`.
-    if (aiGenerationGuard.isCurrent(myGeneration)) {
+    if (generationCanContinue()) {
       const message = e instanceof Error ? e.message : String(e);
-      const msg = messages.value[assistantIdx];
+      const msg = runMessages[assistantIdx];
       if (msg) msg.content = `${t("ai.requestFailed")}\n\n${translateBackendError(t, message)}`;
+      if (detachedRun) finishDesktopAiRun(detachedRun, "failed");
     }
   } finally {
     // Everything below mutates state (messages, isGenerating, currentSessionId,
@@ -2580,17 +3088,27 @@ async function send() {
     // resetPendingRequestState() below for the abandon-path equivalent that
     // discards it instead. If you add a new piece of per-request transient
     // state, it must be handled on both paths.
-    if (aiGenerationGuard.isCurrent(myGeneration)) {
-      if (assistantDeltaFrame !== null) cancelAnimationFrame(assistantDeltaFrame);
-      flushAssistantDeltas();
-      const msg = messages.value[assistantIdx];
+    if (detachedRun || aiGenerationGuard.isCurrent(myGeneration)) {
+      if (detachedDeltaBuffer) detachedDeltaBuffer.flush();
+      else {
+        if (assistantDeltaFrame !== null) cancelAnimationFrame(assistantDeltaFrame);
+        flushAssistantDeltas();
+      }
+      const msg = runMessages[assistantIdx];
       if (msg) msg.isThinking = false;
-      isGenerating.value = false;
+      if (runIsVisible()) isGenerating.value = false;
+      // Normal-path generation-status cleanup (dual-path reset — see
+      // resetPendingRequestState() below for the abandon-path equivalent).
+      if (runIsVisible()) {
+        stopStatusTimer();
+        generationStatus.value = createGenerationStatus(Date.now());
+        statusNow.value = Date.now();
+      }
       // Render agent tool call steps from agent events (fallback when no real-time steps)
       if (msg && agentEvents.length > 0 && !msg.agentSteps?.length) {
         const steps: AiAgentStepItem[] = [];
         agentEvents.forEach((e, index) => {
-          const step = agentEventToStep(e, index);
+          const step = agentEventToStep(e, index, Date.now());
           if (step) upsertAgentStep(steps, step);
         });
         if (steps.length) msg.agentSteps = steps;
@@ -2608,26 +3126,111 @@ async function send() {
         if (msg && requestedMode === "agent") msg.agentSteps = buildAiAgentStepItems(agentPlan);
         if (agentPlan.handoffSql) emit("requestAutoExecuteSql", agentPlan.handoffSql);
       }
-      currentSessionId.value = "";
-      currentAssistantMessageIndex = -1;
+      if (runIsVisible()) {
+        currentSessionId.value = "";
+        currentAssistantMessageIndex = -1;
+      }
       // Apply deferred context compaction after streaming so assistantIdx stays stable.
       // Visible chat history is kept for the user; future LLM history starts from this hidden summary.
-      if (pendingCompaction.value) {
-        const { summary, compactedMessages } = pendingCompaction.value;
-        pendingCompaction.value = null;
-        const insertAt = Math.min(1 + compactedMessages, messages.value.length - 1);
+      const compaction = detachedRun ? detachedCompaction : pendingCompaction.value;
+      if (compaction) {
+        const { summary, compactedMessages } = compaction;
+        if (!detachedRun) pendingCompaction.value = null;
+        const insertAt = Math.min(1 + compactedMessages, runMessages.length - 1);
         if (summary) {
-          messages.value.splice(insertAt, 0, {
+          runMessages.splice(insertAt, 0, {
             role: "user",
             content: summary,
             kind: "contextSummary",
           });
         }
       }
-      persistConversation();
-      scrollToBottom();
+      // A stop-side force-abandon (STOP_FORCE_ABANDON_MS), a conversation
+      // delete, or a replacement send may have finalized and removed this run
+      // from the registry already. Re-running the finish chain would resurrect
+      // it over whatever now owns the conversation's registry slot
+      // (updateDesktopAiRun() re-inserts unconditionally).
+      const runStillOwned = detachedRun ? desktopAiRun(detachedRun.conversationId) === detachedRun : false;
+      if (detachedRun && runStillOwned) {
+        if (detachedRun.cancelRequested) finishDesktopAiRun(detachedRun, "cancelled");
+        else if (detachedRun.status !== "failed") {
+          if (writeConfirmationRequired) updateDesktopAiRun(detachedRun, { status: "awaiting_write_confirmation", currentSessionId: "", flushPending: undefined });
+          else finishDesktopAiRun(detachedRun, "completed");
+        }
+        // Read the run's settled status once, after the finish/update chain above,
+        // so the checks below see the terminal/awaiting value without TypeScript
+        // narrowing the property from the earlier `!== "failed"` branch.
+        const runSettledStatus = detachedRun.status;
+        // Reflect the terminal/confirmation state in the history row, and mark
+        // the conversation unread if the user was looking elsewhere (seq
+        // baseline: only events beyond the user's read position count).
+        if (runSettledStatus === "completed" || runSettledStatus === "failed" || runSettledStatus === "cancelled" || runSettledStatus === "awaiting_write_confirmation") {
+          conversationRunStatus.set(runConversationId, runSettledStatus);
+          const seenSeq = conversationReadSeq.get(runConversationId) ?? 0;
+          if (!runIsVisible() && (detachedRun.maxSeq ?? 0) > seenSeq) unreadConversations.add(runConversationId);
+        }
+        if (!runIsVisible() && !detachedRun.cancelRequested) {
+          toast(t(writeConfirmationRequired ? "ai.backgroundRunNeedsConfirmation" : "ai.backgroundRunCompleted"), 5000, {
+            label: t("ai.openPanel"),
+            onClick: () => window.dispatchEvent(new CustomEvent("dbx:ai-run-notify", { detail: { conversationId: runConversationId, status: runSettledStatus } })),
+          });
+        }
+        // Auto-send the conversation's queued input once this run reaches a
+        // terminal state (parent PRD §5). Exceptions: awaiting confirmation is
+        // not terminal, and a run cancelled because the user rejected the write
+        // confirmation must NOT auto-send — the queued input waits for an
+        // explicit "send queued message" click instead. In-memory terminal
+        // statuses are completed/failed/cancelled; `interrupted` only ever
+        // appears as a persisted row status after a restart.
+        if (!detachedRun.discardOnFinish && (runSettledStatus === "completed" || runSettledStatus === "failed" || runSettledStatus === "cancelled")) {
+          const queued = queuedInputs.get(runConversationId);
+          if (queued && !(detachedRun.pendingConfirmationRejected && runSettledStatus === "cancelled")) {
+            scheduleAutoSend(runConversationId, queued, runMessages);
+          }
+        }
+      }
+      if (desktopSlotAcquired && detachedRun) releaseDesktopAiRunSlot(detachedRun.runId);
+      if (detachedRun && runStillOwned) {
+        // A run the user deleted (discardOnFinish) must never be written back:
+        // the DELETE already committed, and INSERT OR REPLACE would resurrect it.
+        if (!detachedRun.discardOnFinish) {
+          // Drop the pending throttled save: this ordered final save is
+          // authoritative.
+          runSnapshotScheduler.cancel(detachedRun.runId);
+          void runSnapshotScheduler.save(detachedRun).finally(() => {
+            if (detachedRun?.status === "completed" || detachedRun?.status === "failed" || detachedRun?.status === "cancelled") {
+              retireDesktopAiRun(detachedRun);
+            }
+          });
+        }
+      } else if (!detachedRun) {
+        void persistConversationSnapshot(runConversationId, runMessages, connection.name, tab.database || "", runCreatedAt);
+      }
+      if (runIsVisible()) scrollToBottom();
+      // Wake any stop request waiting for this pipeline's real terminal state.
+      resolveDetachedRunSettled();
     }
   }
+}
+
+/** Sends the conversation's queued input as a fresh run (parent PRD §5). Runs
+ *  in the background when the conversation is not the visible one. The queued
+ *  input is consumed by the send pipeline once it actually starts, so a failed
+ *  early bail (no config, superseded) does not silently drop it. */
+function scheduleAutoSend(convId: string, queued: QueuedConversationInput, messages: ChatMessage[]) {
+  pendingAutoSends.push({ conversationId: convId, text: queued.text, messages, mode: queued.mode, action: queued.action });
+  void send();
+}
+
+/** Manual trigger for a queued input that must wait (e.g. the previous run was
+ *  cancelled by a rejected write confirmation). Reuses the same background path
+ *  as auto-send. */
+function sendQueuedInputNow() {
+  const convId = conversationId.value;
+  const queued = convId ? queuedInputs.get(convId) : undefined;
+  if (!queued) return;
+  const run = backgroundAiRunsEnabled ? desktopAiRun<ChatMessage>(convId) : undefined;
+  scheduleAutoSend(convId, queued, run?.messages ?? messages.value);
 }
 
 // Resolves once `isGenerating` goes false, or after `timeoutMs` — whichever
@@ -2652,7 +3255,149 @@ function waitForGenerationToClear(timeoutMs: number): Promise<void> {
   });
 }
 
+/** Waits for a detached run's owning send() pipeline to reach its terminal
+ *  state. Resolves false when STOP_FORCE_ABANDON_MS elapses first - the caller
+ *  must then force-abandon the run so a hung backend stream cannot wedge its
+ *  concurrency slot forever. */
+function waitForDesktopRunSettled(run: DesktopAiRunRuntime<ChatMessage>): Promise<boolean> {
+  if (!run.settled) return Promise.resolve(false);
+  return Promise.race([run.settled.then(() => true), new Promise<false>((resolve) => setTimeout(() => resolve(false), STOP_FORCE_ABANDON_MS))]);
+}
+
+/** Fires the backend cancel RPC for the run's current session until it is
+ *  acknowledged or `deadlineAt` passes. aiCancelStream() resolves true only
+ *  when the session id is already registered with the backend; a stop during
+ *  context preparation RPCs before runAgentStream() has registered the
+ *  session, so a single fire-and-forget call would silently miss the
+ *  cancellation. When the session is not registered yet, the loop waits for it
+ *  to appear and retries. `requireRegistryOwnership` is false for the delete
+ *  path, which removes the run from the registry before this loop runs. */
+async function requestDesktopRunCancellation(run: DesktopAiRunRuntime<ChatMessage>, deadlineAt: number, requireRegistryOwnership = true) {
+  for (;;) {
+    // The run settled (or was replaced) while retrying - nothing left to cancel.
+    if (isTerminalDesktopAiRunStatus(run.status)) return;
+    if (requireRegistryOwnership && desktopAiRun(run.conversationId) !== run) return;
+    if (run.currentSessionId) {
+      const acknowledged = await aiCancelStream(run.currentSessionId).catch(() => false);
+      if (acknowledged) return;
+    }
+    if (Date.now() + DESKTOP_CANCEL_ACK_RETRY_MS > deadlineAt) return;
+    await new Promise((resolve) => setTimeout(resolve, DESKTOP_CANCEL_ACK_RETRY_MS));
+  }
+}
+
+/** Clears the visible generation state once a run the user stopped has fully
+ *  settled (or been force-abandoned). Only safe to call while the stopped
+ *  conversation is still the visible one. */
+function clearVisibleGenerationState() {
+  isGenerating.value = false;
+  currentSessionId.value = "";
+  currentAssistantMessageIndex = -1;
+  stopStatusTimer();
+  generationStatus.value = createGenerationStatus(Date.now());
+  statusNow.value = Date.now();
+}
+
+/** Terminal cleanup for a run whose send() pipeline never settled (hung
+ *  backend stream) or settled through a pre-stream early return that left it
+ *  non-terminal. Mirrors what send()'s finally does on the normal path, plus
+ *  the slot release the old stop path used to skip entirely. */
+async function forceAbandonDesktopAiRun(run: DesktopAiRunRuntime<ChatMessage>) {
+  if (conversationId.value === run.conversationId) clearVisibleGenerationState();
+  finishDesktopAiRun(run, "cancelled");
+  releaseDesktopAiRunSlot(run.runId);
+  conversationRunStatus.set(run.conversationId, "cancelled");
+  if (!run.discardOnFinish) {
+    runSnapshotScheduler.cancel(run.runId);
+    await runSnapshotScheduler.save(run);
+  }
+  retireDesktopAiRun(run);
+}
+
+/** Releases a deleted run's concurrency slot once its owning pipeline settles,
+ *  or after the force-abandon deadline if the backend stream never settles,
+ *  while retrying the backend cancel until the session registers.
+ *  discardOnFinish guarantees nothing is ever persisted. Runs in the
+ *  background so the delete is not blocked by a possibly-hung stream; without
+ *  it, a few deleted-but-hung runs would permanently wedge the global queue
+ *  (admittedRunIds never shrinks). */
+function releaseDeletedRunSlot(run: DesktopAiRunRuntime<ChatMessage>) {
+  // Recovered runs (awaiting_write_confirmation / pending_recoverable) have no
+  // pipeline and hold no slot; only send()-created runs do.
+  if (!run.settled) return;
+  const deadlineAt = Date.now() + STOP_FORCE_ABANDON_MS;
+  void requestDesktopRunCancellation(run, deadlineAt, false);
+  void waitForDesktopRunSettled(run).then(() => releaseDesktopAiRunSlot(run.runId));
+}
+
+/** Stops a background run without lying about its state: the stop path used to
+ *  finish+retire the run before the backend settled, so a hung or merely
+ *  cancellation-pending stream went invisible while still occupying its
+ *  concurrency slot, with no way to see or retry the stop. Mirrors the
+ *  foreground stopAiGenerationWithFallback() contract: reflect the request
+ *  immediately, then wait for the owning send() pipeline's real terminal
+ *  event - bounded by STOP_FORCE_ABANDON_MS, after which the run is
+ *  force-finalized so the queue can never wedge. */
+async function stopDesktopAiRun(run: DesktopAiRunRuntime<ChatMessage>) {
+  run.cancelRequested = true;
+  if (run.status === "queued") {
+    // Never admitted: no backend session and no slot - finalize immediately.
+    cancelQueuedDesktopAiRun(run);
+    if (conversationId.value === run.conversationId) clearVisibleGenerationState();
+    conversationRunStatus.set(run.conversationId, "cancelled");
+    if (!run.discardOnFinish) await runSnapshotScheduler.save(run);
+    retireDesktopAiRun(run);
+    return;
+  }
+  // Show what streamed so far (plus the cancelled placeholder when empty) and
+  // reflect the stop in the status line while the backend settles.
+  run.flushPending?.();
+  const msg = run.messages[run.assistantMessageIndex];
+  if (msg) {
+    msg.isThinking = false;
+    if (!msg.content) msg.content = t("ai.requestCancelled");
+  }
+  if (conversationId.value === run.conversationId && isGenerating.value) {
+    generationStatus.value = markCancelling(generationStatus.value, Date.now());
+    statusNow.value = Date.now();
+  }
+  const deadlineAt = Date.now() + STOP_FORCE_ABANDON_MS;
+  const settled = waitForDesktopRunSettled(run);
+  // Fire-and-forget the backend-cancel retry: it must never gate the bounded
+  // force-abandon below. If the IPC itself hangs, awaiting it here would leave
+  // the stop stuck forever — the STOP_FORCE_ABANDON_MS race would never be
+  // read. The loop is internally bounded by deadlineAt and bails once the run
+  // is retired.
+  void requestDesktopRunCancellation(run, deadlineAt);
+  if (await settled) {
+    // The pipeline settled. Its finally has normally finalized the run
+    // already; a pre-stream early return can leave it a zombie instead - the
+    // conversation would stay busy forever with no stream behind it.
+    if (desktopAiRun(run.conversationId) === run && !isTerminalDesktopAiRunStatus(run.status)) {
+      await forceAbandonDesktopAiRun(run);
+    }
+    return;
+  }
+  // The backend never settled within the timeout - force-finalize so the run
+  // stops occupying its slot and the conversation becomes usable again. If it
+  // was deleted or replaced meanwhile, whoever retired it already owns the
+  // cleanup.
+  if (desktopAiRun(run.conversationId) === run) await forceAbandonDesktopAiRun(run);
+}
+
 async function cancelStream() {
+  // User explicitly requested stop — reflect it in the status line (phase=cancelling)
+  // so it reads "正在取消…" while the backend cancellation is still settling.
+  if (isGenerating.value) {
+    generationStatus.value = markCancelling(generationStatus.value, Date.now());
+    statusNow.value = Date.now();
+  }
+  if (backgroundAiRunsEnabled) {
+    const run = desktopAiRun<ChatMessage>(conversationId.value);
+    if (!run || (run.status !== "preparing" && run.status !== "queued" && run.status !== "running")) return;
+    await stopDesktopAiRun(run);
+    return;
+  }
   await stopAiGenerationWithFallback({
     isGenerating: () => isGenerating.value,
     currentGeneration: () => aiGenerationGuard.peek(),
@@ -2688,6 +3433,13 @@ function resetPendingRequestState() {
   pendingAssistantReasoning = "";
   pendingAssistantIndex = -1;
   pendingCompaction.value = null;
+  // Abandon-path generation-status cleanup: a clear/switch/new-chat/unmount must
+  // stop the status ticker and clear the per-request status (and its `now` ref),
+  // otherwise switching conversations leaks a stale status line into the next
+  // generation.
+  stopStatusTimer();
+  generationStatus.value = createGenerationStatus(Date.now());
+  statusNow.value = Date.now();
 }
 
 // `alreadyCancelledSessionId`: the session id a caller (cancelStream()) has
@@ -2807,13 +3559,26 @@ function clearMessages() {
   // session id yet — otherwise isGenerating would never reset (nothing but
   // send()'s own finally clears it) and the send box would stay stuck disabled
   // indefinitely.
-  if (isGenerating.value) abandonInFlightRequest();
+  if (isGenerating.value && !backgroundAiRunsEnabled) abandonInFlightRequest();
+  // Desktop detaches the view from the running conversation. Its message array
+  // remains owned by the run registry and will be persisted by send() when the
+  // stream reaches a terminal/confirmation state.
+  if (isGenerating.value && backgroundAiRunsEnabled) void persistConversation();
+  // Anchor the away-updates separator at the last-read position before wiping
+  // the transcript, so returning to this conversation shows what changed.
+  if (conversationId.value) conversationReadMessageCount.set(conversationId.value, visibleMessages.value.length);
   messages.value = [];
   cancelEdit();
   clearAttachmentDraftState();
   conversationId.value = "";
+  isGenerating.value = false;
+  currentSessionId.value = "";
+  currentAssistantMessageIndex = -1;
+  stopStatusTimer();
+  generationStatus.value = createGenerationStatus(Date.now());
   historyIndex.value = -1;
   draftBeforeHistory.value = "";
+  recoveredDraftActive.value = false;
   messageRenderer.value.clear();
 }
 
@@ -2828,25 +3593,148 @@ function clearAttachmentDraftState() {
   browserAttachmentDragDepth = 0;
 }
 
-async function persistConversation() {
-  if (!messages.value.length || !props.connection) return;
-  if (!conversationId.value) conversationId.value = uuid();
-  const first = messages.value.find((m) => m.role === "user" && m.kind !== "contextSummary");
-  await saveAiConversation({
-    id: conversationId.value,
+function buildConversationSnapshot(targetConversationId: string, targetMessages: ChatMessage[], connectionName: string, database: string, createdAt = new Date().toISOString()): AiConversation | null {
+  if (!targetConversationId || !targetMessages.length) return null;
+  const first = targetMessages.find((m) => m.role === "user" && m.kind !== "contextSummary");
+  return {
+    id: targetConversationId,
     title: first ? messageTitle(first).slice(0, 50) : "Untitled",
-    connectionName: props.connection.name,
-    database: props.tab?.database || "",
-    messages: messages.value.map((m) => ({
+    connectionName,
+    database,
+    messages: targetMessages.map((m) => ({
       role: m.role,
       content: m.content,
       ...(m.mentions?.length ? { mentions: m.mentions } : {}),
       ...(m.reasoning ? { reasoning: m.reasoning } : {}),
       ...(m.kind ? { kind: m.kind } : {}),
     })),
-    createdAt: new Date().toISOString(),
+    // The conversation's single queued "send later" input, persisted so it
+    // survives a restart (parent PRD §5).
+    queuedInput: queuedInputs.get(targetConversationId)?.text,
+    createdAt,
     updatedAt: new Date().toISOString(),
-  }).catch(() => {});
+  };
+}
+
+async function persistConversationSnapshot(targetConversationId: string, targetMessages: ChatMessage[], connectionName: string, database: string, createdAt = new Date().toISOString()) {
+  const conversation = buildConversationSnapshot(targetConversationId, targetMessages, connectionName, database, createdAt);
+  if (!conversation) return;
+  await saveAiConversation(conversation)
+    .then(() => syncPersistedConversation(conversation))
+    .catch(() => {});
+}
+
+async function persistDesktopRunSnapshot(run: DesktopAiRunRuntime<ChatMessage>) {
+  const conversation = buildConversationSnapshot(run.conversationId, run.messages, run.connectionName, run.database, run.createdAt);
+  if (!conversation) return;
+  await saveAiRunState(conversation, {
+    runId: run.runId,
+    conversationId: run.conversationId,
+    sessionIds: run.sessionIds,
+    status: run.status,
+    connectionId: run.connectionId,
+    database: run.database,
+    schema: run.schema,
+    pendingConfirmation: run.pendingConfirmation,
+    fifoCategory: run.fifoCategory,
+    pendingInput: run.pendingInput,
+    maxSeq: run.maxSeq,
+    createdAt: run.createdAt,
+    updatedAt: run.updatedAt,
+  })
+    // A newly-created conversation is not in `conversations` until the next
+    // list reload unless we mirror the successful durable snapshot here. The
+    // background-complete toast relies on that list to navigate back to it.
+    .then(() => syncPersistedConversation(conversation))
+    .catch(() => {});
+}
+
+/** Throttled, serialized snapshot persistence for streaming runs: detached
+ *  deltas used to live only in memory, so a crash or quit mid-response lost
+ *  everything after the last pre-stream snapshot. Saves are chained per run so
+ *  a slow write can never let an older snapshot overwrite a newer one. */
+const runSnapshotScheduler = createDesktopAiRunSnapshotScheduler<ChatMessage>({
+  persist: (run) => persistDesktopRunSnapshot(run),
+  intervalMs: RUN_SNAPSHOT_PERSIST_INTERVAL_MS,
+});
+
+function syncPersistedConversation(conversation: AiConversation) {
+  const index = conversations.value.findIndex((item) => item.id === conversation.id);
+  if (index >= 0) conversations.value.splice(index, 1, conversation);
+  else conversations.value.unshift(conversation);
+  conversations.value.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+}
+
+/** Re-registers a persisted run at startup. `extra` overrides the transcript
+ *  (e.g. a recovered pending-input run whose message was stripped) and other
+ *  fields for the specific recovery path. */
+function registerPersistedAiRun(conversation: AiConversation, persistedRun: AiRun, status: DesktopAiRunStatus, updatedAt: string, extra?: Partial<DesktopAiRunRuntime<ChatMessage>>) {
+  registerDesktopAiRun({
+    runId: persistedRun.runId,
+    conversationId: persistedRun.conversationId,
+    sessionIds: [...persistedRun.sessionIds],
+    currentSessionId: "",
+    status,
+    messages: chatMessagesFromConversation(conversation),
+    assistantMessageIndex: -1,
+    connectionId: persistedRun.connectionId,
+    connectionName: conversation.connectionName,
+    database: persistedRun.database,
+    schema: persistedRun.schema,
+    pendingConfirmation: persistedRun.pendingConfirmation,
+    maxSeq: persistedRun.maxSeq,
+    createdAt: persistedRun.createdAt,
+    updatedAt,
+    cancelRequested: false,
+    ...extra,
+  });
+}
+
+/** The last user message in a transcript, treated as the queued-but-unsent
+ *  input of a normal-send FIFO run. Returns the draft text plus the transcript
+ *  WITHOUT that message (the input was never submitted, so it must not stay in
+ *  the history). Returns null when the tail is an assistant message or empty. */
+function extractRecoverableDraft(messages: ChatMessage[]): { draft: string; messages: ChatMessage[] } | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.kind === "contextSummary") continue;
+    if (msg.role === "user") {
+      if (!msg.content.trim()) return null;
+      return { draft: msg.content, messages: messages.slice(0, i) };
+    }
+    return null;
+  }
+  return null;
+}
+
+/** Persists a normal-send FIFO run recovered as an editable pending draft:
+ *  status `pending_recoverable` (protected, never a failure), the draft text on
+ *  the run, and the conversation transcript without the unsent user message. */
+async function persistPendingInputRecovery(conversation: AiConversation, messages: ChatMessage[], run: AiRun, updatedAt: string) {
+  const first = messages.find((m) => m.role === "user" && m.kind !== "contextSummary");
+  const snapshot: AiConversation = {
+    id: conversation.id,
+    title: first ? messageTitle(first).slice(0, 50) : conversation.title || "Untitled",
+    connectionName: conversation.connectionName,
+    database: conversation.database,
+    messages: messages.map((m) => ({
+      role: m.role,
+      content: m.content,
+      ...(m.mentions?.length ? { mentions: m.mentions } : {}),
+      ...(m.reasoning ? { reasoning: m.reasoning } : {}),
+      ...(m.kind ? { kind: m.kind } : {}),
+    })),
+    queuedInput: conversation.queuedInput,
+    createdAt: conversation.createdAt,
+    updatedAt,
+  };
+  await saveAiRunState(snapshot, run).catch(() => {});
+}
+
+async function persistConversation() {
+  if (!messages.value.length || !props.connection) return;
+  if (!conversationId.value) conversationId.value = uuid();
+  await persistConversationSnapshot(conversationId.value, messages.value, props.connection.name, props.tab?.database || "");
 }
 
 async function setConversationListOpen(open: boolean) {
@@ -2859,18 +3747,8 @@ async function setConversationListOpen(open: boolean) {
   }
 }
 
-function selectConversation(conv: AiConversation) {
-  // Same guard as clearMessages(): switching away from an in-flight request must
-  // abandon it first — abandonInFlightRequest() invalidates the generation so
-  // the old send() can't write its deltas/result into this (different)
-  // conversation's messages array once it's assigned below.
-  if (isGenerating.value) abandonInFlightRequest();
-  conversationId.value = conv.id;
-  cancelEdit();
-  clearAttachmentDraftState();
-  // Drop the previous conversation's rendered Markdown instead of keeping it until the LRU evicts it.
-  messageRenderer.value.clear();
-  messages.value = conv.messages.map((m) => ({
+function chatMessagesFromConversation(conv: AiConversation): ChatMessage[] {
+  return conv.messages.map((m) => ({
     role: m.role as "user" | "assistant",
     content: m.content,
     sourceConnectionName: m.role === "assistant" ? conv.connectionName : undefined,
@@ -2878,16 +3756,137 @@ function selectConversation(conv: AiConversation) {
     reasoning: m.reasoning,
     kind: m.kind,
   }));
+}
+
+function selectConversation(conv: AiConversation) {
+  // Same guard as clearMessages(): switching away from an in-flight request must
+  // abandon it first — abandonInFlightRequest() invalidates the generation so
+  // the old send() can't write its deltas/result into this (different)
+  // conversation's messages array once it's assigned below.
+  if (isGenerating.value && !backgroundAiRunsEnabled) abandonInFlightRequest();
+  if (isGenerating.value && backgroundAiRunsEnabled) void persistConversation();
+  // Anchor the "updates while you were away" separator at the message count the
+  // user is leaving behind (parent PRD §8). Uses the VISIBLE count (context
+  // summaries are filtered out of rendering) so the anchor matches row indices.
+  if (conversationId.value) conversationReadMessageCount.set(conversationId.value, visibleMessages.value.length);
+  conversationId.value = conv.id;
+  cancelEdit();
+  clearAttachmentDraftState();
+  // Drop the previous conversation's rendered Markdown instead of keeping it until the LRU evicts it.
+  messageRenderer.value.clear();
+  const activeRun = backgroundAiRunsEnabled ? desktopAiRun<ChatMessage>(conv.id) : undefined;
+  messages.value = activeRun?.messages ?? chatMessagesFromConversation(conv);
+  unreadConversations.delete(conv.id);
+  isGenerating.value = activeRun?.status === "preparing" || activeRun?.status === "queued" || activeRun?.status === "running";
+  currentSessionId.value = activeRun?.currentSessionId ?? "";
+  currentAssistantMessageIndex = activeRun?.assistantMessageIndex ?? -1;
+  // Reset the seq read baseline to the run's current position: anything beyond
+  // this that arrives while the user is away is "new" again (parent PRD §8).
+  conversationReadSeq.set(conv.id, activeRun?.maxSeq ?? 0);
+  // A recovered pending-input run restores its draft into the input box exactly
+  // once per mount; re-selecting the same conversation later must not clobber
+  // whatever the user has since typed or cleared.
+  if (activeRun?.status === "pending_recoverable" && !recoveredDraftLoadedFor.has(conv.id)) {
+    recoveredDraftLoadedFor.add(conv.id);
+    prompt.value = activeRun.pendingInput ?? "";
+    recoveredDraftActive.value = true;
+  } else {
+    recoveredDraftActive.value = activeRun?.status === "pending_recoverable";
+  }
+  // If the conversation gained content since the user left, show the separator
+  // before the first "new" message plus a jump-to-latest affordance.
+  const awayBaseline = conversationReadMessageCount.get(conv.id);
+  if (awayBaseline !== undefined && visibleMessages.value.length > awayBaseline) {
+    conversationHasAwayUpdates.set(conv.id, true);
+  } else {
+    conversationHasAwayUpdates.delete(conv.id);
+  }
+  if (isGenerating.value) {
+    generationStatus.value = createGenerationStatus(new Date(activeRun?.createdAt ?? Date.now()).getTime());
+    startStatusTimer();
+  } else {
+    stopStatusTimer();
+    generationStatus.value = createGenerationStatus(Date.now());
+  }
   pendingCompaction.value = null;
   showConversationList.value = false;
   scrollToBottom({ force: true });
 }
 
+/** Opens a conversation by id from outside the panel (e.g. a background-run
+ *  toast click). No-op when the conversation is unknown; retries briefly in
+ *  case the panel is still loading its conversation list on first mount. */
+function selectConversationById(convId: string) {
+  const open = (list: AiConversation[]): boolean => {
+    const conv = list.find((c) => c.id === convId);
+    if (conv) {
+      selectConversation(conv);
+      return true;
+    }
+    return false;
+  };
+  if (open(conversations.value)) return;
+  let timer = 0;
+  const stop = watch(
+    () => conversations.value,
+    (list) => {
+      if (open(list)) {
+        clearTimeout(timer);
+        stop();
+      }
+    },
+  );
+  timer = window.setTimeout(() => stop(), 5000);
+}
+
+/** Conversation id awaiting a destructive delete confirmation (parent PRD §4:
+ *  deleting a conversation that owns an active task must ask first). */
+const deleteConfirmConversationId = ref<string | null>(null);
+
+function conversationHasActiveTask(id: string): boolean {
+  const status = (backgroundAiRunsEnabled ? desktopAiRun<ChatMessage>(id)?.status : undefined) ?? conversationRunStatus.get(id);
+  return status === "preparing" || status === "queued" || status === "running" || status === "awaiting_write_confirmation" || status === "pending_recoverable";
+}
+
 async function deleteConversation(id: string) {
+  if (backgroundAiRunsEnabled && conversationHasActiveTask(id)) {
+    deleteConfirmConversationId.value = id;
+    return;
+  }
+  await performDeleteConversation(id);
+}
+
+function cancelDeleteConversation() {
+  deleteConfirmConversationId.value = null;
+}
+
+async function confirmDeleteConversation() {
+  const id = deleteConfirmConversationId.value;
+  deleteConfirmConversationId.value = null;
+  if (id) await performDeleteConversation(id);
+}
+
+async function performDeleteConversation(id: string) {
+  if (backgroundAiRunsEnabled) {
+    const run = desktopAiRun<ChatMessage>(id);
+    if (run && (run.status === "preparing" || run.status === "queued" || run.status === "running" || run.status === "awaiting_write_confirmation" || run.status === "pending_recoverable")) {
+      run.discardOnFinish = true;
+      run.cancelRequested = true;
+      if (run.status === "queued") cancelQueuedDesktopAiRun(run);
+      // Bound the backend cancel and guarantee the concurrency slot is freed
+      // when the pipeline settles (or after the force-abandon deadline if the
+      // stream is hung). The old path removed the run immediately without ever
+      // releasing the slot, so a few deleted-but-hung runs wedged the queue
+      // permanently. Never blocks the delete itself.
+      releaseDeletedRunSlot(run);
+    }
+    removeDesktopAiRun(id);
+  }
+  queuedInputs.delete(id);
   await deleteConversationWithCancellation({
     id,
     currentConversationId: () => conversationId.value,
-    isGenerating: () => isGenerating.value,
+    isGenerating: () => !backgroundAiRunsEnabled && isGenerating.value,
     abandon: () => abandonInFlightRequest(),
     deletePersisted: () => deleteAiConversation(id).catch(() => {}),
     afterDelete: () => {
@@ -2895,6 +3894,21 @@ async function deleteConversation(id: string) {
       if (conversationId.value === id) clearMessages();
     },
   });
+}
+
+/** Removes a recovered pending-input draft and the `pending_recoverable` run
+ *  that carries it. The draft was never sent, so nothing needs a backend
+ *  cancel — just finish the run terminal and drop it from the registry. */
+function discardRecoveredDraft() {
+  const run = backgroundAiRunsEnabled ? desktopAiRun<ChatMessage>(conversationId.value) : undefined;
+  if (run?.status === "pending_recoverable") {
+    run.discardOnFinish = true;
+    run.cancelRequested = true;
+    finishDesktopAiRun(run, "cancelled");
+    removeDesktopAiRun(run.conversationId);
+  }
+  prompt.value = "";
+  recoveredDraftActive.value = false;
 }
 
 function startNewChat() {
@@ -2906,7 +3920,96 @@ function startNewChat() {
   activeAction.value = resolveDefaultAction(mode);
 }
 
+/** Send-button dispatcher: with an active run on the visible conversation the
+ *  button becomes "queue send" (parent PRD §5) and stores the input instead of
+ *  creating a second run. */
+function onSendClick() {
+  if (hasActiveRunForCurrentConversation.value) queueInput();
+  else void send();
+}
+
+/** Saves the input as the conversation's single queued "send later" message.
+ *  Does not create an AiRun; persisted via the conversation and auto-sent when
+ *  the active run reaches a terminal state. */
+function queueInput() {
+  const text = prompt.value.trim();
+  if (!text) return;
+  if (!conversationId.value) conversationId.value = uuid();
+  queuedInputs.set(conversationId.value, { text, mode: assistantMode.value, action: activeAction.value });
+  prompt.value = "";
+  selectedMentions.value = [];
+  selectedSqlFileMentions.value = [];
+  selectedCsvAttachments.value = [];
+  selectedImageAttachments.value = [];
+  void persistConversation();
+  toast(t("ai.inputQueued"), 2500);
+}
+
+function removeQueuedInput() {
+  if (!conversationId.value) return;
+  queuedInputs.delete(conversationId.value);
+  void persistConversation();
+}
+
+/** Pulls the queued input back into the input box for editing; the queued slot
+ *  is cleared so the user owns the draft again. */
+function editQueuedInput() {
+  const queued = currentQueuedInput.value;
+  if (!queued || !conversationId.value) return;
+  prompt.value = queued.text;
+  queuedInputs.delete(conversationId.value);
+  recoveredDraftActive.value = false;
+  nextTick(() => promptTextareaRef.value?.focus());
+}
+
+/** Stops a specific conversation's run from its history row. Mirrors the
+ *  desktop branch of cancelStream() so the row and the input area stop the
+ *  exact same AiRun (parent PRD §7). */
+async function stopConversationRun(convId: string) {
+  const run = backgroundAiRunsEnabled ? desktopAiRun<ChatMessage>(convId) : undefined;
+  if (!run || (run.status !== "preparing" && run.status !== "queued" && run.status !== "running")) return;
+  await stopDesktopAiRun(run);
+}
+
+/** "Retry this round" for a failed/interrupted row: sends a fresh run whose
+ *  history ends before the failed round's user message, excluding any partial
+ *  assistant text/reasoning/tool results it produced (parent PRD §7). */
+function retryConversationRun(convId: string) {
+  const run = backgroundAiRunsEnabled ? desktopAiRun<ChatMessage>(convId) : undefined;
+  const history = run?.messages ?? chatMessagesFromConversation(conversations.value.find((c) => c.id === convId) ?? conversations.value[0]);
+  let lastUserIdx = -1;
+  for (let i = history.length - 1; i >= 0; i--) {
+    const m = history[i];
+    if (m.kind === "contextSummary") continue;
+    if (m.role === "user") {
+      lastUserIdx = i;
+      break;
+    }
+  }
+  if (lastUserIdx < 0) return;
+  const text = history[lastUserIdx].content;
+  if (!text.trim()) return;
+  // A fresh run — never reuse the failed run's id/session. (`interrupted` is a
+  // persisted row status only; a live registry run can never be interrupted.)
+  if (run && run.status === "failed") {
+    run.discardOnFinish = true;
+    run.cancelRequested = true;
+    finishDesktopAiRun(run, "cancelled");
+  }
+  scheduleAutoSend(convId, { text, mode: assistantMode.value, action: activeAction.value }, history.slice(0, lastUserIdx));
+}
+
+/** Dismisses the "updates while you were away" separator and jumps to the end. */
+function dismissAwayUpdates() {
+  const convId = conversationId.value;
+  if (!convId) return;
+  conversationHasAwayUpdates.delete(convId);
+  conversationReadMessageCount.set(convId, visibleMessages.value.length);
+  scrollToBottom({ force: true });
+}
+
 onMounted(async () => {
+  assistantViewMounted = true;
   const savedHeight = localStorage.getItem(AI_TEXTAREA_HEIGHT_STORAGE_KEY);
   if (savedHeight) {
     const height = parseInt(savedHeight, 10);
@@ -2916,6 +4019,94 @@ onMounted(async () => {
   }
 
   conversations.value = await loadAiConversations().catch(() => []);
+  // Restore per-conversation queued "send later" inputs (parent PRD §5) — they
+  // are persisted with the conversation and must surface again after a restart.
+  for (const conversation of conversations.value) {
+    if (conversation.queuedInput) {
+      queuedInputs.set(conversation.id, { text: conversation.queuedInput, mode: assistantMode.value, action: activeAction.value });
+    }
+  }
+  if (backgroundAiRunsEnabled) {
+    const persistedRuns = await loadAiRuns().catch(() => []);
+    const conversationsById = new Map(conversations.value.map((conversation) => [conversation.id, conversation]));
+    const recoveredConversations = new Set<string>();
+    for (const persistedRun of persistedRuns) {
+      const conversation = conversationsById.get(persistedRun.conversationId);
+      if (!conversation) continue;
+      // The panel can be closed and reopened while the original component's
+      // detached stream is still alive. Its run object is the authoritative
+      // live owner of incoming deltas; never replace it with an older durable
+      // snapshot during the new component's startup recovery.
+      const liveRun = desktopAiRun<ChatMessage>(persistedRun.conversationId);
+      if (liveRun) {
+        conversationRunStatus.set(persistedRun.conversationId, liveRun.status);
+        conversationReadSeq.set(persistedRun.conversationId, liveRun.maxSeq ?? 0);
+        recoveredConversations.add(persistedRun.conversationId);
+        continue;
+      }
+      // Multiple runs can exist per conversation across separate sends; the
+      // newest run (first in the updated_at DESC list) defines the row state.
+      if (recoveredConversations.has(persistedRun.conversationId)) continue;
+      recoveredConversations.add(persistedRun.conversationId);
+      // The read baseline for a recovered run starts at its persisted max seq:
+      // anything the run later produces while the user is away is "new".
+      conversationReadSeq.set(persistedRun.conversationId, persistedRun.maxSeq ?? 0);
+      const now = new Date().toISOString();
+      if (persistedRun.status === "awaiting_write_confirmation") {
+        conversationRunStatus.set(persistedRun.conversationId, "awaiting_write_confirmation");
+        registerPersistedAiRun(conversation, persistedRun, "awaiting_write_confirmation", now);
+      } else if (persistedRun.status === "queued") {
+        if (persistedRun.fifoCategory === "write_confirmation_resume") {
+          // The accepted write confirmation never survives a restart: the grant
+          // is intentionally not serialized (PRD §7). Fall back to the original
+          // confirmation card; the user must confirm again before the resume
+          // segment may re-enter the FIFO.
+          void saveAiRun({ ...persistedRun, status: "awaiting_write_confirmation", fifoCategory: undefined, pendingInput: undefined, updatedAt: now }).catch(() => {});
+          conversationRunStatus.set(persistedRun.conversationId, "awaiting_write_confirmation");
+          registerPersistedAiRun(conversation, persistedRun, "awaiting_write_confirmation", now);
+        } else {
+          // A normal-send FIFO item becomes an editable, UNSENT pending draft
+          // (PRD §7 line 93, AC 123) — never a failed/interrupted task. Pull the
+          // user's input out of the transcript and surface it as the draft.
+          const messages = chatMessagesFromConversation(conversation);
+          const recovered = extractRecoverableDraft(messages);
+          const draft = persistedRun.pendingInput ?? recovered?.draft;
+          if (draft && recovered) {
+            await persistPendingInputRecovery(conversation, recovered.messages, { ...persistedRun, status: "pending_recoverable", fifoCategory: undefined, pendingInput: draft, updatedAt: now }, now);
+            conversationRunStatus.set(persistedRun.conversationId, "pending_recoverable");
+            registerPersistedAiRun(conversation, persistedRun, "pending_recoverable", now, {
+              messages: recovered.messages,
+              pendingInput: draft,
+            });
+          } else if (draft) {
+            // Draft recovered without a transcript message to strip (e.g. the
+            // conversation was pruned mid-restart) — keep the transcript intact.
+            await persistPendingInputRecovery(conversation, messages, { ...persistedRun, status: "pending_recoverable", fifoCategory: undefined, pendingInput: draft, updatedAt: now }, now);
+            conversationRunStatus.set(persistedRun.conversationId, "pending_recoverable");
+            registerPersistedAiRun(conversation, persistedRun, "pending_recoverable", now, { pendingInput: draft });
+          } else {
+            // No input to recover; do not fake an interruption for a task that
+            // never started. Simply mark it terminal so it leaves the queue.
+            void saveAiRun({ ...persistedRun, status: "cancelled", updatedAt: now }).catch(() => {});
+            conversationRunStatus.set(persistedRun.conversationId, "cancelled");
+          }
+        }
+      } else if (persistedRun.status === "pending_recoverable") {
+        // A draft recovered in an earlier session that was still pending when the
+        // app closed again — keep it recoverable, do not fake a failure.
+        conversationRunStatus.set(persistedRun.conversationId, "pending_recoverable");
+        registerPersistedAiRun(conversation, persistedRun, "pending_recoverable", now, { pendingInput: persistedRun.pendingInput });
+      } else if (persistedRun.status === "preparing" || persistedRun.status === "running") {
+        // A process restart cannot truthfully resume a Tauri producer. Preserve
+        // the transcript, but make the terminal state explicit instead of
+        // pretending the old stream is still alive.
+        void saveAiRun({ ...persistedRun, status: "interrupted", updatedAt: now }).catch(() => {});
+        conversationRunStatus.set(persistedRun.conversationId, "interrupted");
+      } else {
+        conversationRunStatus.set(persistedRun.conversationId, persistedRun.status);
+      }
+    }
+  }
   shikiCodeHighlighter.value = await createAiShikiCodeHighlighter({
     appearance: () => aiCodeAppearance.value,
   }).catch(() => undefined);
@@ -2980,18 +4171,20 @@ function stopResize() {
 }
 
 onUnmounted(() => {
+  assistantViewMounted = false;
   // Ignore any FileReader/Tauri filesystem work that finishes after this panel is gone.
   attachmentDraftEpoch += 1;
   if (assistantDeltaFrame !== null) cancelAnimationFrame(assistantDeltaFrame);
   clearTimeout(mentionTimer);
   clearEffortMenuCloseTimer();
+  stopStatusTimer();
   // Must invalidate the generation the same way clearMessages()/selectConversation()
   // do, not just fire the best-effort cancelStream() RPC: if a request is still
   // mid-await (context preparation, or the backend hasn't registered a session id
   // yet) when this component unmounts, cancelStream() alone leaves the generation
   // current, so the request still starts and its event callback/catch/finally keep
   // writing into refs this now-unmounted instance's closures still hold.
-  if (isGenerating.value) abandonInFlightRequest();
+  if (isGenerating.value && !backgroundAiRunsEnabled) abandonInFlightRequest();
   detachMessageScrollListener();
   // 清理拖拽事件监听，防止内存泄漏
   document.removeEventListener("mousemove", handleResize);
@@ -3041,7 +4234,7 @@ function clearContextReferences() {
   mentionError.value = "";
 }
 
-defineExpose({ triggerAction, setPrompt, addTableMention, clearContextReferences });
+defineExpose({ triggerAction, setPrompt, addTableMention, clearContextReferences, selectConversationById });
 
 const messageRenderer = computed(() => {
   const appearance = aiCodeAppearance.value;
@@ -3120,8 +4313,47 @@ async function openExternalUrl(url: string) {
           </div>
           <div v-else class="max-h-64 overflow-auto p-1">
             <div v-for="conv in filteredConversations" :key="conv.id" class="flex min-w-0 cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-xs hover:bg-muted" :class="{ 'bg-muted': conv.id === conversationId }" @click="selectConversation(conv)">
-              <span class="min-w-0 flex-1 truncate">{{ conv.title }}</span>
-              <button class="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-background hover:text-destructive" @click.stop="deleteConversation(conv.id)">
+              <span class="min-w-0 flex-1 truncate" :title="conv.title">{{ conv.title }}</span>
+              <span v-if="conversationRowDetail(conv).hasQueuedInput" class="shrink-0 rounded border border-primary/40 bg-primary/10 px-1 py-px text-[10px] text-primary" :aria-label="t('ai.rowQueuedInput')" :title="t('ai.rowQueuedInput')">{{ t("ai.rowQueuedInput") }}</span>
+              <span v-if="conversationRowDetail(conv).status === 'preparing' || conversationRowDetail(conv).status === 'running'" class="flex min-w-0 shrink-0 items-center gap-1 text-muted-foreground" :aria-label="t('ai.runStatusRunning')" :title="t('ai.runStatusRunning')">
+                <Loader2 class="h-3 w-3 shrink-0 animate-spin" />
+                <span class="hidden truncate min-[430px]:inline">{{ conversationRowDetail(conv).phaseText ?? t("ai.runStatusRunning") }}</span>
+                <span v-if="conversationRowDetail(conv).elapsedSeconds !== null" class="shrink-0 tabular-nums text-muted-foreground/70">{{ formatRunElapsed(conversationRowDetail(conv).elapsedSeconds) }}</span>
+                <button class="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-destructive" :title="t('ai.stopGenerating')" :aria-label="t('ai.stopGenerating')" @click.stop="stopConversationRun(conv.id)">
+                  <Square class="h-3 w-3" />
+                </button>
+              </span>
+              <span v-else-if="conversationRowDetail(conv).status === 'queued'" class="flex shrink-0 items-center gap-1 text-muted-foreground" :aria-label="t('ai.runStatusWaitingToStart')">
+                <Hourglass class="h-3 w-3" />
+                <span>{{ t("ai.runStatusWaitingToStart") }}</span>
+              </span>
+              <span v-else-if="conversationRowDetail(conv).status === 'awaiting_write_confirmation'" class="flex shrink-0 items-center gap-1 font-medium text-amber-600 dark:text-amber-400" :aria-label="t('ai.runStatusAwaitingConfirmation')">
+                <AlertTriangle class="h-3 w-3" />
+                <span>{{ t("ai.runStatusAwaitingConfirmation") }}</span>
+              </span>
+              <span v-else-if="conversationRowDetail(conv).status === 'pending_recoverable'" class="flex shrink-0 items-center gap-1 text-muted-foreground" :aria-label="t('ai.runStatusPendingDraft')">
+                <Clock class="h-3 w-3" />
+                <span>{{ t("ai.runStatusPendingDraft") }}</span>
+              </span>
+              <span v-else-if="conversationRowDetail(conv).status === 'completed'" class="flex min-w-0 shrink-0 items-center gap-1" :aria-label="t('ai.runStatusCompleted')" :title="conversationRowDetail(conv).summary ?? t('ai.runStatusCompleted')">
+                <Check class="h-3 w-3 shrink-0 text-green-500" />
+              </span>
+              <span
+                v-else-if="conversationRowDetail(conv).status === 'failed' || conversationRowDetail(conv).status === 'interrupted'"
+                class="flex min-w-0 shrink-0 items-center gap-1"
+                :aria-label="t(conversationRowDetail(conv).status === 'interrupted' ? 'ai.runStatusInterrupted' : 'ai.runStatusFailed')"
+                :title="conversationRowDetail(conv).reason ?? t(conversationRowDetail(conv).status === 'interrupted' ? 'ai.runStatusInterrupted' : 'ai.runStatusFailed')"
+              >
+                <AlertTriangle class="h-3 w-3 shrink-0 text-destructive" />
+                <button class="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground" :title="t('ai.retryRound')" :aria-label="t('ai.retryRound')" @click.stop="retryConversationRun(conv.id)">
+                  <RefreshCw class="h-3 w-3" />
+                </button>
+              </span>
+              <span v-else-if="conversationRowDetail(conv).status === 'cancelled'" class="flex shrink-0 items-center" :aria-label="t('ai.runStatusCancelled')" :title="t('ai.runStatusCancelled')">
+                <CircleSlash class="h-3 w-3 text-muted-foreground" />
+              </span>
+              <span v-if="conversationRowDetail(conv).unread" class="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" :aria-label="t('ai.runUnread')" :title="t('ai.runUnread')" />
+              <button class="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-background hover:text-destructive" :title="t('ai.deleteConversation')" :aria-label="t('ai.deleteConversation')" @click.stop="deleteConversation(conv.id)">
                 <X class="h-3 w-3" />
               </button>
             </div>
@@ -3148,6 +4380,15 @@ async function openExternalUrl(url: string) {
       <ScrollArea ref="scrollRef" class="ai-message-scroll h-full overflow-hidden">
         <div class="flex flex-col gap-3 p-3">
           <template v-for="(msg, i) in visibleMessages" :key="i">
+            <div v-if="awayUpdatesBaselineIndex >= 0 && i === awayUpdatesBaselineIndex" class="mb-1 flex items-center gap-2 py-0.5" role="separator" :aria-label="t('ai.awayUpdatesDivider')">
+              <span class="h-px flex-1 bg-primary/25" />
+              <span class="shrink-0 text-[10px] uppercase tracking-wide text-primary/80">{{ t("ai.awayUpdatesDivider") }}</span>
+              <button type="button" class="shrink-0 rounded border border-primary/30 bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary hover:bg-primary/20" :title="t('ai.jumpToLatest')" :aria-label="t('ai.jumpToLatest')" @click="dismissAwayUpdates">
+                <ArrowDown class="mr-0.5 inline h-2.5 w-2.5" />
+                {{ t("ai.jumpToLatest") }}
+              </button>
+              <span class="h-px flex-1 bg-primary/25" />
+            </div>
             <div v-if="msg.role === 'user'" class="group flex justify-end">
               <div class="relative min-w-0 max-w-[85%]" :class="{ 'w-[85%]': editingMessageIndex === i }">
                 <template v-if="editingMessageIndex === i">
@@ -3317,10 +4558,18 @@ async function openExternalUrl(url: string) {
                 <div v-if="msg.agentSteps?.length" class="mb-2 space-y-1">
                   <div v-for="step in msg.agentSteps" :key="step.key" class="rounded border text-[10px]" :class="agentStepClass(step.tone)">
                     <button class="flex w-full items-center gap-1 px-2 py-1.5 text-left" @click="step.toolResult || step.toolArgs?.sql ? toggleStep(step.key) : undefined">
-                      <component :is="agentStepIcon(step.tone)" class="h-3 w-3 shrink-0" />
+                      <Loader2 v-if="step.tone === 'active' && step.toolName" class="h-3 w-3 shrink-0 animate-spin" />
+                      <component :is="agentStepIcon(step.tone)" v-else class="h-3 w-3 shrink-0" />
                       <span class="font-medium">{{ t(step.labelKey) }}</span>
                       <span v-if="step.toolName" class="text-muted-foreground">: {{ step.toolName }}</span>
-                      <ChevronRight v-if="step.toolResult || step.toolArgs?.sql" class="ml-auto h-3 w-3 shrink-0 transition-transform duration-150" :class="{ 'rotate-90': expandedSteps.has(step.key) }" />
+                      <template v-if="step.tone === 'active' && step.toolName">
+                        <span class="ml-auto flex shrink-0 items-center gap-1">
+                          <Loader2 class="h-3 w-3 animate-spin" />
+                          <span>{{ t("ai.agentSteps.executing") }}</span>
+                        </span>
+                      </template>
+                      <span v-else-if="step.durationMs !== undefined" class="ml-auto shrink-0 tabular-nums" :class="step.tone === 'danger' ? 'text-red-600 dark:text-red-400' : 'text-chart-2'">{{ formatToolDurationMs(step.durationMs) }}</span>
+                      <ChevronRight v-if="step.toolResult || step.toolArgs?.sql" class="h-3 w-3 shrink-0 transition-transform duration-150" :class="[{ 'rotate-90': expandedSteps.has(step.key) }, !agentStepHasTail(step) ? 'ml-auto' : '']" />
                     </button>
                     <div v-if="expandedSteps.has(step.key)" class="border-t border-current/10 px-2 pb-2 pt-1">
                       <div v-if="step.toolArgs?.sql" class="mb-1 rounded bg-background/50 px-2 py-1 font-mono text-[10px] text-foreground/80 whitespace-pre-wrap">{{ step.toolArgs.sql }}</div>
@@ -3407,9 +4656,39 @@ async function openExternalUrl(url: string) {
             </div>
           </template>
 
-          <div v-if="isWaitingForFirstDelta" class="flex items-center gap-2 text-xs text-muted-foreground">
-            <Loader2 class="h-3.5 w-3.5 animate-spin" />
-            <span>{{ t("ai.thinking") }}</span>
+          <!-- Live generation-status line (Issue #6743 feature 1). Replaces the old
+               "Thinking..." placeholder and covers the WHOLE generation period
+               (`v-if="isGenerating"`), not just the wait for the first token. The
+               `phase !== 'finished'` guard hides it the instant agent_end/error
+               arrives — before isGenerating clears — so a completed reply never
+               shows a lingering "等待模型响应 · 已运行 0s". `finalizing` (the
+               non-terminal `response_complete`) hides the line the same way, while
+               the listener stays alive for the real agent_end/error. -->
+          <div v-if="isGenerating && generationStatus.phase !== 'finished' && generationStatus.phase !== 'finalizing'" class="flex min-w-0 items-center gap-[7px] text-xs text-muted-foreground" data-ai-generation-status>
+            <!-- Screen-reader live region: announces discrete execution-state changes
+                 (phase / tool / turn / idle crossing) only, never the per-second
+                 elapsed numerals — see `liveAnnouncementText`. -->
+            <span class="sr-only" role="status" aria-live="polite" aria-atomic="true">{{ statusLiveAnnouncement }}</span>
+            <Loader2 v-if="!generationStatusIdle" class="h-3 w-3 shrink-0 animate-spin" aria-hidden="true" />
+            <Hourglass v-else class="h-3 w-3 shrink-0" aria-hidden="true" />
+            <!-- Idle-with-tool copy MUST win over the running-tool layout: PRD copy
+                 priority 1 (idle >20s, "等待此步骤完成 · 最后活动 Ns 前 · 正在执行 {tool}")
+                 outranks priority 2 ("第 N 轮 · 正在执行 {tool} · 已运行 Ns"), matching
+                 the pure `statusText()` branch order. Exclude the cancelling phase so
+                 "正在取消…" (checked first by `statusText`) is never masked by the idle
+                 copy while the user is stopping a long-running tool. -->
+            <template v-if="generationStatusIdle && generationStatus.activeTool && generationStatus.phase !== 'cancelling'">
+              <span class="whitespace-nowrap tabular-nums">{{ t("ai.status.idle", { idle: statusIdleSeconds }) }}</span>
+              <span class="whitespace-nowrap">{{ t("ai.status.runningToolAction") }}</span>
+              <span class="whitespace-nowrap rounded-[5px] border border-chart-2/30 bg-chart-2/12 px-1.5 py-px font-mono text-[10px] text-chart-2">{{ statusToolLabel }}</span>
+            </template>
+            <template v-else-if="generationStatusRunningTool">
+              <span v-if="statusTurnBadge" class="whitespace-nowrap rounded-[5px] border border-border px-[5px] font-mono text-[10px] text-muted-foreground">{{ statusTurnBadge }}</span>
+              <span class="whitespace-nowrap">{{ t("ai.status.runningToolAction") }}</span>
+              <span class="whitespace-nowrap rounded-[5px] border border-chart-2/30 bg-chart-2/12 px-1.5 py-px font-mono text-[10px] text-chart-2">{{ statusToolLabel }}</span>
+              <span class="whitespace-nowrap tabular-nums">{{ t("ai.status.runningToolElapsed", { elapsed: statusElapsedSeconds }) }}</span>
+            </template>
+            <span v-else class="min-w-0 tabular-nums">{{ generationStatusText }}</span>
           </div>
         </div>
       </ScrollArea>
@@ -3609,6 +4888,35 @@ async function openExternalUrl(url: string) {
               @remove="removeImageAttachment(index)"
             />
           </div>
+          <div v-if="recoveredDraftActive" class="mb-1.5 flex items-center gap-1.5 rounded-[7px] border border-primary/30 bg-primary/10 px-[9px] py-[5px] text-[11px] text-primary" role="status">
+            <Clock class="h-3.5 w-3.5 shrink-0" />
+            <span class="min-w-0 flex-1 truncate"> {{ t("ai.recoveredDraftBanner") }} — {{ t("ai.recoveredDraftHint") }} </span>
+            <button type="button" class="shrink-0 rounded p-0.5 text-muted-foreground hover:text-destructive" :title="t('ai.discardDraft')" :aria-label="t('ai.discardDraft')" @click="discardRecoveredDraft">
+              <X class="h-3 w-3" />
+            </button>
+          </div>
+          <div v-if="currentQueuedInput" class="mb-1.5 flex items-center gap-1.5 rounded-[7px] border border-primary/30 bg-primary/10 px-[9px] py-[5px] text-[11px] text-primary" role="status">
+            <Hourglass class="h-3.5 w-3.5 shrink-0" />
+            <span class="min-w-0 flex-1 truncate" :title="currentQueuedInput.text">
+              {{ hasActiveRunForCurrentConversation ? t("ai.queuedInputWaiting", { text: currentQueuedInput.text }) : t("ai.queuedInputPending", { text: currentQueuedInput.text }) }}
+            </span>
+            <button
+              v-if="!hasActiveRunForCurrentConversation"
+              type="button"
+              class="shrink-0 rounded border border-primary/40 bg-primary px-1.5 py-0.5 text-[10px] font-medium text-primary-foreground hover:bg-primary/90"
+              :title="t('ai.sendQueuedInput')"
+              :aria-label="t('ai.sendQueuedInput')"
+              @click="sendQueuedInputNow"
+            >
+              {{ t("ai.sendQueuedInput") }}
+            </button>
+            <button type="button" class="shrink-0 rounded p-0.5 text-muted-foreground hover:text-primary" :title="t('ai.queuedInputEdit')" :aria-label="t('ai.queuedInputEdit')" @click="editQueuedInput">
+              <Pencil class="h-3 w-3" />
+            </button>
+            <button type="button" class="shrink-0 rounded p-0.5 text-muted-foreground hover:text-destructive" :title="t('ai.queuedInputRemove')" :aria-label="t('ai.queuedInputRemove')" @click="removeQueuedInput">
+              <X class="h-3 w-3" />
+            </button>
+          </div>
           <textarea
             ref="promptTextareaRef"
             v-model="prompt"
@@ -3624,6 +4932,12 @@ async function openExternalUrl(url: string) {
             @paste="onPromptPaste"
           />
           <input ref="csvFileInputRef" type="file" multiple accept="image/png,image/jpeg,image/gif,image/webp,.csv,.md,.markdown,.txt,.text,.json,.yaml,.yml,.xml,.log,.tsv" class="hidden" @change="onCsvFileSelected" />
+          <!-- Gentle >60s hint (Issue #6743 feature 1): never asserts the request is
+               stuck/hung, only that it is running long and may be waited on or stopped. -->
+          <div v-if="statusLongRunningHintVisible" class="mb-1.5 flex items-center gap-1.5 rounded-[7px] border border-warning/30 bg-warning/10 px-[9px] py-[5px] text-[11px] text-warning">
+            <Clock class="h-3.5 w-3.5 shrink-0" />
+            <span>{{ t("ai.status.longRunningHint") }}</span>
+          </div>
           <div class="flex min-w-0 flex-nowrap items-center gap-1.5 overflow-hidden">
             <Tooltip>
               <TooltipTrigger as-child>
@@ -3879,6 +5193,10 @@ async function openExternalUrl(url: string) {
             <button v-if="isGenerating" class="h-7 w-7 shrink-0 rounded-full bg-destructive text-destructive-foreground flex items-center justify-center" :title="t('ai.stopGenerating')" @click="cancelStream">
               <Square class="h-3.5 w-3.5" />
             </button>
+            <button v-else-if="hasActiveRunForCurrentConversation" class="h-7 shrink-0 items-center gap-1 rounded-full bg-foreground px-2.5 text-[11px] font-medium text-background disabled:opacity-30 flex" :disabled="!canSubmitPrompt" :title="t('ai.queueSendHint')" @click="onSendClick">
+              <Hourglass class="h-3.5 w-3.5" />
+              <span>{{ t("ai.queueSend") }}</span>
+            </button>
             <button v-else class="h-7 w-7 shrink-0 rounded-full bg-foreground text-background flex items-center justify-center disabled:opacity-30" :disabled="!canSubmitPrompt" @click="send">
               <ArrowUp class="h-4 w-4" />
             </button>
@@ -3904,6 +5222,26 @@ async function openExternalUrl(url: string) {
       <div class="flex max-h-[75vh] min-h-48 items-center justify-center overflow-hidden rounded-md border bg-muted/30 p-3">
         <img v-if="previewImageAttachment" :src="imageAttachmentUrl(previewImageAttachment)" :alt="previewImageAttachment.name" class="max-h-[70vh] max-w-full object-contain" />
       </div>
+    </DialogContent>
+  </Dialog>
+
+  <Dialog
+    :open="deleteConfirmConversationId !== null"
+    @update:open="
+      (open: boolean) => {
+        if (!open) deleteConfirmConversationId = null;
+      }
+    "
+  >
+    <DialogContent class="sm:max-w-[440px]" @interact-outside.prevent>
+      <DialogHeader>
+        <DialogTitle>{{ t("ai.deleteActiveConversationTitle") }}</DialogTitle>
+        <DialogDescription>{{ t("ai.deleteActiveConversationDescription") }}</DialogDescription>
+      </DialogHeader>
+      <DialogFooter class="gap-2 sm:gap-2">
+        <Button type="button" variant="outline" @click="cancelDeleteConversation">{{ t("ai.keepConversation") }}</Button>
+        <Button type="button" variant="destructive" @click="confirmDeleteConversation">{{ t("ai.cancelTaskAndDelete") }}</Button>
+      </DialogFooter>
     </DialogContent>
   </Dialog>
 </template>

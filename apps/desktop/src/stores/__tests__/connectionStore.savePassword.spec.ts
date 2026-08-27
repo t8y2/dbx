@@ -297,6 +297,35 @@ describe("connectionStore save_password opt-out", () => {
     expect(store.getConfig("mysql-1")?.password).toBe("typed-pw");
   });
 
+  it("prompts and retries when an encrypted SQLite file is opened without a password", async () => {
+    const connectDb = vi.fn().mockRejectedValueOnce(new Error("Selected file is not a valid SQLite database file.")).mockResolvedValueOnce("sqlite-1");
+    installApiMocks({ connectDb });
+    installPasswordPromptMock();
+    requestPassword.mockResolvedValue({ password: "123456", rememberPassword: true });
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = postgresConnection({
+      id: "sqlite-1",
+      name: "Encrypted SQLite",
+      db_type: "sqlite",
+      host: "/tmp/encrypted.db",
+      port: 0,
+      username: "",
+      database: undefined,
+      save_password: true,
+      password: "",
+    });
+    store.connections = [connection];
+
+    await store.connect(connection);
+
+    expect(requestPassword).toHaveBeenCalledWith({ connectionId: "sqlite-1", connectionName: "Encrypted SQLite" });
+    expect(connectDb).toHaveBeenCalledTimes(2);
+    expect(connectDb).toHaveBeenNthCalledWith(1, expect.objectContaining({ password: "" }), expect.any(Number));
+    expect(connectDb).toHaveBeenNthCalledWith(2, expect.objectContaining({ password: "123456" }), expect.any(Number));
+    expect(store.getConfig("sqlite-1")?.password).toBe("123456");
+  });
+
   it("does not persist a recovered password after the connection config changes", async () => {
     const connected = deferred<string>();
     const connectDb = vi

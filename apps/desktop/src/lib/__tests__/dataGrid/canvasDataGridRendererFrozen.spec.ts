@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { drawCanvasDataGrid, resolveCanvasBackingStoreMetrics, type DrawCanvasDataGridOptions } from "@/lib/dataGrid/canvasDataGridRenderer";
+import { canvasDataGridActionOverlayWidth, canvasDataGridActionReservedWidth, drawCanvasDataGrid, resolveCanvasBackingStoreMetrics, type DrawCanvasDataGridOptions } from "@/lib/dataGrid/canvasDataGridRenderer";
 
 function createMockCanvas(width = 800, height = 400) {
   const canvas = document.createElement("canvas");
@@ -78,6 +78,18 @@ describe("drawCanvasDataGrid with frozen columns", () => {
       lineHeight: "normal",
       getPropertyValue: () => "",
     } as CSSStyleDeclaration);
+  });
+
+  it.each([
+    [false, false, true, 22, 28],
+    [false, false, false, 0, 0],
+    [true, false, false, 22, 28],
+    [false, true, false, 22, 28],
+    [true, true, false, 44, 50],
+    [true, true, true, 66, 72],
+  ])("reserves only enabled Canvas actions (download=%s, foreign key=%s, detail=%s)", (canQuickDownload, canNavigateForeignKey, showCellDetail, overlayWidth, reservedWidth) => {
+    expect(canvasDataGridActionOverlayWidth(canQuickDownload, canNavigateForeignKey, showCellDetail)).toBe(overlayWidth);
+    expect(canvasDataGridActionReservedWidth(canQuickDownload, canNavigateForeignKey, showCellDetail)).toBe(reservedWidth);
   });
 
   it("uses the exact observed device-pixel size instead of a nominal DPR", () => {

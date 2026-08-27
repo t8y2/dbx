@@ -10,6 +10,7 @@ import {
   shouldAutoOpenSqlCompletion,
   extractCteDefinitions,
   getSqlCompletionContext,
+  prepareSqlCompletionReplacement,
   recordCompletionSelection,
   shouldChainSqlCompletionAfterAccept,
   type SqlCompletionColumn,
@@ -868,6 +869,117 @@ test("quotes mixed-case Dameng schema, table, and column identifiers", () => {
   assert.equal(columnItems.find((item) => item.type === "column" && item.label === "MixedColumn")?.apply, '"MixedColumn"');
 });
 
+test("replaces partially typed quoted identifiers without duplicating quotes", () => {
+  const cases = [
+    {
+      label: "Dameng paired double quotes",
+      markedSql: 'SELECT h."Mi|" FROM SHA."MixedTable" h',
+      databaseType: "dameng",
+      dialect: "mysql",
+      table: "MixedTable",
+      schema: "SHA",
+      column: "MixedColumn",
+      expectedSql: 'SELECT h."MixedColumn" FROM SHA."MixedTable" h',
+      expectedClosingQuote: '"',
+    },
+    {
+      label: "Dameng unclosed double quote in a later statement",
+      markedSql: 'SELECT 1;\nSELECT h."Mi| FROM SHA."MixedTable" h',
+      databaseType: "dameng",
+      dialect: "mysql",
+      table: "MixedTable",
+      schema: "SHA",
+      column: "MixedColumn",
+      expectedSql: 'SELECT 1;\nSELECT h."MixedColumn" FROM SHA."MixedTable" h',
+      expectedClosingQuote: undefined,
+    },
+    {
+      label: "PostgreSQL paired double quotes",
+      markedSql: 'SELECT o."Us|" FROM public."Order Details" o',
+      databaseType: "postgres",
+      dialect: "postgres",
+      table: "Order Details",
+      schema: "public",
+      column: "User Name",
+      expectedSql: 'SELECT o."User Name" FROM public."Order Details" o',
+      expectedClosingQuote: '"',
+    },
+    {
+      label: "MySQL paired backticks",
+      markedSql: "SELECT o.`SE|` FROM app.orders o",
+      databaseType: "mysql",
+      dialect: "mysql",
+      table: "orders",
+      schema: "app",
+      column: "SELECT",
+      expectedSql: "SELECT o.`SELECT` FROM app.orders o",
+      expectedClosingQuote: "`",
+    },
+    {
+      label: "SQL Server paired brackets",
+      markedSql: "SELECT o.[se|] FROM dbo.orders o",
+      databaseType: "sqlserver",
+      dialect: "sqlserver",
+      table: "orders",
+      schema: "dbo",
+      column: "select",
+      expectedSql: "SELECT o.[select] FROM dbo.orders o",
+      expectedClosingQuote: "]",
+    },
+  ] as const;
+
+  for (const fixture of cases) {
+    const cursor = fixture.markedSql.indexOf("|");
+    const sql = fixture.markedSql.replace("|", "");
+    const options = { databaseType: fixture.databaseType, dialect: fixture.dialect };
+    const context = sqlCompletionContextFromSemantic(buildSqlSemanticModel(sql, cursor, options), getSqlCompletionContext(sql, cursor, options));
+    const items = buildSqlCompletionItemsFromContext(context, {
+      tables: [{ name: fixture.table, schema: fixture.schema, type: "table" }],
+      columnsByTable: new Map([[`${fixture.schema}.${fixture.table}`, [{ name: fixture.column, table: fixture.table, schema: fixture.schema }]]]),
+      ...options,
+    });
+    const replacement = prepareSqlCompletionReplacement(sql, cursor, context, items);
+    const column = replacement.items.find((item) => item.type === "column" && item.label === fixture.column);
+
+    assert.ok(column, fixture.label);
+    assert.equal(column.replaceClosingQuote, fixture.expectedClosingQuote, fixture.label);
+    const replaceTo = column.replaceClosingQuote === sql[cursor] ? cursor + 1 : cursor;
+    assert.equal(`${sql.slice(0, replacement.from)}${column.apply ?? column.label}${sql.slice(replaceTo)}`, fixture.expectedSql, fixture.label);
+  }
+});
+
+test("suggests same-prefix tables while editing double-quoted Oracle-family identifiers", () => {
+  for (const databaseType of ["oracle", "dameng"] as const) {
+    const markedSql = 'SELECT * FROM "Fo|"';
+    const cursor = markedSql.indexOf("|");
+    const sql = markedSql.replace("|", "");
+    const options = { databaseType, dialect: "mysql" as const };
+    const context = sqlCompletionContextFromSemantic(buildSqlSemanticModel(sql, cursor, options), getSqlCompletionContext(sql, cursor, options));
+    const items = buildSqlCompletionItemsFromContext(context, {
+      tables: [
+        { name: "FormAlpha", schema: "APP", type: "table" },
+        { name: "FormArchive", schema: "APP", type: "table" },
+      ],
+      columnsByTable: new Map(),
+      ...options,
+    });
+    const replacement = prepareSqlCompletionReplacement(sql, cursor, context, items);
+    const tableItems = replacement.items.filter((item) => item.type === "table");
+
+    assert.deepEqual(
+      tableItems.map((item) => item.label),
+      ["FormAlpha", "FormArchive"],
+      databaseType,
+    );
+    assert.equal(replacement.from, sql.indexOf('"'), databaseType);
+    assert.equal(
+      tableItems.every((item) => item.replaceClosingQuote === '"'),
+      true,
+      databaseType,
+    );
+  }
+});
+
 test("uses PostgreSQL-style double quotes for PostgreSQL-family completion identifiers", () => {
   const databaseTypes: DatabaseType[] = ["kingbase", "vastbase", "highgo", "uxdb"];
 
@@ -1498,7 +1610,8 @@ test("keeps database-qualified FROM input in table suggestion mode", () => {
   assert.equal(context.exclusiveColumnSuggestions, false);
   assert.deepEqual(
     items.map((item) => [item.label, item.type, item.detail]),
-    [["orders", "table", "other_db.orders"]],
+    // 单一非同名表不再展示冗余 schema 详情（PR 只在跨 schema 同名表时保留区分信息）
+    [["orders", "table", undefined]],
   );
 });
 
@@ -1572,7 +1685,8 @@ test("includes views in exclusive FROM object suggestions", () => {
   const tableItems = items.filter((item) => item.type === "table");
   assert.deepEqual(
     tableItems.map((item) => [item.label, item.type, item.detail]),
-    [["ticket_summary", "table", "public.ticket_summary"]],
+    // 视图保留类型提示，替代旧的 schema 前缀详情
+    [["ticket_summary", "table", "view"]],
   );
 });
 
@@ -1835,7 +1949,8 @@ test("suggests matching table names for partial table input", () => {
   const tableItems = items.filter((item) => item.type === "table");
   assert.deepEqual(
     tableItems.map((item) => [item.label, item.type, item.detail]),
-    [["ihli_data", "table", "public.ihli_data"]],
+    // 单一非同名表不再展示冗余 schema 详情（PR 只在跨 schema 同名表时保留区分信息）
+    [["ihli_data", "table", undefined]],
   );
 });
 

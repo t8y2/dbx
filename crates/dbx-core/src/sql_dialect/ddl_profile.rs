@@ -78,6 +78,23 @@ pub enum RenameColumnSyntax {
     SqlServerSpRename,
 }
 
+/// Column DDL that cannot use the generic `ADD COLUMN` / `ALTER COLUMN` forms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnDdlSyntax {
+    Generic,
+    /// SQL Server uses `ADD` without `COLUMN`, a full definition for
+    /// `ALTER COLUMN`, and separate default-constraint objects.
+    SqlServer,
+}
+
+/// Standalone table and column comment representation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommentDdlSyntax {
+    Generic,
+    /// SQL Server stores comments in the `MS_Description` extended property.
+    SqlServerExtendedProperty,
+}
+
 /// DDL generation profile for one [`DatabaseType`].
 #[derive(Debug, Clone, Copy)]
 pub struct DdlDialectProfile {
@@ -108,8 +125,10 @@ pub struct DdlDialectProfile {
     pub table_comment_via_alter: bool,
     /// Standalone column comment SQL is unsupported (MySQL needs MODIFY COLUMN).
     pub column_comment_via_modify_only: bool,
+    pub comment_ddl: CommentDdlSyntax,
     pub trigger_template: TriggerTemplate,
     pub rename_column: RenameColumnSyntax,
+    pub column_ddl: ColumnDdlSyntax,
     /// MySQL `MODIFY COLUMN` vs ANSI `ALTER COLUMN … TYPE/SET`.
     pub alter_uses_modify_column: bool,
     /// Batch multiple alter clauses in one `ALTER TABLE` statement.
@@ -193,6 +212,9 @@ const SEQ_CREATE: &str =
 const SEQ_ALTER: &str =
     "ALTER SEQUENCE {name} AS {data_type} START WITH {start_value} INCREMENT BY {increment} MINVALUE {min_value} MAXVALUE {max_value} {cycle};";
 const SEQ_DROP: &str = "DROP SEQUENCE {name}{cascade};";
+const SQLSERVER_FN_DROP: &str = "DROP FUNCTION {name};";
+const SQLSERVER_SEQ_ALTER: &str =
+    "ALTER SEQUENCE {name} RESTART WITH {start_value} INCREMENT BY {increment} MINVALUE {min_value} MAXVALUE {max_value} {cycle};";
 const RULE_DROP: &str = "DROP RULE IF EXISTS {rule_name} ON {table_name}{cascade};";
 const OWNER_ALTER: &str = "ALTER {object_type} {name} OWNER TO {owner};";
 
@@ -303,8 +325,10 @@ fn mysql_family(db: DatabaseType) -> DdlDialectProfile {
         index_supports_comment: true,
         table_comment_via_alter: true,
         column_comment_via_modify_only: true,
+        comment_ddl: CommentDdlSyntax::Generic,
         trigger_template: TriggerTemplate::MysqlStyle,
         rename_column: RenameColumnSyntax::MysqlChangeColumn,
+        column_ddl: ColumnDdlSyntax::Generic,
         prefers_native_source_ddl: true,
         grant_uses_mysql_user_syntax: true,
         warn_fk_needs_table_rebuild: false,
@@ -346,8 +370,10 @@ fn postgres_family(db: DatabaseType) -> DdlDialectProfile {
         index_supports_comment: false,
         table_comment_via_alter: false,
         column_comment_via_modify_only: false,
+        comment_ddl: CommentDdlSyntax::Generic,
         trigger_template: TriggerTemplate::PostgresStyle,
         rename_column: RenameColumnSyntax::RenameColumn,
+        column_ddl: ColumnDdlSyntax::Generic,
         prefers_native_source_ddl: false,
         grant_uses_mysql_user_syntax: false,
         warn_fk_needs_table_rebuild: false,
@@ -389,8 +415,10 @@ fn oracle_family(db: DatabaseType) -> DdlDialectProfile {
         index_supports_comment: false,
         table_comment_via_alter: false,
         column_comment_via_modify_only: false,
+        comment_ddl: CommentDdlSyntax::Generic,
         trigger_template: TriggerTemplate::GenericRowBody,
         rename_column: RenameColumnSyntax::RenameColumn,
+        column_ddl: ColumnDdlSyntax::Generic,
         prefers_native_source_ddl: false,
         grant_uses_mysql_user_syntax: false,
         warn_fk_needs_table_rebuild: false,
@@ -419,7 +447,7 @@ fn oracle_family(db: DatabaseType) -> DdlDialectProfile {
 fn sqlserver_family(db: DatabaseType) -> DdlDialectProfile {
     DdlDialectProfile {
         database_type: db,
-        quote: QuoteStyle::DoubleQuote,
+        quote: QuoteStyle::Brackets,
         auto_inc: AutoIncSyntax::Suffix(" IDENTITY(1,1)"),
         supports_display_width: false,
         max_varchar_len: None,
@@ -433,24 +461,26 @@ fn sqlserver_family(db: DatabaseType) -> DdlDialectProfile {
         index_supports_comment: false,
         table_comment_via_alter: false,
         column_comment_via_modify_only: false,
+        comment_ddl: CommentDdlSyntax::SqlServerExtendedProperty,
         trigger_template: TriggerTemplate::SqlServerStyle,
         rename_column: RenameColumnSyntax::SqlServerSpRename,
+        column_ddl: ColumnDdlSyntax::SqlServer,
         prefers_native_source_ddl: false,
         grant_uses_mysql_user_syntax: false,
         warn_fk_needs_table_rebuild: false,
         alter_uses_modify_column: false,
         alter_batches_clauses: false,
         create_table_if_not_exists: false,
-        create_index_if_not_exists: true,
+        create_index_if_not_exists: false,
         create_function_or_replace: false,
         supports_function_ddl: true,
         supports_sequence_ddl: true,
         supports_rule_ddl: false,
         supports_owner_ddl: false,
         function_create_template: Some(FN_CREATE),
-        function_drop_template: Some(FN_DROP),
+        function_drop_template: Some(SQLSERVER_FN_DROP),
         sequence_create_template: Some(SEQ_CREATE),
-        sequence_alter_template: Some(SEQ_ALTER),
+        sequence_alter_template: Some(SQLSERVER_SEQ_ALTER),
         sequence_drop_template: Some(SEQ_DROP),
         rule_drop_template: None,
         owner_alter_template: None,
@@ -476,8 +506,10 @@ fn sqlite_family(db: DatabaseType) -> DdlDialectProfile {
         index_supports_comment: false,
         table_comment_via_alter: false,
         column_comment_via_modify_only: false,
+        comment_ddl: CommentDdlSyntax::Generic,
         trigger_template: TriggerTemplate::GenericRowBody,
         rename_column: RenameColumnSyntax::RenameColumn,
+        column_ddl: ColumnDdlSyntax::Generic,
         prefers_native_source_ddl: false,
         grant_uses_mysql_user_syntax: false,
         warn_fk_needs_table_rebuild: true,
@@ -519,8 +551,10 @@ fn access_profile() -> DdlDialectProfile {
         index_supports_comment: false,
         table_comment_via_alter: false,
         column_comment_via_modify_only: false,
+        comment_ddl: CommentDdlSyntax::Generic,
         trigger_template: TriggerTemplate::GenericRowBody,
         rename_column: RenameColumnSyntax::RenameColumn,
+        column_ddl: ColumnDdlSyntax::Generic,
         prefers_native_source_ddl: false,
         grant_uses_mysql_user_syntax: false,
         warn_fk_needs_table_rebuild: false,
@@ -562,8 +596,10 @@ fn h2_profile() -> DdlDialectProfile {
         index_supports_comment: false,
         table_comment_via_alter: false,
         column_comment_via_modify_only: false,
+        comment_ddl: CommentDdlSyntax::Generic,
         trigger_template: TriggerTemplate::GenericRowBody,
         rename_column: RenameColumnSyntax::AlterColumnRenameTo,
+        column_ddl: ColumnDdlSyntax::Generic,
         prefers_native_source_ddl: false,
         grant_uses_mysql_user_syntax: false,
         warn_fk_needs_table_rebuild: false,
@@ -605,8 +641,10 @@ fn conservative_ansi(db: DatabaseType) -> DdlDialectProfile {
         index_supports_comment: false,
         table_comment_via_alter: false,
         column_comment_via_modify_only: false,
+        comment_ddl: CommentDdlSyntax::Generic,
         trigger_template: TriggerTemplate::GenericRowBody,
         rename_column: RenameColumnSyntax::RenameColumn,
+        column_ddl: ColumnDdlSyntax::Generic,
         prefers_native_source_ddl: false,
         grant_uses_mysql_user_syntax: false,
         warn_fk_needs_table_rebuild: false,
@@ -692,11 +730,12 @@ mod tests {
         assert!(matches!(mssql.auto_inc, AutoIncSyntax::Suffix(s) if s.contains("IDENTITY")));
         assert!(access.lookup_type("VARCHAR").is_some());
         assert!(mssql.type_map.is_empty());
-        // Access must not inherit SQL Server lock-timeout / idempotent flags.
+        // Access must not inherit SQL Server lock-timeout behavior. Neither
+        // database supports CREATE INDEX IF NOT EXISTS syntax.
         assert_eq!(access.lock_timeout_sql, None);
         assert!(mssql.lock_timeout_sql.is_some());
         assert!(!access.create_index_if_not_exists);
-        assert!(mssql.create_index_if_not_exists);
+        assert!(!mssql.create_index_if_not_exists);
     }
 
     #[test]
@@ -713,6 +752,7 @@ mod tests {
     fn quote_styles() {
         assert_eq!(profile_for(DatabaseType::Mysql).quote_ident("a`b"), "`a``b`");
         assert_eq!(profile_for(DatabaseType::Access).quote_ident(r#"a"b"#), "\"a\"\"b\"");
+        assert_eq!(profile_for(DatabaseType::SqlServer).quote_ident("a]b"), "[a]]b]");
         assert_eq!(profile_for(DatabaseType::Oracle).quote_ident("emp"), "EMP");
         assert_eq!(profile_for(DatabaseType::Oracle).quote_ident("EMP"), "EMP");
         // Mixed-case must preserve spelling via quotes (not EMPMIXED).

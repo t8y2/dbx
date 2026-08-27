@@ -83,6 +83,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.MCP_RELEASE_TOKEN }}
 
       - name: Download agent version patch
         uses: actions/download-artifact@v4
@@ -146,7 +147,11 @@ jobs:
           for module in "${MODULES[@]}"; do
             TASKS+=(":${module}:shadowJar")
           done
-          ./gradlew "${TASKS[@]}" --parallel
+          # agents/common changes trigger a parallel mass rebuild of every
+          # packaged module; the Gradle daemon default heap is too small for
+          # ~25 shadowJar fat jars at once on a 16 GB runner.
+          ./gradlew "${TASKS[@]}" --parallel \
+            -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g"
         working-directory: agents
       - run: python3 scripts/validate_agent_jars.py
         working-directory: agents
@@ -272,7 +277,6 @@ jobs:
             ["linux-aarch64"]="linux/arm64"
             ["linux-x64"]="linux/amd64"
             ["windows-aarch64"]="windows/arm64"
-            ["windows-x64"]="windows/amd64"
           )
           for platform in "${!TARGETS[@]}"; do
             IFS=/ read -r goos goarch <<< "${TARGETS[$platform]}"
@@ -284,6 +288,20 @@ jobs:
             CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "$output" .
           done
           ls -lh ../../../release-native
+      # Go 1.20 is the last release that supports Windows 7; keep other targets on Go 1.22.
+      - name: Set up Go for Windows 7-compatible RabbitMQ agent
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.20.14"
+          cache-dependency-path: agents/drivers/rabbitmq/go.sum
+      - name: Build Windows 7-compatible RabbitMQ agent
+        shell: bash
+        working-directory: agents/drivers/rabbitmq
+        run: |
+          output="../../../release-native/dbx-agent-rabbitmq-windows-x64.exe"
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o "$output" .
+          go version -m "$output" | tee /tmp/rabbitmq-windows-x64-build-info.txt
+          grep -q ': go1\.20\.14$' /tmp/rabbitmq-windows-x64-build-info.txt
       - uses: actions/upload-artifact@v4
         with:
           name: rabbitmq-native

@@ -94,6 +94,8 @@ ORDER BY CASE
   WHEN username = SYS_CONTEXT('USERENV', 'SESSION_USER') THEN 1
   ELSE 2
 END, username`
+
+// Sorting SYS views through ALL_OBJECTS can take over a minute on Oracle 11g; use the specialized dictionaries.
 const oracleListTablesBaseSQL = `
 SELECT OBJECT_NAME, TABLE_TYPE, COMMENTS
 FROM (
@@ -105,18 +107,22 @@ WHERE t.OWNER = :1
   AND t.NESTED = 'NO'
   AND NOT EXISTS (
     SELECT 1
-    FROM ALL_OBJECTS mv
+    FROM ALL_MVIEWS mv
     WHERE mv.OWNER = t.OWNER
-      AND mv.OBJECT_NAME = t.TABLE_NAME
-      AND mv.OBJECT_TYPE = 'MATERIALIZED VIEW'
+      AND mv.MVIEW_NAME = t.TABLE_NAME
   )
 UNION ALL
-SELECT o.OBJECT_NAME,
-       CASE o.OBJECT_TYPE WHEN 'MATERIALIZED VIEW' THEN 'MATERIALIZED_VIEW' ELSE o.OBJECT_TYPE END AS TABLE_TYPE,
+SELECT v.VIEW_NAME AS OBJECT_NAME,
+       'VIEW' AS TABLE_TYPE,
        CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
-FROM ALL_OBJECTS o
-WHERE o.OWNER = :2
-  AND o.OBJECT_TYPE IN ('VIEW', 'MATERIALIZED VIEW')
+FROM ALL_VIEWS v
+WHERE v.OWNER = :2
+UNION ALL
+SELECT mv.MVIEW_NAME AS OBJECT_NAME,
+       'MATERIALIZED_VIEW' AS TABLE_TYPE,
+       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
+FROM ALL_MVIEWS mv
+WHERE mv.OWNER = :3
 )`
 const oracleListTablesSessionUserBaseSQL = `
 SELECT OBJECT_NAME, TABLE_TYPE, COMMENTS
@@ -128,16 +134,19 @@ FROM USER_TABLES t
 WHERE t.NESTED = 'NO'
   AND NOT EXISTS (
     SELECT 1
-    FROM USER_OBJECTS mv
-    WHERE mv.OBJECT_NAME = t.TABLE_NAME
-      AND mv.OBJECT_TYPE = 'MATERIALIZED VIEW'
+    FROM USER_MVIEWS mv
+    WHERE mv.MVIEW_NAME = t.TABLE_NAME
   )
 UNION ALL
-SELECT o.OBJECT_NAME,
-       CASE o.OBJECT_TYPE WHEN 'MATERIALIZED VIEW' THEN 'MATERIALIZED_VIEW' ELSE o.OBJECT_TYPE END AS TABLE_TYPE,
+SELECT v.VIEW_NAME AS OBJECT_NAME,
+       'VIEW' AS TABLE_TYPE,
        CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
-FROM USER_OBJECTS o
-WHERE o.OBJECT_TYPE IN ('VIEW', 'MATERIALIZED VIEW')
+FROM USER_VIEWS v
+UNION ALL
+SELECT mv.MVIEW_NAME AS OBJECT_NAME,
+       'MATERIALIZED_VIEW' AS TABLE_TYPE,
+       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
+FROM USER_MVIEWS mv
 )`
 const oracleListTablesOrderSQL = `ORDER BY OBJECT_NAME`
 const oracleListTablesSQL = oracleListTablesBaseSQL + "\n" + oracleListTablesOrderSQL
@@ -1688,7 +1697,7 @@ func oracleListTablesQuery(schema string, constraints metadataListConstraints) o
 		"OBJECT_NAME, TABLE_TYPE, COMMENTS",
 		"TABLE_TYPE",
 		oracleListTablesOrderSQL,
-		[]any{schema, schema},
+		[]any{schema, schema, schema},
 		constraints,
 	)
 }
@@ -2950,6 +2959,39 @@ func (s *server) getMetadataObjectSource(schema, name, objectType string) (map[s
 }
 
 func (s *server) loadObjectSourceText(schema, name, objectType string) (string, bool, error) {
+	source, found, err := s.loadAggregatedObjectSourceText(schema, name, objectType)
+	if err == nil {
+		return source, found, nil
+	}
+	return s.loadObjectSourceTextRows(schema, name, objectType)
+}
+
+func (s *server) loadAggregatedObjectSourceText(schema, name, objectType string) (string, bool, error) {
+	rows, err := s.queryRows(`
+SELECT DBMS_XMLGEN.CONVERT(
+  XMLAGG(XMLELEMENT(E, TEXT) ORDER BY LINE).EXTRACT('//text()').GETCLOBVAL(),
+  1
+)
+FROM ALL_SOURCE
+WHERE OWNER = :1 AND NAME = :2 AND TYPE = :3`, []any{schema, name, objectType})
+	if err != nil {
+		return "", false, err
+	}
+	defer s.closeRows(rows)
+	if !rows.Next() {
+		return "", false, rows.Err()
+	}
+	var source sql.NullString
+	if err := rows.Scan(&source); err != nil {
+		return "", false, err
+	}
+	if err := rows.Err(); err != nil {
+		return "", false, err
+	}
+	return source.String, source.Valid, nil
+}
+
+func (s *server) loadObjectSourceTextRows(schema, name, objectType string) (string, bool, error) {
 	rows, err := s.queryRows(`
 SELECT TEXT
 FROM ALL_SOURCE

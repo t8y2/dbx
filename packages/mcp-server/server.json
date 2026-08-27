@@ -6,12 +6,12 @@
     "url": "https://github.com/t8y2/dbx",
     "source": "github"
   },
-  "version": "0.4.70",
+  "version": "0.4.74",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@dbx-app/mcp-server",
-      "version": "0.4.70",
+      "version": "0.4.74",
       "transport": {
         "type": "stdio"
       }

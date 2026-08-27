@@ -63,6 +63,78 @@
   </p>
 </div>
 
+## 赞助商与合作伙伴
+
+<table>
+  <tr>
+    <td align="center" valign="middle" width="220">
+      <a href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank">
+        <picture>
+          <source media="(prefers-color-scheme: dark)" srcset="docs/public/sponsors/rainyun-dark.png" />
+          <img src="https://www.rainyun.com/img/logo.d193755d.png" alt="雨云" height="48" />
+        </picture>
+      </a>
+    </td>
+    <td>
+      雨云是面向开发者和站长的云服务提供商，提供云服务器、物理服务器、游戏云和配套基础设施服务。
+      <a href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank">访问雨云</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="220">
+      <a href="https://www.qiniu.com/" target="_blank">
+        <img src="https://www-static.qbox.me/_next/static/media/logo.0fc18feaa621d2068a7180631f742256.jpg" alt="七牛云" height="64" />
+      </a>
+    </td>
+    <td>
+      七牛云为 DBX 提供对象存储、CDN 等云基础设施资源支持。
+      <a href="https://www.qiniu.com/" target="_blank">访问七牛云</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="220">
+      <a href="https://easysearch.cn" target="_blank">
+        <picture>
+          <source media="(prefers-color-scheme: dark)" srcset="docs/public/sponsors/easysearch-dark.png" />
+          <img src="docs/public/sponsors/easysearch.png" alt="Easysearch" width="150" />
+        </picture>
+      </a>
+    </td>
+    <td>
+      Easysearch 是一款企业级分布式搜索引擎，兼容 ES API、融合全文检索、向量检索、地理空间位置检索、实时分析与 AI 能力，为企业提供统一的数据检索与智能分析基础设施。
+      <a href="https://easysearch.cn" target="_blank">访问 Easysearch</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="220">
+      <a href="https://www.atlascloud.ai/?ref=6YYXWA" target="_blank">
+        <picture>
+          <source media="(prefers-color-scheme: dark)" srcset="docs/public/sponsors/atlas-dark.svg" />
+          <img src="https://www.atlascloud.ai/logo.svg" alt="Atlas Cloud" width="150" />
+        </picture>
+      </a>
+    </td>
+    <td>
+      Atlas Cloud 为开发者提供统一的多模态 AI API，可通过一个接口访问聊天、图像、视频和音频等 400+ 模型。
+      <a href="https://www.atlascloud.ai/?ref=6YYXWA" target="_blank">访问 Atlas Cloud</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="220">
+      <a href="https://www.trustasia.com/ssl/trustasia/code-signing" target="_blank">
+        <picture>
+          <source media="(prefers-color-scheme: dark)" srcset="docs/public/sponsors/trustasia-dark.svg" />
+          <img src="docs/public/sponsors/trustasia.png" alt="TrustAsia" height="44" />
+        </picture>
+      </a>
+    </td>
+    <td>
+      由 TrustAsia 提供代码签名云签服务，实现 CICD 自动化构建可信软件。
+      <a href="https://www.trustasia.com/ssl/trustasia/code-signing" target="_blank">访问 TrustAsia</a>
+    </td>
+  </tr>
+</table>
+
 ## 为什么选择 DBX？
 
 <table>
@@ -402,63 +474,6 @@ make package
 ## 赞助与捐助
 
 DBX 是免费开源项目，但持续维护、数据库兼容性测试、基础设施建设和版本发布都需要长期投入时间与资源。
-
-### 赞助商与合作伙伴
-
-<table>
-  <tr>
-    <td align="center" width="180">
-      <a href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank">
-        <img src="https://www.rainyun.com/img/logo.d193755d.png" alt="雨云" height="48" />
-      </a>
-    </td>
-    <td>
-      雨云是面向开发者和站长的云服务提供商，提供云服务器、物理服务器、游戏云和配套基础设施服务。
-    </td>
-    <td align="center" width="140">
-      <a href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank">访问雨云</a>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" width="180">
-      <a href="https://www.qiniu.com/" target="_blank">
-        <img src="https://www-static.qbox.me/_next/static/media/logo.0fc18feaa621d2068a7180631f742256.jpg" alt="七牛云" height="64" />
-      </a>
-    </td>
-    <td>
-      七牛云为 DBX 提供对象存储、CDN 等云基础设施资源支持。
-    </td>
-    <td align="center" width="140">
-      <a href="https://www.qiniu.com/" target="_blank">访问七牛云</a>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" width="180">
-      <a href="https://easysearch.cn" target="_blank">
-        <img src="docs/public/sponsors/easysearch.png" alt="Easysearch" width="150" />
-      </a>
-    </td>
-    <td>
-      Easysearch 是一款企业级分布式搜索引擎，兼容 ES API、融合全文检索、向量检索、地理空间位置检索、实时分析与 AI 能力，为企业提供统一的数据检索与智能分析基础设施。
-    </td>
-    <td align="center" width="140">
-      <a href="https://easysearch.cn" target="_blank">访问 Easysearch</a>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" width="180">
-      <a href="https://www.atlascloud.ai/?ref=6YYXWA" target="_blank">
-        <img src="https://www.atlascloud.ai/logo.svg" alt="Atlas Cloud" width="150" />
-      </a>
-    </td>
-    <td>
-      Atlas Cloud 为开发者提供统一的多模态 AI API，可通过一个接口访问聊天、图像、视频和音频等 400+ 模型。
-    </td>
-    <td align="center" width="140">
-      <a href="https://www.atlascloud.ai/?ref=6YYXWA" target="_blank">访问 Atlas Cloud</a>
-    </td>
-  </tr>
-</table>
 
 - [支持 DBX](https://my.feishu.cn/wiki/WMTkwdATDiiu4rk14JMcoyhTnoh) —— 通过微信或支付宝自愿捐助
 - [赞助商与合作伙伴](https://my.feishu.cn/wiki/CgOWwwTzzify79k9Oq8cXpUNn6e) —— 支持基础设施、开发工具、服务或社区合作

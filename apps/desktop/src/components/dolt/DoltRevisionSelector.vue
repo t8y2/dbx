@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { Check, ChevronDown, GitBranch, Tag } from "@lucide/vue";
-import DoltScrollArea from "@/components/dolt/DoltScrollArea.vue";
+import VirtualScrollArea from "@/components/common/VirtualScrollArea.vue";
 import type { DoltRef } from "@/lib/dolt/doltVersionControl";
 
 const props = defineProps<{
@@ -153,7 +153,7 @@ onUnmounted(() => document.removeEventListener("pointerdown", onDocumentPointerD
     </div>
 
     <div v-if="open && filteredOptions.length" class="dolt-revision-selector-options" role="listbox">
-      <DoltScrollArea class="max-h-[240px]" scroller-class="p-[3px]">
+      <VirtualScrollArea class="max-h-[240px]" scroller-class="p-[3px]">
         <button
           v-for="(option, index) in filteredOptions"
           :key="`${option.kind}:${option.name}`"
@@ -170,7 +170,7 @@ onUnmounted(() => document.removeEventListener("pointerdown", onDocumentPointerD
           <span class="min-w-0 flex-1 truncate font-mono text-[11px]">{{ option.name }}</span>
           <Check v-if="option.name === modelValue" class="h-3.5 w-3.5 text-primary" />
         </button>
-      </DoltScrollArea>
+      </VirtualScrollArea>
     </div>
   </div>
 </template>

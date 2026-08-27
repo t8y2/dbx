@@ -210,6 +210,8 @@ pub struct TableStructureSqlOptions {
     pub table_comment: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_table_comment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mysql_engine: Option<String>,
     /// Whether the target table is a partitioned parent table (PostgreSQL
     /// `relkind = 'p'`). PostgreSQL rejects `CREATE INDEX CONCURRENTLY` on
     /// partitioned parents, so the builder refuses such a request up front

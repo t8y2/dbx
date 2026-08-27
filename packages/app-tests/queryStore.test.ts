@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { afterEach, test } from "vitest";
+import { afterEach, test, vi } from "vitest";
 import { createPinia, disposePinia, getActivePinia, setActivePinia } from "pinia";
 import { isReactive, nextTick, toRaw } from "vue";
 import { decodeQueryResultArchive } from "../../apps/desktop/src/lib/query/queryResultArchive.ts";
@@ -296,7 +296,7 @@ test("external SQL file paths persist with open query tabs", async () => {
   }
 });
 
-test("legacy Oracle query tabs restore with the manual transaction default", async () => {
+test("legacy Oracle query tabs restore with the auto-commit default", async () => {
   const restoreStorage = installMemoryStorage();
   try {
     setActivePinia(createPinia());
@@ -317,8 +317,32 @@ test("legacy Oracle query tabs restore with the manual transaction default", asy
     store = useQueryStore();
     await store.initOpenTabs();
 
+    assert.equal(store.tabs.find((tab) => tab.id === tabId)?.autoCommit, true);
+  } finally {
+    restoreStorage();
+  }
+});
+
+test("transaction mode changes persist without another tab mutation", async () => {
+  const restoreStorage = installMemoryStorage();
+  vi.useFakeTimers();
+  try {
+    setActivePinia(createPinia());
+    let store = useQueryStore();
+    const tabId = store.createTab("conn-1", "db", "Query");
+    await store.flushPendingPersist();
+
+    store.setAutoCommit(tabId, false);
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(300);
+
+    setActivePinia(createPinia());
+    store = useQueryStore();
+    await store.initOpenTabs();
+
     assert.equal(store.tabs.find((tab) => tab.id === tabId)?.autoCommit, false);
   } finally {
+    vi.useRealTimers();
     restoreStorage();
   }
 });
@@ -693,6 +717,163 @@ test("close all tabs pauses on unsaved query tabs", () => {
   assert.equal(store.showCloseConfirm, false);
   assert.deepEqual(store.tabs, []);
   assert.equal(store.activeTabId, null);
+});
+
+test("connection-scoped close pauses before dropping unsaved query tabs", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+  const queryId = store.createTab("conn-1", "db", "draft query");
+  store.updateSql(queryId, "select 1;");
+  const dataId = store.createTab("conn-1", "db", "users", "data");
+  const outsideId = store.createTab("conn-2", "db", "outside");
+  store.activeTabId = dataId;
+
+  store.closeConnectionTabs("conn-1");
+
+  assert.equal(store.showCloseConfirm, true);
+  assert.equal(store.pendingCloseTabId, queryId);
+  assert.equal(store.closeConfirmContext, "batch");
+  assert.deepEqual(store.closeConfirmDirtyTabIds, [queryId]);
+  assert.deepEqual(
+    store.tabs.map((tab) => tab.id),
+    [queryId, dataId, outsideId],
+  );
+
+  store.cancelClosePendingTab();
+
+  assert.equal(store.showCloseConfirm, false);
+  assert.deepEqual(
+    store.tabs.map((tab) => tab.id),
+    [queryId, dataId, outsideId],
+  );
+});
+
+test("database-scoped close completes the pending batch after all dirty tabs are saved", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+  const firstId = store.createTab("conn-1", "db", "first query");
+  store.updateSql(firstId, "select 1;");
+  const secondId = store.createTab("conn-1", "db", "second query");
+  store.updateSql(secondId, "select 2;");
+  const otherDatabaseId = store.createTab("conn-1", "analytics", "outside");
+
+  store.closeDatabaseTabs("conn-1", "db");
+
+  assert.equal(store.showCloseConfirm, true);
+  assert.deepEqual(store.closeConfirmDirtyTabIds, [firstId, secondId]);
+  store.markTabClean(store.tabs.find((tab) => tab.id === firstId));
+  store.markTabClean(store.tabs.find((tab) => tab.id === secondId));
+
+  assert.equal(store.completePendingCloseAfterSaveAll(), "tabs");
+  assert.deepEqual(
+    store.tabs.map((tab) => tab.id),
+    [otherDatabaseId],
+  );
+});
+
+test("connection-scoped close resumes after a saved tab and restores its prompt after save failure", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+  const firstId = store.createTab("conn-1", "db", "first query");
+  store.updateSql(firstId, "select 1;");
+  const secondId = store.createTab("conn-1", "db", "second query");
+  store.updateSql(secondId, "select 2;");
+  const outsideId = store.createTab("conn-2", "db", "outside");
+
+  store.closeConnectionTabs("conn-1");
+
+  assert.equal(store.saveAndClosePendingTab(), firstId);
+  store.markTabClean(store.tabs.find((tab) => tab.id === firstId));
+  store.closeTab(firstId, { force: true });
+  assert.equal(store.showCloseConfirm, true);
+  assert.equal(store.pendingCloseTabId, secondId);
+
+  assert.equal(store.saveAndClosePendingTab(), secondId);
+  assert.equal(store.resumeCloseConfirm(), true);
+  assert.equal(store.pendingCloseTabId, secondId);
+  assert.deepEqual(
+    store.tabs.map((tab) => tab.id),
+    [secondId, outsideId],
+  );
+
+  assert.equal(store.saveAndClosePendingTab(), secondId);
+  store.markTabClean(store.tabs.find((tab) => tab.id === secondId));
+  store.closeTab(secondId, { force: true });
+  assert.deepEqual(
+    store.tabs.map((tab) => tab.id),
+    [outsideId],
+  );
+  assert.equal(store.activeTabId, outsideId);
+});
+
+test("connection-scoped close honors disabled unsaved SQL confirmation", () => {
+  const restoreStorage = installMemoryStorage();
+  try {
+    setActivePinia(createPinia());
+    useSettingsStore().updateEditorSettings({ confirmUnsavedSqlClose: false });
+    const store = useQueryStore();
+    const queryId = store.createTab("conn-1", "db", "draft query");
+    store.updateSql(queryId, "select 1;");
+    const outsideId = store.createTab("conn-2", "db", "outside");
+
+    store.closeConnectionTabs("conn-1");
+
+    assert.equal(store.showCloseConfirm, false);
+    assert.deepEqual(
+      store.tabs.map((tab) => tab.id),
+      [outsideId],
+    );
+  } finally {
+    restoreStorage();
+  }
+});
+
+test("concurrent connection-scoped closes coalesce every pending scope", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+  const firstConnectionId = store.createTab("conn-1", "db", "first draft");
+  store.updateSql(firstConnectionId, "select 1;");
+  const secondConnectionId = store.createTab("conn-2", "db", "second draft");
+  store.updateSql(secondConnectionId, "select 2;");
+  const keepId = store.createTab("conn-3", "db", "keep");
+
+  store.closeConnectionTabs("conn-1");
+  store.closeConnectionTabs("conn-2");
+
+  assert.deepEqual(store.closeConfirmDirtyTabIds, [firstConnectionId, secondConnectionId]);
+  store.forceCloseAllPendingTabs();
+  assert.deepEqual(
+    store.tabs.map((tab) => tab.id),
+    [keepId],
+  );
+  assert.equal(store.activeTabId, keepId);
+});
+
+test("scoped close coalesces with pending completion state", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+  const firstConnectionId = store.createTab("conn-1", "db", "first draft");
+  store.updateSql(firstConnectionId, "select 1;");
+  const keepId = store.createTab("conn-3", "db", "keep");
+  const secondConnectionId = store.createTab("conn-2", "db", "second draft");
+  store.updateSql(secondConnectionId, "select 2;");
+  let completions = 0;
+
+  store.closeRightTabs(keepId, () => {
+    completions += 1;
+  });
+  store.closeConnectionTabs("conn-1");
+
+  assert.equal(store.showCloseConfirm, true);
+  assert.deepEqual(store.closeConfirmDirtyTabIds, [secondConnectionId, firstConnectionId]);
+  store.forceCloseAllPendingTabs();
+
+  assert.equal(completions, 1);
+  assert.deepEqual(
+    store.tabs.map((tab) => tab.id),
+    [keepId],
+  );
+  assert.equal(store.activeTabId, keepId);
 });
 
 test("disabled unsaved SQL close confirmation closes dirty tabs directly", () => {
@@ -1076,6 +1257,7 @@ test("discard all pending close changes closes the full pending batch", () => {
 
 test("app close confirmation discards dirty SQL without closing the tab", () => {
   setActivePinia(createPinia());
+  useSettingsStore().editorSettings.appCloseUnsavedTabsMode = "prompt";
   const store = useQueryStore();
   const tabId = store.createTab("conn-1", "db", "a.sql");
   const tab = store.tabs.find((item) => item.id === tabId);
@@ -1129,6 +1311,7 @@ test("disabled unsaved SQL close confirmation skips app close prompt", () => {
 
 test("discard all app close changes keeps tabs open and clean", () => {
   setActivePinia(createPinia());
+  useSettingsStore().editorSettings.appCloseUnsavedTabsMode = "prompt";
   const store = useQueryStore();
   const firstId = store.createTab("conn-1", "db", "a.sql");
   const first = store.tabs.find((item) => item.id === firstId);
@@ -1670,6 +1853,47 @@ test("closing an ordinary query result preserves the query tab", async () => {
   assert.equal(tab.result, undefined);
   assert.equal(tab.results, undefined);
   assert.equal(tab.activeResultRunId, undefined);
+});
+
+test("closing a tab releases result payloads retained by deactivated grids", () => {
+  setActivePinia(createPinia());
+  const store = useQueryStore();
+  const tabId = store.createTab("conn-1", "db");
+  const tab = store.tabs.find((item) => item.id === tabId);
+  assert.ok(tab);
+
+  tab.result = {
+    columns: ["payload"],
+    column_types: ["TEXT"],
+    rows: [["x".repeat(10_000)]],
+    spatial_values: [[4326]],
+    mongo_documents: [{ payload: "x".repeat(10_000) }],
+    mongo_copy_documents: [{ $binary: "x".repeat(10_000) }],
+    large_value_cells: [{ row_index: 0, column_index: 0, original_bytes: 10_000 }],
+    elasticsearch_raw_body: "x".repeat(10_000),
+    messages: [{ severity: "NOTICE", message: "x".repeat(10_000) }],
+    affected_rows: 0,
+    execution_time_ms: 1,
+  };
+  const retainedResult = tab.result;
+  const retainedRunResult: QueryResult = {
+    columns: ["older"],
+    rows: [["y".repeat(10_000)]],
+    affected_rows: 0,
+    execution_time_ms: 1,
+  };
+  tab.resultRuns = [{ id: "run-1", title: "Run 1", sequence: 1, sql: "select 1", createdAt: 1, result: retainedRunResult }];
+  tab.activeResultRunId = "run-1";
+
+  store.closeTab(tabId, { force: true });
+
+  assert.equal(store.tabs.some((item) => item.id === tabId), false);
+  assert.deepEqual(retainedResult.columns, []);
+  assert.deepEqual(retainedResult.rows, []);
+  assert.equal(retainedResult.mongo_documents, undefined);
+  assert.equal(retainedResult.elasticsearch_raw_body, undefined);
+  assert.deepEqual(retainedRunResult.rows, []);
+  assert.equal(tab.resultRuns, undefined);
 });
 
 test("removing the active result run clears output when remaining caches are unavailable", async () => {
@@ -2779,6 +3003,101 @@ test("uses the visible Vastbase relation schema for unqualified query writes", a
   }
 });
 
+test("uses the visible Kingbase relation schema for an unqualified aliased query target", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  const columnRequests: Array<{ database: string | null; schema: string | null; table: string | null }> = [];
+
+  connectionStore.addEphemeralConnection(kingbaseConn("kingbase-1"));
+
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/query/execute-multi") {
+      return new Response(
+        JSON.stringify([
+          {
+            columns: ["feearea", "month", "status"],
+            rows: [["1010", 202507, "3"]],
+            affected_rows: 0,
+            execution_time_ms: 1,
+          },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url === "/api/query/analyze-editability") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      const explicitSchema = body.sql.includes("actual_schema") ? "actual_schema" : undefined;
+      return new Response(
+        JSON.stringify({
+          editable: true,
+          analysis: {
+            schema: explicitSchema,
+            schemaQuoted: false,
+            tableName: "m_workflow",
+            tableNameQuoted: false,
+            tableAlias: "mw",
+            selectStar: true,
+            sources: [{ key: "mw:0", schema: explicitSchema, tableName: "m_workflow", tableNameQuoted: false, schemaQuoted: false, alias: "mw" }],
+            columns: [],
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url.startsWith("/api/schema/columns?")) {
+      const params = new URL(url, "http://localhost").searchParams;
+      columnRequests.push({ database: params.get("database"), schema: params.get("schema"), table: params.get("table") });
+      const resolvedSchema = params.get("schema") || "workflow_schema";
+      return new Response(
+        JSON.stringify([
+          { name: "feearea", data_type: "varchar", resolved_schema: resolvedSchema, is_nullable: false, column_default: null, is_primary_key: false, extra: null, comment: null },
+          { name: "month", data_type: "integer", resolved_schema: resolvedSchema, is_nullable: false, column_default: null, is_primary_key: false, extra: null, comment: null },
+          { name: "status", data_type: "varchar", resolved_schema: resolvedSchema, is_nullable: false, column_default: null, is_primary_key: false, extra: null, comment: null },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url === "/api/query/prepare-pagination-plan") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      return new Response(JSON.stringify({ sqlToExecute: body.options.sql, useAgentResultSession: false }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    const tabId = store.createTab("kingbase-1", "lx_dev_db", "Unqualified", "query");
+    await store.executeTabSql(tabId, "select * from m_workflow AS mw where feearea = '1010' and month = 202507");
+
+    const tab = store.tabs.find((item) => item.id === tabId);
+    await waitFor(() => columnRequests.length > 0 && tab?.tableMeta?.tableName === "m_workflow");
+    assert.deepEqual(columnRequests, [{ database: "lx_dev_db", schema: "", table: "m_workflow" }]);
+    assert.equal(tab?.tableMeta?.database, "lx_dev_db");
+    assert.equal(tab?.tableMeta?.schema, "workflow_schema");
+    assert.deepEqual(tab?.tableMeta?.primaryKeys, []);
+    assert.equal(tab?.queryAnalysis?.tableAlias, "mw");
+    assert.equal(tab?.queryEditabilityReason, undefined);
+
+    const explicitTabId = store.createTab("kingbase-1", "lx_dev_db", "Explicit", "query");
+    await store.executeTabSql(explicitTabId, "select * from actual_schema.m_workflow AS mw where feearea = '1010'");
+
+    const explicitTab = store.tabs.find((item) => item.id === explicitTabId);
+    await waitFor(() => columnRequests.length > 1 && explicitTab?.tableMeta?.tableName === "m_workflow");
+    assert.deepEqual(columnRequests[1], { database: "lx_dev_db", schema: "actual_schema", table: "m_workflow" });
+    assert.equal(explicitTab?.tableMeta?.schema, "actual_schema");
+    assert.equal(explicitTab?.queryAnalysis?.tableAlias, "mw");
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
 test("keeps PostgreSQL quoted primary keys distinct from case-only result columns", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());
@@ -3862,6 +4181,15 @@ test("releasing connection tabs keeps SQL tabs and closes object tabs", async ()
       session_id: "session-query",
     };
     queryTab.resultSessionId = "session-query";
+    const retainedQueryResult = queryTab.result;
+    const retainedRunResult: QueryResult = {
+      columns: ["previous"],
+      rows: [["previous payload"]],
+      affected_rows: 0,
+      execution_time_ms: 1,
+    };
+    queryTab.resultRuns = [{ id: "run-1", title: "Run 1", sequence: 1, sql: "select 1", createdAt: 1, result: retainedRunResult }];
+    queryTab.activeResultRunId = "run-1";
     dataTab.result = {
       columns: ["payload"],
       rows: [["data"]],
@@ -3886,6 +4214,10 @@ test("releasing connection tabs keeps SQL tabs and closes object tabs", async ()
     );
     assert.equal(queryTab.result, undefined);
     assert.equal(queryTab.resultSessionId, undefined);
+    assert.equal(queryTab.resultRuns, undefined);
+    assert.equal(queryTab.activeResultRunId, undefined);
+    assert.deepEqual(retainedQueryResult.rows, []);
+    assert.deepEqual(retainedRunResult.rows, []);
     assert.equal(dataTab.result, undefined);
     assert.equal(dataTab.resultSessionId, undefined);
   } finally {

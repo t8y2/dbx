@@ -36,6 +36,19 @@ describe("normalizeColumnFormatter", () => {
     expect(normalizeColumnFormatter({ ...base, filter: { column: "dict_type", mode: "between", value: "A" } })).toBeUndefined();
     expect(normalizeColumnFormatter({ ...base, filter: { column: "dict_type", mode: "raw-sql", value: "1=1" } })).toBeUndefined();
   });
+
+  it.each(["is-blank", "is-not-blank"] as const)("preserves the value-less %s manual reference filter", (mode) => {
+    expect(
+      normalizeColumnFormatter({
+        kind: "foreign-key-display",
+        referenceMode: "manual",
+        refTable: "dictionary",
+        refColumn: "dict_key",
+        displayColumn: "dict_value",
+        filter: { column: "dict_type", mode },
+      }),
+    ).toMatchObject({ filter: { column: "dict_type", mode, value: undefined, endValue: undefined } });
+  });
 });
 
 describe("normalizeSupportedDateTimePattern", () => {

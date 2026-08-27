@@ -1,5 +1,5 @@
-import { diffChars, diffLines, type Change } from "diff";
 import { formatJsonSource } from "@/lib/common/safeJsonFormat";
+import { buildTextDiff, type TextDiffKind, type TextDiffRow, type TextDiffSegment } from "@/lib/common/textDiff";
 import { formatXmlSource } from "@/lib/common/xmlFormat";
 import type { QueryResult } from "@/types/database";
 import type { DoltDiffColumnKind, DoltRowChangeKind } from "@/lib/dolt/doltVersionControl";
@@ -9,7 +9,7 @@ export type DoltCellSide = "before" | "after";
 export type DoltCellFormat = "raw" | "json" | "xml";
 export type DoltCellFormatMode = "auto" | DoltCellFormat;
 export type DoltCellValueState = "value" | "row-missing" | "column-missing";
-export type DoltTextDiffKind = "equal" | "added" | "removed" | "modified";
+export type DoltTextDiffKind = TextDiffKind;
 
 export interface DoltDiffCellTarget {
   rowIndex: number;
@@ -34,23 +34,8 @@ export interface DoltCellFormatResult {
   error: string | null;
 }
 
-export interface DoltTextDiffSegment {
-  text: string;
-  changed: boolean;
-}
-
-export interface DoltTextDiffRow {
-  kind: DoltTextDiffKind;
-  beforeLineNumber: number | null;
-  afterLineNumber: number | null;
-  beforeText: string;
-  afterText: string;
-  beforeSegments: DoltTextDiffSegment[];
-  afterSegments: DoltTextDiffSegment[];
-}
-
-const MAX_DETAILED_LINE_DIFF_CHARACTERS = 500_000;
-const MAX_CHARACTER_DIFF_CHARACTERS = 20_000;
+export type DoltTextDiffSegment = TextDiffSegment;
+export type DoltTextDiffRow = TextDiffRow;
 
 export function doltCellValueState(target: DoltDiffCellTarget, side: DoltCellSide): DoltCellValueState {
   if (side === "before") {
@@ -95,128 +80,8 @@ export function detectDoltCellFormat(values: readonly DoltCellDisplayValue[]): D
   return "raw";
 }
 
-function normalizeLineEndings(value: string): string {
-  return value.replace(/\r\n?/g, "\n");
-}
-
-function linesFromChange(change: Change): string[] {
-  if (!change.value) return [];
-  const lines = change.value.split("\n");
-  if (change.value.endsWith("\n")) lines.pop();
-  return lines;
-}
-
-function unchangedSegments(text: string): DoltTextDiffSegment[] {
-  return text ? [{ text, changed: false }] : [];
-}
-
-function changedSegments(beforeText: string, afterText: string): { before: DoltTextDiffSegment[]; after: DoltTextDiffSegment[] } {
-  if (beforeText.length + afterText.length > MAX_CHARACTER_DIFF_CHARACTERS) {
-    return {
-      before: beforeText ? [{ text: beforeText, changed: true }] : [],
-      after: afterText ? [{ text: afterText, changed: true }] : [],
-    };
-  }
-  const changes = diffChars(beforeText, afterText);
-  return {
-    before: changes.filter((change) => !change.added).map((change) => ({ text: change.value, changed: !!change.removed })),
-    after: changes.filter((change) => !change.removed).map((change) => ({ text: change.value, changed: !!change.added })),
-  };
-}
-
-function appendEqualRows(rows: DoltTextDiffRow[], lines: string[], beforeLine: { value: number }, afterLine: { value: number }) {
-  for (const line of lines) {
-    rows.push({
-      kind: "equal",
-      beforeLineNumber: beforeLine.value++,
-      afterLineNumber: afterLine.value++,
-      beforeText: line,
-      afterText: line,
-      beforeSegments: unchangedSegments(line),
-      afterSegments: unchangedSegments(line),
-    });
-  }
-}
-
-function appendChangedRows(rows: DoltTextDiffRow[], removed: string[], added: string[], beforeLine: { value: number }, afterLine: { value: number }) {
-  const count = Math.max(removed.length, added.length);
-  for (let index = 0; index < count; index += 1) {
-    const beforeText = removed[index];
-    const afterText = added[index];
-    if (beforeText !== undefined && afterText !== undefined) {
-      const segments = changedSegments(beforeText, afterText);
-      rows.push({
-        kind: beforeText === afterText ? "equal" : "modified",
-        beforeLineNumber: beforeLine.value++,
-        afterLineNumber: afterLine.value++,
-        beforeText,
-        afterText,
-        beforeSegments: beforeText === afterText ? unchangedSegments(beforeText) : segments.before,
-        afterSegments: beforeText === afterText ? unchangedSegments(afterText) : segments.after,
-      });
-    } else if (beforeText !== undefined) {
-      rows.push({
-        kind: "removed",
-        beforeLineNumber: beforeLine.value++,
-        afterLineNumber: null,
-        beforeText,
-        afterText: "",
-        beforeSegments: unchangedSegments(beforeText),
-        afterSegments: [],
-      });
-    } else if (afterText !== undefined) {
-      rows.push({
-        kind: "added",
-        beforeLineNumber: null,
-        afterLineNumber: afterLine.value++,
-        beforeText: "",
-        afterText,
-        beforeSegments: [],
-        afterSegments: unchangedSegments(afterText),
-      });
-    }
-  }
-}
-
-function buildFallbackRows(before: string, after: string): DoltTextDiffRow[] {
-  const beforeLines = before.split("\n");
-  const afterLines = after.split("\n");
-  const rows: DoltTextDiffRow[] = [];
-  appendChangedRows(rows, beforeLines, afterLines, { value: 1 }, { value: 1 });
-  return rows;
-}
-
 export function buildDoltTextDiff(beforeValue: string, afterValue: string): DoltTextDiffRow[] {
-  const before = normalizeLineEndings(beforeValue);
-  const after = normalizeLineEndings(afterValue);
-  if (before.length + after.length > MAX_DETAILED_LINE_DIFF_CHARACTERS) return buildFallbackRows(before, after);
-
-  const changes = diffLines(before, after, { newlineIsToken: false });
-  const rows: DoltTextDiffRow[] = [];
-  const beforeLine = { value: 1 };
-  const afterLine = { value: 1 };
-  let index = 0;
-  while (index < changes.length) {
-    const change = changes[index];
-    if (!change.added && !change.removed) {
-      appendEqualRows(rows, linesFromChange(change), beforeLine, afterLine);
-      index += 1;
-      continue;
-    }
-
-    const removed: string[] = [];
-    const added: string[] = [];
-    while (index < changes.length && (changes[index].added || changes[index].removed)) {
-      const changedLines = linesFromChange(changes[index]);
-      if (changes[index].removed) removed.push(...changedLines);
-      else added.push(...changedLines);
-      index += 1;
-    }
-    appendChangedRows(rows, removed, added, beforeLine, afterLine);
-  }
-
-  if (rows.length === 0) appendEqualRows(rows, [""], beforeLine, afterLine);
-  return rows;
+  return buildTextDiff(beforeValue, afterValue);
 }
 
 export function doltCellCopyText(target: DoltDiffCellTarget, side: DoltCellSide): string | null {

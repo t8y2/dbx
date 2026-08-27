@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch, type CSSProperties } from "vue";
-import DoltScrollArea from "@/components/dolt/DoltScrollArea.vue";
+import VirtualScrollArea from "@/components/common/VirtualScrollArea.vue";
 import type { QueryResult } from "@/types/database";
 import type { DoltDiffColumnKind, DoltDiffRow } from "@/lib/dolt/doltVersionControl";
 import type { DoltDiffCellTarget } from "@/lib/dolt/doltCellDiff";
@@ -32,7 +32,7 @@ const COLUMN_BUFFER = 240;
 const minimumColumnWidth = 72;
 const maximumColumnWidth = 360;
 
-const scrollArea = ref<InstanceType<typeof DoltScrollArea> | null>(null);
+const scrollArea = ref<InstanceType<typeof VirtualScrollArea> | null>(null);
 const measuredWidths = ref<number[]>([]);
 const scrollTop = ref(0);
 const scrollLeft = ref(0);
@@ -227,7 +227,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <DoltScrollArea ref="scrollArea" class="min-h-0 flex-1" scroller-class="dolt-diff-table-scroller" @scroll="onScroll" @resize="updateViewport">
+  <VirtualScrollArea ref="scrollArea" class="min-h-0 flex-1" scroller-class="dolt-diff-table-scroller" @scroll="onScroll" @resize="updateViewport">
     <div class="dolt-diff-table-content" :style="contentStyle">
       <div class="dolt-diff-table-header" :style="{ width: `${Math.max(totalWidth, 1)}px`, height: '28px' }">
         <div v-for="column in visibleColumns" :key="`header-${column.index}-${column.column}`" class="dolt-diff-table-header-cell" :class="headerClass?.(column.index, column.column)" :data-column-kind="column.kind" :style="{ left: `${column.left}px`, width: `${column.width}px` }">
@@ -258,7 +258,7 @@ onUnmounted(() => {
       </div>
       <div v-if="rows.length === 0" class="dolt-diff-table-empty">{{ $t("doltVersionControl.noRowChanges") }}</div>
     </div>
-  </DoltScrollArea>
+  </VirtualScrollArea>
 </template>
 
 <style scoped>

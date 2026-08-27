@@ -33,6 +33,46 @@ describe("connectionStore disconnect data-tab metadata freshness", () => {
     setActivePinia(createPinia());
   });
 
+  it("disconnect keeps an unsaved query pending until the user resolves scoped close", async () => {
+    const checkConnectionHealth = vi.fn().mockResolvedValue(undefined);
+    const disconnectDb = vi.fn().mockResolvedValue(undefined);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth,
+      disconnectDb,
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    useSettingsStore().editorSettings.disconnectTabHandlingMode = "close-tabs";
+    store.connections = [pgConnection("conn-a"), pgConnection("conn-b")];
+    store.connectedIds.add("conn-a");
+
+    const queryStore = useQueryStore();
+    const queryId = queryStore.createTab("conn-a", "app", "draft query");
+    queryStore.updateSql(queryId, "select 1;");
+    const outsideId = queryStore.createTab("conn-b", "app", "outside");
+
+    await store.disconnect("conn-a");
+
+    expect(disconnectDb).toHaveBeenCalledWith("conn-a", undefined);
+    expect(store.connectedIds.has("conn-a")).toBe(false);
+    expect(queryStore.showCloseConfirm).toBe(true);
+    expect(queryStore.pendingCloseTabId).toBe(queryId);
+    expect(queryStore.tabs.map((tab) => tab.id)).toEqual([queryId, outsideId]);
+
+    queryStore.forceCloseAllPendingTabs();
+    expect(queryStore.tabs.map((tab) => tab.id)).toEqual([outsideId]);
+  }, 10_000);
+
   it("clears data-tab metadata freshness for the disconnected connection only", async () => {
     const checkConnectionHealth = vi.fn().mockResolvedValue(undefined);
     const disconnectDb = vi.fn().mockResolvedValue(undefined);
@@ -42,7 +82,9 @@ describe("connectionStore disconnect data-tab metadata freshness", () => {
       checkConnectionHealth,
       disconnectDb,
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
       saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
       saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
     }));
 

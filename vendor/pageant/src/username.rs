@@ -25,11 +25,20 @@ pub(crate) fn resolve_username<E>(
     parse_username(local().map_err(UsernameLookupError::Api)?).map_err(|_| UsernameLookupError::Invalid)
 }
 
-fn parse_username(buffer: Vec<u8>) -> Result<String, UsernameParseError> {
-    let Some((&0, bytes)) = buffer.split_last() else {
-        return if buffer.is_empty() { Err(UsernameParseError::Empty) } else { Err(UsernameParseError::Invalid) };
-    };
-    let username = std::str::from_utf8(bytes).map_err(|_| UsernameParseError::Invalid)?;
+fn parse_username(mut buffer: Vec<u8>) -> Result<String, UsernameParseError> {
+    if buffer.is_empty() {
+        return Err(UsernameParseError::Empty);
+    }
+    if buffer.last() != Some(&0) {
+        return Err(UsernameParseError::Invalid);
+    }
+    while buffer.last() == Some(&0) {
+        buffer.pop();
+    }
+    if buffer.contains(&0) {
+        return Err(UsernameParseError::Invalid);
+    }
+    let username = std::str::from_utf8(&buffer).map_err(|_| UsernameParseError::Invalid)?;
     let username = username.rsplit_once('\\').map_or(username, |(_, username)| username);
     let username = username.split_once('@').map_or(username, |(username, _)| username);
     if username.is_empty() { Err(UsernameParseError::Empty) } else { Ok(username.to_owned()) }
@@ -55,6 +64,13 @@ mod tests {
     fn normalizes_principal_and_sam_names() {
         assert_eq!(parse_username(b"alice@example.com\0".to_vec()), Ok("alice".to_owned()));
         assert_eq!(parse_username(b"DOMAIN\\alice\0".to_vec()), Ok("alice".to_owned()));
+    }
+
+    #[test]
+    fn accepts_only_trailing_username_buffer_padding() {
+        assert_eq!(parse_username(b"Shaan\0\0\0\0\0\0\0".to_vec()), Ok("Shaan".to_owned()));
+        assert_eq!(format_pipe_name("Shaan", "0123abcd"), "\\\\.\\pipe\\pageant.Shaan.0123abcd");
+        assert_eq!(parse_username(b"alice\0unexpected\0".to_vec()), Err(UsernameParseError::Invalid));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { beforeEach, test, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
-import { encodeSchemaTreeCache, encodeTableSearchIndexManifest, type TableSearchIndexManifestEntry } from "../../apps/desktop/src/lib/metadata/schemaTreeCache.ts";
+import { decodeSchemaTreeCache, encodeSchemaTreeCache, encodeTableSearchIndexManifest, type TableSearchIndexManifestEntry } from "../../apps/desktop/src/lib/metadata/schemaTreeCache.ts";
 import type { ConnectionConfig, TreeNode } from "../../apps/desktop/src/types/database.ts";
 
 const MANIFEST_CACHE_KEY = "dbx:sidebar-table-search-index-manifest-v1";
@@ -99,6 +99,51 @@ function connectionNodeWithDatabases(...databases: string[]): TreeNode {
     isExpanded: true,
     children: databases.map((database) => ({ id: "conn-1:" + database, label: database, type: "database", connectionId: "conn-1", database })),
   };
+}
+
+function connectionNodeWithTableGroups(...databases: string[]): { root: TreeNode; groups: Record<string, TreeNode> } {
+  const groups: Record<string, TreeNode> = {};
+  const root: TreeNode = {
+    id: "conn-1",
+    label: "conn-1",
+    type: "connection",
+    connectionId: "conn-1",
+    isExpanded: true,
+    children: databases.map((database) => {
+      const group: TreeNode = {
+        id: `conn-1:${database}:public:__tables`,
+        label: "tree.tables",
+        type: "group-tables",
+        connectionId: "conn-1",
+        database,
+        schema: "public",
+        isExpanded: true,
+        children: [],
+      };
+      groups[database] = group;
+      return {
+        id: `conn-1:${database}`,
+        label: database,
+        type: "database",
+        connectionId: "conn-1",
+        database,
+        isExpanded: true,
+        children: [
+          {
+            id: `conn-1:${database}:public`,
+            label: "public",
+            type: "schema",
+            connectionId: "conn-1",
+            database,
+            schema: "public",
+            isExpanded: true,
+            children: [group],
+          },
+        ],
+      } satisfies TreeNode;
+    }),
+  };
+  return { root, groups };
 }
 
 function indexEnvelope(entries: Array<{ name: string; tableType: string }>, cachedAt = Date.now()) {
@@ -203,6 +248,30 @@ test("concurrent reads of the same index cache key hit the storage once", async 
     assert.equal(loadSchemaCacheMock.mock.calls.filter(([key]) => key !== MANIFEST_CACHE_KEY).length, 1);
     assert.equal(listTablesMock.mock.calls.length, 0);
     assert.equal(checkConnectionHealthMock.mock.calls.length, 0);
+  } finally {
+    restoreStorage();
+  }
+});
+
+test("bounds in-memory regex indexes while keeping persisted scopes reloadable", async () => {
+  const restoreStorage = installMemoryStorage();
+  try {
+    setActivePinia(createPinia());
+    const store = useConnectionStore();
+    store.addEphemeralConnection(conn("conn-1"));
+    const scopes = Array.from({ length: 33 }, (_, index) => manifestScope(`index-${index}`, `parent-${index}`, { database: `db-${index}` }));
+    persistedCache.set(MANIFEST_CACHE_KEY, encodeTableSearchIndexManifest(scopes));
+    for (let index = 0; index < scopes.length; index += 1) {
+      persistedCache.set(`index-${index}`, indexEnvelope([{ name: `table_${index}`, tableType: "TABLE" }]));
+    }
+
+    assert.equal((await store.loadSidebarTableSearchIndexScopes()).length, 33);
+    loadSchemaCacheMock.mockClear();
+
+    // Iterating again from the oldest scope reloads each persisted entry because
+    // only the most recent 32 indexes are kept in memory.
+    assert.equal((await store.loadSidebarTableSearchIndexScopes()).length, 33);
+    assert.equal(loadSchemaCacheMock.mock.calls.length, 33);
   } finally {
     restoreStorage();
   }
@@ -496,6 +565,167 @@ test("updating a connection invalidates its in-memory index and manifest scopes"
     assert.equal(lastPayload?.scopes.length, 1);
     assert.equal(listTablesMock.mock.calls.length, 0);
     assert.equal(checkConnectionHealthMock.mock.calls.length, 0);
+  } finally {
+    restoreStorage();
+  }
+});
+
+test("refreshing a table group invalidates only its local index across rename and delete", async () => {
+  const restoreStorage = installMemoryStorage();
+  try {
+    setActivePinia(createPinia());
+    const store = useConnectionStore();
+    store.addEphemeralConnection(conn("conn-1"));
+    const { root, groups } = connectionNodeWithTableGroups("app", "audit");
+    store.treeNodes.push(root);
+    const tables = new Map<string, Array<{ name: string; table_type: string }>>([
+      ["app", [{ name: "old_orders", table_type: "TABLE" }]],
+      ["audit", [{ name: "audit_log", table_type: "TABLE" }]],
+    ]);
+    listTablesMock.mockImplementation(async (_connectionId: string, database: string, _schema: string, _filter: unknown, limit = 500, offset = 0) => (tables.get(database) ?? []).slice(offset, offset + limit));
+
+    await store.refreshSidebarTableSearchIndex(groups.app!.id);
+    await store.refreshSidebarTableSearchIndex(groups.audit!.id);
+    store.setSidebarTableSearchQuery(groups.app!.id, "orders");
+
+    tables.set("app", [{ name: "renamed_orders", table_type: "TABLE" }]);
+    await store.refreshTreeNode(groups.app!);
+
+    assert.deepEqual(
+      groups.app!.children?.map((node) => node.label),
+      ["renamed_orders"],
+    );
+    assert.equal(await store.loadSidebarTableSearchIndex(groups.app!.id), null);
+    assert.deepEqual(
+      (await store.loadSidebarTableSearchIndex(groups.audit!.id))?.map((entry) => entry.name),
+      ["audit_log"],
+    );
+    assert.deepEqual(
+      store.sidebarTableSearchIndexInvalidation.scopes.map((scope) => scope.parentNodeId),
+      [groups.app!.id],
+    );
+
+    assert.deepEqual(
+      (await store.refreshSidebarTableSearchIndex(groups.app!.id)).map((entry) => entry.name),
+      ["renamed_orders"],
+    );
+    tables.set("app", []);
+    await store.refreshTreeNode(groups.app!);
+    assert.deepEqual(await store.refreshSidebarTableSearchIndex(groups.app!.id), []);
+    assert.equal(
+      (await store.loadSidebarTableSearchIndex(groups.app!.id))?.some((entry) => entry.name === "renamed_orders"),
+      false,
+    );
+    assert.deepEqual(
+      (await store.loadSidebarTableSearchIndex(groups.audit!.id))?.map((entry) => entry.name),
+      ["audit_log"],
+    );
+  } finally {
+    restoreStorage();
+  }
+});
+
+test("a table refresh prevents an older in-flight index build from restoring stale names", async () => {
+  const restoreStorage = installMemoryStorage();
+  try {
+    setActivePinia(createPinia());
+    const store = useConnectionStore();
+    store.addEphemeralConnection(conn("conn-1"));
+    const { root, groups } = connectionNodeWithTableGroups("app");
+    store.treeNodes.push(root);
+    store.setSidebarTableSearchQuery(groups.app!.id, "orders");
+    let releaseStale!: () => void;
+    const staleGate = new Promise<void>((resolve) => {
+      releaseStale = resolve;
+    });
+    let callCount = 0;
+    listTablesMock.mockImplementation(async () => {
+      callCount += 1;
+      if (callCount === 1) {
+        await staleGate;
+        return [{ name: "stale_orders", table_type: "TABLE" }];
+      }
+      return [{ name: "fresh_orders", table_type: "TABLE" }];
+    });
+
+    const staleBuild = store.refreshSidebarTableSearchIndex(groups.app!.id);
+    await vi.waitFor(() => assert.equal(callCount, 1));
+    await store.refreshTreeNode(groups.app!);
+    releaseStale();
+
+    assert.deepEqual(await staleBuild, []);
+    assert.deepEqual(
+      groups.app!.children?.map((node) => node.label),
+      ["fresh_orders"],
+    );
+    assert.equal(await store.loadSidebarTableSearchIndex(groups.app!.id), null);
+    const invalidatedCacheKey = deleteSchemaCachePrefixMock.mock.calls.at(-1)?.[0];
+    assert.ok(typeof invalidatedCacheKey === "string");
+    assert.equal(persistedCache.has(invalidatedCacheKey), false);
+  } finally {
+    restoreStorage();
+  }
+});
+
+test("stale index persistence cannot delete a replacement built after refresh", async () => {
+  const restoreStorage = installMemoryStorage();
+  try {
+    setActivePinia(createPinia());
+    const store = useConnectionStore();
+    store.addEphemeralConnection(conn("conn-1"));
+    const { root, groups } = connectionNodeWithTableGroups("app");
+    store.treeNodes.push(root);
+    store.setSidebarTableSearchQuery(groups.app!.id, "orders");
+
+    let listCallCount = 0;
+    listTablesMock.mockImplementation(async () => {
+      listCallCount += 1;
+      return [{ name: listCallCount === 1 ? "stale_orders" : "fresh_orders", table_type: "TABLE" }];
+    });
+
+    let releaseStaleSave!: () => void;
+    let markStaleSaveStarted!: () => void;
+    const staleSaveStarted = new Promise<void>((resolve) => {
+      markStaleSaveStarted = resolve;
+    });
+    const staleSaveGate = new Promise<void>((resolve) => {
+      releaseStaleSave = resolve;
+    });
+    let indexSaveCount = 0;
+    let indexCacheKey = "";
+    saveSchemaCacheMock.mockImplementation(async (cacheKey: string, payload: unknown) => {
+      if (cacheKey !== MANIFEST_CACHE_KEY) {
+        indexCacheKey = cacheKey;
+        indexSaveCount += 1;
+        if (indexSaveCount === 1) {
+          markStaleSaveStarted();
+          await staleSaveGate;
+        }
+      }
+      persistedCache.set(cacheKey, payload);
+    });
+
+    const staleBuild = store.refreshSidebarTableSearchIndex(groups.app!.id);
+    await staleSaveStarted;
+    const treeRefresh = store.refreshTreeNode(groups.app!);
+    await vi.waitFor(() => assert.ok(listCallCount >= 2));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const freshBuild = store.refreshSidebarTableSearchIndex(groups.app!.id);
+
+    releaseStaleSave();
+    assert.deepEqual(await staleBuild, []);
+    await treeRefresh;
+    assert.deepEqual(
+      (await freshBuild).map((entry) => entry.name),
+      ["fresh_orders"],
+    );
+
+    assert.ok(indexCacheKey);
+    const persisted = decodeSchemaTreeCache<TreeNode[]>(persistedCache.get(indexCacheKey));
+    assert.deepEqual(
+      persisted?.tableSearchIndex?.entries.map((entry) => entry.name),
+      ["fresh_orders"],
+    );
   } finally {
     restoreStorage();
   }

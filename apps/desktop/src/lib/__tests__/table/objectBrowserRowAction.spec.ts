@@ -177,6 +177,14 @@ describe("shouldDeferSingleClick", () => {
     expect(shouldDeferSingleClick(tableRow, "open-table")).toBe(false);
   });
 
+  it("opens MongoDB collections instead of SQL table-info", () => {
+    expect(singleClickRowAction(tableRow, "mongodb")).toBe("open-table");
+    expect(doubleClickRowAction(tableRow, "mongodb")).toBe("open-table");
+    expect(singleClickRowAction(viewRow, "mongodb")).toBe("open-table");
+    expect(doubleClickRowAction(viewRow, "mongodb")).toBe("open-table");
+    expect(shouldDeferSingleClick(tableRow, "open-table", "mongodb")).toBe(false);
+  });
+
   it("handles null/undefined row", () => {
     expect(shouldDeferSingleClick(null, "table-info")).toBe(false);
     expect(shouldDeferSingleClick(undefined, "open-source")).toBe(false);

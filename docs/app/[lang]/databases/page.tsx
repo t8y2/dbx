@@ -49,7 +49,7 @@ export default async function DatabasesPage({ params }: { params: Promise<{ lang
   const t = i18n[l];
 
   return (
-    <main className="min-h-screen bg-[#0b1120] text-landing-ink">
+    <main className="min-h-screen bg-[#08080a] text-landing-ink">
       <LandingNav lang={l} active="databases" />
 
       {/* Hero */}

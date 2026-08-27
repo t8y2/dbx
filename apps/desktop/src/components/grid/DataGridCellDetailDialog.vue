@@ -9,10 +9,11 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { useCellDetailEditor, type UseCellDetailEditorReturn } from "@/composables/useCellDetailEditor";
 import { useTheme } from "@/composables/useTheme";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { BINARY_CELL_DOWNLOAD_MODES, type BinaryCellDownloadMode } from "@/lib/dataGrid/binaryCellDownload";
+import { BINARY_CELL_DOWNLOAD_MODES, binaryCellUtf8Text, isBlobCellColumnType, type BinaryCellDownloadMode } from "@/lib/dataGrid/binaryCellDownload";
 import { isGeometryColumnType } from "@/lib/dataGrid/cellDetailPresentation";
 import { isHexGeometry, renderWktOnCanvas } from "@/lib/dataGrid/geometryPreview";
 import type { DataGridCellDetail } from "@/lib/dataGrid/dataGridDetail";
+import type { DatabaseType } from "@/types/database";
 
 const { t } = useI18n();
 const settingsStore = useSettingsStore();
@@ -27,6 +28,8 @@ const props = defineProps<{
   downloadBinaryValue: (detail: DataGridCellDetail | null, mode: BinaryCellDownloadMode) => void | Promise<void>;
   canImportBinaryValue: (detail: DataGridCellDetail | null) => boolean;
   importBinaryValue: (detail: DataGridCellDetail | null) => void | Promise<void>;
+  /** BLOB 文本预览与编辑写回一致，仅在 MySQL 连接开启。 */
+  databaseType?: DatabaseType;
 }>();
 
 const emit = defineEmits<{
@@ -41,6 +44,8 @@ let jsonPreviewEditor: UseCellDetailEditorReturn | null = null;
 
 const jsonFormatted = computed(() => settingsStore.editorSettings.cellDetailJsonFormatted);
 const jsonView = computed(() => jsonFormatted.value && !!props.detail?.formattedJson);
+const binaryTextPreview = computed(() => (props.detail && isBlobCellColumnType(props.detail.type) ? binaryCellUtf8Text(props.detail.value, props.detail.type, props.databaseType) : null));
+const presentedValuePreview = computed(() => (binaryTextPreview.value === null ? props.detail?.rawValuePreview : props.detail?.displayValuePreview) ?? "");
 
 function toggleJsonFormatted() {
   settingsStore.updateEditorSettings({ cellDetailJsonFormatted: !jsonFormatted.value });
@@ -53,7 +58,7 @@ function copyCurrentValue() {
     props.copyText(detail.formattedJson);
     return;
   }
-  props.copyText(detail.value === null ? "" : detail.rawValue);
+  props.copyText(detail.value === null ? "" : (binaryTextPreview.value ?? detail.rawValue));
 }
 
 function copyColumnName() {
@@ -186,7 +191,7 @@ watch(
             <img :src="detail.imagePreviewUrl" :alt="detail.column" loading="lazy" decoding="async" referrerpolicy="no-referrer" class="max-h-72 w-full object-contain" />
           </a>
           <div v-if="jsonView && detail.formattedJson" ref="jsonPreviewContainer" data-cell-detail-editor-root class="h-[44vh] min-h-60 overflow-hidden rounded border bg-muted/20 p-3" />
-          <pre v-else class="dbx-data-grid-value-font max-h-[44vh] overflow-auto rounded border bg-muted/20 p-3 text-xs whitespace-pre-wrap break-words" :class="{ 'italic text-muted-foreground': detail.value === null }">{{ detail.rawValuePreview }}</pre>
+          <pre v-else class="dbx-data-grid-value-font max-h-[44vh] overflow-auto rounded border bg-muted/20 p-3 text-xs whitespace-pre-wrap break-words" :class="{ 'italic text-muted-foreground': detail.value === null }">{{ presentedValuePreview }}</pre>
           <div v-if="detail.isValuePreviewTruncated && !jsonView" class="text-[11px] text-muted-foreground">
             {{ t("grid.largeValuePreviewHint", { count: detail.rawValuePreview.length }) }}
           </div>

@@ -12,4 +12,9 @@ describe("DataGrid column comments", () => {
     expect(dataGridSource).toContain(':tooltip-column-comment="resolvedColumnComment(col.name, col.actualColIdx)"');
     expect(dataGridSource).toContain("(column, index) => headerColumnComment(column, index)");
   });
+
+  it("routes per-ordinal comments to field filtering and go-to-column lookup", () => {
+    expect(dataGridSource).toMatch(/useDataGridColumnLayoutState\(\{[\s\S]*?columnComments: \(\) => props\.resultColumnComments,[\s\S]*?\}\);/);
+    expect(dataGridSource).toMatch(/const goToColumnItems = computed\(\(\) =>[\s\S]*?buildDataGridColumnLookupItems\(\{[\s\S]*?columnComments: props\.resultColumnComments,[\s\S]*?\}\),[\s\S]*?\);/);
+  });
 });

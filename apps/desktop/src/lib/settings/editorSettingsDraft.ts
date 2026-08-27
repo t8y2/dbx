@@ -2,6 +2,7 @@ import type { EditorSettings } from "@/stores/settingsStore";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { normalizeQueryResultMaxRows } from "@/lib/dataGrid/queryResultRowLimit";
 import { normalizeCompletionTriggerMode } from "@/lib/sql/sqlCompletionTriggerPolicy";
+import { normalizeRedisKeyTemplates } from "@/lib/redis/redisKeyTemplates";
 
 export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "fontFamily",
@@ -16,11 +17,13 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "executeAllOnBlankLine",
   "showExecutionTargetPicker",
   "showStatementRunButtons",
+  "showLineNumbers",
   "showCurrentStatementFrame",
   "showInsertValueHints",
   "autoAliasTables",
   "insertSpaceAfterCompletion",
   "sortCompletionColumnsAlphabetically",
+  "selectFirstCompletionOnOpen",
   "wordWrap",
   "vimModeEnabled",
   "autoCloseBrackets",
@@ -43,6 +46,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "dataGridFilterEditorView",
   "dataGridTextFilterPanelHeight",
   "dataGridAutoTransposeSingleRow",
+  "dataGridCellDetailButtonVisible",
   "pageSize",
   "tableOpenPageSize",
   "queryResultMaxRowsEnabled",
@@ -66,12 +70,14 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "openDataTabsNextToActive",
   "prefillNewQueryWithSelect",
   "generateSqlIncludeDatabaseName",
+  "formatSqlOnSqlFileSave",
   "updateNotificationsEnabled",
   "sidebarObjectInfoMode",
   "sidebarAllowHorizontalScroll",
   "sidebarIndent",
   "sidebarFontSize",
   "sidebarHiddenTablePrefixes",
+  "redisKeyTemplates",
   "exportBatchSize",
   "exportRowLimitEnabled",
   "exportRowLimit",
@@ -110,6 +116,7 @@ function normalizedDraftValue(key: EditorSettingsDraftKey, value: unknown): unkn
   if (key === "pageSize" || key === "tableOpenPageSize") return normalizeTableOpenPageSizeDraft(value);
   if (key === "queryResultMaxRows") return normalizeQueryResultMaxRowsDraft(value);
   if (key === "completionTriggerMode") return normalizeCompletionTriggerMode(value);
+  if (key === "redisKeyTemplates") return normalizeRedisKeyTemplates(value);
   return value;
 }
 

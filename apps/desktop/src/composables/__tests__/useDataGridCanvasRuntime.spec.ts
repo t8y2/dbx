@@ -53,6 +53,55 @@ describe("data grid visual runtimes", () => {
     expect(resize.observe).toHaveBeenNthCalledWith(2, surface, { box: "device-pixel-content-box" });
     runtime.dispose();
   });
+  it("keeps viewport observation on a stable measurement surface while render surfaces flip", () => {
+    const viewport = { children: [] } as unknown as Element;
+    const measurementSurface = { children: [] } as unknown as Element;
+    const frontSurface = { children: [] } as unknown as Element;
+    const backSurface = { children: [] } as unknown as Element;
+    const observe = vi.fn();
+    const disconnect = vi.fn();
+    const syncViewport = vi.fn();
+    let activeSurface = frontSurface;
+    let observerCallback: ResizeObserverCallback | null = null;
+    let observer: ResizeObserver | null = null;
+    const runtime = useDataGridCanvasRuntime({
+      draw: () => {
+        activeSurface = activeSurface === frontSurface ? backSurface : frontSurface;
+      },
+      syncViewport,
+      getViewport: () => viewport,
+      getSurface: () => measurementSurface,
+      createResizeObserver: (callback) => {
+        observerCallback = callback;
+        observer = { observe, disconnect } as unknown as ResizeObserver;
+        return observer;
+      },
+    });
+
+    runtime.observeViewport();
+    runtime.drawNow();
+    runtime.drawNow();
+
+    expect(activeSurface).toBe(frontSurface);
+    expect(observe.mock.calls[0]?.[0]).toBe(viewport);
+    expect(observe.mock.calls[1]?.[0]).toBe(measurementSurface);
+    expect(observe.mock.calls[1]?.[1]).toEqual({ box: "device-pixel-content-box" });
+    expect(observe.mock.calls.map(([target]) => target)).not.toContain(frontSurface);
+    expect(observe.mock.calls.map(([target]) => target)).not.toContain(backSurface);
+    expect(syncViewport).toHaveBeenCalledOnce();
+
+    const entry = {
+      target: measurementSurface,
+      contentRect: { width: 640, height: 320 },
+      devicePixelContentBoxSize: [{ inlineSize: 1280, blockSize: 640 }],
+    } as unknown as ResizeObserverEntry;
+    observerCallback?.([entry], observer as ResizeObserver);
+
+    expect(syncViewport).toHaveBeenCalledTimes(2);
+    expect(syncViewport).toHaveBeenLastCalledWith([entry]);
+    expect(dataGridCanvasDevicePixelSize(entry)).toEqual({ cssWidth: 640, cssHeight: 320, pixelWidth: 1280, pixelHeight: 640 });
+    runtime.dispose();
+  });
 
   it("coalesces canvas frames and cancels all resources on dispose", () => {
     const frames = createFrameDriver();

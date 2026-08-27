@@ -6071,6 +6071,8 @@ export default withEnglishFallback({
     dataGridAutoTransposeSingleRowDescription: "有効にすると、1 行かつ複数列の SQL クエリ結果が自動的に転置表示に切り替わります。",
     dataGridCellDetailButtonVisible: "セル詳細ボタンを表示",
     dataGridCellDetailButtonVisibleDescription: "セルにカーソルを合わせたときにセル詳細ボタンを表示します。",
+    dataGridCrosshairHighlight: "行と列の十字ハイライト",
+    dataGridCrosshairHighlightDescription: "有効にすると、アクティブなセルの行と列全体を淡くハイライトします（Excel と同様）。フォーカスされたセルは選択スタイルを維持します。",
     tableColumnTemplateFields: "新規テーブルのプリセット列",
     tableColumnTemplateFieldsDescription: "データベース種別を選択し、新規テーブル作成時に使うプリセット列の型を設定します。",
     tableColumnTemplateAdd: "列を追加",

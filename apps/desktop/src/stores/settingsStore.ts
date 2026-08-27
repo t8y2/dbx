@@ -576,6 +576,7 @@ export interface EditorSettings {
   resultRunDisplayMode: ResultRunDisplayMode;
   dataGridAutoTransposeSingleRow: boolean;
   dataGridCellDetailButtonVisible: boolean;
+  dataGridCrosshairHighlight: boolean;
   dataGridMultiRowTranspose: boolean;
   dataGridHideNullColumns: boolean;
   dataGridBooleanDisplayMode: "dropdown" | "checkbox";
@@ -789,6 +790,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   resultRunDisplayMode: "tabs",
   dataGridAutoTransposeSingleRow: false,
   dataGridCellDetailButtonVisible: true,
+  dataGridCrosshairHighlight: false,
   dataGridMultiRowTranspose: false,
   dataGridHideNullColumns: false,
   dataGridBooleanDisplayMode: "dropdown",
@@ -1166,6 +1168,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     resultRunDisplayMode: normalizeResultRunDisplayMode(settings.resultRunDisplayMode),
     dataGridAutoTransposeSingleRow: settings.dataGridAutoTransposeSingleRow === true,
     dataGridCellDetailButtonVisible: typeof settings.dataGridCellDetailButtonVisible === "boolean" ? settings.dataGridCellDetailButtonVisible : DEFAULT_EDITOR_SETTINGS.dataGridCellDetailButtonVisible,
+    dataGridCrosshairHighlight: typeof settings.dataGridCrosshairHighlight === "boolean" ? settings.dataGridCrosshairHighlight : DEFAULT_EDITOR_SETTINGS.dataGridCrosshairHighlight,
     dataGridMultiRowTranspose: settings.dataGridMultiRowTranspose === true,
     dataGridHideNullColumns: settings.dataGridHideNullColumns === true,
     dataGridBooleanDisplayMode: settings.dataGridBooleanDisplayMode === "checkbox" ? "checkbox" : "dropdown",
@@ -1782,6 +1785,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.resultRunDisplayMode !== undefined) editorSettings.value.resultRunDisplayMode = normalizeResultRunDisplayMode(partial.resultRunDisplayMode);
     if (partial.dataGridAutoTransposeSingleRow !== undefined) editorSettings.value.dataGridAutoTransposeSingleRow = partial.dataGridAutoTransposeSingleRow === true;
     if (partial.dataGridCellDetailButtonVisible !== undefined) editorSettings.value.dataGridCellDetailButtonVisible = typeof partial.dataGridCellDetailButtonVisible === "boolean" ? partial.dataGridCellDetailButtonVisible : DEFAULT_EDITOR_SETTINGS.dataGridCellDetailButtonVisible;
+    if (partial.dataGridCrosshairHighlight !== undefined) editorSettings.value.dataGridCrosshairHighlight = typeof partial.dataGridCrosshairHighlight === "boolean" ? partial.dataGridCrosshairHighlight : DEFAULT_EDITOR_SETTINGS.dataGridCrosshairHighlight;
     if (partial.dataGridMultiRowTranspose !== undefined) editorSettings.value.dataGridMultiRowTranspose = partial.dataGridMultiRowTranspose === true;
     if (partial.dataGridHideNullColumns !== undefined) editorSettings.value.dataGridHideNullColumns = partial.dataGridHideNullColumns === true;
     if (partial.dataGridBooleanDisplayMode !== undefined) editorSettings.value.dataGridBooleanDisplayMode = partial.dataGridBooleanDisplayMode === "dropdown" ? "dropdown" : "checkbox";

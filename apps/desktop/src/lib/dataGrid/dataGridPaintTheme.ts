@@ -13,6 +13,8 @@ export interface DataGridPaintTheme {
   rowNew: string;
   rowDeleted: string;
   cellActive: string;
+  cellCrosshairRow: string;
+  cellCrosshairCol: string;
   cellDirty: string;
   cellSelected: string;
   cellSelectedDirty: string;
@@ -43,6 +45,12 @@ export const DATA_GRID_DARK_SEARCH_COLORS = {
 } as const;
 export const DATA_GRID_LIGHT_ACTIVE_ROW_BG = "rgb(244, 248, 255)";
 export const DATA_GRID_DARK_ACTIVE_ROW_BG = "rgb(25, 34, 46)";
+// 十字行/列底色必须比 cellActive 更明显（否则与 active-row 重影，感知不到增强）。
+// 行/列用同一蓝色系不同透明度：列略深，十字交点叠加后仍可分辨，且不覆盖 cell-selected。
+export const DATA_GRID_LIGHT_CROSSHAIR_ROW_BG = "rgba(59, 130, 246, 0.10)";
+export const DATA_GRID_LIGHT_CROSSHAIR_COL_BG = "rgba(59, 130, 246, 0.16)";
+export const DATA_GRID_DARK_CROSSHAIR_ROW_BG = "rgba(96, 165, 250, 0.12)";
+export const DATA_GRID_DARK_CROSSHAIR_COL_BG = "rgba(96, 165, 250, 0.18)";
 export const DATA_GRID_LIGHT_STRIPED_ROW_BG = "rgb(240, 240, 240)";
 export const DATA_GRID_DARK_STRIPED_ROW_BG = "rgb(40, 40, 43)";
 export const DATA_GRID_DARK_ROW_NUMBER_BG = "rgb(35, 37, 42)";
@@ -257,6 +265,8 @@ export function resolveDataGridPaintTheme(options: { getVar: (name: string) => s
   const rowNew = isDark ? "rgb(51, 51, 55)" : "rgb(243, 243, 243)";
   const rowDeleted = isDark ? "rgb(55, 31, 32)" : "rgb(255, 244, 244)";
   const cellActive = activeSurface;
+  const cellCrosshairRow = isDark ? DATA_GRID_DARK_CROSSHAIR_ROW_BG : paintToken(getVar, "--data-grid-cell-crosshair-row-bg", DATA_GRID_LIGHT_CROSSHAIR_ROW_BG);
+  const cellCrosshairCol = isDark ? DATA_GRID_DARK_CROSSHAIR_COL_BG : paintToken(getVar, "--data-grid-cell-crosshair-col-bg", DATA_GRID_LIGHT_CROSSHAIR_COL_BG);
   const cellDirty = isDark ? "rgb(94, 75, 26)" : "rgb(255, 248, 230)";
   const cellSelected = isDark ? "rgb(20, 40, 60)" : "rgb(239, 246, 255)";
   const cellSelectedDirty = isDark ? "rgb(76, 66, 38)" : "rgb(235, 224, 184)";
@@ -288,6 +298,8 @@ export function resolveDataGridPaintTheme(options: { getVar: (name: string) => s
     rowNew: isDark ? rowNew : paintToken(getVar, "--data-grid-row-new-bg", rowNew),
     rowDeleted: isDark ? rowDeleted : paintToken(getVar, "--data-grid-row-deleted-bg", rowDeleted),
     cellActive: isDark ? cellActive : paintToken(getVar, "--data-grid-cell-active-bg", cellActive),
+    cellCrosshairRow,
+    cellCrosshairCol,
     cellDirty: paintToken(getVar, "--data-grid-cell-dirty-bg", cellDirty),
     cellSelected: paintToken(getVar, "--data-grid-cell-selected-bg", cellSelected),
     cellSelectedDirty: paintToken(getVar, "--data-grid-cell-selected-dirty-bg", cellSelectedDirty),

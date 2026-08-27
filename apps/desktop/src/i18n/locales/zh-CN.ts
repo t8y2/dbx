@@ -6301,6 +6301,8 @@ export default withEnglishFallback({
     dataGridAutoTransposeSingleRowDescription: "开启后，SQL 查询结果只有一行且包含多列时，自动切换为转置视图。",
     dataGridCellDetailButtonVisible: "显示单元格详情按钮",
     dataGridCellDetailButtonVisibleDescription: "鼠标悬停在单元格上时显示单元格详情按钮。",
+    dataGridCrosshairHighlight: "行列十字高亮",
+    dataGridCrosshairHighlightDescription: "开启后，以当前活动单元格为中心淡色高亮整行和整列（类似 Excel）。焦点单元格仍保留原有的选中样式。",
     infiniteScroll: "无限滚动加载",
     autoCalculateTotalRows: "自动统计总行数",
     autoCalculateTotalRowsDescription: "每次查询后自动执行 COUNT(*) 显示匹配的总行数。默认关闭以保证大查询速度 —— 可在结果栏按需手动统计。",

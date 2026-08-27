@@ -6,6 +6,7 @@ import { dataGridFrameCoversRow, dataGridFrameIsMultiCell, dataGridSelectionFram
 import type { CellSelectionRange } from "@/lib/dataGrid/gridSelection";
 import type { RowStatus } from "@/lib/dataGrid/gridRowStatus";
 import { DATA_GRID_DARK_SEARCH_COLORS, dataGridTypeForeground, resolveDataGridPaintTheme, type DataGridPaintTheme } from "@/lib/dataGrid/dataGridPaintTheme";
+import type { CrosshairTarget } from "@/lib/dataGrid/crosshairHighlight";
 
 export const CANVAS_DATA_GRID_ROW_HEIGHT = 26;
 export const MAX_CANVAS_DATA_GRID_PIXEL_RATIO = 4;
@@ -94,6 +95,8 @@ export interface DrawCanvasDataGridOptions {
   columnAligns?: readonly ("left" | "right")[];
   columnTypeVisualKinds?: readonly DataGridTypeVisualKind[];
   colorizeDataTypes?: boolean;
+  /** 行列十字高亮目标（原样传入，null 表示开关关闭或无焦点）。只画当前 viewport 内的行/列底色 */
+  crosshair?: CrosshairTarget | null;
   rightAlignedActionCell?: CanvasRightAlignedActionCell | null;
   booleanDisplayMode?: "checkbox" | "dropdown";
   flatteningMultiLineEnabled: boolean;
@@ -353,6 +356,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     columnAligns,
     columnTypeVisualKinds,
     colorizeDataTypes = false,
+    crosshair,
     rightAlignedActionCell,
     columnIsBoolean,
     booleanDisplayMode = "dropdown",
@@ -429,6 +433,13 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     ctx.fillStyle = rowFill;
     ctx.fillRect(0, y, width, CANVAS_DATA_GRID_ROW_HEIGHT);
 
+    // 十字行高亮：叠在基础行色之上，但低于整行选中（rowSelectionVisual），
+    // 也低于后续 drawCell 的脏格/搜索/选中格填充
+    if (crosshair?.rowCrosshair && item.displayIndex === crosshair.rowIndex && !rowSelectionVisual && !item.isDeleted) {
+      ctx.fillStyle = theme.cellCrosshairRow;
+      ctx.fillRect(rowNumberWidth, y, width - rowNumberWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
+    }
+
     // 选区覆盖指示（Navicat 风格）：行落在选区范围内时行号淡色高亮；
     // 优先级低于行选中/状态色/活动行，与 DOM 的级联顺序一致
     const rowInSelection = !rowSelectionVisual && selectionRowCoverage && dataGridFrameCoversRow(selectionFrames, item.displayIndex);
@@ -502,6 +513,12 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
       const clippedX = Math.max(drawX, rowNumberWidth);
       const cellPaintWidth = Math.min(width, drawX + colWidth) - clippedX;
       if (cellPaintWidth <= 0) return;
+
+      // 十字列高亮：整列覆盖，叠在行底色之上；脏格/搜索/选中格填充在其后绘制，优先级更高
+      if (crosshair?.columnCrosshair && visibleColIdx === crosshair.visibleColIdx && !selectedFillVisual && !item.isDeleted) {
+        ctx.fillStyle = theme.cellCrosshairCol;
+        ctx.fillRect(clippedX, y, cellPaintWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
+      }
 
       if (isDirtyCell && !selectedFillVisual) {
         ctx.fillStyle = theme.cellDirty;
@@ -656,6 +673,11 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
       ctx.fillRect(rowNumberWidth, y, frozenWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
       if (rowFill !== theme.background) {
         ctx.fillStyle = rowFill;
+        ctx.fillRect(rowNumberWidth, y, frozenWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
+      }
+      // 冻结区会重绘底色遮挡第一轮溢入内容，需在此重绘十字行底色保持一致
+      if (crosshair?.rowCrosshair && item.displayIndex === crosshair.rowIndex && !rowSelectionVisual && !item.isDeleted) {
+        ctx.fillStyle = theme.cellCrosshairRow;
         ctx.fillRect(rowNumberWidth, y, frozenWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
       }
       // 绘制冻结列的每个单元格（x 坐标不受 scrollLeft 影响）

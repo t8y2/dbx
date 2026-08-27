@@ -5356,6 +5356,8 @@ export default withEnglishFallback({
     dataGridAutoTransposeSingleRowDescription: "開啟後，SQL 查詢結果只有一行且包含多個欄位時，會自動切換為轉置檢視。",
     dataGridCellDetailButtonVisible: "顯示儲存格詳細資料按鈕",
     dataGridCellDetailButtonVisibleDescription: "游標懸停在儲存格上時顯示儲存格詳細資料按鈕。",
+    dataGridCrosshairHighlight: "行列十字高亮",
+    dataGridCrosshairHighlightDescription: "開啟後，以目前活動儲存格為中心淡色高亮整列和整行（類似 Excel）。焦點儲存格仍保留原有選取樣式。",
     infiniteScroll: "無限滾動載入",
     autoCalculateTotalRows: "自動統計總筆數",
     autoCalculateTotalRowsDescription: "每次查詢後自動執行 COUNT(*) 顯示符合的總筆數。預設關閉以確保大型查詢速度 —— 可在結果列按需手動統計。",

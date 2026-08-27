@@ -6039,6 +6039,8 @@ export default withEnglishFallback({
     dataGridAutoTransposeSingleRowDescription: "Quando ativado, os resultados de consultas SQL com exatamente uma linha e várias colunas alternam automaticamente para a visualização transposta.",
     dataGridCellDetailButtonVisible: "Mostrar botão de detalhes da célula",
     dataGridCellDetailButtonVisibleDescription: "Mostrar o botão de detalhes da célula ao passar o mouse sobre uma célula.",
+    dataGridCrosshairHighlight: "Destacar linha e coluna em cruz",
+    dataGridCrosshairHighlightDescription: "Quando ativado, destaca levemente toda a linha e a coluna da célula ativa (como no Excel). A célula focada mantém o estilo selecionado.",
     infiniteScroll: "Carregamento por rolagem infinita",
     autoCalculateTotalRows: "Calcular automaticamente o total de linhas",
     autoCalculateTotalRowsDescription: "Executa COUNT(*) automaticamente após cada consulta para mostrar o total de linhas correspondentes. Desativado por padrão para manter consultas grandes rápidas; você pode calculá-lo quando quiser no rodapé dos resultados.",

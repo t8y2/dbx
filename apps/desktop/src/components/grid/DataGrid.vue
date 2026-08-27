@@ -231,6 +231,7 @@ import {
 } from "@/lib/dataGrid/dataGridInfiniteScroll";
 import { resolveDataGridWheelScroll } from "@/lib/dataGrid/dataGridWheel";
 import { CANVAS_DATA_GRID_ROW_HEIGHT, MAX_CANVAS_DATA_GRID_PIXEL_RATIO, canvasDataGridActionOverlayWidth, canvasDataGridActionReservedWidth, dataGridSearchMatchKey, drawCanvasDataGrid, type CanvasDevicePixelSize } from "@/lib/dataGrid/canvasDataGridRenderer";
+import { resolveCrosshairTarget, type CrosshairTarget } from "@/lib/dataGrid/crosshairHighlight";
 import { DATA_GRID_DARK_STRIPED_ROW_BG, DATA_GRID_LIGHT_STRIPED_ROW_BG, dataGridActiveRowBackground } from "@/lib/dataGrid/dataGridPaintTheme";
 import { createRowLowerTextCache } from "@/lib/dataGrid/dataGridRowLowerText";
 import { dataGridPreviewLabelKey, dataGridSaveActionMode, dataGridSaveToolbarState } from "@/lib/dataGrid/dataGridSaveUi";
@@ -385,6 +386,7 @@ const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 const cellDetailButtonEnabled = computed(() => settingsStore.editorSettings.dataGridCellDetailButtonVisible);
+const dataGridCrosshairHighlight = computed(() => settingsStore.editorSettings.dataGridCrosshairHighlight);
 const tableFontSize = computed(() => settingsStore.editorSettings.tableFontSize);
 const rowNumberWidth = ref(DATA_GRID_ROW_NUM_WIDTH);
 const largeValueResolutionVersion = ref(0);
@@ -5491,6 +5493,29 @@ const {
   isRowSelected,
 } = selection;
 
+// 行列十字高亮目标：以 selectionFocus（原始坐标系）为中心解析，整行/整列选中时从
+// lastClickedRowIndex / selectedRowIds / selectedColumnIndexes 派生。开关关闭时恒为 null。
+const crosshairTarget = computed<CrosshairTarget | null>(() => {
+  if (!dataGridCrosshairHighlight.value) return null;
+  let fallbackRowIndex = selection.lastClickedRowIndex.value;
+  if (fallbackRowIndex === null && selectedRowIds.value.size > 0) {
+    const firstSelectedId = [...selectedRowIds.value][0];
+    const firstSelectedIndex = displayItems.value.findIndex((item) => item.id === firstSelectedId);
+    fallbackRowIndex = firstSelectedIndex >= 0 ? firstSelectedIndex : null;
+  }
+  if (fallbackRowIndex === null && transposeRowIndex.value !== null) fallbackRowIndex = transposeRowIndex.value;
+  const fallbackColumnIndex = selectedColumnIndexes.value.size > 0 ? [...selectedColumnIndexes.value][0] : null;
+  return resolveCrosshairTarget({
+    selectionFocus: selectionFocus.value,
+    selectionAnchor: selectionAnchor.value,
+    hasRowSelection: hasRowSelection.value,
+    hasColumnSelection: hasColumnSelection.value,
+    visibleColumnIndexes: visibleColumnIndexes.value,
+    fallbackRowIndex,
+    fallbackColumnIndex,
+  });
+});
+
 function selectionCaptureBase(): Omit<CaptureDataGridSelectionOptions, "selectedRowIds" | "selectedColumnIndexes" | "selectedCellKeys" | "selectionAnchor" | "selectionFocus" | "selectingAll" | "lastClickedRowIndex"> {
   return {
     columns: props.result.columns,
@@ -7615,6 +7640,7 @@ function drawCanvasGrid() {
     columnAligns: columnAligns.value,
     columnTypeVisualKinds: visibleColumnTypeVisualKinds.value,
     colorizeDataTypes: colorizeDataGridCellTypes.value,
+    crosshair: crosshairTarget.value,
     rightAlignedActionCell: canvasRightAlignedActionCell.value,
     columnIsBoolean: isBooleanGridColumn,
     booleanDisplayMode: booleanDisplayMode.value,
@@ -12225,6 +12251,7 @@ function openGridSnapshot() {
                         'transpose-record-header-selected text-primary font-semibold': transposeRecordUsesFramedHeader(recordIndex),
                         'transpose-record-header-active text-primary': transposeRecordUsesActiveHighlight(recordIndex) && !transposeRecordUsesFramedHeader(recordIndex),
                         'data-grid-header-cell': !transposeRecordUsesActiveHighlight(recordIndex) && !transposeRecordUsesFramedHeader(recordIndex),
+                        'crosshair-column': !!crosshairTarget?.rowCrosshair && crosshairTarget.rowIndex === recordIndex && !transposeRecordUsesFramedHeader(recordIndex) && !transposeRecordUsesActiveHighlight(recordIndex),
                       }"
                       :style="{
                         width: `${getTransposeRecordWidth(recordIndex)}px`,
@@ -12304,6 +12331,8 @@ function openGridSnapshot() {
                           'cell-selected-dirty--sparse': transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
                           'row-cell-selected': transposeRecordUsesSelectionVisual(cell.recordIndex) && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
                           'row-cell-selected-dirty': transposeRecordUsesSelectionVisual(cell.recordIndex) && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
+                          'crosshair-row':
+                            !!crosshairTarget?.columnCrosshair && cell.valueIndex === crosshairTarget.actualColIdx && !transposeRecordUsesSelectionVisual(cell.recordIndex) && !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex] && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex),
                           'bg-primary/15': transposeRecordUsesActiveHighlight(cell.recordIndex) && !transposeRecordUsesSelectionVisual(cell.recordIndex) && !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex] && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex),
                           'bg-yellow-500/10 cell-dirty': displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
                           'bg-yellow-200/60 dark:bg-yellow-500/20': cellIsSearchMatch(cell.recordIndex, cell.valueIndex),
@@ -12450,6 +12479,7 @@ function openGridSnapshot() {
                     :name="col.name"
                     :actual-column-index="col.actualColIdx"
                     :visible-column-index="col.visibleColIdx"
+                    :class="{ 'crosshair-column': !!crosshairTarget?.columnCrosshair && crosshairTarget.visibleColIdx === col.visibleColIdx }"
                     :selected="highlightedColumnIndex === col.actualColIdx || columnIsSelected(col.visibleColIdx)"
                     :search-match="currentSearchMatch?.kind === 'column' && currentSearchMatch.col === col.actualColIdx"
                     :dark="isDark"
@@ -13205,6 +13235,7 @@ function openGridSnapshot() {
                         'data-grid-row--draft': item.isDraft && !isRowActive(item.displayIndex),
                         'data-grid-row--striped': !item.isNew && !item.isDraft && !item.isDeleted && !isRowActive(item.displayIndex) && item.displayIndex % 2 === 1,
                         'active-row': isRowActive(item.displayIndex) && !item.isDeleted,
+                        'crosshair-row': !!crosshairTarget?.rowCrosshair && crosshairTarget.rowIndex === item.displayIndex && !item.isDeleted,
                         'relative z-20 overflow-visible': editingCell?.rowId === item.id || readonlyTextCell?.rowId === item.id,
                       }"
                       :style="dataGridRowStyle(item)"
@@ -13251,6 +13282,7 @@ function openGridSnapshot() {
                             'cell-selected-dirty--sparse': selectionFramesData.sparse && cellIsSelected(item.displayIndex, col.visibleColIdx) && item.isDirtyCol[col.actualColIdx],
                             'row-cell-selected': rowCellsUseSelectionVisual(item.id) && !cellIsSelected(item.displayIndex, col.visibleColIdx) && !item.isDirtyCol[col.actualColIdx],
                             'row-cell-selected-dirty': rowCellsUseSelectionVisual(item.id) && !cellIsSelected(item.displayIndex, col.visibleColIdx) && item.isDirtyCol[col.actualColIdx],
+                            'crosshair-column': !!crosshairTarget?.columnCrosshair && crosshairTarget.visibleColIdx === col.visibleColIdx && !item.isDeleted,
                             'cell-search-match': cellIsSearchMatch(item.displayIndex, col.actualColIdx),
                             'cell-current-search-match': cellIsCurrentMatch(item.displayIndex, col.actualColIdx),
                             'bg-yellow-200/60 dark:bg-yellow-500/20': cellIsSearchMatch(item.displayIndex, col.actualColIdx),
@@ -14094,6 +14126,8 @@ function openGridSnapshot() {
   --data-grid-row-new-bg: rgb(243, 243, 243);
   --data-grid-row-deleted-bg: rgb(255, 244, 244);
   --data-grid-cell-active-bg: rgb(244, 248, 255);
+  --data-grid-cell-crosshair-row-bg: rgba(59, 130, 246, 0.1);
+  --data-grid-cell-crosshair-col-bg: rgba(59, 130, 246, 0.16);
   --data-grid-cell-dirty-bg: rgb(255, 248, 230);
   --data-grid-cell-selected-bg: rgb(239, 246, 255);
   --data-grid-cell-selected-single-bg: rgb(191, 219, 254);
@@ -14126,6 +14160,8 @@ function openGridSnapshot() {
   --data-grid-row-new-bg: rgb(51, 51, 55);
   --data-grid-row-deleted-bg: rgb(55, 31, 32);
   --data-grid-cell-active-bg: rgb(25, 34, 46);
+  --data-grid-cell-crosshair-row-bg: rgba(96, 165, 250, 0.12);
+  --data-grid-cell-crosshair-col-bg: rgba(96, 165, 250, 0.18);
   --data-grid-cell-dirty-bg: rgb(94, 75, 26);
   --data-grid-cell-selected-bg: rgb(20, 40, 60);
   --data-grid-cell-selected-single-bg: rgb(30, 64, 96);
@@ -14159,6 +14195,8 @@ function openGridSnapshot() {
     --data-grid-row-new-bg: color-mix(in oklab, var(--primary) 5%, transparent);
     --data-grid-row-deleted-bg: color-mix(in oklab, var(--destructive) 5%, transparent);
     --data-grid-cell-dirty-bg: color-mix(in oklab, rgb(240 177 0) 10%, transparent);
+    --data-grid-cell-crosshair-row-bg: color-mix(in oklab, rgb(59 130 246) 12%, transparent);
+    --data-grid-cell-crosshair-col-bg: color-mix(in oklab, rgb(59 130 246) 20%, transparent);
     --data-grid-cell-selected-bg: color-mix(in oklab, rgb(59 130 246) 12%, var(--background));
     --data-grid-cell-selected-single-bg: color-mix(in oklab, rgb(59 130 246) 30%, var(--background));
     --data-grid-cell-selected-dirty-bg: color-mix(in oklab, rgb(234 181 50) 30%, color-mix(in oklab, rgb(59 130 246) 18%, var(--background)));
@@ -14229,6 +14267,18 @@ function openGridSnapshot() {
 
 .data-grid-row {
   background-color: var(--data-grid-cell-bg);
+}
+
+/* 行列十字高亮：覆盖基础单元格变量而非只涂父行，避免不透明 data-grid-cell /
+ * frozen cell 遮住行高亮。选中、脏数据和搜索状态仍用各自的显式背景覆盖它。 */
+.crosshair-row {
+  --data-grid-cell-bg: var(--data-grid-cell-crosshair-row-bg) !important;
+  background-color: var(--data-grid-cell-crosshair-row-bg);
+}
+
+.crosshair-column {
+  --data-grid-cell-bg: var(--data-grid-cell-crosshair-col-bg) !important;
+  background-color: var(--data-grid-cell-crosshair-col-bg);
 }
 
 .data-grid-cell {

@@ -305,6 +305,16 @@ describe("normalizeEditorSettings", () => {
     }
   });
 
+  it("defaults the crosshair highlight off and preserves only boolean values", () => {
+    expect(normalizeEditorSettings({}).dataGridCrosshairHighlight).toBe(false);
+    expect(normalizeEditorSettings({ dataGridCrosshairHighlight: true }).dataGridCrosshairHighlight).toBe(true);
+    expect(normalizeEditorSettings({ dataGridCrosshairHighlight: false }).dataGridCrosshairHighlight).toBe(false);
+
+    for (const invalidValue of [0, 1, "true", null]) {
+      expect(normalizeEditorSettings({ dataGridCrosshairHighlight: invalidValue as never }).dataGridCrosshairHighlight).toBe(false);
+    }
+  });
+
   it("defaults the data grid font and preserves a custom font family", () => {
     const defaultFontFamily = `"Geist Variable Tabular", "Geist Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif`;
     expect(normalizeEditorSettings({}).tableFontFamily).toBe(defaultFontFamily);
@@ -778,6 +788,29 @@ describe("settingsStore persisted settings initialization", () => {
     const restartedStore = useSettingsStore();
     await restartedStore.initEditorSettings();
     expect(restartedStore.editorSettings.dataGridCellDetailButtonVisible).toBe(true);
+  });
+
+  it("defaults the crosshair highlight to off, persists an opt-in, and reloads it", async () => {
+    let persistedSettings: Record<string, unknown> = {};
+    const loadEditorSettings = vi.fn(async () => JSON.parse(JSON.stringify(persistedSettings)));
+    const saveEditorSettings = vi.fn(async (settings: Record<string, unknown>) => {
+      persistedSettings = JSON.parse(JSON.stringify(settings));
+    });
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+
+    expect(store.editorSettings.dataGridCrosshairHighlight).toBe(false);
+
+    await store.updateEditorSettingsAndPersist({ dataGridCrosshairHighlight: true });
+    expect(saveEditorSettings).toHaveBeenLastCalledWith(expect.objectContaining({ dataGridCrosshairHighlight: true }));
+
+    setActivePinia(createPinia());
+    const restartedStore = useSettingsStore();
+    await restartedStore.initEditorSettings();
+    expect(restartedStore.editorSettings.dataGridCrosshairHighlight).toBe(true);
   });
 
   it("loads, persists, and reloads hidden query editor line numbers", async () => {

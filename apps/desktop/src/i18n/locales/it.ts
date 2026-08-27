@@ -6037,6 +6037,8 @@ export default withEnglishFallback({
     dataGridAutoTransposeSingleRowDescription: "Quando è attivata, i risultati delle query SQL con esattamente una riga e più colonne passano automaticamente alla vista trasposta.",
     dataGridCellDetailButtonVisible: "Mostra il pulsante dei dettagli della cella",
     dataGridCellDetailButtonVisibleDescription: "Mostra il pulsante dei dettagli della cella al passaggio del mouse su una cella.",
+    dataGridCrosshairHighlight: "Evidenzia riga e colonna a croce",
+    dataGridCrosshairHighlightDescription: "Se attivato, evidenzia leggermente l'intera riga e la colonna della cella attiva (come Excel). La cella focalizzata mantiene il suo stile selezionato.",
     infiniteScroll: "Caricamento a scorrimento infinito",
     autoCalculateTotalRows: "Calcola automaticamente il totale delle righe",
     autoCalculateTotalRowsDescription: "Esegue COUNT(*) automaticamente dopo ogni query per mostrare il totale delle righe corrispondenti. Disattivato per impostazione predefinita per mantenere veloci le query grandi; puoi calcolarlo all'occorrenza dal piè di pagina dei risultati.",

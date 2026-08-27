@@ -11687,7 +11687,14 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
   const row = contextRowItem.value;
   const rowLabels = rowActionLabels();
   const hasEditableSelection = selectionHasEditableCells();
-  const gridSnapshotContext = contextHeaderColumn.value && hasColumnSelection.value ? "columns" : contextCell.value?.col === -1 && affectedRowIds().length > 0 ? "rows" : contextCell.value && hasCellSelection.value ? "cells" : null;
+  const gridSnapshotContext =
+    contextHeaderColumn.value && hasColumnSelection.value
+      ? "columns"
+      : contextCell.value?.col === -1 && affectedRowIds().length > 0
+        ? "rows"
+        : contextCell.value && hasCellSelection.value && selectedCellMatrix.value
+          ? "cells"
+          : null;
   const previewItems: ContextMenuItem[] = [];
   if (!contextHeaderColumn.value && contextCell.value) {
     const colType = props.result.column_types?.[contextCell.value.col];

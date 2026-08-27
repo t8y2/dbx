@@ -5873,6 +5873,9 @@ struct PostgresSearchPathBaseline {
     first_resolved_schema: Option<String>,
 }
 
+type PostgresSearchPathBaselineEntry = (Weak<deadpool_postgres::StatementCache>, PostgresSearchPathBaseline);
+type PostgresSearchPathBaselineCache = Mutex<HashMap<usize, PostgresSearchPathBaselineEntry>>;
+
 pub(crate) fn postgres_set_search_path_sql(schema: &str, context: PostgresSearchPathContext) -> String {
     let (scope, suffix) = match context {
         // Ordinary queries and exports historically fall back to public for
@@ -5952,11 +5955,8 @@ fn mark_postgres_client_single_schema_search_path(client: &deadpool_postgres::Cl
     clients.insert(key, Arc::downgrade(statement_cache));
 }
 
-fn postgres_search_path_baselines(
-) -> &'static Mutex<HashMap<usize, (Weak<deadpool_postgres::StatementCache>, PostgresSearchPathBaseline)>> {
-    static BASELINES: OnceLock<
-        Mutex<HashMap<usize, (Weak<deadpool_postgres::StatementCache>, PostgresSearchPathBaseline)>>,
-    > = OnceLock::new();
+fn postgres_search_path_baselines() -> &'static PostgresSearchPathBaselineCache {
+    static BASELINES: OnceLock<PostgresSearchPathBaselineCache> = OnceLock::new();
     BASELINES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 

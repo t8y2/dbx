@@ -46,6 +46,7 @@ import {
   PencilRuler,
   Settings2,
   WandSparkles,
+  Camera,
 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -75,6 +76,7 @@ import DataGridTextFilterWorkbench from "@/components/grid/DataGridTextFilterWor
 import TemporalCellEditor from "@/components/grid/TemporalCellEditor.vue";
 import EnumCellEditor from "@/components/grid/EnumCellEditor.vue";
 import DataGridReadonlyTextSelection from "@/components/grid/DataGridReadonlyTextSelection.vue";
+import GridSnapshotDialog from "@/components/grid/GridSnapshotDialog.vue";
 import type { QueryResult, ColumnInfo, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo, TableInfoTab, QueryResultSourceColumnRef } from "@/types/database";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import { tableObjectSourceKind } from "@/lib/table/tableObjectSourceKind";
@@ -307,6 +309,7 @@ import { useDataGridSelection } from "@/composables/useDataGridSelection";
 import { dataGridNavigationOrigin, dataGridPageScrollTop, dataGridRowScrollTop, moveDataGridCell, navigateDataGridCell, type DataGridNavigationDirection, type DataGridScrollAlignment } from "@/lib/dataGrid/dataGridNavigation";
 import { dataGridInlineBulkEditValue } from "@/lib/dataGrid/dataGridInlineBulkEdit";
 import type { CellPosition } from "@/lib/dataGrid/gridSelection";
+import type { GridSnapshotSource } from "@/lib/gridSnapshot/gridSnapshot";
 import { createDataGridRuntimeScope } from "@/lib/dataGrid/dataGridRuntime";
 import { useDataGridEditor } from "@/composables/useDataGridEditor";
 import { useDataGridSort } from "@/composables/useDataGridSort";
@@ -924,6 +927,8 @@ const insertPosition = ref<GridInsertRowPosition>("below");
 const generateIncrementDialogOpen = ref(false);
 const generateIncrementStartValue = ref("1");
 const generateIncrementTarget = ref<"selection" | "detail">("selection");
+const gridSnapshotOpen = ref(false);
+const gridSnapshotSource = ref<GridSnapshotSource | null>(null);
 const detailCell = ref<{ rowIndex: number; col: number } | null>(null);
 const hoveredDetailCell = ref<{ rowIndex: number; col: number } | null>(null);
 const quickDownloadMenuCell = ref<{ rowIndex: number; col: number } | null>(null);
@@ -11682,6 +11687,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
   const row = contextRowItem.value;
   const rowLabels = rowActionLabels();
   const hasEditableSelection = selectionHasEditableCells();
+  const gridSnapshotContext = contextHeaderColumn.value && hasColumnSelection.value ? "columns" : contextCell.value?.col === -1 && affectedRowIds().length > 0 ? "rows" : contextCell.value && hasCellSelection.value ? "cells" : null;
   const previewItems: ContextMenuItem[] = [];
   if (!contextHeaderColumn.value && contextCell.value) {
     const colType = props.result.column_types?.[contextCell.value.col];
@@ -11810,6 +11816,15 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
         children: generateSelectionMenuItems(!hasEditableSelection),
       },
     }),
+    [
+      { label: "", separator: true, visible: gridSnapshotContext !== null },
+      {
+        label: t(gridSnapshotContext === "rows" ? "gridSnapshot.openRows" : gridSnapshotContext === "columns" ? "gridSnapshot.openColumns" : "gridSnapshot.open"),
+        action: openGridSnapshot,
+        icon: Camera,
+        visible: gridSnapshotContext !== null,
+      },
+    ],
     createDataGridRowContextMenuItems({
       editable: props.editable,
       hasRow: !!row,
@@ -11843,6 +11858,40 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 
 function currentGridContextMenuItems(): ContextMenuItem[] {
   return gridContextMenuItems.value;
+}
+
+function gridSnapshotVisibleColumnIndexes(): number[] {
+  if (selectedCellMatrix.value) return selectedCellMatrix.value.columnIndexes.slice();
+  if (selectedCellKeys.value.size > 0) {
+    return [...new Set([...selectedCellKeys.value].map((key) => Number(key.split(":")[1])).filter((index) => Number.isInteger(index) && index >= 0))].sort((a, b) => a - b);
+  }
+  if (hasColumnSelection.value) return [...selectedColumnIndexes.value].sort((a, b) => a - b);
+  const range = selectedRange.value;
+  return range ? Array.from({ length: range.endCol - range.startCol + 1 }, (_, index) => range.startCol + index) : [];
+}
+
+function openGridSnapshot() {
+  const rowSelection = contextCell.value?.col === -1 && hasRowSelection.value;
+  const selectedRows = rowSelection ? new Set(affectedRowIds()) : null;
+  const selection = rowSelection
+    ? {
+        columns: visibleColumns.value,
+        rows: visibleDisplayItems.value.filter((item) => selectedRows!.has(item.id)).map((item) => item.data),
+      }
+    : (selectedCellMatrix.value ?? selectedCells.value);
+  if (!selection.columns.length || !selection.rows.length) return;
+  const columnIndexes = rowSelection ? visibleColumns.value.map((_, index) => index) : gridSnapshotVisibleColumnIndexes();
+  gridSnapshotSource.value = {
+    columns: selection.columns.slice(),
+    columnTypes: columnIndexes.map((index) => {
+      const type = visibleColumnTypes.value[index];
+      return type ? shortTypeName(compactHeaderColumnType(type)) : undefined;
+    }),
+    columnDetails: columnIndexes.map((index) => visibleColumnComments.value[index]),
+    rows: selection.rows.map((row) => row.slice()),
+    title: props.exportFileBaseName || props.result.sourceLabel || undefined,
+  };
+  gridSnapshotOpen.value = true;
 }
 </script>
 
@@ -13933,6 +13982,7 @@ function currentGridContextMenuItems(): ContextMenuItem[] {
 
     <DataGridExtractorDialog v-model:open="extractorConfigOpen" :preference="selectedCopyPreference" :options="settingsStore.editorSettings.dataGridExtractorOptions" :items="copyPreferenceMenuItems" :preview="previewWithPreference" @save="saveExtractorConfiguration" />
     <DataGridCopyColumnNamesDialog v-if="copyColumnNamesDialogMounted" v-model:open="copyColumnNamesDialogOpen" :column-names="copyColumnNamesDialogColumns" :database-type="resolvedDatabaseType" :column-comments="columnCommentMap" @copy="copyText" />
+    <GridSnapshotDialog v-model:open="gridSnapshotOpen" :source="gridSnapshotSource" />
 
     <Dialog v-model:open="generateIncrementDialogOpen">
       <DialogContent class="sm:max-w-[380px]">

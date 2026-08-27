@@ -226,6 +226,12 @@ function selectAllHeader(host: HTMLElement): HTMLElement {
   return header;
 }
 
+function rowNumber(host: HTMLElement, rowIndex = 0): HTMLElement {
+  const cell = host.querySelector<HTMLElement>(`[data-row-index="${rowIndex}"] .data-grid-row-number`);
+  if (!cell) throw new Error(`Row number not found: ${rowIndex}`);
+  return cell;
+}
+
 function openContextMenu(target: HTMLElement) {
   target.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 12, clientY: 12 }));
 }
@@ -294,6 +300,32 @@ describe("DataGrid context menu target lifecycle", () => {
 
     expect(contextMenuLabels()).toContain("Copy Selected Column Names (2)");
     expect(contextMenuLabels()).toContain("Freeze Selected Columns");
+  });
+
+  it("offers snapshots for full-column selections from the column header", async () => {
+    const { host } = mountGrid(hydratedResult(1, "value"));
+    await settle();
+
+    openContextMenu(columnHeader(host, 1));
+    await settle();
+
+    expect(contextMenuLabels()).toContain("Screenshot selected columns");
+    contextMenuButton("Screenshot selected columns").click();
+    await settle();
+    expect(document.body.textContent).toContain("Grid Snapshot");
+  });
+
+  it("offers snapshots for full-row selections from the row number", async () => {
+    const { host } = mountGrid(hydratedResult(1, "value"));
+    await settle();
+
+    openContextMenu(rowNumber(host));
+    await settle();
+
+    expect(contextMenuLabels()).toContain("Screenshot selected rows");
+    contextMenuButton("Screenshot selected rows").click();
+    await settle();
+    expect(document.body.textContent).toContain("Grid Snapshot");
   });
 
   it.each(["WHERE", "ORDER BY"] as const)("keeps the native context menu for the %s condition editor", async (placeholder) => {

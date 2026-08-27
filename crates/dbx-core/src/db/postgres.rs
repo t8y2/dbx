@@ -5867,6 +5867,12 @@ pub(crate) enum PostgresSearchPathContext {
     LocalQueryTransaction,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PostgresSearchPathBaseline {
+    configured: String,
+    first_resolved_schema: Option<String>,
+}
+
 pub(crate) fn postgres_set_search_path_sql(schema: &str, context: PostgresSearchPathContext) -> String {
     let (scope, suffix) = match context {
         // Ordinary queries and exports historically fall back to public for
@@ -5881,8 +5887,39 @@ pub(crate) fn postgres_set_search_path_sql(schema: &str, context: PostgresSearch
 }
 
 fn postgres_set_single_schema_search_path_sql(schema: &str, context: PostgresSearchPathContext) -> String {
-    let scope = if context == PostgresSearchPathContext::LocalTransaction { " LOCAL" } else { "" };
+    let scope = if matches!(
+        context,
+        PostgresSearchPathContext::LocalTransaction | PostgresSearchPathContext::LocalQueryTransaction
+    ) {
+        " LOCAL"
+    } else {
+        ""
+    };
     format!("SET{scope} search_path TO {}", pg_quote_ident(schema))
+}
+
+fn postgres_set_preserved_search_path_sql(
+    schema: &str,
+    context: PostgresSearchPathContext,
+    baseline: &PostgresSearchPathBaseline,
+) -> Option<String> {
+    if baseline.first_resolved_schema.as_deref() == Some(schema) {
+        return None;
+    }
+    let scope = if matches!(
+        context,
+        PostgresSearchPathContext::LocalTransaction | PostgresSearchPathContext::LocalQueryTransaction
+    ) {
+        " LOCAL"
+    } else {
+        ""
+    };
+    let configured = baseline.configured.trim();
+    if configured.is_empty() {
+        Some(format!("SET{scope} search_path TO {}", pg_quote_ident(schema)))
+    } else {
+        Some(format!("SET{scope} search_path TO {}, {configured}", pg_quote_ident(schema)))
+    }
 }
 
 fn postgres_requires_single_schema_search_path(error: &str) -> bool {
@@ -5915,6 +5952,59 @@ fn mark_postgres_client_single_schema_search_path(client: &deadpool_postgres::Cl
     clients.insert(key, Arc::downgrade(statement_cache));
 }
 
+fn postgres_search_path_baselines(
+) -> &'static Mutex<HashMap<usize, (Weak<deadpool_postgres::StatementCache>, PostgresSearchPathBaseline)>> {
+    static BASELINES: OnceLock<
+        Mutex<HashMap<usize, (Weak<deadpool_postgres::StatementCache>, PostgresSearchPathBaseline)>>,
+    > = OnceLock::new();
+    BASELINES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cached_postgres_search_path_baseline(client: &deadpool_postgres::Client) -> Option<PostgresSearchPathBaseline> {
+    let statement_cache = &client.statement_cache;
+    let key = Arc::as_ptr(statement_cache) as usize;
+    let mut baselines = postgres_search_path_baselines().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    match baselines.get(&key) {
+        Some((cached, baseline)) if cached.upgrade().is_some_and(|cached| Arc::ptr_eq(&cached, statement_cache)) => {
+            Some(baseline.clone())
+        }
+        _ => {
+            baselines.remove(&key);
+            None
+        }
+    }
+}
+
+fn cache_postgres_search_path_baseline(client: &deadpool_postgres::Client, baseline: PostgresSearchPathBaseline) {
+    let statement_cache = &client.statement_cache;
+    let key = Arc::as_ptr(statement_cache) as usize;
+    let mut baselines = postgres_search_path_baselines().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    baselines.retain(|_, (cached, _)| cached.strong_count() > 0);
+    baselines.insert(key, (Arc::downgrade(statement_cache), baseline));
+}
+
+async fn postgres_search_path_baseline(
+    client: &deadpool_postgres::Client,
+    timeout_duration: Duration,
+) -> Result<PostgresSearchPathBaseline, String> {
+    if let Some(baseline) = cached_postgres_search_path_baseline(client) {
+        return Ok(baseline);
+    }
+    let row = tokio::time::timeout(
+        timeout_duration,
+        client.query_one("SELECT current_setting('search_path'), (current_schemas(false))[1]", &[]),
+    )
+    .await
+    .map_err(|_| format!("PostgreSQL schema.get timed out after {} seconds", timeout_duration.as_secs()))?
+    .map_err(pg_error_to_string)?;
+    let baseline = PostgresSearchPathBaseline {
+        configured: row.try_get(0).map_err(|error| error.to_string())?,
+        first_resolved_schema: row.try_get(1).map_err(|error| error.to_string())?,
+    };
+    cache_postgres_search_path_baseline(client, baseline.clone());
+    Ok(baseline)
+}
+
 pub(crate) async fn set_postgres_search_path(
     client: &deadpool_postgres::Client,
     schema: &str,
@@ -5931,7 +6021,16 @@ pub(crate) async fn set_postgres_search_path(
         .await;
     }
 
-    let primary_sql = postgres_set_search_path_sql(schema, context);
+    let primary_sql = match postgres_search_path_baseline(client, timeout_duration).await {
+        Ok(baseline) => match postgres_set_preserved_search_path_sql(schema, context, &baseline) {
+            Some(sql) => sql,
+            None => return Ok(0),
+        },
+        Err(error) => {
+            log::warn!("[postgres][schema.get:error] schema={schema} error={error}; using compatibility fallback");
+            postgres_set_search_path_sql(schema, context)
+        }
+    };
     match execute_postgres_infra_statement(client, &primary_sql, timeout_duration, "schema.set").await {
         Ok(affected) => Ok(affected),
         Err(primary_error) if postgres_requires_single_schema_search_path(&primary_error) => {
@@ -8496,6 +8595,42 @@ mod tests {
                 PostgresSearchPathContext::LocalTransaction,
             ),
             "SET LOCAL search_path TO \"tenant\"\"; RESET search_path; --\""
+        );
+        assert_eq!(
+            postgres_set_single_schema_search_path_sql("application", PostgresSearchPathContext::LocalQueryTransaction),
+            "SET LOCAL search_path TO \"application\""
+        );
+    }
+
+    #[test]
+    fn postgres_search_path_keeps_the_configured_path_when_selected_schema_is_first() {
+        let baseline = PostgresSearchPathBaseline {
+            configured: "application, extensions, public".to_string(),
+            first_resolved_schema: Some("application".to_string()),
+        };
+        assert_eq!(
+            postgres_set_preserved_search_path_sql("application", PostgresSearchPathContext::Query, &baseline),
+            None
+        );
+    }
+
+    #[test]
+    fn postgres_search_path_prepends_selected_schema_without_dropping_configured_items() {
+        let baseline = PostgresSearchPathBaseline {
+            configured: "\"$user\", extensions, public".to_string(),
+            first_resolved_schema: Some("public".to_string()),
+        };
+        assert_eq!(
+            postgres_set_preserved_search_path_sql("application", PostgresSearchPathContext::Query, &baseline),
+            Some("SET search_path TO \"application\", \"$user\", extensions, public".to_string())
+        );
+        assert_eq!(
+            postgres_set_preserved_search_path_sql(
+                "application",
+                PostgresSearchPathContext::LocalQueryTransaction,
+                &baseline,
+            ),
+            Some("SET LOCAL search_path TO \"application\", \"$user\", extensions, public".to_string())
         );
     }
 

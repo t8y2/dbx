@@ -4314,6 +4314,7 @@ export const useQueryStore = defineStore("query", () => {
       const queryAnalysis = {
         ...target.analysis,
         ...(target.analysis.distinct && canInsertIntoEditableQuerySource(tab, dbType as DatabaseType, target, target.sourceColumns) ? { allowInsert: true } : {}),
+        allowDelete: !target.analysis.distinct,
         allowInsertDelete: false,
         multiSource: true,
       };

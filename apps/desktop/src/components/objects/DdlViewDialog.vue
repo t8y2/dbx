@@ -80,7 +80,7 @@ async function loadDdl(force = false) {
   }
 }
 
-/** Loads the persisted table DDL when the dialog opens. */
+/** An explicit DDL view should reflect the current database state, not a persisted snapshot. */
 watch(
   () => props.open,
   async (open) => {
@@ -88,7 +88,7 @@ watch(
     const active = document.activeElement;
     editorRootToRestoreFocus = active instanceof HTMLElement ? active.closest(".cm-editor") : null;
     ddlContent.value = "";
-    await loadDdl();
+    await loadDdl(true);
   },
   { immediate: true },
 );

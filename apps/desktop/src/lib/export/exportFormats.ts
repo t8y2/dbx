@@ -1,4 +1,4 @@
-import type { DatabaseType } from "@/types/database";
+import type { DatabaseType, QueryResult } from "@/types/database";
 import * as api from "@/lib/backend/api";
 
 export type ExportCellValue = string | number | boolean | null;
@@ -35,6 +35,8 @@ export interface FormatSqlInsertOptions {
   qualifiedTableName?: string;
   columns: string[];
   columnTypes?: Array<string | null | undefined>;
+  spatialColumns?: QueryResult["spatial_columns"];
+  spatialValues?: QueryResult["spatial_values"];
   rows: ExportCellValue[][];
 }
 

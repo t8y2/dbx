@@ -117,6 +117,7 @@ export interface UseDataGridEditorOptions {
   cacheKey?: ComputedRef<string | undefined>;
   /** 保存成功后结果负载被原地修改时通知宿主，使缓存的字节估算失效。 */
   onResultPayloadMutated?: () => void;
+  refreshSavedRows?: (request: { dirtyRows: ReadonlyMap<number, ReadonlyMap<number, CellValue>>; columns: readonly string[]; rows: readonly (readonly CellValue[])[] }) => Promise<boolean>;
   onCellValueChanged?: (rowId: number, columnIndex: number) => void;
   prepareFullReload?: () => void;
   emit: (event: "reload", sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number) => void;
@@ -1835,11 +1836,23 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     }
     applyDirtyRowsToResult(snapshot);
     options.onResultPayloadMutated?.();
+    let savedRowsRefreshed = false;
+    if (!shouldReloadAfterSave && snapshot.dirtyRows.size > 0 && options.refreshSavedRows) {
+      try {
+        savedRowsRefreshed = await options.refreshSavedRows({
+          dirtyRows: snapshot.dirtyRows,
+          columns: result.value.columns,
+          rows: result.value.rows,
+        });
+      } catch (error) {
+        console.warn("[DBX] failed to refresh saved data grid rows", error);
+      }
+    }
     snapshot.newRowRefs.forEach((row) => savingNewRows.delete(row));
     clearSavedPendingChanges(snapshot);
     if (!hasPendingChanges.value) exitTransaction();
     clearPendingChangeHistory();
-    if (shouldReloadAfterSqlSave) {
+    if (shouldReloadAfterSqlSave && !savedRowsRefreshed) {
       reloadCurrentData();
     }
     await finishSaveChanges(snapshot);

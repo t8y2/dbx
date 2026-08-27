@@ -373,7 +373,7 @@
       "capabilities": {
         "queryExecution": true,
         "metadataBrowse": false,
-        "objectBrowser": false,
+        "objectBrowser": true,
         "objectSource": false,
         "schemaSearch": false,
         "diagram": false,

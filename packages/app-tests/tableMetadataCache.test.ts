@@ -61,37 +61,51 @@ test("table metadata loader deduplicates equivalent in-flight requests and cache
   assert.equal(getColumns.mock.calls.length, 1);
 });
 
-test("uses the visible Vastbase relation schema for the index lookup", async () => {
-  const getColumns = vi.fn(async (): Promise<ColumnInfo[]> => [
-    {
-      name: "id",
-      data_type: "bigint",
-      resolved_schema: "tenant_b",
-      is_nullable: false,
-      column_default: null,
-      is_primary_key: true,
-      extra: null,
-    },
-  ]);
+test("uses agent-reported visible schemas for Vastbase and Kingbase index lookups", async () => {
+  const resolvedSchemas: Record<string, string> = {
+    "vastbase-1": "tenant_b",
+    "kingbase-1": "workflow_schema",
+  };
+  const getColumns = vi.fn(async (connectionId: string): Promise<ColumnInfo[]> => {
+    const resolvedSchema = resolvedSchemas[connectionId];
+    assert.ok(resolvedSchema);
+    return [
+      {
+        name: "id",
+        data_type: "bigint",
+        resolved_schema: resolvedSchema,
+        is_nullable: false,
+        column_default: null,
+        is_primary_key: true,
+        extra: null,
+      },
+    ];
+  });
   const listIndexes = vi.fn(async (): Promise<IndexInfo[]> => []);
   vi.doMock("@/lib/backend/api", () => ({ getColumns, listIndexes }));
 
   const { clearTableMetadataCache, loadTableMetadata } = await import("../../apps/desktop/src/lib/metadata/tableMetadataCache.ts");
   clearTableMetadataCache();
 
-  const result = await loadTableMetadata({
-    connectionId: "conn",
-    database: "app",
-    schema: "",
-    tableName: "users",
-    tableType: "TABLE",
-    databaseType: "vastbase",
-    driverProfile: "vastbase",
-  });
+  const testCases = [
+    { connectionId: "vastbase-1", databaseType: "vastbase", resolvedSchema: "tenant_b" },
+    { connectionId: "kingbase-1", databaseType: "kingbase", resolvedSchema: "workflow_schema" },
+  ] as const;
+  for (const [index, testCase] of testCases.entries()) {
+    const result = await loadTableMetadata({
+      connectionId: testCase.connectionId,
+      database: "app",
+      schema: "",
+      tableName: "users",
+      tableType: "TABLE",
+      databaseType: testCase.databaseType,
+      driverProfile: testCase.databaseType,
+    });
 
-  assert.equal(result.metadata.schema, "tenant_b");
-  assert.equal(listIndexes.mock.calls.length, 1);
-  assert.equal(listIndexes.mock.calls[0]?.[2], "tenant_b");
+    assert.equal(result.metadata.schema, testCase.resolvedSchema);
+    assert.equal(listIndexes.mock.calls[index]?.[2], testCase.resolvedSchema);
+  }
+  assert.equal(listIndexes.mock.calls.length, 2);
 });
 
 test("table metadata invalidation keeps unrelated schemas cached", async () => {

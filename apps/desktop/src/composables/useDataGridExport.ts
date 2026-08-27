@@ -86,6 +86,8 @@ export interface UseDataGridExportOptions {
   columnComments?: ComputedRef<Array<string | undefined>>;
   allColumnComments?: ComputedRef<Array<string | undefined>>;
   mongoDocuments?: ComputedRef<unknown[] | undefined>;
+  spatialColumns?: ComputedRef<QueryResult["spatial_columns"] | undefined>;
+  spatialValues?: ComputedRef<QueryResult["spatial_values"] | undefined>;
   columnTypes: ComputedRef<Array<string | undefined> | undefined>;
   allColumnTypes?: ComputedRef<Array<string | undefined> | undefined>;
   whereInput: ComputedRef<string | undefined>;
@@ -174,6 +176,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     connectionId,
     database,
     context,
+    spatialColumns: spatialColumnsOption,
+    spatialValues: spatialValuesOption,
     whereInput,
     orderBy,
     columnTypes,
@@ -335,12 +339,24 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     useFullExport = true,
     formatDateTime = true,
     headerMode: XlsxHeaderMode = "name",
-  ): Promise<{ columns: string[]; columnTypes: string[]; columnComments?: (string | null)[]; rows: CellValue[][] }> {
+  ): Promise<{
+    columns: string[];
+    columnTypes: string[];
+    columnComments?: (string | null)[];
+    spatialColumns?: QueryResult["spatial_columns"];
+    spatialValues?: QueryResult["spatial_values"];
+    rows: CellValue[][];
+  }> {
     if (useFullExport && rowIds === undefined && fullExportResult && !hasCompleteLocalResult?.value) {
       const result = await fullExportResult(onProgress);
       if (result) {
         const columnComments = buildXlsxHeaderOverrides(result.columns, commentsForExportColumns(result.columns), headerMode);
-        return { ...applyGlobalDateTimeExportFormat({ columns: result.columns, columnTypes: result.column_types ?? [], rows: result.rows }, formatDateTime), columnComments };
+        return {
+          ...applyGlobalDateTimeExportFormat({ columns: result.columns, columnTypes: result.column_types ?? [], rows: result.rows }, formatDateTime),
+          columnComments,
+          spatialColumns: result.spatial_columns,
+          spatialValues: result.spatial_values,
+        };
       }
     }
     // The full result is already in memory — export the raw QueryResult (all
@@ -351,19 +367,30 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     if (useFullExport && rowIds === undefined && hasCompleteLocalResult?.value && completeLocalResult?.value) {
       const normalized = normalizeCompleteLocalResult(completeLocalResult.value);
       const columnComments = buildXlsxHeaderOverrides(normalized.columns, normalized.columnComments, headerMode);
-      return { ...applyGlobalDateTimeExportFormat({ columns: normalized.columns, columnTypes: normalized.columnTypes, rows: normalized.rows }, formatDateTime), columnComments };
+      return {
+        ...applyGlobalDateTimeExportFormat({ columns: normalized.columns, columnTypes: normalized.columnTypes, rows: normalized.rows }, formatDateTime),
+        columnComments,
+        spatialColumns: completeLocalResult.value.spatial_columns,
+        spatialValues: completeLocalResult.value.spatial_values,
+      };
     }
     const commentHeader = buildXlsxHeaderOverrides(columns.value, visibleXlsxColumnComments.value, headerMode);
+    const exportItems = await resolveVisibleRowValues(rowsToExport(rowIds));
+    const visibleIndexes = visibleColumnIndexesOption?.value ?? columns.value.map((_, index) => index);
+    const spatialColumns = spatialColumnsOption?.value?.map((column) => ({ column_index: visibleIndexes.indexOf(column.column_index), srid: column.srid })).filter((column) => column.column_index >= 0);
+    const spatialValues = spatialValuesOption?.value;
     return {
       ...applyGlobalDateTimeExportFormat(
         {
           columns: columns.value,
           columnTypes: (columnTypes.value ?? []).map((type) => type ?? ""),
-          rows: (await resolveVisibleRowValues(rowsToExport(rowIds))).map((item) => item.data),
+          rows: exportItems.map((item) => item.data),
         },
         formatDateTime,
       ),
       columnComments: commentHeader,
+      ...(spatialColumns?.length ? { spatialColumns } : {}),
+      ...(spatialValues?.length ? { spatialValues: exportItems.map((item) => visibleIndexes.map((index) => spatialValues[item.sourceIndex ?? -1]?.[index] ?? null)) } : {}),
     };
   }
 
@@ -1278,6 +1305,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           tableName: tableMeta.value?.tableName || "table_name",
           columns: exportData.columns,
           columnTypes: exportData.columnTypes,
+          spatialColumns: exportData.spatialColumns,
+          spatialValues: exportData.spatialValues,
           rows: exportData.rows,
         });
         await saveTextFile(content, exportFileName(tableMeta.value?.tableName || "export", "sql", { preferFallback: true }), "SQL", "sql");
@@ -1300,6 +1329,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           tableName: tableMeta.value?.tableName || "table_name",
           columns: exportData.columns,
           columnTypes: exportData.columnTypes,
+          spatialColumns: exportData.spatialColumns,
+          spatialValues: exportData.spatialValues,
           rows: exportData.rows,
         });
         await saveTextFile(content, exportFileName("export-page", "sql", { page: true }), "SQL", "sql");
@@ -1315,17 +1346,26 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     await copyText(sql.value);
   }
 
-  function sqlInsertExportData(result: { columns: string[]; rows: CellValue[][] }): {
+  function sqlInsertExportData(result: { columns: string[]; rows: CellValue[][]; spatialColumns?: QueryResult["spatial_columns"]; spatialValues?: QueryResult["spatial_values"] }): {
     columns: string[];
     columnTypes?: Array<string | undefined>;
+    spatialColumns?: QueryResult["spatial_columns"];
+    spatialValues?: QueryResult["spatial_values"];
     rows: CellValue[][];
   } {
     const exportColumns = context.value === "table-data" && tableMeta.value ? effectiveColumns(sourceColumns.value, result.columns) : result.columns;
     const columnIndexes = exportColumns.map((column, index) => ({ column, index })).filter((item): item is { column: string; index: number } => !!item.column);
     const exportColumnTypes = columnTypes.value?.length === result.columns.length ? columnTypes.value : undefined;
+    const indexBySource = new Map(columnIndexes.map((item, index) => [item.index, index]));
+    const spatialColumns = result.spatialColumns?.flatMap((column) => {
+      const columnIndex = indexBySource.get(column.column_index);
+      return columnIndex === undefined ? [] : [{ column_index: columnIndex, srid: column.srid }];
+    });
     return {
       columns: columnIndexes.map((item) => item.column),
       columnTypes: exportColumnTypes ? columnIndexes.map((item) => exportColumnTypes[item.index]) : undefined,
+      ...(spatialColumns?.length ? { spatialColumns } : {}),
+      ...(result.spatialValues?.length ? { spatialValues: result.spatialValues.map((row) => columnIndexes.map((item) => row[item.index] ?? null)) } : {}),
       rows: result.rows.map((row) => columnIndexes.map((item) => row[item.index] ?? null)),
     };
   }

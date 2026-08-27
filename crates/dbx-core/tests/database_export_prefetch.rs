@@ -8,6 +8,7 @@ use std::process::Command;
 use dbx_core::connection::AppState;
 use dbx_core::database_export::{export_database_sql_core, DatabaseExportRequest};
 use dbx_core::storage::Storage;
+use std::sync::Arc;
 use support::{postgres_test_config, psql, start_docker_postgres};
 
 #[test]
@@ -54,7 +55,7 @@ async fn run_database_export_writes_structure_and_data_for_all_tables() {
     let dir = std::env::temp_dir().join(format!("dbx-export-prefetch-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
-    let state = AppState::new(storage);
+    let state = Arc::new(AppState::new(storage));
 
     let connection_id = "export-prefetch-conn";
     state.configs.write().await.insert(connection_id.to_string(), postgres_test_config(connection_id, container.port));

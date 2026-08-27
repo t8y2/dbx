@@ -1256,6 +1256,7 @@ dependencies = [
  "minijinja",
  "mongodb",
  "mysql_async",
+ "nix",
  "notify",
  "openssl",
  "pageant",

@@ -37,10 +37,17 @@ function shortcutKeyName(key: string): string | null {
   return key;
 }
 
+function shortcutKeyNameFromEvent(event: ShortcutLikeEvent, platform: string): string | null {
+  if (event.altKey && isMacShortcutPlatform(platform) && /^Key[A-Z]$/.test(event.code ?? "")) {
+    return event.code!.slice(3);
+  }
+  return shortcutKeyName(event.key);
+}
+
 export function eventToShortcut(event: ShortcutLikeEvent, platform = globalThis.navigator?.platform || ""): string | null {
   if (event.isComposing) return null;
 
-  const key = shortcutKeyName(event.key);
+  const key = shortcutKeyNameFromEvent(event, platform);
   if (!key) return null;
 
   const hasModifier = !!event.metaKey || !!event.ctrlKey || !!event.altKey || !!event.shiftKey;
@@ -211,8 +218,8 @@ export function isDeleteCurrentRowShortcut(event: ShortcutLikeEvent, shortcuts?:
   return matchesShortcut(event, actionShortcut("deleteCurrentRow", shortcuts));
 }
 
-export function isGoToColumnShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
-  return matchesShortcut(event, actionShortcut("goToColumn", shortcuts));
+export function isGoToColumnShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
+  return matchesShortcut(event, actionShortcut("goToColumn", shortcuts, platform), platform);
 }
 
 export function isGoToFirstPageShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {

@@ -24,6 +24,7 @@ use crate::query_result_sql::{
 };
 use crate::table_export::TableExportProgress;
 use crate::transfer::keyset_pagination_sql;
+use crate::types::SpatialColumn;
 use crate::xlsx_export::{
     finish_streaming_xlsx_workbook, start_streaming_xlsx_workbook_with_options, StreamingXlsxWriter, XlsxWorksheetData,
 };
@@ -297,8 +298,10 @@ struct SqlInsertWriter {
     file: Option<BufWriter<File>>,
     target: Option<StagedExportTarget>,
     pending_rows: Vec<Vec<Value>>,
+    pending_spatial_values: Vec<Vec<Option<u32>>>,
     columns: Vec<String>,
     column_types: Vec<Option<String>>,
+    spatial_columns: Vec<SpatialColumn>,
     database_type: DatabaseType,
     schema: Option<String>,
     table_name: String,
@@ -323,8 +326,10 @@ impl SqlInsertWriter {
             file: Some(file),
             target: Some(target),
             pending_rows: Vec::new(),
+            pending_spatial_values: Vec::new(),
             columns: Vec::new(),
             column_types: Vec::new(),
+            spatial_columns: Vec::new(),
             database_type: request.database_type,
             schema: request.schema.clone(),
             table_name,
@@ -339,14 +344,17 @@ impl SqlInsertWriter {
         &mut self,
         columns: Vec<String>,
         result_column_types: &[String],
+        spatial_columns: &[SpatialColumn],
         request: &QueryResultExportRequest,
     ) {
         self.column_types = sql_insert_column_types(request, result_column_types);
+        self.spatial_columns = spatial_columns.to_vec();
         self.columns = columns;
     }
 
-    fn write_row(&mut self, row: Vec<Value>) -> Result<(), String> {
+    fn write_row(&mut self, row: Vec<Value>, spatial_values: Option<Vec<Option<u32>>>) -> Result<(), String> {
         self.pending_rows.push(row);
+        self.pending_spatial_values.push(spatial_values.unwrap_or_default());
         if self.pending_rows.len() >= SQL_INSERT_BATCH_SIZE {
             self.flush_batch()?;
         }
@@ -366,6 +374,8 @@ impl SqlInsertWriter {
             columns: self.columns.clone(),
             column_types: self.column_types.clone(),
             column_extras: Vec::new(),
+            spatial_columns: self.spatial_columns.clone(),
+            spatial_values: mem::take(&mut self.pending_spatial_values),
             rows: mem::take(&mut self.pending_rows),
             batch_size: Some(SQL_INSERT_BATCH_SIZE),
         })?;
@@ -857,7 +867,7 @@ async fn export_query_result_core_inner(
             columns = result.columns.clone();
             column_types = result.column_types.clone();
             if let Some(writer) = sql_writer.as_mut() {
-                writer.set_columns(columns.clone(), &column_types, request);
+                writer.set_columns(columns.clone(), &column_types, &result.spatial_columns, request);
             }
         }
         let fetched_row_count = result.rows.len();
@@ -886,8 +896,8 @@ async fn export_query_result_core_inner(
             }
         } else if format == "sql" {
             let writer = sql_writer.as_mut().ok_or_else(|| "SQL export writer missing".to_string())?;
-            for row in formatted_rows.into_owned() {
-                writer.write_row(row)?;
+            for (row_index, row) in formatted_rows.into_owned().into_iter().enumerate() {
+                writer.write_row(row, result.spatial_values.get(row_index).cloned())?;
             }
         } else {
             if xlsx.is_none() {
@@ -1060,7 +1070,7 @@ async fn try_export_postgres_query_result_stream(
                     columns = stream_columns;
                     temporal_column_types = column_types.clone();
                     if let Some(writer) = sql_writer.as_mut() {
-                        writer.set_columns(columns.clone(), &column_types, request);
+                        writer.set_columns(columns.clone(), &column_types, &[], request);
                     } else if let Some(file) = text_file.as_mut() {
                         let header = format_text_export_header(format, &columns);
                         file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write export header: {e}"))?;
@@ -1082,7 +1092,7 @@ async fn try_export_postgres_query_result_stream(
                         request.date_time_format.as_deref(),
                     );
                     if let Some(writer) = sql_writer.as_mut() {
-                        writer.write_row(formatted.into_owned())?;
+                        writer.write_row(formatted.into_owned(), None)?;
                     } else if let Some(file) = text_file.as_mut() {
                         write_text_export_row(file, format, formatted.as_ref(), &mut text_buffer)?;
                     } else if let Some(writer) = xlsx.as_mut() {
@@ -1304,7 +1314,7 @@ async fn try_export_mysql_query_result_stream(
                     columns = stream_columns;
                     temporal_column_types = column_types.clone();
                     if let Some(writer) = sql_writer.as_mut() {
-                        writer.set_columns(columns.clone(), &column_types, request);
+                        writer.set_columns(columns.clone(), &column_types, &[], request);
                     } else if let Some(file) = text_file.as_mut() {
                         let header = format_text_export_header(format, &columns);
                         file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write export header: {e}"))?;
@@ -1326,7 +1336,7 @@ async fn try_export_mysql_query_result_stream(
                         request.date_time_format.as_deref(),
                     );
                     if let Some(writer) = sql_writer.as_mut() {
-                        writer.write_row(formatted.into_owned())?;
+                        writer.write_row(formatted.into_owned(), None)?;
                     } else if let Some(file) = text_file.as_mut() {
                         write_text_export_row(file, format, formatted.as_ref(), &mut text_buffer)?;
                     } else if let Some(writer) = xlsx.as_mut() {
@@ -1519,7 +1529,7 @@ async fn try_export_clickhouse_query_result_stream(
                     columns = stream_columns;
                     temporal_column_types = column_types.clone();
                     if let Some(writer) = sql_writer.as_mut() {
-                        writer.set_columns(columns.clone(), &column_types, request);
+                        writer.set_columns(columns.clone(), &column_types, &[], request);
                     } else if let Some(file) = text_file.as_mut() {
                         let header = format_text_export_header(format, &columns);
                         file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write export header: {e}"))?;
@@ -1541,7 +1551,7 @@ async fn try_export_clickhouse_query_result_stream(
                         request.date_time_format.as_deref(),
                     );
                     if let Some(writer) = sql_writer.as_mut() {
-                        writer.write_row(formatted.into_owned())?;
+                        writer.write_row(formatted.into_owned(), None)?;
                     } else if let Some(file) = text_file.as_mut() {
                         write_text_export_row(file, format, formatted.as_ref(), &mut text_buffer)?;
                     } else if let Some(writer) = xlsx.as_mut() {
@@ -1703,7 +1713,7 @@ async fn try_export_sqlserver_query_result_stream(
                     columns = stream_columns.to_vec();
                     temporal_column_types = column_types.to_vec();
                     if let Some(writer) = sql_writer.as_mut() {
-                        writer.set_columns(columns.clone(), &temporal_column_types, request);
+                        writer.set_columns(columns.clone(), &temporal_column_types, &[], request);
                     } else if let Some(file) = text_file.as_mut() {
                         let header = format_text_export_header(format, &columns);
                         file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write export header: {e}"))?;
@@ -1721,7 +1731,7 @@ async fn try_export_sqlserver_query_result_stream(
                         request.date_time_format.as_deref(),
                     );
                     if let Some(writer) = sql_writer.as_mut() {
-                        writer.write_row(formatted.into_owned())?;
+                        writer.write_row(formatted.into_owned(), None)?;
                     } else if let Some(file) = text_file.as_mut() {
                         write_text_export_row(file, format, formatted.as_ref(), &mut text_buffer)?;
                     } else if let Some(writer) = xlsx.as_mut() {

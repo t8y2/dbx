@@ -67,7 +67,16 @@ describe("gridSelection", () => {
     ["single cell", [[8]], 1, 1, 8],
     ["row", [[1, 3]], 2, 1, 2],
     ["column", [[1], [3]], 2, 2, 2],
-    ["range", [[1, 2], [3, 4]], 4, 2, 2.5],
+    [
+      "range",
+      [
+        [1, 2],
+        [3, 4],
+      ],
+      4,
+      2,
+      2.5,
+    ],
   ] as const)("averages a %s selection without changing its counts", (_label, rows, cellCount, rowCount, average) => {
     expect(summarizeSelection({ columns: [], rows: rows.map((row) => [...row]) })).toMatchObject({ cellCount, rowCount, average });
   });

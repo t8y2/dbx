@@ -134,11 +134,12 @@ import { decorateDatabaseSavedSqlTreeNodes, indexSavedSqlFilesByDatabase, stripD
 import { encodeSqlServerLinkedSchema, parseSqlServerLinkedSchema } from "@/lib/database/sqlServerLinkedServers";
 import { inferMongoCompletionFields, type MongoCompletionField } from "@/lib/mongo/mongoCompletion";
 import { isMongoLegacyDriverProfile } from "@/lib/mongo/mongoCapabilities";
-import { mongoCollectionKindFromNode, toMongoCollectionKind } from "@/lib/sidebar/mongoCollectionMutation";
+import { mongoCollectionKindFromNode, toMongoCollectionKind, visibleMongoCollections } from "@/lib/sidebar/mongoCollectionMutation";
 import { completionSchemasFromTree, completionTablesFromTree } from "@/lib/metadata/completionTreeIndex";
 import { kvRootNodeLabel } from "@/lib/kv/kvRootPresentation";
 import { REDIS_SCAN_PAGE_SIZE_DEFAULT } from "@/lib/redis/redisKeyPattern";
 import { normalizeRedisDatabaseAliases, redisDatabaseAlias, redisDatabaseLabel } from "@/lib/redis/redisDatabaseAlias";
+import { normalizeRedisKeyTemplates } from "@/lib/redis/redisKeyTemplates";
 import { appendAgentDriverUpdateHint, hasAgentDriverUpdate, hasInstalledAgentVersion, type AgentDriverInstallState } from "@/lib/connection/agentDriverInstallHint";
 import { appendConnectionErrorHints, isMysqlMissingPasswordFailure } from "@/lib/connection/connectionErrorHints";
 import { connectionNeedsPasswordPrompt } from "@/lib/connection/connectionPassword";
@@ -180,6 +181,9 @@ const DEFAULT_KEEPALIVE_INTERVAL_SECS = 30;
 const METADATA_LIST_PAGE_CACHE_TTL_MS = 30_000;
 const METADATA_LIST_PAGE_CACHE_MAX_ENTRIES = 160;
 const SIDEBAR_DATABASE_STORAGE_CACHE_TTL_MS = 30_000;
+const SIDEBAR_DATABASE_STORAGE_CACHE_MAX_ENTRIES = 32;
+const SIDEBAR_TABLE_STORAGE_CACHE_MAX_ENTRIES = 64;
+const SIDEBAR_TABLE_SEARCH_INDEX_CACHE_MAX_ENTRIES = 32;
 export const COMPLETION_METADATA_CONCURRENCY = 2;
 const MONGO_LEGACY_DRIVER_PROFILE = "mongodb-legacy";
 const MONGO_LEGACY_DRIVER_LABEL = "MongoDB (Legacy)";
@@ -418,9 +422,15 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   });
   const treeNodes = ref<TreeNode[]>([]);
-  const sidebarDatabaseStorageCache = new Map<string, { expiresAt: number; value: DatabaseStorageInfo[] }>();
+  const sidebarDatabaseStorageCache = new MetadataResultCache<DatabaseStorageInfo[]>({
+    ttlMs: SIDEBAR_DATABASE_STORAGE_CACHE_TTL_MS,
+    maxEntries: SIDEBAR_DATABASE_STORAGE_CACHE_MAX_ENTRIES,
+  });
   const sidebarDatabaseStorageInFlight = new Map<string, Promise<DatabaseStorageInfo[]>>();
-  const sidebarTableStorageCache = new Map<string, { expiresAt: number; value: ObjectStatistics[] }>();
+  const sidebarTableStorageCache = new MetadataResultCache<ObjectStatistics[]>({
+    ttlMs: SIDEBAR_DATABASE_STORAGE_CACHE_TTL_MS,
+    maxEntries: SIDEBAR_TABLE_STORAGE_CACHE_MAX_ENTRIES,
+  });
   const sidebarTableStorageInFlight = new Map<string, Promise<ObjectStatistics[]>>();
   const pinnedTreeNodeOrder = ref<string[]>([]);
   const pinnedTreeNodeIds = ref<Set<string>>(new Set());
@@ -1078,6 +1088,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function markConnectionLost(connectionId: string, error: unknown) {
     connectedIds.value.delete(connectionId);
+    clearSidebarStorageCaches(connectionId);
     clearPrimaryVisibleObjectNames(connectionId);
     clearConnectionIdentifierQuote(connectionId);
     clearConnectionNodeLoading(connectionId);
@@ -1249,6 +1260,10 @@ export const useConnectionStore = defineStore("connection", () => {
       idle_timeout_secs: config.idle_timeout_secs ?? 60,
       keepalive_interval_secs: config.keepalive_interval_secs ?? DEFAULT_KEEPALIVE_INTERVAL_SECS,
       redis_database_aliases: normalizeRedisDatabaseAliases(config.redis_database_aliases),
+      redis_key_templates: (() => {
+        const templates = normalizeRedisKeyTemplates(config.redis_key_templates);
+        return templates.length > 0 ? templates : undefined;
+      })(),
       database_info: normalizeDatabaseConnectionInfo(config.database_info),
     };
   }
@@ -2383,6 +2398,24 @@ export const useConnectionStore = defineStore("connection", () => {
     return `${treeCacheKey}:table-search-index-v1`;
   }
 
+  function getSidebarTableSearchIndexMemoryCache(cacheKey: string): TableInfo[] | null | undefined {
+    if (!sidebarTableSearchIndexCache.has(cacheKey)) return undefined;
+    const cached = sidebarTableSearchIndexCache.get(cacheKey) ?? null;
+    sidebarTableSearchIndexCache.delete(cacheKey);
+    sidebarTableSearchIndexCache.set(cacheKey, cached);
+    return cached;
+  }
+
+  function setSidebarTableSearchIndexMemoryCache(cacheKey: string, entries: TableInfo[] | null) {
+    sidebarTableSearchIndexCache.delete(cacheKey);
+    sidebarTableSearchIndexCache.set(cacheKey, entries);
+    while (sidebarTableSearchIndexCache.size > SIDEBAR_TABLE_SEARCH_INDEX_CACHE_MAX_ENTRIES) {
+      const oldest = sidebarTableSearchIndexCache.keys().next().value;
+      if (oldest === undefined) break;
+      sidebarTableSearchIndexCache.delete(oldest);
+    }
+  }
+
   const sidebarTableSearchIndexManifestCacheKey = "dbx:sidebar-table-search-index-manifest-v1";
 
   function sidebarTableSearchIndexManifestEntry(parent: TreeNode, cacheKey: string): TableSearchIndexManifestEntry | null {
@@ -2619,7 +2652,8 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function readSidebarTableSearchIndexCache(cacheKey: string, connectionId: string): Promise<TableInfo[] | null> {
-    if (sidebarTableSearchIndexCache.has(cacheKey)) return sidebarTableSearchIndexCache.get(cacheKey) ?? null;
+    const cached = getSidebarTableSearchIndexMemoryCache(cacheKey);
+    if (cached !== undefined) return cached;
     const pending = sidebarTableSearchIndexInFlight.get(cacheKey);
     if (pending) return pending;
     const connectionGeneration = sidebarTableSearchIndexConnectionGeneration(connectionId);
@@ -2629,7 +2663,7 @@ export const useConnectionStore = defineStore("connection", () => {
       const index = decoded?.tableSearchIndex;
       const entries = index ? index.entries.map((entry) => ({ name: entry.name, table_type: entry.tableType, ...(entry.comment !== undefined ? { comment: entry.comment } : {}) })) : null;
       if (!sidebarTableSearchIndexGenerationIsCurrent(connectionId, cacheKey, connectionGeneration, scopeGeneration)) return null;
-      sidebarTableSearchIndexCache.set(cacheKey, entries);
+      setSidebarTableSearchIndexMemoryCache(cacheKey, entries);
       return entries;
     })();
     sidebarTableSearchIndexInFlight.set(cacheKey, read);
@@ -2705,7 +2739,7 @@ export const useConnectionStore = defineStore("connection", () => {
       persisted = true;
     });
     if (!persisted || !sidebarTableSearchIndexGenerationIsCurrent(connectionId, cacheKey, connectionGeneration, scopeGeneration)) return [];
-    sidebarTableSearchIndexCache.set(cacheKey, deduped);
+    setSidebarTableSearchIndexMemoryCache(cacheKey, deduped);
     await registerSidebarTableSearchIndexScope(parent, cacheKey);
     return deduped;
   }
@@ -3158,6 +3192,7 @@ export const useConnectionStore = defineStore("connection", () => {
       clearConnectionError(id);
       connectionErrorRevisions.delete(id);
       connectedIds.value.delete(id);
+      clearSidebarStorageCaches(id);
       clearPrimaryVisibleObjectNames(id);
       clearConnectionIdentifierQuote(id);
       clearConnectionHealthCheck(id);
@@ -3198,6 +3233,7 @@ export const useConnectionStore = defineStore("connection", () => {
     if (!runtimeConfigChanged) return;
     clearPrimaryVisibleObjectNames(config.id);
     connectedIds.value.delete(config.id);
+    clearSidebarStorageCaches(config.id);
     clearConnectionIdentifierQuote(config.id);
     clearConnectionHealthCheck(config.id);
     invalidateCompletionCache(config.id);
@@ -3692,6 +3728,7 @@ export const useConnectionStore = defineStore("connection", () => {
     if (!cancelled) return false;
     clearConnectionError(connectionId);
     connectedIds.value.delete(connectionId);
+    clearSidebarStorageCaches(connectionId);
     clearPrimaryVisibleObjectNames(connectionId);
     clearConnectionIdentifierQuote(connectionId);
     clearConnectionHealthCheck(connectionId);
@@ -3711,6 +3748,7 @@ export const useConnectionStore = defineStore("connection", () => {
     cancelLocalConnectionAttempt(connectionId);
 
     connectedIds.value.delete(connectionId);
+    clearSidebarStorageCaches(connectionId);
     clearPrimaryVisibleObjectNames(connectionId);
     clearConnectionIdentifierQuote(connectionId);
     forgetSuccessfulLocalConnectionAttempt(connectionId);
@@ -3797,6 +3835,7 @@ export const useConnectionStore = defineStore("connection", () => {
       clearLoadedChildrenCache(node.id);
     }
     invalidateCompletionCache(connectionId, database);
+    clearSidebarStorageCaches(connectionId, database);
     invalidateObjectBrowserRowsCache({ connectionId, database });
     // 数据库级生命周期边界：与连接级断开一致，数据标签页的元数据 freshness
     // 戳必须作废，重开/刷新时重新拉取结构（issue #6623）。bump 数据库级代次
@@ -3920,6 +3959,29 @@ export const useConnectionStore = defineStore("connection", () => {
     return `${connectionId}\0${[...databases].sort().join("\0")}`;
   }
 
+  function sidebarDatabaseStorageCacheScope(connectionId: string, databases: readonly string[]): MetadataScopeInput {
+    return { kind: "sidebar-database-storage", connectionId, extra: { databases: [...databases].sort() } };
+  }
+
+  function sidebarTableStorageCacheScope(scope: SidebarTableStorageScope): MetadataScopeInput {
+    return { kind: "sidebar-table-storage", connectionId: scope.connectionId, database: scope.database, schema: scope.schema };
+  }
+
+  function clearSidebarStorageCaches(connectionId: string, database?: string) {
+    if (database === undefined) sidebarDatabaseStorageCache.invalidate({ connectionId });
+    sidebarTableStorageCache.invalidate(database === undefined ? { connectionId } : { connectionId, database });
+    const connectionPrefix = `${connectionId}\0`;
+    if (database === undefined) {
+      for (const key of sidebarDatabaseStorageInFlight.keys()) {
+        if (key.startsWith(connectionPrefix)) sidebarDatabaseStorageInFlight.delete(key);
+      }
+    }
+    const tablePrefix = database === undefined ? connectionPrefix : `${connectionId}\0${database}\0`;
+    for (const key of sidebarTableStorageInFlight.keys()) {
+      if (key.startsWith(tablePrefix)) sidebarTableStorageInFlight.delete(key);
+    }
+  }
+
   async function loadSidebarDatabaseStorage(connectionId: string, options?: { force?: boolean }): Promise<void> {
     if (settingsStore.editorSettings.sidebarObjectInfoMode !== "size" || !connectedIds.value.has(connectionId)) return;
     if (!supportsSidebarDatabaseStorage(getConfig(connectionId))) return;
@@ -3928,8 +3990,9 @@ export const useConnectionStore = defineStore("connection", () => {
     if (!databases.length) return;
 
     const requestKey = sidebarDatabaseStorageRequestKey(connectionId, databases);
-    const cached = sidebarDatabaseStorageCache.get(requestKey);
-    if (!options?.force && cached && cached.expiresAt > Date.now()) {
+    const cacheScope = sidebarDatabaseStorageCacheScope(connectionId, databases);
+    const cached = sidebarDatabaseStorageCache.get(cacheScope);
+    if (!options?.force && cached) {
       applySidebarDatabaseStorage(connectionNode?.children, cached.value);
       return;
     }
@@ -3941,10 +4004,8 @@ export const useConnectionStore = defineStore("connection", () => {
     }
     try {
       const storage = await request;
-      sidebarDatabaseStorageCache.set(requestKey, {
-        expiresAt: Date.now() + SIDEBAR_DATABASE_STORAGE_CACHE_TTL_MS,
-        value: storage,
-      });
+      if (sidebarDatabaseStorageInFlight.get(requestKey) !== request || !connectedIds.value.has(connectionId)) return;
+      sidebarDatabaseStorageCache.set(cacheScope, storage);
       const currentNode = findConnectionNode(connectionId);
       const currentNames = sidebarDatabaseNames(currentNode?.children);
       if (sidebarDatabaseStorageRequestKey(connectionId, currentNames) === requestKey) {
@@ -3967,8 +4028,9 @@ export const useConnectionStore = defineStore("connection", () => {
     if (settingsStore.editorSettings.sidebarObjectInfoMode !== "size" || !connectedIds.value.has(scope.connectionId)) return;
     if (!supportsSidebarTableStorage(getConfig(scope.connectionId))) return;
     const requestKey = sidebarTableStorageRequestKey(scope);
-    const cached = sidebarTableStorageCache.get(requestKey);
-    if (!options?.force && cached && cached.expiresAt > Date.now()) {
+    const cacheScope = sidebarTableStorageCacheScope(scope);
+    const cached = sidebarTableStorageCache.get(cacheScope);
+    if (!options?.force && cached) {
       applySidebarTableStorage(treeNodes.value, scope, cached.value);
       return;
     }
@@ -3980,11 +4042,8 @@ export const useConnectionStore = defineStore("connection", () => {
     }
     try {
       const statistics = await request;
-      if (sidebarTableStorageInFlight.get(requestKey) !== request) return;
-      sidebarTableStorageCache.set(requestKey, {
-        expiresAt: Date.now() + SIDEBAR_DATABASE_STORAGE_CACHE_TTL_MS,
-        value: statistics,
-      });
+      if (sidebarTableStorageInFlight.get(requestKey) !== request || !connectedIds.value.has(scope.connectionId)) return;
+      sidebarTableStorageCache.set(cacheScope, statistics);
       applySidebarTableStorage(treeNodes.value, scope, statistics);
     } catch (error) {
       console.debug("[DBX][sidebar-table-storage:unavailable]", { ...scope, error });
@@ -4842,9 +4901,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const load = beginTreeNodeLoad(node);
     try {
       const collections = await api.mongoListCollections(connectionId, database);
-      const bucketNames = new Set(collections.filter((c) => c.kind === "bucket" && c.bucketName).map((c) => c.bucketName as string));
-      const hiddenCollectionNames = new Set([...bucketNames].flatMap((bucketName) => [`${bucketName}.files`, `${bucketName}.chunks`]));
-      const collectionEntries = collections.filter((c) => c.kind !== "bucket").filter((c) => !hiddenCollectionNames.has(c.name));
+      const collectionEntries = visibleMongoCollections(collections);
       const collectionChildren = [...collectionEntries]
         .sort((left, right) => compareSidebarNames(left.name, right.name))
         .map((col) => ({
@@ -6634,7 +6691,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function completionColumnsKey(connectionId: string, database: string, table: string, schema?: string, catalog?: string, context?: { tableQuoted?: boolean; schemaQuoted?: boolean }): string {
     const databaseType = getConfig(connectionId)?.db_type;
-    if (databaseType === "oracle") {
+    if (databaseType === "oracle" || databaseType === "oceanbase-oracle") {
       const normalizedTable = context?.tableQuoted === false ? table.toUpperCase() : table;
       const normalizedSchema = schema && context?.schemaQuoted === false ? schema.toUpperCase() : (schema ?? "");
       return `${connectionId}:${database}:${catalog ?? ""}:${normalizedSchema}:${normalizedTable}`;
@@ -7736,7 +7793,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function listCompletionColumns(connectionId: string, database: string, table: string, schema?: string, context?: { clientSessionId?: string; version?: number; tableQuoted?: boolean; schemaQuoted?: boolean }, catalog?: string): Promise<SqlCompletionColumn[]> {
     const config = getConfig(connectionId);
-    const oracleIdentifier = config?.db_type === "oracle";
+    const oracleIdentifier = config?.db_type === "oracle" || config?.db_type === "oceanbase-oracle";
     const uppercaseUnquotedIdentifier = oracleIdentifier || config?.db_type === "saphana";
     const completionTable = uppercaseUnquotedIdentifier && context?.tableQuoted === false ? table.toUpperCase() : table;
     const rawCompletionSchema = schema?.trim() || (config?.db_type === "dameng" ? config.username?.trim() || undefined : undefined);

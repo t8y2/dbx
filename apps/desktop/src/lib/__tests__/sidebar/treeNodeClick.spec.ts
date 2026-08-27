@@ -127,6 +127,14 @@ describe("treeNodeClick", () => {
     expect(shouldOpenObjectBrowserOnSingleClick("table", true)).toBe(false);
     expect(shouldOpenObjectBrowserOnSingleClick("database", true)).toBe(true);
     expect(shouldOpenObjectBrowserOnSingleClick("database", false)).toBe(false);
+    expect(shouldOpenObjectBrowserOnSingleClick("mongo-db", true)).toBe(true);
+    expect(shouldOpenObjectBrowserOnSingleClick("mongo-db", false)).toBe(false);
+  });
+
+  it("opens the MongoDB object browser from mongo-db nodes like SQL databases", () => {
+    expect(treeNodeRowAction("mongo-db", true, "single", "mongodb", true, true)).toBe("open-object-browser-and-expand");
+    expect(treeNodeRowAction("mongo-db", true, "single", "mongodb", false, true)).toBe("toggle");
+    expect(treeNodeRowDoubleClickAction("mongo-db", true, "single", true, "mongodb")).toBe("open-object-browser");
   });
 
   it("expands package containers while preserving source behavior for leaf packages", () => {

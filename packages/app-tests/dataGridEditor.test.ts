@@ -624,6 +624,7 @@ test("saving inserted rows reloads current table data", async () => {
   const rowStatusFilter = ref<"all" | "changed" | "edited" | "new" | "deleted">("all");
   const emitted: unknown[][] = [];
   const executedSql: string[] = [];
+  let refreshCalls = 0;
 
   const editor = useDataGridEditor({
     result,
@@ -650,6 +651,10 @@ test("saving inserted rows reloads current table data", async () => {
     pageSize: ref(50),
     currentPage: ref(2),
     getRowItem: () => undefined,
+    refreshSavedRows: async () => {
+      refreshCalls++;
+      return true;
+    },
     emit: (...args) => {
       emitted.push(args);
     },
@@ -659,6 +664,7 @@ test("saving inserted rows reloads current table data", async () => {
   await editor.saveChanges();
 
   assert.deepEqual(executedSql, [`INSERT INTO "public"."people" ("id", "name") VALUES (2, 'Linus');`]);
+  assert.equal(refreshCalls, 0);
   assert.deepEqual(emitted, [["reload", "SELECT id, name FROM people", "linus", "name ILIKE '%l%'", "id DESC", 50, 50]]);
 });
 
@@ -761,6 +767,114 @@ test("saving edited rows without deletes does not reload table data", async () =
 
   assert.deepEqual(emitted, []);
   assert.deepEqual(result.value.rows[0], [1, "Ada Lovelace"]);
+});
+
+test("SQL row updates refresh saved rows in place and skip a full reload", async () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+
+  const result = computed(() => ({
+    columns: ["id", "name", "updated_at"],
+    rows: [[1, "Ada", "old"] as CellValue[]],
+  }));
+  const emitted: unknown[][] = [];
+  let refreshCalls = 0;
+  let editor: ReturnType<typeof useDataGridEditor>;
+  editor = useDataGridEditor({
+    result,
+    editable: computed(() => true),
+    databaseType: computed(() => "postgres"),
+    connectionId: computed(() => undefined),
+    database: computed(() => undefined),
+    tableMeta: computed(() => ({
+      tableName: "people",
+      columns: [column("id", true), column("name"), column("updated_at")],
+      primaryKeys: ["id"],
+    })),
+    onExecuteSql: computed(() => async () => {}),
+    customSaveHandler: computed(() => undefined),
+    sql: computed(() => "SELECT id, name, updated_at FROM people"),
+    searchText: ref(""),
+    whereFilterInput: ref(""),
+    orderByInput: ref(""),
+    currentWhereInput: computed(() => undefined),
+    rowStatusFilter: ref<RowStatusFilter>("all"),
+    pageSize: ref(50),
+    currentPage: ref(1),
+    getRowItem: (rowId) => {
+      if (rowId !== 0) return undefined;
+      return {
+        id: 0,
+        sourceIndex: 0,
+        data: editor.rowDataWithChanges(result.value.rows[0], 0),
+        isNew: false,
+        isDeleted: false,
+        isDirtyCol: [false, true, false],
+        status: "edited",
+      };
+    },
+    refreshSavedRows: async ({ dirtyRows }) => {
+      refreshCalls++;
+      assert.deepEqual([...dirtyRows.get(0)!.entries()], [[1, "Ada Lovelace"]]);
+      result.value.rows[0] = [1, "Ada Lovelace", "fresh-from-trigger"];
+      return true;
+    },
+    emit: (...args) => emitted.push(args),
+  });
+
+  editor.applyCellValue(0, 1, "Ada Lovelace");
+  await editor.saveChanges();
+
+  assert.equal(refreshCalls, 1);
+  assert.deepEqual(emitted, []);
+  assert.deepEqual(result.value.rows[0], [1, "Ada Lovelace", "fresh-from-trigger"]);
+  assert.equal(editor.dirtyRows.value.size, 0);
+});
+
+test("SQL row refresh failure falls back to a full reload", async () => {
+  setActivePinia(createPinia());
+  installBrowserTestGlobals();
+
+  const result = computed(() => ({ columns: ["id", "name"], rows: [[1, "Ada"] as CellValue[]] }));
+  const emitted: unknown[][] = [];
+  let editor: ReturnType<typeof useDataGridEditor>;
+  editor = useDataGridEditor({
+    result,
+    editable: computed(() => true),
+    databaseType: computed(() => "postgres"),
+    connectionId: computed(() => undefined),
+    database: computed(() => undefined),
+    tableMeta: computed(() => ({ tableName: "people", columns: [column("id", true), column("name")], primaryKeys: ["id"] })),
+    onExecuteSql: computed(() => async () => {}),
+    customSaveHandler: computed(() => undefined),
+    sql: computed(() => "SELECT id, name FROM people"),
+    searchText: ref("ada"),
+    whereFilterInput: ref(""),
+    orderByInput: ref("id DESC"),
+    currentWhereInput: computed(() => undefined),
+    rowStatusFilter: ref<RowStatusFilter>("all"),
+    pageSize: ref(50),
+    currentPage: ref(2),
+    getRowItem: (rowId) => {
+      if (rowId !== 0) return undefined;
+      return {
+        id: 0,
+        sourceIndex: 0,
+        data: editor.rowDataWithChanges(result.value.rows[0], 0),
+        isNew: false,
+        isDeleted: false,
+        isDirtyCol: [false, true],
+        status: "edited",
+      };
+    },
+    refreshSavedRows: async () => false,
+    emit: (...args) => emitted.push(args),
+  });
+
+  editor.applyCellValue(0, 1, "Ada Lovelace");
+  await editor.saveChanges();
+
+  assert.deepEqual(emitted, [["reload", "SELECT id, name FROM people", "ada", undefined, "id DESC", 50, 50]]);
 });
 
 test("undo and redo restore pending cell edits before save", () => {

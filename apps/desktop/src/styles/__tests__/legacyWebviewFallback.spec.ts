@@ -9,6 +9,7 @@ const dialogOverlaySource = readFileSync(new URL("../../components/ui/dialog/Dia
 const dataTransferDialogSource = readFileSync(new URL("../../components/transfer/DataTransferDialog.vue", import.meta.url), "utf8");
 const connectionDialogSource = readFileSync(new URL("../../components/connection/ConnectionDialog.vue", import.meta.url), "utf8");
 const connectionTreeSource = readFileSync(new URL("../../components/sidebar/ConnectionTree.vue", import.meta.url), "utf8");
+const activeConnectionFilterSource = readFileSync(new URL("../../components/sidebar/ActiveConnectionFilterButton.vue", import.meta.url), "utf8");
 const scheduledDatabaseBackupSource = readFileSync(new URL("../../components/backup/ScheduledDatabaseBackupSettings.vue", import.meta.url), "utf8");
 const driverStoreDialogSource = readFileSync(new URL("../../components/config/DriverStoreDialog.vue", import.meta.url), "utf8");
 const tunnelProfileManagerSource = readFileSync(new URL("../../components/connection/TunnelProfileManager.vue", import.meta.url), "utf8");
@@ -97,9 +98,10 @@ describe("legacy WebView CSS fallbacks", () => {
     expect(globalsCss).toContain(".border-primary\\/30");
     expect(globalsCss).toContain("border-color: rgba(var(--dbx-primary-rgb), 0.3) !important;");
     expect(globalsCss).toContain(".hover\\:bg-primary\\/15:hover");
-    expect(connectionTreeSource).toContain("showActiveConnectionsOnly");
+    const activeConnectionSources = `${connectionTreeSource}\n${activeConnectionFilterSource}`;
+    expect(activeConnectionSources).toContain("showActiveConnectionsOnly");
     // Three pre-existing usages plus the sidebar regex-search toggle.
-    expect(connectionTreeSource.match(/bg-primary\/10 border-primary\/30/g)?.length).toBe(4);
+    expect(activeConnectionSources.match(/bg-primary\/10 border-primary\/30/g)?.length).toBe(4);
   });
 
   it("keeps legacy tab triggers connected to the configured corner style", () => {

@@ -3325,6 +3325,7 @@ impl AppState {
             return false;
         }
 
+        let mut checked_mysql_pool = None;
         let stale = {
             let connections = self.connections.read().await;
             let Some(pool) = connections.get(pool_key) else {
@@ -3333,6 +3334,7 @@ impl AppState {
             match pool {
                 PoolKind::Mysql(pool, _) => {
                     let pool = pool.clone();
+                    checked_mysql_pool = Some(pool.clone());
                     drop(connections);
                     match db::mysql::checkout_mysql_conn(&pool, HEALTH_CHECK_POOL_ACQUIRE_TIMEOUT).await {
                         // Pool saturation means active work, not a dead connection. Removing this pool would
@@ -3624,16 +3626,75 @@ impl AppState {
             return false;
         }
 
+        if let Some(checked_pool) = checked_mysql_pool {
+            return self.remove_stale_mysql_pool_if_current(pool_key, &checked_pool).await;
+        }
+
+        let removed = self.connections.write().await.remove(pool_key);
+
+        let Some(pool) = removed else {
+            return false;
+        };
+
         self.stop_keepalive_task(pool_key).await;
         self.pool_activity.write().await.remove(pool_key);
         self.postgres_cancel_contexts.write().await.remove(pool_key);
-        let removed = self.connections.write().await.remove(pool_key);
-        if let Some(pool) = removed {
-            self.pool_routing_control().close_pool_with_timeout(pool_key.to_string(), pool).await;
-            true
-        } else {
-            false
-        }
+        self.pool_routing_control().close_pool_with_timeout(pool_key.to_string(), pool).await;
+        true
+    }
+
+    async fn remove_stale_mysql_pool_if_current(&self, pool_key: &str, checked_pool: &db::mysql::MySqlPool) -> bool {
+        self.remove_stale_mysql_pool_if_current_inner(
+            pool_key,
+            checked_pool,
+            #[cfg(test)]
+            None,
+        )
+        .await
+    }
+
+    async fn remove_stale_mysql_pool_if_current_inner(
+        &self,
+        pool_key: &str,
+        checked_pool: &db::mysql::MySqlPool,
+        #[cfg(test)] cleanup_barriers: Option<(
+            std::sync::Arc<tokio::sync::Barrier>,
+            std::sync::Arc<tokio::sync::Barrier>,
+        )>,
+    ) -> bool {
+        let routing = self.pool_routing_control();
+        let removed = loop {
+            let mut connections = self.connections.write().await;
+            let is_current = matches!(
+                connections.get(pool_key),
+                Some(PoolKind::Mysql(current, _)) if checked_pool.is_same_pool(current)
+            );
+            if !is_current {
+                log::debug!(
+                    "MySQL connection pool '{pool_key}' was replaced while its health check was running; keeping the current route"
+                );
+                return false;
+            }
+            let Ok(mut activity) = self.pool_activity.try_write() else {
+                drop(connections);
+                tokio::task::yield_now().await;
+                continue;
+            };
+            let removed = remove_mysql_pool_if_current(&mut connections, pool_key, checked_pool)
+                .expect("checked MySQL pool must remain current while routing is locked");
+            #[cfg(test)]
+            if let Some((route_removed, continue_cleanup)) = cleanup_barriers.as_ref() {
+                route_removed.wait().await;
+                continue_cleanup.wait().await;
+            }
+            routing.stop_keepalive(pool_key);
+            activity.remove(pool_key);
+            break removed;
+        };
+
+        self.postgres_cancel_contexts.write().await.remove(pool_key);
+        routing.close_pool_with_timeout(pool_key.to_string(), removed).await;
+        true
     }
 
     pub async fn reconnect_pool(&self, connection_id: &str, database: Option<&str>) -> Result<String, String> {
@@ -5304,6 +5365,18 @@ fn clone_pool_kind(pool: &PoolKind) -> PoolKind {
     }
 }
 
+fn remove_mysql_pool_if_current(
+    connections: &mut HashMap<String, PoolKind>,
+    pool_key: &str,
+    expected: &db::mysql::MySqlPool,
+) -> Option<PoolKind> {
+    let is_current = matches!(
+        connections.get(pool_key),
+        Some(PoolKind::Mysql(current, _)) if expected.is_same_pool(current)
+    );
+    is_current.then(|| connections.remove(pool_key)).flatten()
+}
+
 async fn close_pool_kind(pool: PoolKind) -> Result<(), String> {
     match pool {
         PoolKind::Mysql(p, _) => {
@@ -5772,6 +5845,7 @@ mod tests {
             redis_key_separator: default_redis_key_separator(),
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
+            redis_key_templates: Vec::new(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),
@@ -7331,6 +7405,102 @@ mod tests {
         assert_eq!(super::mysql_pool_max_connections_for_session(None), 10);
         assert_eq!(super::mysql_pool_max_connections_for_session(Some("")), 10);
         assert_eq!(super::mysql_pool_max_connections_for_session(Some("tab-1")), 1);
+    }
+
+    #[test]
+    fn stale_mysql_pool_observation_does_not_remove_replacement_generation() {
+        let checked = crate::db::mysql::MySqlPool::new("mysql://root@127.0.0.1:3306/app", 10);
+        let checked_clone = checked.clone();
+        let replacement = crate::db::mysql::MySqlPool::new("mysql://root@127.0.0.1:3306/app", 10);
+        assert!(checked.is_same_pool(&checked_clone));
+        assert!(!checked.is_same_pool(&replacement));
+
+        let mut connections = std::collections::HashMap::from([(
+            "conn:app".to_string(),
+            PoolKind::Mysql(replacement.clone(), MysqlMode::Normal),
+        )]);
+
+        assert!(super::remove_mysql_pool_if_current(&mut connections, "conn:app", &checked).is_none());
+        assert!(
+            matches!(connections.get("conn:app"), Some(PoolKind::Mysql(current, _)) if replacement.is_same_pool(current))
+        );
+
+        assert!(super::remove_mysql_pool_if_current(&mut connections, "conn:app", &replacement).is_some());
+        assert!(!connections.contains_key("conn:app"));
+    }
+
+    #[tokio::test]
+    async fn stale_mysql_cleanup_preserves_replacement_support_state() {
+        let (state, dir) = test_app_state().await;
+        let state = std::sync::Arc::new(state);
+        let pool_key = "conn:app";
+        let checked = crate::db::mysql::MySqlPool::new("mysql://root@127.0.0.1:3306/app", 10);
+        let replacement = crate::db::mysql::MySqlPool::new("mysql://root@127.0.0.1:3306/app", 10);
+        let mut config = mysql_config(Some("app"));
+        config.keepalive_interval_secs = 60;
+        state
+            .connections
+            .write()
+            .await
+            .insert(pool_key.to_string(), PoolKind::Mysql(checked.clone(), MysqlMode::Normal));
+        state.pool_activity.write().await.insert(pool_key.to_string(), super::PoolActivity::now());
+        state.start_keepalive_task(
+            pool_key,
+            &PoolKind::Mysql(checked.clone(), MysqlMode::Normal),
+            &config,
+            #[cfg(feature = "mq-admin")]
+            None,
+        );
+        assert_eq!(state.supervised_task_count(), 1);
+
+        let route_removed = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let continue_cleanup = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let cleanup_state = state.clone();
+        let cleanup_checked = checked.clone();
+        let cleanup_route_removed = route_removed.clone();
+        let cleanup_continue = continue_cleanup.clone();
+        let cleanup = tokio::spawn(async move {
+            cleanup_state
+                .remove_stale_mysql_pool_if_current_inner(
+                    pool_key,
+                    &cleanup_checked,
+                    Some((cleanup_route_removed, cleanup_continue)),
+                )
+                .await
+        });
+        route_removed.wait().await;
+
+        let publish_state = state.clone();
+        let publish_config = config.clone();
+        let publish_replacement = replacement.clone();
+        let mut publish = tokio::spawn(async move {
+            publish_state
+                .insert_connection_pool(
+                    pool_key.to_string(),
+                    PoolKind::Mysql(publish_replacement, MysqlMode::Normal),
+                    &publish_config,
+                )
+                .await
+        });
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut publish).await.is_err(),
+            "replacement publication must wait while stale support state is cleaned"
+        );
+        continue_cleanup.wait().await;
+        assert!(cleanup.await.unwrap());
+        publish.await.unwrap().unwrap();
+
+        let connections = state.connections.read().await;
+        assert!(
+            matches!(connections.get(pool_key), Some(PoolKind::Mysql(current, _)) if replacement.is_same_pool(current))
+        );
+        drop(connections);
+        assert!(state.pool_activity.read().await.contains_key(pool_key));
+        assert_eq!(state.supervised_task_count(), 1);
+
+        state.shutdown(Duration::from_secs(1)).await;
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

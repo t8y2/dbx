@@ -21,7 +21,8 @@ import type { DatabaseType } from "@/types/database";
 import type { TransferTask, TransferTaskConfig } from "@/types/database";
 import { isSchemaAware, supportsTransfer } from "@/lib/database/databaseCapabilities";
 import { isDorisFamilyCatalogCapable } from "@/lib/database/databaseFeatureSupport";
-import { isSameTransferDatabase, normalizeTransferCatalog } from "@/lib/database/dataTransferSelection";
+import { decodeTransferDatabaseOption, encodeTransferDatabaseOptions, isSameTransferDatabase, isTransferDatabaseSelected, normalizeTransferCatalog } from "@/lib/database/dataTransferSelection";
+import { formatDatabaseLabel } from "@/lib/database/defaultDatabase";
 import { databaseOptionsForConnection, fetchCatalogNamespaceOptions, fetchNamespaceOptionsForConnection, namespaceOptionsAreSchemas } from "@/composables/useDatabaseOptions";
 import { useExportTracker } from "@/composables/useExportTracker";
 import { useTransferTaskStore, TransferTaskNameConflictError, nextTransferTaskCopyName } from "@/stores/transferTaskStore";
@@ -184,19 +185,37 @@ function isCatalogCapable(id: string): boolean {
   return isDorisFamilyCatalogCapable(config?.db_type, config?.driver_profile);
 }
 
+function decodedDatabase(connectionId: string, option: string): string {
+  return decodeTransferDatabaseOption(connectionType(connectionId), option);
+}
+
+function encodedDatabase(connectionId: string, database: string): string {
+  return encodeTransferDatabaseOptions(connectionType(connectionId), [database])[0] ?? "";
+}
+
+function databaseOptionLabel(connectionId: string, option: string): string {
+  return formatDatabaseLabel(store.getConfig(connectionId), decodedDatabase(connectionId, option), {
+    defaultDatabase: t("editor.defaultDatabase"),
+    noDatabase: t("editor.noDatabase"),
+  });
+}
+
+const sourceDatabaseName = computed(() => decodedDatabase(sourceConnectionId.value, sourceDatabase.value));
+const targetDatabaseName = computed(() => decodedDatabase(targetConnectionId.value, targetDatabase.value));
+
 const canStart = computed(() => {
-  const effectiveSourceSchema = sourceSchema.value || sourceDatabase.value;
-  const effectiveTargetSchema = targetSchema.value || targetDatabase.value;
+  const effectiveSourceSchema = sourceSchema.value || sourceDatabaseName.value;
+  const effectiveTargetSchema = targetSchema.value || targetDatabaseName.value;
   const sameCatalogAndDatabase = isSameTransferDatabase(
-    { connectionId: sourceConnectionId.value, catalog: sourceCatalog.value, catalogs: sourceCatalogs.value, database: sourceDatabase.value },
-    { connectionId: targetConnectionId.value, catalog: targetCatalog.value, catalogs: targetCatalogs.value, database: targetDatabase.value },
+    { connectionId: sourceConnectionId.value, catalog: sourceCatalog.value, catalogs: sourceCatalogs.value, database: sourceDatabaseName.value },
+    { connectionId: targetConnectionId.value, catalog: targetCatalog.value, catalogs: targetCatalogs.value, database: targetDatabaseName.value },
   );
   const sameSourceAndTarget = sameCatalogAndDatabase && effectiveSourceSchema === effectiveTargetSchema;
   return (
     !!sourceConnectionId.value &&
-    !!sourceDatabase.value &&
+    isTransferDatabaseSelected(sourceDatabase.value) &&
     !!targetConnectionId.value &&
-    !!targetDatabase.value &&
+    isTransferDatabaseSelected(targetDatabase.value) &&
     (sourceCatalogs.value.length <= 1 || !!sourceCatalog.value) &&
     (targetCatalogs.value.length <= 1 || !!targetCatalog.value) &&
     (selectedTables.value.size > 0 || Object.values(selectedObjects.value).some((names) => names.size > 0)) &&
@@ -249,13 +268,14 @@ async function loadDatabases(connectionId: string, target: "source" | "target", 
     const config = store.getConfig(connectionId);
     if (!config) return;
     const names = isMongoConnection(connectionId) ? databaseOptionsForConnection(await api.mongoListDatabases(connectionId), config) : await fetchNamespaceOptionsForConnection(connectionId, config);
+    const options = encodeTransferDatabaseOptions(config.db_type, names);
     if (isStale()) return;
     if (target === "source") {
-      sourceDatabases.value = names;
-      sourceDatabase.value = names.length === 1 ? names[0] : "";
+      sourceDatabases.value = options;
+      sourceDatabase.value = options.length === 1 ? options[0] : "";
     } else {
-      targetDatabases.value = names;
-      targetDatabase.value = names.length === 1 ? names[0] : "";
+      targetDatabases.value = options;
+      targetDatabase.value = options.length === 1 ? options[0] : "";
     }
   } catch {
     if (isStale()) return;
@@ -277,13 +297,14 @@ async function loadDatabasesForCatalog(connectionId: string, catalog: string, ta
     const config = store.getConfig(connectionId);
     if (!config) return;
     const names = await fetchCatalogNamespaceOptions(connectionId, catalog, config);
+    const options = encodeTransferDatabaseOptions(config.db_type, names);
     if (isStale()) return;
     if (target === "source") {
-      sourceDatabases.value = names;
-      sourceDatabase.value = names.length === 1 ? names[0] : "";
+      sourceDatabases.value = options;
+      sourceDatabase.value = options.length === 1 ? options[0] : "";
     } else {
-      targetDatabases.value = names;
-      targetDatabase.value = names.length === 1 ? names[0] : "";
+      targetDatabases.value = options;
+      targetDatabase.value = options.length === 1 ? options[0] : "";
     }
   } catch {
     if (isStale()) return;
@@ -293,11 +314,11 @@ async function loadDatabasesForCatalog(connectionId: string, catalog: string, ta
 }
 
 async function loadSchemas(connectionId: string, database: string, side: "source" | "target", preferredSchema = "", isCancelled: () => boolean = () => false) {
-  if (!connectionId || !database) return;
+  if (!connectionId) return;
   // 竞态防护：连接或数据库切换后，旧请求的 schema 列表回调直接丢弃。
   const isStale = () => {
     const currentConnection = side === "source" ? sourceConnectionId.value : targetConnectionId.value;
-    const currentDatabase = side === "source" ? sourceDatabase.value : targetDatabase.value;
+    const currentDatabase = side === "source" ? sourceDatabaseName.value : targetDatabaseName.value;
     return isCancelled() || currentConnection !== connectionId || currentDatabase !== database;
   };
   if (isMongoConnection(connectionId)) {
@@ -362,8 +383,9 @@ function applyPendingObjectSelection() {
 
 async function loadObjects(isCancelled: () => boolean = () => false) {
   const connectionId = sourceConnectionId.value;
-  const database = sourceDatabase.value;
-  if (!connectionId || !database) {
+  const databaseOption = sourceDatabase.value;
+  const database = sourceDatabaseName.value;
+  if (!connectionId || !isTransferDatabaseSelected(databaseOption)) {
     objectGroups.value = {};
     return;
   }
@@ -371,7 +393,7 @@ async function loadObjects(isCancelled: () => boolean = () => false) {
   // 旧请求的对象列表回调直接丢弃，不覆盖新选择对应的状态。
   const catalog = sourceCatalog.value || undefined;
   const schemaValue = sourceSchema.value;
-  const isStale = () => isCancelled() || sourceConnectionId.value !== connectionId || sourceDatabase.value !== database || (sourceCatalog.value || undefined) !== catalog || sourceSchema.value !== schemaValue;
+  const isStale = () => isCancelled() || sourceConnectionId.value !== connectionId || sourceDatabase.value !== databaseOption || (sourceCatalog.value || undefined) !== catalog || sourceSchema.value !== schemaValue;
   loadingObjects.value = true;
   try {
     if (isMongoConnection(connectionId)) {
@@ -465,18 +487,19 @@ watch(sourceDatabase, async (db) => {
     skipSourceDatabaseWatch.value = false;
     return;
   }
-  if (db) {
+  if (isTransferDatabaseSelected(db)) {
     const config = store.getConfig(sourceConnectionId.value);
+    const database = sourceDatabaseName.value;
     if (namespaceOptionsAreSchemas(config)) {
       // Dameng has no selectable catalog, so the top-level namespace option is
       // also the schema used for metadata lookup and qualified transfer SQL.
       sourceSchemas.value = [];
-      sourceSchema.value = db;
+      sourceSchema.value = database;
     } else if (isSchemaAware(config?.db_type)) {
-      await loadSchemas(sourceConnectionId.value, db, "source", pendingSourceSchemaPrefill.value);
+      await loadSchemas(sourceConnectionId.value, database, "source", pendingSourceSchemaPrefill.value);
       pendingSourceSchemaPrefill.value = "";
     } else {
-      sourceSchema.value = db;
+      sourceSchema.value = database;
     }
   }
 });
@@ -531,16 +554,17 @@ watch(targetDatabase, async (db) => {
     skipTargetDatabaseWatch.value = false;
     return;
   }
-  if (db) {
+  if (isTransferDatabaseSelected(db)) {
     const config = store.getConfig(targetConnectionId.value);
+    const database = targetDatabaseName.value;
     if (namespaceOptionsAreSchemas(config)) {
       targetSchemas.value = [];
-      targetSchema.value = db;
+      targetSchema.value = database;
     } else if (isSchemaAware(config?.db_type)) {
-      await loadSchemas(targetConnectionId.value, db, "target", pendingTargetSchemaPrefill.value);
+      await loadSchemas(targetConnectionId.value, database, "target", pendingTargetSchemaPrefill.value);
       pendingTargetSchemaPrefill.value = "";
     } else {
-      targetSchema.value = db;
+      targetSchema.value = database;
     }
   }
 });
@@ -568,7 +592,7 @@ watch(
         } else {
           await loadDatabases(props.prefillConnectionId, "source");
         }
-        if (props.prefillDatabase) sourceDatabase.value = props.prefillDatabase;
+        if (props.prefillDatabase !== undefined) sourceDatabase.value = encodedDatabase(props.prefillConnectionId, props.prefillDatabase);
       }
       if (props.prefillTargetConnectionId) {
         skipTargetWatch.value = true;
@@ -581,7 +605,7 @@ watch(
         } else {
           await loadDatabases(props.prefillTargetConnectionId, "target");
         }
-        if (props.prefillTargetDatabase) targetDatabase.value = props.prefillTargetDatabase;
+        if (props.prefillTargetDatabase !== undefined) targetDatabase.value = encodedDatabase(props.prefillTargetConnectionId, props.prefillTargetDatabase);
       }
     }
   },
@@ -631,21 +655,21 @@ async function startTransfer() {
   if (!canStart.value || isSubmitting.value) return;
   isSubmitting.value = true;
 
-  const effectiveSourceSchema = sourceSchema.value || sourceDatabase.value;
-  const effectiveTargetSchema = targetSchema.value || targetDatabase.value;
-  const sourceDatabaseName = sourceDatabase.value;
+  const effectiveSourceSchema = sourceSchema.value || sourceDatabaseName.value;
+  const effectiveTargetSchema = targetSchema.value || targetDatabaseName.value;
+  const sourceDatabase = sourceDatabaseName.value;
   const targetConnection = targetConnectionId.value;
-  const targetDatabaseName = targetDatabase.value;
+  const targetDatabase = targetDatabaseName.value;
   const shouldRefreshTargetTree = transferContent.value !== "dataOnly";
 
   const request: api.TransferRequest = {
     transferId: uuid(),
     sourceConnectionId: sourceConnectionId.value,
-    sourceDatabase: sourceDatabaseName,
+    sourceDatabase,
     sourceSchema: effectiveSourceSchema,
     sourceCatalog: normalizeTransferCatalog(sourceCatalog.value, sourceCatalogs.value) || undefined,
     targetConnectionId: targetConnection,
-    targetDatabase: targetDatabaseName,
+    targetDatabase,
     targetSchema: effectiveTargetSchema,
     targetCatalog: normalizeTransferCatalog(targetCatalog.value, targetCatalogs.value) || undefined,
     tables: [...selectedTables.value],
@@ -729,11 +753,11 @@ function currentConfig(): TransferTaskConfig {
   return {
     sourceConnectionId: sourceConnectionId.value,
     sourceCatalog: normalizeTransferCatalog(sourceCatalog.value, sourceCatalogs.value) || undefined,
-    sourceDatabase: sourceDatabase.value,
+    sourceDatabase: sourceDatabaseName.value,
     sourceSchema: sourceSchema.value || undefined,
     targetConnectionId: targetConnectionId.value,
     targetCatalog: normalizeTransferCatalog(targetCatalog.value, targetCatalogs.value) || undefined,
-    targetDatabase: targetDatabase.value,
+    targetDatabase: targetDatabaseName.value,
     targetSchema: targetSchema.value || undefined,
     objects,
     content: transferContent.value,
@@ -755,7 +779,7 @@ function configSnapshot(config: TransferTaskConfig) {
 const formHasContent = computed(() => !!sourceConnectionId.value || !!targetConnectionId.value);
 const isConfigDirty = computed(() => !!activeTaskId.value && configSnapshot(currentConfig()) !== savedConfigSnapshot.value);
 const needsDiscardConfirm = computed(() => isConfigDirty.value || (!activeTaskId.value && formHasContent.value));
-const canSaveConfig = computed(() => !!sourceConnectionId.value && !!sourceDatabase.value && !!targetConnectionId.value && !!targetDatabase.value);
+const canSaveConfig = computed(() => !!sourceConnectionId.value && isTransferDatabaseSelected(sourceDatabase.value) && !!targetConnectionId.value && isTransferDatabaseSelected(targetDatabase.value));
 
 /** Applies a saved task to the form, loading catalogs/databases/schemas/objects with explicit awaits. */
 async function loadTaskIntoForm(task: TransferTask) {
@@ -787,11 +811,12 @@ async function loadTaskIntoForm(task: TransferTask) {
     await loadDatabases(config.sourceConnectionId, "source", isTaskLoadStale);
     if (isTaskLoadStale()) return;
   }
-  if (sourceDatabase.value !== config.sourceDatabase) {
-    skipSourceDatabaseWatch.value = true;
-    sourceDatabase.value = config.sourceDatabase;
-  }
   const sourceConfig = store.getConfig(config.sourceConnectionId);
+  const sourceDatabaseOption = encodedDatabase(config.sourceConnectionId, config.sourceDatabase);
+  if (sourceDatabase.value !== sourceDatabaseOption) {
+    skipSourceDatabaseWatch.value = true;
+    sourceDatabase.value = sourceDatabaseOption;
+  }
   if (namespaceOptionsAreSchemas(sourceConfig)) {
     sourceSchemas.value = [];
     sourceSchema.value = config.sourceDatabase;
@@ -823,11 +848,12 @@ async function loadTaskIntoForm(task: TransferTask) {
     await loadDatabases(config.targetConnectionId, "target", isTaskLoadStale);
     if (isTaskLoadStale()) return;
   }
-  if (targetDatabase.value !== config.targetDatabase) {
-    skipTargetDatabaseWatch.value = true;
-    targetDatabase.value = config.targetDatabase;
-  }
   const targetConfig = store.getConfig(config.targetConnectionId);
+  const targetDatabaseOption = encodedDatabase(config.targetConnectionId, config.targetDatabase);
+  if (targetDatabase.value !== targetDatabaseOption) {
+    skipTargetDatabaseWatch.value = true;
+    targetDatabase.value = targetDatabaseOption;
+  }
   if (namespaceOptionsAreSchemas(targetConfig)) {
     targetSchemas.value = [];
     targetSchema.value = config.targetDatabase;
@@ -884,8 +910,8 @@ function onSelectedTaskIdUpdate(id: string | null) {
 /** Number of objects currently selected across all kinds. */
 const selectedObjectCount = computed(() => Object.values(selectedObjects.value).reduce((total, names) => total + (names?.size ?? 0), 0));
 
-const startConfirmSource = computed(() => `${getConnectionName(sourceConnectionId.value)}.${sourceDatabase.value}`);
-const startConfirmTarget = computed(() => `${getConnectionName(targetConnectionId.value)}.${targetDatabase.value}`);
+const startConfirmSource = computed(() => `${getConnectionName(sourceConnectionId.value)}.${databaseOptionLabel(sourceConnectionId.value, sourceDatabase.value)}`);
+const startConfirmTarget = computed(() => `${getConnectionName(targetConnectionId.value)}.${databaseOptionLabel(targetConnectionId.value, targetDatabase.value)}`);
 
 /** Opens the confirmation dialog before starting a transfer. */
 function requestStartTransfer() {
@@ -985,6 +1011,7 @@ async function saveConfigTask() {
                   <SearchableSelect
                     v-model="sourceDatabase"
                     :options="sourceDatabases"
+                    :display-name="(option) => databaseOptionLabel(sourceConnectionId, option)"
                     :placeholder="t('transfer.selectDatabase')"
                     :search-placeholder="t('transfer.searchDatabase')"
                     :empty-text="t('common.noResults')"
@@ -1055,6 +1082,7 @@ async function saveConfigTask() {
                   <SearchableSelect
                     v-model="targetDatabase"
                     :options="targetDatabases"
+                    :display-name="(option) => databaseOptionLabel(targetConnectionId, option)"
                     :placeholder="t('transfer.selectDatabase')"
                     :search-placeholder="t('transfer.searchDatabase')"
                     :empty-text="t('common.noResults')"

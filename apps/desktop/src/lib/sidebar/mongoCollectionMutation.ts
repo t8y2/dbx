@@ -73,6 +73,13 @@ export function toMongoCollectionKind(kind?: string | null): MongoCollectionKind
   return "collection";
 }
 
+/** Drop GridFS buckets and their backing `.files` / `.chunks` collections from object lists. */
+export function visibleMongoCollections<T extends { name: string; kind?: string | null; bucketName?: string }>(collections: readonly T[]): T[] {
+  const bucketNames = new Set(collections.filter((collection) => collection.kind === "bucket" && collection.bucketName).map((collection) => collection.bucketName as string));
+  const hiddenCollectionNames = new Set([...bucketNames].flatMap((bucketName) => [`${bucketName}.files`, `${bucketName}.chunks`]));
+  return collections.filter((collection) => collection.kind !== "bucket" && !hiddenCollectionNames.has(collection.name));
+}
+
 export function mongoRenameCollectionPreview(database: string, oldName: string, newName: string): string {
   return `db.getSiblingDB(${JSON.stringify(database)}).getCollection(${JSON.stringify(oldName)}).renameCollection(${JSON.stringify(newName)})`;
 }

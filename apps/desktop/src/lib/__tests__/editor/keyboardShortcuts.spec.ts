@@ -41,6 +41,13 @@ describe("keyboard shortcut matching", () => {
     expect(eventToShortcut({ key: "+", ctrlKey: true, shiftKey: true }, "Win32")).toBe("Shift+Mod+Plus");
   });
 
+  it.each([
+    ["¨", "KeyU", "Shift+Alt+U"],
+    ["Ò", "KeyL", "Shift+Alt+L"],
+  ])("records macOS Option-modified %s by physical letter", (key, code, expected) => {
+    expect(eventToShortcut({ key, code, altKey: true, shiftKey: true }, "MacIntel")).toBe(expected);
+  });
+
   it("keeps Control distinct from Command when recording macOS shortcuts", () => {
     const controlShortcut = eventToShortcut({ key: "b", ctrlKey: true }, "MacIntel");
 
@@ -97,9 +104,9 @@ describe("keyboard shortcut matching", () => {
   });
 
   it("matches only the configured go-to-column shortcut", () => {
-    expect(isGoToColumnShortcut({ key: "g", ctrlKey: true }, { goToColumn: "Mod+G" })).toBe(true);
-    expect(isGoToColumnShortcut({ key: "g", ctrlKey: true, shiftKey: true }, { goToColumn: "Mod+G" })).toBe(false);
-    expect(isGoToColumnShortcut({ key: "j", ctrlKey: true }, { goToColumn: "Mod+G" })).toBe(false);
+    expect(isGoToColumnShortcut({ key: "g", ctrlKey: true }, { goToColumn: "Mod+G" }, "Win32")).toBe(true);
+    expect(isGoToColumnShortcut({ key: "g", ctrlKey: true, shiftKey: true }, { goToColumn: "Mod+G" }, "Win32")).toBe(false);
+    expect(isGoToColumnShortcut({ key: "j", ctrlKey: true }, { goToColumn: "Mod+G" }, "Win32")).toBe(false);
   });
 
   it("does not match an empty or composing go-to-column shortcut", () => {

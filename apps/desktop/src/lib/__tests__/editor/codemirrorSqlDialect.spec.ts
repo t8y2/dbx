@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import * as langSql from "@codemirror/lang-sql";
 import { createDbxCodeMirrorSqlDialect, postgresKeywordSyntaxTerms } from "@/lib/editor/codemirrorSqlDialect";
+import type { DatabaseType } from "@/types/database";
 
 describe("codemirrorSqlDialect", () => {
   it("keeps common PostgreSQL identifier names out of keyword highlighting", () => {
@@ -22,5 +23,13 @@ describe("codemirrorSqlDialect", () => {
     expect(doltBuiltins.has("dolt_branch")).toBe(true);
     expect(doltBuiltins.has("dolt_merge")).toBe(true);
     expect(mysqlBuiltins.has("dolt_branch")).toBe(false);
+  });
+
+  it("keeps double quotes as identifier delimiters for Oracle-family dialects", () => {
+    const databaseTypes: DatabaseType[] = ["oracle", "dameng", "yashandb", "oscar", "oceanbase-oracle"];
+
+    for (const databaseType of databaseTypes) {
+      expect(createDbxCodeMirrorSqlDialect(langSql, "mysql", databaseType).spec.doubleQuotedStrings, databaseType).toBe(false);
+    }
   });
 });

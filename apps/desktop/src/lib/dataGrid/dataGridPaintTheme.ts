@@ -51,7 +51,7 @@ export const DATA_GRID_DARK_ACTIVE_ROW_BG = "rgb(25, 34, 46)";
 // 主题的大面积网格中仍不够醒目。列更重，交点通过 Canvas 的两次绘制进一步加深；选中格仍以显式
 // 填充与描边优先，故不会被十字高亮覆盖。
 // 常量按默认主题 soft-light/dark（primary/background）混合得出，作为 var 未设置 / 旧浏览器
-// 降级实色；color-mix 支持时 DataGrid.vue 的 CSS 变量会用它重新混成 —— 两处取值一致。
+// 降级实色；color-mix 支持时网格组件的 CSS 变量会用它重新混成 —— 两处取值一致。
 export const DATA_GRID_LIGHT_CROSSHAIR_ROW_BG = "rgb(174, 195, 224)";
 export const DATA_GRID_LIGHT_CROSSHAIR_COL_BG = "rgb(142, 170, 210)";
 export const DATA_GRID_DARK_CROSSHAIR_ROW_BG = "rgb(75, 84, 98)";

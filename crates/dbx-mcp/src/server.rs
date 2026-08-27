@@ -247,6 +247,10 @@ impl DbxMcpServer {
     }
 
     pub fn with_runtime_options(backend: Arc<dyn DbxBackend>, scope: McpScope, web_mode: bool) -> Self {
+        // The workspace enables more than one rustls crypto feature through
+        // transitive dependencies. Native MCP runs outside the desktop/web
+        // startup paths, so select the same provider before any TLS tool call.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let mut tool_router = Self::tool_router();
         if scope.enabled() {
             tool_router.disable_route("dbx_add_connection");

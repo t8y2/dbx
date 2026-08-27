@@ -39,6 +39,10 @@ const props = defineProps<{
   showSettingsPage: boolean;
   checkingUpdates: boolean;
   hasUpdateAvailable: boolean;
+  isDownloadingUpdate: boolean;
+  downloadProgress: number;
+  updateReadyToInstall: boolean;
+  updateReady: boolean;
   agentDriverUpdateCount: number;
   hasMcpUpdateAvailable: boolean;
   hasConnections: boolean;
@@ -69,6 +73,20 @@ const settingsStore = useSettingsStore();
 const toolbarItems = computed(() => settingsStore.editorSettings.toolbarItems);
 const { isMac, isDesktop, showControls, isMaximized, isFullscreen, minimize, toggleMaximize, close } = useWindowControls();
 const checkingUpdates = computed(() => props.checkingUpdates);
+const updateTooltip = computed(() => {
+  if (props.isDownloadingUpdate) return t("updates.downloading", { progress: props.downloadProgress });
+  if (props.updateReady) return t("updates.restartRequiredTooltip");
+  if (props.updateReadyToInstall) return t("updates.updateReadyTooltip");
+  return t("updates.check");
+});
+const updateProgressRingStyle = computed(() => {
+  const progress = Math.max(0, Math.min(100, props.downloadProgress));
+  return {
+    background: `conic-gradient(var(--primary) ${progress}%, transparent ${progress}%)`,
+    mask: "radial-gradient(farthest-side, transparent calc(100% - 1.75px), #000 calc(100% - 1.75px))",
+    WebkitMask: "radial-gradient(farthest-side, transparent calc(100% - 1.75px), #000 calc(100% - 1.75px))",
+  };
+});
 const sqlLibrarySaveFeedbackActive = ref(false);
 const SQL_LIBRARY_BOOKMARK_PATH = "M10 2 L10 10 L13 7 L16 10 L16 2";
 const SQL_LIBRARY_CHECK_PATH = "M9 9.5 L9 9.5 L11 11.5 L15 7.5 L15 7.5";
@@ -585,12 +603,16 @@ const toolbarStyle = computed(() => {
         <Tooltip>
           <TooltipTrigger as-child>
             <Button v-show="isRightItemVisible('checkUpdates')" variant="ghost" size="icon" class="relative h-8 w-8 shrink-0" :disabled="checkingUpdates" @click="emit('check-updates')">
-              <Loader2 v-if="checkingUpdates" class="h-4 w-4 animate-spin" />
-              <CloudDownload v-else class="h-4 w-4" />
-              <span v-if="hasUpdateAvailable" class="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-red-500 ring-2 ring-background" />
+              <span v-if="isDownloadingUpdate" class="h-4 w-4 rounded-full" :style="updateProgressRingStyle" />
+              <template v-else>
+                <Loader2 v-if="checkingUpdates" class="h-4 w-4 animate-spin" />
+                <CloudDownload v-else class="h-4 w-4" />
+              </template>
+              <span v-if="updateReady || updateReadyToInstall" class="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-emerald-500 ring-2 ring-background" />
+              <span v-else-if="hasUpdateAvailable && !isDownloadingUpdate" class="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-red-500 ring-2 ring-background" />
             </Button>
           </TooltipTrigger>
-          <TooltipContent>{{ t("updates.check") }}</TooltipContent>
+          <TooltipContent>{{ updateTooltip }}</TooltipContent>
         </Tooltip>
       </template>
 

@@ -24,7 +24,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   "open-latest-release": [];
-  "download-and-install": [];
+  "download-in-background": [];
   "cancel-download": [];
   "install-downloaded": [];
   restart: [];
@@ -35,11 +35,10 @@ const { t } = useI18n();
 const isDesktop = isTauriRuntime();
 
 const renderedNotes = ref("");
-// Only active file replacement (installation) must trap the dialog.
+// Only active file replacement (installation) must trap the dialog. A background
+// download survives the dialog closing, so closing it never cancels the download.
 const isCloseBlocked = computed(() => props.isInstallingUpdate);
-// Accidental dismiss gestures (outside click, Escape) must not cancel a running download;
-// only the explicit close/cancel buttons should.
-const blocksImplicitDismiss = computed(() => props.isInstallingUpdate || props.isDownloadingUpdate);
+const blocksImplicitDismiss = computed(() => props.isInstallingUpdate);
 const canIgnoreVersion = computed(() => props.updateInfo?.update_available === true && !props.updateDownloaded && !props.isDownloadingUpdate && !props.isInstallingUpdate && !props.updateReady);
 
 function handleCancel() {
@@ -52,9 +51,6 @@ function handleOpenChange(nextOpen: boolean) {
     return;
   }
   if (isCloseBlocked.value) return;
-  if (props.isDownloadingUpdate) {
-    emit("cancel-download");
-  }
   open.value = false;
 }
 
@@ -154,12 +150,15 @@ watch(
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("updates.installing") }}
             </Button>
-            <Button v-else-if="isDownloadingUpdate" class="w-52 tabular-nums" disabled>
-              <Loader2 class="h-4 w-4 animate-spin" />
-              {{ t("updates.downloading", { progress: downloadProgress }) }}
-            </Button>
+            <template v-else-if="isDownloadingUpdate">
+              <Button variant="ghost" @click="emit('cancel-download')">{{ t("updates.cancelDownload") }}</Button>
+              <Button class="w-52 tabular-nums" disabled>
+                <Loader2 class="h-4 w-4 animate-spin" />
+                {{ t("updates.downloading", { progress: downloadProgress }) }}
+              </Button>
+            </template>
             <Button v-else-if="updateDownloaded" :disabled="activeTaskCount > 0" @click="emit('install-downloaded')">{{ t("updates.exitAndUpdate") }}</Button>
-            <Button v-else :disabled="activeTaskCount > 0" @click="emit('download-and-install')">{{ t("updates.downloadAndInstall") }}</Button>
+            <Button v-else @click="emit('download-in-background')">{{ t("updates.downloadInBackground") }}</Button>
           </template>
         </template>
         <Button v-else-if="updateCheckMessage" @click="emit('open-latest-release')">{{ t("updates.openRelease") }}</Button>

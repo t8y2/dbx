@@ -8,7 +8,7 @@ import type { UpdateDownloadSource as SettingsUpdateDownloadSource } from "@/sto
 import type { UpdateDownloadProgress } from "@/lib/backend/tauri";
 import { currentLocale } from "@/i18n";
 import { shouldBlockAppUpdate } from "@/lib/app/appUpdateTaskGuard";
-import { downloadAndInstallUpdateWhenIdle, installDownloadedUpdateWhenIdle } from "@/lib/app/appUpdateInstallFlow";
+import { installDownloadedUpdateWhenIdle } from "@/lib/app/appUpdateInstallFlow";
 
 interface UseAppUpdaterOptions {
   getActiveTaskCount?: () => number;
@@ -138,6 +138,12 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
 
   async function checkUpdates(options: { silent?: boolean } = {}) {
     if (checkingUpdates.value) return;
+    // The toolbar icon reuses this as its click handler. If a download/install is already
+    // in flight or finished, just resurface the dialog instead of hitting the network again.
+    if (!options.silent && (isDownloadingUpdate.value || updateDownloaded.value || updateReady.value)) {
+      showUpdateDialog.value = true;
+      return;
+    }
     checkingUpdates.value = true;
     updateCheckMessage.value = "";
     try {
@@ -201,18 +207,21 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     return true;
   }
 
-  async function downloadAndInstallUpdate() {
+  async function downloadUpdateInBackground() {
     if (!isTauriRuntime() || isDownloadingUpdate.value || isInstallingUpdate.value || updateDownloaded.value || updateReady.value) return;
     if (!canDownloadAndInstallUpdate(updateInfo.value, true)) {
       openLatestRelease();
       return;
     }
-    if (blockUpdateForActiveTasks()) return;
+    // Starting the download never has to wait on active work — only installing
+    // (file replacement) is disruptive, so that guard applies at install time instead.
+    showUpdateDialog.value = false;
     const attempt = ++activeDownloadAttempt;
     isDownloadingUpdate.value = true;
     downloadProgress.value = 0;
     let unlisten: (() => void) | undefined;
     const latestVersion = updateInfo.value?.latest_version;
+    toast(t("updates.downloadStarted", { version: latestVersion ? tagVersion(latestVersion) : "" }), 3000);
     try {
       await pendingCancellation;
       if (attempt !== activeDownloadAttempt) return;
@@ -222,21 +231,25 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
         const total = event.payload.total ?? 0;
         downloadProgress.value = total > 0 ? Math.round((event.payload.downloaded / total) * 100) : 0;
       });
-      const result = await downloadAndInstallUpdateWhenIdle({
-        getActiveTaskCount: () => activeTaskCount.value,
-        download: async () => {
-          await api.downloadUpdate(normalizeUpdateDownloadSource(settingsStore.editorSettings.updateDownloadSource), latestVersion);
-          if (attempt !== activeDownloadAttempt) throw new Error("Download canceled by user.");
-          downloadProgress.value = 100;
-          updateDownloaded.value = true;
-          isDownloadingUpdate.value = false;
-        },
-        install: async () => {
-          await installPendingUpdate();
-        },
-      });
-      if (result === "blocked" || result === "downloaded") {
-        blockUpdateForActiveTasks();
+      await api.downloadUpdate(normalizeUpdateDownloadSource(settingsStore.editorSettings.updateDownloadSource), latestVersion);
+      if (attempt !== activeDownloadAttempt) return;
+      downloadProgress.value = 100;
+      updateDownloaded.value = true;
+      // The download phase is truly finished — flip this now so the install guard (which
+      // checks isDownloadingUpdate) can evaluate freely instead of treating us as still busy.
+      isDownloadingUpdate.value = false;
+      if (shouldBlockAppUpdate(activeTaskCount.value)) {
+        // Matches the pre-refactor behavior: installing waits for active work to finish, but
+        // unlike before, only installing waits — the download itself never blocked on it.
+        toast(t("updates.readyToInstall", { version: latestVersion ? tagVersion(latestVersion) : "" }), 10000, {
+          label: t("updates.installNow"),
+          onClick: () => {
+            void installDownloadedUpdate();
+          },
+        });
+      } else {
+        // Restores the pre-refactor auto-install-when-idle behavior for the install step.
+        await installDownloadedUpdate();
       }
     } catch (e: any) {
       if (attempt !== activeDownloadAttempt) return;
@@ -276,7 +289,18 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
         getActiveTaskCount: () => activeTaskCount.value,
         install: installPendingUpdate,
       });
-      if (!installed) blockUpdateForActiveTasks();
+      if (!installed) {
+        blockUpdateForActiveTasks();
+        return;
+      }
+      if (updateReady.value) {
+        toast(t("updates.installedReadyToRestart"), 10000, {
+          label: t("updates.restart"),
+          onClick: () => {
+            void restartApp();
+          },
+        });
+      }
     } catch (e: any) {
       toast(t("updates.installFailed", { error: e?.message || String(e) }), 5000);
     }
@@ -331,7 +355,7 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     formatUpdateError,
     openLatestRelease,
     ignoreCurrentVersion,
-    downloadAndInstallUpdate,
+    downloadUpdateInBackground,
     cancelDownload,
     installDownloadedUpdate,
     restartApp,

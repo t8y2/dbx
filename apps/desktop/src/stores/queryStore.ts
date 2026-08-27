@@ -5578,6 +5578,12 @@ export const useQueryStore = defineStore("query", () => {
           clearOracleTxnPossiblyDirty(tab);
           tab.txnSessionId = undefined;
           tab.txnAutoRolledBack = false;
+        } else if (tab.txnSessionId && executionDispatched && !options?.pagination?.sessionId && effectiveDatabaseTypeForConnection(useConnectionStore().getConfig(tab.connectionId)) === "oracle") {
+          // Frontend timeout/cancel or mid-script failure: the statement may still
+          // have executed server-side while the manual session survives, so keep
+          // the sticky dirty state fail-closed instead of a clean toolbar on a
+          // dirty session. Cursor-page fetches stay excluded like the aggregation.
+          tab.oracleTxnPossiblyDirty = true;
         }
       }
       const current = findExecutionTab(id);

@@ -280,6 +280,40 @@ describe("queryStore Oracle manual-transaction sticky state", () => {
     expect(tab.txnAutoRolledBack).not.toBe(true);
   });
 
+  it("dirties a clean session when a frontend timeout rejects while the manual session survives", async () => {
+    mocks.executeInManualTransaction.mockRejectedValueOnce(new Error("Query timed out after 30 seconds"));
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = await setupManualTab(store);
+
+    await store.executeTabSql(tabId, "UPDATE EMP SET DEPTNO = 10");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    // The statement may still have executed server-side while the manual
+    // session survives, so the sticky state must stay fail-closed dirty.
+    expect(tab.txnSessionId).toBe("txn-oracle");
+    expect(tab.oracleTxnPossiblyDirty).toBe(true);
+  });
+
+  it("keeps a clean session clean when a cursor-page fetch times out", async () => {
+    mocks.executeInManualTransaction.mockResolvedValueOnce(cleanSelect()).mockRejectedValueOnce(new Error("Query timed out after 30 seconds"));
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = await setupManualTab(store);
+
+    await store.executeTabSql(tabId, "SELECT * FROM EMP");
+    await store.executeTabSql(tabId, "SELECT * FROM EMP", {
+      pagination: { sessionId: "cursor-1", clientSessionId: "client-1", limit: 100, offset: 100 },
+    });
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    // Page fetches never participate in the sticky state, matching aggregation.
+    expect(tab.txnSessionId).toBe("txn-oracle");
+    expect(tab.oracleTxnPossiblyDirty).not.toBe(true);
+  });
+
   it("leaves non-Oracle manual sessions using the old rule and no marker handling", async () => {
     mocks.getConnectionConfig.mockReturnValue({
       id: "pg-1",

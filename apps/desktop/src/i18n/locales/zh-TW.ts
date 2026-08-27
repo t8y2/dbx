@@ -3543,6 +3543,8 @@ export default withEnglishFallback({
     sqliteRebuildNotice: "SQLite 會保留一張不含作用中約束的資料快照作為備份表，再於同一交易內重建原表，並使用 CAST 強制轉換已修改型別的欄位；無法表示的值可能變成 0/0.0，執行失敗則整體回復。",
     extendedProperties: "擴充屬性",
     autoIncrement: "自動遞增",
+    mysqlAutoIncrementNextValue: "下一個自動遞增值",
+    editMysqlAutoIncrementValue: "編輯下一個自動遞增值（目前：{value}）",
     onUpdateCurrentTimestamp: "自動更新時間",
     identity: "識別欄位",
     identityGeneration: "產生方式",

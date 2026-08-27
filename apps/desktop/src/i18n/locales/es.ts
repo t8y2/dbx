@@ -3803,6 +3803,8 @@ export default withEnglishFallback({
     sqliteRebuildNotice: "SQLite conserva una instantánea de datos inerte como copia de seguridad, reconstruye la tabla en una sola transacción y fuerza CAST en las columnas modificadas. Los valores no representables pueden convertirse en 0/0.0; si ocurre un error, se revierte todo.",
     extendedProperties: "Extendido",
     autoIncrement: "Auto Incremento",
+    mysqlAutoIncrementNextValue: "Siguiente valor de autoincremento",
+    editMysqlAutoIncrementValue: "Editar el siguiente valor de autoincremento (actual: {value})",
     onUpdateCurrentTimestamp: "Actualización Auto",
     identity: "Identidad",
     identityGeneration: "Generación",

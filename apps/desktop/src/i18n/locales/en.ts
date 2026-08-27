@@ -3988,6 +3988,8 @@ export default {
     sqliteRebuildNotice: "SQLite retains an inert data snapshot as a backup, then rebuilds the table in one transaction and forcibly CASTs changed columns. Unrepresentable values may become 0/0.0; failures roll back.",
     extendedProperties: "Extended",
     autoIncrement: "Auto Increment",
+    mysqlAutoIncrementNextValue: "Next auto-increment value",
+    editMysqlAutoIncrementValue: "Edit next auto-increment value (current: {value})",
     onUpdateCurrentTimestamp: "Auto Update Time",
     identity: "Identity",
     identityGeneration: "Generation",

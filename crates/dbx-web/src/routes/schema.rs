@@ -170,6 +170,18 @@ pub async fn get_sqlserver_column_metadata(
     Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
 }
 
+pub async fn get_mysql_table_auto_increment(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SchemaQuery>,
+) -> Result<Json<Option<String>>, AppError> {
+    let database = q.database.as_deref().unwrap_or("");
+    let table = q.table.as_deref().unwrap_or("");
+    let result = dbx_core::schema::get_mysql_table_auto_increment_core(&state.app, &q.connection_id, database, table)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
 pub async fn list_schemas(
     State(state): State<Arc<WebState>>,
     Query(q): Query<SchemaQuery>,

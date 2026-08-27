@@ -3752,6 +3752,8 @@ export default withEnglishFallback({
     sqliteRebuildNotice: "SQLite는 백업으로 비활성 데이터 스냅샷을 유지한 다음 하나의 트랜잭션에서 테이블을 재구성하고 변경된 컬럼을 강제로 CAST합니다. 표현할 수 없는 값은 0/0.0이 될 수 있으며, 실패 시 롤백됩니다.",
     extendedProperties: "확장",
     autoIncrement: "자동 증가",
+    mysqlAutoIncrementNextValue: "다음 자동 증가 값",
+    editMysqlAutoIncrementValue: "다음 자동 증가 값 편집(현재: {value})",
     onUpdateCurrentTimestamp: "수정 시간 자동 갱신",
     identity: "ID",
     identityGeneration: "생성",

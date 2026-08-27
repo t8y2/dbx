@@ -113,9 +113,17 @@ describe("EditorSettingsDialog choice card containment", () => {
   });
 
   it("preserves intentional single-line truncation for cards with tooltips", () => {
-    for (const key of ["appLayoutSeparatedDescription", "appLayoutClassicDescription", "iconThemeDefaultDescription"] as const) {
+    for (const key of ["appLayoutSeparatedDescription", "appLayoutClassicDescription"] as const) {
       expectClassTokens(classNameFromTag(elementTagForKey(key)), ["truncate"]);
     }
-    expect(dialogSource).toContain('class="text-xs text-muted-foreground truncate">\n                                {{ iconThemeBlackDescriptionText }}');
+  });
+
+  it("keeps icon theme choices compact beside the corner style controls", () => {
+    expect(dialogSource).toContain("grid-template-columns: repeat(3, minmax(0, 1fr));");
+    for (const key of ["iconThemeDefault", "iconThemeBlack"] as const) {
+      const block = buttonBlockForKey(key);
+      expectClassTokens(classNameFromTag(openingTag(block, "Button")), ["settings-choice-button", "h-8"]);
+      expect(block).toContain('class="h-7 w-7 shrink-0"');
+    }
   });
 });

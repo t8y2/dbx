@@ -1,4 +1,4 @@
-use crate::models::connection::ConnectionConfig;
+use crate::models::connection::{ConnectionConfig, DatabaseConnectionInfo};
 use base64::Engine;
 use redis::{
     aio::ConnectionLike,
@@ -747,6 +747,41 @@ pub async fn test_connection(connection: &RedisConnection) -> Result<(), String>
             redis_ping(&mut con, "Redis cluster").await
         }
     }
+}
+
+/// Read the Redis server identity without making metadata unavailable when the
+/// INFO command is disabled by ACL or server policy.
+pub async fn database_connection_info(connection: &RedisConnection) -> Result<DatabaseConnectionInfo, String> {
+    match connection {
+        RedisConnection::Direct(con) => {
+            let mut con = con.lock().await;
+            redis_database_connection_info(&mut *con).await
+        }
+        RedisConnection::Cluster(pool) => {
+            let mut con = cluster_any_connection(pool).await?;
+            redis_database_connection_info(&mut con).await
+        }
+    }
+}
+
+async fn redis_database_connection_info<C>(con: &mut C) -> Result<DatabaseConnectionInfo, String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    let info =
+        tokio::time::timeout(super::connection_timeout(), redis::cmd("INFO").arg("server").query_async::<String>(con))
+            .await
+            .map_err(|_| format!("Redis INFO command timed out ({}s)", super::CONNECTION_TIMEOUT_SECS))?
+            .map_err(|error| format!("Redis INFO command failed: {error}"))?;
+    let product_version = info.lines().find_map(|line| {
+        let (key, value) = line.trim().split_once(':')?;
+        (key.eq_ignore_ascii_case("redis_version") && !value.trim().is_empty()).then(|| value.trim().to_string())
+    });
+    Ok(DatabaseConnectionInfo {
+        product_name: Some("Redis".to_string()),
+        product_version,
+        ..DatabaseConnectionInfo::default()
+    })
 }
 
 async fn redis_ping<C>(con: &mut C, label: &str) -> Result<(), String>
@@ -6044,6 +6079,7 @@ mod tests {
             database: None,
             default_schema: None,
             visible_databases: None,
+            visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
             attached_databases: Vec::new(),

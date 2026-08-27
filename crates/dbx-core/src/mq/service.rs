@@ -38,6 +38,27 @@ pub async fn mq_test_connection_core(state: &AppState, conn_id: &str) -> Result<
     }
 }
 
+/// Convert the adapter's cluster probe into the common connection metadata
+/// shown by the desktop and web connection views.
+pub async fn mq_database_connection_info(
+    state: &AppState,
+    conn_id: &str,
+) -> Result<Option<crate::models::connection::DatabaseConnectionInfo>, String> {
+    let info = mq_test_connection_core(state, conn_id).await?;
+    let product_name = match info.system_kind {
+        MqSystemKind::Pulsar => "Pulsar",
+        MqSystemKind::Kafka => "Kafka",
+        MqSystemKind::RocketMq => "RocketMQ",
+        MqSystemKind::RabbitMq => "RabbitMQ",
+    };
+    Ok(Some(crate::models::connection::DatabaseConnectionInfo {
+        product_name: Some(product_name.to_string()),
+        product_version: info.server_version,
+        driver_name: Some("Message Queue Admin API".to_string()),
+        ..Default::default()
+    }))
+}
+
 // ---- Tenants ----
 
 pub async fn mq_list_tenants_core(state: &AppState, conn_id: &str) -> Result<Vec<TenantInfo>, String> {
@@ -890,6 +911,7 @@ mod tests {
             database: None,
             default_schema: None,
             visible_databases: None,
+            visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
             attached_databases: Vec::new(),

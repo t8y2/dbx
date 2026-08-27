@@ -746,7 +746,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   autoAliasTables: true,
   insertSpaceAfterCompletion: true,
   sortCompletionColumnsAlphabetically: true,
-  selectFirstCompletionOnOpen: false,
+  selectFirstCompletionOnOpen: true,
   wordWrap: false,
   tableDdlWordWrap: true,
   vimModeEnabled: false,

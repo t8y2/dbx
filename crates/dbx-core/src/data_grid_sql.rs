@@ -153,6 +153,8 @@ pub enum DataGridContextFilterMode {
     IsNotBlank,
     Like,
     NotLike,
+    BeginsWith,
+    EndsWith,
     LessThan,
     LessThanOrEqual,
     GreaterThan,
@@ -574,6 +576,22 @@ pub fn build_data_grid_context_filter_condition(options: DataGridContextFilterCo
             "{like_column} NOT LIKE {}",
             format_grid_sql_literal(
                 &Value::String(format!("%{}%", value_to_filter_text(value))),
+                options.database_type,
+                None
+            )
+        )),
+        DataGridContextFilterMode::BeginsWith => Some(format!(
+            "{like_column} LIKE {}",
+            format_grid_sql_literal(
+                &Value::String(format!("{}%", value_to_filter_text(value))),
+                options.database_type,
+                None
+            )
+        )),
+        DataGridContextFilterMode::EndsWith => Some(format!(
+            "{like_column} LIKE {}",
+            format_grid_sql_literal(
+                &Value::String(format!("%{}", value_to_filter_text(value))),
                 options.database_type,
                 None
             )
@@ -4152,6 +4170,48 @@ mod tests {
             })
             .as_deref(),
             Some("\"created_at\"::text NOT LIKE '%2026%'")
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Mysql),
+                identifier_quote: None,
+                column_name: "file_name".to_string(),
+                mode: DataGridContextFilterMode::BeginsWith,
+                value: json!("FN"),
+                values: Vec::new(),
+                end_value: None,
+                column_info: Some(column("file_name", "varchar", false, None)),
+            })
+            .as_deref(),
+            Some("`file_name` LIKE 'FN%'")
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Mysql),
+                identifier_quote: None,
+                column_name: "file_name".to_string(),
+                mode: DataGridContextFilterMode::EndsWith,
+                value: json!(".sql"),
+                values: Vec::new(),
+                end_value: None,
+                column_info: Some(column("file_name", "varchar", false, None)),
+            })
+            .as_deref(),
+            Some("`file_name` LIKE '%.sql'")
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Postgres),
+                identifier_quote: None,
+                column_name: "update_date".to_string(),
+                mode: DataGridContextFilterMode::BeginsWith,
+                value: json!("128"),
+                values: Vec::new(),
+                end_value: None,
+                column_info: Some(column("update_date", "bigint", false, None)),
+            })
+            .as_deref(),
+            Some("\"update_date\"::text LIKE '128%'")
         );
         assert_eq!(
             build_data_grid_column_value_filter_condition(DataGridColumnValueFilterConditionOptions {

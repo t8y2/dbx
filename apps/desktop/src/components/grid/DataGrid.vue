@@ -37,6 +37,7 @@ import {
   Maximize2,
   PanelBottom,
   PanelRight,
+  RefreshCw,
   TableProperties,
   UserRound,
   Database,
@@ -1032,6 +1033,8 @@ const allFilterModeOptions: Array<{ value: FilterMode; labelKey: string }> = [
   { value: "not-equals", labelKey: "grid.filterBuilderNotEquals" },
   { value: "like", labelKey: "grid.filterBuilderContains" },
   { value: "not-like", labelKey: "grid.filterBuilderNotContains" },
+  { value: "begins-with", labelKey: "grid.filterBuilderBeginsWith" },
+  { value: "ends-with", labelKey: "grid.filterBuilderEndsWith" },
   { value: "greater-than", labelKey: "grid.filterBuilderGreaterThan" },
   {
     value: "greater-than-or-equal",
@@ -6890,6 +6893,11 @@ function inactiveCanvasSurface(): HTMLCanvasElement | null {
   return (canvasUsingBackSurface.value ? canvasRef.value : canvasBackRef.value) ?? null;
 }
 const canvasOverlayRef = ref<HTMLElement>();
+
+function isCanvasGridInteractionTarget(target: Node): boolean {
+  return canvasOverlayRef.value?.contains(target) === true || canvasRef.value?.contains(target) === true || canvasBackRef.value?.contains(target) === true;
+}
+
 const canvasViewportWidth = ref(0);
 const canvasViewportHeight = ref(0);
 const canvasScrollTop = ref(0);
@@ -7244,7 +7252,9 @@ function onCanvasMouseMove(event: MouseEvent) {
 
 function onCanvasMouseLeave(event?: MouseEvent) {
   const relatedTarget = event?.relatedTarget;
-  if (relatedTarget instanceof Node && canvasOverlayRef.value?.contains(relatedTarget)) return;
+  // A draw swaps the visible canvas surface. Treat that as an in-grid move so
+  // the action overlay does not disappear between the two surfaces.
+  if (relatedTarget instanceof Node && isCanvasGridInteractionTarget(relatedTarget)) return;
   const previous = canvasHoverCell.value;
   if (previous) {
     const previousActualColIdx = visibleColumnIndexes.value[previous.visibleColIdx];
@@ -7267,7 +7277,7 @@ function keepCanvasDetailHover() {
 
 function clearCanvasDetailHover(event?: MouseEvent) {
   const relatedTarget = event?.relatedTarget;
-  if (relatedTarget instanceof Node && (canvasOverlayRef.value?.contains(relatedTarget) || activeCanvasSurface()?.contains(relatedTarget) || canvasBackRef.value?.contains(relatedTarget))) {
+  if (relatedTarget instanceof Node && isCanvasGridInteractionTarget(relatedTarget)) {
     return;
   }
   onCanvasMouseLeave();
@@ -11816,6 +11826,18 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
     }),
     [exportSubmenu()],
     previewItems,
+    // 右键刷新：与工具栏刷新按钮/Mod+R 走同一个 onToolbarRefresh，方便
+    // 习惯 Navicat 等工具在数据页右键刷新的用户（#7273）。
+    [
+      { label: "", separator: true },
+      {
+        label: t("grid.refresh"),
+        action: () => void onToolbarRefresh(),
+        icon: RefreshCw,
+        shortcut: "Mod+R",
+        disabled: () => isSaving.value,
+      },
+    ],
   );
 });
 
@@ -12077,6 +12099,7 @@ function currentGridContextMenuItems(): ContextMenuItem[] {
               :match-count="searchMatches.length"
               :current-match-index="currentMatchIndex"
               :has-deferred-search-text="!!deferredClientSearchText"
+              :values-truncated="(props.result.large_value_cells?.length ?? 0) > 0"
               @keydown="onSearchKeydown"
               @navigate="navigateMatch"
               @close="closeSearch"

@@ -104,7 +104,7 @@ import { migrateSqlServerLegacyCompatibilityConfig, requiresSqlServerLegacyCompa
 import { gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
 import { deleteTabResultSnapshotsForOwner } from "@/lib/tabs/tabResultCache";
 import { disposeSqlServerActivityTracesForConnection, hasSqlServerActivityTraceForConnection } from "@/lib/sqlserver/sqlServerActivityTraceRuntime";
-import { connectionUsesVisibleSchemaFilter, filterDatabaseNamesForConnection, filterSchemaNamesForConnection, filterVisibleDatabaseNames, normalizeVisibleDatabaseSelection } from "@/lib/database/visibleDatabases";
+import { connectionUsesVisibleSchemaFilter, filterDatabaseNamesForConnection, filterSchemaNamesForConnection, filterVisibleDatabaseNames, normalizeVisibleDatabaseSelection, visibleDatabasePatternsAreEnabled } from "@/lib/database/visibleDatabases";
 import {
   buildObjectGroupPlaceholderNodes,
   buildGroupedObjectTreeNodes,
@@ -142,7 +142,7 @@ import { REDIS_SCAN_PAGE_SIZE_DEFAULT } from "@/lib/redis/redisKeyPattern";
 import { normalizeRedisDatabaseAliases, redisDatabaseAlias, redisDatabaseLabel } from "@/lib/redis/redisDatabaseAlias";
 import { normalizeRedisKeyTemplates } from "@/lib/redis/redisKeyTemplates";
 import { appendAgentDriverUpdateHint, hasAgentDriverUpdate, hasInstalledAgentVersion, type AgentDriverInstallState } from "@/lib/connection/agentDriverInstallHint";
-import { appendConnectionErrorHints, isMysqlMissingPasswordFailure } from "@/lib/connection/connectionErrorHints";
+import { appendConnectionErrorHints, isMysqlMissingPasswordFailure, isSqliteMissingEncryptionPasswordFailure } from "@/lib/connection/connectionErrorHints";
 import { connectionNeedsPasswordPrompt } from "@/lib/connection/connectionPassword";
 import { appendVisibleDatabaseSelection } from "@/lib/connection/connectionVisibleDatabases";
 import { buildXuguTypeMemberNodes, isXuguTypeMemberContainer } from "@/lib/sidebar/xuguTypeMembers";
@@ -3442,6 +3442,26 @@ export const useConnectionStore = defineStore("connection", () => {
     await reloadConnectionDatabaseChildren(connectionId);
   }
 
+  // 显式勾选 + 通配符模式一并保存（#7164）：模式对之后新建的库持续生效
+  async function setVisibleDatabaseFilter(connectionId: string, databaseNames: string[], patterns: string[]) {
+    const config = getConfig(connectionId);
+    if (!config) return;
+    const normalizedPatterns = patterns.map((pattern) => pattern.trim()).filter((pattern) => pattern !== "");
+    const idx = connections.value.findIndex((connection) => connection.id === connectionId);
+    if (idx < 0) return;
+    const nextConnections = [...connections.value];
+    nextConnections[idx] = {
+      ...nextConnections[idx],
+      visible_databases: normalizeVisibleDatabaseSelection(databaseNames, databaseNames),
+      visible_database_patterns: normalizedPatterns.length > 0 ? normalizedPatterns : undefined,
+    };
+    await persistConnections(nextConnections);
+    connections.value = nextConnections;
+    invalidateCompletionCache(connectionId);
+    rebuildTreeNodes();
+    await reloadConnectionDatabaseChildren(connectionId);
+  }
+
   function recordPrimaryVisibleObjectNames(connectionId: string, objectNames: readonly string[]) {
     const names = [...objectNames];
     const existing = primaryVisibleObjectNames.value[connectionId];
@@ -3473,7 +3493,20 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function clearVisibleDatabases(connectionId: string) {
     const config = getConfig(connectionId);
-    if (!config || !Array.isArray(config.visible_databases)) return;
+    if (!config || (!Array.isArray(config.visible_databases) && !visibleDatabasePatternsAreEnabled(config.visible_database_patterns))) return;
+    if (visibleDatabasePatternsAreEnabled(config.visible_database_patterns)) {
+      const idx = connections.value.findIndex((connection) => connection.id === connectionId);
+      if (idx >= 0) {
+        const nextConnections = [...connections.value];
+        nextConnections[idx] = { ...nextConnections[idx], visible_databases: undefined, visible_database_patterns: undefined };
+        await persistConnections(nextConnections);
+        connections.value = nextConnections;
+        invalidateCompletionCache(connectionId);
+        rebuildTreeNodes();
+        await reloadConnectionDatabaseChildren(connectionId);
+        return;
+      }
+    }
     await updateVisibleDatabasesConfig(connectionId, undefined);
     await reloadConnectionDatabaseChildren(connectionId);
   }
@@ -3639,12 +3672,13 @@ export const useConnectionStore = defineStore("connection", () => {
     rebuildTreeNodes();
   }
 
-  async function connectDbWithMissingPasswordRetry(config: ConnectionConfig, localAttempt: number): Promise<{ config: ConnectionConfig; id: string; rememberPassword: boolean }> {
+  async function connectDbWithPasswordRetry(config: ConnectionConfig, localAttempt: number): Promise<{ config: ConnectionConfig; id: string; rememberPassword: boolean }> {
     try {
       const id = await withConnectionAttemptTimeout(api.connectDb(config, localAttempt), config);
       return { config, id, rememberPassword: false };
     } catch (error) {
-      if (!isMysqlMissingPasswordFailure(config, connectionErrorMessage(error))) throw error;
+      const message = connectionErrorMessage(error);
+      if (!isMysqlMissingPasswordFailure(config, message) && !isSqliteMissingEncryptionPasswordFailure(config, message)) throw error;
       const prompted = await ensureConnectionPassword(config, true);
       config = prompted.config;
       ensureLocalConnectionAttemptActive(config.id, localAttempt);
@@ -3670,7 +3704,7 @@ export const useConnectionStore = defineStore("connection", () => {
         await ensureSqlServerLegacyCompatibilityComponentInstalled(config);
       }
       ensureLocalConnectionAttemptActive(config.id, localAttempt);
-      const connection = await connectDbWithMissingPasswordRetry(config, localAttempt);
+      const connection = await connectDbWithPasswordRetry(config, localAttempt);
       config = connection.config;
       rememberPassword ||= connection.rememberPassword;
       const id = connection.id;
@@ -3913,7 +3947,7 @@ export const useConnectionStore = defineStore("connection", () => {
         await ensureSqlServerLegacyCompatibilityComponentInstalled(config);
       }
       ensureLocalConnectionAttemptActive(connectionId, localAttempt);
-      const connection = await connectDbWithMissingPasswordRetry(config, localAttempt);
+      const connection = await connectDbWithPasswordRetry(config, localAttempt);
       config = connection.config;
       rememberPassword ||= connection.rememberPassword;
       const id = connection.id;
@@ -8742,6 +8776,7 @@ export const useConnectionStore = defineStore("connection", () => {
     getRedisDatabaseAlias,
     setRedisDatabaseAlias,
     setVisibleDatabases,
+    setVisibleDatabaseFilter,
     clearVisibleDatabases,
     ensureVisibleDatabase,
     setVisibleSchemas,

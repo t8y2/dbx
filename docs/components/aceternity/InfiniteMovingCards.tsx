@@ -11,12 +11,24 @@ type InfiniteMovingCardsProps = {
   speed?: "slow" | "normal";
 };
 
+// 滚动一圈位移为半个 track（items.length × 卡片步距），
+// 按目标线速度反推 duration，保证不同条数的行视觉速度一致。
+// 36px/s 与首页数据库 pill 墙的最快行实测流速对齐。
+// track 必须 shrink-0，否则作为 flex 子项会被压回容器宽度，
+// -50% 位移随之下缩，实际线速度会远低于目标值。
+const CARD_PITCH_PX = 354; // 340px 卡片 + 14px 间距
+const SCROLL_SPEED_PX_PER_S = 36;
+
 export function InfiniteMovingCards({ items, direction = "left", speed = "normal" }: InfiniteMovingCardsProps) {
   const repeatedItems = [...items, ...items];
+  const durationSeconds = (items.length * CARD_PITCH_PX) / SCROLL_SPEED_PX_PER_S;
 
   return (
     <div className="landing-testimonial-marquee flex overflow-hidden" data-direction={direction} data-speed={speed} aria-label="Testimonials" tabIndex={0}>
-      <div className="landing-testimonial-track flex w-max min-w-full gap-3.5 px-[7px]">
+      <div
+        className="landing-testimonial-track flex w-max min-w-full shrink-0 gap-3.5 px-[7px]"
+        style={{ "--testimonial-duration": `${durationSeconds}s` } as React.CSSProperties}
+      >
         {repeatedItems.map((item, index) => (
           <figure aria-hidden={index >= items.length} className="landing-testimonial-card flex-[0_0_340px] min-h-[188px] rounded-[9px] m-0 p-[22px] max-[760px]:flex-[0_0_286px] max-[760px]:min-h-[210px] max-[760px]:p-[18px]" key={`${item.name}-${index}`}>
             <div className="flex gap-3 items-center">

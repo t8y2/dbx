@@ -26,6 +26,7 @@ fn postgres_test_config(id: &str, database: &str) -> ConnectionConfig {
         database: Some(database.to_string()),
         default_schema: None,
         visible_databases: None,
+        visible_database_patterns: None,
         visible_schemas: None,
         attached_databases: Vec::new(),
         init_script: None,

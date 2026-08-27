@@ -2,6 +2,7 @@ package app.dbx.jdbc;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
@@ -58,7 +59,8 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 public final class DbxJdbcPlugin {
-    private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final ObjectMapper MAPPER =
+        new ObjectMapper().configure(SerializationFeature.WRITE_BIGDECIMAL_AS_PLAIN, true);
     private static final int MAX_ROWS = 10_000;
     private static final String JDBCX_URL_PREFIX = "jdbcx:";
     private static final String JDBCX_EXTENSION_WHITELIST_PROPERTY = "jdbcx.extension.whitelist";
@@ -3387,6 +3389,7 @@ public final class DbxJdbcPlugin {
                     return rs.getString(1);
                 }
             }
+        } catch (SQLException ignored) {
         }
         return null;
     }
@@ -3400,6 +3403,7 @@ public final class DbxJdbcPlugin {
                     return rs.getString(1);
                 }
             }
+        } catch (SQLException ignored) {
         }
         return null;
     }
@@ -3414,8 +3418,18 @@ public final class DbxJdbcPlugin {
                     result.add(name);
                 }
             }
+            return result;
+        } catch (SQLException e) {
+            try (ResultSet rs = conn.getMetaData().getSchemas()) {
+                while (rs.next()) {
+                    String schema = rs.getString("TABLE_SCHEM");
+                    if (schema != null && !schema.isBlank()) {
+                        result.add(schema);
+                    }
+                }
+            }
+            return result;
         }
-        return result;
     }
 
     private static JsonNode oracleListTables(Connection conn, String owner) throws SQLException {

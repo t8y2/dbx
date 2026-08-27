@@ -78,6 +78,7 @@ export interface ConnectionConfig {
   database?: string;
   default_schema?: string;
   visible_databases?: string[];
+  visible_database_patterns?: string[];
   visible_schemas?: Record<string, string[]>;
   show_system_schemas?: boolean;
   attached_databases?: AttachedDatabaseConfig[];

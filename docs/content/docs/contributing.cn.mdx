@@ -161,7 +161,7 @@ make
 
 `make` 会使用锁文件安装依赖，然后启动 Tauri 桌面开发环境。第一次编译 Rust 依赖需要较长时间，后续启动会明显更快。
 
-如需轻量桌面开发构建，可以关闭默认 Rust feature，仅启用 DuckDB sidecar 和 DynamoDB：
+如需轻量桌面开发构建，可以关闭默认 Rust feature，仅启用 DuckDB sidecar、DynamoDB 和 bundled SQLite：
 
 ```bash
 make dev-fast
@@ -183,7 +183,7 @@ pnpm dev:tauri
 使用相同的轻量构建：
 
 ```powershell
-pnpm tauri dev -- --no-default-features --features duckdb-sidecar
+pnpm tauri dev -- --no-default-features --features duckdb-sidecar,dynamodb,sqlite-bundled
 ```
 
 ### 判断是否启动成功

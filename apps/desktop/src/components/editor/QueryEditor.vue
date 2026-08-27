@@ -108,7 +108,7 @@ import {
 import type { SqlHighlighter } from "@/lib/sql/sqlHighlighter";
 import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, editorDiagnosticColors, editorThemeAppearanceFor, loadEditorTheme, editorFontTheme, shellLineCommentTheme, sqlCompletionTheme, sqlSemanticHighlightTheme } from "@/lib/editor/editorThemes";
 import { createStatementGutterMarkerDom, shouldShowStatementGutter } from "@/lib/editor/codemirrorStatementGutter";
-import { createQueryEditorSearchKeymap } from "@/lib/editor/queryEditorSearchKeymap";
+import { createQueryEditorReplaceShortcutBindings, createQueryEditorReplaceShortcutHandler, createQueryEditorSearchKeymap } from "@/lib/editor/queryEditorSearchKeymap";
 import { buildQueryEditorLineNumbersExtension } from "@/lib/editor/queryEditorLineNumbers";
 import { searchKeymapWithoutModD } from "@/lib/editor/codemirrorSearchKeymap";
 import { defaultKeymapForGlobalShortcuts } from "@/lib/editor/codemirrorDefaultKeymap";
@@ -1937,7 +1937,20 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         (currentView) => shouldBlockExecutionShortcut(undefined, currentView),
       );
   const executeInNewResultTabBindings = props.hideExecutionControls ? [] : createQueryEditorExecutionShortcutBindings(shortcuts.executeSqlInNewResultTab, requestExecuteInNewResultTab, (currentView) => shouldBlockExecutionShortcut(undefined, currentView));
+  const replaceShortcutBindings = createQueryEditorReplaceShortcutBindings(shortcuts.replace, openReplace);
+  const replaceShortcutHandler = createQueryEditorReplaceShortcutHandler({
+    shortcut: shortcuts.replace,
+    openReplace,
+    isReadOnly: () => !!props.readOnly,
+  });
   return [
+    editorViewModule
+      ? (Prec?.high(
+          editorViewModule.EditorView.domEventHandlers({
+            keydown: replaceShortcutHandler,
+          }),
+        ) ?? [])
+      : [],
     Prec?.high(
       codeMirrorKeymap.of([
         {
@@ -1945,7 +1958,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
           run: handleEnter,
         },
         ...binding(shortcuts.find, openSearch),
-        ...binding(shortcuts.replace, openReplace),
+        ...replaceShortcutBindings,
         ...executeInNewResultTabBindings,
         ...executeBindings,
         ...binding(shortcuts.saveSql, () => {

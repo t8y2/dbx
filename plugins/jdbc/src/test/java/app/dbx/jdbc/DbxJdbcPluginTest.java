@@ -7,8 +7,10 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.Clob;
 import java.sql.DatabaseMetaData;
@@ -522,6 +524,53 @@ final class DbxJdbcPluginTest {
         } finally {
             closeAndDeregister(connection, driver);
         }
+    }
+
+    @Test
+    void readValueKeepsBigDecimalWithNegativeScaleAsIs() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "readValue",
+            ResultSet.class,
+            ResultSetMetaData.class,
+            int.class,
+            boolean.class
+        );
+        method.setAccessible(true);
+        // Oracle NUMBER(28) columns without a fixed scale can come back from the driver as a
+        // BigDecimal with a negative scale, whose toString() renders in scientific notation.
+        BigDecimal huge = new BigDecimal("2.0260818101758001E+27");
+        ResultSet rs = objectResultSet(huge);
+
+        Object result = method.invoke(null, rs, columnMeta(Types.NUMERIC, "NUMBER"), 1, false);
+
+        assertEquals(huge, result);
+    }
+
+    @Test
+    void bigDecimalValuesSerializeWithoutScientificNotation() throws Exception {
+        ObjectMapper mapper = jdbcPluginMapper();
+        BigDecimal huge = new BigDecimal("2.0260818101758001E+27");
+
+        String json = mapper.writeValueAsString(mapper.valueToTree(huge));
+
+        assertEquals(huge.toPlainString(), json);
+        assertFalse(json.toUpperCase(java.util.Locale.ROOT).contains("E"), json);
+    }
+
+    @Test
+    void ordinaryBigDecimalValuesSerializeUnchanged() throws Exception {
+        ObjectMapper mapper = jdbcPluginMapper();
+        BigDecimal ordinary = new BigDecimal("123.45");
+        BigDecimal negative = new BigDecimal("-9876.5");
+
+        assertEquals("123.45", mapper.writeValueAsString(mapper.valueToTree(ordinary)));
+        assertEquals("-9876.5", mapper.writeValueAsString(mapper.valueToTree(negative)));
+    }
+
+    private static ObjectMapper jdbcPluginMapper() throws Exception {
+        Field field = DbxJdbcPlugin.class.getDeclaredField("MAPPER");
+        field.setAccessible(true);
+        return (ObjectMapper) field.get(null);
     }
 
     @Test
@@ -2678,6 +2727,28 @@ final class DbxJdbcPluginTest {
             } finally {
                 closeAndDeregister(connection, driver);
             }
+        }
+    }
+
+    @Test
+    void oracleListSchemasFallsBackToJdbcSchemasWhenAllUsersIsMissing() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod("oracleListSchemas", Connection.class);
+        method.setAccessible(true);
+
+        try (Connection conn = DriverManager.getConnection("jdbc:h2:mem:dbx_oracle_no_all_users;DB_CLOSE_DELAY=-1", "sa", "")) {
+            conn.createStatement().execute("CREATE SCHEMA DM6_TEST_SCHEMA");
+
+            JsonNode result = (JsonNode) method.invoke(null, conn);
+            assertFalse(result.isNull());
+            assertEquals(true, result.isArray());
+            boolean found = false;
+            for (JsonNode node : result) {
+                if ("DM6_TEST_SCHEMA".equalsIgnoreCase(node.asText())) {
+                    found = true;
+                    break;
+                }
+            }
+            assertEquals(true, found);
         }
     }
 

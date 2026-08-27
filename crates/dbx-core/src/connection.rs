@@ -173,9 +173,21 @@ impl PoolKind {
 
 enum ConnectionDatabaseInfoSource {
     Agent(Arc<db::agent_driver::PooledAgentClient>),
-    ExternalDriver { config: Arc<ConnectionConfig>, session: Arc<PluginDriverSession> },
+    MongoAgent(Arc<db::agent_driver::PooledAgentClient>, Option<String>),
+    ExternalDriver {
+        config: Arc<ConnectionConfig>,
+        session: Arc<PluginDriverSession>,
+    },
     NativeMysql(db::mysql::MySqlPool),
     NativeHBase(db::hbase_driver::HBaseClient),
+    NativeMongo(mongodb::Client, Option<String>),
+    Meilisearch(db::meilisearch_driver::MeilisearchClient),
+    VictoriaMetrics(db::victoriametrics_driver::VictoriaMetricsClient),
+    Redis(String),
+    Nacos,
+    Consul(Box<crate::consul::ConsulClient>),
+    #[cfg(feature = "mq-admin")]
+    MessageQueue,
 }
 
 /// Held connection for a manual transaction session
@@ -4275,6 +4287,9 @@ impl AppState {
         let source = {
             let connections = self.connections.read().await;
             match connections.get(&pool_key) {
+                Some(PoolKind::Agent(client)) if config.db_type == DatabaseType::MongoDb => {
+                    Some(ConnectionDatabaseInfoSource::MongoAgent(client.clone(), database.map(str::to_string)))
+                }
                 Some(PoolKind::Agent(client)) => Some(ConnectionDatabaseInfoSource::Agent(client.clone())),
                 Some(PoolKind::ExternalDriver { config, session, .. }) => {
                     Some(ConnectionDatabaseInfoSource::ExternalDriver {
@@ -4284,6 +4299,18 @@ impl AppState {
                 }
                 Some(PoolKind::Mysql(pool, _)) => Some(ConnectionDatabaseInfoSource::NativeMysql(pool.clone())),
                 Some(PoolKind::HBase(client)) => Some(ConnectionDatabaseInfoSource::NativeHBase(client.clone())),
+                Some(PoolKind::MongoDb(client)) => {
+                    Some(ConnectionDatabaseInfoSource::NativeMongo(client.clone(), database.map(str::to_string)))
+                }
+                Some(PoolKind::Meilisearch(client)) => Some(ConnectionDatabaseInfoSource::Meilisearch(client.clone())),
+                Some(PoolKind::VictoriaMetrics(client)) => {
+                    Some(ConnectionDatabaseInfoSource::VictoriaMetrics(client.clone()))
+                }
+                Some(PoolKind::Redis(_)) => Some(ConnectionDatabaseInfoSource::Redis(pool_key.clone())),
+                Some(PoolKind::Nacos) => Some(ConnectionDatabaseInfoSource::Nacos),
+                Some(PoolKind::Consul(client)) => Some(ConnectionDatabaseInfoSource::Consul(Box::new(client.clone()))),
+                #[cfg(feature = "mq-admin")]
+                Some(PoolKind::MessageQueue) => Some(ConnectionDatabaseInfoSource::MessageQueue),
                 _ => None,
             }
         };
@@ -4292,6 +4319,17 @@ impl AppState {
             Some(ConnectionDatabaseInfoSource::Agent(client)) => {
                 let mut agent = client.lock().await;
                 Ok(agent.connection_info(Some(db::connection_timeout())).await?.database_info)
+            }
+            Some(ConnectionDatabaseInfoSource::MongoAgent(client, database)) => {
+                let mut agent = client.lock().await;
+                let version = agent.mongo_server_version::<String>(database.as_deref().unwrap_or("admin")).await?;
+                Ok(Some(DatabaseConnectionInfo {
+                    product_name: Some("MongoDB".to_string()),
+                    product_version: Some(version),
+                    current_database: database,
+                    driver_name: Some("MongoDB legacy Agent".to_string()),
+                    ..Default::default()
+                }))
             }
             Some(ConnectionDatabaseInfoSource::ExternalDriver { config, session }) => {
                 let response = session
@@ -4308,6 +4346,41 @@ impl AppState {
             }
             Some(ConnectionDatabaseInfoSource::NativeHBase(client)) => {
                 db::hbase_driver::database_connection_info(&client).await
+            }
+            Some(ConnectionDatabaseInfoSource::NativeMongo(client, database)) => {
+                db::mongo_driver::database_connection_info(&client, database.as_deref()).await.map(Some)
+            }
+            Some(ConnectionDatabaseInfoSource::Meilisearch(client)) => {
+                db::meilisearch_driver::database_connection_info(&client).await.map(Some)
+            }
+            Some(ConnectionDatabaseInfoSource::VictoriaMetrics(client)) => {
+                db::victoriametrics_driver::database_connection_info(&client, db::connection_timeout()).await.map(Some)
+            }
+            Some(ConnectionDatabaseInfoSource::Redis(pool_key)) => {
+                let connections = self.connections.read().await;
+                match connections.get(&pool_key) {
+                    Some(PoolKind::Redis(redis)) => db::redis_driver::database_connection_info(redis).await.map(Some),
+                    _ => Ok(None),
+                }
+            }
+            Some(ConnectionDatabaseInfoSource::Nacos) => {
+                let admin_config = self.nacos_admin_config_for_connection(connection_id, &config).await?;
+                let admin = self.nacos_registry.get_or_build_config(connection_id, admin_config).await?;
+                Ok(crate::nacos::service::database_info_from_connection(&admin.test_connection().await?))
+            }
+            Some(ConnectionDatabaseInfoSource::Consul(client)) => {
+                let identity = client.agent_self().await?;
+                Ok(Some(DatabaseConnectionInfo {
+                    product_name: Some("Consul".to_string()),
+                    product_version: identity.version,
+                    server_comment: Some(format!("Agent {}", identity.node)),
+                    driver_name: Some("Consul HTTP API".to_string()),
+                    ..Default::default()
+                }))
+            }
+            #[cfg(feature = "mq-admin")]
+            Some(ConnectionDatabaseInfoSource::MessageQueue) => {
+                Ok(crate::mq::service::mq_database_connection_info(self, connection_id).await?)
             }
             None => Ok(None),
         }
@@ -5818,6 +5891,7 @@ mod tests {
             database: database.map(str::to_string),
             default_schema: None,
             visible_databases: None,
+            visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
             attached_databases: Vec::new(),

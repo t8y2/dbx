@@ -711,6 +711,7 @@ mod tests {
             database: database.map(str::to_string),
             default_schema: None,
             visible_databases: None,
+            visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
             attached_databases: Vec::new(),
@@ -772,6 +773,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(params["sessionRole"], "metadata");
+    }
+
+    #[test]
+    fn oracle_form_connections_use_orcl_when_database_is_omitted() {
+        for (mode, expected_url) in [
+            ("service_name", "jdbc:oracle:thin:@//oracle.example.com:1521/ORCL"),
+            ("sid", "jdbc:oracle:thin:@oracle.example.com:1521:ORCL"),
+        ] {
+            let mut cfg = config(DatabaseType::Oracle, None);
+            cfg.oracle_connection_type = Some(mode.to_string());
+            let database = cfg.effective_database().unwrap_or("");
+
+            let params = agent_connect_params(&cfg, "oracle.example.com", 1521, database).unwrap();
+
+            assert_eq!(params["database"], "ORCL");
+            assert_eq!(params["connection_string"], expected_url);
+        }
     }
 
     #[test]

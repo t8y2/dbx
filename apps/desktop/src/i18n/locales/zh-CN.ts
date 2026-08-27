@@ -8876,6 +8876,7 @@ export default withEnglishFallback({
     copied: "已复制",
     saved: "已保存",
     failed: "操作失败：{message}",
+    reset: "重置",
     rows: "{count} 行",
     columns: "{count} 列",
     cells: "{count} 个单元格",

@@ -8637,6 +8637,7 @@ export default withEnglishFallback({
     copied: "Copiado",
     saved: "Guardado",
     failed: "Error: {message}",
+    reset: "Restablecer",
     rows: "{count} filas",
     columns: "{count} columnas",
     cells: "{count} celdas",

@@ -8895,6 +8895,7 @@ export default {
     copied: "Copied",
     saved: "Saved",
     failed: "Failed: {message}",
+    reset: "Reset",
     rows: "{count} rows",
     columns: "{count} columns",
     cells: "{count} cells",

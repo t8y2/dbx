@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { Camera, Check, ClipboardCopy, Download, Moon, Sun } from "@lucide/vue";
+import { Camera, Check, ClipboardCopy, Download, Moon, RotateCcw, Sun } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -77,10 +77,33 @@ function renderSnapshot() {
   );
 }
 
+function resetSnapshotOptions() {
+  if (titleDebounceTimer) {
+    clearTimeout(titleDebounceTimer);
+    titleDebounceTimer = null;
+  }
+  appearance.value = isDark.value ? "dark" : "light";
+  showTrafficLights.value = true;
+  showFieldNames.value = true;
+  showColumnTypes.value = false;
+  showColumnDetails.value = false;
+  showRowNumbers.value = true;
+  wrapCells.value = false;
+  transpose.value = false;
+  compact.value = false;
+  title.value = props.source?.title ?? "";
+  copied.value = false;
+  if (copyResetTimer) {
+    clearTimeout(copyResetTimer);
+    copyResetTimer = null;
+  }
+  renderSnapshot();
+}
+
 watch(
-  [open, () => props.source],
-  ([isOpen, source]) => {
-    if (isOpen && source) title.value = source.title ?? "";
+  open,
+  (isOpen) => {
+    if (isOpen) resetSnapshotOptions();
   },
   { immediate: true },
 );
@@ -195,11 +218,14 @@ async function exportSnapshot(kind: "clipboard" | "file") {
           </div>
         </div>
       </div>
-      <DialogFooter
-        ><Button variant="outline" @click="open = false">{{ t("codeSnapshot.close") }}</Button
-        ><Button variant="outline" :disabled="exporting" @click="exportSnapshot('clipboard')"><Check v-if="copied" class="mr-1.5 h-4 w-4 text-green-500" /><ClipboardCopy v-else class="mr-1.5 h-4 w-4" />{{ copied ? t("gridSnapshot.copied") : t("codeSnapshot.copy") }}</Button
-        ><Button :disabled="exporting" @click="exportSnapshot('file')"><Download class="mr-1.5 h-4 w-4" />{{ t("codeSnapshot.save") }}</Button></DialogFooter
-      >
+      <DialogFooter class="sm:justify-between">
+        <Button variant="outline" :disabled="exporting" @click="resetSnapshotOptions"><RotateCcw class="mr-1.5 h-4 w-4" />{{ t("gridSnapshot.reset") }}</Button>
+        <div class="flex flex-col-reverse gap-2 sm:flex-row">
+          <Button variant="outline" @click="open = false">{{ t("codeSnapshot.close") }}</Button>
+          <Button variant="outline" :disabled="exporting" @click="exportSnapshot('clipboard')"><Check v-if="copied" class="mr-1.5 h-4 w-4 text-green-500" /><ClipboardCopy v-else class="mr-1.5 h-4 w-4" />{{ copied ? t("gridSnapshot.copied") : t("codeSnapshot.copy") }}</Button>
+          <Button :disabled="exporting" @click="exportSnapshot('file')"><Download class="mr-1.5 h-4 w-4" />{{ t("codeSnapshot.save") }}</Button>
+        </div>
+      </DialogFooter>
     </DialogContent>
   </Dialog>
 </template>

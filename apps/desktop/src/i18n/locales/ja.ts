@@ -8689,6 +8689,7 @@ export default withEnglishFallback({
     copied: "コピーしました",
     saved: "保存しました",
     failed: "失敗: {message}",
+    reset: "リセット",
     rows: "{count} 行",
     columns: "{count} 列",
     cells: "{count} セル",

@@ -8079,6 +8079,7 @@ export default withEnglishFallback({
     copied: "복사됨",
     saved: "저장됨",
     failed: "실패: {message}",
+    reset: "재설정",
     rows: "{count}개 행",
     columns: "{count}개 열",
     cells: "{count}개 셀",

@@ -8628,6 +8628,7 @@ export default withEnglishFallback({
     copied: "已複製",
     saved: "已儲存",
     failed: "操作失敗：{message}",
+    reset: "重設",
     rows: "{count} 列",
     columns: "{count} 欄",
     cells: "{count} 個儲存格",

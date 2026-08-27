@@ -1680,7 +1680,8 @@ async function loadMysqlAutoIncrementCounter(preserveDraft = false) {
     await store.ensureConnected(props.connectionId);
     const value = await api.getMysqlTableAutoIncrement(props.connectionId, props.database, props.tableName);
     if (requestId !== mysqlAutoIncrementLoadRequestId) return;
-    const draft = value === null && !hasPersistedMysqlAutoIncrementColumn.value ? { value: "", originalValue: "" } : refreshMysqlAutoIncrementCounterDraft(value, { value: mysqlAutoIncrementValue.value, originalValue: originalMysqlAutoIncrementValue.value }, preserveDraft);
+    const server = value === null && !hasPersistedMysqlAutoIncrementColumn.value ? "" : value;
+    const draft = refreshMysqlAutoIncrementCounterDraft(server, { value: mysqlAutoIncrementValue.value, originalValue: originalMysqlAutoIncrementValue.value }, preserveDraft);
     originalMysqlAutoIncrementValue.value = draft.originalValue;
     mysqlAutoIncrementValue.value = draft.value;
   } catch (error: any) {
@@ -3403,7 +3404,12 @@ function isShiftEnterShortcut(event: KeyboardEvent): boolean {
 }
 
 function isPlainModDeleteShortcut(event: KeyboardEvent): boolean {
-  return isPlainModShortcut(event, "delete") || (event.metaKey && !event.ctrlKey && isPlainModShortcut(event, "backspace"));
+  if (isPlainModShortcut(event, "delete")) return true;
+  if (!event.metaKey || event.ctrlKey || !isPlainModShortcut(event, "backspace")) return false;
+  // ⌘⌫ is macOS "delete to beginning of line" while editing text; only treat it as a
+  // field delete when the focused input is empty so normal text editing keeps working.
+  const target = event.target;
+  return target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement ? target.value === "" : true;
 }
 
 function onStructureEditorKeydown(event: KeyboardEvent) {

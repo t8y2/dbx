@@ -722,6 +722,21 @@ describe("TableStructureEditor action column", () => {
     expect(root.querySelector('[data-column-row-index="1"]')).not.toBeNull();
   });
 
+  it("keeps Cmd+Backspace available for editing non-empty field text", async () => {
+    const root = await mountEditor("dameng");
+    buttonWithText(root, "structureEditor.addColumn").click();
+    await vi.waitFor(() => expect(root.querySelector('[data-column-row-index="1"]')).not.toBeNull());
+    const addedInput = root.querySelector<HTMLInputElement>('[data-column-row-index="1"] [data-column-name-input]');
+    if (!addedInput) throw new Error("Missing added column name input");
+
+    addedInput.value = "name";
+    addedInput.focus();
+    addedInput.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Backspace", metaKey: true }));
+
+    await nextTick();
+    expect(root.querySelector('[data-column-row-index="1"]')).not.toBeNull();
+  });
+
   it("widens the ordinal indicator for a two-digit primary-key row", async () => {
     const root = await mountEditor("dameng");
     const addColumn = buttonWithText(root, "structureEditor.addColumn");

@@ -278,7 +278,7 @@ function draft(autoIncrement = false, counter?: { value?: string; originalValue?
   };
 }
 
-async function mountEditor(autoIncrement = false, counter?: { value?: string; originalValue?: string }) {
+async function mountEditor(autoIncrement = false, counter?: { value?: string; originalValue?: string }, draftOverride?: ReturnType<typeof draft>) {
   mocks.ensureConnected.mockResolvedValue(undefined);
   mocks.listDataTypes.mockResolvedValue([]);
   mocks.buildTableStructureChangeSql.mockResolvedValue({ statements: [], warnings: [] });
@@ -290,7 +290,7 @@ async function mountEditor(autoIncrement = false, counter?: { value?: string; or
     database: "test",
     schema: "test",
     tableName: "users",
-    draft: draft(autoIncrement, counter),
+    draft: draftOverride ?? draft(autoIncrement, counter),
   });
   mountedApps.push(app);
   mountedEditor = app.mount(root) as unknown as { applyChanges: () => Promise<boolean> };
@@ -379,6 +379,16 @@ describe("TableStructureEditor MySQL AUTO_INCREMENT counter", () => {
     const input = root.querySelector<HTMLInputElement>("[data-mysql-auto-increment-counter]");
     await vi.waitFor(() => expect(input?.disabled).toBe(false));
     expect(input?.value).toBe("");
+  });
+
+  it("keeps a restored dirty blank-counter draft when the server has no counter", async () => {
+    mocks.getMysqlTableAutoIncrement.mockResolvedValueOnce(null);
+    const restoredDraft = draft(false, { value: "500", originalValue: "" });
+    restoredDraft.columns[0].extra.autoIncrement = true;
+    const root = await mountEditor(false, undefined, restoredDraft);
+
+    const input = root.querySelector<HTMLInputElement>("[data-mysql-auto-increment-counter]");
+    await vi.waitFor(() => expect(input?.value).toBe("500"));
   });
 
   it("accepts unsigned bigint digits and rejects non-decimal input without rewriting it", async () => {

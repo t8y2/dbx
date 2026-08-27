@@ -998,6 +998,8 @@ mod tests {
         assert!(!is_oracle_proven_read_only_statement("SELECT * FROM t WHERE b = 'x' AND c IN (3)"));
         assert!(!is_oracle_proven_read_only_statement("SELECT 1 UNION SELECT 2"));
     }
+
+    #[test]
     fn builds_postgres_json_explain_sql() {
         let result = build_explain_sql(ExplainSqlOptions {
             database_type: Some(DatabaseType::Postgres),

@@ -590,6 +590,93 @@ pub fn check_read_only(sql: &str, connection_name: &str, database_type: Database
     Ok(())
 }
 
+/// Oracle-only, fail-closed classifier for manual-transaction UX. Returns true
+/// only for an ordinary top-level read that DBX can prove harmless: a single
+/// top-level `SELECT` (not `WITH`) that after Oracle-aware comment/literal
+/// stripping contains no row-locking, transaction-control, DDL/DCL, `CALL`/
+/// `EXEC`, PL/SQL block, `EXECUTE IMMEDIATE`, database-link, sequence
+/// pseudocolumn (`NEXTVAL`/`CURRVAL`), function-invocation, or subquery
+/// syntax. Any lexical ambiguity is **not** proven read-only; the classifier
+/// deliberately whitelists no functions because user/package function side
+/// effects cannot be proven and would create an unbounded compatibility
+/// surface.
+pub fn is_oracle_proven_read_only_statement(sql: &str) -> bool {
+    let cleaned = strip_sql_comments_and_literals(sql);
+    let trimmed = cleaned.trim_start();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let upper = trimmed.to_uppercase();
+    // Single top-level SELECT only (WITH is excluded because data-modifying
+    // CTEs can hide writes in a row-returning path).
+    if !starts_with_keyword(&upper, "SELECT") {
+        return false;
+    }
+
+    let lower = cleaned.to_lowercase();
+
+    // Function invocation or subquery syntax: any '(' after literal stripping.
+    // This deliberately excludes SELECT upper(name), COUNT(*), package
+    // functions, and subqueries DBX cannot prove harmless.
+    if lower.contains('(') {
+        return false;
+    }
+
+    // Database link: '@' cannot appear in an unquoted Oracle identifier, so any
+    // remaining '@' after literal stripping is a remote-object reference.
+    if lower.contains('@') {
+        return false;
+    }
+
+    // Word-boundary forbidden keywords. These are Oracle keywords/reserved
+    // words, so they cannot be legitimate unquoted identifiers inside a simple
+    // read; a quoted occurrence is already stripped to spaces above.
+    const FORBIDDEN_WORDS: &[&str] = &[
+        // row locking
+        "for",
+        "update",
+        "lock",
+        // transaction control
+        "begin",
+        "commit",
+        "rollback",
+        "savepoint",
+        // DDL/DCL
+        "create",
+        "alter",
+        "drop",
+        "truncate",
+        "rename",
+        "grant",
+        "revoke",
+        "comment",
+        "purge",
+        "audit",
+        "noaudit",
+        "analyze",
+        "flashback",
+        "merge",
+        "insert",
+        "delete",
+        // set operators (a UNION is not a single top-level SELECT)
+        "union",
+        "minus",
+        "intersect",
+        // stored procedures / dynamic SQL / PL/SQL blocks
+        "call",
+        "exec",
+        "execute",
+        "declare",
+        // sequence pseudocolumns
+        "nextval",
+        "currval",
+        // SELECT ... INTO is PL/SQL-only in Oracle
+        "into",
+    ];
+
+    !FORBIDDEN_WORDS.iter().any(|word| contains_word(&lower, word))
+}
+
 fn contains_word(source: &str, word: &str) -> bool {
     let bytes = source.as_bytes();
     let word_bytes = word.as_bytes();
@@ -824,6 +911,93 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oracle_proven_read_only_accepts_simple_top_level_selects() {
+        assert!(is_oracle_proven_read_only_statement("SELECT * FROM table"));
+        assert!(is_oracle_proven_read_only_statement("select id, name from users"));
+        assert!(is_oracle_proven_read_only_statement("SELECT * FROM users WHERE id = 1"));
+        assert!(is_oracle_proven_read_only_statement("SELECT * FROM users ORDER BY id"));
+        assert!(is_oracle_proven_read_only_statement("SELECT * FROM users FETCH FIRST 10 ROWS ONLY"));
+        assert!(is_oracle_proven_read_only_statement("SELECT 1"));
+        assert!(is_oracle_proven_read_only_statement("SELECT ROWNUM FROM dual"));
+        assert!(is_oracle_proven_read_only_statement("SELECT * FROM users"));
+        // Comment/literal stripping hides keywords that are not part of the SQL.
+        assert!(is_oracle_proven_read_only_statement("-- comment\nSELECT * FROM users"));
+        assert!(is_oracle_proven_read_only_statement("SELECT 'update' FROM dual"));
+        assert!(is_oracle_proven_read_only_statement("SELECT \"select\" FROM t"));
+        assert!(is_oracle_proven_read_only_statement("SELECT * FROM user_update"));
+    }
+
+    #[test]
+    fn oracle_proven_read_only_rejects_writes_and_ddl() {
+        for sql in [
+            "UPDATE users SET name = 'x'",
+            "INSERT INTO users VALUES (1)",
+            "DELETE FROM users",
+            "MERGE INTO target USING source ON (a = b) WHEN MATCHED THEN UPDATE",
+            "CREATE TABLE t (id INT)",
+            "ALTER TABLE t ADD COLUMN c INT",
+            "DROP TABLE t",
+            "TRUNCATE TABLE t",
+            "GRANT SELECT ON t TO x",
+            "REVOKE SELECT ON t FROM x",
+        ] {
+            assert!(!is_oracle_proven_read_only_statement(sql), "expected rejected: {sql}");
+        }
+    }
+
+    #[test]
+    fn oracle_proven_read_only_rejects_cte_procedure_and_plsql() {
+        for sql in [
+            "WITH cte AS (SELECT 1 FROM dual) SELECT * FROM cte",
+            "CALL my_proc()",
+            "EXEC my_proc",
+            "EXECUTE IMMEDIATE 'DROP TABLE t'",
+            "BEGIN UPDATE t SET x = 1; END;",
+            "DECLARE x INT; BEGIN NULL; END;",
+        ] {
+            assert!(!is_oracle_proven_read_only_statement(sql), "expected rejected: {sql}");
+        }
+    }
+
+    #[test]
+    fn oracle_proven_read_only_rejects_locking_and_sequence_pseudocolumns() {
+        for sql in [
+            "SELECT * FROM t FOR UPDATE",
+            "LOCK TABLE t IN EXCLUSIVE MODE",
+            "SELECT seq.NEXTVAL FROM dual",
+            "SELECT seq.CURRVAL FROM dual",
+            "SELECT * FROM t@dblink",
+            "SELECT * FROM t WHERE id = 1 FOR UPDATE",
+        ] {
+            assert!(!is_oracle_proven_read_only_statement(sql), "expected rejected: {sql}");
+        }
+    }
+
+    #[test]
+    fn oracle_proven_read_only_rejects_functions_and_subqueries() {
+        for sql in [
+            "SELECT upper(name) FROM users",
+            "SELECT count(*) FROM users",
+            "SELECT pkg.fn() FROM dual",
+            "SELECT * FROM users WHERE id IN (SELECT id FROM orders)",
+            "SELECT * FROM (SELECT * FROM users)",
+            "SELECT NVL(name, 'x') FROM users",
+        ] {
+            assert!(!is_oracle_proven_read_only_statement(sql), "expected rejected: {sql}");
+        }
+    }
+
+    #[test]
+    fn oracle_proven_read_only_rejects_empty_and_ambiguous_input() {
+        assert!(!is_oracle_proven_read_only_statement(""));
+        assert!(!is_oracle_proven_read_only_statement("   "));
+        assert!(!is_oracle_proven_read_only_statement("-- only a comment"));
+        assert!(!is_oracle_proven_read_only_statement("SELECT * FROM t WHERE a IN (1, 2)"));
+        assert!(!is_oracle_proven_read_only_statement("SELECT * FROM t WHERE b = 'x' AND c IN (3)"));
+        assert!(!is_oracle_proven_read_only_statement("SELECT 1 UNION SELECT 2"));
+    }
 
     #[test]
     fn builds_postgres_json_explain_sql() {

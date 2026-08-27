@@ -6,7 +6,11 @@ const globalsCss = readCascadeCss();
 const dialogContentSource = readFileSync(new URL("../../components/ui/dialog/DialogContent.vue", import.meta.url), "utf8");
 const dialogScrollContentSource = readFileSync(new URL("../../components/ui/dialog/DialogScrollContent.vue", import.meta.url), "utf8");
 const dialogOverlaySource = readFileSync(new URL("../../components/ui/dialog/DialogOverlay.vue", import.meta.url), "utf8");
+const codeSnapshotDialogSource = readFileSync(new URL("../../components/codeSnapshot/CodeSnapshotDialog.vue", import.meta.url), "utf8");
 const dataTransferDialogSource = readFileSync(new URL("../../components/transfer/DataTransferDialog.vue", import.meta.url), "utf8");
+const updateDialogSource = readFileSync(new URL("../../components/layout/UpdateDialog.vue", import.meta.url), "utf8");
+const dataGridColumnHeaderSource = readFileSync(new URL("../../components/grid/DataGridColumnHeader.vue", import.meta.url), "utf8");
+const ddlViewDialogSource = readFileSync(new URL("../../components/objects/DdlViewDialog.vue", import.meta.url), "utf8");
 const connectionDialogSource = readFileSync(new URL("../../components/connection/ConnectionDialog.vue", import.meta.url), "utf8");
 const connectionTreeSource = readFileSync(new URL("../../components/sidebar/ConnectionTree.vue", import.meta.url), "utf8");
 const activeConnectionFilterSource = readFileSync(new URL("../../components/sidebar/ActiveConnectionFilterButton.vue", import.meta.url), "utf8");
@@ -86,8 +90,43 @@ describe("legacy WebView CSS fallbacks", () => {
     expect(dataTransferDialogSource).toContain('width: "min(1120px, calc(100vw - 2rem))"');
     expect(dataTransferDialogSource).toContain('html.dbx-legacy-webview [data-slot="dialog-content"].dbx-transfer-dialog[class~="max-w-sm"]');
     expect(dataTransferDialogSource).toContain("max-width: calc(100vw - 2rem) !important;");
+    expect(dataTransferDialogSource).not.toContain("@media (min-width: 640px)");
     expect(dataTransferDialogSource).not.toMatch(/^\s+width: calc\(100vw - 2rem\) !important;$/m);
     expect(globalsCss).not.toContain(".dbx-transfer-dialog");
+  });
+
+  it("keeps the code snapshot dialog layout scoped to legacy WebViews without media queries", () => {
+    expect(codeSnapshotDialogSource).toContain('class="dbx-code-snapshot-dialog flex max-h-[calc(var(--dbx-viewport-height)-2rem)] flex-col overflow-hidden border border-border !bg-background text-foreground shadow-2xl !backdrop-blur-none sm:max-w-[860px]"');
+    expect(codeSnapshotDialogSource).toContain('class="dbx-code-snapshot-dialog__footer"');
+    expect(codeSnapshotDialogSource).toContain('html.dbx-legacy-webview [data-slot="dialog-content"].dbx-code-snapshot-dialog');
+    expect(codeSnapshotDialogSource).toContain("width: calc(100vw - 2rem) !important;");
+    expect(codeSnapshotDialogSource).toContain("flex-direction: row !important;");
+    expect(codeSnapshotDialogSource).toContain("flex-wrap: nowrap !important;");
+    expect(codeSnapshotDialogSource).toContain("justify-content: flex-end !important;");
+    expect(codeSnapshotDialogSource).not.toContain("@media");
+  });
+
+  it("keeps the update dialog's wide layout fallback scoped to legacy WebViews without media queries", () => {
+    expect(updateDialogSource).toContain('class="dbx-update-dialog sm:max-w-[520px]"');
+    expect(updateDialogSource).toContain('html.dbx-legacy-webview [data-slot="dialog-content"].dbx-update-dialog[class~="max-w-sm"]');
+    expect(updateDialogSource).toContain('dbx-update-dialog [data-slot="dialog-footer"]');
+    expect(updateDialogSource).not.toContain("@media");
+  });
+
+  it("keeps the DDL dialog's desktop layout scoped to legacy WebViews without media queries", () => {
+    expect(ddlViewDialogSource).toContain('class="dbx-ddl-view-dialog sm:max-w-190"');
+    expect(ddlViewDialogSource).toContain('html.dbx-legacy-webview [data-slot="dialog-content"].dbx-ddl-view-dialog[class~="max-w-sm"]');
+    expect(ddlViewDialogSource).toContain("max-width: 47.5rem !important;");
+    expect(ddlViewDialogSource).toContain('dbx-ddl-view-dialog [data-slot="dialog-footer"]');
+    expect(ddlViewDialogSource).not.toContain("@media");
+  });
+
+  it("uses an explicit tooltip copy-button hover color in legacy WebViews", () => {
+    expect(dataGridColumnHeaderSource).toContain("data-column-header-copy-name");
+    expect(dataGridColumnHeaderSource).toContain("html.dbx-legacy-webview [data-column-header-copy-name]:hover");
+    expect(dataGridColumnHeaderSource).toContain("background-color: rgba(255, 255, 255, 0.1);");
+    expect(dataGridColumnHeaderSource).toContain("html.dbx-legacy-webview.dark [data-column-header-copy-name]:hover");
+    expect(dataGridColumnHeaderSource).toContain("background-color: rgba(0, 0, 0, 0.1);");
   });
 
   it("keeps primary alpha utilities readable in legacy WebViews", () => {

@@ -90,7 +90,7 @@ watch(
 <template>
   <Dialog :open="open" @update:open="handleOpenChange">
     <DialogContent
-      class="sm:max-w-[700px]"
+      class="dbx-update-dialog sm:max-w-[700px]"
       :show-close-button="!isCloseBlocked"
       @interact-outside="
         (e: Event) => {
@@ -174,3 +174,14 @@ watch(
     </DialogContent>
   </Dialog>
 </template>
+
+<style>
+html.dbx-legacy-webview [data-slot="dialog-content"].dbx-update-dialog[class~="max-w-sm"] {
+  max-width: 700px !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"].dbx-update-dialog [data-slot="dialog-footer"] {
+  flex-direction: row !important;
+  justify-content: flex-end !important;
+}
+</style>

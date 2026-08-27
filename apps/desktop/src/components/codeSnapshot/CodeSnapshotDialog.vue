@@ -158,7 +158,7 @@ const previewVisible = computed(() => open.value && !!props.source);
   <Dialog v-model:open="open">
     <!-- 对话框整体限高：高度上限跟随 --dbx-viewport-height（兼容旧版 WebView 中 vh 不准的情况）；
          内部采用纵向 flex 布局，header/footer 固定，只有中间预览区滚动，保证底部按钮始终可见 -->
-    <DialogContent class="flex max-h-[calc(var(--dbx-viewport-height)-2rem)] flex-col overflow-hidden border border-border !bg-background text-foreground shadow-2xl !backdrop-blur-none sm:max-w-[860px]">
+    <DialogContent class="dbx-code-snapshot-dialog flex max-h-[calc(var(--dbx-viewport-height)-2rem)] flex-col overflow-hidden border border-border !bg-background text-foreground shadow-2xl !backdrop-blur-none sm:max-w-[860px]">
       <DialogHeader>
         <DialogTitle class="flex items-center gap-2">
           <Camera class="h-5 w-5 text-primary" />
@@ -209,7 +209,7 @@ const previewVisible = computed(() => open.value && !!props.source);
         </div>
       </div>
 
-      <DialogFooter>
+      <DialogFooter class="dbx-code-snapshot-dialog__footer">
         <Button variant="outline" @click="open = false">{{ t("codeSnapshot.close") }}</Button>
         <Button variant="outline" :disabled="exporting" @click="exportSnapshot('clipboard')">
           <Check v-if="copied" class="mr-1.5 h-4 w-4 text-green-500" />
@@ -224,3 +224,21 @@ const previewVisible = computed(() => open.value && !!props.source);
     </DialogContent>
   </Dialog>
 </template>
+
+<style>
+html.dbx-legacy-webview [data-slot="dialog-content"].dbx-code-snapshot-dialog {
+  display: flex !important;
+  flex-direction: column !important;
+  width: calc(100vw - 2rem) !important;
+  max-width: 860px !important;
+  min-width: 0 !important;
+}
+
+html.dbx-legacy-webview .dbx-code-snapshot-dialog__footer {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center !important;
+  justify-content: flex-end !important;
+  flex-wrap: nowrap !important;
+}
+</style>

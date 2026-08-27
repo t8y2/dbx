@@ -13,8 +13,8 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/components/export/XlsxHeaderDialog.vue", () => ({
   default: {
     emits: ["confirm"],
-    mounted(this: { $emit: (event: string, value: string) => void }) {
-      queueMicrotask(() => this.$emit("confirm", "name-comment"));
+    mounted(this: { $emit: (event: string, value: { headerMode: string; autoFilter: boolean }) => void }) {
+      queueMicrotask(() => this.$emit("confirm", { headerMode: "name-comment", autoFilter: false }));
     },
     render() {
       return null;
@@ -125,7 +125,11 @@ describe("useDataGridExport XLSX headers", () => {
 
     await state.exportAllResultsXlsx();
 
-    expect(mocks.exportQueryResultsXlsx).toHaveBeenCalledWith(expect.any(String), expect.arrayContaining([expect.objectContaining({ sheetName: "Ids", columnComments: ["id (Identifier)"] }), expect.objectContaining({ sheetName: "Names", columnComments: ["name (Display name)"] })]));
+    expect(mocks.exportQueryResultsXlsx).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.arrayContaining([expect.objectContaining({ sheetName: "Ids", columnComments: ["id (Identifier)"], autoFilter: false }), expect.objectContaining({ sheetName: "Names", columnComments: ["name (Display name)"], autoFilter: false })]),
+      false,
+    );
   });
 
   it("uses ordinal result comments when single-table metadata is unavailable", async () => {
@@ -137,6 +141,6 @@ describe("useDataGridExport XLSX headers", () => {
 
     await state.exportAllResultsXlsx();
 
-    expect(mocks.exportQueryResultsXlsx).toHaveBeenCalledWith(expect.any(String), expect.arrayContaining([expect.objectContaining({ sheetName: "Ids", columnComments: ["id (Joined identifier)"] })]));
+    expect(mocks.exportQueryResultsXlsx).toHaveBeenCalledWith(expect.any(String), expect.arrayContaining([expect.objectContaining({ sheetName: "Ids", columnComments: ["id (Joined identifier)"], autoFilter: false })]), false);
   });
 });

@@ -121,6 +121,7 @@ async fn live_sqlserver_xlsx_export_can_outlive_query_timeout_while_rows_keep_ar
         export_table_name: None,
         export_column_types: None,
         column_comments: None,
+        auto_filter: None,
         identifier_quote: None,
         numeric_column_right_align: false,
     };

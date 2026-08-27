@@ -27,7 +27,7 @@ import { formatTemporalRowsForExport } from "@/lib/dataGrid/columnFormatter";
 import { translateBackendError } from "@/i18n/backend-errors";
 import XlsxHeaderDialog from "@/components/export/XlsxHeaderDialog.vue";
 import i18n from "@/i18n";
-import { buildXlsxHeaderOverrides, hasXlsxHeaderComments, type XlsxHeaderMode } from "@/lib/export/xlsxHeader";
+import { buildXlsxHeaderOverrides, hasXlsxHeaderComments, type XlsxExportOptions, type XlsxHeaderMode } from "@/lib/export/xlsxHeader";
 
 /**
  * Format metadata for backend table exports. Each entry maps a format key
@@ -292,16 +292,17 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return targetColumns.map((column) => commentsByName.get(column.toLocaleLowerCase()));
   }
 
-  function showXlsxHeaderDialog(): Promise<XlsxHeaderMode | null> {
-    if (!hasXlsxHeaderComments(allXlsxColumnComments.value) && !hasXlsxHeaderComments(visibleXlsxColumnComments.value)) return Promise.resolve("name");
+  function showXlsxHeaderDialog(): Promise<XlsxExportOptions | null> {
+    if (typeof document === "undefined") return Promise.resolve({ headerMode: "name", autoFilter: false });
 
     return new Promise((resolve) => {
       const container = document.createElement("div");
       document.body.appendChild(container);
       const app = createApp(XlsxHeaderDialog, {
         open: true,
-        onConfirm: (mode: XlsxHeaderMode) => {
-          resolve(mode);
+        showHeaderOptions: hasXlsxHeaderComments(allXlsxColumnComments.value) || hasXlsxHeaderComments(visibleXlsxColumnComments.value),
+        onConfirm: (exportOptions: XlsxExportOptions) => {
+          resolve(exportOptions);
           app.unmount();
           document.body.removeChild(container);
         },
@@ -402,24 +403,29 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return resultExportSql?.value || sql.value;
   }
 
-  async function writeXlsxResult(outputPath: string, result: { columns: string[]; columnTypes: string[]; columnComments?: (string | null)[]; rows: CellValue[][] }, includeSqlSheet: boolean) {
+  async function writeXlsxResult(outputPath: string, result: { columns: string[]; columnTypes: string[]; columnComments?: (string | null)[]; rows: CellValue[][] }, includeSqlSheet: boolean, autoFilter: boolean) {
     const sqlWorksheet = includeSqlSheet ? buildXlsxSqlWorksheet([{ sql: currentExportSql() || "" }]) : undefined;
     const rightAlign = useSettingsStore().editorSettings.numericColumnRightAlign;
     if (!sqlWorksheet) {
-      await api.exportQueryResultXlsx(outputPath, currentXlsxSheetName(), result.columns, result.columnTypes, result.columnComments, result.rows, rightAlign);
+      await api.exportQueryResultXlsx(outputPath, currentXlsxSheetName(), result.columns, result.columnTypes, result.columnComments, result.rows, rightAlign, autoFilter);
       return;
     }
-    await api.exportQueryResultsXlsx(outputPath, [
-      {
-        sheetName: currentXlsxSheetName(),
-        columns: result.columns,
-        columnTypes: result.columnTypes,
-        columnComments: result.columnComments,
-        rows: result.rows,
-        numericColumnRightAlign: rightAlign,
-      },
-      sqlWorksheet,
-    ]);
+    await api.exportQueryResultsXlsx(
+      outputPath,
+      [
+        {
+          sheetName: currentXlsxSheetName(),
+          columns: result.columns,
+          columnTypes: result.columnTypes,
+          columnComments: result.columnComments,
+          rows: result.rows,
+          numericColumnRightAlign: rightAlign,
+          autoFilter,
+        },
+        { ...sqlWorksheet, autoFilter },
+      ],
+      autoFilter,
+    );
   }
 
   function targetedRows(): RowItem[] {
@@ -910,13 +916,13 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   }
 
   async function exportXlsxResult(rowIds: number[] | undefined, includeSqlSheet: boolean) {
-    const headerMode = await showXlsxHeaderDialog();
-    if (headerMode === null) return;
+    const exportOptions = await showXlsxHeaderDialog();
+    if (exportOptions === null) return;
 
     await runExclusiveExport(async () => {
       try {
-        if (await exportQueryResultViaBackend("xlsx", rowIds, includeSqlSheet, headerMode)) return;
-        if (await exportFullTableDataViaBackend("xlsx", rowIds, headerMode)) return;
+        if (await exportQueryResultViaBackend("xlsx", rowIds, includeSqlSheet, exportOptions.headerMode, exportOptions.autoFilter)) return;
+        if (await exportFullTableDataViaBackend("xlsx", rowIds, exportOptions.headerMode, exportOptions.autoFilter)) return;
 
         let outputPath = exportFileName("export", "xlsx");
         if (isTauriRuntime()) {
@@ -958,7 +964,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           },
           true,
           true,
-          headerMode,
+          exportOptions.headerMode,
         );
         if (needsFullExport && exportProgressState) {
           exportProgressState.value = {
@@ -968,7 +974,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
             totalRows: result.rows.length,
           };
         }
-        await writeXlsxResult(outputPath, result, includeSqlSheet);
+        await writeXlsxResult(outputPath, result, includeSqlSheet, exportOptions.autoFilter);
         if (needsFullExport && exportProgressState) {
           exportProgressState.value = {
             ...exportProgressState.value,
@@ -1001,8 +1007,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   }
 
   async function exportCurrentPageXlsxResult(includeSqlSheet: boolean) {
-    const headerMode = await showXlsxHeaderDialog();
-    if (headerMode === null) return;
+    const exportOptions = await showXlsxHeaderDialog();
+    if (exportOptions === null) return;
 
     await runExclusiveExport(async () => {
       try {
@@ -1016,8 +1022,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           if (!path) return;
           outputPath = path as string;
         }
-        const result = await resultToExport(undefined, undefined, false, true, headerMode);
-        await writeXlsxResult(outputPath, result, includeSqlSheet);
+        const result = await resultToExport(undefined, undefined, false, true, exportOptions.headerMode);
+        await writeXlsxResult(outputPath, result, includeSqlSheet, exportOptions.autoFilter);
         toast(t("grid.exported"));
       } catch (e: any) {
         toast(t("grid.exportFailed", { message: translateBackendError(t, e) }), 5000);
@@ -1034,8 +1040,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   }
 
   async function exportAllResultsXlsxResult(includeSqlSheet: boolean) {
-    const headerMode = await showXlsxHeaderDialog();
-    if (headerMode === null) return;
+    const exportOptions = await showXlsxHeaderDialog();
+    if (exportOptions === null) return;
 
     await runExclusiveExport(async () => {
       try {
@@ -1059,12 +1065,13 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           sheetName: sheet.sheetName,
           columns: sheet.result.columns,
           columnTypes: sheet.result.column_types ?? [],
-          columnComments: buildXlsxHeaderOverrides(sheet.result.columns, commentsForExportColumns(sheet.result.columns), headerMode),
+          columnComments: buildXlsxHeaderOverrides(sheet.result.columns, commentsForExportColumns(sheet.result.columns), exportOptions.headerMode),
           rows: formatTemporalRowsForExport(sheet.result.rows, sheet.result.column_types ?? [], exportPattern),
           numericColumnRightAlign: rightAlign,
+          autoFilter: exportOptions.autoFilter,
         }));
         const sqlWorksheet = includeSqlSheet ? buildXlsxSqlWorksheet(sheets.map((sheet) => ({ resultName: sheet.sheetName, sql: sheet.sql || sheet.result.sourceStatement || "" }))) : undefined;
-        await api.exportQueryResultsXlsx(outputPath, sqlWorksheet ? [...worksheets, sqlWorksheet] : worksheets);
+        await api.exportQueryResultsXlsx(outputPath, sqlWorksheet ? [...worksheets, { ...sqlWorksheet, autoFilter: exportOptions.autoFilter }] : worksheets, exportOptions.autoFilter);
         toast(t("grid.exported"));
       } catch (e: any) {
         toast(t("grid.exportFailed", { message: translateBackendError(t, e) }), 5000);
@@ -1080,7 +1087,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     await exportAllResultsXlsxResult(true);
   }
 
-  async function exportFullTableDataViaBackend(format: "csv" | "xlsx" | "json" | "markdown" | "sql" | "txt", rowIds?: number[], headerMode: XlsxHeaderMode = "name"): Promise<boolean> {
+  async function exportFullTableDataViaBackend(format: "csv" | "xlsx" | "json" | "markdown" | "sql" | "txt", rowIds?: number[], headerMode: XlsxHeaderMode = "name", autoFilter = true): Promise<boolean> {
     const meta = tableMeta.value;
     // The backend table exporter currently builds two-part table names. External
     // Doris/StarRocks catalogs need the data-tab paginator's three-part SQL.
@@ -1150,6 +1157,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           rowLimit,
           dateTimeFormat: editorSettings.globalDateTimeExportFormat || undefined,
           numericColumnRightAlign: editorSettings.numericColumnRightAlign ?? true,
+          autoFilter: format === "xlsx" ? autoFilter : undefined,
         },
         (progress) => {
           if (exportProgressState) {
@@ -1177,7 +1185,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return true;
   }
 
-  async function exportQueryResultViaBackend(format: "csv" | "xlsx" | "txt" | "sql", rowIds?: number[], includeSqlSheet = false, headerMode: XlsxHeaderMode = "name"): Promise<boolean> {
+  async function exportQueryResultViaBackend(format: "csv" | "xlsx" | "txt" | "sql", rowIds?: number[], includeSqlSheet = false, headerMode: XlsxHeaderMode = "name", autoFilter = true): Promise<boolean> {
     if (rowIds !== undefined || context.value !== "results" || !queryResultExportRequest) {
       return false;
     }
@@ -1210,7 +1218,9 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       exportColumnTypes: format === "sql" ? allColumnTypes.value?.map((type) => type ?? null) : undefined,
     });
     const columnComments = format === "xlsx" ? buildXlsxHeaderOverrides(allColumns.value, allXlsxColumnComments.value, headerMode) : undefined;
-    const request = baseRequest ? { ...baseRequest, dateTimeFormat: useSettingsStore().editorSettings.globalDateTimeExportFormat || undefined, numericColumnRightAlign: useSettingsStore().editorSettings.numericColumnRightAlign ?? true, columnComments } : undefined;
+    const request = baseRequest
+      ? { ...baseRequest, dateTimeFormat: useSettingsStore().editorSettings.globalDateTimeExportFormat || undefined, numericColumnRightAlign: useSettingsStore().editorSettings.numericColumnRightAlign ?? true, columnComments, autoFilter: format === "xlsx" ? autoFilter : undefined }
+      : undefined;
     if (!request) throw new Error("Unable to build query result export request");
 
     if (exportProgressState) {

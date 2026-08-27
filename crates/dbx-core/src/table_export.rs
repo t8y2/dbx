@@ -68,6 +68,8 @@ pub struct TableExportRequest {
     pub numeric_column_right_align: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub column_comments: Option<Vec<Option<String>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_filter: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1050,6 +1052,7 @@ async fn try_export_native_table_stream(
                 &[],
                 request.date_time_format.as_deref(),
                 request.numeric_column_right_align,
+                request.auto_filter.unwrap_or(true),
             )?;
             let result = stream_native_table_rows(
                 state,
@@ -1705,6 +1708,7 @@ async fn export_table_data_core_inner(
                 &[],
                 request.date_time_format.as_deref(),
                 request.numeric_column_right_align,
+                request.auto_filter.unwrap_or(true),
             )?;
 
             loop {
@@ -2200,6 +2204,7 @@ mod tests {
             date_time_format: None,
             numeric_column_right_align: false,
             column_comments: None,
+            auto_filter: None,
         };
 
         ExternalDriverExportFixture { state, request, calls, output, dir }
@@ -2373,6 +2378,7 @@ mod tests {
             date_time_format: None,
             numeric_column_right_align: false,
             column_comments: None,
+            auto_filter: None,
         };
         let context = table_export_sql_context(DatabaseType::Iotdb, None, request.schema.as_deref());
         let columns = vec!["Time".to_string(), "root.test.device2.temperature".to_string()];
@@ -2428,6 +2434,7 @@ mod tests {
             date_time_format: None,
             numeric_column_right_align: false,
             column_comments: None,
+            auto_filter: None,
         };
         let context = table_export_sql_context(DatabaseType::Iotdb, None, request.schema.as_deref());
         let columns = vec!["tImE".to_string(), "temperature".to_string()];
@@ -2461,6 +2468,7 @@ mod tests {
             date_time_format: None,
             numeric_column_right_align: false,
             column_comments: None,
+            auto_filter: None,
         };
         let context = table_export_sql_context(DatabaseType::Iotdb, None, request.schema.as_deref());
         let error = table_export_query_columns(&request, &context, &["TIME".to_string()]).unwrap_err();
@@ -2489,6 +2497,7 @@ mod tests {
             date_time_format: None,
             numeric_column_right_align: false,
             column_comments: None,
+            auto_filter: None,
         };
         let context = table_export_sql_context(DatabaseType::Iotdb, None, request.schema.as_deref());
         let columns = vec![
@@ -2525,6 +2534,7 @@ mod tests {
             date_time_format: None,
             numeric_column_right_align: false,
             column_comments: None,
+            auto_filter: None,
         };
         let columns = vec!["Time".to_string(), "value".to_string()];
 
@@ -2573,6 +2583,7 @@ mod tests {
             date_time_format: None,
             numeric_column_right_align: false,
             column_comments: None,
+            auto_filter: None,
         };
         let context = table_export_sql_context(DatabaseType::Oracle, None, request.schema.as_deref());
 
@@ -2615,6 +2626,7 @@ mod tests {
             date_time_format: None,
             numeric_column_right_align: false,
             column_comments: None,
+            auto_filter: None,
         };
         let columns = vec!["id".to_string(), "payload".to_string()];
         let primary_keys = vec!["id".to_string()];
@@ -2685,6 +2697,7 @@ mod tests {
             date_time_format: None,
             numeric_column_right_align: false,
             column_comments: None,
+            auto_filter: None,
         };
         let columns = vec!["id".to_string(), "DisplayName".to_string()];
         let primary_keys = vec!["id".to_string()];
@@ -2737,6 +2750,7 @@ mod tests {
             date_time_format: None,
             numeric_column_right_align: false,
             column_comments: None,
+            auto_filter: None,
         };
         let columns = vec!["id".to_string(), "geom".to_string(), "name".to_string()];
         let column_types = vec![Some("int".to_string()), Some("geometry".to_string()), Some("varchar".to_string())];
@@ -2791,6 +2805,7 @@ mod tests {
             date_time_format: None,
             numeric_column_right_align: false,
             column_comments: None,
+            auto_filter: None,
         };
         let context = table_export_sql_context(DatabaseType::Oracle, None, request.schema.as_deref());
         let sql = table_cursor_sql(&request, &context, &columns, &[], &primary_keys);

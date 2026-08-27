@@ -1,5 +1,10 @@
 export type XlsxHeaderMode = "name" | "comment" | "name-comment";
 
+export interface XlsxExportOptions {
+  headerMode: XlsxHeaderMode;
+  autoFilter: boolean;
+}
+
 export function hasXlsxHeaderComments(comments: readonly (string | null | undefined)[] | undefined): boolean {
   return comments?.some((comment) => !!comment?.trim()) ?? false;
 }

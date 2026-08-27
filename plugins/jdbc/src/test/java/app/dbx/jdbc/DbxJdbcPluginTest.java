@@ -41,6 +41,7 @@ import java.util.regex.Pattern;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class DbxJdbcPluginTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -4447,5 +4448,48 @@ final class DbxJdbcPluginTest {
             { "id": 1, "method": "%s", "params": %s }
             """.formatted(method, params);
         return MAPPER.valueToTree(handleLine.invoke(null, line));
+    }
+
+    @Test
+    void enrichDriverHintAppendsChineseOrlai18nGuidanceForOracleCharsetErrors() {
+        JsonNode connection = MAPPER.createObjectNode()
+            .put("connection_string", "jdbc:oracle:thin:@//db:1521/ORCL");
+        String enriched = DbxJdbcPlugin.enrichDriverHint(
+            connection,
+            "不支持的字符集 (在类路径中添加 orai18n.jar): ZHS16GBK"
+        );
+        assertTrue(enriched.startsWith("不支持的字符集 (在类路径中添加 orai18n.jar): ZHS16GBK"));
+        assertTrue(enriched.contains("orai18n.jar"));
+        assertTrue(enriched.contains("内置 Oracle 连接"));
+    }
+
+    @Test
+    void enrichDriverHintAppendsEnglishOrlai18nGuidanceForOracleCharsetErrors() {
+        JsonNode connection = MAPPER.createObjectNode()
+            .put("connection_string", "jdbc:oracle:thin:@//db:1521/ORCL");
+        String enriched = DbxJdbcPlugin.enrichDriverHint(connection, "Unsupported charset: ZHS16GBK");
+        assertTrue(enriched.startsWith("Unsupported charset: ZHS16GBK"));
+        assertTrue(enriched.contains("Settings -> JDBC Drivers"));
+    }
+
+    @Test
+    void enrichDriverHintKeepsMessagesForOtherUrlsAndErrors() {
+        JsonNode oracleConnection = MAPPER.createObjectNode()
+            .put("connection_string", "jdbc:oracle:thin:@//db:1521/ORCL");
+        JsonNode mysqlConnection = MAPPER.createObjectNode()
+            .put("connection_string", "jdbc:mysql://db:3306/test");
+        assertEquals("ORA-12505", DbxJdbcPlugin.enrichDriverHint(oracleConnection, "ORA-12505"));
+        assertEquals(
+            "Unsupported charset: ZHS16GBK",
+            DbxJdbcPlugin.enrichDriverHint(mysqlConnection, "Unsupported charset: ZHS16GBK")
+        );
+    }
+
+    @Test
+    void enrichDriverHintDoesNotStackRepeatedHints() {
+        JsonNode connection = MAPPER.createObjectNode()
+            .put("connection_string", "jdbc:oracle:thin:@//db:1521/ORCL");
+        String once = DbxJdbcPlugin.enrichDriverHint(connection, "Unsupported charset: ZHS16GBK");
+        assertEquals(once, DbxJdbcPlugin.enrichDriverHint(connection, once));
     }
 }

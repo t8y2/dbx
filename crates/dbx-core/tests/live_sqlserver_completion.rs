@@ -1205,6 +1205,7 @@ async fn live_sqlserver_query_result_export_streams_cte_query_to_csv() {
         export_table_name: None,
         export_column_types: None,
         column_comments: None,
+        auto_filter: None,
         identifier_quote: None,
         numeric_column_right_align: false,
     };

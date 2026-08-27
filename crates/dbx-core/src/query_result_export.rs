@@ -106,6 +106,8 @@ pub struct QueryResultExportRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub column_comments: Option<Vec<Option<String>>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_filter: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identifier_quote: Option<String>,
 }
 
@@ -236,6 +238,7 @@ fn start_query_result_xlsx_workbook<W: Write + Seek>(
         &trailing_sheets,
         request.date_time_format.as_deref(),
         request.numeric_column_right_align,
+        request.auto_filter.unwrap_or(true),
     )
 }
 
@@ -1917,6 +1920,7 @@ mod tests {
             export_column_types: None,
             numeric_column_right_align: false,
             column_comments: None,
+            auto_filter: None,
             identifier_quote: None,
         }
     }

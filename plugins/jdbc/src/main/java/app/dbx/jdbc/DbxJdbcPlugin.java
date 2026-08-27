@@ -273,10 +273,11 @@ public final class DbxJdbcPlugin {
         ObjectNode response = MAPPER.createObjectNode();
         response.set("id", id.isMissingNode() ? MAPPER.getNodeFactory().numberNode(1) : id);
 
+        JsonNode connection = MAPPER.createObjectNode();
         try {
             String method = requireText(request, "method");
             JsonNode params = request.path("params");
-            JsonNode connection = params.path("connection");
+            connection = params.path("connection");
             if ("close".equals(method)) {
                 closeSharedConnection();
                 ObjectNode result = MAPPER.createObjectNode();
@@ -290,10 +291,29 @@ public final class DbxJdbcPlugin {
         } catch (Throwable error) {
             // The plugin protocol boundary must report linkage errors from vendor drivers instead of exiting silently.
             ObjectNode errorNode = MAPPER.createObjectNode();
-            errorNode.put("message", throwableMessage(error));
+            errorNode.put("message", enrichDriverHint(connection, throwableMessage(error)));
             response.set("error", errorNode);
         }
         return response;
+    }
+
+    private static final Pattern ORACLE_UNSUPPORTED_CHARSET_PATTERN =
+        Pattern.compile("(?i)unsupported charset|不支持的字符集");
+
+    // The base Oracle thin driver jar ships converters for a handful of charsets only;
+    // databases such as ZHS16GBK need orai18n.jar, otherwise every metadata call that
+    // reads dictionary comments fails wholesale.
+    static String enrichDriverHint(JsonNode connection, String message) {
+        if (message == null || !ORACLE_UNSUPPORTED_CHARSET_PATTERN.matcher(message).find()) {
+            return message;
+        }
+        if (!isOracleUrl(jdbcUrl(connection))) {
+            return message;
+        }
+        String hint = message.contains("不支持的字符集")
+            ? "。请在 设置 → JDBC 驱动 中为该 Oracle 驱动一并导入同版本的 orai18n.jar，或改用 DBX 内置 Oracle 连接（默认驱动已支持中文多字节字符集）"
+            : ". Import orai18n.jar (same version as the ojdbc driver) next to the Oracle driver under Settings -> JDBC Drivers, or use DBX's built-in Oracle connection instead, whose default driver supports multibyte Chinese charsets";
+        return message.endsWith(hint) ? message : message + hint;
     }
 
     private static String throwableMessage(Throwable error) {

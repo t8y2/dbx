@@ -276,7 +276,21 @@ pub fn build_table_data_select_sql_with_database(
         if options.columns.is_empty() {
             "*".to_string()
         } else {
-            format!("\"{DBX_ROWID_COLUMN}\", {rownum_select_columns}")
+            // Callers that address rows by the synthetic key may list it among
+            // the requested columns; the leading projection already supplies
+            // it from the inline view, so drop the duplicate.
+            let rest = options
+                .columns
+                .iter()
+                .filter(|column| !column.eq_ignore_ascii_case(DBX_ROWID_COLUMN))
+                .map(|column| quote_table_identifier(database_type, column))
+                .collect::<Vec<_>>()
+                .join(", ");
+            if rest.is_empty() {
+                format!("\"{DBX_ROWID_COLUMN}\"")
+            } else {
+                format!("\"{DBX_ROWID_COLUMN}\", {rest}")
+            }
         }
     } else {
         rownum_select_columns.clone()

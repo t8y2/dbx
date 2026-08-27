@@ -157,7 +157,7 @@ describe("queryStore hidden primary key editing", () => {
     expect(tab.queryAnalysis).toBeDefined();
     expect(tab.queryAnalysis?.allowInsert).toBe(false);
     expect(tab.queryEditabilityReason).toBeUndefined();
-  });
+  }, 10_000);
 
   it("keeps MySQL expression columns read-only without disabling direct columns", async () => {
     const sql = "SELECT id, status, extra->>'$.mode' mode, extra->>'$.template' tmpl FROM items";

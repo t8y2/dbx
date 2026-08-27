@@ -5266,8 +5266,6 @@ export default {
     formatJsonDescription: "Object or array rows",
     formatExcel: "Excel",
     formatExcelDescription: "XLS, XLSX, XLSM",
-    formatSql: "SQL",
-    formatSqlDescription: "INSERT statements in SQL scripts",
     previewRows: "Preview rows",
     delimiter: "Delimiter",
     encoding: "Encoding",

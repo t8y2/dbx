@@ -5251,8 +5251,6 @@ export default withEnglishFallback({
     formatJsonDescription: "对象行或数组行",
     formatExcel: "Excel",
     formatExcelDescription: "XLS、XLSX、XLSM",
-    formatSql: "SQL",
-    formatSqlDescription: "SQL 脚本中的 INSERT 语句",
     previewRows: "预览行数",
     delimiter: "分隔符",
     encoding: "文件编码",

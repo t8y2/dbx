@@ -4697,8 +4697,6 @@ export default withEnglishFallback({
     formatJsonDescription: "객체 또는 배열 행",
     formatExcel: "Excel",
     formatExcelDescription: "XLS, XLSX, XLSM",
-    formatSql: "SQL",
-    formatSqlDescription: "SQL 스크립트의 INSERT 문",
     previewRows: "미리보기 행",
     delimiter: "구분자",
     encoding: "인코딩",

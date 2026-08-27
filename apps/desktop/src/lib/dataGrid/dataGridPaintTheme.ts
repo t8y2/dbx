@@ -265,8 +265,10 @@ export function resolveDataGridPaintTheme(options: { getVar: (name: string) => s
   const rowNew = isDark ? "rgb(51, 51, 55)" : "rgb(243, 243, 243)";
   const rowDeleted = isDark ? "rgb(55, 31, 32)" : "rgb(255, 244, 244)";
   const cellActive = activeSurface;
-  const cellCrosshairRow = isDark ? DATA_GRID_DARK_CROSSHAIR_ROW_BG : paintToken(getVar, "--data-grid-cell-crosshair-row-bg", DATA_GRID_LIGHT_CROSSHAIR_ROW_BG);
-  const cellCrosshairCol = isDark ? DATA_GRID_DARK_CROSSHAIR_COL_BG : paintToken(getVar, "--data-grid-cell-crosshair-col-bg", DATA_GRID_LIGHT_CROSSHAIR_COL_BG);
+  // 浅/深都读 CSS 变量（--data-grid-cell-crosshair-*-bg 从 --primary 派生），保证 DOM 与
+  // Canvas 在不同主题/深浅模式下取到同一色源；固定常量仅作 var 未设置时的降级默认。
+  const cellCrosshairRow = paintToken(getVar, "--data-grid-cell-crosshair-row-bg", isDark ? DATA_GRID_DARK_CROSSHAIR_ROW_BG : DATA_GRID_LIGHT_CROSSHAIR_ROW_BG);
+  const cellCrosshairCol = paintToken(getVar, "--data-grid-cell-crosshair-col-bg", isDark ? DATA_GRID_DARK_CROSSHAIR_COL_BG : DATA_GRID_LIGHT_CROSSHAIR_COL_BG);
   const cellDirty = isDark ? "rgb(94, 75, 26)" : "rgb(255, 248, 230)";
   const cellSelected = isDark ? "rgb(20, 40, 60)" : "rgb(239, 246, 255)";
   const cellSelectedDirty = isDark ? "rgb(76, 66, 38)" : "rgb(235, 224, 184)";

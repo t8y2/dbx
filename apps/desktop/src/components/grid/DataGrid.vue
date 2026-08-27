@@ -14195,8 +14195,8 @@ function openGridSnapshot() {
     --data-grid-row-new-bg: color-mix(in oklab, var(--primary) 5%, transparent);
     --data-grid-row-deleted-bg: color-mix(in oklab, var(--destructive) 5%, transparent);
     --data-grid-cell-dirty-bg: color-mix(in oklab, rgb(240 177 0) 10%, transparent);
-    --data-grid-cell-crosshair-row-bg: color-mix(in oklab, rgb(59 130 246) 12%, transparent);
-    --data-grid-cell-crosshair-col-bg: color-mix(in oklab, rgb(59 130 246) 20%, transparent);
+    --data-grid-cell-crosshair-row-bg: color-mix(in oklab, var(--primary) 12%, transparent);
+    --data-grid-cell-crosshair-col-bg: color-mix(in oklab, var(--primary) 20%, transparent);
     --data-grid-cell-selected-bg: color-mix(in oklab, rgb(59 130 246) 12%, var(--background));
     --data-grid-cell-selected-single-bg: color-mix(in oklab, rgb(59 130 246) 30%, var(--background));
     --data-grid-cell-selected-dirty-bg: color-mix(in oklab, rgb(234 181 50) 30%, color-mix(in oklab, rgb(59 130 246) 18%, var(--background)));
@@ -14206,6 +14206,11 @@ function openGridSnapshot() {
     --data-grid-row-number-edited-bg: color-mix(in oklab, rgb(245 158 11) 15%, var(--background));
     --data-grid-row-number-deleted-bg: color-mix(in oklab, var(--destructive) 15%, var(--background));
     --data-grid-row-number-selected-bg: color-mix(in oklab, rgb(59 130 246) 30%, var(--background));
+  }
+  [data-grid-root].data-grid--dark,
+  :global(.dark) [data-grid-root] {
+    --data-grid-cell-crosshair-row-bg: color-mix(in oklab, var(--primary) 10%, transparent);
+    --data-grid-cell-crosshair-col-bg: color-mix(in oklab, var(--primary) 18%, transparent);
   }
   [data-grid-root].data-grid--has-save-error {
     --data-grid-cell-dirty-bg: rgb(250, 212, 216) !important;

@@ -3270,6 +3270,81 @@ WHERE b.sno = 'BJ-LIMELSA-20260825-1517'`;
   }
 });
 
+test("keeps joined query rows read-only when the only candidate source has no primary keys", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  const columnRequests: string[] = [];
+  const sql = `SELECT e.* FROM audit_events e
+INNER JOIN audit_sources s ON s.id = e.source_id
+WHERE s.code = 'SRC-1'`;
+
+  connectionStore.addEphemeralConnection(conn("pg-join-keyless"));
+
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/query/execute-multi") {
+      return new Response(
+        JSON.stringify([
+          {
+            columns: ["event_no", "payload", "source_id"],
+            rows: [["EVT-9", "reload", 4]],
+            affected_rows: 0,
+            execution_time_ms: 1,
+          },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url === "/api/query/analyze-editability") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      assert.equal(body.sql, sql);
+      return new Response(JSON.stringify(analyzeEditableQueryEditability(body.sql)), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (url.startsWith("/api/schema/columns?")) {
+      const table = new URL(url, "http://localhost").searchParams.get("table") ?? "";
+      columnRequests.push(table);
+      const columnsByTable: Record<string, Array<Record<string, unknown>>> = {
+        audit_events: [
+          { name: "event_no", data_type: "varchar", is_nullable: true, column_default: null, is_primary_key: false, extra: null, comment: null },
+          { name: "payload", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null, comment: null },
+          { name: "source_id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: false, extra: null, comment: null },
+        ],
+        audit_sources: [
+          { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: false, extra: null, comment: null },
+          { name: "code", data_type: "varchar", is_nullable: false, column_default: null, is_primary_key: false, extra: null, comment: null },
+        ],
+      };
+      return new Response(JSON.stringify(columnsByTable[table] ?? []), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (url === "/api/query/prepare-pagination-plan") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      return new Response(JSON.stringify({ sqlToExecute: body.options.sql, useAgentResultSession: false }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    const tabId = store.createTab("pg-join-keyless", "appdb", "Query 1", "query");
+    await store.executeTabSql(tabId, sql);
+
+    const tab = store.tabs.find((item) => item.id === tabId);
+    await waitFor(() => columnRequests.length === 2 && tab?.queryEditabilityReason === "no-primary-key");
+    assert.deepEqual(columnRequests, ["audit_events", "audit_sources"]);
+    assert.equal(tab?.queryAnalysis, undefined);
+    assert.equal(tab?.tableMeta, undefined);
+    assert.equal(tab?.querySourceColumns, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
 test("binds DISTINCT qualified-star edits to the single safe joined source", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());

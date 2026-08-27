@@ -136,24 +136,27 @@ type rowScanner struct {
 }
 
 type server struct {
-	db                         *sql.DB
-	openDatabase               agentDBOpener
-	params                     connectParams
-	mode                       vastbaseMode
-	usePgDefaultExpression     bool
-	catalogIdentityUnsupported bool
-	infoColumnTypeUnsupported  bool
-	infoUdtNameUnsupported     bool
-	listTablesStatement        *sql.Stmt
-	connectionRuntime          *connectionRuntime
-	sessionAffinity            bool
-	currentSchema              string
-	schemaInitialized          bool
-	schemaConnectionID         uintptr
-	sessions                   map[string]*querySession
-	nextSessionID              uint64
-	activeCancelMu             sync.Mutex
-	activeCancel               context.CancelFunc
+	db                              *sql.DB
+	openDatabase                    agentDBOpener
+	params                          connectParams
+	mode                            vastbaseMode
+	usePgDefaultExpression          bool
+	catalogIdentityUnsupported      bool
+	infoColumnTypeUnsupported       bool
+	infoUdtNameUnsupported          bool
+	constraintDefinitionUnsupported bool
+	constraintValidatedUnsupported  bool
+	constraintEnabledUnsupported    bool
+	listTablesStatement             *sql.Stmt
+	connectionRuntime               *connectionRuntime
+	sessionAffinity                 bool
+	currentSchema                   string
+	schemaInitialized               bool
+	schemaConnectionID              uintptr
+	sessions                        map[string]*querySession
+	nextSessionID                   uint64
+	activeCancelMu                  sync.Mutex
+	activeCancel                    context.CancelFunc
 }
 
 type agentSession struct {
@@ -433,6 +436,9 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 	case "list_foreign_keys":
 		result, err := s.listForeignKeys(stringParam(params, "schema"), stringParam(params, "table"))
 		return result, false, err
+	case "list_constraints":
+		result, err := s.listConstraints(stringParam(params, "schema"), stringParam(params, "table"))
+		return result, false, err
 	case "list_triggers":
 		result, err := s.listTriggers(stringParam(params, "schema"), stringParam(params, "table"))
 		return result, false, err
@@ -489,6 +495,9 @@ func (s *server) connect(cp connectParams) error {
 	s.catalogIdentityUnsupported = false
 	s.infoColumnTypeUnsupported = false
 	s.infoUdtNameUnsupported = false
+	s.constraintDefinitionUnsupported = false
+	s.constraintValidatedUnsupported = false
+	s.constraintEnabledUnsupported = false
 	s.sessionAffinity = false
 	return nil
 }
@@ -505,11 +514,14 @@ func (s *server) connectWithRuntime(cp connectParams, connectionRuntime *connect
 	s.db = db
 	s.connectionRuntime = connectionRuntime
 	s.params = cp
-	s.mode = detectAgentMode(db, cp.MySQLCompatMode)
+	s.mode = detectAgentMode(connectionRuntime.database(), cp.MySQLCompatMode)
 	s.usePgDefaultExpression = false
 	s.catalogIdentityUnsupported = false
 	s.infoColumnTypeUnsupported = false
 	s.infoUdtNameUnsupported = false
+	s.constraintDefinitionUnsupported = false
+	s.constraintValidatedUnsupported = false
+	s.constraintEnabledUnsupported = false
 	s.sessionAffinity = false
 	return nil
 }
@@ -584,6 +596,9 @@ func (s *server) disconnect() error {
 	s.catalogIdentityUnsupported = false
 	s.infoColumnTypeUnsupported = false
 	s.infoUdtNameUnsupported = false
+	s.constraintDefinitionUnsupported = false
+	s.constraintValidatedUnsupported = false
+	s.constraintEnabledUnsupported = false
 	s.connectionRuntime = nil
 	s.sessionAffinity = false
 	s.resetSchemaCache()

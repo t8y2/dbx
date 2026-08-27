@@ -175,7 +175,7 @@ func (s *server) metadataDatabase() (*sql.DB, error) {
 func isMetadataOperation(method string) bool {
 	switch method {
 	case "connection_info", "list_databases", "list_schemas", "list_tables", "get_table_comment", "list_objects",
-		"list_data_types", "completion_assistant_search_v1", "get_columns", "list_indexes", "list_foreign_keys",
+		"list_data_types", "completion_assistant_search_v1", "get_columns", "list_indexes", "list_foreign_keys", "list_constraints",
 		"list_triggers", "get_object_source", "get_table_ddl", "get_explain_info":
 		return true
 	default:

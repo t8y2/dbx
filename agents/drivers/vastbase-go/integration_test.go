@@ -65,17 +65,21 @@ func TestVastbaseIntegration(t *testing.T) {
 	mustExecute(t, server, "CREATE TABLE public."+quoteIdentifier(child)+" (id integer PRIMARY KEY, parent_id integer REFERENCES public."+quoteIdentifier(parent)+"(id))")
 	mustExecute(t, server, "CREATE INDEX "+quoteIdentifier(child+"_parent_idx")+" ON public."+quoteIdentifier(child)+"(parent_id)")
 	mustExecute(t, server, "CREATE VIEW public."+quoteIdentifier(view)+" AS SELECT id, name FROM public."+quoteIdentifier(parent))
-	mustExecute(t, server, "CREATE FUNCTION public."+quoteIdentifier(function)+"() RETURNS text AS $$ SELECT 'dbx'; $$ LANGUAGE SQL")
+	if !server.mode.mysqlCompat {
+		mustExecute(t, server, "CREATE FUNCTION public."+quoteIdentifier(function)+"() RETURNS text AS $$ SELECT 'dbx'; $$ LANGUAGE SQL")
+	}
 	mustExecute(t, server, "CREATE SCHEMA "+quoteIdentifier(searchFirst))
 	mustExecute(t, server, "CREATE SCHEMA "+quoteIdentifier(searchSecond))
 	mustExecute(t, server, "CREATE TABLE "+quoteIdentifier(searchSecond)+"."+quoteIdentifier(searchTable)+" (id integer PRIMARY KEY, name varchar(64))")
-	mustExecute(t, server, "SET search_path TO "+quoteIdentifier(searchFirst)+", "+quoteIdentifier(searchSecond))
-	visibleColumns, err := server.getColumns("", searchTable)
-	if err != nil || len(visibleColumns) != 2 || visibleColumns[0].ResolvedSchema == nil || *visibleColumns[0].ResolvedSchema != searchSecond {
-		t.Fatalf("unqualified metadata did not resolve the non-first search_path schema: columns=%#v err=%v", visibleColumns, err)
+	if !server.mode.mysqlCompat {
+		mustExecute(t, server, "SET search_path TO "+quoteIdentifier(searchFirst)+", "+quoteIdentifier(searchSecond))
+		visibleColumns, err := server.getColumns("", searchTable)
+		if err != nil || len(visibleColumns) != 2 || visibleColumns[0].ResolvedSchema == nil || *visibleColumns[0].ResolvedSchema != searchSecond {
+			t.Fatalf("unqualified metadata did not resolve the non-first search_path schema: columns=%#v err=%v", visibleColumns, err)
+		}
+		mustExecute(t, server, "INSERT INTO "+quoteIdentifier(searchTable)+" VALUES (1, 'visible')")
+		mustExecute(t, server, "SET search_path TO public")
 	}
-	mustExecute(t, server, "INSERT INTO "+quoteIdentifier(searchTable)+" VALUES (1, 'visible')")
-	mustExecute(t, server, "SET search_path TO public")
 
 	tables, err := server.listTables("public", metadataListConstraints{Filter: suffix})
 	if err != nil || len(tables) < 3 {
@@ -111,9 +115,11 @@ func TestVastbaseIntegration(t *testing.T) {
 	if err != nil || len(foreignKeys) != 1 || foreignKeys[0].RefTable != parent {
 		t.Fatalf("list foreign keys failed: keys=%v err=%v", foreignKeys, err)
 	}
-	source, err := server.getObjectSource("public", function, "FUNCTION")
-	if err != nil || !strings.Contains(fmt.Sprint(source["source"]), function) {
-		t.Fatalf("get function source failed: source=%v err=%v", source, err)
+	if !server.mode.mysqlCompat {
+		source, err := server.getObjectSource("public", function, "FUNCTION")
+		if err != nil || !strings.Contains(fmt.Sprint(source["source"]), function) {
+			t.Fatalf("get function source failed: source=%v err=%v", source, err)
+		}
 	}
 
 	transactionParams := map[string]json.RawMessage{
@@ -152,6 +158,126 @@ func TestVastbaseIntegration(t *testing.T) {
 	}
 	if err := server.validateConnection(); err != nil {
 		t.Fatalf("connection was not reusable after cancellation: %v", err)
+	}
+}
+
+func TestVastbaseConstraintsIntegration(t *testing.T) {
+	host := os.Getenv("VASTBASE_TEST_HOST")
+	portText := os.Getenv("VASTBASE_TEST_PORT")
+	username := os.Getenv("VASTBASE_TEST_USERNAME")
+	password := os.Getenv("VASTBASE_TEST_PASSWORD")
+	if host == "" || portText == "" || username == "" || password == "" {
+		t.Skip("Vastbase integration environment is not configured")
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	databases := []string{os.Getenv("VASTBASE_TEST_DATABASE")}
+	if databases[0] == "" {
+		databases[0] = "postgres"
+	}
+	if raw := os.Getenv("VASTBASE_TEST_DATABASES"); raw != "" {
+		databases = strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || r == ';' })
+	}
+	for _, database := range databases {
+		database = strings.TrimSpace(database)
+		if database == "" {
+			continue
+		}
+		t.Run(database, func(t *testing.T) {
+			suffix := strconv.FormatInt(time.Now().UnixNano(), 36)
+			schema := "dbx_constraints_" + suffix
+			parent := schema + ".parent"
+			child := schema + ".child"
+			server := newServer()
+			cp := connectParams{
+				Host: host, Port: port, Database: database, Username: username, Password: password,
+				ConnectionString: fmt.Sprintf("jdbc:vastbase://%s:%d/%s", host, port, database),
+			}
+			if err := server.connect(cp); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = server.disconnect() })
+			t.Cleanup(func() { _, _ = server.executeQuery(queryOptions{SQL: "DROP SCHEMA IF EXISTS " + schema + " CASCADE"}) })
+			expectedModes := map[string]string{"A": "oracle", "B": "mysql", "PG": "postgres", "MSSQL": "sqlserver"}
+			if expected, ok := expectedModes[server.mode.compatibilityModeRaw]; ok && server.mode.compatibilityMode != expected {
+				t.Fatalf("compatibility mode %q normalized to %q, want %q", server.mode.compatibilityModeRaw, server.mode.compatibilityMode, expected)
+			}
+
+			mustExecute(t, server, "CREATE SCHEMA "+schema)
+			mustExecute(t, server, "CREATE TABLE "+parent+" (id integer PRIMARY KEY, region integer, CONSTRAINT parent_pair_unique UNIQUE (id, region))")
+			childID := "id integer PRIMARY KEY"
+			if server.mode.sqlServerIdentity {
+				childID = "id integer IDENTITY(10,2) PRIMARY KEY"
+			}
+			mustExecute(t, server, "CREATE TABLE "+child+" ("+childID+", parent_id integer, parent_region integer, amount integer, CONSTRAINT child_parent_fk FOREIGN KEY (parent_id, parent_region) REFERENCES "+parent+" (id, region) DEFERRABLE INITIALLY DEFERRED, CONSTRAINT child_amount_check CHECK (amount > 0))")
+
+			constraints, err := server.listConstraints(schema, "child")
+			if err != nil {
+				t.Fatalf("list constraints failed in %s mode: %v", server.mode.compatibilityMode, err)
+			}
+			byName := map[string]constraintInfo{}
+			for _, constraint := range constraints {
+				byName[constraint.Name] = constraint
+			}
+			fk := byName["child_parent_fk"]
+			if fk.ConstraintType != "FOREIGN KEY" || !fk.Enabled || !fk.Valid || !fk.Deferrable || !fk.InitiallyDeferred || !equalVastbaseStrings(fk.Columns, []string{"parent_id", "parent_region"}) || !equalVastbaseStrings(fk.RefColumns, []string{"id", "region"}) {
+				t.Fatalf("foreign key metadata mismatch in %s mode: %+v", server.mode.compatibilityMode, fk)
+			}
+			check := byName["child_amount_check"]
+			if check.ConstraintType != "CHECK" || !check.Enabled || !check.Valid || !strings.Contains(check.Definition, "amount") {
+				t.Fatalf("check metadata mismatch in %s mode: %+v", server.mode.compatibilityMode, check)
+			}
+			if server.mode.sqlServerIdentity {
+				columns, err := server.getColumns(schema, "child")
+				if err != nil || len(columns) == 0 || columns[0].Extra == nil || *columns[0].Extra != "IDENTITY(10,2)" {
+					t.Fatalf("SQL Server identity metadata mismatch: columns=%+v err=%v", columns, err)
+				}
+			}
+			foreignKeys, err := server.listForeignKeys(schema, "child")
+			if err != nil || len(foreignKeys) != 2 {
+				t.Fatalf("foreign key listing failed in %s mode: keys=%v err=%v", server.mode.compatibilityMode, foreignKeys, err)
+			}
+			foreignKeyNames := map[string]struct{}{}
+			for _, foreignKey := range foreignKeys {
+				foreignKeyNames[foreignKey.Name] = struct{}{}
+			}
+			constraintForeignKeyNames := map[string]struct{}{}
+			for _, constraint := range constraints {
+				if constraint.ConstraintType == "FOREIGN KEY" {
+					constraintForeignKeyNames[constraint.Name] = struct{}{}
+				}
+			}
+			if len(foreignKeyNames) != len(constraintForeignKeyNames) {
+				t.Fatalf("foreign-key metadata sources disagree in %s mode: constraints=%v foreign_keys=%v", server.mode.compatibilityMode, constraintForeignKeyNames, foreignKeyNames)
+			}
+			for name := range foreignKeyNames {
+				if _, ok := constraintForeignKeyNames[name]; !ok {
+					t.Fatalf("foreign-key %q missing from list_constraints in %s mode", name, server.mode.compatibilityMode)
+				}
+			}
+			if vastbaseSupportsDisableConstraint(server.mode) {
+				mustExecute(t, server, "ALTER TABLE "+child+" DISABLE CONSTRAINT child_amount_check")
+				disabled, err := server.listConstraints(schema, "child")
+				if err != nil {
+					t.Fatalf("list disabled constraints failed in %s mode: %v", server.mode.compatibilityMode, err)
+				}
+				var disabledCheck constraintInfo
+				found := false
+				for _, constraint := range disabled {
+					if constraint.Name == "child_amount_check" {
+						disabledCheck = constraint
+						found = true
+						break
+					}
+				}
+				if !found || disabledCheck.Enabled {
+					t.Fatalf("disabled constraint state mismatch in %s mode: %+v", server.mode.compatibilityMode, disabledCheck)
+				}
+				mustExecute(t, server, "ALTER TABLE "+child+" ENABLE CONSTRAINT child_amount_check")
+			}
+		})
 	}
 }
 

@@ -319,6 +319,7 @@ function taskParseOptions(format: api.TableImportSourceFormat, sheetName = ""): 
     emptyStringAsNull: emptyStringAsNull.value,
     sheetName,
     jsonShape: jsonShape.value,
+    databaseType: structureDatabaseType.value,
   });
 }
 

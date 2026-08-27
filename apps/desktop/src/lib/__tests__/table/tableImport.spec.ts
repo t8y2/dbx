@@ -125,10 +125,13 @@ describe("tableImport", () => {
       trimValues: false,
       emptyStringAsNull: true,
       jsonShape: "auto" as const,
+      databaseType: "mysql" as const,
     };
 
     expect(buildTableImportParseOptions({ ...settings, format: "sql" }).encoding).toBe("gbk");
+    expect(buildTableImportParseOptions({ ...settings, format: "sql" }).sqlDialect).toBe("mysql");
     expect(buildTableImportParseOptions({ ...settings, format: "delimited" }).encoding).toBe("gbk");
+    expect(buildTableImportParseOptions({ ...settings, format: "delimited" }).sqlDialect).toBeNull();
     expect(buildTableImportParseOptions({ ...settings, format: "excel" }).encoding).toBeNull();
   });
 

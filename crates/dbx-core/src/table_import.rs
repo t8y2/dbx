@@ -16,6 +16,11 @@ use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader as XmlReader;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use sqlparser::ast::{
+    Expr, Ident, Insert, ObjectName, ObjectNamePart, SetExpr, Statement, TableObject, UnaryOperator, Value as SqlValue,
+};
+use sqlparser::dialect::{GenericDialect, MsSqlDialect, MySqlDialect, OracleDialect, PostgreSqlDialect, SQLiteDialect};
+use sqlparser::parser::Parser;
 
 use crate::connection::{task_client_session_id, AppState, PoolKind};
 use crate::models::connection::DatabaseType;
@@ -186,6 +191,9 @@ pub struct TableImportParseOptions {
     pub sheet_name: Option<String>,
     pub sheet_index: Option<usize>,
     pub json_shape: Option<TableImportJsonShape>,
+    /// SQL 脚本的源方言（目标连接类型）。决定字符串转义、标识符大小写与语句拆分规则。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sql_dialect: Option<DatabaseType>,
 }
 
 impl Default for TableImportParseOptions {
@@ -202,6 +210,7 @@ impl Default for TableImportParseOptions {
             sheet_name: None,
             sheet_index: None,
             json_shape: Some(TableImportJsonShape::Auto),
+            sql_dialect: None,
         }
     }
 }
@@ -1114,406 +1123,272 @@ fn decode_sql_script_bytes(
     Ok((decoded.into_owned(), encoding))
 }
 
-fn sql_bare_identifier_char(byte: u8) -> bool {
-    // 非 ASCII 字节同样允许，保证中文等标识符可以作为裸标识符解析
-    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$' || !byte.is_ascii()
+/// 源 SQL 方言家族：决定未加引号标识符的大小写折叠规则。
+/// 字符串/表达式/标识符的词法解析已交给 sqlparser（按方言正确解释反斜杠、E'...'、
+/// X'...' 等），这里只按方言决定标识符的显示与比较规则，避免把 PostgreSQL 的
+/// "Foo" 与 foo 错误合并。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SqlImportDialectFamily {
+    Postgres,
+    MySql,
+    Sqlite,
+    SqlServer,
+    Oracle,
+    Generic,
 }
 
-fn sql_read_word_span(bytes: &[u8], index: usize) -> (usize, usize) {
-    let start = index;
-    let mut i = index;
-    while i < bytes.len() && sql_bare_identifier_char(bytes[i]) {
-        i += 1;
+fn sql_import_dialect_family(db_type: DatabaseType) -> SqlImportDialectFamily {
+    if matches!(
+        db_type,
+        DatabaseType::Postgres
+            | DatabaseType::Redshift
+            | DatabaseType::Kingbase
+            | DatabaseType::Highgo
+            | DatabaseType::Uxdb
+            | DatabaseType::Vastbase
+            | DatabaseType::OpenGauss
+            | DatabaseType::Gaussdb
+            | DatabaseType::Kwdb
+            | DatabaseType::Iris
+    ) {
+        SqlImportDialectFamily::Postgres
+    } else if matches!(
+        db_type,
+        DatabaseType::Mysql
+            | DatabaseType::Doris
+            | DatabaseType::StarRocks
+            | DatabaseType::ManticoreSearch
+            | DatabaseType::Goldendb
+    ) {
+        SqlImportDialectFamily::MySql
+    } else if matches!(
+        db_type,
+        DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso | DatabaseType::CloudflareD1
+    ) {
+        SqlImportDialectFamily::Sqlite
+    } else if matches!(db_type, DatabaseType::SqlServer) {
+        SqlImportDialectFamily::SqlServer
+    } else if matches!(
+        db_type,
+        DatabaseType::Oracle
+            | DatabaseType::Dameng
+            | DatabaseType::OceanbaseOracle
+            | DatabaseType::Yashandb
+            | DatabaseType::Oscar
+            | DatabaseType::Xugu
+    ) {
+        SqlImportDialectFamily::Oracle
+    } else {
+        SqlImportDialectFamily::Generic
     }
-    (start, i)
 }
 
-fn sql_word_equals(bytes: &[u8], span: (usize, usize), expected: &str) -> bool {
-    let word = &bytes[span.0..span.1];
-    word.len() == expected.len() && word.iter().zip(expected.bytes()).all(|(a, b)| a.eq_ignore_ascii_case(&b))
-}
-
-fn sql_skip_line_comment(bytes: &[u8], index: usize) -> usize {
-    let mut i = index;
-    while i < bytes.len() && bytes[i] != b'\n' {
-        i += 1;
+fn sql_import_parser_dialect(family: SqlImportDialectFamily) -> Box<dyn sqlparser::dialect::Dialect> {
+    match family {
+        SqlImportDialectFamily::Postgres => Box::new(PostgreSqlDialect {}),
+        SqlImportDialectFamily::MySql => Box::new(MySqlDialect {}),
+        SqlImportDialectFamily::Sqlite => Box::new(SQLiteDialect {}),
+        SqlImportDialectFamily::SqlServer => Box::new(MsSqlDialect {}),
+        SqlImportDialectFamily::Oracle => Box::new(OracleDialect {}),
+        SqlImportDialectFamily::Generic => Box::new(GenericDialect {}),
     }
-    i
 }
 
-fn sql_skip_block_comment(bytes: &[u8], index: usize) -> usize {
-    let mut i = index + 2;
-    while i + 1 < bytes.len() {
-        if bytes[i] == b'*' && bytes[i + 1] == b'/' {
-            return i + 2;
-        }
-        i += 1;
+/// 标识符的展示名：PostgreSQL 未加引号标识符折叠为小写，加引号保留原样；
+/// 其它方言保留原文大小写。
+fn sql_import_ident_display(ident: &Ident, family: SqlImportDialectFamily) -> String {
+    if family == SqlImportDialectFamily::Postgres && ident.quote_style.is_none() {
+        ident.value.to_lowercase()
+    } else {
+        ident.value.clone()
     }
-    bytes.len()
 }
 
-/// 跳过一个单引号字符串（支持 '' 与反斜杠转义），返回闭引号之后的位置。
-fn sql_skip_single_quoted_span(bytes: &[u8], index: usize) -> usize {
-    let mut i = index + 1;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\\' => i += 2,
-            b'\'' => {
-                if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
-                    i += 2;
-                } else {
-                    return i + 1;
+/// 判断两组列名是否指向同一列清单。
+/// - PostgreSQL：未加引号已折叠为小写、加引号保留原样，精确比较即可区分 "Foo" 与 foo。
+/// - 其它方言（MySQL/SQLite/…）：列名大小写不敏感。
+fn sql_import_names_match(a: &[String], b: &[String], family: SqlImportDialectFamily) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(left, right)| {
+            if family == SqlImportDialectFamily::Postgres {
+                left == right
+            } else {
+                left.eq_ignore_ascii_case(right)
+            }
+        })
+}
+
+fn sql_import_table_matches(a: &str, b: &str, family: SqlImportDialectFamily) -> bool {
+    if family == SqlImportDialectFamily::Postgres {
+        a == b
+    } else {
+        a.eq_ignore_ascii_case(b)
+    }
+}
+
+/// 从 `ObjectName`（可能是 `schema.column`）取出最后一个标识符部分。
+fn sql_import_object_name_ident<'a>(name: &'a ObjectName, what: &str) -> Result<&'a Ident, String> {
+    let Some(last) = name.0.last() else {
+        return Err(format!("SQL import: empty {what} name"));
+    };
+    match last {
+        ObjectNamePart::Identifier(ident) => Ok(ident),
+        ObjectNamePart::Function(_) => Err(format!("SQL import: function-based {what} names are not supported")),
+    }
+}
+
+fn sql_import_number_value(raw: &str, context: &str) -> Result<serde_json::Value, String> {
+    // 优先保留整数精度；小数与科学计数法回退到浮点。
+    if let Ok(integer) = raw.parse::<i64>() {
+        return Ok(serde_json::Value::Number(integer.into()));
+    }
+    if let Ok(float) = raw.parse::<f64>() {
+        if float.is_finite() {
+            if float.fract() == 0.0 && float >= i64::MIN as f64 && float < -(i64::MIN as f64) {
+                let integer = float as i64;
+                if integer as f64 == float {
+                    return Ok(serde_json::Value::Number(integer.into()));
                 }
             }
-            _ => i += 1,
-        }
-    }
-    bytes.len()
-}
-
-/// 跳过一个双引号或反引号标识符（支持双写转义），返回闭引号之后的位置。
-fn sql_skip_quoted_span(bytes: &[u8], index: usize, quote: u8) -> usize {
-    let mut i = index + 1;
-    while i < bytes.len() {
-        if bytes[i] == quote {
-            if i + 1 < bytes.len() && bytes[i + 1] == quote {
-                i += 2;
-            } else {
-                return i + 1;
+            if let Some(number) = serde_json::Number::from_f64(float) {
+                return Ok(serde_json::Value::Number(number));
             }
-        } else {
-            i += 1;
         }
     }
-    bytes.len()
+    Err(format!("{context}: unsupported numeric literal '{raw}'"))
 }
 
-/// 跳过一个 [方括号] 标识符（SQL Server 风格），返回闭括号之后的位置。
-fn sql_skip_bracket_span(bytes: &[u8], index: usize) -> usize {
-    let mut i = index + 1;
-    while i < bytes.len() {
-        if bytes[i] == b']' {
-            if i + 1 < bytes.len() && bytes[i + 1] == b']' {
-                i += 2;
-            } else {
-                return i + 1;
+fn sql_import_expr_value(expr: &Expr, context: &str) -> Result<serde_json::Value, String> {
+    match expr {
+        Expr::Value(value) => match &value.value {
+            SqlValue::Number(raw, _) => sql_import_number_value(raw.as_str(), context),
+            SqlValue::Boolean(flag) => Ok(serde_json::Value::Bool(*flag)),
+            SqlValue::Null => Ok(serde_json::Value::Null),
+            // 二进制/十六进制字面量无法无损地作为文本导入，明确拒绝而非静默改写。
+            SqlValue::HexStringLiteral(_)
+            | SqlValue::SingleQuotedByteStringLiteral(_)
+            | SqlValue::DoubleQuotedByteStringLiteral(_) => {
+                Err(format!("{context}: binary/hex literals (X'..', B'..') are not supported for SQL import"))
             }
-        } else {
-            i += 1;
-        }
-    }
-    bytes.len()
-}
-
-/// 跳过空白与 SQL 注释（-- 行注释、# 行注释、/* */ 块注释），返回新位置。
-fn sql_skip_whitespace(bytes: &[u8], mut index: usize) -> usize {
-    loop {
-        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
-            index += 1;
-        }
-        if index + 1 < bytes.len() && bytes[index] == b'-' && bytes[index + 1] == b'-' {
-            index = sql_skip_line_comment(bytes, index);
-            continue;
-        }
-        if index < bytes.len() && bytes[index] == b'#' {
-            index = sql_skip_line_comment(bytes, index);
-            continue;
-        }
-        if index + 1 < bytes.len() && bytes[index] == b'/' && bytes[index + 1] == b'*' {
-            index = sql_skip_block_comment(bytes, index);
-            continue;
-        }
-        return index;
-    }
-}
-
-/// 按分号切分语句；字符串、引号标识符与注释内的分号不作为语句边界。
-fn sql_statement_ranges(bytes: &[u8]) -> Vec<(usize, usize)> {
-    let mut ranges = Vec::new();
-    let mut start = 0usize;
-    let mut index = 0usize;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        // `--` 与 `#` 都是行注释，统一交给 sql_skip_line_comment 跳过
-        if byte == b'#' || (byte == b'-' && index + 1 < bytes.len() && bytes[index + 1] == b'-') {
-            index = sql_skip_line_comment(bytes, index);
-        } else if byte == b'/' && index + 1 < bytes.len() && bytes[index + 1] == b'*' {
-            index = sql_skip_block_comment(bytes, index);
-        } else if byte == b'\'' {
-            index = sql_skip_single_quoted_span(bytes, index);
-        } else if byte == b'"' {
-            index = sql_skip_quoted_span(bytes, index, b'"');
-        } else if byte == b'`' {
-            index = sql_skip_quoted_span(bytes, index, b'`');
-        } else if byte == b'[' {
-            index = sql_skip_bracket_span(bytes, index);
-        } else if byte == b';' {
-            ranges.push((start, index));
-            start = index + 1;
-            index += 1;
-        } else {
-            index += 1;
-        }
-    }
-    if start < bytes.len() {
-        ranges.push((start, bytes.len()));
-    }
-    ranges
-}
-
-/// 读取一个标识符：支持裸标识符、"双引号"、`反引号`、[方括号] 四种形式。
-fn sql_read_identifier(bytes: &[u8], index: usize) -> Result<(String, usize), String> {
-    if index >= bytes.len() {
-        return Err("Expected identifier in INSERT statement".to_string());
-    }
-    let quote = bytes[index];
-    if quote == b'"' || quote == b'`' {
-        let end = sql_skip_quoted_span(bytes, index, quote);
-        if end > bytes.len() {
-            return Err("Unterminated quoted identifier in INSERT statement".to_string());
-        }
-        let inner = std::str::from_utf8(&bytes[index + 1..end - 1]).map_err(|e| e.to_string())?;
-        let unescaped = inner.replace(&format!("{quote}{quote}"), &format!("{quote}"));
-        return Ok((unescaped, end));
-    }
-    if quote == b'[' {
-        let end = sql_skip_bracket_span(bytes, index);
-        let inner = std::str::from_utf8(&bytes[index + 1..end - 1]).map_err(|e| e.to_string())?;
-        return Ok((inner.replace("]]", "]"), end));
-    }
-    let (start, end) = sql_read_word_span(bytes, index);
-    if end == start {
-        return Err("Expected identifier in INSERT statement".to_string());
-    }
-    let word = std::str::from_utf8(&bytes[start..end]).map_err(|e| e.to_string())?;
-    Ok((word.to_string(), end))
-}
-
-/// 读取表引用：允许多段（如 `db`.`table` 或 schema.table）。
-fn sql_read_table_reference(bytes: &[u8], mut index: usize) -> Result<(String, usize), String> {
-    let mut parts = Vec::new();
-    loop {
-        let (part, next) = sql_read_identifier(bytes, index)?;
-        parts.push(part);
-        index = sql_skip_whitespace(bytes, next);
-        if index < bytes.len() && bytes[index] == b'.' {
-            index = sql_skip_whitespace(bytes, index + 1);
-            continue;
-        }
-        break;
-    }
-    Ok((parts.join("."), index))
-}
-
-/// 读取单引号字符串字面量，支持 '' 双写与 MySQL 反斜杠转义。
-fn sql_read_single_quoted_value(bytes: &[u8], index: usize) -> Result<(serde_json::Value, usize), String> {
-    let mut text = String::new();
-    let mut i = index + 1;
-    while i < bytes.len() {
-        let byte = bytes[i];
-        if byte == b'\\' {
-            i += 1;
-            if i >= bytes.len() {
-                return Err("Unterminated escape sequence in SQL string literal".to_string());
-            }
-            let escaped = bytes[i];
-            if escaped.is_ascii() {
-                let ch = match escaped {
-                    b'n' => '\n',
-                    b'r' => '\r',
-                    b't' => '\t',
-                    b'0' => '\0',
-                    b'b' => '\u{8}',
-                    b'Z' => '\u{1A}',
-                    other => other as char,
-                };
-                text.push(ch);
-            } else {
-                // 反斜杠后跟多字节字符时保留原始字符
-                let remainder = std::str::from_utf8(&bytes[i..]).map_err(|e| e.to_string())?;
-                let ch =
-                    remainder.chars().next().ok_or_else(|| "Truncated escape in SQL string literal".to_string())?;
-                text.push(ch);
-                i += ch.len_utf8().saturating_sub(1);
-            }
-            i += 1;
-            continue;
-        }
-        if byte == b'\'' {
-            if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
-                text.push('\'');
-                i += 2;
-                continue;
-            }
-            return Ok((serde_json::Value::String(text), i + 1));
-        }
-        let remainder = std::str::from_utf8(&bytes[i..]).map_err(|e| e.to_string())?;
-        let ch =
-            remainder.chars().next().ok_or_else(|| "Unterminated string literal in INSERT statement".to_string())?;
-        text.push(ch);
-        i += ch.len_utf8();
-    }
-    Err("Unterminated string literal in INSERT statement".to_string())
-}
-
-/// 读取不含转义的引号字面量（十六进制 X'..'、二进制 b'..' 等），返回引号内原文。
-fn sql_read_plain_quoted_value(bytes: &[u8], index: usize) -> Result<(serde_json::Value, usize), String> {
-    let mut i = index + 1;
-    while i < bytes.len() {
-        if bytes[i] == b'\'' {
-            let inner = std::str::from_utf8(&bytes[index + 1..i]).map_err(|e| e.to_string())?;
-            return Ok((serde_json::Value::String(inner.to_string()), i + 1));
-        }
-        i += 1;
-    }
-    Err("Unterminated quoted literal in INSERT statement".to_string())
-}
-
-/// 读取数字字面量；先按整数解析，失败后按浮点解析，均失败时报错。
-fn sql_read_numeric_value(bytes: &[u8], index: usize) -> Result<(serde_json::Value, usize), String> {
-    let start = index;
-    let mut i = index;
-    if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
-        i += 1;
-    }
-    let digits_start = i;
-    while i < bytes.len() {
-        let byte = bytes[i];
-        if byte.is_ascii_digit() || byte == b'.' {
-            i += 1;
-        } else if byte == b'e' || byte == b'E' {
-            i += 1;
-            if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
-                i += 1;
-            }
-        } else {
-            break;
-        }
-    }
-    if i == digits_start {
-        return Err("Invalid numeric literal in INSERT statement".to_string());
-    }
-    let text = std::str::from_utf8(&bytes[start..i]).map_err(|e| e.to_string())?;
-    if let Ok(integer) = text.parse::<i64>() {
-        return Ok((serde_json::Value::Number(integer.into()), i));
-    }
-    if let Ok(float) = text.parse::<f64>() {
-        if let Some(number) = serde_json::Number::from_f64(float) {
-            return Ok((serde_json::Value::Number(number), i));
-        }
-    }
-    Err(format!("Invalid numeric literal '{text}' in INSERT statement"))
-}
-
-/// 读取括号表达式原文（如函数调用），跟踪嵌套括号与字符串，返回原始文本。
-fn sql_read_paren_expression(bytes: &[u8], index: usize) -> Result<(String, usize), String> {
-    let mut depth = 0usize;
-    let mut i = index;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\'' => i = sql_skip_single_quoted_span(bytes, i),
-            b'"' => i = sql_skip_quoted_span(bytes, i, b'"'),
-            b'`' => i = sql_skip_quoted_span(bytes, i, b'`'),
-            b'(' => {
-                depth += 1;
-                i += 1;
-            }
-            b')' => {
-                depth -= 1;
-                i += 1;
-                if depth == 0 {
-                    let raw = std::str::from_utf8(&bytes[index..i]).map_err(|e| e.to_string())?;
-                    return Ok((raw.trim().to_string(), i));
+            SqlValue::Placeholder(_) => Err(format!("{context}: bind placeholders are not supported for SQL import")),
+            // 普通字符串字面量：转义已由 sqlparser 按源方言正确解码。
+            other => match other.clone().into_string() {
+                Some(text) => Ok(serde_json::Value::String(text)),
+                None => Err(format!("{context}: unsupported SQL literal")),
+            },
+        },
+        // 一元正负号作用于数值字面量：`-1.5`、`+3` 等是合法值，不能当表达式拒绝。
+        Expr::UnaryOp { op, expr } => match op {
+            UnaryOperator::Minus => {
+                if let Expr::Value(value) = expr.as_ref() {
+                    if let SqlValue::Number(raw, _) = &value.value {
+                        return sql_import_number_value(&format!("-{raw}"), context);
+                    }
                 }
+                Err(sql_import_unsupported_expression(context))
             }
-            _ => i += 1,
-        }
+            UnaryOperator::Plus => {
+                if let Expr::Value(value) = expr.as_ref() {
+                    if let SqlValue::Number(raw, _) = &value.value {
+                        return sql_import_number_value(raw.as_str(), context);
+                    }
+                }
+                Err(sql_import_unsupported_expression(context))
+            }
+            _ => Err(sql_import_unsupported_expression(context)),
+        },
+        _ => Err(sql_import_unsupported_expression(context)),
     }
-    Err("Unterminated expression in INSERT statement".to_string())
 }
 
-/// 读取 VALUES 元组中的单个值。
-fn sql_read_value(bytes: &[u8], index: usize) -> Result<(serde_json::Value, usize), String> {
-    let index = sql_skip_whitespace(bytes, index);
-    if index >= bytes.len() {
-        return Err("Unexpected end of INSERT statement while reading a value".to_string());
-    }
-    let byte = bytes[index];
-    if byte == b'\'' {
-        return sql_read_single_quoted_value(bytes, index);
-    }
-    if byte == b'(' {
-        let (raw, next) = sql_read_paren_expression(bytes, index)?;
-        return Ok((serde_json::Value::String(raw), next));
-    }
-    if byte.is_ascii_digit()
-        || byte == b'.'
-        || ((byte == b'+' || byte == b'-')
-            && index + 1 < bytes.len()
-            && (bytes[index + 1].is_ascii_digit() || bytes[index + 1] == b'.'))
-    {
-        return sql_read_numeric_value(bytes, index);
-    }
-    let (start, end) = sql_read_word_span(bytes, index);
-    if end == start {
-        return Err(format!("Unexpected character '{}' in INSERT value list", bytes[index] as char));
-    }
-    let word = std::str::from_utf8(&bytes[start..end]).map_err(|e| e.to_string())?;
-    let upper = word.to_ascii_uppercase();
-    if upper == "NULL" {
-        return Ok((serde_json::Value::Null, end));
-    }
-    if upper == "TRUE" {
-        return Ok((serde_json::Value::Bool(true), end));
-    }
-    if upper == "FALSE" {
-        return Ok((serde_json::Value::Bool(false), end));
-    }
-    // X'..'、B'..'、N'..' 等带前缀的引号字面量：引号内按原文保留或按字符串解析
-    if end < bytes.len() && bytes[end] == b'\'' && word.len() == 1 {
-        let prefix = word.as_bytes()[0].to_ascii_uppercase();
-        if prefix == b'N' {
-            return sql_read_single_quoted_value(bytes, end);
-        }
-        return sql_read_plain_quoted_value(bytes, end);
-    }
-    // 函数调用（如 NOW()）：保留原始表达式文本，交由目标库按文本写入
-    if end < bytes.len() && bytes[end] == b'(' {
-        let (raw, next) = sql_read_paren_expression(bytes, end)?;
-        return Ok((serde_json::Value::String(format!("{word}{raw}")), next));
-    }
-    Ok((serde_json::Value::String(word.to_string()), end))
+fn sql_import_unsupported_expression(context: &str) -> String {
+    format!(
+        "{context}: expressions (functions, operators, casts, ...) are not supported; \
+         SQL import only accepts literal values so statement semantics are preserved"
+    )
 }
 
-/// 登记一条 INSERT/REPLACE 语句的目标表与列清单，校验文件内所有语句指向同一张表。
-fn register_sql_insert_columns(
+/// 解析单条 INSERT 语句，把值行登记到 `target`/`rows`。
+/// REPLACE、INSERT IGNORE、INSERT ... SELECT、INSERT ... SET、ON CONFLICT 等无法用
+/// 普通 INSERT 无损表达的构造一律拒绝。
+fn parse_sql_insert_statement(
+    insert: &Insert,
+    family: SqlImportDialectFamily,
     target: &mut Option<SqlInsertTarget>,
-    table_ref: &str,
-    explicit_columns: Option<Vec<String>>,
+    rows: &mut Vec<Vec<serde_json::Value>>,
+    preview_limit: usize,
+    total_rows: &mut usize,
 ) -> Result<(), String> {
-    match target.as_mut() {
-        None => {
-            if let Some(columns) = explicit_columns {
-                if columns.is_empty() {
-                    return Err("INSERT statement has an empty column list".to_string());
-                }
-                *target = Some(SqlInsertTarget { table: table_ref.to_string(), columns, columns_generated: false });
-            }
+    if insert.replace_into {
+        return Err(
+            "SQL import does not support REPLACE; its delete-then-insert conflict semantics cannot be preserved"
+                .to_string(),
+        );
+    }
+    if insert.ignore {
+        return Err("SQL import does not support INSERT IGNORE".to_string());
+    }
+    if insert.or.is_some() {
+        return Err("SQL import does not support INSERT OR ... conflict clauses".to_string());
+    }
+    if insert.on.is_some() {
+        return Err("SQL import does not support ON DUPLICATE KEY / ON CONFLICT clauses".to_string());
+    }
+    if !insert.assignments.is_empty() {
+        return Err("SQL import does not support INSERT ... SET".to_string());
+    }
+    if insert.returning.is_some() || insert.output.is_some() {
+        return Err("SQL import does not support INSERT ... RETURNING / OUTPUT".to_string());
+    }
+
+    let table_ref = match &insert.table {
+        TableObject::TableName(name) => name,
+        TableObject::TableFunction(_) | TableObject::TableQuery(_) => {
+            return Err("SQL import only supports INSERT into a named table".to_string());
         }
-        Some(existing) => {
-            if !existing.table.eq_ignore_ascii_case(table_ref) {
-                return Err(format!(
-                    "SQL import supports one table per file; found '{}' and '{}'",
-                    existing.table, table_ref
-                ));
+    };
+    let table_ident = sql_import_object_name_ident(table_ref, "table")?;
+    let table_name = sql_import_ident_display(table_ident, family);
+
+    if let Some(existing) = target.as_ref() {
+        if !sql_import_table_matches(&existing.table, &table_name, family) {
+            return Err(format!(
+                "SQL import supports one table per file; found '{}' and '{}'",
+                existing.table, table_name
+            ));
+        }
+    }
+
+    let explicit_columns = insert
+        .columns
+        .iter()
+        .map(|column| {
+            sql_import_object_name_ident(column, "column").map(|ident| sql_import_ident_display(ident, family))
+        })
+        .collect::<Result<Vec<String>, String>>()?;
+
+    let Some(source) = insert.source.as_deref() else {
+        return Err("SQL import only supports INSERT ... VALUES".to_string());
+    };
+    let SetExpr::Values(values) = source.body.as_ref() else {
+        return Err("SQL import only supports INSERT ... VALUES; INSERT ... SELECT is not supported".to_string());
+    };
+
+    // 登记/校验列清单：显式列优先，无列清单时延后到首行按值数量推断（保留旧行为），
+    // 列名比较改为按方言规则（区分引号状态）。
+    if !explicit_columns.is_empty() {
+        match target.as_mut() {
+            None => {
+                *target = Some(SqlInsertTarget {
+                    table: table_name.clone(),
+                    columns: explicit_columns,
+                    columns_generated: false,
+                });
             }
-            if let Some(columns) = explicit_columns {
-                let same_shape = columns.len() == existing.columns.len()
-                    && columns.iter().zip(existing.columns.iter()).all(|(a, b)| a.eq_ignore_ascii_case(b));
-                if !same_shape {
-                    if existing.columns_generated && columns.len() == existing.columns.len() {
-                        // 首条语句没有列清单时列名是推断出来的，遇到显式列清单时采用显式列名
-                        existing.columns = columns;
+            Some(existing) => {
+                if !sql_import_names_match(&existing.columns, &explicit_columns, family) {
+                    if existing.columns_generated && existing.columns.len() == explicit_columns.len() {
+                        existing.columns = explicit_columns;
                         existing.columns_generated = false;
                     } else {
                         return Err(format!(
@@ -1525,133 +1400,76 @@ fn register_sql_insert_columns(
             }
         }
     }
-    Ok(())
-}
 
-/// 解析单条 INSERT/REPLACE 语句，从 keyword_end（关键字之后的位置）开始。
-fn parse_sql_insert_statement(
-    stmt: &[u8],
-    mut index: usize,
-    target: &mut Option<SqlInsertTarget>,
-    rows: &mut Vec<Vec<serde_json::Value>>,
-    preview_limit: usize,
-    total_rows: &mut usize,
-) -> Result<(), String> {
-    // 跳过 INSERT 与 INTO 之间的修饰关键字（如 IGNORE / LOW_PRIORITY）
-    loop {
-        index = sql_skip_whitespace(stmt, index);
-        let span = sql_read_word_span(stmt, index);
-        if span.1 == span.0 {
-            return Ok(());
-        }
-        let is_into = sql_word_equals(stmt, span, "INTO");
-        let is_overwrite = sql_word_equals(stmt, span, "OVERWRITE");
-        index = span.1;
-        if is_into {
-            break;
-        }
-        // INSERT OVERWRITE 等不支持的形式直接跳过
-        if is_overwrite {
-            return Ok(());
-        }
-    }
-
-    index = sql_skip_whitespace(stmt, index);
-    let (table_ref, mut index) = sql_read_table_reference(stmt, index)?;
-
-    index = sql_skip_whitespace(stmt, index);
-    let mut explicit_columns: Option<Vec<String>> = None;
-    if index < stmt.len() && stmt[index] == b'(' {
-        index += 1;
-        let mut columns = Vec::new();
-        loop {
-            index = sql_skip_whitespace(stmt, index);
-            let (name, next) = sql_read_identifier(stmt, index)?;
-            columns.push(name);
-            index = sql_skip_whitespace(stmt, next);
-            if index >= stmt.len() {
-                return Err("Unterminated column list in INSERT statement".to_string());
-            }
-            match stmt[index] {
-                b',' => index += 1,
-                b')' => {
-                    index += 1;
-                    break;
-                }
-                other => {
-                    return Err(format!("Unexpected character '{}' in INSERT column list", other as char));
-                }
-            }
-        }
-        explicit_columns = Some(columns);
-    }
-
-    index = sql_skip_whitespace(stmt, index);
-    let span = sql_read_word_span(stmt, index);
-    if !sql_word_equals(stmt, span, "VALUES") && !sql_word_equals(stmt, span, "VALUE") {
-        // INSERT ... SELECT 等非 VALUES 形式不支持，跳过该语句
-        return Ok(());
-    }
-    index = span.1;
-
-    register_sql_insert_columns(target, &table_ref, explicit_columns)?;
-
-    loop {
-        index = sql_skip_whitespace(stmt, index);
-        if index >= stmt.len() || stmt[index] != b'(' {
-            return Err("Expected '(' after VALUES in INSERT statement".to_string());
-        }
-        index += 1;
-        let mut row: Vec<serde_json::Value> = Vec::new();
-        loop {
-            let (value, next) = sql_read_value(stmt, index)?;
-            row.push(value);
-            index = sql_skip_whitespace(stmt, next);
-            if index >= stmt.len() {
-                return Err("Unterminated value tuple in INSERT statement".to_string());
-            }
-            match stmt[index] {
-                b',' => index += 1,
-                b')' => {
-                    index += 1;
-                    break;
-                }
-                other => {
-                    return Err(format!("Unexpected character '{}' in INSERT value tuple", other as char));
-                }
-            }
-        }
-
+    for row in &values.rows {
+        let values = &row.content;
         if target.is_none() {
-            // 文件首条语句没有列清单时，按首个元组的值数量推断列名
-            if row.is_empty() {
+            if values.is_empty() {
                 return Err("INSERT statement has an empty value tuple".to_string());
             }
-            let columns = (0..row.len()).map(|i| format!("column_{}", i + 1)).collect::<Vec<_>>();
-            *target = Some(SqlInsertTarget { table: table_ref.clone(), columns, columns_generated: true });
+            let columns = (0..values.len()).map(|index| format!("column_{}", index + 1)).collect::<Vec<_>>();
+            *target = Some(SqlInsertTarget { table: table_name.clone(), columns, columns_generated: true });
         }
         let columns = &target.as_ref().expect("insert target registered above").columns;
-        if row.len() != columns.len() {
+        if values.len() != columns.len() {
             return Err(format!(
                 "INSERT row has {} values but table '{}' expects {} columns",
-                row.len(),
-                table_ref,
+                values.len(),
+                table_name,
                 columns.len()
             ));
         }
+        let mut converted = Vec::with_capacity(values.len());
+        for (index, value) in values.iter().enumerate() {
+            let context = format!("SQL import: table '{table_name}', column {}", columns[index]);
+            converted.push(sql_import_expr_value(value, &context)?);
+        }
         *total_rows += 1;
         if rows.len() < preview_limit {
-            rows.push(row);
+            rows.push(converted);
         }
+    }
+    Ok(())
+}
 
-        index = sql_skip_whitespace(stmt, index);
-        if index < stmt.len() && stmt[index] == b',' {
+/// 跳过空白与 SQL 注释，返回第一个关键字（用于判断语句是否以 INSERT/REPLACE 开头）。
+fn sql_import_leading_keyword(statement: &str) -> Option<String> {
+    let bytes = statement.as_bytes();
+    let mut index = 0usize;
+    loop {
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
             index += 1;
+        }
+        if index + 1 < bytes.len() && bytes[index] == b'-' && bytes[index + 1] == b'-' {
+            while index < bytes.len() && bytes[index] != b'\n' {
+                index += 1;
+            }
+            continue;
+        }
+        if index < bytes.len() && bytes[index] == b'#' {
+            while index < bytes.len() && bytes[index] != b'\n' {
+                index += 1;
+            }
+            continue;
+        }
+        if index + 1 < bytes.len() && bytes[index] == b'/' && bytes[index + 1] == b'*' {
+            index += 2;
+            while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/') {
+                index += 1;
+            }
+            index = (index + 2).min(bytes.len());
             continue;
         }
         break;
     }
-    Ok(())
+    let start = index;
+    while index < bytes.len() && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_') {
+        index += 1;
+    }
+    if index == start {
+        return None;
+    }
+    Some(statement[start..index].to_string())
 }
 
 pub fn parse_sql_bytes_with_options(
@@ -1660,22 +1478,44 @@ pub fn parse_sql_bytes_with_options(
     preview_limit: usize,
 ) -> Result<ParsedImportFile, String> {
     let (text, encoding) = decode_sql_script_bytes(bytes, options.encoding)?;
-    let script = text.as_bytes();
+    let family = options.sql_dialect.map(sql_import_dialect_family).unwrap_or(SqlImportDialectFamily::Generic);
+    let dialect = sql_import_parser_dialect(family);
+
+    // 复用 sql.rs 的方言感知拆分器：正确处理 MySQL DELIMITER、PostgreSQL 美元引用、
+    // SQL Server GO、Oracle / 等，替代原来按分号裸切的实现。
+    let statements = match options.sql_dialect {
+        Some(db_type) => crate::sql::split_sql_statements_for_database(&text, db_type),
+        None => crate::sql::split_sql_statements(&text),
+    };
+
     let mut target: Option<SqlInsertTarget> = None;
     let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
     let mut total_rows = 0usize;
-    for (start, end) in sql_statement_ranges(script) {
-        let stmt = &script[start..end];
-        let index = sql_skip_whitespace(stmt, 0);
-        let span = sql_read_word_span(stmt, index);
-        if span.1 == span.0 {
-            continue;
+
+    for statement_sql in statements {
+        let parsed = match Parser::parse_sql(dialect.as_ref(), &statement_sql) {
+            Ok(statements) => statements,
+            Err(error) => {
+                // 非 INSERT 语句（DDL、SET、……）不属于数据导入范畴，跳过；
+                // 以 INSERT/REPLACE 开头却解析失败的语句必须报错，不能静默丢弃。
+                let keyword = sql_import_leading_keyword(&statement_sql);
+                let is_insert = keyword
+                    .as_deref()
+                    .is_some_and(|word| word.eq_ignore_ascii_case("INSERT") || word.eq_ignore_ascii_case("REPLACE"));
+                if is_insert {
+                    return Err(format!("SQL import could not parse INSERT statement: {error}"));
+                }
+                continue;
+            }
+        };
+        for statement in parsed {
+            let Statement::Insert(insert) = statement else {
+                continue;
+            };
+            parse_sql_insert_statement(&insert, family, &mut target, &mut rows, preview_limit, &mut total_rows)?;
         }
-        if !sql_word_equals(stmt, span, "INSERT") && !sql_word_equals(stmt, span, "REPLACE") {
-            continue;
-        }
-        parse_sql_insert_statement(stmt, span.1, &mut target, &mut rows, preview_limit, &mut total_rows)?;
     }
+
     let target = target.ok_or_else(|| "No INSERT statements found in SQL file".to_string())?;
     Ok(ParsedImportFile { columns: target.columns, rows, total_rows, effective_encoding: Some(encoding) })
 }
@@ -8269,6 +8109,10 @@ mod tests {
         assert!(error.contains("configured for object rows"));
     }
 
+    fn sql_import_options(dialect: DatabaseType) -> TableImportParseOptions {
+        TableImportParseOptions { sql_dialect: Some(dialect), ..TableImportParseOptions::default() }
+    }
+
     #[test]
     fn parses_sql_insert_with_column_list_and_comments() {
         let script = b"-- dump header comment\n\
@@ -8277,7 +8121,8 @@ mod tests {
                        /* block comment; with semicolon */\n\
                        INSERT INTO `users` (`id`, `name`) VALUES (1, 'Ada'), (2, 'Bob');\n\
                        INSERT INTO users (id, name) VALUES (3, 'Cathy');";
-        let parsed = parse_sql_bytes(script, 10).unwrap();
+        let options = sql_import_options(DatabaseType::Mysql);
+        let parsed = parse_sql_bytes_with_options(script, &options, 10).unwrap();
 
         assert_eq!(parsed.columns, vec!["id", "name"]);
         assert_eq!(parsed.total_rows, 3);
@@ -8288,7 +8133,8 @@ mod tests {
     #[test]
     fn parses_sql_insert_without_column_list_using_generated_columns() {
         let script = b"INSERT INTO users VALUES (1, 'it''s'), (2, 'back\\'slash');";
-        let parsed = parse_sql_bytes(script, 10).unwrap();
+        let options = sql_import_options(DatabaseType::Mysql);
+        let parsed = parse_sql_bytes_with_options(script, &options, 10).unwrap();
 
         assert_eq!(parsed.columns, vec!["column_1", "column_2"]);
         assert_eq!(parsed.total_rows, 2);
@@ -8298,8 +8144,8 @@ mod tests {
 
     #[test]
     fn parses_sql_insert_value_kinds() {
-        let script = b"INSERT INTO t (a, b, c, d, e, f, g, h) VALUES \
-                       (NULL, TRUE, FALSE, -1.5, 3, '2026-01-01 10:00:00', X'1A2B', NOW());";
+        let script = b"INSERT INTO t (a, b, c, d, e, f) VALUES \
+                       (NULL, TRUE, FALSE, -1.5, 3, '2026-01-01 10:00:00');";
         let parsed = parse_sql_bytes(script, 10).unwrap();
 
         assert_eq!(parsed.total_rows, 1);
@@ -8312,21 +8158,68 @@ mod tests {
                 serde_json::json!(-1.5),
                 serde_json::json!(3),
                 serde_json::json!("2026-01-01 10:00:00"),
-                serde_json::json!("1A2B"),
-                serde_json::json!("NOW()"),
             ]
         );
     }
 
     #[test]
-    fn parses_sql_replace_into_and_adopts_explicit_columns() {
-        let script = b"REPLACE INTO users VALUES (1, 'Ada');\n\
-                       INSERT INTO users (id, name) VALUES (2, 'Bob');";
-        let parsed = parse_sql_bytes(script, 10).unwrap();
+    fn sql_import_rejects_replace() {
+        let error = parse_sql_bytes(b"REPLACE INTO users (id) VALUES (1);", 10).unwrap_err();
+        assert!(error.contains("REPLACE"));
+    }
 
-        // 首条语句没有列清单，推断的列名应被第二条语句的显式列名替换
-        assert_eq!(parsed.columns, vec!["id", "name"]);
-        assert_eq!(parsed.total_rows, 2);
+    #[test]
+    fn sql_import_rejects_expressions() {
+        let error = parse_sql_bytes(b"INSERT INTO t (a) VALUES (NOW());", 10).unwrap_err();
+        assert!(error.contains("not supported"));
+    }
+
+    #[test]
+    fn sql_import_rejects_binary_literals() {
+        let error = parse_sql_bytes(b"INSERT INTO t (a) VALUES (X'1A2B');", 10).unwrap_err();
+        assert!(error.contains("binary/hex"));
+    }
+
+    #[test]
+    fn sql_import_rejects_insert_select() {
+        let error = parse_sql_bytes(b"INSERT INTO t (a) SELECT a FROM other;", 10).unwrap_err();
+        assert!(error.contains("VALUES"));
+    }
+
+    #[test]
+    fn sql_import_postgres_treats_backslash_as_literal() {
+        // PostgreSQL 普通字符串中的反斜杠是字面量，不解释为转义。
+        let script = b"INSERT INTO t (a) VALUES ('a\\nb');";
+        let options = sql_import_options(DatabaseType::Postgres);
+        let parsed = parse_sql_bytes_with_options(script, &options, 10).unwrap();
+        assert_eq!(parsed.rows[0], vec![serde_json::json!("a\\nb")]);
+    }
+
+    #[test]
+    fn sql_import_mysql_decodes_backslash_escapes() {
+        // MySQL 普通字符串中的反斜杠转义（\n → 换行）。
+        let script = b"INSERT INTO t (a) VALUES ('a\\nb');";
+        let options = sql_import_options(DatabaseType::Mysql);
+        let parsed = parse_sql_bytes_with_options(script, &options, 10).unwrap();
+        assert_eq!(parsed.rows[0], vec![serde_json::json!("a\nb")]);
+    }
+
+    #[test]
+    fn sql_import_postgres_distinguishes_quoted_identifiers() {
+        // 加引号的 "Foo" 与未加引号的 foo 在 PostgreSQL 中是不同标识符。
+        let script = b"INSERT INTO t (\"Foo\", foo) VALUES (1, 2);";
+        let options = sql_import_options(DatabaseType::Postgres);
+        let parsed = parse_sql_bytes_with_options(script, &options, 10).unwrap();
+        assert_eq!(parsed.columns, vec!["Foo", "foo"]);
+    }
+
+    #[test]
+    fn sql_import_postgres_rejects_mismatched_quoted_column_lists() {
+        // "Foo" 与 foo 不同，不能合并为同一张表的列清单。
+        let script = b"INSERT INTO t (\"Foo\") VALUES (1); INSERT INTO t (foo) VALUES (2);";
+        let options = sql_import_options(DatabaseType::Postgres);
+        let error = parse_sql_bytes_with_options(script, &options, 10).unwrap_err();
+        assert!(error.contains("different column lists"));
     }
 
     #[test]

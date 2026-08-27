@@ -86,6 +86,7 @@ export interface TableImportParseSettings {
   emptyStringAsNull: boolean;
   sheetName?: string;
   jsonShape: TableImportJsonShape;
+  databaseType?: DatabaseType | null;
 }
 
 export function defaultTableImportEmptyStringAsNull(format: TableImportSourceFormat): boolean {
@@ -106,6 +107,8 @@ export function buildTableImportParseOptions(settings: TableImportParseSettings)
     emptyStringAsNull: settings.emptyStringAsNull,
     sheetName: settings.format === "excel" ? settings.sheetName || null : null,
     jsonShape: settings.format === "json" ? settings.jsonShape : null,
+    // SQL 脚本需要按源方言解析字符串转义与标识符大小写（取目标连接的数据库类型）
+    sqlDialect: settings.format === "sql" ? (settings.databaseType ?? null) : null,
   };
 }
 

@@ -1,6 +1,12 @@
+import { formatObjectBrowserCount } from "@/lib/table/objectBrowserRows";
 import type { ConnectionConfig, DatabaseStorageInfo, ObjectStatistics, TreeNode } from "@/types/database";
 
 const sidebarTableStorageTypes = new Set<ConnectionConfig["db_type"]>(["mysql", "postgres", "sqlserver", "oracle", "clickhouse", "dameng", "gaussdb", "kingbase", "gbase"]);
+
+// Row-count-in-sidebar (#3305) v1: intentionally a narrower, separate allowlist from
+// sidebarTableStorageTypes so extending it doesn't change behavior for other engines.
+// MongoDB etc. need new backend statistics support before they can be added here.
+const sidebarRowCountTypes = new Set<ConnectionConfig["db_type"]>(["mysql", "postgres"]);
 
 export function supportsSidebarDatabaseStorage(connection: ConnectionConfig | undefined): boolean {
   return connection?.db_type === "postgres" && connection.driver_profile !== "cockroachdb";
@@ -9,6 +15,11 @@ export function supportsSidebarDatabaseStorage(connection: ConnectionConfig | un
 export function supportsSidebarTableStorage(connection: ConnectionConfig | undefined): boolean {
   if (!connection || !sidebarTableStorageTypes.has(connection.db_type)) return false;
   if (connection.db_type === "gbase" && connection.driver_profile === "gbase8s") return false;
+  return connection.db_type !== "postgres" || connection.driver_profile !== "cockroachdb";
+}
+
+export function supportsSidebarRowCount(connection: ConnectionConfig | undefined): boolean {
+  if (!connection || !sidebarRowCountTypes.has(connection.db_type)) return false;
   return connection.db_type !== "postgres" || connection.driver_profile !== "cockroachdb";
 }
 
@@ -49,14 +60,18 @@ export function sidebarTableStorageScopes(nodes: readonly TreeNode[]): SidebarTa
 
 export function applySidebarTableStorage(nodes: readonly TreeNode[] | undefined, scope: SidebarTableStorageScope, statistics: readonly ObjectStatistics[]): boolean {
   if (!nodes?.length || !statistics.length) return false;
-  const sizeByName = new Map(statistics.filter((item) => !scope.schema || !item.schema || item.schema === scope.schema).map((item) => [item.name, item.total_bytes ?? null] as const));
+  const statByName = new Map(statistics.filter((item) => !scope.schema || !item.schema || item.schema === scope.schema).map((item) => [item.name, { sizeBytes: item.total_bytes ?? null, rowCount: item.estimated_rows ?? null }] as const));
   let changed = false;
   const visit = (items: readonly TreeNode[]) => {
     for (const node of items) {
-      if ((node.type === "table" || node.type === "materialized_view") && node.connectionId === scope.connectionId && node.database === scope.database && (node.schema || "") === scope.schema && sizeByName.has(node.label)) {
-        const sizeBytes = sizeByName.get(node.label) ?? null;
-        if (node.sizeBytes !== sizeBytes) {
-          node.sizeBytes = sizeBytes;
+      if ((node.type === "table" || node.type === "materialized_view") && node.connectionId === scope.connectionId && node.database === scope.database && (node.schema || "") === scope.schema && statByName.has(node.label)) {
+        const stat = statByName.get(node.label)!;
+        if (node.sizeBytes !== stat.sizeBytes) {
+          node.sizeBytes = stat.sizeBytes;
+          changed = true;
+        }
+        if (node.rowCount !== stat.rowCount) {
+          node.rowCount = stat.rowCount;
           changed = true;
         }
       }
@@ -81,4 +96,9 @@ export function formatSidebarObjectStorage(value: number | null | undefined): st
   const rounded = size.toFixed(fractionDigits);
   const displaySize = rounded.includes(".") ? rounded.replace(/0+$/, "").replace(/\.$/, "") : rounded;
   return `${displaySize} ${units[unitIndex]}`;
+}
+
+export function formatSidebarObjectRowCount(value: number | null | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return "";
+  return `(${formatObjectBrowserCount(value)})`;
 }

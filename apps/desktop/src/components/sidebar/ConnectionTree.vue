@@ -80,7 +80,7 @@ import { SidebarDangerConfirmDialog, SidebarDdlViewDialog, SidebarObjectSourceDi
 import { sortConnectionListForDisplay } from "@/lib/sidebar/connectionListSort";
 import { sidebarDisplayTableName } from "@/lib/sidebar/sidebarTableNameDisplay";
 import { alignedSidebarCommentLabelWidths, isSidebarCommentAlignableNode, sidebarTreeNaturalContentWidth, sidebarTreeNodeComment, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
-import { formatSidebarObjectStorage, sidebarTableStorageScopes, supportsSidebarTableStorage } from "@/lib/sidebar/sidebarDatabaseStorage";
+import { formatSidebarObjectRowCount, formatSidebarObjectStorage, sidebarTableStorageScopes, supportsSidebarRowCount, supportsSidebarTableStorage } from "@/lib/sidebar/sidebarDatabaseStorage";
 import { sidebarScrollbarGeometry as calculateSidebarScrollbarGeometry } from "@/lib/sidebar/sidebarScrollbar";
 import { createSidebarLayoutMonitor, type SidebarExpandedConnectionInfo } from "@/lib/sidebar/sidebarLayoutMonitor";
 import { disconnectSidebarConnections } from "@/lib/sidebar/sidebarConnectionDisconnect";
@@ -871,7 +871,9 @@ function scheduleSidebarCommentLabelMeasure() {
 function sidebarNodeHasTrailingMetadata(node: TreeNode): boolean {
   const mode = settingsStore.editorSettings.sidebarObjectInfoMode;
   if (mode.startsWith("comment-") && sidebarTreeNodeComment(node, settingsStore.editorSettings.sidebarShowConnectionNotes)) return true;
-  return mode === "size" && sidebarStorageDisplayTypes.has(node.type) && !!formatSidebarObjectStorage(node.sizeBytes);
+  if (mode === "size" && sidebarStorageDisplayTypes.has(node.type) && !!formatSidebarObjectStorage(node.sizeBytes)) return true;
+  // Row count (#3305) is independent of sidebarObjectInfoMode — mirrors TreeItem.vue's formattedTableRowCount().
+  return node.type === "table" && !!node.connectionId && supportsSidebarRowCount(store.getConfig(node.connectionId)) && !!formatSidebarObjectRowCount(node.rowCount);
 }
 
 const sidebarTreeNaturalWidthItems = computed(() =>
@@ -930,8 +932,11 @@ watch([sidebarTreeNaturalWidthItems, () => settingsStore.editorSettings.uiFontFa
 });
 
 const visibleSidebarTableStorageScopes = computed(() => {
-  if (settingsStore.editorSettings.sidebarObjectInfoMode !== "size") return [];
-  return sidebarTableStorageScopes(flatNodes.value.map(({ node }) => node)).filter((scope) => supportsSidebarTableStorage(store.getConfig(scope.connectionId)));
+  const wantsSize = settingsStore.editorSettings.sidebarObjectInfoMode === "size";
+  return sidebarTableStorageScopes(flatNodes.value.map(({ node }) => node)).filter((scope) => {
+    const config = store.getConfig(scope.connectionId);
+    return (wantsSize && supportsSidebarTableStorage(config)) || supportsSidebarRowCount(config);
+  });
 });
 
 watch(

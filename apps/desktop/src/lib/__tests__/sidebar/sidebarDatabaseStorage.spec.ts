@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { applySidebarDatabaseStorage, applySidebarTableStorage, formatSidebarObjectStorage, sidebarDatabaseNames, sidebarTableStorageScopes, supportsSidebarDatabaseStorage, supportsSidebarTableStorage } from "@/lib/sidebar/sidebarDatabaseStorage";
+import {
+  applySidebarDatabaseStorage,
+  applySidebarTableStorage,
+  formatSidebarObjectRowCount,
+  formatSidebarObjectStorage,
+  sidebarDatabaseNames,
+  sidebarTableStorageScopes,
+  supportsSidebarDatabaseStorage,
+  supportsSidebarRowCount,
+  supportsSidebarTableStorage,
+} from "@/lib/sidebar/sidebarDatabaseStorage";
 import type { ConnectionConfig, TreeNode } from "@/types/database";
 
 function config(dbType: ConnectionConfig["db_type"]): ConnectionConfig {
@@ -61,5 +71,29 @@ describe("sidebar database storage", () => {
     const table: TreeNode = { id: "products", label: "products", type: "table", connectionId: "connection", database: "shop" };
     expect(applySidebarTableStorage([table], { connectionId: "connection", database: "shop", schema: "" }, [{ name: "products", schema: "shop", total_bytes: 49152 }])).toBe(true);
     expect(table.sizeBytes).toBe(49152);
+  });
+
+  it("gates row count to the v1 engine allowlist (#3305), independent of the size allowlist", () => {
+    expect(supportsSidebarRowCount(config("mysql"))).toBe(true);
+    expect(supportsSidebarRowCount(config("postgres"))).toBe(true);
+    expect(supportsSidebarRowCount({ ...config("postgres"), driver_profile: "cockroachdb" })).toBe(false);
+    for (const dbType of ["sqlserver", "oracle", "clickhouse", "dameng", "gaussdb", "kingbase", "gbase", "sqlite", "mongo", "jdbc"] as const) {
+      expect(supportsSidebarRowCount(config(dbType))).toBe(false);
+    }
+  });
+
+  it("applies estimated_rows alongside total_bytes from the same statistics payload", () => {
+    const table: TreeNode = { id: "orders", label: "orders", type: "table", connectionId: "connection", database: "shop" };
+    expect(applySidebarTableStorage([table], { connectionId: "connection", database: "shop", schema: "" }, [{ name: "orders", schema: "shop", total_bytes: 4096, estimated_rows: 107 }])).toBe(true);
+    expect(table.sizeBytes).toBe(4096);
+    expect(table.rowCount).toBe(107);
+  });
+
+  it("keeps unavailable row counts blank and formats known counts with thousands separators", () => {
+    expect(formatSidebarObjectRowCount(null)).toBe("");
+    expect(formatSidebarObjectRowCount(undefined)).toBe("");
+    expect(formatSidebarObjectRowCount(0)).toBe("(0)");
+    expect(formatSidebarObjectRowCount(107)).toBe("(107)");
+    expect(formatSidebarObjectRowCount(1234567)).toBe(`(${new Intl.NumberFormat().format(1234567)})`);
   });
 });

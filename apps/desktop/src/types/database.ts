@@ -980,6 +980,8 @@ export interface TreeNode {
   comment?: string | null;
   valid?: boolean | null;
   sizeBytes?: number | null;
+  /** Estimated row count (from database statistics, not a live COUNT(*)); populated for a narrower engine allowlist than sizeBytes. */
+  rowCount?: number | null;
   objectCount?: number;
   loadedKeyCount?: number;
   totalKeyCount?: number;

@@ -186,4 +186,59 @@ describe("connectionStore sidebar table storage", () => {
     expect(listDatabaseStorage).toHaveBeenCalledTimes(2);
     expect(store.treeNodes[0]?.children?.[0]?.sizeBytes).toBe(16384);
   });
+
+  it("fetches row counts for MySQL/PostgreSQL (#3305 v1) even when sidebarObjectInfoMode is not 'size'", async () => {
+    const listObjectStatistics = vi.fn().mockResolvedValue([{ name: "ORDERS", schema: "public", total_bytes: 4096, estimated_rows: 107 }]);
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      listInstalledAgents: vi.fn().mockResolvedValue([]),
+      listObjectStatistics,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    useSettingsStore().editorSettings.sidebarObjectInfoMode = "comment-inline";
+    const connection = { id: "pg-1", name: "PostgreSQL", db_type: "postgres", host: "127.0.0.1", port: 5432, username: "postgres", password: "" } as ConnectionConfig;
+    const tableNode: TreeNode = { id: "pg-1:app:public:ORDERS", label: "ORDERS", type: "table", connectionId: connection.id, database: "app", schema: "public" };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [{ id: connection.id, label: connection.name, type: "connection", connectionId: connection.id, children: [tableNode] }];
+
+    await store.loadSidebarTableStorage({ connectionId: connection.id, database: "app", schema: "public" });
+
+    expect(listObjectStatistics).toHaveBeenCalledTimes(1);
+    expect(tableNode.rowCount).toBe(107);
+    expect(tableNode.sizeBytes).toBe(4096);
+  });
+
+  it("does not fetch anything for engines outside the row-count allowlist when sidebarObjectInfoMode is not 'size'", async () => {
+    const listObjectStatistics = vi.fn().mockResolvedValue([{ name: "USERS", schema: "APP", total_bytes: 4096, estimated_rows: 107 }]);
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      listInstalledAgents: vi.fn().mockResolvedValue([]),
+      listObjectStatistics,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    useSettingsStore().editorSettings.sidebarObjectInfoMode = "comment-inline";
+    const connection = { id: "oracle-1", name: "Oracle", db_type: "oracle", host: "127.0.0.1", port: 1521, username: "APP", password: "", database: "ORCL" } as ConnectionConfig;
+    const tableNode: TreeNode = { id: "oracle-1:ORCL:APP:USERS", label: "USERS", type: "table", connectionId: connection.id, database: connection.database, schema: "APP" };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [{ id: connection.id, label: connection.name, type: "connection", connectionId: connection.id, children: [tableNode] }];
+
+    await store.loadSidebarTableStorage({ connectionId: connection.id, database: connection.database, schema: "APP" });
+
+    expect(listObjectStatistics).not.toHaveBeenCalled();
+    expect(tableNode.rowCount).toBeUndefined();
+  });
 });

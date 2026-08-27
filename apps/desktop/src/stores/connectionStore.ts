@@ -165,7 +165,7 @@ import { TreeNodeLoadRegistry, type TreeNodeLoadHandle } from "@/lib/metadata/tr
 import i18n from "@/i18n";
 import type { MqAdminConfig } from "@/types/mq";
 import { RABBITMQ_MQ_TENANT, resolveMqSystemKindFromConnection } from "@/lib/mq/mqConsoleDefaults";
-import { applySidebarDatabaseStorage, applySidebarTableStorage, sidebarDatabaseNames, supportsSidebarDatabaseStorage, supportsSidebarTableStorage, type SidebarTableStorageScope } from "@/lib/sidebar/sidebarDatabaseStorage";
+import { applySidebarDatabaseStorage, applySidebarTableStorage, sidebarDatabaseNames, supportsSidebarDatabaseStorage, supportsSidebarRowCount, supportsSidebarTableStorage, type SidebarTableStorageScope } from "@/lib/sidebar/sidebarDatabaseStorage";
 import { connectionHasConfiguredSidebarVisibleFilter, nacosVisibleNamespaceSummary, sidebarVisibleFilterSummary } from "@/lib/sidebar/sidebarVisibleFilterSummary";
 import { connectionCanConfigureSidebarVisibleDatabases } from "@/lib/sidebar/sidebarVisibleFilterMenu";
 import { isTdengineStableTableType } from "@/lib/table/tableEditing";
@@ -4068,8 +4068,10 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function loadSidebarTableStorage(scope: SidebarTableStorageScope, options?: { force?: boolean }): Promise<void> {
-    if (settingsStore.editorSettings.sidebarObjectInfoMode !== "size" || !connectedIds.value.has(scope.connectionId)) return;
-    if (!supportsSidebarTableStorage(getConfig(scope.connectionId))) return;
+    if (!connectedIds.value.has(scope.connectionId)) return;
+    const config = getConfig(scope.connectionId);
+    const wantsSize = settingsStore.editorSettings.sidebarObjectInfoMode === "size" && supportsSidebarTableStorage(config);
+    if (!wantsSize && !supportsSidebarRowCount(config)) return;
     const requestKey = sidebarTableStorageRequestKey(scope);
     const cacheScope = sidebarTableStorageCacheScope(scope);
     const cached = sidebarTableStorageCache.get(cacheScope);

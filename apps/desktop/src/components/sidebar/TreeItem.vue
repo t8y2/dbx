@@ -55,7 +55,7 @@ import type { ColumnInfo, ConnectionConfig, CustomTypeTreeMemberMeta, DatabaseTy
 import { alignedCommentLeadingWidth, canTreeNodePin, canTreeNodeShowExpander, sidebarTreeNodeComment, trailingCommentAvailableWidth, trailingCommentGapPx, treeItemPaddingLeft, treeLabelWidthClass, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
 import { clearActiveTableReferencePayload, createTableReferencePayload, createTableReferenceDropEvent, setActiveTableReferencePayload, type QueryEditorTableReferencePayload } from "@/lib/editor/queryEditorTableDrop";
 import { AI_ASSISTANT_TABLE_DROP_ROOT_SELECTOR } from "@/lib/ai/aiTableReferenceDrop";
-import { formatSidebarObjectStorage } from "@/lib/sidebar/sidebarDatabaseStorage";
+import { formatSidebarObjectRowCount, formatSidebarObjectStorage, supportsSidebarRowCount } from "@/lib/sidebar/sidebarDatabaseStorage";
 import { dataTabOpenModeFromTreeClick } from "@/lib/sidebar/dataTabOpenPolicy";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { connectionDisplayUrlScheme } from "@/lib/connection/connectionPresentation";
@@ -815,6 +815,18 @@ function formattedObjectStorage(): string {
   return formatSidebarObjectStorage(activeNode.value.sizeBytes);
 }
 
+function formattedTableRowCount(): string {
+  if (activeNode.value.type !== "table" || !activeNode.value.connectionId) return "";
+  if (!supportsSidebarRowCount(connectionStore.getConfig(activeNode.value.connectionId))) return "";
+  return formatSidebarObjectRowCount(activeNode.value.rowCount);
+}
+
+// Combines the "对象大小" and row-count (#3305) trailing badges into one slot so they
+// never fight over the same ml-auto position; row count is independent of sidebarObjectInfoMode.
+function formattedTrailingObjectStats(): string {
+  return [formattedObjectStorage(), formattedTableRowCount()].filter(Boolean).join(" · ");
+}
+
 // 连接节点不参与 aligned 对齐：顶层连接各自独立，按同层最大 label 宽对齐只会让短连接名
 // 后留下一大段空白。无论全局是 aligned 还是 inline，连接节点的 comment 都紧跟 label。
 const alignedCommentLabelWidth = computed(() => (settingsStore.editorSettings.sidebarObjectInfoMode === "comment-aligned" && activeNode.value.type !== "connection" ? props.commentLabelWidth : undefined));
@@ -825,7 +837,7 @@ function alignedCommentLeadingStyle(): { width: string } | undefined {
 }
 
 function hasTrailingMetadata(): boolean {
-  return !!trailingComment.value || !!formattedObjectStorage();
+  return !!trailingComment.value || !!formattedTrailingObjectStats();
 }
 
 const usesFullWidthLabel = computed(() => usesFullWidthTreeLabel(activeNode.value.type, settingsStore.editorSettings.sidebarAllowHorizontalScroll, hasTrailingMetadata()));
@@ -1431,7 +1443,7 @@ function onKeydown(event: KeyboardEvent) {
           <CircleX v-if="node.valid === false" data-invalid-object-indicator="true" class="pointer-events-none absolute -right-1 -bottom-1 h-2.5 w-2.5 rounded-full bg-background text-destructive stroke-[3]" aria-hidden="true" />
         </span>
         <div ref="trailingCommentLayoutRef" :class="hasTrailingMetadata() ? 'flex flex-1 min-w-0 items-center' : 'contents'">
-          <div ref="trailingCommentLeadingRef" :class="trailingComment ? 'flex max-w-full min-w-0 shrink-0 items-center gap-2' : formattedObjectStorage() ? 'flex min-w-0 flex-1 items-center gap-2' : 'contents'" :style="alignedCommentLeadingStyle()">
+          <div ref="trailingCommentLeadingRef" :class="trailingComment ? 'flex max-w-full min-w-0 shrink-0 items-center gap-2' : formattedTrailingObjectStats() ? 'flex min-w-0 flex-1 items-center gap-2' : 'contents'" :style="alignedCommentLeadingStyle()">
             <input
               v-if="isRenamingGroup || isRenamingSavedSql || isRenamingConnection"
               ref="renameInputRef"
@@ -1501,7 +1513,7 @@ function onKeydown(event: KeyboardEvent) {
         <span v-if="databaseOpenVisual.showsIndicator" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
         <Badge v-if="isConnectionReadonly" variant="secondary" class="h-4 px-1.5 text-[10px] gap-0.5"> <Lock class="w-2.5 h-2.5" />{{ t("connection.readOnlyBadge") }} </Badge>
         <ConnectionErrorIndicator v-if="node.type === 'connection'" :connection-id="node.connectionId" trigger-class="h-4 w-4" />
-        <span v-if="formattedObjectStorage()" class="ml-auto shrink-0 text-right text-xs tabular-nums text-muted-foreground">{{ formattedObjectStorage() }}</span>
+        <span v-if="formattedTrailingObjectStats()" class="ml-auto shrink-0 text-right text-xs tabular-nums text-muted-foreground" :title="formattedTableRowCount() ? t('objects.statisticsHint') : undefined">{{ formattedTrailingObjectStats() }}</span>
         <button
           v-if="isConnecting"
           type="button"

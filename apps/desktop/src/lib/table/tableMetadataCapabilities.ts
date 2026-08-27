@@ -32,6 +32,9 @@ const capabilityByType: Partial<Record<DatabaseType, Partial<TableMetadataCapabi
   vastbase: {
     constraints: true,
   },
+  opengauss: {
+    constraints: true,
+  },
   // PostgreSQL reports full pg_constraint metadata (PK/FK/UNIQUE/CHECK/
   // EXCLUDE/NOT NULL) through list_constraints.
   postgres: {

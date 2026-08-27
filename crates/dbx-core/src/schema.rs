@@ -4041,6 +4041,20 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn detects_opengauss_constraint_profiles_without_gaussdb() {
+        assert!(super::is_opengauss_constraint_config(&test_connection_config(DatabaseType::OpenGauss)));
+        assert!(!super::is_opengauss_constraint_config(&test_connection_config(DatabaseType::Gaussdb)));
+        assert!(!super::is_opengauss_constraint_config(&test_connection_config(DatabaseType::Postgres)));
+
+        let mut profiled_postgres = test_connection_config(DatabaseType::Postgres);
+        profiled_postgres.driver_profile = Some("opengauss".to_string());
+        assert!(super::is_opengauss_constraint_config(&profiled_postgres));
+
+        profiled_postgres.driver_profile = Some("gaussdb".to_string());
+        assert!(!super::is_opengauss_constraint_config(&profiled_postgres));
+    }
+
+    #[test]
     fn detects_opengauss_sequence_compatibility_profiles() {
         assert!(super::is_opengauss_family_config(&test_connection_config(DatabaseType::OpenGauss)));
         assert!(super::is_opengauss_family_config(&test_connection_config(DatabaseType::Gaussdb)));
@@ -7010,7 +7024,7 @@ pub async fn list_triggers_core(
 
 /// Lists structured constraints for a relation. Exposed generically so the
 /// agent protocol and native drivers share one route; the built-in drivers
-/// that implement it today are PostgreSQL (and the Xugu agent).
+/// that implement it today are PostgreSQL, OpenGauss, and the Xugu agent.
 pub async fn list_constraints_core(
     state: &AppState,
     connection_id: &str,
@@ -7044,6 +7058,9 @@ pub async fn list_constraints_core(
                 if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Redshift) =>
             {
                 Ok(vec![])
+            }
+            PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_opengauss_constraint_config) => {
+                db::postgres::list_opengauss_constraints(p, schema, table).await
             }
             PoolKind::Postgres(p) => db::postgres::list_constraints(p, schema, table).await,
             _ => Ok(vec![]),
@@ -7622,6 +7639,10 @@ async fn get_table_ddl_once(
 
 async fn connection_config(state: &AppState, connection_id: &str) -> Option<ConnectionConfig> {
     state.configs.read().await.get(connection_id).cloned()
+}
+
+fn is_opengauss_constraint_config(config: &ConnectionConfig) -> bool {
+    config.db_type == DatabaseType::OpenGauss || config.driver_profile.as_deref() == Some("opengauss")
 }
 
 fn is_opengauss_family_config(config: &ConnectionConfig) -> bool {

@@ -224,7 +224,7 @@ function onClose() {
 
 <template>
   <Dialog :open="props.open" @update:open="onClose">
-    <DialogContent class="sm:max-w-190" @close-auto-focus="onDdlDialogCloseAutoFocus">
+    <DialogContent class="dbx-ddl-view-dialog sm:max-w-190" @close-auto-focus="onDdlDialogCloseAutoFocus">
       <DialogHeader>
         <DialogTitle>DDL - {{ props.tableName }}</DialogTitle>
       </DialogHeader>
@@ -275,5 +275,14 @@ function onClose() {
 
 .ddl-view-editor :deep(.cm-content ::selection) {
   background: var(--dbx-editor-selection-background, rgba(59, 130, 246, 0.35)) !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"].dbx-ddl-view-dialog[class~="max-w-sm"] {
+  max-width: 47.5rem !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"].dbx-ddl-view-dialog [data-slot="dialog-footer"] {
+  flex-direction: row !important;
+  justify-content: flex-end !important;
 }
 </style>

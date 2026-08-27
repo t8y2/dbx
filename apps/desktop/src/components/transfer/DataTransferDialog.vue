@@ -1269,10 +1269,8 @@ async function saveConfigTask() {
 </template>
 
 <style>
-@media (min-width: 640px) {
-  html.dbx-legacy-webview [data-slot="dialog-content"].dbx-transfer-dialog[class~="max-w-sm"] {
-    /* Override the legacy default cap without pinning width, so native resize remains effective. */
-    max-width: calc(100vw - 2rem) !important;
-  }
+html.dbx-legacy-webview [data-slot="dialog-content"].dbx-transfer-dialog[class~="max-w-sm"] {
+  /* Override the legacy default cap without pinning width, so native resize remains effective. */
+  max-width: calc(100vw - 2rem) !important;
 }
 </style>

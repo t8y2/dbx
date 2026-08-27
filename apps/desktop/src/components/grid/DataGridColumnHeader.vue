@@ -86,7 +86,7 @@ const emit = defineEmits<{
             <span class="text-background/70">{{ columnNameLabel }}</span>
             <span class="flex min-w-0 items-center gap-2">
               <span class="min-w-0 flex-1 truncate font-mono">{{ name }}</span>
-              <button type="button" class="flex h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-background/10" :title="copyColumnNameLabel" @click.stop="emit('copyName')">
+              <button data-column-header-copy-name type="button" class="flex h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-background/10" :title="copyColumnNameLabel" @click.stop="emit('copyName')">
                 <Copy class="h-3 w-3" />
               </button>
             </span>
@@ -155,5 +155,15 @@ const emit = defineEmits<{
 
 .data-grid-header-cell--dark.data-grid-header-cell--frozen-separator {
   border-right: 2px solid rgb(100, 116, 139) !important;
+}
+</style>
+
+<style>
+html.dbx-legacy-webview [data-column-header-copy-name]:hover {
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+html.dbx-legacy-webview.dark [data-column-header-copy-name]:hover {
+  background-color: rgba(0, 0, 0, 0.1);
 }
 </style>

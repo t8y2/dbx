@@ -45,12 +45,17 @@ export const DATA_GRID_DARK_SEARCH_COLORS = {
 } as const;
 export const DATA_GRID_LIGHT_ACTIVE_ROW_BG = "rgb(244, 248, 255)";
 export const DATA_GRID_DARK_ACTIVE_ROW_BG = "rgb(25, 34, 46)";
-// 十字行/列底色必须比 cellActive 更明显（否则与 active-row 重影，感知不到增强）。
-// 行/列用同一蓝色系不同透明度：列略深，十字交点叠加后仍可分辨，且不覆盖 cell-selected。
-export const DATA_GRID_LIGHT_CROSSHAIR_ROW_BG = "rgba(59, 130, 246, 0.10)";
-export const DATA_GRID_LIGHT_CROSSHAIR_COL_BG = "rgba(59, 130, 246, 0.16)";
-export const DATA_GRID_DARK_CROSSHAIR_ROW_BG = "rgba(96, 165, 250, 0.12)";
-export const DATA_GRID_DARK_CROSSHAIR_COL_BG = "rgba(96, 165, 250, 0.18)";
+// 十字行/列底色：混入背景的实色（color-mix(in srgb, var(--primary) P%, var(--background))），
+// 而非透明叠加——铺在浅底上的半透明色会被冲淡到几乎不可见，对比度不足正 jira #7276 的核心痛点。
+// 行/列占 primary 34%/50%（CSS 方向：P% primary + 其余 background）；现有 28%/40% 在浅色
+// 主题的大面积网格中仍不够醒目。列更重，交点通过 Canvas 的两次绘制进一步加深；选中格仍以显式
+// 填充与描边优先，故不会被十字高亮覆盖。
+// 常量按默认主题 soft-light/dark（primary/background）混合得出，作为 var 未设置 / 旧浏览器
+// 降级实色；color-mix 支持时 DataGrid.vue 的 CSS 变量会用它重新混成 —— 两处取值一致。
+export const DATA_GRID_LIGHT_CROSSHAIR_ROW_BG = "rgb(174, 195, 224)";
+export const DATA_GRID_LIGHT_CROSSHAIR_COL_BG = "rgb(142, 170, 210)";
+export const DATA_GRID_DARK_CROSSHAIR_ROW_BG = "rgb(75, 84, 98)";
+export const DATA_GRID_DARK_CROSSHAIR_COL_BG = "rgb(98, 111, 130)";
 export const DATA_GRID_LIGHT_STRIPED_ROW_BG = "rgb(240, 240, 240)";
 export const DATA_GRID_DARK_STRIPED_ROW_BG = "rgb(40, 40, 43)";
 export const DATA_GRID_DARK_ROW_NUMBER_BG = "rgb(35, 37, 42)";
@@ -159,7 +164,8 @@ function mixRgb(first: RgbaColor, firstPercent: number, second: RgbaColor, secon
 }
 
 function parseColorMix(value: string): string | null {
-  const body = value.match(/^color-mix\(\s*in\s+oklab\s*,\s*(.*)\)$/i)?.[1];
+  // Crosshair tokens use sRGB so Canvas can reproduce the DOM blend exactly.
+  const body = value.match(/^color-mix\(\s*in\s+(?:srgb|oklab)\s*,\s*(.*)\)$/i)?.[1];
   if (!body) return null;
   const [firstRaw, secondRaw] = splitTopLevelCommas(body);
   if (!firstRaw || !secondRaw) return null;

@@ -1447,7 +1447,10 @@ async fn list_postgres_extension_members(
         }
     };
     let mut members = PostgresExtensionMembers::default();
-    for (kind, name, signature) in crate::db::postgres::list_extension_member_objects(&pool, schema).await? {
+    let budget = crate::db::postgres::postgres_default_metadata_query_budget(&pool);
+    for (kind, name, signature) in
+        crate::db::postgres::list_extension_member_objects(&pool, schema, budget, None).await?
+    {
         if kind == "RELATION" {
             members.relation_names.insert(name);
         } else if kind == "FUNCTION" {

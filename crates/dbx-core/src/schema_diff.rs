@@ -8010,7 +8010,8 @@ mod tests {
             )
             .await?;
 
-            let indexes = crate::db::postgres::list_indexes(&pool, &schema, "tankong_data").await?;
+            let budget = crate::db::postgres::postgres_default_metadata_query_budget(&pool);
+            let indexes = crate::db::postgres::list_indexes(&pool, &schema, "tankong_data", budget, None).await?;
             let index = indexes
                 .into_iter()
                 .find(|index| index.name == "uq_tankong_sta_type_time")

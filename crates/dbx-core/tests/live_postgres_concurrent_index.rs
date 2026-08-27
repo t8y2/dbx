@@ -138,7 +138,9 @@ async fn live_postgres_invalid_index_leftover_is_detected() {
     ];
     postgres::execute_batch(&pool, &setup).await.expect("create live test schema");
 
-    let invalid = postgres::list_invalid_indexes(&pool, &schema, "users").await.expect("list invalid indexes");
+    let invalid = postgres::list_invalid_indexes(&pool, &schema, "users", Duration::from_secs(30), None)
+        .await
+        .expect("list invalid indexes");
     assert!(invalid.is_empty(), "fresh index must be valid, got: {invalid:?}");
 
     // Flip indisvalid to false the same way an interrupted concurrent build does.
@@ -150,7 +152,9 @@ async fn live_postgres_invalid_index_leftover_is_detected() {
         .await
         .expect("mark index invalid");
 
-    let invalid = postgres::list_invalid_indexes(&pool, &schema, "users").await.expect("list invalid indexes");
+    let invalid = postgres::list_invalid_indexes(&pool, &schema, "users", Duration::from_secs(30), None)
+        .await
+        .expect("list invalid indexes");
     assert_eq!(invalid, vec!["idx_users_email".to_string()], "invalid leftover must be reported");
 
     postgres::execute_batch(&pool, &cleanup).await.expect("cleanup live test schema");

@@ -37,4 +37,22 @@ describe("listDialectDataTypes backend adapters", () => {
     await expect(listDialectDataTypes("PostgreSQL")).resolves.toEqual(["INTEGER", "TEXT"]);
     expect(fetchMock).toHaveBeenCalledWith("/api/dialect/data-types?dialect_name=PostgreSQL");
   });
+
+  it("threads the abort signal through to fetch when present", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi.fn().mockResolvedValue([]),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const { listDatabases } = await import("@/lib/backend/http");
+    const controller = new AbortController();
+
+    await expect(listDatabases("conn-1", controller.signal)).resolves.toEqual([]);
+    // The signal must be threaded as the second fetch argument so an in-flight
+    // metadata request can be aborted; the no-signal path keeps the classic
+    // single-argument fetch shape (see the dialect route test above).
+    expect(fetchMock).toHaveBeenCalledWith("/api/schema/databases?connection_id=conn-1", {
+      signal: controller.signal,
+    });
+  });
 });

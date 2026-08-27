@@ -12,7 +12,10 @@ pub(in crate::schema) async fn list_databases(
             .map(|databases| filter_mysql_system_databases_for_config(databases, config)),
         PoolKind::Mysql(p, mode) if *mode == MysqlMode::OceanBaseOracle => db::ob_oracle::list_databases(p).await,
         PoolKind::Mysql(p, _) => db::mysql::list_databases(p).await,
-        PoolKind::Postgres(p) => db::postgres::list_databases(p).await,
+        PoolKind::Postgres(p) => {
+            let budget = super::super::native_postgres_metadata_budget(config);
+            db::postgres::list_databases(p, budget, None).await
+        }
         PoolKind::Sqlite(p) => db::sqlite::list_databases(p).await,
         PoolKind::Rqlite(client) => db::rqlite_driver::list_databases(client).await,
         PoolKind::HBase(client) => db::hbase_driver::list_namespaces(client).await,
@@ -51,7 +54,10 @@ pub(in crate::schema) async fn list_tables(
         PoolKind::Postgres(p) if config.is_some_and(is_cloudberry_config) => {
             db::cloudberry::list_tables_filtered(p, schema, None, None, None).await
         }
-        PoolKind::Postgres(p) => db::postgres::list_tables(p, schema).await,
+        PoolKind::Postgres(p) => {
+            let budget = super::super::native_postgres_metadata_budget(config);
+            db::postgres::list_tables(p, schema, budget, None).await
+        }
         PoolKind::Sqlite(p) => db::sqlite::list_tables(p, schema).await,
         PoolKind::Rqlite(client) => db::rqlite_driver::list_tables(client, schema).await,
         PoolKind::Turso(client) => db::turso_driver::list_tables(client, schema).await,
@@ -100,7 +106,10 @@ pub(in crate::schema) async fn list_objects(
         PoolKind::Postgres(p) if config.is_some_and(is_cloudberry_config) => {
             db::cloudberry::list_objects(p, schema).await.map(Some)
         }
-        PoolKind::Postgres(p) => db::postgres::list_objects(p, schema, true, true, false).await.map(Some),
+        PoolKind::Postgres(p) => {
+            let budget = super::super::native_postgres_metadata_budget(config);
+            db::postgres::list_objects(p, schema, true, true, false, budget, None).await.map(Some)
+        }
         _ => Ok(None),
     }
 }
@@ -124,7 +133,10 @@ pub(in crate::schema) async fn list_completion_objects(
         PoolKind::Postgres(p) if config.is_some_and(is_cloudberry_config) => {
             db::cloudberry::list_objects(p, schema).await.map(Some)
         }
-        PoolKind::Postgres(p) => db::postgres::list_objects(p, schema, true, true, false).await.map(Some),
+        PoolKind::Postgres(p) => {
+            let budget = super::super::native_postgres_metadata_budget(config);
+            db::postgres::list_objects(p, schema, true, true, false, budget, None).await.map(Some)
+        }
         _ => Ok(None),
     }
 }
@@ -152,7 +164,10 @@ pub(in crate::schema) async fn get_columns(
         PoolKind::Postgres(p) if config.is_some_and(is_questdb_config) => {
             db::questdb::get_columns(p, schema, table).await
         }
-        PoolKind::Postgres(p) => db::postgres::get_columns(p, schema, table).await,
+        PoolKind::Postgres(p) => {
+            let budget = super::super::native_postgres_metadata_budget(config);
+            db::postgres::get_columns(p, schema, table, budget, None).await
+        }
         PoolKind::Sqlite(p) => db::sqlite::get_columns(p, schema, table).await,
         PoolKind::Rqlite(client) => db::rqlite_driver::get_columns(client, schema, table).await,
         PoolKind::Turso(client) => db::turso_driver::get_columns(client, schema, table).await,
@@ -189,7 +204,10 @@ pub(in crate::schema) async fn list_indexes(
         PoolKind::Postgres(p) if config.is_some_and(is_questdb_config) => {
             db::questdb::list_indexes(p, schema, table).await
         }
-        PoolKind::Postgres(p) => db::postgres::list_indexes(p, schema, table).await,
+        PoolKind::Postgres(p) => {
+            let budget = super::super::native_postgres_metadata_budget(config);
+            db::postgres::list_indexes(p, schema, table, budget, None).await
+        }
         PoolKind::Sqlite(p) => db::sqlite::list_indexes(p, schema, table).await,
         PoolKind::Rqlite(client) => db::rqlite_driver::list_indexes(client, schema, table).await,
         PoolKind::Turso(client) => db::turso_driver::list_indexes(client, schema, table).await,
@@ -203,6 +221,7 @@ pub(in crate::schema) async fn list_indexes(
 
 pub(in crate::schema) async fn list_foreign_keys(
     pool: &PoolKind,
+    config: Option<&ConnectionConfig>,
     schema: &str,
     table: &str,
 ) -> Result<Vec<db::ForeignKeyInfo>, String> {
@@ -211,7 +230,10 @@ pub(in crate::schema) async fn list_foreign_keys(
             db::ob_oracle::list_foreign_keys(p, schema, table).await
         }
         PoolKind::Mysql(p, _) => db::mysql::list_foreign_keys(p, schema, table).await,
-        PoolKind::Postgres(p) => db::postgres::list_foreign_keys(p, schema, table).await,
+        PoolKind::Postgres(p) => {
+            let budget = super::super::native_postgres_metadata_budget(config);
+            db::postgres::list_foreign_keys(p, schema, table, budget, None).await
+        }
         PoolKind::Sqlite(p) => db::sqlite::list_foreign_keys(p, schema, table).await,
         PoolKind::Rqlite(client) => db::rqlite_driver::list_foreign_keys(client, schema, table).await,
         PoolKind::Turso(client) => db::turso_driver::list_foreign_keys(client, schema, table).await,
@@ -221,6 +243,7 @@ pub(in crate::schema) async fn list_foreign_keys(
 
 pub(in crate::schema) async fn list_triggers(
     pool: &PoolKind,
+    config: Option<&ConnectionConfig>,
     schema: &str,
     table: &str,
 ) -> Result<Vec<db::TriggerInfo>, String> {
@@ -229,7 +252,10 @@ pub(in crate::schema) async fn list_triggers(
             db::ob_oracle::list_triggers(p, schema, table).await
         }
         PoolKind::Mysql(p, _) => db::mysql::list_triggers(p, schema, table).await,
-        PoolKind::Postgres(p) => db::postgres::list_triggers(p, schema, table).await,
+        PoolKind::Postgres(p) => {
+            let budget = super::super::native_postgres_metadata_budget(config);
+            db::postgres::list_triggers(p, schema, table, budget, None).await
+        }
         PoolKind::Sqlite(p) => db::sqlite::list_triggers(p, schema, table).await,
         PoolKind::Rqlite(client) => db::rqlite_driver::list_triggers(client, schema, table).await,
         PoolKind::Turso(client) => db::turso_driver::list_triggers(client, schema, table).await,

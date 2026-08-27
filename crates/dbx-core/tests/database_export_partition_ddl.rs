@@ -292,8 +292,28 @@ async fn partition_tree_ddl_query_count_does_not_scale_with_partition_count() {
 /// table/partition/foreign table (e.g. a view) must say so specifically,
 /// not fall back to a generic "not found" message that also covers a
 /// relation that doesn't exist at all.
-#[tokio::test]
-async fn display_ddl_error_distinguishes_wrong_relkind_from_missing_relation() {
+#[test]
+fn display_ddl_error_distinguishes_wrong_relkind_from_missing_relation() {
+    // The display-DDL path stacks a deep async chain (pool checkout + TLS +
+    // tree/relkind queries) that overflows the test harness default stack;
+    // run it on an 8MB thread like the other partition-DDL tests.
+    let handle = std::thread::Builder::new()
+        .name("partition-ddl-relkind-error".to_string())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build partition ddl relkind error runtime")
+                .block_on(run_display_ddl_error_distinguishes_wrong_relkind_from_missing_relation());
+        })
+        .expect("spawn partition ddl relkind error thread");
+    if let Err(panic) = handle.join() {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+async fn run_display_ddl_error_distinguishes_wrong_relkind_from_missing_relation() {
     let Some(container) = start_docker_postgres("dbx-partition-ddl-relkind-error") else {
         return;
     };

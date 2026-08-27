@@ -55,7 +55,15 @@ async fn postgres_tsvector_generated_columns_are_readable_and_omitted_from_inser
     assert_eq!(result.column_types, vec!["int4", "text", "text", "tsvector"]);
     assert_eq!(result.rows[0][3].as_str(), Some("'hello':1 'world':2"));
 
-    let columns = postgres::get_columns(&pool, &schema, "articles").await.expect("get columns");
+    let columns = postgres::get_columns(
+        &pool,
+        &schema,
+        "articles",
+        postgres::postgres_default_metadata_query_budget(&pool),
+        None,
+    )
+    .await
+    .expect("get columns");
     let search_vector = columns.iter().find(|column| column.name == "search_vector").expect("search_vector column");
     assert_eq!(search_vector.column_default, None);
     assert!(search_vector.extra.as_deref().unwrap_or_default().contains("generated always as"));

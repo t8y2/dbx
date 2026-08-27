@@ -61,13 +61,15 @@ pub async fn list_tables_filtered(
     limit: Option<usize>,
     offset: Option<usize>,
 ) -> Result<Vec<TableInfo>, String> {
-    let mut tables = db::postgres::list_tables_filtered(pool, schema, filter, limit, offset).await?;
+    let budget = db::postgres::postgres_default_metadata_query_budget(pool);
+    let mut tables = db::postgres::list_tables_filtered(pool, schema, filter, limit, offset, budget, None).await?;
     annotate_external_tables(pool, schema, &mut tables).await;
     Ok(tables)
 }
 
 pub async fn list_objects(pool: &Pool, schema: &str) -> Result<Vec<ObjectInfo>, String> {
-    let mut objects = db::postgres::list_objects(pool, schema, true, true, false).await?;
+    let budget = db::postgres::postgres_default_metadata_query_budget(pool);
+    let mut objects = db::postgres::list_objects(pool, schema, true, true, false, budget, None).await?;
     let names = objects.iter().map(|object| object.name.clone()).collect::<Vec<_>>();
     let external_names = external_table_names(pool, schema, &names).await.unwrap_or_else(|error| {
         log::debug!("[cloudberry][list_objects:external-table-fallback] error={error}");

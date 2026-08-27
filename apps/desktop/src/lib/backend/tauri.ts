@@ -1058,7 +1058,9 @@ export async function closeDatabaseConnection(connectionId: string, database: st
   return invoke("close_database_connection", { connectionId, database });
 }
 
-export async function listDatabases(connectionId: string): Promise<DatabaseInfo[]> {
+export async function listDatabases(connectionId: string, _signal?: AbortSignal): Promise<DatabaseInfo[]> {
+  // Tauri IPC has no fetch abort; the signal is accepted for signature
+  // compatibility with the HTTP backend and is intentionally ignored here.
   return invoke("list_databases", { connectionId });
 }
 

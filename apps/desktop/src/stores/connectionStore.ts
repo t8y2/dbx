@@ -76,6 +76,7 @@ import {
 import type { SqlCompletionColumn, SqlCompletionForeignKey, SqlCompletionObject, SqlCompletionTable } from "@/lib/sql/sqlCompletion";
 import { usesOracleCurrentSchemaCompletion } from "@/lib/sql/oracleCompletionSession";
 import { mergeSqlObjectNavigationType, sqlObjectNavigationTypeFromTableType } from "@/lib/sql/sqlNavigation";
+import { metadataLoadTimeoutMs } from "@/lib/sql/queryTimeout";
 import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
@@ -175,8 +176,6 @@ const ACTIVE_CONNECTION_STORAGE_KEY = "dbx-active-connection";
 const SIDEBAR_TABLE_NAME_FILTERS_STORAGE_KEY = "dbx-sidebar-table-name-filters";
 const CONNECTION_HEALTH_CHECK_TTL_MS = 2000;
 const CONNECTION_HEALTH_CHECK_TIMEOUT_MS = 5000;
-const METADATA_LOAD_MIN_TIMEOUT_MS = 15_000;
-const METADATA_LOAD_DISABLED_QUERY_TIMEOUT_MS = 60_000;
 const DISCONNECT_REQUEST_TIMEOUT_MS = 5_000;
 const DEFAULT_KEEPALIVE_INTERVAL_SECS = 30;
 const METADATA_LIST_PAGE_CACHE_TTL_MS = 30_000;
@@ -1008,13 +1007,6 @@ export const useConnectionStore = defineStore("connection", () => {
     if (node) node.isLoading = false;
   }
 
-  function metadataLoadTimeoutMs(config?: ConnectionConfig): number {
-    const queryTimeoutSecs = Number(config?.query_timeout_secs);
-    if (queryTimeoutSecs === 0) return METADATA_LOAD_DISABLED_QUERY_TIMEOUT_MS;
-    const boundedTimeoutSecs = Number.isFinite(queryTimeoutSecs) && queryTimeoutSecs > 0 ? queryTimeoutSecs + 5 : 35;
-    return Math.max(METADATA_LOAD_MIN_TIMEOUT_MS, boundedTimeoutSecs * 1000);
-  }
-
   async function withConnectionHealthTimeout(connectionId: string, promise: Promise<void>): Promise<void> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -1035,15 +1027,36 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function withMetadataLoadTimeout<T>(connectionId: string, promise: Promise<T>, label: string): Promise<T> {
-    const timeoutMs = metadataLoadTimeoutMs(getConfig(connectionId));
+    const timeoutMs = metadataLoadTimeoutMs(getConfig(connectionId), settingsStore.editorSettings.globalQueryTimeoutSecs, settingsStore.editorSettings.globalConnectTimeoutSecs);
+    const timeoutMessage = `Connection timed out while loading ${label} after ${Math.ceil(timeoutMs / 1000)}s. Please check the network or VPN and try again.`;
     const errorRevision = connectionErrorRevision(connectionId);
+    let timedOut = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    void promise.then(
+      () => {
+        if (!timedOut) return;
+        // The timer already won; leave the enforced timeout message in place.
+      },
+      (error) => {
+        if (!timedOut) return;
+        // The backend error arrived after the UI timeout fired. The caller's
+        // catch already recorded the generic timeout message; replace it with
+        // the real database error (mirrors withConnectionAttemptTimeout) so a
+        // half-open connection is attributable instead of a silent generic
+        // timeout.
+        const current = connectionErrors.value[connectionId];
+        if (current === timeoutMessage) {
+          setConnectionError(connectionId, connectionAttemptOriginalErrorMessage(timeoutMessage, connectionErrorMessage(error)));
+        }
+      },
+    );
     try {
       const result = await Promise.race([
         promise,
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => {
-            reject(new Error(`Connection timed out while loading ${label} after ${Math.ceil(timeoutMs / 1000)}s. Please check the network or VPN and try again.`));
+            timedOut = true;
+            reject(new Error(timeoutMessage));
           }, timeoutMs);
         }),
       ]);

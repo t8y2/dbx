@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createPinia, setActivePinia } from "pinia";
 import { test, vi } from "vitest";
 import { useConnectionStore } from "../../apps/desktop/src/stores/connectionStore.ts";
+import { metadataLoadTimeoutMs } from "../../apps/desktop/src/lib/sql/queryTimeout.ts";
 import type { ConnectionConfig } from "../../apps/desktop/src/types/database.ts";
 
 function installMemoryStorage() {
@@ -336,8 +337,15 @@ test("hanging database metadata load times out and clears loading state", async 
   vi.useFakeTimers();
   const restoreStorage = installMemoryStorage();
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = (async (input) => {
-    if (String(input).startsWith("/api/schema/databases?")) {
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    // No persisted tree cache, healthy backend, no agents: the load must reach
+    // the databases endpoint and hang there until the metadata deadline fires.
+    if (url.startsWith("/api/schema/cache?")) return jsonResponse(null);
+    if (url === "/api/schema/cache" && init?.method === "POST") return jsonResponse(null);
+    if (url === "/api/connection/check-health") return jsonResponse(null);
+    if (url === "/api/agents/installed") return jsonResponse([]);
+    if (url.startsWith("/api/schema/databases?")) {
       return new Promise<Response>(() => {});
     }
     return new Response("unexpected request", { status: 500 });
@@ -357,9 +365,14 @@ test("hanging database metadata load times out and clears loading state", async 
     });
 
     const loadPromise = store.loadDatabases("conn-1");
-    const timeoutRejection = assert.rejects(() => loadPromise, /Connection timed out while loading databases after 35s/);
+    const timeoutMs = metadataLoadTimeoutMs(conn("conn-1"));
+    const timeoutSecs = Math.ceil(timeoutMs / 1000);
+    const timeoutRejection = assert.rejects(
+      () => loadPromise,
+      new RegExp(`Connection timed out while loading databases after ${timeoutSecs}s`),
+    );
 
-    await vi.advanceTimersByTimeAsync(35000);
+    await vi.advanceTimersByTimeAsync(timeoutMs + 1000);
     await timeoutRejection;
 
     assert.equal(store.treeNodes[0].isLoading, false);
@@ -565,12 +578,19 @@ test.each([
   vi.useFakeTimers();
   const restoreStorage = installMemoryStorage();
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = (async (input) => {
-    if (String(input) === endpoint) {
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    // No persisted tree cache, healthy backend, no agents: the load must reach
+    // the endpoint under test and hang there until the metadata deadline fires.
+    if (url.startsWith("/api/schema/cache?")) return jsonResponse(null);
+    if (url === "/api/schema/cache" && init?.method === "POST") return jsonResponse(null);
+    if (url === "/api/connection/check-health") return jsonResponse(null);
+    if (url === "/api/agents/installed") return jsonResponse([]);
+    if (url === endpoint) {
       return new Promise<Response>(() => {});
     }
     // Marking a connection lost also cleans up any query client sessions.
-    if (String(input) === "/api/query/close-client-session") {
+    if (url === "/api/query/close-client-session") {
       return jsonResponse(true);
     }
     return new Response("unexpected request", { status: 500 });
@@ -590,9 +610,14 @@ test.each([
     });
 
     const loadPromise = store[loader]("conn-1");
-    const timeoutRejection = assert.rejects(() => loadPromise, new RegExp(`Connection timed out while loading ${label} after 35s`));
+    const timeoutMs = metadataLoadTimeoutMs({ ...conn("conn-1"), db_type: dbType });
+    const timeoutSecs = Math.ceil(timeoutMs / 1000);
+    const timeoutRejection = assert.rejects(
+      () => loadPromise,
+      new RegExp(`Connection timed out while loading ${label} after ${timeoutSecs}s`),
+    );
 
-    await vi.advanceTimersByTimeAsync(35000);
+    await vi.advanceTimersByTimeAsync(timeoutMs + 1000);
     await timeoutRejection;
 
     assert.equal(store.treeNodes[0].isLoading, false);

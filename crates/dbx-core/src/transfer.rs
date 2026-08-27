@@ -4932,7 +4932,8 @@ pub async fn get_columns_for_transfer(
         PoolKind::Postgres(p) => {
             let p = p.clone();
             drop(connections);
-            db::postgres::get_columns(&p, &schema, &table).await
+            let budget = db::postgres::postgres_default_metadata_query_budget(&p);
+            db::postgres::get_columns(&p, &schema, &table, budget, None).await
         }
         PoolKind::Sqlite(p) => {
             let p = p.clone();
@@ -4965,7 +4966,8 @@ async fn get_postgres_indexes_for_transfer(
     };
     let pool = pool.clone();
     drop(connections);
-    db::postgres::list_indexes(&pool, schema, table).await
+    let budget = db::postgres::postgres_default_metadata_query_budget(&pool);
+    db::postgres::list_indexes(&pool, schema, table, budget, None).await
 }
 
 async fn get_postgres_foreign_keys_for_transfer(
@@ -4990,7 +4992,8 @@ async fn get_postgres_foreign_keys_for_transfer(
     };
     let pool = pool.clone();
     drop(connections);
-    db::postgres::list_foreign_keys(&pool, schema, table).await
+    let budget = db::postgres::postgres_default_metadata_query_budget(&pool);
+    db::postgres::list_foreign_keys(&pool, schema, table, budget, None).await
 }
 
 async fn get_postgres_owned_sequences_for_transfer(
@@ -6391,7 +6394,8 @@ pub async fn sort_tables_by_fk_dependency_with_foreign_keys(
         None
     };
     let (dependencies, foreign_keys_by_table) = if let Some(pool) = postgres_pool {
-        (db::postgres::list_table_dependencies(&pool, schema).await?, HashMap::new())
+        let budget = db::postgres::postgres_default_metadata_query_budget(&pool);
+        (db::postgres::list_table_dependencies(&pool, schema, budget, None).await?, HashMap::new())
     } else {
         let foreign_keys_by_table =
             fetch_foreign_keys_for_tables(state, connection_id, database, schema, tables).await?;

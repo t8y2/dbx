@@ -1,5 +1,6 @@
 import { splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import { tokenizeSqlSemantic } from "@/lib/sql/semantic/tokens";
+import { DEFAULT_CONNECT_TIMEOUT_SECS } from "@/lib/connection/timeoutLimits";
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 
 export const DEFAULT_QUERY_TIMEOUT_SECS = 30;
@@ -30,6 +31,60 @@ export function queryTimeoutSecsForConnection(connection?: Pick<ConnectionConfig
   }
   const value = Number(connection?.query_timeout_secs);
   return Number.isFinite(value) && value >= 0 ? value : DEFAULT_QUERY_TIMEOUT_SECS;
+}
+
+/** Floor for the metadata-load deadline so slow WAN/tunnel round-trips don't trip a too-tight guard. */
+export const METADATA_LOAD_MIN_TIMEOUT_MS = 15_000;
+/** Backend metadata query budget fallback when query_timeout is 0/unlimited
+ * (mirrors POSTGRES_METADATA_QUERY_BUDGET_FALLBACK in dbx-core). */
+export const METADATA_LOAD_QUERY_BUDGET_FALLBACK_SECS = 60;
+/** Backend server-side cancel allowance added ON TOP of the query budget
+ * (mirrors POSTGRES_METADATA_CANCEL_ALLOWANCE in dbx-core). A CancelRequest is a
+ * separate protocol request the server never answers, so it must not eat into
+ * the statement window. */
+export const METADATA_LOAD_CANCEL_ALLOWANCE_MS = 2_000;
+/** Transport/jitter buffer so the frontend deadline stays safely past the
+ * backend operation total (connect x3 + query + cancel). */
+export const METADATA_LOAD_TRANSPORT_BUFFER_MS = 3_000;
+
+/** Effective connect timeout (seconds) for a connection, honoring inheritance
+ * and the global default — mirrors `queryTimeoutSecsForConnection`. */
+export function effectiveConnectTimeoutSecs(connection?: Pick<ConnectionConfig, "connect_timeout_secs" | "connect_timeout_inherit"> | null, globalConnectTimeoutSecs = DEFAULT_CONNECT_TIMEOUT_SECS): number {
+  if (connection?.connect_timeout_inherit === true) {
+    const globalValue = Number(globalConnectTimeoutSecs);
+    return Number.isFinite(globalValue) && globalValue >= 1 ? globalValue : DEFAULT_CONNECT_TIMEOUT_SECS;
+  }
+  const value = Number(connection?.connect_timeout_secs);
+  return Number.isFinite(value) && value >= 1 ? value : DEFAULT_CONNECT_TIMEOUT_SECS;
+}
+
+/**
+ * End-to-end deadline for a silent metadata load (e.g. the visible-databases
+ * picker or connectionStore's withMetadataLoadTimeout).
+ *
+ * The backend operation total is a hard upper bound: connectDb (pool build +
+ * first connect) ≤ connect timeout, checkout ≤ connect timeout, identity ≤
+ * connect timeout, the metadata query ≤ the effective query budget (or the 60s
+ * fallback when query timeout is disabled), and the server-side cancel ≤ its
+ * fixed 2s allowance on top. The backend retry wrapper enforces this SAME total
+ * as one deadline created before recovery starts (see `metadata_operation_budget`
+ * in dbx-core), so a failed first attempt followed by reconnect and retry still
+ * cannot exceed this estimate. This deadline covers that total (plus a small
+ * transport buffer) so the backend's distinctive PostgreSQL diagnostic — never
+ * the generic frontend timeout — is what surfaces first.
+ */
+export function metadataLoadTimeoutMs(
+  connection?: Pick<ConnectionConfig, "connect_timeout_secs" | "connect_timeout_inherit" | "query_timeout_secs" | "query_timeout_inherit"> | null,
+  globalQueryTimeoutSecs = DEFAULT_QUERY_TIMEOUT_SECS,
+  globalConnectTimeoutSecs = DEFAULT_CONNECT_TIMEOUT_SECS,
+): number {
+  const configuredQuerySecs = queryTimeoutSecsForConnection(connection, globalQueryTimeoutSecs);
+  const querySecs = configuredQuerySecs === 0 ? METADATA_LOAD_QUERY_BUDGET_FALLBACK_SECS : configuredQuerySecs;
+  // The backend floors checkout/identity at the connection timeout, so use the
+  // default as a floor here to stay conservative for sub-default connect values.
+  const connectSecs = Math.max(effectiveConnectTimeoutSecs(connection, globalConnectTimeoutSecs), DEFAULT_CONNECT_TIMEOUT_SECS);
+  const totalMs = (3 * connectSecs + querySecs) * 1000 + METADATA_LOAD_CANCEL_ALLOWANCE_MS + METADATA_LOAD_TRANSPORT_BUFFER_MS;
+  return Math.max(METADATA_LOAD_MIN_TIMEOUT_MS, totalMs);
 }
 
 /**

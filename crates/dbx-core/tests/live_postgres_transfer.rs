@@ -74,6 +74,35 @@ async fn query_scalar(pool: &deadpool_postgres::Pool, sql: &str) -> serde_json::
     postgres::execute_query(pool, sql).await.unwrap().rows[0][0].clone()
 }
 
+async fn query_index_rows(pool: &deadpool_postgres::Pool, schema: &str) -> Vec<(String, String)> {
+    postgres::execute_query(
+        pool,
+        &format!(
+            "SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = '{}' AND tablename = 'index_transfer' ORDER BY indexname",
+            schema
+        ),
+    )
+    .await
+    .unwrap()
+    .rows
+    .into_iter()
+    .filter_map(|row| Some((row.first()?.as_str()?.to_string(), row.get(1)?.as_str()?.to_string())))
+    .collect()
+}
+
+async fn query_index_comment(pool: &deadpool_postgres::Pool, schema: &str) -> Option<serde_json::Value> {
+    postgres::execute_query(
+        pool,
+        &format!(
+            "SELECT obj_description(i.indexrelid, 'pg_class') FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class c ON c.oid = i.indexrelid JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = '{}' AND c.relname = 'index_transfer_status_idx'",
+            schema
+        ),
+    )
+    .await
+    .ok()
+    .and_then(|result| result.rows.first().and_then(|row| row.first()).cloned())
+}
+
 #[tokio::test]
 #[ignore = "requires PostgreSQL URLs via DBX_LIVE_PG_TRANSFER_SOURCE_URL and DBX_LIVE_PG_TRANSFER_TARGET_URL"]
 async fn live_postgres_transfer_upserts_generated_always_identity_values() {
@@ -261,6 +290,195 @@ async fn live_postgres_transfer_upserts_generated_always_identity_values() {
     let _ = postgres::execute_batch(&source_pool, &[cleanup_sql[0].clone()]).await;
     let _ = postgres::execute_batch(&target_pool, &[cleanup_sql[1].clone()]).await;
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+#[ignore = "requires source/target PostgreSQL URLs via DBX_LIVE_PG_TRANSFER_SOURCE_URL and DBX_LIVE_PG_TRANSFER_TARGET_URL"]
+async fn live_postgres_structure_only_preserves_table_indexes() {
+    let source_url = std::env::var("DBX_LIVE_PG_TRANSFER_SOURCE_URL").expect("DBX_LIVE_PG_TRANSFER_SOURCE_URL");
+    let target_url = std::env::var("DBX_LIVE_PG_TRANSFER_TARGET_URL").unwrap_or_else(|_| source_url.clone());
+    let source_pool = postgres::connect(&source_url, std::time::Duration::from_secs(5)).await.unwrap();
+    let target_pool = postgres::connect(&target_url, std::time::Duration::from_secs(5)).await.unwrap();
+    let source_database = query_scalar(&source_pool, "SELECT current_database()").await.as_str().unwrap().to_string();
+    let target_database = query_scalar(&target_pool, "SELECT current_database()").await.as_str().unwrap().to_string();
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let source_schema = format!("dbx_src_structure_only_{}", &suffix[..8]);
+    let target_schema = format!("dbx_dst_structure_only_{}", &suffix[..8]);
+    let cleanup_sql = [
+        format!("DROP SCHEMA IF EXISTS \"{}\" CASCADE", source_schema),
+        format!("DROP SCHEMA IF EXISTS \"{}\" CASCADE", target_schema),
+    ];
+    let _ = postgres::execute_batch(&source_pool, &[cleanup_sql[0].clone()]).await;
+    let _ = postgres::execute_batch(&target_pool, &[cleanup_sql[1].clone()]).await;
+
+    postgres::execute_batch(
+        &source_pool,
+        &[
+            format!("CREATE SCHEMA \"{}\"", source_schema),
+            format!(
+                "CREATE TABLE \"{}\".\"index_transfer\" (\"id\" bigint PRIMARY KEY, \"email\" text NOT NULL, \"status\" text, \"created_at\" timestamptz)",
+                source_schema
+            ),
+            format!(
+                "CREATE INDEX \"index_transfer_status_idx\" ON \"{}\".\"index_transfer\" (\"status\")",
+                source_schema
+            ),
+            format!(
+                "CREATE UNIQUE INDEX \"index_transfer_email_uidx\" ON \"{}\".\"index_transfer\" (\"email\")",
+                source_schema
+            ),
+            format!(
+                "CREATE INDEX \"index_transfer_email_lower_idx\" ON \"{}\".\"index_transfer\" (lower(\"email\"))",
+                source_schema
+            ),
+            format!(
+                "CREATE INDEX \"index_transfer_created_at_partial_idx\" ON \"{}\".\"index_transfer\" (\"created_at\") WHERE \"status\" IS NOT NULL",
+                source_schema
+            ),
+            format!(
+                "CREATE INDEX \"index_transfer_status_include_idx\" ON \"{}\".\"index_transfer\" (\"status\") INCLUDE (\"created_at\")",
+                source_schema
+            ),
+            format!(
+                "COMMENT ON INDEX \"{}\".\"index_transfer_status_idx\" IS 'status lookup'",
+                source_schema
+            ),
+            format!(
+                "INSERT INTO \"{}\".\"index_transfer\" (\"id\", \"email\", \"status\", \"created_at\") VALUES (1, 'alpha@example.com', 'active', now())",
+                source_schema
+            ),
+        ],
+    )
+    .await
+    .unwrap();
+
+    let dir = std::env::temp_dir().join(format!("dbx-live-structure-only-transfer-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let state = AppState::new(storage);
+    let source_connection_id = "live-structure-only-source";
+    let target_connection_id = "live-structure-only-target";
+    let source_pool_key = format!("{source_connection_id}:{source_database}");
+    let target_pool_key = format!("{target_connection_id}:{target_database}");
+    state.connections.write().await.insert(source_pool_key.clone(), PoolKind::Postgres(source_pool.clone()));
+    state.connections.write().await.insert(target_pool_key.clone(), PoolKind::Postgres(target_pool.clone()));
+    state
+        .configs
+        .write()
+        .await
+        .insert(source_connection_id.to_string(), postgres_test_config(source_connection_id, &source_database));
+    state
+        .configs
+        .write()
+        .await
+        .insert(target_connection_id.to_string(), postgres_test_config(target_connection_id, &target_database));
+
+    let mut request = TransferRequest {
+        transfer_id: format!("live-structure-only-transfer-{suffix}"),
+        source_connection_id: source_connection_id.to_string(),
+        source_database: source_database.clone(),
+        source_schema: source_schema.clone(),
+        source_catalog: None,
+        target_connection_id: target_connection_id.to_string(),
+        target_database: target_database.clone(),
+        target_schema: target_schema.clone(),
+        target_catalog: None,
+        tables: vec!["index_transfer".to_string()],
+        create_table: true,
+        content: dbx_core::transfer::TransferContent::default(),
+        objects: Vec::new(),
+        mode: TransferMode::Append,
+        target_table_name_case: TransferTableNameCase::Preserve,
+        ownership_policy: TransferOwnershipPolicy::Preserve,
+        batch_size: 100,
+    };
+
+    transfer_postgres_schema_dependencies(&state, &request, &source_pool_key, &target_pool_key, |_| {}).await.unwrap();
+    let source_db_type = get_db_type(&state, source_connection_id).await.unwrap();
+    let target_db_type = get_db_type(&state, target_connection_id).await.unwrap();
+    let structure_and_data_result = transfer_table(
+        &state,
+        &request,
+        "index_transfer",
+        0,
+        &source_db_type,
+        &target_db_type,
+        &source_pool_key,
+        &target_pool_key,
+        &std::collections::HashMap::new(),
+        &mut Vec::new(),
+        |_| {},
+    )
+    .await;
+
+    let structure_and_data_index_rows = query_index_rows(&target_pool, &target_schema).await;
+    let structure_and_data_row_count =
+        query_scalar(&target_pool, &format!("SELECT count(*) FROM \"{}\".\"index_transfer\"", target_schema)).await;
+    let structure_and_data_index_comment = query_index_comment(&target_pool, &target_schema).await;
+
+    let _ = postgres::execute_batch(&target_pool, &[cleanup_sql[1].clone()]).await;
+    request.content = dbx_core::transfer::TransferContent::StructureOnly;
+    transfer_postgres_schema_dependencies(&state, &request, &source_pool_key, &target_pool_key, |_| {}).await.unwrap();
+    let structure_only_result = transfer_table(
+        &state,
+        &request,
+        "index_transfer",
+        0,
+        &source_db_type,
+        &target_db_type,
+        &source_pool_key,
+        &target_pool_key,
+        &std::collections::HashMap::new(),
+        &mut Vec::new(),
+        |_| {},
+    )
+    .await;
+    let structure_only_index_rows = query_index_rows(&target_pool, &target_schema).await;
+    let structure_only_row_count =
+        query_scalar(&target_pool, &format!("SELECT count(*) FROM \"{}\".\"index_transfer\"", target_schema)).await;
+    let structure_only_index_comment = query_index_comment(&target_pool, &target_schema).await;
+
+    let _ = postgres::execute_batch(&source_pool, &[cleanup_sql[0].clone()]).await;
+    let _ = postgres::execute_batch(&target_pool, &[cleanup_sql[1].clone()]).await;
+    let _ = std::fs::remove_dir_all(dir);
+
+    assert_eq!(structure_and_data_result.unwrap(), 1);
+    assert_eq!(structure_and_data_row_count, json!(1));
+    assert_eq!(structure_only_result.unwrap(), 0);
+    assert_eq!(structure_only_row_count, json!(0));
+    let assert_indexes = |rows: &[(String, String)]| {
+        let names = rows.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>();
+        assert!(names.contains(&"index_transfer_pkey"), "target indexes: {names:?}");
+        for expected in [
+            "index_transfer_status_idx",
+            "index_transfer_email_uidx",
+            "index_transfer_email_lower_idx",
+            "index_transfer_created_at_partial_idx",
+            "index_transfer_status_include_idx",
+        ] {
+            assert!(names.contains(&expected), "missing {expected}; target indexes: {names:?}");
+        }
+        assert!(
+            rows.iter()
+                .any(|(name, definition)| name == "index_transfer_email_lower_idx" && definition.contains("lower")),
+            "target indexes: {rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|(name, definition)| name == "index_transfer_created_at_partial_idx"
+                    && definition.contains("WHERE")),
+            "target indexes: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|(name, definition)| name == "index_transfer_status_include_idx" && definition.contains("INCLUDE")),
+            "target indexes: {rows:?}"
+        );
+    };
+    assert_indexes(&structure_and_data_index_rows);
+    assert_indexes(&structure_only_index_rows);
+    assert_eq!(structure_and_data_index_comment, Some(json!("status lookup")));
+    assert_eq!(structure_only_index_comment, Some(json!("status lookup")));
 }
 
 #[tokio::test]

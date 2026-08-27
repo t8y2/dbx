@@ -40,6 +40,7 @@ vi.mock("@lucide/vue", async () => {
     Copy: Icon,
     Database: Icon,
     Info: Icon,
+    Keyboard: Icon,
     KeyRound: Icon,
     ListChevronsUpDown: Icon,
     Loader2: Icon,
@@ -626,6 +627,65 @@ describe("TableStructureEditor data type options", () => {
     expect(picker.dataset.allowCustom).toBe("true");
     picker.click();
     await vi.waitFor(() => expect(mocks.buildTableStructureChangeSql).toHaveBeenLastCalledWith(expect.objectContaining({ columns: [expect.objectContaining({ dataType: "custom_domain" })] })));
+  });
+});
+
+describe("TableStructureEditor action column", () => {
+  it("shows the field shortcut hints in the toolbar", async () => {
+    const root = await mountEditor("dameng");
+
+    expect(root.textContent).toContain("settings.shortcutsTab");
+    expect(root.textContent).toContain("Shift+Enter");
+    expect(root.textContent).toContain("⌘/Ctrl+D");
+    expect(root.querySelector("[data-field-shortcut-hints]")?.className).toContain("flex-col");
+    expect(root.querySelector("[data-field-shortcut-hints]")?.className).toContain("w-56");
+    expect(root.querySelector("[data-field-shortcut-hints]")?.className).toContain("!bg-secondary");
+    expect(root.querySelector("[data-field-shortcut-hints] kbd")?.className).toContain("text-primary");
+  });
+
+  it("adds a field below the focused input on Shift+Enter", async () => {
+    const root = await mountEditor("dameng");
+    const sourceInput = root.querySelector<HTMLInputElement>('[data-column-row-index="0"] [data-column-name-input]');
+    if (!sourceInput) throw new Error("Missing source column name input");
+
+    sourceInput.focus();
+    sourceInput.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter", shiftKey: true }));
+
+    await vi.waitFor(() => expect(root.querySelector('[data-column-row-index="1"]')).not.toBeNull());
+    const addedInput = root.querySelector<HTMLInputElement>('[data-column-row-index="1"] [data-column-name-input]');
+    expect(addedInput?.value).toBe("");
+    expect(document.activeElement).toBe(addedInput);
+  });
+
+  it("copies the field below the focused input on Mod+D", async () => {
+    const root = await mountEditor("dameng");
+    const sourceInput = root.querySelector<HTMLInputElement>('[data-column-row-index="0"] [data-column-name-input]');
+    if (!sourceInput) throw new Error("Missing source column name input");
+
+    sourceInput.focus();
+    sourceInput.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "d", ctrlKey: true }));
+
+    await vi.waitFor(() => expect(root.querySelector('[data-column-row-index="1"]')).not.toBeNull());
+    const copiedInput = root.querySelector<HTMLInputElement>('[data-column-row-index="1"] [data-column-name-input]');
+    expect(copiedInput?.value).toBe(sourceInput.value);
+    expect(document.activeElement).toBe(copiedInput);
+  });
+
+  it("widens the ordinal indicator for a two-digit primary-key row", async () => {
+    const root = await mountEditor("dameng");
+    const addColumn = buttonWithText(root, "structureEditor.addColumn");
+    for (let index = 0; index < 9; index += 1) {
+      addColumn.click();
+      await nextTick();
+    }
+
+    const primaryKey = columnCheckbox(root, "structureEditor.primaryKey", 9);
+    primaryKey.checked = true;
+    primaryKey.dispatchEvent(new Event("change", { bubbles: true }));
+    await nextTick();
+
+    const actionIndicator = root.querySelector<HTMLElement>('[data-column-row-index="9"] td:first-child > div > div:first-child');
+    expect(Number.parseFloat(actionIndicator?.style.width ?? "0")).toBeGreaterThan(28);
   });
 });
 

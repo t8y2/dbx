@@ -127,8 +127,8 @@ describe("legacy WebView CSS fallbacks", () => {
     expect(globalsCss).toContain(".hover\\:bg-primary\\/15:hover");
     const activeConnectionSources = `${connectionTreeSource}\n${activeConnectionFilterSource}`;
     expect(activeConnectionSources).toContain("showActiveConnectionsOnly");
-    // Three pre-existing usages plus the sidebar regex-search toggle.
-    expect(activeConnectionSources.match(/bg-primary\/10 border-primary\/30/g)?.length).toBe(4);
+    expect(connectionTreeSource).toContain("text-primary bg-primary/10 border-primary/30");
+    expect(activeConnectionFilterSource).toContain("text-primary bg-primary/10 border-primary/30");
   });
 
   it("keeps legacy tab triggers connected to the configured corner style", () => {

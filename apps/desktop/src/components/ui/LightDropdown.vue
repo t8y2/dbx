@@ -5,6 +5,7 @@ import { Check, ChevronDown } from "@lucide/vue";
 export interface LightDropdownItem {
   label: string;
   value: string;
+  groupLabel?: string;
   title?: string;
   icon?: Component;
   iconClass?: string;
@@ -182,6 +183,7 @@ onBeforeUnmount(close);
       <div v-if="label" class="bg-border -mx-1 my-1 h-px" />
       <template v-for="item in items" :key="item.value">
         <div v-if="item.separatorBefore" class="bg-border -mx-1 my-1 h-px" />
+        <div v-if="item.groupLabel" class="px-1.5 py-1 text-[11px] font-medium text-muted-foreground">{{ item.groupLabel }}</div>
         <button
           type="button"
           class="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-sm outline-hidden hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"

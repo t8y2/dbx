@@ -4,6 +4,12 @@ import { describe, expect, it } from "vitest";
 const panelSource = readFileSync(new URL("../SqlLibraryPanel.vue", import.meta.url), "utf8");
 
 describe("SqlLibraryPanel selection contrast", () => {
+  it("explains how SQL Library content differs from local SQL files", () => {
+    expect(panelSource).toContain('import HelpTooltip from "@/components/ui/tooltip/HelpTooltip.vue";');
+    expect(panelSource).toMatch(/<HelpTooltip :label="t\('sqlLibrary\.storageHelp'\)" side="bottom"[\s\S]*?\{\{ t\("sqlLibrary\.storageHelp"\) \}\}[\s\S]*?<\/HelpTooltip>/);
+    expect(panelSource).toContain('content-class="max-w-[320px] whitespace-pre-line"');
+  });
+
   it("uses the accent foreground for selected rows and their metadata", () => {
     expect(panelSource).toContain('return "bg-accent text-accent-foreground";');
     expect(panelSource).toMatch(/function fileMetaClass[\s\S]*\? "text-accent-foreground" : "text-muted-foreground";/);

@@ -109,6 +109,7 @@ const sqlFormatterOptionLabelKeys: Record<keyof SqlFormatterOptionSettings, stri
   fromClauseLayout: "settings.sqlFormatterFromClauseLayout",
   expressionWidth: "settings.sqlFormatterExpressionWidth",
   linesBetweenQueries: "settings.sqlFormatterLinesBetweenQueries",
+  preserveEmptyLines: "settings.sqlFormatterPreserveEmptyLines",
   denseOperators: "settings.sqlFormatterDenseOperators",
   newlineBeforeSemicolon: "settings.sqlFormatterNewlineBeforeSemicolon",
   paramTypes: "settings.sqlFormatterParamTypes",
@@ -667,6 +668,11 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="grid gap-3 md:grid-cols-2">
+          <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+            <Label for="sql-formatter-preserve-empty-lines">{{ t("settings.sqlFormatterPreserveEmptyLines") }}</Label>
+            <Switch id="sql-formatter-preserve-empty-lines" :model-value="settings.preserveEmptyLines" @update:model-value="(value: boolean) => updateOption('preserveEmptyLines', value)" />
+          </div>
+
           <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
             <Label for="sql-formatter-dense-operators">{{ t("settings.sqlFormatterDenseOperators") }}</Label>
             <Switch id="sql-formatter-dense-operators" :model-value="settings.denseOperators" @update:model-value="(value: boolean) => updateOption('denseOperators', value)" />

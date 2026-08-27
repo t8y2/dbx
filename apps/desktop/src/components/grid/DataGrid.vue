@@ -6893,6 +6893,11 @@ function inactiveCanvasSurface(): HTMLCanvasElement | null {
   return (canvasUsingBackSurface.value ? canvasRef.value : canvasBackRef.value) ?? null;
 }
 const canvasOverlayRef = ref<HTMLElement>();
+
+function isCanvasGridInteractionTarget(target: Node): boolean {
+  return canvasOverlayRef.value?.contains(target) === true || canvasRef.value?.contains(target) === true || canvasBackRef.value?.contains(target) === true;
+}
+
 const canvasViewportWidth = ref(0);
 const canvasViewportHeight = ref(0);
 const canvasScrollTop = ref(0);
@@ -7247,7 +7252,9 @@ function onCanvasMouseMove(event: MouseEvent) {
 
 function onCanvasMouseLeave(event?: MouseEvent) {
   const relatedTarget = event?.relatedTarget;
-  if (relatedTarget instanceof Node && canvasOverlayRef.value?.contains(relatedTarget)) return;
+  // A draw swaps the visible canvas surface. Treat that as an in-grid move so
+  // the action overlay does not disappear between the two surfaces.
+  if (relatedTarget instanceof Node && isCanvasGridInteractionTarget(relatedTarget)) return;
   const previous = canvasHoverCell.value;
   if (previous) {
     const previousActualColIdx = visibleColumnIndexes.value[previous.visibleColIdx];
@@ -7270,7 +7277,7 @@ function keepCanvasDetailHover() {
 
 function clearCanvasDetailHover(event?: MouseEvent) {
   const relatedTarget = event?.relatedTarget;
-  if (relatedTarget instanceof Node && (canvasOverlayRef.value?.contains(relatedTarget) || activeCanvasSurface()?.contains(relatedTarget) || canvasBackRef.value?.contains(relatedTarget))) {
+  if (relatedTarget instanceof Node && isCanvasGridInteractionTarget(relatedTarget)) {
     return;
   }
   onCanvasMouseLeave();

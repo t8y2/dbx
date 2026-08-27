@@ -118,6 +118,95 @@ function splitTrailingStandaloneDot(sql: string): { body: string; suffix: string
   };
 }
 
+interface EmptyLineProtection {
+  sql: string;
+  markers: string[];
+}
+
+/**
+ * Replaces blank source lines with unique line comments while the third-party
+ * formatter runs. sql-formatter intentionally normalizes whitespace, whereas
+ * the optional DBX setting needs to retain visual paragraph boundaries such as
+ * the blank line between a heading comment and a query. Line comments are
+ * valid at every SQL code boundary and are restored only after all DBX layout
+ * post-processing is complete.
+ */
+function protectEmptyLines(sql: string): EmptyLineProtection {
+  let namespace = 0;
+  while (sql.includes(`__DBX_PRESERVE_EMPTY_LINE_${namespace}_`)) namespace += 1;
+
+  const markers: string[] = [];
+  const lineBreakPattern = /\r\n|\r|\n/g;
+  let output = "";
+  let lineStart = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = lineBreakPattern.exec(sql))) {
+    const line = sql.slice(lineStart, match.index);
+    if (line.trim().length === 0) {
+      const marker = `-- __DBX_PRESERVE_EMPTY_LINE_${namespace}_${markers.length}__`;
+      markers.push(marker);
+      output += marker;
+    } else {
+      output += line;
+    }
+    output += match[0];
+    lineStart = lineBreakPattern.lastIndex;
+  }
+
+  // A final non-terminated blank line is still a user-authored empty line.
+  // Do not manufacture one after a trailing line break, though: that would
+  // turn the normal EOF sentinel into an additional preserved blank line.
+  const finalLine = sql.slice(lineStart);
+  if (finalLine.length > 0 && finalLine.trim().length === 0) {
+    const marker = `-- __DBX_PRESERVE_EMPTY_LINE_${namespace}_${markers.length}__`;
+    markers.push(marker);
+    output += marker;
+  } else {
+    output += finalLine;
+  }
+
+  return { sql: markers.length > 0 ? output : sql, markers };
+}
+
+function restoreProtectedEmptyLines(sql: string, markers: readonly string[]): string {
+  if (markers.length === 0) return sql;
+
+  const markerSet = new Set(markers);
+  const lines = sql.split(/\r\n|\r|\n/);
+  for (let index = 0; index < lines.length; ) {
+    if (!markerSet.has(lines[index].trim())) {
+      index += 1;
+      continue;
+    }
+
+    let runEnd = index;
+    while (runEnd < lines.length && markerSet.has(lines[runEnd].trim())) runEnd += 1;
+    const markerCount = runEnd - index;
+
+    // sql-formatter adds `linesBetweenQueries` blank lines before a marker
+    // group placed between statements. Those lines did not exist in the
+    // source—the marker group itself represents the source blank lines—so
+    // remove at most one generated line per original blank line. This keeps
+    // the larger of the user-authored spacing and the formatter's configured
+    // query spacing instead of adding the two counts together.
+    let removed = 0;
+    while (removed < markerCount && index > 0 && lines[index - 1].trim().length === 0) {
+      lines.splice(index - 1, 1);
+      index -= 1;
+      runEnd -= 1;
+      removed += 1;
+    }
+
+    for (let markerIndex = index; markerIndex < runEnd; markerIndex += 1) {
+      lines[markerIndex] = "";
+    }
+    index = runEnd;
+  }
+
+  return lines.join("\n");
+}
+
 const DUCKDB_ALIAS_IDENTIFIER_START_RE = /[\p{L}_]/u;
 const DUCKDB_ALIAS_IDENTIFIER_CHAR_RE = /[\p{L}\p{N}_]/u;
 
@@ -253,7 +342,9 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
   const normalizedSettings = normalizeSqlFormatterSettings(settings);
   const options = sqlFormatterOptions(normalizedSettings);
   const language = formatterLanguage(dialect);
-  const protectedInput = dialect === "duckdb" ? protectDuckDbPrefixAliasSeparators(sql) : { sql, marker: null };
+  const emptyLineProtection = normalizedSettings.preserveEmptyLines ? protectEmptyLines(sql) : null;
+  const sqlWithProtectedEmptyLines = emptyLineProtection?.sql ?? sql;
+  const protectedInput = dialect === "duckdb" ? protectDuckDbPrefixAliasSeparators(sqlWithProtectedEmptyLines) : { sql: sqlWithProtectedEmptyLines, marker: null };
   const formatterOptions =
     language === "postgresql"
       ? {
@@ -290,16 +381,20 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
     }
   };
 
+  const finalizeFormattedSql = (formatted: string): string => {
+    const restoredDuckDbAliases = restoreDuckDbPrefixAliasSeparators(formatted, protectedInput.marker);
+    const laidOut = applySqlFormatterLayout(restoredDuckDbAliases, normalizedSettings, dialect);
+    return emptyLineProtection ? restoreProtectedEmptyLines(laidOut, emptyLineProtection.markers) : laidOut;
+  };
+
   try {
-    const formatted = restoreDuckDbPrefixAliasSeparators(formatWithFallback(protectedInput.sql), protectedInput.marker);
-    return applySqlFormatterLayout(formatted, normalizedSettings, dialect);
+    return finalizeFormattedSql(formatWithFallback(protectedInput.sql));
   } catch (err) {
-    const trailingDot = dialect === "dameng" ? splitTrailingStandaloneDot(sql) : null;
+    const trailingDot = dialect === "dameng" ? splitTrailingStandaloneDot(protectedInput.sql) : null;
     if (!trailingDot) throw err;
 
     try {
-      const formatted = applySqlFormatterLayout(formatWithFallback(trailingDot.body), normalizedSettings, dialect);
-      return `${formatted}${trailingDot.suffix}`;
+      return finalizeFormattedSql(`${formatWithFallback(trailingDot.body)}${trailingDot.suffix}`);
     } catch {
       throw err;
     }

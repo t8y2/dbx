@@ -26,6 +26,40 @@ describe("sqlCompletion keyword snippets", () => {
   });
 });
 
+describe("SQL Server datepart completion", () => {
+  it.each(["DATEADD", "DATEDIFF", "DATEPART", "DATENAME"])("suggests datepart values for the first %s argument", (functionName) => {
+    const sql = `SELECT ${functionName}(d`;
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [],
+      columnsByTable: new Map(),
+      databaseType: "sqlserver",
+      dialect: "sqlserver",
+      keywordCase: "lower",
+    });
+
+    expect(items).toEqual(expect.arrayContaining([expect.objectContaining({ label: "day", type: "keyword" }), expect.objectContaining({ label: "dayofyear", type: "keyword" })]));
+    expect(items.some((item) => item.label === "deadlock_priority")).toBe(false);
+  });
+
+  it("auto-opens the datepart list immediately after the opening parenthesis", () => {
+    const sql = "SELECT DATEADD(";
+
+    expect(shouldAutoOpenSqlCompletion(sql, sql.length, { databaseType: "sqlserver", dialect: "sqlserver" })).toBe(true);
+  });
+
+  it("stops offering datepart values after the first argument", () => {
+    const sql = "SELECT DATEADD(day, d";
+
+    expect(getSqlCompletionContext(sql, sql.length, { databaseType: "sqlserver", dialect: "sqlserver" }).preferredValueKeywords).toBeUndefined();
+  });
+
+  it("does not apply SQL Server datepart values to other dialects", () => {
+    const sql = "SELECT DATEADD(d";
+
+    expect(getSqlCompletionContext(sql, sql.length, { databaseType: "mysql", dialect: "mysql" }).preferredValueKeywords).toBeUndefined();
+  });
+});
+
 describe("MySQL DESCRIBE table completion", () => {
   it.each(["DESC", "DESCRIBE"])("treats %s as a table-name context", (keyword) => {
     const sql = `${keyword} ord`;

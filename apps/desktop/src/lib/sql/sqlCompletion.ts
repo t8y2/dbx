@@ -1067,6 +1067,9 @@ const SQLSERVER_FUNCTION_SIGNATURES = new Map<string, string[]>([
   ["ISNULL", ["expression", "replacement"]],
 ]);
 
+const SQLSERVER_DATEPART_FUNCTIONS = new Set(["DATEADD", "DATEDIFF", "DATEPART", "DATENAME"]);
+const SQLSERVER_DATEPART_VALUES = ["year", "quarter", "month", "dayofyear", "day", "week", "weekday", "hour", "minute", "second", "millisecond", "microsecond", "nanosecond", "tzoffset", "iso_week"];
+
 const MANTICORESEARCH_FUNCTION_SIGNATURES = new Map<string, string[]>([
   ["MATCH", ["query"]],
   ["BM25F", ["field=weight", "...fields"]],
@@ -1335,6 +1338,7 @@ export type SqlCompletionContextKind = "table" | "schema" | "catalog" | "routine
 export interface SqlCompletionContext {
   prefix: string;
   replacementRange?: { start: number; end: number };
+  preferredValueKeywords?: string[];
   qualifier?: string;
   qualifierParts?: string[];
   suggestTables: boolean;
@@ -1515,6 +1519,10 @@ class SqlCompletionProvider {
       return dedupeAndSort(buildMongoCompletionItemsFromContext({ mode: "root", prefix: context.prefix, from: 0 }).map(mongoCompletionItemToSqlCompletionItem));
     }
 
+    if (context.preferredValueKeywords?.length) {
+      return dedupeAndSort(buildPreferredKeywordItems(context.prefix, context.preferredValueKeywords, this.input.keywordCase));
+    }
+
     const preferReferencedColumns = hasMatchingReferencedColumnPrefix(context, this.input.columnsByTable);
     if (!pendingJoinKeyword && !context.exclusiveTableSuggestions && !context.exclusiveColumnSuggestions && !context.exclusiveRoutineSuggestions) {
       const snippets = this.databaseType === "manticoresearch" ? [...(this.input.snippets ?? DEFAULT_SQL_SNIPPETS), ...MANTICORESEARCH_SQL_SNIPPETS] : (this.input.snippets ?? DEFAULT_SQL_SNIPPETS);
@@ -1638,7 +1646,7 @@ export function shouldAutoOpenSqlCompletion(sql: string, cursor: number, options
   if (isAfterJoinModifierContext(sql.slice(0, cursor))) return true;
   if (/\bcall\s+(?:[A-Za-z_][\w$]*\.)?$/i.test(sql.slice(0, cursor))) return true;
   const context = getSqlCompletionContext(sql, cursor, options);
-  if (previousChar === "(" && context.insertTable) return true;
+  if (previousChar === "(" && (context.insertTable || context.preferredValueKeywords?.length)) return true;
   if (/[,;()[\]]/.test(previousChar)) return false;
   if (context.exclusiveTableSuggestions || context.exclusiveRoutineSuggestions || context.suggestTables) {
     return true;
@@ -2266,6 +2274,7 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
 
   const statementKind = detectStatementKind(beforeCursor || fullStatement);
   const dataTypeContext = isCreateTableColumnTypeContext(beforeToken);
+  const preferredValueKeywords = sqlServerDatepartCompletionValues(beforeCursor, options.databaseType);
   const preferredKeywords = qualifier ? [] : preferredKeywordsForCompletion(beforeCursor, beforeToken, selectListColumnContext, exclusiveTableSuggestions, updateInfo, deleteInfo);
   const contextKind = detectCompletionContextKind({
     qualifier,
@@ -2284,6 +2293,7 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
 
   return {
     prefix,
+    preferredValueKeywords,
     qualifier: insertInfo ? undefined : qualifier,
     qualifierParts: insertInfo ? undefined : qualifierParts,
     suggestTables: insertInfo ? false : afterTableTrigger,
@@ -2318,6 +2328,13 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
     contextKind,
     dataTypeContext,
   };
+}
+
+function sqlServerDatepartCompletionValues(beforeCursor: string, databaseType?: DatabaseType): string[] | undefined {
+  if (databaseType !== "sqlserver") return undefined;
+  const call = findActiveFunctionCall(beforeCursor);
+  if (!call || call.activeGroup !== 0 || !SQLSERVER_DATEPART_FUNCTIONS.has(call.name.toUpperCase())) return undefined;
+  return countTopLevelCommas(call.groupText) === 0 ? SQLSERVER_DATEPART_VALUES : undefined;
 }
 
 function isCreateTableColumnTypeContext(beforeToken: string): boolean {

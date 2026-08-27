@@ -16,6 +16,30 @@ describe("sqlFormatter", () => {
     expect(canFormatSqlForDatabaseType("mysql")).toBe(true);
   });
 
+  it("preserves source empty lines only when configured", async () => {
+    const sql = "-- tstt\n\nSELECT * FROM AUX_TABLE AS au LIMIT 100;";
+    const consecutiveEmptyLines = "-- section\n\n\nSELECT 1;";
+    const queriesWithEmptyLine = "SELECT 1;\n\nSELECT 2;";
+    const queriesWithTwoEmptyLines = "SELECT 1;\n\n\nSELECT 2;";
+
+    const defaultFormatted = await formatSqlForEditing(sql, "generic");
+    const preserved = await formatSqlForEditing(sql, "generic", { preserveEmptyLines: true });
+    const preservedConsecutive = await formatSqlForEditing(consecutiveEmptyLines, "generic", { preserveEmptyLines: true });
+    const preservedQueriesNoSpacing = await formatSqlForEditing(queriesWithEmptyLine, "generic", { preserveEmptyLines: true, linesBetweenQueries: 0 });
+    const preservedQueries = await formatSqlForEditing(queriesWithEmptyLine, "generic", { preserveEmptyLines: true, linesBetweenQueries: 1 });
+    const preservedQueriesWideSpacing = await formatSqlForEditing(queriesWithEmptyLine, "generic", { preserveEmptyLines: true, linesBetweenQueries: 2 });
+    const preservedQueriesWithTwoEmptyLines = await formatSqlForEditing(queriesWithTwoEmptyLines, "generic", { preserveEmptyLines: true, linesBetweenQueries: 1 });
+
+    expect(defaultFormatted).toContain("-- tstt\nSELECT");
+    expect(preserved).toContain("-- tstt\n\nSELECT");
+    expect(preservedConsecutive).toContain("-- section\n\n\nSELECT");
+    expect(preservedQueriesNoSpacing).toBe("SELECT\n  1;\n\nSELECT\n  2;");
+    expect(preservedQueries).toBe("SELECT\n  1;\n\nSELECT\n  2;");
+    expect(preservedQueriesWideSpacing).toBe("SELECT\n  1;\n\n\nSELECT\n  2;");
+    expect(preservedQueriesWithTwoEmptyLines).toBe("SELECT\n  1;\n\n\nSELECT\n  2;");
+    expect(preserved).not.toContain("__DBX_PRESERVE_EMPTY_LINE_");
+  });
+
   it("maps PostgreSQL-compatible database types to the postgres formatter dialect", () => {
     for (const dbType of ["postgres", "kwdb", "gaussdb", "opengauss", "questdb", "kingbase", "highgo", "vastbase", "redshift"]) {
       expect(sqlFormatDialectForDbType(dbType)).toBe("postgres");

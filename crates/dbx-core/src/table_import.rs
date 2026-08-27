@@ -3693,7 +3693,10 @@ fn import_data_type(inferred_type: ImportInferredType, db_type: &DatabaseType) -
     .to_string()
 }
 
-fn normalize_import_target_data_type(mapping: &TableImportColumnMapping) -> Result<Option<String>, String> {
+fn normalize_import_target_data_type(
+    mapping: &TableImportColumnMapping,
+    db_type: &DatabaseType,
+) -> Result<Option<String>, String> {
     let Some(raw_data_type) = mapping.target_data_type.as_deref() else {
         return Ok(None);
     };
@@ -3702,7 +3705,29 @@ fn normalize_import_target_data_type(mapping: &TableImportColumnMapping) -> Resu
         return Err(format!("Target data type cannot be empty: {}", mapping.target_column));
     }
     validate_import_target_data_type(data_type)?;
-    Ok(Some(data_type.to_string()))
+    Ok(Some(with_default_length_if_required(data_type, db_type)))
+}
+
+/// MySQL and its wire-compatible engines reject a bare `VARCHAR`/`CHAR` column
+/// (`ERROR 1064: You have an error in your SQL syntax`) -- unlike PostgreSQL,
+/// where an unparameterized `VARCHAR` is valid and means "unlimited". The
+/// import type picker offers these bare names as options (shared with the
+/// table structure editor, which pairs them with a separate length field the
+/// import dialog doesn't have), so a user selecting "VARCHAR" here sends a
+/// type MySQL cannot create a table with. See #7302.
+fn with_default_length_if_required(data_type: &str, db_type: &DatabaseType) -> String {
+    let requires_length = matches!(
+        db_type,
+        DatabaseType::Mysql
+            | DatabaseType::Doris
+            | DatabaseType::StarRocks
+            | DatabaseType::Goldendb
+            | DatabaseType::Sundb
+    );
+    if requires_length && matches!(data_type.to_ascii_uppercase().as_str(), "VARCHAR" | "CHAR") {
+        return format!("{data_type}(255)");
+    }
+    data_type.to_string()
 }
 
 fn validate_import_target_data_type(data_type: &str) -> Result<(), String> {
@@ -3752,7 +3777,7 @@ pub fn build_import_create_table_plan(
     let mapped = mapping_indexes_with_mappings(&data.columns, mappings)?;
     let mut columns = Vec::with_capacity(mapped.len());
     for (source_index, mapping) in mapped {
-        let data_type = match normalize_import_target_data_type(mapping)? {
+        let data_type = match normalize_import_target_data_type(mapping, db_type)? {
             Some(data_type) => data_type,
             None => {
                 let inferred_type = infer_column_type(&data.rows, source_index);
@@ -9134,6 +9159,38 @@ mod tests {
                 ImportCreateTableColumn { name: "amount".to_string(), data_type: "DECIMAL(10,2)".to_string() },
             ]
         );
+    }
+
+    #[test]
+    fn create_table_plan_defaults_length_for_bare_varchar_on_mysql_family() {
+        let data = ParsedImportFile {
+            columns: vec!["name".to_string()],
+            rows: vec![vec![serde_json::json!("Ada")]],
+            total_rows: 1,
+            effective_encoding: None,
+        };
+        let mappings = vec![TableImportColumnMapping {
+            source_column: "name".to_string(),
+            target_column: "name".to_string(),
+            target_data_type: Some("VARCHAR".to_string()),
+        }];
+
+        for db_type in [
+            DatabaseType::Mysql,
+            DatabaseType::Doris,
+            DatabaseType::StarRocks,
+            DatabaseType::Goldendb,
+            DatabaseType::Sundb,
+        ] {
+            let plan = build_import_create_table_plan(&data, &mappings, "users", "", &db_type).unwrap();
+            assert_eq!(plan.columns[0].data_type, "VARCHAR(255)", "{db_type:?} should default a length");
+        }
+
+        // PostgreSQL allows a bare, unparameterized VARCHAR (unlimited length),
+        // so it must be left untouched.
+        let plan =
+            build_import_create_table_plan(&data, &mappings, "users", "public", &DatabaseType::Postgres).unwrap();
+        assert_eq!(plan.columns[0].data_type, "VARCHAR");
     }
 
     #[test]

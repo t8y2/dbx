@@ -9,6 +9,7 @@ import { useToast } from "@/composables/useToast";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { formatSqlText, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { createShikiSqlHighlighter, type SqlHighlighter } from "@/lib/sql/sqlHighlighter";
+import { useSettingsStore } from "@/stores/settingsStore";
 
 const props = defineProps<{
   sql: string;
@@ -27,6 +28,7 @@ const emit = defineEmits<{
 const { t } = useI18n();
 const { isDark } = useTheme();
 const { toast } = useToast();
+const settingsStore = useSettingsStore();
 
 const isFormatted = ref(false);
 const formattedSql = ref("");
@@ -79,7 +81,7 @@ async function toggleFormat() {
 
   formatting.value = true;
   try {
-    formattedSql.value = await formatSqlText(props.sql, props.sqlFormatDialect ?? "generic");
+    formattedSql.value = await formatSqlText(props.sql, props.sqlFormatDialect ?? "generic", settingsStore.editorSettings.sqlFormatter);
     isFormatted.value = true;
     await highlightSql();
   } catch {

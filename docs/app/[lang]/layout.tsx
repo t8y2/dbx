@@ -1,6 +1,7 @@
 import "../global.css";
 import type { ReactNode } from "react";
 import type { Metadata, Viewport } from "next";
+import { RouteProgress } from "@/components/RouteProgress";
 import { buildMetadata, DEFAULT_DESCRIPTION, getHtmlLang, SITE_NAME, SITE_URL } from "@/lib/metadata";
 import { buildSiteStructuredData } from "@/lib/structuredData";
 
@@ -72,7 +73,10 @@ export default async function LangLayout({ params, children }: { params: Promise
           <script key={structuredData["@id"]} type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(structuredData) }} />
         ))}
       </head>
-      <body className="flex min-h-screen flex-col">{children}</body>
+      <body className="flex min-h-screen flex-col">
+        <RouteProgress />
+        {children}
+      </body>
     </html>
   );
 }

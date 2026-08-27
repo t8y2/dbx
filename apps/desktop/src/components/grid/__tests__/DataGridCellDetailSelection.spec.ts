@@ -4,6 +4,18 @@ import { describe, expect, it } from "vitest";
 const dataGridSource = readFileSync(new URL("../DataGrid.vue", import.meta.url), "utf8");
 
 describe("DataGrid cell detail selection", () => {
+  it("keeps Canvas hover state while the renderer swaps drawing surfaces", () => {
+    expect(dataGridSource).toContain("function isCanvasGridInteractionTarget(target: Node): boolean");
+    expect(dataGridSource).toContain("canvasOverlayRef.value?.contains(target) === true");
+    expect(dataGridSource).toContain("canvasRef.value?.contains(target) === true");
+    expect(dataGridSource).toContain("canvasBackRef.value?.contains(target) === true");
+
+    const canvasLeave = dataGridSource.match(/function onCanvasMouseLeave[\s\S]*?\n\}/)?.[0];
+    const detailLeave = dataGridSource.match(/function clearCanvasDetailHover[\s\S]*?\n\}/)?.[0];
+    expect(canvasLeave).toContain("isCanvasGridInteractionTarget(relatedTarget)");
+    expect(detailLeave).toContain("isCanvasGridInteractionTarget(relatedTarget)");
+  });
+
   it("gates only the three hover Info buttons with the visibility setting", () => {
     expect(dataGridSource).toContain("const cellDetailButtonEnabled = computed(() => settingsStore.editorSettings.dataGridCellDetailButtonVisible);");
     expect(dataGridSource.match(/v-if="cellDetailButtonEnabled"/g)).toHaveLength(3);

@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { AlertTriangle, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, Database, Info, KeyRound, ListChevronsUpDown, Loader2, Maximize2, Plus, RefreshCw, Save, Search, Settings, SlidersHorizontal, Trash2, UserRound, X } from "@lucide/vue";
+import { AlertTriangle, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, Database, Info, Keyboard, KeyRound, ListChevronsUpDown, Loader2, Maximize2, Plus, RefreshCw, Save, Search, Settings, SlidersHorizontal, Trash2, UserRound, X } from "@lucide/vue";
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -531,8 +531,8 @@ const structureToolbarButtonClass = "h-[var(--structure-control-height)] gap-1 p
 const structureIconButtonClass = "h-[var(--structure-control-height)] w-[var(--structure-control-height)]";
 const structureIconClass = "h-[var(--structure-icon-size)] w-[var(--structure-icon-size)]";
 const structureCheckboxClass = "h-[var(--structure-checkbox-size)] w-[var(--structure-checkbox-size)]";
-const structureHeaderCellClass = "relative min-w-0 overflow-hidden border-b border-r px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-left";
-const structureCellClass = "min-w-0 overflow-hidden border-b border-r px-[var(--structure-cell-px)] py-[var(--structure-cell-py)]";
+const structureHeaderCellClass = "relative min-w-0 overflow-hidden border-b border-r px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-left last:border-r-0";
+const structureCellClass = "min-w-0 overflow-hidden border-b border-r px-[var(--structure-cell-px)] py-[var(--structure-cell-py)] last:border-r-0";
 const structureLastCellClass = "min-w-0 overflow-hidden border-b px-[var(--structure-cell-px)] py-[var(--structure-cell-py)]";
 const structurePropertyListClass = "flex min-w-0 items-center gap-0 overflow-hidden";
 const structurePropertyLabelClass = "flex min-w-0 items-center gap-1 whitespace-nowrap";
@@ -831,11 +831,22 @@ function columnCollation(column: EditableStructureColumn): string {
 
 const extendedPropertiesColumnIndex = 10;
 const actionButtonGap = 2;
-const columnActionButtonCount = computed(() => (canShowColumnDragControls.value ? 2 : 1));
+const columnOrdinalIndicatorGap = 4;
+const columnOrdinalIndicatorTrailingChrome = 3;
+const columnActionButtonCount = computed(() => (canShowColumnDragControls.value ? 3 : 2));
+const columnOrdinalIndicatorWidth = computed(() => {
+  const metric = structureDensityMetric.value;
+  const digitCount = String(Math.max(1, columns.value.length)).length;
+  // Reserve a full em per digit plus the primary-key icon, its gap, padding,
+  // and divider. The indicator is shared by every row, so it must fit the
+  // largest ordinal even when that row is a primary-key column.
+  const requiredWidth = metric.fontSize * digitCount + metric.iconSize + columnOrdinalIndicatorGap + columnOrdinalIndicatorTrailingChrome;
+  return Math.max(metric.columns[0], requiredWidth);
+});
 const columnActionsWidth = computed(() => {
   const metric = structureDensityMetric.value;
   const count = columnActionButtonCount.value;
-  return metric.actionButtonWidth * count + actionButtonGap * Math.max(0, count - 1) + metric.cellPaddingX * 2;
+  return columnOrdinalIndicatorWidth.value + metric.actionButtonWidth * count + actionButtonGap * count + metric.cellPaddingX * 2;
 });
 const visibleColumnIndexes = computed(() => colLabels.value.map((column) => column.widthIndex));
 const visibleColWidths = computed(() =>
@@ -852,7 +863,7 @@ function columnWidthIndex(visibleIndex: number) {
 
 const colLabels = computed(() => {
   const labels = [
-    { key: "ordinal", label: "#", widthIndex: 0 },
+    { key: "actions", label: t("structureEditor.actions"), widthIndex: 11 },
     { key: "name", label: t("structureEditor.columnName"), widthIndex: 1 },
     { key: "type", label: t("structureEditor.dataType"), widthIndex: 2 },
   ];
@@ -866,7 +877,6 @@ const colLabels = computed(() => {
   if (showExtendedProperties.value) {
     labels.push({ key: "extendedProperties", label: t("structureEditor.extendedProperties"), widthIndex: extendedPropertiesColumnIndex });
   }
-  labels.push({ key: "actions", label: t("structureEditor.actions"), widthIndex: 11 });
   return labels;
 });
 const indexColLabels = computed(() => [
@@ -2169,7 +2179,7 @@ async function copyColumn(column: EditableStructureColumn) {
   await focusColumnNameInput(copiedColumn.id);
 }
 
-async function addColumn() {
+async function addColumn(afterColumn?: EditableStructureColumn) {
   if (!canAddColumn.value) return;
   activeTab.value = "columns";
   const dataType = defaultNewColumnDataType(databaseType.value, dataTypeOptions.value);
@@ -2187,7 +2197,8 @@ async function addColumn() {
     extra: {},
     markedForDrop: false,
   };
-  const insertAt = resolveInsertColumnIndex(columns.value, selectedColumnId.value);
+  const sourceIndex = afterColumn ? columns.value.findIndex((item) => item.id === afterColumn.id) : -1;
+  const insertAt = sourceIndex >= 0 ? sourceIndex + 1 : resolveInsertColumnIndex(columns.value, selectedColumnId.value);
   columns.value.splice(insertAt, 0, column);
   selectSingleColumn(column);
   if (usesLocalTableColumnOrder.value) persistLocalColumnOrder(false);
@@ -3360,7 +3371,32 @@ function addItemForActiveTab(): boolean {
   return false;
 }
 
+function focusedEditableColumn(eventTarget: EventTarget | null): EditableStructureColumn | undefined {
+  if (!(eventTarget instanceof HTMLInputElement || eventTarget instanceof HTMLTextAreaElement) || eventTarget.disabled || eventTarget.readOnly) return;
+  const row = eventTarget.closest<HTMLElement>("[data-column-id]");
+  const columnId = row?.dataset.columnId;
+  if (!columnId) return;
+  return columns.value.find((column) => column.id === columnId && !column.markedForDrop);
+}
+
+function isShiftEnterShortcut(event: KeyboardEvent): boolean {
+  return !event.isComposing && event.key === "Enter" && event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey;
+}
+
 function onStructureEditorKeydown(event: KeyboardEvent) {
+  const focusedColumn = activeTab.value === "columns" ? focusedEditableColumn(event.target) : undefined;
+  if (focusedColumn && isShiftEnterShortcut(event) && canAddColumn.value) {
+    event.preventDefault();
+    event.stopPropagation();
+    void addColumn(focusedColumn);
+    return;
+  }
+  if (focusedColumn && isPlainModShortcut(event, "d") && canAddColumn.value) {
+    event.preventDefault();
+    event.stopPropagation();
+    void copyColumn(focusedColumn);
+    return;
+  }
   if (isPlainModShortcut(event, "f")) {
     event.preventDefault();
     event.stopPropagation();
@@ -3842,6 +3878,28 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                 <Plus :class="structureIconClass" />
                 {{ t("structureEditor.addColumn") }}
               </Button>
+              <Tooltip v-if="activeTab === 'columns'" :delay-duration="0">
+                <TooltipTrigger as-child>
+                  <Button type="button" size="sm" variant="ghost" :class="[structureToolbarButtonClass, 'text-muted-foreground']" :aria-label="t('settings.shortcutsTab')">
+                    <Keyboard :class="structureIconClass" />
+                    {{ t("settings.shortcutsTab") }}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent
+                  data-field-shortcut-hints
+                  side="bottom"
+                  class="flex w-56 max-w-none flex-col items-stretch gap-1.5 border border-primary/30 !bg-secondary !text-secondary-foreground shadow-lg data-open:!animate-none data-[state=delayed-open]:!animate-none data-closed:!animate-none [&>svg]:!bg-secondary [&>svg]:!fill-secondary"
+                >
+                  <div class="flex items-center justify-between gap-4">
+                    <span class="whitespace-nowrap"><span class="text-primary">↓</span> {{ t("structureEditor.addColumn") }}</span>
+                    <kbd class="min-w-5 shrink-0 whitespace-nowrap rounded border border-primary/30 bg-background px-1.5 py-0.5 text-center font-mono text-[11px] leading-none text-primary shadow-xs">Shift+Enter</kbd>
+                  </div>
+                  <div class="flex items-center justify-between gap-4">
+                    <span class="whitespace-nowrap"><span class="text-primary">↓</span> {{ t("structureEditor.copyColumn") }}</span>
+                    <kbd class="min-w-5 shrink-0 whitespace-nowrap rounded border border-primary/30 bg-background px-1.5 py-0.5 text-center font-mono text-[11px] leading-none text-primary shadow-xs">⌘/Ctrl+D</kbd>
+                  </div>
+                </TooltipContent>
+              </Tooltip>
               <Button v-if="activeTab === 'columns'" size="sm" variant="outline" :class="structureToolbarButtonClass" :disabled="!canAddColumn" @click="openCopyColumnsDialog">
                 <Copy :class="structureIconClass" />
                 {{ t("structureEditor.copyColumns") }}
@@ -3899,8 +3957,14 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                       minWidth: visibleColWidths[i] + 'px',
                     }"
                   >
-                    {{ columnLabel.label }}
-                    <div v-if="i < colLabels.length - 1" class="absolute right-0 top-0 z-20 h-full w-1 cursor-col-resize hover:bg-primary/30" :class="colResizing?.col === columnWidthIndex(i) ? 'bg-primary/30' : ''" @mousedown="onColResize($event, i)" />
+                    <template v-if="columnLabel.key === 'actions'">
+                      <div class="flex min-w-0 items-center">
+                        <span class="shrink-0 border-r pr-0.5 text-center text-muted-foreground" :style="{ width: columnOrdinalIndicatorWidth + 'px' }">#</span>
+                        <span class="min-w-0 flex-1 pl-0.5 text-center">{{ columnLabel.label }}</span>
+                      </div>
+                    </template>
+                    <template v-else>{{ columnLabel.label }}</template>
+                    <div v-if="columnLabel.key !== 'actions' && i < colLabels.length - 1" class="absolute right-0 top-0 z-20 h-full w-1 cursor-col-resize hover:bg-primary/30" :class="colResizing?.col === columnWidthIndex(i) ? 'bg-primary/30' : ''" @mousedown="onColResize($event, i)" />
                   </th>
                 </tr>
               </thead>
@@ -3918,10 +3982,49 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                     @dragover="onColumnDragOver(index, $event)"
                     @drop="onColumnDrop(index, $event)"
                   >
-                    <td :class="[structureCellClass, 'text-muted-foreground']">
-                      <div class="flex items-center gap-1">
-                        <span>{{ index + 1 }}</span>
-                        <KeyRound v-if="column.isPrimaryKey" :class="[structureIconClass, 'text-amber-500']" />
+                    <td :class="structureCellClass">
+                      <div class="flex min-w-0 items-center">
+                        <div class="flex shrink-0 items-center justify-center gap-1 border-r pr-0.5 text-muted-foreground" :style="{ width: columnOrdinalIndicatorWidth + 'px' }">
+                          <span class="tabular-nums">{{ index + 1 }}</span>
+                          <KeyRound v-if="column.isPrimaryKey" :class="[structureIconClass, 'shrink-0 text-amber-500']" />
+                        </div>
+                        <div class="flex min-w-0 items-center gap-0.5 pl-0.5">
+                          <Button
+                            v-if="canShowColumnDragControls"
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            :class="[structureActionButtonClass, canDragColumn(index) ? 'cursor-grab active:cursor-grabbing' : 'cursor-not-allowed', hasLocalColumnOrderChange ? 'border-primary/30 bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary' : '']"
+                            :disabled="!canDragColumn(index)"
+                            :title="t('structureEditor.dragColumn')"
+                            :aria-label="t('structureEditor.dragColumn')"
+                            :draggable="canDragColumn(index)"
+                            @pointerdown="onColumnDragPointerDown(index, $event)"
+                            @dragstart="onColumnDragStart(index, $event)"
+                            @dragend="onColumnDragEnd"
+                          >
+                            <ListChevronsUpDown :class="structureIconClass" />
+                          </Button>
+                          <Button variant="ghost" size="icon" :class="structureActionButtonClass" :disabled="!canAddColumn || column.markedForDrop" :title="t('structureEditor.copyColumn')" :aria-label="t('structureEditor.copyColumn')" @click.stop="copyColumn(column)">
+                            <Copy :class="structureIconClass" />
+                          </Button>
+                          <Button
+                            v-if="column.original"
+                            variant="ghost"
+                            size="icon"
+                            :class="structureActionButtonClass"
+                            :disabled="!canDropColumn(column)"
+                            :title="column.markedForDrop ? t('structureEditor.restore') : t('structureEditor.drop')"
+                            :aria-label="column.markedForDrop ? t('structureEditor.restore') : t('structureEditor.drop')"
+                            @click.stop="toggleDropColumn(column)"
+                          >
+                            <RefreshCw v-if="column.markedForDrop" :class="structureIconClass" />
+                            <Trash2 v-else :class="structureIconClass" />
+                          </Button>
+                          <Button v-else variant="ghost" size="icon" :class="structureActionButtonClass" :title="t('structureEditor.remove')" :aria-label="t('structureEditor.remove')" @click.stop="removeNewColumn(column)">
+                            <X :class="structureIconClass" />
+                          </Button>
+                        </div>
                       </div>
                     </td>
                     <td :class="structureCellClass">
@@ -4219,45 +4322,6 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                             />
                           </template>
                         </template>
-                      </div>
-                    </td>
-                    <td :class="structureLastCellClass">
-                      <div class="flex min-w-0 items-center justify-start gap-0.5">
-                        <Button
-                          v-if="canShowColumnDragControls"
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          :class="[structureActionButtonClass, canDragColumn(index) ? 'cursor-grab active:cursor-grabbing' : 'cursor-not-allowed', hasLocalColumnOrderChange ? 'border-primary/30 bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary' : '']"
-                          :disabled="!canDragColumn(index)"
-                          :title="t('structureEditor.dragColumn')"
-                          :aria-label="t('structureEditor.dragColumn')"
-                          :draggable="canDragColumn(index)"
-                          @pointerdown="onColumnDragPointerDown(index, $event)"
-                          @dragstart="onColumnDragStart(index, $event)"
-                          @dragend="onColumnDragEnd"
-                        >
-                          <ListChevronsUpDown :class="structureIconClass" />
-                        </Button>
-                        <Button variant="ghost" size="icon" :class="structureActionButtonClass" :disabled="!canAddColumn || column.markedForDrop" :title="t('structureEditor.copyColumn')" :aria-label="t('structureEditor.copyColumn')" @click.stop="copyColumn(column)">
-                          <Copy :class="structureIconClass" />
-                        </Button>
-                        <Button
-                          v-if="column.original"
-                          variant="ghost"
-                          size="icon"
-                          :class="structureActionButtonClass"
-                          :disabled="!canDropColumn(column)"
-                          :title="column.markedForDrop ? t('structureEditor.restore') : t('structureEditor.drop')"
-                          :aria-label="column.markedForDrop ? t('structureEditor.restore') : t('structureEditor.drop')"
-                          @click.stop="toggleDropColumn(column)"
-                        >
-                          <RefreshCw v-if="column.markedForDrop" :class="structureIconClass" />
-                          <Trash2 v-else :class="structureIconClass" />
-                        </Button>
-                        <Button v-else variant="ghost" size="icon" :class="structureActionButtonClass" :title="t('structureEditor.remove')" :aria-label="t('structureEditor.remove')" @click.stop="removeNewColumn(column)">
-                          <X :class="structureIconClass" />
-                        </Button>
                       </div>
                     </td>
                   </tr>

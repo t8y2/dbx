@@ -145,12 +145,10 @@ describe("renderCodeSnapshotHtml", () => {
     expect(html).toContain("padding:0 24px 24px");
   });
 
-  it("keeps the snapshot dialog desktop layout in legacy WebViews", () => {
-    expect(codeSnapshotDialogSource).toContain("dbx-code-snapshot-dialog__body");
-    expect(codeSnapshotDialogSource).toContain("dbx-code-snapshot-dialog__options");
-    expect(codeSnapshotDialogSource).toContain("@media (min-width: 768px)");
-    expect(codeSnapshotDialogSource).toContain("flex-direction: row !important;");
-    expect(codeSnapshotDialogSource).toContain("width: 13rem !important;");
+  it("keeps the snapshot dialog responsive layout classes in source", () => {
+    expect(codeSnapshotDialogSource).toContain("sm:max-w-[860px]");
+    expect(codeSnapshotDialogSource).toContain("md:flex-row");
+    expect(codeSnapshotDialogSource).toContain("md:w-52");
   });
 
   it("materializes real line-number nodes in the export clone", () => {

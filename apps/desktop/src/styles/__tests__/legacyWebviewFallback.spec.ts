@@ -6,6 +6,7 @@ const globalsCss = readCascadeCss();
 const dialogContentSource = readFileSync(new URL("../../components/ui/dialog/DialogContent.vue", import.meta.url), "utf8");
 const dialogScrollContentSource = readFileSync(new URL("../../components/ui/dialog/DialogScrollContent.vue", import.meta.url), "utf8");
 const dialogOverlaySource = readFileSync(new URL("../../components/ui/dialog/DialogOverlay.vue", import.meta.url), "utf8");
+const codeSnapshotDialogSource = readFileSync(new URL("../../components/codeSnapshot/CodeSnapshotDialog.vue", import.meta.url), "utf8");
 const dataTransferDialogSource = readFileSync(new URL("../../components/transfer/DataTransferDialog.vue", import.meta.url), "utf8");
 const updateDialogSource = readFileSync(new URL("../../components/layout/UpdateDialog.vue", import.meta.url), "utf8");
 const dataGridColumnHeaderSource = readFileSync(new URL("../../components/grid/DataGridColumnHeader.vue", import.meta.url), "utf8");
@@ -92,6 +93,17 @@ describe("legacy WebView CSS fallbacks", () => {
     expect(dataTransferDialogSource).not.toContain("@media (min-width: 640px)");
     expect(dataTransferDialogSource).not.toMatch(/^\s+width: calc\(100vw - 2rem\) !important;$/m);
     expect(globalsCss).not.toContain(".dbx-transfer-dialog");
+  });
+
+  it("keeps the code snapshot dialog layout scoped to legacy WebViews without media queries", () => {
+    expect(codeSnapshotDialogSource).toContain('class="dbx-code-snapshot-dialog flex max-h-[calc(var(--dbx-viewport-height)-2rem)] flex-col overflow-hidden border border-border !bg-background text-foreground shadow-2xl !backdrop-blur-none sm:max-w-[860px]"');
+    expect(codeSnapshotDialogSource).toContain('class="dbx-code-snapshot-dialog__footer"');
+    expect(codeSnapshotDialogSource).toContain('html.dbx-legacy-webview [data-slot="dialog-content"].dbx-code-snapshot-dialog');
+    expect(codeSnapshotDialogSource).toContain("width: calc(100vw - 2rem) !important;");
+    expect(codeSnapshotDialogSource).toContain("flex-direction: row !important;");
+    expect(codeSnapshotDialogSource).toContain("flex-wrap: nowrap !important;");
+    expect(codeSnapshotDialogSource).toContain("justify-content: flex-end !important;");
+    expect(codeSnapshotDialogSource).not.toContain("@media");
   });
 
   it("keeps the update dialog's wide layout fallback scoped to legacy WebViews without media queries", () => {

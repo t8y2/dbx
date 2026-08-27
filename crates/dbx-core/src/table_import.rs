@@ -17,7 +17,8 @@ use quick_xml::Reader as XmlReader;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlparser::ast::{
-    Expr, Ident, Insert, ObjectName, ObjectNamePart, SetExpr, Statement, TableObject, UnaryOperator, Value as SqlValue,
+    DataType, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Ident, Insert, ObjectName, ObjectNamePart,
+    SetExpr, Statement, TableObject, UnaryOperator, Value as SqlValue,
 };
 use sqlparser::dialect::{GenericDialect, MsSqlDialect, MySqlDialect, OracleDialect, PostgreSqlDialect, SQLiteDialect};
 use sqlparser::parser::Parser;
@@ -1297,8 +1298,58 @@ fn sql_import_expr_value(expr: &Expr, context: &str) -> Result<serde_json::Value
             }
             _ => Err(sql_import_unsupported_expression(context)),
         },
+        // `DATE '...'`、`TIMESTAMP '...'`、`TIME '...'` 等标准字面量：值就是引号里的字符串，无损导入。
+        Expr::TypedString(typed) => sql_import_typed_string(typed, context),
+        // 白名单字面量日期函数（TO_DATE/TO_TIMESTAMP/...）：参数全为字符串字面量时按第一个参数导入。
+        Expr::Function(function) => sql_import_literal_temporal_function(function, context),
         _ => Err(sql_import_unsupported_expression(context)),
     }
+}
+
+/// `DATE '...'`、`TIMESTAMP '...'`、`TIME '...'` 这类标准字面量：值就是引号里的字符串，
+/// 无损地作为字符串导入。其它 TypedString（如 INTERVAL）语义更复杂，不展开。
+fn sql_import_typed_string(typed: &sqlparser::ast::TypedString, context: &str) -> Result<serde_json::Value, String> {
+    match &typed.data_type {
+        DataType::Date | DataType::Time(..) | DataType::Timestamp(..) => match typed.value.clone().into_string() {
+            Some(text) => Ok(serde_json::Value::String(text)),
+            None => Err(sql_import_unsupported_expression(context)),
+        },
+        _ => Err(sql_import_unsupported_expression(context)),
+    }
+}
+
+/// 白名单“字面量日期函数”：`TO_DATE('2021-09-08 09:06:25', 'YYYY-MM-DD HH24:MI:SS')` 这类调用，
+/// 当参数全部是字符串字面量时，其“值”就是第一个字符串实参表示的日期时间，按该字符串无损导入。
+/// 任何非字面量参数（列引用、表达式、命名参数、ORDER BY 子句等）都不展开，回退到“表达式不支持”，
+/// 避免静默改变语句语义。
+fn sql_import_literal_temporal_function(
+    function: &sqlparser::ast::Function,
+    context: &str,
+) -> Result<serde_json::Value, String> {
+    let name = function.name.to_string().to_ascii_lowercase();
+    if !matches!(name.as_str(), "to_date" | "to_timestamp" | "to_timestamp_tz") {
+        return Err(sql_import_unsupported_expression(context));
+    }
+    let FunctionArguments::List(list) = &function.args else {
+        return Err(sql_import_unsupported_expression(context));
+    };
+    if list.args.is_empty() || !list.clauses.is_empty() || list.duplicate_treatment.is_some() {
+        return Err(sql_import_unsupported_expression(context));
+    }
+
+    let mut first_value: Option<String> = None;
+    for arg in &list.args {
+        let FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(value))) = arg else {
+            return Err(sql_import_unsupported_expression(context));
+        };
+        let text = value.clone().into_string().ok_or_else(|| sql_import_unsupported_expression(context))?;
+        if first_value.is_none() {
+            first_value = Some(text);
+        }
+    }
+
+    let value = first_value.expect("args non-empty checked above");
+    Ok(serde_json::Value::String(value))
 }
 
 fn sql_import_unsupported_expression(context: &str) -> String {
@@ -8171,6 +8222,53 @@ mod tests {
     #[test]
     fn sql_import_rejects_expressions() {
         let error = parse_sql_bytes(b"INSERT INTO t (a) VALUES (NOW());", 10).unwrap_err();
+        assert!(error.contains("not supported"));
+    }
+
+    #[test]
+    fn sql_import_expands_literal_temporal_functions() {
+        let options = sql_import_options(DatabaseType::Oracle);
+        let script = b"INSERT INTO t (a, b, c) VALUES \
+            (TO_DATE('2021-09-08 09:06:25', 'YYYY-MM-DD HH24:MI:SS'), \
+             TO_TIMESTAMP('2021-09-08 09:06:25', 'YYYY-MM-DD HH24:MI:SS'), \
+             TIMESTAMP '2021-09-08 09:06:25');";
+        let parsed = parse_sql_bytes_with_options(script, &options, 10).unwrap();
+
+        assert_eq!(parsed.rows[0][0], serde_json::json!("2021-09-08 09:06:25"));
+        assert_eq!(parsed.rows[0][1], serde_json::json!("2021-09-08 09:06:25"));
+        assert_eq!(parsed.rows[0][2], serde_json::json!("2021-09-08 09:06:25"));
+    }
+
+    #[test]
+    fn sql_import_expands_typed_date_literal() {
+        let script = b"INSERT INTO t (a) VALUES (DATE '2021-09-08');";
+        let parsed = parse_sql_bytes(script, 10).unwrap();
+        assert_eq!(parsed.rows[0][0], serde_json::json!("2021-09-08"));
+    }
+
+    #[test]
+    fn sql_import_expands_temporal_function_generic_dialect() {
+        // 未指定目标方言（Generic）时也按函数名展开。
+        let script = b"INSERT INTO t (a) VALUES (TO_DATE('2021-09-08 09:06:25', 'YYYY-MM-DD HH24:MI:SS'));";
+        let parsed = parse_sql_bytes(script, 10).unwrap();
+        assert_eq!(parsed.rows[0][0], serde_json::json!("2021-09-08 09:06:25"));
+    }
+
+    #[test]
+    fn sql_import_rejects_temporal_function_with_non_literal_args() {
+        let options = sql_import_options(DatabaseType::Oracle);
+        // 列引用作为参数：无法无损展开，应拒绝而非静默改写。
+        let error =
+            parse_sql_bytes_with_options(b"INSERT INTO t (a) VALUES (TO_DATE(col, 'YYYY-MM-DD'));", &options, 10)
+                .unwrap_err();
+        assert!(error.contains("not supported"));
+    }
+
+    #[test]
+    fn sql_import_rejects_unlisted_function_still() {
+        // 非白名单函数（如 NOW()）仍按表达式拒绝。
+        let options = sql_import_options(DatabaseType::Mysql);
+        let error = parse_sql_bytes_with_options(b"INSERT INTO t (a) VALUES (NOW());", &options, 10).unwrap_err();
         assert!(error.contains("not supported"));
     }
 

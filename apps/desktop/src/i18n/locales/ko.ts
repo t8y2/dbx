@@ -3047,6 +3047,7 @@ export default withEnglishFallback({
     eventLoading: "Loading...",
     eventCancel: "Cancel",
     eventSave: "Save",
+    refreshDdlOnOpen: "열 때마다 DDL 새로 고침",
   },
   visibleDatabases: {
     title: "표시할 데이터베이스",

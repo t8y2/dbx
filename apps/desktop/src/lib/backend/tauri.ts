@@ -246,6 +246,7 @@ export interface McpGlobalPolicy {
   allowDangerousSql: boolean;
   allowedConnectionIds: string[] | null;
   configured: boolean;
+  queryTimeoutSecs: number | null;
 }
 
 export interface SavedSqlSyncEntry {

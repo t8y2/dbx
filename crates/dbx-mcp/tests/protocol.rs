@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, sync::Mutex};
 
 use async_trait::async_trait;
 use dbx_core::{
@@ -111,6 +111,123 @@ impl DbxBackend for PolicyBackend {
     }
 }
 
+struct CapturingBackend {
+    policy: McpGlobalPolicy,
+    connections: Vec<ConnectionConfig>,
+    /// Records the arguments passed to `execute_agent_tool` so tests can assert
+    /// what the server injected (e.g. `timeout_secs` from the MCP policy).
+    calls: Mutex<Vec<Value>>,
+}
+
+#[async_trait]
+impl DbxBackend for CapturingBackend {
+    async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String> {
+        Ok(self.policy.clone())
+    }
+
+    async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String> {
+        Ok(self.connections.clone())
+    }
+
+    async fn execute_agent_tool(
+        &self,
+        _connection: &ConnectionConfig,
+        _database: &str,
+        tool_name: &str,
+        arguments: Value,
+        _permissions: AgentSqlPermissions,
+    ) -> ToolResult {
+        self.calls.lock().expect("lock captures").push(arguments);
+        ToolResult {
+            tool_call_id: "capture-test".to_string(),
+            tool_name: tool_name.to_string(),
+            content: "ok".to_string(),
+            is_error: false,
+            explain_data: None,
+        }
+    }
+
+    async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
+        Ok(config)
+    }
+
+    async fn duplicate_connection_for_mcp(
+        &self,
+        _source_id: &str,
+        _copy_id: &str,
+        _copy_name: &str,
+    ) -> Result<ConnectionConfig, String> {
+        Err("not exercised".to_string())
+    }
+
+    async fn remove_connection_for_mcp(&self, _connection_id: &str) -> Result<bool, String> {
+        Ok(true)
+    }
+}
+
+/// Drives one `dbx_execute_query` call against a `CapturingBackend`, returning
+/// the captured arguments for assertion.
+async fn captured_query_arguments(backend: Arc<CapturingBackend>, sql_arguments: Value) -> Vec<Value> {
+    let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
+    let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+    let server_task = tokio::spawn(async move { server.serve(server_transport).await });
+    let client = ().serve(client_transport).await.expect("initialize MCP client");
+    let _ = client
+        .peer()
+        .call_tool(
+            CallToolRequestParams::new("dbx_execute_query")
+                .with_arguments(sql_arguments.as_object().cloned().unwrap_or_else(Map::new)),
+        )
+        .await
+        .expect("call execute_query");
+    client.cancel().await.expect("close MCP client");
+    server_task.abort();
+    backend.calls.lock().expect("lock captures").clone()
+}
+
+/// Regression for the MCP global query-timeout override: the server must inject
+/// `timeout_secs` into the `dbx_execute_query` arguments whenever the persisted
+/// policy carries a value, and must NOT inject it when the policy inherits the
+/// connection (None). This is the native boundary that turns the settings-page
+/// value into a per-query argument (server.rs `if let Some(secs) = ...`).
+#[tokio::test]
+async fn execute_query_injects_and_omits_timeout_secs_from_policy() {
+    // Case 1: a positive policy timeout is injected on every call.
+    let backend = Arc::new(CapturingBackend {
+        policy: McpGlobalPolicy {
+            read_only: false,
+            allow_dangerous_sql: false,
+            allowed_connection_ids: None,
+            query_timeout_secs: Some(300),
+        },
+        connections: vec![test_connection("scoped", "shared-db")],
+        calls: Mutex::new(Vec::new()),
+    });
+    let captured = captured_query_arguments(backend, json!({ "connection_id": "scoped", "sql": "SELECT 1" })).await;
+    assert_eq!(captured.len(), 1, "expected one captured execute_query call");
+    assert_eq!(captured[0]["timeout_secs"], json!(300), "policy timeout must be injected");
+
+    // Case 2: an inheriting policy (None) omits the key so the connection-level
+    // default is honoured rather than overridden by a stale value.
+    let backend = Arc::new(CapturingBackend {
+        policy: McpGlobalPolicy {
+            read_only: false,
+            allow_dangerous_sql: false,
+            allowed_connection_ids: None,
+            query_timeout_secs: None,
+        },
+        connections: vec![test_connection("scoped", "shared-db")],
+        calls: Mutex::new(Vec::new()),
+    });
+    let captured = captured_query_arguments(backend, json!({ "connection_id": "scoped", "sql": "SELECT 1" })).await;
+    assert_eq!(captured.len(), 1, "expected one captured execute_query call");
+    assert!(
+        !captured[0].get("timeout_secs").is_some(),
+        "no timeout_secs must be injected when the policy inherits the connection: {}",
+        captured[0]
+    );
+}
+
 fn test_connection(id: &str, name: &str) -> ConnectionConfig {
     serde_json::from_value(json!({
         "id": id,
@@ -188,6 +305,7 @@ async fn enforces_global_connection_scope_and_read_only_policy() {
             read_only: true,
             allow_dangerous_sql: false,
             allowed_connection_ids: Some(vec!["allowed".to_string(), "allowed-staging".to_string()]),
+            query_timeout_secs: None,
         },
         connections: vec![
             test_connection("allowed", "shared-db"),
@@ -256,7 +374,12 @@ async fn read_only_policy_blocks_write_capable_sql_the_keyword_scan_misses() {
         (true, "SELECT * FROM users FOR SHARE"),
     ] {
         let backend = PolicyBackend {
-            policy: McpGlobalPolicy { read_only: true, allow_dangerous_sql, allowed_connection_ids: None },
+            policy: McpGlobalPolicy {
+                read_only: true,
+                allow_dangerous_sql,
+                allowed_connection_ids: None,
+                query_timeout_secs: None,
+            },
             connections: vec![mysql_connection("mysql", "reporting")],
             group_paths: Ok(HashMap::new()),
         };
@@ -296,7 +419,12 @@ async fn read_only_policy_allows_read_only_show_statements() {
     ] {
         let connection_id = connection.id.clone();
         let backend = PolicyBackend {
-            policy: McpGlobalPolicy { read_only: true, allow_dangerous_sql: false, allowed_connection_ids: None },
+            policy: McpGlobalPolicy {
+                read_only: true,
+                allow_dangerous_sql: false,
+                allowed_connection_ids: None,
+                query_timeout_secs: None,
+            },
             connections: vec![connection],
             group_paths: Ok(HashMap::new()),
         };

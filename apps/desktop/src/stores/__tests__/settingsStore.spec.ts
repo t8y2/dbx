@@ -427,6 +427,7 @@ describe("normalizeMcpGlobalPolicy", () => {
       allowDangerousSql: false,
       allowedConnectionIds: null,
       configured: false,
+      queryTimeoutSecs: null,
     });
   });
 
@@ -443,11 +444,19 @@ describe("normalizeMcpGlobalPolicy", () => {
       allowDangerousSql: true,
       allowedConnectionIds: ["connection-1", "connection-2"],
       configured: true,
+      queryTimeoutSecs: null,
     });
   });
 
   it("preserves an empty allowlist as deny all", () => {
     expect(normalizeMcpGlobalPolicy({ allowedConnectionIds: [] }).allowedConnectionIds).toEqual([]);
+  });
+
+  it("round-trips queryTimeoutSecs null, undefined and positive numbers", () => {
+    expect(normalizeMcpGlobalPolicy({ queryTimeoutSecs: null }).queryTimeoutSecs).toBeNull();
+    expect(normalizeMcpGlobalPolicy({ queryTimeoutSecs: undefined } as any).queryTimeoutSecs).toBeNull();
+    expect(normalizeMcpGlobalPolicy({ queryTimeoutSecs: 0 }).queryTimeoutSecs).toBe(0);
+    expect(normalizeMcpGlobalPolicy({ queryTimeoutSecs: 300 }).queryTimeoutSecs).toBe(300);
   });
 });
 
@@ -661,6 +670,7 @@ describe("settingsStore MCP policy persistence", () => {
       allowDangerousSql: false,
       allowedConnectionIds: ["connection-1"],
       configured: true,
+      queryTimeoutSecs: null,
     };
     store.mcpGlobalPolicy = previous;
 
@@ -673,6 +683,7 @@ describe("settingsStore MCP policy persistence", () => {
       allowDangerousSql: false,
       allowedConnectionIds: [],
       configured: true,
+      queryTimeoutSecs: null,
     });
 
     rejectSave(new Error("save failed"));

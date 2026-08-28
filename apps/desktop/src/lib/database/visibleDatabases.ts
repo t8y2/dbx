@@ -150,14 +150,57 @@ export function visibleDatabaseFilterIsEnabled(visibleDatabases: string[] | unde
   return Array.isArray(visibleDatabases);
 }
 
+const visibleDatabasePatternRegExpCache = new Map<string, RegExp>();
+
+/** SQL LIKE 语义：`%` 匹配任意字符序列、`_` 匹配单个字符，其余按字面匹配（区分大小写）。 */
+export function visibleDatabasePatternRegExp(pattern: string): RegExp {
+  const trimmed = pattern.trim();
+  const cached = visibleDatabasePatternRegExpCache.get(trimmed);
+  if (cached) return cached;
+  let source = "";
+  for (const ch of trimmed) {
+    if (ch === "%") source += "[\\s\\S]*";
+    else if (ch === "_") source += "[\\s\\S]";
+    else source += ch.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+  }
+  const regExp = new RegExp(`^${source}$`);
+  if (visibleDatabasePatternRegExpCache.size > 256) visibleDatabasePatternRegExpCache.clear();
+  visibleDatabasePatternRegExpCache.set(trimmed, regExp);
+  return regExp;
+}
+
+export function visibleDatabasePatternsAreEnabled(patterns: string[] | undefined): boolean {
+  return Array.isArray(patterns) && patterns.some((pattern) => pattern.trim() !== "");
+}
+
+/** 解析用户输入的模式列表：逗号/分号/换行分隔，去空白、去重。 */
+export function parseVisibleDatabasePatternsInput(value: string): string[] {
+  const seen = new Set<string>();
+  const patterns: string[] = [];
+  for (const part of value.split(/[\n,，;；]+/)) {
+    const pattern = part.trim();
+    if (!pattern || seen.has(pattern)) continue;
+    seen.add(pattern);
+    patterns.push(pattern);
+  }
+  return patterns;
+}
+
+export function databaseNameMatchesVisiblePatterns(name: string, patterns: string[] | undefined): boolean {
+  if (!visibleDatabasePatternsAreEnabled(patterns)) return false;
+  return patterns!.some((pattern) => visibleDatabasePatternRegExp(pattern).test(name));
+}
+
 export function canSaveVisibleDatabaseSelection(selectedNames: string[]): boolean {
   return selectedNames.length > 0;
 }
 
-export function filterVisibleDatabaseNames(databaseNames: string[], visibleDatabases: string[] | undefined): string[] {
-  if (!visibleDatabaseFilterIsEnabled(visibleDatabases)) return databaseNames;
-  const visible = new Set(visibleDatabases);
-  return databaseNames.filter((name) => visible.has(name));
+export function filterVisibleDatabaseNames(databaseNames: string[], visibleDatabases: string[] | undefined, visibleDatabasePatterns?: string[]): string[] {
+  const exactEnabled = visibleDatabaseFilterIsEnabled(visibleDatabases);
+  if (!exactEnabled && !visibleDatabasePatternsAreEnabled(visibleDatabasePatterns)) return databaseNames;
+  // 显式勾选与模式取并集：模式对新建的数据库持续生效（#7164）
+  const visible = exactEnabled ? new Set(visibleDatabases) : undefined;
+  return databaseNames.filter((name) => visible?.has(name) || databaseNameMatchesVisiblePatterns(name, visibleDatabasePatterns));
 }
 
 export function normalizeVisibleDatabaseSelection(selectedNames: string[], databaseNames: string[]): string[] {
@@ -187,8 +230,9 @@ export function isSystemSchemaName(databaseType: DatabaseType | undefined, schem
 
 export function filterDatabaseNamesForConnection(databaseNames: string[], connection: VisibleDatabaseConnection | undefined): string[] {
   const visibleDatabases = connection?.visible_databases;
-  if (visibleDatabaseFilterIsEnabled(visibleDatabases)) {
-    return filterVisibleDatabaseNames(databaseNames, visibleDatabases);
+  const visibleDatabasePatterns = connection?.visible_database_patterns;
+  if (visibleDatabaseFilterIsEnabled(visibleDatabases) || visibleDatabasePatternsAreEnabled(visibleDatabasePatterns)) {
+    return filterVisibleDatabaseNames(databaseNames, visibleDatabases, visibleDatabasePatterns);
   }
   return filterDatabaseNamesForVisiblePicker(databaseNames, connection);
 }
@@ -218,8 +262,10 @@ export function visibleSchemaFilterIsEnabled(visibleSchemas: Record<string, stri
 export function filterSchemaNamesForConnection(schemaNames: string[], connection: VisibleDatabaseConnection | undefined, database: string, options?: SchemaFilterOptions): string[] {
   const visibleSchemas = connection?.visible_schemas;
   if (!visibleSchemaFilterIsEnabled(visibleSchemas, database)) {
-    if (connectionUsesVisibleSchemaFilter(connection) && visibleDatabaseFilterIsEnabled(connection?.visible_databases)) {
-      return filterVisibleDatabaseNames(schemaNames, connection?.visible_databases);
+    const visibleDatabases = connection?.visible_databases;
+    const visibleDatabasePatterns = connection?.visible_database_patterns;
+    if (connectionUsesVisibleSchemaFilter(connection) && (visibleDatabaseFilterIsEnabled(visibleDatabases) || visibleDatabasePatternsAreEnabled(visibleDatabasePatterns))) {
+      return filterVisibleDatabaseNames(schemaNames, visibleDatabases, visibleDatabasePatterns);
     }
     return filterSchemaNamesForVisiblePicker(schemaNames, connection, options);
   }

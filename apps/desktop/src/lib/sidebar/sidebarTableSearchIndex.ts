@@ -19,14 +19,26 @@ import type { TableInfo } from "@/types/database";
  */
 const inFlightSidebarTableSearchBuilds = new Map<string, Promise<TableInfo[]>>();
 
+/**
+ * Stop a later explicit refresh from reusing a build that started before the
+ * underlying table list was refreshed. The old promise may still settle, but
+ * callers can start a new build for the same scope immediately.
+ */
+export function invalidateSidebarTableSearchBuild(scopeKey: string): void {
+  inFlightSidebarTableSearchBuilds.delete(scopeKey);
+}
+
 function dedupeInFlightBuild(scopeKey: string, build: () => Promise<TableInfo[]>): Promise<TableInfo[]> {
   const existing = inFlightSidebarTableSearchBuilds.get(scopeKey);
   if (existing) return existing;
-  const pending = (async () => {
+  let pending!: Promise<TableInfo[]>;
+  pending = (async () => {
     try {
       return await build();
     } finally {
-      inFlightSidebarTableSearchBuilds.delete(scopeKey);
+      if (inFlightSidebarTableSearchBuilds.get(scopeKey) === pending) {
+        inFlightSidebarTableSearchBuilds.delete(scopeKey);
+      }
     }
   })();
   inFlightSidebarTableSearchBuilds.set(scopeKey, pending);

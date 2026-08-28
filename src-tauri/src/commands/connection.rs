@@ -240,6 +240,7 @@ mod tests {
             database: Some("RestCloud_V45PUB_Gateway".to_string()),
             default_schema: None,
             visible_databases: None,
+            visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
             attached_databases: Vec::new(),
@@ -269,6 +270,7 @@ mod tests {
             redis_key_separator: dbx_core::models::connection::default_redis_key_separator(),
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
+            redis_key_templates: Vec::new(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),
@@ -379,7 +381,7 @@ mod tests {
             Ok(_) => panic!("SQLCipher attachments must be rejected"),
             Err(error) => error,
         };
-        assert!(error.contains("SQLCipher"), "{error}");
+        assert!(error.contains("encrypted connections"), "{error}");
     }
 
     #[tokio::test]
@@ -565,7 +567,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    #[cfg(feature = "sqlite-sqlcipher")]
+    #[cfg(any(feature = "sqlite-sqlcipher", feature = "sqlite-multiple-ciphers"))]
     #[tokio::test]
     async fn sqlite_connect_from_config_uses_sqlcipher_key() {
         let path = std::env::temp_dir().join(format!("dbx-tauri-sqlcipher-{}.db", uuid::Uuid::new_v4()));
@@ -599,7 +601,7 @@ mod tests {
             Ok(_) => panic!("wrong SQLCipher key must fail"),
             Err(err) => err,
         };
-        assert!(wrong_key.contains("SQLCipher database unlock failed"));
+        assert!(wrong_key.contains("Encrypted SQLite database unlock failed"));
 
         let missing_key = match connect_sqlite_from_config(&sqlite_config(&path, "")).await {
             Ok(_) => panic!("missing SQLCipher key must fail"),
@@ -1023,17 +1025,30 @@ async fn test_redis_connection(
     host: &str,
     port: u16,
     connect_timeout: std::time::Duration,
-) -> Result<String, String> {
+) -> Result<Option<DatabaseConnectionInfo>, String> {
     // Connection tests must exercise the same Redis lifecycle as a saved connection,
     // including compatibility auth, TLS, and database selection.
     if config.uses_redis_cluster() {
-        drop(state.connect_redis_cluster(tunnel_id, config).await?);
-    } else if config.uses_redis_sentinel() {
-        drop(state.connect_redis_sentinel(tunnel_id, config).await?);
-    } else {
-        drop(db::redis_driver::connect_standalone(config, host, port, connect_timeout).await?);
+        let connection =
+            db::redis_driver::RedisConnection::Cluster(state.connect_redis_cluster(tunnel_id, config).await?);
+        let info = db::redis_driver::database_connection_info(&connection).await.ok();
+        drop(connection);
+        return Ok(info);
     }
-    Ok("Connection successful".to_string())
+    if config.uses_redis_sentinel() {
+        let connection = db::redis_driver::RedisConnection::Direct(tokio::sync::Mutex::new(
+            state.connect_redis_sentinel(tunnel_id, config).await?,
+        ));
+        let info = db::redis_driver::database_connection_info(&connection).await.ok();
+        drop(connection);
+        return Ok(info);
+    }
+    let connection = db::redis_driver::RedisConnection::Direct(tokio::sync::Mutex::new(
+        db::redis_driver::connect_standalone(config, host, port, connect_timeout).await?,
+    ));
+    let info = db::redis_driver::database_connection_info(&connection).await.ok();
+    drop(connection);
+    Ok(info)
 }
 
 #[tauri::command]
@@ -1172,7 +1187,13 @@ async fn test_connection_with_info_inner(
             DatabaseType::Redis => {
                 // Keep the result inside the outer lifecycle so temporary transports
                 // are reset after both successful and failed Redis tests.
-                test_redis_connection(state, &tunnel_id, &config, &host, port, connect_timeout).await
+                match test_redis_connection(state, &tunnel_id, &config, &host, port, connect_timeout).await {
+                    Ok(info) => {
+                        database_info = info;
+                        Ok("Connection successful".to_string())
+                    }
+                    Err(error) => Err(error),
+                }
             }
             #[cfg(feature = "duckdb-sidecar")]
             DatabaseType::DuckDb => {
@@ -1190,8 +1211,19 @@ async fn test_connection_with_info_inner(
                         .connect(mongo_legacy_connect_params(&config, &host, port)?)
                         .await
                         .map_err(|err| mongo_legacy_error_with_auth_hint(&err))?;
+                    let version = client
+                        .mongo_server_version::<String>(config.effective_database().unwrap_or("admin"))
+                        .await
+                        .ok();
                     client.disconnect().await.ok();
-                    return Ok(ConnectionTestResult::success("Connection successful (via legacy driver)"));
+                    return Ok(ConnectionTestResult::success("Connection successful (via legacy driver)")
+                        .with_database_info(version.map(|product_version| DatabaseConnectionInfo {
+                            product_name: Some("MongoDB".to_string()),
+                            product_version: Some(product_version),
+                            current_database: config.effective_database().map(str::to_string),
+                            driver_name: Some("MongoDB legacy Agent".to_string()),
+                            ..Default::default()
+                        })));
                 }
 
                 let native_err = match db::mongo_driver::connect_with_oidc(
@@ -1211,7 +1243,15 @@ async fn test_connection_with_info_inner(
                         )
                         .await
                         {
-                            Ok(()) => return Ok(ConnectionTestResult::success("Connection successful")),
+                            Ok(()) => {
+                                let info =
+                                    db::mongo_driver::database_connection_info(&client, config.effective_database())
+                                        .await
+                                        .ok();
+                                return Ok(
+                                    ConnectionTestResult::success("Connection successful").with_database_info(info)
+                                );
+                            }
                             Err(e) => e,
                         }
                     }
@@ -1227,7 +1267,18 @@ async fn test_connection_with_info_inner(
                             &mongo_legacy_error_with_auth_hint(&err),
                         )
                     })?;
+                    let version = client
+                        .mongo_server_version::<String>(config.effective_database().unwrap_or("admin"))
+                        .await
+                        .ok();
                     client.disconnect().await.ok();
+                    database_info = version.map(|product_version| DatabaseConnectionInfo {
+                        product_name: Some("MongoDB".to_string()),
+                        product_version: Some(product_version),
+                        current_database: config.effective_database().map(str::to_string),
+                        driver_name: Some("MongoDB legacy Agent".to_string()),
+                        ..Default::default()
+                    });
                     Ok("Connection successful (via legacy driver)".to_string())
                 } else {
                     Err(native_err)
@@ -1300,9 +1351,9 @@ async fn test_connection_with_info_inner(
                     config.external_config.as_ref(),
                     connect_timeout,
                 )?;
-                db::meilisearch_driver::test_connection(&client, connect_timeout)
-                    .await
-                    .map(|_| "Connection successful".to_string())
+                db::meilisearch_driver::test_connection(&client, connect_timeout).await?;
+                database_info = db::meilisearch_driver::database_connection_info(&client).await.ok();
+                Ok("Connection successful".to_string())
             }
             DatabaseType::Hbase => {
                 let client = db::hbase_driver::HBaseClient::new(
@@ -1312,9 +1363,9 @@ async fn test_connection_with_info_inner(
                     false,
                     connect_timeout,
                 )?;
-                db::hbase_driver::test_connection(&client, connect_timeout)
-                    .await
-                    .map(|_| "Connection successful".to_string())
+                db::hbase_driver::test_connection(&client, connect_timeout).await?;
+                database_info = db::hbase_driver::database_connection_info(&client).await.ok().flatten();
+                Ok("Connection successful".to_string())
             }
             DatabaseType::Qdrant | DatabaseType::Milvus | DatabaseType::Weaviate | DatabaseType::ChromaDb => {
                 let kind = match config.db_type {
@@ -1387,14 +1438,16 @@ async fn test_connection_with_info_inner(
             DatabaseType::VictoriaMetrics => {
                 let client =
                     db::victoriametrics_driver::VictoriaMetricsClient::new_for_config(&url, &config, connect_timeout)?;
-                db::victoriametrics_driver::test_connection(&client, connect_timeout)
-                    .await
-                    .map(|_| "Connection successful".to_string())
+                db::victoriametrics_driver::test_connection(&client, connect_timeout).await?;
+                database_info =
+                    db::victoriametrics_driver::database_connection_info(&client, connect_timeout).await.ok();
+                Ok("Connection successful".to_string())
             }
             DatabaseType::Nacos => {
                 let admin_config = state.nacos_admin_config_for_connection(connection_id, &config).await?;
                 let adapter = state.nacos_registry.build_transient_config(admin_config).await?;
-                adapter.test_connection_with_scope_validation().await?;
+                let info = adapter.test_connection_with_scope_validation().await?;
+                database_info = dbx_core::nacos::service::database_info_from_connection(&info);
                 Ok("Connection successful".to_string())
             }
             DatabaseType::Consul => {
@@ -1412,6 +1465,13 @@ async fn test_connection_with_info_inner(
                 } else {
                     client.agent_self().await.ok()
                 };
+                database_info = identity.as_ref().map(|identity| DatabaseConnectionInfo {
+                    product_name: Some("Consul".to_string()),
+                    product_version: identity.version.clone(),
+                    server_comment: Some(format!("Agent {}", identity.node)),
+                    driver_name: Some("Consul HTTP API".to_string()),
+                    ..Default::default()
+                });
                 Ok(identity
                     .map(|identity| format!("Connection successful (Agent: {} at {})", identity.node, identity.address))
                     .unwrap_or_else(|| {
@@ -1425,7 +1485,21 @@ async fn test_connection_with_info_inner(
                 let mqc = state.mq_admin_config_for_connection(connection_id, &config).await?;
                 let agent_launch = dbx_core::mq::service::resolve_mq_agent_launch_spec(&mqc, state);
                 let adapter = state.mq_registry.build_transient_config(mqc, agent_launch).await?;
-                adapter.test_connection().await?;
+                let info = adapter.test_connection().await?;
+                database_info = Some(DatabaseConnectionInfo {
+                    product_name: Some(
+                        match info.system_kind {
+                            dbx_core::mq::types::MqSystemKind::Pulsar => "Pulsar",
+                            dbx_core::mq::types::MqSystemKind::Kafka => "Kafka",
+                            dbx_core::mq::types::MqSystemKind::RocketMq => "RocketMQ",
+                            dbx_core::mq::types::MqSystemKind::RabbitMq => "RabbitMQ",
+                        }
+                        .to_string(),
+                    ),
+                    product_version: info.server_version,
+                    driver_name: Some("Message Queue Admin API".to_string()),
+                    ..Default::default()
+                });
                 Ok("Connection successful".to_string())
             }
             #[cfg(not(feature = "mq-admin"))]
@@ -2032,6 +2106,39 @@ pub async fn save_connection_database_info(
     database_info: Option<DatabaseConnectionInfo>,
 ) -> Result<(), String> {
     state.save_connection_database_info(&connection_id, database_info).await
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteUnlockState {
+    pub remaining_ms: u64,
+}
+
+#[tauri::command]
+pub async fn unlock_connection_writes(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    duration_secs: u64,
+) -> Result<WriteUnlockState, String> {
+    if !state.configs.read().await.contains_key(&connection_id) {
+        return Err("Connection not found".to_string());
+    }
+    let remaining_ms = state.write_unlock_windows.unlock(&connection_id, duration_secs).await?;
+    Ok(WriteUnlockState { remaining_ms })
+}
+
+#[tauri::command]
+pub async fn lock_connection_writes(state: State<'_, Arc<AppState>>, connection_id: String) -> Result<(), String> {
+    state.write_unlock_windows.lock(&connection_id).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn connection_write_unlock_state(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+) -> Result<WriteUnlockState, String> {
+    Ok(WriteUnlockState { remaining_ms: state.write_unlock_windows.remaining_ms(&connection_id).await })
 }
 
 /// Check whether a connection has read-only protection enabled.

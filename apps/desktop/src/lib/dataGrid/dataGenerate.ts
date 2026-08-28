@@ -1204,7 +1204,7 @@ export function defaultGeneratorParams(_columnName: string, attrs: ColumnAttrs, 
   const scale = attrs.numericScale ?? null;
   const charLen = attrs.characterMaximumLength ?? null;
   if (!attrs.isAutoIncrement && generatedDefaultValue(attrs.columnDefault, attrs.dataType) !== undefined) {
-    params.includeDefault = true;
+    params.includeDefault = false;
     params.defaultPercent = 100;
   }
 
@@ -1552,7 +1552,7 @@ export function generateValue(columnName: string, dataType: string, generatorKey
   if (params?.includeNull && params.nullPercent && Math.random() * 100 < params.nullPercent) return null;
   const defaultValue = generatedDefaultValue(columnDefault, dataType);
   if (defaultValue !== undefined) {
-    const includeDefault = params?.includeDefault ?? true;
+    const includeDefault = params?.includeDefault ?? false;
     const defaultPercent = params?.defaultPercent ?? 100;
     if (includeDefault && defaultPercent > 0 && Math.random() * 100 < defaultPercent) return defaultValue;
   }

@@ -10,6 +10,7 @@ use sqlparser::ast::{
 };
 use sqlparser::dialect::{
     ClickHouseDialect, DuckDbDialect, GenericDialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect,
+    SparkSqlDialect,
 };
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::{Parser, ParserError};
@@ -83,6 +84,7 @@ struct Analyzer {
     cte_scope_stack: Vec<HashSet<String>>,
     next_scope_id: usize,
     is_sqlserver: bool,
+    is_spark: bool,
 }
 
 pub fn analyze_sql_references(sql: &str, dialect: Option<&str>) -> Result<SqlReferenceAnalysis, String> {
@@ -106,6 +108,7 @@ pub fn analyze_sql_references(sql: &str, dialect: Option<&str>) -> Result<SqlRef
         "sqlserver" => parse_sqlserver(&parser_sql),
         "clickhouse" => Parser::parse_sql(&ClickHouseDialect {}, &parser_sql),
         "duckdb" => Parser::parse_sql(&DuckDbDialect {}, &parser_sql),
+        "spark" => parse_spark_sql(&parser_sql),
         _ => Parser::parse_sql(&GenericDialect {}, &parser_sql),
     };
     let statements = match parsed_statements {
@@ -123,7 +126,11 @@ pub fn analyze_sql_references(sql: &str, dialect: Option<&str>) -> Result<SqlRef
         Err(error) => return Err(error.to_string()),
     };
 
-    let mut analyzer = Analyzer { is_sqlserver: normalized_dialect == "sqlserver", ..Analyzer::default() };
+    let mut analyzer = Analyzer {
+        is_sqlserver: normalized_dialect == "sqlserver",
+        is_spark: normalized_dialect == "spark",
+        ..Analyzer::default()
+    };
     for statement in statements {
         analyzer.visit_statement(&statement);
     }
@@ -155,6 +162,237 @@ fn parse_sqlserver(sql: &str) -> Result<Vec<Statement>, ParserError> {
     }
 }
 
+fn parse_spark_sql(sql: &str) -> Result<Vec<Statement>, ParserError> {
+    let dialect = SparkSqlDialect {};
+    let tokens = Tokenizer::new(&dialect, sql).tokenize_with_location()?;
+    let mut fallback_tokens = tokens.clone();
+    let fallback_changed = normalize_spark_datasource_create_table_tokens(&mut fallback_tokens)?;
+    match Parser::new(&dialect).with_tokens_with_locations(tokens).parse_statements() {
+        Ok(statements) => Ok(statements),
+        Err(error) => {
+            // sqlparser 0.62 accepts Spark's USING clause but expects later datasource clauses in Hive order.
+            // The fallback removes only clauses parsed independently from the same located token stream.
+            if fallback_changed {
+                if let Ok(statements) =
+                    Parser::new(&dialect).with_tokens_with_locations(fallback_tokens).parse_statements()
+                {
+                    return Ok(statements);
+                }
+            }
+            Err(error)
+        }
+    }
+}
+
+fn normalize_spark_datasource_create_table_tokens(tokens: &mut Vec<TokenWithSpan>) -> Result<bool, ParserError> {
+    let dialect = SparkSqlDialect {};
+    let mut removals = Vec::new();
+    let mut index = 0usize;
+
+    while let Some(statement_start) = next_significant_token_index(tokens, index) {
+        if matches!(tokens[statement_start].token, Token::EOF) {
+            break;
+        }
+        if matches!(tokens[statement_start].token, Token::SemiColon) {
+            index = statement_start + 1;
+            continue;
+        }
+
+        let statement_end = sql_statement_end_index(tokens, statement_start);
+        let significant_indexes = tokens
+            .iter()
+            .enumerate()
+            .take(statement_end)
+            .skip(statement_start)
+            .filter_map(|(index, token)| (!matches!(token.token, Token::Whitespace(_))).then_some(index))
+            .collect::<Vec<_>>();
+        removals.extend(spark_datasource_clause_removals(tokens, &significant_indexes, &dialect)?);
+        index = statement_end.saturating_add(1);
+    }
+
+    removals.sort_unstable();
+    removals.dedup();
+    let changed = !removals.is_empty();
+    for index in removals.into_iter().rev() {
+        tokens.remove(index);
+    }
+    Ok(changed)
+}
+
+fn spark_datasource_clause_removals(
+    tokens: &[TokenWithSpan],
+    indexes: &[usize],
+    dialect: &SparkSqlDialect,
+) -> Result<Vec<usize>, ParserError> {
+    let Some(using_position) = spark_create_table_using_position(tokens, indexes) else {
+        return Ok(vec![]);
+    };
+    let Some(provider_index) = indexes.get(using_position + 1).copied() else {
+        return Ok(vec![]);
+    };
+    if !matches!(tokens[provider_index].token, Token::Word(_)) {
+        return Parser::new(dialect).expected("data source identifier", tokens[provider_index].clone());
+    }
+
+    let mut removals = Vec::new();
+    let mut seen_options = false;
+    let mut seen_partitioning = false;
+    let mut seen_comment = false;
+    let mut seen_table_properties = false;
+    let mut position = using_position + 2;
+    while position < indexes.len() {
+        let token = &tokens[indexes[position]];
+        match unquoted_token_keyword(token) {
+            Some(Keyword::OPTIONS) | Some(Keyword::TBLPROPERTIES) => {
+                let keyword = unquoted_token_keyword(token).expect("matched option keyword");
+                let (seen, clause_name) = match keyword {
+                    Keyword::OPTIONS => (&mut seen_options, "OPTIONS"),
+                    Keyword::TBLPROPERTIES => (&mut seen_table_properties, "TBLPROPERTIES"),
+                    _ => unreachable!("matched option keyword"),
+                };
+                if *seen {
+                    return Parser::new(dialect).expected(&format!("at most one {clause_name} clause"), token.clone());
+                }
+                *seen = true;
+                let Some(open_index) = indexes.get(position + 1).copied() else {
+                    return Ok(vec![]);
+                };
+                if !matches!(tokens[open_index].token, Token::LParen) {
+                    return Ok(vec![]);
+                }
+                let Some(close_index) = matching_parenthesis_index(tokens, open_index) else {
+                    return Ok(vec![]);
+                };
+                let Some(close_position) = indexes.iter().position(|index| *index == close_index) else {
+                    return Ok(vec![]);
+                };
+                if !spark_tokens_parse_options(tokens, &indexes[position..=close_position], keyword, dialect) {
+                    return Ok(vec![]);
+                }
+                removals.extend_from_slice(&indexes[position..=close_position]);
+                position = close_position + 1;
+            }
+            Some(Keyword::PARTITIONED) => {
+                if seen_partitioning {
+                    return Parser::new(dialect).expected("at most one PARTITIONED BY clause", token.clone());
+                }
+                seen_partitioning = true;
+                if indexes.get(position + 1).and_then(|index| unquoted_token_keyword(&tokens[*index]))
+                    != Some(Keyword::BY)
+                {
+                    return Ok(vec![]);
+                }
+                let Some(open_index) = indexes.get(position + 2).copied() else {
+                    return Ok(vec![]);
+                };
+                if !matches!(tokens[open_index].token, Token::LParen) {
+                    return Ok(vec![]);
+                }
+                let Some(close_index) = matching_parenthesis_index(tokens, open_index) else {
+                    return Ok(vec![]);
+                };
+                let Some(close_position) = indexes.iter().position(|index| *index == close_index) else {
+                    return Ok(vec![]);
+                };
+                if !spark_tokens_parse_partitioning(tokens, &indexes[position..=close_position], dialect) {
+                    return Ok(vec![]);
+                }
+                removals.extend_from_slice(&indexes[position..=close_position]);
+                position = close_position + 1;
+            }
+            Some(Keyword::COMMENT) => {
+                if seen_comment {
+                    return Parser::new(dialect).expected("at most one COMMENT clause", token.clone());
+                }
+                seen_comment = true;
+                let Some(comment_index) = indexes.get(position + 1).copied() else {
+                    return Ok(vec![]);
+                };
+                if !matches!(tokens[comment_index].token, Token::SingleQuotedString(_)) {
+                    return Ok(vec![]);
+                }
+                removals.extend_from_slice(&indexes[position..=position + 1]);
+                position += 2;
+            }
+            Some(Keyword::LOCATION) => {
+                let Some(location_index) = indexes.get(position + 1).copied() else {
+                    return Ok(vec![]);
+                };
+                if !matches!(tokens[location_index].token, Token::SingleQuotedString(_)) {
+                    return Ok(vec![]);
+                }
+                position += 2;
+            }
+            Some(Keyword::AS) => break,
+            _ => return Ok(vec![]),
+        }
+    }
+    Ok(removals)
+}
+
+fn spark_create_table_using_position(tokens: &[TokenWithSpan], indexes: &[usize]) -> Option<usize> {
+    if indexes.first().and_then(|index| unquoted_token_keyword(&tokens[*index])) != Some(Keyword::CREATE) {
+        return None;
+    }
+    let mut position = 1usize;
+    if indexes.get(position).and_then(|index| unquoted_token_keyword(&tokens[*index])) == Some(Keyword::OR)
+        && indexes.get(position + 1).and_then(|index| unquoted_token_keyword(&tokens[*index])) == Some(Keyword::REPLACE)
+    {
+        position += 2;
+    }
+    while indexes.get(position).is_some_and(|index| {
+        ["GLOBAL", "LOCAL", "TEMP", "TEMPORARY", "EXTERNAL"]
+            .iter()
+            .any(|modifier| unquoted_token_word_eq(&tokens[*index], modifier))
+    }) {
+        position += 1;
+    }
+    if indexes.get(position).and_then(|index| unquoted_token_keyword(&tokens[*index])) != Some(Keyword::TABLE) {
+        return None;
+    }
+
+    let mut depth = 0usize;
+    for (position, index) in indexes.iter().copied().enumerate().skip(position + 1) {
+        match tokens[index].token {
+            Token::LParen => depth += 1,
+            Token::RParen => depth = depth.saturating_sub(1),
+            _ if depth == 0 && unquoted_token_keyword(&tokens[index]) == Some(Keyword::AS) => return None,
+            _ if depth == 0 && unquoted_token_keyword(&tokens[index]) == Some(Keyword::USING) => {
+                return Some(position);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn spark_tokens_parse_options(
+    tokens: &[TokenWithSpan],
+    indexes: &[usize],
+    keyword: Keyword,
+    dialect: &SparkSqlDialect,
+) -> bool {
+    let clause_tokens = indexes.iter().map(|index| tokens[*index].clone()).collect();
+    let mut parser = Parser::new(dialect).with_tokens_with_locations(clause_tokens);
+    parser.parse_options(keyword).is_ok() && matches!(parser.peek_token_ref().token, Token::EOF)
+}
+
+fn spark_tokens_parse_partitioning(tokens: &[TokenWithSpan], indexes: &[usize], dialect: &SparkSqlDialect) -> bool {
+    let clause_tokens = indexes.iter().map(|index| tokens[*index].clone()).collect();
+    let mut parser = Parser::new(dialect).with_tokens_with_locations(clause_tokens);
+    if parser.expect_keywords(&[Keyword::PARTITIONED, Keyword::BY]).is_err()
+        || parser.expect_token(&Token::LParen).is_err()
+    {
+        return false;
+    }
+    let Ok(expressions) = parser.parse_comma_separated(Parser::parse_expr) else {
+        return false;
+    };
+    !expressions.is_empty()
+        && parser.expect_token(&Token::RParen).is_ok()
+        && matches!(parser.peek_token_ref().token, Token::EOF)
+}
+
 fn normalize_sqlserver_cursor_tokens(tokens: &mut Vec<TokenWithSpan>) -> bool {
     let mut removals = Vec::new();
     let mut index = 0usize;
@@ -168,7 +406,7 @@ fn normalize_sqlserver_cursor_tokens(tokens: &mut Vec<TokenWithSpan>) -> bool {
             continue;
         }
 
-        let statement_end = sqlserver_statement_end_index(tokens, statement_start);
+        let statement_end = sql_statement_end_index(tokens, statement_start);
         let significant_indexes = tokens
             .iter()
             .enumerate()
@@ -275,7 +513,7 @@ fn normalize_sqlserver_alter_table_add_tokens(tokens: &mut Vec<TokenWithSpan>) -
             continue;
         }
 
-        let statement_end = sqlserver_statement_end_index(tokens, table_index + 1);
+        let statement_end = sql_statement_end_index(tokens, table_index + 1);
         let Some(add_index) = sqlserver_alter_table_add_index(tokens, table_index + 1, statement_end) else {
             index = statement_end.saturating_add(1);
             continue;
@@ -311,7 +549,7 @@ fn normalize_sqlserver_alter_table_add_tokens(tokens: &mut Vec<TokenWithSpan>) -
     changed
 }
 
-fn sqlserver_statement_end_index(tokens: &[TokenWithSpan], start: usize) -> usize {
+fn sql_statement_end_index(tokens: &[TokenWithSpan], start: usize) -> usize {
     let mut depth = 0usize;
     for (index, token) in tokens.iter().enumerate().skip(start) {
         match token.token {
@@ -771,6 +1009,7 @@ fn normalize_dialect(dialect: Option<&str>) -> String {
         "sqlserver" | "mssql" => "sqlserver".to_string(),
         "clickhouse" => "clickhouse".to_string(),
         "duckdb" => "duckdb".to_string(),
+        "spark" | "sparksql" => "spark".to_string(),
         _ => "generic".to_string(),
     }
 }
@@ -779,6 +1018,11 @@ impl Analyzer {
     fn visit_statement(&mut self, statement: &Statement) {
         match statement {
             Statement::Query(query) => self.visit_query_in_new_scope(query, None),
+            Statement::CreateTable(create_table) if self.is_spark => {
+                if let Some(query) = &create_table.query {
+                    self.visit_query_in_new_scope(query, None);
+                }
+            }
             Statement::Declare { stmts } if self.is_sqlserver => {
                 for declaration in stmts {
                     if let Some(query) = &declaration.for_query {

@@ -18,6 +18,8 @@ export interface ExportedTableSql {
   columns: string[];
   columnTypes?: Array<string | null | undefined>;
   columnExtras?: Array<string | null | undefined>;
+  spatialColumns?: QueryResult["spatial_columns"];
+  spatialValues?: QueryResult["spatial_values"];
   rows: QueryResult["rows"];
   truncated?: boolean;
 }
@@ -41,6 +43,8 @@ export interface BuildExportInsertStatementsOptions {
   columns: string[];
   columnTypes?: Array<string | null | undefined>;
   columnExtras?: Array<string | null | undefined>;
+  spatialColumns?: QueryResult["spatial_columns"];
+  spatialValues?: QueryResult["spatial_values"];
   rows: QueryResult["rows"];
   batchSize?: number;
 }

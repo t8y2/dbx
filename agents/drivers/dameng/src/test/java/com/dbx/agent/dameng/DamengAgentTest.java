@@ -12,6 +12,7 @@ import com.dbx.agent.test.JdbcAgentFake;
 import com.dbx.agent.test.TestSupport;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
@@ -98,6 +99,18 @@ class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
         assertDoesNotEnableDbmsOutput("EXECUTOR RUN");
         assertDoesNotEnableDbmsOutput("EXECUTE_IMMEDIATE 'SELECT 1'");
         assertDoesNotEnableDbmsOutput("/* CALL hidden in a comment */ SELECT 1");
+    }
+
+    @Test
+    void legacyDamengSkipsUnavailableDbmsOutputInitialization() {
+        List<String> executedSql = new ArrayList<>();
+        DamengAgent agent = new DamengAgent();
+        TestSupport.setPrivateConnection(agent, printMessageConnection(null, executedSql));
+        setLegacyJdbcMetadata(agent, true);
+
+        agent.executeQuery("BEGIN NULL; END;", null, new ExecuteQueryOptions());
+
+        assertEquals(List.of("BEGIN NULL; END;"), executedSql);
     }
 
     @Test
@@ -214,6 +227,22 @@ class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
             "BEGIN DBMS_OUTPUT.ENABLE(1000000); END;",
             "CALL LOG_ONLY_PROCEDURE('input')"
         ), executedSql);
+    }
+
+    @Test
+    void legacyStatementWithoutJdbc4UnwrapReturnsNoPrintMessages() {
+        Statement statement = (Statement) Proxy.newProxyInstance(
+            DamengAgentTest.class.getClassLoader(),
+            new Class<?>[]{Statement.class},
+            (unused, method, args) -> {
+                if ("unwrap".equals(method.getName())) {
+                    throw new AbstractMethodError("legacy JDBC driver");
+                }
+                return defaultValue(method.getReturnType());
+            }
+        );
+
+        assertEquals(List.of(), DamengAgent.statementPrintMessages(statement));
     }
 
     @Test
@@ -618,6 +647,16 @@ class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
 
         assertSame(failure, error.getCause());
         assertEquals(List.of("BEGIN DBMS_OUTPUT.ENABLE(1000000); END;"), executedSql);
+    }
+
+    private static void setLegacyJdbcMetadata(DamengAgent agent, boolean value) {
+        try {
+            Field field = DamengAgent.class.getDeclaredField("legacyJdbcMetadata");
+            field.setAccessible(true);
+            field.set(agent, value);
+        } catch (ReflectiveOperationException error) {
+            throw new IllegalStateException("Unable to set legacy JDBC metadata mode", error);
+        }
     }
 
     private static Object defaultValue(Class<?> type) {

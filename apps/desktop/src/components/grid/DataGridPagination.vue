@@ -16,6 +16,7 @@ const props = withDefaults(
     paginationEnabled?: boolean;
     selectionSummary: { cellCount: number; rowCount: number } | null;
     selectionSummarySumText: string;
+    selectionSummaryAverageText: string;
     loading: boolean;
     infiniteScrollEnabled: boolean;
     infiniteScrollAllLoaded: boolean;
@@ -86,6 +87,7 @@ function handlePageInputKeydown(event: KeyboardEvent) {
   <div class="flex min-w-max items-center justify-end gap-1">
     <div v-if="selectionSummary" class="flex shrink-0 items-center gap-3 tabular-nums">
       <span class="shrink-0">{{ t("grid.selectionSum", { value: selectionSummarySumText }) }}</span>
+      <span class="shrink-0">{{ t("grid.selectionAverage", { value: selectionSummaryAverageText }) }}</span>
       <div class="flex shrink-0 items-center gap-1">
         <span class="shrink-0">{{ t("grid.selectionCells", { count: selectionSummary.cellCount }) }}</span>
         <span class="shrink-0">{{ t("grid.rows", { count: selectionSummary.rowCount }) }}</span>

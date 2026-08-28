@@ -55,6 +55,14 @@ impl MySqlPool {
     pub async fn disconnect(self) -> Result<(), mysql_async::Error> {
         self.inner.disconnect().await
     }
+
+    /// Returns whether both handles refer to the same underlying pool
+    /// generation. Pool options are not an identity: a reconnect creates a new
+    /// pool with identical options, and a late health probe for the old pool
+    /// must not be allowed to remove that replacement from routing.
+    pub(crate) fn is_same_pool(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.inner.metrics(), &other.inner.metrics())
+    }
 }
 
 impl Deref for MySqlPool {
@@ -318,6 +326,19 @@ fn get_opt_metadata_string(row: &mysql_async::Row, name: &str) -> Option<String>
         .or_else(|| row_get::<NaiveDateTime, _>(row, name).map(|value| value.to_string()))
         .or_else(|| row_get::<NaiveDate, _>(row, name).map(|value| value.to_string()))
         .or_else(|| row_get::<NaiveTime, _>(row, name).map(|value| value.to_string()))
+}
+
+fn get_opt_unsigned_metadata_string(row: &mysql_async::Row, name: &str) -> Option<String> {
+    row_get::<u64, _>(row, name)
+        .map(|value| value.to_string())
+        .or_else(|| {
+            row_get::<i64, _>(row, name).and_then(|value| u64::try_from(value).ok()).map(|value| value.to_string())
+        })
+        .or_else(|| {
+            get_opt_str(row, name)
+                .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+                .and_then(|value| value.parse::<u64>().ok().map(|parsed| parsed.to_string()))
+        })
 }
 
 fn numeric_metadata_u64_to_i32(value: Option<u64>) -> Option<i32> {
@@ -2842,7 +2863,10 @@ pub(super) struct TableStatusMeta {
     comment: Option<String>,
     created_at: Option<String>,
     updated_at: Option<String>,
+    auto_increment: Option<String>,
 }
+
+const MYSQL_FRESH_TABLE_STATUS_SESSION_SQL: &str = "/*!80000 SET SESSION information_schema_stats_expiry = 0 */";
 
 async fn list_table_status_show(pool: &MySqlPool, database: &str) -> Result<HashMap<String, TableStatusMeta>, String> {
     query_table_status_show(pool, database, None).await
@@ -2872,8 +2896,19 @@ async fn query_table_status_show(
     filter: Option<&str>,
 ) -> Result<HashMap<String, TableStatusMeta>, String> {
     let sql = show_table_status_sql(database, filter);
+    query_table_status_sql(pool, &sql).await
+}
+
+async fn query_table_status_sql(pool: &MySqlPool, sql: &str) -> Result<HashMap<String, TableStatusMeta>, String> {
     let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
-    let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
+    query_table_status_sql_with_conn(&mut conn, sql).await
+}
+
+async fn query_table_status_sql_with_conn(
+    conn: &mut mysql_async::Conn,
+    sql: &str,
+) -> Result<HashMap<String, TableStatusMeta>, String> {
+    let result = conn.query_iter(sql).await.map_err(|e| e.to_string())?;
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
     Ok(rows
         .iter()
@@ -2886,11 +2921,23 @@ async fn query_table_status_show(
                         .filter(|s| !s.is_empty()),
                     created_at: get_opt_metadata_string(row, "Create_time"),
                     updated_at: get_opt_metadata_string(row, "Update_time"),
+                    auto_increment: get_opt_unsigned_metadata_string(row, "Auto_increment"),
                 },
             )
         })
         .filter(|(name, _)| !name.is_empty())
         .collect())
+}
+
+pub async fn get_table_auto_increment(pool: &MySqlPool, database: &str, table: &str) -> Result<Option<String>, String> {
+    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    // MySQL 8 caches SHOW TABLE STATUS statistics by default, including the
+    // counter after ALTER TABLE. The version comment is a no-op on MySQL 5.7.
+    if let Err(error) = conn.query_drop(MYSQL_FRESH_TABLE_STATUS_SESSION_SQL).await {
+        log::debug!("Failed to disable cached MySQL table statistics before reading AUTO_INCREMENT: {error}");
+    }
+    let status = query_table_status_sql_with_conn(&mut conn, &show_table_status_exact_sql(database, table)).await?;
+    Ok(status.into_values().next().and_then(|meta| meta.auto_increment))
 }
 
 fn filter_table_status_fallback(
@@ -3065,6 +3112,15 @@ fn show_table_status_sql(database: &str, filter: Option<&str>) -> String {
         sql.push_str(&conditions.join(" OR "));
     }
     sql
+}
+
+fn show_table_status_exact_sql(database: &str, table: &str) -> String {
+    let prefix = if database.trim().is_empty() {
+        "SHOW TABLE STATUS".to_string()
+    } else {
+        format!("SHOW TABLE STATUS FROM {}", quote_identifier(database))
+    };
+    format!("{prefix} WHERE Name = {}", quote_value(table))
 }
 
 fn show_tables_filter_conditions(database: &str, filter: Option<&str>, exact_names: &[String]) -> Vec<String> {
@@ -6504,6 +6560,33 @@ mod tests {
         let filtered = filter_table_status_fallback(status, Some("purchase"));
 
         assert_eq!(filtered.keys().map(String::as_str).collect::<Vec<_>>(), vec!["orders"]);
+    }
+
+    #[test]
+    fn mysql_table_status_auto_increment_is_lossless_and_nullable() {
+        let auto_increment_column = Column::new(ColumnType::MYSQL_TYPE_LONGLONG).with_name(b"Auto_increment");
+        let maximum = mysql_test_row_with_columns(vec![Value::UInt(u64::MAX)], vec![auto_increment_column.clone()]);
+        let null = mysql_test_row_with_columns(vec![Value::NULL], vec![auto_increment_column]);
+
+        assert_eq!(
+            get_opt_unsigned_metadata_string(&maximum, "Auto_increment").as_deref(),
+            Some("18446744073709551615")
+        );
+        assert_eq!(get_opt_unsigned_metadata_string(&null, "Auto_increment"), None);
+    }
+
+    #[test]
+    fn mysql_exact_table_status_sql_quotes_identifiers_and_names() {
+        assert_eq!(
+            show_table_status_exact_sql("sales`archive", "order's"),
+            "SHOW TABLE STATUS FROM `sales``archive` WHERE Name = 'order\\'s'"
+        );
+    }
+
+    #[test]
+    fn mysql_table_status_refresh_directive_is_version_gated() {
+        assert!(MYSQL_FRESH_TABLE_STATUS_SESSION_SQL.starts_with("/*!80000 "));
+        assert!(MYSQL_FRESH_TABLE_STATUS_SESSION_SQL.contains("information_schema_stats_expiry = 0"));
     }
 
     #[test]

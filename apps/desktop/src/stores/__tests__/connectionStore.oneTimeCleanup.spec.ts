@@ -132,12 +132,14 @@ describe("connectionStore one_time runtime cleanup", () => {
     const store = useConnectionStore();
     const queryStore = useQueryStore();
     store.connections = [previewConnection()];
-    queryStore.createTab("preview-1", "", "sales.parquet", "query");
+    const queryId = queryStore.createTab("preview-1", "", "sales.parquet", "query");
+    queryStore.updateSql(queryId, "select 1;");
     expect(queryStore.tabs.some((tab) => tab.connectionId === "preview-1")).toBe(true);
 
     await store.removeConnection("preview-1");
 
     expect(queryStore.tabs.some((tab) => tab.connectionId === "preview-1")).toBe(false);
+    expect(queryStore.showCloseConfirm).toBe(false);
   });
 
   it("deleteConnectionGroups closes the tabs of removed one_time connections", async () => {

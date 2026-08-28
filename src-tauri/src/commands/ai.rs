@@ -286,6 +286,25 @@ pub async fn delete_ai_conversation(state: State<'_, Arc<AppState>>, id: String)
     state.storage.delete_ai_conversation(&id).await
 }
 
+#[tauri::command]
+pub async fn save_ai_run(state: State<'_, Arc<AppState>>, run: AiRun) -> Result<(), String> {
+    state.storage.save_ai_run(&run).await
+}
+
+#[tauri::command]
+pub async fn save_ai_run_state(
+    state: State<'_, Arc<AppState>>,
+    conversation: AiConversation,
+    run: AiRun,
+) -> Result<(), String> {
+    state.storage.save_ai_run_state(&conversation, &run).await
+}
+
+#[tauri::command]
+pub async fn load_ai_runs(state: State<'_, Arc<AppState>>) -> Result<Vec<AiRun>, String> {
+    state.storage.load_ai_runs().await
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};

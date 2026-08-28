@@ -4,7 +4,7 @@ description: 使用 WebDAV、GitHub Gist 或 Gitee 代码片段同步 DBX 连接
 ---
 
 <Callout type="info">
-DBX 可以把连接配置、界面设置和保存的 SQL 组成一个快照，上传到 WebDAV 或私有代码片段，并在另一台设备恢复。
+DBX 可以把连接配置、界面设置和保存的 SQL 组成一个快照。桌面端可通过 WebDAV 或私有代码片段同步，Web/Docker 可通过 WebDAV 同步，并在另一个 DBX 实例恢复。
 </Callout>
 
 <Callout type="warn">云同步备份的是 DBX 配置，不会读取或备份连接中的业务数据库。表结构和数据请使用 [数据库导出](/cn/docs/database-export)；Desktop 定时 MySQL/PostgreSQL 备份请使用 [数据库备份](/cn/docs/database-backup)。</Callout>
@@ -12,7 +12,7 @@ DBX 可以把连接配置、界面设置和保存的 SQL 组成一个快照，�
 在 **设置 → 同步** 中选择同步方式：
 
 - **WebDAV**：适合已有 NAS、Nextcloud、坚果云或其他 WebDAV 服务的用户，支持定时自动上传。
-- **GitHub / Gitee 代码片段**：不需要自己维护服务器，通过私有 Gist 或私有代码片段保存快照。目前需要手动上传和下载。
+- **GitHub / Gitee 代码片段**：不需要自己维护服务器，通过私有 Gist 或私有代码片段保存快照。目前仅桌面端显示，且需要手动上传和下载。
 
 ## 同步哪些内容
 
@@ -109,7 +109,9 @@ GitHub Gist 和 Gitee 代码片段始终使用**代码片段加密密码**加密
 
 填写 WebDAV 服务地址、用户名、应用密码和远端快照路径。默认路径为 `DBX/sync/snapshot.json`。
 
-WebDAV 支持定时自动上传。自动上传只在 DBX 运行期间执行；下载始终需要手动确认，避免远端快照意外覆盖本地数据。
+Web/Docker 模式下，WebDAV 请求由 DBX 服务端发起，因此不受浏览器 CORS 限制；WebDAV 应用密码会加密保存在当前 DBX 实例中，不会写入同步快照。
+
+WebDAV 支持定时自动上传。自动上传只在对应 DBX 客户端保持打开时执行；Web/Docker 使用时需保持至少一个 DBX 页面打开。下载始终需要手动确认，避免远端快照意外覆盖当前实例的数据。
 
 ## 常见问题
 

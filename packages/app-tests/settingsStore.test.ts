@@ -390,8 +390,13 @@ test("defaults shortcut settings", () => {
   assert.equal(settings.shortcuts.executeSql, "Mod+Enter");
   assert.equal(settings.shortcuts.saveSql, "Mod+S");
   assert.equal(settings.shortcuts.extendSelection, "Alt+W");
-  assert.equal(settings.shortcuts.copyCurrentRow, "Mod+D");
+  assert.equal(settings.shortcuts.editTableStructure, "Mod+D");
+  assert.equal(settings.shortcuts.copyCurrentRow, "");
   assert.equal(settings.shortcuts.deleteCurrentRow, "Delete");
+  assert.equal(settings.shortcuts.goToFirstPage, "");
+  assert.equal(settings.shortcuts.goToPreviousPage, "");
+  assert.equal(settings.shortcuts.goToNextPage, "");
+  assert.equal(settings.shortcuts.goToLastPage, "");
   assert.equal(settings.shortcuts.newQuery, "Mod+T");
   assert.equal(settings.shortcuts.openSettings, "Mod+,");
   assert.equal(settings.shortcuts.focusSearch, "Mod+F");
@@ -413,6 +418,7 @@ test("keeps saved shortcut overrides", () => {
       executeSql: "Shift+Mod+Enter",
       copyCurrentRow: "Alt+Shift+D",
       deleteCurrentRow: "Backspace",
+      goToNextPage: "Alt+F3",
       newQuery: "Shift+Mod+N",
       openSettings: "Shift+Mod+P",
       zoomInUi: "Alt+Mod+=",
@@ -423,6 +429,8 @@ test("keeps saved shortcut overrides", () => {
   assert.equal(settings.shortcuts.executeSql, "Shift+Mod+Enter");
   assert.equal(settings.shortcuts.copyCurrentRow, "Alt+Shift+D");
   assert.equal(settings.shortcuts.deleteCurrentRow, "Backspace");
+  assert.equal(settings.shortcuts.goToNextPage, "Alt+F3");
+  assert.equal(settings.shortcuts.goToFirstPage, "");
   assert.equal(settings.shortcuts.newQuery, "Shift+Mod+N");
   assert.equal(settings.shortcuts.openSettings, "Shift+Mod+P");
   assert.equal(settings.shortcuts.zoomInUi, "Alt+Mod+=");

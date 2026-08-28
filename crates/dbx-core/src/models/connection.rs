@@ -94,6 +94,8 @@ pub struct ConnectionConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible_databases: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_database_patterns: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible_schemas: Option<HashMap<String, Vec<String>>>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub show_system_schemas: bool,
@@ -153,6 +155,10 @@ pub struct ConnectionConfig {
     pub redis_scan_page_size: Option<u64>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub redis_database_aliases: HashMap<String, String>,
+    /// Optional key-search templates for the Redis key browser (one pattern per entry).
+    /// Empty means inherit the global editor setting.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub redis_key_templates: Vec<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub etcd_endpoints: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -521,6 +527,8 @@ struct ConnectionConfigData {
     #[serde(default)]
     pub visible_databases: Option<Vec<String>>,
     #[serde(default)]
+    pub visible_database_patterns: Option<Vec<String>>,
+    #[serde(default)]
     pub visible_schemas: Option<HashMap<String, Vec<String>>>,
     #[serde(default)]
     pub show_system_schemas: bool,
@@ -577,6 +585,8 @@ struct ConnectionConfigData {
     #[serde(default)]
     pub redis_database_aliases: HashMap<String, String>,
     #[serde(default)]
+    pub redis_key_templates: Vec<String>,
+    #[serde(default)]
     pub etcd_endpoints: String,
     #[serde(default)]
     pub gbase_server: String,
@@ -620,6 +630,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             database: data.database,
             default_schema: data.default_schema,
             visible_databases: data.visible_databases,
+            visible_database_patterns: data.visible_database_patterns,
             visible_schemas: data.visible_schemas,
             show_system_schemas: data.show_system_schemas,
             attached_databases: data.attached_databases,
@@ -648,6 +659,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             redis_key_separator: data.redis_key_separator,
             redis_scan_page_size: data.redis_scan_page_size,
             redis_database_aliases: data.redis_database_aliases,
+            redis_key_templates: data.redis_key_templates,
             etcd_endpoints: data.etcd_endpoints,
             gbase_server: data.gbase_server,
             informix_server: data.informix_server,
@@ -849,6 +861,11 @@ impl ConnectionConfig {
             DatabaseType::Highgo => Some("highgo"),
             DatabaseType::Uxdb => Some("uxdb"),
             DatabaseType::Yashandb => Some("yasdb"),
+            DatabaseType::Oracle
+                if !self.oracle_connection_type.as_deref().is_some_and(|mode| mode.eq_ignore_ascii_case("tns")) =>
+            {
+                Some("ORCL")
+            }
             DatabaseType::Oscar => Some("osrdb"),
             DatabaseType::Firebird => Some("employee"),
             DatabaseType::H2 => Some("test"),
@@ -864,6 +881,15 @@ impl ConnectionConfig {
             || self.driver_profile.as_deref().map(|p| p.to_lowercase()).is_some_and(|p| {
                 matches!(p.as_str(), "doris" | "starrocks" | "manticoresearch" | "selectdb" | "oceanbase")
             })
+    }
+
+    fn enables_cleartext_mysql_auth_by_default(&self) -> bool {
+        matches!(self.db_type, DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch)
+            || self
+                .driver_profile
+                .as_deref()
+                .map(|p| p.to_lowercase())
+                .is_some_and(|p| matches!(p.as_str(), "doris" | "selectdb" | "starrocks" | "manticoresearch"))
     }
 
     pub fn is_starrocks(&self) -> bool {
@@ -995,7 +1021,10 @@ impl ConnectionConfig {
                     return cs;
                 }
                 let mut suffix = if params.is_empty() { String::new() } else { format!("?{params}") };
-                if is_tunneled && !suffix.contains("directConnection=") {
+                if is_tunneled
+                    && !suffix.contains("directConnection=")
+                    && !mongo_url_params_have_load_balanced_true(&suffix)
+                {
                     if suffix.is_empty() {
                         suffix = "?directConnection=true".to_string();
                     } else {
@@ -1163,7 +1192,10 @@ impl ConnectionConfig {
                     return cs;
                 }
                 let mut suffix = if params.is_empty() { String::new() } else { format!("?{params}") };
-                if is_tunneled && !suffix.contains("directConnection=") {
+                if is_tunneled
+                    && !suffix.contains("directConnection=")
+                    && !mongo_url_params_have_load_balanced_true(&suffix)
+                {
                     if suffix.is_empty() {
                         suffix = "?directConnection=true".to_string();
                     } else {
@@ -1457,23 +1489,16 @@ impl ConnectionConfig {
 
     fn normalized_url_params(&self) -> String {
         let value = self.url_params.as_deref().unwrap_or("").trim();
-        if self.needs_bare_mysql() {
-            if self.bare_mysql_uses_tls() {
-                return normalize_mysql_url_params(value, true, self.ca_cert_path.trim().is_empty());
-            }
-            return normalize_bare_mysql_url_params(value);
-        }
         match self.db_type {
             DatabaseType::Mysql => {
-                normalize_mysql_url_params(value, self.mysql_uses_tls(), self.ca_cert_path.trim().is_empty())
+                if self.needs_bare_mysql() {
+                    self.normalized_bare_mysql_url_params(value)
+                } else {
+                    normalize_mysql_url_params(value, self.mysql_uses_tls(), self.ca_cert_path.trim().is_empty())
+                }
             }
             DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch => {
-                let params = normalize_bare_mysql_url_params(value);
-                if params.is_empty() {
-                    "enable_cleartext_plugin=true".to_string()
-                } else {
-                    format!("{params}&enable_cleartext_plugin=true")
-                }
+                self.normalized_bare_mysql_url_params(value)
             }
             DatabaseType::Databend => normalize_bare_mysql_url_params(value),
             DatabaseType::Postgres | DatabaseType::Redshift => normalize_postgres_url_params(value, self.ssl),
@@ -1481,6 +1506,19 @@ impl ConnectionConfig {
                 normalize_mongo_url_params(value, self.ssl, !self.username.trim().is_empty(), self.ca_cert_path.trim())
             }
             _ => value.trim_start_matches('?').to_string(),
+        }
+    }
+
+    fn normalized_bare_mysql_url_params(&self, value: &str) -> String {
+        let params = if self.bare_mysql_uses_tls() {
+            normalize_mysql_url_params(value, true, self.ca_cert_path.trim().is_empty())
+        } else {
+            normalize_bare_mysql_url_params(value)
+        };
+        if self.enables_cleartext_mysql_auth_by_default() {
+            enable_mysql_cleartext_password_auth(params)
+        } else {
+            params
         }
     }
 
@@ -1748,6 +1786,20 @@ fn normalize_bare_mysql_url_params(value: &str) -> String {
         .join("&")
 }
 
+fn enable_mysql_cleartext_password_auth(params: String) -> String {
+    let mut parts = params
+        .split('&')
+        .filter(|part| {
+            !part.is_empty()
+                && !url_param_key_is(part, "allowCleartextPasswords")
+                && !url_param_key_is(part, "enable_cleartext_plugin")
+        })
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    parts.push("enable_cleartext_plugin=true".to_string());
+    parts.join("&")
+}
+
 fn is_mysql_cleartext_password_param(key: &str) -> bool {
     matches!(key.to_ascii_lowercase().as_str(), "allowcleartextpasswords" | "enable_cleartext_plugin")
 }
@@ -2006,6 +2058,24 @@ fn mongo_url_param_is_direct_connection_true(part: &str) -> bool {
         && percent_decode_str(value).decode_utf8_lossy().eq_ignore_ascii_case("true")
 }
 
+fn mongo_url_param_is_load_balanced_true(part: &str) -> bool {
+    let Some((key, value)) = part.split_once('=') else {
+        return false;
+    };
+    percent_decode_str(key).decode_utf8_lossy().eq_ignore_ascii_case("loadBalanced")
+        && percent_decode_str(value).decode_utf8_lossy().eq_ignore_ascii_case("true")
+}
+
+fn mongo_uri_has_load_balanced_true(uri: &str) -> bool {
+    uri.split_once('?')
+        .map(|(_, query)| query.split('#').next().unwrap_or("").split('&').any(mongo_url_param_is_load_balanced_true))
+        .unwrap_or(false)
+}
+
+fn mongo_url_params_have_load_balanced_true(params: &str) -> bool {
+    params.trim_start_matches('?').split('&').any(mongo_url_param_is_load_balanced_true)
+}
+
 fn normalize_postgres_url_params(value: &str, force_tls: bool) -> String {
     let value = value.trim_start_matches('?');
 
@@ -2248,7 +2318,9 @@ fn rewrite_mongo_uri_host(uri: &str, new_host: &str, new_port: u16) -> String {
 
     let mut result = format!("mongodb://{creds_prefix}{new_host}:{new_port}{after_hosts}");
 
-    if !result.contains("directConnection=") {
+    // loadBalanced=true requires directConnection to be unset or false, so a
+    // tunneled load-balanced endpoint must keep its original option set.
+    if !result.contains("directConnection=") && !mongo_uri_has_load_balanced_true(&result) {
         if result.contains('?') {
             result.push_str("&directConnection=true");
         } else {
@@ -2575,6 +2647,7 @@ mod tests {
             database: database.map(str::to_string),
             default_schema: None,
             visible_databases: None,
+            visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
             attached_databases: Vec::new(),
@@ -2602,6 +2675,7 @@ mod tests {
             redis_key_separator: default_redis_key_separator(),
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
+            redis_key_templates: Vec::new(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),
@@ -2767,6 +2841,20 @@ mod tests {
 
         config.db_type = DatabaseType::Postgres;
         assert_eq!(config.effective_database(), Some("postgres"));
+    }
+
+    #[test]
+    fn oracle_database_defaults_to_orcl_except_for_tns_aliases() {
+        let mut config = mysql_config("system", "oracle", None);
+        config.db_type = DatabaseType::Oracle;
+
+        for mode in [None, Some("service_name"), Some("sid")] {
+            config.oracle_connection_type = mode.map(str::to_string);
+            assert_eq!(config.effective_database(), Some("ORCL"));
+        }
+
+        config.oracle_connection_type = Some("tns".to_string());
+        assert_eq!(config.effective_database(), None);
     }
 
     fn mongodb_config(username: &str, password: &str, database: Option<&str>) -> ConnectionConfig {
@@ -3133,6 +3221,77 @@ mod tests {
     }
 
     #[test]
+    fn doris_database_type_enables_cleartext_password_auth_for_direct_and_tunneled_urls() {
+        let mut config = mysql_config("root", "secret", Some("analytics"));
+        config.db_type = DatabaseType::Doris;
+        config.port = 9030;
+
+        let direct_url = config.connection_url();
+        assert_eq!(direct_url, "mysql://root:secret@10.1.2.3:9030/analytics?enable_cleartext_plugin=true");
+        assert!(mysql_async::Opts::from_url(&direct_url).unwrap().enable_cleartext_plugin());
+        assert_eq!(
+            config.connection_url_with_host("127.0.0.1", 19030),
+            "mysql://root:secret@127.0.0.1:19030/analytics?enable_cleartext_plugin=true"
+        );
+    }
+
+    #[test]
+    fn doris_family_database_types_and_profiles_enable_cleartext_password_auth() {
+        for profile in ["doris", "selectdb", "starrocks", "manticoresearch"] {
+            let mut config = mysql_config("root", "secret", Some("analytics"));
+            config.driver_profile = Some(profile.to_string());
+            config.port = 9030;
+
+            assert_eq!(
+                config.connection_url(),
+                "mysql://root:secret@10.1.2.3:9030/analytics?enable_cleartext_plugin=true",
+                "profile {profile}"
+            );
+        }
+
+        for (db_type, port) in
+            [(DatabaseType::Doris, 9030), (DatabaseType::StarRocks, 9030), (DatabaseType::ManticoreSearch, 9306)]
+        {
+            let mut config = mysql_config("root", "secret", Some("analytics"));
+            config.db_type = db_type;
+            config.port = port;
+
+            assert_eq!(
+                config.connection_url(),
+                format!("mysql://root:secret@10.1.2.3:{port}/analytics?enable_cleartext_plugin=true")
+            );
+        }
+    }
+
+    #[test]
+    fn doris_family_cleartext_password_auth_is_canonical() {
+        let mut config = mysql_config("root", "secret", Some("analytics"));
+        config.driver_profile = Some("doris".to_string());
+        config.url_params = Some(
+            "charset=utf8mb4&allowCleartextPasswords=false&enable_cleartext_plugin=false&connect_timeout=10&enable_cleartext_plugin=true"
+                .to_string(),
+        );
+
+        assert_eq!(
+            config.connection_url(),
+            "mysql://root:secret@10.1.2.3:2883/analytics?connect_timeout=10&enable_cleartext_plugin=true"
+        );
+    }
+
+    #[test]
+    fn doris_family_cleartext_password_auth_does_not_change_other_mysql_profiles() {
+        let mysql = mysql_config("root", "secret", Some("analytics"));
+        assert_eq!(
+            mysql.connection_url(),
+            "mysql://root:secret@10.1.2.3:2883/analytics?ssl-mode=disabled&charset=utf8mb4"
+        );
+
+        let mut oceanbase = mysql_config("root", "secret", Some("analytics"));
+        oceanbase.driver_profile = Some("oceanbase".to_string());
+        assert_eq!(oceanbase.connection_url(), "mysql://root:secret@10.1.2.3:2883/analytics");
+    }
+
+    #[test]
     fn starrocks_profile_omits_mysql_ssl_mode_param_when_tls_disabled() {
         let mut config = mysql_config("root", "secret", Some("analytics"));
         config.driver_profile = Some("starrocks".to_string());
@@ -3143,7 +3302,7 @@ mod tests {
 
         assert!(config.needs_bare_mysql());
         assert!(!config.bare_mysql_uses_tls());
-        assert_eq!(config.connection_url(), "mysql://root:secret@10.1.2.3:2883/analytics");
+        assert_eq!(config.connection_url(), "mysql://root:secret@10.1.2.3:2883/analytics?enable_cleartext_plugin=true");
     }
 
     #[test]
@@ -3156,7 +3315,7 @@ mod tests {
         assert!(config.bare_mysql_uses_tls());
         assert_eq!(
             config.connection_url(),
-            "mysql://root:secret@10.1.2.3:2883/analytics?require_ssl=true&verify_ca=true&verify_identity=false&charset=utf8mb4"
+            "mysql://root:secret@10.1.2.3:2883/analytics?require_ssl=true&verify_ca=true&verify_identity=false&charset=utf8mb4&enable_cleartext_plugin=true"
         );
     }
 
@@ -3170,7 +3329,7 @@ mod tests {
         assert!(config.bare_mysql_uses_tls());
         assert_eq!(
             config.connection_url(),
-            "mysql://root:secret@10.1.2.3:2883/analytics?require_ssl=true&verify_identity=false&charset=utf8mb4"
+            "mysql://root:secret@10.1.2.3:2883/analytics?require_ssl=true&verify_identity=false&charset=utf8mb4&enable_cleartext_plugin=true"
         );
     }
 
@@ -3182,7 +3341,7 @@ mod tests {
 
         assert_eq!(
             config.connection_url(),
-            "mysql://root:secret@10.1.2.3:2883/analytics?connect_timeout=10&sessionVariables=query_timeout=60"
+            "mysql://root:secret@10.1.2.3:2883/analytics?connect_timeout=10&sessionVariables=query_timeout=60&enable_cleartext_plugin=true"
         );
     }
 
@@ -4113,6 +4272,26 @@ mod tests {
             url,
             "mongodb://read:pass@127.0.0.1:54321/admin?replicaSet=rs0&authSource=admin&directConnection=true"
         );
+    }
+
+    #[test]
+    fn mongodb_tunneled_connection_string_keeps_load_balanced_without_direct_connection() {
+        let mut config = mongodb_config("root", "secret", Some("admin"));
+        config.connection_string = Some("mongodb://read:pass@lb.example.net:27017/admin?loadBalanced=true".to_string());
+
+        let url = config.connection_url_with_host("127.0.0.1", 54321);
+
+        assert_eq!(url, "mongodb://read:pass@127.0.0.1:54321/admin?loadBalanced=true");
+    }
+
+    #[test]
+    fn mongodb_tunneled_form_url_keeps_load_balanced_without_direct_connection() {
+        let mut config = mongodb_config("root", "secret", Some("admin"));
+        config.url_params = Some("loadBalanced=true&authSource=admin".to_string());
+
+        let url = config.connection_url_with_host("127.0.0.1", 54321);
+
+        assert_eq!(url, "mongodb://root:secret@127.0.0.1:54321/admin?loadBalanced=true&authSource=admin");
     }
 
     #[test]

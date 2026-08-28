@@ -9,6 +9,8 @@ import {
   supportsConnectionDatabaseBrowser,
   supportsDatabaseNameCompletion,
   supportsDatabaseSchemaQualifier,
+  supportsObjectBrowser,
+  supportsObjectBrowserTreeNode,
   supportsQueryTargetDatabaseListing,
   supportsQueryEditorBlockComments,
   supportsSqlInListPaste,
@@ -50,6 +52,17 @@ describe("connection database browser", () => {
   it("follows object browser support without enabling unsupported connection types", () => {
     expect(supportsConnectionDatabaseBrowser("postgres")).toBe(true);
     expect(supportsConnectionDatabaseBrowser("redis")).toBe(false);
+    expect(supportsConnectionDatabaseBrowser("mongodb")).toBe(false);
+  });
+});
+
+describe("object browser tree nodes", () => {
+  it("opens MongoDB object browser from mongo-db nodes without the SQL database list", () => {
+    expect(supportsObjectBrowser("mongodb")).toBe(true);
+    expect(supportsObjectBrowserTreeNode("mongodb", "mongo-db")).toBe(true);
+    expect(supportsObjectBrowserTreeNode("mongodb", "database")).toBe(false);
+    expect(supportsObjectBrowserTreeNode("mysql", "database")).toBe(true);
+    expect(supportsObjectBrowserTreeNode("mysql", "mongo-db")).toBe(false);
   });
 });
 
@@ -91,9 +104,11 @@ describe("supportsTransaction", () => {
     expect(supportsTransaction("postgres")).toBe(true);
     expect(supportsTransaction("mysql")).toBe(true);
     expect(supportsTransaction("oracle")).toBe(true);
+    expect(supportsTransaction("jdbc")).toBe(true);
   });
 
   it("returns false for unsupported database types", () => {
+    expect(supportsTransaction("oceanbase-oracle")).toBe(false);
     expect(supportsTransaction("redis")).toBe(false);
     expect(supportsTransaction("mongodb")).toBe(false);
     expect(supportsTransaction("duckdb")).toBe(false);
@@ -114,11 +129,9 @@ describe("supportsTransaction", () => {
 });
 
 describe("defaultAutoCommitForDbType", () => {
-  it("defaults Oracle query tabs to manual transactions", () => {
-    expect(defaultAutoCommitForDbType("oracle")).toBe(false);
-  });
-
-  it("defaults other databases to auto-commit", () => {
+  it("defaults query tabs to auto-commit", () => {
+    expect(defaultAutoCommitForDbType("oceanbase-oracle")).toBe(true);
+    expect(defaultAutoCommitForDbType("oracle")).toBe(true);
     expect(defaultAutoCommitForDbType("mysql")).toBe(true);
     expect(defaultAutoCommitForDbType("postgres")).toBe(true);
     expect(defaultAutoCommitForDbType("dameng")).toBe(true);

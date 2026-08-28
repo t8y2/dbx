@@ -11,6 +11,7 @@ import { useToast } from "@/composables/useToast";
 import * as api from "@/lib/backend/api";
 import { currentGridFsBucketFilter, currentGridFsBucketSort, currentGridFsBucketSortDirection, gridFsBucketSortInputForColumn } from "@/lib/document/gridFsBrowser";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { useQueryStore } from "@/stores/queryStore";
 
 const props = defineProps<{
@@ -39,7 +40,7 @@ const filterBuilderOpen = ref(false);
 const selectedBucket = computed(() => buckets.value.find((bucket) => bucket.name === selectedBucketName.value) || null);
 const totalFiles = computed(() => buckets.value.reduce((sum, bucket) => sum + bucket.fileCount, 0));
 const totalBytes = computed(() => buckets.value.reduce((sum, bucket) => sum + bucket.totalBytes, 0));
-const isReadonly = computed(() => connectionStore.getConfig(props.connectionId)?.read_only ?? false);
+const isReadonly = computed(() => connectionIsEffectivelyReadOnly(connectionStore.getConfig(props.connectionId)));
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;

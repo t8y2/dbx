@@ -14,6 +14,7 @@
 import type { AppThemeAppearance } from "@/lib/app/appTheme";
 import { createAiShikiBlockCodeHighlighter, type AiCodeHighlighter } from "@/lib/ai/aiCodeHighlighter";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { LEGACY_WEBVIEW_CLASS } from "@/lib/ui/legacyWebView";
 
 export interface CodeSnapshotSource {
   code: string;
@@ -27,7 +28,7 @@ export interface CodeSnapshotStyleOptions {
   appearance: AppThemeAppearance;
   /** Render the macOS-style traffic light dots. Defaults to true. */
   showTrafficLights?: boolean;
-  /** Render line numbers via CSS counters. Defaults to true. */
+  /** Render line numbers. Defaults to true. */
   showLineNumbers?: boolean;
   /** Padding (px) around the code area. Defaults to 16. */
   padding?: number;
@@ -53,6 +54,11 @@ const SNAPSHOT_BAR_TEXT: Record<AppThemeAppearance, string> = {
 const SNAPSHOT_LINE_NUMBER: Record<AppThemeAppearance, string> = {
   light: "#d0d7de",
   dark: "#484f58",
+};
+
+const SNAPSHOT_CODE_TEXT: Record<AppThemeAppearance, string> = {
+  light: "#24292f",
+  dark: "#e1e4e8",
 };
 
 const TRAFFIC_LIGHT_COLORS = ["#ff5f57", "#febc2e", "#28c840"] as const;
@@ -112,6 +118,16 @@ export const CODE_SNAPSHOT_CSS = `
   display: block;
   min-height: 1.6em;
 }
+.dbx-code-snapshot__line-number {
+  display: inline-block;
+  min-width: 2.2em;
+  margin-right: 1.4em;
+  text-align: right;
+  color: var(--dbx-snapshot-line-number, #8b949e);
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+  -webkit-user-select: none;
+}
 .dbx-code-snapshot__pre--numbered {
   counter-reset: dbx-snapshot-line;
 }
@@ -160,6 +176,48 @@ function renderSnapshotBar(title: string | undefined, appearance: AppThemeAppear
   return `<div class="dbx-code-snapshot__bar" style="background:${SNAPSHOT_BAR_BACKGROUND[appearance]};color:${SNAPSHOT_BAR_TEXT[appearance]}">${dots}${titleHtml}</div>`;
 }
 
+function isSnapshotNumberedLineNode(node: Node): node is Element {
+  return node instanceof Element && node.classList.contains("line") && node.closest(".dbx-code-snapshot__pre--numbered") !== null;
+}
+
+function hasMaterializedLineNumber(line: Element): boolean {
+  return Array.from(line.children).some((child) => child.classList.contains("dbx-code-snapshot__line-number"));
+}
+
+function legacyWebViewExportFallbackEnabled(): boolean {
+  return typeof document !== "undefined" && document.documentElement.classList.contains(LEGACY_WEBVIEW_CLASS);
+}
+
+/**
+ * Keep preview rendering on CSS counters, but rewrite the cloned export DOM to
+ * use real line-number nodes. Older WebKit foreignObject exports can flatten
+ * every counter() value to "1", while the live preview still looks correct.
+ */
+export function materializeSnapshotCloneLineNumbers(root: ParentNode): void {
+  for (const block of Array.from(root.querySelectorAll<HTMLElement>(".dbx-code-snapshot__pre--numbered"))) {
+    block.classList.remove("dbx-code-snapshot__pre--numbered");
+    const lineNumberColor = block.style.getPropertyValue("--dbx-snapshot-line-number").trim() || SNAPSHOT_LINE_NUMBER.dark;
+    const lines = Array.from(block.querySelectorAll<HTMLElement>("code > .line"));
+    for (const [index, line] of lines.entries()) {
+      if (hasMaterializedLineNumber(line)) continue;
+      const lineNumber = block.ownerDocument.createElement("span");
+      lineNumber.className = "dbx-code-snapshot__line-number";
+      lineNumber.setAttribute("aria-hidden", "true");
+      lineNumber.textContent = String(index + 1);
+      lineNumber.style.cssText = ["display:inline-block", "min-width:2.2em", "margin-right:1.4em", "text-align:right", `color:${lineNumberColor}`, "font-variant-numeric:tabular-nums", "user-select:none", "-webkit-user-select:none"].join(";");
+
+      const lineContent = block.ownerDocument.createElement("span");
+      lineContent.className = "dbx-code-snapshot__line-content";
+      lineContent.style.display = "inline";
+      while (line.firstChild) {
+        lineContent.append(line.firstChild);
+      }
+
+      line.append(lineNumber, lineContent);
+    }
+  }
+}
+
 /**
  * Render a self-contained snapshot DOM (as an HTML string) for the given code.
  * The returned string includes its own `<style>` tag and can be injected via
@@ -189,7 +247,7 @@ export async function renderCodeSnapshotHtml(source: CodeSnapshotSource, options
     `<style>${CODE_SNAPSHOT_CSS}</style>` +
     `<div class="dbx-code-snapshot" data-snapshot-appearance="${appearance}" style="background:${SNAPSHOT_BACKGROUND[appearance]};font-size:${fontSize}px">` +
     bar +
-    `<pre class="${preClass}" style="--dbx-snapshot-line-number:${lineNumberColor};padding:0 ${padding}px ${padding}px"><code>${body}</code></pre>` +
+    `<pre class="${preClass}" style="--dbx-snapshot-line-number:${lineNumberColor};color:${SNAPSHOT_CODE_TEXT[appearance]};padding:0 ${padding}px ${padding}px"><code>${body}</code></pre>` +
     `</div>`
   );
 }
@@ -207,12 +265,28 @@ export async function snapshotElementToPng(element: HTMLElement): Promise<string
 
   const targetScale = Math.min(MAX_EXPORT_PIXEL_RATIO, Math.max(1, typeof window === "undefined" ? 1 : window.devicePixelRatio || 1));
   const scale = Math.min(targetScale, MAX_EXPORT_CANVAS_EDGE / width, MAX_EXPORT_CANVAS_EDGE / height, Math.sqrt(MAX_EXPORT_CANVAS_PIXELS / basePixels));
+  const useLegacyLineNumberFallback = legacyWebViewExportFallbackEnabled();
   return domtoimage.toPng(element, {
     quality: 1,
     width,
     height,
     // dom-to-image-more 使用 scale 放大实际画布；pixelRatio 不是该库支持的参数。
     scale,
+    adjustPseudoElement: useLegacyLineNumberFallback
+      ? (node: Node, pseudoElement: ":before" | ":after") => {
+          if (pseudoElement === ":before" && isSnapshotNumberedLineNode(node)) {
+            return false;
+          }
+          return undefined;
+        }
+      : undefined,
+    onclone: useLegacyLineNumberFallback
+      ? (clone: Node) => {
+          if (typeof (clone as ParentNode).querySelectorAll === "function") {
+            materializeSnapshotCloneLineNumbers(clone as ParentNode);
+          }
+        }
+      : undefined,
     style: {
       width: `${width}px`,
       height: `${height}px`,

@@ -173,7 +173,24 @@ function compareNumbers(left: number, right: number): number {
 }
 
 function dateSortValue(value: string): number | null {
-  if (!/^\d{4}-\d{2}-\d{2}/.test(value)) return null;
-  const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? parsed : null;
+  const trimmed = value.trim();
+  // PostgreSQL and KingbaseES render timestamps as `YYYY-MM-DD HH:MM:SS.ffffff`
+  // (space separator, microsecond precision, optional numeric UTC offset) plus
+  // the special values infinity/-infinity. Date.parse rejects several of those
+  // shapes depending on the engine, silently degrading time columns to
+  // lexicographic order (issue #7281), so parse them deterministically.
+  if (trimmed === "infinity") return Number.MAX_SAFE_INTEGER;
+  if (trimmed === "-infinity") return Number.MIN_SAFE_INTEGER;
+  const match = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?(Z|[+-]\d{2}(?::?\d{2})?)?)?/.exec(trimmed);
+  if (!match) return null;
+  const [, year, month, day, hour = "0", minute = "0", second = "0", fraction, zone] = match;
+  let sortValue = Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second)) + (fraction ? Number(`0.${fraction}`) * 1000 : 0);
+  if (zone && zone !== "Z") {
+    const zoneMatch = /^([+-])(\d{2}):?(\d{2})?$/.exec(zone);
+    if (zoneMatch) {
+      const offsetMinutes = Number(zoneMatch[2]) * 60 + Number(zoneMatch[3] ?? 0);
+      sortValue -= (zoneMatch[1] === "-" ? -1 : 1) * offsetMinutes * 60_000;
+    }
+  }
+  return Number.isFinite(sortValue) ? sortValue : null;
 }

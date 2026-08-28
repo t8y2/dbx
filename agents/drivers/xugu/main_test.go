@@ -1011,6 +1011,11 @@ func TestXuguIndexScopeDDL(t *testing.T) {
 			want:  " INDEXTYPE IS BTREE",
 		},
 		{
+			name:  "spatial index preserves Xugu RTREE type",
+			index: indexInfo{IndexType: indexTypePtr("RTREE")},
+			want:  " INDEXTYPE IS RTREE",
+		},
+		{
 			name:  "local partition index",
 			index: indexInfo{IndexType: &indexType, IsLocal: true},
 			want:  " INDEXTYPE IS BTREE LOCAL",
@@ -1077,6 +1082,26 @@ func TestXuguIndexScopeDDL(t *testing.T) {
 			}
 			if tc.name == "incomplete subpartition keeps valid first level" && strings.Contains(got, "SUBPARTITION") {
 				t.Fatalf("incomplete subpartition metadata must not produce a partial clause: %q", got)
+			}
+		})
+	}
+}
+
+func TestXuguIndexTypeName(t *testing.T) {
+	for _, tc := range []struct {
+		value any
+		want  string
+	}{
+		{value: int64(0), want: "BTREE"},
+		{value: int64(1), want: "RTREE"},
+		{value: int64(2), want: "FULLTEXT"},
+		{value: int64(3), want: "BITMAP"},
+		{value: "RTREE", want: "RTREE"},
+		{value: "vendor-specific", want: "vendor-specific"},
+	} {
+		t.Run(fmt.Sprint(tc.value), func(t *testing.T) {
+			if got := indexTypeName(tc.value); got != tc.want {
+				t.Fatalf("indexTypeName(%v) = %q, want %q", tc.value, got, tc.want)
 			}
 		})
 	}

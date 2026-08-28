@@ -91,13 +91,15 @@ for (const file of files) {
 }
 
 const databaseSupportSource = fs.readFileSync(path.join(repositoryDir, "docs/data/databaseSupport.ts"), "utf8");
-const connectionDialogSource = fs.readFileSync(path.join(repositoryDir, "apps/desktop/src/components/connection/ConnectionDialog.vue"), "utf8");
+const connectionProfilesSource = fs.readFileSync(path.join(repositoryDir, "apps/desktop/src/types/generated/connectionProfiles.ts"), "utf8");
 const jdbcProductProfilesSource = fs.readFileSync(path.join(repositoryDir, "apps/desktop/src/lib/database/jdbcProductProfiles.ts"), "utf8");
-const connectionOptionsMatch = connectionDialogSource.match(/const dbOptions: DbOption\[\] = \[([\s\S]*?)\n\];/);
+const connectionOptionsMatch = connectionProfilesSource.match(
+  /export const CONNECTION_PICKER_OPTIONS = \[([\s\S]*?)\n\] as const satisfies readonly ConnectionPickerOption\[\];/,
+);
 const jdbcProductProfilesMatch = jdbcProductProfilesSource.match(/JDBC_PRODUCT_PROFILES = \[([^\]]*)\]/);
 
 if (!connectionOptionsMatch) {
-  errors.push("Unable to read database options from ConnectionDialog.vue");
+  errors.push("Unable to read database options from connectionProfiles.ts");
 } else {
   const connectionModeIds = new Set(["custom_mysql", "custom_postgres"]);
   const connectionIds = [...connectionOptionsMatch[1].matchAll(/value: "([^"]+)"/g)]
@@ -132,7 +134,7 @@ if (!connectionOptionsMatch) {
     .filter((id) => id !== "request");
 
   for (const [label, ids] of [
-    ["ConnectionDialog.vue", connectionIds],
+    ["connectionProfiles.ts", connectionIds],
     ["databaseSupport.ts", websiteIds],
   ]) {
     const duplicates = ids.filter((id, index) => ids.indexOf(id) !== index);

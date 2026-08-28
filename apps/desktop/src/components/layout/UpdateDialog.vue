@@ -90,7 +90,7 @@ watch(
 <template>
   <Dialog :open="open" @update:open="handleOpenChange">
     <DialogContent
-      class="sm:max-w-[520px]"
+      class="dbx-update-dialog sm:max-w-[700px]"
       :show-close-button="!isCloseBlocked"
       @interact-outside="
         (e: Event) => {
@@ -140,30 +140,48 @@ watch(
           <span>{{ t("updates.activeTasksBlockUpdate", { count: activeTaskCount }) }}</span>
         </div>
       </div>
-      <DialogFooter>
-        <Button v-if="!isCloseBlocked" variant="outline" @click="handleCancel">{{ t("dangerDialog.cancel") }}</Button>
-        <Button v-if="canIgnoreVersion" variant="ghost" :disabled="isIgnoringUpdate" @click="emit('ignore-version')">
-          <Loader2 v-if="isIgnoringUpdate" class="h-4 w-4 animate-spin" />
-          {{ t("updates.ignoreVersion") }}
-        </Button>
+      <DialogFooter class="min-w-0">
         <template v-if="updateInfo?.update_available">
-          <Button variant="outline" @click="emit('open-latest-release')">{{ t("updates.openRelease") }}</Button>
+          <div class="flex min-w-0 flex-wrap items-center gap-2 sm:justify-end">
+            <Button v-if="!isCloseBlocked" variant="outline" class="shrink-0" @click="handleCancel">{{ t("dangerDialog.cancel") }}</Button>
+            <Button v-if="canIgnoreVersion" variant="ghost" class="shrink-0" :disabled="isIgnoringUpdate" @click="emit('ignore-version')">
+              <Loader2 v-if="isIgnoringUpdate" class="h-4 w-4 animate-spin" />
+              {{ t("updates.ignoreVersion") }}
+            </Button>
+            <Button variant="outline" class="shrink-0" @click="emit('open-latest-release')">{{ t("updates.openRelease") }}</Button>
+          </div>
           <template v-if="canDownloadAndInstallUpdate(updateInfo, isDesktop)">
-            <Button v-if="updateReady" :disabled="activeTaskCount > 0" @click="emit('restart')">{{ t("updates.restart") }}</Button>
-            <Button v-else-if="isInstallingUpdate" disabled>
+            <Button v-if="updateReady" class="shrink-0" :disabled="activeTaskCount > 0" @click="emit('restart')">{{ t("updates.restart") }}</Button>
+            <Button v-else-if="isInstallingUpdate" class="shrink-0" disabled>
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("updates.installing") }}
             </Button>
-            <Button v-else-if="isDownloadingUpdate" class="w-52 tabular-nums" disabled>
+            <Button v-else-if="isDownloadingUpdate" class="w-52 shrink-0 tabular-nums" disabled>
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("updates.downloading", { progress: downloadProgress }) }}
             </Button>
-            <Button v-else-if="updateDownloaded" :disabled="activeTaskCount > 0" @click="emit('install-downloaded')">{{ t("updates.exitAndUpdate") }}</Button>
-            <Button v-else :disabled="activeTaskCount > 0" @click="emit('download-and-install')">{{ t("updates.downloadAndInstall") }}</Button>
+            <Button v-else-if="updateDownloaded" class="shrink-0" :disabled="activeTaskCount > 0" @click="emit('install-downloaded')">{{ t("updates.exitAndUpdate") }}</Button>
+            <Button v-else class="shrink-0" :disabled="activeTaskCount > 0" @click="emit('download-and-install')">{{ t("updates.downloadAndInstall") }}</Button>
           </template>
         </template>
-        <Button v-else-if="updateCheckMessage" @click="emit('open-latest-release')">{{ t("updates.openRelease") }}</Button>
+        <template v-else>
+          <div class="flex min-w-0 flex-wrap items-center gap-2 sm:justify-end">
+            <Button v-if="!isCloseBlocked" variant="outline" class="shrink-0" @click="handleCancel">{{ t("dangerDialog.cancel") }}</Button>
+            <Button v-if="updateCheckMessage" class="shrink-0" @click="emit('open-latest-release')">{{ t("updates.openRelease") }}</Button>
+          </div>
+        </template>
       </DialogFooter>
     </DialogContent>
   </Dialog>
 </template>
+
+<style>
+html.dbx-legacy-webview [data-slot="dialog-content"].dbx-update-dialog[class~="max-w-sm"] {
+  max-width: 700px !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"].dbx-update-dialog [data-slot="dialog-footer"] {
+  flex-direction: row !important;
+  justify-content: flex-end !important;
+}
+</style>

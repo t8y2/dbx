@@ -114,6 +114,7 @@ const HEX_ESCAPE_RE = /^(?:\\x[0-9a-fA-F]{2}|\s)+$/;
 const BINARY_TYPE_RE = /^(?:blob|tinyblob|mediumblob|longblob|bytea|bytes|binary|varbinary|image|raw|long\s+raw)(?:\b|\()/i;
 const FIXED_BINARY_TYPE_RE = /^binary(?:\b|\()/i;
 const BINARY_STRING_TYPE_RE = /^(?:binary|varbinary)(?:\b|\()/i;
+const BLOB_TYPE_RE = /^(?:blob|tinyblob|mediumblob|longblob)(?:\b|\()/i;
 const MYSQL_FILE_IMPORT_TYPE_RE = /^(?:blob|tinyblob|mediumblob|longblob|binary|varbinary)(?:\b|\()/i;
 
 function copyBytesForBlob(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
@@ -182,6 +183,11 @@ export function isBinaryCellColumnType(columnType?: string): boolean {
   return !!type && BINARY_TYPE_RE.test(type);
 }
 
+export function isBlobCellColumnType(columnType?: string): boolean {
+  const type = (columnType ?? "").trim();
+  return !!type && BLOB_TYPE_RE.test(type);
+}
+
 export function canImportBinaryCellFile(databaseType?: DatabaseType, columnType?: string): boolean {
   const type = (columnType ?? "").trim();
   if (databaseType === "postgres") return /^bytea(?:\b|\()/i.test(type);
@@ -200,12 +206,32 @@ export function binaryCellDisplayText(value: unknown, columnType?: string, origi
   }
   const bytes = parseBinaryCellBytes(value, columnType, databaseType);
   if (!bytes || !isBinaryCellColumnType(columnType)) return null;
-  if (BINARY_STRING_TYPE_RE.test((columnType ?? "").trim())) {
-    const previewBytes = FIXED_BINARY_TYPE_RE.test((columnType ?? "").trim()) ? trimTrailingNullBytes(bytes) : bytes;
-    const text = printableUtf8Text(previewBytes);
+  if (isBinaryCellTextPreviewColumn(columnType, databaseType)) {
+    const text = binaryCellUtf8TextBytes(bytes, columnType);
     if (text !== null) return text;
   }
   return `${binaryCellDisplayLabel(columnType)} [${formatBinaryCellByteSize(bytes.length)}]`;
+}
+
+export function binaryCellUtf8Text(value: unknown, columnType?: string, databaseType?: DatabaseType): string | null {
+  if (!isBinaryCellColumnType(columnType) || !isBinaryCellTextPreviewColumn(columnType, databaseType)) return null;
+  const bytes = parseBinaryCellBytes(value, columnType, databaseType);
+  if (!bytes) return null;
+  return binaryCellUtf8TextBytes(bytes, columnType);
+}
+
+// MySQL BLOB 的文本预览必须与编辑写回路径（coerceMysqlBlobTextValue，仅 mysql）走同一闸门：
+// SQLite/DuckDB/H2/Firebird 等库同样暴露 `blob` 列，若一律按文本预览会出现
+// “显示是文本、编辑器却是十六进制”的不一致，故 blob 文本预览仅在 mysql 连接开启。
+// binary/varbinary 的文本预览早于该特性存在（如 TDengine BINARY 文本），保持全库通用。
+function isBinaryCellTextPreviewColumn(columnType: string | undefined, databaseType: DatabaseType | undefined): boolean {
+  if (BINARY_STRING_TYPE_RE.test((columnType ?? "").trim())) return true;
+  return isBlobCellColumnType(columnType) && databaseType === "mysql";
+}
+
+function binaryCellUtf8TextBytes(bytes: Uint8Array, columnType?: string): string | null {
+  const previewBytes = FIXED_BINARY_TYPE_RE.test((columnType ?? "").trim()) ? trimTrailingNullBytes(bytes) : bytes;
+  return printableUtf8Text(previewBytes);
 }
 
 function trimTrailingNullBytes(bytes: Uint8Array): Uint8Array {

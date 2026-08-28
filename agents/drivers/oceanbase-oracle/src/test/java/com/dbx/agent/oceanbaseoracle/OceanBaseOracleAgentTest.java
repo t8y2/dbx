@@ -399,6 +399,28 @@ class OceanBaseOracleAgentTest {
     }
 
     @Test
+    void getColumnsResolvesTheCurrentSchemaWhenSchemaIsEmpty() {
+        List<String> sql = new ArrayList<>();
+        List<String> params = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, currentSchemaColumnConnection(
+            sql,
+            params,
+            resultSet(new String[]{"CURRENT_SCHEMA"}, new Object[][]{{"APP"}}),
+            columnResultSet(new Object[][]{
+                {"PARAM_VALUE", "VARCHAR2", "Y", null, null, 100, 100, null, null, 0}
+            })
+        ));
+
+        List<ColumnInfo> columns = agent.getColumns("", "TBPARAM");
+
+        Assertions.assertEquals(List.of("PARAM_VALUE"), columns.stream().map(ColumnInfo::getName).toList());
+        Assertions.assertEquals(List.of("APP", "TBPARAM", "APP", "TBPARAM"), params);
+        Assertions.assertTrue(sql.get(0).contains("SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')"), sql.get(0));
+        Assertions.assertTrue(sql.get(1).contains("FROM ALL_TAB_COLUMNS"), sql.get(1));
+    }
+
+    @Test
     void tableDdlIncludesDefaultsAndOnlyNonBlankColumnComments() {
         OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
         TestSupport.setPrivateConnection(agent, preparedConnection(new ArrayList<>(),
@@ -488,6 +510,45 @@ class OceanBaseOracleAgentTest {
         return proxy(Connection.class, (method, args) -> {
             if ("createStatement".equals(method.getName())) {
                 return statement;
+            }
+            if ("isClosed".equals(method.getName())) {
+                return false;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static Connection currentSchemaColumnConnection(List<String> sql, List<String> params, ResultSet currentSchema, ResultSet columns) {
+        Statement schemaStatement = proxy(Statement.class, (method, args) -> {
+            if ("executeQuery".equals(method.getName())) {
+                sql.add(String.valueOf(args[0]));
+                return currentSchema;
+            }
+            if ("close".equals(method.getName())) {
+                return null;
+            }
+            return defaultValue(method.getReturnType());
+        });
+        PreparedStatement columnStatement = proxy(PreparedStatement.class, (method, args) -> {
+            if ("executeQuery".equals(method.getName())) {
+                return columns;
+            }
+            if ("setString".equals(method.getName())) {
+                params.add(String.valueOf(args[1]));
+                return null;
+            }
+            if ("close".equals(method.getName())) {
+                return null;
+            }
+            return defaultValue(method.getReturnType());
+        });
+        return proxy(Connection.class, (method, args) -> {
+            if ("createStatement".equals(method.getName())) {
+                return schemaStatement;
+            }
+            if ("prepareStatement".equals(method.getName())) {
+                sql.add(String.valueOf(args[0]));
+                return columnStatement;
             }
             if ("isClosed".equals(method.getName())) {
                 return false;

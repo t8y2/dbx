@@ -118,6 +118,7 @@ const showRemoved = ref(true);
 const showModified = ref(true);
 
 let syncPlanRequestId = 0;
+let initializingPrefill = false;
 
 const sqlConnections = computed(() => store.connections.filter((connection) => !["redis", "mongodb", "elasticsearch", "easysearch", "meilisearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "nacos"].includes(connection.db_type)));
 const selectedSourceTableNames = computed(() => sourceTables.value.filter((table) => selectedSourceTables.value.has(table)));
@@ -780,6 +781,7 @@ function formatModifiedSummary(row: SelectableDataCompareModifiedRow): string {
 }
 
 watch(sourceConnectionId, (id) => {
+  if (initializingPrefill) return;
   clearResult();
   sourceDatabase.value = "";
   sourceSchema.value = "";
@@ -799,6 +801,7 @@ watch(targetConnectionId, (id) => {
   loadDatabases(id, "target").catch((e) => toast(String(e), 5000));
 });
 watch(sourceDatabase, () => {
+  if (initializingPrefill) return;
   clearResult();
   sourceSchema.value = "";
   sourceSchemas.value = [];
@@ -816,6 +819,7 @@ watch(targetDatabase, () => {
   loadSchemas("target").catch((e) => toast(String(e), 5000));
 });
 watch(sourceSchema, () => {
+  if (initializingPrefill) return;
   clearResult();
   sourceTables.value = [];
   sourceTable.value = "";
@@ -853,16 +857,21 @@ watch(
     if (!value) return;
     clearResult();
     if (props.prefillConnectionId) {
-      sourceConnectionId.value = props.prefillConnectionId;
-      await loadDatabases(props.prefillConnectionId, "source");
-      if (props.prefillDatabase) sourceDatabase.value = props.prefillDatabase;
-      if (props.prefillDatabase) await loadSchemas("source", props.prefillSchema);
-      if (props.prefillTable) {
-        await loadTables("source");
-        if (sourceTables.value.includes(props.prefillTable)) {
-          resetSelectedSourceTables([props.prefillTable]);
-          sourceTable.value = props.prefillTable;
+      initializingPrefill = true;
+      try {
+        sourceConnectionId.value = props.prefillConnectionId;
+        await loadDatabases(props.prefillConnectionId, "source");
+        if (props.prefillDatabase) sourceDatabase.value = props.prefillDatabase;
+        if (props.prefillDatabase) await loadSchemas("source", props.prefillSchema);
+        if (props.prefillTable) {
+          await loadTables("source");
+          if (sourceTables.value.includes(props.prefillTable)) {
+            resetSelectedSourceTables([props.prefillTable]);
+            sourceTable.value = props.prefillTable;
+          }
         }
+      } finally {
+        initializingPrefill = false;
       }
     }
   },

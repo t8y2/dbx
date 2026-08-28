@@ -40,20 +40,7 @@ describe("queryStore app close unsaved drafts", () => {
     return tabId;
   }
 
-  it("prompts for unsaved SQL when quitting by default", async () => {
-    const { queryStore } = await createStoreWithDirtyQueryTab();
-
-    const confirmed = queryStore.requestAppCloseConfirmation();
-
-    expect(confirmed).toBe(true);
-    expect(queryStore.showCloseConfirm).toBe(true);
-    expect(queryStore.closeConfirmContext).toBe("app");
-  });
-
-  it("skips the quit prompt and keeps unsaved drafts in keep-drafts mode", async () => {
-    const { useSettingsStore } = await import("@/stores/settingsStore");
-    useSettingsStore().updateEditorSettings({ appCloseUnsavedTabsMode: "keep-drafts" });
-
+  it("skips the quit prompt and keeps unsaved drafts by default", async () => {
     const { queryStore } = await createStoreWithDirtyQueryTab();
 
     const confirmed = queryStore.requestAppCloseConfirmation();
@@ -63,6 +50,19 @@ describe("queryStore app close unsaved drafts", () => {
     expect(queryStore.tabs[0].sql).toBe("select 1;");
     expect(queryStore.isTabDirty(queryStore.tabs[0])).toBe(true);
     expect(queryStore.requiresAppCloseDraftPersist).toBe(true);
+  });
+
+  it("prompts for unsaved SQL when quitting in prompt mode", async () => {
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    useSettingsStore().updateEditorSettings({ appCloseUnsavedTabsMode: "prompt" });
+
+    const { queryStore } = await createStoreWithDirtyQueryTab();
+
+    const confirmed = queryStore.requestAppCloseConfirmation();
+
+    expect(confirmed).toBe(true);
+    expect(queryStore.showCloseConfirm).toBe(true);
+    expect(queryStore.closeConfirmContext).toBe("app");
   });
 
   it("does not require draft persistence when unsaved SQL confirmation is disabled", async () => {

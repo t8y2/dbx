@@ -34,6 +34,12 @@ const props = defineProps<{
   autoCommit?: boolean;
   txnSessionId?: string;
   txnAutoRolledBack?: boolean;
+  /** Oracle-only: whether the current manual Oracle session executed a statement
+   *  DBX cannot prove read-only. Commit/Rollback are hidden while false. */
+  oracleTxnPossiblyDirty?: boolean;
+  /** Oracle manual mode derived from the resolved database type (not raw
+   *  db_type, which can be the agent transport). */
+  isOracleManualTransaction?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -153,6 +159,12 @@ function toggleSqlSemanticDiagnostics() {
 const isTransactionActive = computed(() => !!props.txnSessionId);
 const isManualTransactionMode = computed(() => props.autoCommit === false || isTransactionActive.value);
 const transactionModeBadge = computed(() => (isManualTransactionMode.value ? "M" : "A"));
+// Oracle manual mode hides Commit/Rollback while the session is clean (no
+// unproven statement executed). Every other database keeps the existing rule.
+const showTxnActions = computed(() => {
+  if (props.isOracleManualTransaction) return isTransactionActive.value && props.oracleTxnPossiblyDirty === true;
+  return isTransactionActive.value;
+});
 const transactionTooltip = computed(() => {
   const isAgent = (props.activeConnection?.db_type as string) === "agent";
   const isManual = isManualTransactionMode.value;
@@ -430,8 +442,8 @@ async function changeCatalog(selectedCatalog: string) {
           </TooltipTrigger>
           <TooltipContent>{{ transactionTooltip }}</TooltipContent>
         </Tooltip>
-        <!-- Commit button (only when transaction is active) -->
-        <Tooltip v-if="isTransactionActive">
+        <!-- Commit button (only when a transaction action is warranted) -->
+        <Tooltip v-if="showTxnActions">
           <TooltipTrigger as-child>
             <Button variant="ghost" size="icon" class="h-6 w-6 text-green-600 hover:bg-green-500/10 hover:text-green-700 dark:text-green-300 dark:hover:text-green-200" :disabled="activeTab.isExecuting" :aria-label="t('toolbar.commit')" @click="emit('commit')">
               <Check class="h-3.5 w-3.5" />
@@ -440,8 +452,8 @@ async function changeCatalog(selectedCatalog: string) {
           <TooltipContent>{{ t("toolbar.commit") }}</TooltipContent>
         </Tooltip>
 
-        <!-- Rollback button (only when transaction is active) -->
-        <Tooltip v-if="isTransactionActive">
+        <!-- Rollback button (only when a transaction action is warranted) -->
+        <Tooltip v-if="showTxnActions">
           <TooltipTrigger as-child>
             <Button variant="ghost" size="icon" class="h-6 w-6 text-red-600 hover:bg-red-500/10 hover:text-red-700 dark:text-red-300 dark:hover:text-red-200" :disabled="activeTab.isExecuting" :aria-label="t('toolbar.rollback')" @click="emit('rollback')">
               <RotateCcw class="h-3.5 w-3.5" />

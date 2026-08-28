@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { CalendarDateTime } from "@internationalized/date";
 import { Check, Clock, Eye, Loader2, X } from "@lucide/vue";
@@ -19,6 +19,7 @@ const loading = ref(false),
   saving = ref(false),
   error = ref(""),
   preview = ref("");
+let loadRequestId = 0;
 const activeTab = ref<"definition" | "schedule" | "comment" | "preview">("definition");
 const draft = ref<any>({ name: props.name || "", schema: props.schema, schedule: { mode: "every", intervalValue: "1", intervalUnit: "DAY" }, preserve: true, enabled: true, body: "" });
 const existing = computed(() => !!props.name);
@@ -63,6 +64,8 @@ function refreshPreview() {
   }
 }
 async function load() {
+  const requestId = ++loadRequestId;
+  error.value = "";
   if (!props.name) {
     refreshPreview();
     return;
@@ -70,6 +73,7 @@ async function load() {
   loading.value = true;
   try {
     const info: MysqlEventInfo = await api.getEventInfo(props.connection.id, props.database, props.schema, props.name);
+    if (requestId !== loadRequestId) return;
     draft.value = {
       name: info.name,
       schema: info.schema,
@@ -83,9 +87,10 @@ async function load() {
     };
     refreshPreview();
   } catch (e) {
+    if (requestId !== loadRequestId) return;
     error.value = e instanceof Error ? e.message : String(e);
   } finally {
-    loading.value = false;
+    if (requestId === loadRequestId) loading.value = false;
   }
 }
 async function save() {
@@ -111,12 +116,13 @@ async function save() {
     saving.value = false;
   }
 }
+watch(() => props.name, load);
 onMounted(load);
 </script>
 <template>
   <div class="flex min-h-0 flex-1 flex-col gap-3 overflow-auto p-4" data-mysql-event-editor>
     <div class="flex items-center justify-between border-b pb-2">
-      <div class="flex items-center gap-2 text-sm font-semibold"><Clock class="h-4 w-4 text-orange-300" /> {{ t("contextMenu.eventEditorTitle") }}</div>
+      <div class="flex items-center gap-2 text-sm font-semibold"><Clock class="h-4 w-4 text-orange-400" /> {{ t("contextMenu.eventEditorTitle") }}</div>
       <Button variant="ghost" size="icon" class="h-6 w-6" :aria-label="t('contextMenu.eventCancel')" @click="emit('close')"><X class="h-4 w-4" /></Button>
     </div>
     <div v-if="loading" class="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 class="h-4 w-4 animate-spin" /> {{ t("contextMenu.eventLoading") }}</div>

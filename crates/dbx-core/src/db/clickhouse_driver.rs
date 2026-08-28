@@ -616,18 +616,99 @@ pub async fn list_databases(client: &ChClient) -> Result<Vec<DatabaseInfo>, Stri
 }
 
 pub async fn list_tables(client: &ChClient, database: &str) -> Result<Vec<TableInfo>, String> {
-    let database_lit = clickhouse_literal(database);
-    let sql_with_comment =
-        format!("SELECT name, engine, comment FROM system.tables WHERE database = '{database_lit}' ORDER BY name");
+    list_tables_by_kind(client, database, None, None, None, false).await
+}
+
+/// Lists physical tables with server-side name filtering and pagination.
+pub async fn list_table_objects_filtered(
+    client: &ChClient,
+    database: &str,
+    filter: Option<&str>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Result<Vec<TableInfo>, String> {
+    list_tables_by_kind(client, database, filter, limit, offset, true).await
+}
+
+async fn list_tables_by_kind(
+    client: &ChClient,
+    database: &str,
+    filter: Option<&str>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    table_objects_only: bool,
+) -> Result<Vec<TableInfo>, String> {
+    let sql_with_comment = clickhouse_tables_sql(database, filter, limit, offset, table_objects_only, true);
     let result = match ch_query(client, &sql_with_comment, Some(database)).await {
         Ok(result) => result,
         Err(error) => {
             log::debug!("Falling back to ClickHouse table list without comments: {error}");
-            let sql = format!("SELECT name, engine FROM system.tables WHERE database = '{database_lit}' ORDER BY name");
+            let sql = clickhouse_tables_sql(database, filter, limit, offset, table_objects_only, false);
             ch_query(client, &sql, Some(database)).await?
         }
     };
     Ok(result.data.iter().map(|row| clickhouse_table_info_from_row(row)).collect())
+}
+
+fn clickhouse_tables_sql(
+    database: &str,
+    filter: Option<&str>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    table_objects_only: bool,
+    include_comment: bool,
+) -> String {
+    let columns = if include_comment { "name, engine, comment" } else { "name, engine" };
+    let database_lit = clickhouse_literal(database);
+    let table_kind_filter = if table_objects_only { " AND position(engine, 'View') = 0" } else { "" };
+    let name_filter = clickhouse_table_name_filter_sql(filter, include_comment);
+    let pagination = limit.map(|limit| format!(" LIMIT {limit} OFFSET {}", offset.unwrap_or(0))).unwrap_or_default();
+
+    format!(
+        "SELECT {columns} FROM system.tables WHERE database = '{database_lit}'{table_kind_filter}{name_filter} ORDER BY name{pagination}"
+    )
+}
+
+fn clickhouse_table_name_filter_sql(filter: Option<&str>, include_comment: bool) -> String {
+    let filter = filter.unwrap_or("").trim();
+    if filter.is_empty() {
+        return String::new();
+    }
+
+    let mut patterns = vec![clickhouse_like_contains_pattern(filter)];
+    if crate::sql::fuzzy_filter_enabled(filter) {
+        patterns.push(crate::sql::fuzzy_like_pattern_with_escape(filter, clickhouse_escape_like_literal));
+    }
+    let predicates = patterns
+        .into_iter()
+        .map(|pattern| {
+            // Keep comment-based search parity with the name predicate; the comment
+            // column is absent from the no-comment fallback query, so the extra
+            // predicate must be gated on include_comment.
+            let name_predicate = format!("lowerUTF8(name) LIKE '{}'", clickhouse_literal(&pattern));
+            if include_comment {
+                format!("{name_predicate} OR lowerUTF8(coalesce(comment, '')) LIKE '{}'", clickhouse_literal(&pattern))
+            } else {
+                name_predicate
+            }
+        })
+        .collect::<Vec<_>>();
+    format!(" AND ({})", predicates.join(" OR "))
+}
+
+fn clickhouse_like_contains_pattern(value: &str) -> String {
+    format!("%{}%", clickhouse_escape_like_literal(value))
+}
+
+fn clickhouse_escape_like_literal(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 1);
+    for ch in value.chars().flat_map(char::to_lowercase) {
+        if ch == '\\' || ch == '%' || ch == '_' {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
 }
 
 pub async fn list_object_statistics(client: &ChClient, database: &str) -> Result<Vec<ObjectStatistics>, String> {
@@ -1127,5 +1208,37 @@ mod tests {
         assert_eq!(table.name, "active_users");
         assert_eq!(table.table_type, "VIEW");
         assert_eq!(table.comment, None);
+    }
+
+    #[test]
+    fn table_object_query_filters_before_pagination() {
+        let sql = clickhouse_tables_sql("analytics", Some("orders"), Some(102), Some(100), true, true);
+
+        assert!(sql.contains("SELECT name, engine, comment FROM system.tables"));
+        assert!(sql.contains("database = 'analytics'"));
+        assert!(sql.contains("position(engine, 'View') = 0"));
+        assert!(sql.contains("lowerUTF8(name) LIKE '%orders%'"));
+        assert!(sql.contains("lowerUTF8(coalesce(comment, '')) LIKE '%orders%'"));
+        assert!(sql.contains("ORDER BY name LIMIT 102 OFFSET 100"));
+        assert!(sql.find("position(engine, 'View') = 0").unwrap() < sql.find("ORDER BY name").unwrap());
+        assert!(sql.find("lowerUTF8(name) LIKE '%orders%'").unwrap() < sql.find("ORDER BY name").unwrap());
+    }
+
+    #[test]
+    fn table_object_query_supports_fuzzy_name_filtering() {
+        let sql = clickhouse_tables_sql("analytics", Some("ord"), Some(100), None, true, false);
+
+        assert!(sql.contains("lowerUTF8(name) LIKE '%ord%'"));
+        assert!(sql.contains("lowerUTF8(name) LIKE '%o%r%d%'"));
+        assert!(!sql.contains("comment"));
+        assert!(sql.ends_with("ORDER BY name LIMIT 100 OFFSET 0"));
+    }
+
+    #[test]
+    fn table_object_query_matches_fuzzy_filter_against_comments() {
+        let sql = clickhouse_tables_sql("analytics", Some("ord"), Some(100), None, true, true);
+
+        assert!(sql.contains("lowerUTF8(coalesce(comment, '')) LIKE '%ord%'"));
+        assert!(sql.contains("lowerUTF8(coalesce(comment, '')) LIKE '%o%r%d%'"));
     }
 }

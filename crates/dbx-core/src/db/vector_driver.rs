@@ -769,10 +769,10 @@ fn rest_query_result(kind: VectorDbKind, status: u16, body: Value, start: Instan
     Ok(json_to_query_result(status, body, start))
 }
 
-// Milvus v2 returns many request failures as HTTP 200 with a non-zero JSON code.
+// Milvus REST uses HTTP-style code 200 for success, while some responses use gRPC-style code 0.
 fn milvus_business_error(body: &Value) -> Option<String> {
     let code = body.get("code").and_then(Value::as_i64)?;
-    if code == 0 {
+    if code == 0 || code == 200 {
         return None;
     }
     let detail = body
@@ -1091,7 +1091,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_milvus_business_errors_returned_with_http_success() {
+    fn handles_milvus_business_codes_returned_with_http_success() {
         assert_eq!(
             rest_query_result(
                 VectorDbKind::Milvus,
@@ -1103,6 +1103,28 @@ mod tests {
             "Milvus error (code 1100): field kind does not exist"
         );
         assert!(rest_query_result(VectorDbKind::Milvus, 200, json!({ "code": 0 }), Instant::now()).is_ok());
+        assert!(rest_query_result(
+            VectorDbKind::Milvus,
+            200,
+            json!({ "code": 200, "data": ["kb_vectors"] }),
+            Instant::now()
+        )
+        .is_ok());
+        assert!(rest_query_result(VectorDbKind::Milvus, 200, json!({ "data": [] }), Instant::now()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn milvus_connection_test_accepts_rest_success_code() {
+        let (url, server) = spawn_json_response_server(json!({
+            "code": 200,
+            "data": ["kb_vectors"]
+        }))
+        .await;
+        let client = VectorClient::new(VectorDbKind::Milvus, &url, None, None, false, Duration::from_secs(1));
+
+        test_connection(&client, Duration::from_secs(1)).await.unwrap();
+
+        server.await.unwrap();
     }
 
     #[tokio::test]

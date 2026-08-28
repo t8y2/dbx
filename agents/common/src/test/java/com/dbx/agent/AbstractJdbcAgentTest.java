@@ -128,6 +128,19 @@ class AbstractJdbcAgentTest {
     }
 
     @Test
+    void validatesLegacyJdbcConnectionsWithConfiguredQueryInsteadOfIsValid() {
+        TrackingConnection tracking = new TrackingConnection();
+        tracking.isValidUnsupported = true;
+        TestAgent agent = new TestAgent(tracking);
+        agent.validationQuery = "SELECT 1";
+
+        assertTrue(agent.testConnection(new ConnectParams()));
+
+        assertEquals(0, tracking.isValidCount);
+        assertEquals(Arrays.asList("setQueryTimeout:5", "execute:SELECT 1"), tracking.calls);
+    }
+
+    @Test
     void testConnectionCanSkipOpeningAPhysicalConnection() {
         TrackingConnection tracking = new TrackingConnection();
         TestAgent agent = new TestAgent(tracking);
@@ -339,6 +352,7 @@ class AbstractJdbcAgentTest {
         private int afterConnectCount;
         private int afterDisconnectCount;
         private boolean skipTestConnectionOpen;
+        private String validationQuery;
 
         private TestAgent(TrackingConnection tracking) {
             this.tracking = tracking;
@@ -373,6 +387,11 @@ class AbstractJdbcAgentTest {
         @Override
         protected void afterDisconnect() {
             afterDisconnectCount += 1;
+        }
+
+        @Override
+        protected String connectionValidationQuery() {
+            return validationQuery;
         }
 
         @Override
@@ -436,6 +455,7 @@ class AbstractJdbcAgentTest {
         private String identifierQuote = "\"";
         private boolean compatibilityQueryFails;
         private int compatibilityQueryCount;
+        private boolean isValidUnsupported;
 
         private Connection connection() {
             return proxy(Connection.class, new MethodHandler() {
@@ -450,6 +470,9 @@ class AbstractJdbcAgentTest {
                     }
                     if ("isValid".equals(name)) {
                         isValidCount += 1;
+                        if (isValidUnsupported) {
+                            throw new AbstractMethodError("legacy JDBC driver");
+                        }
                         return true;
                     }
                     if ("close".equals(name)) {

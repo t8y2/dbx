@@ -1,5 +1,12 @@
+// @vitest-environment happy-dom
+
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { CODE_SNAPSHOT_CSS, renderCodeSnapshotHtml, savePngDataUrlToFile, snapshotElementToPng } from "@/lib/codeSnapshot/codeSnapshot";
+import { CODE_SNAPSHOT_CSS, materializeSnapshotCloneLineNumbers, renderCodeSnapshotHtml, savePngDataUrlToFile, snapshotElementToPng } from "@/lib/codeSnapshot/codeSnapshot";
+import { LEGACY_WEBVIEW_CLASS } from "@/lib/ui/legacyWebView";
+
+const codeSnapshotDialogSource = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/codeSnapshot/CodeSnapshotDialog.vue"), "utf8");
 
 const { createCodeHighlighter, highlightCode, toPng, isTauriRuntime, save, writeFile } = vi.hoisted(() => {
   const highlightCode = vi.fn((content: string, _lang: string) => `<span class="line">${content}</span>`);
@@ -78,6 +85,7 @@ describe("renderCodeSnapshotHtml", () => {
     expect(html).toContain(".dbx-code-snapshot *");
     expect(html).toContain("border: 0");
     expect(html).toContain("outline: 0");
+    expect(html).toContain(".dbx-code-snapshot__line-number");
   });
 
   it("renders macOS traffic lights and an optional title by default", async () => {
@@ -124,8 +132,10 @@ describe("renderCodeSnapshotHtml", () => {
 
     expect(dark).toContain("background:#0d1117");
     expect(dark).toContain("--dbx-snapshot-line-number:#484f58");
+    expect(dark).toContain("color:#e1e4e8");
     expect(light).toContain("background:#ffffff");
     expect(light).toContain("--dbx-snapshot-line-number:#d0d7de");
+    expect(light).toContain("color:#24292f");
   });
 
   it("applies custom padding and font size", async () => {
@@ -135,12 +145,35 @@ describe("renderCodeSnapshotHtml", () => {
     expect(html).toContain("padding:0 24px 24px");
   });
 
+  it("keeps the snapshot dialog responsive layout classes in source", () => {
+    expect(codeSnapshotDialogSource).toContain("sm:max-w-[860px]");
+    expect(codeSnapshotDialogSource).toContain("md:flex-row");
+    expect(codeSnapshotDialogSource).toContain("md:w-52");
+  });
+
+  it("materializes real line-number nodes in the export clone", () => {
+    document.body.innerHTML = '<div class="dbx-code-snapshot"><pre class="dbx-code-snapshot__pre dbx-code-snapshot__pre--numbered"><code><span class="line">SELECT 1</span><span class="line">FROM dual</span></code></pre></div>';
+    const root = document.body.firstElementChild as HTMLElement;
+
+    materializeSnapshotCloneLineNumbers(root);
+
+    const pre = root.querySelector(".dbx-code-snapshot__pre") as HTMLElement;
+    const lines = Array.from(root.querySelectorAll<HTMLElement>("code > .line"));
+    expect(pre.classList.contains("dbx-code-snapshot__pre--numbered")).toBe(false);
+    expect(lines).toHaveLength(2);
+    expect(lines[0]?.querySelector(".dbx-code-snapshot__line-number")?.textContent).toBe("1");
+    expect(lines[1]?.querySelector(".dbx-code-snapshot__line-number")?.textContent).toBe("2");
+    expect(lines[0]?.querySelector(".dbx-code-snapshot__line-content")?.textContent).toBe("SELECT 1");
+    expect(lines[1]?.querySelector(".dbx-code-snapshot__line-content")?.textContent).toBe("FROM dual");
+  });
+
   it("exports at a capped device-pixel ratio for crisp high-DPI snapshots", async () => {
     toPng.mockResolvedValue("data:image/png;base64,test");
     vi.stubGlobal("window", { devicePixelRatio: 3 });
     try {
       await snapshotElementToPng({ offsetWidth: 320, offsetHeight: 160, scrollWidth: 640, scrollHeight: 240 } as HTMLElement);
 
+      const options = toPng.mock.calls.at(-1)?.[1];
       expect(toPng).toHaveBeenLastCalledWith(
         expect.anything(),
         expect.objectContaining({
@@ -153,12 +186,39 @@ describe("renderCodeSnapshotHtml", () => {
           },
         }),
       );
+      expect(options?.adjustPseudoElement).toBeUndefined();
+      expect(options?.onclone).toBeUndefined();
 
       vi.stubGlobal("window", { devicePixelRatio: 0 });
       await snapshotElementToPng({ offsetWidth: 320, offsetHeight: 160, scrollWidth: 320, scrollHeight: 160 } as HTMLElement);
       expect(toPng).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ scale: 1 }));
     } finally {
       vi.unstubAllGlobals();
+    }
+  });
+
+  it("enables the legacy WebView export fallback only when the runtime is marked legacy", async () => {
+    toPng.mockResolvedValue("data:image/png;base64,test");
+    document.documentElement.classList.add(LEGACY_WEBVIEW_CLASS);
+    try {
+      await snapshotElementToPng({ offsetWidth: 320, offsetHeight: 160, scrollWidth: 320, scrollHeight: 160 } as HTMLElement);
+
+      const options = toPng.mock.calls.at(-1)?.[1];
+      expect(typeof options?.adjustPseudoElement).toBe("function");
+      expect(typeof options?.onclone).toBe("function");
+      expect(options.adjustPseudoElement?.(document.createElement("span"), ":after", {} as CSSStyleDeclaration)).toBeUndefined();
+
+      const clone = document.createElement("div");
+      clone.innerHTML = '<div class="dbx-code-snapshot"><pre class="dbx-code-snapshot__pre dbx-code-snapshot__pre--numbered" style="--dbx-snapshot-line-number:#d0d7de"><code><span class="line">SELECT 1</span><span class="line">FROM dual</span></code></pre></div>';
+      options.onclone?.(clone);
+
+      const line = clone.querySelector<HTMLElement>(".dbx-code-snapshot__line-number");
+      expect(line?.textContent).toBe("1");
+      expect(line?.getAttribute("style")).toContain("display: inline-block");
+      expect(line?.getAttribute("style")).toContain("margin-right: 1.4em");
+      expect(line?.getAttribute("style")).toContain("color: #d0d7de");
+    } finally {
+      document.documentElement.classList.remove(LEGACY_WEBVIEW_CLASS);
     }
   });
 

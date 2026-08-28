@@ -172,10 +172,6 @@ pub fn build_executable_object_source_statements(input: EditableObjectSourceSqlI
         return Ok(executable_informix_view_statements(input.schema.as_deref(), &input.name, source));
     }
 
-    if input.database_type == DatabaseType::Mysql && input.object_type == ObjectSourceKind::View {
-        return Ok(vec![executable_mysql_view_ddl(source)]);
-    }
-
     if is_mysql_like(input.database_type)
         && matches!(input.object_type, ObjectSourceKind::Function | ObjectSourceKind::Procedure)
     {
@@ -216,6 +212,10 @@ pub fn build_editable_object_source(input: EditableObjectSourceSqlInput) -> Stri
         && matches!(input.object_type, ObjectSourceKind::Function | ObjectSourceKind::Procedure)
     {
         return ensure_semicolon(source.trim());
+    }
+    if input.database_type == DatabaseType::Mysql && input.object_type == ObjectSourceKind::View {
+        // Existing view DDL opens as ALTER, while save must preserve CREATE for new views and TiDB.
+        return executable_mysql_view_ddl(&source);
     }
     match build_executable_object_source_statements(input) {
         Ok(statements) => statements.into_iter().next().unwrap_or_default(),
@@ -1851,7 +1851,7 @@ mod tests {
     fn mysql_view_source_opened_for_editing_uses_alter_view() {
         let source = "CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`%` SQL SECURITY DEFINER VIEW `new_view` AS select `base_plugins`.`id` AS `id` from `base_plugins`";
         let expected = "ALTER ALGORITHM=UNDEFINED DEFINER=`root`@`%` SQL SECURITY DEFINER VIEW `new_view` AS select `base_plugins`.`id` AS `id` from `base_plugins`;";
-        let input = EditableObjectSourceSqlInput {
+        let mut input = EditableObjectSourceSqlInput {
             database_type: DatabaseType::Mysql,
             object_type: ObjectSourceKind::View,
             schema: Some("dol_test".to_string()),
@@ -1859,12 +1859,29 @@ mod tests {
             source: source.to_string(),
         };
 
-        assert_eq!(build_editable_object_source(input.clone()), expected);
+        let editable = build_editable_object_source(input.clone());
+        assert_eq!(editable, expected);
+        input.source = editable;
         assert_eq!(build_executable_object_source_sql(input).unwrap(), expected);
     }
 
     #[test]
-    fn mysql_view_create_source_preserves_leading_comments() {
+    fn mysql_new_view_create_source_remains_create() {
+        let source = "CREATE VIEW `new_view` AS SELECT 1 AS `id`";
+        let sql = build_executable_object_source_sql(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Mysql,
+            object_type: ObjectSourceKind::View,
+            schema: Some("dol_test".to_string()),
+            name: "new_view".to_string(),
+            source: source.to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(sql, "CREATE VIEW `new_view` AS SELECT 1 AS `id`;");
+    }
+
+    #[test]
+    fn mysql_new_view_create_source_preserves_leading_comments() {
         let source =
             "-- keep this view note\n/* and this block */\nCREATE OR REPLACE VIEW `new_view` AS SELECT 1 AS `id`";
         let sql = build_executable_object_source_sql(EditableObjectSourceSqlInput {
@@ -1876,7 +1893,10 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(sql, "-- keep this view note\n/* and this block */\nALTER VIEW `new_view` AS SELECT 1 AS `id`;");
+        assert_eq!(
+            sql,
+            "-- keep this view note\n/* and this block */\nCREATE OR REPLACE VIEW `new_view` AS SELECT 1 AS `id`;"
+        );
     }
 
     #[test]

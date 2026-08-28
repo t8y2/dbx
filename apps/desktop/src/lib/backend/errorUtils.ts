@@ -22,6 +22,8 @@ export interface BackendError {
   helpUrl?: string;
 }
 
+export const MANUAL_TRANSACTION_SESSION_EXPIRED_CODE = "DBX-TXN-1001";
+
 const MAX_FALLBACK_CHARS = 64 * 1024;
 const MAX_ERROR_PARSE_DEPTH = 16;
 const AGENT_RPC_ERROR_DATA_MARKER = "\nDBX_AGENT_ERROR_DATA:";
@@ -82,6 +84,12 @@ function isBackendError(value: unknown): value is BackendError {
 
 export function normalizeBackendError(error: unknown): BackendError | null {
   return normalizeBackendErrorAtDepth(error, new WeakSet<object>(), 0);
+}
+
+export function isManualTransactionSessionExpired(error: unknown): boolean {
+  if (normalizeBackendError(error)?.code === MANUAL_TRANSACTION_SESSION_EXPIRED_CODE) return true;
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
+  return message?.startsWith("Transaction session not found or expired;") === true || message === "Transaction was auto-rolled back due to 5 minutes of inactivity";
 }
 
 function normalizeBackendErrorAtDepth(error: unknown, seen: WeakSet<object>, depth: number): BackendError | null {

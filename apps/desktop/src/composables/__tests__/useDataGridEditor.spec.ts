@@ -19,6 +19,9 @@ vi.mock("@/lib/backend/api", () => ({
   executeConditionalUpdate: mocks.executeConditionalUpdate,
   cancelConditionalUpdate: mocks.cancelConditionalUpdate,
   executeInTransaction: mocks.executeInTransaction,
+  unlockConnectionWrites: vi.fn(),
+  lockConnectionWrites: vi.fn(),
+  connectionWriteUnlockState: vi.fn().mockResolvedValue(0),
 }));
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({ getConfig: mocks.getConfig }),
@@ -149,6 +152,104 @@ describe("useDataGridEditor result snapshots", () => {
     expect(oldIdentity.editingCell.value).toBeNull();
     expect(oldIdentityScroller.scrollTop).toBe(0);
     expect(oldIdentityScroller.scrollLeft).toBe(0);
+  });
+
+  it("does not adopt a scroll-only snapshot when remounting with a same-shape result (#7341)", () => {
+    class TestScroller {
+      scrollTop = 0;
+      scrollLeft = 0;
+      scrollTo({ top, left }: ScrollToOptions) {
+        if (typeof top === "number") this.scrollTop = top;
+        if (typeof left === "number") this.scrollLeft = left;
+      }
+    }
+    vi.stubGlobal("HTMLElement", TestScroller);
+    const rows: CellValue[][] = [
+      ["a", null, 1],
+      ["b", null, 2],
+      ["c", null, 3],
+    ];
+    const key = "table-tab-scroll-only-snapshot";
+    const previous = createEditor(undefined, true, key, undefined, rows);
+    previous.newRows.value = [];
+    const previousScroller = new TestScroller();
+    previousScroller.scrollTop = 6_400;
+    previousScroller.scrollLeft = 24;
+    previous.scrollerRef.value = previousScroller as unknown as NonNullable<typeof previous.scrollerRef.value>;
+    // Unmount path: saves a pure scroll snapshot even without pending edits.
+    previous.savePendingSnapshot(true, true);
+
+    const remounted = createEditor(undefined, true, key, undefined, rows);
+    const remountedScroller = new TestScroller();
+    remounted.scrollerRef.value = remountedScroller as unknown as NonNullable<typeof remounted.scrollerRef.value>;
+    remounted.restorePendingSnapshotFocus();
+    expect(remountedScroller.scrollTop).toBe(0);
+    expect(remountedScroller.scrollLeft).toBe(0);
+  });
+
+  it("still adopts the cached scroll when the snapshot carries pending edits", () => {
+    class TestScroller {
+      scrollTop = 0;
+      scrollLeft = 0;
+      scrollTo({ top, left }: ScrollToOptions) {
+        if (typeof top === "number") this.scrollTop = top;
+        if (typeof left === "number") this.scrollLeft = left;
+      }
+    }
+    vi.stubGlobal("HTMLElement", TestScroller);
+    const rows: CellValue[][] = [
+      ["a", null, 1],
+      ["b", null, 2],
+      ["c", null, 3],
+    ];
+    const key = "table-tab-edit-snapshot";
+    const previous = createEditor(undefined, true, key, undefined, rows);
+    previous.newRows.value = [];
+    previous.dirtyRows.value.set(1, new Map([[0, "edited"]]));
+    const previousScroller = new TestScroller();
+    previousScroller.scrollTop = 6_400;
+    previousScroller.scrollLeft = 24;
+    previous.scrollerRef.value = previousScroller as unknown as NonNullable<typeof previous.scrollerRef.value>;
+    previous.savePendingSnapshot(true, true);
+
+    const remounted = createEditor(undefined, true, key, undefined, rows);
+    const remountedScroller = new TestScroller();
+    remounted.scrollerRef.value = remountedScroller as unknown as NonNullable<typeof remounted.scrollerRef.value>;
+    remounted.restorePendingSnapshotFocus();
+    expect(remounted.dirtyRows.value.get(1)?.get(0)).toBe("edited");
+    expect(remountedScroller.scrollTop).toBe(6_400);
+    expect(remountedScroller.scrollLeft).toBe(24);
+  });
+
+  it("keeps pure scroll restore for the KeepAlive reactivate path", () => {
+    class TestScroller {
+      scrollTop = 0;
+      scrollLeft = 0;
+      scrollTo({ top, left }: ScrollToOptions) {
+        if (typeof top === "number") this.scrollTop = top;
+        if (typeof left === "number") this.scrollLeft = left;
+      }
+    }
+    vi.stubGlobal("HTMLElement", TestScroller);
+    const rows: CellValue[][] = [
+      ["a", null, 1],
+      ["b", null, 2],
+      ["c", null, 3],
+    ];
+    const editor = createEditor(undefined, true, "table-tab-activate-path", undefined, rows);
+    editor.newRows.value = [];
+    const scroller = new TestScroller();
+    scroller.scrollTop = 6_400;
+    scroller.scrollLeft = 24;
+    editor.scrollerRef.value = scroller as unknown as NonNullable<typeof editor.scrollerRef.value>;
+    // Deactivate path: snapshot keeps the scroll for the same instance.
+    editor.savePendingSnapshot(true, true);
+    // Detaching the DOM resets the element's scroll offsets.
+    scroller.scrollTop = 0;
+    scroller.scrollLeft = 0;
+    editor.restorePendingSnapshotFocus();
+    expect(scroller.scrollTop).toBe(6_400);
+    expect(scroller.scrollLeft).toBe(24);
   });
 });
 

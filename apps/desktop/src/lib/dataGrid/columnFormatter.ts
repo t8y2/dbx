@@ -190,7 +190,26 @@ export function normalizeColumnFormatter(value: unknown): ColumnFormatterConfig 
   return undefined;
 }
 
-const FOREIGN_KEY_DISPLAY_FILTER_MODES = new Set<DataGridContextFilterMode>(["equals", "not-equals", "is-null", "is-not-null", "like", "not-like", "less-than", "less-than-or-equal", "greater-than", "greater-than-or-equal", "in", "not-in", "between", "not-between"]);
+const FOREIGN_KEY_DISPLAY_FILTER_MODES = new Set<DataGridContextFilterMode>([
+  "equals",
+  "not-equals",
+  "is-null",
+  "is-not-null",
+  "is-blank",
+  "is-not-blank",
+  "like",
+  "not-like",
+  "begins-with",
+  "ends-with",
+  "less-than",
+  "less-than-or-equal",
+  "greater-than",
+  "greater-than-or-equal",
+  "in",
+  "not-in",
+  "between",
+  "not-between",
+]);
 
 function normalizeForeignKeyDisplayFilter(value: unknown): ForeignKeyDisplayFilterConfig | undefined {
   if (!value || typeof value !== "object") return undefined;
@@ -200,7 +219,7 @@ function normalizeForeignKeyDisplayFilter(value: unknown): ForeignKeyDisplayFilt
   const mode = filter.mode as DataGridContextFilterMode;
   const rawValue = typeof filter.value === "string" ? filter.value.trim() : "";
   const rawEndValue = typeof filter.endValue === "string" ? filter.endValue.trim() : "";
-  if (mode !== "is-null" && mode !== "is-not-null" && !rawValue) return undefined;
+  if (mode !== "is-null" && mode !== "is-not-null" && mode !== "is-blank" && mode !== "is-not-blank" && !rawValue) return undefined;
   if ((mode === "between" || mode === "not-between") && !rawEndValue) return undefined;
   return {
     column: filter.column.trim(),

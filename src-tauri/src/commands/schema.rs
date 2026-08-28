@@ -211,6 +211,16 @@ pub async fn get_table_comment(
 }
 
 #[tauri::command]
+pub async fn get_mysql_table_auto_increment(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    table: String,
+) -> Result<Option<String>, String> {
+    dbx_core::schema::get_mysql_table_auto_increment_core(&state, &connection_id, &database, &table).await
+}
+
+#[tauri::command]
 pub async fn list_objects(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
@@ -422,6 +432,24 @@ pub async fn list_reference_key_columns(
         return Ok(dbx_core::schema::reference_key_columns_from_indexes(&indexes));
     }
     dbx_core::schema::list_reference_key_columns_core(&state, &connection_id, &database, &schema, &table).await
+}
+
+#[tauri::command]
+pub async fn list_reference_keys(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    schema: String,
+    table: String,
+    catalog: Option<String>,
+) -> Result<Vec<dbx_core::schema::ReferenceKeyInfo>, String> {
+    if let Some(catalog) = external_doris_catalog(&state, &connection_id, catalog.as_deref()).await {
+        let indexes =
+            dbx_core::schema::list_doris_catalog_indexes_core(&state, &connection_id, &catalog, &database, &table)
+                .await?;
+        return Ok(dbx_core::schema::reference_keys_from_indexes(&indexes));
+    }
+    dbx_core::schema::list_reference_keys_core(&state, &connection_id, &database, &schema, &table).await
 }
 
 #[tauri::command]

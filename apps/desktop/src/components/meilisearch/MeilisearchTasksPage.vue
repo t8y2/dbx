@@ -12,6 +12,7 @@ import ErrorBanner from "@/components/ui/ErrorBanner.vue";
 import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
 import * as api from "@/lib/backend/api";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { useToast } from "@/composables/useToast";
 import {
   formatMeilisearchTaskDateTime,
@@ -32,7 +33,7 @@ const props = defineProps<{ connectionId: string; fixedIndexUid?: string }>();
 const { locale, t } = useI18n();
 const { toast } = useToast();
 const connectionStore = useConnectionStore();
-const readOnly = computed(() => Boolean(connectionStore.getConfig(props.connectionId)?.read_only));
+const readOnly = computed(() => connectionIsEffectivelyReadOnly(connectionStore.getConfig(props.connectionId)));
 
 const rows = ref<MeilisearchTask[]>([]);
 const total = ref(0);

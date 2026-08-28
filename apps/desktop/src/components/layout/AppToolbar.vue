@@ -27,6 +27,10 @@ const props = defineProps<{
   isDark: boolean;
   themeMode: AppThemeMode;
   showAiPanel: boolean;
+  activeAiRunCount: number;
+  /** Runs awaiting a write confirmation; the badge turns amber to outrank the
+   *  plain active count (parent PRD §4 line 71). */
+  awaitingAiRunCount: number;
   showHistory: boolean;
   showSqlLibrary: boolean;
   sqlLibrarySaveFeedbackId: number;
@@ -642,8 +646,19 @@ const toolbarStyle = computed(() => {
 
       <Tooltip v-if="toolbarItems.ai">
         <TooltipTrigger as-child>
-          <Button v-show="isRightItemVisible('ai')" variant="ghost" size="icon" class="h-8 w-8 shrink-0" :class="{ 'bg-accent': showAiPanel }" @click="emit('toggle-ai')">
+          <Button v-show="isRightItemVisible('ai')" variant="ghost" size="icon" class="relative h-8 w-8 shrink-0" :class="{ 'bg-accent': showAiPanel }" @click="emit('toggle-ai')">
             <Bot class="h-4 w-4" />
+            <span
+              v-if="awaitingAiRunCount > 0"
+              class="absolute right-0.5 top-0.5 flex h-3 min-w-3 items-center justify-center rounded-full bg-amber-500 px-0.5 text-[8px] font-semibold leading-none text-white"
+              :aria-label="t('ai.toolbarAwaitingConfirmation', { count: awaitingAiRunCount })"
+              :title="t('ai.toolbarAwaitingConfirmation', { count: awaitingAiRunCount })"
+            >
+              {{ awaitingAiRunCount > 9 ? "9+" : awaitingAiRunCount }}
+            </span>
+            <span v-else-if="activeAiRunCount > 0" class="absolute right-0.5 top-0.5 flex h-3 min-w-3 items-center justify-center rounded-full bg-primary px-0.5 text-[8px] font-semibold leading-none text-primary-foreground">
+              {{ activeAiRunCount > 9 ? "9+" : activeAiRunCount }}
+            </span>
           </Button>
         </TooltipTrigger>
         <TooltipContent>AI</TooltipContent>

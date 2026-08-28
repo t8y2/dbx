@@ -62,6 +62,26 @@ fn is_sql_string_literal(value: &str) -> bool {
     true
 }
 
+pub(crate) fn sqlserver_unicode_string_literal(value: &str) -> Option<String> {
+    let mut candidate = value.trim();
+    let mut parenthesis_depth = 0usize;
+
+    loop {
+        if let Some(literal) = candidate.strip_prefix('N').or_else(|| candidate.strip_prefix('n')) {
+            if is_sql_string_literal(literal) {
+                return Some(format!("{}N{}{}", "(".repeat(parenthesis_depth), literal, ")".repeat(parenthesis_depth)));
+            }
+        }
+        if is_sql_string_literal(candidate) {
+            return Some(format!("{}N{}{}", "(".repeat(parenthesis_depth), candidate, ")".repeat(parenthesis_depth)));
+        }
+
+        let inner = candidate.strip_prefix('(')?.strip_suffix(')')?;
+        parenthesis_depth += 1;
+        candidate = inner.trim();
+    }
+}
+
 fn postgres_string_default_literal(value: &str) -> Option<&str> {
     let trimmed = value.trim();
     let inner = trimmed.strip_prefix('\'')?;
@@ -284,6 +304,17 @@ pub(super) fn format_default_for_sql(dialect: StructureDialect, data_type: &str,
         return quote_string(default_value);
     }
     if is_string_type_for_default(dialect, base_type) {
+        if dialect == StructureDialect::SqlServer
+            && matches!(base_type.to_ascii_lowercase().as_str(), "nchar" | "nvarchar" | "ntext" | "sysname")
+        {
+            if let Some(literal) = sqlserver_unicode_string_literal(default_value) {
+                return literal;
+            }
+            if default_value.contains('(') || default_value.contains(')') {
+                return default_value.to_string();
+            }
+            return format!("N{}", quote_string(default_value));
+        }
         // Only skip quoting for function-call expressions like `gen_random_uuid()`.
         // Simple identifiers like `CURRENT_TIMESTAMP` are not valid defaults for string columns.
         if is_sql_string_literal(default_value)
@@ -315,4 +346,23 @@ pub(super) fn original_default(column: &EditableStructureColumn) -> String {
 
 pub(super) fn original_comment(column: &EditableStructureColumn) -> String {
     clean(column.original.as_ref().and_then(|original| original.comment.as_deref()).unwrap_or(""))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sqlserver_unicode_defaults_use_unicode_literals_without_double_quoting() {
+        assert_eq!(format_default_for_sql(StructureDialect::SqlServer, "nvarchar(50)", "中文"), "N'中文'");
+        assert_eq!(format_default_for_sql(StructureDialect::SqlServer, "nchar(5)", "'中文'"), "N'中文'");
+        assert_eq!(format_default_for_sql(StructureDialect::SqlServer, "sysname", "n'guest'"), "N'guest'");
+        assert_eq!(format_default_for_sql(StructureDialect::SqlServer, "nvarchar(50)", "('中文')"), "(N'中文')");
+        assert_eq!(format_default_for_sql(StructureDialect::SqlServer, "nvarchar(50)", "((N'中文'))"), "((N'中文'))");
+        assert_eq!(
+            format_default_for_sql(StructureDialect::SqlServer, "nvarchar(max)", "CONCAT(N'a', N'b')"),
+            "CONCAT(N'a', N'b')"
+        );
+        assert_eq!(format_default_for_sql(StructureDialect::SqlServer, "varchar(50)", "中文"), "'中文'");
+    }
 }

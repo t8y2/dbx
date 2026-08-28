@@ -17,6 +17,9 @@ vi.mock("vue-i18n", () => ({
 vi.mock("@/lib/backend/api", () => ({
   saveEditorSettings: vi.fn(),
   saveHistory: vi.fn(),
+  unlockConnectionWrites: vi.fn(),
+  lockConnectionWrites: vi.fn(),
+  connectionWriteUnlockState: vi.fn().mockResolvedValue(0),
 }));
 
 function installLocalStorage() {
@@ -257,6 +260,40 @@ describe("useSqlExecution", () => {
     await execution.tryExecute();
 
     expect(activeOutputView.value).toBe("summary");
+  });
+
+  it("does not change the current output view when a background tab finishes", async () => {
+    const sql = "SELECT run_side_effect()";
+    const executionTab = { ...queryTab("app"), sql };
+    const activeTab = ref<QueryTab | undefined>(executionTab);
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("mysql"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart" | "messages">("result");
+    const queryStore = useQueryStore();
+    let finishExecution!: () => void;
+    const executionFinished = new Promise<void>((resolve) => {
+      finishExecution = resolve;
+    });
+    const executeCurrentSql = vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      await executionFinished;
+      executionTab.result = { columns: [], rows: [], affected_rows: 1, execution_time_ms: 1 };
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+
+    const pending = execution.tryExecute();
+    await vi.waitFor(() => expect(executeCurrentSql).toHaveBeenCalledOnce());
+    activeTab.value = { ...queryTab("app"), id: "tab-2" };
+    activeOutputView.value = "messages";
+    finishExecution();
+    await pending;
+
+    expect(activeOutputView.value).toBe("messages");
   });
 
   it("shows SQL Server PRINT messages instead of leaving them behind the execution summary", async () => {
@@ -1165,8 +1202,9 @@ SELECT @value AS Message;`;
     });
 
     const pendingExecution = execution.tryExecute();
-    await Promise.resolve();
-    expect(productionSafetyStore.pending?.sql).toContain("UPDATE users");
+    await vi.waitFor(() => {
+      expect(productionSafetyStore.pending?.sql).toContain("UPDATE users");
+    });
     expect(executeCurrentSql).not.toHaveBeenCalled();
 
     productionSafetyStore.confirm();

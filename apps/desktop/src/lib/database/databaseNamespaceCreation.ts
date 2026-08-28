@@ -1,5 +1,6 @@
 import type { ConnectionConfig, DatabaseType, TreeNodeType } from "@/types/database";
 import { isMongoLegacyDriverProfile } from "@/lib/mongo/mongoCapabilities";
+import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 
 export type DatabaseNamespaceCreationTarget = "database" | "schema" | "attach" | "special";
 
@@ -12,7 +13,7 @@ export interface DatabaseNamespaceCreationMatrixEntry {
   deferred?: string;
 }
 
-type CreationConnection = (Pick<ConnectionConfig, "db_type" | "driver_profile" | "read_only"> & Partial<Pick<ConnectionConfig, "host" | "password">>) | undefined;
+type CreationConnection = (Pick<ConnectionConfig, "db_type" | "driver_profile" | "read_only"> & Partial<Pick<ConnectionConfig, "host" | "password" | "id">>) | undefined;
 
 // Keep creation target-specific: many products expose schemas, files, or provider-managed namespaces instead of a top-level database.
 export const DATABASE_NAMESPACE_CREATION_MATRIX = {
@@ -97,7 +98,7 @@ export const DATABASE_NAMESPACE_CREATION_MATRIX = {
 } satisfies Record<DatabaseType, DatabaseNamespaceCreationMatrixEntry>;
 
 export function connectionNamespaceCreationTarget(connection: CreationConnection): ConnectionCreationTarget | null {
-  if (!connection || connection.read_only) return null;
+  if (!connection || connectionIsEffectivelyReadOnly(connection)) return null;
   if (connection.db_type === "mongodb" && isMongoLegacyDriverProfile(connection.driver_profile)) return null;
   if (connection.db_type === "sqlite" && (connection.host?.trim().toLowerCase() === ":memory:" || Boolean(connection.password))) {
     return null;
@@ -107,7 +108,7 @@ export function connectionNamespaceCreationTarget(connection: CreationConnection
 }
 
 export function databaseNodeNamespaceCreationTarget(connection: CreationConnection, node: Pick<{ type: TreeNodeType; database?: string | null }, "type" | "database">): DatabaseNodeCreationTarget | null {
-  if (!connection || connection.read_only || node.type !== "database" || !node.database) return null;
+  if (!connection || connectionIsEffectivelyReadOnly(connection) || node.type !== "database" || !node.database) return null;
   const entry: DatabaseNamespaceCreationMatrixEntry = DATABASE_NAMESPACE_CREATION_MATRIX[connection.db_type];
   return entry.database ?? null;
 }

@@ -6,6 +6,7 @@ import { dataGridFrameCoversRow, dataGridFrameIsMultiCell, dataGridSelectionFram
 import type { CellSelectionRange } from "@/lib/dataGrid/gridSelection";
 import type { RowStatus } from "@/lib/dataGrid/gridRowStatus";
 import { DATA_GRID_DARK_SEARCH_COLORS, dataGridTypeForeground, resolveDataGridPaintTheme, type DataGridPaintTheme } from "@/lib/dataGrid/dataGridPaintTheme";
+import type { CrosshairTarget } from "@/lib/dataGrid/crosshairHighlight";
 
 export const CANVAS_DATA_GRID_ROW_HEIGHT = 26;
 export const MAX_CANVAS_DATA_GRID_PIXEL_RATIO = 4;
@@ -80,7 +81,7 @@ export interface DrawCanvasDataGridOptions {
   currentSearchMatch: CanvasSearchMatch | null;
   formatCell: (value: CellValue, columnIndex: number, row: CanvasDataGridRow) => string;
   columnIsBoolean?: (columnIndex: number) => boolean;
-  draftCellPlaceholder?: string;
+  newRowCellPlaceholder?: (row: CanvasDataGridRow, columnIndex: number) => string | null;
   isRowActive: (rowIndex: number) => boolean;
   rowCellsUseSelectionVisual: (rowId: number) => boolean;
   cellIsSelected: (rowIndex: number, visibleColIdx: number) => boolean;
@@ -94,6 +95,8 @@ export interface DrawCanvasDataGridOptions {
   columnAligns?: readonly ("left" | "right")[];
   columnTypeVisualKinds?: readonly DataGridTypeVisualKind[];
   colorizeDataTypes?: boolean;
+  /** 行列十字高亮目标（原样传入，null 表示开关关闭或无焦点）。只画当前 viewport 内的行/列底色 */
+  crosshair?: CrosshairTarget | null;
   rightAlignedActionCell?: CanvasRightAlignedActionCell | null;
   booleanDisplayMode?: "checkbox" | "dropdown";
   flatteningMultiLineEnabled: boolean;
@@ -195,13 +198,14 @@ export function fitCanvasText(ctx: CanvasRenderingContext2D, text: string, maxWi
   return result;
 }
 
-export function canvasDataGridActionReservedWidth(canQuickDownload: boolean, canNavigateForeignKey = false): number {
-  return canvasDataGridActionOverlayWidth(canQuickDownload, canNavigateForeignKey) + 6;
+export function canvasDataGridActionReservedWidth(canQuickDownload: boolean, canNavigateForeignKey = false, showCellDetail = true): number {
+  const overlayWidth = canvasDataGridActionOverlayWidth(canQuickDownload, canNavigateForeignKey, showCellDetail);
+  return overlayWidth > 0 ? overlayWidth + 6 : 0;
 }
 
-/** 悬浮按钮组宽度：每个按钮 20px + 2px 间距（detail 按钮始终存在） */
-export function canvasDataGridActionOverlayWidth(canQuickDownload: boolean, canNavigateForeignKey = false): number {
-  return 22 + (canQuickDownload ? 22 : 0) + (canNavigateForeignKey ? 22 : 0);
+/** 悬浮按钮组宽度：每个已启用按钮 20px + 2px 间距。 */
+export function canvasDataGridActionOverlayWidth(canQuickDownload: boolean, canNavigateForeignKey = false, showCellDetail = true): number {
+  return (showCellDetail ? 22 : 0) + (canQuickDownload ? 22 : 0) + (canNavigateForeignKey ? 22 : 0);
 }
 
 export function resolveCanvasCellTextLayout(options: { drawX: number; colWidth: number; dpr: number; isRightAlign: boolean; reservedWidth?: number }): { textAnchorX: number; maxWidth: number } {
@@ -340,7 +344,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     searchMatchKeys,
     currentSearchMatch,
     formatCell,
-    draftCellPlaceholder,
+    newRowCellPlaceholder,
     isRowActive,
     rowCellsUseSelectionVisual,
     cellIsSelected,
@@ -352,6 +356,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     columnAligns,
     columnTypeVisualKinds,
     colorizeDataTypes = false,
+    crosshair,
     rightAlignedActionCell,
     columnIsBoolean,
     booleanDisplayMode = "dropdown",
@@ -428,6 +433,13 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     ctx.fillStyle = rowFill;
     ctx.fillRect(0, y, width, CANVAS_DATA_GRID_ROW_HEIGHT);
 
+    // 十字行高亮：叠在基础行色之上，但低于整行选中（rowSelectionVisual），
+    // 也低于后续 drawCell 的脏格/搜索/选中格填充
+    if (crosshair?.rowCrosshair && item.displayIndex === crosshair.rowIndex && !rowSelectionVisual && !item.isDeleted) {
+      ctx.fillStyle = theme.cellCrosshairRow;
+      ctx.fillRect(rowNumberWidth, y, width - rowNumberWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
+    }
+
     // 选区覆盖指示（Navicat 风格）：行落在选区范围内时行号淡色高亮；
     // 优先级低于行选中/状态色/活动行，与 DOM 的级联顺序一致
     const rowInSelection = !rowSelectionVisual && selectionRowCoverage && dataGridFrameCoversRow(selectionFrames, item.displayIndex);
@@ -501,6 +513,12 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
       const clippedX = Math.max(drawX, rowNumberWidth);
       const cellPaintWidth = Math.min(width, drawX + colWidth) - clippedX;
       if (cellPaintWidth <= 0) return;
+
+      // 十字列高亮：整列覆盖，叠在行底色之上；脏格/搜索/选中格填充在其后绘制，优先级更高
+      if (crosshair?.columnCrosshair && visibleColIdx === crosshair.visibleColIdx && !selectedFillVisual && !item.isDeleted) {
+        ctx.fillStyle = theme.cellCrosshairCol;
+        ctx.fillRect(clippedX, y, cellPaintWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
+      }
 
       if (isDirtyCell && !selectedFillVisual) {
         ctx.fillStyle = theme.cellDirty;
@@ -577,7 +595,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
           ctx.stroke();
         }
       } else {
-        const rawDisplayText = item.isDraft && value === null ? (draftCellPlaceholder ?? "") : formatCell(value, actualColIdx, item);
+        const rawDisplayText = (value === null ? newRowCellPlaceholder?.(item, actualColIdx) : null) ?? formatCell(value, actualColIdx, item);
         const displayText = isEditingThisCell ? "" : firstLineCellDisplayValue(rawDisplayText, flatteningMultiLineEnabled);
         const text = isEditingThisCell ? displayText : fitCanvasText(ctx, displayText, cellMaxWidth, isBooleanNullCell ? "left" : isRightAlign ? "right" : "left");
         const anchorX = isBooleanNullCell ? alignCanvasPixel(drawX + colWidth / 2, scaleX) : textAnchorX;
@@ -655,6 +673,11 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
       ctx.fillRect(rowNumberWidth, y, frozenWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
       if (rowFill !== theme.background) {
         ctx.fillStyle = rowFill;
+        ctx.fillRect(rowNumberWidth, y, frozenWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
+      }
+      // 冻结区会重绘底色遮挡第一轮溢入内容，需在此重绘十字行底色保持一致
+      if (crosshair?.rowCrosshair && item.displayIndex === crosshair.rowIndex && !rowSelectionVisual && !item.isDeleted) {
+        ctx.fillStyle = theme.cellCrosshairRow;
         ctx.fillRect(rowNumberWidth, y, frozenWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
       }
       // 绘制冻结列的每个单元格（x 坐标不受 scrollLeft 影响）

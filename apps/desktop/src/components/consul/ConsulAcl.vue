@@ -6,6 +6,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import NacosConfigDiffDialog from "@/components/nacos/NacosConfigDiffDialog.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import * as api from "@/lib/backend/api";
 import type { ConsulAclItem, ConsulAclKind, ConsulAclReferences, ConsulAclWrite, ConsulCapabilities } from "@/types/consul";
 import { useI18n } from "vue-i18n";
@@ -13,7 +14,7 @@ import { useI18n } from "vue-i18n";
 const props = defineProps<{ connectionId: string; capabilities: ConsulCapabilities | null }>();
 const { t } = useI18n();
 const store = useConnectionStore();
-const readOnly = computed(() => Boolean(store.getConfig(props.connectionId)?.read_only));
+const readOnly = computed(() => connectionIsEffectivelyReadOnly(store.getConfig(props.connectionId)));
 const active = ref<ConsulAclKind>("token");
 const items = ref<Record<string, unknown>[]>([]);
 const loading = ref(false);

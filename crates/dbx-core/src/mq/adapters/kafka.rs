@@ -269,32 +269,20 @@ impl MessageQueueAdmin for KafkaAdmin {
     // ---- Subscriptions (mapped to consumer groups) ----
 
     async fn list_subscriptions(&self, topic: &TopicRef) -> Result<Vec<SubscriptionInfo>, String> {
-        // List consumer groups and filter those subscribed to this topic
-        let result: serde_json::Value = self.call("mq_list_consumer_groups", serde_json::json!({})).await?;
+        // One batched agent RPC: the agent lists every consumer group, batch-describes
+        // them, and resolves committed + end offsets for the requested topic with a
+        // handful of Kafka Admin calls. Subscriptions are filtered in memory below.
+        // (The previous 1 + 2N serial RPC pattern — describe + lag per group — took
+        // tens of seconds on remote clusters with many groups, see #7163.)
+        let result: serde_json::Value =
+            self.call("mq_list_consumer_groups", serde_json::json!({ "topic": topic.topic })).await?;
         let groups = result.get("groups").and_then(|v| v.as_array()).cloned().unwrap_or_default();
 
         // For each group, check both active assignments and committed offsets.
         let mut subs = Vec::new();
         for group in groups {
             let group_id = group.get("groupId").and_then(|v| v.as_str()).unwrap_or_default();
-            let desc = match self
-                .call::<serde_json::Value>("mq_describe_consumer_group", serde_json::json!({ "groupId": group_id }))
-                .await
-            {
-                Ok(desc) => desc,
-                Err(_) => continue, // Skip groups we can't describe
-            };
-            let lag = self
-                .call::<serde_json::Value>(
-                    "mq_get_consumer_lag",
-                    serde_json::json!({
-                        "groupId": group_id,
-                        "topic": topic.topic,
-                    }),
-                )
-                .await
-                .ok();
-            if let Some(sub) = kafka_subscription_for_topic(group_id, &topic.topic, &desc, lag.as_ref()) {
+            if let Some(sub) = kafka_subscription_from_group_row(group_id, &topic.topic, &group) {
                 subs.push(sub);
             }
         }
@@ -763,13 +751,12 @@ fn reset_cursor_params(topic: &TopicRef, sub: &str, pos: ResetPosition) -> Resul
     }
 }
 
-fn kafka_subscription_for_topic(
-    group_id: &str,
-    topic: &str,
-    desc: &serde_json::Value,
-    lag: Option<&serde_json::Value>,
-) -> Option<SubscriptionInfo> {
-    let consumers = desc
+/// Build a `SubscriptionInfo` for `topic` from one row of the batched
+/// `mq_list_consumer_groups` response. The agent already resolved committed
+/// offsets (and end offsets for the requested topic) for every group, so no
+/// per-group RPC happens here.
+fn kafka_subscription_from_group_row(group_id: &str, topic: &str, row: &serde_json::Value) -> Option<SubscriptionInfo> {
+    let consumers = row
         .get("members")
         .and_then(|v| v.as_array())
         .into_iter()
@@ -778,20 +765,58 @@ fn kafka_subscription_for_topic(
         .map(kafka_consumer_from_member)
         .collect::<Vec<_>>();
     let has_active_assignment = !consumers.is_empty();
-    let has_committed_offsets = lag
-        .and_then(|v| v.get("partitions"))
+
+    let committed = row
+        .get("committedOffsets")
         .and_then(|v| v.as_array())
-        .map(|partitions| !partitions.is_empty())
-        .unwrap_or(false);
+        .into_iter()
+        .flatten()
+        .filter(|partition| partition.get("topic").and_then(|v| v.as_str()) == Some(topic))
+        .collect::<Vec<_>>();
+    let has_committed_offsets = !committed.is_empty();
 
     if !has_active_assignment && !has_committed_offsets {
         return None;
     }
 
+    let end_offsets = row
+        .get("endOffsets")
+        .and_then(|v| v.as_array())
+        .map(|partitions| {
+            partitions
+                .iter()
+                .filter_map(|partition| {
+                    // Defensive: the agent already filters end offsets to the
+                    // requested topic, but keying by partition id alone would
+                    // let a same-numbered partition of another topic collide.
+                    if partition.get("topic").and_then(|v| v.as_str()) != Some(topic) {
+                        return None;
+                    }
+                    let partition_id = partition.get("partition").and_then(|v| v.as_i64())?;
+                    let offset = partition.get("offset").and_then(|v| v.as_i64())?;
+                    Some((partition_id, offset))
+                })
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
+
+    // Sum lag over the topic's committed partitions. A partition without a
+    // resolved end offset contributes nothing (matches the agent's lag probe:
+    // unknown end offsets are not reported as zero lag).
+    let msg_backlog = committed
+        .iter()
+        .filter_map(|partition| {
+            let partition_id = partition.get("partition").and_then(|v| v.as_i64())?;
+            let committed_offset = partition.get("offset").and_then(|v| v.as_i64())?;
+            let end_offset = end_offsets.get(&partition_id).copied()?;
+            Some((end_offset - committed_offset).max(0))
+        })
+        .sum();
+
     Some(SubscriptionInfo {
         name: group_id.to_string(),
         sub_type: "consumer-group".to_string(),
-        msg_backlog: lag.and_then(|v| v.get("totalLag")).and_then(|v| v.as_i64()).unwrap_or(0),
+        msg_backlog,
         msg_rate_out: 0.0,
         msg_throughput_out: 0.0,
         consumers,
@@ -1163,31 +1188,37 @@ mod tests {
     }
 
     #[test]
-    fn kafka_subscription_for_topic_includes_offline_group_with_committed_offsets() {
-        let desc = serde_json::json!({
+    fn kafka_subscription_from_group_row_includes_offline_group_with_committed_offsets() {
+        let row = serde_json::json!({
             "groupId": "orders-service",
-            "members": []
-        });
-        let lag = serde_json::json!({
-            "totalLag": 7,
-            "partitions": [
-                { "partition": 0, "currentOffset": 3, "endOffset": 10, "lag": 7 }
+            "state": "EMPTY",
+            "simpleGroup": false,
+            "members": [],
+            "committedOffsets": [
+                { "topic": "orders", "partition": 0, "offset": 3 },
+                { "topic": "orders", "partition": 1, "offset": 8 }
+            ],
+            "endOffsets": [
+                { "topic": "orders", "partition": 0, "offset": 10 },
+                { "topic": "orders", "partition": 1, "offset": 12 }
             ]
         });
 
-        let sub = kafka_subscription_for_topic("orders-service", "orders", &desc, Some(&lag))
+        let sub = kafka_subscription_from_group_row("orders-service", "orders", &row)
             .expect("committed offsets should make an inactive group visible");
 
         assert_eq!(sub.name, "orders-service");
         assert_eq!(sub.sub_type, "consumer-group");
-        assert_eq!(sub.msg_backlog, 7);
+        assert_eq!(sub.msg_backlog, 11); // (10-3) + (12-8)
         assert!(sub.consumers.is_empty());
     }
 
     #[test]
-    fn kafka_subscription_for_topic_includes_active_assignment_without_committed_offsets() {
-        let desc = serde_json::json!({
+    fn kafka_subscription_from_group_row_includes_active_assignment_without_committed_offsets() {
+        let row = serde_json::json!({
             "groupId": "live-service",
+            "state": "STABLE",
+            "simpleGroup": false,
             "members": [
                 {
                     "memberId": "consumer-events",
@@ -1203,14 +1234,12 @@ mod tests {
                         { "topic": "audit", "partition": 0 }
                     ]
                 }
-            ]
-        });
-        let lag = serde_json::json!({
-            "totalLag": 0,
-            "partitions": []
+            ],
+            "committedOffsets": [],
+            "endOffsets": []
         });
 
-        let sub = kafka_subscription_for_topic("live-service", "events", &desc, Some(&lag))
+        let sub = kafka_subscription_from_group_row("live-service", "events", &row)
             .expect("active assignments should make the group visible");
 
         assert_eq!(sub.name, "live-service");
@@ -1221,21 +1250,72 @@ mod tests {
     }
 
     #[test]
-    fn kafka_subscription_for_topic_ignores_unrelated_group() {
-        let desc = serde_json::json!({
+    fn kafka_subscription_from_group_row_ignores_unrelated_group() {
+        let row = serde_json::json!({
             "groupId": "billing-service",
+            "state": "EMPTY",
+            "simpleGroup": false,
             "members": [{
                 "assignments": [
                     { "topic": "billing", "partition": 0 }
                 ]
-            }]
-        });
-        let lag = serde_json::json!({
-            "totalLag": 0,
-            "partitions": []
+            }],
+            "committedOffsets": [
+                { "topic": "billing", "partition": 0, "offset": 2 }
+            ],
+            "endOffsets": [
+                { "topic": "billing", "partition": 0, "offset": 5 }
+            ]
         });
 
-        assert!(kafka_subscription_for_topic("billing-service", "orders", &desc, Some(&lag)).is_none());
+        assert!(kafka_subscription_from_group_row("billing-service", "orders", &row).is_none());
+    }
+
+    #[test]
+    fn kafka_subscription_from_group_row_skips_partitions_without_end_offsets() {
+        let row = serde_json::json!({
+            "groupId": "orders-service",
+            "state": "EMPTY",
+            "simpleGroup": false,
+            "members": [],
+            "committedOffsets": [
+                { "topic": "orders", "partition": 0, "offset": 3 },
+                { "topic": "orders", "partition": 1, "offset": 8 }
+            ],
+            "endOffsets": [
+                // partition 1's end offset is unavailable (agent-side failure)
+                { "topic": "orders", "partition": 0, "offset": 10 }
+            ]
+        });
+
+        let sub = kafka_subscription_from_group_row("orders-service", "orders", &row)
+            .expect("the group still has visible committed offsets");
+
+        assert_eq!(sub.msg_backlog, 7); // only partition 0 contributes
+    }
+
+    #[test]
+    fn kafka_subscription_from_group_row_filters_committed_offsets_to_the_requested_topic() {
+        let row = serde_json::json!({
+            "groupId": "multi-topic-service",
+            "state": "EMPTY",
+            "simpleGroup": false,
+            "members": [],
+            "committedOffsets": [
+                { "topic": "orders", "partition": 0, "offset": 3 },
+                { "topic": "payments", "partition": 0, "offset": 7 }
+            ],
+            "endOffsets": [
+                { "topic": "orders", "partition": 0, "offset": 8 },
+                { "topic": "payments", "partition": 0, "offset": 9 }
+            ]
+        });
+
+        let sub = kafka_subscription_from_group_row("multi-topic-service", "orders", &row)
+            .expect("committed offsets on the requested topic make the group visible");
+
+        // Lag totals only the requested topic's partitions.
+        assert_eq!(sub.msg_backlog, 5);
     }
 
     #[test]

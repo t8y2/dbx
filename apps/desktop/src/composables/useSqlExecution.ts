@@ -19,6 +19,7 @@ import { extractSqlParameterDescriptors, type SqlParameterDescriptor, type SqlPa
 import { expandSqlVariables } from "@/lib/sql/sqlVariables";
 import { enabledSqlParameterSyntaxes, resolveSqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
 import { assessProductionSql } from "@/lib/database/productionSafety";
+import { ensureReadOnlyWriteAccess } from "@/lib/database/readOnlyWriteAccess";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import type { SqlExecutionDangerRequest } from "@/stores/sqlExecutionDangerStore";
 import type { ConnectionConfig, DatabaseType, QueryTab } from "@/types/database";
@@ -176,6 +177,7 @@ export function useSqlExecution(deps: {
   }
 
   async function continueExecute(sql: string, sourceOffset?: number, options: SqlExecutionOptions = {}) {
+    if (!(await ensureReadOnlyWriteAccess({ connection: deps.activeConnection.value, sql, source: t("production.sourceSqlEditor") }))) return;
     // Redis: block dangerous commands when toggle is on (scan entire batch for highest safety level)
     if (deps.activeConnection.value?.db_type === "redis" && deps.blockDangerousRedisCommands?.value !== false) {
       const commands = sql
@@ -302,14 +304,15 @@ export function useSqlExecution(deps: {
       ...(options.editorViewportRequestId !== undefined ? { onExecutionStarted: () => deps.onExecutionStarted?.(options.editorViewportRequestId!) } : {}),
     });
     if (producedResult === false) return;
+    const executionTabStillActive = deps.activeTab.value?.id === tab.id;
     const sqlServerMessageResultIndex = executionDatabaseType === "sqlserver" ? tab.results?.findIndex((result) => result.server_message === true) : undefined;
     if (sqlServerMessageResultIndex !== undefined && sqlServerMessageResultIndex >= 0) {
       focusSqlServerDataResult(tab.id, executionDatabaseType, tab);
-      deps.activeOutputView.value = "result";
+      if (executionTabStillActive) deps.activeOutputView.value = "result";
     } else if (executionDatabaseType === "sqlserver" && tab.result?.server_message === true) {
-      deps.activeOutputView.value = "result";
+      if (executionTabStillActive) deps.activeOutputView.value = "result";
     } else if (tab.result && !tab.result.columns.length && !tab.results?.some((result) => result.columns.length > 0)) {
-      deps.activeOutputView.value = statementCount === 1 ? defaultViewForResult(tab.result) : "summary";
+      if (executionTabStillActive) deps.activeOutputView.value = statementCount === 1 ? defaultViewForResult(tab.result) : "summary";
     }
     const elapsed = Date.now() - start;
     const failure = firstQueryExecutionError(tab);
@@ -357,6 +360,9 @@ export function useSqlExecution(deps: {
     const tabCancelRequested = (count: number) => (tab.cancelRequestCount ?? 0) !== count;
     if (cancelRequested()) return finish({ status: "cancelled" });
     if (!sql.trim()) return finish({ status: "failed", errorMessage: t("explain.emptySql") });
+    if (!(await ensureReadOnlyWriteAccess({ connection, sql, source: t("production.sourceMultiDbSql") }))) {
+      return finish({ status: "skipped", errorMessage: t("dangerDialog.cancel") });
+    }
     if (requiresDatabaseSelection(executionTab, connection, sql)) {
       return finish({ status: "failed", errorMessage: t("editor.selectDatabaseRequired") });
     }
@@ -481,7 +487,7 @@ export function useSqlExecution(deps: {
       // 会让多个 worker 几乎同时改这个共享 ref，导致主视图在 result/summary 间反复
       // 跳动（闪烁/竞态）。worker 结果已由 captureMultiDbExecutionWorkerResult 记录
       // 到 source tab 的 result run 并通过 projectResultRun 投影显示，无需再切主视图。
-      if (!workerId) {
+      if (!workerId && deps.activeTab.value?.id === tab.id) {
         deps.activeOutputView.value = success && (latest.result?.columns.length || latest.results?.some((result) => result.columns.length)) ? "result" : "summary";
       }
       return finish(success ? { status: "success", errorMessage } : { status: "failed", errorMessage });
@@ -543,6 +549,7 @@ export function useSqlExecution(deps: {
       settingsStore.updateEditorSettings({ confirmDangerousSqlExecution: false });
     }
     suppressDangerConfirm.value = false;
+    if (!(await ensureReadOnlyWriteAccess({ connection: deps.activeConnection.value, sql, source: t("production.sourceSqlEditor") }))) return;
     await doExecute(sql, sourceOffset, { openInNewResultTab, editorViewportRequestId });
   }
 

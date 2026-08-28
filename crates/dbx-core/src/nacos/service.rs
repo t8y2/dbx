@@ -1,8 +1,17 @@
 use std::future::Future;
 
 use crate::connection::AppState;
-use crate::models::connection::DatabaseType;
+use crate::models::connection::{DatabaseConnectionInfo, DatabaseType};
 use crate::nacos::types::*;
+
+pub fn database_info_from_connection(info: &NacosConnectionInfo) -> Option<DatabaseConnectionInfo> {
+    let product_version = info.server_version.clone().filter(|value| !value.trim().is_empty());
+    Some(DatabaseConnectionInfo {
+        product_name: Some("Nacos".to_string()),
+        product_version,
+        ..DatabaseConnectionInfo::default()
+    })
+}
 
 async fn refresh_access_control_after_mutation(admin: &std::sync::Arc<dyn crate::nacos::port::NacosAdmin>) {
     admin.invalidate_access_control_capabilities();
@@ -545,7 +554,7 @@ async fn get_admin_with_operation_fingerprint(
 
 pub(crate) async fn ensure_connection_writable(state: &AppState, conn_id: &str, action: &str) -> Result<(), String> {
     let cfg = state.configs.read().await.get(conn_id).cloned().ok_or("Connection not found")?;
-    if cfg.read_only {
+    if cfg.read_only && !state.write_unlock_windows.is_active(conn_id).await {
         Err(format!("{action} is blocked because this connection is read-only"))
     } else {
         Ok(())
@@ -649,6 +658,7 @@ mod tests {
             database: None,
             default_schema: None,
             visible_databases: None,
+            visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
             attached_databases: Vec::new(),
@@ -676,6 +686,7 @@ mod tests {
             redis_key_separator: ":".to_string(),
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
+            redis_key_templates: Vec::new(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),
@@ -724,6 +735,7 @@ mod tests {
             database: None,
             default_schema: None,
             visible_databases: None,
+            visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
             attached_databases: Vec::new(),
@@ -751,6 +763,7 @@ mod tests {
             redis_key_separator: ":".to_string(),
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
+            redis_key_templates: Vec::new(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),

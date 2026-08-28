@@ -33,7 +33,8 @@ describe("DataGridReadonlyTextSelection", () => {
   it("closes a stale read-only selection when a result is replaced", () => {
     const resultWatcher = dataGridSource.match(/watch\(\s*\(\) => props\.result,\s*\(result, previousResult\) => \{[\s\S]*?\n\);/)?.[0] ?? "";
 
-    expect(resultWatcher).toContain("if (isDataGridPrefixAppend(previousResult, result)) return;");
+    expect(resultWatcher).toContain("const appendCompletion = dataGridInfiniteScrollAppendCompletion(previousResult, result");
+    expect(resultWatcher).toContain("if (appendCompletion) {");
     expect(resultWatcher).toContain("closeReadonlyCellTextSelection();");
   });
 

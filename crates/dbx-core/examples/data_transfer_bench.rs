@@ -100,6 +100,8 @@ fn run() -> Result<(), String> {
         columns: columns.clone(),
         column_types: vec![None; columns.len()],
         column_extras: Vec::new(),
+        spatial_columns: Vec::new(),
+        spatial_values: Vec::new(),
         rows: rows.clone(),
         batch_size: Some(options.batch_size),
     })?;

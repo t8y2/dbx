@@ -79,18 +79,23 @@ test("parses explicit enum-style boolean selections", () => {
   assert.equal(parseBooleanCellEditorValue("maybe"), undefined);
 });
 
-test("indexes table metadata once and resolves source-column aliases", () => {
+test("indexes table metadata once and honors explicit source-column mappings", () => {
   const enabled = column("Enabled", "boolean");
   const displayName = column("DisplayName", "varchar");
-  const resolved = resolveDataGridColumnsByResultIndex({
+  const explicitlyMapped = resolveDataGridColumnsByResultIndex({
     resultColumns: ["enabled_alias", "DisplayName", "missing"],
     sourceColumns: ["enabled", undefined, undefined],
     tableColumns: [enabled, displayName],
   });
+  const inferred = resolveDataGridColumnsByResultIndex({
+    resultColumns: ["DisplayName"],
+    tableColumns: [enabled, displayName],
+  });
 
-  assert.equal(resolved[0], enabled);
-  assert.equal(resolved[1], displayName);
-  assert.equal(resolved[2], undefined);
+  assert.equal(explicitlyMapped[0], enabled);
+  assert.equal(explicitlyMapped[1], undefined);
+  assert.equal(explicitlyMapped[2], undefined);
+  assert.equal(inferred[0], displayName);
 });
 
 test("shows nullability only for query results with resolved column metadata", () => {

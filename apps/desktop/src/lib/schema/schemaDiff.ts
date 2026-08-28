@@ -1208,7 +1208,13 @@ export function groupDiffObjects(objects: SchemaDiffObject[]): OperationGroup[] 
     },
   };
 
-  for (const obj of schemaDiffReviewObjects(objects)) {
+  // Classification is presence-based (DBeaver structure-compare semantics): an
+  // object that exists on both sides keeps operationType "modify" and carries
+  // its per-child operations in the drill-down, so only target-only objects
+  // ("delete") and source-only objects ("create") appear in those groups. A
+  // both-side table must never be re-bucketed as delete/create just because
+  // some of its columns or indexes differ.
+  for (const obj of objects) {
     groups[obj.operationType][obj.objectKind].push(obj);
   }
 
@@ -1240,32 +1246,6 @@ export function groupDiffObjects(objects: SchemaDiffObject[]): OperationGroup[] 
       expanded: opType !== "none",
       typeGroups,
     };
-  });
-}
-
-function schemaDiffReviewObjects(objects: SchemaDiffObject[]): SchemaDiffObject[] {
-  return objects.flatMap((object) => {
-    const children = object.children?.filter((child) => child.operationType !== "none") ?? [];
-    if (object.operationType !== "modify" || children.length === 0) return [object];
-
-    const operationOrder: DiffOperationType[] = ["modify", "create", "delete"];
-    return operationOrder.flatMap((operationType): SchemaDiffObject[] => {
-      const operationChildren = children.filter((child) => child.operationType === operationType);
-      if (operationChildren.length === 0) return [];
-      return [
-        {
-          ...object,
-          id: `review-${operationType}-${object.id}`,
-          operationType,
-          selected: operationChildren.every((child) => child.selected),
-          sourceName: operationType === "delete" ? undefined : object.sourceName,
-          targetName: operationType === "create" ? undefined : object.targetName,
-          children: operationChildren,
-          parentId: object.id,
-          changes: operationChildren.flatMap((child) => child.changes ?? []),
-        },
-      ];
-    });
   });
 }
 

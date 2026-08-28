@@ -1,7 +1,21 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { useConnectionStore } from "@/stores/connectionStore";
-import { connectionGroupDisplayName, executionSummaryItems, middleEllipsis, queryResultBaseSql, queryResultExecutionSql, resultGridCacheKey, resultGridInstanceKey, resultSourceRange, statementExecutionMarkers, tabDisplayTitle, tabTooltipLines, tabularResultItems } from "@/lib/tabs/tabPresentation";
+import {
+  connectionGroupDisplayName,
+  executionSummaryItems,
+  middleEllipsis,
+  queryResultBaseSql,
+  queryResultExecutionSql,
+  resultGridCacheKey,
+  resultGridColumnWidthCacheKey,
+  resultGridInstanceKey,
+  resultSourceRange,
+  statementExecutionMarkers,
+  tabDisplayTitle,
+  tabTooltipLines,
+  tabularResultItems,
+} from "@/lib/tabs/tabPresentation";
 import { sqlTextFingerprint } from "@/lib/sql/sqlTextFingerprint";
 import type { ConnectionConfig, QueryTab } from "@/types/database";
 
@@ -136,12 +150,14 @@ describe("query result labels", () => {
 describe("query result grid identity", () => {
   it("separates rerun payloads while retaining run and result-set identity", () => {
     const first = queryTab({ activeResultRunId: "run-1", activeResultIndex: 2, resultGridRevision: "execution-1" });
-    const rerun = queryTab({ activeResultRunId: "run-1", activeResultIndex: 2, resultGridRevision: "execution-2" });
+    const rerun = queryTab({ activeResultRunId: "run-2", activeResultIndex: 2, resultGridRevision: "execution-2" });
 
     expect(resultGridInstanceKey(first)).toBe("tab-1-run-1-2-execution-1");
     expect(resultGridInstanceKey(rerun)).not.toBe(resultGridInstanceKey(first));
     expect(resultGridInstanceKey({ ...first, activeResultIndex: 1 })).toBe("tab-1-run-1-1-execution-1");
-    expect(resultGridCacheKey(rerun)).toBe(resultGridCacheKey(first));
+    expect(resultGridCacheKey(rerun)).not.toBe(resultGridCacheKey(first));
+    expect(resultGridColumnWidthCacheKey(rerun)).toBe(resultGridColumnWidthCacheKey(first));
+    expect(resultGridColumnWidthCacheKey({ ...first, activeResultIndex: 1 })).not.toBe(resultGridColumnWidthCacheKey(first));
   });
 });
 

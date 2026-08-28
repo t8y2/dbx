@@ -175,7 +175,14 @@ describe("connectionStore metadata loading", () => {
       fallback_used: false,
     });
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
-    vi.doMock("@/lib/backend/api", () => ({ checkConnectionHealth: vi.fn().mockResolvedValue(undefined), completionAssistantSearch, deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined), listInstalledAgents: vi.fn().mockResolvedValue([]) }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listInstalledAgents: vi.fn().mockResolvedValue([]),
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+    }));
 
     const { useConnectionStore } = await import("@/stores/connectionStore");
     const store = useConnectionStore();
@@ -314,6 +321,8 @@ describe("connectionStore metadata loading", () => {
       completionAssistantSearch,
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
       getCustomTypeDetails,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
     }));
 
     const { useConnectionStore } = await import("@/stores/connectionStore");

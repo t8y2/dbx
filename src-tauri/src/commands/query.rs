@@ -23,6 +23,13 @@ struct ExecuteMultiProgress {
     error: Option<BackendError>,
 }
 
+#[derive(Debug, serde::Serialize)]
+#[serde(untagged)]
+pub enum ManualTransactionCommandError {
+    Structured(Box<BackendError>),
+    Legacy(String),
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_query(
@@ -456,17 +463,34 @@ pub async fn execute_in_manual_transaction(
     schema: Option<String>,
     max_rows: Option<usize>,
     table_data_preview: Option<bool>,
-) -> Result<Vec<dbx_core::query::ExecuteMultiResult>, String> {
+    page_size: Option<usize>,
+    result_session_id: Option<String>,
+    classification_sql: Option<String>,
+) -> Result<Vec<dbx_core::query::ExecuteMultiResult>, ManualTransactionCommandError> {
     dbx_core::query::execute_in_manual_transaction_with_options(
         &state,
         &txn_session_id,
         &sql,
         &database,
         schema.as_deref(),
-        max_rows,
-        table_data_preview.unwrap_or(false),
+        dbx_core::query::ManualTransactionExecutionOptions {
+            max_rows,
+            table_data_preview: table_data_preview.unwrap_or(false),
+            page_size,
+            result_session_id,
+            classification_sql,
+        },
     )
     .await
+    .map_err(|error| {
+        if dbx_core::query::is_manual_transaction_session_expired_error(&error) {
+            ManualTransactionCommandError::Structured(Box::new(BackendError::from_manual_transaction_session_expired(
+                dbx_core::query::MANUAL_TRANSACTION_IDLE_TIMEOUT_SECS,
+            )))
+        } else {
+            ManualTransactionCommandError::Legacy(error)
+        }
+    })
 }
 
 #[tauri::command]

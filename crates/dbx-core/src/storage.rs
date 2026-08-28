@@ -3,11 +3,17 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use log::warn;
-use rusqlite::{params, params_from_iter, types::Value, Connection, DatabaseName, OpenFlags, OptionalExtension, ToSql};
+use rusqlite::{
+    params, params_from_iter, types::Value, Connection, DatabaseName, OpenFlags, OptionalExtension, ToSql, Transaction,
+    TransactionBehavior,
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::ai::{AiChatMessage, AiChatSelectionState, AiConfig, AiConfigItem, AiConversation, AiProvider};
+use crate::ai::{
+    AiChatMessage, AiChatSelectionState, AiConfig, AiConfigItem, AiConversation, AiProvider, AiRun, AiRunFifoCategory,
+    AiRunStatus,
+};
 use crate::connection_secrets::{
     MQ_AUTH_API_KEY_VALUE_KEY, MQ_AUTH_CLIENT_SECRET_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_SECRET_PREFIX,
     MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, MQ_TOKEN_SIGNING_SECRET_PREFIX, NACOS_AUTH_PASSWORD_KEY,
@@ -43,6 +49,7 @@ const USER_DATA_TABLES: &[&str] = &[
     "connection_secrets",
     "history",
     "ai_conversations",
+    "ai_runs",
     "mq_token_records",
     "saved_sql_folders",
     "saved_sql_files",
@@ -366,9 +373,27 @@ const SCHEMA_STATEMENTS: &[&str] = &[
         connection_name TEXT NOT NULL DEFAULT '',
         database TEXT NOT NULL DEFAULT '',
         messages_json TEXT NOT NULL DEFAULT '[]',
+        queued_input TEXT,
         created_at TEXT NOT NULL DEFAULT '',
         updated_at TEXT NOT NULL DEFAULT ''
     )",
+    "CREATE TABLE IF NOT EXISTS ai_runs (
+        run_id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL,
+        session_ids_json TEXT NOT NULL DEFAULT '[]',
+        status TEXT NOT NULL,
+        connection_id TEXT NOT NULL DEFAULT '',
+        database TEXT NOT NULL DEFAULT '',
+        schema_name TEXT,
+        pending_confirmation_json TEXT,
+        fifo_category TEXT,
+        pending_input TEXT,
+        max_seq INTEGER,
+        created_at TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL DEFAULT '',
+        FOREIGN KEY (conversation_id) REFERENCES ai_conversations(id) ON DELETE CASCADE
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_ai_runs_conversation_status ON ai_runs(conversation_id, status)",
     "CREATE TABLE IF NOT EXISTS sidebar_layout (
         id INTEGER PRIMARY KEY CHECK (id = 1),
         layout_json TEXT NOT NULL
@@ -501,8 +526,50 @@ impl Storage {
         let db_path = db_path.to_string_lossy().to_string();
         let db = connect_path_create_if_missing(&db_path).await?;
         let storage = Self { db, path };
+        // Best-effort: switching journal mode is itself a lock-sensitive
+        // operation, so a transient failure here (e.g. another process
+        // racing to open the same brand-new database file) must never stop
+        // the app from starting.
+        storage.enable_wal_mode().await;
         storage.init_schema().await?;
         Ok(storage)
+    }
+
+    /// Multiple `dbx` processes can end up pointed at the same data directory
+    /// (e.g. a portable install shared by several users on one machine).
+    /// WAL mode lets readers and writers proceed without blocking each other,
+    /// which combined with `TransactionBehavior::Immediate` on every write
+    /// transaction (see `conn.transaction_with_behavior` call sites below)
+    /// avoids the instant `SQLITE_BUSY` that a deferred transaction's
+    /// SHARED-to-RESERVED lock upgrade can trigger under concurrent access.
+    /// Never fails: this is a best-effort upgrade, retried a handful of
+    /// times, that logs and gives up rather than blocking startup.
+    async fn enable_wal_mode(&self) {
+        const ATTEMPTS: u32 = 5;
+        for attempt in 1..=ATTEMPTS {
+            let result = self
+                .with_conn(|conn| {
+                    conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get::<_, String>(0))
+                        .map_err(|e| e.to_string())
+                })
+                .await;
+            match result {
+                Ok(mode) if mode.eq_ignore_ascii_case("wal") => return,
+                Ok(mode) => {
+                    // Non-lock reasons WAL can't apply (e.g. an in-memory
+                    // database in tests) won't be fixed by retrying.
+                    warn!("dbx.db journal_mode did not switch to WAL (got '{mode}'); concurrent multi-process access may hit 'database is locked' more often");
+                    return;
+                }
+                Err(_) if attempt < ATTEMPTS => {
+                    std::thread::sleep(std::time::Duration::from_millis(100 * attempt as u64));
+                }
+                Err(error) => {
+                    warn!("dbx.db could not switch journal_mode to WAL after {ATTEMPTS} attempts: {error}; concurrent multi-process access may hit 'database is locked' more often");
+                    return;
+                }
+            }
+        }
     }
 
     /// Directory containing the SQLite database (`dbx.db`). SSH host keys are
@@ -523,6 +590,8 @@ impl Storage {
             ensure_ai_configs_columns_sync(conn)?;
             ensure_state_store_columns_sync(conn)?;
             ensure_sql_projects_columns_sync(conn)?;
+            ensure_ai_conversations_columns_sync(conn)?;
+            ensure_ai_runs_columns_sync(conn)?;
             Ok(())
         })
     }
@@ -721,6 +790,24 @@ fn ensure_ai_configs_columns_sync(conn: &Connection) -> Result<(), String> {
 
     Ok(())
 }
+
+/// Adds the queued-input column to `ai_conversations` for databases created
+/// by earlier iterations of the uncommitted WIP, where the table predates it.
+fn ensure_ai_conversations_columns_sync(conn: &Connection) -> Result<(), String> {
+    const COLUMNS: &[(&str, &str)] = &[("queued_input", "TEXT")];
+
+    ensure_table_columns(conn, "ai_conversations", COLUMNS)
+}
+
+/// Adds the background-run recovery columns (`fifo_category`, `pending_input`,
+/// `max_seq`) to databases created by earlier iterations of the uncommitted
+/// WIP, where the `ai_runs` table predates these fields.
+fn ensure_ai_runs_columns_sync(conn: &Connection) -> Result<(), String> {
+    const COLUMNS: &[(&str, &str)] = &[("fifo_category", "TEXT"), ("pending_input", "TEXT"), ("max_seq", "INTEGER")];
+
+    ensure_table_columns(conn, "ai_runs", COLUMNS)
+}
+
 fn ensure_table_columns(conn: &Connection, table_name: &str, columns: &[(&str, &str)]) -> Result<(), String> {
     let mut stmt =
         conn.prepare(&format!("SELECT name FROM pragma_table_info('{table_name}')")).map_err(|e| e.to_string())?;
@@ -1289,7 +1376,7 @@ impl Storage {
     pub async fn save_ai_configs(&self, configs: &[AiConfigItem]) -> Result<(), String> {
         let configs = configs.to_vec();
         self.with_conn(move |conn| {
-            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
             tx.execute("DELETE FROM ai_configs", []).map_err(|e| e.to_string())?;
             for config in &configs {
                 let json = serde_json::to_string(&config.config).map_err(|e| e.to_string())?;
@@ -1358,7 +1445,7 @@ impl Storage {
     pub async fn set_default_ai_config(&self, config_id: &str) -> Result<(), String> {
         let config_id = config_id.to_string();
         self.with_conn(move |conn| {
-            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
             tx.execute("UPDATE ai_configs SET is_default = 0 WHERE is_default = 1", []).map_err(|e| e.to_string())?;
             tx.execute("UPDATE ai_configs SET is_default = 1 WHERE id = ?1", params![config_id])
                 .map_err(|e| e.to_string())?;
@@ -1373,7 +1460,7 @@ impl Storage {
         self.with_conn(move |conn| {
             let json = serde_json::to_string(&config.config).map_err(|e| e.to_string())?;
             let models_json = serde_json::to_string(&config.config.models).map_err(|e| e.to_string())?;
-            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
 
             // 如果设该配置为默认，先清除其他默认，避免与 idx_ai_configs_default 冲突
             if config.is_default {
@@ -1452,7 +1539,7 @@ impl Storage {
         }
         let profiles = profiles.to_vec();
         self.with_conn(move |conn| {
-            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
             tx.execute("DELETE FROM tunnel_profiles", []).map_err(|e| e.to_string())?;
             for profile in &profiles {
                 let json = serde_json::to_string(profile).map_err(|e| e.to_string())?;
@@ -2132,34 +2219,109 @@ impl Storage {
 
 // AI Conversations
 
+// Terminal runs beyond this many per conversation are pruned on every AI save.
+// Only the newest terminal run per conversation is ever read at recovery (it
+// drives the history row's status badge after a restart); the older ones are
+// pure, unbounded storage + startup-load growth.
+const KEEP_TERMINAL_AI_RUNS_PER_CONVERSATION: i64 = 2;
+
+/// Caps each conversation's terminal run history. `save_ai_run` /
+/// `save_ai_run_state` persist every run unconditionally and `load_ai_runs`
+/// loads the whole table at startup, so without this cap repeated completed/
+/// failed/cancelled runs grow SQLite storage and recovery work forever. The
+/// frontend recovery loop dedups to the newest run per conversation, so keeping
+/// the newest few terminal runs preserves the row status badge exactly while
+/// bounding the table. Non-terminal statuses (preparing/queued/running/
+/// awaiting_write_confirmation/pending_recoverable) are never touched - they
+/// are the recovery payload.
+fn prune_terminal_ai_runs(tx: &Transaction<'_>) -> Result<(), String> {
+    tx.execute(
+        "DELETE FROM ai_runs
+         WHERE status IN ('completed', 'failed', 'cancelled', 'interrupted')
+           AND run_id NOT IN (
+               SELECT run_id FROM (
+                   SELECT run_id,
+                          ROW_NUMBER() OVER (
+                              PARTITION BY conversation_id
+                              ORDER BY updated_at DESC, run_id DESC
+                          ) AS rn
+                   FROM ai_runs
+                   WHERE status IN ('completed', 'failed', 'cancelled', 'interrupted')
+               ) WHERE rn <= ?1
+           )",
+        params![KEEP_TERMINAL_AI_RUNS_PER_CONVERSATION],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn prune_ai_conversations(tx: &Transaction<'_>) -> Result<(), String> {
+    // The 50-row limit is a soft cap: conversations with active or actionable
+    // runs remain reachable even when they exceed the cap. Only terminal,
+    // unprotected conversations compete for the remaining budget.
+    tx.execute(
+        "WITH protected AS (
+             SELECT DISTINCT conversation_id FROM ai_runs
+             WHERE status IN ('preparing', 'queued', 'running', 'awaiting_write_confirmation', 'pending_recoverable')
+         ), budget AS (
+             SELECT MAX(0, 50 - COUNT(*)) AS value FROM protected
+         ), keepers AS (
+             SELECT conversation_id AS id FROM protected
+             UNION
+             SELECT id FROM (
+                 SELECT id FROM ai_conversations
+                 WHERE id NOT IN (SELECT conversation_id FROM protected)
+                 ORDER BY updated_at DESC
+                 LIMIT (SELECT value FROM budget)
+             )
+         )
+         DELETE FROM ai_conversations WHERE id NOT IN (SELECT id FROM keepers)",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    // Do not depend on a connection-wide foreign_keys pragma for cleanup.
+    tx.execute("DELETE FROM ai_runs WHERE conversation_id NOT IN (SELECT id FROM ai_conversations)", [])
+        .map_err(|e| e.to_string())?;
+    // Cap terminal run history for the conversations that survive the cap
+    // above (they are deliberately retained), so normal use cannot grow the
+    // ai_runs table without bound.
+    prune_terminal_ai_runs(tx)?;
+    Ok(())
+}
+
 impl Storage {
     pub async fn save_ai_conversation(&self, conv: &AiConversation) -> Result<(), String> {
         let conv = conv.clone();
         let messages_json = serde_json::to_string(&conv.messages).map_err(|e| e.to_string())?;
         self.with_conn(move |conn| {
-            conn.execute(
-                "INSERT OR REPLACE INTO ai_conversations \
-                 (id, title, connection_name, database, messages_json, created_at, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            tx.execute(
+                "INSERT INTO ai_conversations \
+                 (id, title, connection_name, database, messages_json, queued_input, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT(id) DO UPDATE SET \
+                   title = excluded.title, \
+                   connection_name = excluded.connection_name, \
+                   database = excluded.database, \
+                   messages_json = excluded.messages_json, \
+                   queued_input = excluded.queued_input, \
+                   created_at = excluded.created_at, \
+                   updated_at = excluded.updated_at",
                 params![
                     conv.id,
                     conv.title,
                     conv.connection_name,
                     conv.database,
                     messages_json,
+                    conv.queued_input,
                     conv.created_at,
                     conv.updated_at
                 ],
             )
             .map_err(|e| e.to_string())?;
 
-            conn.execute(
-                "DELETE FROM ai_conversations WHERE id NOT IN \
-                 (SELECT id FROM ai_conversations ORDER BY updated_at DESC LIMIT 50)",
-                [],
-            )
-            .map_err(|e| e.to_string())?;
-            Ok(())
+            prune_ai_conversations(&tx)?;
+            tx.commit().map_err(|e| e.to_string())
         })
         .await
     }
@@ -2168,7 +2330,7 @@ impl Storage {
         self.with_conn(|conn| {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, title, connection_name, database, messages_json, created_at, updated_at \
+                    "SELECT id, title, connection_name, database, messages_json, queued_input, created_at, updated_at \
                      FROM ai_conversations ORDER BY updated_at DESC",
                 )
                 .map_err(|e| e.to_string())?;
@@ -2183,8 +2345,9 @@ impl Storage {
                         connection_name: row.get(2)?,
                         database: row.get(3)?,
                         messages,
-                        created_at: row.get(5)?,
-                        updated_at: row.get(6)?,
+                        queued_input: row.get(5)?,
+                        created_at: row.get(6)?,
+                        updated_at: row.get(7)?,
                     })
                 })
                 .map_err(|e| e.to_string())?;
@@ -2196,7 +2359,179 @@ impl Storage {
     pub async fn delete_ai_conversation(&self, id: &str) -> Result<(), String> {
         let id = id.to_string();
         self.with_conn(move |conn| {
-            conn.execute("DELETE FROM ai_conversations WHERE id = ?1", [id]).map(|_| ()).map_err(|e| e.to_string())
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            tx.execute("DELETE FROM ai_runs WHERE conversation_id = ?1", [&id]).map_err(|e| e.to_string())?;
+            tx.execute("DELETE FROM ai_conversations WHERE id = ?1", [&id]).map_err(|e| e.to_string())?;
+            prune_ai_conversations(&tx)?;
+            tx.commit().map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    pub async fn save_ai_run(&self, run: &AiRun) -> Result<(), String> {
+        let run = run.clone();
+        let session_ids_json = serde_json::to_string(&run.session_ids).map_err(|e| e.to_string())?;
+        let pending_confirmation_json = run.pending_confirmation.map(|value| value.to_string());
+        let fifo_category = run.fifo_category.map(|c| c.as_str().to_string());
+        self.with_conn(move |conn| {
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            tx.execute(
+                "INSERT OR REPLACE INTO ai_runs
+                 (run_id, conversation_id, session_ids_json, status, connection_id, database, schema_name,
+                  pending_confirmation_json, fifo_category, pending_input, max_seq, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    run.run_id,
+                    run.conversation_id,
+                    session_ids_json,
+                    run.status.as_str(),
+                    run.connection_id,
+                    run.database,
+                    run.schema,
+                    pending_confirmation_json,
+                    fifo_category,
+                    run.pending_input,
+                    run.max_seq,
+                    run.created_at,
+                    run.updated_at,
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+            prune_ai_conversations(&tx)?;
+            tx.commit().map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    pub async fn save_ai_run_state(&self, conv: &AiConversation, run: &AiRun) -> Result<(), String> {
+        let conv = conv.clone();
+        let run = run.clone();
+        let messages_json = serde_json::to_string(&conv.messages).map_err(|e| e.to_string())?;
+        let session_ids_json = serde_json::to_string(&run.session_ids).map_err(|e| e.to_string())?;
+        let pending_confirmation_json = run.pending_confirmation.map(|value| value.to_string());
+        let fifo_category = run.fifo_category.map(|c| c.as_str().to_string());
+        self.with_conn(move |conn| {
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            tx.execute(
+                "INSERT INTO ai_conversations
+                 (id, title, connection_name, database, messages_json, queued_input, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(id) DO UPDATE SET
+                   title = excluded.title,
+                   connection_name = excluded.connection_name,
+                   database = excluded.database,
+                   messages_json = excluded.messages_json,
+                   queued_input = excluded.queued_input,
+                   created_at = excluded.created_at,
+                   updated_at = excluded.updated_at",
+                params![
+                    conv.id,
+                    conv.title,
+                    conv.connection_name,
+                    conv.database,
+                    messages_json,
+                    conv.queued_input,
+                    conv.created_at,
+                    conv.updated_at
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+            tx.execute(
+                "INSERT OR REPLACE INTO ai_runs
+                 (run_id, conversation_id, session_ids_json, status, connection_id, database, schema_name,
+                  pending_confirmation_json, fifo_category, pending_input, max_seq, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    run.run_id,
+                    run.conversation_id,
+                    session_ids_json,
+                    run.status.as_str(),
+                    run.connection_id,
+                    run.database,
+                    run.schema,
+                    pending_confirmation_json,
+                    fifo_category,
+                    run.pending_input,
+                    run.max_seq,
+                    run.created_at,
+                    run.updated_at,
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+            prune_ai_conversations(&tx)?;
+            tx.commit().map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    pub async fn load_ai_runs(&self) -> Result<Vec<AiRun>, String> {
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT run_id, conversation_id, session_ids_json, status, connection_id, database,
+                            schema_name, pending_confirmation_json, fifo_category, pending_input, max_seq, created_at, updated_at
+                     FROM ai_runs ORDER BY updated_at DESC",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |row| {
+                    let session_ids_json: String = row.get(2)?;
+                    let status: String = row.get(3)?;
+                    let pending_confirmation_json: Option<String> = row.get(7)?;
+                    let fifo_category: Option<String> = row.get(8)?;
+                    let pending_input: Option<String> = row.get(9)?;
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        session_ids_json,
+                        status,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                        pending_confirmation_json,
+                        fifo_category,
+                        pending_input,
+                        row.get::<_, Option<u64>>(10)?,
+                        row.get::<_, String>(11)?,
+                        row.get::<_, String>(12)?,
+                    ))
+                })
+                .map_err(|e| e.to_string())?;
+            rows.map(|row| {
+                let (
+                    run_id,
+                    conversation_id,
+                    session_ids_json,
+                    status,
+                    connection_id,
+                    database,
+                    schema,
+                    pending_confirmation_json,
+                    fifo_category,
+                    pending_input,
+                    max_seq,
+                    created_at,
+                    updated_at,
+                ) = row.map_err(|e| e.to_string())?;
+                Ok(AiRun {
+                    run_id,
+                    conversation_id,
+                    session_ids: serde_json::from_str(&session_ids_json).map_err(|e| e.to_string())?,
+                    status: AiRunStatus::parse(&status)?,
+                    connection_id,
+                    database,
+                    schema,
+                    pending_confirmation: pending_confirmation_json
+                        .map(|json| serde_json::from_str(&json).map_err(|e| e.to_string()))
+                        .transpose()?,
+                    fifo_category: fifo_category.map(|value| AiRunFifoCategory::parse(&value)).transpose()?,
+                    pending_input,
+                    max_seq,
+                    created_at,
+                    updated_at,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()
         })
         .await
     }
@@ -2542,7 +2877,7 @@ impl Storage {
     ) -> Result<(), String> {
         let configs = configs.to_vec();
         self.with_conn(move |conn| {
-            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
             let replacement_ids = configs.iter().map(|config| config.id.clone()).collect::<HashSet<_>>();
             let mut retained_ids = preserve_unreadable_connections_for_replacement(&tx, &replacement_ids)?;
 
@@ -2582,7 +2917,7 @@ impl Storage {
     pub async fn save_connections(&self, configs: &[ConnectionConfig]) -> Result<(), String> {
         let configs = configs.to_vec();
         self.with_conn(move |conn| {
-            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
             let replacement_ids = configs.iter().map(|config| config.id.clone()).collect::<HashSet<_>>();
             let mut retained_ids = preserve_unreadable_connections_for_replacement(&tx, &replacement_ids)?;
 
@@ -2601,7 +2936,7 @@ impl Storage {
     pub async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
         let config = config.canonicalized();
         self.with_conn(move |conn| {
-            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
             ensure_mcp_connection_change_allowed_in_tx(&tx, None)?;
             persist_connection_in_tx(&tx, &config)?;
             tx.commit().map_err(|e| e.to_string())?;
@@ -2621,7 +2956,8 @@ impl Storage {
         let copied_id = copy_id.clone();
         let copy_name = copy_name.to_string();
         self.with_conn(move |conn| {
-            let tx = conn.transaction().map_err(|error| error.to_string())?;
+            let tx =
+                conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
             ensure_mcp_connection_change_allowed_in_tx(&tx, Some(&source_id))?;
             let copy_name_lower = copy_name.to_lowercase();
             let mut names = tx.prepare("SELECT config_json FROM connections").map_err(|error| error.to_string())?;
@@ -2669,7 +3005,7 @@ impl Storage {
     pub async fn remove_connection_for_mcp(&self, connection_id: &str) -> Result<bool, String> {
         let connection_id = connection_id.to_string();
         self.with_conn(move |conn| {
-            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
             ensure_mcp_connection_change_allowed_in_tx(&tx, Some(&connection_id))?;
             let removed =
                 tx.execute("DELETE FROM connections WHERE id = ?1", [&connection_id]).map_err(|e| e.to_string())? > 0;
@@ -3010,7 +3346,7 @@ impl Storage {
     pub async fn replace_saved_sql_library(&self, library: &SavedSqlLibrary) -> Result<(), String> {
         let library = library.clone();
         self.with_conn(move |conn| {
-            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
             tx.execute("DELETE FROM saved_sql_files", []).map_err(|e| e.to_string())?;
             tx.execute("DELETE FROM saved_sql_folders", []).map_err(|e| e.to_string())?;
 
@@ -3277,7 +3613,7 @@ impl Storage {
     pub async fn delete_saved_sql_folder(&self, id: &str) -> Result<(), String> {
         let id = id.to_string();
         self.with_conn(move |conn| {
-            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
             let mut folder_ids = vec![id.clone()];
             let mut index = 0;
             while index < folder_ids.len() {
@@ -3990,7 +4326,8 @@ impl Storage {
         let owner_id = schema_cache_owner(&cache_key).to_string();
         let now_ms = unix_timestamp_millis();
         self.with_conn(move |conn| {
-            let transaction = conn.transaction().map_err(|error| error.to_string())?;
+            let transaction =
+                conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
             transaction
                 .execute(
                     "INSERT INTO schema_cache (
@@ -4017,7 +4354,9 @@ impl Storage {
         let now_ms = unix_timestamp_millis();
         let json: Option<String> = self
             .with_conn(move |conn| {
-                let transaction = conn.transaction().map_err(|error| error.to_string())?;
+                let transaction = conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(|error| error.to_string())?;
                 let json = transaction
                     .query_row(
                         "SELECT payload_json FROM schema_cache
@@ -4314,7 +4653,8 @@ impl Storage {
 
             let deleted_bytes =
                 entries.iter().filter(|(key, _, _, _)| deleted.contains(key)).map(|(_, bytes, _, _)| *bytes).sum();
-            let transaction = conn.transaction().map_err(|e| e.to_string())?;
+            let transaction =
+                conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
             for key in &deleted {
                 transaction
                     .execute("DELETE FROM tab_runtime_cache WHERE cache_key = ?1", [key])
@@ -4752,10 +5092,11 @@ fn map_from_sql_err(err: serde_json::Error) -> rusqlite::Error {
 mod tests {
     use super::{
         maybe_import_user_data_db, DataDbImportResult, DesktopIconTheme, DesktopSettings, McpGlobalPolicy,
-        McpGlobalPolicyState, Storage, MCP_GLOBAL_POLICY_KEY,
+        McpGlobalPolicyState, Storage, KEEP_TERMINAL_AI_RUNS_PER_CONVERSATION, MCP_GLOBAL_POLICY_KEY,
     };
     use crate::ai::{
-        AiActiveModelSelection, AiAssistantMode, AiChatSelectionState, AiEffortSelection, AiModelEffortPreference,
+        AiActiveModelSelection, AiAssistantMode, AiChatMessage, AiChatSelectionState, AiConversation,
+        AiEffortSelection, AiModelEffortPreference, AiRun, AiRunFifoCategory, AiRunStatus,
     };
     use crate::connection_secrets::NACOS_RNACOS_CONSOLE_PASSWORD_KEY;
     use crate::connection_secrets::{
@@ -4767,7 +5108,7 @@ mod tests {
     };
     use crate::saved_sql::SavedSqlFile;
     use crate::sql_project::{SqlFileSnapshot, SqlProject, TrashEntry};
-    use rusqlite::Connection;
+    use rusqlite::{Connection, TransactionBehavior};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     fn temp_db_path(name: &str) -> std::path::PathBuf {
@@ -4806,6 +5147,239 @@ mod tests {
             rollback_sql: None,
             details_json: None,
         }
+    }
+
+    fn ai_conversation(id: &str, updated_at: &str) -> AiConversation {
+        AiConversation {
+            id: id.to_string(),
+            title: id.to_string(),
+            connection_name: "local".to_string(),
+            database: "db".to_string(),
+            messages: vec![AiChatMessage {
+                role: "user".to_string(),
+                content: id.to_string(),
+                mentions: None,
+                reasoning: None,
+                kind: None,
+                covered_messages: None,
+            }],
+            queued_input: None,
+            created_at: updated_at.to_string(),
+            updated_at: updated_at.to_string(),
+        }
+    }
+
+    fn ai_run(id: &str, conversation_id: &str, status: AiRunStatus, updated_at: &str) -> AiRun {
+        AiRun {
+            run_id: id.to_string(),
+            conversation_id: conversation_id.to_string(),
+            session_ids: vec![],
+            status,
+            connection_id: "connection".to_string(),
+            database: "db".to_string(),
+            schema: None,
+            pending_confirmation: None,
+            fifo_category: None,
+            pending_input: None,
+            max_seq: None,
+            created_at: updated_at.to_string(),
+            updated_at: updated_at.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn ai_conversation_soft_cap_never_evicts_protected_runs() {
+        let path = temp_db_path("ai-conversation-soft-cap");
+        let storage = Storage::open(&path).await.unwrap();
+
+        let protected = ai_conversation("protected", "0000");
+        let protected_run = ai_run("protected-run", "protected", AiRunStatus::Running, "0000");
+        storage.save_ai_run_state(&protected, &protected_run).await.unwrap();
+        for index in 0..55 {
+            let timestamp = format!("{index:04}");
+            storage.save_ai_conversation(&ai_conversation(&format!("terminal-{index}"), &timestamp)).await.unwrap();
+        }
+
+        let conversations = storage.load_ai_conversations().await.unwrap();
+        assert_eq!(conversations.len(), 50);
+        assert!(conversations.iter().any(|conversation| conversation.id == "protected"));
+        assert!(!conversations.iter().any(|conversation| conversation.id == "terminal-0"));
+        assert!(conversations.iter().any(|conversation| conversation.id == "terminal-54"));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn ai_conversation_soft_cap_allows_more_than_fifty_protected_runs() {
+        let path = temp_db_path("ai-conversation-protected-overflow");
+        let storage = Storage::open(&path).await.unwrap();
+
+        for index in 0..51 {
+            let id = format!("protected-{index}");
+            let timestamp = format!("{index:04}");
+            storage
+                .save_ai_run_state(
+                    &ai_conversation(&id, &timestamp),
+                    &ai_run(&format!("run-{index}"), &id, AiRunStatus::AwaitingWriteConfirmation, &timestamp),
+                )
+                .await
+                .unwrap();
+        }
+        storage.save_ai_conversation(&ai_conversation("terminal-extra", "9999")).await.unwrap();
+
+        let conversations = storage.load_ai_conversations().await.unwrap();
+        assert_eq!(conversations.len(), 51);
+        assert!(conversations.iter().all(|conversation| conversation.id.starts_with("protected-")));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn ai_conversation_soft_cap_protects_pending_recoverable_runs() {
+        let path = temp_db_path("ai-conversation-pending-recoverable-protection");
+        let storage = Storage::open(&path).await.unwrap();
+
+        // A recovered pending-input run (PRD §7 line 93) must be protected like
+        // any other non-terminal run: its draft is not lost to pruning.
+        let protected = ai_conversation("recoverable", "0000");
+        let mut protected_run = ai_run("recoverable-run", "recoverable", AiRunStatus::PendingRecoverable, "0000");
+        protected_run.pending_input = Some("recover me".to_string());
+        storage.save_ai_run_state(&protected, &protected_run).await.unwrap();
+        for index in 0..55 {
+            let timestamp = format!("{index:04}");
+            storage.save_ai_conversation(&ai_conversation(&format!("terminal-{index}"), &timestamp)).await.unwrap();
+        }
+
+        let conversations = storage.load_ai_conversations().await.unwrap();
+        assert_eq!(conversations.len(), 50);
+        assert!(conversations.iter().any(|conversation| conversation.id == "recoverable"));
+        assert!(!conversations.iter().any(|conversation| conversation.id == "terminal-0"));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn ai_run_roundtrips_fifo_category_and_pending_input() {
+        let path = temp_db_path("ai-run-fifo-category-roundtrip");
+        let storage = Storage::open(&path).await.unwrap();
+
+        let conversation = ai_conversation("fifo-conv", "0000");
+        let mut run = ai_run("fifo-run", "fifo-conv", AiRunStatus::Queued, "0000");
+        run.fifo_category = Some(AiRunFifoCategory::NormalSend);
+        run.pending_input = Some("select * from orders limit 5".to_string());
+        run.max_seq = Some(42);
+        storage.save_ai_run_state(&conversation, &run).await.unwrap();
+
+        let loaded = storage.load_ai_runs().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].run_id, "fifo-run");
+        assert_eq!(loaded[0].status, AiRunStatus::Queued);
+        assert_eq!(loaded[0].fifo_category, Some(AiRunFifoCategory::NormalSend));
+        assert_eq!(loaded[0].pending_input.as_deref(), Some("select * from orders limit 5"));
+        assert_eq!(loaded[0].max_seq, Some(42));
+
+        // The write_confirmation_resume category survives too.
+        let mut resume = ai_run("resume-run", "fifo-conv", AiRunStatus::Queued, "0001");
+        resume.fifo_category = Some(AiRunFifoCategory::WriteConfirmationResume);
+        storage.save_ai_run(&resume).await.unwrap();
+        let loaded = storage.load_ai_runs().await.unwrap();
+        let resume = loaded.iter().find(|run| run.run_id == "resume-run").unwrap();
+        assert_eq!(resume.fifo_category, Some(AiRunFifoCategory::WriteConfirmationResume));
+        assert!(resume.pending_input.is_none());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn saving_a_conversation_keeps_its_background_runs() {
+        let path = temp_db_path("ai-conversation-upsert-keeps-runs");
+        let storage = Storage::open(&path).await.unwrap();
+        // `ai_runs` declares an ON DELETE CASCADE relationship. Exercise the
+        // snapshot path with enforcement enabled so an accidental REPLACE
+        // (delete + insert) cannot silently erase an active run on restart.
+        storage
+            .with_conn(|conn| conn.execute_batch("PRAGMA foreign_keys = ON").map_err(|e| e.to_string()))
+            .await
+            .unwrap();
+
+        let mut conversation = ai_conversation("upsert-conv", "0000");
+        let run = ai_run("upsert-run", "upsert-conv", AiRunStatus::Running, "0000");
+        storage.save_ai_run_state(&conversation, &run).await.unwrap();
+
+        conversation.updated_at = "0001".to_string();
+        conversation.queued_input = Some("send later".to_string());
+        storage.save_ai_conversation(&conversation).await.unwrap();
+
+        let runs = storage.load_ai_runs().await.unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].run_id, "upsert-run");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn terminal_ai_runs_are_capped_per_conversation_while_nonterminal_survive() {
+        // Reviewed finding (unbounded terminal run growth): save_ai_run /
+        // save_ai_run_state persist every terminal run and load_ai_runs loads
+        // the whole table at startup, but prune_ai_conversations only caps
+        // conversations and deliberately retains runs for the survivors - so
+        // repeated completed runs grew SQLite storage and recovery work
+        // forever. The storage layer now caps terminal history per
+        // conversation (keeping the newest few, which drive the row status
+        // badge after restart) and never touches recovery-relevant runs.
+        let path = temp_db_path("ai-terminal-runs-capped");
+        let storage = Storage::open(&path).await.unwrap();
+
+        // A non-terminal run must always survive - it is the recovery payload.
+        let conversation = ai_conversation("cap-conv", "0000");
+        storage
+            .save_ai_run_state(&conversation, &ai_run("active-run", "cap-conv", AiRunStatus::Running, "0000"))
+            .await
+            .unwrap();
+        // Repeated completed runs (normal use): older ones must be pruned.
+        for index in 0..5 {
+            let timestamp = format!("{index:04}");
+            storage
+                .save_ai_run(&ai_run(&format!("terminal-{index}"), "cap-conv", AiRunStatus::Completed, &timestamp))
+                .await
+                .unwrap();
+        }
+
+        let runs = storage.load_ai_runs().await.unwrap();
+        assert!(runs.iter().any(|run| run.run_id == "active-run"), "recovery-relevant run must survive");
+        let terminal: Vec<_> = runs.iter().filter(|run| run.status == AiRunStatus::Completed).collect();
+        assert_eq!(
+            terminal.len(),
+            KEEP_TERMINAL_AI_RUNS_PER_CONVERSATION as usize,
+            "only the newest terminal runs per conversation survive"
+        );
+        assert!(terminal.iter().any(|run| run.run_id == "terminal-4"), "the newest terminal run is retained");
+        assert!(!runs.iter().any(|run| run.run_id == "terminal-0"), "the oldest terminal runs are pruned");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn ai_conversation_roundtrips_queued_input() {
+        let path = temp_db_path("ai-conversation-queued-input-roundtrip");
+        let storage = Storage::open(&path).await.unwrap();
+
+        let mut conversation = ai_conversation("queued-conv", "0000");
+        conversation.queued_input = Some("run this after the current task".to_string());
+        storage.save_ai_conversation(&conversation).await.unwrap();
+
+        let loaded = storage.load_ai_conversations().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "queued-conv");
+        assert_eq!(loaded[0].queued_input.as_deref(), Some("run this after the current task"));
+
+        // Overwriting clears a stale queued input.
+        conversation.queued_input = None;
+        storage.save_ai_conversation(&conversation).await.unwrap();
+        let loaded = storage.load_ai_conversations().await.unwrap();
+        assert!(loaded[0].queued_input.is_none());
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]
@@ -5062,6 +5636,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_save_connections_from_two_connections_does_not_lock() {
+        // Regression test for issue #6605: multiple `dbx` processes sharing one
+        // data directory (e.g. a portable install shared by several users on
+        // the same machine) each open their own connection to the same
+        // `dbx.db`. Opening two independent `Storage` instances here exercises
+        // the same inter-connection SQLite file locking that separate OS
+        // processes would hit.
+        let path = temp_db_path("concurrent-save-connections");
+        let storage_a = std::sync::Arc::new(Storage::open(&path).await.unwrap());
+        let storage_b = std::sync::Arc::new(Storage::open(&path).await.unwrap());
+
+        let mut tasks = Vec::new();
+        for i in 0..20 {
+            let storage = if i % 2 == 0 { storage_a.clone() } else { storage_b.clone() };
+            let config = plain_connection(&format!("concurrent-{i}"), "hunter2");
+            tasks.push(tokio::spawn(async move { storage.save_connections(std::slice::from_ref(&config)).await }));
+        }
+
+        for task in tasks {
+            task.await.unwrap().expect("concurrent save_connections should not fail with 'database is locked'");
+        }
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
     async fn save_connections_persists_password_when_save_password_true() {
         let path = temp_db_path("save-password-true");
         let storage = Storage::open(&path).await.unwrap();
@@ -5114,6 +5714,7 @@ mod tests {
             database: None,
             default_schema: None,
             visible_databases: None,
+            visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
             attached_databases: Vec::new(),
@@ -5141,6 +5742,7 @@ mod tests {
             redis_key_separator: ":".to_string(),
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
+            redis_key_templates: Vec::new(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),
@@ -5181,6 +5783,7 @@ mod tests {
             database: None,
             default_schema: None,
             visible_databases: None,
+            visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
             attached_databases: Vec::new(),
@@ -5208,6 +5811,7 @@ mod tests {
             redis_key_separator: ":".to_string(),
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
+            redis_key_templates: Vec::new(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),
@@ -5544,7 +6148,7 @@ mod tests {
         let inserted_json = future_json.clone();
         storage
             .with_conn(move |conn| {
-                let tx = conn.transaction().map_err(|e| e.to_string())?;
+                let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
                 tx.execute(
                     "INSERT INTO connections (id, config_json) VALUES (?1, ?2)",
                     rusqlite::params!["future", inserted_json],
@@ -6145,7 +6749,9 @@ mod tests {
         let storage = Storage::open(&path).await.unwrap();
         storage
             .with_conn(|conn| {
-                let transaction = conn.transaction().map_err(|error| error.to_string())?;
+                let transaction = conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(|error| error.to_string())?;
                 {
                     let mut statement = transaction
                         .prepare(

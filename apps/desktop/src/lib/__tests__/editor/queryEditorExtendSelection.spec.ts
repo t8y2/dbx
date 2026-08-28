@@ -398,6 +398,10 @@ describe("query editor extend selection", () => {
     expect(queryEditorSource).toContain("runQueryEditorAltExtendSelection");
   });
 
+  it("registers a high-priority SQL string mouse selection style", () => {
+    expect(queryEditorSource).toMatch(/Prec\.highest\(\s*EditorView\.mouseSelectionStyle\.of/);
+  });
+
   it("matches macOS Option+W by physical key when the event key is transformed", () => {
     let commandRuns = 0;
     let prevented = false;

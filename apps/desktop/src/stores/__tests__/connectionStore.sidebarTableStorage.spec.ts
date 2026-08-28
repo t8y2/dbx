@@ -107,4 +107,83 @@ describe("connectionStore sidebar table storage", () => {
     expect(currentExistingTable?.sizeBytes).toBe(8192);
     expect(newTable?.sizeBytes).toBe(16384);
   });
+
+  it("does not cache a table-size request that finishes after the connection is lost", async () => {
+    const staleStatistics = deferred<Array<{ name: string; schema: string; total_bytes: number }>>();
+    const listObjectStatistics = vi
+      .fn()
+      .mockReturnValueOnce(staleStatistics.promise)
+      .mockResolvedValueOnce([{ name: "USERS", schema: "APP", total_bytes: 8192 }]);
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      listInstalledAgents: vi.fn().mockResolvedValue([]),
+      listObjectStatistics,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    useSettingsStore().editorSettings.sidebarObjectInfoMode = "size";
+    const connection = { id: "oracle-1", name: "Oracle", db_type: "oracle", host: "127.0.0.1", port: 1521, username: "APP", password: "", database: "ORCL" } as ConnectionConfig;
+    const tableNode = (): TreeNode => ({ id: "oracle-1:ORCL:APP:USERS", label: "USERS", type: "table", connectionId: connection.id, database: connection.database, schema: "APP" });
+    const setLiveTree = () => {
+      store.connectedIds.add(connection.id);
+      store.treeNodes = [{ id: connection.id, label: connection.name, type: "connection", connectionId: connection.id, children: [tableNode()] }];
+    };
+    store.connections = [connection];
+    setLiveTree();
+
+    const staleLoad = store.loadSidebarTableStorage({ connectionId: connection.id, database: connection.database, schema: "APP" });
+    store.markConnectionLost(connection.id, new Error("connection closed"));
+    staleStatistics.resolve([{ name: "USERS", schema: "APP", total_bytes: 4096 }]);
+    await staleLoad;
+
+    setLiveTree();
+    await store.loadSidebarTableStorage({ connectionId: connection.id, database: connection.database, schema: "APP" });
+
+    expect(listObjectStatistics).toHaveBeenCalledTimes(2);
+    expect(store.treeNodes[0]?.children?.[0]?.sizeBytes).toBe(8192);
+  });
+
+  it("does not cache a database-size request that finishes after the connection is lost", async () => {
+    const staleStorage = deferred<Array<{ name: string; size_bytes: number }>>();
+    const listDatabaseStorage = vi
+      .fn()
+      .mockReturnValueOnce(staleStorage.promise)
+      .mockResolvedValueOnce([{ name: "app", size_bytes: 16384 }]);
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      listDatabaseStorage,
+      listInstalledAgents: vi.fn().mockResolvedValue([]),
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    useSettingsStore().editorSettings.sidebarObjectInfoMode = "size";
+    const connection = { id: "pg-1", name: "PostgreSQL", db_type: "postgres", host: "127.0.0.1", port: 5432, username: "postgres", password: "" } as ConnectionConfig;
+    const setLiveTree = () => {
+      store.connectedIds.add(connection.id);
+      store.treeNodes = [{ id: connection.id, label: connection.name, type: "connection", connectionId: connection.id, children: [{ id: "pg-1:app", label: "app", type: "database", connectionId: connection.id, database: "app" }] }];
+    };
+    store.connections = [connection];
+    setLiveTree();
+
+    const staleLoad = store.loadSidebarDatabaseStorage(connection.id);
+    store.markConnectionLost(connection.id, new Error("connection closed"));
+    staleStorage.resolve([{ name: "app", size_bytes: 4096 }]);
+    await staleLoad;
+
+    setLiveTree();
+    await store.loadSidebarDatabaseStorage(connection.id);
+
+    expect(listDatabaseStorage).toHaveBeenCalledTimes(2);
+    expect(store.treeNodes[0]?.children?.[0]?.sizeBytes).toBe(16384);
+  });
 });

@@ -717,7 +717,10 @@ pub fn build_create_schema_sql(options: SchemaNameSqlOptions) -> Result<String, 
 
 pub fn build_drop_schema_sql(options: SchemaNameSqlOptions) -> String {
     let schema = quote_table_identifier(options.database_type, &options.name);
-    if matches!(
+    if options.database_type == Some(DatabaseType::OceanbaseOracle) {
+        // OceanBase Oracle mode models schemas as users, so dropping one drops the user.
+        format!("DROP USER {schema} CASCADE;")
+    } else if matches!(
         options.database_type,
         Some(DatabaseType::Postgres | DatabaseType::Gaussdb | DatabaseType::Kwdb | DatabaseType::Dameng)
     ) {
@@ -1761,19 +1764,22 @@ mod tests {
 
     #[test]
     fn builds_mysql_auto_increment_sql_and_rejects_invalid_values() {
-        let options = MysqlAutoIncrementSqlOptions {
-            database_type: Some(DatabaseType::Mysql),
-            driver_profile: Some("mysql".to_string()),
-            schema: Some("sales`archive".to_string()),
-            table_name: "order`items".to_string(),
-            value: "18446744073709551615".to_string(),
-        };
-        assert_eq!(
-            build_mysql_auto_increment_sql(options),
-            Ok("ALTER TABLE `sales``archive`.`order``items` AUTO_INCREMENT = 18446744073709551615;".to_string())
-        );
+        for value in ["1", "9007199254740993", "18446744073709551615"] {
+            assert_eq!(
+                build_mysql_auto_increment_sql(MysqlAutoIncrementSqlOptions {
+                    database_type: Some(DatabaseType::Mysql),
+                    driver_profile: Some("mysql".to_string()),
+                    schema: Some("sales`archive".to_string()),
+                    table_name: "order`items".to_string(),
+                    value: value.to_string(),
+                }),
+                Ok(format!("ALTER TABLE `sales``archive`.`order``items` AUTO_INCREMENT = {value};"))
+            );
+        }
 
-        for value in ["", "0", "01", " 1", "1 ", "+1", "-1", "1; DROP TABLE users", "18446744073709551616"] {
+        for value in
+            ["", "0", "01", " 1", "1 ", "+1", "-1", "1.0", "1e3", "1; DROP TABLE users", "18446744073709551616"]
+        {
             assert!(
                 build_mysql_auto_increment_sql(MysqlAutoIncrementSqlOptions {
                     database_type: Some(DatabaseType::Mysql),
@@ -1891,6 +1897,34 @@ mod tests {
                 name: "analytics".to_string(),
             }),
             "DROP SCHEMA \"analytics\" CASCADE;"
+        );
+        assert_eq!(
+            build_drop_schema_sql(SchemaNameSqlOptions {
+                database_type: Some(DatabaseType::Postgres),
+                name: "analytics".to_string(),
+            }),
+            "DROP SCHEMA \"analytics\" CASCADE;"
+        );
+        assert_eq!(
+            build_drop_schema_sql(SchemaNameSqlOptions {
+                database_type: Some(DatabaseType::Mysql),
+                name: "analytics".to_string(),
+            }),
+            "DROP SCHEMA `analytics`;"
+        );
+        assert_eq!(
+            build_drop_schema_sql(SchemaNameSqlOptions {
+                database_type: Some(DatabaseType::OceanbaseOracle),
+                name: "analytics".to_string(),
+            }),
+            "DROP USER \"analytics\" CASCADE;"
+        );
+        assert_eq!(
+            build_drop_schema_sql(SchemaNameSqlOptions {
+                database_type: Some(DatabaseType::OceanbaseOracle),
+                name: "ana\"lytics".to_string(),
+            }),
+            "DROP USER \"ana\"\"lytics\" CASCADE;"
         );
     }
 

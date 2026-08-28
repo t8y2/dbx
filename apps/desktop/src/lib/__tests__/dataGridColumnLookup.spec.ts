@@ -37,4 +37,41 @@ describe("data grid column lookup search", () => {
   it("returns all columns for an empty query", () => {
     expect(filterDataGridColumnLookupItems(items, " ")).toEqual(items);
   });
+
+  it("keeps grouped comments aligned by result ordinal and searches them", () => {
+    const groupedItems = buildDataGridColumnLookupItems({
+      columns: ["label", "label", "total"],
+      columnComments: ["Primary label", "Joined label", undefined],
+      commentByColumn: new Map([
+        ["label", "Wrong name-based label"],
+        ["total", "Wrong aggregate label"],
+      ]),
+    });
+
+    expect(groupedItems.map((item) => item.comment)).toEqual(["Primary label", "Joined label", undefined]);
+    expect(filterDataGridColumnLookupItems(groupedItems, "joined").map((item) => item.index)).toEqual([1]);
+    expect(filterDataGridColumnLookupItems(groupedItems, "wrong")).toEqual([]);
+  });
+
+  it("falls back to source metadata only when ordinal comments are absent", () => {
+    const comments = new Map([
+      ["department", "Department name"],
+      ["total", "Unsafe aggregate fallback"],
+    ]);
+
+    expect(
+      buildDataGridColumnLookupItems({
+        columns: ["dept"],
+        sourceColumns: ["department"],
+        commentByColumn: comments,
+      }),
+    ).toMatchObject([{ comment: "Department name" }]);
+    expect(
+      buildDataGridColumnLookupItems({
+        columns: ["total"],
+        columnComments: [undefined],
+        commentByColumn: comments,
+      }),
+    ).toEqual([{ index: 0, name: "total" }]);
+  });
 });

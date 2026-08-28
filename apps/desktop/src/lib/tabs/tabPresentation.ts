@@ -358,6 +358,10 @@ export function resultGridCacheKey(tab: Pick<QueryTab, "id" | "activeResultRunId
   return `${tab.id}-${tab.activeResultRunId ?? "current"}-${tab.activeResultIndex ?? 0}`;
 }
 
+export function resultGridColumnWidthCacheKey(tab: Pick<QueryTab, "id"> & Partial<Pick<QueryTab, "activeResultIndex">>): string {
+  return `result-column-width-${tab.id}-${tab.activeResultIndex ?? 0}`;
+}
+
 export function resultGridInstanceKey(tab: Pick<QueryTab, "id" | "activeResultRunId" | "activeResultIndex" | "resultGridRevision">): string {
   return `${resultGridCacheKey(tab)}-${tab.resultGridRevision ?? "initial"}`;
 }

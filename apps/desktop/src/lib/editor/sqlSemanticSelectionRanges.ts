@@ -17,6 +17,7 @@ interface SqlSelectionToken {
   to: number;
   depth: number;
   quote?: string;
+  closed?: boolean;
 }
 
 interface StatementWindow {
@@ -36,6 +37,7 @@ interface QueryBlockRange extends SemanticSelectionRange {
 export interface SqlSemanticSelectionAnalysis {
   doc: string;
   statements: readonly PreparedStatementWindow[];
+  stringContents: readonly SemanticSelectionRange[];
 }
 
 const QUERY_CLAUSE_WORDS = new Set(["where", "having", "on", "using", "limit", "offset", "fetch", "returning", "qualify", "window"]);
@@ -98,7 +100,7 @@ function normalizeTokens(input: string, tokens: SqlSemanticToken[]): SqlSelectio
         continue;
       }
     }
-    result.push({ kind: token.kind, text: input.slice(token.span.start, token.span.end), normalized: token.normalized, from: token.span.start, to: token.span.end, depth: token.depth, quote: token.quote });
+    result.push({ kind: token.kind, text: input.slice(token.span.start, token.span.end), normalized: token.normalized, from: token.span.start, to: token.span.end, depth: token.depth, quote: token.quote, closed: token.closed });
   }
   return result;
 }
@@ -108,7 +110,7 @@ function validateTokens(input: string, tokens: SqlSelectionToken[]): boolean {
   for (const token of tokens) {
     if (token.kind === "string") {
       const quote = token.quote ?? token.text[0] ?? "";
-      if (quote.startsWith("$") ? !token.text.endsWith(quote) : !token.text.endsWith(quote)) return false;
+      if (token.closed === false || !token.text.endsWith(quote)) return false;
     }
     if (token.kind === "comment" && token.text.startsWith("/*") && !token.text.endsWith("*/")) return false;
     if (token.text === "(") stack.push(token);
@@ -382,16 +384,40 @@ function collectSqlRanges(input: string, statement: StatementWindow, maps: { ope
   return ranges;
 }
 
+function stringContentRange(token: SqlSelectionToken): SemanticSelectionRange | null {
+  if (token.kind !== "string") return null;
+  const quote = token.quote ?? token.text[0] ?? "";
+  const quoteLength = quote.startsWith("$") ? quote.length : 1;
+  const from = token.from + quoteLength;
+  const to = token.to - quoteLength;
+  return token.closed !== false && quote && token.text.startsWith(quote) && token.text.endsWith(quote) && from <= to ? { from, to } : null;
+}
+
 export function analyzeSqlSemanticSelectionRanges(doc: string, options: SqlSemanticSelectionOptions = {}): SqlSemanticSelectionAnalysis {
   const dialect = sqlSemanticDialectFor(options).id;
   const rawTokens = tokenizeSqlSemantic(doc, dialect);
-  const validationTokens = rawTokens.map((token) => ({ kind: token.kind, text: token.text, normalized: token.normalized, from: token.span.start, to: token.span.end, depth: token.depth, quote: token.quote }));
+  const validationTokens = rawTokens.map((token) => ({ kind: token.kind, text: token.text, normalized: token.normalized, from: token.span.start, to: token.span.end, depth: token.depth, quote: token.quote, closed: token.closed }));
   const tokens = normalizeTokens(doc, rawTokens);
   const statements: PreparedStatementWindow[] = statementWindows(doc, tokens).filter((statement) => {
     const statementValidationTokens = validationTokens.filter((token) => token.from >= statement.start && token.to <= statement.end);
     return validateTokens(doc.slice(statement.start, statement.end), statementValidationTokens);
   });
-  return { doc, statements };
+  const stringContents = statements.flatMap((statement) => statement.tokens.map(stringContentRange).filter((range): range is SemanticSelectionRange => range != null));
+  return { doc, statements, stringContents };
+}
+
+export function sqlStringContentRangeAt(doc: string, position: number, assoc: -1 | 1, options: SqlSemanticSelectionOptions = {}, analysis = analyzeSqlSemanticSelectionRanges(doc, options)): SemanticSelectionRange | null {
+  if (analysis.doc !== doc) analysis = analyzeSqlSemanticSelectionRanges(doc, options);
+  const character = assoc < 0 ? position - 1 : position;
+  let low = 0;
+  let high = analysis.stringContents.length;
+  while (low < high) {
+    const middle = low + Math.floor((high - low) / 2);
+    if ((analysis.stringContents[middle]?.to ?? Number.POSITIVE_INFINITY) <= character) low = middle + 1;
+    else high = middle;
+  }
+  const range = analysis.stringContents[low];
+  return range && range.from <= character && character < range.to ? range : null;
 }
 
 function findStatement(context: SemanticSelectionContext, analysis: SqlSemanticSelectionAnalysis): PreparedStatementWindow | undefined {

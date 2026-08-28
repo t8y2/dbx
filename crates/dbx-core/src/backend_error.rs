@@ -234,6 +234,24 @@ impl BackendError {
         )
     }
 
+    /// Create a retryable envelope for a manual transaction session that DBX
+    /// already rolled back before the requested SQL was executed.
+    pub fn from_manual_transaction_session_expired(timeout_secs: u64) -> Self {
+        let entry = catalog_entry(CatalogCode::TransactionSessionExpired);
+        let mut params = BTreeMap::new();
+        params
+            .insert("timeoutSecs".to_string(), BackendMessageParam::Integer(timeout_secs.min(i64::MAX as u64) as i64));
+        Self::new(
+            entry,
+            BackendErrorSource::LegacyBackend,
+            BackendErrorOrigin::database(BackendErrorAdapter::Native),
+            BackendOperationOutcome::NotStarted,
+            params,
+            None,
+            Some(diagnostics_for_local("transaction", AgentErrorStage::Execute)),
+        )
+    }
+
     /// Create a SQL failure envelope while retaining bounded native driver detail.
     ///
     /// The caller must pass a typed SQL execution error, not a connection or
@@ -364,6 +382,7 @@ enum CatalogCode {
     ConnectionInterrupted,
     TimeoutNotStarted,
     TimeoutUnknown,
+    TransactionSessionExpired,
     Canceled,
     BusyRetryLater,
     RuntimeReplaced,
@@ -396,6 +415,7 @@ struct CatalogEntry {
 }
 
 const STAGE_PARAM: &[ParamSpec] = &[ParamSpec { name: "stage", kind: ParamKind::String }];
+const TRANSACTION_TIMEOUT_PARAM: &[ParamSpec] = &[ParamSpec { name: "timeoutSecs", kind: ParamKind::Integer }];
 const NO_PARAMS: &[ParamSpec] = &[];
 
 fn catalog_entry(code: CatalogCode) -> &'static CatalogEntry {
@@ -433,6 +453,15 @@ fn catalog_entry(code: CatalogCode) -> &'static CatalogEntry {
                 code: "DBX-JDBC-2002",
                 message_key: "backendErrors.jdbc.operationTimedOut",
                 params: STAGE_PARAM,
+                help_url: None,
+            },
+        ),
+        (
+            CatalogCode::TransactionSessionExpired,
+            CatalogEntry {
+                code: "DBX-TXN-1001",
+                message_key: "backendErrors.transaction.sessionExpired",
+                params: TRANSACTION_TIMEOUT_PARAM,
                 help_url: None,
             },
         ),
@@ -1031,6 +1060,7 @@ mod tests {
             (CatalogCode::ConnectionInterrupted, "DBX-JDBC-1002", "backendErrors.jdbc.connectionInterrupted"),
             (CatalogCode::TimeoutNotStarted, "DBX-JDBC-2001", "backendErrors.jdbc.operationTimedOut"),
             (CatalogCode::TimeoutUnknown, "DBX-JDBC-2002", "backendErrors.jdbc.operationTimedOut"),
+            (CatalogCode::TransactionSessionExpired, "DBX-TXN-1001", "backendErrors.transaction.sessionExpired"),
             (CatalogCode::Canceled, "DBX-JDBC-2003", "backendErrors.jdbc.operationCanceled"),
             (CatalogCode::BusyRetryLater, "DBX-JDBC-3001", "backendErrors.jdbc.busyRetryLater"),
             (CatalogCode::RuntimeReplaced, "DBX-JDBC-3002", "backendErrors.jdbc.runtimeReplaced"),
@@ -1047,6 +1077,18 @@ mod tests {
             assert_eq!(entry.message_key, expected_key);
             assert!(codes.insert(entry.code), "duplicate catalog code: {}", entry.code);
         }
+    }
+
+    #[test]
+    fn manual_transaction_session_expiry_is_retryable_before_execution() {
+        let error = BackendError::from_manual_transaction_session_expired(300);
+        let payload = serde_json::to_value(&error).unwrap();
+
+        assert_eq!(error.code(), "DBX-TXN-1001");
+        assert_eq!(error.operation_outcome(), BackendOperationOutcome::NotStarted);
+        assert_eq!(payload["messageKey"], "backendErrors.transaction.sessionExpired");
+        assert_eq!(payload["messageParams"]["timeoutSecs"], 300);
+        assert_eq!(payload["diagnostics"]["category"], "transaction");
     }
 
     #[test]

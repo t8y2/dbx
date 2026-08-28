@@ -13,4 +13,8 @@ describe("DataGrid selection gesture ownership", () => {
     const canvasMove = source.slice(source.indexOf("function onCanvasMouseMove"), source.indexOf("function onCanvasMouseLeave"));
     expect(canvasMove).toContain("stopReleasedSelectionGesture(event);");
   });
+
+  it("only exposes cell snapshots for selections with a rectangular matrix", () => {
+    expect(source).toMatch(/contextCell\.value && hasCellSelection\.value && selectedCellMatrix\.value\s*\n?\s*\?\s*"cells"/);
+  });
 });

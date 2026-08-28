@@ -86,6 +86,17 @@ export function buildConnectionPickerRows(layout: SidebarLayout, connections: re
   }
 
   const rows: ConnectionPickerRow[] = [];
+  const subtreeHasConnection = (entries: SidebarOrderEntry[]): boolean => {
+    for (const entry of entries) {
+      if (entry.type === "connection") {
+        if (connectionById.has(entry.id)) return true;
+        continue;
+      }
+      if (!groupById.has(entry.id)) continue;
+      if (subtreeHasConnection(groupEntryChildren(entry))) return true;
+    }
+    return false;
+  };
   const visitTree = (entries: SidebarOrderEntry[], depth: number) => {
     for (const entry of entries) {
       if (entry.type === "connection") {
@@ -96,6 +107,9 @@ export function buildConnectionPickerRows(layout: SidebarLayout, connections: re
       }
       const group = groupById.get(entry.id);
       if (!group) continue;
+      // Skip groups that hold none of the picker's connections (e.g. when the
+      // caller passes a filtered list such as transfer-capable connections).
+      if (!subtreeHasConnection(groupEntryChildren(entry))) continue;
       const collapsed = collapsedGroupIds.has(group.id);
       rows.push({ key: `group:${group.id}`, kind: "group", id: group.id, label: group.name, depth, collapsed });
       if (!collapsed) visitTree(groupEntryChildren(entry), depth + 1);

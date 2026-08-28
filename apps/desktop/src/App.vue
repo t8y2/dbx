@@ -68,6 +68,7 @@ import { externalSqlFileOpenErrorMessage, readBrowserSqlFile, sqlFileTitleFromPa
 import type { ConnectionConfig, DatabaseType, ObjectSourceKind, QueryTab, TreeNode } from "@/types/database";
 import { parseConnectionDeepLink, type ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
 import { parseAiConfigDeepLink, type AiConfigDeepLinkDraft } from "@/lib/ai/aiConfigDeepLink";
+import { activeDesktopAiRuns, blockingDesktopAiRunsForQuit } from "@/lib/ai/desktopAiRunRegistry";
 import {
   isBrowserReloadShortcut,
   isCloseOtherTabsShortcut,
@@ -87,7 +88,9 @@ import {
   isSendSelectionToAiShortcut,
   isSwitchToNextTabShortcut,
   isSwitchToPreviousTabShortcut,
+  isToggleResultsPaneShortcut,
   isToggleSidebarShortcut,
+  isToggleZenModeShortcut,
   isZoomInShortcut,
   isZoomOutShortcut,
   switchToTabIndexFromShortcut,
@@ -120,7 +123,11 @@ import { initSavedSqlEditorPositions } from "@/lib/app/savedSqlEditorPosition";
 import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
 import { isSchemaAware, isSingleDatabase, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
 import { codeMirrorSqlDialect, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
-import { sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
+import { canFormatSqlForDatabaseType, formatSqlForEditing, sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
+import { formatSqlSnapshotForSave } from "@/lib/sql/sqlFormatOnSave";
+import { detectAndFormatStructured } from "@/lib/sql/autoFormat";
+import { formatMongoShellText } from "@/lib/mongo/mongoFormatter";
+import { detectAndFormatElasticsearchRequests } from "@/lib/elasticsearch/elasticsearchFormatter";
 import { detectDatabaseFileType } from "@/lib/database/databaseFileDetection";
 import { ensureJdbcxRuntimeDrivers } from "@/lib/database/jdbcxBuiltinDriver";
 import { ensureRegisteredJdbcProductRuntimeDrivers } from "@/lib/database/jdbcProductProfiles";
@@ -140,6 +147,7 @@ const DriverStorePage = defineAsyncComponent(() => import("@/components/config/D
 const EditorSettingsPage = defineAsyncComponent(() => import("@/components/editor/EditorSettingsDialog.vue"));
 const UpdateDialog = defineAsyncComponent(() => import("@/components/layout/UpdateDialog.vue"));
 const CloseActionPromptDialog = defineAsyncComponent(() => import("@/components/layout/CloseActionPromptDialog.vue"));
+const AiRunsClosePromptDialog = defineAsyncComponent(() => import("@/components/layout/AiRunsClosePromptDialog.vue"));
 const LoginPage = defineAsyncComponent(() => import("@/components/auth/LoginPage.vue"));
 const QuickOpenDialog = defineAsyncComponent(() => import("@/components/quick-open/QuickOpenDialog.vue"));
 const TabSwitcherDialog = defineAsyncComponent(() => import("@/components/tabs/TabSwitcherDialog.vue"));
@@ -151,6 +159,8 @@ type AiAssistantHandle = {
   setPrompt: (text: string) => void;
   addTableMention: (target: { schema?: string; table: string }) => void;
   clearContextReferences: () => void;
+  /** Opens a conversation by id (used by the background-run toast, §9). */
+  selectConversationById: (conversationId: string) => void;
 };
 
 const { t } = useI18n();
@@ -178,7 +188,7 @@ connectionStore.setBeforeConnectHandler(async (config) => {
     await connectionStore.updateConnection(config);
   }
 });
-const { message: toastMessage, visible: toastVisible, toast } = useToast();
+const { message: toastMessage, visible: toastVisible, action: toastAction, toast } = useToast();
 const { isDark, themeMode, applyTheme, setThemeMode } = useTheme();
 const { activeCount: activeBackgroundTaskCount } = useExportTracker();
 const trackedUpdateTaskCount = computed(() => countActiveUpdateBlockingTasks(activeBackgroundTaskCount.value, queryStore.tabs));
@@ -209,6 +219,10 @@ const {
 const { setupFileDrop } = useFileDrop();
 
 const isDesktop = isTauriRuntime();
+const activeAiRunCount = computed(() => (isDesktop ? activeDesktopAiRuns().length : 0));
+/** Runs waiting for a write confirmation — the panel-entry badge shows these
+ *  with a higher-priority indicator (parent PRD §4 line 71 / §9). */
+const awaitingAiRunCount = computed(() => (isDesktop ? activeDesktopAiRuns().filter((run) => run.status === "awaiting_write_confirmation").length : 0));
 const { mcpUpdateAvailable, refreshMcpUpdateStatus, handleMcpStatusChanged } = useMcpUpdateBadge({
   isDesktop,
   updateNotificationsEnabled: () => settingsStore.editorSettings.updateNotificationsEnabled,
@@ -244,6 +258,7 @@ const agentDriverUpdateCount = ref(0);
 const showHistory = ref(false);
 const showAiPanel = ref(safeLocalStorageGet("dbx-ai-panel-open") === "true");
 const isAiPanelMaximized = ref(false);
+const isZenMode = ref(false);
 const showSqlLibraryPanel = ref(safeLocalStorageGet("dbx-sql-library-open") === "true");
 const showSqlFilePanel = ref(safeLocalStorageGet("dbx-sql-file-panel-open") === "true");
 const rightSidebarPanelRefs: Record<RightSidebarPanelId, typeof showAiPanel> = {
@@ -305,10 +320,25 @@ const pendingPrevActiveTabId = ref<string | null>(null);
 const pendingSaveShouldCloseTab = ref(true);
 const pendingAppCloseAction = ref<AppCloseAction | null>(null);
 const pendingCloseActionChoice = ref(false);
+const showAiRunsClosePrompt = ref(false);
+const blockingAiRunCount = computed(() => (isDesktop ? blockingDesktopAiRunsForQuit().length : 0));
+let aiRunsQuitConfirmed = false;
 
 const activeTab = computed(() => queryStore.tabs.find((t) => t.id === queryStore.activeTabId));
 const tabNavigationHistory = ref(createTabNavigationHistory());
 let pendingTabHistoryNavigationId: string | null = null;
+
+watch(
+  () => activeTab.value?.mode,
+  (mode) => {
+    if (mode !== "data") isZenMode.value = false;
+  },
+);
+
+function toggleZenMode() {
+  if (activeTab.value?.mode !== "data") return;
+  isZenMode.value = !isZenMode.value;
+}
 
 const externalSqlFileChanges = useExternalSqlFileChanges({
   activeTab,
@@ -327,6 +357,12 @@ const activeConnection = computed(() => {
   const tab = activeTab.value;
   return tab ? connectionStore.getConfig(tab.connectionId) : undefined;
 });
+
+// Oracle manual-mode indicator derived from the RESOLVED database type (an
+// Oracle connection uses the agent runtime but reports db_type "oracle"), so
+// the toolbar's Commit/Rollback visibility can apply the Oracle dirty-state rule
+// without inferring Oracle from the raw transport type.
+const isOracleManualTransaction = computed(() => effectiveDatabaseTypeForConnection(activeConnection.value) === "oracle" && (activeTab.value?.autoCommit ?? true) === false);
 
 function updateAgentDriverUpdateCount(count: number) {
   if (!settingsStore.editorSettings.updateNotificationsEnabled) {
@@ -539,6 +575,13 @@ function openSettings(initialTab = "appearance", initialSection?: string) {
   activateSettingsPage();
 }
 
+type MainContentSurface = "query" | "settings" | "driverStore";
+
+function activateMainContentSurface(surface: MainContentSurface) {
+  settingsStore.settingsPageActive = surface === "settings";
+  driverStoreActive.value = surface === "driverStore";
+}
+
 watch(
   () => settingsStore.settingsNavigationRequest,
   (request) => {
@@ -550,23 +593,20 @@ watch(
 
 function activateSettingsPage() {
   settingsPageTabOpen.value = true;
-  settingsStore.settingsPageActive = true;
-  driverStoreActive.value = false;
+  activateMainContentSurface("settings");
 }
 
 function activateQuerySurface() {
-  driverStoreActive.value = false;
-  settingsStore.settingsPageActive = false;
+  activateMainContentSurface("query");
 }
 
 function closeSettingsPage() {
   settingsPageTabOpen.value = false;
-  settingsStore.settingsPageActive = false;
   if (settingsReturnSurface.value === "driverStore" && driverStoreTabOpen.value) {
-    driverStoreActive.value = true;
+    activateMainContentSurface("driverStore");
     return;
   }
-  driverStoreActive.value = false;
+  activateMainContentSurface("query");
 }
 
 const driverStoreFocus = ref<DriverStoreFocus | null>(null);
@@ -582,13 +622,12 @@ function openDriverStorePage(target?: "agent" | "jdbc" | "storage" | "runtime" |
     driverStoreFocus.value = target ?? null;
   }
   driverStoreTabOpen.value = true;
-  driverStoreActive.value = true;
-  settingsStore.settingsPageActive = false;
+  activateMainContentSurface("driverStore");
 }
 
 function closeDriverStorePage() {
   driverStoreTabOpen.value = false;
-  driverStoreActive.value = false;
+  activateMainContentSurface("query");
   driverStoreActiveTab.value = "agent";
   driverStoreFocus.value = null;
 }
@@ -949,6 +988,16 @@ function openAiPanel() {
   openRightSidebarPanel("ai");
 }
 
+/** A background AI run reached a terminal/confirmation state while the panel
+ *  was closed. Opens the panel and selects the run's conversation (parent PRD
+ *  §4 line 71 / §9 clickable toast). */
+function handleAiRunNotify(event: Event) {
+  const conversationId = (event as CustomEvent).detail?.conversationId as string | undefined;
+  if (!conversationId) return;
+  openRightSidebarPanel("ai");
+  invokeWhenAiReady((handle) => handle.selectConversationById(conversationId));
+}
+
 function analyzeHistoryWithAi(entry: HistoryEntry) {
   const connectionId = entry.connection_id || activeTab.value?.connectionId;
   if (!connectionId) {
@@ -1084,10 +1133,18 @@ function cancelPendingSaveAndClose() {
 function cancelPendingAppClose() {
   pendingAppCloseAction.value = null;
   pendingCloseActionChoice.value = false;
+  showAiRunsClosePrompt.value = false;
+  aiRunsQuitConfirmed = false;
   pendingSaveShouldCloseTab.value = true;
 }
 
 async function finishPendingAppClose(action: AppCloseAction) {
+  if (action === "quit" && !aiRunsQuitConfirmed && blockingAiRunCount.value > 0) {
+    pendingAppCloseAction.value = action;
+    showAiRunsClosePrompt.value = true;
+    return;
+  }
+  aiRunsQuitConfirmed = false;
   if (pendingCloseActionChoice.value) {
     pendingCloseActionChoice.value = false;
     showCloseActionPrompt.value = true;
@@ -1114,6 +1171,13 @@ async function finishPendingAppClose(action: AppCloseAction) {
   await disposeRuntimeBeforeClose();
   await queryStore.flushPendingPersist().catch(() => undefined);
   await performCloseAction(action);
+}
+
+function confirmQuitWithActiveAiRuns() {
+  const action = pendingAppCloseAction.value ?? "quit";
+  showAiRunsClosePrompt.value = false;
+  aiRunsQuitConfirmed = true;
+  void finishPendingAppClose(action);
 }
 
 function continuePendingAppCloseAfterSave() {
@@ -1173,7 +1237,7 @@ async function writeExternalSqlTab(tab: QueryTab, options: { closeAfterSave?: bo
         // 快照失败不阻断保存（快照仅为保底，非关键路径）
       }
     }
-    const result = await api.writeExternalSqlFile(tab.externalSqlPath, tab.sql, {
+    const result = await api.writeExternalSqlFile(tab.externalSqlPath, await formattedSqlForSave(tab), {
       expectedContentHash: options.expectedContentHash,
       expectedMissing: options.expectedMissing,
       encoding: tab.fileEncoding,
@@ -1221,6 +1285,45 @@ function savedSqlTargetForSave(tab: QueryTab) {
   });
 }
 
+/**
+ * Applies the "format SQL when saving SQL files" editor setting: returns the
+ * formatted SQL that should be written to disk / the SQL library, mirroring the
+ * editor's own formatting logic (Mongo shell, Elasticsearch, structured JSON/XML
+ * and SQL) so a save never corrupts non-SQL content. When formatting changes the
+ * SQL, the tab content is also updated so the editor reflects exactly what was
+ * saved and stays clean if `markTabClean` runs afterwards.
+ */
+async function formattedSqlForSave(tab: QueryTab): Promise<string> {
+  if (!settingsStore.editorSettings.formatSqlOnSqlFileSave) return tab.sql;
+  const sqlSnapshot = tab.sql;
+  if (!sqlSnapshot.trim()) return sqlSnapshot;
+  const connection = connectionStore.getConfig(tab.connectionId);
+  const databaseType = effectiveDatabaseTypeForConnection(connection) ?? connection?.db_type;
+  if (!canFormatSqlForDatabaseType(databaseType)) return sqlSnapshot;
+  try {
+    return await formatSqlSnapshotForSave(
+      sqlSnapshot,
+      () => tab.sql,
+      async (sql) => {
+        if (databaseType === "mongodb") return formatMongoShellText(sql, settingsStore.editorSettings.sqlFormatter);
+        const esRequest = detectAndFormatElasticsearchRequests(sql, databaseType, settingsStore.editorSettings.sqlFormatter.tabWidth);
+        if (esRequest.kind === "elasticsearch") return esRequest.formatted;
+        if (esRequest.kind === "unsupported") return sql;
+        const structured = detectAndFormatStructured(sql, {
+          indentSize: settingsStore.editorSettings.sqlFormatter.tabWidth,
+          useTabs: settingsStore.editorSettings.sqlFormatter.useTabs,
+        });
+        if (structured.kind === "json" || structured.kind === "xml") return structured.formatted;
+        if (structured.kind === "unsupported") return sql;
+        return formatSqlForEditing(sql, sqlFormatDialectForDbType(databaseType), settingsStore.editorSettings.sqlFormatter);
+      },
+      (formatted) => queryStore.updateSql(tab.id, formatted),
+    );
+  } catch {
+    return tab.sql;
+  }
+}
+
 async function saveTabForCloseAll(tabId: string): Promise<boolean> {
   const tab = queryStore.tabs.find((t) => t.id === tabId);
   if (!tab) return true;
@@ -1247,7 +1350,7 @@ async function saveTabForCloseAll(tabId: string): Promise<boolean> {
       database: target.database,
       catalog: target.catalog,
       schema: target.schema,
-      sql: tab.sql,
+      sql: await formattedSqlForSave(tab),
     });
     queryStore.linkSavedSql(tab.id, saved.id, saved.name);
     queryStore.markTabClean(tab);
@@ -1315,7 +1418,7 @@ async function handleSaveTab(tabId: string) {
         database: target.database,
         catalog: target.catalog,
         schema: target.schema,
-        sql: tab.sql,
+        sql: await formattedSqlForSave(tab),
       });
       queryStore.linkSavedSql(tab.id, updated.id, updated.name);
       queryStore.markTabClean(tab);
@@ -1357,7 +1460,7 @@ async function openSaveSqlDialog() {
         database: target.database,
         catalog: target.catalog,
         schema: target.schema,
-        sql: tab.sql,
+        sql: await formattedSqlForSave(tab),
       });
       queryStore.linkSavedSql(tab.id, updated.id, updated.name);
       queryStore.markTabClean(tab);
@@ -1456,7 +1559,7 @@ async function confirmSaveSqlToLibrary() {
       database: target.database,
       catalog: target.catalog,
       schema: target.schema,
-      sql: tab.sql,
+      sql: await formattedSqlForSave(tab),
     });
     queryStore.linkSavedSql(tab.id, saved.id, saved.name);
     queryStore.markTabClean(tab);
@@ -1471,7 +1574,7 @@ async function confirmSaveSqlToLibrary() {
 async function saveExternalSqlTabAs(tab: QueryTab): Promise<boolean> {
   if (!canSaveSqlTab(tab) || !isTauriRuntime()) return false;
   try {
-    const saved = await api.saveExternalSqlFile(defaultSavedSqlName(tab.title), tab.sql);
+    const saved = await api.saveExternalSqlFile(defaultSavedSqlName(tab.title), await formattedSqlForSave(tab));
     if (!saved) return false;
     queryStore.linkExternalSqlPath(tab.id, saved.path, sqlFileTitleFromPath(saved.path), saved.version);
     rememberExternalSqlFileTarget(saved.path, { connectionId: tab.connectionId, database: tab.database, catalog: tab.catalog });
@@ -1681,7 +1784,7 @@ async function openDbFilePath(path: string) {
       password: "",
     };
     await connectionStore.addConnection(config);
-    void connectionStore.connect(config);
+    await connectionStore.connect(config);
     toast(t("welcome.fileOpened", { name }));
   } catch (e: any) {
     toast(t("toolbar.sqlOpenFailed", { message: e?.message || String(e) }), 5000);
@@ -2583,6 +2686,11 @@ async function handleKeydown(e: KeyboardEvent) {
     contentAreaRef.value?.refreshData();
     return;
   }
+  if (isToggleResultsPaneShortcut(e, shortcuts) && contentAreaRef.value?.toggleResultsPane()) {
+    e.preventDefault();
+    e.stopPropagation();
+    return;
+  }
   if (isNewQueryShortcut(e, shortcuts)) {
     e.preventDefault();
     e.stopPropagation();
@@ -2593,6 +2701,12 @@ async function handleKeydown(e: KeyboardEvent) {
     e.preventDefault();
     e.stopPropagation();
     setSidebarOpen(!sidebarOpen.value);
+    return;
+  }
+  if (isToggleZenModeShortcut(e, shortcuts) && activeTab.value?.mode === "data") {
+    e.preventDefault();
+    e.stopPropagation();
+    toggleZenMode();
     return;
   }
   if (switchTabIndex != null) {
@@ -2648,16 +2762,18 @@ async function handleKeydown(e: KeyboardEvent) {
     void openSaveSqlDialog();
     return;
   }
+  // CodeMirror ignores keydown events after an IME composition changes the
+  // document, so this app-level fallback must share the editor shortcut guard.
   if (activeTab.value?.mode === "query" && isExecuteSqlInNewResultTabShortcut(e, shortcuts) && e.target instanceof Element && e.target.closest("[data-query-editor-root]")) {
     e.preventDefault();
     e.stopPropagation();
-    requestActiveEditorExecuteInNewResultTab();
+    if (!contentAreaRef.value?.shouldBlockQueryEditorExecutionShortcut?.(e)) requestActiveEditorExecuteInNewResultTab();
     return;
   }
   if (activeTab.value?.mode === "query" && isExecuteSqlShortcut(e, shortcuts) && e.target instanceof Element && e.target.closest("[data-query-editor-root]")) {
     e.preventDefault();
     e.stopPropagation();
-    requestActiveEditorExecute();
+    if (!contentAreaRef.value?.shouldBlockQueryEditorExecutionShortcut?.(e)) requestActiveEditorExecute();
     return;
   }
   if (activeTab.value?.mode === "query" && isSendSelectionToAiShortcut(e, shortcuts) && e.target instanceof Element && e.target.closest("[data-query-editor-root]")) {
@@ -2841,6 +2957,7 @@ onMounted(async () => {
   window.addEventListener("dbx-show-sql-file-panel", showSqlFilePanelFromEvent);
   window.addEventListener("dbx:activate-query-surface", activateQuerySurface);
   window.addEventListener("dbx-mcp-status-changed", handleMcpStatusChanged);
+  window.addEventListener("dbx:ai-run-notify", handleAiRunNotify);
   if (isDesktop) {
     document.addEventListener("contextmenu", handleContextMenu);
   }
@@ -2918,6 +3035,7 @@ onUnmounted(() => {
   window.removeEventListener("dbx-show-sql-file-panel", showSqlFilePanelFromEvent);
   window.removeEventListener("dbx:activate-query-surface", activateQuerySurface);
   window.removeEventListener("dbx-mcp-status-changed", handleMcpStatusChanged);
+  window.removeEventListener("dbx:ai-run-notify", handleAiRunNotify);
   document.removeEventListener("contextmenu", handleContextMenu);
   window.clearTimeout(sqlLibraryFlyAnimationTimer);
 });
@@ -2932,6 +3050,8 @@ onUnmounted(() => {
           :is-dark="isDark"
           :theme-mode="themeMode"
           :show-ai-panel="showAiPanel"
+          :active-ai-run-count="activeAiRunCount"
+          :awaiting-ai-run-count="awaitingAiRunCount"
           :show-history="showHistory"
           :show-sql-library="showSqlLibraryPanel"
           :sql-library-save-feedback-id="sqlLibrarySaveFeedbackId"
@@ -2963,7 +3083,7 @@ onUnmounted(() => {
 
         <div :class="isClassicLayout ? 'app-layout-classic flex-1 flex min-h-0' : 'app-panel-gutter flex-1 flex min-h-0 gap-1 p-1'">
           <AppSidebar
-            v-show="sidebarOpen"
+            v-show="sidebarOpen && !isZenMode"
             ref="appSidebarRef"
             :sidebar-width="sidebarWidth"
             :classic-layout="isClassicLayout"
@@ -2974,13 +3094,13 @@ onUnmounted(() => {
             @open-settings="(initialTab) => openSettings(initialTab ?? 'appearance')"
             @add-to-ai="addToAi"
           />
-          <div v-show="!sidebarOpen" class="flex h-full w-8 shrink-0 items-start justify-center border-r bg-background/80 pt-2" :class="isClassicLayout ? '' : 'rounded-md border border-border/80'">
+          <div v-show="!sidebarOpen && !isZenMode" class="flex h-full w-8 shrink-0 items-start justify-center border-r bg-background/80 pt-2" :class="isClassicLayout ? '' : 'rounded-md border border-border/80'">
             <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('sidebar.expand')" :aria-label="t('sidebar.expand')" @click="setSidebarOpen(true)">
               <ChevronsRight class="h-4 w-4" />
             </Button>
           </div>
 
-          <div v-show="!isAiPanelMaximized" :class="isClassicLayout ? 'flex-1 min-w-0 overflow-hidden' : 'flex-1 min-w-0 overflow-hidden rounded-md border border-border/80 bg-background'">
+          <div v-show="!isAiPanelMaximized || isZenMode" :class="isClassicLayout ? 'flex-1 min-w-0 overflow-hidden' : 'flex-1 min-w-0 overflow-hidden rounded-md border border-border/80 bg-background'">
             <div class="h-full flex flex-col min-w-0">
               <AppTabBar
                 ref="appTabBarRef"
@@ -2989,6 +3109,7 @@ onUnmounted(() => {
                 :settings-page-open="settingsPageTabOpen"
                 :settings-page-active="settingsStore.settingsPageActive"
                 :agent-driver-update-count="toolbarAgentDriverUpdateCount"
+                @toggle-zen-mode="toggleZenMode"
                 @activate-driver-store="openDriverStorePage"
                 @activate-settings-page="activateSettingsPage"
                 @locate-tab="locateTabInSidebar"
@@ -3031,6 +3152,8 @@ onUnmounted(() => {
                   :auto-commit="activeTab.autoCommit ?? true"
                   :txn-session-id="activeTab?.txnSessionId"
                   :txn-auto-rolled-back="activeTab?.txnAutoRolledBack"
+                  :oracle-txn-possibly-dirty="activeTab?.oracleTxnPossiblyDirty"
+                  :is-oracle-manual-transaction="isOracleManualTransaction"
                   @update:explain-mode="(m: 'explain' | 'autotrace') => (explainMode = m)"
                   @update:block-dangerous-redis-commands="(v: boolean) => (blockDangerousRedisCommands = v)"
                   @update:auto-commit="
@@ -3152,6 +3275,7 @@ onUnmounted(() => {
 
           <div
             v-if="showAiPanel"
+            v-show="!isZenMode"
             :class="[isClassicLayout ? 'h-full relative z-30 isolate bg-background' : 'h-full relative z-30 isolate rounded-md border border-border/80 bg-background', isAiPanelMaximized ? 'min-w-0 flex-1' : 'min-w-[180px] max-w-full']"
             :style="isAiPanelMaximized ? {} : { width: aiPanelWidth + 'px' }"
           >
@@ -3176,21 +3300,21 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <div v-if="showHistory" v-show="!isAiPanelMaximized" :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'" :style="{ width: historyWidth + 'px' }">
+          <div v-if="showHistory" v-show="!isAiPanelMaximized && !isZenMode" :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'" :style="{ width: historyWidth + 'px' }">
             <div class="panel-resize-handle panel-resize-handle--left" @mousedown="startHistoryResize" />
             <div class="h-full min-h-0 overflow-hidden rounded-[inherit]">
               <QueryHistory :current-connection-id="activeTab?.connectionId" :current-database="activeTab?.database" @restore="restoreHistorySql" @analyze-ai="analyzeHistoryWithAi" @close="closeRightSidebarPanel('history')" />
             </div>
           </div>
 
-          <div v-if="showSqlLibraryPanel" v-show="!isAiPanelMaximized" :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'" :style="{ width: sqlLibraryWidth + 'px' }">
+          <div v-if="showSqlLibraryPanel" v-show="!isAiPanelMaximized && !isZenMode" :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'" :style="{ width: sqlLibraryWidth + 'px' }">
             <div class="panel-resize-handle panel-resize-handle--left" @mousedown="startSqlLibraryResize" />
             <div class="h-full min-h-0 overflow-hidden rounded-[inherit]">
               <SqlLibraryPanel @close="closeRightSidebarPanel('sqlLibrary')" />
             </div>
           </div>
 
-          <div v-if="showSqlFilePanel" v-show="!isAiPanelMaximized" :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'" :style="{ width: sqlFilePanelWidth + 'px' }">
+          <div v-if="showSqlFilePanel" v-show="!isAiPanelMaximized && !isZenMode" :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'" :style="{ width: sqlFilePanelWidth + 'px' }">
             <div class="panel-resize-handle panel-resize-handle--left" @mousedown="startSqlFilePanelResize" />
             <div class="h-full min-h-0 overflow-hidden rounded-[inherit]">
               <SqlFilePanel @close="closeRightSidebarPanel('sqlFile')" />
@@ -3273,6 +3397,7 @@ onUnmounted(() => {
         />
         <ExternalSqlFileChangeDialog :prompt="externalSqlFilePrompt" @decide="externalSqlFileChanges.resolvePrompt" />
         <CloseActionPromptDialog v-if="isDesktop && showCloseActionPrompt" :open="showCloseActionPrompt" @update:open="handleCloseActionPromptOpenChange" @quit="chooseQuit" @minimize="chooseMinimize" />
+        <AiRunsClosePromptDialog v-if="isDesktop && showAiRunsClosePrompt" v-model:open="showAiRunsClosePrompt" :count="blockingAiRunCount" @cancel="cancelPendingAppClose" @quit="confirmQuitWithActiveAiRuns" />
         <QuickOpenDialog :open="showQuickOpen" @update:open="showQuickOpen = $event" @select="handleQuickOpenSelect" />
         <TabSwitcherDialog :open="showTabSwitcher" :tabs="tabSwitcherTabs" :selected-index="tabSwitcherIndex" :shortcut-hint="tabSwitcherShortcutHint" @update:open="handleTabSwitcherOpenChange" @update:selected-index="tabSwitcherIndex = $event" @select="handleTabSwitcherSelect" />
       </div>
@@ -3291,8 +3416,11 @@ onUnmounted(() => {
           @animationend="finishSqlLibraryFlyAnimation(sqlLibraryFlyAnimation.id)"
         />
         <Transition name="toast">
-          <div v-if="toastVisible" class="fixed bottom-6 inset-x-0 w-max max-w-[90vw] sm:max-w-3xl mx-auto z-99999 px-4 py-2 rounded-lg bg-foreground text-background text-sm shadow-lg select-text whitespace-pre-wrap break-words">
-            {{ toastMessage }}
+          <div v-if="toastVisible" class="fixed bottom-6 inset-x-0 mx-auto z-99999 w-max max-w-[90vw] sm:max-w-3xl px-4 py-2 rounded-lg bg-foreground text-background text-sm shadow-lg select-text whitespace-pre-wrap break-words">
+            <span>{{ toastMessage }}</span>
+            <button v-if="toastAction" type="button" class="ml-3 shrink-0 rounded border border-background/40 bg-background/10 px-2 py-0.5 text-xs font-medium hover:bg-background/20" @click="toastAction.onClick()">
+              {{ toastAction.label }}
+            </button>
           </div>
         </Transition>
       </Teleport>

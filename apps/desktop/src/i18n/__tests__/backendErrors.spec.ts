@@ -37,6 +37,7 @@ const STRUCTURED_BACKEND_ERROR_KEYS = [
   "backendErrors.jdbc.protocolFailed",
   "backendErrors.jdbc.contractInvalid",
   "backendErrors.jdbc.legacyFailure",
+  "backendErrors.transaction.sessionExpired",
   "backendErrors.legacy",
   "backendErrors.unknown",
 ] as const;

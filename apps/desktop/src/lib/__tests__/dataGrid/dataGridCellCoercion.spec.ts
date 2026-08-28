@@ -77,6 +77,17 @@ describe("coerceDataGridCellValue", () => {
     ).toBe(true);
   });
 
+  it.each(["0", "1"])("keeps numeric MySQL TINYINT(1) edits numeric for %s", (value) => {
+    expect(
+      coerceDataGridCellValue({
+        value,
+        oldValue: 0,
+        databaseType: "mysql",
+        columnInfo: { data_type: "TINYINT(1)" },
+      }),
+    ).toBe(Number(value));
+  });
+
   it.each([
     ["missing numeric metadata", 1, undefined, "2", 2],
     ["empty numeric metadata", 1, { data_type: "" }, "2", 2],

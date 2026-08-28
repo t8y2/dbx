@@ -50,30 +50,36 @@ pub(super) fn sqlserver_schema_name(schema: Option<&str>) -> String {
     schema.filter(|s| !s.trim().is_empty()).map(|s| s.trim().to_string()).unwrap_or_else(|| "dbo".to_string())
 }
 
-pub(super) fn build_sqlserver_table_comment_sql(
+fn build_sqlserver_extended_property_comment_sql(exists: &str, levels: &str, new_comment: &str) -> Vec<String> {
+    let new_comment = clean(new_comment);
+    if new_comment.is_empty() {
+        return vec![format!("IF {exists} EXEC sys.sp_dropextendedproperty @name=N'MS_Description', {levels};")];
+    }
+
+    let escaped_comment = new_comment.replace('\'', "''");
+    vec![format!(
+        "IF {exists} EXEC sys.sp_updateextendedproperty @name=N'MS_Description', @value=N'{escaped_comment}', {levels} ELSE EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'{escaped_comment}', {levels};"
+    )]
+}
+
+pub(crate) fn build_sqlserver_table_comment_sql(
     qualified_table: &str,
     schema: Option<&str>,
     table_name: &str,
     new_comment: &str,
 ) -> Vec<String> {
-    let mut statements = Vec::new();
     let schema_name = sqlserver_schema_name(schema);
     let escaped_qualified = qualified_table.replace('\'', "''");
     let escaped_schema = schema_name.replace('\'', "''");
     let escaped_table = table_name.replace('\'', "''");
+    let exists = format!(
+        "EXISTS (SELECT 1 FROM sys.extended_properties AS ep WHERE ep.class = 1 AND ep.major_id = OBJECT_ID(N'{escaped_qualified}') AND ep.minor_id = 0 AND ep.name = N'MS_Description')"
+    );
+    let levels = format!(
+        "@level0type=N'SCHEMA', @level0name=N'{escaped_schema}', @level1type=N'TABLE', @level1name=N'{escaped_table}'"
+    );
 
-    statements.push(format!(
-        "IF EXISTS (SELECT 1 FROM sys.extended_properties WHERE major_id = OBJECT_ID(N'{escaped_qualified}') AND minor_id = 0 AND name = N'MS_Description') EXEC sys.sp_dropextendedproperty @name=N'MS_Description', @level0type=N'SCHEMA', @level0name=N'{escaped_schema}', @level1type=N'TABLE', @level1name=N'{escaped_table}';"
-    ));
-
-    if !clean(new_comment).is_empty() {
-        let quoted_comment = clean(new_comment).replace('\'', "''");
-        statements.push(format!(
-            "EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'{quoted_comment}', @level0type=N'SCHEMA', @level0name=N'{escaped_schema}', @level1type=N'TABLE', @level1name=N'{escaped_table}';"
-        ));
-    }
-
-    statements
+    build_sqlserver_extended_property_comment_sql(&exists, &levels, new_comment)
 }
 
 pub(super) fn build_sqlserver_index_comment_sql(
@@ -83,51 +89,97 @@ pub(super) fn build_sqlserver_index_comment_sql(
     index_name: &str,
     new_comment: &str,
 ) -> Vec<String> {
-    let mut statements = Vec::new();
     let schema_name = sqlserver_schema_name(schema);
     let escaped_qualified = qualified_table.replace('\'', "''");
     let escaped_schema = schema_name.replace('\'', "''");
     let escaped_table = table_name.replace('\'', "''");
     let escaped_idx = index_name.replace('\'', "''");
+    let exists = format!(
+        "EXISTS (SELECT 1 FROM sys.extended_properties AS ep INNER JOIN sys.indexes AS i ON i.object_id = ep.major_id AND i.index_id = ep.minor_id WHERE ep.class = 7 AND ep.major_id = OBJECT_ID(N'{escaped_qualified}') AND i.name = N'{escaped_idx}' AND ep.name = N'MS_Description')"
+    );
+    let levels = format!(
+        "@level0type=N'SCHEMA', @level0name=N'{escaped_schema}', @level1type=N'TABLE', @level1name=N'{escaped_table}', @level2type=N'INDEX', @level2name=N'{escaped_idx}'"
+    );
 
-    statements.push(format!(
-        "IF EXISTS (SELECT 1 FROM sys.extended_properties WHERE major_id = OBJECT_ID(N'{escaped_qualified}') AND minor_id = 0 AND name = N'MS_Description' AND class_desc = 'INDEX') EXEC sys.sp_dropextendedproperty @name=N'MS_Description', @level0type=N'SCHEMA', @level0name=N'{escaped_schema}', @level1type=N'TABLE', @level1name=N'{escaped_table}', @level2type=N'INDEX', @level2name=N'{escaped_idx}';"
-    ));
-
-    if !clean(new_comment).is_empty() {
-        let quoted_comment = clean(new_comment).replace('\'', "''");
-        statements.push(format!(
-            "EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'{quoted_comment}', @level0type=N'SCHEMA', @level0name=N'{escaped_schema}', @level1type=N'TABLE', @level1name=N'{escaped_table}', @level2type=N'INDEX', @level2name=N'{escaped_idx}';"
-        ));
-    }
-
-    statements
+    build_sqlserver_extended_property_comment_sql(&exists, &levels, new_comment)
 }
 
-pub(super) fn build_sqlserver_column_comment_sql(
+pub(crate) fn build_sqlserver_column_comment_sql(
     qualified_table: &str,
     schema: Option<&str>,
     table_name: &str,
     column_name: &str,
     new_comment: &str,
 ) -> Vec<String> {
-    let mut statements = Vec::new();
     let schema_name = sqlserver_schema_name(schema);
     let escaped_qualified = qualified_table.replace('\'', "''");
     let escaped_schema = schema_name.replace('\'', "''");
     let escaped_table = table_name.replace('\'', "''");
     let escaped_col = column_name.replace('\'', "''");
+    let exists = format!(
+        "EXISTS (SELECT 1 FROM sys.extended_properties AS ep WHERE ep.class = 1 AND ep.major_id = OBJECT_ID(N'{escaped_qualified}') AND ep.minor_id = COLUMNPROPERTY(OBJECT_ID(N'{escaped_qualified}'), N'{escaped_col}', 'ColumnId') AND ep.name = N'MS_Description')"
+    );
+    let levels = format!(
+        "@level0type=N'SCHEMA', @level0name=N'{escaped_schema}', @level1type=N'TABLE', @level1name=N'{escaped_table}', @level2type=N'COLUMN', @level2name=N'{escaped_col}'"
+    );
 
-    statements.push(format!(
-        "IF EXISTS (SELECT 1 FROM sys.extended_properties WHERE major_id = OBJECT_ID(N'{escaped_qualified}') AND minor_id = COLUMNPROPERTY(OBJECT_ID(N'{escaped_qualified}'), N'{escaped_col}', 'ColumnId') AND name = N'MS_Description') EXEC sys.sp_dropextendedproperty @name=N'MS_Description', @level0type=N'SCHEMA', @level0name=N'{escaped_schema}', @level1type=N'TABLE', @level1name=N'{escaped_table}', @level2type=N'COLUMN', @level2name=N'{escaped_col}';"
-    ));
+    build_sqlserver_extended_property_comment_sql(&exists, &levels, new_comment)
+}
 
-    if !clean(new_comment).is_empty() {
-        let quoted_comment = clean(new_comment).replace('\'', "''");
-        statements.push(format!(
-            "EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'{quoted_comment}', @level0type=N'SCHEMA', @level0name=N'{escaped_schema}', @level1type=N'TABLE', @level1name=N'{escaped_table}', @level2type=N'COLUMN', @level2name=N'{escaped_col}';"
-        ));
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sqlserver_table_comment_updates_or_adds_without_dropping() {
+        let statements = build_sqlserver_table_comment_sql("[app's].[user's]", Some("app's"), "user's", "owner's 新值");
+
+        assert_eq!(statements.len(), 1);
+        let sql = &statements[0];
+        assert!(sql.contains("ep.class = 1"), "table extended-property class: {sql}");
+        assert!(sql.contains("sys.sp_updateextendedproperty"), "update existing comment: {sql}");
+        assert!(sql.contains("ELSE EXEC sys.sp_addextendedproperty"), "add missing comment: {sql}");
+        assert!(!sql.contains("sys.sp_dropextendedproperty"), "non-empty comments are not dropped first: {sql}");
+        assert!(sql.contains("OBJECT_ID(N'[app''s].[user''s]')"), "object name escaping: {sql}");
+        assert!(sql.contains("@value=N'owner''s 新值'"), "Unicode comment escaping: {sql}");
+        assert_eq!(
+            crate::sql::split_sql_statements_for_database(sql, crate::models::connection::DatabaseType::SqlServer)
+                .len(),
+            1,
+            "IF/ELSE comment upsert must remain one executable statement: {sql}"
+        );
     }
 
-    statements
+    #[test]
+    fn sqlserver_empty_column_comment_drops_only_when_present() {
+        let statements = build_sqlserver_column_comment_sql("[dbo].[orders]", None, "orders", "owner'id", "  ");
+
+        assert_eq!(statements.len(), 1);
+        let sql = &statements[0];
+        assert!(sql.contains("COLUMNPROPERTY(OBJECT_ID(N'[dbo].[orders]'), N'owner''id', 'ColumnId')"));
+        assert!(sql.contains("sys.sp_dropextendedproperty"), "drop existing comment: {sql}");
+        assert!(!sql.contains("sys.sp_updateextendedproperty"), "empty comment must not update: {sql}");
+        assert!(!sql.contains("sys.sp_addextendedproperty"), "empty comment must not add: {sql}");
+        assert!(sql.contains("@level0name=N'dbo'"), "default schema: {sql}");
+        assert_eq!(
+            crate::sql::split_sql_statements_for_database(sql, crate::models::connection::DatabaseType::SqlServer)
+                .len(),
+            1,
+            "conditional comment drop must remain one executable statement: {sql}"
+        );
+    }
+
+    #[test]
+    fn sqlserver_index_comment_uses_index_extended_property_identity() {
+        let statements =
+            build_sqlserver_index_comment_sql("[dbo].[orders]", None, "orders", "ix_owner's", "index comment");
+
+        assert_eq!(statements.len(), 1);
+        let sql = &statements[0];
+        assert!(sql.contains("INNER JOIN sys.indexes AS i"), "index lookup: {sql}");
+        assert!(sql.contains("ep.class = 7"), "index extended-property class: {sql}");
+        assert!(sql.contains("i.name = N'ix_owner''s'"), "index name escaping: {sql}");
+        assert!(sql.contains("sys.sp_updateextendedproperty"), "update existing comment: {sql}");
+        assert!(sql.contains("ELSE EXEC sys.sp_addextendedproperty"), "add missing comment: {sql}");
+    }
 }

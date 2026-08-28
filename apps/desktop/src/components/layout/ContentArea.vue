@@ -125,7 +125,20 @@ import { TABLE_FONT_SIZE_MAX, TABLE_FONT_SIZE_MIN, useSettingsStore, type DataGr
 import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { canCancelQueryExecution, queryExecutionLabelKey } from "@/lib/sql/queryExecutionState";
-import { databaseDisplayNameForTab, executionSummaryItems, queryResultExecutionSql, resultGridCacheKey, resultGridInstanceKey, resultRunItems, resultSourceRange, resultSqlForGrid, statementExecutionMarkers, tabularResultItems, type ExecutionSummaryItem } from "@/lib/tabs/tabPresentation";
+import {
+  databaseDisplayNameForTab,
+  executionSummaryItems,
+  queryResultExecutionSql,
+  resultGridCacheKey,
+  resultGridColumnWidthCacheKey,
+  resultGridInstanceKey,
+  resultRunItems,
+  resultSourceRange,
+  resultSqlForGrid,
+  statementExecutionMarkers,
+  tabularResultItems,
+  type ExecutionSummaryItem,
+} from "@/lib/tabs/tabPresentation";
 import { defaultQueryResultArchiveFileName } from "@/lib/query/queryResultArchive";
 import { saveQueryResultArchiveFile } from "@/lib/query/queryResultArchiveFile";
 import { isTableDataEditable } from "@/lib/table/tableEditing";
@@ -149,6 +162,7 @@ import type { QueryTab, ConnectionConfig, TableInfoTab, TreeNode, VectorCollecti
 import type { SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
+import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 
 type DataGridHandle = DataGridColumnLayoutHandle & {
   onToolbarRefresh: () => Promise<void> | void;
@@ -443,6 +457,7 @@ const allResultExportSheets = computed(() =>
 );
 const resultRuns = computed(() => resultRunItems(props.activeTab));
 const activeResultGridCacheKey = computed(() => resultGridCacheKey(props.activeTab));
+const activeResultGridColumnWidthCacheKey = computed(() => resultGridColumnWidthCacheKey(props.activeTab));
 const activeResultGridInstanceKey = computed(() => resultGridInstanceKey(props.activeTab));
 const activeResultSql = computed(() => resultSqlForGrid(props.activeTab));
 const activeResultExportSql = computed(() => queryResultExecutionSql(props.activeTab));
@@ -637,6 +652,12 @@ const resultsPaneSize = ref(Number(safeLocalStorageGet("dbx-results-pane-size"))
 const editorPaneSize = computed(() => (resultsPaneOpen.value ? 100 - resultsPaneSize.value : 100));
 const queryRunningElapsed = ref(0);
 
+function toggleResultsPane(): boolean {
+  if (props.activeTab.mode !== "query" || !hasQueryOutput.value) return false;
+  resultsPaneOpen.value = !resultsPaneOpen.value;
+  return true;
+}
+
 function onResultsResized(payload: { panes: { size: number }[] }) {
   const resultsPane = payload.panes[1];
   if (resultsPane?.size != null && resultsPane.size >= 20 && resultsPane.size <= 85) {
@@ -700,7 +721,7 @@ watch(
 );
 
 watch(
-  () => [props.activeTab.id, props.activeTab.result, props.activeTab.results, props.activeTab.isExecuting] as const,
+  () => [props.activeTab.id, props.activeTab.result, props.activeTab.results, props.activeTab.isExecuting, props.activeOutputView] as const,
   () => {
     if (props.activeTab.isExecuting) return;
     if (hasExecutionSummary.value && !hasTabularResult.value && props.activeOutputView === "result") {
@@ -751,6 +772,9 @@ watch(
 watch(
   () => props.activeTab.isExecuting,
   (isExecuting, wasExecuting) => {
+    if (isExecuting && !wasExecuting) {
+      queryEditorRef.value?.beginExecutionViewportTracking();
+    }
     if (!isExecuting && wasExecuting) {
       nextTick(() => {
         requestAnimationFrame(() => {
@@ -1097,6 +1121,10 @@ function requestQueryEditorExecuteInNewResultTab() {
   return queryEditorRef.value?.requestExecuteInNewResultTab();
 }
 
+function shouldBlockQueryEditorExecutionShortcut(event: KeyboardEvent) {
+  return queryEditorRef.value?.shouldBlockExecutionShortcut?.(event) ?? false;
+}
+
 function acceptQueryEditorExecutionViewport(requestId: number) {
   return queryEditorRef.value?.acceptGutterExecutionViewport(requestId) ?? false;
 }
@@ -1136,10 +1164,12 @@ async function executeRedisCommand(command: string): Promise<boolean> {
 defineExpose({
   focusSearch,
   refreshData,
+  toggleResultsPane,
   refreshQueryEditorCompletionCache,
   handleModRTarget,
   requestQueryEditorExecute,
   requestQueryEditorExecuteInNewResultTab,
+  shouldBlockQueryEditorExecutionShortcut,
   acceptQueryEditorExecutionViewport,
   pasteClipboardAsSqlInCondition,
   applyTableStructureChanges,
@@ -1713,6 +1743,7 @@ defineExpose({
                 ref="dataGridRef"
                 :key="activeResultGridInstanceKey"
                 :cache-key="activeResultGridCacheKey"
+                :column-width-cache-key="activeResultGridColumnWidthCacheKey"
                 :pending-state-key="activeResultGridInstanceKey"
                 class="flex-1 min-h-0"
                 :result="activeTab.result"
@@ -1733,7 +1764,7 @@ defineExpose({
                 :mongo-update-target="mongoQueryResultSaveHandler && activeTab.result.mongo_copy_documents?.length === activeTab.result.rows.length ? activeTab.mongoEditTarget : undefined"
                 :query-editability-reason="activeTab.queryEditabilityReason"
                 :allow-insert-rows="activeTab.queryAnalysis?.allowInsert ?? activeTab.queryAnalysis?.allowInsertDelete !== false"
-                :allow-delete-rows="activeTab.queryAnalysis?.allowInsertDelete !== false"
+                :allow-delete-rows="activeTab.queryAnalysis?.allowDelete ?? activeTab.queryAnalysis?.allowInsertDelete !== false"
                 context="results"
                 :auto-transpose-single-row="settingsStore.editorSettings.dataGridAutoTransposeSingleRow"
                 :database-type="activeEffectiveDatabaseType"
@@ -2196,7 +2227,7 @@ defineExpose({
 
     <template v-else-if="activeTab.mode === 'nacos-access-control'">
       <div class="flex-1 min-h-0">
-        <NacosAccessControlConsole :key="activeTab.id" :connection-id="activeTab.connectionId" :read-only="activeConnection?.read_only ?? false" />
+        <NacosAccessControlConsole :key="activeTab.id" :connection-id="activeTab.connectionId" :read-only="connectionIsEffectivelyReadOnly(activeConnection)" />
       </div>
     </template>
 
@@ -2223,7 +2254,7 @@ defineExpose({
     <!-- Document mode: MongoDB collections and Elasticsearch indices -->
     <template v-else-if="activeTab.mode === 'mongo'">
       <div class="flex-1 min-h-0">
-        <DocumentBrowser ref="documentBrowserRef" :key="activeTab.id" :connection-id="activeTab.connectionId" :database="activeTab.database" :collection="activeTab.sql" :database-type="activeEffectiveDatabaseType" :table-meta="activeTab.tableMeta" />
+        <DocumentBrowser ref="documentBrowserRef" :key="`${activeTab.id}:${activeTab.sql}`" :connection-id="activeTab.connectionId" :database="activeTab.database" :collection="activeTab.sql" :database-type="activeEffectiveDatabaseType" :table-meta="activeTab.tableMeta" />
       </div>
     </template>
 
@@ -2267,7 +2298,7 @@ defineExpose({
 
     <template v-else-if="activeTab.mode === 'mq'">
       <div class="flex-1 min-h-0">
-        <MqAdminConsole :key="activeTab.id" :connection-id="activeTab.connectionId" :initial-tenant="activeTab.mqTenant" :initial-tab="activeTab.mqInitialTab" :read-only="activeConnection?.read_only ?? false" />
+        <MqAdminConsole :key="activeTab.id" :connection-id="activeTab.connectionId" :initial-tenant="activeTab.mqTenant" :initial-tab="activeTab.mqInitialTab" :read-only="connectionIsEffectivelyReadOnly(activeConnection)" />
       </div>
     </template>
 
@@ -2288,7 +2319,7 @@ defineExpose({
           :target-group="activeTab.nacosTargetGroup"
           :target-keyword="activeTab.nacosTargetKeyword"
           :target-request-id="activeTab.nacosTargetRequestId"
-          :read-only="activeConnection?.read_only ?? false"
+          :read-only="connectionIsEffectivelyReadOnly(activeConnection)"
         />
       </div>
     </template>

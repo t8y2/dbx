@@ -40,6 +40,7 @@ import {
   Scissors,
   Search,
   ScrollText,
+  Settings2,
   Square,
   Table2,
   TableProperties,
@@ -54,7 +55,9 @@ import i18n from "@/i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+import { Switch } from "@/components/ui/switch";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import ProcedureExecutionDialog from "@/components/objects/ProcedureExecutionDialog.vue";
@@ -87,6 +90,7 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { generateDatabaseExportId } from "@/lib/export/databaseExport";
 import { buildXlsxHeaderOverrides, hasXlsxHeaderComments, type XlsxExportOptions, type XlsxHeaderMode } from "@/lib/export/xlsxHeader";
 import { copyToClipboard, eventTargetAllowsAppClipboardShortcut } from "@/lib/common/clipboard";
+import { uuid } from "@/lib/common/utils";
 import {
   defaultPasteTableMode,
   pasteTableModeCopiesData,
@@ -181,6 +185,7 @@ const { highlight } = useSqlHighlighter();
 const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
+const refreshDdlOnOpenControlId = `object-browser-refresh-ddl-on-open-${uuid()}`;
 const refreshTooltip = computed(() => {
   const shortcut = formatShortcut(settingsStore.editorSettings.shortcuts.refreshData);
   return shortcut ? `${t("grid.refresh")} (${shortcut})` : t("grid.refresh");
@@ -1067,7 +1072,7 @@ function tableMetadataRequest(row: ObjectBrowserRow): ObjectDdlRequest {
   };
 }
 
-async function fetchTableDdl(force = false) {
+async function fetchTableDdl(force = settingsStore.editorSettings.refreshDdlOnOpen) {
   const row = sidePanelRow.value;
   if (!row || (tableDdlLoaded.value && !force)) return;
   const epoch = sidePanelGuard.capture();
@@ -1087,6 +1092,11 @@ async function fetchTableDdl(force = false) {
       tableDdlLoading.value = false;
     }
   }
+}
+
+function setTableInfoRefreshDdlOnOpen(value: boolean) {
+  settingsStore.updateEditorSettings({ refreshDdlOnOpen: value });
+  if (value) void fetchTableDdl(true);
 }
 
 async function fetchTableColumns(force = false) {
@@ -3437,9 +3447,25 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                 <Copy class="w-3 h-3" />
                 <span class="table-info-action-label">{{ t("grid.copyDdl") }}</span>
               </Button>
+              <Button variant="ghost" size="icon" class="h-6 w-6" :disabled="tableDdlLoading" :title="t('structureEditor.refresh')" :aria-label="t('structureEditor.refresh')" @click="fetchTableDdl(true)">
+                <RefreshCw class="h-3 w-3" :class="{ 'animate-spin': tableDdlLoading }" />
+              </Button>
               <Button variant="ghost" size="icon" class="h-6 w-6" :class="{ 'bg-accent': settingsStore.editorSettings.tableDdlWordWrap }" @click="toggleTableDdlWordWrap">
                 <WrapText class="w-3 h-3" />
               </Button>
+              <Popover>
+                <PopoverTrigger as-child>
+                  <Button variant="ghost" size="icon" class="h-6 w-6" :title="t('settings.title')" :aria-label="t('settings.title')">
+                    <Settings2 class="h-3 w-3" />
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent align="end" class="w-64 p-3">
+                  <div class="flex items-center justify-between gap-4 text-sm">
+                    <label :for="refreshDdlOnOpenControlId" class="cursor-pointer">{{ t("contextMenu.refreshDdlOnOpen") }}</label>
+                    <Switch :id="refreshDdlOnOpenControlId" size="sm" :model-value="settingsStore.editorSettings.refreshDdlOnOpen" @update:model-value="setTableInfoRefreshDdlOnOpen" />
+                  </div>
+                </PopoverContent>
+              </Popover>
             </div>
             <Button v-if="canOpenTableStructureEditor" variant="ghost" size="sm" class="table-info-action-button h-6 px-2 text-xs" :title="t('contextMenu.editStructure')" :aria-label="t('contextMenu.editStructure')" @click="openTableStructureEditor">
               <PencilRuler class="w-3 h-3" />

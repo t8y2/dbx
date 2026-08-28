@@ -83,6 +83,7 @@ import { tableObjectSourceKind } from "@/lib/table/tableObjectSourceKind";
 import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPresentation";
 import { shouldNavigateFromTableInfoColumnClick } from "@/lib/table/tableInfoColumnNavigation";
 import { tableInfoTabForDrawerToggle } from "@/lib/table/tableInfoTabPreference";
+import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
 import { loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
 import * as api from "@/lib/backend/api";
 import { formatElapsedSeconds } from "@/lib/common/elapsedTime";
@@ -387,6 +388,7 @@ const slots = useSlots();
 const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
+const refreshDdlOnOpenControlId = `data-grid-refresh-ddl-on-open-${uuid()}`;
 const cellDetailButtonEnabled = computed(() => settingsStore.editorSettings.dataGridCellDetailButtonVisible);
 const dataGridCrosshairHighlight = computed(() => settingsStore.editorSettings.dataGridCrosshairHighlight);
 const tableFontSize = computed(() => settingsStore.editorSettings.tableFontSize);
@@ -10795,18 +10797,34 @@ watch(
   { immediate: true },
 );
 
-async function fetchDdl() {
+async function fetchDdl(force = settingsStore.editorSettings.refreshDdlOnOpen) {
   if (!props.connectionId || !props.tableMeta) return;
   showTableInfo.value = true;
   ddlLoading.value = true;
   try {
     // Preserve view identity so the backend loads the stored view source instead of synthesizing table DDL.
-    ddlContent.value = await api.getTableDisplayDdl(props.connectionId, props.database || "", props.tableMeta.schema || props.database || "", props.tableMeta.tableName, tableObjectSourceKind(props.tableMeta.tableType), props.tableMeta.catalog);
+    const { ddl } = await loadObjectDdl(
+      {
+        connectionId: props.connectionId,
+        database: props.database || "",
+        schema: props.tableMeta.schema || props.database || "",
+        tableName: props.tableMeta.tableName,
+        objectType: tableObjectSourceKind(props.tableMeta.tableType),
+        catalog: props.tableMeta.catalog,
+      },
+      { force },
+    );
+    ddlContent.value = ddl;
   } catch (e: any) {
     ddlContent.value = `-- Error: ${e}`;
   } finally {
     ddlLoading.value = false;
   }
+}
+
+function setTableInfoRefreshDdlOnOpen(value: boolean) {
+  settingsStore.updateEditorSettings({ refreshDdlOnOpen: value });
+  if (value) void fetchDdl(true);
 }
 
 async function fetchIndexes() {
@@ -13538,9 +13556,25 @@ function openGridSnapshot() {
                   <Copy class="w-3 h-3" />
                   <span class="table-info-action-label">{{ t("grid.copyDdl") }}</span>
                 </Button>
+                <Button variant="ghost" size="icon" class="h-6 w-6" :disabled="ddlLoading" :title="t('structureEditor.refresh')" :aria-label="t('structureEditor.refresh')" @click="fetchDdl(true)">
+                  <RefreshCw class="h-3 w-3" :class="{ 'animate-spin': ddlLoading }" />
+                </Button>
                 <Button variant="ghost" size="icon" class="h-6 w-6" :class="{ 'bg-accent': settingsStore.editorSettings.tableDdlWordWrap }" @click="toggleDdlWrap">
                   <WrapText class="w-3 h-3" />
                 </Button>
+                <Popover>
+                  <PopoverTrigger as-child>
+                    <Button variant="ghost" size="icon" class="h-6 w-6" :title="t('settings.title')" :aria-label="t('settings.title')">
+                      <Settings2 class="h-3 w-3" />
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent align="end" class="w-64 p-3">
+                    <div class="flex items-center justify-between gap-4 text-sm">
+                      <label :for="refreshDdlOnOpenControlId" class="cursor-pointer">{{ t("contextMenu.refreshDdlOnOpen") }}</label>
+                      <Switch :id="refreshDdlOnOpenControlId" size="sm" :model-value="settingsStore.editorSettings.refreshDdlOnOpen" @update:model-value="setTableInfoRefreshDdlOnOpen" />
+                    </div>
+                  </PopoverContent>
+                </Popover>
               </div>
               <div v-else-if="activeTableInfoTab === 'indexes' && canManageMongoIndexes" class="table-info-actions flex min-w-0 shrink-0 items-center gap-1">
                 <Button variant="ghost" size="sm" class="table-info-action-button h-6 px-2 text-xs text-destructive hover:text-destructive" :disabled="indexesLoading || dropAllMongoIndexesLoading || droppableMongoIndexes.length === 0" @click="requestDropAllMongoIndexes">

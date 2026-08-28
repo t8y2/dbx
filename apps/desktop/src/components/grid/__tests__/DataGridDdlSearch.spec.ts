@@ -7,4 +7,13 @@ describe("DataGrid DDL search navigation", () => {
   it("resets navigation when the raw search query changes", () => {
     expect(dataGridSource).toMatch(/watch\(\s*\[filteredDdlContent, searchQuery\],/);
   });
+
+  it("uses the shared DDL cache policy and exposes refresh controls", () => {
+    expect(dataGridSource).toContain('from "@/lib/metadata/objectDdlCache"');
+    expect(dataGridSource).toContain("async function fetchDdl(force = settingsStore.editorSettings.refreshDdlOnOpen)");
+    expect(dataGridSource).toMatch(/loadObjectDdl\([\s\S]*?objectType: tableObjectSourceKind\(props\.tableMeta\.tableType\),[\s\S]*?\{ force \},/);
+    expect(dataGridSource).toMatch(/function setTableInfoRefreshDdlOnOpen\(value: boolean\)[\s\S]*?if \(value\) void fetchDdl\(true\);/);
+    expect(dataGridSource).toContain('@click="fetchDdl(true)"');
+    expect(dataGridSource).toContain('t("contextMenu.refreshDdlOnOpen")');
+  });
 });

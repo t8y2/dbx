@@ -674,6 +674,12 @@ describe("Oracle and Dameng trigger pseudo-records", () => {
 });
 
 describe("substituteSqlParameters", () => {
+  it("preserves empty raw placeholders", () => {
+    const sql = "select ${raw_value}, '${raw_value}', 'prefix ${raw_value} suffix'";
+
+    expect(substituteSqlParameters(sql, { raw_value: { kind: "raw", value: "  " } })).toBe(sql);
+  });
+
   it("substitutes dotted names by their complete key", () => {
     const sql = "select ${params.id}, #{params.profile.name}, 'prefix${params.label}'";
     expect(
@@ -908,7 +914,7 @@ describe("substituteSqlParameters", () => {
         empty_raw: { kind: "raw", value: "  " },
         empty_string: { kind: "string", value: "" },
       }),
-    ).toBe("select NULL, NULL, NULL, ''");
+    ).toBe("select NULL, NULL, '${empty_raw}', ''");
   });
 
   it("replaces placeholders embedded in ordinary SQL string values", () => {

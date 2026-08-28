@@ -31,6 +31,36 @@ describe("dataGridCellDisplayText", () => {
       }),
     ).toBeUndefined();
   });
+
+  it.each([
+    ["2026-08-28 12:34:56.1", "2026-08-28 12:34:56.100"],
+    ["2026-08-28 12:34:56.12+08:00", "2026-08-28 12:34:56.120+08:00"],
+  ])("pads short timestamp fractions for display", (value, expected) => {
+    expect(
+      dataGridCellDisplayText({
+        value,
+        databaseType: "mysql",
+        columnInfo: { data_type: "timestamp" },
+      }),
+    ).toBe(expected);
+  });
+
+  it("leaves full-precision and non-timestamp values unchanged", () => {
+    expect(
+      dataGridCellDisplayText({
+        value: "2026-08-28 12:34:56.1234",
+        databaseType: "mysql",
+        columnInfo: { data_type: "timestamp(6)" },
+      }),
+    ).toBeUndefined();
+    expect(
+      dataGridCellDisplayText({
+        value: "2026-08-28 12:34:56.1",
+        databaseType: "mysql",
+        columnInfo: { data_type: "varchar(64)" },
+      }),
+    ).toBeUndefined();
+  });
 });
 
 describe("coerceDataGridCellValue", () => {

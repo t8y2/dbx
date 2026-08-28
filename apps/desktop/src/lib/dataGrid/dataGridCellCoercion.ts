@@ -93,10 +93,20 @@ export function dataGridCellDisplayText(options: { value: GridCellValue; databas
   if (Array.isArray(options.value) && options.databaseType === "postgres" && isPostgresArrayColumn(options.columnInfo, options.value)) {
     return formatPostgresArrayText(options.value);
   }
+  if (typeof options.value === "string") {
+    const timestampDisplay = normalizeTimestampFractionDisplayText(options.value, options.columnInfo?.data_type);
+    if (timestampDisplay !== options.value) return timestampDisplay;
+  }
   if (typeof options.value === "string" && isOracleDateColumn(options.databaseType, options.columnInfo)) {
     return formatOracleDateDisplayText(options.value);
   }
   return undefined;
+}
+
+function normalizeTimestampFractionDisplayText(value: string, dataType: string | undefined): string {
+  if (!/^timestamp(?:\s*\([^)]*\))?(?:\s+(?:with|without)\s+time\s+zone)?$/i.test(dataType?.trim() ?? "")) return value;
+  const match = value.match(/^(\d{4}[-/]\d{1,2}[-/]\d{1,2}[ T]\d{1,2}:\d{1,2}:\d{1,2})\.(\d{1,2})(Z|[+-]\d{2}:?\d{2})?$/);
+  return match ? `${match[1]}.${match[2].padEnd(3, "0")}${match[3] ?? ""}` : value;
 }
 
 function coercePostgresArrayValue(options: CoerceDataGridCellValueOptions): unknown[] | undefined {

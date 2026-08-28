@@ -464,6 +464,10 @@ fn linux_webkit_environment_override<'a>(
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_appimage_requires_dmabuf_workaround(appimage: Option<&std::ffi::OsStr>) -> bool {
+    appimage.is_some_and(|value| !value.is_empty())
+}
+
 fn linux_appimage_wayland_backend_override(
     appimage: Option<&std::ffi::OsStr>,
     wayland_display: Option<&std::ffi::OsStr>,
@@ -506,6 +510,7 @@ fn linux_uses_native_wayland(
 #[cfg(target_os = "linux")]
 fn apply_linux_webkit_rendering_workarounds() {
     let render_devices = linux_drm_render_devices();
+    let appimage = std::env::var_os("APPIMAGE");
     let explicit_device_file = std::env::var_os("WEBKIT_WEB_RENDER_DEVICE_FILE")
         .filter(|path| !path.is_empty())
         .map(std::path::PathBuf::from)
@@ -520,11 +525,21 @@ fn apply_linux_webkit_rendering_workarounds() {
     let has_hardware_render_device =
         render_devices.iter().any(|device| !linux_drm_driver_is_software_only(device.driver.as_deref()));
     let uses_native_wayland = linux_uses_native_wayland(
-        std::env::var_os("APPIMAGE").as_deref(),
+        appimage.as_deref(),
         std::env::var_os("WAYLAND_DISPLAY").as_deref(),
         std::env::var_os("XDG_SESSION_TYPE").as_deref(),
         std::env::var_os("GDK_BACKEND").as_deref(),
     );
+    // AppImages bundle WebKitGTK/GTK but use the host EGL/GL stack. On some
+    // combinations, WebKit's DMABUF initialization aborts the WebProcess
+    // before it can fall back to software rendering. Keep this opt-out
+    // user-overridable and use the stable shared-memory renderer instead.
+    if linux_appimage_requires_dmabuf_workaround(appimage.as_deref())
+        && linux_webkit_environment_override(std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").as_deref(), "1")
+            .is_some()
+    {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
     for (key, value) in linux_webkit_rendering_workarounds(
         nvidia_driver,
         has_hardware_render_device,
@@ -536,7 +551,7 @@ fn apply_linux_webkit_rendering_workarounds() {
         }
     }
     if let Some(gdk_backend) = linux_appimage_wayland_backend_override(
-        std::env::var_os("APPIMAGE").as_deref(),
+        appimage.as_deref(),
         std::env::var_os("WAYLAND_DISPLAY").as_deref(),
         std::env::var_os("GDK_BACKEND").as_deref(),
     ) {
@@ -953,14 +968,15 @@ pub(crate) fn apply_desktop_settings(app: &tauri::AppHandle, desktop_settings: &
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
-        app_menu_copy_support_info_label, app_menu_quit_label, linux_appimage_wayland_backend_override,
-        linux_drm_driver_is_software_only, linux_drm_render_devices_from_paths, linux_nvidia_driver_from_state,
-        linux_pci_id_from_sysfs_value, linux_selected_drm_render_device, linux_uses_native_wayland,
-        linux_webkit_environment_override, linux_webkit_rendering_workarounds, native_window_decorations_override,
-        should_confirm_app_exit_request, should_enable_single_instance, should_fallback_to_native_quit,
-        should_hide_window_on_close, should_setup_desktop_tray, should_show_main_window_after_setup,
-        should_show_main_window_before_setup_tasks, startup_data_dir_mode, tray_menu_labels_for_locale,
-        uses_application_level_icon, LinuxDrmRenderDevice, LinuxNvidiaDriver,
+        app_menu_copy_support_info_label, app_menu_quit_label, linux_appimage_requires_dmabuf_workaround,
+        linux_appimage_wayland_backend_override, linux_drm_driver_is_software_only,
+        linux_drm_render_devices_from_paths, linux_nvidia_driver_from_state, linux_pci_id_from_sysfs_value,
+        linux_selected_drm_render_device, linux_uses_native_wayland, linux_webkit_environment_override,
+        linux_webkit_rendering_workarounds, native_window_decorations_override, should_confirm_app_exit_request,
+        should_enable_single_instance, should_fallback_to_native_quit, should_hide_window_on_close,
+        should_setup_desktop_tray, should_show_main_window_after_setup, should_show_main_window_before_setup_tasks,
+        startup_data_dir_mode, tray_menu_labels_for_locale, uses_application_level_icon, LinuxDrmRenderDevice,
+        LinuxNvidiaDriver,
     };
     use crate::data_dir::DataDirMode;
     use std::ffi::OsStr;
@@ -1264,6 +1280,13 @@ mod tests {
             linux_webkit_rendering_workarounds(LinuxNvidiaDriver::None, false, None, false),
             &[("WEBKIT_DISABLE_DMABUF_RENDERER", "1")]
         );
+    }
+
+    #[test]
+    fn enables_appimage_dmabuf_workaround_only_for_real_appimage_values() {
+        assert!(linux_appimage_requires_dmabuf_workaround(Some(OsStr::new("/opt/DBX.AppImage"))));
+        assert!(!linux_appimage_requires_dmabuf_workaround(Some(OsStr::new(""))));
+        assert!(!linux_appimage_requires_dmabuf_workaround(None));
     }
 
     #[test]

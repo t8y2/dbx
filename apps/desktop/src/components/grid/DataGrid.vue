@@ -388,7 +388,6 @@ const slots = useSlots();
 const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
-const refreshDdlOnOpenControlId = `data-grid-refresh-ddl-on-open-${uuid()}`;
 const cellDetailButtonEnabled = computed(() => settingsStore.editorSettings.dataGridCellDetailButtonVisible);
 const dataGridCrosshairHighlight = computed(() => settingsStore.editorSettings.dataGridCrosshairHighlight);
 const tableFontSize = computed(() => settingsStore.editorSettings.tableFontSize);
@@ -10822,11 +10821,6 @@ async function fetchDdl(force = settingsStore.editorSettings.refreshDdlOnOpen) {
   }
 }
 
-function setTableInfoRefreshDdlOnOpen(value: boolean) {
-  settingsStore.updateEditorSettings({ refreshDdlOnOpen: value });
-  if (value) void fetchDdl(true);
-}
-
 async function fetchIndexes() {
   const requestIdentity = currentIndexTableIdentity.value;
   if (!props.connectionId || !props.tableMeta || !canShowTableIndexes.value || !requestIdentity || indexesLoaded.value || indexesLoading.value) return;
@@ -13562,19 +13556,6 @@ function openGridSnapshot() {
                 <Button variant="ghost" size="icon" class="h-6 w-6" :class="{ 'bg-accent': settingsStore.editorSettings.tableDdlWordWrap }" @click="toggleDdlWrap">
                   <WrapText class="w-3 h-3" />
                 </Button>
-                <Popover>
-                  <PopoverTrigger as-child>
-                    <Button variant="ghost" size="icon" class="h-6 w-6" :title="t('settings.title')" :aria-label="t('settings.title')">
-                      <Settings2 class="h-3 w-3" />
-                    </Button>
-                  </PopoverTrigger>
-                  <PopoverContent align="end" class="w-64 p-3">
-                    <div class="flex items-center justify-between gap-4 text-sm">
-                      <label :for="refreshDdlOnOpenControlId" class="cursor-pointer">{{ t("contextMenu.refreshDdlOnOpen") }}</label>
-                      <Switch :id="refreshDdlOnOpenControlId" size="sm" :model-value="settingsStore.editorSettings.refreshDdlOnOpen" @update:model-value="setTableInfoRefreshDdlOnOpen" />
-                    </div>
-                  </PopoverContent>
-                </Popover>
               </div>
               <div v-else-if="activeTableInfoTab === 'indexes' && canManageMongoIndexes" class="table-info-actions flex min-w-0 shrink-0 items-center gap-1">
                 <Button variant="ghost" size="sm" class="table-info-action-button h-6 px-2 text-xs text-destructive hover:text-destructive" :disabled="indexesLoading || dropAllMongoIndexesLoading || droppableMongoIndexes.length === 0" @click="requestDropAllMongoIndexes">

@@ -49,9 +49,8 @@ describe("ObjectBrowser table metadata refresh", () => {
 
   it("shares the DDL refresh preference and exposes an explicit refresh action", () => {
     expect(source).toContain("async function fetchTableDdl(force = settingsStore.editorSettings.refreshDdlOnOpen)");
-    expect(functionBody("setTableInfoRefreshDdlOnOpen")).toMatch(/updateEditorSettings\(\{ refreshDdlOnOpen: value \}\);[\s\S]*?if \(value\) void fetchTableDdl\(true\);/);
     expect(source).toContain('@click="fetchTableDdl(true)"');
-    expect(source).toContain('t("contextMenu.refreshDdlOnOpen")');
+    expect(source).not.toContain("setTableInfoRefreshDdlOnOpen");
   });
 
   it("keeps automatic object reloads free of extra metadata requests", () => {

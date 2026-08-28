@@ -3924,9 +3924,25 @@ public final class DbxJdbcPlugin {
             indexes.clear();
             try {
                 DatabaseMetaData meta = conn.getMetaData();
-                try (ResultSet rs = meta.getIndexInfo(null, owner, table, false, false)) {
-                    appendJdbcIndexes(indexes, Collections.emptySet(), rs);
+                Set<String> primaryIndexNames = new HashSet<>();
+                Map<Integer, String> primaryColumnsBySequence = new TreeMap<>();
+                try (ResultSet rs = meta.getPrimaryKeys(null, owner, table)) {
+                    while (rs != null && rs.next()) {
+                        String name = rs.getString("PK_NAME");
+                        if (name != null && !name.isBlank()) {
+                            primaryIndexNames.add(name);
+                        }
+                        String column = rs.getString("COLUMN_NAME");
+                        if (column != null && !column.isBlank()) {
+                            primaryColumnsBySequence.put((int) rs.getShort("KEY_SEQ"), column);
+                        }
+                    }
+                } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
                 }
+                try (ResultSet rs = meta.getIndexInfo(null, owner, table, false, false)) {
+                    appendJdbcIndexes(indexes, primaryIndexNames, rs);
+                }
+                markPrimaryIndexByColumns(indexes.values(), new ArrayList<>(primaryColumnsBySequence.values()));
             } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
             }
         }

@@ -2962,6 +2962,20 @@ final class DbxJdbcPluginTest {
                 }
             }
             assertEquals(true, found);
+            boolean primaryMarked = false;
+            for (JsonNode node : result) {
+                boolean idColumn = false;
+                for (JsonNode column : node.path("columns")) {
+                    if ("ID".equalsIgnoreCase(column.asText())) {
+                        idColumn = true;
+                        break;
+                    }
+                }
+                if (idColumn && node.path("is_primary").asBoolean()) {
+                    primaryMarked = true;
+                }
+            }
+            assertEquals(true, primaryMarked);
         }
     }
 

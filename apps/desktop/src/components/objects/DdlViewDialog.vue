@@ -13,6 +13,7 @@ import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
+import { HelpTooltip } from "@/components/ui/tooltip";
 import EditorSearchPanel from "@/components/editor/EditorSearchPanel.vue";
 import type { EditorView } from "@codemirror/view";
 import type { DatabaseType, ObjectSourceKind } from "@/types/database";
@@ -254,7 +255,12 @@ function onClose() {
       <DialogFooter>
         <div class="mr-auto flex items-center gap-2 text-sm text-muted-foreground">
           <Switch id="ddl-refresh-on-open" size="sm" :model-value="settingsStore.editorSettings.refreshDdlOnOpen" @update:model-value="setRefreshDdlOnOpen" />
-          <label for="ddl-refresh-on-open" class="cursor-pointer">{{ t("contextMenu.refreshDdlOnOpen") }}</label>
+          <div class="flex items-center gap-1">
+            <label for="ddl-refresh-on-open" class="cursor-pointer">{{ t("contextMenu.refreshDdlOnOpen") }}</label>
+            <HelpTooltip :label="t('contextMenu.refreshDdlOnOpenHint')" trigger-class="[&_svg]:h-3 [&_svg]:w-3">
+              {{ t("contextMenu.refreshDdlOnOpenHint") }}
+            </HelpTooltip>
+          </div>
         </div>
         <Button variant="outline" @click="onClose">{{ t("common.close") }}</Button>
         <Button variant="outline" :disabled="ddlLoading" :title="t('structureEditor.refresh')" @click="loadDdl(true)">

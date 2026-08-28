@@ -3162,6 +3162,7 @@ export default withEnglishFallback({
     viewDdlLoading: "DDLを読み込み中...",
     ddlCopied: "DDLをコピーしました",
     refreshDdlOnOpen: "開くたびに DDL を更新",
+    refreshDdlOnOpenHint: "有効にすると開くたびにデータベースから DDL を再取得し、無効にするとキャッシュを優先して使用します",
     manageExtension: "拡張機能を管理...",
     dropExtension: "拡張機能を削除",
     processList: "プロセス一覧",

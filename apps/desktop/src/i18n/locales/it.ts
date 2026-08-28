@@ -2940,6 +2940,7 @@ export default withEnglishFallback({
     viewDdlLoading: "Caricamento DDL...",
     ddlCopied: "DDL copiato",
     refreshDdlOnOpen: "Aggiorna il DDL a ogni apertura",
+    refreshDdlOnOpenHint: "Se attivo, il DDL viene ricaricato dal database a ogni apertura; se disattivo, vengono usati prima i dati memorizzati nella cache",
     dropObject: "Elimina Oggetto",
     dropView: "Elimina Vista",
     dropColumn: "Elimina Colonna",

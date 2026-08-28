@@ -2965,6 +2965,7 @@ export default withEnglishFallback({
     viewDdlLoading: "正在读取 DDL...",
     ddlCopied: "DDL 已复制",
     refreshDdlOnOpen: "每次打开时刷新 DDL",
+    refreshDdlOnOpenHint: "开启后每次打开都会从数据库重新读取；关闭时优先使用缓存",
     dropObject: "删除对象",
     dropView: "删除视图",
     dropColumn: "删除字段",

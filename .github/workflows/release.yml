@@ -661,6 +661,133 @@ jobs:
             Remove-Item -LiteralPath $workDir -Recurse -Force
           }
 
+  build-windows-server-2012-r2-offline:
+    needs: release-ready
+    runs-on: windows-2022
+    environment: release-signing
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
+      VSIGN_CERT_HASH: ${{ vars.VSIGN_CERT_HASH }}
+      VSIGN_OPERATOR_SHA1: ${{ vars.VSIGN_OPERATOR_SHA1 }}
+      VSIGN_SERVER: ${{ vars.VSIGN_SERVER }}
+      VSIGN_TOOL_SHA256: ${{ vars.VSIGN_TOOL_SHA256 }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Install frontend dependencies
+        run: pnpm install
+
+      - name: Setup Rust for Server 2012 R2
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-07-22
+          components: rust-src
+
+      - name: Prepare Server 2012 R2 WebView2 loader
+        shell: pwsh
+        run: ./.github/scripts/prepare-webview2-server2012-loader.ps1 -InstallStaticLoader
+
+      - name: Prepare WebView2 109 fixed runtime
+        shell: pwsh
+        run: ./.github/scripts/prepare-webview2-win7-runtime.ps1
+
+      - name: Probe pinned Loader and WebView2 runtime
+        shell: pwsh
+        run: |
+          ./.github/scripts/assert-webview2-win7-runtime.ps1 `
+            -LoaderPath "$env:TEMP/dbx-server2012-webview2-loader-probe/WebView2Loader.dll"
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./ -> target"
+          shared-key: release-x86_64-server2012-r2-windows-msvc
+          add-rust-environment-hash-key: true
+          cache-targets: false
+          cache-on-failure: true
+
+      - name: Build frontend
+        run: pnpm build
+
+      - name: Build DBX for Windows Server 2012 R2
+        shell: pwsh
+        run: |
+          $env:TAURI_CONFIG = Get-Content src-tauri/tauri.webview2-server-2012-r2-fixed.conf.json -Raw
+          cargo build --locked --package dbx --release --features custom-protocol --target x86_64-win7-windows-msvc -Z build-std=std,panic_abort
+
+      - name: Audit Server 2012 R2 PE imports
+        shell: pwsh
+        run: ./.github/scripts/assert-win7-pe-compat.ps1 -BinaryPath target/x86_64-win7-windows-msvc/release/dbx.exe
+
+      - name: Setup TrustAsia VSign
+        shell: pwsh
+        env:
+          VSIGN_OPERATOR_PFX_B64: ${{ secrets.VSIGN_OPERATOR_PFX_B64 }}
+          VSIGN_OPERATOR_PWD: ${{ secrets.VSIGN_OPERATOR_PWD }}
+        run: ./.github/scripts/setup-vsign.ps1
+
+      - name: Bundle and upload Server 2012 R2 fixed-runtime installer
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SSIGNCODE_OPERATOR_PWD: ${{ secrets.VSIGN_OPERATOR_PWD }}
+          VSIGN_KEY_PIN: ${{ secrets.VSIGN_KEY_PIN }}
+        run: |
+          $version = "${env:GITHUB_REF_NAME}".TrimStart("v")
+          $bundleDir = "target/x86_64-win7-windows-msvc/release/bundle/nsis"
+          $offlineName = "DBX_${version}_x64-windows-server-2012-r2-webview2-109-offline-setup.exe"
+          $checksumName = "${offlineName}.sha256"
+          $cargoMetadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $appVersion = ($cargoMetadata.packages | Where-Object { $_.name -eq "dbx" } | Select-Object -First 1).version
+
+          if (!$appVersion -or $appVersion -ne $version) {
+            Write-Error "Release tag version $version does not match the built DBX package version $appVersion"
+            exit 1
+          }
+
+          pnpm tauri bundle --bundles nsis --target x86_64-win7-windows-msvc `
+            --config src-tauri/tauri.webview2-server-2012-r2-fixed.conf.json `
+            --config src-tauri/tauri.vsign.conf.json
+
+          $installer = Get-ChildItem $bundleDir -Filter "*.exe" |
+            Sort-Object LastWriteTimeUtc -Descending |
+            Select-Object -First 1
+          if (!$installer) {
+            Write-Error "Missing Server 2012 R2 fixed-runtime installer in ${bundleDir}"
+            exit 1
+          }
+
+          ./.github/scripts/assert-win7-installer-content.ps1 -InstallerPath $installer.FullName
+          ./.github/scripts/assert-authenticode.ps1 -Path $installer.FullName
+
+          Copy-Item $installer.FullName $offlineName -Force
+          $hash = (Get-FileHash -LiteralPath $offlineName -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $offlineName" | Set-Content -LiteralPath $checksumName -Encoding ascii
+          gh release upload "${env:GITHUB_REF_NAME}" $offlineName $checksumName `
+            --repo "${env:GITHUB_REPOSITORY}" --clobber
+
+      - name: Remove temporary VSign files
+        if: always()
+        shell: pwsh
+        run: |
+          $workDir = if ([string]::IsNullOrWhiteSpace($env:VSIGN_WORK_DIR)) {
+            Join-Path $env:RUNNER_TEMP "vsign-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          } else {
+            $env:VSIGN_WORK_DIR
+          }
+          if (Test-Path -LiteralPath $workDir) {
+            Remove-Item -LiteralPath $workDir -Recurse -Force
+          }
+
   static-browser:
     # Fully static musl builds of the browser (dbx-web) variant. No glibc
     # dependency, so the tarball runs on any Linux distribution (verified in
@@ -764,7 +891,7 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" --clobber
 
   cleanup-release-signatures:
-    needs: [build, build-windows, build-windows-7-offline]
+    needs: [build, build-windows, build-windows-7-offline, build-windows-server-2012-r2-offline]
     runs-on: ubuntu-latest
     steps:
       - name: Remove standalone updater signature assets

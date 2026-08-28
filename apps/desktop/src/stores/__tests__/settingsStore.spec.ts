@@ -5,6 +5,13 @@ import { DEFAULT_EDITOR_SETTINGS, EXECUTE_MODE_CURRENT_DEFAULT_VERSION, enforceR
 import type { AiConfigItem } from "@/types/ai";
 
 describe("normalizeEditorSettings", () => {
+  it("keeps automatic DDL refresh disabled unless explicitly enabled", () => {
+    expect(normalizeEditorSettings({}).refreshDdlOnOpen).toBe(false);
+    expect(normalizeEditorSettings({ refreshDdlOnOpen: true }).refreshDdlOnOpen).toBe(true);
+    expect(normalizeEditorSettings({ refreshDdlOnOpen: false }).refreshDdlOnOpen).toBe(false);
+    expect(normalizeEditorSettings({ refreshDdlOnOpen: "true" } as any).refreshDdlOnOpen).toBe(false);
+  });
+
   it("enables SQL variable substitution by default and only preserves booleans", () => {
     expect(normalizeEditorSettings({}).sqlVariableSubstitutionEnabled).toBe(true);
     expect(normalizeEditorSettings({ sqlVariableSubstitutionEnabled: true }).sqlVariableSubstitutionEnabled).toBe(true);

@@ -3040,6 +3040,7 @@ export default {
     viewDdl: "View DDL",
     viewDdlLoading: "Loading DDL...",
     ddlCopied: "DDL copied",
+    refreshDdlOnOpen: "Refresh DDL each time it opens",
     dropObject: "Drop Object",
     dropEventSuccess: 'Event "{name}" dropped',
     editObject: "Edit Object",

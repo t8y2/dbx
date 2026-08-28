@@ -3161,6 +3161,7 @@ export default withEnglishFallback({
     instanceInfo: "インスタンス情報",
     viewDdlLoading: "DDLを読み込み中...",
     ddlCopied: "DDLをコピーしました",
+    refreshDdlOnOpen: "開くたびに DDL を更新",
     manageExtension: "拡張機能を管理...",
     dropExtension: "拡張機能を削除",
     processList: "プロセス一覧",

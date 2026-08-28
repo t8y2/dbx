@@ -2939,6 +2939,7 @@ export default withEnglishFallback({
     viewDdl: "Visualizza DDL",
     viewDdlLoading: "Caricamento DDL...",
     ddlCopied: "DDL copiato",
+    refreshDdlOnOpen: "Aggiorna il DDL a ogni apertura",
     dropObject: "Elimina Oggetto",
     dropView: "Elimina Vista",
     dropColumn: "Elimina Colonna",

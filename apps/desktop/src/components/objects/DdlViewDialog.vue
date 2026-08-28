@@ -12,6 +12,7 @@ import { formatSqlForDisplay, type SqlFormatDialect } from "@/lib/sql/sqlFormatt
 import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Switch } from "@/components/ui/switch";
 import EditorSearchPanel from "@/components/editor/EditorSearchPanel.vue";
 import type { EditorView } from "@codemirror/view";
 import type { DatabaseType, ObjectSourceKind } from "@/types/database";
@@ -80,7 +81,7 @@ async function loadDdl(force = false) {
   }
 }
 
-/** An explicit DDL view should reflect the current database state, not a persisted snapshot. */
+/** Loads from the persisted snapshot by default; users can opt into a fresh database query on every open. */
 watch(
   () => props.open,
   async (open) => {
@@ -88,7 +89,7 @@ watch(
     const active = document.activeElement;
     editorRootToRestoreFocus = active instanceof HTMLElement ? active.closest(".cm-editor") : null;
     ddlContent.value = "";
-    await loadDdl(true);
+    await loadDdl(settingsStore.editorSettings.refreshDdlOnOpen);
   },
   { immediate: true },
 );
@@ -217,6 +218,11 @@ function retry() {
   void loadDdl(true);
 }
 
+function setRefreshDdlOnOpen(value: boolean) {
+  settingsStore.updateEditorSettings({ refreshDdlOnOpen: value });
+  if (value) void loadDdl(true);
+}
+
 function onClose() {
   emit("update:open", false);
 }
@@ -246,6 +252,10 @@ function onClose() {
         </div>
       </div>
       <DialogFooter>
+        <div class="mr-auto flex items-center gap-2 text-sm text-muted-foreground">
+          <Switch id="ddl-refresh-on-open" size="sm" :model-value="settingsStore.editorSettings.refreshDdlOnOpen" @update:model-value="setRefreshDdlOnOpen" />
+          <label for="ddl-refresh-on-open" class="cursor-pointer">{{ t("contextMenu.refreshDdlOnOpen") }}</label>
+        </div>
         <Button variant="outline" @click="onClose">{{ t("common.close") }}</Button>
         <Button variant="outline" :disabled="ddlLoading" :title="t('structureEditor.refresh')" @click="loadDdl(true)">
           <RefreshCw class="h-4 w-4" />

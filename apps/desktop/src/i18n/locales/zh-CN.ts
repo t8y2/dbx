@@ -2964,6 +2964,7 @@ export default withEnglishFallback({
     viewDdl: "查看 DDL",
     viewDdlLoading: "正在读取 DDL...",
     ddlCopied: "DDL 已复制",
+    refreshDdlOnOpen: "每次打开时刷新 DDL",
     dropObject: "删除对象",
     dropView: "删除视图",
     dropColumn: "删除字段",

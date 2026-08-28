@@ -541,6 +541,7 @@ export interface EditorSettings {
   selectFirstCompletionOnOpen: boolean;
   wordWrap: boolean;
   tableDdlWordWrap: boolean;
+  refreshDdlOnOpen: boolean;
   vimModeEnabled: boolean;
   autoCloseBrackets: boolean;
   sqlSemanticDiagnosticsMode: SqlSemanticDiagnosticsMode;
@@ -756,6 +757,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   selectFirstCompletionOnOpen: true,
   wordWrap: false,
   tableDdlWordWrap: true,
+  refreshDdlOnOpen: false,
   vimModeEnabled: false,
   autoCloseBrackets: true,
   sqlSemanticDiagnosticsMode: "auto",
@@ -1134,6 +1136,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     selectFirstCompletionOnOpen: typeof settings.selectFirstCompletionOnOpen === "boolean" ? settings.selectFirstCompletionOnOpen : DEFAULT_EDITOR_SETTINGS.selectFirstCompletionOnOpen,
     wordWrap: settings.wordWrap ?? DEFAULT_EDITOR_SETTINGS.wordWrap,
     tableDdlWordWrap: typeof settings.tableDdlWordWrap === "boolean" ? settings.tableDdlWordWrap : DEFAULT_EDITOR_SETTINGS.tableDdlWordWrap,
+    refreshDdlOnOpen: typeof settings.refreshDdlOnOpen === "boolean" ? settings.refreshDdlOnOpen : DEFAULT_EDITOR_SETTINGS.refreshDdlOnOpen,
     vimModeEnabled: typeof settings.vimModeEnabled === "boolean" ? settings.vimModeEnabled : DEFAULT_EDITOR_SETTINGS.vimModeEnabled,
     autoCloseBrackets: typeof settings.autoCloseBrackets === "boolean" ? settings.autoCloseBrackets : DEFAULT_EDITOR_SETTINGS.autoCloseBrackets,
     sqlSemanticDiagnosticsMode,
@@ -1740,6 +1743,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.selectFirstCompletionOnOpen !== undefined) editorSettings.value.selectFirstCompletionOnOpen = partial.selectFirstCompletionOnOpen === true;
     if (partial.wordWrap !== undefined) editorSettings.value.wordWrap = partial.wordWrap;
     if (partial.tableDdlWordWrap !== undefined) editorSettings.value.tableDdlWordWrap = partial.tableDdlWordWrap === true;
+    if (partial.refreshDdlOnOpen !== undefined) editorSettings.value.refreshDdlOnOpen = partial.refreshDdlOnOpen === true;
     if (partial.vimModeEnabled !== undefined) editorSettings.value.vimModeEnabled = partial.vimModeEnabled === true;
     if (partial.autoCloseBrackets !== undefined) editorSettings.value.autoCloseBrackets = partial.autoCloseBrackets === true;
     if (partial.sqlSemanticDiagnosticsMode !== undefined || partial.sqlSemanticDiagnosticsEnabled !== undefined) {

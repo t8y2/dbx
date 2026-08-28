@@ -10,13 +10,14 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import NacosConfigDiffDialog from "@/components/nacos/NacosConfigDiffDialog.vue";
 import * as api from "@/lib/backend/api";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import type { ConsulCapabilities, ConsulConfigEntry, ConsulDiscoveryChain, ConsulExportedService, ConsulIntention, ConsulPeering } from "@/types/consul";
 import { useI18n } from "vue-i18n";
 
 type MeshTab = "config" | "intentions" | "discovery" | "peering" | "exported";
 const props = defineProps<{ connectionId: string; capabilities: ConsulCapabilities | null }>();
 const store = useConnectionStore();
-const readOnly = computed(() => Boolean(store.getConfig(props.connectionId)?.read_only));
+const readOnly = computed(() => connectionIsEffectivelyReadOnly(store.getConfig(props.connectionId)));
 const { t } = useI18n();
 function capabilityLabel(value?: string) {
   if (value === "supported") return t("consul.ui.capabilitySupported");

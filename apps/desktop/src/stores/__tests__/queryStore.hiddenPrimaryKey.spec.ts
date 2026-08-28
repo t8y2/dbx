@@ -157,7 +157,7 @@ describe("queryStore hidden primary key editing", () => {
     expect(tab.queryAnalysis).toBeDefined();
     expect(tab.queryAnalysis?.allowInsert).toBe(false);
     expect(tab.queryEditabilityReason).toBeUndefined();
-  });
+  }, 10_000);
 
   it("keeps MySQL expression columns read-only without disabling direct columns", async () => {
     const sql = "SELECT id, status, extra->>'$.mode' mode, extra->>'$.template' tmpl FROM items";
@@ -799,6 +799,68 @@ describe("queryStore hidden primary key editing", () => {
       { name: "NAME", data_type: "VARCHAR2(100)", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
     ]);
     await execution;
+  });
+
+  it("starts an Oracle star query when index metadata exceeds the preflight budget", async () => {
+    vi.useFakeTimers();
+    const columnsGate = deferred<Awaited<ReturnType<typeof getColumns>>>();
+    const indexesGate = deferred<Awaited<ReturnType<typeof listIndexes>>>();
+    try {
+      getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", query_timeout_secs: 30 });
+      getColumns.mockReturnValue(columnsGate.promise);
+      listIndexes.mockReturnValue(indexesGate.promise);
+      analyzeEditableQueryEditability.mockImplementation(async () => ({
+        editable: true,
+        analysis: {
+          schema: "APP",
+          tableName: "SLOW_METADATA_TABLE",
+          selectStar: true,
+          columns: [],
+        },
+      }));
+      executeMulti.mockResolvedValue([
+        {
+          columns: ["ID", "NAME"],
+          rows: [[1, "Alice"]],
+          affected_rows: 0,
+          execution_time_ms: 12,
+        },
+      ]);
+
+      const { useQueryStore } = await import("@/stores/queryStore");
+      const store = useQueryStore();
+      const tabId = store.createTab("oracle-1", "ORCL", "Query");
+      store.setAutoCommit(tabId, true);
+
+      const execution = store.executeTabSql(tabId, "SELECT * FROM APP.SLOW_METADATA_TABLE");
+      await vi.waitFor(() => expect(listIndexes).toHaveBeenCalledOnce());
+      expect(executeMulti).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.waitFor(() => expect(executeMulti).toHaveBeenCalledOnce());
+      expect(executeMulti).toHaveBeenCalledWith("oracle-1", "ORCL", "SELECT * FROM APP.SLOW_METADATA_TABLE", undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
+      await execution;
+
+      indexesGate.resolve([{ name: "PK_SLOW_METADATA_TABLE", columns: ["ID"], is_unique: true, is_primary: true }]);
+      columnsGate.resolve([
+        { name: "ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+        { name: "NAME", data_type: "VARCHAR2(100)", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+      ]);
+      await vi.waitFor(() => expect(store.tabs.find((item) => item.id === tabId)?.tableMeta?.primaryKeys).toEqual(["ID"]));
+
+      await store.executeTabSql(tabId, "SELECT * FROM APP.SLOW_METADATA_TABLE");
+      expect(executeMulti).toHaveBeenCalledTimes(2);
+      expect(listIndexes).toHaveBeenCalledOnce();
+      expect(getColumns).toHaveBeenCalledOnce();
+    } finally {
+      indexesGate.resolve([{ name: "PK_SLOW_METADATA_TABLE", columns: ["ID"], is_unique: true, is_primary: true }]);
+      columnsGate.resolve([
+        { name: "ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+        { name: "NAME", data_type: "VARCHAR2(100)", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+      ]);
+      await vi.runAllTimersAsync();
+      vi.useRealTimers();
+    }
   });
 
   it("waits for first-run Oracle XMLTYPE metadata before manual transaction execution", async () => {

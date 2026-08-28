@@ -15,7 +15,7 @@ use dbx_core::runtime_config::{
     release_runtime_config_on_disconnect, should_retain_runtime_config, TEST_PROBE_ID_PREFIX,
 };
 use dbx_core::session_credentials::{PurposeSessionCredentialWriteToken, SessionCredentialWriteToken};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::auth::session_token_from_headers;
 use crate::error::AppError;
@@ -139,6 +139,19 @@ pub struct ConnectionIdentifierQuoteRequest {
 pub struct SaveConnectionDatabaseInfoRequest {
     pub connection_id: String,
     pub database_info: Option<DatabaseConnectionInfo>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnlockConnectionWritesRequest {
+    pub connection_id: String,
+    pub duration_secs: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteUnlockStateResponse {
+    pub remaining_ms: u64,
 }
 
 #[derive(Deserialize)]
@@ -439,6 +452,35 @@ pub async fn save_connection_database_info(
         .await
         .map(|_| Json(()))
         .map_err(AppError::from)
+}
+
+pub async fn unlock_connection_writes(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<UnlockConnectionWritesRequest>,
+) -> Result<Json<WriteUnlockStateResponse>, AppError> {
+    if !state.app.configs.read().await.contains_key(&body.connection_id) {
+        return Err(AppError::from("Connection not found".to_string()));
+    }
+    let remaining_ms =
+        state.app.write_unlock_windows.unlock(&body.connection_id, body.duration_secs).await.map_err(AppError::from)?;
+    Ok(Json(WriteUnlockStateResponse { remaining_ms }))
+}
+
+pub async fn lock_connection_writes(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<ConnectionIdentifierQuoteRequest>,
+) -> Result<Json<()>, AppError> {
+    state.app.write_unlock_windows.lock(&body.connection_id).await;
+    Ok(Json(()))
+}
+
+pub async fn connection_write_unlock_state(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<ConnectionIdentifierQuoteRequest>,
+) -> Result<Json<WriteUnlockStateResponse>, AppError> {
+    Ok(Json(WriteUnlockStateResponse {
+        remaining_ms: state.app.write_unlock_windows.remaining_ms(&body.connection_id).await,
+    }))
 }
 
 pub async fn connection_final_proxy_port(

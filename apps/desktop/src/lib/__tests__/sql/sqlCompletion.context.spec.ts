@@ -1021,6 +1021,57 @@ describe("sqlCompletion scoped context classification", () => {
     expect(context.referencedTables).toEqual(expect.arrayContaining([expect.objectContaining({ name: "recent_orders", columns: ["id", "total"] }), expect.objectContaining({ name: "recent_orders", alias: "ro" })]));
   });
 
+  it("scopes CTE bodies out of the outer query's referenced tables", () => {
+    const sql = "WITH cte AS (SELECT id, name FROM orders) SELECT id, na FROM cte";
+    const cursor = sql.indexOf(" FROM cte");
+    const context = getSqlCompletionContext(sql, cursor);
+
+    expect(context.referencedTables.map((table) => table.name)).toEqual(["cte"]);
+  });
+
+  it("suggests bare CTE column names instead of forcing a cte. qualifier (issue #7396)", () => {
+    const sql = "WITH cte AS (SELECT id, name FROM orders) SELECT id, na FROM cte";
+    const cursor = sql.indexOf(" FROM cte");
+    const items = buildSqlCompletionItems(sql, cursor, {
+      tables: [],
+      columnsByTable: new Map([
+        [
+          "orders",
+          [
+            { name: "id", table: "orders", dataType: "int" },
+            { name: "name", table: "orders", dataType: "text" },
+          ],
+        ],
+        [
+          "cte",
+          [
+            { name: "id", table: "cte" },
+            { name: "name", table: "cte" },
+          ],
+        ],
+      ]),
+    });
+
+    expect(items).toEqual(expect.arrayContaining([expect.objectContaining({ label: "name", type: "column" })]));
+    expect(items.filter((item) => item.type === "column").map((item) => item.label)).not.toContain("orders.name");
+  });
+
+  it("keeps the CTE body's own tables while completing inside that body", () => {
+    const sql = "WITH cte AS (SELECT id, na FROM orders) SELECT * FROM cte";
+    const cursor = sql.indexOf(" FROM orders");
+    const context = getSqlCompletionContext(sql, cursor);
+
+    expect(context.referencedTables.map((table) => table.name)).toEqual(expect.arrayContaining(["orders", "cte"]));
+  });
+
+  it("keeps the underlying table when a CTE body projects an unresolved star", () => {
+    const sql = "WITH cte AS (SELECT * FROM orders) SELECT na FROM cte";
+    const cursor = sql.indexOf(" FROM cte");
+    const context = getSqlCompletionContext(sql, cursor);
+
+    expect(context.referencedTables.map((table) => table.name)).toEqual(expect.arrayContaining(["orders", "cte"]));
+  });
+
   it("extracts subquery aliases and projected columns", () => {
     const sql = "SELECT * FROM (SELECT id, name AS user_name FROM users) sq WHERE sq.";
     const context = getSqlCompletionContext(sql, sql.length);

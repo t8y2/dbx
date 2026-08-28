@@ -523,6 +523,10 @@ export interface IndexInfo {
   key_is_expression?: boolean[] | null;
 }
 
+export interface ReferenceKeyInfo {
+  columns: string[];
+}
+
 export interface ForeignKeyInfo {
   name: string;
   column: string;
@@ -1249,6 +1253,7 @@ export interface QueryTab {
     editableSourceKey?: string;
     multiSource?: boolean;
     allowInsert?: boolean;
+    allowDelete?: boolean;
     allowInsertDelete?: boolean;
     distinct?: boolean;
     sources?: {

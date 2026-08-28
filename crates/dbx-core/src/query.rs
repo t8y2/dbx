@@ -723,10 +723,12 @@ pub async fn check_read_only_for_connection(state: &AppState, pool_key: &str, sq
         let configs = state.configs.read().await;
         crate::connection::config_for_pool_key(pool_key, &configs)
             .filter(|config| config.read_only)
-            .map(|config| (config.name.clone(), config.db_type))
+            .map(|config| (config.id.clone(), config.name.clone(), config.db_type))
     };
-    if let Some((name, database_type)) = connection {
-        crate::query_execution_sql::check_read_only(sql, &name, database_type)?;
+    if let Some((connection_id, name, database_type)) = connection {
+        if !state.write_unlock_windows.is_active(&connection_id).await {
+            crate::query_execution_sql::check_read_only(sql, &name, database_type)?;
+        }
     }
     Ok(())
 }
@@ -741,11 +743,13 @@ pub async fn check_read_only_for_connection_multi(
         let configs = state.configs.read().await;
         crate::connection::config_for_pool_key(pool_key, &configs)
             .filter(|config| config.read_only)
-            .map(|config| (config.name.clone(), config.db_type))
+            .map(|config| (config.id.clone(), config.name.clone(), config.db_type))
     };
-    if let Some((name, database_type)) = connection {
-        for sql in statements {
-            crate::query_execution_sql::check_read_only(sql.as_ref(), &name, database_type)?;
+    if let Some((connection_id, name, database_type)) = connection {
+        if !state.write_unlock_windows.is_active(&connection_id).await {
+            for sql in statements {
+                crate::query_execution_sql::check_read_only(sql.as_ref(), &name, database_type)?;
+            }
         }
     }
     Ok(())
@@ -755,7 +759,14 @@ pub async fn check_read_only_for_connection_multi(
 /// This uses connection_id directly (not pool_key), so it is safe to call at command entry points
 /// before any pool key is constructed.
 pub async fn connection_readonly_name(state: &AppState, connection_id: &str) -> Option<String> {
-    state.configs.read().await.get(connection_id).filter(|c| c.read_only).map(|c| c.name.clone())
+    let name = {
+        let configs = state.configs.read().await;
+        configs.get(connection_id).filter(|c| c.read_only).map(|c| c.name.clone())?
+    };
+    if state.write_unlock_windows.is_active(connection_id).await {
+        return None;
+    }
+    Some(name)
 }
 
 async fn connection_is_mongodb(state: &AppState, connection_id: &str) -> bool {
@@ -1693,15 +1704,11 @@ async fn do_execute_typed(
     let _activity_touch = state.pool_activity_touch(pool_key);
 
     let query_timeout = resolve_query_timeout(options.timeout_secs);
-    let read_only_connection = {
-        let configs = state.configs.read().await;
-        let config = crate::connection::config_for_pool_key(pool_key, &configs);
-        config.filter(|config| config.read_only).map(|config| (config.name.clone(), config.db_type))
-    };
+    // Re-check at statement start so a write that becomes ready after the
+    // temporary unlock window expires is still blocked, even if an earlier
+    // statement in the same batch is still running.
+    check_read_only_for_connection(state, pool_key, sql).await?;
     let operation_budget = operation_budget_for_pool_key(state, pool_key, query_timeout).await;
-    if let Some((name, database_type)) = read_only_connection {
-        crate::query_execution_sql::check_read_only(sql, &name, database_type)?;
-    }
     let pool_db_type = connection_database_type_for_pool_key(state, pool_key).await;
     let mysql_catalog_dialect = connection_mysql_catalog_dialect_for_pool_key(state, pool_key).await;
     let connections = state.connections.read().await;

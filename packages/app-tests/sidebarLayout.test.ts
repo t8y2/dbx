@@ -9,6 +9,7 @@ import {
   moveConnectionToGroup,
   reorderEntry,
   toggleGroupCollapsed,
+  expandGroups,
   appendConnectionToLayout,
   removeConnectionFromSidebarLayout,
   emptyLayout,
@@ -379,6 +380,35 @@ test("collapseAllGroups keeps other groups collapsed after one group is reopened
       ["g2", true],
     ],
   );
+});
+
+// --- expandGroups ---
+
+test("expandGroups reopens collapsed groups and is a no-op otherwise", () => {
+  const layout: SidebarLayout = {
+    groups: [
+      { id: "g1", name: "G1", collapsed: true },
+      { id: "g2", name: "G2", collapsed: false },
+    ],
+    order: [
+      { type: "group", id: "g1", children: [{ type: "connection", id: "a" }] },
+      { type: "group", id: "g2", children: [] },
+    ],
+  };
+
+  const expanded = expandGroups(layout, ["g1", "g2", "missing"]);
+  assert.deepEqual(
+    expanded.groups.map((group) => [group.id, group.collapsed]),
+    [
+      ["g1", false],
+      ["g2", false],
+    ],
+  );
+
+  // Nothing to reopen: the same layout reference comes back so callers skip
+  // unnecessary rebuilds and persistence.
+  assert.equal(expandGroups(expanded, ["g1"]), expanded);
+  assert.equal(expandGroups(layout, []), layout);
 });
 
 // --- moveConnectionToGroup ---

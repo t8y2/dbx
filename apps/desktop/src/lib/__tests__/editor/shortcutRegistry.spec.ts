@@ -146,6 +146,14 @@ describe("shortcutRegistry editor actions", () => {
     expect(findShortcutConflict("find", DEFAULT_SHORTCUT_SETTINGS.find, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
   });
 
+  it("registers a conflict-free global shortcut for Zen mode", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "toggleZenMode");
+
+    expect(definition).toMatchObject({ labelKey: "settings.shortcutToggleZenMode", scope: "global", defaultShortcut: "Shift+Mod+F12" });
+    expect(DEFAULT_SHORTCUT_SETTINGS.toggleZenMode).toBe("Shift+Mod+F12");
+    expect(findShortcutConflict("toggleZenMode", DEFAULT_SHORTCUT_SETTINGS.toggleZenMode, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
+  });
+
   it("uses Shift+Enter for inserting a complete line below", () => {
     const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "insertLineBelow");
 

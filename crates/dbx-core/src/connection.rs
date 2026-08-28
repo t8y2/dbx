@@ -295,6 +295,8 @@ pub struct AppState {
     /// Web 端 owner 为已认证会话 token，不同登录会话互不可见。建池/池重建/
     /// AI/元数据从它读取，前端通过状态接口查询。
     pub session_credentials: SessionCredentialStore,
+    /// In-memory, never-persisted 1/5 minute write overrides for read-only connections.
+    pub write_unlock_windows: crate::write_unlock::WriteUnlockWindows,
     metadata_gates: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
     mongo_oidc_browser_opener: std::sync::RwLock<Option<MongoOidcBrowserOpener>>,
     #[cfg(feature = "mq-admin")]
@@ -1237,6 +1239,7 @@ impl AppState {
             postgres_cancel_contexts: Arc::new(RwLock::new(HashMap::new())),
             transaction_sessions: Arc::new(RwLock::new(HashMap::new())),
             session_credentials: SessionCredentialStore::new(),
+            write_unlock_windows: crate::write_unlock::WriteUnlockWindows::default(),
             metadata_gates: Arc::new(Mutex::new(HashMap::new())),
             mongo_oidc_browser_opener: std::sync::RwLock::new(None),
             #[cfg(feature = "mq-admin")]

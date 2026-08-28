@@ -16,6 +16,7 @@ import { useToast } from "@/composables/useToast";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
+import { connectionIsEffectivelyReadOnly, ensureReadOnlyWriteAccess } from "@/lib/database/readOnlyWriteAccess";
 import { fetchSqlFileTargetOptions } from "@/composables/useDatabaseOptions";
 import { requiresSqlFileTargetDatabaseSelection } from "@/lib/connection/connectionLevelDatabaseBootstrap";
 import { cancelSqlFileExecution, executeSqlFiles, listenSqlFileProgress, previewSqlFile, type SqlFilePreview, type SqlFileProgress, type SqlFileStatus } from "@/lib/backend/api";
@@ -357,6 +358,12 @@ async function refreshTargetAfterImport() {
 
 async function startExecution() {
   if (!canStart.value || previews.value.length === 0) return;
+  // Await the unlock guard only when it can actually prompt/block (effectively
+  // read-only); writable or already-unlocked connections stay synchronous so
+  // the running state flips in the same tick as the click.
+  if (connectionIsEffectivelyReadOnly(selectedConnection.value)) {
+    if (!(await ensureReadOnlyWriteAccess({ connection: selectedConnection.value, source: t("readOnlyUnlock.sourceSqlFile"), treatAsMutation: true }))) return;
+  }
   const productionContext = productionContextForDatabase(selectedConnection.value, database.value);
   if (productionContext.active) {
     // File previews are truncated, so production file execution is always reviewed instead of inferring safety from a partial preview.

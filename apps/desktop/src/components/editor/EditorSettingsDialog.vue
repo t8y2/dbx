@@ -51,6 +51,7 @@ import { HelpTooltip, Tooltip, TooltipContent, TooltipTrigger, TooltipProvider }
 import {
   useSettingsStore,
   AI_PROVIDER_PRESETS,
+  aiProviderLabel,
   EDITOR_THEMES,
   DEFAULT_EDITOR_SETTINGS,
   DEFAULT_DESKTOP_SETTINGS,
@@ -414,6 +415,7 @@ const dataGridFilterViewPreviewExpanded = ref(true);
 const editDataGridTextFilterPanelHeight = ref(settingsStore.editorSettings.dataGridTextFilterPanelHeight);
 const editDataGridAutoTransposeSingleRow = ref(settingsStore.editorSettings.dataGridAutoTransposeSingleRow);
 const editDataGridCellDetailButtonVisible = ref(settingsStore.editorSettings.dataGridCellDetailButtonVisible);
+const editDataGridCrosshairHighlight = ref(settingsStore.editorSettings.dataGridCrosshairHighlight);
 const editPageSize = ref(settingsStore.editorSettings.pageSize);
 const editTableOpenPageSize = ref(settingsStore.editorSettings.tableOpenPageSize);
 const editQueryResultMaxRowsEnabled = ref(settingsStore.editorSettings.queryResultMaxRowsEnabled);
@@ -606,6 +608,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     dataGridTextFilterPanelHeight: editDataGridTextFilterPanelHeight.value,
     dataGridAutoTransposeSingleRow: editDataGridAutoTransposeSingleRow.value,
     dataGridCellDetailButtonVisible: editDataGridCellDetailButtonVisible.value,
+    dataGridCrosshairHighlight: editDataGridCrosshairHighlight.value,
     flatteningMultiLineText: editFlatteningMultiLineText.value,
     pageSize: editPageSize.value,
     tableOpenPageSize: editTableOpenPageSize.value,
@@ -870,6 +873,7 @@ function syncEditorSettingsDraftFromStore() {
   editDataGridTextFilterPanelHeight.value = settingsStore.editorSettings.dataGridTextFilterPanelHeight;
   editDataGridAutoTransposeSingleRow.value = settingsStore.editorSettings.dataGridAutoTransposeSingleRow;
   editDataGridCellDetailButtonVisible.value = settingsStore.editorSettings.dataGridCellDetailButtonVisible;
+  editDataGridCrosshairHighlight.value = settingsStore.editorSettings.dataGridCrosshairHighlight;
   editFlatteningMultiLineText.value = settingsStore.editorSettings.flatteningMultiLineText;
   editPageSize.value = settingsStore.editorSettings.pageSize;
   editTableOpenPageSize.value = settingsStore.editorSettings.tableOpenPageSize;
@@ -1169,6 +1173,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editDataGridTextFilterPanelHeight.value = DEFAULT_EDITOR_SETTINGS.dataGridTextFilterPanelHeight;
     editDataGridAutoTransposeSingleRow.value = DEFAULT_EDITOR_SETTINGS.dataGridAutoTransposeSingleRow;
     editDataGridCellDetailButtonVisible.value = DEFAULT_EDITOR_SETTINGS.dataGridCellDetailButtonVisible;
+    editDataGridCrosshairHighlight.value = DEFAULT_EDITOR_SETTINGS.dataGridCrosshairHighlight;
     editFlatteningMultiLineText.value = DEFAULT_EDITOR_SETTINGS.flatteningMultiLineText;
     editPageSize.value = DEFAULT_EDITOR_SETTINGS.pageSize;
     editTableOpenPageSize.value = DEFAULT_EDITOR_SETTINGS.tableOpenPageSize;
@@ -1251,6 +1256,7 @@ function resetAllDefaults() {
   editDataGridTextFilterPanelHeight.value = DEFAULT_EDITOR_SETTINGS.dataGridTextFilterPanelHeight;
   editDataGridAutoTransposeSingleRow.value = DEFAULT_EDITOR_SETTINGS.dataGridAutoTransposeSingleRow;
   editDataGridCellDetailButtonVisible.value = DEFAULT_EDITOR_SETTINGS.dataGridCellDetailButtonVisible;
+  editDataGridCrosshairHighlight.value = DEFAULT_EDITOR_SETTINGS.dataGridCrosshairHighlight;
   editFlatteningMultiLineText.value = DEFAULT_EDITOR_SETTINGS.flatteningMultiLineText;
   editPageSize.value = DEFAULT_EDITOR_SETTINGS.pageSize;
   editTableOpenPageSize.value = DEFAULT_EDITOR_SETTINGS.tableOpenPageSize;
@@ -5510,6 +5516,17 @@ onUnmounted(() => {
                 </div>
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
+                    <Label for="data-grid-crosshair-highlight">
+                      {{ t("settings.dataGridCrosshairHighlight") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.dataGridCrosshairHighlightDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="data-grid-crosshair-highlight" v-model="editDataGridCrosshairHighlight" />
+                </div>
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
                     <Label for="flattening-multi-line">
                       {{ t("settings.flatteningMultiLineText") }}
                     </Label>
@@ -6282,7 +6299,7 @@ onUnmounted(() => {
                           </Badge>
                         </div>
                         <div class="text-xs text-muted-foreground">
-                          {{ AI_PROVIDER_PRESETS[config.provider].label }}
+                          {{ aiProviderLabel(config.provider, t) }}
                         </div>
                       </div>
                     </div>
@@ -6531,8 +6548,8 @@ onUnmounted(() => {
                     <SelectTrigger class="col-span-2" inputClass="h-8 text-xs">
                       <SelectValue>
                         <span class="flex items-center gap-2">
-                          <AiProviderLogo :provider="selectedAiProviderPreset.provider" :label="selectedAiProviderPreset.label" :icon-slug="selectedAiProviderPreset.iconSlug" />
-                          <span>{{ selectedAiProviderPreset.label }}</span>
+                          <AiProviderLogo :provider="selectedAiProviderPreset.provider" :label="aiProviderLabel(selectedAiProviderPreset.provider, t)" :icon-slug="selectedAiProviderPreset.iconSlug" />
+                          <span>{{ aiProviderLabel(selectedAiProviderPreset.provider, t) }}</span>
                         </span>
                       </SelectValue>
                     </SelectTrigger>
@@ -6540,8 +6557,8 @@ onUnmounted(() => {
                       <SelectItem v-for="provider in aiProviderOptions" :key="provider.provider" :value="provider.provider">
                         <span class="flex w-full items-center justify-between gap-4">
                           <span class="flex items-center gap-2">
-                            <AiProviderLogo :provider="provider.provider" :label="provider.label" :icon-slug="provider.iconSlug" />
-                            <span>{{ provider.label }}</span>
+                            <AiProviderLogo :provider="provider.provider" :label="aiProviderLabel(provider.provider, t)" :icon-slug="provider.iconSlug" />
+                            <span>{{ aiProviderLabel(provider.provider, t) }}</span>
                           </span>
                         </span>
                       </SelectItem>

@@ -9,7 +9,7 @@ use rustls::client::verify_server_cert_signed_by_trust_anchor;
 use rustls::crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::server::ParsedCertificate;
-use sqlparser::ast::Statement;
+use sqlparser::ast::{SetExpr, Statement};
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -5956,27 +5956,60 @@ fn query_result_row_limit(max_rows: Option<usize>) -> usize {
     max_rows.unwrap_or(crate::query::MAX_ROWS).max(1)
 }
 
+/// Returns whether a parsed DML statement produces a result set, or `None` when
+/// the statement is not DML.
+fn postgres_dml_statement_returns_rows(statement: &Statement) -> Option<bool> {
+    match statement {
+        Statement::Insert(insert) => Some(insert.returning.is_some()),
+        Statement::Update(update) => Some(update.returning.is_some()),
+        Statement::Delete(delete) => Some(delete.returning.is_some()),
+        Statement::Merge(merge) => Some(merge.output.is_some()),
+        _ => None,
+    }
+}
+
+/// `WITH cte AS (...) UPDATE ...` parses as a query whose body is the wrapped
+/// DML statement; returns that statement so its `RETURNING` clause can decide.
+fn postgres_query_body_dml(body: &SetExpr) -> Option<&Statement> {
+    match body {
+        SetExpr::Insert(statement)
+        | SetExpr::Update(statement)
+        | SetExpr::Delete(statement)
+        | SetExpr::Merge(statement) => Some(statement),
+        _ => None,
+    }
+}
+
 /// Returns whether PostgreSQL should execute this statement through the row
 /// retrieval path. DML without `RETURNING` needs `execute` for its command
 /// tag/affected-row count, while DML with `RETURNING` produces a result set.
 pub(crate) fn postgres_statement_returns_rows(sql: &str) -> bool {
-    if starts_with_executable_sql_keyword(sql, &["SELECT", "SHOW", "EXPLAIN", "WITH", "TABLE"]) {
+    if starts_with_executable_sql_keyword(sql, &["SELECT", "SHOW", "EXPLAIN", "TABLE"]) {
         return true;
     }
 
+    // A leading `WITH` is usually a CTE query, but PostgreSQL also allows a CTE
+    // to be followed directly by INSERT/UPDATE/DELETE/MERGE, which only returns
+    // rows with `RETURNING`. The prefix alone cannot decide, so parse it and
+    // keep the row-returning assumption whenever parsing does not say otherwise.
+    let leads_with_cte = starts_with_executable_sql_keyword(sql, &["WITH"]);
+
     let Ok(statements) = Parser::parse_sql(&PostgreSqlDialect {}, sql) else {
-        return false;
+        return leads_with_cte;
     };
     let [statement] = statements.as_slice() else {
-        return false;
+        return leads_with_cte;
     };
 
+    if let Some(returns_rows) = postgres_dml_statement_returns_rows(statement) {
+        return returns_rows;
+    }
+
     match statement {
-        Statement::Insert(insert) => insert.returning.is_some(),
-        Statement::Update(update) => update.returning.is_some(),
-        Statement::Delete(delete) => delete.returning.is_some(),
-        Statement::Merge(merge) => merge.output.is_some(),
-        _ => false,
+        Statement::Query(query) => {
+            postgres_query_body_dml(&query.body).and_then(postgres_dml_statement_returns_rows).unwrap_or(true)
+        }
+        _ => leads_with_cte,
     }
 }
 
@@ -8492,6 +8525,47 @@ mod tests {
             "DELETE FROM users WHERE id = 1",
             "MERGE INTO users AS target USING updates AS source ON target.id = source.id WHEN MATCHED THEN UPDATE SET name = source.name",
             "INSERT INTO users (note) VALUES ('RETURNING is text')",
+        ] {
+            assert!(!postgres_statement_returns_rows(sql), "expected command result for: {sql}");
+        }
+    }
+
+    #[test]
+    fn cte_wrapped_dml_parses_as_query_body() {
+        let statements = Parser::parse_sql(
+            &PostgreSqlDialect {},
+            "WITH cte AS (SELECT id FROM t) UPDATE t SET x = 1 WHERE id IN (SELECT id FROM cte)",
+        )
+        .expect("CTE-wrapped UPDATE should parse");
+        let [Statement::Query(query)] = statements.as_slice() else {
+            panic!("expected a single Statement::Query, got: {statements:?}");
+        };
+        assert!(query.with.is_some(), "expected the CTE to be attached to the query");
+        assert!(
+            matches!(postgres_query_body_dml(&query.body), Some(Statement::Update(_))),
+            "expected an UPDATE body, got: {:?}",
+            query.body
+        );
+    }
+
+    #[test]
+    fn postgres_statement_returns_rows_for_cte_wrapped_dml() {
+        for sql in [
+            "WITH cte AS (SELECT id FROM t) SELECT * FROM cte",
+            "WITH cte AS (SELECT id FROM t) UPDATE t SET x = 1 WHERE id IN (SELECT id FROM cte) RETURNING id",
+            "WITH cte AS (SELECT id FROM t) DELETE FROM t WHERE id IN (SELECT id FROM cte) RETURNING id",
+            "WITH cte AS (SELECT id FROM t) INSERT INTO u (id) SELECT id FROM cte RETURNING id",
+            // Not parseable by sqlparser: keep assuming a CTE query returns rows.
+            "WITH RECURSIVE cte AS MATERIALIZED (SELECT 1) SELECT * FROM cte",
+        ] {
+            assert!(postgres_statement_returns_rows(sql), "expected result rows for: {sql}");
+        }
+
+        for sql in [
+            "WITH cte AS (SELECT id FROM t) UPDATE t SET x = 1 WHERE id IN (SELECT id FROM cte)",
+            "WITH cte AS (SELECT id FROM t) DELETE FROM t WHERE id IN (SELECT id FROM cte)",
+            "WITH cte AS (SELECT id FROM t) INSERT INTO u (id) SELECT id FROM cte",
+            "  with cte as (select id from t)\n  update t set x = 1 where id in (select id from cte)  ",
         ] {
             assert!(!postgres_statement_returns_rows(sql), "expected command result for: {sql}");
         }

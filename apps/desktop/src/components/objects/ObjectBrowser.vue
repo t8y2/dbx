@@ -111,6 +111,7 @@ import MySqlEventEditor from "@/components/objects/MySqlEventEditor.vue";
 import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { isCancelSearchShortcut } from "@/lib/editor/keyboardShortcuts";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
+import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { buildXuguCompileSql } from "@/lib/database/xuguCompileSql";
 import { formatShortcut } from "@/lib/editor/shortcutRegistry";
 import { batchTableEmptyFeedback, buildBatchTableEmptyPlan, runBatchTableEmpty, type BatchTableEmptyPlanItem } from "@/lib/sidebar/batchTableEmpty";
@@ -335,7 +336,7 @@ const canOpenStructureEditor = computed(() => supportsTableStructureEditing(tabl
 const canOpenDiagram = computed(() => !!props.database && supportsSchemaDiagram(effectiveDatabaseType.value));
 const canOpenTableImport = computed(() => !!props.database && supportsTableImport(effectiveDatabaseType.value));
 const supportsTruncateTable = computed(() => supportsTableTruncate(effectiveDatabaseType.value));
-const supportsVacuumTable = computed(() => !props.connection.read_only && supportsTableVacuum(effectiveDatabaseType.value));
+const supportsVacuumTable = computed(() => !connectionIsEffectivelyReadOnly(props.connection) && supportsTableVacuum(effectiveDatabaseType.value));
 const vacuumRiskMessage = computed(() => (vacuumExecuting.value ? t("contextMenu.vacuumTableRunningHint") : vacuumTableFull.value ? t("contextMenu.vacuumTableFullRisk") : vacuumTableAnalyze.value ? t("contextMenu.vacuumTableAnalyzeRisk") : t("contextMenu.vacuumTableDefaultRisk")));
 const sourceDialect = computed(() => codeMirrorSqlDialect(effectiveDatabaseType.value));
 const sourceFormatDialect = computed<SqlFormatDialect>(() => sqlFormatDialectForDbType(effectiveDatabaseType.value));
@@ -2212,7 +2213,7 @@ function canTransferTableClipboard(): boolean {
   if (isVictoriaMetrics.value) return false;
   const entries = normalizedObjectBrowserTableClipboardEntries();
   const target = pasteTableTargetContext();
-  if (entries.length === 0 || props.connection.read_only) return false;
+  if (entries.length === 0 || connectionIsEffectivelyReadOnly(props.connection)) return false;
   const source = tableClipboardSourceContext(entries);
   const sourceConfig = source ? connectionStore.getConfig(source.connectionId) : undefined;
   return !!source && !!sourceConfig && supportsTransfer(sourceConfig.db_type) && supportsTransfer(props.connection.db_type) && !tableClipboardMatchesTarget(entries, target);

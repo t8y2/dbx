@@ -2210,7 +2210,9 @@ function skipSqlWhitespaceAndComments(sql: string, pos: number): number {
 export function getSqlCompletionContext(sql: string, cursor: number, options: SqlSemanticBuildOptions = {}): SqlCompletionContext {
   const statementSpan = sqlCompletionStatementSpan(sql, cursor, options);
   // Extract the full statement at cursor position for referenced tables
-  const fullStatement = sql.slice(statementSpan.start, statementSpan.end).trim();
+  const rawStatement = sql.slice(statementSpan.start, statementSpan.end);
+  const fullStatement = rawStatement.trim();
+  const cursorInStatement = cursor - statementSpan.start - (rawStatement.length - rawStatement.trimStart().length);
 
   // Content before cursor within the current statement
   const beforeCursor = sql.slice(statementSpan.start, cursor);
@@ -2223,10 +2225,10 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
   const beforeToken = beforeCursor.slice(0, Math.max(0, bareStart)).trimEnd();
   const lastWord = /([A-Za-z_][\w$]*)$/.exec(beforeToken)?.[1]?.toLowerCase() ?? "";
 
-  let referencedTables = extractReferencedTables(fullStatement, options.databaseType);
-
-  // Merge CTE definitions into referenced tables
-  const cteDefs = extractCteDefinitions(fullStatement);
+  // CTE bodies are their own scope: resolve them first so the outer query's
+  // referenced tables are read from a statement with those bodies blanked out.
+  const cteDefs = scanCteDefinitions(fullStatement);
+  let referencedTables = extractReferencedTables(maskResolvedCteBodies(fullStatement, cursorInStatement, cteDefs), options.databaseType);
   for (const cte of cteDefs) {
     if (!referencedTables.some((rt) => rt.name.toLowerCase() === cte.name.toLowerCase())) {
       referencedTables.push({ name: cte.name, columns: cte.columns });
@@ -3287,8 +3289,21 @@ function extractSelectColumnNames(sql: string): string[] {
   return names;
 }
 
-export function extractCteDefinitions(sql: string): Array<{ name: string; columns: string[] }> {
-  const ctes: Array<{ name: string; columns: string[] }> = [];
+interface ScannedCteDefinition {
+  name: string;
+  columns: string[];
+  /** Index of the `(` opening the CTE body. */
+  bodyStart: number;
+  /** Index of the `)` closing the CTE body. */
+  bodyEnd: number;
+}
+
+/**
+ * Scans `WITH` definitions, keeping each body's span so callers can tell which
+ * part of the statement belongs to a CTE rather than to the outer query.
+ */
+function scanCteDefinitions(sql: string): ScannedCteDefinition[] {
+  const ctes: ScannedCteDefinition[] = [];
   let lower = sql.toLowerCase();
   const withMatch = /\bwith\b/.exec(lower);
   if (!withMatch) return ctes;
@@ -3347,11 +3362,39 @@ export function extractCteDefinitions(sql: string): Array<{ name: string; column
       columns = extractSelectColumnNames(body);
     }
 
-    ctes.push({ name: cteName, columns });
+    ctes.push({ name: cteName, columns, bodyStart: pos, bodyEnd });
     pos = bodyEnd + 1;
   }
 
   return ctes;
+}
+
+export function extractCteDefinitions(sql: string): Array<{ name: string; columns: string[] }> {
+  return scanCteDefinitions(sql).map(({ name, columns }) => ({ name, columns }));
+}
+
+/**
+ * Blanks out CTE bodies whose projected columns are already known, so the outer
+ * query's referenced tables stay scoped to its own row sources. Without this the
+ * tables read inside a CTE (`WITH cte AS (SELECT id, name FROM t) SELECT na|`)
+ * would count as extra outer row sources and force every column suggestion to be
+ * qualified, hiding the bare `name` candidate the CTE actually provides.
+ *
+ * The body holding the cursor is never blanked -- completion inside a CTE body
+ * still needs that body's own tables -- and neither is a body whose columns could
+ * not be resolved (e.g. `SELECT *`), where the underlying table remains the only
+ * source of column names.
+ */
+function maskResolvedCteBodies(statement: string, cursorOffset: number, ctes: readonly ScannedCteDefinition[]): string {
+  let masked = statement;
+  for (const cte of ctes) {
+    if (cte.columns.length === 0) continue;
+    if (cursorOffset > cte.bodyStart && cursorOffset <= cte.bodyEnd) continue;
+    const bodyLength = cte.bodyEnd - cte.bodyStart - 1;
+    if (bodyLength <= 0) continue;
+    masked = `${masked.slice(0, cte.bodyStart + 1)}${" ".repeat(bodyLength)}${masked.slice(cte.bodyEnd)}`;
+  }
+  return masked;
 }
 
 function extractSubqueryReferences(sql: string): SqlCompletionReferencedTable[] {

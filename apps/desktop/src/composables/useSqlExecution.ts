@@ -19,6 +19,7 @@ import { extractSqlParameterDescriptors, type SqlParameterDescriptor, type SqlPa
 import { expandSqlVariables } from "@/lib/sql/sqlVariables";
 import { enabledSqlParameterSyntaxes, resolveSqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
 import { assessProductionSql } from "@/lib/database/productionSafety";
+import { ensureReadOnlyWriteAccess } from "@/lib/database/readOnlyWriteAccess";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import type { SqlExecutionDangerRequest } from "@/stores/sqlExecutionDangerStore";
 import type { ConnectionConfig, DatabaseType, QueryTab } from "@/types/database";
@@ -176,6 +177,7 @@ export function useSqlExecution(deps: {
   }
 
   async function continueExecute(sql: string, sourceOffset?: number, options: SqlExecutionOptions = {}) {
+    if (!(await ensureReadOnlyWriteAccess({ connection: deps.activeConnection.value, sql, source: t("production.sourceSqlEditor") }))) return;
     // Redis: block dangerous commands when toggle is on (scan entire batch for highest safety level)
     if (deps.activeConnection.value?.db_type === "redis" && deps.blockDangerousRedisCommands?.value !== false) {
       const commands = sql
@@ -358,6 +360,9 @@ export function useSqlExecution(deps: {
     const tabCancelRequested = (count: number) => (tab.cancelRequestCount ?? 0) !== count;
     if (cancelRequested()) return finish({ status: "cancelled" });
     if (!sql.trim()) return finish({ status: "failed", errorMessage: t("explain.emptySql") });
+    if (!(await ensureReadOnlyWriteAccess({ connection, sql, source: t("production.sourceMultiDbSql") }))) {
+      return finish({ status: "skipped", errorMessage: t("dangerDialog.cancel") });
+    }
     if (requiresDatabaseSelection(executionTab, connection, sql)) {
       return finish({ status: "failed", errorMessage: t("editor.selectDatabaseRequired") });
     }
@@ -544,6 +549,7 @@ export function useSqlExecution(deps: {
       settingsStore.updateEditorSettings({ confirmDangerousSqlExecution: false });
     }
     suppressDangerConfirm.value = false;
+    if (!(await ensureReadOnlyWriteAccess({ connection: deps.activeConnection.value, sql, source: t("production.sourceSqlEditor") }))) return;
     await doExecute(sql, sourceOffset, { openInNewResultTab, editorViewportRequestId });
   }
 

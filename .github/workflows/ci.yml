@@ -71,6 +71,13 @@ jobs:
             echo "SCCACHE_S3_USE_SSL=true"
             echo "AWS_ACCESS_KEY_ID=${CACHE_ACCESS_KEY_ID}"
             echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
+            # Keep the server alive through post-compile test/lint phases so
+            # "Show sccache stats" reflects the real counters.
+            echo "SCCACHE_IDLE_TIMEOUT=0"
+            # Also cache the C/C++ compilation of -sys crates. These jobs are
+            # native Linux builds, so plain CC/CXX select the target compiler.
+            echo "CC=${SCCACHE_PATH} cc"
+            echo "CXX=${SCCACHE_PATH} c++"
           } >> "$GITHUB_ENV"
 
       - name: Rust cache
@@ -378,6 +385,13 @@ jobs:
             echo "SCCACHE_S3_USE_SSL=true"
             echo "AWS_ACCESS_KEY_ID=${CACHE_ACCESS_KEY_ID}"
             echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
+            # Keep the server alive through post-compile test/lint phases so
+            # "Show sccache stats" reflects the real counters.
+            echo "SCCACHE_IDLE_TIMEOUT=0"
+            # Also cache the C/C++ compilation of -sys crates. These jobs are
+            # native Linux builds, so plain CC/CXX select the target compiler.
+            echo "CC=${SCCACHE_PATH} cc"
+            echo "CXX=${SCCACHE_PATH} c++"
           } >> "$GITHUB_ENV"
 
       - name: Rust cache
@@ -455,6 +469,13 @@ jobs:
             echo "SCCACHE_S3_USE_SSL=true"
             echo "AWS_ACCESS_KEY_ID=${CACHE_ACCESS_KEY_ID}"
             echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
+            # Keep the server alive through post-compile test/lint phases so
+            # "Show sccache stats" reflects the real counters.
+            echo "SCCACHE_IDLE_TIMEOUT=0"
+            # Also cache the C/C++ compilation of -sys crates. These jobs are
+            # native Linux builds, so plain CC/CXX select the target compiler.
+            echo "CC=${SCCACHE_PATH} cc"
+            echo "CXX=${SCCACHE_PATH} c++"
           } >> "$GITHUB_ENV"
 
       - name: Rust cache

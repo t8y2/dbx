@@ -66,6 +66,19 @@ describe("AppTabBar locate-in-sidebar action", () => {
   });
 });
 
+describe("AppTabBar Zen mode interaction", () => {
+  it("switches Zen mode for data tabs while preserving query-tab renaming", () => {
+    const handler = sourceBetween("function handleTabDoubleClick", "function handleTabMouseDown");
+
+    expect(tabBarSource).toContain('"toggle-zen-mode": [];');
+    expect(handler).toContain('if (tab.mode === "data") {');
+    expect(handler).toContain('emit("toggle-zen-mode");');
+    expect(handler).toContain("startRenameTab(tab);");
+    expect(handler).toContain("event.target instanceof Element && event.target.closest(\"button, input, [role='button']\")");
+    expect(tabBarSource.match(/@dblclick="handleTabDoubleClick\(tab, \$event\)"/g)).toHaveLength(2);
+  });
+});
+
 describe("AppTabBar right-side close action", () => {
   it("places the action after close-other and disables it when the target has no tabs to its right", () => {
     expect(tabBarSource).toContain('label: t("contextMenu.closeRightTabs")');

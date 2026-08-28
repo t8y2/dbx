@@ -21,6 +21,7 @@ import type {
   ColumnInfo,
   SqlServerColumnMetadata,
   IndexInfo,
+  ReferenceKeyInfo,
   ForeignKeyInfo,
   TriggerInfo,
   ConstraintInfo,
@@ -396,6 +397,20 @@ export async function saveConnectionDatabaseInfo(connectionId: string, databaseI
     connectionId,
     databaseInfo,
   });
+}
+
+export async function unlockConnectionWrites(connectionId: string, durationSecs: number): Promise<number> {
+  const state = await post<{ remainingMs: number }>("/api/connection/write-unlock", { connectionId, durationSecs });
+  return state.remainingMs;
+}
+
+export async function lockConnectionWrites(connectionId: string): Promise<void> {
+  return post("/api/connection/write-unlock/lock", { connectionId });
+}
+
+export async function connectionWriteUnlockState(connectionId: string): Promise<number> {
+  const state = await post<{ remainingMs: number }>("/api/connection/write-unlock/state", { connectionId });
+  return state.remainingMs;
 }
 
 export async function connectionFinalProxyPort(config: ConnectionConfig): Promise<number> {
@@ -832,8 +847,8 @@ export async function getTableComment(_connectionId: string, _database: string, 
   throw new Error("Table comment lookup is not available in the web backend");
 }
 
-export async function getMysqlTableAutoIncrement(_connectionId: string, _database: string, _table: string): Promise<string | null> {
-  throw new Error("MySQL AUTO_INCREMENT metadata is not available in the web backend");
+export async function getMysqlTableAutoIncrement(connectionId: string, database: string, table: string): Promise<string | null> {
+  return get(`/api/schema/mysql/auto-increment?${qs({ connection_id: connectionId, database, table })}`);
 }
 
 export async function listObjects(connectionId: string, database: string, schema: string, objectTypes?: (SidebarObjectKind | "EVENT")[], filter?: string, limit?: number, offset?: number, catalog?: string, tableNameFilter?: TableNameFilter): Promise<ObjectInfo[]> {
@@ -904,6 +919,10 @@ export async function listIndexes(connectionId: string, database: string, schema
 
 export async function listReferenceKeyColumns(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<string[]> {
   return get(`/api/schema/reference-key-columns?${qs({ connection_id: connectionId, database, schema, table, catalog })}`);
+}
+
+export async function listReferenceKeys(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<ReferenceKeyInfo[]> {
+  return get(`/api/schema/reference-keys?${qs({ connection_id: connectionId, database, schema, table, catalog })}`);
 }
 
 export async function listForeignKeys(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<ForeignKeyInfo[]> {

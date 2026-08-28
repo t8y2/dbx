@@ -55,7 +55,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { useTheme } from "@/composables/useTheme";
 import CodeSnapshotDialog from "@/components/codeSnapshot/CodeSnapshotDialog.vue";
 import type { CodeSnapshotSource } from "@/lib/codeSnapshot/codeSnapshot";
-import { useSettingsStore, AI_PROVIDER_PRESETS, normalizeAiConfig } from "@/stores/settingsStore";
+import { useSettingsStore, AI_PROVIDER_PRESETS, aiProviderLabel, normalizeAiConfig } from "@/stores/settingsStore";
 import AiProviderLogo from "@/components/icons/AiProviderLogo.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
@@ -725,7 +725,7 @@ function getModelsForConfig(configId: string) {
 }
 
 function configMatchesModelQuery(config: AiConfigItem, query: string): boolean {
-  return config.name.toLowerCase().includes(query) || config.provider.toLowerCase().includes(query) || AI_PROVIDER_PRESETS[config.provider].label.toLowerCase().includes(query);
+  return config.name.toLowerCase().includes(query) || config.provider.toLowerCase().includes(query) || aiProviderLabel(config.provider, t).toLowerCase().includes(query) || AI_PROVIDER_PRESETS[config.provider].label.toLowerCase().includes(query);
 }
 
 function getConfigModelOptions(config: AiConfigItem) {
@@ -5001,12 +5001,7 @@ async function openExternalUrl(url: string) {
               <Popover v-model:open="providerSelectorOpen">
                 <PopoverTrigger as-child>
                   <button type="button" class="min-w-0 flex shrink items-center gap-1.5 max-w-[220px] rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground">
-                    <AiProviderLogo
-                      :provider="activeFullConfig?.provider ?? 'claude'"
-                      :label="AI_PROVIDER_PRESETS[activeFullConfig?.provider ?? 'claude']?.label ?? activeFullConfig?.provider ?? 'claude'"
-                      :icon-slug="AI_PROVIDER_PRESETS[activeFullConfig?.provider ?? 'claude']?.iconSlug"
-                      class="h-3 w-3 shrink-0"
-                    />
+                    <AiProviderLogo :provider="activeFullConfig?.provider ?? 'claude'" :label="aiProviderLabel(activeFullConfig?.provider ?? 'claude', t)" :icon-slug="AI_PROVIDER_PRESETS[activeFullConfig?.provider ?? 'claude']?.iconSlug" class="h-3 w-3 shrink-0" />
                     <span class="min-w-0 truncate">{{ activeFullConfig?.model || t("ai.selectModel") }}</span>
                     <svg class="h-3 w-3 shrink-0 opacity-60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6" /></svg>
                   </button>

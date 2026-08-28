@@ -717,7 +717,10 @@ pub fn build_create_schema_sql(options: SchemaNameSqlOptions) -> Result<String, 
 
 pub fn build_drop_schema_sql(options: SchemaNameSqlOptions) -> String {
     let schema = quote_table_identifier(options.database_type, &options.name);
-    if matches!(
+    if options.database_type == Some(DatabaseType::OceanbaseOracle) {
+        // OceanBase Oracle mode models schemas as users, so dropping one drops the user.
+        format!("DROP USER {schema} CASCADE;")
+    } else if matches!(
         options.database_type,
         Some(DatabaseType::Postgres | DatabaseType::Gaussdb | DatabaseType::Kwdb | DatabaseType::Dameng)
     ) {
@@ -1894,6 +1897,34 @@ mod tests {
                 name: "analytics".to_string(),
             }),
             "DROP SCHEMA \"analytics\" CASCADE;"
+        );
+        assert_eq!(
+            build_drop_schema_sql(SchemaNameSqlOptions {
+                database_type: Some(DatabaseType::Postgres),
+                name: "analytics".to_string(),
+            }),
+            "DROP SCHEMA \"analytics\" CASCADE;"
+        );
+        assert_eq!(
+            build_drop_schema_sql(SchemaNameSqlOptions {
+                database_type: Some(DatabaseType::Mysql),
+                name: "analytics".to_string(),
+            }),
+            "DROP SCHEMA `analytics`;"
+        );
+        assert_eq!(
+            build_drop_schema_sql(SchemaNameSqlOptions {
+                database_type: Some(DatabaseType::OceanbaseOracle),
+                name: "analytics".to_string(),
+            }),
+            "DROP USER \"analytics\" CASCADE;"
+        );
+        assert_eq!(
+            build_drop_schema_sql(SchemaNameSqlOptions {
+                database_type: Some(DatabaseType::OceanbaseOracle),
+                name: "ana\"lytics".to_string(),
+            }),
+            "DROP USER \"ana\"\"lytics\" CASCADE;"
         );
     }
 

@@ -1567,6 +1567,16 @@ async function locateTabInSidebar(tab: QueryTab | undefined | null, align: Sideb
     }
   }
 
+  // Connection groups never register loaded tree children, so the guard above
+  // skips them and a collapsed group keeps the target out of the visible flat
+  // tree. Reopen them through the layout op so the expansion is persisted and
+  // survives the next layout rebuild; flipping isExpanded directly would be
+  // reverted by that rebuild (issue #7387).
+  const collapsedGroupIds = nodePath.filter((node) => node.type === "connection-group" && !node.isExpanded).map((node) => node.id);
+  if (collapsedGroupIds.length > 0) {
+    store.expandConnectionGroups(collapsedGroupIds);
+  }
+
   await nextTick();
 
   const match = target ? findSidebarNodeForTarget(target, flatNodes.value) : null;

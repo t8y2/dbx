@@ -45,6 +45,7 @@ vi.mock("@lucide/vue", async () => {
     ListChevronsUpDown: Icon,
     Loader2: Icon,
     Maximize2: Icon,
+    Pencil: Icon,
     Plus: Icon,
     RefreshCw: Icon,
     Save: Icon,
@@ -277,7 +278,7 @@ function draft(autoIncrement = false, counter?: { value?: string; originalValue?
   };
 }
 
-async function mountEditor(autoIncrement = false, counter?: { value?: string; originalValue?: string }) {
+async function mountEditor(autoIncrement = false, counter?: { value?: string; originalValue?: string }, draftOverride?: ReturnType<typeof draft>) {
   mocks.ensureConnected.mockResolvedValue(undefined);
   mocks.listDataTypes.mockResolvedValue([]);
   mocks.buildTableStructureChangeSql.mockResolvedValue({ statements: [], warnings: [] });
@@ -289,7 +290,7 @@ async function mountEditor(autoIncrement = false, counter?: { value?: string; or
     database: "test",
     schema: "test",
     tableName: "users",
-    draft: draft(autoIncrement, counter),
+    draft: draftOverride ?? draft(autoIncrement, counter),
   });
   mountedApps.push(app);
   mountedEditor = app.mount(root) as unknown as { applyChanges: () => Promise<boolean> };
@@ -357,6 +358,59 @@ describe("TableStructureEditor MySQL AUTO_INCREMENT counter", () => {
     const input = root.querySelector<HTMLInputElement>("[data-mysql-auto-increment-counter]");
     expect(input?.value).toBe("10");
     expect(input?.disabled).toBe(false);
+    expect(input?.classList.contains("structure-grid-control")).toBe(false);
+    expect(input?.classList.contains("font-mono")).toBe(true);
+    expect(input?.closest("td")).not.toBeNull();
+    expect(root.querySelector("[data-mysql-auto-increment-editor-trigger]")?.getAttribute("title")).toContain("structureEditor.editMysqlAutoIncrementValue");
+  });
+
+  it("loads an editable blank counter when auto-increment is checked before saving", async () => {
+    mocks.getMysqlTableAutoIncrement.mockResolvedValueOnce(null);
+    const root = await mountEditor(false);
+    expect(root.querySelector("[data-mysql-auto-increment-editor-trigger]")).toBeNull();
+
+    const autoIncrementLabel = Array.from(root.querySelectorAll("label")).find((label) => label.textContent?.includes("structureEditor.autoIncrement"));
+    const checkbox = autoIncrementLabel?.querySelector<HTMLInputElement>('input[type="checkbox"]');
+    expect(checkbox).toBeTruthy();
+    checkbox!.checked = true;
+    checkbox!.dispatchEvent(new Event("change", { bubbles: true }));
+
+    await vi.waitFor(() => expect(mocks.getMysqlTableAutoIncrement).toHaveBeenCalledWith("structure-charset-test", "test", "users"));
+    const input = root.querySelector<HTMLInputElement>("[data-mysql-auto-increment-counter]");
+    await vi.waitFor(() => expect(input?.disabled).toBe(false));
+    expect(input?.value).toBe("");
+  });
+
+  it("keeps a restored dirty blank-counter draft when the server has no counter", async () => {
+    mocks.getMysqlTableAutoIncrement.mockResolvedValueOnce(null);
+    const restoredDraft = draft(false, { value: "500", originalValue: "" });
+    restoredDraft.columns[0].extra.autoIncrement = true;
+    const root = await mountEditor(false, undefined, restoredDraft);
+
+    const input = root.querySelector<HTMLInputElement>("[data-mysql-auto-increment-counter]");
+    await vi.waitFor(() => expect(input?.value).toBe("500"));
+  });
+
+  it("accepts unsigned bigint digits and rejects non-decimal input without rewriting it", async () => {
+    const root = await mountEditor(true);
+    const input = root.querySelector<HTMLInputElement>("[data-mysql-auto-increment-counter]")!;
+    await vi.waitFor(() => expect(input.value).toBe("10"));
+    expect(input.getAttribute("inputmode")).toBe("numeric");
+    expect(input.getAttribute("pattern")).toBe("[0-9]*");
+
+    const maxUnsignedBigint = "18446744073709551615";
+    input.value = maxUnsignedBigint;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.waitFor(() => expect(mocks.buildMysqlAutoIncrementSql).toHaveBeenCalledWith(expect.objectContaining({ value: maxUnsignedBigint })));
+    mocks.buildMysqlAutoIncrementSql.mockClear();
+
+    for (const invalidValue of ["abc", "-1", "+1", "1.5", "1e3"]) {
+      input.value = invalidValue;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      expect(input.value).toBe(maxUnsignedBigint);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(mocks.buildMysqlAutoIncrementSql).not.toHaveBeenCalled();
   });
 
   it("refreshes a restored clean counter draft from the server", async () => {

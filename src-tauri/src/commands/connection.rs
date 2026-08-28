@@ -2108,6 +2108,39 @@ pub async fn save_connection_database_info(
     state.save_connection_database_info(&connection_id, database_info).await
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteUnlockState {
+    pub remaining_ms: u64,
+}
+
+#[tauri::command]
+pub async fn unlock_connection_writes(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    duration_secs: u64,
+) -> Result<WriteUnlockState, String> {
+    if !state.configs.read().await.contains_key(&connection_id) {
+        return Err("Connection not found".to_string());
+    }
+    let remaining_ms = state.write_unlock_windows.unlock(&connection_id, duration_secs).await?;
+    Ok(WriteUnlockState { remaining_ms })
+}
+
+#[tauri::command]
+pub async fn lock_connection_writes(state: State<'_, Arc<AppState>>, connection_id: String) -> Result<(), String> {
+    state.write_unlock_windows.lock(&connection_id).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn connection_write_unlock_state(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+) -> Result<WriteUnlockState, String> {
+    Ok(WriteUnlockState { remaining_ms: state.write_unlock_windows.remaining_ms(&connection_id).await })
+}
+
 /// Check whether a connection has read-only protection enabled.
 /// Returns an error if the connection is read-only, preventing write operations.
 pub async fn ensure_connection_writable(

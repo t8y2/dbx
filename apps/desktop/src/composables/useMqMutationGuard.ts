@@ -2,6 +2,7 @@ import { toValue, type MaybeRefOrGetter } from "vue";
 import { useI18n } from "vue-i18n";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
+import { ensureReadOnlyWriteAccess } from "@/lib/database/readOnlyWriteAccess";
 import { useToast } from "@/composables/useToast";
 
 /**
@@ -24,8 +25,7 @@ export function useMqMutationGuard(connectionId: MaybeRefOrGetter<string>) {
       toast(t("mqAdmin.connectionMissing"));
       return false;
     }
-    if (config.read_only) {
-      toast(t("mqAdmin.writeDeniedReadOnly"));
+    if (!(await ensureReadOnlyWriteAccess({ connection: config, sql: operation, source: t("production.sourceMq"), treatAsMutation: true }))) {
       return false;
     }
     if (!config.is_production) return true;

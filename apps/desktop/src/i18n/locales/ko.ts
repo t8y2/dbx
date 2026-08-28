@@ -3047,7 +3047,7 @@ export default withEnglishFallback({
     eventLoading: "Loading...",
     eventCancel: "Cancel",
     eventSave: "Save",
-    refreshDdlOnOpen: "열 때마다 DDL 새로 고침",
+    refreshDdlOnOpen: "열 때마다 새로 고침",
     refreshDdlOnOpenHint: "켜면 열 때마다 데이터베이스에서 DDL을 다시 불러오고, 끄면 캐시된 데이터를 우선 사용합니다",
   },
   visibleDatabases: {

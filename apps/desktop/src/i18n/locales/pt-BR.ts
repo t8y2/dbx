@@ -2937,7 +2937,7 @@ export default withEnglishFallback({
     viewDdl: "Ver DDL",
     viewDdlLoading: "Carregando DDL...",
     ddlCopied: "DDL copiado",
-    refreshDdlOnOpen: "Atualizar DDL sempre que abrir",
+    refreshDdlOnOpen: "Atualizar sempre que abrir",
     refreshDdlOnOpenHint: "Quando ativado, o DDL é recarregado do banco de dados sempre que é aberto; quando desativado, os dados em cache têm prioridade",
     dropObject: "Remover Objeto",
     dropView: "Remover Visão",

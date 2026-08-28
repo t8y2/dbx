@@ -3040,7 +3040,7 @@ export default {
     viewDdl: "View DDL",
     viewDdlLoading: "Loading DDL...",
     ddlCopied: "DDL copied",
-    refreshDdlOnOpen: "Refresh DDL each time it opens",
+    refreshDdlOnOpen: "Refresh each time it opens",
     refreshDdlOnOpenHint: "When enabled, DDL is reloaded from the database each time it opens; when disabled, cached data is preferred",
     dropObject: "Drop Object",
     dropEventSuccess: 'Event "{name}" dropped',

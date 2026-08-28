@@ -4183,8 +4183,8 @@ pub async fn list_opengauss_constraints(pool: &Pool, schema: &str, table: &str) 
         let referenced_relation_oid = pg_row_try_u32(&row, 14).filter(|oid| *oid != 0);
         let ref_columns = if kind == "f" {
             if let Some(oid) = referenced_relation_oid {
-                if !referenced_attributes.contains_key(&oid) {
-                    referenced_attributes.insert(oid, opengauss_relation_attributes(&client, oid).await?);
+                if let std::collections::hash_map::Entry::Vacant(entry) = referenced_attributes.entry(oid) {
+                    entry.insert(opengauss_relation_attributes(&client, oid).await?);
                 }
                 map_opengauss_attribute_names(&ref_column_numbers, referenced_attributes.get(&oid).unwrap())
             } else {

@@ -94,6 +94,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "continueOnErrorOnBatch",
   "clickTableNavigationTarget",
   "completionTriggerMode",
+  "defaultTransactionMode",
 ] as const satisfies readonly (keyof EditorSettings)[];
 
 export type EditorSettingsDraftKey = (typeof EDITOR_SETTINGS_DRAFT_KEYS)[number];

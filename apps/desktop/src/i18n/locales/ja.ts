@@ -6205,6 +6205,11 @@ export default withEnglishFallback({
     executeModeDescription: "SQL実行ショートカット: {shortcut}。既定でSQL全体またはカーソル位置のステートメントのどちらを実行するかを設定します。",
     executeModeAll: "すべてのSQLを実行",
     executeModeCurrent: "カーソル位置の文を実行",
+    defaultTransactionMode: "既定のトランザクションコミットモード",
+    defaultTransactionModeDescription:
+      "新しい SQL エディタを開いたときに既定で使用するトランザクションモード。「手動トランザクション」を選択すると、新しいエディタは手動トランザクションモードで開始され、手動でコミットまたはロールバックします。「自動コミット」を選択すると、各ステートメントが自動的にコミットされます。トランザクションをサポートするデータベース（PostgreSQL、MySQL、Oracle、JDBC）のみに適用されます。",
+    defaultTransactionModeAuto: "自動コミット",
+    defaultTransactionModeManual: "手動トランザクション",
     executeAllOnBlankLine: "空行ではすべてのSQLを実行",
     executeAllOnBlankLineDescription: "現在の文を実行するモードで、カーソル位置に文がない場合はすべてのSQLを実行します。既定では無効です。",
     showExecutionTargetPicker: "実行対象ピッカーを表示",

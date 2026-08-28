@@ -733,6 +733,9 @@ export const useQueryStore = defineStore("query", () => {
   const t = getI18nT();
   const settingsStore = useSettingsStore();
   const tabs = ref<QueryTab[]>([]);
+  // Default auto-commit for a fresh query tab follows the user's global
+  // "默认事务提交方式" setting (Settings > Editor), not a hard-coded constant.
+  const defaultAutoCommitForDbTypeWithSetting = (dbType?: string) => defaultAutoCommitForDbType(dbType, settingsStore.editorSettings.defaultTransactionMode);
   // A stable Set of "connectionId\x00database" keys. Computed only from the
   // minimal tab identity fields so that it does NOT invalidate when other
   // properties change (isExecuting, result, sql, tableMeta...). Previously
@@ -1655,7 +1658,7 @@ export const useQueryStore = defineStore("query", () => {
     for (const tab of restored.tabs) {
       const connection = connectionStore.getConfig(tab.connectionId);
       if (tab.mode === "query" && tab.autoCommit === undefined) {
-        tab.autoCommit = defaultAutoCommitForDbType(connection?.db_type);
+        tab.autoCommit = defaultAutoCommitForDbTypeWithSetting(connection?.db_type);
       } else if (tab.mode === "data" && connection) {
         tab.schema = connectionObjectTreeNodeSchema(connection, tab.database, tab.schema);
       }
@@ -1837,7 +1840,7 @@ export const useQueryStore = defineStore("query", () => {
       isCancelling: false,
       isExplaining: false,
       mode,
-      ...(mode === "query" ? { autoCommit: defaultAutoCommitForDbType(dbType) } : {}),
+      ...(mode === "query" ? { autoCommit: defaultAutoCommitForDbTypeWithSetting(dbType) } : {}),
     };
     if (mode === "query") tab.originalSql = initialSql ?? "";
     const activeIndex = options.insertAfterActive ? tabs.value.findIndex((item) => item.id === activeTabId.value) : -1;
@@ -1931,7 +1934,7 @@ export const useQueryStore = defineStore("query", () => {
       isCancelling: false,
       isExplaining: false,
       mode: "query",
-      autoCommit: defaultAutoCommitForDbType(dbType),
+      autoCommit: defaultAutoCommitForDbTypeWithSetting(dbType),
     };
     tabs.value.push(tab);
     activeTabId.value = id;
@@ -3286,7 +3289,7 @@ export const useQueryStore = defineStore("query", () => {
     if (tab.txnSessionId) void rollbackTransaction(tab.id);
     if (options?.resetAutoCommit) {
       const dbType = useConnectionStore().getConfig(tab.connectionId)?.db_type;
-      tab.autoCommit = defaultAutoCommitForDbType(dbType);
+      tab.autoCommit = defaultAutoCommitForDbTypeWithSetting(dbType);
     }
     clearOracleTxnPossiblyDirty(tab);
     tab.txnAutoRolledBack = false;
@@ -3441,7 +3444,7 @@ export const useQueryStore = defineStore("query", () => {
       isCancelling: false,
       isExplaining: false,
       mode: "query",
-      autoCommit: defaultAutoCommitForDbType(dbType),
+      autoCommit: defaultAutoCommitForDbTypeWithSetting(dbType),
       editorSelection: restoredPosition.selection,
       editorViewport: restoredPosition.viewport,
     };
@@ -6361,7 +6364,7 @@ export const useQueryStore = defineStore("query", () => {
       isCancelling: false,
       isExplaining: false,
       mode: "query",
-      autoCommit: defaultAutoCommitForDbType(dbType),
+      autoCommit: defaultAutoCommitForDbTypeWithSetting(dbType),
     };
     if (!restoreCachedResultPayload(tab, archive.snapshot)) return undefined;
     const activeRun = tab.resultRuns?.find((run) => run.id === tab.activeResultRunId) ?? tab.resultRuns?.[0];

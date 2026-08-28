@@ -6511,6 +6511,11 @@ export default {
     executeModeDescription: "Run SQL shortcut: {shortcut}. Controls whether it executes all SQL or the statement at the cursor by default.",
     executeModeAll: "Execute all SQL",
     executeModeCurrent: "Execute statement at cursor",
+    defaultTransactionMode: "Default transaction commit mode",
+    defaultTransactionModeDescription:
+      'The transaction mode used by default when a new SQL editor is opened. With "Manual transaction", new editors start in manual transaction mode, requiring manual commit or rollback; with "Auto commit", each statement is committed automatically. Only applies to databases that support transactions (PostgreSQL, MySQL, Oracle, JDBC).',
+    defaultTransactionModeAuto: "Auto commit",
+    defaultTransactionModeManual: "Manual transaction",
     executeAllOnBlankLine: "Execute all SQL from blank lines",
     executeAllOnBlankLineDescription: "In current-statement mode, execute all SQL when there is no statement at the cursor. Disabled by default.",
     showExecutionTargetPicker: "Show execution target picker",

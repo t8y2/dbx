@@ -351,6 +351,7 @@ const editActiveDataGridTypeColorSchemeId = ref(settingsStore.editorSettings.act
 const showThemeCustomizer = ref(false);
 const showDataGridTypeColorScheme = ref(false);
 const editExecuteMode = ref(settingsStore.editorSettings.executeMode);
+const editDefaultTransactionMode = ref(settingsStore.editorSettings.defaultTransactionMode);
 const editShortcuts = ref(normalizeShortcutSettings(settingsStore.editorSettings.shortcuts));
 function translateWithExecuteShortcut(key: string): string {
   return t(key, { shortcut: formatShortcutDisplay(editShortcuts.value.executeSql) });
@@ -573,6 +574,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     customThemes: editCustomThemes.value,
     activeCustomThemeId: editActiveCustomThemeId.value,
     executeMode: editExecuteMode.value,
+    defaultTransactionMode: editDefaultTransactionMode.value,
     executeAllOnBlankLine: editExecuteAllOnBlankLine.value,
     showExecutionTargetPicker: editShowExecutionTargetPicker.value,
     showStatementRunButtons: editShowStatementRunButtons.value,
@@ -837,6 +839,7 @@ function syncEditorSettingsDraftFromStore() {
   editCustomThemes.value = [...settingsStore.editorSettings.customThemes];
   editActiveCustomThemeId.value = settingsStore.editorSettings.activeCustomThemeId;
   editExecuteMode.value = settingsStore.editorSettings.executeMode;
+  editDefaultTransactionMode.value = settingsStore.editorSettings.defaultTransactionMode;
   editExecuteAllOnBlankLine.value = settingsStore.editorSettings.executeAllOnBlankLine;
   editShowExecutionTargetPicker.value = settingsStore.editorSettings.showExecutionTargetPicker;
   editShowStatementRunButtons.value = settingsStore.editorSettings.showStatementRunButtons;
@@ -1094,6 +1097,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editFontFamily.value = DEFAULT_EDITOR_SETTINGS.fontFamily;
     editFontSize.value = DEFAULT_EDITOR_SETTINGS.fontSize;
     editExecuteMode.value = DEFAULT_EDITOR_SETTINGS.executeMode;
+    editDefaultTransactionMode.value = DEFAULT_EDITOR_SETTINGS.defaultTransactionMode;
     editExecuteAllOnBlankLine.value = DEFAULT_EDITOR_SETTINGS.executeAllOnBlankLine;
     editShowExecutionTargetPicker.value = DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker;
     editShowStatementRunButtons.value = DEFAULT_EDITOR_SETTINGS.showStatementRunButtons;
@@ -1212,6 +1216,7 @@ function resetAllDefaults() {
   editCustomThemes.value = [...DEFAULT_EDITOR_SETTINGS.customThemes];
   editActiveCustomThemeId.value = DEFAULT_EDITOR_SETTINGS.activeCustomThemeId;
   editExecuteMode.value = DEFAULT_EDITOR_SETTINGS.executeMode;
+  editDefaultTransactionMode.value = DEFAULT_EDITOR_SETTINGS.defaultTransactionMode;
   editExecuteAllOnBlankLine.value = DEFAULT_EDITOR_SETTINGS.executeAllOnBlankLine;
   editShowExecutionTargetPicker.value = DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker;
   editShowStatementRunButtons.value = DEFAULT_EDITOR_SETTINGS.showStatementRunButtons;
@@ -1427,6 +1432,10 @@ function isTableColumnTemplateLengthDisabled(row: TableColumnTemplateGridRow): b
 
 function onExecuteModeChange(v: any) {
   if (v === "all" || v === "current") editExecuteMode.value = v;
+}
+
+function onDefaultTransactionModeChange(v: any) {
+  if (v === "auto" || v === "manual") editDefaultTransactionMode.value = v;
 }
 
 function onCompletionTriggerModeChange(v: any) {
@@ -4027,6 +4036,24 @@ onUnmounted(() => {
                     <SelectContent>
                       <SelectItem value="all">{{ t("settings.executeModeAll") }}</SelectItem>
                       <SelectItem value="current">{{ t("settings.executeModeCurrent") }}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2" data-editor-default-transaction-mode>
+                  <div class="min-w-0 space-y-1">
+                    <Label for="editor-default-transaction-mode">{{ t("settings.defaultTransactionMode") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.defaultTransactionModeDescription") }}
+                    </p>
+                  </div>
+                  <Select :model-value="editDefaultTransactionMode" @update:model-value="onDefaultTransactionModeChange">
+                    <SelectTrigger id="editor-default-transaction-mode" class="h-8 w-48 shrink-0">
+                      <SelectValue :placeholder="t('settings.defaultTransactionMode')" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="auto">{{ t("settings.defaultTransactionModeAuto") }}</SelectItem>
+                      <SelectItem value="manual">{{ t("settings.defaultTransactionModeManual") }}</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>

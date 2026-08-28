@@ -106,6 +106,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "editor-theme", category: "editor", titleKey: "settings.theme", targetId: "editor" },
   { id: "editor-font-size", category: "editor", titleKey: "settings.fontSize", targetId: "editor" },
   { id: "editor-execute-mode", category: "editor", titleKey: "settings.executeMode", targetId: "editor" },
+  { id: "editor-default-transaction-mode", category: "editor", titleKey: "settings.defaultTransactionMode", descriptionKey: "settings.defaultTransactionModeDescription", targetId: "editor" },
   { id: "editor-execute-all-on-blank-line", category: "editor", titleKey: "settings.executeAllOnBlankLine", descriptionKey: "settings.executeAllOnBlankLineDescription", targetId: "editor" },
   { id: "editor-execution-target", category: "editor", titleKey: "settings.showExecutionTargetPicker", descriptionKey: "settings.showExecutionTargetPickerDescription", targetId: "editor" },
   { id: "editor-run-buttons", category: "editor", titleKey: "settings.showStatementRunButtons", descriptionKey: "settings.showStatementRunButtonsDescription", targetId: "editor" },

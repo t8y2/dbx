@@ -6179,6 +6179,11 @@ export default withEnglishFallback({
     executeModeDescription: "Scorciatoia Esegui SQL: {shortcut}. Stabilisce se eseguire tutto l'SQL o l'istruzione al cursore per impostazione predefinita.",
     executeModeAll: "Esegui tutto l'SQL",
     executeModeCurrent: "Esegui istruzione al cursore",
+    defaultTransactionMode: "Modalità di commit transazione predefinita",
+    defaultTransactionModeDescription:
+      'La modalità di transazione utilizzata per impostazione predefinita quando si apre un nuovo editor SQL. Con "Transazione manuale", i nuovi editori iniziano in modalità di transazione manuale, richiedendo commit o rollback manuale; con "Commit automatico", ogni istruzione viene committata automaticamente. Si applica solo ai database che supportano le transazioni (PostgreSQL, MySQL, Oracle, JDBC).',
+    defaultTransactionModeAuto: "Commit automatico",
+    defaultTransactionModeManual: "Transazione manuale",
     executeAllOnBlankLine: "Esegui tutto l'SQL dalle righe vuote",
     executeAllOnBlankLineDescription: "In modalità istruzione corrente, esegue tutto l'SQL quando non è presente un'istruzione al cursore. Disattivato per impostazione predefinita.",
     showExecutionTargetPicker: "Mostra selettore destinazione",

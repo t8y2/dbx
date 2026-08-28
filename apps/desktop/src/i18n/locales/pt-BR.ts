@@ -6181,6 +6181,11 @@ export default withEnglishFallback({
     executeModeDescription: "Atalho Executar SQL: {shortcut}. Controla se todo o SQL ou a instrução no cursor é executada por padrão.",
     executeModeAll: "Executar todo o SQL",
     executeModeCurrent: "Executar instrução no cursor",
+    defaultTransactionMode: "Modo de confirmação de transação padrão",
+    defaultTransactionModeDescription:
+      'O modo de transação usado por padrão ao abrir um novo editor SQL. Com "Transação manual", novos editores iniciam no modo de transação manual, exigindo confirmação ou reversão manual; com "Confirmação automática", cada instrução é confirmada automaticamente. Aplica-se apenas a bancos de dados que oferecem suporte a transações (PostgreSQL, MySQL, Oracle, JDBC).',
+    defaultTransactionModeAuto: "Confirmação automática",
+    defaultTransactionModeManual: "Transação manual",
     executeAllOnBlankLine: "Executar todo o SQL em linhas em branco",
     executeAllOnBlankLineDescription: "No modo de instrução atual, executa todo o SQL quando não há instrução no cursor. Desativado por padrão.",
     showExecutionTargetPicker: "Mostrar seletor de destino",

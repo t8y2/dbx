@@ -61,6 +61,7 @@ export type UpdateDownloadSource = "official" | "cnb";
 export type SqlSemanticDiagnosticsMode = "auto" | "enabled" | "disabled";
 export type OpenTabsRestoreMode = "all" | "pinned" | "none";
 export type AppCloseUnsavedTabsMode = "prompt" | "keep-drafts";
+export type DefaultTransactionMode = "auto" | "manual";
 
 export const DEFAULT_SIDEBAR_TABLE_PAGE_SIZE = 1000;
 export const DUCKDB_WORKER_MAX_PROCESSES_MIN = 1;
@@ -644,6 +645,7 @@ export interface EditorSettings {
   continueOnErrorOnBatch: boolean;
   clickTableNavigationTarget: ClickTableNavigationTarget;
   completionTriggerMode: SqlCompletionTriggerMode;
+  defaultTransactionMode: DefaultTransactionMode;
 }
 
 export interface ToolbarItems {
@@ -857,6 +859,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   continueOnErrorOnBatch: false,
   clickTableNavigationTarget: "data",
   completionTriggerMode: "positional",
+  defaultTransactionMode: "auto",
 };
 
 export const STORAGE_KEY = "dbx-editor-settings";
@@ -968,6 +971,10 @@ function normalizeDisconnectTabHandlingMode(value: unknown, legacyCloseTabsOnDis
 
 function normalizeClickTableNavigationTarget(value: unknown): ClickTableNavigationTarget {
   return value === "data" || value === "ddl" ? value : DEFAULT_EDITOR_SETTINGS.clickTableNavigationTarget;
+}
+
+function normalizeDefaultTransactionMode(value: unknown): DefaultTransactionMode {
+  return value === "manual" ? value : DEFAULT_EDITOR_SETTINGS.defaultTransactionMode;
 }
 
 function normalizeOpenTabsRestoreMode(value: unknown, legacyRestoreOpenTabsOnLaunch?: unknown): OpenTabsRestoreMode {
@@ -1273,6 +1280,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     continueOnErrorOnBatch: settings.continueOnErrorOnBatch === true,
     clickTableNavigationTarget: normalizeClickTableNavigationTarget(settings.clickTableNavigationTarget),
     completionTriggerMode: normalizeCompletionTriggerMode(settings.completionTriggerMode),
+    defaultTransactionMode: normalizeDefaultTransactionMode(settings.defaultTransactionMode),
   };
 }
 
@@ -1852,6 +1860,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.continueOnErrorOnBatch !== undefined) editorSettings.value.continueOnErrorOnBatch = partial.continueOnErrorOnBatch === true;
     if (partial.clickTableNavigationTarget !== undefined) editorSettings.value.clickTableNavigationTarget = normalizeClickTableNavigationTarget(partial.clickTableNavigationTarget);
     if (partial.completionTriggerMode !== undefined) editorSettings.value.completionTriggerMode = normalizeCompletionTriggerMode(partial.completionTriggerMode);
+    if (partial.defaultTransactionMode !== undefined) editorSettings.value.defaultTransactionMode = normalizeDefaultTransactionMode(partial.defaultTransactionMode);
     if (partial.flatteningMultiLineText !== undefined) editorSettings.value.flatteningMultiLineText = partial.flatteningMultiLineText;
   }
 

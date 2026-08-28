@@ -31,6 +31,8 @@ const props = withDefaults(
     dialect: "mysql" | "postgres" | "sqlserver";
     /** SQL formatter dialect. Kept separate from the syntax-highlighting dialect because several PG-compatible DBs highlight as MySQL. */
     formatDialect?: SqlFormatDialect;
+    /** Open the search panel automatically when opened from a hover shortcut. */
+    autoOpenSearch?: boolean;
   }>(),
   {},
 );
@@ -89,6 +91,11 @@ watch(
     editorRootToRestoreFocus = active instanceof HTMLElement ? active.closest(".cm-editor") : null;
     ddlContent.value = "";
     await loadDdl();
+    if (props.autoOpenSearch) {
+      await nextTick();
+      await nextTick();
+      ddlSearchPanelRef.value?.openSearch();
+    }
   },
   { immediate: true },
 );

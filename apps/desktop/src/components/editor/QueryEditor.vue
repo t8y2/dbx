@@ -2605,8 +2605,9 @@ async function ensureForeignKeysForTables(tables: Array<{ name: string; database
   }
 }
 
-function createHoverDom(title: string, detail: string, sqlContent?: string, rows: string[] = []): { dom: HTMLElement; mount?: () => void; destroy?: () => void } {
+function createHoverDom(title: string, detail: string, sqlContent?: string, rows: string[] = [], openDdlTarget?: Record<string, unknown>): { dom: HTMLElement; mount?: () => void; destroy?: () => void } {
   const dom = document.createElement("div");
+  dom.tabIndex = 0;
   dom.className = "rounded-md border bg-popover px-3 py-2 text-xs text-popover-foreground shadow-md";
 
   const heading = document.createElement("div");
@@ -2621,6 +2622,7 @@ function createHoverDom(title: string, detail: string, sqlContent?: string, rows
 
   let layoutController: ReturnType<typeof constrainSqlHoverLayout> | null = null;
   let handleCopy: ((event: ClipboardEvent) => void) | null = null;
+  let handleHoverKeydown: ((event: KeyboardEvent) => void) | null = null;
 
   if (sqlContent) {
     heading.className = "flex items-center justify-between gap-3 font-medium";
@@ -2650,6 +2652,27 @@ function createHoverDom(title: string, detail: string, sqlContent?: string, rows
       })();
     });
     heading.appendChild(copyButton);
+
+    handleHoverKeydown = (event) => {
+      if (!(event instanceof KeyboardEvent) || !(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "f" || !openDdlTarget) return;
+      event.preventDefault();
+      event.stopPropagation();
+      window.dispatchEvent(new CustomEvent("dbx-open-ddl-viewer", { detail: { ...openDdlTarget, autoOpenSearch: true } }));
+    };
+
+    if (openDdlTarget) {
+      const openButton = document.createElement("button");
+      openButton.type = "button";
+      openButton.className = "rounded border border-border/60 px-1.5 py-0.5 text-[11px] leading-none text-muted-foreground hover:bg-accent hover:text-accent-foreground";
+      openButton.textContent = t("contextMenu.viewDdl");
+      openButton.title = t("contextMenu.viewDdl");
+      openButton.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        window.dispatchEvent(new CustomEvent("dbx-open-ddl-viewer", { detail: openDdlTarget }));
+      });
+      heading.appendChild(openButton);
+    }
 
     const separator = document.createElement("div");
     separator.className = "mt-2 border-t border-border/60";
@@ -2703,6 +2726,7 @@ function createHoverDom(title: string, detail: string, sqlContent?: string, rows
         ? () => {
             layoutController?.mount();
             if (handleCopy) document.addEventListener("copy", handleCopy);
+            if (handleHoverKeydown) document.addEventListener("keydown", handleHoverKeydown, true);
           }
         : undefined,
     destroy:
@@ -2710,6 +2734,7 @@ function createHoverDom(title: string, detail: string, sqlContent?: string, rows
         ? () => {
             layoutController?.destroy();
             if (handleCopy) document.removeEventListener("copy", handleCopy);
+            if (handleHoverKeydown) document.removeEventListener("keydown", handleHoverKeydown, true);
           }
         : undefined,
   };
@@ -2835,7 +2860,7 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
       return {
         pos: range.from,
         end: range.to,
-        create: () => createHoverDom(table.name, sqlObjectHoverDetail(table), sqlContent, metadataLoadFailed ? ["[DBX] Failed to load table structure — check connection"] : undefined),
+        create: () => createHoverDom(table.name, sqlObjectHoverDetail(table), sqlContent, metadataLoadFailed ? ["[DBX] Failed to load table structure — check connection"] : undefined, { ...objectMetadataRequest }),
       };
     }
 

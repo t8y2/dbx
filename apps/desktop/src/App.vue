@@ -241,6 +241,7 @@ const settingsNavigationRequestId = ref(0);
 const settingsAiConfigDraft = ref<AiConfigDeepLinkDraft | null>(null);
 const settingsAiConfigRequestId = ref(0);
 const showQueryEditorDdlDialog = ref(false);
+const queryEditorDdlAutoSearch = ref(false);
 const showQueryEditorObjectSourceDialog = ref(false);
 const driverStoreTabOpen = ref(false);
 const driverStoreActive = ref(false);
@@ -2000,6 +2001,7 @@ async function onClickTable(table: SqlObjectNavigationTarget) {
   if (objectType) {
     // Definition navigation for views must not run the view query, which may be expensive or have side effects upstream.
     queryEditorDdlTarget.value = { ...target, objectType };
+    queryEditorDdlAutoSearch.value = false;
     showQueryEditorDdlDialog.value = true;
     return;
   }
@@ -2028,6 +2030,16 @@ function onViewTableDdl(table: SqlObjectNavigationTarget) {
   const target = tableTargetFromActiveTab(table);
   if (!target) return;
   queryEditorDdlTarget.value = { ...target, objectType: sqlObjectNavigationSourceKind(table) };
+  queryEditorDdlAutoSearch.value = false;
+  showQueryEditorDdlDialog.value = true;
+}
+
+function openDdlViewerFromHover(event: Event) {
+  if (!(event instanceof CustomEvent) || !event.detail) return;
+  const target = event.detail as typeof queryEditorDdlTarget.value;
+  if (!target?.connectionId || !target.database || !target.tableName) return;
+  queryEditorDdlTarget.value = target;
+  queryEditorDdlAutoSearch.value = Boolean((event.detail as any)?.autoOpenSearch);
   showQueryEditorDdlDialog.value = true;
 }
 
@@ -2871,6 +2883,7 @@ onMounted(async () => {
   window.addEventListener("blur", handleTabSwitcherWindowBlur);
   document.addEventListener("visibilitychange", handleTabSwitcherVisibilityChange);
   window.addEventListener("dbx-open-driver-store", openDriverStoreFromEvent);
+  window.addEventListener("dbx-open-ddl-viewer", openDdlViewerFromHover);
   window.addEventListener("dbx:activate-query-surface", activateQuerySurface);
   window.addEventListener("dbx-mcp-status-changed", handleMcpStatusChanged);
   window.addEventListener("dbx:ai-run-notify", handleAiRunNotify);
@@ -2934,6 +2947,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  window.removeEventListener("dbx-open-ddl-viewer", openDdlViewerFromHover);
   cleanupTauriListeners();
   cleanupCloseActionPromptListener();
   if (updateCheckTimer) {
@@ -3401,6 +3415,7 @@ onUnmounted(() => {
         :object-type="queryEditorDdlTarget.objectType"
         :database-type="queryEditorDdlDatabaseType"
         :dialect="queryEditorDdlDialect"
+        :auto-open-search="queryEditorDdlAutoSearch"
       />
       <QueryEditorObjectSourceDialog
         v-if="queryEditorObjectSourceTarget"

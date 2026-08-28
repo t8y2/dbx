@@ -277,6 +277,15 @@ async function initDdlEditor(content: string) {
 function scheduleDdlEditorInit() {
   void nextTick(() => {
     if (activeTab.value !== "ddl" || loading.value || ddlLoading.value) return;
+    // TabsContent may mount its panel one tick after the active tab changes.
+    // Retry once when the container ref is not available; otherwise the old
+    // editor is destroyed on tab leave and never recreated on return.
+    if (!ddlEditorContainer.value) {
+      window.setTimeout(() => {
+        if (activeTab.value === "ddl" && !loading.value && !ddlLoading.value) void initDdlEditor(ddlEditorDocument());
+      }, 0);
+      return;
+    }
     void initDdlEditor(ddlEditorDocument());
   });
 }

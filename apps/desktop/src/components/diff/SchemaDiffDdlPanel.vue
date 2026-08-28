@@ -11,7 +11,7 @@ import { buildHunks, type DiffLine } from "@/components/diff/DiffHunkBuilder";
 import { buildSchemaDiffHighlightSegments, type SchemaDiffHighlightSegment } from "@/lib/schema/schemaDiffHighlight";
 import { findSchemaDiffDdlLineNumber } from "@/lib/schema/schemaDiffDdlLocate";
 import DiffSvgConnector from "@/components/diff/DiffSvgConnector.vue";
-import { FileCode, ScrollText, Copy, Play, FileDiff } from "@lucide/vue";
+import { FileCode, ScrollText, Copy, Play, FileDiff, Search, ChevronUp, ChevronDown, X } from "@lucide/vue";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import type { SchemaDiffObject, CompatibilityWarning, DependencyGraph, PermissionDiff, MissingRollbackObject, RollbackCompleteness } from "@/lib/schema/schemaDiff";
@@ -62,6 +62,44 @@ const containerSize = ref({ width: 0, height: 0 });
 const connectorKey = ref(0);
 const focusedSourceLineNumber = ref<number | null>(null);
 const focusedTargetLineNumber = ref<number | null>(null);
+const ddlSearchQuery = ref("");
+const ddlSearchIndex = ref(0);
+
+type DdlSearchMatch = { side: "source" | "target"; lineNumber: number; hunkId: string | number };
+const ddlSearchMatches = computed<DdlSearchMatch[]>(() => {
+  const query = ddlSearchQuery.value.trim().toLocaleLowerCase();
+  if (!query) return [];
+  const matches: DdlSearchMatch[] = [];
+  for (const hunk of hunks.value) {
+    for (const line of hunk.leftLines) if (!line.isPadding && line.content.toLocaleLowerCase().includes(query)) matches.push({ side: "source", lineNumber: line.lineNumber ?? 0, hunkId: hunk.id });
+    for (const line of hunk.rightLines) if (!line.isPadding && line.content.toLocaleLowerCase().includes(query)) matches.push({ side: "target", lineNumber: line.lineNumber ?? 0, hunkId: hunk.id });
+  }
+  return matches;
+});
+const activeDdlSearchMatch = computed(() => ddlSearchMatches.value[ddlSearchIndex.value] ?? null);
+watch(ddlSearchQuery, () => {
+  ddlSearchIndex.value = 0;
+});
+
+function navigateDdlSearch(delta: number) {
+  const count = ddlSearchMatches.value.length;
+  if (!count) return;
+  ddlSearchIndex.value = (ddlSearchIndex.value + delta + count) % count;
+  const match = activeDdlSearchMatch.value;
+  if (!match) return;
+  const pane = match.side === "source" ? leftPaneRef.value : rightPaneRef.value;
+  scrollPaneToLine(pane, match.lineNumber);
+}
+
+function isDdlSearchMatch(line: DiffLine, side: "source" | "target", hunkId: string | number): boolean {
+  const query = ddlSearchQuery.value.trim().toLocaleLowerCase();
+  return !!query && !line.isPadding && line.content.toLocaleLowerCase().includes(query) && ddlSearchMatches.value.some((m) => m.side === side && m.hunkId === hunkId && m.lineNumber === line.lineNumber);
+}
+
+function isActiveDdlSearchMatch(line: DiffLine, side: "source" | "target", hunkId: string | number): boolean {
+  const match = activeDdlSearchMatch.value;
+  return !!match && match.side === side && match.hunkId === hunkId && match.lineNumber === line.lineNumber;
+}
 
 const rollbackDiffContainerRef = ref<HTMLDivElement>();
 const rollbackLeftPaneRef = ref<HTMLDivElement>();
@@ -183,6 +221,7 @@ function rollbackUpdateContainerSize() {
 }
 
 watch([() => props.selectedObject?.id, () => props.focusedObject?.id, hunks], async () => {
+  ddlSearchIndex.value = 0;
   if (props.focusedObject?.parentId) activeTab.value = "ddl";
   await nextTick();
   updateContainerSize();
@@ -332,6 +371,17 @@ function copyDeploySqlAll() {
       </button>
     </div>
 
+    <div v-if="activeTab === 'ddl'" class="flex items-center gap-1.5 px-3 py-1.5 border-b bg-background shrink-0">
+      <div class="relative min-w-0 flex-1 max-w-sm">
+        <Search class="absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+        <input v-model="ddlSearchQuery" class="h-7 w-full rounded border bg-muted/30 pl-7 pr-7 text-xs outline-none focus:border-primary/50" :placeholder="t('grid.search')" @keydown.enter.prevent="navigateDdlSearch($event.shiftKey ? -1 : 1)" />
+        <button v-if="ddlSearchQuery" type="button" class="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground" :aria-label="t('common.clear')" @click="ddlSearchQuery = ''"><X class="h-3 w-3" /></button>
+      </div>
+      <span class="w-12 text-center text-[11px] tabular-nums text-muted-foreground">{{ ddlSearchQuery ? `${ddlSearchMatches.length ? ddlSearchIndex + 1 : 0}/${ddlSearchMatches.length}` : "" }}</span>
+      <button type="button" class="h-7 w-7 rounded text-muted-foreground hover:bg-muted disabled:opacity-40" :disabled="!ddlSearchMatches.length" :aria-label="t('search.prevMatch')" @click="navigateDdlSearch(-1)"><ChevronUp class="h-3.5 w-3.5 mx-auto" /></button>
+      <button type="button" class="h-7 w-7 rounded text-muted-foreground hover:bg-muted disabled:opacity-40" :disabled="!ddlSearchMatches.length" :aria-label="t('search.nextMatch')" @click="navigateDdlSearch(1)"><ChevronDown class="h-3.5 w-3.5 mx-auto" /></button>
+    </div>
+
     <!-- DDL Compare -->
     <div v-if="activeTab === 'ddl'" class="flex-1 overflow-hidden relative">
       <!-- No object selected -->
@@ -352,7 +402,14 @@ function copyDeploySqlAll() {
                 {{ t("diff.sourceDdl") }}
               </div>
               <div v-for="hunk in hunks" :key="`left-${hunk.id}`" :data-hunk-id="hunk.id">
-                <div v-for="(line, idx) in hunk.leftLines" :key="`l-${hunk.id}-${idx}`" class="flex min-h-[1.5em]" :class="focusedLineClass(line, 'source')" :data-ddl-line-number="line.lineNumber ?? undefined" :style="{ backgroundColor: lineBackground(line) }">
+                <div
+                  v-for="(line, idx) in hunk.leftLines"
+                  :key="`l-${hunk.id}-${idx}`"
+                  class="flex min-h-[1.5em]"
+                  :class="[focusedLineClass(line, 'source'), isDdlSearchMatch(line, 'source', hunk.id) ? 'bg-amber-500/15' : '', isActiveDdlSearchMatch(line, 'source', hunk.id) ? 'outline outline-1 -outline-offset-1 outline-primary' : '']"
+                  :data-ddl-line-number="line.lineNumber ?? undefined"
+                  :style="{ backgroundColor: lineBackground(line) }"
+                >
                   <span class="text-muted-foreground w-8 text-right pr-2 select-none shrink-0">
                     {{ line.lineNumber ?? "" }}
                   </span>
@@ -376,7 +433,14 @@ function copyDeploySqlAll() {
                 {{ t("diff.targetDdl") }}
               </div>
               <div v-for="hunk in hunks" :key="`right-${hunk.id}`" :data-hunk-id="hunk.id">
-                <div v-for="(line, idx) in hunk.rightLines" :key="`r-${hunk.id}-${idx}`" class="flex min-h-[1.5em]" :class="focusedLineClass(line, 'target')" :data-ddl-line-number="line.lineNumber ?? undefined" :style="{ backgroundColor: lineBackground(line) }">
+                <div
+                  v-for="(line, idx) in hunk.rightLines"
+                  :key="`r-${hunk.id}-${idx}`"
+                  class="flex min-h-[1.5em]"
+                  :class="[focusedLineClass(line, 'target'), isDdlSearchMatch(line, 'target', hunk.id) ? 'bg-amber-500/15' : '', isActiveDdlSearchMatch(line, 'target', hunk.id) ? 'outline outline-1 -outline-offset-1 outline-primary' : '']"
+                  :data-ddl-line-number="line.lineNumber ?? undefined"
+                  :style="{ backgroundColor: lineBackground(line) }"
+                >
                   <span class="text-muted-foreground w-8 text-right pr-2 select-none shrink-0">
                     {{ line.lineNumber ?? "" }}
                   </span>

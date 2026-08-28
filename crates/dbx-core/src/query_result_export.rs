@@ -39,6 +39,8 @@ use tokio_util::sync::CancellationToken;
 const AGENT_UNBOUNDED_ROW_LIMIT: usize = i32::MAX as usize;
 const STREAMING_PAGINATION_UNSUPPORTED_ERROR: &str =
     "Streaming export is unsupported for this query. Simplify it or use a supported driver.";
+const HIGHGO_STREAMING_PAGINATION_UNSUPPORTED_ERROR: &str =
+    "HighGo cannot safely paginate this query for export. Run and export a single SELECT statement that supports LIMIT/OFFSET.";
 const AGENT_SESSION_MISSING_ERROR: &str =
     "Streaming export needs a result-set session, but this driver returned no session_id.";
 const STREAM_PROGRESS_TIME_INTERVAL: Duration = Duration::from_secs(1);
@@ -506,6 +508,21 @@ fn supports_streaming_offset_pagination(request: &QueryResultExportRequest, page
         && !first_sql.trim().eq_ignore_ascii_case(second_sql.trim())
 }
 
+fn streaming_pagination_preflight_error(
+    request: &QueryResultExportRequest,
+    page_size: usize,
+    has_keyset_plan: bool,
+    has_single_execution_bound: bool,
+) -> Option<&'static str> {
+    if has_keyset_plan || supports_streaming_offset_pagination(request, page_size) || has_single_execution_bound {
+        return None;
+    }
+    if request.database_type == DatabaseType::Highgo {
+        return Some(HIGHGO_STREAMING_PAGINATION_UNSUPPORTED_ERROR);
+    }
+    (!request.use_agent_cursor).then_some(STREAMING_PAGINATION_UNSUPPORTED_ERROR)
+}
+
 /// Enforceable in-memory row bound for a single-execution export, or `None`
 /// when the query cannot be safely streamed in one shot without an Agent
 /// cursor. Kingbase SQL Server compatibility mode TOP queries cannot be
@@ -747,12 +764,13 @@ async fn export_query_result_core_inner(
     // bound (concrete TOP count and/or the configured export row limit), then it
     // stops after the first response.
     let single_execution_bound = single_execution_page_limit(request, page_size);
-    if keyset_plan.is_none()
-        && !request.use_agent_cursor
-        && !supports_streaming_offset_pagination(request, page_size)
-        && single_execution_bound.is_none()
-    {
-        return Err(STREAMING_PAGINATION_UNSUPPORTED_ERROR.to_string());
+    if let Some(error) = streaming_pagination_preflight_error(
+        request,
+        page_size,
+        keyset_plan.is_some(),
+        single_execution_bound.is_some(),
+    ) {
+        return Err(error.to_string());
     }
 
     let mut sql_writer: Option<SqlInsertWriter> =
@@ -1915,6 +1933,32 @@ mod tests {
             auto_filter: None,
             identifier_quote: None,
         }
+    }
+
+    #[test]
+    fn highgo_unrewritable_query_export_reports_actionable_pagination_error() {
+        let mut req = request("csv", None, None);
+        req.database_type = DatabaseType::Highgo;
+        req.use_agent_cursor = true;
+        req.sql = "SELECT * FROM users; SELECT 1".to_string();
+        req.query_base_sql = req.sql.clone();
+
+        assert!(!supports_streaming_offset_pagination(&req, 100));
+        assert_eq!(
+            streaming_pagination_preflight_error(&req, 100, false, false),
+            Some(HIGHGO_STREAMING_PAGINATION_UNSUPPORTED_ERROR)
+        );
+    }
+
+    #[test]
+    fn agent_cursor_export_keeps_unrewritable_fallback_for_other_databases() {
+        let mut req = request("csv", None, None);
+        req.database_type = DatabaseType::Oracle;
+        req.use_agent_cursor = true;
+        req.sql = "SELECT * FROM users; SELECT 1".to_string();
+        req.query_base_sql = req.sql.clone();
+
+        assert_eq!(streaming_pagination_preflight_error(&req, 100, false, false), None);
     }
 
     #[test]

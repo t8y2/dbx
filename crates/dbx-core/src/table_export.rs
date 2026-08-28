@@ -505,6 +505,13 @@ enum TableExportCursorKind {
     ExternalDriver,
 }
 
+fn table_export_cursor_allowed(database_type: DatabaseType, cursor_kind: TableExportCursorKind) -> bool {
+    // HighGo's JDBC driver may materialize the complete unbounded result before
+    // startTableRead can return its first cursor page. Use the existing bounded
+    // keyset/LIMIT-OFFSET table export path instead.
+    database_type != DatabaseType::Highgo || cursor_kind != TableExportCursorKind::Agent
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum TableExportCursorSession {
     Agent(String),
@@ -652,7 +659,10 @@ async fn fetch_table_export_batch(
     }
 
     if !*table_read_attempted {
-        match table_export_cursor_kind(state, pool_key).await {
+        let cursor_kind = table_export_cursor_kind(state, pool_key)
+            .await
+            .filter(|cursor_kind| table_export_cursor_allowed(*db_type, *cursor_kind));
+        match cursor_kind {
             Some(TableExportCursorKind::Agent) => {
                 *table_read_attempted = true;
                 let sql = table_cursor_sql(request, sql_context, query_col_names, column_types, primary_keys);
@@ -2346,6 +2356,13 @@ mod tests {
     fn formats_tsv_rows_returns_empty_for_empty_rows() {
         let rows: Vec<Vec<Value>> = vec![];
         assert_eq!(format_tsv_rows(&rows), "");
+    }
+
+    #[test]
+    fn highgo_table_export_avoids_unbounded_agent_cursor() {
+        assert!(!table_export_cursor_allowed(DatabaseType::Highgo, TableExportCursorKind::Agent));
+        assert!(table_export_cursor_allowed(DatabaseType::Highgo, TableExportCursorKind::ExternalDriver));
+        assert!(table_export_cursor_allowed(DatabaseType::Oracle, TableExportCursorKind::Agent));
     }
 
     #[test]

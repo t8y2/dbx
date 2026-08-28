@@ -419,6 +419,7 @@ export default withEnglishFallback({
     clearSelection: "Cancella selezione",
     sortByDate: "Ordina per data di modifica",
     sortByFolder: "Ordina per struttura cartelle",
+    collapseAll: "Comprimi tutto",
   },
 
   connection: {

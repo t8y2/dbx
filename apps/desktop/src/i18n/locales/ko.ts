@@ -413,6 +413,7 @@ export default withEnglishFallback({
     clearSelection: "선택 해제",
     sortByDate: "수정 날짜순 정렬",
     sortByFolder: "폴더 구조순 정렬",
+    collapseAll: "모두 접기",
   },
   connection: {
     title: "새 연결",

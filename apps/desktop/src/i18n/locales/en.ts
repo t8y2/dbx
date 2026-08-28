@@ -418,6 +418,7 @@ export default {
     clearSelection: "Clear Selection",
     sortByDate: "Sort by Date Modified",
     sortByFolder: "Sort by Folder Structure",
+    collapseAll: "Collapse all",
   },
 
   connection: {

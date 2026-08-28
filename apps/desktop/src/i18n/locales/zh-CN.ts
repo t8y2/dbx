@@ -343,6 +343,7 @@ export default withEnglishFallback({
     clearSelection: "清除选择",
     sortByDate: "按修改日期排序",
     sortByFolder: "按文件夹结构排序",
+    collapseAll: "全部折叠",
   },
 
   connection: {

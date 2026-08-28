@@ -420,6 +420,7 @@ export default withEnglishFallback({
     clearSelection: "Limpar seleção",
     sortByDate: "Ordenar por data de modificação",
     sortByFolder: "Ordenar por estrutura de pastas",
+    collapseAll: "Recolher todos",
   },
 
   connection: {

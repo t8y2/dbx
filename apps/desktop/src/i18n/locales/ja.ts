@@ -420,6 +420,7 @@ export default withEnglishFallback({
     clearSelection: "選択を解除",
     sortByDate: "更新日時で並べ替え",
     sortByFolder: "フォルダ構造で並べ替え",
+    collapseAll: "すべて折りたたむ",
   },
   connection: {
     title: "新しい接続",

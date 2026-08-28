@@ -32,4 +32,18 @@ describe("SqlLibraryPanel selection contrast", () => {
     expect(panelSource).toMatch(/if \(anchorIndex === null\)[\s\S]*lastClickedItemIndex\.value = currentIndex;[\s\S]*return;/);
     expect(panelSource).not.toContain("lastClickedItemIndex.value ?? 0");
   });
+
+  it("shows a single collapse-all button and seeds a default-collapsed library", () => {
+    expect(panelSource).toContain("ChevronsDownUp,");
+    expect(panelSource).toContain("t('sqlLibrary.collapseAll')");
+    expect(panelSource).toMatch(/function collapseAllFolders\(\)[\s\S]*allFoldersTreeOrder[\s\S]*collapsedFolders\.value = new Set\(folderIds\);/);
+    expect(panelSource).toMatch(/const collapseDefaultsSeeded = ref\(false\);[\s\S]*collapsedFolders\.value = new Set\(folderIds\);/);
+    expect(panelSource).toMatch(/@click="collapseAllFolders"/);
+    expect(panelSource).toMatch(/:disabled="!hasAnyFolder\(\)"/);
+  });
+
+  it("auto-expands a search-matched branch so matched files remain visible when the library collapses by default", () => {
+    expect(panelSource).toMatch(/function isFolderExpanded\(folder: SavedSqlFolder\) \{[\s\S]*if \(searchQuery\.value && folderBranchMatchesQuery\(folder\)\) return true;[\s\S]*return !collapsedFolders\.value\.has\(folder\.id\);/);
+    expect(panelSource).toMatch(/if \(!isFolderExpanded\(folder\)\) return;/);
+  });
 });

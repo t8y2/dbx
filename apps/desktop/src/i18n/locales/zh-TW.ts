@@ -420,6 +420,7 @@ export default withEnglishFallback({
     clearSelection: "清除選取",
     sortByDate: "依修改日期排序",
     sortByFolder: "依資料夾結構排序",
+    collapseAll: "全部摺疊",
   },
 
   connection: {

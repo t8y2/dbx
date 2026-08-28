@@ -10491,6 +10491,9 @@ function clampCellDetailPanelSize(value: number, layout = cellDetailPanelLayout.
 const showTableInfo = ref(false);
 const activeTableInfoTab = ref<TableInfoTab>(settingsStore.editorSettings.tableInfoActiveTab);
 const ddlContent = ref("");
+const tableInfoColumns = ref<ColumnInfo[]>(props.tableMeta?.columns ?? []);
+const tableInfoColumnsLoading = ref(false);
+let tableInfoColumnsRequestGeneration = 0;
 const ddlPreRef = ref<HTMLPreElement | null>(null);
 const ddlSearchMatchCount = ref(0);
 const ddlSearchMatchIndex = ref(0);
@@ -10632,6 +10635,13 @@ const triggersLoaded = ref(false);
 const triggersLoading = ref(false);
 const triggersError = ref("");
 const searchQuery = ref("");
+const activeTableInfoLoading = computed(() => {
+  if (activeTableInfoTab.value === "ddl") return ddlLoading.value;
+  if (activeTableInfoTab.value === "columns") return tableInfoColumnsLoading.value;
+  if (activeTableInfoTab.value === "indexes") return indexesLoading.value;
+  if (activeTableInfoTab.value === "foreignKeys") return foreignKeysLoading.value;
+  return activeTableInfoTab.value === "triggers" && triggersLoading.value;
+});
 const cellDetailPanelLayout = computed(() => settingsStore.editorSettings.cellDetailPanelLayout);
 const cellDetailPanelIsBottom = computed(() => cellDetailPanelLayout.value === "bottom");
 
@@ -10731,7 +10741,7 @@ const tableInfoTabs = computed(() => {
       id: "columns",
       label: t("grid.tableInfoColumns"),
       icon: ListTree,
-      count: props.tableMeta?.columns.length,
+      count: tableInfoColumns.value.length,
     });
   }
   if (canShowTableIndexes.value) {
@@ -10818,6 +10828,40 @@ async function fetchDdl(force = settingsStore.editorSettings.refreshDdlOnOpen) {
     ddlContent.value = `-- Error: ${e}`;
   } finally {
     ddlLoading.value = false;
+  }
+}
+
+async function fetchTableInfoColumns() {
+  if (!props.connectionId || !props.tableMeta) return;
+  const requestGeneration = ++tableInfoColumnsRequestGeneration;
+  tableInfoColumnsLoading.value = true;
+  try {
+    const columns = await api.getColumns(props.connectionId, props.database || "", props.tableMeta.schema || props.database || "", props.tableMeta.tableName, props.tableMeta.catalog);
+    if (requestGeneration !== tableInfoColumnsRequestGeneration) return;
+    tableInfoColumns.value = columns;
+  } catch (error) {
+    if (requestGeneration !== tableInfoColumnsRequestGeneration) return;
+    toast(translateBackendError(t, error), 5000);
+  } finally {
+    if (requestGeneration === tableInfoColumnsRequestGeneration) tableInfoColumnsLoading.value = false;
+  }
+}
+
+async function refreshActiveTableInfo() {
+  if (!showTableInfo.value || !props.tableMeta) return;
+  if (canShowTableOwner.value) void fetchTableOwner(true);
+
+  if (activeTableInfoTab.value === "ddl") await fetchDdl(true);
+  else if (activeTableInfoTab.value === "columns") await fetchTableInfoColumns();
+  else if (activeTableInfoTab.value === "indexes") {
+    indexesLoaded.value = false;
+    await fetchIndexes();
+  } else if (activeTableInfoTab.value === "foreignKeys") {
+    foreignKeysLoaded.value = false;
+    await fetchForeignKeys();
+  } else if (activeTableInfoTab.value === "triggers") {
+    triggersLoaded.value = false;
+    await fetchTriggers();
   }
 }
 
@@ -10961,6 +11005,9 @@ async function fetchTriggers() {
 watch(
   () => [props.connectionId, props.database, props.tableMeta?.catalog, props.tableMeta?.schema, props.tableMeta?.tableName],
   () => {
+    tableInfoColumns.value = props.tableMeta?.columns ?? [];
+    tableInfoColumnsLoading.value = false;
+    tableInfoColumnsRequestGeneration += 1;
     tableOwner.value = null;
     tableOwnerLoading.value = false;
     tableOwnerError.value = "";
@@ -10985,6 +11032,13 @@ watch(
     }
     if (showTableInfo.value) selectTableInfoTab(activeTableInfoTab.value);
     if (showTableInfo.value) void fetchTableOwner();
+  },
+);
+
+watch(
+  () => props.tableMeta?.columns,
+  (columns) => {
+    if (!tableInfoColumnsLoading.value) tableInfoColumns.value = columns ?? [];
   },
 );
 
@@ -11431,7 +11485,7 @@ onUnmounted(() => {
   stopLoadingElapsedTimer();
 });
 
-const filteredColumns = computed(() => filterObjectBrowserTableColumns(props.tableMeta?.columns ?? [], searchQuery.value));
+const filteredColumns = computed(() => filterObjectBrowserTableColumns(tableInfoColumns.value, searchQuery.value));
 
 const filteredIndexes = computed(() => {
   if (!searchQuery.value) return indexes.value;
@@ -13550,9 +13604,6 @@ function openGridSnapshot() {
                   <Copy class="w-3 h-3" />
                   <span class="table-info-action-label">{{ t("grid.copyDdl") }}</span>
                 </Button>
-                <Button variant="ghost" size="icon" class="h-6 w-6" :disabled="ddlLoading" :title="t('structureEditor.refresh')" :aria-label="t('structureEditor.refresh')" @click="fetchDdl(true)">
-                  <RefreshCw class="h-3 w-3" :class="{ 'animate-spin': ddlLoading }" />
-                </Button>
                 <Button variant="ghost" size="icon" class="h-6 w-6" :class="{ 'bg-accent': settingsStore.editorSettings.tableDdlWordWrap }" @click="toggleDdlWrap">
                   <WrapText class="w-3 h-3" />
                 </Button>
@@ -13602,6 +13653,9 @@ function openGridSnapshot() {
                     <X class="w-3 h-3" />
                   </button>
                 </div>
+                <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :disabled="activeTableInfoLoading" :title="t('structureEditor.refresh')" :aria-label="t('structureEditor.refresh')" @click="refreshActiveTableInfo">
+                  <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': activeTableInfoLoading }" />
+                </Button>
                 <template v-if="activeTableInfoTab === 'ddl'">
                   <span class="w-9 shrink-0 text-center text-[11px] tabular-nums text-muted-foreground">
                     {{ searchQuery ? (ddlSearchMatchCount > 0 ? `${ddlSearchMatchIndex + 1}/${ddlSearchMatchCount}` : "0") : "" }}
@@ -13617,7 +13671,10 @@ function openGridSnapshot() {
             </div>
 
             <div v-if="activeTableInfoTab === 'columns'" class="flex-1 min-h-0 overflow-auto">
-              <div v-if="searchQuery && filteredColumns.length === 0" class="p-6 text-center text-xs text-muted-foreground">
+              <div v-if="tableInfoColumnsLoading" class="h-full flex items-center justify-center">
+                <Loader2 class="w-4 h-4 animate-spin text-muted-foreground" />
+              </div>
+              <div v-else-if="searchQuery && filteredColumns.length === 0" class="p-6 text-center text-xs text-muted-foreground">
                 {{ t("grid.tableInfoNoResults") }}
               </div>
               <table v-else class="w-full text-xs">

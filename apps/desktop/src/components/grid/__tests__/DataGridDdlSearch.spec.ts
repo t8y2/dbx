@@ -12,7 +12,8 @@ describe("DataGrid DDL search navigation", () => {
     expect(dataGridSource).toContain('from "@/lib/metadata/objectDdlCache"');
     expect(dataGridSource).toContain("async function fetchDdl(force = settingsStore.editorSettings.refreshDdlOnOpen)");
     expect(dataGridSource).toMatch(/loadObjectDdl\([\s\S]*?objectType: tableObjectSourceKind\(props\.tableMeta\.tableType\),[\s\S]*?\{ force \},/);
-    expect(dataGridSource).toContain('@click="fetchDdl(true)"');
+    expect(dataGridSource).toMatch(/async function refreshActiveTableInfo\(\)[\s\S]*?fetchDdl\(true\)[\s\S]*?fetchTableInfoColumns\(\)[\s\S]*?fetchIndexes\(\)[\s\S]*?fetchForeignKeys\(\)[\s\S]*?fetchTriggers\(\)/);
+    expect(dataGridSource).toContain('@click="refreshActiveTableInfo"');
     expect(dataGridSource).not.toContain("setTableInfoRefreshDdlOnOpen");
   });
 });

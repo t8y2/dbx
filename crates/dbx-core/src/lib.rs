@@ -106,6 +106,7 @@ pub mod transfer;
 pub mod two_phase_commit;
 pub mod types;
 pub mod update;
+pub mod write_unlock;
 pub mod xlsx_export;
 
 pub const R2_CDN_BASE: &str = "https://dl.dbxio.com/";

@@ -32,12 +32,14 @@ vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => mocks.sto
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
 
 import { useDialogSources } from "@/composables/useDialogSources";
+import { clearRememberedExportPassphrase, getRememberedExportPassphrase } from "@/lib/backend/exportPassphraseSession";
 
 const mountedApps: App[] = [];
 
 beforeEach(() => {
   mocks.store.connections = [];
   mocks.store.exportConnectionsToFile.mockReset().mockResolvedValue("saved");
+  clearRememberedExportPassphrase();
 });
 
 afterEach(() => {
@@ -177,5 +179,51 @@ describe("useDialogSources", () => {
     await first;
     await second;
     expect(dialogs.configExportBusy.value).toBe(false);
+  });
+
+  it("keeps the passphrase dialog open and reports an error when writing the encrypted export fails", async () => {
+    mocks.store.connections = [conn("selected")];
+    mocks.store.exportConnectionsToFile.mockRejectedValue(new Error("disk full"));
+    const dialogs = await mountDialogs();
+
+    dialogs.onExportClick();
+    dialogs.onConfigConnectionSelectConfirm(["selected"]);
+    await dialogs.onExportConfirm("passphrase");
+
+    expect(dialogs.showConfigPassphraseDialog.value).toBe(true);
+    expect(dialogs.configPassphraseError.value).toBe("Failed to export connections");
+    expect(mocks.toast).not.toHaveBeenCalled();
+    expect(getRememberedExportPassphrase()).toBe("");
+  });
+
+  it("reports an error instead of success when writing the plaintext export fails", async () => {
+    mocks.store.connections = [conn("selected")];
+    mocks.store.exportConnectionsToFile.mockRejectedValue(new Error("disk full"));
+    const dialogs = await mountDialogs();
+
+    dialogs.onExportClick();
+    dialogs.onConfigConnectionSelectConfirm(["selected"]);
+    dialogs.onRequestUnencryptedExport();
+    await dialogs.onConfigUnencryptedExportConfirm();
+
+    expect(dialogs.showConfigUnencryptedExportConfirm.value).toBe(false);
+    expect(dialogs.showConfigPassphraseDialog.value).toBe(true);
+    expect(dialogs.configPassphraseError.value).toBe("Failed to export connections");
+    expect(mocks.toast).not.toHaveBeenCalled();
+  });
+
+  it("remembers the passphrase only after the export file is actually written", async () => {
+    mocks.store.connections = [conn("selected")];
+    mocks.store.exportConnectionsToFile.mockResolvedValueOnce("cancelled").mockResolvedValueOnce("saved");
+    const dialogs = await mountDialogs();
+
+    dialogs.onExportClick();
+    dialogs.onConfigConnectionSelectConfirm(["selected"]);
+
+    await dialogs.onExportConfirm("passphrase");
+    expect(getRememberedExportPassphrase()).toBe("");
+
+    await dialogs.onExportConfirm("passphrase");
+    expect(getRememberedExportPassphrase()).toBe("passphrase");
   });
 });

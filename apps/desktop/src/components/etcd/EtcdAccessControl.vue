@@ -8,6 +8,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { Input } from "@/components/ui/input";
 import * as api from "@/lib/backend/api";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 
 type AccessView = "users" | "roles";
 type PermissionAccess = "read" | "write" | "readwrite";
@@ -52,7 +53,7 @@ const approvalExpected = ref("");
 let pendingApproval: (() => Promise<void>) | null = null;
 let detailRequest = 0;
 
-const readOnly = computed(() => Boolean(connectionStore.getConfig(props.connectionId)?.read_only));
+const readOnly = computed(() => connectionIsEffectivelyReadOnly(connectionStore.getConfig(props.connectionId)));
 const selectedUserRoles = computed(() => userDetail.value?.roles ?? []);
 const grantableRoles = computed(() => roles.value.filter((role) => !selectedUserRoles.value.includes(role)));
 const initialUserRoleLabel = computed(() => (newUserRoles.value.length ? t("etcd.access.createAndAssignRoles", { count: newUserRoles.value.length }) : t("etcd.access.createUserAction")));

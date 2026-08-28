@@ -116,6 +116,10 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     // happens to be the primary key. sql-select intentionally keeps using only
     // the selected cell via the matrix branch below.
     const hasNonSyntheticContextCell = !!options.contextCell.value && options.contextCell.value.col >= 0 && !options.contextSelectionIsSynthetic.value && !!matrix && !isMultiCellSelection;
+    // INSERT and UPDATE need the complete record to retain key columns and
+    // writable values. Other extractors should respect the actual cell range
+    // that a right-click creates, just like keyboard copy does.
+    const requiresFullRowContext = extractor === "sql-inserts" || (extractor === "sql-updates" && options.databaseType.value !== "mongodb");
 
     if (contextPredicateCell) {
       const item = fullItemsById.get(contextPredicateCell.rowId);
@@ -137,20 +141,15 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       sourceRowIds = items.map((item) => item.id);
       selectedSourceIndexes = dedupeColumnIndexes(matrix.columnIndexes.map((index) => visibleIndexes[index] ?? index)).filter((index) => index < fullColumns.length);
       if (options.hasColumnSelection.value) selectionKind = "columns";
-    } else if ((hasRightClickContext || (hasNonSyntheticContextCell && extractor !== "sql-select")) && options.contextCell.value) {
-      // A SELECT targets the clicked cell; other extractors use the full row
-      // so that right-clicking a selected PK cell still enables INSERT/UPDATE.
+    } else if (requiresFullRowContext && (hasRightClickContext || hasNonSyntheticContextCell) && options.contextCell.value) {
+      // SQL INSERT/UPDATE needs the full row so that right-clicking a selected
+      // primary-key cell still includes writable columns.
       const item = fullItemsById.get(options.contextCell.value.rowId);
       if (item && !item.isDraft) {
         sourceRows = [item.data];
         sourceRowIds = [item.id];
-        if (extractor === "sql-select") {
-          const sourceIndex = visibleIndexes[options.contextCell.value.col];
-          selectedSourceIndexes = sourceIndex === undefined ? [] : [sourceIndex];
-        } else {
-          selectedSourceIndexes = dedupeColumnIndexes(visibleIndexes).filter((index) => index < fullColumns.length);
-          selectionKind = "rows";
-        }
+        selectedSourceIndexes = dedupeColumnIndexes(visibleIndexes).filter((index) => index < fullColumns.length);
+        selectionKind = "rows";
       }
     } else if (matrix) {
       // Single-cell matrix without a context cell — still honor the explicit selection.

@@ -7,6 +7,7 @@ import { Label } from "@/components/ui/label";
 import * as api from "@/lib/backend/api";
 import type { ConsulCapabilities, ConsulOperatorDocument, ConsulOperatorReadKind } from "@/types/consul";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { useI18n } from "vue-i18n";
 
 const props = defineProps<{ connectionId: string; capabilities: ConsulCapabilities | null }>();
@@ -26,7 +27,7 @@ const settings = computed(() => {
   const external = connectionStore.getConfig(props.connectionId)?.external_config;
   return external && typeof external === "object" && !Array.isArray(external) ? (external as Record<string, unknown>) : {};
 });
-const readOnly = computed(() => Boolean(connectionStore.getConfig(props.connectionId)?.read_only));
+const readOnly = computed(() => connectionIsEffectivelyReadOnly(connectionStore.getConfig(props.connectionId)));
 const autopilotWriteVisible = computed(() => settings.value.consulOperatorAutopilotWriteEnabled && props.capabilities?.operatorAutopilot === "supported");
 const raftWriteVisible = computed(() => settings.value.consulOperatorRaftWriteEnabled && props.capabilities?.operatorRaft === "supported");
 const keyringWriteVisible = computed(() => settings.value.consulOperatorKeyringWriteEnabled && props.capabilities?.operatorKeyring === "supported");

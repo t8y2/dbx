@@ -90,7 +90,7 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         return unchecked(() -> {
             loadDriver(params);
             try (Connection conn = openTestConnection(params)) {
-                boolean valid = conn != null && conn.isValid(5);
+                boolean valid = isConnectionValid(conn, 5);
                 Map<String, Object> result = new LinkedHashMap<>();
                 result.put("ok", valid);
                 if (valid) {
@@ -273,6 +273,31 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
 
     public boolean supportsConnectionPooling() {
         return true;
+    }
+
+    final boolean isConnectionValid(Connection connection, int timeoutSecs) {
+        if (connection == null) {
+            return false;
+        }
+        try {
+            if (connection.isClosed()) {
+                return false;
+            }
+            String validationQuery = connectionValidationQuery();
+            if (validationQuery == null || validationQuery.isBlank()) {
+                return connection.isValid(timeoutSecs);
+            }
+            try (Statement statement = connection.createStatement()) {
+                try {
+                    statement.setQueryTimeout(timeoutSecs);
+                } catch (Exception | AbstractMethodError ignored) {
+                }
+                statement.execute(validationQuery);
+                return true;
+            }
+        } catch (Exception | AbstractMethodError ignored) {
+            return false;
+        }
     }
 
     final synchronized boolean usesConnectionPool() {
@@ -485,6 +510,10 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
     protected void afterDisconnect() throws Exception {
     }
 
+    protected String connectionValidationQuery() {
+        return null;
+    }
+
     protected void beforeQueryExecution(Connection connection, int timeoutSecs) throws Exception {
     }
 
@@ -586,6 +615,7 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         return registry.borrow(
             identity,
             JdbcSessionRole.from(params.getSessionRole()),
+            connectionValidationQuery(),
             () -> openInitializedConnection(params)
         );
     }

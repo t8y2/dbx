@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
+import { isDesktopVersionOnlyCargoLockChange } from "./release-lock.mjs";
 import {
   evaluateAgentVersionBump,
   getAgentVersionChanges,
@@ -410,13 +411,28 @@ function getPackageReleaseStatus() {
     };
   }
 
-  const changedFiles = getChangedFilesSince(latest.tag, PACKAGE_RELEASE_PATHS);
+  const changedFiles = getPackageChangedFilesSince(latest.tag);
   return {
     needed: changedFiles.length > 0,
     baseline: latest.tag,
     latestVersion: latest.versionText,
     changedFiles,
   };
+}
+
+function getPackageChangedFilesSince(ref) {
+  const changedFiles = getChangedFilesSince(ref, PACKAGE_RELEASE_PATHS);
+  if (!changedFiles.includes("Cargo.lock") || !isDesktopOnlyCargoLockChangeSince(ref)) {
+    return changedFiles;
+  }
+
+  return changedFiles.filter((file) => file !== "Cargo.lock");
+}
+
+function isDesktopOnlyCargoLockChangeSince(ref) {
+  const beforeLockfile = run("git", ["show", `${ref}:Cargo.lock`]).stdout;
+  const afterLockfile = readFileSync("Cargo.lock", "utf8");
+  return isDesktopVersionOnlyCargoLockChange(beforeLockfile, afterLockfile);
 }
 
 function getLatestAgentTag() {

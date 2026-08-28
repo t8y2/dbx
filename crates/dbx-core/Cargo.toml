@@ -10,6 +10,10 @@ duckdb-sidecar = []
 dynamodb = ["dep:aws-sdk-dynamodb"]
 mq-admin = ["dep:rumqttc"]
 sqlite-sqlcipher = ["rusqlite/bundled-sqlcipher-vendored-openssl"]
+sqlite-multiple-ciphers = ["dep:libsqlite3-hotbundle"]
+# Keeps bundled SQLite for consumers that enable no other sqlite source
+# (dbx-cli, dbx-mcp); do not combine with the cipher features.
+sqlite-bundled = ["rusqlite/bundled"]
 openapi = ["dep:utoipa"]
 system-fonts = ["font-kit"]
 
@@ -42,7 +46,8 @@ tokio-postgres-rustls = "0.13"
 postgres-openssl = "0.5"
 openssl = { version = "0.10", features = ["vendored"] }
 webpki-roots = "0.26"
-rusqlite = { version = "0.32", features = ["bundled", "load_extension", "backup", "functions", "column_decltype"] }
+rusqlite = { version = "0.32", default-features = false, features = ["load_extension", "backup", "functions", "column_decltype"] }
+libsqlite3-hotbundle = { git = "https://github.com/zipg/libsqlite3-hotbundle.git", rev = "7f12f203b4f4694a273410bd9b02d77f82b6114e", features = ["cipher-sqlcipher"], optional = true }
 mysql_async = { version = "0.37", default-features = false, features = ["default-rustls", "client_ed25519", "chrono", "rust_decimal"] }
 sqlparser = { version = "0.62.0", features = ["visitor"] }
 redis = { version = "0.32.2", features = ["tokio-comp", "tls-rustls", "tls-rustls-insecure", "tokio-rustls-comp", "sentinel", "cluster-async"] }
@@ -89,6 +94,9 @@ iana-time-zone = "0.1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security"] }
+
+[target.'cfg(all(unix, not(target_os = "redox")))'.dependencies]
+nix = { version = "0.31.3", features = ["user"] }
 
 [dev-dependencies]
 mysql_common = { git = "https://github.com/t8y2/rust_mysql_common.git", rev = "47740d85a8277167a5717afac785d37b46a36296", default-features = false }

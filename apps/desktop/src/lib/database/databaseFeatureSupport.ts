@@ -216,11 +216,13 @@ export function supportsObjectBrowser(dbType?: DatabaseType): boolean {
 }
 
 export function supportsConnectionDatabaseBrowser(dbType?: DatabaseType): boolean {
-  return supportsObjectBrowser(dbType);
+  // MongoDB reuses the object browser for collections, not the SQL database list.
+  return supportsObjectBrowser(dbType) && dbType !== "mongodb";
 }
 
 export function supportsObjectBrowserTreeNode(dbType: DatabaseType | undefined, nodeType: TreeNodeType): boolean {
   if (!supportsObjectBrowser(dbType)) return false;
+  if (dbType === "mongodb") return nodeType === "mongo-db";
   if (nodeType === "database" && usesDatabaseObjectTreeMode(dbType)) return true;
   if (nodeType === "database" && isSchemaAware(dbType) && dbType !== "sqlserver") return false;
   return nodeType === "database" || nodeType === "schema" || nodeType === "object-browser";

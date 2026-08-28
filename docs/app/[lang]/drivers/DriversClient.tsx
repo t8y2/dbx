@@ -417,7 +417,7 @@ export function DriversClient({ initialCatalog }: { initialCatalog: AgentDownloa
                                 className="h-8 min-w-[190px] rounded-[6px] border border-landing-line bg-black/10 px-2.5 text-xs text-landing-ink outline-none transition-colors focus:border-landing-blue max-[760px]:w-full"
                               >
                                 {group.options.map((option) => (
-                                  <option key={nativeKey(option)} value={option.platformKey} className="bg-[#10151d] text-landing-ink">
+                                  <option key={nativeKey(option)} value={option.platformKey} className="bg-[#121317] text-landing-ink">
                                     {option.platformLabel}
                                   </option>
                                 ))}

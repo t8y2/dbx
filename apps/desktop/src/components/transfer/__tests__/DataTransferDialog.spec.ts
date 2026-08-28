@@ -99,6 +99,15 @@ describe("DataTransferDialog transfer prefill", () => {
     expect(dialogSource).toContain("store.refreshObjectListTreeNode(request.targetConnectionId, request.targetDatabase, request.targetSchema, request.targetCatalog)");
   });
 
+  it("keeps default tree-schema databases selectable without leaking sentinels", () => {
+    expect(dialogSource).toContain("const sourceDatabaseName = computed(() => decodedDatabase(sourceConnectionId.value, sourceDatabase.value))");
+    expect(dialogSource).toContain("const targetDatabaseName = computed(() => decodedDatabase(targetConnectionId.value, targetDatabase.value))");
+    expect(dialogSource).toContain("sourceDatabase: sourceDatabaseName.value");
+    expect(dialogSource).toContain("targetDatabase: targetDatabaseName.value");
+    expect(dialogSource).toContain(':display-name="(option) => databaseOptionLabel(sourceConnectionId, option)"');
+    expect(dialogSource).toContain(':display-name="(option) => databaseOptionLabel(targetConnectionId, option)"');
+  });
+
   it("discards stale async results after the connection changes", () => {
     // 竞态防护：切换连接后旧请求的回调必须丢弃，不能覆盖新选择的下拉选项
     expect(dialogSource).toContain("if (isStale()) return;");

@@ -168,6 +168,30 @@ test("passes value-less blank modes through the shared context filter API", asyn
   }
 });
 
+test("passes begins-with and ends-with modes through the shared context filter API", async () => {
+  installFilterFetchMock();
+  for (const mode of ["begins-with", "ends-with"] as const) {
+    await buildDataGridContextFilterCondition({
+      databaseType: "mysql",
+      columnName: "file_name",
+      mode,
+      value: "FN",
+    });
+    assert.deepEqual(lastContextFilterOptions, {
+      databaseType: "mysql",
+      columnName: "file_name",
+      mode,
+      value: "FN",
+    });
+  }
+  assert.equal(filterModeIsSupportedForDatabase("begins-with", "mysql"), true);
+  assert.equal(filterModeIsSupportedForDatabase("ends-with", "postgres"), true);
+  assert.equal(filterModeIsSupportedForDatabase("begins-with", "cassandra"), true);
+  assert.equal(filterModeHasCompleteValue("begins-with", "FN"), true);
+  assert.equal(filterModeHasCompleteValue("begins-with", " "), false);
+  assert.equal(filterModeHasCompleteValue("ends-with", ".sql"), true);
+});
+
 test("passes list and range values through the shared context filter API", async () => {
   installFilterFetchMock();
   await buildDataGridContextFilterCondition({

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { appendConnectionErrorHints } from "@/lib/connection/connectionErrorHints";
+import { appendConnectionErrorHints, isSqliteMissingEncryptionPasswordFailure } from "@/lib/connection/connectionErrorHints";
 import type { ConnectionConfig } from "@/types/database";
 
 function mysqlConfig(urlParams: string | undefined): ConnectionConfig {
@@ -40,6 +40,14 @@ const t = (key: string) => {
 };
 
 describe("appendConnectionErrorHints", () => {
+  it("recognizes an encrypted SQLite file that was first opened without a password", () => {
+    const config = { ...mysqlConfig(undefined), db_type: "sqlite" as const, host: "/tmp/encrypted.db", port: 0 };
+
+    expect(isSqliteMissingEncryptionPasswordFailure(config, "Selected file is not a valid SQLite database file.")).toBe(true);
+    expect(isSqliteMissingEncryptionPasswordFailure({ ...config, password: "wrong" }, "Selected file is not a valid SQLite database file.")).toBe(false);
+    expect(isSqliteMissingEncryptionPasswordFailure(config, "SQLite connection failed: unable to open database file")).toBe(false);
+  });
+
   it("adds a MySQL TLS hint for non-disabled TLS failures", () => {
     const message = appendConnectionErrorHints(mysqlConfig("ssl-mode=preferred"), "MySQL connection failed: TLS handshake failed", t);
 

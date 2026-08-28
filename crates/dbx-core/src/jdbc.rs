@@ -212,10 +212,57 @@ pub async fn install_jdbc_driver_from_maven(
     let local_repo = plugin_dir.join("maven-cache");
     std::fs::create_dir_all(&local_repo).map_err(|err| err.to_string())?;
 
-    let mut command = crate::process::new_tokio_command(&resolver);
+    let mut resolved = resolve_maven_artifacts(&resolver, &coordinate, &local_repo, &repositories, &env).await?;
+    if let Some(orai18n) = oracle_orai18n_companion(&resolved) {
+        match resolve_maven_artifacts(&resolver, &orai18n, &local_repo, &repositories, &env).await {
+            Ok(mut companion) => resolved.artifacts.append(&mut companion.artifacts),
+            Err(_) => {
+                // A missing orai18n companion must not block the driver install;
+                // affected charsets surface a dedicated hint at runtime.
+            }
+        }
+    }
+    let root = plugins_root.to_path_buf();
+    tokio::task::spawn_blocking(move || install_jdbc_maven_bundle(&root, &coordinate, &resolved))
+        .await
+        .map_err(|err| err.to_string())??;
+    list_jdbc_drivers(plugins_root)
+}
+
+const ORACLE_JDBC_GROUP_ID: &str = "com.oracle.database.jdbc";
+const ORACLE_NLS_GROUP_ID: &str = "com.oracle.database.nls";
+const ORAI18N_ARTIFACT_ID: &str = "orai18n";
+
+/// Oracle's thin driver jar ships converters for a small default charset set;
+/// multibyte charsets such as ZHS16GBK need the orai18n companion jar, otherwise
+/// every metadata call that reads dictionary comments fails wholesale. DBeaver
+/// ships the same pairing.
+fn oracle_orai18n_companion(resolved: &MavenResolveOutput) -> Option<String> {
+    let ojdbc = resolved
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.group_id == ORACLE_JDBC_GROUP_ID && artifact.artifact_id.starts_with("ojdbc"))?;
+    if resolved
+        .artifacts
+        .iter()
+        .any(|artifact| artifact.group_id == ORACLE_NLS_GROUP_ID && artifact.artifact_id == ORAI18N_ARTIFACT_ID)
+    {
+        return None;
+    }
+    Some(format!("{ORACLE_NLS_GROUP_ID}:{ORAI18N_ARTIFACT_ID}:{}", ojdbc.version))
+}
+
+async fn resolve_maven_artifacts(
+    resolver: &Path,
+    coordinate: &str,
+    local_repo: &Path,
+    repositories: &[String],
+    env: &PluginRuntimeEnv,
+) -> Result<MavenResolveOutput, String> {
+    let mut command = crate::process::new_tokio_command(resolver);
     env.apply_to(&mut command);
-    command.arg("resolve").arg("--coordinate").arg(&coordinate).arg("--local-repo").arg(&local_repo);
-    for repo in &repositories {
+    command.arg("resolve").arg("--coordinate").arg(coordinate).arg("--local-repo").arg(local_repo);
+    for repo in repositories {
         command.arg("--repo").arg(repo);
     }
     let output = command.output().await.map_err(|err| format!("Failed to run JDBC Maven resolver: {err}"))?;
@@ -224,13 +271,7 @@ pub async fn install_jdbc_driver_from_maven(
         return Err(if stderr.is_empty() { "JDBC Maven resolver failed".to_string() } else { stderr });
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let resolved: MavenResolveOutput =
-        serde_json::from_str(&stdout).map_err(|err| format!("Failed to parse JDBC Maven resolver output: {err}"))?;
-    let root = plugins_root.to_path_buf();
-    tokio::task::spawn_blocking(move || install_jdbc_maven_bundle(&root, &coordinate, &resolved))
-        .await
-        .map_err(|err| err.to_string())??;
-    list_jdbc_drivers(plugins_root)
+    serde_json::from_str(&stdout).map_err(|err| format!("Failed to parse JDBC Maven resolver output: {err}"))
 }
 
 pub async fn install_prestosql_jdbc_driver(plugins_root: &Path) -> Result<Vec<JdbcDriverInfo>, String> {
@@ -1252,6 +1293,51 @@ mod tests {
         );
         assert!(is_safe_bundle_id("org.apache.hive_hive-jdbc_4.0.1_standalone"));
         assert!(!is_safe_bundle_id("../hive"));
+    }
+
+    fn resolved_artifact(group_id: &str, artifact_id: &str, version: &str) -> MavenResolvedArtifact {
+        MavenResolvedArtifact {
+            group_id: group_id.to_string(),
+            artifact_id: artifact_id.to_string(),
+            version: version.to_string(),
+            classifier: String::new(),
+            extension: "jar".to_string(),
+            file: format!("/tmp/{artifact_id}-{version}.jar"),
+        }
+    }
+
+    fn resolved_with(artifacts: Vec<MavenResolvedArtifact>) -> MavenResolveOutput {
+        MavenResolveOutput {
+            coordinate: String::new(),
+            scope: "runtime".to_string(),
+            repositories: vec!["https://repo.maven.apache.org/maven2/".to_string()],
+            artifacts,
+        }
+    }
+
+    #[test]
+    fn oracle_ojdbc_resolves_matching_orai18n_companion() {
+        let resolved = resolved_with(vec![resolved_artifact("com.oracle.database.jdbc", "ojdbc11", "21.9.0.0")]);
+        assert_eq!(oracle_orai18n_companion(&resolved).as_deref(), Some("com.oracle.database.nls:orai18n:21.9.0.0"));
+    }
+
+    #[test]
+    fn oracle_orai18n_companion_skips_existing_nls_artifact() {
+        let resolved = resolved_with(vec![
+            resolved_artifact("com.oracle.database.jdbc", "ojdbc11", "21.9.0.0"),
+            resolved_artifact("com.oracle.database.nls", "orai18n", "21.9.0.0"),
+        ]);
+        assert_eq!(oracle_orai18n_companion(&resolved), None);
+    }
+
+    #[test]
+    fn oracle_orai18n_companion_ignores_non_oracle_drivers() {
+        for coordinate in
+            [("org.postgresql", "postgresql"), ("com.oracle.database.xml", "xdb6"), ("mysql", "mysql-connector-java")]
+        {
+            let resolved = resolved_with(vec![resolved_artifact(coordinate.0, coordinate.1, "8.0.33")]);
+            assert_eq!(oracle_orai18n_companion(&resolved), None, "{}", coordinate.1);
+        }
     }
 
     #[test]

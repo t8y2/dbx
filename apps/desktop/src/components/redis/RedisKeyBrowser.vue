@@ -51,7 +51,8 @@ import { isCancelSearchShortcut } from "@/lib/editor/keyboardShortcuts";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { useEditorFontFamilyStyle } from "@/composables/useEditorFontFamilyStyle";
 import { useToast } from "@/composables/useToast";
-import { redisKeySearchPattern } from "@/lib/redis/redisKeyPattern";
+import { redisKeySearchPattern, redisGroupSubtreePattern } from "@/lib/redis/redisKeyPattern";
+import { filterRedisKeyTemplates, resolveRedisKeyTemplates } from "@/lib/redis/redisKeyTemplates";
 import { REDIS_SCAN_PAGE_SIZE_DEFAULT } from "@/lib/redis/redisKeyPattern";
 import { chunkRedisKeyRaws, collectUniqueRedisKeys } from "@/lib/redis/redisKeyBatch";
 import { getRedisCreateKeyTypeHelp, redisCreateKeyTypeHelpOptionOnOpen, shouldActivateRedisCreateKeyTypeHelpOnFocus } from "@/lib/redis/redisCreateKeyTypeHelp";
@@ -112,6 +113,10 @@ const commandTerminalRef = ref<HTMLElement>();
 const searchPattern = ref("");
 const searchMode = ref<RedisSearchMode>("key");
 const fuzzyKeySearch = ref(false);
+const keyTemplateMenuOpen = ref(false);
+const keyTemplateSelectedIndex = ref(0);
+const keyTemplateListboxId = `redis-key-template-suggestions-${uuid()}`;
+let keyTemplateBlurTimer: ReturnType<typeof setTimeout> | null = null;
 const selectedKeyRaw = ref<string | null>(null);
 const hasMore = ref(false);
 const scanCursor = ref(0);
@@ -193,6 +198,13 @@ let redisDbFlushedListenerRegistered = false;
 let redisInfiniteScrollFrame = 0;
 const loadedKeyRaws = new Set<string>();
 let treeIndex: RedisKeyTreeIndex | null = null;
+// 展开分组时已定向补扫过的子树（见 fillGroupSubtree）；在 loadKeys 重置。
+const subtreeFilledGroupIds = new Set<string>();
+// 刷新前已展开分组的快照（#7173）：刷新首屏重建树时，本轮尚未扫到的分组会被
+// rebuildTree 从 expandedGroupIds 中裁掉；后续 load-more 页面让这些分组重新
+// 出现时，用该快照恢复展开状态。SCAN 游标归零（本轮已扫尽，仍未出现的分组
+// 确实不存在）或连接/db 切换（resetLoadedKeys）时清除，避免过期 id 累积。
+const refreshExpandedGroupIds = new Set<string>();
 const REDIS_COMMAND_COMPLETION_MENU_LIMIT = 12;
 let commandCompletionRequestId = 0;
 let commandDocumentationConnectionId: string | null = null;
@@ -216,6 +228,10 @@ const searchPlaceholder = computed(() => {
   if (searchMode.value === "key") return fuzzyKeySearch.value ? t("redis.fuzzyPattern") : t("redis.pattern");
   return searchMode.value === "all" ? t("redis.allSearchPlaceholder") : t("redis.valueSearchPlaceholder");
 });
+const redisKeyTemplates = computed(() => resolveRedisKeyTemplates(connectionStore.getConfig(props.connectionId)?.redis_key_templates, settingsStore.editorSettings.redisKeyTemplates ?? []));
+const keyTemplateSuggestions = computed(() => (searchMode.value === "key" ? filterRedisKeyTemplates(redisKeyTemplates.value, searchPattern.value) : []));
+const keyTemplateMenuVisible = computed(() => keyTemplateMenuOpen.value && searchMode.value === "key" && keyTemplateSuggestions.value.length > 0);
+const keyTemplateActiveDescendant = computed(() => (keyTemplateMenuVisible.value ? `${keyTemplateListboxId}-option-${keyTemplateSelectedIndex.value}` : undefined));
 const loadingEmptyText = computed(() => (isValueSearchMode.value && valueQuery.value ? t(searchMode.value === "all" ? "redis.searchingAll" : "redis.searchingValues") : t("redis.loadingKeys")));
 const redisKeySeparator = computed(() => connectionStore.getConfig(props.connectionId)?.redis_key_separator ?? ":");
 const redisScanPageSize = computed(() => connectionStore.getConfig(props.connectionId)?.redis_scan_page_size ?? REDIS_SCAN_PAGE_SIZE_DEFAULT);
@@ -261,7 +277,8 @@ const keyCountText = computed(() => {
   if (!isSearchMode.value && lastTotalKeys.value > 0) {
     return t("redis.loadedKeys", { loaded: displayedKeyCount.value, total: lastTotalKeys.value });
   }
-  return t("redis.keys", { count: displayedKeyCount.value });
+  const count = isSearchMode.value && hasMore.value && !isFetchingAll.value ? `${displayedKeyCount.value}+` : displayedKeyCount.value;
+  return t("redis.keys", { count });
 });
 const selectedKey = computed(() => flatKeys.value.find((key) => key.key_raw === selectedKeyRaw.value) ?? null);
 const dangerDetails = computed(() => {
@@ -599,6 +616,10 @@ function mergeTree(newKeys: RedisKeyInfo[]) {
   for (const id of expandedGroupIds.value) {
     if (treeIndex.groupById.has(id)) nextExpanded.add(id);
   }
+  // 刷新快照恢复（#7173）：首屏重建时被裁掉、后续页面重新出现的分组保持展开
+  for (const id of refreshExpandedGroupIds) {
+    if (treeIndex.groupById.has(id)) nextExpanded.add(id);
+  }
   if (isFuzzyHierarchyView.value) {
     for (const id of addedGroupIds) nextExpanded.add(id);
   }
@@ -700,6 +721,9 @@ function appendScanResult(result: RedisScanResult, options: { updateTree?: boole
       mergeTree(newKeys);
     }
   }
+  // 本轮 SCAN 已扫尽：上方树已并入本页数据（mergeTree 先完成快照恢复），快照
+  // 中仍未恢复的分组确实已不存在，丢弃避免过期累积
+  if (!hasMore.value) refreshExpandedGroupIds.clear();
 
   connectionStore.updateRedisDbKeyStats(props.connectionId, props.db, {
     loaded: isSearchMode.value ? undefined : loadedCount,
@@ -735,12 +759,17 @@ async function loadKeys() {
   loading.value = true;
   loadedKeyRaws.clear();
   ttlObservedAtByRaw.clear();
+  subtreeFilledGroupIds.clear();
   flatKeys.value = [];
   treeKeys.value = [];
   treeIndex = null;
   selectedKeyRaw.value = null;
   resetCheckedKeys();
-  expandedGroupIds.value = new Set();
+  // 刷新/重载不清空展开状态（#7173）：首屏重建树时由 rebuildTree 裁掉已消失
+  // 的分组；这里快照一份，供后续页面让分组重新出现时恢复展开。连接/db 切换
+  // 先走 resetLoadedKeys 清空快照与展开集，仍保持从折叠开始。
+  refreshExpandedGroupIds.clear();
+  for (const id of expandedGroupIds.value) refreshExpandedGroupIds.add(id);
   scanCursor.value = 0;
   lastTotalKeys.value = 0;
   // Only chain the automatic continuation after a page actually applied. A
@@ -903,12 +932,58 @@ function stopFetchAll() {
   fetchAllStopRequested.value = true;
 }
 
+// 展开分组时的定向补扫：树模式的自动加载只覆盖有界 SCAN 预算内的键，
+// 未扫到的分组在树里完全不存在（搜索能找到、树里看不到）。展开分组时用
+// `前缀:*` 模式以独立游标扫描该子树直至耗尽，让"展开即可见"成立；补扫
+// 结果经 loadedKeyRaws 去重后并入主树，主 SCAN 游标不受影响。
+const SUBTREE_SCAN_ITERATIONS_PER_CALL = 8;
+
+function shouldFillGroupSubtree(): boolean {
+  return hasMore.value && !useFlatKeySearchRows.value && !isSearchMode.value && !isFetchingAll.value;
+}
+
+function mergeScannedKeys(newKeys: RedisKeyInfo[]) {
+  if (newKeys.length === 0) return;
+  for (const key of newKeys) recordKeyTtlObservedAt(key);
+  flatKeys.value = [...flatKeys.value, ...newKeys];
+  mergeTree(newKeys);
+  connectionStore.updateRedisDbKeyStats(props.connectionId, props.db, {
+    loaded: isSearchMode.value ? undefined : flatKeys.value.length,
+  });
+}
+
+async function fillGroupSubtree(group: RedisKeyTreeGroupNode, requestId = searchRequestId) {
+  if (subtreeFilledGroupIds.has(group.id)) return;
+  subtreeFilledGroupIds.add(group.id);
+  const pattern = redisGroupSubtreePattern(group.pathSegments, redisKeySeparator.value);
+  let cursor = 0;
+  try {
+    while (requestId === searchRequestId && !isFetchingAll.value) {
+      if (flatKeys.value.length >= redisInfiniteScrollMaxKeys.value) break;
+      const result = await api.redisScanKeysBatch(props.connectionId, props.db, cursor, pattern, redisScanPageSize.value, SUBTREE_SCAN_ITERATIONS_PER_CALL, true);
+      if (requestId !== searchRequestId) return;
+      mergeScannedKeys(collectUniqueRedisKeys(result.keys, loadedKeyRaws));
+      cursor = result.cursor;
+      if (cursor === 0) break;
+    }
+  } catch (error) {
+    // 失败不阻塞浏览；下次展开该分组会重试
+    subtreeFilledGroupIds.delete(group.id);
+    toast(errorMessage(error), 5000);
+  }
+}
+
 function toggleGroup(groupId: string) {
   const next = new Set(expandedGroupIds.value);
-  if (next.has(groupId)) next.delete(groupId);
-  else next.add(groupId);
+  const expanding = !next.has(groupId);
+  if (expanding) next.add(groupId);
+  else next.delete(groupId);
   expandedGroupIds.value = next;
   void maybeAutoLoadMoreRedisKeys();
+  if (expanding && shouldFillGroupSubtree()) {
+    const group = treeIndex?.groupById.get(groupId);
+    if (group) void fillGroupSubtree(group);
+  }
 }
 
 function onRowClick(node: RedisKeyTreeNode, event?: MouseEvent) {
@@ -1098,6 +1173,7 @@ function resetLoadedKeys() {
   selectedKeyRaw.value = null;
   resetCheckedKeys();
   expandedGroupIds.value = new Set();
+  refreshExpandedGroupIds.clear();
   hasMore.value = false;
   lastTotalKeys.value = 0;
 }
@@ -1636,7 +1712,90 @@ function typeColor(type: string): string {
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
 let hasAutoFocusedSearch = false;
 
+function dismissKeyTemplateMenu() {
+  keyTemplateMenuOpen.value = false;
+  keyTemplateSelectedIndex.value = 0;
+  if (keyTemplateBlurTimer) {
+    clearTimeout(keyTemplateBlurTimer);
+    keyTemplateBlurTimer = null;
+  }
+}
+
+function openKeyTemplateMenu() {
+  if (searchMode.value !== "key" || redisKeyTemplates.value.length === 0) {
+    dismissKeyTemplateMenu();
+    return;
+  }
+  keyTemplateMenuOpen.value = true;
+  keyTemplateSelectedIndex.value = 0;
+}
+
+function clampKeyTemplateSelection() {
+  const max = Math.max(keyTemplateSuggestions.value.length - 1, 0);
+  if (keyTemplateSelectedIndex.value > max) keyTemplateSelectedIndex.value = max;
+}
+
+function selectKeyTemplate(index: number) {
+  const template = keyTemplateSuggestions.value[index];
+  if (!template) return;
+  if (searchTimer) {
+    clearTimeout(searchTimer);
+    searchTimer = null;
+  }
+  searchPending.value = false;
+  searchPattern.value = template;
+  dismissKeyTemplateMenu();
+  void nextTick(() => getSearchInput()?.focus());
+}
+
+function moveKeyTemplateSelection(direction: number): boolean {
+  if (!keyTemplateMenuVisible.value) return false;
+  const count = keyTemplateSuggestions.value.length;
+  if (count === 0) return false;
+  keyTemplateSelectedIndex.value = Math.min(Math.max(keyTemplateSelectedIndex.value + direction, 0), count - 1);
+  void nextTick(() => {
+    document.getElementById(`${keyTemplateListboxId}-option-${keyTemplateSelectedIndex.value}`)?.scrollIntoView({ block: "nearest" });
+  });
+  return true;
+}
+
+function onSearchFocus() {
+  openKeyTemplateMenu();
+}
+
+function onSearchBlur() {
+  if (keyTemplateBlurTimer) clearTimeout(keyTemplateBlurTimer);
+  keyTemplateBlurTimer = setTimeout(() => {
+    dismissKeyTemplateMenu();
+    keyTemplateBlurTimer = null;
+  }, 150);
+}
+
 function onSearchInput() {
+  if (searchMode.value === "key" && redisKeyTemplates.value.length > 0) {
+    keyTemplateMenuOpen.value = true;
+    keyTemplateSelectedIndex.value = 0;
+    clampKeyTemplateSelection();
+  } else {
+    dismissKeyTemplateMenu();
+  }
+  // Key search is Enter-only so users can finish editing templates / patterns
+  // (including {$placeholders}) without triggering SCAN on every keystroke.
+  if (searchMode.value === "key") {
+    if (searchTimer) {
+      clearTimeout(searchTimer);
+      searchTimer = null;
+    }
+    searchPending.value = false;
+    invalidateScanRequests();
+    loading.value = false;
+    isFetchingAll.value = false;
+    fetchAllStopRequested.value = true;
+    fetchAllLoadedCount.value = 0;
+    selectedKeyRaw.value = null;
+    resetCheckedKeys();
+    return;
+  }
   if (searchTimer) clearTimeout(searchTimer);
   // Invalidate in-flight SCAN work as soon as the query changes instead of
   // waiting for the debounce timer to start the replacement search.
@@ -1654,6 +1813,7 @@ function onSearchInput() {
 function setSearchMode(mode: RedisSearchMode) {
   if (searchMode.value === mode) return;
   searchMode.value = mode;
+  if (mode !== "key") dismissKeyTemplateMenu();
   void loadKeys();
 }
 
@@ -1834,6 +1994,28 @@ function focusSearch(): boolean {
 }
 
 function onSearchKeydown(event: KeyboardEvent) {
+  if (keyTemplateMenuVisible.value) {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      moveKeyTemplateSelection(1);
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      moveKeyTemplateSelection(-1);
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      selectKeyTemplate(keyTemplateSelectedIndex.value);
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      dismissKeyTemplateMenu();
+      return;
+    }
+  }
   if (event.key === "Enter") {
     void loadKeys();
     return;
@@ -1841,6 +2023,7 @@ function onSearchKeydown(event: KeyboardEvent) {
   if (!isCancelSearchShortcut(event)) return;
   event.preventDefault();
   searchPattern.value = "";
+  dismissKeyTemplateMenu();
   void loadKeys();
 }
 
@@ -2083,15 +2266,37 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
             </div>
             <div class="redis-key-search-row mt-2">
               <div class="relative min-w-0">
-                <Search class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground/80" />
+                <Search class="pointer-events-none absolute left-2.5 top-1/2 z-[1] h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground/80" />
                 <Input
                   v-model="searchPattern"
                   data-redis-search-input
+                  role="combobox"
                   class="h-8 border-border/70 bg-background pl-8 pr-3 text-xs shadow-sm caret-primary placeholder:text-muted-foreground/80 focus-visible:border-primary/60 focus-visible:ring-2 focus-visible:ring-primary/20"
                   :placeholder="searchPlaceholder"
+                  :aria-expanded="keyTemplateMenuVisible"
+                  :aria-controls="keyTemplateMenuVisible ? keyTemplateListboxId : undefined"
+                  :aria-activedescendant="keyTemplateActiveDescendant"
+                  autocomplete="off"
                   @input="onSearchInput"
                   @keydown="onSearchKeydown"
+                  @focus="onSearchFocus"
+                  @blur="onSearchBlur"
                 />
+                <div v-if="keyTemplateMenuVisible" :id="keyTemplateListboxId" role="listbox" :aria-label="t('redis.keyTemplateSuggestions')" class="absolute left-0 right-0 top-[calc(100%+0.25rem)] z-30 max-h-60 overflow-y-auto rounded-md border bg-popover py-1 text-popover-foreground shadow-md">
+                  <button
+                    v-for="(template, index) in keyTemplateSuggestions"
+                    :id="`${keyTemplateListboxId}-option-${index}`"
+                    :key="template"
+                    type="button"
+                    role="option"
+                    class="dbx-editor-font-family flex w-full items-center px-3 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
+                    :class="keyTemplateSelectedIndex === index ? 'bg-accent text-accent-foreground' : ''"
+                    :aria-selected="keyTemplateSelectedIndex === index"
+                    @mousedown.prevent="selectKeyTemplate(index)"
+                  >
+                    <span class="truncate">{{ template }}</span>
+                  </button>
+                </div>
               </div>
               <div class="flex shrink-0 items-center gap-1">
                 <Button

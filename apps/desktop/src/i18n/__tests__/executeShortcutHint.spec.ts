@@ -21,16 +21,18 @@ describe("execute-shortcut hints reflect the configured binding", () => {
     expect(formatShortcutDisplay(shortcut, platform)).toBe(expected);
   });
 
-  it("interpolates the formatted shortcut into toolbar and settings labels", async () => {
+  it("interpolates the formatted shortcut into the toolbar label and settings description", async () => {
     const shortcut = formatShortcutDisplay("Shift+Mod+Enter", "Win32");
 
     await setLocale("en");
     expect(i18n.global.t("toolbar.executeShortcut", { shortcut })).toBe("Execute selection/query (Ctrl + Shift + ↵)");
-    expect(i18n.global.t("settings.executeMode", { shortcut })).toBe("Execute Mode (Ctrl + Shift + ↵)");
+    expect(i18n.global.t("settings.executeMode")).toBe("Execute mode");
+    expect(i18n.global.t("settings.executeModeDescription", { shortcut })).toBe("Run SQL shortcut: Ctrl + Shift + ↵. Controls whether it executes all SQL or the statement at the cursor by default.");
 
     await setLocale("zh-CN");
     expect(i18n.global.t("toolbar.executeShortcut", { shortcut })).toBe("执行选中/全部 (Ctrl + Shift + ↵)");
-    expect(i18n.global.t("settings.executeMode", { shortcut })).toBe("执行模式 (Ctrl + Shift + ↵)");
+    expect(i18n.global.t("settings.executeMode")).toBe("执行模式");
+    expect(i18n.global.t("settings.executeModeDescription", { shortcut })).toBe("执行 SQL 快捷键：Ctrl + Shift + ↵。用于控制默认执行全部 SQL 或光标所在语句。");
     await setLocale("en");
   });
 
@@ -41,7 +43,7 @@ describe("execute-shortcut hints reflect the configured binding", () => {
 
   it("EditorSettingsDialog.vue uses the currently edited executeSql shortcut", () => {
     expect(settingsDialogSource).toMatch(/function translateWithExecuteShortcut\([^)]*\)[^}]*formatShortcutDisplay\(editShortcuts\.value\.executeSql\)/);
-    expect(settingsDialogSource).toContain('translateWithExecuteShortcut("settings.executeMode")');
+    expect(settingsDialogSource).toContain('translateWithExecuteShortcut("settings.executeModeDescription")');
   });
 
   it("EditorSettingsDialog.vue uses the same edited shortcut in settings search", () => {

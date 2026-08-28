@@ -42,6 +42,11 @@ export function dataGridTotalRowCountLabelKey(totalRowCountIsExact: boolean, ine
   return inexactMode === "estimated" ? "grid.totalRowCountEstimated" : "grid.totalRowCountAtLeast";
 }
 
+export function showDataGridRerunTotalCountAction(options: { canCalculateTotalRowCount: boolean; displayedTotalRowCount?: number; totalRowCountIsExact: boolean }): boolean {
+  if (!options.canCalculateTotalRowCount || options.totalRowCountIsExact !== true) return false;
+  return typeof options.displayedTotalRowCount === "number" && Number.isFinite(options.displayedTotalRowCount) && options.displayedTotalRowCount >= 0;
+}
+
 export function resolveDataGridPaginationTotal(options: { paginationTotalRowCount?: number; serverKnownTotalRowCount?: number; totalRowCountIsExact: boolean; maxRows?: number }): number | undefined {
   const total = options.paginationTotalRowCount ?? (options.totalRowCountIsExact ? options.serverKnownTotalRowCount : undefined);
   if (total === undefined || options.maxRows === undefined) return total;

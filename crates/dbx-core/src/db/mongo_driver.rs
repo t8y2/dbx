@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use super::with_connection_timeout;
 use crate::document_ops::{MongoGridFsBucketInfo, MongoGridFsFileInfo};
+use crate::models::connection::DatabaseConnectionInfo;
 use crate::types::IndexInfo;
 use futures::{io::AsyncReadExt, io::AsyncWriteExt, TryStreamExt};
 use percent_encoding::percent_decode_str;
@@ -111,7 +112,7 @@ pub async fn connect_with_oidc(
         // set discovery. This is essential when connecting through a TCP proxy
         // or NAT where the driver would otherwise receive internal IPs from
         // the replica set handshake and fail to connect.
-        if !is_multi_host {
+        if !is_multi_host && options.load_balanced != Some(true) && options.direct_connection.is_none() {
             options.direct_connection = Some(true);
         }
         Client::with_options(options).map_err(|e| format!("MongoDB connection failed: {e}"))
@@ -237,6 +238,20 @@ pub async fn server_version(client: &Client, database: &str) -> Result<String, S
     let database = if database.is_empty() { "admin" } else { database };
     let result = client.database(database).run_command(doc! { "buildInfo": 1 }).await.map_err(|e| e.to_string())?;
     server_version_from_build_info(&result)
+}
+
+pub async fn database_connection_info(
+    client: &Client,
+    database: Option<&str>,
+) -> Result<DatabaseConnectionInfo, String> {
+    let version = server_version(client, database.unwrap_or("admin")).await?;
+    Ok(DatabaseConnectionInfo {
+        product_name: Some("MongoDB".to_string()),
+        product_version: Some(version),
+        current_database: database.map(str::to_string),
+        driver_name: Some("MongoDB Rust driver".to_string()),
+        ..Default::default()
+    })
 }
 
 pub async fn run_command(client: &Client, database: &str, command_json: &str) -> Result<MongoDocumentResult, String> {

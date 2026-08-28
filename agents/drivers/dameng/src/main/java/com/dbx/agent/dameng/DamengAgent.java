@@ -7,6 +7,7 @@ import com.dbx.agent.DatabaseInfo;
 import com.dbx.agent.ExecuteQueryOptions;
 import com.dbx.agent.ForeignKeyInfo;
 import com.dbx.agent.IndexInfo;
+import com.dbx.agent.JdbcAgentProfile;
 import com.dbx.agent.JdbcExecutor;
 import com.dbx.agent.JdbcIdentifiers;
 import com.dbx.agent.MultiSessionJsonRpcServer;
@@ -18,14 +19,18 @@ import com.dbx.agent.QueryPageResult;
 import com.dbx.agent.QueryResult;
 import com.dbx.agent.TableInfo;
 import com.dbx.agent.TriggerInfo;
-import dm.jdbc.driver.DmdbConnection;
+import com.dbx.agent.StandardJdbcMetadata;
 import java.io.PrintStream;
 import java.io.Reader;
+import java.net.URL;
+import java.net.URLClassLoader;
 import java.net.SocketTimeoutException;
+import java.nio.file.Paths;
 import java.sql.Blob;
 import java.sql.Clob;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
+import java.sql.Driver;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -49,16 +54,26 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Properties;
 import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public final class DamengAgent extends AbstractJdbcAgent {
     private static final Logger LOGGER = Logger.getLogger("com.dbx.agent.dameng");
     private static final String AGENT_VERSION = "9999.06.04.1-fix-default";
     private static final int DBMS_OUTPUT_ENABLE_TIMEOUT_SECS = 5;
     private static final int DBMS_OUTPUT_ENABLE_NETWORK_TIMEOUT_MILLIS = 5_000;
+    private static final Pattern DATABASE_VERSION_MAJOR_PATTERN = Pattern.compile("(\\d+)\\.");
+    private static final JdbcAgentProfile DM6_METADATA_PROFILE = new JdbcAgentProfile(
+        "dm6.jdbc.driver.DmDriver",
+        "jdbc:dm6://{host}:{port}/{database}",
+        5236,
+        true
+    );
     private static final String DAMENG_CLASSIFIED_OBJECT_TYPE_SQL =
         "CASE WHEN o.OBJECT_TYPE = 'MATERIALIZED VIEW' OR (o.OBJECT_TYPE = 'VIEW' AND mv.MVIEW_NAME IS NOT NULL) "
             + "THEN 'MATERIALIZED_VIEW' ELSE o.OBJECT_TYPE END";
@@ -90,6 +105,11 @@ public final class DamengAgent extends AbstractJdbcAgent {
         ) mv ON mv.OWNER = o.OWNER AND mv.MVIEW_NAME = o.OBJECT_NAME
         """.stripIndent().trim();
     private String connectedUsername;
+    private Driver externalDriver;
+    private URLClassLoader externalDriverLoader;
+    private List<URL> externalDriverUrls;
+    private String externalDriverClass;
+    private volatile boolean legacyJdbcMetadata;
     private volatile boolean dbmsOutputInitializationSupported = true;
     private final Map<Object, Boolean> dbmsOutputInitializedConnections =
         Collections.synchronizedMap(new WeakHashMap<>());
@@ -106,19 +126,120 @@ public final class DamengAgent extends AbstractJdbcAgent {
 
     @Override
     protected void loadDriver(ConnectParams params) throws Exception {
-        withSuppressedStdout(() -> super.loadDriver(params));
+        withSuppressedStdout(() -> {
+            if (params.getJdbc_driver_paths() == null || params.getJdbc_driver_paths().isEmpty()) {
+                // Keep an existing external loader open: pooled connections may
+                // still hold classes loaded from it. Only stop using it here.
+                externalDriver = null;
+                super.loadDriver(params);
+                return;
+            }
+
+            List<URL> urls = new ArrayList<>();
+            for (String path : params.getJdbc_driver_paths()) {
+                urls.add(Paths.get(path).toUri().toURL());
+            }
+            String driverClass = params.getJdbc_driver_class();
+            if (driverClass == null || driverClass.trim().isEmpty()) {
+                driverClass = driverClass();
+            }
+            // Reuse the loader for unchanged paths and class: recreating it
+            // would strand classes that live pooled connections still need
+            // (lazy driver classes would fail with NoClassDefFoundError). A
+            // loader dropped for changed paths is never closed here for the
+            // same reason; disconnect() releases the active one.
+            if (externalDriverLoader != null
+                && urls.equals(externalDriverUrls)
+                && driverClass.equals(externalDriverClass)) {
+                if (externalDriver == null) {
+                    externalDriver = (Driver) Class.forName(driverClass, true, externalDriverLoader)
+                        .getDeclaredConstructor()
+                        .newInstance();
+                }
+                return;
+            }
+            externalDriverLoader = new URLClassLoader(
+                urls.toArray(new URL[0]),
+                ClassLoader.getPlatformClassLoader()
+            );
+            externalDriverUrls = urls;
+            externalDriverClass = driverClass;
+            externalDriver = (Driver) Class.forName(driverClass, true, externalDriverLoader)
+                .getDeclaredConstructor()
+                .newInstance();
+        });
     }
 
     @Override
     protected Connection openConnection(ConnectParams params) throws Exception {
-        return withSuppressedStdout(
-            () -> DriverManager.getConnection(buildUrl(params), params.getUsername(), params.getPassword())
-        );
+        return withSuppressedStdout(() -> {
+            if (externalDriver == null) {
+                return DriverManager.getConnection(buildUrl(params), params.getUsername(), params.getPassword());
+            }
+            Properties properties = new Properties();
+            if (params.getUsername() != null) {
+                properties.setProperty("user", params.getUsername());
+            }
+            if (params.getPassword() != null) {
+                properties.setProperty("password", params.getPassword());
+            }
+            Connection connection = externalDriver.connect(buildUrl(params), properties);
+            if (connection == null) {
+                throw new SQLException("Selected Dameng JDBC driver does not accept URL: " + buildUrl(params));
+            }
+            return connection;
+        });
+    }
+
+    @Override
+    protected String connectionValidationQuery() {
+        return "SELECT 1";
+    }
+
+    @Override
+    public synchronized void disconnect() {
+        super.disconnect();
+        try {
+            closeExternalDriverLoader();
+        } catch (Exception error) {
+            // Best-effort release during teardown.
+        }
+    }
+
+    private void closeExternalDriverLoader() throws Exception {
+        externalDriver = null;
+        externalDriverUrls = null;
+        externalDriverClass = null;
+        if (externalDriverLoader != null) {
+            externalDriverLoader.close();
+            externalDriverLoader = null;
+        }
     }
 
     @Override
     protected void afterConnect(ConnectParams params, Connection connection) {
         connectedUsername = params.getUsername();
+        legacyJdbcMetadata = usesLegacyJdbcMetadata(connection);
+    }
+
+    static boolean usesLegacyJdbcMetadata(Connection connection) {
+        try {
+            int major = connection.getMetaData().getDatabaseMajorVersion();
+            if (major > 0) {
+                return major < 7;
+            }
+        } catch (Exception | AbstractMethodError ignored) {
+        }
+        try {
+            String version = connection.getMetaData().getDatabaseProductVersion();
+            if (version == null) {
+                return false;
+            }
+            Matcher matcher = DATABASE_VERSION_MAJOR_PATTERN.matcher(version);
+            return matcher.find() && Integer.parseInt(matcher.group(1)) < 7;
+        } catch (Exception | AbstractMethodError ignored) {
+            return false;
+        }
     }
 
     @Override
@@ -127,12 +248,12 @@ public final class DamengAgent extends AbstractJdbcAgent {
     }
 
     private void initializeDbmsOutputIfNeeded(String sql) throws SQLException {
-        if (!dbmsOutputInitializationSupported || !isDbmsOutputStatement(sql)) {
+        if (legacyJdbcMetadata || !dbmsOutputInitializationSupported || !isDbmsOutputStatement(sql)) {
             return;
         }
 
         Connection connection = requireConnected();
-        Object physicalConnection = connection.unwrap(DmdbConnection.class);
+        Object physicalConnection = physicalConnectionIdentity(connection);
         synchronized (dbmsOutputInitializedConnections) {
             if (dbmsOutputInitializedConnections.containsKey(physicalConnection)) {
                 return;
@@ -188,6 +309,22 @@ public final class DamengAgent extends AbstractJdbcAgent {
             || startsWithKeyword(sql, start, "DECLARE")
             || startsWithKeyword(sql, start, "EXEC")
             || startsWithKeyword(sql, start, "EXECUTE");
+    }
+
+    private Object physicalConnectionIdentity(Connection connection) {
+        try {
+            String driverClassName = externalDriver == null ? driverClass() : externalDriver.getClass().getName();
+            int packageSeparator = driverClassName.lastIndexOf('.');
+            if (packageSeparator < 0) {
+                return connection;
+            }
+            String connectionClassName = driverClassName.substring(0, packageSeparator + 1) + "DmdbConnection";
+            ClassLoader loader = externalDriverLoader == null ? getClass().getClassLoader() : externalDriverLoader;
+            Class<?> connectionClass = Class.forName(connectionClassName, false, loader);
+            return connection.unwrap(connectionClass);
+        } catch (Exception | AbstractMethodError ignored) {
+            return connection;
+        }
     }
 
     private static boolean startsWithKeyword(String sql, int start, String keyword) {
@@ -321,11 +458,17 @@ public final class DamengAgent extends AbstractJdbcAgent {
 
     @Override
     public List<DatabaseInfo> listDatabases() {
+        if (legacyJdbcMetadata) {
+            return unchecked(() -> listJdbcSchemas().stream().map(DatabaseInfo::new).toList());
+        }
         return unchecked(() -> listVisibleUsers().stream().map(DatabaseInfo::new).toList());
     }
 
     @Override
     public List<String> listSchemas() {
+        if (legacyJdbcMetadata) {
+            return StandardJdbcMetadata.INSTANCE.listSchemas(requireConnected(), DM6_METADATA_PROFILE);
+        }
         return unchecked(() -> {
             try {
                 return listVisibleSchemas();
@@ -395,6 +538,9 @@ public final class DamengAgent extends AbstractJdbcAgent {
     }
 
     private List<TableInfo> queryConstrainedTables(String schema, MetadataListConstraints constraints) {
+        if (legacyJdbcMetadata) {
+            return executeJdbcMetadataTables(schema, constraints);
+        }
         if (!constraints.includesTableLikeTypes()) {
             return List.of();
         }
@@ -913,6 +1059,9 @@ public final class DamengAgent extends AbstractJdbcAgent {
     }
 
     private List<ObjectInfo> queryConstrainedObjects(String schema, MetadataListConstraints constraints) {
+        if (legacyJdbcMetadata) {
+            return executeJdbcMetadataObjects(schema, constraints);
+        }
         if (!includesSupportedObjectTypes(constraints)) {
             return List.of();
         }
@@ -1451,6 +1600,9 @@ public final class DamengAgent extends AbstractJdbcAgent {
 
     @Override
     public String getTableDdl(String schema, String table) {
+        if (legacyJdbcMetadata) {
+            return super.getTableDdl(schema, table);
+        }
         try {
             return unchecked(() -> {
                 String sql = "SELECT /*+ PARALLEL(1) */ DBMS_METADATA.GET_DDL(?, ?, ?) FROM DUAL";
@@ -1486,6 +1638,15 @@ public final class DamengAgent extends AbstractJdbcAgent {
 
     @Override
     public List<ColumnInfo> getColumns(String schema, String table) {
+        if (legacyJdbcMetadata) {
+            return StandardJdbcMetadata.INSTANCE.getColumns(
+                requireConnected(),
+                DM6_METADATA_PROFILE,
+                getConfiguredDatabase(),
+                schema,
+                table
+            );
+        }
         return unchecked(() -> {
             Set<String> pkColumns = new java.util.HashSet<>();
             String pkSql = """
@@ -1590,6 +1751,15 @@ public final class DamengAgent extends AbstractJdbcAgent {
 
     @Override
     public List<IndexInfo> listIndexes(String schema, String table) {
+        if (legacyJdbcMetadata) {
+            return StandardJdbcMetadata.INSTANCE.listIndexes(
+                requireConnected(),
+                DM6_METADATA_PROFILE,
+                getConfiguredDatabase(),
+                schema,
+                table
+            );
+        }
         return unchecked(() -> {
             List<IndexInfo> result = new ArrayList<>();
             String sql = """
@@ -1630,6 +1800,9 @@ public final class DamengAgent extends AbstractJdbcAgent {
 
     @Override
     public List<ForeignKeyInfo> listForeignKeys(String schema, String table) {
+        if (legacyJdbcMetadata) {
+            return StandardJdbcMetadata.INSTANCE.listForeignKeys(requireConnected(), schema, table);
+        }
         return unchecked(() -> {
             List<ForeignKeyInfo> result = new ArrayList<>();
             String sql = """
@@ -1661,6 +1834,9 @@ public final class DamengAgent extends AbstractJdbcAgent {
 
     @Override
     public List<TriggerInfo> listTriggers(String schema, String table) {
+        if (legacyJdbcMetadata) {
+            return StandardJdbcMetadata.INSTANCE.listTriggers(schema, table);
+        }
         return unchecked(() -> {
             List<TriggerInfo> result = new ArrayList<>();
             String sql = """
@@ -1722,7 +1898,7 @@ public final class DamengAgent extends AbstractJdbcAgent {
             }
             String message = (String) value;
             return message.isEmpty() ? List.of() : message.lines().toList();
-        } catch (Exception ignored) {
+        } catch (Exception | AbstractMethodError ignored) {
             return List.of();
         }
     }
@@ -1921,6 +2097,10 @@ public final class DamengAgent extends AbstractJdbcAgent {
     }
 
     private static String buildUrl(ConnectParams params) {
+        String connectionString = params.getConnection_string() == null ? "" : params.getConnection_string().trim();
+        if (!connectionString.isEmpty()) {
+            return connectionString;
+        }
         String database = params.getDatabase() == null ? "" : params.getDatabase().trim();
         String suffix = database.isEmpty() ? "" : "/" + database;
         String url = "jdbc:dm://" + params.getHost() + ":" + params.getPort() + suffix;

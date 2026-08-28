@@ -259,11 +259,13 @@ function semanticMutationTarget(model: SqlSemanticModel): SqlSemanticRowSource |
 }
 
 export function sqlCompletionContextFromSemantic(model: SqlSemanticModel, base: SqlCompletionContext): SqlCompletionContext {
-  if (model.cursorIntent.confidence === "low" || model.cursorIntent.kind === "suppressed") {
+  if (model.cursorIntent.kind === "suppressed") {
     return base;
   }
+  const replacementRange = model.cursorIntent.replacementRange;
+  if (model.cursorIntent.confidence === "low") return { ...base, replacementRange };
   if ((base.suggestTables || base.exclusiveTableSuggestions) && model.cursorIntent.kind !== "table" && model.cursorIntent.kind !== "schema" && model.cursorIntent.kind !== "catalog" && model.cursorIntent.kind !== "delete_target") {
-    return base;
+    return { ...base, replacementRange };
   }
 
   const scope = sqlSemanticCompletionScope(model);
@@ -284,6 +286,7 @@ export function sqlCompletionContextFromSemantic(model: SqlSemanticModel, base: 
 
   return {
     ...base,
+    replacementRange,
     prefix,
     qualifier,
     qualifierParts,

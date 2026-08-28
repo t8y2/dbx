@@ -21,11 +21,12 @@ const status = computed(() => {
     v-if="status"
     data-tab-execution-status
     role="status"
-    class="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-background/80"
+    class="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center"
     :class="status === 'cancelling' ? 'text-amber-600 dark:text-amber-400' : 'text-blue-600 dark:text-blue-400'"
     :aria-label="t(queryExecutionLabelKey(tab))"
     :title="t(queryExecutionLabelKey(tab))"
   >
-    <Loader2 aria-hidden="true" class="h-3 w-3 animate-spin motion-reduce:animate-none" />
+    <Loader2 aria-hidden="true" class="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
   </span>
+  <slot v-else />
 </template>

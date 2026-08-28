@@ -435,6 +435,24 @@ pub async fn list_reference_key_columns(
 }
 
 #[tauri::command]
+pub async fn list_reference_keys(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    schema: String,
+    table: String,
+    catalog: Option<String>,
+) -> Result<Vec<dbx_core::schema::ReferenceKeyInfo>, String> {
+    if let Some(catalog) = external_doris_catalog(&state, &connection_id, catalog.as_deref()).await {
+        let indexes =
+            dbx_core::schema::list_doris_catalog_indexes_core(&state, &connection_id, &catalog, &database, &table)
+                .await?;
+        return Ok(dbx_core::schema::reference_keys_from_indexes(&indexes));
+    }
+    dbx_core::schema::list_reference_keys_core(&state, &connection_id, &database, &schema, &table).await
+}
+
+#[tauri::command]
 pub async fn list_foreign_keys(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

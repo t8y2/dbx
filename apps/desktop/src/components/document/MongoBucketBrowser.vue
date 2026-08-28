@@ -18,6 +18,7 @@ import { buildGridFsFilesStructuredFilter, createGridFsFileFilterRule, currentGr
 import { buildGridFsDownloadArchive, defaultGridFsArchiveFileName, formatGridFsUploadDate } from "@/lib/document/gridfsFiles";
 import { clampGridFsPage, gridFsTotalPages, paginateGridFsItems } from "@/lib/document/gridfsPagination";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { useSettingsStore } from "@/stores/settingsStore";
 
 const props = defineProps<{
@@ -62,7 +63,7 @@ const partiallyChecked = computed(() => checkedFileIds.value.size > 0 && checked
 const downloadTargets = computed(() => (checkedFileCount.value > 0 ? checkedFiles.value : selectedFile.value ? [selectedFile.value] : []));
 const downloadButtonLabel = computed(() => (checkedFileCount.value > 0 ? t("gridfsBrowser.downloadSelected") : t("gridfsBrowser.downloadFile")));
 const selectedMetadata = computed(() => (selectedFile.value?.metadata ? JSON.stringify(selectedFile.value.metadata, null, 2) : ""));
-const isReadonly = computed(() => connectionStore.getConfig(props.connectionId)?.read_only ?? false);
+const isReadonly = computed(() => connectionIsEffectivelyReadOnly(connectionStore.getConfig(props.connectionId)));
 const mongoProvider = documentStoreProviderFor("mongodb");
 const activeStructuredRuleCount = computed(() => {
   if (!appliedStructuredFilter.value) return 0;

@@ -1565,8 +1565,8 @@ fn transfer_key_columns(columns: &[db::ColumnInfo], db_type: &DatabaseType) -> V
         .collect()
 }
 
-fn dameng_identity_insert_statement(table: &str, schema: &str, enabled: bool) -> String {
-    let full_table = qualified_table(table, schema, &DatabaseType::Dameng, None);
+fn identity_insert_statement(table: &str, schema: &str, db_type: &DatabaseType, enabled: bool) -> String {
+    let full_table = qualified_table(table, schema, db_type, None);
     format!("SET IDENTITY_INSERT {full_table} {}", if enabled { "ON" } else { "OFF" })
 }
 
@@ -1590,27 +1590,25 @@ async fn execute_transfer_write_statement(
     schema: &str,
     needs_identity_insert: bool,
 ) -> Result<(), String> {
-    if !needs_identity_insert || !matches!(target_db_type, DatabaseType::Dameng) {
+    if !needs_identity_insert || !matches!(target_db_type, DatabaseType::Dameng | DatabaseType::SqlServer) {
         execute_on_pool(state, target_pool_key, sql).await?;
         return Ok(());
     }
 
-    let enable_sql = dameng_identity_insert_statement(table, schema, true);
-    let disable_sql = dameng_identity_insert_statement(table, schema, false);
+    let enable_sql = identity_insert_statement(table, schema, target_db_type, true);
+    let disable_sql = identity_insert_statement(table, schema, target_db_type, false);
     execute_on_pool(state, target_pool_key, &enable_sql)
         .await
-        .map_err(|e| format!("Failed to enable Dameng IDENTITY_INSERT for {table}: {e}"))?;
+        .map_err(|e| format!("Failed to enable IDENTITY_INSERT for {table}: {e}"))?;
     let write_result = execute_on_pool(state, target_pool_key, sql).await;
     let disable_result = execute_on_pool(state, target_pool_key, &disable_sql).await;
 
     match (write_result, disable_result) {
         (Ok(_), Ok(_)) => Ok(()),
         (Err(write_error), Ok(_)) => Err(write_error),
-        (Ok(_), Err(disable_error)) => {
-            Err(format!("Failed to disable Dameng IDENTITY_INSERT for {table}: {disable_error}"))
-        }
+        (Ok(_), Err(disable_error)) => Err(format!("Failed to disable IDENTITY_INSERT for {table}: {disable_error}")),
         (Err(write_error), Err(disable_error)) => {
-            Err(format!("{write_error}; also failed to disable Dameng IDENTITY_INSERT for {table}: {disable_error}"))
+            Err(format!("{write_error}; also failed to disable IDENTITY_INSERT for {table}: {disable_error}"))
         }
     }
 }
@@ -1895,6 +1893,22 @@ fn oracle_rownum_page_sql(col_list: &str, base_sql: String, offset: u64, limit: 
     )
 }
 
+// SQL Server 2008 R2 and older reject `OFFSET ... FETCH` (added in SQL Server
+// 2012), so paged reads must use a ROW_NUMBER() subquery that every supported
+// SQL Server version accepts (issue #7356).
+fn sqlserver_row_number_page_sql(
+    col_list: &str,
+    from_clause: &str,
+    order_by: &str,
+    offset: u64,
+    limit: usize,
+) -> String {
+    let end = offset + limit as u64;
+    format!(
+        "SELECT {col_list} FROM (SELECT {col_list}, ROW_NUMBER() OVER (ORDER BY {order_by}) AS __dbx_row_num FROM {from_clause}) AS __dbx_page WHERE __dbx_row_num > {offset} AND __dbx_row_num <= {end}"
+    )
+}
+
 fn postgres_index_column_sql(column: &str) -> String {
     if is_simple_identifier(column) {
         quote_identifier(column, &DatabaseType::Postgres)
@@ -2013,6 +2027,29 @@ fn generate_postgres_foreign_key_ddl(
     }
 
     statements
+}
+
+async fn restore_postgres_table_schema_objects(
+    state: &AppState,
+    target_pool_key: &str,
+    target_table: &str,
+    source_schema: &str,
+    target_schema: &str,
+    source_indexes: &[db::IndexInfo],
+    source_foreign_keys: &[db::ForeignKeyInfo],
+) -> Result<(), String> {
+    for statement in generate_postgres_index_ddl(source_indexes, target_table, target_schema) {
+        execute_on_pool(state, target_pool_key, &statement)
+            .await
+            .map_err(|e| format!("Failed to create PostgreSQL index for {target_table}: {e}"))?;
+    }
+    for statement in generate_postgres_foreign_key_ddl(source_foreign_keys, target_table, source_schema, target_schema)
+    {
+        execute_on_pool(state, target_pool_key, &statement)
+            .await
+            .map_err(|e| format!("Failed to create PostgreSQL foreign key for {target_table}: {e}"))?;
+    }
+    Ok(())
 }
 
 /// Builds deferred `ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY` statements for a
@@ -4021,7 +4058,7 @@ pub fn pagination_sql(
     let col_list = columns.iter().map(|c| quote_identifier(c, db_type)).collect::<Vec<_>>().join(", ");
 
     match db_type {
-        DatabaseType::Oracle => {
+        DatabaseType::Oracle | DatabaseType::OceanbaseOracle => {
             let base_sql = format!("SELECT {col_list} FROM {full_table}");
             oracle_rownum_page_sql(&col_list, base_sql, offset, limit)
         }
@@ -4032,7 +4069,10 @@ pub fn pagination_sql(
                 format!("SELECT SKIP {offset} FIRST {limit} {col_list} FROM {full_table}")
             }
         }
-        DatabaseType::SqlServer | DatabaseType::Dameng => {
+        DatabaseType::SqlServer => {
+            sqlserver_row_number_page_sql(&col_list, &full_table, "(SELECT NULL)", offset, limit)
+        }
+        DatabaseType::Dameng => {
             format!(
                 "SELECT {col_list} FROM {full_table} ORDER BY (SELECT NULL) OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY"
             )
@@ -4062,7 +4102,7 @@ pub fn pagination_sql_with_order(
     let order_expression = postgres_order_by_expression(order_by_columns, db_type);
 
     match db_type {
-        DatabaseType::Oracle => {
+        DatabaseType::Oracle | DatabaseType::OceanbaseOracle => {
             let order_by = order_expression.map(|value| format!(" ORDER BY {value}")).unwrap_or_default();
             let base_sql = format!("SELECT {col_list} FROM {full_table}{order_by}");
             oracle_rownum_page_sql(&col_list, base_sql, offset, limit)
@@ -4075,7 +4115,11 @@ pub fn pagination_sql_with_order(
                 format!("SELECT SKIP {offset} FIRST {limit} {col_list} FROM {full_table}{order_by}")
             }
         }
-        DatabaseType::SqlServer | DatabaseType::Dameng => {
+        DatabaseType::SqlServer => {
+            let order_by = order_expression.unwrap_or_else(|| "(SELECT NULL)".to_string());
+            sqlserver_row_number_page_sql(&col_list, &full_table, &order_by, offset, limit)
+        }
+        DatabaseType::Dameng => {
             let order_by = order_expression.unwrap_or_else(|| "(SELECT NULL)".to_string());
             format!(
                 "SELECT {col_list} FROM {full_table} ORDER BY {order_by} OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY"
@@ -4146,7 +4190,7 @@ pub fn pagination_sql_with_filter_order_and_identifier_quote(
         });
 
     match db_type {
-        DatabaseType::Oracle => {
+        DatabaseType::Oracle | DatabaseType::OceanbaseOracle => {
             let order_by = order_expression.map(|value| format!(" ORDER BY {value}")).unwrap_or_default();
             let base_sql = format!("SELECT {col_list} FROM {full_table}{where_clause}{order_by}");
             oracle_rownum_page_sql(&col_list, base_sql, offset, limit)
@@ -4159,7 +4203,12 @@ pub fn pagination_sql_with_filter_order_and_identifier_quote(
                 format!("SELECT SKIP {offset} FIRST {limit} {col_list} FROM {full_table}{where_clause}{order_by}")
             }
         }
-        DatabaseType::SqlServer | DatabaseType::Dameng => {
+        DatabaseType::SqlServer => {
+            let order_by = order_expression.unwrap_or_else(|| "(SELECT NULL)".to_string());
+            let from_clause = format!("{full_table}{where_clause}");
+            sqlserver_row_number_page_sql(&col_list, &from_clause, &order_by, offset, limit)
+        }
+        DatabaseType::Dameng => {
             let order_by = order_expression.unwrap_or_else(|| "(SELECT NULL)".to_string());
             format!(
                 "SELECT {col_list} FROM {full_table}{where_clause} ORDER BY {order_by} OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY"
@@ -4252,14 +4301,17 @@ pub fn keyset_pagination_sql_with_identifier_quote(
     let where_clause = keyset_where_clause(primary_keys, last_pk_values, db_type, identifier_quote);
 
     match db_type {
-        DatabaseType::Oracle => {
+        DatabaseType::Oracle | DatabaseType::OceanbaseOracle => {
             let base_sql = format!("SELECT {col_list} FROM {full_table}{where_clause} ORDER BY {order}");
             oracle_rownum_page_sql(&col_list, base_sql, 0, limit)
         }
         DatabaseType::Informix => {
             format!("SELECT FIRST {limit} {col_list} FROM {full_table}{where_clause} ORDER BY {order}")
         }
-        DatabaseType::SqlServer | DatabaseType::Dameng => {
+        DatabaseType::SqlServer => {
+            format!("SELECT TOP ({limit}) {col_list} FROM {full_table}{where_clause} ORDER BY {order}")
+        }
+        DatabaseType::Dameng => {
             format!(
                 "SELECT {col_list} FROM {full_table}{where_clause} ORDER BY {order} OFFSET 0 ROWS FETCH NEXT {limit} ROWS ONLY"
             )
@@ -6910,7 +6962,9 @@ where
     let col_names: Vec<String> = writable_columns.iter().map(|c| c.name.clone()).collect();
     let col_types: Vec<Option<String>> = writable_columns.iter().map(|c| Some(c.data_type.clone())).collect();
     let primary_key_columns = transfer_key_columns(&writable_columns, source_db_type);
-    log::info!("[transfer] {} has {} columns, counting rows...", table, columns.len());
+    if should_copy_data(&request.content) {
+        log::info!("[transfer] {} has {} columns, counting rows...", table, columns.len());
+    }
 
     // Fetch source table comment
     // Route through the catalog-aware path for Doris/StarRocks external catalogs
@@ -6979,8 +7033,8 @@ where
             Vec::new()
         };
 
-    // Count source rows
-    let total_rows = {
+    let total_rows = if should_copy_data(&request.content) {
+        // Count source rows only for data-bearing transfers.
         let sql = count_sql(table, &request.source_schema, source_db_type, request.source_catalog.as_deref());
         match execute_on_pool(state, source_pool_key, &sql).await {
             Ok(result) => result.rows.first().and_then(|r| r.first()).and_then(|v| match v {
@@ -6993,6 +7047,8 @@ where
                 None
             }
         }
+    } else {
+        None
     };
     log::info!("[transfer] {} total_rows={:?}", table, total_rows);
 
@@ -7220,9 +7276,24 @@ where
         }
     }
 
-    // Structure-only transfer: DDL work (create table, indexes, comments) is
-    // done above; skip everything data-related.
+    let should_restore_postgres_table_schema =
+        request.create_table && pg_compat_transfer && preserves_target_table_name && !target_table_preexisting;
+
+    // Structure-only transfer: complete the table's post-create schema DDL,
+    // then skip everything data-related.
     if !should_copy_data(&request.content) {
+        if should_restore_postgres_table_schema {
+            restore_postgres_table_schema_objects(
+                state,
+                target_pool_key,
+                &target_table,
+                &request.source_schema,
+                &request.target_schema,
+                &source_indexes,
+                &source_foreign_keys,
+            )
+            .await?;
+        }
         return Ok(0);
     }
 
@@ -7314,7 +7385,7 @@ where
         (request.mode.clone(), vec![])
     };
 
-    let writes_dameng_identity_columns = matches!(target_db_type, DatabaseType::Dameng)
+    let writes_identity_insert_columns = matches!(target_db_type, DatabaseType::Dameng | DatabaseType::SqlServer)
         && selected_columns_include_identity_columns(&col_names, &target_columns);
     let overrides_postgres_system_values = matches!(target_db_type, DatabaseType::Postgres)
         && selected_columns_include_postgres_generated_always_identity_columns(&col_names, &target_columns);
@@ -7398,7 +7469,7 @@ where
                     target_db_type,
                     &target_table,
                     &request.target_schema,
-                    writes_dameng_identity_columns,
+                    writes_identity_insert_columns,
                 )
                 .await
                 .map_err(|e| {
@@ -7452,22 +7523,17 @@ where
         }
     }
 
-    if request.create_table && pg_compat_transfer && preserves_target_table_name && !target_table_preexisting {
-        for statement in generate_postgres_index_ddl(&source_indexes, &target_table, &request.target_schema) {
-            execute_on_pool(state, target_pool_key, &statement)
-                .await
-                .map_err(|e| format!("Failed to create PostgreSQL index for {target_table}: {e}"))?;
-        }
-        for statement in generate_postgres_foreign_key_ddl(
-            &source_foreign_keys,
+    if should_restore_postgres_table_schema {
+        restore_postgres_table_schema_objects(
+            state,
+            target_pool_key,
             &target_table,
             &request.source_schema,
             &request.target_schema,
-        ) {
-            execute_on_pool(state, target_pool_key, &statement)
-                .await
-                .map_err(|e| format!("Failed to create PostgreSQL foreign key for {target_table}: {e}"))?;
-        }
+            &source_indexes,
+            &source_foreign_keys,
+        )
+        .await?;
     }
 
     Ok(total_transferred)
@@ -9497,6 +9563,18 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_identity_insert_statement_quotes_schema_and_table() {
+        assert_eq!(
+            identity_insert_statement("inter_putaway", "dbo", &DatabaseType::SqlServer, true),
+            "SET IDENTITY_INSERT [dbo].[inter_putaway] ON"
+        );
+        assert_eq!(
+            identity_insert_statement("inter_putaway", "dbo", &DatabaseType::SqlServer, false),
+            "SET IDENTITY_INSERT [dbo].[inter_putaway] OFF"
+        );
+    }
+
+    #[test]
     fn mysql_create_table_includes_column_comments() {
         let cols = vec![
             db::ColumnInfo { comment: Some("用户ID".to_string()), is_primary_key: true, ..test_column("id", "int") },
@@ -10464,6 +10542,65 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_export_pagination_uses_row_number_subquery() {
+        let sql = pagination_sql(
+            &[String::from("id"), String::from("name")],
+            "users",
+            "dbo",
+            &DatabaseType::SqlServer,
+            500,
+            100,
+        );
+
+        assert_eq!(
+            sql,
+            "SELECT [id], [name] FROM (SELECT [id], [name], ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS __dbx_row_num FROM [dbo].[users]) AS __dbx_page WHERE __dbx_row_num > 500 AND __dbx_row_num <= 600"
+        );
+        assert!(!sql.contains("OFFSET"));
+        assert!(!sql.contains(" FETCH "));
+    }
+
+    #[test]
+    fn sqlserver_ordered_pagination_uses_row_number_subquery() {
+        let sql = pagination_sql_with_order(
+            &[String::from("id"), String::from("name")],
+            "users",
+            "dbo",
+            &DatabaseType::SqlServer,
+            200,
+            100,
+            &[String::from("id")],
+            None,
+        );
+
+        assert!(sql.contains("ROW_NUMBER() OVER (ORDER BY [id]) AS __dbx_row_num"));
+        assert!(sql.contains("WHERE __dbx_row_num > 200 AND __dbx_row_num <= 300"));
+        assert!(!sql.contains("OFFSET"));
+        assert!(!sql.contains(" FETCH "));
+    }
+
+    #[test]
+    fn sqlserver_filtered_pagination_preserves_filter_in_subquery() {
+        let sql = pagination_sql_with_filter_order(
+            &[String::from("id"), String::from("status")],
+            "users",
+            "dbo",
+            &DatabaseType::SqlServer,
+            10_000,
+            2_000,
+            Some("WHERE status = 'active'"),
+            Some("[id] DESC"),
+            &[String::from("id")],
+        );
+
+        assert!(sql.contains("ROW_NUMBER() OVER (ORDER BY [id] DESC) AS __dbx_row_num"));
+        assert!(sql.contains("FROM [dbo].[users] WHERE (status = 'active')"));
+        assert!(sql.contains("WHERE __dbx_row_num > 10000 AND __dbx_row_num <= 12000"));
+        assert!(!sql.contains("OFFSET"));
+        assert!(!sql.contains(" FETCH "));
+    }
+
+    #[test]
     fn filtered_pagination_preserves_where_and_order() {
         let sql = pagination_sql_with_filter_order(
             &[String::from("id"), String::from("status")],
@@ -10535,7 +10672,7 @@ mod tests {
     }
 
     #[test]
-    fn sqlserver_keyset_pagination_includes_offset_fetch() {
+    fn sqlserver_keyset_pagination_uses_top() {
         let sql = keyset_pagination_sql(
             &[String::from("id"), String::from("name")],
             "users",
@@ -10546,10 +10683,7 @@ mod tests {
             100,
         );
 
-        assert_eq!(
-            sql,
-            "SELECT [id], [name] FROM [dbo].[users] ORDER BY [id] ASC OFFSET 0 ROWS FETCH NEXT 100 ROWS ONLY"
-        );
+        assert_eq!(sql, "SELECT TOP (100) [id], [name] FROM [dbo].[users] ORDER BY [id] ASC");
     }
 
     #[test]
@@ -10592,6 +10726,51 @@ mod tests {
     }
 
     #[test]
+    fn oceanbase_oracle_pagination_uses_rownum_for_all_transfer_paths() {
+        let columns = [String::from("id"), String::from("name")];
+        let order = [String::from("id")];
+
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            let sql = pagination_sql(&columns, "users", "APP", &database_type, 100, 50);
+            assert!(sql.contains("ROWNUM"), "database_type={database_type:?}, sql={sql}");
+            assert!(!sql.contains(" LIMIT "), "database_type={database_type:?}, sql={sql}");
+
+            let sql = pagination_sql_with_order(&columns, "users", "APP", &database_type, 100, 50, &order, None);
+            assert!(sql.contains("ROWNUM"), "database_type={database_type:?}, sql={sql}");
+            assert!(sql.contains("ORDER BY \"id\""), "database_type={database_type:?}, sql={sql}");
+            assert!(!sql.contains(" LIMIT "), "database_type={database_type:?}, sql={sql}");
+
+            let sql = pagination_sql_with_filter_order(
+                &columns,
+                "users",
+                "APP",
+                &database_type,
+                100,
+                50,
+                Some("WHERE status = 'active'"),
+                Some("id DESC"),
+                &order,
+            );
+            assert!(sql.contains("ROWNUM"), "database_type={database_type:?}, sql={sql}");
+            assert!(sql.contains("WHERE (status = 'active')"), "database_type={database_type:?}, sql={sql}");
+            assert!(!sql.contains(" LIMIT "), "database_type={database_type:?}, sql={sql}");
+
+            let sql = keyset_pagination_sql(
+                &columns,
+                "users",
+                "APP",
+                &database_type,
+                &[String::from("id")],
+                &[json!(25)],
+                50,
+            );
+            assert!(sql.contains("ROWNUM"), "database_type={database_type:?}, sql={sql}");
+            assert!(sql.contains("WHERE \"id\" > 25"), "database_type={database_type:?}, sql={sql}");
+            assert!(!sql.contains(" LIMIT "), "database_type={database_type:?}, sql={sql}");
+        }
+    }
+
+    #[test]
     fn composite_keyset_pagination_uses_portable_lexicographic_predicate() {
         let sql = keyset_pagination_sql(
             &[String::from("tenant_id"), String::from("id"), String::from("name")],
@@ -10605,7 +10784,7 @@ mod tests {
 
         assert_eq!(
             sql,
-            "SELECT [tenant_id], [id], [name] FROM [dbo].[users] WHERE ([tenant_id] > 10 OR ([tenant_id] = 10 AND [id] > 25)) ORDER BY [tenant_id] ASC, [id] ASC OFFSET 0 ROWS FETCH NEXT 100 ROWS ONLY"
+            "SELECT TOP (100) [tenant_id], [id], [name] FROM [dbo].[users] WHERE ([tenant_id] > 10 OR ([tenant_id] = 10 AND [id] > 25)) ORDER BY [tenant_id] ASC, [id] ASC"
         );
     }
 
@@ -11848,6 +12027,7 @@ SELECT 1 FROM dual"#
             database: None,
             default_schema: None,
             visible_databases: None,
+            visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
             attached_databases: Vec::new(),
@@ -11875,6 +12055,7 @@ SELECT 1 FROM dual"#
             redis_key_separator: crate::models::connection::default_redis_key_separator(),
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
+            redis_key_templates: Vec::new(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),

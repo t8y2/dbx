@@ -2002,7 +2002,7 @@ dependencies = [
 
 [[package]]
 name = "dbx"
-version = "0.5.93"
+version = "0.5.97"
 dependencies = [
  "anyhow",
  "axum",
@@ -2058,7 +2058,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-cli"
-version = "0.4.71"
+version = "0.4.74"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -2096,11 +2096,13 @@ dependencies = [
  "insta",
  "json5",
  "jsonwebtoken",
+ "libsqlite3-hotbundle",
  "log",
  "minijinja",
  "mongodb",
  "mysql_async",
  "mysql_common",
+ "nix",
  "notify",
  "openssl",
  "pageant",
@@ -2150,7 +2152,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-mcp"
-version = "0.4.71"
+version = "0.4.74"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -2171,7 +2173,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-web"
-version = "0.5.93"
+version = "0.5.97"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",
@@ -4608,6 +4610,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c943259e342f1e06ff2da7a83eabdfe7f92ce10262688dbf1895ff0b3e6e4652"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "libsqlite3-hotbundle"
+version = "1.510300.0"
+source = "git+https://github.com/zipg/libsqlite3-hotbundle.git?rev=7f12f203b4f4694a273410bd9b02d77f82b6114e#7f12f203b4f4694a273410bd9b02d77f82b6114e"
+dependencies = [
+ "cc",
 ]
 
 [[package]]
@@ -8948,7 +8958,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

@@ -24,6 +24,22 @@ vi.mock("@lucide/vue", () => {
     ChevronRight: Icon,
   };
 });
+vi.mock("vue-virtual-scroller", () => ({
+  RecycleScroller: defineComponent({
+    inheritAttrs: false,
+    props: { items: { type: Array, default: () => [] } },
+    setup(props, { attrs, slots }) {
+      return () =>
+        h(
+          "div",
+          attrs,
+          // Keep the unit test deterministic while mirroring a viewport-sized
+          // RecycleScroller pool instead of rendering every supplied item.
+          props.items.slice(0, 50).map((item, index) => slots.default?.({ item, index, active: true })),
+        );
+    },
+  }),
+}));
 vi.mock("@/components/ui/button", () => ({ Button: passthrough("button") }));
 
 import ObjectSelectionTree from "../ObjectSelectionTree.vue";
@@ -45,15 +61,20 @@ const POSTGRES_FUNCTIONS: TreeGroup = {
   items: ["_st_beststride", "_st_coveredby", "box", "box2d"],
 };
 const POSTGRES_SEQUENCES: TreeGroup = { kind: "SEQUENCE", label: "Sequences", items: ["biz_banner_id_seq"] };
+const LARGE_TABLES: TreeGroup = {
+  kind: "TABLE",
+  label: "Tables",
+  items: Array.from({ length: 40_000 }, (_, index) => (index === 20_000 ? "customer_order_special" : `table_${String(index).padStart(5, "0")}`)),
+};
 
 function mountTree(init: { groups?: TreeGroup[]; disabledGroups?: Kind[]; disabledHints?: Record<string, string>; selection?: Record<string, string[]>; search?: string }) {
   const { groups = [VIEWS, FUNCTIONS], disabledGroups = [], disabledHints = {}, selection = {}, search = "" } = init;
-  const state = reactive({ selection, search });
+  const state = reactive({ selection, search, groups });
   const Wrapper = defineComponent({
     setup() {
       return () =>
         h(ObjectSelectionTree, {
-          groups,
+          groups: state.groups,
           disabledGroups,
           disabledHints,
           modelValue: state.selection,
@@ -78,6 +99,10 @@ function groupToggle(container: HTMLElement, index = 0): HTMLButtonElement {
   return container.querySelectorAll<HTMLButtonElement>('button[data-test="group-toggle"]')[index];
 }
 
+function expandGroup(container: HTMLElement, kind: string) {
+  container.querySelector<HTMLButtonElement>(`[data-test="group-${kind}"] button[data-test="group-expand"]`)!.click();
+}
+
 function itemCheckbox(container: HTMLElement, kind: string, item: string): HTMLInputElement {
   return container.querySelector<HTMLInputElement>(`label[data-test="item-${kind}-${item}"] input`)!;
 }
@@ -97,7 +122,7 @@ let cleanup: (() => void) | undefined;
 afterEach(() => {
   cleanup?.();
   cleanup = undefined;
-  document.body.innerHTML = "";
+  document.body.replaceChildren();
   vi.clearAllMocks();
 });
 
@@ -109,6 +134,55 @@ describe("ObjectSelectionTree interaction", () => {
     expect(container.querySelector('label[data-test="item-VIEW-v1"]')).not.toBeNull();
     expect(container.querySelector('label[data-test="item-FUNCTION-f2"]')).not.toBeNull();
     expect(container.querySelector('input[data-test="search"]')).not.toBeNull();
+  });
+
+  it("does not render a large group until the user expands it", async () => {
+    const { container, app } = mountTree({ groups: [LARGE_TABLES] });
+    cleanup = () => app.unmount();
+
+    expect(container.querySelector('[data-test="group-TABLE"]')).not.toBeNull();
+    expect(container.querySelectorAll('label[data-test^="item-TABLE-"]')).toHaveLength(0);
+  });
+
+  it("keeps asynchronously loaded large groups collapsed", async () => {
+    const { state, container, app } = mountTree({ groups: [] });
+    cleanup = () => app.unmount();
+
+    state.groups = [LARGE_TABLES];
+    await nextTick();
+    expect(container.querySelector('[data-test="group-TABLE"]')).not.toBeNull();
+    expect(container.querySelectorAll('label[data-test^="item-TABLE-"]')).toHaveLength(0);
+  });
+
+  it("virtualizes expanded large groups while keeping the full selection model", async () => {
+    const { state, container, app } = mountTree({ groups: [LARGE_TABLES] });
+    cleanup = () => app.unmount();
+
+    expandGroup(container, "TABLE");
+    await nextTick();
+    const renderedItems = container.querySelectorAll('label[data-test^="item-TABLE-"]');
+    expect(renderedItems.length).toBeGreaterThan(0);
+    expect(renderedItems.length).toBeLessThan(100);
+    expect(container.querySelector('label[data-test="item-TABLE-table_00000"]')).not.toBeNull();
+    expect(container.querySelector('label[data-test="item-TABLE-table_39999"]')).toBeNull();
+
+    groupToggle(container).click();
+    await nextTick();
+    expect(state.selection.TABLE).toHaveLength(40_000);
+    expect(container.querySelectorAll('label[data-test^="item-TABLE-"]').length).toBeLessThan(100);
+  });
+
+  it("reveals large-group search matches without rendering every result", async () => {
+    const { container, app } = mountTree({ groups: [LARGE_TABLES] });
+    cleanup = () => app.unmount();
+
+    await typeSearch(container, "customer_order");
+    expect(container.querySelector('label[data-test="item-TABLE-customer_order_special"]')).not.toBeNull();
+    expect(container.querySelectorAll('label[data-test^="item-TABLE-"]')).toHaveLength(1);
+
+    await typeSearch(container, "table_");
+    expect(container.querySelector('label[data-test="item-TABLE-table_00000"]')).not.toBeNull();
+    expect(container.querySelectorAll('label[data-test^="item-TABLE-"]').length).toBeLessThan(100);
   });
 
   it("toggles all items of a group through the group header checkbox", async () => {

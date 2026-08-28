@@ -46,6 +46,7 @@ fn change_options(table_name: &str, columns: Vec<EditableStructureColumn>) -> Ta
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     }

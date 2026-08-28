@@ -10,12 +10,12 @@ vi.mock("vue-i18n", () => ({
 
 const mountedApps: ReturnType<typeof createApp>[] = [];
 
-function mountStatus(initial: { mode: "query" | "data"; isExecuting: boolean; isCancelling?: boolean }) {
+function mountStatus(initial: { mode: "query" | "data"; isExecuting: boolean; isCancelling?: boolean }, withFallback = false) {
   const state = reactive(initial);
   const root = document.createElement("div");
   document.body.appendChild(root);
   const app = createApp({
-    setup: () => () => h(TabExecutionStatus, { tab: state }),
+    setup: () => () => h(TabExecutionStatus, { tab: state }, withFallback ? { default: () => h("span", { "data-tab-icon": "" }) } : undefined),
   });
   mountedApps.push(app);
   app.mount(root);
@@ -46,6 +46,22 @@ describe("TabExecutionStatus", () => {
     const status = root.querySelector<HTMLElement>("[data-tab-execution-status]");
     expect(status?.getAttribute("aria-label")).toBe("common.stopping");
     expect(status?.className).toContain("text-amber-600");
+  });
+
+  it("replaces the tab icon while the query is executing", async () => {
+    const { root, state } = mountStatus({ mode: "query", isExecuting: false }, true);
+    await nextTick();
+    expect(root.querySelector("[data-tab-icon]")).not.toBeNull();
+
+    state.isExecuting = true;
+    await nextTick();
+    expect(root.querySelector("[data-tab-icon]")).toBeNull();
+    expect(root.querySelector("[data-tab-execution-status]")).not.toBeNull();
+
+    state.isExecuting = false;
+    await nextTick();
+    expect(root.querySelector("[data-tab-execution-status]")).toBeNull();
+    expect(root.querySelector("[data-tab-icon]")).not.toBeNull();
   });
 
   it.each(["success", "error", "cancelled"])("disappears as soon as %s completes", async () => {

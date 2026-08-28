@@ -22,6 +22,7 @@ src-tauri/webview2-fixed-runtime/
 plugins/jdbc/target/
 plugins/jdbc/dependency-reduced-pom.xml
 plugins/jdbc/lib/*.jar
+agents/drivers/duckdb/target/
 plugins/jdbc/.gradle/
 plugins/jdbc/build/
 plugins/jdbc/dist/
@@ -61,6 +62,11 @@ Thumbs.db
 
 # Temp
 tmp/
+
+# AI background-run dev artifacts (never commit)
+.dlp-quarantine/
+outputs/
+target-ai-write-confirmation/
 
 # Code review tool artifacts
 review_diff.json

@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { createApp, defineComponent, h, nextTick, type App } from "vue";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
 
 vi.mock("@/components/ui/dialog", async () => {
@@ -63,8 +63,13 @@ vi.mock("@lucide/vue", async () => {
 });
 
 import ConfigPassphraseDialog from "@/components/config/ConfigPassphraseDialog.vue";
+import { clearRememberedExportPassphrase, rememberExportPassphrase } from "@/lib/backend/exportPassphraseSession";
 
 const mountedApps: App[] = [];
+
+beforeEach(() => {
+  clearRememberedExportPassphrase();
+});
 
 afterEach(() => {
   for (const app of mountedApps.splice(0)) app.unmount();
@@ -111,6 +116,55 @@ describe("ConfigPassphraseDialog", () => {
     await nextTick();
     expect(confirm).not.toHaveBeenCalled();
     expect(document.body.textContent).toContain("Passphrase is required");
+  });
+
+  it("blocks encrypted export when the confirmation passphrase does not match", async () => {
+    const confirm = vi.fn();
+    await mountDialog({ open: true, mode: "export", onConfirm: confirm });
+
+    const [passphraseInput, confirmInput] = [...document.body.querySelectorAll("input")];
+    passphraseInput.value = "correct-pass";
+    passphraseInput.dispatchEvent(new Event("input"));
+    confirmInput.value = "mismatched-pass";
+    confirmInput.dispatchEvent(new Event("input"));
+
+    const encrypted = [...document.body.querySelectorAll("button")].find((button) => button.textContent?.includes("Export encrypted"));
+    encrypted?.click();
+    await nextTick();
+
+    expect(confirm).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("Passphrases do not match");
+  });
+
+  it("confirms encrypted export when both passphrase entries match", async () => {
+    const confirm = vi.fn();
+    await mountDialog({ open: true, mode: "export", onConfirm: confirm });
+
+    const [passphraseInput, confirmInput] = [...document.body.querySelectorAll("input")];
+    passphraseInput.value = "matching-pass";
+    passphraseInput.dispatchEvent(new Event("input"));
+    confirmInput.value = "matching-pass";
+    confirmInput.dispatchEvent(new Event("input"));
+
+    const encrypted = [...document.body.querySelectorAll("button")].find((button) => button.textContent?.includes("Export encrypted"));
+    encrypted?.click();
+    await nextTick();
+
+    expect(confirm).toHaveBeenCalledWith("matching-pass");
+  });
+
+  it("prefills the session-remembered passphrase into both export fields", async () => {
+    rememberExportPassphrase("session-pass");
+    await mountDialog({ open: true, mode: "export", onConfirm: vi.fn() });
+
+    expect([...document.body.querySelectorAll("input")].map((input) => input.value)).toEqual(["session-pass", "session-pass"]);
+  });
+
+  it("never prefills the passphrase in import mode", async () => {
+    rememberExportPassphrase("session-pass");
+    await mountDialog({ open: true, mode: "import", onConfirm: vi.fn() });
+
+    expect([...document.body.querySelectorAll("input")].map((input) => input.value)).toEqual([""]);
   });
 
   it("keeps import mode free of the unencrypted export action", async () => {

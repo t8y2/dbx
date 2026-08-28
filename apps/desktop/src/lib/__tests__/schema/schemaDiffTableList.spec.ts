@@ -37,7 +37,7 @@ describe("schemaDiffTableList", () => {
     expect(shouldLoadSchemaDiffTableList("target", true, 0, true)).toBe(false);
   });
 
-  it("loads each side at most once and reuses successful results for Compare", async () => {
+  it("loads each side at most once for non-refreshing reads", async () => {
     const listTables = vi.fn(async (connectionId: string) => [table(`${connectionId}_table`)]);
     const loader = createSchemaDiffTableListLoader({ ensureConnected: vi.fn().mockResolvedValue(undefined), listTables });
     const identities: Record<SchemaDiffTableSide, SchemaDiffTableIdentity> = {
@@ -57,6 +57,22 @@ describe("schemaDiffTableList", () => {
     expect(listTables).toHaveBeenCalledTimes(2);
     expect(listTables).toHaveBeenCalledWith("source", "app", "public");
     expect(listTables).toHaveBeenCalledWith("target", "app", "public");
+  });
+
+  it("refreshes table names before a second compare after the database changes", async () => {
+    const listTables = vi
+      .fn()
+      .mockResolvedValueOnce([table("removed_table")])
+      .mockResolvedValueOnce([table("current_table")]);
+    const loader = createSchemaDiffTableListLoader({ ensureConnected: vi.fn().mockResolvedValue(undefined), listTables });
+    const identity: SchemaDiffTableIdentity = { connectionId: "source", database: "app", schema: "public" };
+
+    const firstTables = await loader.load(identity);
+    const refreshedTables = await loader.load(identity, { refresh: true });
+
+    expect(firstTables.map((entry) => entry.name)).toEqual(["removed_table"]);
+    expect(refreshedTables.map((entry) => entry.name)).toEqual(["current_table"]);
+    expect(listTables).toHaveBeenCalledTimes(2);
   });
 
   it("prunes deleted selections only after a successful source load", async () => {

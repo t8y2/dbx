@@ -8,8 +8,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { AlertTriangle, ArrowLeft, ArrowRight, Check, CheckCircle2, FileJson, FileSpreadsheet, FileText, FileUp, Loader2, RefreshCw, Square, Upload, X } from "@lucide/vue";
+import { AlertTriangle, ArrowLeft, ArrowRight, Check, CheckCircle2, FileCode, FileJson, FileSpreadsheet, FileText, FileUp, Loader2, RefreshCw, Square, Upload, X } from "@lucide/vue";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { ensureReadOnlyWriteAccess } from "@/lib/database/readOnlyWriteAccess";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import {
@@ -109,6 +110,7 @@ const formatOptions: Array<{ value: api.TableImportSourceFormat; icon: any; labe
   { value: "delimited", icon: FileText, labelKey: "tableImport.formatDelimited", descriptionKey: "tableImport.formatDelimitedDescription" },
   { value: "json", icon: FileJson, labelKey: "tableImport.formatJson", descriptionKey: "tableImport.formatJsonDescription" },
   { value: "excel", icon: FileSpreadsheet, labelKey: "tableImport.formatExcel", descriptionKey: "tableImport.formatExcelDescription" },
+  { value: "sql", icon: FileCode, labelKey: "tableImport.formatSql", descriptionKey: "tableImport.formatSqlDescription" },
 ];
 
 const encodingOptions: Array<{ value: api.TableImportTextEncoding; labelKey: string }> = [
@@ -275,6 +277,7 @@ function detectFormat(name: string): api.TableImportSourceFormat {
   if (lower.endsWith(".txt")) return "delimited";
   if (lower.endsWith(".json")) return "json";
   if (lower.endsWith(".xls") || lower.endsWith(".xlsx") || lower.endsWith(".xlsm")) return "excel";
+  if (lower.endsWith(".sql")) return "sql";
   return "csv";
 }
 
@@ -317,12 +320,14 @@ function taskParseOptions(format: api.TableImportSourceFormat, sheetName = ""): 
     emptyStringAsNull: emptyStringAsNull.value,
     sheetName,
     jsonShape: jsonShape.value,
+    databaseType: structureDatabaseType.value,
   });
 }
 
 function importParseOptions(format: api.TableImportSourceFormat, currentPreview: api.TableImportPreview, sheetName = ""): api.TableImportParseOptions {
   const options = taskParseOptions(format, sheetName);
-  if (isDelimitedFormat(format) && currentPreview.totalRowsExact !== false && options.encoding === "auto" && currentPreview.effectiveEncoding) {
+  // SQL 脚本与分隔文本一样依赖文本编码检测，导入时沿用预览阶段确定的编码避免二次检测结果不一致
+  if ((isDelimitedFormat(format) || format === "sql") && currentPreview.totalRowsExact !== false && options.encoding === "auto" && currentPreview.effectiveEncoding) {
     options.encoding = currentPreview.effectiveEncoding;
   }
   return options;
@@ -615,10 +620,11 @@ async function selectFile() {
   const selected = await open({
     multiple: targetMode.value === "create",
     filters: [
-      { name: "Data files", extensions: ["csv", "tsv", "txt", "json", "xlsx", "xlsm", "xls"] },
+      { name: "Data files", extensions: ["csv", "tsv", "txt", "json", "xlsx", "xlsm", "xls", "sql"] },
       { name: "Text", extensions: ["csv", "tsv", "txt"] },
       { name: "JSON", extensions: ["json"] },
       { name: "Excel", extensions: ["xlsx", "xlsm", "xls"] },
+      { name: "SQL", extensions: ["sql"] },
     ],
   });
   if (!selected) return;
@@ -708,6 +714,9 @@ async function goNext() {
 
 async function startImport() {
   saveActiveBatchTask();
+  if (!(await ensureReadOnlyWriteAccess({ connection: store.getConfig(props.prefillConnectionId ?? ""), source: t("readOnlyUnlock.sourceImport"), treatAsMutation: true }))) {
+    return;
+  }
   if (isBatchImport.value) {
     await startBatchImport();
     return;
@@ -939,7 +948,8 @@ async function reloadBatchPreviewsForEncoding() {
   errorMessage.value = "";
   try {
     for (const task of batchTasks.value) {
-      if (!isDelimitedFormat(task.format)) continue;
+      // SQL 脚本同样是文本源，编码变化时需要重新预览
+      if (!isDelimitedFormat(task.format) && task.format !== "sql") continue;
       const reusableSource = task.preview.sourceRef ? task.preview.filePath : task.source;
       const nextPreview = await api.previewTableImportFile(reusableSource, {
         sourceRef: task.preview.sourceRef || null,
@@ -1018,7 +1028,7 @@ watch(rawProgressPercent, (percent) => {
 
       <div class="min-h-0 flex-1 space-y-4 overflow-y-auto py-2 pr-1">
         <div class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
-          <input ref="fileInput" type="file" accept=".csv,.tsv,.txt,.json,.xlsx,.xlsm,.xls" :multiple="targetMode === 'create'" class="hidden" @change="handleFileInputChange" />
+          <input ref="fileInput" type="file" accept=".csv,.tsv,.txt,.json,.xlsx,.xlsm,.xls,.sql" :multiple="targetMode === 'create'" class="hidden" @change="handleFileInputChange" />
           <div class="flex h-10 min-w-0 items-center gap-2 rounded-md border bg-muted/20 px-3">
             <span class="shrink-0 text-xs text-muted-foreground">{{ t("tableImport.target") }}</span>
             <span class="min-w-0 truncate text-sm font-medium">
@@ -1092,7 +1102,7 @@ watch(rawProgressPercent, (percent) => {
               {{ t("tableImport.selectFile") }}
             </Button>
           </div>
-          <div class="grid grid-cols-5 gap-2">
+          <div class="grid grid-cols-6 gap-2">
             <button v-for="format in formatOptions" :key="format.value" type="button" class="min-h-20 rounded-md border px-3 py-2 text-left" :class="sourceFormat === format.value ? 'border-primary bg-primary/5' : 'hover:bg-muted/30'" @click="sourceFormat = format.value">
               <component :is="format.icon" class="mb-2 h-4 w-4 text-muted-foreground" />
               <div class="text-xs font-medium">{{ t(format.labelKey) }}</div>
@@ -1192,6 +1202,25 @@ watch(rawProgressPercent, (percent) => {
               <input v-model="emptyStringAsNull" type="checkbox" class="h-3.5 w-3.5 accent-primary" />
               {{ t("tableImport.emptyStringAsNull") }}
             </label>
+          </div>
+
+          <div v-else-if="sourceFormat === 'sql'" class="grid grid-cols-5 gap-3 rounded-md border p-3">
+            <div class="space-y-1.5">
+              <Label class="text-xs">{{ t("tableImport.encoding") }}</Label>
+              <Select :model-value="textEncoding" @update:model-value="(value: any) => (textEncoding = value)">
+                <SelectTrigger class="h-8 text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem v-for="option in encodingOptions" :key="option.value" :value="option.value">
+                    {{ t(option.labelKey) }}
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+              <div v-if="textEncoding === 'auto' && preview?.effectiveEncoding" class="truncate text-[11px] text-muted-foreground" :title="t('tableImport.encodingDetected', { encoding: encodingLabel(preview.effectiveEncoding) })">
+                {{ t("tableImport.encodingDetected", { encoding: encodingLabel(preview.effectiveEncoding) }) }}
+              </div>
+            </div>
           </div>
 
           <div v-else-if="sourceFormat === 'json'" class="grid grid-cols-2 gap-3 rounded-md border p-3">

@@ -11,6 +11,16 @@ export function redisKeySearchPattern(value: string, fuzzy: boolean): string {
   return fuzzy ? `*${escapeRedisGlobText(pattern, fuzzy)}*` : pattern;
 }
 
+/**
+ * SCAN MATCH pattern covering exactly the subtree of a tree group: every
+ * segment is glob-escaped so keys containing `*`/`?`/`[`/`]` match literally,
+ * and the trailing `*` only widens to the group's descendants.
+ */
+export function redisGroupSubtreePattern(pathSegments: readonly string[], separator = ":"): string {
+  const prefix = pathSegments.map((segment) => escapeRedisGlobText(segment)).join(separator);
+  return `${prefix}${separator}*`;
+}
+
 // Redis scan page size (COUNT parameter per SCAN round-trip) — shared defaults
 // and validation bounds used by the connection form and key browser.
 export const REDIS_SCAN_PAGE_SIZE_DEFAULT = 1000;

@@ -10,7 +10,7 @@ vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     getConfig: (id: string) => {
       if (id === "missing") return undefined;
-      if (id === "readonly") return { name: "ro", read_only: true, is_production: false };
+      if (id === "readonly") return { id: "readonly", name: "ro", read_only: true, is_production: false, db_type: "mq" };
       if (id === "prod") return { name: "prod-mq", read_only: false, is_production: true };
       return { name: "dev-mq", read_only: false, is_production: false };
     },
@@ -19,6 +19,12 @@ vi.mock("@/stores/connectionStore", () => ({
 
 vi.mock("@/stores/productionSafetyStore", () => ({
   useProductionSafetyStore: () => ({ requestConfirmation }),
+}));
+
+vi.mock("@/lib/backend/api", () => ({
+  unlockConnectionWrites: vi.fn(),
+  lockConnectionWrites: vi.fn(),
+  connectionWriteUnlockState: vi.fn().mockResolvedValue(0),
 }));
 
 vi.mock("@/composables/useToast", () => ({
@@ -32,6 +38,7 @@ vi.mock("vue-i18n", () => ({
 }));
 
 import { useMqMutationGuard } from "@/composables/useMqMutationGuard";
+import { useReadOnlyUnlockStore } from "@/stores/readOnlyUnlockStore";
 
 describe("useMqMutationGuard", () => {
   beforeEach(() => {
@@ -41,14 +48,20 @@ describe("useMqMutationGuard", () => {
     toast.mockReset();
   });
 
-  it("denies missing and read-only connections without prompting", async () => {
+  it("denies missing connections and prompts to unlock read-only ones", async () => {
     const missing = useMqMutationGuard("missing");
-    const readonly = useMqMutationGuard("readonly");
     await expect(missing.confirmMqWrite("send")).resolves.toBe(false);
-    await expect(readonly.confirmMqWrite("send")).resolves.toBe(false);
-    expect(requestConfirmation).not.toHaveBeenCalled();
     expect(toast).toHaveBeenCalledWith("mqAdmin.connectionMissing");
-    expect(toast).toHaveBeenCalledWith("mqAdmin.writeDeniedReadOnly");
+
+    const unlockStore = useReadOnlyUnlockStore();
+    const readonly = useMqMutationGuard("readonly");
+    const pending = readonly.confirmMqWrite("send");
+    await vi.waitFor(() => {
+      expect(unlockStore.pending?.connectionId).toBe("readonly");
+    });
+    expect(requestConfirmation).not.toHaveBeenCalled();
+    unlockStore.cancel();
+    await expect(pending).resolves.toBe(false);
   });
 
   it("allows non-production writes immediately", async () => {

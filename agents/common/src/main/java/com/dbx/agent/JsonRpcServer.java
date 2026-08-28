@@ -171,8 +171,10 @@ public final class JsonRpcServer {
             boolean valid = false;
             if (conn != null) {
                 try {
-                    valid = !conn.isClosed() && conn.isValid(2);
-                } catch (Exception ignored) {
+                    valid = agent instanceof AbstractJdbcAgent jdbcAgent
+                        ? jdbcAgent.isConnectionValid(conn, 2)
+                        : !conn.isClosed() && conn.isValid(2);
+                } catch (Exception | AbstractMethodError ignored) {
                 }
             }
             if (!valid) {
@@ -370,8 +372,10 @@ public final class JsonRpcServer {
         }
         boolean valid = false;
         try {
-            valid = !conn.isClosed() && conn.isValid(2);
-        } catch (Exception ignored) {
+            valid = agent instanceof AbstractJdbcAgent validationAgent
+                ? validationAgent.isConnectionValid(conn, 2)
+                : !conn.isClosed() && conn.isValid(2);
+        } catch (Exception | AbstractMethodError ignored) {
         }
         if (valid) {
             lastConnectionValidationTimeMillis = now;

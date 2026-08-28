@@ -1,8 +1,8 @@
 import type { ConnectionConfig } from "@/types/database";
-import { connectionUsesVisibleSchemaFilter, filterDatabaseNamesForVisiblePicker, filterSchemaNamesForVisiblePicker, normalizeVisibleDatabaseSelection } from "@/lib/database/visibleDatabases";
+import { connectionUsesVisibleSchemaFilter, databaseNameMatchesVisiblePatterns, filterDatabaseNamesForVisiblePicker, filterSchemaNamesForVisiblePicker, normalizeVisibleDatabaseSelection, visibleDatabasePatternsAreEnabled } from "@/lib/database/visibleDatabases";
 import { nacosNamespaceIdentity } from "@/lib/nacos/nacosNamespaceVisibility";
 
-type SidebarVisibleFilterConnection = Pick<ConnectionConfig, "database" | "db_type" | "driver_profile" | "show_system_schemas" | "username" | "visible_databases" | "visible_schemas">;
+type SidebarVisibleFilterConnection = Pick<ConnectionConfig, "database" | "db_type" | "driver_profile" | "show_system_schemas" | "username" | "visible_databases" | "visible_database_patterns" | "visible_schemas">;
 
 export type SidebarVisibleFilterSummary = {
   mode: "database" | "schema" | "namespace";
@@ -15,13 +15,15 @@ export function connectionHasConfiguredSidebarVisibleFilter(connection: SidebarV
   if (connectionUsesVisibleSchemaFilter(connection)) {
     return Array.isArray(connection.visible_schemas?.[connection.database || ""]);
   }
-  return Array.isArray(connection.visible_databases);
+  return Array.isArray(connection.visible_databases) || (connection.db_type !== "nacos" && visibleDatabasePatternsAreEnabled(connection.visible_database_patterns));
 }
 
 export function sidebarVisibleFilterSummary(connection: SidebarVisibleFilterConnection, objectNames?: readonly string[]): SidebarVisibleFilterSummary {
   const mode = connectionUsesVisibleSchemaFilter(connection) ? "schema" : "database";
   const configured = mode === "schema" ? connection.visible_schemas?.[connection.database || ""] : connection.visible_databases;
-  const isExplicit = Array.isArray(configured);
+  // 通配符模式只在数据库模式生效；命中的库名与显式勾选取并集（#7164）
+  const patterns = mode === "database" ? connection.visible_database_patterns : undefined;
+  const isExplicit = Array.isArray(configured) || visibleDatabasePatternsAreEnabled(patterns);
   if (!objectNames) return { mode, isActive: false, selected: null, total: null };
 
   const names = [...objectNames];
@@ -30,7 +32,13 @@ export function sidebarVisibleFilterSummary(connection: SidebarVisibleFilterConn
     return { mode, isActive: false, selected: defaultNames.length, total: defaultNames.length };
   }
 
-  const selectedNames = normalizeVisibleDatabaseSelection(configured, names);
+  const selectedSet = new Set(Array.isArray(configured) ? normalizeVisibleDatabaseSelection(configured, names) : []);
+  if (visibleDatabasePatternsAreEnabled(patterns)) {
+    for (const name of names) {
+      if (databaseNameMatchesVisiblePatterns(name, patterns)) selectedSet.add(name);
+    }
+  }
+  const selectedNames = [...selectedSet];
   const defaultNameSet = new Set(defaultNames);
   const includesSystemObject = selectedNames.some((name) => !defaultNameSet.has(name));
   const total = includesSystemObject ? names.length : defaultNames.length;

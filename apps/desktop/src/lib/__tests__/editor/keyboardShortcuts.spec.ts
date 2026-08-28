@@ -9,6 +9,7 @@ import {
   isGoToLastPageShortcut,
   isGoToNextPageShortcut,
   isGoToPreviousPageShortcut,
+  isToggleZenModeShortcut,
   matchesModifierOnlyShortcut,
   matchesShortcut,
   tabSwitcherDirectionFromShortcut,
@@ -39,6 +40,13 @@ describe("keyboard shortcut matching", () => {
   it("records the plus key without losing it to the separator", () => {
     expect(eventToShortcut({ key: "+", ctrlKey: true }, "Win32")).toBe("Mod+Plus");
     expect(eventToShortcut({ key: "+", ctrlKey: true, shiftKey: true }, "Win32")).toBe("Shift+Mod+Plus");
+  });
+
+  it.each([
+    ["¨", "KeyU", "Shift+Alt+U"],
+    ["Ò", "KeyL", "Shift+Alt+L"],
+  ])("records macOS Option-modified %s by physical letter", (key, code, expected) => {
+    expect(eventToShortcut({ key, code, altKey: true, shiftKey: true }, "MacIntel")).toBe(expected);
   });
 
   it("keeps Control distinct from Command when recording macOS shortcuts", () => {
@@ -91,15 +99,23 @@ describe("keyboard shortcut matching", () => {
     expect(isExecuteSqlInNewResultTabShortcut({ key: "\\", metaKey: true }, { executeSqlInNewResultTab: "Mod+\\" })).toBe(true);
   });
 
+  it("matches the configurable Zen mode shortcut", () => {
+    const platformModEvent = isMacShortcutPlatform() ? { key: "F12", metaKey: true, shiftKey: true } : { key: "F12", ctrlKey: true, shiftKey: true };
+
+    expect(isToggleZenModeShortcut(platformModEvent, { toggleZenMode: "Shift+Mod+F12" })).toBe(true);
+    expect(isToggleZenModeShortcut({ ...platformModEvent, shiftKey: false }, { toggleZenMode: "Shift+Mod+F12" })).toBe(false);
+    expect(isToggleZenModeShortcut(platformModEvent, { toggleZenMode: "" })).toBe(false);
+  });
+
   it("matches legacy plus-key shortcuts saved with plus as a separator", () => {
     expect(matchesShortcut({ key: "+", ctrlKey: true }, "Mod++", "Win32")).toBe(true);
     expect(matchesShortcut({ key: "+", ctrlKey: true, shiftKey: true }, "Shift+Mod++", "Win32")).toBe(true);
   });
 
   it("matches only the configured go-to-column shortcut", () => {
-    expect(isGoToColumnShortcut({ key: "g", ctrlKey: true }, { goToColumn: "Mod+G" })).toBe(true);
-    expect(isGoToColumnShortcut({ key: "g", ctrlKey: true, shiftKey: true }, { goToColumn: "Mod+G" })).toBe(false);
-    expect(isGoToColumnShortcut({ key: "j", ctrlKey: true }, { goToColumn: "Mod+G" })).toBe(false);
+    expect(isGoToColumnShortcut({ key: "g", ctrlKey: true }, { goToColumn: "Mod+G" }, "Win32")).toBe(true);
+    expect(isGoToColumnShortcut({ key: "g", ctrlKey: true, shiftKey: true }, { goToColumn: "Mod+G" }, "Win32")).toBe(false);
+    expect(isGoToColumnShortcut({ key: "j", ctrlKey: true }, { goToColumn: "Mod+G" }, "Win32")).toBe(false);
   });
 
   it("does not match an empty or composing go-to-column shortcut", () => {

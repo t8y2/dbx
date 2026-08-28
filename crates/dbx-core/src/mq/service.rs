@@ -38,6 +38,27 @@ pub async fn mq_test_connection_core(state: &AppState, conn_id: &str) -> Result<
     }
 }
 
+/// Convert the adapter's cluster probe into the common connection metadata
+/// shown by the desktop and web connection views.
+pub async fn mq_database_connection_info(
+    state: &AppState,
+    conn_id: &str,
+) -> Result<Option<crate::models::connection::DatabaseConnectionInfo>, String> {
+    let info = mq_test_connection_core(state, conn_id).await?;
+    let product_name = match info.system_kind {
+        MqSystemKind::Pulsar => "Pulsar",
+        MqSystemKind::Kafka => "Kafka",
+        MqSystemKind::RocketMq => "RocketMQ",
+        MqSystemKind::RabbitMq => "RabbitMQ",
+    };
+    Ok(Some(crate::models::connection::DatabaseConnectionInfo {
+        product_name: Some(product_name.to_string()),
+        product_version: info.server_version,
+        driver_name: Some("Message Queue Admin API".to_string()),
+        ..Default::default()
+    }))
+}
+
 // ---- Tenants ----
 
 pub async fn mq_list_tenants_core(state: &AppState, conn_id: &str) -> Result<Vec<TenantInfo>, String> {
@@ -851,17 +872,21 @@ pub fn resolve_kafka_launch_spec(mqc: &MqAdminConfig, state: &AppState) -> Optio
 }
 
 async fn ensure_connection_writable(state: &AppState, conn_id: &str, operation: &str) -> Result<(), String> {
-    let configs = state.configs.read().await;
-    if let Some(config) = configs.get(conn_id) {
-        if config.read_only {
-            return Err(format!(
-                "Read-only mode: connection '{}' has read-only protection enabled. {} blocked.",
-                config.name, operation
-            ));
+    let (name, read_only) = {
+        let configs = state.configs.read().await;
+        match configs.get(conn_id) {
+            Some(config) => (config.name.clone(), config.read_only),
+            None => return Ok(()),
         }
-        // Production protection for desktop MQ uses UI confirmation; MCP enforces
-        // is_production separately. Do not hard-block confirmed desktop writes here.
+    };
+    if read_only && !state.write_unlock_windows.is_active(conn_id).await {
+        return Err(format!(
+            "Read-only mode: connection '{}' has read-only protection enabled. {} blocked.",
+            name, operation
+        ));
     }
+    // Production protection for desktop MQ uses UI confirmation; MCP enforces
+    // is_production separately. Do not hard-block confirmed desktop writes here.
     Ok(())
 }
 
@@ -890,6 +915,7 @@ mod tests {
             database: None,
             default_schema: None,
             visible_databases: None,
+            visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
             attached_databases: Vec::new(),
@@ -917,6 +943,7 @@ mod tests {
             redis_key_separator: ":".to_string(),
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
+            redis_key_templates: Vec::new(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),

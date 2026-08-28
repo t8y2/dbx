@@ -9,6 +9,8 @@ import {
   supportsConnectionDatabaseBrowser,
   supportsDatabaseNameCompletion,
   supportsDatabaseSchemaQualifier,
+  supportsObjectBrowser,
+  supportsObjectBrowserTreeNode,
   supportsQueryTargetDatabaseListing,
   supportsQueryEditorBlockComments,
   supportsSqlInListPaste,
@@ -50,6 +52,17 @@ describe("connection database browser", () => {
   it("follows object browser support without enabling unsupported connection types", () => {
     expect(supportsConnectionDatabaseBrowser("postgres")).toBe(true);
     expect(supportsConnectionDatabaseBrowser("redis")).toBe(false);
+    expect(supportsConnectionDatabaseBrowser("mongodb")).toBe(false);
+  });
+});
+
+describe("object browser tree nodes", () => {
+  it("opens MongoDB object browser from mongo-db nodes without the SQL database list", () => {
+    expect(supportsObjectBrowser("mongodb")).toBe(true);
+    expect(supportsObjectBrowserTreeNode("mongodb", "mongo-db")).toBe(true);
+    expect(supportsObjectBrowserTreeNode("mongodb", "database")).toBe(false);
+    expect(supportsObjectBrowserTreeNode("mysql", "database")).toBe(true);
+    expect(supportsObjectBrowserTreeNode("mysql", "mongo-db")).toBe(false);
   });
 });
 

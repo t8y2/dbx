@@ -1,5 +1,6 @@
 import type { ConnectionConfig, DatabaseType, TreeNodeType } from "@/types/database";
 import { supportsCreateDatabaseCharset } from "@/lib/database/createDatabaseSql";
+import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 
 export type DatabasePropertyEditGroup = "charsetCollation" | "databaseComment" | "schemaComment";
 
@@ -9,7 +10,7 @@ export interface DatabasePropertyEditingEntry {
   deferred?: string;
 }
 
-type PropertyEditConnection = Pick<ConnectionConfig, "db_type" | "driver_profile" | "read_only"> | undefined;
+type PropertyEditConnection = (Pick<ConnectionConfig, "db_type" | "driver_profile" | "read_only"> & Partial<Pick<ConnectionConfig, "id">>) | undefined;
 type DatabaseNode = Pick<{ type: TreeNodeType; database?: string | null }, "type" | "database">;
 type SchemaNode = Pick<{ type: TreeNodeType; database?: string | null; schema?: string | null }, "type" | "database" | "schema">;
 
@@ -97,7 +98,7 @@ export const DATABASE_PROPERTY_EDITING_MATRIX = {
 } satisfies Record<DatabaseType, DatabasePropertyEditingEntry>;
 
 function entryFor(connection: PropertyEditConnection): DatabasePropertyEditingEntry | null {
-  if (!connection || connection.read_only) return null;
+  if (!connection || connectionIsEffectivelyReadOnly(connection)) return null;
   return DATABASE_PROPERTY_EDITING_MATRIX[connection.db_type] ?? null;
 }
 

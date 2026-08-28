@@ -15,17 +15,23 @@ describe("DataGrid save reload integration", () => {
   it("shares the toolbar full-reload preparation with editor saves", () => {
     const prepareSource = functionSource("prepareFullReload", "onToolbarRefresh");
     const toolbarSource = functionSource("onToolbarRefresh", "setAutoRefreshInterval");
+    const rollbackSource = functionSource("onToolbarRollback", "addRow");
 
     expect(dataGridSource).toContain("prepareFullReload,\n  emit,");
+    expect(dataGridSource).toContain("refreshSavedRows,\n  onCellValueChanged");
     expect(toolbarSource).toContain("prepareFullReload();");
+    expect(rollbackSource).toContain("prepareFullReload();");
     expect(toolbarSource).toContain("const resetToFirstPage = hasPendingConditionInputs();");
     expect(toolbarSource).toContain("resetToFirstPage ? 0 : (currentPage.value - 1) * pageSize.value");
     expect(prepareSource).toContain("resetInfiniteScrollState();");
+    expect(prepareSource).toContain("captureViewportAnchorForRefresh();");
+    expect(prepareSource).toContain("preservedViewportAnchorOnNextResult = viewportAnchor ? { anchor: viewportAnchor, sourceResult: props.result } : null;");
     expect(prepareSource).toContain("captureCurrentSelectionForRefresh();");
     expect(prepareSource).toContain("preservedSelectionOnNextResult = selection ? { selection, sourceResult: props.result } : null;");
     expect(prepareSource).toContain("preservedDetailsOnNextResult = captureDetailsForRefresh();");
     expect(prepareSource).toContain("preserveTransposeOnNextResult.value = showTranspose.value;");
     expect(dataGridSource).toContain("if (detailsSnapshot) restoreDetailsAfterRefresh(detailsSnapshot);");
+    expect(dataGridSource).toContain("if (viewportAnchorSnapshot) restoreViewportAnchorAfterRefresh(viewportAnchorSnapshot);");
   });
 
   it("resets accumulated infinite-scroll pagination before reloading from offset zero", () => {

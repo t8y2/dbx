@@ -473,6 +473,43 @@ pub async fn redis_hash_del_in_db_core(
     }
 }
 
+/// Atomically update a Redis hash field and optionally rename it.
+///
+/// The driver executes the source check, destination collision check, value
+/// write, and old-field deletion in one EVAL on the connection for the hash
+/// key.  Keeping the dispatch here mirrors the other Redis operations so
+/// standalone and cluster connections follow the same path.
+pub async fn redis_hash_field_update_in_db_core(
+    state: &AppState,
+    connection_id: &str,
+    db: u32,
+    key_raw: &str,
+    old_field: &str,
+    new_field: &str,
+    value: &str,
+) -> Result<(), String> {
+    ensure_redis_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::Redis(redis) => {
+            let key = redis_driver::redis_key_raw_to_bytes(key_raw)?;
+            match redis {
+                RedisConnection::Direct(con) => {
+                    let mut con = con.lock().await;
+                    redis_driver::select_db(&mut *con, db).await?;
+                    redis_driver::hash_field_update(&mut *con, &key, old_field, new_field, value).await
+                }
+                RedisConnection::Cluster(cluster) => {
+                    redis_driver::ensure_cluster_db(db)?;
+                    let mut con = redis_driver::cluster_key_connection(cluster, &key).await?;
+                    redis_driver::hash_field_update(&mut con, &key, old_field, new_field, value).await
+                }
+            }
+        }
+        _ => Err("Not a Redis connection".to_string()),
+    }
+}
+
 pub async fn redis_hash_field_set_ttl_in_db_core(
     state: &AppState,
     connection_id: &str,

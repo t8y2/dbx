@@ -173,6 +173,10 @@ const selectedMemberContext = ref<RedisMemberContext | null>(null);
 const isEditingMember = ref(false);
 const savingMember = ref(false);
 const memberEditValue = ref("");
+const memberFieldEditValue = ref("");
+// Keep the original hash field separate from the editable draft so a rename
+// remains visible (and protected from refresh) after the detail dialog closes.
+const memberFieldDraftBaseline = ref("");
 const editingZsetMemberKey = ref<string | null>(null);
 const savingZsetMember = ref(false);
 const zsetInlineMember = ref("");
@@ -590,17 +594,22 @@ const hasRetainedStringDraft = computed(() => isStringDraftDirty(stringDraftForm
 const redisJsonValueChanged = computed(() => data.value?.data.kind === "json" && editValue.value !== redisJsonDraftBaseline.value);
 const canEditCurrentMemberFormat = computed(() => selectedMemberCanEdit.value && memberValueView.value === "utf8");
 const isEditingHashJson = computed(() => selectedMemberContext.value?.kind === "hash" && selectedMemberCanEdit.value && memberValueView.value === "json" && Boolean(selectedMemberDetail.value.json));
+const memberFieldChanged = computed(() => {
+  const context = selectedMemberContext.value;
+  return context?.kind === "hash" && context.canEdit && memberFieldEditValue.value !== memberFieldDraftBaseline.value;
+});
 const memberValueChanged = computed(() => {
   if (!selectedMemberCanEdit.value) return false;
   const original = selectedMemberDetail.value.rawText;
-  if (isEditingHashJson.value && selectedMemberDetail.value.json) return memberEditValue.value !== memberJsonDraftBaseline.value;
-  return memberEditValue.value !== original;
+  const valueChanged = isEditingHashJson.value && selectedMemberDetail.value.json ? memberEditValue.value !== memberJsonDraftBaseline.value : memberEditValue.value !== original;
+  return valueChanged || memberFieldChanged.value;
 });
 // A member sheet can close without discarding its draft, so its dirty state
 // must outlive the sheet and whichever display format is currently selected.
 const memberDraftFormat = ref<"utf8" | "json" | null>(null);
 const hasRetainedMemberDraft = computed(() => {
   const format = memberDraftFormat.value;
+  if (memberFieldChanged.value) return true;
   if (!format || !selectedMemberCanEdit.value) return false;
 
   const original = selectedMemberDetail.value.rawText;
@@ -609,7 +618,7 @@ const hasRetainedMemberDraft = computed(() => {
   }
   return memberEditValue.value !== original;
 });
-const hasUnsavedRedisDraft = computed(() => hasRetainedStringDraft.value || redisJsonValueChanged.value || hasRetainedMemberDraft.value || editingZsetMemberKey.value !== null || showHashFieldTtlDialog.value);
+const hasUnsavedRedisDraft = computed(() => hasRetainedStringDraft.value || redisJsonValueChanged.value || hasRetainedMemberDraft.value || memberFieldChanged.value || editingZsetMemberKey.value !== null || showHashFieldTtlDialog.value);
 const hasMore = computed(() => scanCursor.value != null && scanCursor.value > 0);
 const collectionTotal = computed(() => (data.value ? redisValueCollectionTotal(data.value) : null));
 const hashFieldTtlSupported = computed(() => {
@@ -1824,6 +1833,8 @@ function selectMember(title: string, value: unknown, context: RedisMemberContext
   memberJsonRawBaseline.value = detail.json?.formattedText ?? "";
   memberJsonDraftBaseline.value = jsonDraftBaseline(memberJsonRawBaseline.value, redisJsonDecoded.value);
   memberEditValue.value = memberValueView.value === "json" && detail.json ? memberJsonDraftBaseline.value : detail.rawText;
+  memberFieldDraftBaseline.value = context.kind === "hash" ? (context.field ?? "") : "";
+  memberFieldEditValue.value = memberFieldDraftBaseline.value;
   memberDraftFormat.value = context.kind === "hash" && context.canEdit && memberValueView.value === "json" && detail.json ? "json" : null;
 }
 
@@ -1834,6 +1845,8 @@ function clearSelectedMember() {
   selectedMemberContext.value = null;
   isEditingMember.value = false;
   memberEditValue.value = "";
+  memberFieldEditValue.value = "";
+  memberFieldDraftBaseline.value = "";
   memberJsonDraftBaseline.value = "";
   memberDraftFormat.value = null;
 }
@@ -1857,7 +1870,9 @@ function viewMember(title: string, value: unknown, context: RedisMemberContext, 
 
 function handleMemberDetailOpenChange(open: boolean) {
   showMemberDetail.value = open;
-  if (!open) isEditingMember.value = false;
+  if (!open) {
+    isEditingMember.value = false;
+  }
 }
 
 function finishMemberDetailClose() {
@@ -1988,6 +2003,11 @@ function startEditMember() {
   if (!memberValueChanged.value) memberEditValue.value = selectedMemberDetail.value.rawText;
   // Do not demote a retained JSON draft to utf8; save still needs compact normalization.
   if (memberDraftFormat.value !== "json") memberDraftFormat.value = "utf8";
+  // A closed dialog can be reopened into the same edit. Keep a dirty field
+  // draft instead of replacing it with the currently stored field name.
+  if (selectedMemberContext.value?.kind === "hash" && !memberFieldChanged.value) {
+    memberFieldEditValue.value = selectedMemberContext.value.field ?? "";
+  }
   isEditingMember.value = true;
   nextTick(() => memberTextareaRef.value?.focus());
 }
@@ -1996,6 +2016,7 @@ function cancelEditMember() {
   memberEditValue.value = selectedMemberDetail.value.rawText;
   memberDraftFormat.value = null;
   isEditingMember.value = false;
+  memberFieldEditValue.value = memberFieldDraftBaseline.value;
 }
 
 function discardHashJsonEdit() {
@@ -2020,13 +2041,24 @@ async function saveMemberEdit() {
   }
 
   let nextContext: RedisMemberContext = context;
+  const nextHashField = context.kind === "hash" ? memberFieldEditValue.value : "";
+  if (context.kind === "hash" && nextHashField.length === 0) {
+    toast(t("redis.fieldRequired"), 3000);
+    return;
+  }
   savingMember.value = true;
   try {
     if (context.kind === "list") {
       await api.redisListSet(props.connectionId, props.db, props.keyRaw, context.index, writeValue);
     } else if (context.kind === "hash") {
-      if (!context.field) return;
-      await api.redisHashSet(props.connectionId, props.db, props.keyRaw, context.field, writeValue);
+      if (context.field == null) return;
+      try {
+        await api.redisHashFieldUpdate(props.connectionId, props.db, props.keyRaw, context.field, nextHashField, writeValue);
+      } catch (error) {
+        toast(errorMessage(error), 3000);
+        return;
+      }
+      nextContext = { kind: "hash", field: nextHashField, canEdit: canEditRedisMemberDetail("hash", writeValue) };
     } else if (context.kind === "set") {
       if (!context.member) return;
       await api.redisSetRemove(props.connectionId, props.db, props.keyRaw, context.member);
@@ -2149,7 +2181,7 @@ function resolveSelectedMember(context: RedisMemberContext): { title: string; va
       };
     }
     case "hash": {
-      if (redisKind.value !== "hash" || !context.field) return null;
+      if (redisKind.value !== "hash" || context.field == null) return null;
       const item = (collectionItems.value as RedisHashItem[]).find((candidate) => redisBlobText(candidate.field) === context.field);
       if (!item) return null;
       const field = redisBlobText(item.field);
@@ -3480,7 +3512,8 @@ defineExpose({ focusSearch });
         />
         <DialogHeader class="border-b px-5 py-4 pr-12">
           <DialogTitle class="flex items-center gap-2">
-            <span class="truncate">{{ selectedMemberTitle ? formatValue(selectedMemberTitle) : t("redis.memberDetail") }}</span>
+            <Input v-if="isEditingMember && selectedMemberContext?.kind === 'hash'" v-model="memberFieldEditValue" class="h-7 min-w-0 flex-1 text-sm" :placeholder="t('redis.field')" :aria-label="t('redis.field')" @keydown.enter="saveMemberEdit" />
+            <span v-else class="truncate">{{ selectedMemberTitle ? formatValue(selectedMemberTitle) : t("redis.memberDetail") }}</span>
             <Badge variant="outline" class="shrink-0 text-xs">{{ redisFormatLabel(memberValueView, selectedMemberDetail.rawLabel) }}</Badge>
             <Badge v-if="memberGzipBadge && memberValueCodec === 'none'" variant="outline" class="shrink-0 text-xs text-muted-foreground" :title="t('redis.gzipBadgeTitle')" :aria-label="t('redis.gzipBadgeTitle')">
               <FileArchive class="h-3 w-3 mr-1" />
@@ -3596,7 +3629,7 @@ defineExpose({ focusSearch });
             <Button variant="ghost" :disabled="savingMember" @click="cancelEditMember">
               {{ t("grid.discard") }}
             </Button>
-            <Button :disabled="savingMember" @click="saveMemberEdit">
+            <Button :disabled="savingMember || !memberValueChanged" @click="saveMemberEdit">
               <Loader2 v-if="savingMember" class="h-4 w-4 animate-spin" />
               <Save v-else class="h-4 w-4" />
               {{ t("grid.save") }}

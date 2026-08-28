@@ -143,6 +143,36 @@ const CLICKHOUSE_TYPES = [
 
 const CLICKHOUSE_BUILTINS = ["now", "today", "toDate", "toDateTime", "toDateTime64", "toYYYYMM", "count", "sum", "avg", "min", "max", "uniq", "uniqExact", "argMin", "argMax", "groupArray", "arrayJoin", "mapKeys", "mapValues", "JSONExtract", "JSONExtractString"].join(" ").toLowerCase();
 
+// COUNT is stripped from Postgres keywords by postgresKeywordSyntaxTerms() (it's a
+// valid Postgres identifier name), so it's re-added here as a builtin function instead.
+const POSTGRES_BUILTINS = [
+  "count",
+  "coalesce",
+  "nullif",
+  "greatest",
+  "least",
+  "to_char",
+  "to_date",
+  "to_number",
+  "to_timestamp",
+  "extract",
+  "date_trunc",
+  "date_part",
+  "now",
+  "current_date",
+  "current_timestamp",
+  "array_agg",
+  "string_agg",
+  "lower",
+  "upper",
+  "length",
+  "substring",
+  "trim",
+  "concat",
+].join(" ");
+
+const MYSQL_BUILTINS = ["ifnull", "date_format", "str_to_date", "date_add", "date_sub", "curdate", "curtime", "unix_timestamp", "from_unixtime", "group_concat", "concat_ws"].join(" ");
+
 export function postgresKeywordSyntaxTerms(keywords: string): string {
   return keywords
     .split(/\s+/)
@@ -179,7 +209,9 @@ function codeMirrorBaseDialect(langSql: CodeMirrorSqlLanguageModule, dialectName
 export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModule, dialectName: CodeMirrorSqlDialectName = "mysql", databaseType?: DatabaseType, driverProfile?: string): SQLDialect {
   const baseDialect = codeMirrorBaseDialect(langSql, dialectName, databaseType);
   const isPostgres = baseDialect === langSql.PostgreSQL;
+  const isMysql = baseDialect === langSql.MySQL;
   const isSqlServer = baseDialect === langSql.MSSQL;
+  const isPlsql = baseDialect === langSql.PLSQL;
   const isClickHouse = databaseType === "clickhouse" || dialectName === "clickhouse";
   const baseKeywords = isClickHouse ? standardSqlKeywordSyntaxTerms(langSql) : isPostgres ? postgresKeywordSyntaxTerms(baseDialect.spec.keywords || "") : baseDialect.spec.keywords || "";
   const baseTypes = isClickHouse ? STANDARD_SQL_TYPES : baseDialect.spec.types || "";
@@ -189,7 +221,7 @@ export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModu
     ...baseDialect.spec,
     keywords: [baseKeywords, commonKeywords, isClickHouse ? CLICKHOUSE_KEYWORDS : "", isPostgres ? POSTGRES_PLPGSQL_KEYWORDS : "", isSqlServer ? SQLSERVER_KEYWORDS : ""].filter(Boolean).join(" "),
     types: [baseTypes, isClickHouse ? CLICKHOUSE_TYPES : "", isPostgres ? POSTGRES_PLPGSQL_TYPES : ""].filter(Boolean).join(" ") || undefined,
-    builtin: [baseDialect.spec.builtin || "", isClickHouse ? CLICKHOUSE_BUILTINS : "", isPostgres ? POSTGRES_PLPGSQL_BUILTIN : "", driverProfileSqlBuiltinTerms(driverProfile)].filter(Boolean).join(" ") || undefined,
+    builtin: [baseDialect.spec.builtin || "", isClickHouse ? CLICKHOUSE_BUILTINS : "", isPostgres ? `${POSTGRES_BUILTINS} ${POSTGRES_PLPGSQL_BUILTIN}` : "", isMysql ? MYSQL_BUILTINS : "", driverProfileSqlBuiltinTerms(driverProfile)].filter(Boolean).join(" ") || undefined,
     ...(isClickHouse
       ? {
           identifierQuotes: '"`',
@@ -197,6 +229,7 @@ export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModu
           spaceAfterDashes: false,
         }
       : {}),
+    ...(isPlsql ? { doubleQuotedStrings: false } : {}),
     doubleDollarQuotedStrings: false,
   });
 }

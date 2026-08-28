@@ -2,7 +2,7 @@ import { displayCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
 import type { ColumnFormatterConfig, ForeignKeyDisplayFilterConfig } from "@/lib/dataGrid/columnFormatter";
 import { isNumericColumnType } from "@/lib/dataGrid/dataGridColumnType";
 import type { ForeignKeyAssociation } from "@/lib/dataGrid/dataGridForeignKeyNavigation";
-import type { ColumnInfo, ForeignKeyInfo, QueryResult } from "@/types/database";
+import type { ColumnInfo, ForeignKeyInfo, QueryResult, ReferenceKeyInfo } from "@/types/database";
 
 export type ForeignKeyDisplayConfig = Extract<ColumnFormatterConfig, { kind: "foreign-key-display" }>;
 
@@ -169,19 +169,29 @@ export function foreignKeyDisplayConfigIsUsable(config: ForeignKeyDisplayConfig,
 export type ManualReferenceMetadataStatus = "loading" | "available" | "unavailable";
 export type ManualReferenceColumnValidation = "pending" | "valid" | "invalid" | "unavailable";
 
-export function manualReferenceKeyColumns(columns: readonly ColumnInfo[], referenceKeyColumnNames: readonly string[]): ColumnInfo[] {
-  const uniqueColumnNames = new Set(referenceKeyColumnNames);
-  return columns.filter((column) => uniqueColumnNames.has(column.name));
+export function manualReferenceKeySupportsColumn(referenceKeys: readonly ReferenceKeyInfo[], columnName: string, filter?: ForeignKeyDisplayFilterConfig): boolean {
+  if (!columnName) return false;
+  return referenceKeys.some((key) => {
+    if (!key.columns.includes(columnName)) return false;
+    if (key.columns.length === 1) return true;
+    if (key.columns.length !== 2 || filter?.mode !== "equals" || !filter.value?.trim()) return false;
+    const otherColumn = key.columns.find((column) => column !== columnName);
+    return !!otherColumn && filter.column === otherColumn;
+  });
 }
 
-export function manualReferenceKeyColumnIsUnique(columns: readonly ColumnInfo[], referenceKeyColumnNames: readonly string[], columnName: string): boolean {
-  return !!columnName && manualReferenceKeyColumns(columns, referenceKeyColumnNames).some((column) => column.name === columnName);
+export function manualReferenceKeyColumns(columns: readonly ColumnInfo[], referenceKeys: readonly ReferenceKeyInfo[], filter?: ForeignKeyDisplayFilterConfig): ColumnInfo[] {
+  return columns.filter((column) => manualReferenceKeySupportsColumn(referenceKeys, column.name, filter));
 }
 
-export function manualReferenceColumnValidation(columns: readonly ColumnInfo[], referenceKeyColumnNames: readonly string[], columnName: string, metadataStatus: ManualReferenceMetadataStatus): ManualReferenceColumnValidation {
+export function manualReferenceKeyColumnIsUnique(columns: readonly ColumnInfo[], referenceKeys: readonly ReferenceKeyInfo[], columnName: string, filter?: ForeignKeyDisplayFilterConfig): boolean {
+  return !!columns.some((column) => column.name === columnName) && manualReferenceKeySupportsColumn(referenceKeys, columnName, filter);
+}
+
+export function manualReferenceColumnValidation(columns: readonly ColumnInfo[], referenceKeys: readonly ReferenceKeyInfo[], columnName: string, metadataStatus: ManualReferenceMetadataStatus, filter?: ForeignKeyDisplayFilterConfig): ManualReferenceColumnValidation {
   if (metadataStatus === "loading") return "pending";
   if (metadataStatus === "unavailable") return "unavailable";
-  return manualReferenceKeyColumnIsUnique(columns, referenceKeyColumnNames, columnName) ? "valid" : "invalid";
+  return manualReferenceKeyColumnIsUnique(columns, referenceKeys, columnName, filter) ? "valid" : "invalid";
 }
 
 export function reconcileManualReferenceColumn(currentColumn: string, referenceColumns: readonly ColumnInfo[], metadataStatus: ManualReferenceMetadataStatus): string {

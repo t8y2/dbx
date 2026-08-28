@@ -13,7 +13,7 @@ const (
 	maxRPCMessageBytes   = 32 * 1024 * 1024
 )
 
-var capabilities = []string{"connect", "test_connection", "kv"}
+var capabilities = []string{"connect", "test_connection", "connection_info", "kv"}
 
 type rpcRequest struct {
 	ID     json.RawMessage `json:"id"`
@@ -41,6 +41,7 @@ type handshakeResult struct {
 
 type server struct {
 	activeClient          znodeClient
+	activeConfig          connectionConfig
 	statLookupConcurrency int
 }
 
@@ -103,6 +104,9 @@ func (service *server) dispatch(method string, params json.RawMessage) (any, boo
 		return result, false, err
 	case "test_connection":
 		result, err := service.testConnection(params)
+		return result, false, err
+	case "connection_info":
+		result, err := service.connectionInfo()
 		return result, false, err
 	case "kv_list_prefix":
 		result, err := service.listPrefix(params)

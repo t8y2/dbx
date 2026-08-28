@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 
 use serde_json::json;
 
@@ -35,6 +36,32 @@ const MAX_QUERY_CELL_CHAR_LIMIT: usize = 4_000;
 
 /// Bounds explicit sliding-window scans without changing the underlying database request.
 const MAX_QUERY_CELL_CHAR_OFFSET: usize = 1_000_000;
+
+fn connection_tool_lock(connection_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: OnceLock<StdMutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    let locks = LOCKS.get_or_init(|| StdMutex::new(HashMap::new()));
+    let mut registry = locks.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    registry.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = registry.get(connection_id).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    registry.insert(connection_id.to_string(), Arc::downgrade(&lock));
+    lock
+}
+
+fn tool_uses_database(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "list_tables"
+            | "get_columns"
+            | "execute_query"
+            | "get_sample_data"
+            | "list_collections"
+            | "browse_collection"
+            | "explain_query"
+    )
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueryCellWindow {
@@ -506,6 +533,15 @@ pub async fn execute_tool(
     db_type: &DatabaseType,
     sql_permissions: AgentSqlPermissions,
 ) -> ToolResult {
+    // Agent loops for different conversations may share a physical connection.
+    // Lock only the database tool future; model generation and non-DB tools stay
+    // concurrent. Dropping a cancelled future releases either the waiter or the
+    // acquired guard automatically.
+    let _connection_guard = if tool_uses_database(&tool_call.name) {
+        Some(connection_tool_lock(connection_id).lock_owned().await)
+    } else {
+        None
+    };
     let result = match tool_call.name.as_str() {
         "list_tables" => execute_list_tables(tool_call, state, connection_id, database, default_schema, db_type).await,
         "get_columns" => execute_get_columns(tool_call, state, connection_id, database, default_schema, db_type).await,
@@ -1243,6 +1279,24 @@ async fn resolve_chroma_collection_uuid(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn database_tool_locks_are_connection_scoped_and_cancel_safe() {
+        let first = connection_tool_lock("agent-tool-lock-a").lock_owned().await;
+        let same_connection = connection_tool_lock("agent-tool-lock-a");
+        let other_connection = connection_tool_lock("agent-tool-lock-b");
+
+        assert!(same_connection.try_lock().is_err(), "same connection must serialize tool calls");
+        assert!(other_connection.try_lock().is_ok(), "different connections must remain concurrent");
+
+        let waiter = tokio::spawn(async move { same_connection.lock_owned().await });
+        tokio::task::yield_now().await;
+        waiter.abort();
+        let _ = waiter.await;
+        drop(first);
+
+        assert!(connection_tool_lock("agent-tool-lock-a").try_lock().is_ok());
+    }
     #[cfg(unix)]
     use crate::connection::PoolKind;
     #[cfg(unix)]
@@ -1313,6 +1367,7 @@ for line in sys.stdin:
             database: Some(database.to_string()),
             default_schema: None,
             visible_databases: None,
+            visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
             attached_databases: Vec::new(),
@@ -1340,6 +1395,7 @@ for line in sys.stdin:
             redis_key_separator: default_redis_key_separator(),
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
+            redis_key_templates: Vec::new(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),

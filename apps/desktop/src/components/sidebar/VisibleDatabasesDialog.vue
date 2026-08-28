@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { CheckSquare, Loader2, Search, Square } from "@lucide/vue";
+import { Asterisk, CheckSquare, Loader2, Search, Square } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { useConnectionStore } from "@/stores/connectionStore";
-import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, filterDatabaseNamesForVisiblePicker, filterSchemaNamesForVisiblePicker, normalizeVisibleDatabaseSelection } from "@/lib/database/visibleDatabases";
+import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, databaseNameMatchesVisiblePatterns, filterDatabaseNamesForVisiblePicker, filterSchemaNamesForVisiblePicker, normalizeVisibleDatabaseSelection, parseVisibleDatabasePatternsInput } from "@/lib/database/visibleDatabases";
 import * as api from "@/lib/backend/api";
 
 const props = defineProps<{
@@ -26,6 +26,7 @@ type FilterMode = "database" | "schema";
 
 const objectNames = ref<string[]>([]);
 const selectedNames = ref<Set<string>>(new Set());
+const patternInput = ref("");
 const searchText = ref("");
 const showSystemDatabases = ref(false);
 const isLoading = ref(false);
@@ -51,6 +52,11 @@ const filteredObjectNames = computed(() => {
   if (!query) return listedObjectNames.value;
   return listedObjectNames.value.filter((name) => name.toLowerCase().includes(query));
 });
+const parsedPatterns = computed(() => parseVisibleDatabasePatternsInput(patternInput.value));
+const patternMatchCount = computed(() => {
+  if (parsedPatterns.value.length === 0) return 0;
+  return objectNames.value.filter((name) => databaseNameMatchesVisiblePatterns(name, parsedPatterns.value)).length;
+});
 const selectedCount = computed(() => selectedNames.value.size);
 const totalCount = computed(() => listedObjectNames.value.length);
 const canSaveSelection = computed(() => canSaveVisibleDatabaseSelection([...selectedNames.value]));
@@ -59,7 +65,7 @@ const showAllDisabled = computed(() => {
   if (isSchemaFilterMode.value) {
     return !connection.value?.visible_schemas?.[databaseKey.value];
   }
-  return !Array.isArray(connection.value?.visible_databases);
+  return !Array.isArray(connection.value?.visible_databases) && parsedPatterns.value.length === 0;
 });
 
 watch(
@@ -88,6 +94,7 @@ async function loadDatabases() {
     objectNames.value = names;
     showSystemDatabases.value = false;
     const configured = isSchemaFilterMode.value ? connection.value?.visible_schemas?.[databaseKey.value] : connection.value?.visible_databases;
+    patternInput.value = isSchemaFilterMode.value ? "" : (connection.value?.visible_database_patterns?.join(", ") ?? "");
     const initialSelection = Array.isArray(configured) ? normalizeVisibleDatabaseSelection(configured, names) : listedObjectNames.value;
     selectedNames.value = new Set(initialSelection);
     const defaultVisible = new Set(defaultObjectNames.value);
@@ -153,7 +160,7 @@ async function saveSelection() {
   if (isSchemaFilterMode.value) {
     await connectionStore.setVisibleSchemas(props.connectionId, databaseKey.value, normalizeVisibleDatabaseSelection([...selectedNames.value], objectNames.value));
   } else {
-    await connectionStore.setVisibleDatabases(props.connectionId, [...selectedNames.value]);
+    await connectionStore.setVisibleDatabaseFilter(props.connectionId, [...selectedNames.value], parsedPatterns.value);
   }
   emit("update:open", false);
 }
@@ -172,6 +179,17 @@ async function saveSelection() {
       <div class="flex items-center gap-2 rounded-md border bg-background px-2">
         <Search class="h-4 w-4 shrink-0 text-muted-foreground" />
         <Input v-model="searchText" :placeholder="t(searchPlaceholderKey)" class="h-8 border-0 px-0 shadow-none focus-visible:ring-0" :disabled="isLoading || !!errorMessage" />
+      </div>
+
+      <!-- 通配符模式：与勾选取并集，命中的库（含之后新建的）始终显示（#7164） -->
+      <div v-if="!isSchemaFilterMode" class="space-y-1">
+        <div class="flex items-center gap-2 rounded-md border bg-background px-2" :title="t('visibleDatabases.patternsHint')">
+          <Asterisk class="h-4 w-4 shrink-0 text-muted-foreground" />
+          <Input v-model="patternInput" data-visible-database-patterns :placeholder="t('visibleDatabases.patternsPlaceholder')" class="h-8 border-0 px-0 shadow-none focus-visible:ring-0" :disabled="isLoading || !!errorMessage" />
+        </div>
+        <p class="px-1 text-xs text-muted-foreground">
+          {{ t("visibleDatabases.patternsHint") }}<template v-if="parsedPatterns.length > 0"> · {{ t("visibleDatabases.patternsMatchCount", { count: patternMatchCount }) }}</template>
+        </p>
       </div>
 
       <div class="flex items-center justify-between text-xs text-muted-foreground">

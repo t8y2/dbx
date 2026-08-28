@@ -81,10 +81,14 @@ final class JdbcConnectionPoolRegistry implements AutoCloseable {
     }
 
     Lease borrow(String identity, ConnectionFactory connectionFactory) throws Exception {
-        return borrow(identity, JdbcSessionRole.WORKLOAD, connectionFactory);
+        return borrow(identity, JdbcSessionRole.WORKLOAD, null, connectionFactory);
     }
 
     Lease borrow(String identity, JdbcSessionRole role, ConnectionFactory connectionFactory) throws Exception {
+        return borrow(identity, role, null, connectionFactory);
+    }
+
+    Lease borrow(String identity, JdbcSessionRole role, String connectionTestQuery, ConnectionFactory connectionFactory) throws Exception {
         String key = digest(identity);
         while (true) {
             if (closed.get()) {
@@ -96,7 +100,7 @@ final class JdbcConnectionPoolRegistry implements AutoCloseable {
             }
             PoolEntry entry;
             try {
-                entry = pools.computeIfAbsent(key, ignored -> createPoolEntry(key, connectionFactory));
+                entry = pools.computeIfAbsent(key, ignored -> createPoolEntry(key, connectionTestQuery, connectionFactory));
             } catch (PoolCreationException error) {
                 throw error.unwrap();
             }
@@ -130,7 +134,7 @@ final class JdbcConnectionPoolRegistry implements AutoCloseable {
         return entry != null && entry.hasActiveLeases();
     }
 
-    private PoolEntry createPoolEntry(String key, ConnectionFactory connectionFactory) {
+    private PoolEntry createPoolEntry(String key, String connectionTestQuery, ConnectionFactory connectionFactory) {
         try {
             ConnectionFactoryDataSource factoryDataSource = new ConnectionFactoryDataSource(
                 connectionFactory,
@@ -146,6 +150,9 @@ final class JdbcConnectionPoolRegistry implements AutoCloseable {
             config.setMinimumIdle(settings.minimumIdle);
             config.setConnectionTimeout(settings.connectionTimeoutMillis);
             config.setValidationTimeout(settings.validationTimeoutMillis);
+            if (connectionTestQuery != null && !connectionTestQuery.isBlank()) {
+                config.setConnectionTestQuery(connectionTestQuery);
+            }
             config.setIdleTimeout(settings.idleTimeoutMillis);
             config.setMaxLifetime(settings.maxLifetimeMillis);
             config.setInitializationFailTimeout(-1L);

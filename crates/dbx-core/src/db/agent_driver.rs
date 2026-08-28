@@ -26,6 +26,8 @@ struct CachedAgentQuery {
 
 pub struct AgentRuntimeClient {
     child: Arc<Mutex<Child>>,
+    child_reaper_started: Arc<AtomicBool>,
+    child_reaped: Arc<AtomicBool>,
     stdin: Arc<Mutex<BufWriter<ChildStdin>>>,
     pending: Arc<Mutex<HashMap<u64, PendingAgentResponse>>>,
     stderr_tail: Arc<Mutex<StderrTail>>,
@@ -66,6 +68,8 @@ impl AgentRuntimeClient {
 
         let runtime = Arc::new(Self {
             child: Arc::new(Mutex::new(child)),
+            child_reaper_started: Arc::new(AtomicBool::new(false)),
+            child_reaped: Arc::new(AtomicBool::new(false)),
             stdin: Arc::new(Mutex::new(BufWriter::new(child_stdin))),
             pending: Arc::new(Mutex::new(HashMap::new())),
             stderr_tail,
@@ -106,12 +110,16 @@ impl AgentRuntimeClient {
     fn start_response_reader(self: &Arc<Self>, mut stdout: BufReader<ChildStdout>) {
         let pending = self.pending.clone();
         let failed = self.failed.clone();
+        let child = self.child.clone();
+        let child_reaper_started = self.child_reaper_started.clone();
+        let child_reaped = self.child_reaped.clone();
         std::thread::spawn(move || loop {
             let response = match read_agent_json_response(&mut stdout) {
                 Ok((_, response)) => response,
                 Err(err) => {
                     failed.store(true, Ordering::Release);
                     fail_pending_requests(&pending, err);
+                    terminate_and_reap_shared_agent(child, child_reaper_started, child_reaped);
                     return;
                 }
             };
@@ -285,24 +293,72 @@ impl AgentRuntimeClient {
         if let Ok(mut child) = self.child.lock() {
             let _ = child.kill();
         }
+        start_shared_agent_reaper(self.child.clone(), self.child_reaper_started.clone(), self.child_reaped.clone());
         fail_pending_requests(&self.pending, "Agent runtime terminated".to_string());
     }
 
     pub async fn kill_and_wait(&self) {
         self.failed.store(true, Ordering::Release);
         fail_pending_requests(&self.pending, "Agent runtime terminated".to_string());
+        if self.child_reaper_started.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+            wait_for_shared_agent_reaper(self.child_reaped.clone()).await;
+            return;
+        }
         let child = self.child.clone();
-        match tokio::task::spawn_blocking(move || {
-            let mut child = child.lock().map_err(|_| "Shared agent process lock poisoned".to_string())?;
-            let _ = child.kill();
-            child.wait().map(|_| ()).map_err(|err| format!("Failed to wait for shared agent runtime: {err}"))
+        let child_reaped = self.child_reaped.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let result =
+                child.lock().map_err(|_| "Shared agent process lock poisoned".to_string()).and_then(|mut child| {
+                    let _ = child.kill();
+                    child.wait().map(|_| ()).map_err(|err| format!("Failed to wait for shared agent runtime: {err}"))
+                });
+            child_reaped.store(true, Ordering::Release);
+            result
         })
-        .await
-        {
+        .await;
+        match result {
             Ok(Ok(())) => {}
             Ok(Err(err)) => log::warn!("{err}"),
             Err(err) => log::warn!("Failed to join shared agent shutdown task: {err}"),
         }
+    }
+}
+
+fn terminate_and_reap_shared_agent(
+    child: Arc<Mutex<Child>>,
+    child_reaper_started: Arc<AtomicBool>,
+    child_reaped: Arc<AtomicBool>,
+) {
+    if let Ok(mut child) = child.lock() {
+        let _ = child.kill();
+    }
+    start_shared_agent_reaper(child, child_reaper_started, child_reaped);
+}
+
+fn start_shared_agent_reaper(
+    child: Arc<Mutex<Child>>,
+    child_reaper_started: Arc<AtomicBool>,
+    child_reaped: Arc<AtomicBool>,
+) {
+    if child_reaper_started.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+        return;
+    }
+    std::thread::spawn(move || {
+        let result =
+            child.lock().map_err(|_| "Shared agent process lock poisoned".to_string()).and_then(|mut child| {
+                child.wait().map(|_| ()).map_err(|err| format!("Failed to wait for shared agent runtime: {err}"))
+            });
+        child_reaped.store(true, Ordering::Release);
+        match result {
+            Ok(()) => {}
+            Err(err) => log::warn!("{err}"),
+        }
+    });
+}
+
+async fn wait_for_shared_agent_reaper(child_reaped: Arc<AtomicBool>) {
+    while !child_reaped.load(Ordering::Acquire) {
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
@@ -3328,6 +3384,7 @@ mod tests {
     use std::io::Cursor;
     use std::io::Write;
     use std::process::{Command, Stdio};
+    use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
     use tokio_util::sync::CancellationToken;
@@ -4103,6 +4160,39 @@ for line in sys.stdin:
         runtime.call(method, serde_json::json!({}), Some(Duration::from_secs(2)), None).await.unwrap()
     }
 
+    async fn wait_for_runtime_reap(runtime: &AgentRuntimeClient) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !runtime.child_reaped.load(Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("shared Agent child should be reaped");
+    }
+
+    #[tokio::test]
+    async fn shared_runtime_kill_reaps_child_process() {
+        let (runtime, script_path) = spawn_stateful_test_runtime("kill-reap-test").await;
+
+        runtime.kill();
+        wait_for_runtime_reap(&runtime).await;
+
+        assert!(runtime.child.lock().unwrap().try_wait().unwrap().is_some());
+        let _ = std::fs::remove_file(script_path);
+    }
+
+    #[tokio::test]
+    async fn shared_runtime_kill_and_wait_joins_existing_reaper() {
+        let (runtime, script_path) = spawn_stateful_test_runtime("kill-and-wait-reap-test").await;
+
+        runtime.kill();
+        runtime.kill_and_wait().await;
+
+        assert!(runtime.child_reaped.load(Ordering::Acquire));
+        assert!(runtime.child.lock().unwrap().try_wait().unwrap().is_some());
+        let _ = std::fs::remove_file(script_path);
+    }
+
     #[tokio::test]
     async fn shared_runtime_timeout_cancels_session_with_and_without_token() {
         let (runtime, script_path) = spawn_stateful_test_runtime("timeout-cancel-test").await;
@@ -4663,6 +4753,7 @@ for line in sys.stdin:
             .unwrap_err();
         assert!(error.contains("end of stream") || error.contains("response channel closed"));
         assert!(runtime.is_failed());
+        wait_for_runtime_reap(&runtime).await;
         let _ = std::fs::remove_file(script_path);
     }
 

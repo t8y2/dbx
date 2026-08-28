@@ -16,6 +16,30 @@ describe("sqlFormatter", () => {
     expect(canFormatSqlForDatabaseType("mysql")).toBe(true);
   });
 
+  it("preserves source empty lines only when configured", async () => {
+    const sql = "-- tstt\n\nSELECT * FROM AUX_TABLE AS au LIMIT 100;";
+    const consecutiveEmptyLines = "-- section\n\n\nSELECT 1;";
+    const queriesWithEmptyLine = "SELECT 1;\n\nSELECT 2;";
+    const queriesWithTwoEmptyLines = "SELECT 1;\n\n\nSELECT 2;";
+
+    const defaultFormatted = await formatSqlForEditing(sql, "generic");
+    const preserved = await formatSqlForEditing(sql, "generic", { preserveEmptyLines: true });
+    const preservedConsecutive = await formatSqlForEditing(consecutiveEmptyLines, "generic", { preserveEmptyLines: true });
+    const preservedQueriesNoSpacing = await formatSqlForEditing(queriesWithEmptyLine, "generic", { preserveEmptyLines: true, linesBetweenQueries: 0 });
+    const preservedQueries = await formatSqlForEditing(queriesWithEmptyLine, "generic", { preserveEmptyLines: true, linesBetweenQueries: 1 });
+    const preservedQueriesWideSpacing = await formatSqlForEditing(queriesWithEmptyLine, "generic", { preserveEmptyLines: true, linesBetweenQueries: 2 });
+    const preservedQueriesWithTwoEmptyLines = await formatSqlForEditing(queriesWithTwoEmptyLines, "generic", { preserveEmptyLines: true, linesBetweenQueries: 1 });
+
+    expect(defaultFormatted).toContain("-- tstt\nSELECT");
+    expect(preserved).toContain("-- tstt\n\nSELECT");
+    expect(preservedConsecutive).toContain("-- section\n\n\nSELECT");
+    expect(preservedQueriesNoSpacing).toBe("SELECT\n  1;\n\nSELECT\n  2;");
+    expect(preservedQueries).toBe("SELECT\n  1;\n\nSELECT\n  2;");
+    expect(preservedQueriesWideSpacing).toBe("SELECT\n  1;\n\n\nSELECT\n  2;");
+    expect(preservedQueriesWithTwoEmptyLines).toBe("SELECT\n  1;\n\n\nSELECT\n  2;");
+    expect(preserved).not.toContain("__DBX_PRESERVE_EMPTY_LINE_");
+  });
+
   it("maps PostgreSQL-compatible database types to the postgres formatter dialect", () => {
     for (const dbType of ["postgres", "kwdb", "gaussdb", "opengauss", "questdb", "kingbase", "highgo", "vastbase", "redshift"]) {
       expect(sqlFormatDialectForDbType(dbType)).toBe("postgres");
@@ -34,6 +58,42 @@ describe("sqlFormatter", () => {
 
   it("maps DuckDB to its scoped formatter dialect", () => {
     expect(sqlFormatDialectForDbType("duckdb")).toBe("duckdb");
+  });
+
+  it("maps only Oracle to the PL/SQL formatter dialect", () => {
+    expect(sqlFormatDialectForDbType("oracle")).toBe("oracle");
+    expect(sqlFormatDialectForDbType("oceanbase-oracle")).toBe("generic");
+  });
+
+  it("keeps issue #7138 Oracle hierarchy clauses intact", async () => {
+    const sql = "SELECT ctt.U_DM FROM cte_test ctt START WITH ctt.SU_DM IN ('16','17','18','19') CONNECT BY PRIOR ctt.U_DM = HY.SU_DM;";
+
+    await expect(formatSqlForEditing(sql, sqlFormatDialectForDbType("oracle"))).resolves.toBe(`SELECT
+  ctt.U_DM
+FROM
+  cte_test ctt
+START WITH ctt.SU_DM IN ('16', '17', '18', '19')
+CONNECT BY PRIOR ctt.U_DM = HY.SU_DM;`);
+  });
+
+  it("formats valid Oracle hierarchy clauses with the same alias", async () => {
+    const sql = "SELECT ctt.U_DM FROM cte_test ctt START WITH ctt.SU_DM = '16' CONNECT BY PRIOR ctt.U_DM = ctt.SU_DM;";
+
+    const formatted = await formatSqlForEditing(sql, sqlFormatDialectForDbType("oracle"));
+
+    expect(formatted).toContain("FROM\n  cte_test ctt\nSTART WITH ctt.SU_DM = '16'");
+    expect(formatted).toContain("\nCONNECT BY PRIOR ctt.U_DM = ctt.SU_DM;");
+  });
+
+  it("formats ordinary Oracle SQL and anonymous PL/SQL", async () => {
+    await expect(formatSqlForEditing("select employee_id from employees where department_id = 10;", sqlFormatDialectForDbType("oracle"))).resolves.toBe("SELECT\n  employee_id\nFROM\n  employees\nWHERE\n  department_id = 10;");
+    await expect(formatSqlForEditing("declare v_count number := 1; begin v_count := v_count + 1; end;", sqlFormatDialectForDbType("oracle"))).resolves.toBe("DECLARE v_count number := 1;\n\nBEGIN v_count := v_count + 1;\n\nEND;");
+  });
+
+  it("keeps incomplete Oracle editor SQL unchanged", async () => {
+    const sql = "select *\nfrom dbname.\n;";
+
+    await expect(formatSqlForEditing(sql, sqlFormatDialectForDbType("oracle"))).resolves.toBe(sql);
   });
 
   it("keeps DuckDB prefix aliases out of formatted named parameters", async () => {

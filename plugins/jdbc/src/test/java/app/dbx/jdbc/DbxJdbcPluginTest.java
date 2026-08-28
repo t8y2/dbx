@@ -7,8 +7,10 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.Clob;
 import java.sql.DatabaseMetaData;
@@ -39,6 +41,7 @@ import java.util.regex.Pattern;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class DbxJdbcPluginTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -522,6 +525,53 @@ final class DbxJdbcPluginTest {
         } finally {
             closeAndDeregister(connection, driver);
         }
+    }
+
+    @Test
+    void readValueKeepsBigDecimalWithNegativeScaleAsIs() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod(
+            "readValue",
+            ResultSet.class,
+            ResultSetMetaData.class,
+            int.class,
+            boolean.class
+        );
+        method.setAccessible(true);
+        // Oracle NUMBER(28) columns without a fixed scale can come back from the driver as a
+        // BigDecimal with a negative scale, whose toString() renders in scientific notation.
+        BigDecimal huge = new BigDecimal("2.0260818101758001E+27");
+        ResultSet rs = objectResultSet(huge);
+
+        Object result = method.invoke(null, rs, columnMeta(Types.NUMERIC, "NUMBER"), 1, false);
+
+        assertEquals(huge, result);
+    }
+
+    @Test
+    void bigDecimalValuesSerializeWithoutScientificNotation() throws Exception {
+        ObjectMapper mapper = jdbcPluginMapper();
+        BigDecimal huge = new BigDecimal("2.0260818101758001E+27");
+
+        String json = mapper.writeValueAsString(mapper.valueToTree(huge));
+
+        assertEquals(huge.toPlainString(), json);
+        assertFalse(json.toUpperCase(java.util.Locale.ROOT).contains("E"), json);
+    }
+
+    @Test
+    void ordinaryBigDecimalValuesSerializeUnchanged() throws Exception {
+        ObjectMapper mapper = jdbcPluginMapper();
+        BigDecimal ordinary = new BigDecimal("123.45");
+        BigDecimal negative = new BigDecimal("-9876.5");
+
+        assertEquals("123.45", mapper.writeValueAsString(mapper.valueToTree(ordinary)));
+        assertEquals("-9876.5", mapper.writeValueAsString(mapper.valueToTree(negative)));
+    }
+
+    private static ObjectMapper jdbcPluginMapper() throws Exception {
+        Field field = DbxJdbcPlugin.class.getDeclaredField("MAPPER");
+        field.setAccessible(true);
+        return (ObjectMapper) field.get(null);
     }
 
     @Test
@@ -2024,6 +2074,104 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
+    void listDatabasesFallsBackToShowDatabasesWhenGetCatalogsUnsupported() throws Exception {
+        Driver driver = new HiveCatalogsUnsupportedDriver("jdbc:hive2://inceptor.example.test:10000/default");
+        DriverManager.registerDriver(driver);
+        try {
+            JsonNode response = request("listDatabases", """
+                {
+                  "connection": {
+                    "connection_string": "jdbc:hive2://inceptor.example.test:10000/default",
+                    "username": "dcuser",
+                    "password": "secret"
+                  }
+                }
+                """);
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals(1, response.path("result").size());
+            assertEquals("default", response.path("result").path(0).path("name").asText());
+        } finally {
+            DriverManager.deregisterDriver(driver);
+            request("close", """
+                {
+                  "connection": {
+                    "connection_string": "jdbc:hive2://inceptor.example.test:10000/default",
+                    "username": "dcuser",
+                    "password": "secret"
+                  }
+                }
+                """);
+        }
+    }
+
+    @Test
+    void connectUsesRegisteredDriverWhenOtherDriversThrowUnsupportedOperationException() throws Exception {
+        String url = "jdbc:hive2://hive2-connect-test:10000/default";
+        String driverClass = Hive2ConnectGoodDriver.class.getName();
+        Driver badDriver = new Hive2ConnectThrowsUnsupportedDriver();
+        DriverManager.registerDriver(badDriver);
+        String connection = """
+            {
+              "connection_string": "%s",
+              "jdbc_driver_class": "%s"
+            }
+            """.formatted(url, driverClass);
+        try {
+            JsonNode response = request("listDatabases", """
+                { "connection": %s }
+                """.formatted(connection));
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals(1, response.path("result").size());
+            assertEquals("default", response.path("result").path(0).path("name").asText());
+        } finally {
+            DriverManager.deregisterDriver(badDriver);
+            request("close", """
+                { "connection": %s }
+                """.formatted(connection));
+        }
+    }
+
+    @Test
+    void hiveAdhocRetryOnlyRewritesSelectStatements() throws Exception {
+        List<String> executedSql = new ArrayList<>();
+        Driver driver = new AdhocFailingHiveDriver(executedSql);
+        DriverManager.registerDriver(driver);
+        String connection = """
+            {
+              "connection_string": "jdbc:hive2://adhoc-retry-test:10000/default",
+              "connect_timeout_secs": 30
+            }
+            """;
+        try {
+            JsonNode insertResponse = request("executeQuery", """
+                {
+                  "connection": %s,
+                  "sql": "INSERT INTO logs VALUES (1)"
+                }
+                """.formatted(connection));
+
+            assertTrue(insertResponse.has("error"), insertResponse.toString());
+            assertTrue(insertResponse.path("error").path("message").asText().contains("10750"), insertResponse.toString());
+            assertEquals(List.of("INSERT INTO logs VALUES (1)"), executedSql);
+
+            executedSql.clear();
+            JsonNode selectResponse = request("executeQuery", """
+                {
+                  "connection": %s,
+                  "sql": "SELECT name FROM users"
+                }
+                """.formatted(connection));
+
+            assertTrue(selectResponse.has("error"), selectResponse.toString());
+            assertEquals(List.of("SELECT name FROM users", "SELECT /*+ adhoc */ name FROM users"), executedSql);
+        } finally {
+            DriverManager.deregisterDriver(driver);
+        }
+    }
+
+    @Test
     void listDataTypesUsesJdbcTypeInfo() throws Exception {
         JsonNode response = request("listDataTypes", """
             { "connection": %s }
@@ -2678,6 +2826,28 @@ final class DbxJdbcPluginTest {
             } finally {
                 closeAndDeregister(connection, driver);
             }
+        }
+    }
+
+    @Test
+    void oracleListSchemasFallsBackToJdbcSchemasWhenAllUsersIsMissing() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod("oracleListSchemas", Connection.class);
+        method.setAccessible(true);
+
+        try (Connection conn = DriverManager.getConnection("jdbc:h2:mem:dbx_oracle_no_all_users;DB_CLOSE_DELAY=-1", "sa", "")) {
+            conn.createStatement().execute("CREATE SCHEMA DM6_TEST_SCHEMA");
+
+            JsonNode result = (JsonNode) method.invoke(null, conn);
+            assertFalse(result.isNull());
+            assertEquals(true, result.isArray());
+            boolean found = false;
+            for (JsonNode node : result) {
+                if ("DM6_TEST_SCHEMA".equalsIgnoreCase(node.asText())) {
+                    found = true;
+                    break;
+                }
+            }
+            assertEquals(true, found);
         }
     }
 
@@ -3696,10 +3866,25 @@ final class DbxJdbcPluginTest {
             new Class<?>[] { Connection.class },
             (proxy, method, args) -> switch (method.getName()) {
                 case "getMetaData" -> metadata;
+                // Hive fallback probes "SHOW DATABASES" via a plain statement before
+                // falling back to getSchemas; report no rows so the schema fallback
+                // path stays covered.
+                case "createStatement" -> emptyQueryResultStatement();
                 case "isClosed" -> false;
                 case "isValid" -> true;
                 case "getCatalog" -> null;
                 case "close" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    private static Statement emptyQueryResultStatement() {
+        return (Statement) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Statement.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "executeQuery" -> rowsResultSet(new String[] { "database_name" }, new Object[0][]);
                 default -> defaultValue(method.getReturnType());
             }
         );
@@ -4361,6 +4546,275 @@ final class DbxJdbcPluginTest {
         return null;
     }
 
+    private static final class AdhocFailingHiveDriver implements Driver {
+        private final List<String> executedSql;
+
+        private AdhocFailingHiveDriver(List<String> executedSql) {
+            this.executedSql = executedSql;
+        }
+
+        @Override
+        public Connection connect(String url, Properties info) {
+            if (!acceptsURL(url)) {
+                return null;
+            }
+            return (Connection) Proxy.newProxyInstance(
+                DbxJdbcPluginTest.class.getClassLoader(),
+                new Class<?>[] { Connection.class },
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "createStatement" -> adhocFailingStatement(executedSql);
+                    case "isClosed" -> false;
+                    case "close" -> null;
+                    default -> defaultValue(method.getReturnType());
+                }
+            );
+        }
+
+        @Override
+        public boolean acceptsURL(String url) {
+            return url != null && url.startsWith("jdbc:hive2://adhoc-retry-test:");
+        }
+
+        @Override
+        public DriverPropertyInfo[] getPropertyInfo(String url, Properties info) {
+            return new DriverPropertyInfo[0];
+        }
+
+        @Override
+        public int getMajorVersion() {
+            return 1;
+        }
+
+        @Override
+        public int getMinorVersion() {
+            return 0;
+        }
+
+        @Override
+        public boolean jdbcCompliant() {
+            return false;
+        }
+
+        @Override
+        public java.util.logging.Logger getParentLogger() {
+            return java.util.logging.Logger.getGlobal();
+        }
+    }
+
+    private static Statement adhocFailingStatement(List<String> executedSql) {
+        return (Statement) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Statement.class },
+            (proxy, method, args) -> {
+                if ("execute".equals(method.getName()) || "executeQuery".equals(method.getName())) {
+                    executedSql.add((String) args[0]);
+                    throw new SQLException(
+                        "FAILED: Execution Error, return code 10750 from org.apache.hadoop.hive.ql.exec.mr.MapRedTask");
+                }
+                return switch (method.getName()) {
+                    case "setMaxRows", "setFetchSize", "setQueryTimeout", "close" -> null;
+                    default -> defaultValue(method.getReturnType());
+                };
+            }
+        );
+    }
+
+    private static final class Hive2ConnectThrowsUnsupportedDriver implements Driver {
+        @Override
+        public Connection connect(String connectUrl, Properties info) {
+            if (acceptsURL(connectUrl)) {
+                throw new UnsupportedOperationException("Method not supported");
+            }
+            return null;
+        }
+
+        @Override
+        public boolean acceptsURL(String connectUrl) {
+            return connectUrl != null && connectUrl.startsWith("jdbc:hive2:");
+        }
+
+        @Override
+        public DriverPropertyInfo[] getPropertyInfo(String connectUrl, Properties info) {
+            return new DriverPropertyInfo[0];
+        }
+
+        @Override
+        public int getMajorVersion() {
+            return 1;
+        }
+
+        @Override
+        public int getMinorVersion() {
+            return 0;
+        }
+
+        @Override
+        public boolean jdbcCompliant() {
+            return false;
+        }
+
+        @Override
+        public java.util.logging.Logger getParentLogger() {
+            return java.util.logging.Logger.getGlobal();
+        }
+    }
+
+    // Instantiated reflectively by DbxJdbcPlugin through jdbc_driver_class, so it
+    // must stay accessible outside this class.
+    public static final class Hive2ConnectGoodDriver implements Driver {
+        private static final String URL = "jdbc:hive2://hive2-connect-test:10000/default";
+
+        @Override
+        public Connection connect(String connectUrl, Properties info) throws SQLException {
+            if (!acceptsURL(connectUrl)) {
+                return null;
+            }
+            return new HiveCatalogsUnsupportedDriver(URL).connect(connectUrl, info);
+        }
+
+        @Override
+        public boolean acceptsURL(String connectUrl) {
+            return URL.equals(connectUrl);
+        }
+
+        @Override
+        public DriverPropertyInfo[] getPropertyInfo(String connectUrl, Properties info) {
+            return new DriverPropertyInfo[0];
+        }
+
+        @Override
+        public int getMajorVersion() {
+            return 1;
+        }
+
+        @Override
+        public int getMinorVersion() {
+            return 0;
+        }
+
+        @Override
+        public boolean jdbcCompliant() {
+            return false;
+        }
+
+        @Override
+        public java.util.logging.Logger getParentLogger() {
+            return java.util.logging.Logger.getGlobal();
+        }
+    }
+
+    private static final class HiveCatalogsUnsupportedDriver implements Driver {
+        private final String url;
+
+        private HiveCatalogsUnsupportedDriver(String url) {
+            this.url = url;
+        }
+
+        @Override
+        public Connection connect(String connectUrl, Properties info) throws SQLException {
+            if (!acceptsURL(connectUrl)) {
+                return null;
+            }
+            return (Connection) Proxy.newProxyInstance(
+                DbxJdbcPluginTest.class.getClassLoader(),
+                new Class<?>[] { Connection.class },
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "isClosed" -> false;
+                    case "isValid" -> true;
+                    case "close" -> null;
+                    case "getMetaData" -> hiveMetaData();
+                    case "getCatalog" -> {
+                        throw new UnsupportedOperationException("Method not supported");
+                    }
+                    case "createStatement" -> hiveShowDatabasesStatement();
+                    default -> defaultValue(method.getReturnType());
+                }
+            );
+        }
+
+        @Override
+        public boolean acceptsURL(String connectUrl) {
+            return url.equals(connectUrl);
+        }
+
+        @Override
+        public DriverPropertyInfo[] getPropertyInfo(String connectUrl, Properties info) {
+            return new DriverPropertyInfo[0];
+        }
+
+        @Override
+        public int getMajorVersion() {
+            return 1;
+        }
+
+        @Override
+        public int getMinorVersion() {
+            return 0;
+        }
+
+        @Override
+        public boolean jdbcCompliant() {
+            return false;
+        }
+
+        @Override
+        public java.util.logging.Logger getParentLogger() {
+            return java.util.logging.Logger.getGlobal();
+        }
+
+        private static DatabaseMetaData hiveMetaData() {
+            return (DatabaseMetaData) Proxy.newProxyInstance(
+                DbxJdbcPluginTest.class.getClassLoader(),
+                new Class<?>[] { DatabaseMetaData.class },
+                (proxy, method, args) -> {
+                    if ("getCatalogs".equals(method.getName())) {
+                        throw new UnsupportedOperationException("Method not supported");
+                    }
+                    return defaultValue(method.getReturnType());
+                }
+            );
+        }
+
+        private static Statement hiveShowDatabasesStatement() {
+            return (Statement) Proxy.newProxyInstance(
+                DbxJdbcPluginTest.class.getClassLoader(),
+                new Class<?>[] { Statement.class },
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "executeQuery" -> {
+                        if (args != null && args.length > 0 && "SHOW DATABASES".equals(args[0])) {
+                            yield singleColumnResultSet("default");
+                        }
+                        throw new SQLException("unexpected sql: " + (args == null || args.length == 0 ? null : args[0]));
+                    }
+                    case "close" -> null;
+                    case "isClosed" -> false;
+                    default -> defaultValue(method.getReturnType());
+                }
+            );
+        }
+
+        private static ResultSet singleColumnResultSet(String value) {
+            return (ResultSet) Proxy.newProxyInstance(
+                DbxJdbcPluginTest.class.getClassLoader(),
+                new Class<?>[] { ResultSet.class },
+                new java.lang.reflect.InvocationHandler() {
+                    private int index = -1;
+
+                    @Override
+                    public Object invoke(Object proxy, Method method, Object[] args) {
+                        return switch (method.getName()) {
+                            case "next" -> ++index == 0;
+                            case "getString" -> value;
+                            case "getObject" -> value;
+                            case "close" -> null;
+                            default -> defaultValue(method.getReturnType());
+                        };
+                    }
+                }
+            );
+        }
+    }
+
     public static final class ErrorOnLoad {
         private static final Object FAILURE = fail();
 
@@ -4376,5 +4830,48 @@ final class DbxJdbcPluginTest {
             { "id": 1, "method": "%s", "params": %s }
             """.formatted(method, params);
         return MAPPER.valueToTree(handleLine.invoke(null, line));
+    }
+
+    @Test
+    void enrichDriverHintAppendsChineseOrlai18nGuidanceForOracleCharsetErrors() {
+        JsonNode connection = MAPPER.createObjectNode()
+            .put("connection_string", "jdbc:oracle:thin:@//db:1521/ORCL");
+        String enriched = DbxJdbcPlugin.enrichDriverHint(
+            connection,
+            "不支持的字符集 (在类路径中添加 orai18n.jar): ZHS16GBK"
+        );
+        assertTrue(enriched.startsWith("不支持的字符集 (在类路径中添加 orai18n.jar): ZHS16GBK"));
+        assertTrue(enriched.contains("orai18n.jar"));
+        assertTrue(enriched.contains("内置 Oracle 连接"));
+    }
+
+    @Test
+    void enrichDriverHintAppendsEnglishOrlai18nGuidanceForOracleCharsetErrors() {
+        JsonNode connection = MAPPER.createObjectNode()
+            .put("connection_string", "jdbc:oracle:thin:@//db:1521/ORCL");
+        String enriched = DbxJdbcPlugin.enrichDriverHint(connection, "Unsupported charset: ZHS16GBK");
+        assertTrue(enriched.startsWith("Unsupported charset: ZHS16GBK"));
+        assertTrue(enriched.contains("Settings -> JDBC Drivers"));
+    }
+
+    @Test
+    void enrichDriverHintKeepsMessagesForOtherUrlsAndErrors() {
+        JsonNode oracleConnection = MAPPER.createObjectNode()
+            .put("connection_string", "jdbc:oracle:thin:@//db:1521/ORCL");
+        JsonNode mysqlConnection = MAPPER.createObjectNode()
+            .put("connection_string", "jdbc:mysql://db:3306/test");
+        assertEquals("ORA-12505", DbxJdbcPlugin.enrichDriverHint(oracleConnection, "ORA-12505"));
+        assertEquals(
+            "Unsupported charset: ZHS16GBK",
+            DbxJdbcPlugin.enrichDriverHint(mysqlConnection, "Unsupported charset: ZHS16GBK")
+        );
+    }
+
+    @Test
+    void enrichDriverHintDoesNotStackRepeatedHints() {
+        JsonNode connection = MAPPER.createObjectNode()
+            .put("connection_string", "jdbc:oracle:thin:@//db:1521/ORCL");
+        String once = DbxJdbcPlugin.enrichDriverHint(connection, "Unsupported charset: ZHS16GBK");
+        assertEquals(once, DbxJdbcPlugin.enrichDriverHint(connection, once));
     }
 }

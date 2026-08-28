@@ -2959,6 +2959,39 @@ func (s *server) getMetadataObjectSource(schema, name, objectType string) (map[s
 }
 
 func (s *server) loadObjectSourceText(schema, name, objectType string) (string, bool, error) {
+	source, found, err := s.loadAggregatedObjectSourceText(schema, name, objectType)
+	if err == nil {
+		return source, found, nil
+	}
+	return s.loadObjectSourceTextRows(schema, name, objectType)
+}
+
+func (s *server) loadAggregatedObjectSourceText(schema, name, objectType string) (string, bool, error) {
+	rows, err := s.queryRows(`
+SELECT DBMS_XMLGEN.CONVERT(
+  XMLAGG(XMLELEMENT(E, TEXT) ORDER BY LINE).EXTRACT('//text()').GETCLOBVAL(),
+  1
+)
+FROM ALL_SOURCE
+WHERE OWNER = :1 AND NAME = :2 AND TYPE = :3`, []any{schema, name, objectType})
+	if err != nil {
+		return "", false, err
+	}
+	defer s.closeRows(rows)
+	if !rows.Next() {
+		return "", false, rows.Err()
+	}
+	var source sql.NullString
+	if err := rows.Scan(&source); err != nil {
+		return "", false, err
+	}
+	if err := rows.Err(); err != nil {
+		return "", false, err
+	}
+	return source.String, source.Valid, nil
+}
+
+func (s *server) loadObjectSourceTextRows(schema, name, objectType string) (string, bool, error) {
 	rows, err := s.queryRows(`
 SELECT TEXT
 FROM ALL_SOURCE

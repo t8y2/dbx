@@ -49,12 +49,13 @@ import { copyToClipboard, readTextFromClipboard } from "@/lib/common/clipboard";
 import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLayer";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { editorFontTheme, loadEditorTheme } from "@/lib/editor/editorThemes";
-import { clampEditorFontSize, createEditorZoomCommitScheduler, fontSizeFromWheelDelta } from "@/lib/editor/editorZoom";
+import { clampEditorFontSize, createEditorWheelZoomGestureGuard, createEditorZoomCommitScheduler, fontSizeFromWheelDelta } from "@/lib/editor/editorZoom";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useTheme } from "@/composables/useTheme";
 import { executeWithProductionContextGuard } from "@/lib/database/productionExecutionGuard";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
+import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import type {
   NacosBatchPreview,
   NacosBatchReport,
@@ -170,6 +171,7 @@ const configEditorZoomCommitScheduler = createEditorZoomCommitScheduler((fontSiz
   if (settingsStore.editorSettings.fontSize === fontSize) return;
   settingsStore.updateEditorSettings({ fontSize });
 });
+const configEditorWheelZoomGestureGuard = createEditorWheelZoomGestureGuard();
 const knownConfigFormats = ref<Record<string, string>>({});
 const selectedConfigKeys = ref<string[]>([]);
 const searchOpen = ref(false);
@@ -279,7 +281,7 @@ const namespace = computed(() => props.namespace ?? connectionInfo.value?.namesp
 const nacosProductionContext = computed(() => productionContextForDatabase(connectionStore.getConfig(props.connectionId), namespace.value));
 const batchTargetConnections = computed<NacosConfigTransferTarget[]>(() =>
   connectionStore.connections
-    .filter((connection) => connection.db_type === "nacos" && !connection.read_only)
+    .filter((connection) => connection.db_type === "nacos" && !connectionIsEffectivelyReadOnly(connection))
     .map((connection) => {
       const address = [connection.host, connection.port].filter(Boolean).join(":");
       return { id: connection.id, label: connection.name ? `${connection.name} (${address})` : address || connection.id };
@@ -538,7 +540,7 @@ async function mountConfigEditor() {
       keymap.of([...defaultKeymap, ...historyKeymap]),
       EditorView.domEventHandlers({
         wheel(event, eventView) {
-          if (!event.metaKey && !event.ctrlKey) return false;
+          if (!configEditorWheelZoomGestureGuard.accepts(event)) return false;
           event.preventDefault();
           const next = fontSizeFromWheelDelta(configEditorFontSize.value, event.deltaY);
           if (next !== configEditorFontSize.value) {

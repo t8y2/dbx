@@ -1,13 +1,16 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
+import { isDesktopVersionOnlyCargoLockChange } from "./release-lock.mjs";
 
 const repoRoot = new URL("..", import.meta.url).pathname;
 const releaseScript = join(repoRoot, "scripts/release.mjs");
+const releaseWorkflow = join(repoRoot, ".github/workflows/release.yml");
 const packagesWorkflow = join(repoRoot, ".github/workflows/mcp-release.yml");
+const vsignConfigPath = join(repoRoot, "src-tauri/tauri.vsign.conf.json");
 
 function runRelease(args, env = {}) {
   return spawnSync(process.execPath, [releaseScript, ...args], {
@@ -110,4 +113,60 @@ test("launcher packages bypass filtered publishing for provenance", () => {
   assert.match(workflow, /pnpm publish "\.\/packages\/cli" --access public --provenance --no-git-checks/);
   assert.match(workflow, /pnpm publish "\.\/packages\/mcp-server" --access public --provenance --no-git-checks/);
   assert.doesNotMatch(workflow, /pnpm --filter "@dbx-app\/(?:cli|mcp-server)" publish/);
+});
+
+test("Tauri VSign script resolves from the src-tauri working directory", () => {
+  const config = JSON.parse(readFileSync(vsignConfigPath, "utf8"));
+  const args = config.bundle.windows.signCommand.args;
+  const fileArgumentIndex = args.indexOf("-File");
+
+  assert.notEqual(fileArgumentIndex, -1);
+  const scriptPath = args[fileArgumentIndex + 1];
+  assert.equal(typeof scriptPath, "string");
+  assert.equal(existsSync(resolve(repoRoot, "src-tauri", scriptPath)), true);
+});
+
+test("Windows 7 release build does not use sccache", () => {
+  const workflow = readFileSync(releaseWorkflow, "utf8");
+  const start = workflow.indexOf("  build-windows-7-offline:");
+  const end = workflow.indexOf("\n  static-browser:", start);
+
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const win7Job = workflow.slice(start, end);
+  assert.doesNotMatch(win7Job, /RUSTC_WRAPPER|SCCACHE_|sccache/i);
+});
+
+test("desktop-only Cargo.lock version refresh does not count as a Node package change", () => {
+  const before = `
+[[package]]
+name = "dbx"
+version = "0.5.95"
+dependencies = ["dbx-core"]
+
+[[package]]
+name = "dbx-web"
+version = "0.5.95"
+dependencies = ["dbx-core"]
+
+[[package]]
+name = "dbx-mcp"
+version = "0.4.73"
+dependencies = ["dbx-core"]
+`;
+  const after = before.replaceAll('version = "0.5.95"', 'version = "0.5.96"');
+
+  assert.equal(isDesktopVersionOnlyCargoLockChange(before, after), true);
+});
+
+test("Cargo.lock dependency changes still count as a Node package change", () => {
+  const before = `
+[[package]]
+name = "dbx"
+version = "0.5.95"
+dependencies = ["dbx-core"]
+`;
+  const after = before.replace('dependencies = ["dbx-core"]', 'dependencies = ["dbx-core", "dbx-mcp"]');
+
+  assert.equal(isDesktopVersionOnlyCargoLockChange(before, after), false);
 });

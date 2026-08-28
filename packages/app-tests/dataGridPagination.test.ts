@@ -261,3 +261,29 @@ test("row number gutter width tracks the largest visible row index", () => {
   assert.match(source, /resolveDataGridMaxRowNumber/);
   assert.match(source, /rowNumberWidth,/);
 });
+
+test("rerun total-count visibility comes from the shared rule and triggers the manual count", () => {
+  const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
+  const rerunComputed = source.match(/const showRerunTotalCountAction = computed\(\(\) =>[\s\S]*?\n\);/)?.[0] ?? "";
+  assert.match(rerunComputed, /showDataGridRerunTotalCountAction\(\{/);
+  assert.match(rerunComputed, /canCalculateTotalRowCount: canCalculateTotalRowCount\.value/);
+  assert.match(rerunComputed, /displayedTotalRowCount: displayedTotalRowCount\.value/);
+  assert.match(rerunComputed, /totalRowCountIsExact: totalRowCountIsExact\.value/);
+  const rerunButton = source.match(/<button\s+v-else-if="showRerunTotalCountAction"[\s\S]*?<\/button>/)?.[0] ?? "";
+  assert.match(rerunButton, /@click="calculateTotalRowCount"/);
+});
+
+test("manual rerun counts through props.countSql and resets when the query context changes", () => {
+  const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
+  assert.match(source, /if \(props\.countSql\) return \{ sql: props\.countSql, schema: props\.schema \};/);
+  assert.match(source, /const serverKnownTotalRowCount = computed\(\(\) => \(typeof manualTotalRowCount\.value === "number" \? manualTotalRowCount\.value : props\.totalRowCount\)\)/);
+  assert.match(source, /watch\(\s*\(\) => \[props\.countSql \?\? ""/);
+});
+
+test("executed plans refresh the count SQL shared with the background count", () => {
+  const source = readFileSync("apps/desktop/src/stores/queryStore.ts", "utf8");
+  assert.ok((source.match(/current\.resultCountSql = countSql;/g)?.length ?? 0) >= 2, "every executed-plan path must refresh the tab count SQL");
+  assert.match(source, /countSql = sqlServerUseScript && plan\.countSql \? replaceSqlServerLeadingUseQuery\(queryBaseSql, sqlServerUseScript, plan\.countSql\) : plan\.countSql;/);
+  const backgroundCount = source.match(/countQueryTotalRowsInBackground\(\{[\s\S]*?\}\);/)?.[0] ?? "";
+  assert.match(backgroundCount, /\n\s+countSql,/);
+});

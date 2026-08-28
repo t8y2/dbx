@@ -1,6 +1,7 @@
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DataTabReuseMode } from "@/lib/tabs/dataTabReuseMode";
+import { buildMongoObjectBrowserRows } from "@/lib/table/objectBrowserRows";
 import type { QueryResult } from "@/types/database";
 
 const mocks = vi.hoisted(() => ({
@@ -231,6 +232,65 @@ describe("useNavigationTargets with the real query store", () => {
 
     expect(queryStore.tabs).toHaveLength(1);
     expect(queryStore.activeTabId).toBe(firstTabId);
+  });
+
+  it("reuses only the same MongoDB collection in same-table mode", async () => {
+    mocks.connectionStore.getConfig.mockImplementation((connectionId: string) => ({ id: connectionId, db_type: "mongodb" }));
+    const { navigation, queryStore } = await setupNavigation();
+    const rows = buildMongoObjectBrowserRows({ collections: [{ name: " users " }, { name: "users" }], database: "app" });
+
+    for (const row of rows) {
+      await navigation.openObjectBrowserTableTarget({ connectionId: "connection-1", database: "app", tableName: row.name, tableType: row.type });
+    }
+    await navigation.openObjectBrowserTableTarget({ connectionId: "connection-1", database: "app", tableName: rows[0]!.name, tableType: rows[0]!.type });
+
+    expect(queryStore.tabs).toHaveLength(2);
+    expect(new Set(queryStore.tabs.map((tab) => tab.id))).toHaveLength(2);
+    expect(queryStore.tabs.map((tab) => tab.sql)).toEqual([" users ", "users"]);
+    expect(queryStore.tabs.map((tab) => tab.tableMeta?.tableName)).toEqual([" users ", "users"]);
+    expect(queryStore.activeTabId).toBe(queryStore.tabs[0]?.id);
+  });
+
+  it("always creates a new MongoDB collection tab in always-new mode", async () => {
+    mocks.connectionStore.getConfig.mockImplementation((connectionId: string) => ({ id: connectionId, db_type: "mongodb" }));
+    mocks.settingsStore.editorSettings.dataTabReuseMode = "always-new";
+    const { navigation, queryStore } = await setupNavigation();
+    const target = { connectionId: "connection-1", database: "app", tableName: "users", tableType: "TABLE" };
+
+    await navigation.openObjectBrowserTableTarget(target);
+    await navigation.openObjectBrowserTableTarget(target);
+
+    expect(queryStore.tabs).toHaveLength(2);
+    expect(new Set(queryStore.tabs.map((tab) => tab.id))).toHaveLength(2);
+  });
+
+  it("reuses the active safe MongoDB collection tab in active-tab mode", async () => {
+    mocks.connectionStore.getConfig.mockImplementation((connectionId: string) => ({ id: connectionId, db_type: "mongodb" }));
+    mocks.settingsStore.editorSettings.dataTabReuseMode = "active-tab";
+    const { navigation, queryStore } = await setupNavigation();
+    const target = { connectionId: "connection-1", database: "app", tableName: "users", tableType: "TABLE" };
+
+    await navigation.openObjectBrowserTableTarget(target);
+    const originalTabId = queryStore.activeTabId;
+    await navigation.openObjectBrowserTableTarget({ ...target, tableName: "orders" });
+
+    expect(queryStore.tabs).toHaveLength(1);
+    expect(queryStore.activeTabId).toBe(originalTabId);
+    expect(queryStore.tabs[0]).toMatchObject({ title: "app.orders", sql: "orders", tableMeta: { tableName: "orders" } });
+  });
+
+  it("does not reuse an unsafe active MongoDB collection tab", async () => {
+    mocks.connectionStore.getConfig.mockImplementation((connectionId: string) => ({ id: connectionId, db_type: "mongodb" }));
+    mocks.settingsStore.editorSettings.dataTabReuseMode = "active-tab";
+    const { navigation, queryStore } = await setupNavigation();
+    const target = { connectionId: "connection-1", database: "app", tableName: "users", tableType: "TABLE" };
+
+    await navigation.openObjectBrowserTableTarget(target);
+    queryStore.tabs[0]!.pinned = true;
+    await navigation.openObjectBrowserTableTarget({ ...target, tableName: "orders" });
+
+    expect(queryStore.tabs).toHaveLength(2);
+    expect(queryStore.tabs.map((tab) => tab.sql)).toEqual(["users", "orders"]);
   });
 
   it("reuses a restored legacy MySQL tab when the same table is opened from the sidebar", async () => {

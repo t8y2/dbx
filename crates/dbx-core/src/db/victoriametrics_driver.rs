@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use super::with_connection_timeout;
 use crate::models::connection::ConnectionConfig;
+use crate::models::connection::DatabaseConnectionInfo;
 use crate::types::{ColumnInfo, DatabaseInfo, ObjectStatistics, QueryResult, TableInfo};
 
 const DEFAULT_API_PATH: &str = "/prometheus";
@@ -180,6 +181,24 @@ pub async fn test_connection(client: &VictoriaMetricsClient, timeout: Duration) 
     })
     .await?;
     parse_api_response::<Value>(response).await.map(|_| ())
+}
+
+pub async fn database_connection_info(
+    client: &VictoriaMetricsClient,
+    timeout: Duration,
+) -> Result<DatabaseConnectionInfo, String> {
+    let request = client.request(client.http.get(client.endpoint("/api/v1/status/buildinfo")));
+    let response = with_connection_timeout("VictoriaMetrics", timeout, async {
+        request.send().await.map_err(|error| format!("VictoriaMetrics connection failed: {error}"))
+    })
+    .await?;
+    let value = parse_api_response::<Value>(response).await?;
+    Ok(DatabaseConnectionInfo {
+        product_name: Some("VictoriaMetrics".to_string()),
+        product_version: value.get("version").and_then(Value::as_str).map(str::to_string),
+        driver_name: Some("VictoriaMetrics HTTP API".to_string()),
+        ..Default::default()
+    })
 }
 
 pub async fn list_databases(client: &VictoriaMetricsClient) -> Result<Vec<DatabaseInfo>, String> {

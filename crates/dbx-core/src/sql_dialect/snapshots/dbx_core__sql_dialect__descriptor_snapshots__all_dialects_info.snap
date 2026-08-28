@@ -202,7 +202,6 @@ expression: all
       "drop_sequence",
       "alter_owner",
       "grant_revoke",
-      "if_not_exists",
       "temporary_table",
       "transactional_ddl",
       "identity_columns"

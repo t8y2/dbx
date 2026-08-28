@@ -13,6 +13,20 @@ import (
 	"github.com/go-zookeeper/zk"
 )
 
+func TestParseServerVersionTrimsBuiltOnSuffix(t *testing.T) {
+	srvr := "Zookeeper version: 3.6.1--104dcb3dcae0bf1bca4b4a00b2d76f2b5f6d79c, built on 04/21/2020 15:01 GMT\n"
+	if got := parseServerVersion(srvr); got != "3.6.1--104dcb3dcae0bf1bca4b4a00b2d76f2b5f6d79c" {
+		t.Fatalf("srvr version = %q", got)
+	}
+	envi := "zookeeper.version=3.8.4-9a6b1d5e9c0f, built on 2024-01-01 00:00 GMT\n"
+	if got := parseServerVersion(envi); got != "3.8.4-9a6b1d5e9c0f" {
+		t.Fatalf("envi version = %q", got)
+	}
+	if got := parseServerVersion("Latency min/avg/max: 0/0/0\n"); got != "" {
+		t.Fatalf("unrelated line parsed as version %q", got)
+	}
+}
+
 func TestHandshakeAndRPCFailures(t *testing.T) {
 	service := newServer()
 	response, shutdown := service.handleRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"handshake","params":{}}`))
@@ -20,7 +34,7 @@ func TestHandshakeAndRPCFailures(t *testing.T) {
 		t.Fatalf("handshake response = %#v, shutdown=%v", response, shutdown)
 	}
 	handshake, ok := response.Result.(handshakeResult)
-	if !ok || handshake.ProtocolVersion != 1 || handshake.AgentProtocolVersion != 1 || strings.Join(handshake.Capabilities, ",") != "connect,test_connection,kv" {
+	if !ok || handshake.ProtocolVersion != 1 || handshake.AgentProtocolVersion != 1 || strings.Join(handshake.Capabilities, ",") != "connect,test_connection,connection_info,kv" {
 		t.Fatalf("unexpected handshake: %#v", response.Result)
 	}
 

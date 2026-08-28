@@ -161,7 +161,7 @@ make
 
 `make` installs dependencies from the lockfile and starts the Tauri desktop development environment. The first Rust build can take a while; later starts are much faster.
 
-For a lightweight desktop build, disable the default Rust features and enable only the DuckDB sidecar and DynamoDB:
+For a lightweight desktop build, disable the default Rust features and enable only the DuckDB sidecar, DynamoDB, and bundled SQLite:
 
 ```bash
 make dev-fast
@@ -183,7 +183,7 @@ pnpm dev:tauri
 For the same lightweight build:
 
 ```powershell
-pnpm tauri dev -- --no-default-features --features duckdb-sidecar
+pnpm tauri dev -- --no-default-features --features duckdb-sidecar,dynamodb,sqlite-bundled
 ```
 
 ### Confirm the Environment Works

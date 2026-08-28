@@ -1,0 +1,33 @@
+---
+title: 常见问题
+description: DBX 常见问题：连接数据保存在哪里、如何备份、如何让数据与程序同目录或自定义数据目录。
+---
+
+<Callout type="info">DBX 桌面端的常见问题。本页从数据存储与数据目录开始，后续会持续补充新条目。</Callout>
+
+## 数据与备份
+
+<Accordions>
+  <Accordion title="连接配置保存在哪里？">
+    DBX 桌面端把连接、已保存的凭据、SSH 隧道配置、查询历史和应用设置保存在数据目录下的单个 SQLite 数据库文件 `dbx.db` 中：
+
+    - **Windows（安装版）：** `C:\Users\<用户名>\AppData\Roaming\com.dbx.app\dbx.db`
+    - **Windows（便携版压缩包）：** `<DBX.exe 所在目录>\data\dbx.db`
+    - **macOS：** `~/Library/Application Support/com.dbx.app/dbx.db`
+    - **Linux：** `~/.local/share/com.dbx.app/dbx.db`
+
+    SSH 主机指纹保存在同目录的 `known_hosts` 中，DBX 不会读写 `~/.ssh`。数据目录下还可能出现 `dbx.db-wal`、`dbx.db-shm` 检查点文件。
+
+    旧版本 DBX 曾使用 `connections.json` 和 `secrets.json` 保存连接，现在启动时会自动迁移进 `dbx.db`，原文件改名为 `*.bak` 保留。
+
+    跨设备迁移推荐使用加密的[配置导出/导入](/cn/docs/config-export)，而不是直接拷贝文件。手动备份时请先退出 DBX，再复制整个数据目录，或至少复制 `dbx.db` 并连同 `-wal`、`-shm` 文件。
+  </Accordion>
+  <Accordion title="能把数据放在程序同目录，或自定义数据目录吗？">
+    可以，有两种官方支持的方式：
+
+    - **Windows 便携版：** Release 页面的 `DBX_<版本>_<架构>-portable.zip` 自带 `portable.dbx` 标记文件。解压到任意目录运行，所有数据自动保存在 `DBX.exe` 旁边的 `data` 目录。首次启动时，如果便携目录还没有数据、而 AppData 中存在旧数据，会自动导入一次。
+    - **`DBX_DATA_DIR` 环境变量：** 所有平台、安装版和便携版均可用，优先级最高，可指向任意目录。新目录首次启动是空库，请用配置导出/导入迁移，或在 DBX 退出后拷贝 `dbx.db`。
+
+    `portable.dbx` 标记仅对 Windows 生效，且当 exe 旁存在 `uninstall.exe`（安装版）时会被忽略；解压版目录中手动创建该标记同样可以启用便携模式。应用内没有切换数据目录的设置项。
+  </Accordion>
+</Accordions>

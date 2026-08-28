@@ -154,6 +154,7 @@ export const SQL_SEMANTIC_DIALECTS: Record<string, SqlSemanticDialectAdapter> = 
 };
 
 export function sqlReferenceAnalysisDialectFor(options: { databaseType?: DatabaseType; identifierQuote?: string; fallbackDialect: string }): string {
+  if (options.databaseType === "kyuubi") return "spark";
   if (options.databaseType === "kingbase" && options.identifierQuote === "`") return "mysql";
   return options.fallbackDialect;
 }

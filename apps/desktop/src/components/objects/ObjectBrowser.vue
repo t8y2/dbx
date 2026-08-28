@@ -87,7 +87,7 @@ import { buildExecutableObjectSourceStatements, buildRoutineRenameObjectSourceSt
 import { buildRenameObjectSql, supportsObjectRename } from "@/lib/table/objectRenameSql";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { generateDatabaseExportId } from "@/lib/export/databaseExport";
-import { buildXlsxHeaderOverrides, hasXlsxHeaderComments, type XlsxHeaderMode } from "@/lib/export/xlsxHeader";
+import { buildXlsxHeaderOverrides, hasXlsxHeaderComments, type XlsxExportOptions, type XlsxHeaderMode } from "@/lib/export/xlsxHeader";
 import { copyToClipboard, eventTargetAllowsAppClipboardShortcut } from "@/lib/common/clipboard";
 import {
   defaultPasteTableMode,
@@ -113,6 +113,7 @@ import MySqlEventEditor from "@/components/objects/MySqlEventEditor.vue";
 import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { isCancelSearchShortcut } from "@/lib/editor/keyboardShortcuts";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
+import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { buildXuguCompileSql } from "@/lib/database/xuguCompileSql";
 import { formatShortcut } from "@/lib/editor/shortcutRegistry";
 import { batchTableEmptyFeedback, buildBatchTableEmptyPlan, runBatchTableEmpty, type BatchTableEmptyPlanItem } from "@/lib/sidebar/batchTableEmpty";
@@ -121,6 +122,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { filterSchemaNamesForConnection } from "@/lib/database/visibleDatabases";
 import {
   buildObjectBrowserRows,
+  buildMongoObjectBrowserRows,
   countObjectBrowserRowsByFilter,
   formatObjectBrowserBytes,
   formatObjectBrowserCount,
@@ -141,6 +143,7 @@ import { isSourceOnlyObjectBrowserRow, resolveRowClickAction, shouldDeferSingleC
 import { objectBrowserTableSelectionAnchor, objectBrowserTableSelectionRange } from "@/lib/table/objectBrowserSelection";
 import { customTypeCapabilities, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
 import { filterObjectBrowserTableColumns } from "@/lib/table/objectBrowserTableInfo";
+import { visibleMongoCollections } from "@/lib/sidebar/mongoCollectionMutation";
 import { createSidePanelRequestGuard } from "@/lib/table/sidePanelRequestGuard";
 import { runBatchTableTruncate } from "@/lib/table/batchTableTruncate";
 import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPresentation";
@@ -245,6 +248,9 @@ const tableMetadataCapabilities = computed<TableMetadataCapabilities>(() => getT
 const effectiveDatabaseType = computed(() => effectiveDatabaseTypeForConnection(props.connection) ?? props.connection.db_type);
 const isGaussdbM = computed(() => effectiveDatabaseType.value === "gaussdb" && props.connection.driver_profile?.toLowerCase() === "gaussdb-m");
 const isVictoriaMetrics = computed(() => effectiveDatabaseType.value === "victoriametrics");
+const isMongodb = computed(() => props.connection.db_type === "mongodb");
+const showObjectRowStats = computed(() => !isMongodb.value);
+const showObjectSizeStats = computed(() => !isVictoriaMetrics.value && !isMongodb.value);
 const objectRowsLabel = computed(() => t(isVictoriaMetrics.value ? "objects.series" : "objects.rows"));
 
 function toggleTableDdlWordWrap() {
@@ -338,7 +344,7 @@ const canOpenStructureEditor = computed(() => supportsTableStructureEditing(tabl
 const canOpenDiagram = computed(() => !!props.database && supportsSchemaDiagram(effectiveDatabaseType.value));
 const canOpenTableImport = computed(() => !!props.database && supportsTableImport(effectiveDatabaseType.value));
 const supportsTruncateTable = computed(() => supportsTableTruncate(effectiveDatabaseType.value));
-const supportsVacuumTable = computed(() => !props.connection.read_only && supportsTableVacuum(effectiveDatabaseType.value));
+const supportsVacuumTable = computed(() => !connectionIsEffectivelyReadOnly(props.connection) && supportsTableVacuum(effectiveDatabaseType.value));
 const vacuumRiskMessage = computed(() => (vacuumExecuting.value ? t("contextMenu.vacuumTableRunningHint") : vacuumTableFull.value ? t("contextMenu.vacuumTableFullRisk") : vacuumTableAnalyze.value ? t("contextMenu.vacuumTableAnalyzeRisk") : t("contextMenu.vacuumTableDefaultRisk")));
 const sourceDialect = computed(() => codeMirrorSqlDialect(effectiveDatabaseType.value));
 const sourceFormatDialect = computed<SqlFormatDialect>(() => sqlFormatDialectForDbType(effectiveDatabaseType.value));
@@ -510,8 +516,9 @@ function toggleCheckboxColumn() {
 const objectBrowserColumns = computed<ObjectBrowserColumnKey[]>(() => {
   const columns: ObjectBrowserColumnKey[] = [];
   if (showCheckboxColumn.value) columns.push("select");
-  columns.push("name", "type", "estimatedRows");
-  if (!isVictoriaMetrics.value) columns.push("totalBytes");
+  columns.push("name", "type");
+  if (showObjectRowStats.value) columns.push("estimatedRows");
+  if (showObjectSizeStats.value) columns.push("totalBytes");
   if (hasCreatedAt.value) columns.push("created_at");
   if (hasUpdatedAt.value) columns.push("updated_at");
   columns.push("comment");
@@ -645,18 +652,23 @@ function iconFor(row: ObjectBrowserRow) {
   return Table2;
 }
 
-function typeLabel(type: ObjectBrowserRow["type"]) {
-  if (type === "MATERIALIZED_VIEW") return t("common.materializedView");
-  if (type === "VIEW") return t("objects.view");
-  if (type === "PROCEDURE") return t("objects.procedure");
-  if (type === "FUNCTION") return t("objects.function");
-  if (type === "TRIGGER") return t("objects.trigger");
-  if (type === "EVENT") return t("tree.events");
-  if (type === "SEQUENCE") return t("objects.sequence");
-  if (type === "PACKAGE") return t("objects.package");
-  if (type === "PACKAGE_BODY") return t("objects.packageBody");
-  if (type === "TYPE") return t("objects.typeDefinition");
-  if (type === "TYPE_BODY") return t("objects.typeBody");
+function typeLabel(row: ObjectBrowserRow) {
+  if (isMongodb.value) {
+    if (row.collectionKind === "view" || row.type === "VIEW") return t("objects.view");
+    if (row.collectionKind === "timeseries") return t("objects.timeseries");
+    return t("objects.collection");
+  }
+  if (row.type === "MATERIALIZED_VIEW") return t("common.materializedView");
+  if (row.type === "VIEW") return t("objects.view");
+  if (row.type === "PROCEDURE") return t("objects.procedure");
+  if (row.type === "FUNCTION") return t("objects.function");
+  if (row.type === "TRIGGER") return t("objects.trigger");
+  if (row.type === "EVENT") return t("tree.events");
+  if (row.type === "SEQUENCE") return t("objects.sequence");
+  if (row.type === "PACKAGE") return t("objects.package");
+  if (row.type === "PACKAGE_BODY") return t("objects.packageBody");
+  if (row.type === "TYPE") return t("objects.typeDefinition");
+  if (row.type === "TYPE_BODY") return t("objects.typeBody");
   return t("objects.table");
 }
 
@@ -675,8 +687,9 @@ function toggleSort(key: ObjectBrowserSortKey) {
 }
 
 const sortKeyOptions = computed<ObjectBrowserSortKey[]>(() => {
-  const options: ObjectBrowserSortKey[] = ["name", "type", "estimatedRows"];
-  if (!isVictoriaMetrics.value) options.push("totalBytes");
+  const options: ObjectBrowserSortKey[] = ["name", "type"];
+  if (showObjectRowStats.value) options.push("estimatedRows");
+  if (showObjectSizeStats.value) options.push("totalBytes");
   if (hasCreatedAt.value) options.push("created_at");
   if (hasUpdatedAt.value) options.push("updated_at");
   options.push("comment");
@@ -901,7 +914,7 @@ function executeRowAction(row: ObjectBrowserRow, action: ObjectBrowserRowAction)
       void openTypeInfo(row);
       break;
     case "open-table":
-      emit("openTable", { tableName: row.name, schema: row.schema, catalog: props.catalog });
+      emit("openTable", { tableName: row.name, schema: row.schema, tableType: objectBrowserOpenTableType(row), catalog: props.catalog });
       break;
     case "open-source":
       void (row.type === "EVENT" ? openEventEditor(row) : openSource(row));
@@ -943,7 +956,7 @@ function onRowClick(row: ObjectBrowserRow, event: MouseEvent) {
   }
   // Single click: defer when the row has a distinct double-click action so a
   // following second click can cancel it (e.g. TABLE single→table-info, double→open-table).
-  if (shouldDeferSingleClick(row, action)) {
+  if (shouldDeferSingleClick(row, action, effectiveDatabaseType.value)) {
     if (singleClickTimer) clearTimeout(singleClickTimer);
     singleClickTimer = setTimeout(() => {
       singleClickTimer = null;
@@ -1663,8 +1676,14 @@ async function saveFileContent(content: string, defaultFileName: string, filterN
   }
 }
 
+function objectBrowserOpenTableType(row: ObjectBrowserRow): string {
+  if (row.collectionKind === "view") return "VIEW";
+  if (row.collectionKind === "timeseries") return "TIMESERIES";
+  return row.type;
+}
+
 function openViewData(row: ObjectBrowserRow) {
-  emit("openTable", { tableName: row.name, schema: row.schema, tableType: row.type, catalog: props.catalog });
+  emit("openTable", { tableName: row.name, schema: row.schema, tableType: objectBrowserOpenTableType(row), catalog: props.catalog });
 }
 
 function openStructureEditor(row: ObjectBrowserRow) {
@@ -2030,16 +2049,17 @@ async function exportData(row: ObjectBrowserRow, format: "csv" | "json" | "sql")
   else await exportTableData(row, format);
 }
 
-function showObjectBrowserXlsxHeaderDialog(hasComments: boolean): Promise<XlsxHeaderMode | null> {
-  if (!hasComments) return Promise.resolve("name");
+function showObjectBrowserXlsxHeaderDialog(hasComments: boolean): Promise<XlsxExportOptions | null> {
+  if (typeof document === "undefined") return Promise.resolve({ headerMode: "name", autoFilter: false });
 
   return new Promise((resolve) => {
     const container = document.createElement("div");
     document.body.appendChild(container);
     const app = createApp(XlsxHeaderDialog, {
       open: true,
-      onConfirm: (mode: XlsxHeaderMode) => {
-        resolve(mode);
+      showHeaderOptions: hasComments,
+      onConfirm: (exportOptions: XlsxExportOptions) => {
+        resolve(exportOptions);
         app.unmount();
         document.body.removeChild(container);
       },
@@ -2056,24 +2076,20 @@ function showObjectBrowserXlsxHeaderDialog(hasComments: boolean): Promise<XlsxHe
 
 async function exportDataXlsx(row: ObjectBrowserRow) {
   const schema = row.schema || selectedSchema.value;
-  let headerMode: XlsxHeaderMode = "name";
   let columnInfos: ColumnInfo[] | undefined;
 
   try {
     columnInfos = await api.getColumns(props.connection.id, props.database, schema || props.database, row.name, props.catalog);
-    const hasComments = hasXlsxHeaderComments(columnInfos.map((column) => column.comment));
-    const result = await showObjectBrowserXlsxHeaderDialog(hasComments);
-    if (result === null) return;
-    headerMode = result;
   } catch {
-    // Column fetch failed, fallback to export without comments
-    columnInfos = undefined;
+    // Export still works with field-name headers when column metadata is unavailable.
   }
 
-  await exportTableData(row, "xlsx", columnInfos, headerMode);
+  const exportOptions = await showObjectBrowserXlsxHeaderDialog(hasXlsxHeaderComments(columnInfos?.map((column) => column.comment)));
+  if (exportOptions === null) return;
+  await exportTableData(row, "xlsx", columnInfos, exportOptions.headerMode, exportOptions.autoFilter);
 }
 
-async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx" | "sql", columnInfos?: ColumnInfo[], headerMode: XlsxHeaderMode = "name") {
+async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx" | "sql", columnInfos?: ColumnInfo[], headerMode: XlsxHeaderMode = "name", autoFilter = true) {
   const schema = row.schema || selectedSchema.value;
 
   // Save dialog first
@@ -2113,7 +2129,7 @@ async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx" | "
       } else {
         const comments = result.columns.map((name) => columnInfos?.find((column) => column.name.toLocaleLowerCase() === name.toLocaleLowerCase())?.comment);
         const headerOverrides = buildXlsxHeaderOverrides(result.columns, comments, headerMode);
-        await api.exportQueryResultXlsx(filePath, row.name, result.columns, result.column_types ?? result.columns.map(() => ""), headerOverrides, result.rows);
+        await api.exportQueryResultXlsx(filePath, row.name, result.columns, result.column_types ?? result.columns.map(() => ""), headerOverrides, result.rows, undefined, autoFilter);
       }
       toast(t("grid.exported"));
       return;
@@ -2149,6 +2165,7 @@ async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx" | "
       format,
       columns,
       columnComments: format === "xlsx" ? columnComments : undefined,
+      autoFilter: format === "xlsx" ? autoFilter : undefined,
       batchSize: settingsStore.editorSettings.exportBatchSize,
       skipCount: format === "sql",
       rowLimit,
@@ -2229,7 +2246,7 @@ function copySelectedTablesToClipboard() {
 }
 
 function canPasteTableClipboard(): boolean {
-  return !isVictoriaMetrics.value && tableClipboardMatchesTarget(normalizedObjectBrowserTableClipboardEntries(), pasteTableTargetContext());
+  return !isVictoriaMetrics.value && !isMongodb.value && tableClipboardMatchesTarget(normalizedObjectBrowserTableClipboardEntries(), pasteTableTargetContext());
 }
 
 function normalizedObjectBrowserTableClipboardEntries() {
@@ -2245,7 +2262,7 @@ function canTransferTableClipboard(): boolean {
   if (isVictoriaMetrics.value) return false;
   const entries = normalizedObjectBrowserTableClipboardEntries();
   const target = pasteTableTargetContext();
-  if (entries.length === 0 || props.connection.read_only) return false;
+  if (entries.length === 0 || connectionIsEffectivelyReadOnly(props.connection)) return false;
   const source = tableClipboardSourceContext(entries);
   const sourceConfig = source ? connectionStore.getConfig(source.connectionId) : undefined;
   return !!source && !!sourceConfig && supportsTransfer(sourceConfig.db_type) && supportsTransfer(props.connection.db_type) && !tableClipboardMatchesTarget(entries, target);
@@ -2738,23 +2755,32 @@ async function loadObjects(options?: { allowCached?: boolean }) {
   loadingObjects.value = true;
   rows.value = [];
   try {
-    const objects: ObjectInfo[] = await api.listObjects(request.scope.connectionId, request.scope.database, request.scope.schema, undefined, undefined, undefined, undefined, request.scope.catalog);
+    const nextRows = props.connection.db_type === "mongodb" ? await loadMongoObjectBrowserRows(request.scope.connectionId, request.scope.database) : await loadSqlObjectBrowserRows(request);
     if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
-    const nextRows = buildObjectBrowserRows({
-      objects,
-      database: request.scope.database,
-      fallbackSchema: request.scope.schema,
-      rowSchema: connectionObjectTreeNodeSchema(props.connection, props.database, selectedSchema.value),
-    });
     applyObjectBrowserRows(nextRows);
     const cachedAt = cacheObjectBrowserRows(cacheWriteToken, nextRows);
-    void loadObjectStatistics(request, cacheWriteToken, cachedAt);
+    if (props.connection.db_type !== "mongodb") void loadObjectStatistics(request, cacheWriteToken, cachedAt);
   } catch (e: any) {
     if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
     error.value = translateBackendError(t, e);
   } finally {
     if (objectBrowserRowsLoadGuard.isCurrent(request)) finishObjectBrowserRowsLoad();
   }
+}
+
+async function loadSqlObjectBrowserRows(request: ObjectBrowserRowsLoadHandle) {
+  const objects: ObjectInfo[] = await api.listObjects(request.scope.connectionId, request.scope.database, request.scope.schema, undefined, undefined, undefined, undefined, request.scope.catalog);
+  return buildObjectBrowserRows({
+    objects,
+    database: request.scope.database,
+    fallbackSchema: request.scope.schema,
+    rowSchema: connectionObjectTreeNodeSchema(props.connection, props.database, selectedSchema.value),
+  });
+}
+
+async function loadMongoObjectBrowserRows(connectionId: string, database: string) {
+  const collections = await api.mongoListCollections(connectionId, database);
+  return buildMongoObjectBrowserRows({ collections: visibleMongoCollections(collections), database });
 }
 
 async function loadObjectStatistics(request: ObjectBrowserRowsLoadHandle, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, cachedAt: number | undefined) {
@@ -2819,7 +2845,9 @@ function filterCount(filter: ObjectFilter) {
 function filterLabel(filter: ObjectFilter) {
   const key =
     filter === "tables"
-      ? "objects.tables"
+      ? isMongodb.value
+        ? "objects.collections"
+        : "objects.tables"
       : filter === "views"
         ? "objects.views"
         : filter === "materializedViews"
@@ -3101,6 +3129,13 @@ function getTypeMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
 }
 
 function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
+  if (isMongodb.value) {
+    return [
+      { label: t("contextMenu.viewData"), action: () => openViewData(item), icon: Table2 },
+      { label: "", separator: true },
+      { label: t("contextMenu.copyName"), action: () => copyName(item), icon: Copy },
+    ];
+  }
   if (item.type === "TABLE") return getTableMenuItems(item);
   if (item.type === "VIEW" || item.type === "MATERIALIZED_VIEW") return getViewMenuItems(item);
   if (item.type === "EVENT") return getEventMenuItems(item);
@@ -3124,7 +3159,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       <div class="flex min-w-0 flex-1 items-center gap-2">
         <div class="relative min-w-0 flex-1">
           <Search class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-          <Input v-model="search" data-object-search-input class="h-7 pl-8 pr-6 text-xs" :placeholder="t('objects.search')" @keydown="onSearchKeydown" />
+          <Input v-model="search" data-object-search-input class="h-7 pl-8 pr-6 text-xs" :placeholder="isMongodb ? t('objects.searchCollections') : t('objects.search')" @keydown="onSearchKeydown" />
           <button v-if="search" type="button" class="absolute right-1.5 top-1/2 flex h-4 w-4 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground" :aria-label="t('common.clear')" @click="clearObjectSearch">
             <X class="h-3 w-3" />
           </button>
@@ -3201,23 +3236,23 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       <div class="min-w-0 flex-1 truncate text-muted-foreground">
         {{ t("objects.selectedTables", { count: selectedTableCount }) }}
       </div>
-      <Button v-if="!isVictoriaMetrics" variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="openBatchDatabaseExport">
+      <Button v-if="showObjectSizeStats" variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="openBatchDatabaseExport">
         <Upload class="mr-1.5 h-3.5 w-3.5" />
         {{ t("objects.exportSelected") }}
       </Button>
-      <Button v-if="!isVictoriaMetrics" variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="copySelectedTablesToClipboard">
+      <Button v-if="showObjectSizeStats" variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="copySelectedTablesToClipboard">
         <Clipboard class="mr-1.5 h-3.5 w-3.5" />
         {{ t("objects.copyTableSelected") }}
       </Button>
-      <Button v-if="!isVictoriaMetrics && supportsTruncateTable" variant="ghost" size="sm" class="h-7 px-2 text-xs text-destructive" @click="requestBatchTruncateTables">
+      <Button v-if="showObjectSizeStats && supportsTruncateTable" variant="ghost" size="sm" class="h-7 px-2 text-xs text-destructive" @click="requestBatchTruncateTables">
         <Scissors class="mr-1.5 h-3.5 w-3.5" />
         {{ t("objects.truncateSelected") }}
       </Button>
-      <Button v-if="!isVictoriaMetrics" variant="ghost" size="sm" class="h-7 px-2 text-xs text-destructive" @click="requestBatchEmptyTables">
+      <Button v-if="showObjectSizeStats" variant="ghost" size="sm" class="h-7 px-2 text-xs text-destructive" @click="requestBatchEmptyTables">
         <Eraser class="mr-1.5 h-3.5 w-3.5" />
         {{ t("contextMenu.batchEmpty", { count: selectedTableCount }) }}
       </Button>
-      <Button v-if="!isVictoriaMetrics" variant="ghost" size="sm" class="h-7 px-2 text-xs text-destructive" @click="requestBatchDropTables">
+      <Button v-if="showObjectSizeStats" variant="ghost" size="sm" class="h-7 px-2 text-xs text-destructive" @click="requestBatchDropTables">
         <Trash2 class="mr-1.5 h-3.5 w-3.5" />
         {{ t("objects.dropSelected") }}
       </Button>
@@ -3268,7 +3303,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                 <GripVertical class="h-3 w-3" />
               </div>
             </div>
-            <div class="relative flex min-w-0 items-center">
+            <div v-if="showObjectRowStats" class="relative flex min-w-0 items-center">
               <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :title="t('objects.statisticsHint')" @click="toggleSort('estimatedRows')">
                 <span class="truncate">{{ objectRowsLabel }}</span>
                 <component :is="sortIconFor('estimatedRows')" v-if="sortIconFor('estimatedRows')" class="h-3 w-3 shrink-0" />
@@ -3281,7 +3316,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                 <GripVertical class="h-3 w-3" />
               </div>
             </div>
-            <div v-if="!isVictoriaMetrics" class="relative flex min-w-0 items-center">
+            <div v-if="showObjectSizeStats" class="relative flex min-w-0 items-center">
               <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :title="t('objects.statisticsHint')" @click="toggleSort('totalBytes')">
                 <span class="truncate">{{ t("objects.size") }}</span>
                 <component :is="sortIconFor('totalBytes')" v-if="sortIconFor('totalBytes')" class="h-3 w-3 shrink-0" />
@@ -3369,11 +3404,11 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                       {{ t("objects.partitions", { count: item.partitionCount }) }}
                     </span>
                   </div>
-                  <div class="truncate text-xs text-muted-foreground">{{ typeLabel(item.type) }}</div>
-                  <div class="truncate text-xs tabular-nums text-muted-foreground" :title="item.estimatedRows == null ? '' : formatObjectBrowserCount(item.estimatedRows)">
+                  <div class="truncate text-xs text-muted-foreground">{{ typeLabel(item) }}</div>
+                  <div v-if="showObjectRowStats" class="truncate text-xs tabular-nums text-muted-foreground" :title="item.estimatedRows == null ? '' : formatObjectBrowserCount(item.estimatedRows)">
                     {{ formatObjectBrowserCount(item.estimatedRows) }}
                   </div>
-                  <div v-if="!isVictoriaMetrics" class="truncate text-xs tabular-nums text-muted-foreground" :title="item.totalBytes == null ? '' : formatObjectBrowserBytes(item.totalBytes)">
+                  <div v-if="showObjectSizeStats" class="truncate text-xs tabular-nums text-muted-foreground" :title="item.totalBytes == null ? '' : formatObjectBrowserBytes(item.totalBytes)">
                     {{ formatObjectBrowserBytes(item.totalBytes) }}
                   </div>
                   <div v-if="hasCreatedAt" class="truncate text-xs tabular-nums text-muted-foreground" :title="formatObjectBrowserTimestamp(item.created_at)">
@@ -3414,11 +3449,11 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                     </div>
                     <span class="w-full truncate text-sm font-medium leading-tight text-foreground">{{ item.displayName }}</span>
                     <div class="flex items-center gap-1.5">
-                      <span class="text-xs text-muted-foreground">{{ typeLabel(item.type) }}</span>
-                      <span v-if="item.estimatedRows != null && item.estimatedRows > 0" class="object-browser-stat-badge object-browser-stat-badge-rows rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-primary">{{
+                      <span class="text-xs text-muted-foreground">{{ typeLabel(item) }}</span>
+                      <span v-if="showObjectRowStats && item.estimatedRows != null && item.estimatedRows > 0" class="object-browser-stat-badge object-browser-stat-badge-rows rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-primary">{{
                         formatObjectBrowserCount(item.estimatedRows)
                       }}</span>
-                      <span v-if="!isVictoriaMetrics && item.totalBytes != null && item.totalBytes > 0" class="object-browser-stat-badge object-browser-stat-badge-bytes rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-muted-foreground">{{
+                      <span v-if="showObjectSizeStats && item.totalBytes != null && item.totalBytes > 0" class="object-browser-stat-badge object-browser-stat-badge-bytes rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-muted-foreground">{{
                         formatObjectBrowserBytes(item.totalBytes)
                       }}</span>
                     </div>

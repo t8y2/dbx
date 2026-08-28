@@ -441,7 +441,9 @@ async function handleCompare() {
 
     const sourceTableIdentity: SchemaDiffTableIdentity = { connectionId: sourceConnectionId.value, database: sourceDatabase.value, schema: sourceSchema.value };
     const targetTableIdentity: SchemaDiffTableIdentity = { connectionId: targetConnectionId.value, database: targetDatabase.value, schema: targetSchema.value };
-    const [srcTables, tgtTables] = await Promise.all([schemaDiffTableListLoader.load(sourceTableIdentity), schemaDiffTableListLoader.load(targetTableIdentity)]);
+    // The dialog can remain open while either database changes, so Compare must not reuse
+    // the table list cached while configuring the comparison.
+    const [srcTables, tgtTables] = await Promise.all([schemaDiffTableListLoader.load(sourceTableIdentity, { refresh: true }), schemaDiffTableListLoader.load(targetTableIdentity, { refresh: true })]);
     // Explicit (visual) table selection is applied here, BEFORE any per-table
     // metadata details are loaded, so metadata requests only happen for the
     // final table set. `undefined`/empty means no restriction (legacy path).

@@ -167,7 +167,8 @@ pub fn build_query_pagination_execution_plan(
     }
 
     let can_use_first_page_cursor = options.use_agent_cursor && options.pagination.offset == 0;
-    let prefer_server_pagination = options.database_type == Some(DatabaseType::Kingbase);
+    let prefer_server_pagination = options.database_type == Some(DatabaseType::Kingbase)
+        && kingbase_server_pagination_is_stable(&options.query_base_sql);
     if can_use_first_page_cursor && !prefer_server_pagination {
         if !options.first_page_uses_actual_sql && options.sql == options.query_base_sql {
             plan.sql_to_execute = options.query_base_sql;
@@ -438,6 +439,22 @@ fn find_query_result_statement_at_cursor(sql: &str, cursor_pos: usize, database_
     } else {
         find_statement_at_cursor(sql, cursor_pos)
     }
+}
+
+fn kingbase_server_pagination_is_stable(sql: &str) -> bool {
+    let has_order_by = Parser::parse_sql(&GenericDialect {}, sql)
+        .ok()
+        .and_then(|statements| {
+            let [Statement::Query(query)] = statements.as_slice() else {
+                return None;
+            };
+            Some(query.order_by.as_ref().is_some_and(
+                |order_by| !matches!(&order_by.kind, OrderByKind::Expressions(expressions) if expressions.is_empty()),
+            ))
+        })
+        .unwrap_or(false);
+
+    has_order_by || dedup_projection_count_without_order_by(sql).is_some()
 }
 
 fn single_selectable_statement(original_sql: &str, database_type: Option<DatabaseType>) -> Result<String, ()> {
@@ -3994,7 +4011,25 @@ WHERE u.id = picked.id;
     }
 
     #[test]
-    fn kingbase_prefers_server_pagination_over_agent_cursor() {
+    fn kingbase_prefers_server_pagination_for_ordered_query() {
+        let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+            sql: "SELECT * FROM events ORDER BY id".to_string(),
+            query_base_sql: "SELECT * FROM events ORDER BY id".to_string(),
+            database_type: Some(DatabaseType::Kingbase),
+            pagination: QueryPagination { limit: 500, offset: 0, session_id: None },
+            use_agent_cursor: true,
+            first_page_uses_actual_sql: false,
+        });
+
+        assert_eq!(plan.sql_to_execute, "SELECT * FROM events ORDER BY id LIMIT 500;");
+        assert_eq!(plan.page_sql, Some(plan.sql_to_execute.clone()));
+        assert_eq!(plan.page_limit, Some(500));
+        assert_eq!(plan.page_offset, Some(0));
+        assert!(!plan.use_agent_result_session);
+    }
+
+    #[test]
+    fn kingbase_uses_agent_cursor_for_unordered_query() {
         let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
             sql: "SELECT * FROM events".to_string(),
             query_base_sql: "SELECT * FROM events".to_string(),
@@ -4004,11 +4039,11 @@ WHERE u.id = picked.id;
             first_page_uses_actual_sql: false,
         });
 
-        assert_eq!(plan.sql_to_execute, "SELECT * FROM events LIMIT 500;");
-        assert_eq!(plan.page_sql, Some(plan.sql_to_execute.clone()));
+        assert_eq!(plan.sql_to_execute, "SELECT * FROM events");
+        assert!(plan.page_sql.is_none());
         assert_eq!(plan.page_limit, Some(500));
         assert_eq!(plan.page_offset, Some(0));
-        assert!(!plan.use_agent_result_session);
+        assert!(plan.use_agent_result_session);
     }
 
     #[test]
@@ -4058,9 +4093,7 @@ WHERE u.id = picked.id;
     }
 
     #[test]
-    fn kingbase_subquery_top_still_uses_server_pagination() {
-        // A TOP inside a derived table is not a top-level clause, so the outer
-        // statement can still be paginated with LIMIT/OFFSET.
+    fn kingbase_unordered_subquery_top_uses_agent_cursor() {
         let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
             sql: "SELECT * FROM (SELECT TOP 100 * FROM events) t".to_string(),
             query_base_sql: "SELECT * FROM (SELECT TOP 100 * FROM events) t".to_string(),
@@ -4070,11 +4103,11 @@ WHERE u.id = picked.id;
             first_page_uses_actual_sql: false,
         });
 
-        assert_eq!(plan.sql_to_execute, "SELECT * FROM (SELECT TOP 100 * FROM events) t LIMIT 500;");
-        assert_eq!(plan.page_sql, Some(plan.sql_to_execute.clone()));
+        assert_eq!(plan.sql_to_execute, "SELECT * FROM (SELECT TOP 100 * FROM events) t");
+        assert!(plan.page_sql.is_none());
         assert_eq!(plan.page_limit, Some(500));
         assert_eq!(plan.page_offset, Some(0));
-        assert!(!plan.use_agent_result_session);
+        assert!(plan.use_agent_result_session);
     }
 
     #[test]

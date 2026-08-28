@@ -31,4 +31,13 @@ describe("ConnectionDialog service deep-link hydration", () => {
     expect(applyBody).toContain("parseConnectionDeepLink(input) ?? parseServiceConnectionUrl(input)");
     expect(applyBody.indexOf("applyConnectionDraftToForm")).toBeLessThan(applyBody.indexOf("parseConnectionUrl(input"));
   });
+
+  it("keeps failed one-time connections available for error inspection and retry", () => {
+    const saveStart = source.indexOf("async function save()");
+    const saveEnd = source.indexOf('const dialogTitle = ref("")', saveStart);
+    const saveBody = source.slice(saveStart, saveEnd);
+
+    expect(saveBody).not.toContain("store.removeConnection(config.id)");
+    expect(saveBody).toContain('emit("connectFailed"');
+  });
 });

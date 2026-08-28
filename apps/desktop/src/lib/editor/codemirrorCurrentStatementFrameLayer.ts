@@ -37,6 +37,17 @@ function spansVisualRows(start: PositionRect, end: PositionRect): boolean {
 }
 
 /**
+ * Statements spanning more logical lines than this render no frame. The
+ * horizontal-bounds loop below does a constant number of geometry probes
+ * per logical line, so its cost is O(logical lines) — fine for ordinary
+ * statements, but a multi-thousand-line PL/SQL package body (Oracle, and
+ * other dialects with BEGIN/END routine bodies) is parsed as a single
+ * statement spanning the whole file, turning routine scrolling into
+ * thousands of `coordsAtPos` calls per frame. See dbx#7226.
+ */
+export const MAX_FRAME_STATEMENT_LINES = 500;
+
+/**
  * Measure the pixel rectangle of one statement rendered in `view`.
  *
  * The frame is a single continuous rectangle: it starts at the first
@@ -62,6 +73,7 @@ export function currentStatementFrameRect(view: Viewish, from: number, to: numbe
 
   const startLine = doc.lineAt(from);
   const endLine = doc.lineAt(to);
+  if (endLine.number - startLine.number > MAX_FRAME_STATEMENT_LINES) return null;
   const base = view.scrollDOM.getBoundingClientRect();
 
   // Vertical bounds: convert screen coords to content-layer coords.

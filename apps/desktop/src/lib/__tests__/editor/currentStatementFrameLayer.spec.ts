@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { Text } from "@codemirror/state";
-import { currentStatementFrameLayer, currentStatementFrameRect, FRAME_INSET_PX } from "@/lib/editor/codemirrorCurrentStatementFrameLayer";
+import { currentStatementFrameLayer, currentStatementFrameRect, FRAME_INSET_PX, MAX_FRAME_STATEMENT_LINES } from "@/lib/editor/codemirrorCurrentStatementFrameLayer";
 
 interface CoordRect {
   left: number;
@@ -251,6 +251,30 @@ describe("currentStatementFrameRect", () => {
     // bottom = lineBlockAt(73).bottom = 73 * LINE_HEIGHT
     const expectedHeight = (73 - 47) * LINE_HEIGHT + FRAME_INSET_PX * 2;
     expect(rect!.height).toBe(expectedHeight);
+  });
+
+  it("skips huge multi-thousand-line statements instead of probing every line (dbx#7226)", () => {
+    // A large Oracle package body is parsed as one statement spanning the
+    // whole file. Without a cap, this loop would issue two coordsAtPos
+    // calls per logical line, freezing the UI on every scroll frame.
+    const lineCount = MAX_FRAME_STATEMENT_LINES + 2000;
+    const lines = Array.from({ length: lineCount }, (_, i) => `  proc_body_line_${i};`);
+    const view = buildView(lines);
+    const coords = vi.spyOn(view, "coordsAtPos");
+
+    const rect = currentStatementFrameRect(view, 0, view.state.doc.length);
+
+    expect(rect).toBeNull();
+    expect(coords).not.toHaveBeenCalled();
+  });
+
+  it("still frames a statement right at the line-count cap", () => {
+    const lines = Array.from({ length: MAX_FRAME_STATEMENT_LINES + 1 }, (_, i) => `-- line ${i}`);
+    const view = buildView(lines);
+
+    const rect = currentStatementFrameRect(view, 0, view.state.doc.length);
+
+    expect(rect).not.toBeNull();
   });
 });
 

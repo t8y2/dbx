@@ -1,0 +1,21 @@
+#!/bin/sh
+basedir=$(dirname "$(echo "$0" | sed -e 's,\\,/,g')")
+
+case `uname` in
+    *CYGWIN*|*MINGW*|*MSYS*)
+        if command -v cygpath > /dev/null 2>&1; then
+            basedir=`cygpath -w "$basedir"`
+        fi
+    ;;
+esac
+
+if [ -z "$NODE_PATH" ]; then
+  export NODE_PATH="/pnpm-fixture/global/5/.pnpm/@dbx-app+mcp-server@0.4.71/node_modules/@dbx-app/mcp-server/bin/node_modules:/pnpm-fixture/global/5/.pnpm/@dbx-app+mcp-server@0.4.71/node_modules/@dbx-app/mcp-server/node_modules:/pnpm-fixture/global/5/.pnpm/@dbx-app+mcp-server@0.4.71/node_modules/@dbx-app/node_modules:/pnpm-fixture/global/5/.pnpm/@dbx-app+mcp-server@0.4.71/node_modules:/pnpm-fixture/global/5/.pnpm/node_modules"
+else
+  export NODE_PATH="/pnpm-fixture/global/5/.pnpm/@dbx-app+mcp-server@0.4.71/node_modules/@dbx-app/mcp-server/bin/node_modules:/pnpm-fixture/global/5/.pnpm/@dbx-app+mcp-server@0.4.71/node_modules/@dbx-app/mcp-server/node_modules:/pnpm-fixture/global/5/.pnpm/@dbx-app+mcp-server@0.4.71/node_modules/@dbx-app/node_modules:/pnpm-fixture/global/5/.pnpm/@dbx-app+mcp-server@0.4.71/node_modules:/pnpm-fixture/global/5/.pnpm/node_modules:$NODE_PATH"
+fi
+if [ -x "$basedir/node" ]; then
+  exec "$basedir/node"  "$basedir/../global/5/.pnpm/@dbx-app+mcp-server@0.4.71/node_modules/@dbx-app/mcp-server/bin/dbx-mcp-server.js" "$@"
+else
+  exec node  "$basedir/../global/5/.pnpm/@dbx-app+mcp-server@0.4.71/node_modules/@dbx-app/mcp-server/bin/dbx-mcp-server.js" "$@"
+fi

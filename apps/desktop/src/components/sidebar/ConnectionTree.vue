@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, shallowRef, computed, nextTick, watch, provide, onMounted, onUnmounted, type Component, type ComponentPublicInstance, type CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { Search, X, ListFilter, ListOrdered, ArrowDownAZ, ArrowUpZA, CircleDot, Crosshair, Server, Database, FolderTree, Table2, Eye, RotateCcw, Loader2, Unplug } from "@lucide/vue";
+import { Search, X, SlidersHorizontal, ListOrdered, ArrowDownAZ, ArrowUpZA, LocateFixed, Server, Database, FolderTree, Table2, Eye, RotateCcw, Loader2, Unplug } from "@lucide/vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
@@ -55,6 +55,7 @@ import { createSidebarPasteHandlerRegistry } from "@/lib/sidebar/sidebarPasteHan
 import { insertSidebarTableSearchControls, isSidebarTableSearchControlNode } from "@/lib/sidebar/sidebarTableSearchControl";
 import { createSidebarTableSearchDebouncer, invalidateSidebarTableSearchBuild, loadOrBuildSidebarTableSearchIndex, scheduleExclusiveSidebarTableSearchDebounce } from "@/lib/sidebar/sidebarTableSearchIndex";
 import TreeItem from "./TreeItem.vue";
+import ActiveConnectionFilterButton from "./ActiveConnectionFilterButton.vue";
 import SidebarTreeRuntimeHost from "./SidebarTreeRuntimeHost.vue";
 import SidebarTreeItemDialogs from "./SidebarTreeItemDialogs.vue";
 import InstallExtensionDialog from "@/components/objects/InstallExtensionDialog.vue";
@@ -277,6 +278,7 @@ watch(
 );
 
 watch([deferredSearchQuery, regexMode], ([newQuery, isRegexMode], [oldQuery, wasRegexMode]) => {
+  if (!isRegexMode || !newQuery) regexTableSearchScopes.value = [];
   // The regex source is a client-side projection; the remote tree-loading
   // search state must never carry it, or explicit node expansion would leak
   // the expression as a remote searchFilter.
@@ -441,24 +443,6 @@ const searchScopeOptions = computed(() => {
     { scope: "view", label: t("sidebar.searchScopeView"), icon: Eye },
   ] as const satisfies ReadonlyArray<{ scope: SearchScope; label: string; icon: Component }>;
 });
-const searchScopeMenuItems = computed(() => [
-  ...searchScopeOptions.value.map((item) => ({
-    value: item.scope,
-    label: item.label,
-    icon: item.icon,
-  })),
-  ...(hasSearchScopeFilter.value
-    ? [
-        {
-          value: "__clear",
-          label: t("sidebar.clearFilter"),
-          icon: RotateCcw,
-          separatorBefore: true,
-        },
-      ]
-    : []),
-]);
-
 const connectionListSortMenuItems = computed(() => [
   { value: "manual", label: t("sidebar.sortConnectionsManual"), icon: ListOrdered },
   { value: "asc", label: t("sidebar.sortConnectionsAscending"), icon: ArrowDownAZ },
@@ -466,6 +450,33 @@ const connectionListSortMenuItems = computed(() => [
 ]);
 
 const isConnectionListAlphabeticallySorted = computed(() => settingsStore.editorSettings.sidebarConnectionSortMode !== "manual");
+const sidebarListOptionsLabel = computed(() => `${t("sidebar.sortConnections")} / ${t("sidebar.filterByType")}`);
+const sidebarListOptionItems = computed(() => [
+  ...connectionListSortMenuItems.value.map((item, index) => ({
+    ...item,
+    value: `sort:${item.value}`,
+    groupLabel: index === 0 ? t("sidebar.sortConnections") : undefined,
+  })),
+  ...searchScopeOptions.value.map((item, index) => ({
+    value: `scope:${item.scope}`,
+    label: item.label,
+    icon: item.icon,
+    separatorBefore: index === 0,
+    groupLabel: index === 0 ? t("sidebar.filterByType") : undefined,
+  })),
+  ...(hasSearchScopeFilter.value
+    ? [
+        {
+          value: "clear-scopes",
+          label: t("sidebar.clearFilter"),
+          icon: RotateCcw,
+          separatorBefore: true,
+        },
+      ]
+    : []),
+]);
+const selectedSidebarListOptions = computed(() => [`sort:${settingsStore.editorSettings.sidebarConnectionSortMode}`, ...selectedSearchScopes.value.map((scope) => `scope:${scope}`)]);
+const hasCustomSidebarListOptions = computed(() => isConnectionListAlphabeticallySorted.value || hasSearchScopeFilter.value);
 
 function updateConnectionListSortMode(mode: string) {
   if (mode === "manual" || mode === "asc" || mode === "desc") {
@@ -494,12 +505,16 @@ function toggleSearchScope(scope: SearchScope) {
   }
 }
 
-function selectSearchScopeMenuItem(value: string) {
-  if (value === "__clear") {
-    clearSearchScopeFilter();
+function selectSidebarListOption(value: string) {
+  if (value.startsWith("sort:")) {
+    updateConnectionListSortMode(value.slice("sort:".length));
     return;
   }
-  toggleSearchScope(value as SearchScope);
+  if (value.startsWith("scope:")) {
+    toggleSearchScope(value.slice("scope:".length) as SearchScope);
+    return;
+  }
+  if (value === "clear-scopes") clearSearchScopeFilter();
 }
 
 function clearSearchScopeFilter() {
@@ -785,15 +800,14 @@ function readExpandedSidebarSchemas(): Array<{ id: string; label: string }> {
   return expanded;
 }
 
-// The plain (non-virtualized) renderer keeps the sticky database/schema header
-// via native CSS position: sticky on the container rows, mirroring the overlay
-// the virtual branch renders. Only container rows stick; children scroll under
-// them until the next container takes over.
-function isPlainStickyContainerNode(node: TreeNode): boolean {
+// The plain (non-virtualized) renderer uses the same container selection as the
+// virtual sticky overlay: database containers take precedence, while schema
+// containers stick only in trees without a database-level container.
+function isPlainStickyContainerNode(index: number): boolean {
   // Mirror the virtual branch's sticky overlay: both suppress sticky headers
   // while a search filter is active so filtered rows don't pin at the top.
   if (isTreeSearchFiltering.value) return false;
-  return DATABASE_LEVEL_TYPES.has(node.type) || SCHEMA_LEVEL_TYPES.has(node.type);
+  return flatTreeIndex.value.stickyContainerIndexByIndex[index] === index;
 }
 
 const sidebarLayoutMonitor = createSidebarLayoutMonitor({
@@ -1551,6 +1565,16 @@ async function locateTabInSidebar(tab: QueryTab | undefined | null, align: Sideb
     if (!ancestor.isExpanded && store.canUseLoadedTreeNodeToggle(ancestor)) {
       ancestor.isExpanded = true;
     }
+  }
+
+  // Connection groups never register loaded tree children, so the guard above
+  // skips them and a collapsed group keeps the target out of the visible flat
+  // tree. Reopen them through the layout op so the expansion is persisted and
+  // survives the next layout rebuild; flipping isExpanded directly would be
+  // reverted by that rebuild (issue #7387).
+  const collapsedGroupIds = nodePath.filter((node) => node.type === "connection-group" && !node.isExpanded).map((node) => node.id);
+  if (collapsedGroupIds.length > 0) {
+    store.expandConnectionGroups(collapsedGroupIds);
   }
 
   await nextTick();
@@ -2372,7 +2396,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
     />
     <div class="connection-tree-search sticky top-0 z-10 bg-background px-2 py-1">
       <div class="relative flex items-center gap-1">
-        <div class="relative flex-1">
+        <div class="relative min-w-0 flex-1">
           <Loader2 v-if="isSidebarSearchLoading" class="absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 animate-spin text-muted-foreground" />
           <Search v-else class="absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-muted-foreground" />
           <input
@@ -2381,66 +2405,47 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
             autocapitalize="off"
             autocorrect="off"
             spellcheck="false"
-            class="w-full h-6 pl-7 pr-6 text-xs rounded border bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+            class="w-full h-6 pl-7 pr-[4.75rem] text-xs rounded border bg-background focus:outline-none focus:ring-1 focus:ring-ring"
             :class="regexMode && compileSearchRegex(searchQuery).invalid ? 'border-destructive focus:ring-destructive' : 'border-border'"
             :aria-invalid="regexMode && compileSearchRegex(searchQuery).invalid ? 'true' : 'false'"
             :placeholder="t('grid.search')"
             @keydown="onSearchKeydown"
           />
-          <button v-if="searchQuery" class="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" @click="searchQuery = ''">
-            <X class="h-3 w-3" />
-          </button>
+          <div class="absolute inset-y-0 right-0.5 flex items-center">
+            <button v-if="searchQuery" type="button" class="flex h-5 w-5 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground" :aria-label="t('common.clear')" @click="searchQuery = ''">
+              <X class="h-3 w-3" />
+            </button>
+            <LightTooltip :text="t('sidebar.regexSearchTooltip')" side="top" :delay="300">
+              <button
+                type="button"
+                class="flex h-5 min-w-5 items-center justify-center rounded-sm px-0.5 text-[10px] font-mono text-muted-foreground hover:bg-accent hover:text-foreground"
+                :class="{ 'text-primary bg-primary/10': regexMode, 'text-destructive': regexMode && compileSearchRegex(searchQuery).invalid }"
+                :aria-label="t('sidebar.regexSearch')"
+                :aria-pressed="regexMode"
+                @click="regexMode = !regexMode"
+              >
+                .*
+              </button>
+            </LightTooltip>
+            <LightTooltip :text="t('sidebar.globalLocalSearchTooltip')" side="top" :delay="300">
+              <Switch size="sm" :model-value="settingsStore.editorSettings.sidebarGlobalSearchLocal" :disabled="regexMode" :aria-label="t('sidebar.globalLocalSearch')" @update:model-value="settingsStore.updateEditorSettings({ sidebarGlobalSearchLocal: Boolean($event) })" />
+            </LightTooltip>
+          </div>
         </div>
-        <LightTooltip :text="t('sidebar.globalLocalSearchTooltip')" side="top" :delay="300">
-          <Switch size="sm" :model-value="settingsStore.editorSettings.sidebarGlobalSearchLocal" :disabled="regexMode" :aria-label="t('sidebar.globalLocalSearch')" @update:model-value="settingsStore.updateEditorSettings({ sidebarGlobalSearchLocal: Boolean($event) })" />
-        </LightTooltip>
-        <LightTooltip :text="t('sidebar.regexSearchTooltip')" side="top" :delay="300">
-          <button
-            type="button"
-            class="shrink-0 h-6 min-w-6 px-1 flex items-center justify-center rounded border border-border text-[10px] font-mono hover:bg-accent"
-            :class="{ 'text-primary bg-primary/10 border-primary/30': regexMode, 'text-destructive border-destructive/60': regexMode && compileSearchRegex(searchQuery).invalid }"
-            :aria-label="t('sidebar.regexSearch')"
-            :aria-pressed="regexMode"
-            @click="regexMode = !regexMode"
-          >
-            .*
-          </button>
-        </LightTooltip>
         <LightTooltip :text="t('sidebar.locateActiveTab')" side="top" :delay="300" nowrap>
-          <button type="button" class="shrink-0 h-6 w-6 flex items-center justify-center rounded border border-border text-muted-foreground hover:bg-accent hover:text-foreground" :aria-label="t('sidebar.locateActiveTab')" @click="locateActiveTabInSidebar">
-            <Crosshair class="h-3.5 w-3.5" />
+          <button type="button" class="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-border text-muted-foreground hover:bg-accent hover:text-foreground" :aria-label="t('sidebar.locateActiveTab')" @click="locateActiveTabInSidebar">
+            <LocateFixed class="h-3.5 w-3.5" />
           </button>
         </LightTooltip>
-        <LightTooltip :text="t('sidebar.sortConnections')" side="top" :delay="300" nowrap>
-          <span class="inline-flex">
-            <LightDropdown
-              :model-value="settingsStore.editorSettings.sidebarConnectionSortMode"
-              :items="connectionListSortMenuItems"
-              :aria-label="t('sidebar.sortConnections')"
-              :label="t('sidebar.sortConnections')"
-              :trigger-class="['shrink-0 h-6 w-6 flex items-center justify-center rounded border border-border hover:bg-accent', isConnectionListAlphabeticallySorted ? 'text-primary bg-primary/10 border-primary/30' : 'text-muted-foreground'].join(' ')"
-              trigger-icon-class="h-3.5 w-3.5"
-              item-icon-class="h-3.5 w-3.5"
-              content-class="w-max min-w-0"
-              selected-item-class="bg-primary/10 text-primary"
-              selected-check-class="text-primary"
-              :show-trigger-label="false"
-              :show-chevron="false"
-              align="end"
-              @update:model-value="updateConnectionListSortMode"
-            />
-          </span>
-        </LightTooltip>
-        <LightTooltip v-if="searchScopeOptions.length > 0" :text="t('sidebar.filterByType')" side="top" :delay="300" nowrap>
+        <LightTooltip :text="sidebarListOptionsLabel" side="top" :delay="300" nowrap>
           <span class="inline-flex">
             <LightDropdown
               model-value=""
-              :items="searchScopeMenuItems"
-              :selected-values="selectedSearchScopes"
-              :aria-label="t('sidebar.filterByType')"
-              :label="t('sidebar.filterByType')"
-              :trigger-icon="ListFilter"
-              :trigger-class="['shrink-0 h-6 w-6 flex items-center justify-center rounded border border-border hover:bg-accent', hasSearchScopeFilter ? 'text-primary bg-primary/10 border-primary/30' : 'text-muted-foreground'].join(' ')"
+              :items="sidebarListOptionItems"
+              :selected-values="selectedSidebarListOptions"
+              :aria-label="sidebarListOptionsLabel"
+              :trigger-icon="SlidersHorizontal"
+              :trigger-class="['shrink-0 h-6 w-6 flex items-center justify-center rounded border border-border hover:bg-accent', hasCustomSidebarListOptions ? 'text-primary bg-primary/10 border-primary/30' : 'text-muted-foreground'].join(' ')"
               trigger-icon-class="h-3.5 w-3.5"
               item-icon-class="h-3.5 w-3.5"
               content-class="w-max min-w-0"
@@ -2450,22 +2455,11 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
               :show-chevron="false"
               :close-on-select="false"
               align="end"
-              @update:model-value="selectSearchScopeMenuItem"
+              @update:model-value="selectSidebarListOption"
             />
           </span>
         </LightTooltip>
-        <LightTooltip :text="t('sidebar.showActiveConnectionsOnly')" side="top" :delay="300" nowrap>
-          <button
-            type="button"
-            class="shrink-0 h-6 w-6 flex items-center justify-center rounded border hover:bg-accent"
-            :class="showConnectedConnectionsOnly ? 'text-primary bg-primary/10 border-primary/30' : 'border-border text-muted-foreground hover:text-foreground'"
-            :aria-label="t('sidebar.showActiveConnectionsOnly')"
-            :aria-pressed="showConnectedConnectionsOnly"
-            @click="showConnectedConnectionsOnly = !showConnectedConnectionsOnly"
-          >
-            <CircleDot class="h-3.5 w-3.5" />
-          </button>
-        </LightTooltip>
+        <ActiveConnectionFilterButton :active-connection-count="store.connectedIds.size" :pressed="showConnectedConnectionsOnly" @toggle="showConnectedConnectionsOnly = !showConnectedConnectionsOnly" />
       </div>
     </div>
     <CustomContextMenu ref="sidebarContextMenuRef" :items="sidebarContextMenuItems" v-slot="contextMenuSlot">
@@ -2506,7 +2500,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
             />
           </template>
         </RecycleScroller>
-        <div v-if="stickyNode" class="sticky-database-header pointer-events-auto absolute inset-x-0 top-0 z-[5] border-b border-border/60" :style="stickyHeaderStyle">
+        <div v-if="stickyNode" class="sticky-database-header pointer-events-auto absolute inset-x-0 top-0 z-[5]" :style="stickyHeaderStyle">
           <TreeItem
             :node="stickyNode.node"
             :depth="stickyNode.depth"
@@ -2539,7 +2533,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
         <div ref="plainTreeScrollerRef" class="sidebar-tree connection-tree-scroller h-full overflow-y-auto" :class="sidebarTreeOverflowClass" :style="sidebarTreeScrollerStyle" @click="clearSidebarSelection" @scroll.passive="onTreeScroll">
           <div class="connection-tree-content">
             <TreeItem
-              v-for="item in flatNodes"
+              v-for="(item, index) in flatNodes"
               :key="item.renderKey"
               :node="item.node"
               :depth="item.depth"
@@ -2548,7 +2542,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
               :pending-rename="pendingRenameNodeId === item.node.id"
               :highlighted="highlightedNodeId === item.id"
               :comment-label-width="sidebarCommentLabelWidths.get(item.node.id)"
-              :sticky-header="isPlainStickyContainerNode(item.node)"
+              :sticky-header="isPlainStickyContainerNode(index)"
               @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)"
               @rename-started="pendingRenameNodeId = null"
               @group-created="startRenamingCreatedGroup"

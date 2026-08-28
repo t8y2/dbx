@@ -5465,6 +5465,15 @@ export default withEnglishFallback({
     restoreSummary: "Ripristina tabella riepilogativa",
   },
   diff: {
+    progress: {
+      loadingObjects: "Lettura degli oggetti dei database sorgente e di destinazione...",
+      loadingSourceDetails: "Lettura della struttura delle tabelle del database sorgente",
+      loadingTargetDetails: "Lettura della struttura delle tabelle del database di destinazione",
+      loadingExtraObjects: "Lettura degli altri oggetti del database...",
+      comparing: "Analisi delle differenze dello schema...",
+      generating: "Generazione del risultato del confronto...",
+      count: "{current} / {total}",
+    },
     title: "Confronta Schemi",
     source: "Sorgente",
     target: "Destinazione",

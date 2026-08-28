@@ -4789,6 +4789,15 @@ export default withEnglishFallback({
     runInBackground: "背景執行",
   },
   diff: {
+    progress: {
+      loadingObjects: "正在讀取來源與目標資料庫物件……",
+      loadingSourceDetails: "正在讀取來源資料庫資料表結構",
+      loadingTargetDetails: "正在讀取目標資料庫資料表結構",
+      loadingExtraObjects: "正在讀取其他資料庫物件……",
+      comparing: "正在分析結構差異……",
+      generating: "正在產生比較結果……",
+      count: "{current} / {total}",
+    },
     title: "比較架構",
     source: "來源資料庫",
     target: "目標資料庫",

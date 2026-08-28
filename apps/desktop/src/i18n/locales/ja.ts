@@ -5503,6 +5503,15 @@ export default withEnglishFallback({
     restoreSummary: "復元統計表",
   },
   diff: {
+    progress: {
+      loadingObjects: "ソースとターゲットのデータベースオブジェクトを読み込み中...",
+      loadingSourceDetails: "ソースデータベースのテーブル構造を読み込み中",
+      loadingTargetDetails: "ターゲットデータベースのテーブル構造を読み込み中",
+      loadingExtraObjects: "その他のデータベースオブジェクトを読み込み中...",
+      comparing: "スキーマの差分を分析中...",
+      generating: "比較結果を生成中...",
+      count: "{current} / {total}",
+    },
     title: "スキーマを比較",
     source: "ソース",
     target: "対象",

@@ -5467,6 +5467,15 @@ export default withEnglishFallback({
     restoreSummary: "Restaurar Tabela Estatística",
   },
   diff: {
+    progress: {
+      loadingObjects: "Lendo os objetos dos bancos de dados de origem e destino...",
+      loadingSourceDetails: "Lendo a estrutura das tabelas do banco de dados de origem",
+      loadingTargetDetails: "Lendo a estrutura das tabelas do banco de dados de destino",
+      loadingExtraObjects: "Lendo outros objetos do banco de dados...",
+      comparing: "Analisando as diferenças do esquema...",
+      generating: "Gerando o resultado da comparação...",
+      count: "{current} / {total}",
+    },
     title: "Comparar Esquemas",
     source: "Origem",
     target: "Destino",

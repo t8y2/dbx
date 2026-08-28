@@ -18,11 +18,11 @@ import SchemaDiffOptionsPanel from "@/components/diff/SchemaDiffOptionsPanel.vue
 
 import { getSchemaDiffOptionsForDbType } from "@/lib/schema/schemaDiffOptions";
 import { buildDeployTxResult } from "@/lib/schema/deployTxResult";
-import { createConcurrencyLimiter, mapWithConcurrency, schemaDiffMetadataConcurrency, schemaDiffMetadataLoadPlan } from "@/lib/schema/schemaDiffMetadataLoad";
+import { loadSchemaDetails } from "@/lib/schema/schemaDiffMetadataLoad";
 import { createSchemaDiffTableListLoader, type SchemaDiffTableIdentity } from "@/lib/schema/schemaDiffTableList";
 import { normalizeSchemaDiffCompareOptions } from "@/types/schemaDiff";
 import type { SchemaDiffCompareOptions, SchemaDiffConfig, FieldMappingEntry } from "@/types/schemaDiff";
-import type { DatabaseType, ObjectSourceKind, TableInfo } from "@/types/database";
+import type { DatabaseType, ObjectSourceKind } from "@/types/database";
 import {
   convertToSchemaDiffObjects,
   detectDestructiveSchemaDiffStatements,
@@ -46,13 +46,12 @@ import {
   type SchemaDiffPreparation,
   type MissingRollbackObject,
   type RollbackCompleteness,
-  type TableSchemaDetail,
   type RenameCandidate,
   type CompatibilityWarning,
   type PermissionDiff,
   type DependencyGraph,
 } from "@/lib/schema/schemaDiff";
-import { compileSchemaDiffTableFilter, filterSchemaDiffTables, isSchemaDiffView } from "@/lib/schema/schemaDiffTableFilter";
+import { compileSchemaDiffTableFilter, filterSchemaDiffTables } from "@/lib/schema/schemaDiffTableFilter";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 
@@ -105,7 +104,17 @@ const optionTree = computed(() => {
 });
 
 // Compare state
+type SchemaDiffProgressPhase = "loading-table-lists" | "loading-source-details" | "loading-target-details" | "loading-extra-objects" | "comparing" | "generating" | "complete";
+interface SchemaDiffProgress {
+  phase: SchemaDiffProgressPhase;
+  current?: number;
+  total?: number;
+  objectName?: string;
+}
+
 const loading = ref(false);
+const schemaDiffProgress = ref<SchemaDiffProgress | null>(null);
+let comparisonRequestId = 0;
 const diffObjects = ref<SchemaDiffObject[]>([]);
 const diffGroups = ref<OperationGroup[]>([]);
 const selectedObjectId = ref<string | null>(null);
@@ -278,9 +287,41 @@ const canDeploy = computed(() => {
   return selectedSchemaDiffObjects(diffObjects.value).length > 0;
 });
 
+const schemaDiffProgressCount = computed(() => {
+  const progress = schemaDiffProgress.value;
+  return progress && progress.total !== undefined && progress.total > 0 && progress.current !== undefined ? { current: progress.current, total: progress.total } : null;
+});
+
+const schemaDiffProgressPercent = computed(() => {
+  const count = schemaDiffProgressCount.value;
+  return count ? Math.min(100, Math.round((count.current / count.total) * 100)) : null;
+});
+
+const schemaDiffProgressLabel = computed(() => {
+  switch (schemaDiffProgress.value?.phase) {
+    case "loading-table-lists":
+      return t("diff.progress.loadingObjects");
+    case "loading-source-details":
+      return t("diff.progress.loadingSourceDetails");
+    case "loading-target-details":
+      return t("diff.progress.loadingTargetDetails");
+    case "loading-extra-objects":
+      return t("diff.progress.loadingExtraObjects");
+    case "comparing":
+      return t("diff.progress.comparing");
+    case "generating":
+      return t("diff.progress.generating");
+    default:
+      return "";
+  }
+});
+
 function resetComparisonResultState() {
+  comparisonRequestId++;
   selectedDeploySqlGeneration++;
   focusedDeploySqlGeneration++;
+  loading.value = false;
+  schemaDiffProgress.value = null;
   step.value = "config";
   diffObjects.value = [];
   diffGroups.value = [];
@@ -320,6 +361,10 @@ watch(
           sourceSchema.value = props.prefillSchema;
         }
       }
+    } else {
+      comparisonRequestId++;
+      loading.value = false;
+      schemaDiffProgress.value = null;
     }
   },
   { immediate: true },
@@ -385,51 +430,13 @@ function handleFieldMappingsUpdate(mappings: FieldMappingEntry[]) {
   }
 }
 
-/** Map a JDBC table_type to an ObjectSourceKind for getTableDdl routing.
- *  Views and materialized views need the object_type parameter so the
- *  backend can call DBMS_METADATA.GET_DDL with the correct type. */
-function isViewOrMaterializedView(tableType: string): ObjectSourceKind | undefined {
-  switch (tableType.toUpperCase().replace(/\s+/g, "_")) {
-    case "VIEW":
-      return "VIEW";
-    case "MATERIALIZED_VIEW":
-      return "MATERIALIZED_VIEW";
-    default:
-      return undefined;
-  }
-}
-
-interface SchemaDetailLoadContext {
-  connectionId: string;
-  database: string;
-  schema: string;
-  dbType: string;
-  options: SchemaDiffCompareOptions;
-}
-
-async function loadSchemaDetails(tables: TableInfo[], context: SchemaDetailLoadContext): Promise<TableSchemaDetail[]> {
-  const concurrency = schemaDiffMetadataConcurrency(context.dbType, tables.length);
-  const runMetadataQuery = createConcurrencyLimiter(concurrency);
-
-  return mapWithConcurrency(tables, concurrency, async (table) => {
-    const objectType = isViewOrMaterializedView(table.table_type);
-    const loadPlan = schemaDiffMetadataLoadPlan(isSchemaDiffView(table), context.options);
-    const ddlPromise = loadPlan.ddl ? runMetadataQuery(() => api.getTableDdl(context.connectionId, context.database, context.schema, table.name, objectType)) : Promise.resolve("");
-    const [columns, indexes, foreignKeys, triggers, ddl] = await Promise.all([
-      loadPlan.columns ? runMetadataQuery(() => api.getColumns(context.connectionId, context.database, context.schema, table.name)) : Promise.resolve([]),
-      loadPlan.indexes ? runMetadataQuery(() => api.listIndexes(context.connectionId, context.database, context.schema, table.name)) : Promise.resolve([]),
-      loadPlan.foreignKeys ? runMetadataQuery(() => api.listForeignKeys(context.connectionId, context.database, context.schema, table.name)) : Promise.resolve([]),
-      loadPlan.triggers ? runMetadataQuery(() => api.listTriggers(context.connectionId, context.database, context.schema, table.name)) : Promise.resolve([]),
-      ddlPromise,
-    ]);
-
-    return { name: table.name, columns, indexes, foreignKeys, triggers, ddl };
-  });
-}
-
 async function handleCompare() {
+  const requestId = ++comparisonRequestId;
+  const isCurrentRequest = () => requestId === comparisonRequestId;
+
   loading.value = true;
   step.value = "compare";
+  schemaDiffProgress.value = { phase: "loading-table-lists" };
 
   // Reset Phase 4 state to prevent stale data from previous compares
   rollbackSql.value = "";
@@ -453,26 +460,45 @@ async function handleCompare() {
     // The dialog can remain open while either database changes, so Compare must not reuse
     // the table list cached while configuring the comparison.
     const [srcTables, tgtTables] = await Promise.all([schemaDiffTableListLoader.load(sourceTableIdentity, { refresh: true }), schemaDiffTableListLoader.load(targetTableIdentity, { refresh: true })]);
+    if (!isCurrentRequest()) return;
     // Explicit (visual) table selection is applied here, BEFORE any per-table
     // metadata details are loaded, so metadata requests only happen for the
     // final table set. `undefined`/empty means no restriction (legacy path).
     const { sourceTables, targetTables } = filterSchemaDiffTables(srcTables, tgtTables, tableFilter, opts, opts.selectedTables);
 
-    const sourceDetails = await loadSchemaDetails(sourceTables, {
-      connectionId: sourceConnectionId.value,
-      database: sourceDatabase.value,
-      schema: sourceSchema.value,
-      dbType: sourceDbType,
-      options: opts,
-    });
+    schemaDiffProgress.value = { phase: "loading-source-details", current: 0, total: sourceTables.length };
+    const sourceDetails = await loadSchemaDetails(
+      sourceTables,
+      {
+        connectionId: sourceConnectionId.value,
+        database: sourceDatabase.value,
+        schema: sourceSchema.value,
+        dbType: sourceDbType,
+        options: opts,
+        onProgress: (progress) => {
+          if (isCurrentRequest()) schemaDiffProgress.value = { phase: "loading-source-details", ...progress };
+        },
+      },
+      api,
+    );
+    if (!isCurrentRequest()) return;
 
-    const targetDetails = await loadSchemaDetails(targetTables, {
-      connectionId: targetConnectionId.value,
-      database: targetDatabase.value,
-      schema: targetSchema.value,
-      dbType,
-      options: opts,
-    });
+    schemaDiffProgress.value = { phase: "loading-target-details", current: 0, total: targetTables.length };
+    const targetDetails = await loadSchemaDetails(
+      targetTables,
+      {
+        connectionId: targetConnectionId.value,
+        database: targetDatabase.value,
+        schema: targetSchema.value,
+        dbType,
+        options: opts,
+        onProgress: (progress) => {
+          if (isCurrentRequest()) schemaDiffProgress.value = { phase: "loading-target-details", ...progress };
+        },
+      },
+      api,
+    );
+    if (!isCurrentRequest()) return;
 
     const isPostgresLike = dbType === "postgres" || dbType === "opengauss";
 
@@ -495,7 +521,9 @@ async function handleCompare() {
       promises.push(api.listOwners(targetConnectionId.value, targetDatabase.value, targetSchema.value));
     }
 
+    if (promises.length > 0) schemaDiffProgress.value = { phase: "loading-extra-objects" };
     const results = await Promise.all(promises);
+    if (!isCurrentRequest()) return;
     let idx = 0;
     const srcFunctions = opts?.functions && isPostgresLike ? results[idx++] : [];
     const tgtFunctions = opts?.functions && isPostgresLike ? results[idx++] : [];
@@ -506,6 +534,7 @@ async function handleCompare() {
     const srcOwners = opts?.owners && isPostgresLike ? results[idx++] : [];
     const tgtOwners = opts?.owners && isPostgresLike ? results[idx++] : [];
 
+    schemaDiffProgress.value = { phase: "comparing" };
     const result = await api.prepareSchemaDiff({
       sourceTables,
       targetTables,
@@ -545,6 +574,7 @@ async function handleCompare() {
           customParams: m.customParams,
         })) || [],
     });
+    if (!isCurrentRequest()) return;
 
     // Extract new result fields
     rollbackSql.value = result.rollbackSyncSql ?? "";
@@ -565,15 +595,20 @@ async function handleCompare() {
     // current selection projection below rather than from the initial full SQL.
     lastDiffResult.value = result;
     deploySqlMode.value = "forward";
+    schemaDiffProgress.value = { phase: "generating" };
     await regenerateSelectedDeploySql();
     await regenerateFocusedDeploySql();
+    if (!isCurrentRequest()) return;
 
+    schemaDiffProgress.value = null;
     step.value = "result";
   } catch (e: any) {
+    if (!isCurrentRequest()) return;
+    schemaDiffProgress.value = null;
     toast(e?.message || String(e), 5000);
     step.value = "config";
   } finally {
-    loading.value = false;
+    if (isCurrentRequest()) loading.value = false;
   }
 }
 
@@ -1021,8 +1056,31 @@ const targetConnectionInfo = computed(() => {
 
         <!-- Compare Loading -->
         <div v-else-if="step === 'compare'" class="flex items-center justify-center py-20">
-          <Loader2 class="w-6 h-6 animate-spin mr-2" />
-          <span class="text-sm text-muted-foreground">{{ t("diff.comparing") }}</span>
+          <div class="w-full max-w-md px-6 space-y-3">
+            <div class="flex items-center justify-center gap-2 text-sm text-muted-foreground">
+              <Loader2 class="w-5 h-5 animate-spin text-primary" />
+              <span>{{ schemaDiffProgressLabel }}</span>
+            </div>
+            <div v-if="schemaDiffProgressCount" class="flex items-center justify-between text-xs tabular-nums text-muted-foreground">
+              <span>{{ t("diff.progress.count", schemaDiffProgressCount) }}</span>
+              <span>{{ schemaDiffProgressPercent }}%</span>
+            </div>
+            <div class="h-2 overflow-hidden rounded-full bg-muted">
+              <div
+                v-if="schemaDiffProgressPercent !== null"
+                class="h-full rounded-full bg-primary transition-[width] duration-200"
+                role="progressbar"
+                :aria-valuemin="0"
+                :aria-valuemax="schemaDiffProgressCount?.total"
+                :aria-valuenow="schemaDiffProgressCount?.current"
+                :style="{ width: `${schemaDiffProgressPercent}%` }"
+              />
+              <div v-else class="h-full w-full overflow-hidden rounded-full">
+                <div class="schema-diff-progress-indeterminate h-full rounded-full bg-primary" />
+              </div>
+            </div>
+            <div v-if="schemaDiffProgress?.objectName" class="truncate text-center text-xs text-muted-foreground" :title="schemaDiffProgress.objectName">{{ schemaDiffProgress.objectName }}</div>
+          </div>
         </div>
 
         <!-- Result Step -->
@@ -1278,6 +1336,23 @@ const targetConnectionInfo = computed(() => {
 </template>
 
 <style scoped>
+.schema-diff-progress-indeterminate {
+  width: 42%;
+  animation: schema-diff-progress-slide 1.15s ease-in-out infinite;
+}
+
+@keyframes schema-diff-progress-slide {
+  0% {
+    transform: translateX(-110%);
+  }
+  50% {
+    transform: translateX(190%);
+  }
+  100% {
+    transform: translateX(290%);
+  }
+}
+
 :deep(.splitpanes--horizontal > .splitpanes__splitter) {
   height: 8px;
   background: var(--border);

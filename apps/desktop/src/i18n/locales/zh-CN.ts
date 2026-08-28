@@ -5738,6 +5738,15 @@ export default withEnglishFallback({
     collapseAll: "全部折叠",
   },
   diff: {
+    progress: {
+      loadingObjects: "正在读取源库和目标库对象…",
+      loadingSourceDetails: "正在读取源数据库表结构",
+      loadingTargetDetails: "正在读取目标数据库表结构",
+      loadingExtraObjects: "正在读取其他数据库对象…",
+      comparing: "正在分析结构差异…",
+      generating: "正在生成比较结果…",
+      count: "{current} / {total}",
+    },
     title: "比较架构",
     source: "源数据库",
     target: "目标数据库",

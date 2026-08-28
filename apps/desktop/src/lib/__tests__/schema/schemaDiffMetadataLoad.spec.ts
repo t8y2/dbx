@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { createConcurrencyLimiter, mapWithConcurrency, schemaDiffMetadataConcurrency, schemaDiffMetadataLoadPlan, shouldFetchSchemaDiffDdl } from "@/lib/schema/schemaDiffMetadataLoad";
+import { createConcurrencyLimiter, loadSchemaDetails, mapWithConcurrency, schemaDiffMetadataConcurrency, schemaDiffMetadataLoadPlan, shouldFetchSchemaDiffDdl, type SchemaDiffMetadataApi, type SchemaDiffMetadataProgress } from "@/lib/schema/schemaDiffMetadataLoad";
+import { DEFAULT_MYSQL_OPTIONS } from "@/types/schemaDiff";
+import type { TableInfo } from "@/types/database";
 
 function wait(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -98,6 +100,40 @@ describe("schemaDiffMetadataLoad", () => {
 
     expect(result).toEqual(["0:30", "1:5", "2:10", "3:1"]);
     expect(maxActive).toBeLessThanOrEqual(2);
+  });
+
+  it("reports each completed table while loading metadata", async () => {
+    const tables = ["orders", "customers", "events"].map((name) => ({ name, table_type: "TABLE" }) as TableInfo);
+    const progress: SchemaDiffMetadataProgress[] = [];
+    const api: SchemaDiffMetadataApi = {
+      getTableDdl: async (_connectionId, _database, _schema, table) => {
+        await wait(table === "orders" ? 10 : table === "customers" ? 1 : 5);
+        return `ddl:${table}`;
+      },
+      getColumns: async () => [],
+      listIndexes: async () => [],
+      listForeignKeys: async () => [],
+      listTriggers: async () => [],
+    };
+
+    const details = await loadSchemaDetails(
+      tables,
+      {
+        connectionId: "source",
+        database: "db",
+        schema: "public",
+        dbType: "mysql",
+        options: { ...DEFAULT_MYSQL_OPTIONS },
+        onProgress: (value) => progress.push(value),
+      },
+      api,
+    );
+
+    expect(details.map((detail) => detail.name)).toEqual(["orders", "customers", "events"]);
+    expect(details.map((detail) => detail.ddl)).toEqual(["ddl:orders", "ddl:customers", "ddl:events"]);
+    expect(progress.map((value) => value.current)).toEqual([1, 2, 3]);
+    expect(progress.map((value) => value.total)).toEqual([3, 3, 3]);
+    expect(new Set(progress.map((value) => value.objectName))).toEqual(new Set(["orders", "customers", "events"]));
   });
 
   it("propagates the first worker error and stops scheduling new work", async () => {

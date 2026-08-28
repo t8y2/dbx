@@ -5753,6 +5753,15 @@ export default {
     collapseAll: "Collapse all",
   },
   diff: {
+    progress: {
+      loadingObjects: "Reading source and target database objects...",
+      loadingSourceDetails: "Reading source database table structures",
+      loadingTargetDetails: "Reading target database table structures",
+      loadingExtraObjects: "Reading other database objects...",
+      comparing: "Analyzing schema differences...",
+      generating: "Generating comparison result...",
+      count: "{current} / {total}",
+    },
     title: "Compare Schemas",
     source: "Source",
     target: "Target",

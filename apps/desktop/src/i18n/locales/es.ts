@@ -5465,6 +5465,15 @@ export default withEnglishFallback({
     totalFiles: "{count} archivos",
   },
   diff: {
+    progress: {
+      loadingObjects: "Leyendo los objetos de las bases de datos de origen y destino...",
+      loadingSourceDetails: "Leyendo la estructura de tablas de la base de datos de origen",
+      loadingTargetDetails: "Leyendo la estructura de tablas de la base de datos de destino",
+      loadingExtraObjects: "Leyendo otros objetos de la base de datos...",
+      comparing: "Analizando las diferencias del esquema...",
+      generating: "Generando el resultado de la comparación...",
+      count: "{current} / {total}",
+    },
     title: "Comparar esquemas",
     source: "Origen",
     target: "Destino",

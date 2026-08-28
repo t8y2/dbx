@@ -5178,6 +5178,15 @@ export default withEnglishFallback({
     collapseAll: "모두 접기",
   },
   diff: {
+    progress: {
+      loadingObjects: "원본 및 대상 데이터베이스 객체를 읽는 중...",
+      loadingSourceDetails: "원본 데이터베이스 테이블 구조를 읽는 중",
+      loadingTargetDetails: "대상 데이터베이스 테이블 구조를 읽는 중",
+      loadingExtraObjects: "기타 데이터베이스 객체를 읽는 중...",
+      comparing: "스키마 차이를 분석하는 중...",
+      generating: "비교 결과를 생성하는 중...",
+      count: "{current} / {total}",
+    },
     title: "스키마 비교",
     source: "소스",
     target: "대상",

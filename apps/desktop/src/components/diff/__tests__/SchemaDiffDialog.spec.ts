@@ -63,6 +63,14 @@ describe("SchemaDiffDialog fullscreen layout", () => {
     expect(dialogSource).not.toMatch(/\b(?:20|40|60|80)%/);
   });
 
+  it("renders a localized next-step label alongside the current progress state", () => {
+    expect(dialogSource).toContain("getSchemaDiffNextProgressStep");
+    expect(dialogSource).toContain("schemaDiffNextProgressLabel");
+    expect(dialogSource).toContain('t("diff.progress.next"');
+    expect(dialogSource).toContain('v-if="schemaDiffNextProgressLabel"');
+    expect(dialogSource).toContain("shouldLoadSchemaDiffExtraObjects");
+  });
+
   it("clears progress before preserving the existing comparison error flow", () => {
     expect(dialogSource).toMatch(/\} catch \(e: any\) \{\s+if \(!isCurrentRequest\(\)\) return;\s+schemaDiffProgress\.value = null;/);
     expect(dialogSource).toContain("toast(e?.message || String(e), 5000);");

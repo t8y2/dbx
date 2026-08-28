@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { createConcurrencyLimiter, loadSchemaDetails, mapWithConcurrency, schemaDiffMetadataConcurrency, schemaDiffMetadataLoadPlan, shouldFetchSchemaDiffDdl, type SchemaDiffMetadataApi, type SchemaDiffMetadataProgress } from "@/lib/schema/schemaDiffMetadataLoad";
-import { DEFAULT_MYSQL_OPTIONS } from "@/types/schemaDiff";
-import type { TableInfo } from "@/types/database";
+import { createConcurrencyLimiter, loadSchemaDetails, mapWithConcurrency, schemaDiffMetadataConcurrency, schemaDiffMetadataLoadPlan, shouldFetchSchemaDiffDdl, type SchemaDiffMetadataApi, type SchemaDiffMetadataProgress } from "../../schema/schemaDiffMetadataLoad";
+import { getSchemaDiffNextProgressStep, shouldLoadSchemaDiffExtraObjects } from "../../schema/schemaDiffProgress";
+import { DEFAULT_MYSQL_OPTIONS, DEFAULT_POSTGRES_OPTIONS } from "../../../types/schemaDiff";
+import type { TableInfo } from "../../../types/database";
 
 function wait(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -169,5 +170,32 @@ describe("schemaDiffMetadataLoad", () => {
 
     expect(result).toEqual([0, 1, 2, 3]);
     expect(maxActive).toBeLessThanOrEqual(2);
+  });
+
+  it("only enables extra objects for PostgreSQL-like databases with relevant options", () => {
+    expect(shouldLoadSchemaDiffExtraObjects("mysql", { ...DEFAULT_MYSQL_OPTIONS, functions: true })).toBe(false);
+    expect(shouldLoadSchemaDiffExtraObjects("postgres", DEFAULT_POSTGRES_OPTIONS)).toBe(true);
+    expect(shouldLoadSchemaDiffExtraObjects("opengauss", DEFAULT_POSTGRES_OPTIONS)).toBe(true);
+    expect(
+      shouldLoadSchemaDiffExtraObjects("postgres", {
+        ...DEFAULT_POSTGRES_OPTIONS,
+        functions: false,
+        sequences: false,
+        rules: false,
+        owners: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("maps phases to the next step on the actual comparison path", () => {
+    expect(getSchemaDiffNextProgressStep("loading-table-lists", false)).toBe("nextSourceDetails");
+    expect(getSchemaDiffNextProgressStep("loading-source-details", false)).toBe("nextTargetDetails");
+    expect(getSchemaDiffNextProgressStep("loading-target-details", false)).toBe("nextComparing");
+    expect(getSchemaDiffNextProgressStep("loading-target-details", true)).toBe("nextExtraObjects");
+    expect(getSchemaDiffNextProgressStep("loading-extra-objects", true)).toBe("nextComparing");
+    expect(getSchemaDiffNextProgressStep("comparing", false)).toBe("nextGenerating");
+    expect(getSchemaDiffNextProgressStep("generating", false)).toBe("nextComplete");
+    expect(getSchemaDiffNextProgressStep("complete", false)).toBeNull();
+    expect(getSchemaDiffNextProgressStep(undefined, false)).toBeNull();
   });
 });

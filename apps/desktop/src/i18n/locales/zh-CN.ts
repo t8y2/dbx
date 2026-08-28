@@ -1264,6 +1264,10 @@ export default withEnglishFallback({
         JSON_ARRAY: "创建 JSON 数组",
       },
     },
+    previewChanges: "预览变更",
+    previewChangesComment: "变更预览（干跑）：{operation} 语句",
+    previewChangesFailed: "变更预览失败。",
+    previewChangesNoStatement: "请选中或把光标放在一条 UPDATE / INSERT / DELETE 语句上以预览变更。",
     contextMenu: {
       executeSelection: "执行选中 SQL",
       executeCurrent: "执行 SQL",

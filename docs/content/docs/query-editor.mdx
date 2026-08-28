@@ -56,6 +56,16 @@ For multi-statement execution, the result area shows the current statement, tota
 
 <Callout type="warn">Cancellation depends on the driver and database. After Stop is clicked, the server may still need time to interrupt the current statement.</Callout>
 
+### Preview DML changes before executing
+
+For an `UPDATE`, `INSERT`, or `DELETE` statement, the toolbar shows a **Preview changes** button (also available in the editor context menu). DBX rewrites the statement into an equivalent read-only `SELECT` and opens it in a new result tab *without writing to the database*:
+
+- `UPDATE` — the grid shows the affected rows plus one **`列名（新值）`** column per assigned column (expressions are evaluated, so `SET a = a + 1` shows the actual new value);
+- `INSERT` — the grid shows the rows that would be inserted (column names from the target columns, `VALUES` expanded);
+- `DELETE` — the grid shows the rows that would be removed.
+
+Statements DBX cannot rewrite safely (for example some dialect-specific forms) are reported as **暂不支持预览** and can still be executed normally.
+
 ## Execution Scope and Target Picker
 
 | Scope | How it is selected | Best for |

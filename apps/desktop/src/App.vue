@@ -281,6 +281,7 @@ const contentAreaRef = ref<InstanceType<typeof ContentArea> | null>(null);
 
 const selectedSql = ref("");
 const cursorPos = ref(0);
+const previewChangesAvailable = ref(false);
 const formatSqlRequest = ref<{ id: number; tabId: string } | null>(null);
 const compressSqlRequest = ref<{ id: number; tabId: string } | null>(null);
 const activeOutputView = ref<"result" | "summary" | "explain" | "chart" | "messages">("result");
@@ -487,6 +488,10 @@ function requestActiveEditorExecute(source?: "pointer" | "keyboard") {
 function requestActiveEditorExecuteInNewResultTab() {
   if (contentAreaRef.value?.requestQueryEditorExecuteInNewResultTab?.()) return;
   void tryExecuteInNewResultTab();
+}
+
+function requestActiveEditorPreviewChanges() {
+  void contentAreaRef.value?.requestQueryEditorPreviewChanges?.();
 }
 
 const multiExecuteDatabaseType = ref<DatabaseType>();
@@ -3101,6 +3106,7 @@ onUnmounted(() => {
                     :active-tab="activeTab"
                     :active-connection="activeConnection"
                     :executable-sql="executableSql"
+                    :can-preview-changes="previewChangesAvailable"
                     :explain-mode="explainMode"
                     :block-dangerous-redis-commands="blockDangerousRedisCommands"
                     :sql-keyword-case="settingsStore.editorSettings.sqlFormatter.keywordCase"
@@ -3122,6 +3128,7 @@ onUnmounted(() => {
                     @dismiss-txn-rolled-back="activeTab && (activeTab.txnAutoRolledBack = false)"
                     @execute-pointer-down="captureActiveEditorExecutionSnapshot()"
                     @execute="requestActiveEditorExecute($event)"
+                    @preview-changes="requestActiveEditorPreviewChanges()"
                     @multi-execute="requestMultiDbExecute()"
                     @cancel="cancelActiveExecution()"
                     @explain="tryExplain()"
@@ -3162,6 +3169,7 @@ onUnmounted(() => {
                       @editor-update="(tabId: string, v: string) => queryStore.updateSql(tabId, v)"
                       @editor-selection-change="(v: string) => (selectedSql = v)"
                       @editor-cursor-change="(p: number) => (cursorPos = p)"
+                      @preview-changes-available="(v: boolean) => (previewChangesAvailable = v)"
                       @editor-viewport-change="(tabId: string, viewport: { scrollTop: number; scrollLeft: number }) => queryStore.updateEditorViewport(tabId, viewport)"
                       @editor-selection-state-change="(tabId: string, selection: { anchor: number; head: number }) => queryStore.updateEditorSelection(tabId, selection)"
                       @format-error="toast(t('toolbar.formatSqlFailed'))"

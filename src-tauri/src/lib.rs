@@ -1948,6 +1948,7 @@ pub fn run() {
             commands::query::extract_data_grid_selection,
             commands::query::build_data_grid_copy_update_statements,
             commands::query::build_data_grid_copy_insert_statement,
+            commands::query::build_dml_change_preview_sql,
             commands::query::build_data_grid_context_filter_condition,
             commands::query::build_data_grid_column_value_filter_condition,
             commands::query::build_data_grid_column_values_filter_condition,

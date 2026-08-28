@@ -324,6 +324,12 @@ pub struct BuildDataGridCopyInsertStatementRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct BuildDmlChangePreviewSqlRequest {
+    pub options: dbx_core::dml_preview_sql::DmlChangePreviewSqlOptions,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BuildDataGridContextFilterConditionRequest {
     pub options: dbx_core::data_grid_sql::DataGridContextFilterConditionOptions,
 }
@@ -1066,6 +1072,14 @@ pub async fn build_data_grid_copy_insert_statement(
     Json(req): Json<BuildDataGridCopyInsertStatementRequest>,
 ) -> Json<Option<String>> {
     Json(dbx_core::data_grid_sql::build_data_grid_copy_insert_statement(req.options))
+}
+
+pub async fn build_dml_change_preview_sql(
+    Json(req): Json<BuildDmlChangePreviewSqlRequest>,
+) -> Result<Json<dbx_core::dml_preview_sql::DmlChangePreviewSqlResult>, (axum::http::StatusCode, Json<String>)> {
+    dbx_core::dml_preview_sql::build_dml_change_preview_sql(req.options)
+        .map(Json)
+        .map_err(|message| (axum::http::StatusCode::BAD_REQUEST, Json(message)))
 }
 
 pub async fn build_data_grid_context_filter_condition(

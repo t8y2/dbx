@@ -1340,6 +1340,10 @@ export default {
         JSON_ARRAY: "Creates a JSON array",
       },
     },
+    previewChanges: "Preview changes",
+    previewChangesComment: "Change preview (dry run) for {operation} statement",
+    previewChangesFailed: "Change preview failed.",
+    previewChangesNoStatement: "Select or place the cursor on an UPDATE / INSERT / DELETE statement to preview its changes.",
     contextMenu: {
       executeSelection: "Execute selection",
       executeCurrent: "Execute SQL",

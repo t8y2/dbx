@@ -830,6 +830,13 @@ pub fn build_data_grid_copy_insert_statement(
 }
 
 #[tauri::command]
+pub fn build_dml_change_preview_sql(
+    options: dbx_core::dml_preview_sql::DmlChangePreviewSqlOptions,
+) -> Result<dbx_core::dml_preview_sql::DmlChangePreviewSqlResult, String> {
+    dbx_core::dml_preview_sql::build_dml_change_preview_sql(options)
+}
+
+#[tauri::command]
 pub fn build_data_grid_context_filter_condition(
     options: dbx_core::data_grid_sql::DataGridContextFilterConditionOptions,
 ) -> Result<Option<String>, String> {

@@ -242,7 +242,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  replaceSql: [sql: string];
+  appendSql: [sql: string];
   executeSql: [sql: string];
   tempRunSql: [sql: string];
   requestAutoExecuteSql: [sql: string];
@@ -1197,7 +1197,7 @@ function sendProposalReply(positive: boolean) {
   const isWriteConfirmation = isActionableWriteProposalMessage(target);
   if (positive && productionContext.value.active && (target.kind === "writeSqlConfirmation" || looksLikeWriteSqlProposal(target.content))) {
     const sql = extractFirstSqlCodeBlock(target.content);
-    if (sql) emit("replaceSql", sql);
+    if (sql) emit("appendSql", sql);
     toast(t("production.aiReviewRequired"), 5000);
     return;
   }
@@ -3477,7 +3477,7 @@ function applySql(code: string) {
     emit("insertRedisCommand", code);
     return;
   }
-  emit("replaceSql", code);
+  emit("appendSql", code);
 }
 
 function executeSql(code: string) {

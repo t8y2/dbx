@@ -101,7 +101,7 @@ import { createTabSwitcherKeyboardController } from "@/lib/tabs/tabSwitcherKeybo
 import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
 import { supportsSqlFileExecution } from "@/lib/database/databaseCapabilities";
 import { classifyAiSqlExecution } from "@/lib/ai/aiSqlExecutionPolicy";
-import { buildAppendedEditorSql } from "@/lib/ai/aiSqlAppend";
+import { buildAppendedEditorSql, buildDeduplicatedAppendedEditorSql } from "@/lib/ai/aiSqlAppend";
 import { assessProductionSql } from "@/lib/database/productionSafety";
 import { normalizeSqlExecutionTarget, sqlExecutionTargetCapabilities } from "@/lib/database/sqlExecutionTargetCapabilities";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
@@ -2227,10 +2227,12 @@ function routeAiRedisCommand(command: string, execute: boolean): boolean {
   return true;
 }
 
-function onAiReplaceSql(sql: string) {
+function onAiAppendSql(sql: string) {
   if (routeAiRedisCommand(sql, false)) return;
   const tabId = ensureQueryTab();
-  queryStore.updateSql(tabId, sql);
+  const currentSql = queryStore.tabs.find((tab) => tab.id === tabId)?.sql ?? "";
+  const appendedSql = buildDeduplicatedAppendedEditorSql(currentSql, sql);
+  if (appendedSql !== currentSql) queryStore.updateSql(tabId, appendedSql);
 }
 
 function runAiGeneratedSql(sql: string) {
@@ -2241,7 +2243,9 @@ function runAiGeneratedSql(sql: string) {
 function onAiExecuteSql(sql: string) {
   if (routeAiRedisCommand(sql, true)) return;
   const tabId = ensureQueryTab();
-  queryStore.updateSql(tabId, buildAppendedEditorSql(activeTab.value?.sql || "", sql));
+  const currentSql = queryStore.tabs.find((tab) => tab.id === tabId)?.sql ?? "";
+  const appendedSql = buildDeduplicatedAppendedEditorSql(currentSql, sql);
+  if (appendedSql !== currentSql) queryStore.updateSql(tabId, appendedSql);
   runAiGeneratedSql(sql);
 }
 
@@ -3201,7 +3205,7 @@ onUnmounted(() => {
                 :tab="activeTab"
                 :connection="activeConnection"
                 :maximized="isAiPanelMaximized"
-                @replace-sql="onAiReplaceSql"
+                @append-sql="onAiAppendSql"
                 @execute-sql="onAiExecuteSql"
                 @temp-run-sql="onAiTempRunSql"
                 @request-auto-execute-sql="onAiRequestAutoExecuteSql"

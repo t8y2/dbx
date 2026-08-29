@@ -42,6 +42,7 @@ export interface DataComparePreparationOptions {
   schema?: string;
   columns: string[];
   keyColumns: string[];
+  ignoredColumns?: string[];
   columnInfo?: ColumnInfo[];
   sourceRows: DataCompareCellValue[][];
   targetRows: DataCompareCellValue[][];
@@ -65,6 +66,7 @@ export interface DataCompareFromTablesOptions {
   targetTable: string;
   columns: string[];
   keyColumns: string[];
+  ignoredColumns?: string[];
   fetchBatchSize?: number;
   degradationThreshold?: DegradationThreshold;
   samplingStrategy?: SamplingStrategy;

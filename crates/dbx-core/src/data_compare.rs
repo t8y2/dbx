@@ -25,6 +25,8 @@ pub struct CompareDataRowsOptions {
     pub columns: Vec<String>,
     pub key_columns: Vec<String>,
     #[serde(default)]
+    pub ignored_columns: Vec<String>,
+    #[serde(default)]
     pub source_rows: Vec<Vec<Value>>,
     #[serde(default)]
     pub target_rows: Vec<Vec<Value>>,
@@ -38,6 +40,8 @@ pub struct DataComparePreparationOptions {
     pub schema: Option<String>,
     pub columns: Vec<String>,
     pub key_columns: Vec<String>,
+    #[serde(default)]
+    pub ignored_columns: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub column_info: Vec<DataGridColumnInfo>,
     #[serde(default)]
@@ -61,6 +65,8 @@ pub struct DataCompareFromTablesOptions {
     pub target_table: String,
     pub columns: Vec<String>,
     pub key_columns: Vec<String>,
+    #[serde(default)]
+    pub ignored_columns: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fetch_batch_size: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -262,6 +268,8 @@ pub struct VerifyDataOptions {
     pub target_table: String,
     pub columns: Vec<String>,
     pub key_columns: Vec<String>,
+    #[serde(default)]
+    pub ignored_columns: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fetch_batch_size: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -291,6 +299,7 @@ pub fn prepare_data_compare(options: DataComparePreparationOptions) -> Result<Da
         schema,
         columns,
         key_columns,
+        ignored_columns,
         column_info,
         source_rows,
         target_rows,
@@ -299,6 +308,7 @@ pub fn prepare_data_compare(options: DataComparePreparationOptions) -> Result<Da
     let result = compare_data_rows(CompareDataRowsOptions {
         columns: columns.clone(),
         key_columns: key_columns.clone(),
+        ignored_columns: ignored_columns.clone(),
         source_rows,
         target_rows,
     })?;
@@ -428,13 +438,16 @@ pub async fn prepare_data_compare_from_tables(
     )
     .await?;
 
+    let compare_column_indexes =
+        effective_compare_column_indexes(&options.columns, &options.key_columns, &options.ignored_columns);
+
     let source_checksums = if enable_checksum && !source_rows.is_empty() {
-        Some(compute_column_checksums(&options.columns, &source_rows))
+        Some(compute_column_checksums(&options.columns, &compare_column_indexes, &source_rows))
     } else {
         None
     };
     let target_checksums = if enable_checksum && !target_rows.is_empty() {
-        Some(compute_column_checksums(&options.columns, &target_rows))
+        Some(compute_column_checksums(&options.columns, &compare_column_indexes, &target_rows))
     } else {
         None
     };
@@ -448,6 +461,7 @@ pub async fn prepare_data_compare_from_tables(
         schema: Some(options.target_schema),
         columns: options.columns,
         key_columns: options.key_columns,
+        ignored_columns: options.ignored_columns,
         column_info: target_columns.into_iter().map(data_grid_column_info).collect(),
         source_rows,
         target_rows,
@@ -652,7 +666,8 @@ pub fn compare_data_rows(options: CompareDataRowsOptions) -> Result<DataCompareR
         collect_compare_rows(&options.columns, &options.key_columns, &column_indexes, options.source_rows, "source")?;
     let (target, target_order) =
         collect_compare_rows(&options.columns, &options.key_columns, &column_indexes, options.target_rows, "target")?;
-    let key_columns: HashSet<&str> = options.key_columns.iter().map(String::as_str).collect();
+    let compare_indexes =
+        effective_compare_column_indexes(&options.columns, &options.key_columns, &options.ignored_columns);
 
     let mut added = Vec::new();
     let mut modified = Vec::new();
@@ -668,12 +683,11 @@ pub fn compare_data_rows(options: CompareDataRowsOptions) -> Result<DataCompareR
             continue;
         };
 
-        let changes = options
-            .columns
+        let changes = compare_indexes
             .iter()
-            .filter(|column| !key_columns.contains(column.as_str()))
-            .filter_map(|column| {
-                let index = column_indexes.get(column.as_str()).copied()?;
+            .copied()
+            .filter_map(|index| {
+                let column = &options.columns[index];
                 let source_value = row_value(source_values, index);
                 let target_value = row_value(target_values, index);
                 (source_value != target_value).then(|| DataCompareChangedCell {
@@ -720,6 +734,25 @@ fn column_index_map(columns: &[String]) -> HashMap<&str, usize> {
         indexes.insert(column.as_str(), index);
     }
     indexes
+}
+
+/// Indexes into `columns` of the columns that participate in value diff and
+/// checksum verification: every column except key columns and ignored columns.
+/// Key columns win over ignored columns, and names that are not present in
+/// `columns` are silently skipped (no-op).
+fn effective_compare_column_indexes(
+    columns: &[String],
+    key_columns: &[String],
+    ignored_columns: &[String],
+) -> Vec<usize> {
+    let key_set: HashSet<&str> = key_columns.iter().map(String::as_str).collect();
+    let ignored_set: HashSet<&str> = ignored_columns.iter().map(String::as_str).collect();
+    columns
+        .iter()
+        .enumerate()
+        .filter(|(_, column)| !key_set.contains(column.as_str()) && !ignored_set.contains(column.as_str()))
+        .map(|(index, _)| index)
+        .collect()
 }
 
 fn collect_compare_rows(
@@ -1582,18 +1615,23 @@ async fn fetch_sampled_compare_rows(
     Ok(result.rows)
 }
 
-fn compute_column_checksums(columns: &[String], rows: &[Vec<Value>]) -> HashMap<String, String> {
-    let mut column_hashers: HashMap<String, Sha256> = columns.iter().map(|col| (col.clone(), Sha256::new())).collect();
-
-    let column_indexes = column_index_map(columns);
+/// Computes per-column checksums over `rows` for the columns identified by
+/// `compare_indexes` (indexes into `columns`). Indexes must refer to the
+/// original `columns` order so full row vectors are read at the right offset.
+fn compute_column_checksums(
+    columns: &[String],
+    compare_indexes: &[usize],
+    rows: &[Vec<Value>],
+) -> HashMap<String, String> {
+    let mut column_hashers: HashMap<String, Sha256> =
+        compare_indexes.iter().map(|&index| (columns[index].clone(), Sha256::new())).collect();
 
     for row in rows {
-        for (column_name, index) in &column_indexes {
-            if let Some(hasher) = column_hashers.get_mut(*column_name) {
-                let value_str = json_stringify(row_value(row, *index));
-                hasher.update(value_str.as_bytes());
-                hasher.update(b"\n");
-            }
+        for &index in compare_indexes {
+            let hasher = column_hashers.get_mut(&columns[index]).expect("compare index should have a hasher");
+            let value_str = json_stringify(row_value(row, index));
+            hasher.update(value_str.as_bytes());
+            hasher.update(b"\n");
         }
     }
 
@@ -1648,6 +1686,7 @@ pub async fn verify_data(state: &AppState, options: VerifyDataOptions) -> Result
         target_table: options.target_table,
         columns: options.columns,
         key_columns: options.key_columns,
+        ignored_columns: options.ignored_columns,
         fetch_batch_size: options.fetch_batch_size,
         degradation_threshold: Some(degradation_threshold),
         sampling_strategy: Some(sampling_strategy),
@@ -1708,6 +1747,7 @@ mod tests {
         let diff = compare_data_rows(CompareDataRowsOptions {
             columns: vec!["id".to_string(), "name".to_string(), "active".to_string()],
             key_columns: vec!["id".to_string()],
+            ignored_columns: Vec::new(),
             source_rows: vec![
                 vec![json!(1), json!("Ada"), json!(true)],
                 vec![json!(2), json!("Bob"), json!(false)],
@@ -1741,6 +1781,7 @@ mod tests {
             schema: Some("public".to_string()),
             columns: vec!["id".to_string(), "name".to_string(), "active".to_string()],
             key_columns: vec!["id".to_string()],
+            ignored_columns: Vec::new(),
             column_info: Vec::new(),
             source_rows: vec![vec![json!(1), json!("Ada"), json!(true)], vec![json!(2), json!("Bob"), json!(false)]],
             target_rows: vec![
@@ -1770,6 +1811,7 @@ mod tests {
             schema: Some("public".to_string()),
             columns: vec!["id".to_string(), "quantity".to_string(), "total_price".to_string()],
             key_columns: vec!["id".to_string()],
+            ignored_columns: Vec::new(),
             column_info: vec![
                 data_compare_column_with_extra("id", "bigint", "generated always as identity"),
                 data_compare_column("quantity", "integer"),
@@ -1941,6 +1983,7 @@ mod tests {
             schema: Some("public".to_string()),
             columns: vec!["id".to_string(), "total_price".to_string()],
             key_columns: vec!["id".to_string()],
+            ignored_columns: Vec::new(),
             column_info: Vec::new(),
             source_rows: vec![vec![json!(1), json!(7.0)], vec![json!(2), json!(10.5)]],
             target_rows: vec![vec![json!(2), json!(9.0)]],
@@ -1959,6 +2002,7 @@ mod tests {
             schema: None,
             columns: vec!["id".to_string(), "enabled".to_string(), "flags".to_string()],
             key_columns: vec!["id".to_string()],
+            ignored_columns: Vec::new(),
             column_info: vec![
                 data_compare_column("id", "int"),
                 data_compare_column("enabled", "bit(1)"),
@@ -2286,10 +2330,397 @@ mod tests {
     }
 
     #[test]
+    fn ignored_column_difference_does_not_mark_rows_modified() {
+        let diff = compare_data_rows(CompareDataRowsOptions {
+            columns: vec!["id".to_string(), "name".to_string(), "status".to_string(), "updated_at".to_string()],
+            key_columns: vec!["id".to_string()],
+            ignored_columns: vec!["updated_at".to_string()],
+            source_rows: vec![vec![json!(1), json!("Ada"), json!("active"), json!("2024-01-01T00:00:00Z")]],
+            target_rows: vec![vec![json!(1), json!("Ada"), json!("active"), json!("2024-06-01T00:00:00Z")]],
+        })
+        .expect("data comparison should succeed");
+
+        assert!(diff.modified.is_empty(), "{:?}", diff.modified);
+        assert!(diff.added.is_empty());
+        assert!(diff.removed.is_empty());
+
+        // Every non-key column is ignored, so the row still compares as
+        // identical even though the raw values differ.
+        let diff = compare_data_rows(CompareDataRowsOptions {
+            columns: vec!["id".to_string(), "updated_at".to_string()],
+            key_columns: vec!["id".to_string()],
+            ignored_columns: vec!["updated_at".to_string()],
+            source_rows: vec![vec![json!(1), json!("2024-01-01T00:00:00Z")]],
+            target_rows: vec![vec![json!(1), json!("2024-06-01T00:00:00Z")]],
+        })
+        .expect("data comparison should succeed");
+
+        assert!(diff.modified.is_empty(), "{:?}", diff.modified);
+        assert!(diff.added.is_empty());
+        assert!(diff.removed.is_empty());
+
+        // The row-level "same" semantics carry through to the sync plan:
+        // rows that only differ in ignored columns must not produce an UPDATE.
+        let preparation = prepare_data_compare(DataComparePreparationOptions {
+            table_name: "users".to_string(),
+            schema: Some("public".to_string()),
+            columns: vec!["id".to_string(), "name".to_string(), "updated_at".to_string()],
+            key_columns: vec!["id".to_string()],
+            ignored_columns: vec!["updated_at".to_string()],
+            column_info: Vec::new(),
+            source_rows: vec![
+                vec![json!(1), json!("Ada"), json!("2024-01-01T00:00:00Z")],
+                vec![json!(2), json!("Bob"), json!("2024-01-02T00:00:00Z")],
+            ],
+            target_rows: vec![
+                vec![json!(1), json!("Ada"), json!("2024-06-01T00:00:00Z")],
+                vec![json!(2), json!("Bob"), json!("2024-06-02T00:00:00Z")],
+            ],
+            database_type: Some(DatabaseType::Postgres),
+        })
+        .expect("data compare preparation should succeed");
+
+        assert!(preparation.result.modified.is_empty(), "{:?}", preparation.result.modified);
+        assert!(preparation.result.added.is_empty());
+        assert!(preparation.result.removed.is_empty());
+        assert!(!preparation.sync_sql.contains("UPDATE"), "{}", preparation.sync_sql);
+        assert!(preparation.sync_statements.is_empty());
+    }
+
+    #[test]
+    fn business_and_ignored_differences_report_only_business_changes() {
+        let diff = compare_data_rows(CompareDataRowsOptions {
+            columns: vec!["id".to_string(), "name".to_string(), "updated_at".to_string()],
+            key_columns: vec!["id".to_string()],
+            ignored_columns: vec!["updated_at".to_string()],
+            source_rows: vec![vec![json!(1), json!("Ada"), json!("2024-01-01T00:00:00Z")]],
+            target_rows: vec![vec![json!(1), json!("Ada Lovelace"), json!("2024-06-01T00:00:00Z")]],
+        })
+        .expect("data comparison should succeed");
+
+        assert!(diff.added.is_empty());
+        assert!(diff.removed.is_empty());
+        assert_eq!(diff.modified.len(), 1, "{:?}", diff.modified);
+
+        let row = &diff.modified[0];
+        // Only the business column difference is reported as a change; the
+        // ignored column difference must not appear.
+        assert_eq!(row.changes.len(), 1, "{:?}", row.changes);
+        assert_eq!(row.changes[0].column, "name");
+        assert_eq!(row.changes[0].source, json!("Ada"));
+        assert_eq!(row.changes[0].target, json!("Ada Lovelace"));
+
+        // Raw row values keep the full-row semantics: ignored columns are
+        // still present in source/target values even though they are not
+        // reported as changes.
+        assert_eq!(row.source_values.get("updated_at"), Some(&json!("2024-01-01T00:00:00Z")));
+        assert_eq!(row.target_values.get("updated_at"), Some(&json!("2024-06-01T00:00:00Z")));
+
+        // The sync plan turns the mixed difference into an UPDATE that only
+        // assigns the business column.
+        let preparation = prepare_data_compare(DataComparePreparationOptions {
+            table_name: "users".to_string(),
+            schema: Some("public".to_string()),
+            columns: vec!["id".to_string(), "name".to_string(), "updated_at".to_string()],
+            key_columns: vec!["id".to_string()],
+            ignored_columns: vec!["updated_at".to_string()],
+            column_info: Vec::new(),
+            source_rows: vec![vec![json!(1), json!("Ada"), json!("2024-01-01T00:00:00Z")]],
+            target_rows: vec![vec![json!(1), json!("Ada Lovelace"), json!("2024-06-01T00:00:00Z")]],
+            database_type: Some(DatabaseType::Postgres),
+        })
+        .expect("data compare preparation should succeed");
+
+        assert_eq!(preparation.result.modified.len(), 1, "{:?}", preparation.result.modified);
+        assert_eq!(
+            preparation.result.modified[0].changes.iter().map(|cell| cell.column.as_str()).collect::<Vec<_>>(),
+            vec!["name"]
+        );
+        assert!(
+            preparation.sync_sql.contains("UPDATE \"public\".\"users\" SET \"name\" ="),
+            "{}",
+            preparation.sync_sql
+        );
+        assert!(!preparation.sync_sql.contains("\"updated_at\" ="), "{}", preparation.sync_sql);
+        assert_eq!(
+            preparation.sync_statements,
+            vec!["UPDATE \"public\".\"users\" SET \"name\" = 'Ada' WHERE \"id\" = 1;"]
+        );
+    }
+
+    #[test]
+    fn key_column_listed_as_ignored_still_matches_rows() {
+        // "id" is both the key column and listed as ignored: it must still be
+        // used for row matching, must not be reported as a change, and must
+        // not lose its duplicate-detection semantics.
+        let diff = compare_data_rows(CompareDataRowsOptions {
+            columns: vec!["id".to_string(), "name".to_string(), "updated_at".to_string()],
+            key_columns: vec!["id".to_string()],
+            ignored_columns: vec!["id".to_string(), "updated_at".to_string()],
+            source_rows: vec![
+                vec![json!(1), json!("Ada"), json!("2024-01-01T00:00:00Z")],
+                vec![json!(2), json!("Bob"), json!("2024-01-02T00:00:00Z")],
+            ],
+            target_rows: vec![
+                vec![json!(1), json!("Ada"), json!("2024-06-01T00:00:00Z")],
+                vec![json!(3), json!("Cara"), json!("2024-06-03T00:00:00Z")],
+            ],
+        })
+        .expect("data comparison should succeed");
+
+        // id=1 matches on both sides via the key column even though "id" is
+        // also ignored, so it is neither added nor removed; the only differing
+        // column (updated_at) is ignored, so nothing is modified.
+        assert!(diff.modified.is_empty(), "{:?}", diff.modified);
+        assert_eq!(
+            diff.added.iter().map(|row| row.key_values.get("id").cloned()).collect::<Vec<_>>(),
+            vec![Some(json!(2))]
+        );
+        assert_eq!(
+            diff.removed.iter().map(|row| row.key_values.get("id").cloned()).collect::<Vec<_>>(),
+            vec![Some(json!(3))]
+        );
+
+        // With a business difference on id=1, the row aligns by key and the
+        // change list contains only "name": the key column wins over the
+        // ignore list for matching and never duplicates as a compared column.
+        let diff = compare_data_rows(CompareDataRowsOptions {
+            columns: vec!["id".to_string(), "name".to_string(), "updated_at".to_string()],
+            key_columns: vec!["id".to_string()],
+            ignored_columns: vec!["id".to_string(), "updated_at".to_string()],
+            source_rows: vec![vec![json!(1), json!("Ada"), json!("2024-01-01T00:00:00Z")]],
+            target_rows: vec![vec![json!(1), json!("Ada Lovelace"), json!("2024-06-01T00:00:00Z")]],
+        })
+        .expect("data comparison should succeed");
+
+        assert!(diff.added.is_empty());
+        assert!(diff.removed.is_empty());
+        assert_eq!(diff.modified.len(), 1, "{:?}", diff.modified);
+        assert_eq!(diff.modified[0].changes.iter().map(|cell| cell.column.as_str()).collect::<Vec<_>>(), vec!["name"]);
+
+        // Duplicate key detection is not weakened by the ignore
+        // configuration: duplicated source keys still fail.
+        let err = compare_data_rows(CompareDataRowsOptions {
+            columns: vec!["id".to_string(), "name".to_string(), "updated_at".to_string()],
+            key_columns: vec!["id".to_string()],
+            ignored_columns: vec!["id".to_string(), "updated_at".to_string()],
+            source_rows: vec![
+                vec![json!(1), json!("Ada"), json!("2024-01-01T00:00:00Z")],
+                vec![json!(1), json!("Ada Clone"), json!("2024-01-02T00:00:00Z")],
+            ],
+            target_rows: vec![vec![json!(1), json!("Ada"), json!("2024-06-01T00:00:00Z")]],
+        })
+        .expect_err("duplicate source keys should still fail when the key column is ignored");
+
+        assert!(err.contains("Duplicate source key"), "{err}");
+    }
+
+    #[test]
+    fn insert_sync_keeps_ignored_column_values_for_added_rows() {
+        // A source-only row must keep the value of ignored columns: even
+        // though "created_at" is ignored for value comparison, it is a
+        // writable NOT NULL column without a default on the target, so the
+        // INSERT for the added row has to contain created_at and its source
+        // value for the row to satisfy the target constraint.
+        let preparation = prepare_data_compare(DataComparePreparationOptions {
+            table_name: "users".to_string(),
+            schema: Some("public".to_string()),
+            columns: vec!["id".to_string(), "name".to_string(), "created_at".to_string()],
+            key_columns: vec!["id".to_string()],
+            ignored_columns: vec!["created_at".to_string()],
+            column_info: vec![
+                data_compare_column("id", "bigint"),
+                data_compare_column("name", "varchar"),
+                DataGridColumnInfo { is_nullable: false, ..data_compare_column("created_at", "timestamp") },
+            ],
+            source_rows: vec![
+                vec![json!(1), json!("Ada"), json!("2024-01-01 00:00:00")],
+                vec![json!(2), json!("Bob"), json!("2024-01-02 09:30:00")],
+            ],
+            target_rows: vec![vec![json!(1), json!("Ada Lovelace"), json!("2024-01-01 00:00:00")]],
+            database_type: Some(DatabaseType::Postgres),
+        })
+        .expect("data compare preparation should succeed");
+
+        // The source-only id=2 row is added, and its raw values keep the
+        // ignored created_at column with the source value (full-row
+        // semantics).
+        assert_eq!(preparation.result.added.len(), 1, "{:?}", preparation.result.added);
+        let added = &preparation.result.added[0];
+        assert_eq!(added.key_values.get("id"), Some(&json!(2)));
+        assert_eq!(added.values.get("created_at"), Some(&json!("2024-01-02 09:30:00")));
+
+        // The INSERT keeps the ignored-but-writable NOT NULL column and its
+        // source literal.
+        assert_eq!(
+            preparation.sync_statements,
+            vec![
+                "INSERT INTO \"public\".\"users\" (\"id\", \"name\", \"created_at\") VALUES (2, 'Bob', '2024-01-02 09:30:00');".to_string(),
+                "UPDATE \"public\".\"users\" SET \"name\" = 'Ada' WHERE \"id\" = 1;".to_string(),
+            ]
+        );
+        assert!(preparation.sync_sql.contains("\"created_at\""), "{}", preparation.sync_sql);
+        assert!(preparation.sync_sql.contains("'2024-01-02 09:30:00'"), "{}", preparation.sync_sql);
+
+        // The sync direction is source -> target: the modified id=1 row only
+        // gets the business column assigned, never the ignored created_at
+        // (the INSERT column list above already contains "created_at", so
+        // match the UPDATE assignment form specifically).
+        assert!(!preparation.sync_sql.contains("\"created_at\" ="), "{}", preparation.sync_sql);
+    }
+
+    #[test]
+    fn unknown_or_empty_ignored_columns_preserve_existing_behavior() {
+        // Classic diff set on columns [id, name, active]: id=4 exists only in
+        // the source (added), id=3 only in the target (removed), and id=2
+        // differs in the business column "name" (modified).
+        let columns = vec!["id".to_string(), "name".to_string(), "active".to_string()];
+        let source_rows = vec![
+            vec![json!(1), json!("Ada"), json!(true)],
+            vec![json!(2), json!("Bob"), json!(false)],
+            vec![json!(4), json!("Dora"), json!(true)],
+        ];
+        let target_rows = vec![
+            vec![json!(1), json!("Ada"), json!(true)],
+            vec![json!(2), json!("Bobby"), json!(false)],
+            vec![json!(3), json!("Cara"), json!(true)],
+        ];
+
+        let compare = |ignored_columns: Vec<String>| {
+            compare_data_rows(CompareDataRowsOptions {
+                columns: columns.clone(),
+                key_columns: vec!["id".to_string()],
+                ignored_columns,
+                source_rows: source_rows.clone(),
+                target_rows: target_rows.clone(),
+            })
+            .expect("data comparison should succeed")
+        };
+
+        // DataCompareResult does not implement PartialEq and HashMap
+        // serialization order is not stable, so structural equality is
+        // asserted field by field; HashMap<String, Value> equality itself is
+        // order-independent.
+        let assert_rows_equal = |left: &[DataCompareRow], right: &[DataCompareRow]| {
+            assert_eq!(left.len(), right.len(), "row count differs");
+            for (l, r) in left.iter().zip(right.iter()) {
+                assert_eq!(l.key, r.key);
+                assert_eq!(l.key_values, r.key_values);
+                assert_eq!(l.values, r.values);
+            }
+        };
+        let assert_same_diff = |left: &DataCompareResult, right: &DataCompareResult| {
+            assert_rows_equal(&left.added, &right.added);
+            assert_rows_equal(&left.removed, &right.removed);
+            assert_eq!(left.modified.len(), right.modified.len(), "modified count differs");
+            for (l, r) in left.modified.iter().zip(right.modified.iter()) {
+                assert_eq!(l.key, r.key);
+                assert_eq!(l.key_values, r.key_values);
+                assert_eq!(l.source_values, r.source_values);
+                assert_eq!(l.target_values, r.target_values);
+                assert_eq!(l.changes.len(), r.changes.len(), "change count differs");
+                for (lc, rc) in l.changes.iter().zip(r.changes.iter()) {
+                    assert_eq!(lc.column, rc.column);
+                    assert_eq!(lc.source, rc.source);
+                    assert_eq!(lc.target, rc.target);
+                }
+            }
+        };
+
+        let baseline = compare(Vec::new());
+        // Sanity-check the baseline itself: 1 added + 1 modified (name only)
+        // + 1 removed.
+        assert_eq!(
+            baseline.added.iter().map(|row| row.key_values.get("id").cloned()).collect::<Vec<_>>(),
+            vec![Some(json!(4))]
+        );
+        assert_eq!(
+            baseline.removed.iter().map(|row| row.key_values.get("id").cloned()).collect::<Vec<_>>(),
+            vec![Some(json!(3))]
+        );
+        assert_eq!(baseline.modified.len(), 1, "{:?}", baseline.modified);
+        assert_eq!(baseline.modified[0].key_values.get("id"), Some(&json!(2)));
+        assert_eq!(baseline.modified[0].changes.len(), 1, "{:?}", baseline.modified[0].changes);
+        assert_eq!(baseline.modified[0].changes[0].column, "name");
+        assert_eq!(baseline.modified[0].changes[0].source, json!("Bob"));
+        assert_eq!(baseline.modified[0].changes[0].target, json!("Bobby"));
+
+        // Unknown ignored column names (not present in `columns`) must be a
+        // no-op: the diff is identical to the empty-ignored baseline.
+        let with_unknown = compare(vec!["nonexistent".to_string(), "also_missing".to_string()]);
+        assert_same_diff(&baseline, &with_unknown);
+
+        // An empty ignored list (the serde default for legacy requests) keeps
+        // the pre-change behavior.
+        let with_empty = compare(Vec::new());
+        assert_same_diff(&baseline, &with_empty);
+
+        // serde backward compatibility: a legacy payload without the
+        // "ignoredColumns" field deserializes with an empty ignored list.
+        let legacy = serde_json::from_str::<CompareDataRowsOptions>(
+            r#"{
+                "columns": ["id", "name", "active"],
+                "keyColumns": ["id"],
+                "sourceRows": [[1, "Ada", true]],
+                "targetRows": [[1, "Ada", true]]
+            }"#,
+        )
+        .expect("payload without ignoredColumns should deserialize");
+        assert!(legacy.ignored_columns.is_empty(), "{:?}", legacy.ignored_columns);
+
+        // The camelCase "ignoredColumns" field maps onto ignored_columns when
+        // it is present.
+        let explicit = serde_json::from_str::<CompareDataRowsOptions>(
+            r#"{
+                "columns": ["id", "name", "active"],
+                "keyColumns": ["id"],
+                "ignoredColumns": ["updated_at"],
+                "sourceRows": [],
+                "targetRows": []
+            }"#,
+        )
+        .expect("payload with ignoredColumns should deserialize");
+        assert_eq!(explicit.ignored_columns, vec!["updated_at".to_string()]);
+    }
+
+    #[test]
+    fn from_tables_options_legacy_payloads_keep_ignored_columns_compatible() {
+        // serde backward compatibility for the Tauri/HTTP entry type: a
+        // legacy payload without the "ignoredColumns" field deserializes with
+        // an empty ignored list, and the camelCase field still maps through
+        // when it is present.
+        let base = r#"{
+            "sourceConnectionId": "conn-a",
+            "sourceDatabase": "db-a",
+            "sourceSchema": "public",
+            "sourceTable": "users",
+            "targetConnectionId": "conn-b",
+            "targetDatabase": "db-b",
+            "targetSchema": "public",
+            "targetTable": "users",
+            "columns": ["id", "name"],
+            "keyColumns": ["id"]
+        }"#;
+
+        let legacy = serde_json::from_str::<DataCompareFromTablesOptions>(base)
+            .expect("payload without ignoredColumns should deserialize");
+        assert!(legacy.ignored_columns.is_empty(), "{:?}", legacy.ignored_columns);
+
+        let explicit_json = base.replace(
+            r#""keyColumns": ["id"]"#,
+            r#""keyColumns": ["id"], "ignoredColumns": ["created_at", "updated_at"]"#,
+        );
+        let explicit = serde_json::from_str::<DataCompareFromTablesOptions>(&explicit_json)
+            .expect("payload with ignoredColumns should deserialize");
+        assert_eq!(explicit.ignored_columns, vec!["created_at".to_string(), "updated_at".to_string()]);
+    }
+
+    #[test]
     fn requires_at_least_one_key_column() {
         let err = compare_data_rows(CompareDataRowsOptions {
             columns: vec!["id".to_string()],
             key_columns: Vec::new(),
+            ignored_columns: Vec::new(),
             source_rows: vec![vec![json!(1)]],
             target_rows: vec![vec![json!(1)]],
         })
@@ -2303,6 +2734,7 @@ mod tests {
         let err = compare_data_rows(CompareDataRowsOptions {
             columns: vec!["id".to_string(), "name".to_string()],
             key_columns: vec!["id".to_string()],
+            ignored_columns: Vec::new(),
             source_rows: vec![vec![json!(1), json!("Ada")], vec![json!(1), json!("Ada Clone")]],
             target_rows: vec![vec![json!(1), json!("Ada")]],
         })
@@ -2316,6 +2748,7 @@ mod tests {
         let err = compare_data_rows(CompareDataRowsOptions {
             columns: vec!["id".to_string(), "name".to_string()],
             key_columns: vec!["id".to_string()],
+            ignored_columns: Vec::new(),
             source_rows: vec![vec![json!(1), json!("Ada")]],
             target_rows: vec![vec![json!(1), json!("Ada")], vec![json!(1), json!("Ada Clone")]],
         })
@@ -2329,6 +2762,7 @@ mod tests {
         let err = compare_data_rows(CompareDataRowsOptions {
             columns: vec!["tenant_id".to_string(), "user_id".to_string(), "name".to_string()],
             key_columns: vec!["tenant_id".to_string(), "user_id".to_string()],
+            ignored_columns: Vec::new(),
             source_rows: vec![
                 vec![json!("A"), json!(1001), json!("Ada")],
                 vec![json!("A"), json!(1001), json!("Ada Clone")],
@@ -2530,5 +2964,116 @@ mod tests {
         let snapshot = metrics.snapshot();
         let up = snapshot.iter().find(|e| e.name == "dbx_auto_upgrade_total").unwrap();
         assert_eq!(up.value, crate::risk_metrics::MetricValue::Counter(1));
+    }
+
+    #[test]
+    fn effective_compare_column_indexes_excludes_key_and_ignored_columns() {
+        let columns = vec!["id".to_string(), "name".to_string(), "updated_at".to_string(), "status".to_string()];
+        let key_columns = vec!["id".to_string()];
+
+        // Ignores only the ignored column, keeping original indexes.
+        assert_eq!(effective_compare_column_indexes(&columns, &key_columns, &["updated_at".to_string()]), vec![1, 3]);
+        // Unknown ignored names are a no-op.
+        assert_eq!(effective_compare_column_indexes(&columns, &key_columns, &["missing".to_string()]), vec![1, 2, 3]);
+        // Key columns win when a column is both key and ignored.
+        assert_eq!(
+            effective_compare_column_indexes(&columns, &key_columns, &["id".to_string(), "status".to_string()]),
+            vec![1, 2]
+        );
+    }
+
+    #[test]
+    fn compute_column_checksums_hashes_values_at_original_row_indexes() {
+        let columns = vec!["id".to_string(), "updated_at".to_string(), "name".to_string()];
+        // The excluded column (`updated_at`) sits in the middle, so a misaligned
+        // implementation would read `name` values from index 0 (the `id` column).
+        let rows = vec![vec![json!(1), json!("x"), json!("a")], vec![json!(2), json!("y"), json!("b")]];
+
+        // Only the selected compare column gets a checksum.
+        let name_checksums = compute_column_checksums(&columns, &[2], &rows);
+        assert_eq!(name_checksums.len(), 1);
+        let name_hash = name_checksums.get("name").cloned().expect("name checksum should exist");
+
+        // The `name` hash must be derived from the values at original index 2:
+        // it matches a checksum over an isolated column with the same value
+        // sequence ["a", "b"], not the id sequence [1, 2] a misaligned read
+        // would produce.
+        let isolated_name =
+            compute_column_checksums(&["name".to_string()], &[0], &[vec![json!("a")], vec![json!("b")]]);
+        assert_eq!(name_hash, isolated_name["name"]);
+
+        // Different column value sequences must produce different hashes.
+        let id_checksums = compute_column_checksums(&columns, &[0], &rows);
+        let id_hash = id_checksums.get("id").cloned().expect("id checksum should exist");
+        assert_ne!(id_hash, name_hash);
+
+        // An empty compare selection produces no checksums.
+        assert!(compute_column_checksums(&columns, &[], &rows).is_empty());
+    }
+
+    #[test]
+    fn column_checksums_ignore_key_and_ignored_columns_and_read_original_indexes() {
+        let columns = vec!["id".to_string(), "name".to_string(), "updated_at".to_string(), "status".to_string()];
+        let key_columns = vec!["id".to_string()];
+        let ignored_columns = vec!["updated_at".to_string()];
+
+        // Full 4-value row vectors, mirroring what `prepare_data_compare_from_tables`
+        // feeds `compute_column_checksums`.
+        let source_rows = vec![
+            vec![json!(1), json!("alice"), json!("2026-01-01T00:00:00Z"), json!("active")],
+            vec![json!(2), json!("bob"), json!("2026-01-02T00:00:00Z"), json!("inactive")],
+        ];
+        // Same id rows: name/status identical, only the ignored middle column differs.
+        let target_rows = vec![
+            vec![json!(1), json!("alice"), json!("2030-06-15T12:00:00Z"), json!("active")],
+            vec![json!(2), json!("bob"), json!("2031-07-20T08:30:00Z"), json!("inactive")],
+        ];
+
+        // The real call path: the helper yields indexes into the original
+        // column order, which feed straight into the checksum computation.
+        let compare_indexes = effective_compare_column_indexes(&columns, &key_columns, &ignored_columns);
+        assert_eq!(compare_indexes, vec![1, 3]);
+
+        let source_checksums = compute_column_checksums(&columns, &compare_indexes, &source_rows);
+        let target_checksums = compute_column_checksums(&columns, &compare_indexes, &target_rows);
+
+        // `checksums_match == Some(true)` semantics: identical compare-column
+        // values produce equal checksum maps despite differing ignored values.
+        assert_eq!(source_checksums, target_checksums);
+
+        // Exactly the compare columns are checksummed: no `id`, no `updated_at`.
+        let mut keys: Vec<&str> = source_checksums.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["name", "status"]);
+
+        // Misalignment regression: differing `name` values must break equality...
+        let diverged_rows = vec![
+            vec![json!(1), json!("alice!"), json!("2030-06-15T12:00:00Z"), json!("active")],
+            vec![json!(2), json!("bob"), json!("2031-07-20T08:30:00Z"), json!("inactive")],
+        ];
+        let diverged_checksums = compute_column_checksums(&columns, &compare_indexes, &diverged_rows);
+        assert_ne!(source_checksums, diverged_checksums);
+        // ...only through the `name` hash, with `status` unchanged.
+        assert_ne!(source_checksums["name"], diverged_checksums["name"]);
+        assert_eq!(source_checksums["status"], diverged_checksums["status"]);
+
+        // The `name` hash is derived from original index 1, not the filtered
+        // index 0: it matches a checksum over the isolated `name` column. If a
+        // future change renumbered the filtered columns, index 0 would read the
+        // `id` values instead and this assertion would fail.
+        let isolated_name =
+            compute_column_checksums(&["name".to_string()], &[0], &[vec![json!("alice")], vec![json!("bob")]]);
+        assert_eq!(source_checksums["name"], isolated_name["name"]);
+
+        // Promoting `status` to a key column leaves only `name` to compare,
+        // and the two row sets still agree.
+        let key_columns_with_status = vec!["id".to_string(), "status".to_string()];
+        let status_key_indexes = effective_compare_column_indexes(&columns, &key_columns_with_status, &ignored_columns);
+        assert_eq!(status_key_indexes, vec![1]);
+        let status_key_source = compute_column_checksums(&columns, &status_key_indexes, &source_rows);
+        let status_key_target = compute_column_checksums(&columns, &status_key_indexes, &target_rows);
+        assert_eq!(status_key_source, status_key_target);
+        let status_key_keys: Vec<&str> = status_key_source.keys().map(String::as_str).collect();
+        assert_eq!(status_key_keys, vec!["name"]);
     }
 }

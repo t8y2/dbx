@@ -101,6 +101,7 @@ const targetSchemas = ref<string[]>([]);
 const targetTables = ref<string[]>([]);
 
 const keyColumnsText = ref("");
+const ignoredColumnsText = ref("");
 const detailPreviewLimit = ref(String(PREVIEW_LIMIT_OPTIONS[1]));
 const batchResults = ref<DataCompareTableResult[]>([]);
 const syncPlan = ref<DataCompareSyncPlan>(emptySyncPlan());
@@ -144,6 +145,12 @@ const missingTargetTables = computed(() => compareTasksPreview.value.filter((tas
 const canCompare = computed(() => sourceConnectionId.value && sourceDatabase.value && sourceSchema.value && selectedSourceTableNames.value.length > 0 && targetConnectionId.value && targetDatabase.value && targetSchema.value);
 const keyColumns = computed(() =>
   keyColumnsText.value
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean),
+);
+const ignoredColumns = computed(() =>
+  ignoredColumnsText.value
     .split(",")
     .map((value) => value.trim())
     .filter(Boolean),
@@ -619,6 +626,7 @@ async function startCompare() {
           targetTable: task.targetTable,
           columns,
           keyColumns: resolvedKeys,
+          ignoredColumns: ignoredColumns.value,
         });
 
         const added = preparation.result.added.length;
@@ -1033,6 +1041,14 @@ watch(
           <Input v-model="keyColumnsText" class="h-8 text-xs" :placeholder="t('dataCompare.keyColumnsPlaceholder')" />
           <div class="text-[11px] text-muted-foreground">
             {{ t("dataCompare.keyColumnsAutoHint") }}
+          </div>
+        </div>
+
+        <div class="space-y-1">
+          <Label class="text-xs font-medium">{{ t("dataCompare.ignoredColumns") }}</Label>
+          <Input v-model="ignoredColumnsText" class="h-8 text-xs" :placeholder="t('dataCompare.ignoredColumnsPlaceholder')" />
+          <div class="text-[11px] text-muted-foreground">
+            {{ t("dataCompare.ignoredColumnsHint") }}
           </div>
         </div>
 

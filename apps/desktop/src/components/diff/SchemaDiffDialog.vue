@@ -1076,11 +1076,10 @@ const targetConnectionInfo = computed(() => {
               <span>{{ t("diff.progress.count", schemaDiffProgressCount) }}</span>
               <span>{{ schemaDiffProgressPercent }}%</span>
             </div>
-            <div class="h-2 overflow-hidden rounded-full bg-muted">
+            <div class="h-2 overflow-hidden rounded-full bg-muted" role="progressbar" :aria-label="schemaDiffProgressLabel || t('diff.progress.comparing')">
               <div
                 v-if="schemaDiffProgressPercent !== null"
                 class="h-full rounded-full bg-primary transition-[width] duration-200"
-                role="progressbar"
                 :aria-valuemin="0"
                 :aria-valuemax="schemaDiffProgressCount?.total"
                 :aria-valuenow="schemaDiffProgressCount?.current"

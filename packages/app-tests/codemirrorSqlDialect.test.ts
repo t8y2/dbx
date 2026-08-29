@@ -27,6 +27,17 @@ test("adds SQL Server READONLY for table-valued procedure parameters", () => {
   assert.equal(countParsedNodes(dialect, "CREATE PROCEDURE [dbo].[gylxcx](@tp2 XTableType5 readonly,@tp xtabletype2 readonly) AS SELECT 1", "Keyword", "readonly"), 2);
 });
 
+test("classifies SQL Server SET as a keyword instead of a builtin", () => {
+  const dialect = createDbxCodeMirrorSqlDialect(langSql, "sqlserver");
+
+  assert.equal(countParsedNodes(dialect, "UPDATE users SET name = 'Alice'", "Keyword", "SET"), 1);
+  assert.equal(countParsedNodes(dialect, "SET NOCOUNT ON", "Keyword", "SET"), 1);
+  assert.equal(
+    dialect.spec.builtin?.split(/\s+/).some((term) => term.toUpperCase() === "SET"),
+    false,
+  );
+});
+
 test("uses MSSQL keywords for an ASE JDBC editor override", () => {
   const dialect = createDbxCodeMirrorSqlDialect(langSql, "sqlserver", "jdbc");
 

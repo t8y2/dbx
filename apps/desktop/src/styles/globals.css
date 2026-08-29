@@ -100,6 +100,20 @@
   --data-grid-type-spatial-fg: #6ee7b7;
 }
 
+/* The column-info tooltip re-derives its type hues from these softer 400-level
+ * values: the 300-level grid-cell palette above is tuned for the data surface
+ * and glares on the dark popover. Light mode keeps the 700-level base. */
+.dark .dbx-column-info-tooltip {
+  --data-grid-type-integer-fg: #60a5fa;
+  --data-grid-type-numeric-fg: #22d3ee;
+  --data-grid-type-string-fg: #4ade80;
+  --data-grid-type-boolean-fg: #fb923c;
+  --data-grid-type-temporal-fg: #c084fc;
+  --data-grid-type-structured-fg: #f472b6;
+  --data-grid-type-identifier-fg: #fbbf24;
+  --data-grid-type-binary-fg: #f87171;
+  --data-grid-type-spatial-fg: #34d399;
+}
 @layer components {
   .data-grid-type-integer {
     color: var(--data-grid-type-integer-fg);
@@ -1581,194 +1595,193 @@ html.dbx-data-grid-native-selection-blocked [role="textbox"] * {
 
 /* Tailwind CSS v4 targets Safari 16.4+. The startup capability check marks
  * older WebViews with .dbx-legacy-webview before the app mounts. */
-@media (min-width: 640px) {
-  html.dbx-legacy-webview .sm\:block {
-    display: block !important;
-  }
-
-  html.dbx-legacy-webview .sm\:hidden {
-    display: none !important;
-  }
-
-  html.dbx-legacy-webview .sm\:inline {
-    display: inline !important;
-  }
-
-  html.dbx-legacy-webview .sm\:flex-row {
-    flex-direction: row !important;
-  }
-
-  html.dbx-legacy-webview .sm\:flex-wrap {
-    flex-wrap: wrap !important;
-  }
-
-  html.dbx-legacy-webview .sm\:items-start {
-    align-items: flex-start !important;
-  }
-
-  html.dbx-legacy-webview .sm\:items-center {
-    align-items: center !important;
-  }
-
-  html.dbx-legacy-webview .sm\:justify-between {
-    justify-content: space-between !important;
-  }
-
-  html.dbx-legacy-webview .sm\:justify-end {
-    justify-content: flex-end !important;
-  }
-
-  html.dbx-legacy-webview .sm\:gap-2 {
-    gap: 0.5rem !important;
-  }
-
-  html.dbx-legacy-webview .sm\:grid-cols-2 {
-    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
-  }
-
-  html.dbx-legacy-webview .sm\:grid-cols-3 {
-    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
-  }
-
-  html.dbx-legacy-webview .sm\:grid-cols-4 {
-    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
-  }
-
-  html.dbx-legacy-webview .sm\:grid-cols-\[minmax\(0\,1fr\)_auto\] {
-    grid-template-columns: minmax(0, 1fr) auto !important;
-  }
-
-  html.dbx-legacy-webview .sm\:grid-cols-\[minmax\(0\,200px\)_minmax\(0\,1fr\)\] {
-    grid-template-columns: minmax(0, 200px) minmax(0, 1fr) !important;
-  }
-
-  html.dbx-legacy-webview .sm\:grid-cols-\[minmax\(0\,1fr\)_minmax\(220px\,0\.8fr\)\] {
-    grid-template-columns: minmax(0, 1fr) minmax(220px, 0.8fr) !important;
-  }
-
-  html.dbx-legacy-webview .sm\:col-span-3 {
-    grid-column: span 3 / span 3 !important;
-  }
-
-  html.dbx-legacy-webview .sm\:w-full {
-    width: 100% !important;
-  }
-
-  html.dbx-legacy-webview .sm\:w-40 {
-    width: 10rem !important;
-  }
-
-  html.dbx-legacy-webview .sm\:w-64 {
-    width: 16rem !important;
-  }
-
-  html.dbx-legacy-webview .sm\:w-auto {
-    width: auto !important;
-  }
-
-  html.dbx-legacy-webview .sm\:flex-none {
-    flex: none !important;
-  }
-
-  html.dbx-legacy-webview .sm\:ml-auto {
-    margin-left: auto !important;
-  }
+/* Like the dialog fallback block below, these breakpoint fallbacks carry no
+ * @media wrapper: production CSS minification rewrites min-width media queries
+ * into range syntax that legacy WebViews cannot parse, and the desktop window
+ * (minWidth 900, see tauri.conf.json) is always wider than these breakpoints
+ * anyway. The html.dbx-legacy-webview class is the only gate. */
+html.dbx-legacy-webview .sm\:block {
+  display: block !important;
 }
 
-@media (min-width: 768px) {
-  html.dbx-legacy-webview .md\:w-full {
-    width: 100% !important;
-  }
-
-  html.dbx-legacy-webview .md\:grid-cols-2 {
-    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
-  }
-
-  html.dbx-legacy-webview .md\:grid-cols-\[1fr_auto\] {
-    grid-template-columns: 1fr auto !important;
-  }
-
-  html.dbx-legacy-webview .md\:grid-cols-\[minmax\(0\,1fr\)_180px_auto\] {
-    grid-template-columns: minmax(0, 1fr) 180px auto !important;
-  }
+html.dbx-legacy-webview .sm\:hidden {
+  display: none !important;
 }
 
-@media (min-width: 1024px) {
-  html.dbx-legacy-webview .lg\:block {
-    display: block !important;
-  }
+html.dbx-legacy-webview .sm\:inline {
+  display: inline !important;
+}
 
-  html.dbx-legacy-webview .lg\:hidden {
-    display: none !important;
-  }
+html.dbx-legacy-webview .sm\:flex-row {
+  flex-direction: row !important;
+}
 
-  html.dbx-legacy-webview .lg\:grid {
-    display: grid !important;
-  }
+html.dbx-legacy-webview .sm\:flex-wrap {
+  flex-wrap: wrap !important;
+}
 
-  html.dbx-legacy-webview .lg\:flex-row {
-    flex-direction: row !important;
-  }
+html.dbx-legacy-webview .sm\:items-start {
+  align-items: flex-start !important;
+}
 
-  html.dbx-legacy-webview .lg\:flex-col {
-    flex-direction: column !important;
-  }
+html.dbx-legacy-webview .sm\:items-center {
+  align-items: center !important;
+}
 
-  html.dbx-legacy-webview .lg\:items-center {
-    align-items: center !important;
-  }
+html.dbx-legacy-webview .sm\:justify-between {
+  justify-content: space-between !important;
+}
 
-  html.dbx-legacy-webview .lg\:justify-between {
-    justify-content: space-between !important;
-  }
+html.dbx-legacy-webview .sm\:justify-end {
+  justify-content: flex-end !important;
+}
 
-  html.dbx-legacy-webview .lg\:justify-end {
-    justify-content: flex-end !important;
-  }
+html.dbx-legacy-webview .sm\:gap-2 {
+  gap: 0.5rem !important;
+}
 
-  html.dbx-legacy-webview .lg\:w-40 {
-    width: 10rem !important;
-  }
+html.dbx-legacy-webview .sm\:grid-cols-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+}
 
-  html.dbx-legacy-webview .lg\:overflow-x-hidden {
-    overflow-x: hidden !important;
-  }
+html.dbx-legacy-webview .sm\:grid-cols-3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+}
 
-  html.dbx-legacy-webview .lg\:overflow-y-auto {
-    overflow-y: auto !important;
-  }
+html.dbx-legacy-webview .sm\:grid-cols-4 {
+  grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+}
 
-  html.dbx-legacy-webview .lg\:border-b-0 {
-    border-bottom-width: 0 !important;
-  }
+html.dbx-legacy-webview .sm\:grid-cols-\[minmax\(0\,1fr\)_auto\] {
+  grid-template-columns: minmax(0, 1fr) auto !important;
+}
 
-  html.dbx-legacy-webview .lg\:border-r {
-    border-right-width: 1px !important;
-  }
+html.dbx-legacy-webview .sm\:grid-cols-\[minmax\(0\,200px\)_minmax\(0\,1fr\)\] {
+  grid-template-columns: minmax(0, 200px) minmax(0, 1fr) !important;
+}
 
-  html.dbx-legacy-webview .lg\:pb-0 {
-    padding-bottom: 0 !important;
-  }
+html.dbx-legacy-webview .sm\:grid-cols-\[minmax\(0\,1fr\)_minmax\(220px\,0\.8fr\)\] {
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 0.8fr) !important;
+}
 
-  html.dbx-legacy-webview .lg\:pr-3 {
-    padding-right: 0.75rem !important;
-  }
+html.dbx-legacy-webview .sm\:col-span-3 {
+  grid-column: span 3 / span 3 !important;
+}
 
-  html.dbx-legacy-webview .lg\:text-right {
-    text-align: right !important;
-  }
+html.dbx-legacy-webview .sm\:w-full {
+  width: 100% !important;
+}
 
-  html.dbx-legacy-webview .lg\:grid-cols-6 {
-    grid-template-columns: repeat(6, minmax(0, 1fr)) !important;
-  }
+html.dbx-legacy-webview .sm\:w-40 {
+  width: 10rem !important;
+}
 
-  html.dbx-legacy-webview .lg\:grid-cols-\[1\.2fr_0\.8fr\] {
-    grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr) !important;
-  }
+html.dbx-legacy-webview .sm\:w-64 {
+  width: 16rem !important;
+}
 
-  html.dbx-legacy-webview .lg\:grid-cols-\[minmax\(0\,1\.6fr\)_72px_56px_76px_58px_76px_72px\] {
-    grid-template-columns: minmax(0, 1.6fr) 72px 56px 76px 58px 76px 72px !important;
-  }
+html.dbx-legacy-webview .sm\:w-auto {
+  width: auto !important;
+}
+
+html.dbx-legacy-webview .sm\:flex-none {
+  flex: none !important;
+}
+
+html.dbx-legacy-webview .sm\:ml-auto {
+  margin-left: auto !important;
+}
+
+html.dbx-legacy-webview .md\:w-full {
+  width: 100% !important;
+}
+
+html.dbx-legacy-webview .md\:grid-cols-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+}
+
+html.dbx-legacy-webview .md\:grid-cols-\[1fr_auto\] {
+  grid-template-columns: 1fr auto !important;
+}
+
+html.dbx-legacy-webview .md\:grid-cols-\[minmax\(0\,1fr\)_180px_auto\] {
+  grid-template-columns: minmax(0, 1fr) 180px auto !important;
+}
+
+html.dbx-legacy-webview .lg\:block {
+  display: block !important;
+}
+
+html.dbx-legacy-webview .lg\:hidden {
+  display: none !important;
+}
+
+html.dbx-legacy-webview .lg\:grid {
+  display: grid !important;
+}
+
+html.dbx-legacy-webview .lg\:flex-row {
+  flex-direction: row !important;
+}
+
+html.dbx-legacy-webview .lg\:flex-col {
+  flex-direction: column !important;
+}
+
+html.dbx-legacy-webview .lg\:items-center {
+  align-items: center !important;
+}
+
+html.dbx-legacy-webview .lg\:justify-between {
+  justify-content: space-between !important;
+}
+
+html.dbx-legacy-webview .lg\:justify-end {
+  justify-content: flex-end !important;
+}
+
+html.dbx-legacy-webview .lg\:w-40 {
+  width: 10rem !important;
+}
+
+html.dbx-legacy-webview .lg\:overflow-x-hidden {
+  overflow-x: hidden !important;
+}
+
+html.dbx-legacy-webview .lg\:overflow-y-auto {
+  overflow-y: auto !important;
+}
+
+html.dbx-legacy-webview .lg\:border-b-0 {
+  border-bottom-width: 0 !important;
+}
+
+html.dbx-legacy-webview .lg\:border-r {
+  border-right-width: 1px !important;
+}
+
+html.dbx-legacy-webview .lg\:pb-0 {
+  padding-bottom: 0 !important;
+}
+
+html.dbx-legacy-webview .lg\:pr-3 {
+  padding-right: 0.75rem !important;
+}
+
+html.dbx-legacy-webview .lg\:text-right {
+  text-align: right !important;
+}
+
+html.dbx-legacy-webview .lg\:grid-cols-6 {
+  grid-template-columns: repeat(6, minmax(0, 1fr)) !important;
+}
+
+html.dbx-legacy-webview .lg\:grid-cols-\[1\.2fr_0\.8fr\] {
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr) !important;
+}
+
+html.dbx-legacy-webview .lg\:grid-cols-\[minmax\(0\,1\.6fr\)_72px_56px_76px_58px_76px_72px\] {
+  grid-template-columns: minmax(0, 1.6fr) 72px 56px 76px 58px 76px 72px !important;
 }
 
 html.dbx-legacy-webview [data-slot="dialog-positioner"] {
@@ -1807,6 +1820,17 @@ html.dbx-legacy-webview [data-slot="dialog-content"][class~="max-w-sm"] {
   max-width: 24rem !important;
 }
 
+/* The schema diagram's fullscreen mode drops the sm:max-w-* width classes and
+ * relies on inline width:100%/max-width:100%, which the 24rem !important cap
+ * above outranks in legacy WebViews — the dialog then renders 24rem wide and
+ * the canvas collapses. Stretch it explicitly; matches the positioner padding. */
+html.dbx-legacy-webview [data-slot="dialog-content"].dbx-diagram-fullscreen {
+  width: calc(100vw - 2rem) !important;
+  max-width: none !important;
+  height: calc(var(--dbx-viewport-height) - 2rem) !important;
+  max-height: none !important;
+  border-radius: 0 !important;
+}
 html.dbx-legacy-webview [data-slot="dialog-content"][class~="max-w-md"] {
   max-width: 28rem !important;
 }
@@ -1855,6 +1879,17 @@ html.dbx-legacy-webview [data-slot="dialog-content"][class*="max-w-[min(720px"] 
   max-width: 720px !important;
 }
 
+/* Arbitrary (non-breakpoint-prefixed) max-w-* utilities live in @layer
+ * utilities, so they lose to the un-layered 24rem generic cap above in every
+ * engine. Each DialogContent-level width of this shape needs its own
+ * !important entry — like max-w-[min(720px above. */
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="max-w-[min(1080px"] {
+  max-width: min(1080px, calc(100vw - 2rem)) !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="max-w-[1800px]"] {
+  max-width: 1800px !important;
+}
 html.dbx-legacy-webview [data-slot="dialog-content"].dbx-form-dialog {
   display: flex !important;
   flex-direction: column !important;
@@ -2218,135 +2253,184 @@ html.dbx-legacy-webview.dark [data-grid-root] [data-grid-column-index]:hover {
   background-color: rgb(38, 39, 42) !important;
 }
 
-@media (min-width: 640px) {
-  html.dbx-legacy-webview [data-slot="dialog-footer"] {
-    flex-direction: row !important;
-    justify-content: flex-end !important;
-  }
+/* Dialog width and footer fallbacks for legacy WebViews. These rules used to sit
+ * inside @media (min-width: 640px), but production CSS minification rewrites
+ * min-width media queries into range syntax that legacy WebViews cannot parse,
+ * which silently disabled the whole block in packaged builds. The desktop window
+ * never opens below 900px (see tauri.conf.json minWidth), so the breakpoint was
+ * always true and is dropped here. New dialogs only need standard sm:max-w-*
+ * classes; no per-component legacy CSS is needed for width or footer layout. */
+html.dbx-legacy-webview [data-slot="dialog-footer"] {
+  flex-direction: row !important;
+  justify-content: flex-end !important;
+}
 
-  html.dbx-legacy-webview [data-slot="dialog-content"][class~="sm:max-w-sm"] {
-    max-width: 24rem !important;
-  }
+html.dbx-legacy-webview [data-slot="dialog-content"][class~="sm:max-w-sm"] {
+  max-width: 24rem !important;
+}
 
-  html.dbx-legacy-webview [data-slot="dialog-content"][class~="sm:max-w-md"] {
-    max-width: 28rem !important;
-  }
+html.dbx-legacy-webview [data-slot="dialog-content"][class~="sm:max-w-md"] {
+  max-width: 28rem !important;
+}
 
-  html.dbx-legacy-webview [data-slot="dialog-content"][class~="sm:max-w-lg"] {
-    max-width: 32rem !important;
-  }
+html.dbx-legacy-webview [data-slot="dialog-content"][class~="sm:max-w-lg"] {
+  max-width: 32rem !important;
+}
 
-  html.dbx-legacy-webview [data-slot="dialog-content"][class~="sm:max-w-xl"] {
-    max-width: 36rem !important;
-  }
+html.dbx-legacy-webview [data-slot="dialog-content"][class~="sm:max-w-xl"] {
+  max-width: 36rem !important;
+}
 
-  html.dbx-legacy-webview [data-slot="dialog-content"][class~="sm:max-w-2xl"] {
-    max-width: 42rem !important;
-  }
+html.dbx-legacy-webview [data-slot="dialog-content"][class~="sm:max-w-2xl"] {
+  max-width: 42rem !important;
+}
 
-  html.dbx-legacy-webview [data-slot="dialog-content"][class~="sm:max-w-3xl"] {
-    max-width: 48rem !important;
-  }
+html.dbx-legacy-webview [data-slot="dialog-content"][class~="sm:max-w-3xl"] {
+  max-width: 48rem !important;
+}
 
-  html.dbx-legacy-webview [data-slot="dialog-content"][class~="sm:max-w-4xl"] {
-    max-width: 56rem !important;
-  }
+html.dbx-legacy-webview [data-slot="dialog-content"][class~="sm:max-w-4xl"] {
+  max-width: 56rem !important;
+}
 
-  html.dbx-legacy-webview [data-slot="dialog-content"][class~="sm:max-w-5xl"] {
-    max-width: 64rem !important;
-  }
+html.dbx-legacy-webview [data-slot="dialog-content"][class~="sm:max-w-5xl"] {
+  max-width: 64rem !important;
+}
 
-  html.dbx-legacy-webview [data-slot="dialog-content"][class~="sm:max-w-190"] {
-    max-width: 47.5rem !important;
-  }
+html.dbx-legacy-webview [data-slot="dialog-content"][class~="sm:max-w-190"] {
+  max-width: 47.5rem !important;
+}
 
-  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[360px]"] {
-    max-width: 360px !important;
-  }
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[360px]"] {
+  max-width: 360px !important;
+}
 
-  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[380px]"] {
-    max-width: 380px !important;
-  }
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[380px]"] {
+  max-width: 380px !important;
+}
 
-  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[400px]"] {
-    max-width: 400px !important;
-  }
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[400px]"] {
+  max-width: 400px !important;
+}
 
-  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[420px]"] {
-    max-width: 420px !important;
-  }
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[420px]"] {
+  max-width: 420px !important;
+}
 
-  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[440px]"] {
-    max-width: 440px !important;
-  }
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[440px]"] {
+  max-width: 440px !important;
+}
 
-  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[460px]"] {
-    max-width: 460px !important;
-  }
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[460px]"] {
+  max-width: 460px !important;
+}
 
-  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[480px]"] {
-    max-width: 480px !important;
-  }
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[480px]"] {
+  max-width: 480px !important;
+}
 
-  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[500px]"] {
-    max-width: 500px !important;
-  }
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[500px]"] {
+  max-width: 500px !important;
+}
 
-  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[520px]"] {
-    max-width: 520px !important;
-  }
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[520px]"] {
+  max-width: 520px !important;
+}
 
-  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[560px]"] {
-    max-width: 560px !important;
-  }
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[560px]"] {
+  max-width: 560px !important;
+}
 
-  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[660px]"] {
-    max-width: 660px !important;
-  }
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[660px]"] {
+  max-width: 660px !important;
+}
 
-  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[720px]"] {
-    max-width: 720px !important;
-  }
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[720px]"] {
+  max-width: 720px !important;
+}
 
-  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[760px]"] {
-    max-width: 760px !important;
-  }
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[760px]"] {
+  max-width: 760px !important;
+}
 
-  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[780px]"] {
-    max-width: 780px !important;
-  }
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[780px]"] {
+  max-width: 780px !important;
+}
 
-  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[840px]"] {
-    max-width: 840px !important;
-  }
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[840px]"] {
+  max-width: 840px !important;
+}
 
-  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[860px]"] {
-    max-width: 860px !important;
-  }
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[860px]"] {
+  max-width: 860px !important;
+}
 
-  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[900px]"] {
-    max-width: 900px !important;
-  }
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[900px]"] {
+  max-width: 900px !important;
+}
 
-  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[960px]"] {
-    max-width: 960px !important;
-  }
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[960px]"] {
+  max-width: 960px !important;
+}
 
-  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[980px]"] {
-    max-width: 980px !important;
-  }
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[980px]"] {
+  max-width: 980px !important;
+}
 
-  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[calc(100vw-2rem)]"] {
-    max-width: calc(100vw - 2rem) !important;
-  }
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[calc(100vw-2rem)]"] {
+  max-width: calc(100vw - 2rem) !important;
+}
 
-  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:!max-w-[92vw]"] {
-    max-width: 92vw !important;
-  }
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:!max-w-[92vw]"] {
+  max-width: 92vw !important;
+}
 
-  html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:!max-w-[min(920px,calc(100vw-48px))]"] {
-    max-width: min(920px, calc(100vw - 48px)) !important;
-  }
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:!max-w-[min(920px,calc(100vw-48px))]"] {
+  max-width: min(920px, calc(100vw - 48px)) !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"][class~="sm:max-w-80"] {
+  max-width: 20rem !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[22rem]"] {
+  max-width: 22rem !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[600px]"] {
+  max-width: 600px !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[620px]"] {
+  max-width: 620px !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[640px]"] {
+  max-width: 640px !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[680px]"] {
+  max-width: 680px !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[700px]"] {
+  max-width: 700px !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[880px]"] {
+  max-width: 880px !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[1120px]"] {
+  max-width: 1120px !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[94vw]"] {
+  max-width: 94vw !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[min(1180px,calc(100vw-32px))]"] {
+  max-width: min(1180px, calc(100vw - 32px)) !important;
 }
 
 /* Splitpanes */

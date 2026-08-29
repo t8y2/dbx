@@ -101,6 +101,7 @@ import DataGridQueryControls from "@/components/grid/DataGridQueryControls.vue";
 import DataGridSearchBar from "@/components/grid/DataGridSearchBar.vue";
 
 const dataGridSource = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
+const globalsCss = readFileSync("apps/desktop/src/styles/globals.css", "utf8");
 
 function detail(patch: Partial<DataGridCellDetail> = {}): DataGridCellDetail {
   return {
@@ -417,6 +418,32 @@ describe("DataGridColumnHeader", () => {
     expect(trigger.parent).toBe(tooltip);
     expect(actions.parent).not.toBe(tooltip);
     expect(resizeHandle.parent).not.toBe(tooltip);
+  });
+
+  it("renders the metadata tooltip type value with the softened type palette", () => {
+    const mounted = mountComponent(DataGridColumnHeader, {
+      name: "title",
+      actualColumnIndex: 0,
+      visibleColumnIndex: 0,
+      showTypeLine: true,
+      columnType: "varchar(255)",
+      typeClass: "data-grid-type-string",
+      copyColumnNameLabel: "copy",
+      columnNameLabel: "name",
+      columnTypeLabel: "type",
+      columnCommentLabel: "comment",
+    });
+    // The vivid 300-level dark-mode type palette is tuned for grid cells and
+    // glares on the popover surface. The tooltip container re-defines the type
+    // CSS variables with softer 400-level values while keeping the per-kind hue.
+    const tooltipContent = findOne(mounted.root, (node) => String(node.props?.class ?? "").includes("dbx-column-info-tooltip"));
+    expect(tooltipContent).toBeDefined();
+    const tooltipType = findOne(mounted.root, (node) => hostText(node) === "varchar(255)" && node.props["data-grid-header-type-line"] === undefined);
+    expect(String(tooltipType.props.class ?? "")).toContain("data-grid-type-string");
+    const headerTypeLine = findOne(mounted.root, (node) => hostText(node) === "varchar(255)" && node.props["data-grid-header-type-line"] === "");
+    expect(String(headerTypeLine.props.class)).toContain("data-grid-type-string");
+    // Softer dark-mode palette override for the tooltip container.
+    expect(globalsCss).toMatch(/\.dark \.dbx-column-info-tooltip \{[^}]*--data-grid-type-string-fg: #4ade80/);
   });
 
   it("cancels resize-handle clicks without leaking header click events", () => {

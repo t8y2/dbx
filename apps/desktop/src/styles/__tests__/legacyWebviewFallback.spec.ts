@@ -11,6 +11,7 @@ const dataTransferDialogSource = readFileSync(new URL("../../components/transfer
 const updateDialogSource = readFileSync(new URL("../../components/layout/UpdateDialog.vue", import.meta.url), "utf8");
 const dataGridColumnHeaderSource = readFileSync(new URL("../../components/grid/DataGridColumnHeader.vue", import.meta.url), "utf8");
 const ddlViewDialogSource = readFileSync(new URL("../../components/objects/DdlViewDialog.vue", import.meta.url), "utf8");
+const schemaDiagramDialogSource = readFileSync(new URL("../../components/diagram/SchemaDiagramDialog.vue", import.meta.url), "utf8");
 const connectionDialogSource = readFileSync(new URL("../../components/connection/ConnectionDialog.vue", import.meta.url), "utf8");
 const connectionTreeSource = readFileSync(new URL("../../components/sidebar/ConnectionTree.vue", import.meta.url), "utf8");
 const activeConnectionFilterSource = readFileSync(new URL("../../components/sidebar/ActiveConnectionFilterButton.vue", import.meta.url), "utf8");
@@ -27,6 +28,24 @@ const legacyWebViewSource = readFileSync(new URL("../../lib/ui/legacyWebView.ts"
 const mainSource = readFileSync(new URL("../../main.ts", import.meta.url), "utf8");
 
 describe("legacy WebView CSS fallbacks", () => {
+  it("keeps globals.css balanced and free of min-width media wrappers", () => {
+    // Production CSS minification rewrites `@media (min-width: ...)` into range
+    // syntax that legacy WebViews cannot parse, which silently disables any rule
+    // placed inside one. The html.dbx-legacy-webview class is the only gate, so
+    // no fallback rule may live inside a min-width media query. The brace check
+    // guards the unwrap refactors against dropping rule closers.
+    expect(globalsCss).not.toMatch(/@media \(min-width[^)]*\)\s*\{/);
+    // The Tailwind @source glob (../**/*.{vue,...}) contains a literal "*/",
+    // so it must be excluded before stripping comments.
+    const withoutComments = globalsCss.replace(/^@source .*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+    const opens = (withoutComments.match(/\{/g) ?? []).length;
+    const closes = (withoutComments.match(/\}/g) ?? []).length;
+    expect(opens).toBe(closes);
+    expect(globalsCss).toContain("html.dbx-legacy-webview .sm\\:flex-row");
+    expect(globalsCss).toContain("html.dbx-legacy-webview .md\\:w-full");
+    expect(globalsCss).toContain("html.dbx-legacy-webview .lg\\:grid-cols-6");
+  });
+
   it("scopes component overrides to the runtime legacy WebView class", () => {
     const fallbackStart = globalsCss.indexOf("html.dbx-legacy-webview .sm\\:block");
     const tabsOverride = globalsCss.indexOf('html.dbx-legacy-webview [data-slot="tabs-trigger"]');
@@ -95,30 +114,79 @@ describe("legacy WebView CSS fallbacks", () => {
     expect(globalsCss).not.toContain(".dbx-transfer-dialog");
   });
 
-  it("keeps the code snapshot dialog layout scoped to legacy WebViews without media queries", () => {
-    expect(codeSnapshotDialogSource).toContain('class="dbx-code-snapshot-dialog flex max-h-[calc(var(--dbx-viewport-height)-2rem)] flex-col overflow-hidden border border-border !bg-background text-foreground shadow-2xl !backdrop-blur-none sm:max-w-[860px]"');
-    expect(codeSnapshotDialogSource).toContain('class="dbx-code-snapshot-dialog__footer"');
-    expect(codeSnapshotDialogSource).toContain('html.dbx-legacy-webview [data-slot="dialog-content"].dbx-code-snapshot-dialog');
-    expect(codeSnapshotDialogSource).toContain("width: calc(100vw - 2rem) !important;");
-    expect(codeSnapshotDialogSource).toContain("flex-direction: row !important;");
-    expect(codeSnapshotDialogSource).toContain("flex-wrap: nowrap !important;");
-    expect(codeSnapshotDialogSource).toContain("justify-content: flex-end !important;");
+  it("covers the transfer dialog footer through the global legacy rule", () => {
+    expect(dataTransferDialogSource).not.toContain('[data-slot="dialog-footer"]');
+  });
+
+  it("keeps the code snapshot dialog layout on the global legacy dialog fallbacks", () => {
+    expect(codeSnapshotDialogSource).toContain('class="flex max-h-[calc(var(--dbx-viewport-height)-2rem)] flex-col overflow-hidden border border-border !bg-background text-foreground shadow-2xl !backdrop-blur-none sm:max-w-[860px]"');
+    expect(codeSnapshotDialogSource).not.toContain("dbx-legacy-webview");
     expect(codeSnapshotDialogSource).not.toContain("@media");
+    expect(globalsCss).toContain('html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[860px]"]');
   });
 
-  it("keeps the update dialog's wide layout fallback scoped to legacy WebViews without media queries", () => {
-    expect(updateDialogSource).toContain('class="dbx-update-dialog sm:max-w-[520px]"');
-    expect(updateDialogSource).toContain('html.dbx-legacy-webview [data-slot="dialog-content"].dbx-update-dialog[class~="max-w-sm"]');
-    expect(updateDialogSource).toContain('dbx-update-dialog [data-slot="dialog-footer"]');
+  it("keeps the update dialog layout on the global legacy dialog fallbacks", () => {
+    expect(updateDialogSource).toContain('class="sm:max-w-[700px]"');
+    expect(updateDialogSource).not.toContain("dbx-legacy-webview");
     expect(updateDialogSource).not.toContain("@media");
+    expect(globalsCss).toContain('html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[700px]"]');
   });
 
-  it("keeps the DDL dialog's desktop layout scoped to legacy WebViews without media queries", () => {
+  it("keeps the DDL dialog layout on the global legacy dialog fallbacks", () => {
     expect(ddlViewDialogSource).toContain('class="dbx-ddl-view-dialog sm:max-w-190"');
-    expect(ddlViewDialogSource).toContain('html.dbx-legacy-webview [data-slot="dialog-content"].dbx-ddl-view-dialog[class~="max-w-sm"]');
-    expect(ddlViewDialogSource).toContain("max-width: 47.5rem !important;");
-    expect(ddlViewDialogSource).toContain('dbx-ddl-view-dialog [data-slot="dialog-footer"]');
+    // The dialog content element is rendered through reka-ui's portal Teleport and
+    // never carries this component's scoped data-v attribute, so per-dialog rules
+    // (scoped or unscoped) are avoided; the global width table covers the dialog.
+    expect(ddlViewDialogSource).not.toContain("dbx-legacy-webview");
     expect(ddlViewDialogSource).not.toContain("@media");
+    expect(globalsCss).toContain('html.dbx-legacy-webview [data-slot="dialog-content"][class~="sm:max-w-190"]');
+  });
+
+  it("keeps the global dialog fallback block outside media queries", () => {
+    // Production minification rewrites `@media (min-width: ...)` into range syntax
+    // that legacy WebViews cannot parse, so this block must stay unwrapped.
+    const footerStart = globalsCss.indexOf('html.dbx-legacy-webview [data-slot="dialog-footer"]');
+    const splitpanesStart = globalsCss.indexOf("/* Splitpanes */", footerStart);
+
+    expect(footerStart).toBeGreaterThan(-1);
+    expect(splitpanesStart).toBeGreaterThan(footerStart);
+    const dialogFallbackBlock = globalsCss.slice(footerStart, splitpanesStart);
+    expect(dialogFallbackBlock).toContain("flex-direction: row !important;");
+    expect(dialogFallbackBlock).toContain("justify-content: flex-end !important;");
+    expect(dialogFallbackBlock).toContain("max-width: 47.5rem !important;");
+    expect(dialogFallbackBlock).toContain('html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[1120px]"]');
+    expect(dialogFallbackBlock).toContain('html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[min(1180px,calc(100vw-32px))]"]');
+    expect(dialogFallbackBlock).not.toContain("@media");
+  });
+
+  it("covers unprefixed arbitrary dialog max-widths that lose to the generic cap", () => {
+    // Arbitrary max-w-* utilities live in @layer utilities and lose to the
+    // un-layered 24rem generic cap in every engine (multi-db execute dialog).
+    const multiDbDialogSource = readFileSync(new URL("../../components/editor/MultiDbExecuteDialog.vue", import.meta.url), "utf8");
+    expect(multiDbDialogSource).toContain("max-w-[min(1080px,calc(100vw-32px))]");
+    expect(globalsCss).toContain('html.dbx-legacy-webview [data-slot="dialog-content"][class*="max-w-[min(1080px"]');
+    expect(globalsCss).toContain("max-width: min(1080px, calc(100vw - 2rem)) !important;");
+    expect(globalsCss).toContain('html.dbx-legacy-webview [data-slot="dialog-content"][class*="max-w-[1800px]"]');
+  });
+
+  it("keeps the schema diagram dialog width covered by the legacy width fallbacks", () => {
+    // The toolbar is overflow-x-auto: when the legacy WebView clamps the dialog
+    // to the generic 24rem cap, the toolbar controls get cut off entirely.
+    expect(schemaDiagramDialogSource).toContain("sm:max-w-[94vw]");
+    expect(globalsCss).toContain('html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[94vw]"]');
+  });
+
+  it("keeps the schema diagram fullscreen mode above the generic legacy width cap", () => {
+    // Fullscreen drops the sm:max-w-* classes and relies on inline width, which
+    // the generic 24rem !important cap outranks in legacy WebViews — the dialog
+    // then renders 24rem wide and the canvas collapses to a sliver.
+    expect(schemaDiagramDialogSource).toContain("dbx-diagram-fullscreen");
+    const ruleStart = globalsCss.indexOf('html.dbx-legacy-webview [data-slot="dialog-content"].dbx-diagram-fullscreen');
+    expect(ruleStart).toBeGreaterThan(globalsCss.indexOf('html.dbx-legacy-webview [data-slot="dialog-content"][class~="max-w-sm"]'));
+    const rule = globalsCss.slice(ruleStart, globalsCss.indexOf("}", ruleStart));
+    expect(rule).toContain("max-width: none !important;");
+    expect(rule).toContain("width: calc(100vw - 2rem) !important;");
+    expect(rule).toContain("var(--dbx-viewport-height)");
   });
 
   it("uses an explicit tooltip copy-button hover color in legacy WebViews", () => {

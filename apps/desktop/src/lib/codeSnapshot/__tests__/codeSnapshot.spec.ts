@@ -119,6 +119,60 @@ describe("renderCodeSnapshotHtml", () => {
     expect(html).not.toContain('class="dbx-code-snapshot__pre dbx-code-snapshot__pre--numbered"');
   });
 
+  it("gives SQL table names their own color, distinct from quoted fields", async () => {
+    // Mirror shiki's classic structure: one .line span per source line.
+    highlightCode.mockImplementation((content: string) =>
+      content
+        .split(/\r\n|\r|\n/)
+        .map((line) => `<span class="line">${line}</span>`)
+        .join(""),
+    );
+    const html = await renderCodeSnapshotHtml({ code: "SELECT `id`, `title`\nFROM `tb_book`;", lang: "sql" }, { appearance: "light" });
+
+    expect(html).toContain('data-sql-token="table"');
+    expect(html).toContain("color:#116329");
+    // Only the table name is marked; the selected fields keep the identifier color.
+    expect(html.match(/data-sql-token="table"/g)).toHaveLength(1);
+    expect(html).toMatch(/data-sql-token="table"[^>]*>`?tb_book`</);
+    expect(html).not.toMatch(/data-sql-token="table"[^>]*>`?id</);
+  });
+
+  it("marks every table across FROM lists, aliases and JOIN clauses", async () => {
+    highlightCode.mockImplementation((content: string) =>
+      content
+        .split(/\r\n|\r|\n/)
+        .map((line) => `<span class="line">${line}</span>`)
+        .join(""),
+    );
+    const html = await renderCodeSnapshotHtml({ code: "SELECT *\nFROM users u, orders o\nJOIN items i ON i.order_id = u.id", lang: "sql" }, { appearance: "dark" });
+
+    expect(html).toContain("color:#7ee787");
+    for (const table of ["users", "orders", "items"]) {
+      expect(html).toMatch(new RegExp(`data-sql-token="table"[^>]*>${table}</span>`));
+    }
+    // Fields referenced in the projection and join condition stay unmarked.
+    expect(html.match(/data-sql-token="table"/g)).toHaveLength(3);
+  });
+
+  it("maps table offsets correctly across CRLF line breaks", async () => {
+    highlightCode.mockImplementation((content: string) =>
+      content
+        .split(/\r\n|\r|\n/)
+        .map((line) => `<span class="line">${line}</span>`)
+        .join(""),
+    );
+    const html = await renderCodeSnapshotHtml({ code: "SELECT `id`\r\nFROM `tb_book`", lang: "sql" }, { appearance: "light" });
+
+    expect(html).toMatch(/data-sql-token="table"[^>]*>`?tb_book`</);
+    expect(html).not.toMatch(/data-sql-token="table"[^>]*>`?id</);
+  });
+
+  it("skips table-name marking for non-SQL languages", async () => {
+    const html = await renderCodeSnapshotHtml({ code: "from app import models", lang: "python" }, { appearance: "light" });
+
+    expect(html).not.toContain('data-sql-token="table"');
+  });
+
   it("escapes the snapshot title", async () => {
     const html = await renderCodeSnapshotHtml({ code: "SELECT 1", lang: "sql", title: `<script>alert(1)</script>` }, { appearance: "dark" });
 

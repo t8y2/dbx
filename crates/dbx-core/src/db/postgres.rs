@@ -9,7 +9,7 @@ use rustls::client::verify_server_cert_signed_by_trust_anchor;
 use rustls::crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::server::ParsedCertificate;
-use sqlparser::ast::Statement;
+use sqlparser::ast::{SetExpr, Statement};
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -33,11 +33,11 @@ use crate::query::{await_stream_with_progress_timeout, DbOperationBudget, Stream
 use crate::sql::starts_with_executable_sql_keyword;
 use crate::types::{
     ColumnInfo, CompletionAssistantCandidate, CompletionAssistantCandidateKind, CompletionAssistantMatchMode,
-    CompletionAssistantObjectKind, CompletionAssistantRequest, CompletionAssistantResponse, CustomTypeDdl,
-    CustomTypeDetails, CustomTypeDomainConstraint, CustomTypeKind, CustomTypeMember, CustomTypeProperties,
-    DatabaseInfo, DatabaseStorageInfo, ExtensionInfo, ForeignKeyInfo, FunctionInfo, IndexInfo, ObjectInfo,
-    ObjectStatistics, OwnerInfo, QueryMessage, QueryResult, RuleInfo, SchemaInfo, SequenceInfo, SpatialColumnBuilder,
-    TableInfo, TriggerInfo,
+    CompletionAssistantObjectKind, CompletionAssistantRequest, CompletionAssistantResponse, ConstraintInfo,
+    CustomTypeDdl, CustomTypeDetails, CustomTypeDomainConstraint, CustomTypeKind, CustomTypeMember,
+    CustomTypeProperties, DatabaseInfo, DatabaseStorageInfo, ExtensionInfo, ForeignKeyInfo, FunctionInfo, IndexInfo,
+    ObjectInfo, ObjectStatistics, OwnerInfo, QueryMessage, QueryResult, RuleInfo, SchemaInfo, SequenceInfo,
+    SpatialColumnBuilder, TableInfo, TriggerInfo,
 };
 
 pub(crate) const GAUSSDB_COMPATIBILITY_SQL: &str =
@@ -4108,6 +4108,282 @@ fn postgres_check_constraints_sql() -> &'static str {
      ORDER BY con.conname"
 }
 
+/// All constraints on a table (primary key, foreign key, unique, check,
+/// exclude, and — on PG 18+ — not-null), as full `ConstraintInfo` records.
+/// `pg_constraint.contype` letters are expanded to display labels and the
+/// `conkey`/`confkey` attribute numbers are resolved to column names.
+/// PostgreSQL has no per-constraint disabled state, so `enabled` is always
+/// true; a `NOT VALID` constraint (e.g. an added-but-unvalidated CHECK or
+/// FK) reports `valid = false` and surfaces the "Not validated" badge.
+pub async fn list_constraints(pool: &Pool, schema: &str, table: &str) -> Result<Vec<ConstraintInfo>, String> {
+    let schema = if schema.is_empty() { "public" } else { schema };
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let rows = postgres_query_cached(&client, postgres_constraints_sql(), &[&schema, &table])
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(rows
+        .iter()
+        .map(|row| ConstraintInfo {
+            name: pg_row_try_string(row, 0),
+            constraint_type: postgres_constraint_type_label(&pg_row_try_string(row, 1)),
+            definition: pg_row_try_string(row, 2),
+            columns: row.try_get::<_, Vec<String>>(3).unwrap_or_default(),
+            ref_schema: row.try_get::<_, Option<String>>(4).ok().flatten(),
+            ref_table: row.try_get::<_, Option<String>>(5).ok().flatten(),
+            ref_columns: row.try_get::<_, Vec<String>>(6).unwrap_or_default(),
+            match_type: postgres_constraint_match_type(row.try_get::<_, Option<String>>(7).ok().flatten()),
+            on_update: postgres_fk_action_label(row.try_get::<_, Option<String>>(8).ok().flatten()),
+            on_delete: postgres_fk_action_label(row.try_get::<_, Option<String>>(9).ok().flatten()),
+            deferrable: row.try_get::<_, bool>(10).unwrap_or(false),
+            initially_deferred: row.try_get::<_, bool>(11).unwrap_or(false),
+            enabled: true,
+            valid: row.try_get::<_, bool>(12).unwrap_or(true),
+        })
+        .collect())
+}
+
+/// OpenGauss-compatible constraint metadata without PostgreSQL's array/LATERAL
+/// dependencies. Older OpenGauss releases expose conkey/confkey as catalog
+/// vectors but may reject WITH ORDINALITY or decode them differently on the
+/// wire, so resolve attribute numbers in Rust.
+pub async fn list_opengauss_constraints(pool: &Pool, schema: &str, table: &str) -> Result<Vec<ConstraintInfo>, String> {
+    let schema = if schema.is_empty() { "public" } else { schema };
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let rows = match postgres_query_cached(&client, opengauss_constraints_sql(true), &[&schema, &table]).await {
+        Ok(rows) => rows,
+        Err(error) if is_missing_opengauss_constraint_column(&error, "convalidated") => {
+            log::debug!(
+                "[opengauss][constraints] convalidated unavailable; defaulting valid=true: {}",
+                pg_error_to_string(error)
+            );
+            postgres_query_cached(&client, opengauss_constraints_sql(false), &[&schema, &table])
+                .await
+                .map_err(|e| e.to_string())?
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let local_relation_oid =
+        pg_row_try_u32(&rows[0], 13).ok_or("OpenGauss constraint metadata did not return a local relation OID")?;
+    let local_attributes = opengauss_relation_attributes(&client, local_relation_oid).await?;
+    let mut referenced_attributes: HashMap<u32, HashMap<i16, String>> = HashMap::new();
+    let mut result = Vec::with_capacity(rows.len());
+
+    for row in rows {
+        let name = pg_row_try_string(&row, 0);
+        let kind = pg_row_try_string(&row, 1);
+        let column_numbers = parse_opengauss_attribute_numbers(&pg_row_try_string(&row, 3))
+            .map_err(|error| format!("failed to parse OpenGauss constraint {name} columns: {error}"))?;
+        let ref_column_numbers = parse_opengauss_attribute_numbers(&pg_row_try_string(&row, 6))
+            .map_err(|error| format!("failed to parse OpenGauss constraint {name} referenced columns: {error}"))?;
+        let referenced_relation_oid = pg_row_try_u32(&row, 14).filter(|oid| *oid != 0);
+        let ref_columns = if kind == "f" {
+            if let Some(oid) = referenced_relation_oid {
+                if let std::collections::hash_map::Entry::Vacant(entry) = referenced_attributes.entry(oid) {
+                    entry.insert(opengauss_relation_attributes(&client, oid).await?);
+                }
+                map_opengauss_attribute_names(&ref_column_numbers, referenced_attributes.get(&oid).unwrap())
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+
+        result.push(ConstraintInfo {
+            name,
+            constraint_type: postgres_constraint_type_label(&kind),
+            definition: pg_row_try_string(&row, 2),
+            columns: map_opengauss_attribute_names(&column_numbers, &local_attributes),
+            ref_schema: row.try_get::<_, Option<String>>(4).ok().flatten(),
+            ref_table: row.try_get::<_, Option<String>>(5).ok().flatten(),
+            ref_columns,
+            match_type: postgres_constraint_match_type(pg_row_try_optional_text(&row, 7)),
+            on_update: postgres_fk_action_label(pg_row_try_optional_text(&row, 8)),
+            on_delete: postgres_fk_action_label(pg_row_try_optional_text(&row, 9)),
+            deferrable: pg_row_try_bool(&row, 10).unwrap_or(false),
+            initially_deferred: pg_row_try_bool(&row, 11).unwrap_or(false),
+            enabled: true,
+            valid: pg_row_try_bool(&row, 12).unwrap_or(true),
+        });
+    }
+    Ok(result)
+}
+
+fn opengauss_constraints_sql(include_validated: bool) -> &'static str {
+    if include_validated {
+        "SELECT COALESCE(con.conname, ''), \
+                con.contype::text, \
+                COALESCE(pg_catalog.pg_get_constraintdef(con.oid, true), ''), \
+                COALESCE(con.conkey::text, ''), \
+                refn.nspname, refc.relname, COALESCE(con.confkey::text, ''), \
+                CASE WHEN con.contype = 'f' THEN con.confmatchtype::text END, \
+                CASE WHEN con.contype = 'f' THEN con.confupdtype::text END, \
+                CASE WHEN con.contype = 'f' THEN con.confdeltype::text END, \
+                con.condeferrable, con.condeferred, con.convalidated, \
+                con.conrelid::oid, con.confrelid::oid \
+         FROM pg_catalog.pg_constraint con \
+         JOIN pg_catalog.pg_class c ON c.oid = con.conrelid \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         LEFT JOIN pg_catalog.pg_class refc ON refc.oid = con.confrelid \
+         LEFT JOIN pg_catalog.pg_namespace refn ON refn.oid = refc.relnamespace \
+         WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r','p','f') \
+         ORDER BY COALESCE(con.conname, '')"
+    } else {
+        "SELECT COALESCE(con.conname, ''), \
+                con.contype::text, \
+                COALESCE(pg_catalog.pg_get_constraintdef(con.oid, true), ''), \
+                COALESCE(con.conkey::text, ''), \
+                refn.nspname, refc.relname, COALESCE(con.confkey::text, ''), \
+                CASE WHEN con.contype = 'f' THEN con.confmatchtype::text END, \
+                CASE WHEN con.contype = 'f' THEN con.confupdtype::text END, \
+                CASE WHEN con.contype = 'f' THEN con.confdeltype::text END, \
+                con.condeferrable, con.condeferred, TRUE, \
+                con.conrelid::oid, con.confrelid::oid \
+         FROM pg_catalog.pg_constraint con \
+         JOIN pg_catalog.pg_class c ON c.oid = con.conrelid \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         LEFT JOIN pg_catalog.pg_class refc ON refc.oid = con.confrelid \
+         LEFT JOIN pg_catalog.pg_namespace refn ON refn.oid = refc.relnamespace \
+         WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r','p','f') \
+         ORDER BY COALESCE(con.conname, '')"
+    }
+}
+
+async fn opengauss_relation_attributes(
+    client: &tokio_postgres::Client,
+    relation_oid: u32,
+) -> Result<HashMap<i16, String>, String> {
+    let rows = client
+        .query(
+            "SELECT a.attnum, a.attname::text FROM pg_catalog.pg_attribute a \
+             WHERE a.attrelid = $1::oid AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum",
+            &[&relation_oid],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(rows.iter().filter_map(|row| Some((row.try_get::<_, i16>(0).ok()?, pg_row_try_string(row, 1)))).collect())
+}
+
+fn parse_opengauss_attribute_numbers(raw: &str) -> Result<Vec<i16>, String> {
+    let value = raw.trim().trim_matches(|character| matches!(character, '{' | '}' | '[' | ']'));
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    value
+        .split(|character: char| character == ',' || character.is_whitespace())
+        .filter(|part| !part.is_empty())
+        .map(|part| part.parse::<i16>().map_err(|_| format!("invalid attribute number {part:?}")))
+        .collect()
+}
+
+fn map_opengauss_attribute_names(numbers: &[i16], attributes: &HashMap<i16, String>) -> Vec<String> {
+    numbers.iter().filter_map(|number| attributes.get(number).cloned()).collect()
+}
+
+fn pg_row_try_u32(row: &Row, idx: usize) -> Option<u32> {
+    row.try_get::<_, u32>(idx)
+        .ok()
+        .or_else(|| row.try_get::<_, i64>(idx).ok().and_then(|value| u32::try_from(value).ok()))
+        .or_else(|| pg_row_try_string(row, idx).parse::<u32>().ok())
+}
+
+fn pg_row_try_optional_text(row: &Row, idx: usize) -> Option<String> {
+    if let Ok(value) = row.try_get::<_, Option<String>>(idx) {
+        return value.filter(|value| !value.is_empty());
+    }
+    row.try_get::<_, PgRawBytes>(idx)
+        .ok()
+        .and_then(|value| String::from_utf8(value.0).ok())
+        .filter(|value| !value.is_empty())
+}
+
+fn is_missing_opengauss_constraint_column(error: &tokio_postgres::Error, column: &str) -> bool {
+    error.as_db_error().is_some_and(|db_error| {
+        db_error.code().code() == "42703" && db_error.message().to_ascii_lowercase().contains(column)
+    })
+}
+
+fn postgres_constraints_sql() -> &'static str {
+    "SELECT con.conname, \
+            con.contype::text, \
+            pg_catalog.pg_get_constraintdef(con.oid, true) AS definition, \
+            COALESCE(conkey.attnames, ARRAY[]::text[]) AS columns, \
+            refn.nspname AS ref_schema, \
+            refc.relname AS ref_table, \
+            COALESCE(confkey.attnames, ARRAY[]::text[]) AS ref_columns, \
+            CASE WHEN con.contype = 'f' THEN con.confmatchtype::text END AS match_type, \
+            CASE WHEN con.contype = 'f' THEN con.confupdtype::text END AS on_update, \
+            CASE WHEN con.contype = 'f' THEN con.confdeltype::text END AS on_delete, \
+            con.condeferrable, \
+            con.condeferred, \
+            con.convalidated \
+     FROM pg_catalog.pg_constraint con \
+     JOIN pg_catalog.pg_class c ON c.oid = con.conrelid \
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     LEFT JOIN pg_catalog.pg_class refc ON refc.oid = con.confrelid \
+     LEFT JOIN pg_catalog.pg_namespace refn ON refn.oid = refc.relnamespace \
+     LEFT JOIN LATERAL ( \
+         SELECT array_agg(a.attname::text ORDER BY ord.ord) AS attnames \
+         FROM unnest(con.conkey) WITH ORDINALITY AS ord(attnum, ord) \
+         JOIN pg_catalog.pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = ord.attnum AND NOT a.attisdropped \
+     ) conkey ON true \
+     LEFT JOIN LATERAL ( \
+         SELECT array_agg(a.attname::text ORDER BY ord.ord) AS attnames \
+         FROM unnest(con.confkey) WITH ORDINALITY AS ord(attnum, ord) \
+         JOIN pg_catalog.pg_attribute a ON a.attrelid = con.confrelid AND a.attnum = ord.attnum AND NOT a.attisdropped \
+     ) confkey ON true \
+     WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r','p','f') \
+     ORDER BY con.conname"
+}
+
+/// Expand a `pg_constraint.contype` letter to a human-readable label.
+fn postgres_constraint_type_label(contype: &str) -> String {
+    match contype {
+        "c" => "CHECK".to_string(),
+        "f" => "FOREIGN KEY".to_string(),
+        "p" => "PRIMARY KEY".to_string(),
+        "u" => "UNIQUE".to_string(),
+        "t" => "CONSTRAINT TRIGGER".to_string(),
+        "x" => "EXCLUDE".to_string(),
+        "n" => "NOT NULL".to_string(),
+        _ => contype.to_string(),
+    }
+}
+
+/// Normalize a `confupdtype`/`confdeltype` letter to an `information_schema`
+/// style referential-action label, mirroring `postgres_foreign_key_action`.
+fn postgres_fk_action_label(action: Option<String>) -> Option<String> {
+    action
+        .as_deref()
+        .and_then(|value| match value {
+            "a" => Some("NO ACTION"),
+            "r" => Some("RESTRICT"),
+            "c" => Some("CASCADE"),
+            "n" => Some("SET NULL"),
+            "d" => Some("SET DEFAULT"),
+            _ => None,
+        })
+        .map(str::to_string)
+}
+
+/// Normalize a `confmatchtype` letter to a match-type label.
+fn postgres_constraint_match_type(match_type: Option<String>) -> Option<String> {
+    match_type
+        .as_deref()
+        .and_then(|value| match value {
+            "f" => Some("FULL"),
+            "p" => Some("PARTIAL"),
+            "s" | "u" => Some("SIMPLE"),
+            _ => None,
+        })
+        .map(str::to_string)
+}
+
 fn postgres_table_partition_relation_sql() -> &'static str {
     "SELECT c.relkind::text, \
             EXISTS ( \
@@ -5867,6 +6143,16 @@ pub(crate) enum PostgresSearchPathContext {
     LocalQueryTransaction,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PostgresSearchPathBaseline {
+    configured: String,
+    first_resolved_schema: Option<String>,
+    has_explicit_pg_catalog: bool,
+}
+
+type PostgresSearchPathBaselineEntry = (Weak<deadpool_postgres::StatementCache>, PostgresSearchPathBaseline);
+type PostgresSearchPathBaselineCache = Mutex<HashMap<usize, PostgresSearchPathBaselineEntry>>;
+
 pub(crate) fn postgres_set_search_path_sql(schema: &str, context: PostgresSearchPathContext) -> String {
     let (scope, suffix) = match context {
         // Ordinary queries and exports historically fall back to public for
@@ -5881,8 +6167,46 @@ pub(crate) fn postgres_set_search_path_sql(schema: &str, context: PostgresSearch
 }
 
 fn postgres_set_single_schema_search_path_sql(schema: &str, context: PostgresSearchPathContext) -> String {
-    let scope = if context == PostgresSearchPathContext::LocalTransaction { " LOCAL" } else { "" };
+    let scope = if matches!(
+        context,
+        PostgresSearchPathContext::LocalTransaction | PostgresSearchPathContext::LocalQueryTransaction
+    ) {
+        " LOCAL"
+    } else {
+        ""
+    };
     format!("SET{scope} search_path TO {}", pg_quote_ident(schema))
+}
+
+fn postgres_set_preserved_search_path_sql(
+    schema: &str,
+    context: PostgresSearchPathContext,
+    baseline: &PostgresSearchPathBaseline,
+) -> String {
+    let scope = if matches!(
+        context,
+        PostgresSearchPathContext::LocalTransaction | PostgresSearchPathContext::LocalQueryTransaction
+    ) {
+        " LOCAL"
+    } else {
+        ""
+    };
+    let configured = baseline.configured.trim();
+    let selected_schema = pg_quote_ident(schema);
+    let mut path = if baseline.first_resolved_schema.as_deref() == Some(schema) {
+        configured.to_string()
+    } else if configured.is_empty() {
+        selected_schema.clone()
+    } else {
+        format!("{selected_schema}, {configured}")
+    };
+    if path.is_empty() {
+        path = selected_schema;
+    }
+    if !baseline.has_explicit_pg_catalog {
+        path.push_str(", pg_catalog");
+    }
+    format!("SET{scope} search_path TO {path}")
 }
 
 fn postgres_requires_single_schema_search_path(error: &str) -> bool {
@@ -5915,6 +6239,61 @@ fn mark_postgres_client_single_schema_search_path(client: &deadpool_postgres::Cl
     clients.insert(key, Arc::downgrade(statement_cache));
 }
 
+fn postgres_search_path_baselines() -> &'static PostgresSearchPathBaselineCache {
+    static BASELINES: OnceLock<PostgresSearchPathBaselineCache> = OnceLock::new();
+    BASELINES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cached_postgres_search_path_baseline(client: &deadpool_postgres::Client) -> Option<PostgresSearchPathBaseline> {
+    let statement_cache = &client.statement_cache;
+    let key = Arc::as_ptr(statement_cache) as usize;
+    let mut baselines = postgres_search_path_baselines().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    match baselines.get(&key) {
+        Some((cached, baseline)) if cached.upgrade().is_some_and(|cached| Arc::ptr_eq(&cached, statement_cache)) => {
+            Some(baseline.clone())
+        }
+        _ => {
+            baselines.remove(&key);
+            None
+        }
+    }
+}
+
+fn cache_postgres_search_path_baseline(client: &deadpool_postgres::Client, baseline: PostgresSearchPathBaseline) {
+    let statement_cache = &client.statement_cache;
+    let key = Arc::as_ptr(statement_cache) as usize;
+    let mut baselines = postgres_search_path_baselines().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    baselines.retain(|_, (cached, _)| cached.strong_count() > 0);
+    baselines.insert(key, (Arc::downgrade(statement_cache), baseline));
+}
+
+async fn postgres_search_path_baseline(
+    client: &deadpool_postgres::Client,
+    timeout_duration: Duration,
+) -> Result<PostgresSearchPathBaseline, String> {
+    if let Some(baseline) = cached_postgres_search_path_baseline(client) {
+        return Ok(baseline);
+    }
+    let row = tokio::time::timeout(
+        timeout_duration,
+        client.query_one(
+            "SELECT current_setting('search_path'), (current_schemas(false))[1], \
+                    'pg_catalog' = ANY(current_schemas(false))",
+            &[],
+        ),
+    )
+    .await
+    .map_err(|_| format!("PostgreSQL schema.get timed out after {} seconds", timeout_duration.as_secs()))?
+    .map_err(pg_error_to_string)?;
+    let baseline = PostgresSearchPathBaseline {
+        configured: row.try_get(0).map_err(|error| error.to_string())?,
+        first_resolved_schema: row.try_get(1).map_err(|error| error.to_string())?,
+        has_explicit_pg_catalog: row.try_get(2).map_err(|error| error.to_string())?,
+    };
+    cache_postgres_search_path_baseline(client, baseline.clone());
+    Ok(baseline)
+}
+
 pub(crate) async fn set_postgres_search_path(
     client: &deadpool_postgres::Client,
     schema: &str,
@@ -5931,7 +6310,13 @@ pub(crate) async fn set_postgres_search_path(
         .await;
     }
 
-    let primary_sql = postgres_set_search_path_sql(schema, context);
+    let primary_sql = match postgres_search_path_baseline(client, timeout_duration).await {
+        Ok(baseline) => postgres_set_preserved_search_path_sql(schema, context, &baseline),
+        Err(error) => {
+            log::warn!("[postgres][schema.get:error] schema={schema} error={error}; using compatibility fallback");
+            postgres_set_search_path_sql(schema, context)
+        }
+    };
     match execute_postgres_infra_statement(client, &primary_sql, timeout_duration, "schema.set").await {
         Ok(affected) => Ok(affected),
         Err(primary_error) if postgres_requires_single_schema_search_path(&primary_error) => {
@@ -5956,27 +6341,60 @@ fn query_result_row_limit(max_rows: Option<usize>) -> usize {
     max_rows.unwrap_or(crate::query::MAX_ROWS).max(1)
 }
 
+/// Returns whether a parsed DML statement produces a result set, or `None` when
+/// the statement is not DML.
+fn postgres_dml_statement_returns_rows(statement: &Statement) -> Option<bool> {
+    match statement {
+        Statement::Insert(insert) => Some(insert.returning.is_some()),
+        Statement::Update(update) => Some(update.returning.is_some()),
+        Statement::Delete(delete) => Some(delete.returning.is_some()),
+        Statement::Merge(merge) => Some(merge.output.is_some()),
+        _ => None,
+    }
+}
+
+/// `WITH cte AS (...) UPDATE ...` parses as a query whose body is the wrapped
+/// DML statement; returns that statement so its `RETURNING` clause can decide.
+fn postgres_query_body_dml(body: &SetExpr) -> Option<&Statement> {
+    match body {
+        SetExpr::Insert(statement)
+        | SetExpr::Update(statement)
+        | SetExpr::Delete(statement)
+        | SetExpr::Merge(statement) => Some(statement),
+        _ => None,
+    }
+}
+
 /// Returns whether PostgreSQL should execute this statement through the row
 /// retrieval path. DML without `RETURNING` needs `execute` for its command
 /// tag/affected-row count, while DML with `RETURNING` produces a result set.
 pub(crate) fn postgres_statement_returns_rows(sql: &str) -> bool {
-    if starts_with_executable_sql_keyword(sql, &["SELECT", "SHOW", "EXPLAIN", "WITH", "TABLE"]) {
+    if starts_with_executable_sql_keyword(sql, &["SELECT", "SHOW", "EXPLAIN", "TABLE"]) {
         return true;
     }
 
+    // A leading `WITH` is usually a CTE query, but PostgreSQL also allows a CTE
+    // to be followed directly by INSERT/UPDATE/DELETE/MERGE, which only returns
+    // rows with `RETURNING`. The prefix alone cannot decide, so parse it and
+    // keep the row-returning assumption whenever parsing does not say otherwise.
+    let leads_with_cte = starts_with_executable_sql_keyword(sql, &["WITH"]);
+
     let Ok(statements) = Parser::parse_sql(&PostgreSqlDialect {}, sql) else {
-        return false;
+        return leads_with_cte;
     };
     let [statement] = statements.as_slice() else {
-        return false;
+        return leads_with_cte;
     };
 
+    if let Some(returns_rows) = postgres_dml_statement_returns_rows(statement) {
+        return returns_rows;
+    }
+
     match statement {
-        Statement::Insert(insert) => insert.returning.is_some(),
-        Statement::Update(update) => update.returning.is_some(),
-        Statement::Delete(delete) => delete.returning.is_some(),
-        Statement::Merge(merge) => merge.output.is_some(),
-        _ => false,
+        Statement::Query(query) => {
+            postgres_query_body_dml(&query.body).and_then(postgres_dml_statement_returns_rows).unwrap_or(true)
+        }
+        _ => leads_with_cte,
     }
 }
 
@@ -6041,15 +6459,8 @@ pub async fn execute_query_with_max_rows_and_cancel(
     .await
 }
 
-fn postgres_read_only_transaction_setup(schema: Option<&str>) -> Vec<(String, &'static str)> {
-    let mut statements = vec![("BEGIN READ ONLY".to_string(), "explain_analyze.begin")];
-    if let Some(schema) = schema.map(str::trim).filter(|schema| !schema.is_empty()) {
-        statements.push((
-            postgres_set_search_path_sql(schema, PostgresSearchPathContext::LocalQueryTransaction),
-            "explain_analyze.schema",
-        ));
-    }
-    statements
+fn postgres_read_only_transaction_setup() -> Vec<(String, &'static str)> {
+    vec![("BEGIN READ ONLY".to_string(), "explain_analyze.begin")]
 }
 
 fn postgres_read_only_transaction_cleanup_error(error: String) -> String {
@@ -6095,12 +6506,21 @@ pub async fn execute_query_in_read_only_transaction_with_rollback(
     cancel_context: Option<PostgresCancelContext>,
 ) -> Result<QueryResult, String> {
     let client = checkout_postgres_client(pool, cancel_token.as_ref(), budget.checkout_timeout).await?;
-    let setup = postgres_read_only_transaction_setup(schema);
+    let setup = postgres_read_only_transaction_setup();
 
     run_postgres_operation_with_rollback(
         || async {
             for (statement, stage) in setup {
                 execute_postgres_infra_statement(&client, &statement, budget.recycle_timeout, stage).await?;
+            }
+            if let Some(schema) = schema.map(str::trim).filter(|schema| !schema.is_empty()) {
+                set_postgres_search_path(
+                    &client,
+                    schema,
+                    PostgresSearchPathContext::LocalQueryTransaction,
+                    budget.recycle_timeout,
+                )
+                .await?;
             }
 
             execute_postgres_user_query_with_mode(
@@ -8138,14 +8558,7 @@ mod tests {
     #[test]
     fn postgres_explain_analyze_uses_read_only_transaction_local_schema() {
         assert_eq!(
-            postgres_read_only_transaction_setup(Some("sales")),
-            vec![
-                ("BEGIN READ ONLY".to_string(), "explain_analyze.begin"),
-                ("SET LOCAL search_path TO \"sales\", pg_catalog, public".to_string(), "explain_analyze.schema"),
-            ]
-        );
-        assert_eq!(
-            postgres_read_only_transaction_setup(None),
+            postgres_read_only_transaction_setup(),
             vec![("BEGIN READ ONLY".to_string(), "explain_analyze.begin")]
         );
     }
@@ -8464,6 +8877,57 @@ mod tests {
             ),
             "SET LOCAL search_path TO \"tenant\"\"; RESET search_path; --\""
         );
+        assert_eq!(
+            postgres_set_single_schema_search_path_sql("application", PostgresSearchPathContext::LocalQueryTransaction),
+            "SET LOCAL search_path TO \"application\""
+        );
+    }
+
+    #[test]
+    fn postgres_search_path_keeps_the_configured_path_when_selected_schema_is_first() {
+        let baseline = PostgresSearchPathBaseline {
+            configured: "application, extensions, public".to_string(),
+            first_resolved_schema: Some("application".to_string()),
+            has_explicit_pg_catalog: false,
+        };
+        assert_eq!(
+            postgres_set_preserved_search_path_sql("application", PostgresSearchPathContext::Query, &baseline),
+            "SET search_path TO application, extensions, public, pg_catalog"
+        );
+    }
+
+    #[test]
+    fn postgres_search_path_prepends_selected_schema_without_dropping_configured_items() {
+        let baseline = PostgresSearchPathBaseline {
+            configured: "\"$user\", extensions, public".to_string(),
+            first_resolved_schema: Some("public".to_string()),
+            has_explicit_pg_catalog: false,
+        };
+        assert_eq!(
+            postgres_set_preserved_search_path_sql("application", PostgresSearchPathContext::Query, &baseline),
+            "SET search_path TO \"application\", \"$user\", extensions, public, pg_catalog"
+        );
+        assert_eq!(
+            postgres_set_preserved_search_path_sql(
+                "application",
+                PostgresSearchPathContext::LocalQueryTransaction,
+                &baseline,
+            ),
+            "SET LOCAL search_path TO \"application\", \"$user\", extensions, public, pg_catalog"
+        );
+    }
+
+    #[test]
+    fn postgres_search_path_keeps_explicit_pg_catalog_position() {
+        let baseline = PostgresSearchPathBaseline {
+            configured: "extensions, pg_catalog, public".to_string(),
+            first_resolved_schema: Some("extensions".to_string()),
+            has_explicit_pg_catalog: true,
+        };
+        assert_eq!(
+            postgres_set_preserved_search_path_sql("application", PostgresSearchPathContext::Query, &baseline),
+            "SET search_path TO \"application\", extensions, pg_catalog, public"
+        );
     }
 
     #[test]
@@ -8492,6 +8956,47 @@ mod tests {
             "DELETE FROM users WHERE id = 1",
             "MERGE INTO users AS target USING updates AS source ON target.id = source.id WHEN MATCHED THEN UPDATE SET name = source.name",
             "INSERT INTO users (note) VALUES ('RETURNING is text')",
+        ] {
+            assert!(!postgres_statement_returns_rows(sql), "expected command result for: {sql}");
+        }
+    }
+
+    #[test]
+    fn cte_wrapped_dml_parses_as_query_body() {
+        let statements = Parser::parse_sql(
+            &PostgreSqlDialect {},
+            "WITH cte AS (SELECT id FROM t) UPDATE t SET x = 1 WHERE id IN (SELECT id FROM cte)",
+        )
+        .expect("CTE-wrapped UPDATE should parse");
+        let [Statement::Query(query)] = statements.as_slice() else {
+            panic!("expected a single Statement::Query, got: {statements:?}");
+        };
+        assert!(query.with.is_some(), "expected the CTE to be attached to the query");
+        assert!(
+            matches!(postgres_query_body_dml(&query.body), Some(Statement::Update(_))),
+            "expected an UPDATE body, got: {:?}",
+            query.body
+        );
+    }
+
+    #[test]
+    fn postgres_statement_returns_rows_for_cte_wrapped_dml() {
+        for sql in [
+            "WITH cte AS (SELECT id FROM t) SELECT * FROM cte",
+            "WITH cte AS (SELECT id FROM t) UPDATE t SET x = 1 WHERE id IN (SELECT id FROM cte) RETURNING id",
+            "WITH cte AS (SELECT id FROM t) DELETE FROM t WHERE id IN (SELECT id FROM cte) RETURNING id",
+            "WITH cte AS (SELECT id FROM t) INSERT INTO u (id) SELECT id FROM cte RETURNING id",
+            // Not parseable by sqlparser: keep assuming a CTE query returns rows.
+            "WITH RECURSIVE cte AS MATERIALIZED (SELECT 1) SELECT * FROM cte",
+        ] {
+            assert!(postgres_statement_returns_rows(sql), "expected result rows for: {sql}");
+        }
+
+        for sql in [
+            "WITH cte AS (SELECT id FROM t) UPDATE t SET x = 1 WHERE id IN (SELECT id FROM cte)",
+            "WITH cte AS (SELECT id FROM t) DELETE FROM t WHERE id IN (SELECT id FROM cte)",
+            "WITH cte AS (SELECT id FROM t) INSERT INTO u (id) SELECT id FROM cte",
+            "  with cte as (select id from t)\n  update t set x = 1 where id in (select id from cte)  ",
         ] {
             assert!(!postgres_statement_returns_rows(sql), "expected command result for: {sql}");
         }
@@ -10163,6 +10668,82 @@ mod tests {
     }
 
     #[test]
+    fn postgres_constraints_sql_covers_all_contypes_and_referential_fields() {
+        let sql = postgres_constraints_sql();
+        assert!(sql.contains("con.contype::text"));
+        assert!(sql.contains("pg_catalog.pg_get_constraintdef(con.oid, true)"));
+        // FK-only referential columns are conditionally selected.
+        assert!(sql.contains("CASE WHEN con.contype = 'f' THEN con.confmatchtype::text END"));
+        assert!(sql.contains("CASE WHEN con.contype = 'f' THEN con.confupdtype::text END"));
+        assert!(sql.contains("CASE WHEN con.contype = 'f' THEN con.confdeltype::text END"));
+        // conkey/confkey attribute numbers are resolved to names via laterals.
+        assert!(sql.contains("unnest(con.conkey) WITH ORDINALITY"));
+        assert!(sql.contains("unnest(con.confkey) WITH ORDINALITY"));
+        // attname (pg_attribute type `name`) is explicitly cast to text so the
+        // array decodes as text[] (matching the COALESCE fallback and Vec<String>).
+        assert!(sql.contains("array_agg(a.attname::text ORDER BY ord.ord)"));
+        assert_eq!(sql.matches("attname::text").count(), 2);
+        assert!(sql.contains("a.attisdropped"));
+        assert!(sql.contains("n.nspname = $1 AND c.relname = $2"));
+        assert!(sql.contains("c.relkind IN ('r','p','f')"));
+        assert!(sql.contains("ORDER BY con.conname"));
+    }
+
+    #[test]
+    fn opengauss_constraint_sql_avoids_array_and_ordinality_dependencies() {
+        let sql = opengauss_constraints_sql(true);
+        assert!(sql.contains("con.conkey::text"));
+        assert!(sql.contains("con.confkey::text"));
+        assert!(sql.contains("con.conrelid::oid"));
+        assert!(sql.contains("con.confrelid::oid"));
+        assert!(!sql.contains("unnest("));
+        assert!(!sql.contains("WITH ORDINALITY"));
+        assert!(!sql.contains("LATERAL"));
+    }
+
+    #[test]
+    fn opengauss_constraint_sql_falls_back_without_convalidated() {
+        let sql = opengauss_constraints_sql(false);
+        assert!(sql.contains("TRUE"));
+        assert!(!sql.contains("con.convalidated"));
+    }
+
+    #[test]
+    fn opengauss_constraint_attribute_vectors_are_strict() {
+        assert_eq!(parse_opengauss_attribute_numbers("1 2 4").unwrap(), vec![1, 2, 4]);
+        assert_eq!(parse_opengauss_attribute_numbers("{3,2}").unwrap(), vec![3, 2]);
+        assert_eq!(parse_opengauss_attribute_numbers("[4, 5]").unwrap(), vec![4, 5]);
+        assert!(parse_opengauss_attribute_numbers("1 bad 3").is_err());
+    }
+
+    #[test]
+    fn postgres_constraint_type_label_expands_contype_letters() {
+        assert_eq!(postgres_constraint_type_label("p"), "PRIMARY KEY");
+        assert_eq!(postgres_constraint_type_label("f"), "FOREIGN KEY");
+        assert_eq!(postgres_constraint_type_label("u"), "UNIQUE");
+        assert_eq!(postgres_constraint_type_label("c"), "CHECK");
+        assert_eq!(postgres_constraint_type_label("x"), "EXCLUDE");
+        assert_eq!(postgres_constraint_type_label("n"), "NOT NULL");
+        assert_eq!(postgres_constraint_type_label("unknown"), "unknown");
+    }
+
+    #[test]
+    fn postgres_fk_action_label_and_match_type_normalize_letters() {
+        assert_eq!(postgres_fk_action_label(Some("c".to_string())).as_deref(), Some("CASCADE"));
+        assert_eq!(postgres_fk_action_label(Some("n".to_string())).as_deref(), Some("SET NULL"));
+        assert_eq!(postgres_fk_action_label(Some("d".to_string())).as_deref(), Some("SET DEFAULT"));
+        assert_eq!(postgres_fk_action_label(Some("a".to_string())).as_deref(), Some("NO ACTION"));
+        assert_eq!(postgres_fk_action_label(Some("r".to_string())).as_deref(), Some("RESTRICT"));
+        assert_eq!(postgres_fk_action_label(Some("zz".to_string())), None);
+        assert_eq!(postgres_fk_action_label(None), None);
+        assert_eq!(postgres_constraint_match_type(Some("f".to_string())).as_deref(), Some("FULL"));
+        assert_eq!(postgres_constraint_match_type(Some("s".to_string())).as_deref(), Some("SIMPLE"));
+        assert_eq!(postgres_constraint_match_type(Some("u".to_string())).as_deref(), Some("SIMPLE"));
+        assert_eq!(postgres_constraint_match_type(Some("p".to_string())).as_deref(), Some("PARTIAL"));
+        assert_eq!(postgres_constraint_match_type(Some("zz".to_string())), None);
+    }
+
+    #[test]
     fn postgres_column_metadata_reads_identity_extra() {
         assert!(POSTGRES_COLUMNS_SQL.contains("a.attidentity"));
         assert!(POSTGRES_COLUMNS_SQL.contains("pg_sequence"));
@@ -11241,8 +11822,36 @@ mod tests {
         drop(client);
 
         let query_sql = format!("SELECT marker, {helper_ident}() AS helper FROM pg_settings");
+        let stale_session_recovery = async {
+            let client = pool.get().await.map_err(|error| error.to_string())?;
+            set_postgres_search_path(&client, &schema, PostgresSearchPathContext::Query, Duration::from_secs(5))
+                .await?;
+            client.execute("SET search_path TO public", &[]).await.map_err(pg_error_to_string)?;
+            set_postgres_search_path(&client, &schema, PostgresSearchPathContext::Query, Duration::from_secs(5))
+                .await?;
+            let selected: String = client
+                .query_one("SELECT marker FROM pg_settings", &[])
+                .await
+                .map_err(pg_error_to_string)?
+                .try_get(0)
+                .map_err(pg_error_to_string)?;
+            client.execute("RESET search_path", &[]).await.map_err(pg_error_to_string)?;
+            Ok::<_, String>(selected)
+        }
+        .await;
         let ordinary_result = execute_query_with_schema(&pool, &schema, &query_sql).await;
         let path_after_ordinary = execute_query(&pool, "SHOW search_path").await;
+        let read_only_result = execute_query_in_read_only_transaction_with_rollback(
+            &pool,
+            Some(&schema),
+            &query_sql,
+            None,
+            None,
+            DbOperationBudget::with_defaults(),
+            None,
+        )
+        .await;
+        let path_after_read_only = execute_query(&pool, "SHOW search_path").await;
 
         let mut streamed_rows = Vec::new();
         let streaming_result = stream_select_query_with_cancel(
@@ -11313,11 +11922,17 @@ mod tests {
             .expect("clean search_path fixtures");
 
         let ordinary = ordinary_result.expect("ordinary schema query");
+        assert_eq!(stale_session_recovery.expect("recover stale session search_path"), "selected-schema");
         assert_eq!(
             ordinary.rows,
             vec![vec![serde_json::json!("selected-schema"), serde_json::json!("public-fallback")]]
         );
         assert_eq!(path_after_ordinary.expect("path after ordinary query").rows, initial_path.rows);
+        assert_eq!(
+            read_only_result.expect("read-only schema query").rows,
+            vec![vec![serde_json::json!("selected-schema"), serde_json::json!("public-fallback")]]
+        );
+        assert_eq!(path_after_read_only.expect("path after read-only query").rows, initial_path.rows);
         assert_eq!(streaming_result.expect("streaming schema query"), 1);
         assert_eq!(
             streamed_rows,

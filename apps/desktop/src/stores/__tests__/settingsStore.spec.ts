@@ -184,6 +184,12 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ sqlSemanticDiagnosticsEnabled: false } as any).sqlSemanticDiagnosticsMode).toBe("disabled");
   });
 
+  it("defaults the transaction commit mode to auto and preserves manual", () => {
+    expect(normalizeEditorSettings({}).defaultTransactionMode).toBe("auto");
+    expect(normalizeEditorSettings({ defaultTransactionMode: "manual" }).defaultTransactionMode).toBe("manual");
+    expect(normalizeEditorSettings({ defaultTransactionMode: "bogus" } as any).defaultTransactionMode).toBe("auto");
+  });
+
   it("defaults update downloads to the official source", () => {
     expect(normalizeEditorSettings({}).updateDownloadSource).toBe("official");
   });
@@ -270,6 +276,12 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ resultRunDisplayMode: "invalid" as any }).resultRunDisplayMode).toBe("tabs");
   });
 
+  it("defaults multi-statement execution to the result table and preserves the summary option", () => {
+    expect(normalizeEditorSettings({}).multiStatementDefaultView).toBe("result");
+    expect(normalizeEditorSettings({ multiStatementDefaultView: "summary" }).multiStatementDefaultView).toBe("summary");
+    expect(normalizeEditorSettings({ multiStatementDefaultView: "invalid" as any }).multiStatementDefaultView).toBe("result");
+  });
+
   it("defaults persistent data grid view options off and preserves enabled values", () => {
     const defaults = normalizeEditorSettings({});
     expect(defaults.dataGridMultiRowTranspose).toBe(false);
@@ -302,6 +314,16 @@ describe("normalizeEditorSettings", () => {
 
     for (const invalidValue of [0, 1, "false", null]) {
       expect(normalizeEditorSettings({ dataGridCellDetailButtonVisible: invalidValue as never }).dataGridCellDetailButtonVisible).toBe(true);
+    }
+  });
+
+  it("defaults the crosshair highlight off and preserves only boolean values", () => {
+    expect(normalizeEditorSettings({}).dataGridCrosshairHighlight).toBe(false);
+    expect(normalizeEditorSettings({ dataGridCrosshairHighlight: true }).dataGridCrosshairHighlight).toBe(true);
+    expect(normalizeEditorSettings({ dataGridCrosshairHighlight: false }).dataGridCrosshairHighlight).toBe(false);
+
+    for (const invalidValue of [0, 1, "true", null]) {
+      expect(normalizeEditorSettings({ dataGridCrosshairHighlight: invalidValue as never }).dataGridCrosshairHighlight).toBe(false);
     }
   });
 
@@ -778,6 +800,29 @@ describe("settingsStore persisted settings initialization", () => {
     const restartedStore = useSettingsStore();
     await restartedStore.initEditorSettings();
     expect(restartedStore.editorSettings.dataGridCellDetailButtonVisible).toBe(true);
+  });
+
+  it("defaults the crosshair highlight to off, persists an opt-in, and reloads it", async () => {
+    let persistedSettings: Record<string, unknown> = {};
+    const loadEditorSettings = vi.fn(async () => JSON.parse(JSON.stringify(persistedSettings)));
+    const saveEditorSettings = vi.fn(async (settings: Record<string, unknown>) => {
+      persistedSettings = JSON.parse(JSON.stringify(settings));
+    });
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+
+    expect(store.editorSettings.dataGridCrosshairHighlight).toBe(false);
+
+    await store.updateEditorSettingsAndPersist({ dataGridCrosshairHighlight: true });
+    expect(saveEditorSettings).toHaveBeenLastCalledWith(expect.objectContaining({ dataGridCrosshairHighlight: true }));
+
+    setActivePinia(createPinia());
+    const restartedStore = useSettingsStore();
+    await restartedStore.initEditorSettings();
+    expect(restartedStore.editorSettings.dataGridCrosshairHighlight).toBe(true);
   });
 
   it("loads, persists, and reloads hidden query editor line numbers", async () => {

@@ -51,6 +51,7 @@ import { HelpTooltip, Tooltip, TooltipContent, TooltipTrigger, TooltipProvider }
 import {
   useSettingsStore,
   AI_PROVIDER_PRESETS,
+  aiProviderLabel,
   EDITOR_THEMES,
   DEFAULT_EDITOR_SETTINGS,
   DEFAULT_DESKTOP_SETTINGS,
@@ -70,6 +71,7 @@ import {
   type DisconnectTabHandlingMode,
   type DataTabReuseMode,
   type DataGridFilterEditorView,
+  type MultiStatementDefaultView,
   type OpenTabsRestoreMode,
   type AppCloseUnsavedTabsMode,
   type SidebarObjectInfoMode,
@@ -153,8 +155,9 @@ import { isMcpPolicyMutationBlocked, MCP_CAPABILITY_ROWS, MCP_EXECUTION_MODE_COL
 import { isMacOS, isWindows } from "@/lib/backend/platform";
 import { combineDataTypeForDatabase, dataTypeLengthInputValue, getDataTypeOptions, getDefaultLengthForType, isDataTypeLengthDisabled, splitDataType } from "@/lib/table/tableStructureEditorState";
 import { useToast } from "@/composables/useToast";
-import type { DatabaseType, SqlSnippet } from "@/types/database";
+import type { DatabaseType, SqlShortcutAction, SqlSnippet } from "@/types/database";
 import { uuid } from "@/lib/common/utils";
+import { findSqlShortcutConflicts, hasSqlShortcutConflicts as sqlShortcutsHaveConflicts, SQL_SHORTCUT_TABLE_TOKEN } from "@/lib/sql/sqlShortcutActions";
 import { DEFAULT_SQL_SNIPPETS } from "@/lib/sql/sqlCompletion";
 import AiProviderLogo from "@/components/icons/AiProviderLogo.vue";
 import AppLogo from "@/components/icons/AppLogo.vue";
@@ -350,6 +353,7 @@ const editActiveDataGridTypeColorSchemeId = ref(settingsStore.editorSettings.act
 const showThemeCustomizer = ref(false);
 const showDataGridTypeColorScheme = ref(false);
 const editExecuteMode = ref(settingsStore.editorSettings.executeMode);
+const editDefaultTransactionMode = ref(settingsStore.editorSettings.defaultTransactionMode);
 const editShortcuts = ref(normalizeShortcutSettings(settingsStore.editorSettings.shortcuts));
 function translateWithExecuteShortcut(key: string): string {
   return t(key, { shortcut: formatShortcutDisplay(editShortcuts.value.executeSql) });
@@ -412,8 +416,10 @@ const editDataGridQuickEntry = ref(settingsStore.editorSettings.dataGridQuickEnt
 const editDataGridFilterEditorView = ref<DataGridFilterEditorView>(settingsStore.editorSettings.dataGridFilterEditorView);
 const dataGridFilterViewPreviewExpanded = ref(true);
 const editDataGridTextFilterPanelHeight = ref(settingsStore.editorSettings.dataGridTextFilterPanelHeight);
+const editMultiStatementDefaultView = ref<MultiStatementDefaultView>(settingsStore.editorSettings.multiStatementDefaultView);
 const editDataGridAutoTransposeSingleRow = ref(settingsStore.editorSettings.dataGridAutoTransposeSingleRow);
 const editDataGridCellDetailButtonVisible = ref(settingsStore.editorSettings.dataGridCellDetailButtonVisible);
+const editDataGridCrosshairHighlight = ref(settingsStore.editorSettings.dataGridCrosshairHighlight);
 const editPageSize = ref(settingsStore.editorSettings.pageSize);
 const editTableOpenPageSize = ref(settingsStore.editorSettings.tableOpenPageSize);
 const editQueryResultMaxRowsEnabled = ref(settingsStore.editorSettings.queryResultMaxRowsEnabled);
@@ -560,6 +566,12 @@ function editableSnippet(snippet: SqlSnippet): SqlSnippet {
 
 const editSnippets = ref<SqlSnippet[]>(settingsStore.editorSettings.snippets.map(editableSnippet));
 
+function editableSqlShortcut(action: SqlShortcutAction): SqlShortcutAction {
+  return { ...action, enabled: action.enabled !== false };
+}
+
+const editSqlShortcuts = ref<SqlShortcutAction[]>(settingsStore.editorSettings.sqlShortcuts.map(editableSqlShortcut));
+
 function currentEditorSettingsDraft(): EditorSettingsDraft {
   return {
     fontFamily: editFontFamily.value,
@@ -571,6 +583,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     customThemes: editCustomThemes.value,
     activeCustomThemeId: editActiveCustomThemeId.value,
     executeMode: editExecuteMode.value,
+    defaultTransactionMode: editDefaultTransactionMode.value,
     executeAllOnBlankLine: editExecuteAllOnBlankLine.value,
     showExecutionTargetPicker: editShowExecutionTargetPicker.value,
     showStatementRunButtons: editShowStatementRunButtons.value,
@@ -604,8 +617,10 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     dataGridQuickEntry: editDataGridQuickEntry.value,
     dataGridFilterEditorView: editDataGridFilterEditorView.value,
     dataGridTextFilterPanelHeight: editDataGridTextFilterPanelHeight.value,
+    multiStatementDefaultView: editMultiStatementDefaultView.value,
     dataGridAutoTransposeSingleRow: editDataGridAutoTransposeSingleRow.value,
     dataGridCellDetailButtonVisible: editDataGridCellDetailButtonVisible.value,
+    dataGridCrosshairHighlight: editDataGridCrosshairHighlight.value,
     flatteningMultiLineText: editFlatteningMultiLineText.value,
     pageSize: editPageSize.value,
     tableOpenPageSize: editTableOpenPageSize.value,
@@ -647,6 +662,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     updateDownloadSource: editUpdateDownloadSource.value,
     toolbarItems: { ...editToolbarItems.value },
     snippets: editSnippets.value,
+    sqlShortcuts: editSqlShortcuts.value,
     sqlVariableSubstitutionEnabled: editSqlVariableSubstitutionEnabled.value,
     sqlVariableSyntaxOverrides: editSqlVariableSyntaxOverrides.value,
     clickTableNavigationTarget: editClickTableNavigationTarget.value,
@@ -660,6 +676,12 @@ const snippetDialogOpen = ref(false);
 const snippetEditingId = ref<string | null>(null);
 const snippetForm = ref({ label: "", prefix: "", body: "" });
 const snippetFormPrefixError = ref("");
+
+const sqlShortcutDialogOpen = ref(false);
+const sqlShortcutEditingId = ref<string | null>(null);
+const sqlShortcutForm = ref({ label: "", shortcut: "", sql: "" });
+const sqlShortcutFormLabelError = ref("");
+const editingSqlShortcutInputId = ref<string | null>(null);
 const iconThemeBlackDescriptionText = computed(() => (isMacOS() ? t("settings.iconThemeBlackDescriptionMac") : t("settings.iconThemeBlackDescription")));
 const layoutDescTruncated = {
   separated: ref<boolean>(false),
@@ -787,6 +809,127 @@ function confirmDeleteSnippet(snippet: SqlSnippet) {
   }
 }
 
+function openAddSqlShortcutDialog() {
+  sqlShortcutEditingId.value = null;
+  sqlShortcutForm.value = { label: "", shortcut: "", sql: `SELECT * FROM ${SQL_SHORTCUT_TABLE_TOKEN}` };
+  sqlShortcutFormLabelError.value = "";
+  editingSqlShortcutInputId.value = null;
+  sqlShortcutDialogOpen.value = true;
+}
+
+function openEditSqlShortcutDialog(action: SqlShortcutAction) {
+  sqlShortcutEditingId.value = action.id;
+  sqlShortcutForm.value = {
+    label: action.label,
+    shortcut: action.shortcut,
+    sql: action.sql,
+  };
+  sqlShortcutFormLabelError.value = "";
+  editingSqlShortcutInputId.value = null;
+  sqlShortcutDialogOpen.value = true;
+}
+
+function saveSqlShortcut() {
+  const label = sqlShortcutForm.value.label.trim();
+  if (!label) {
+    sqlShortcutFormLabelError.value = t("settings.sqlShortcutsLabelRequired");
+    return;
+  }
+  const payload: SqlShortcutAction = {
+    id: sqlShortcutEditingId.value ?? uuid(),
+    label,
+    shortcut: sqlShortcutForm.value.shortcut.trim(),
+    sql: sqlShortcutForm.value.sql,
+    enabled: true,
+  };
+  const nextShortcuts = sqlShortcutEditingId.value
+    ? editSqlShortcuts.value.map((item) =>
+        item.id === sqlShortcutEditingId.value
+          ? {
+              ...payload,
+              enabled: item.enabled !== false,
+            }
+          : item,
+      )
+    : [...editSqlShortcuts.value, payload];
+  if (sqlShortcutsHaveConflicts(nextShortcuts, editShortcuts.value)) {
+    toast(t("settings.shortcutConflict"), 3000);
+    return;
+  }
+  editSqlShortcuts.value = nextShortcuts;
+  sqlShortcutDialogOpen.value = false;
+  void commitSqlShortcuts();
+}
+
+function setSqlShortcutEnabled(id: string, enabled: boolean) {
+  const idx = editSqlShortcuts.value.findIndex((item) => item.id === id);
+  if (idx === -1) return;
+  if (enabled) {
+    const next = editSqlShortcuts.value.map((item) => (item.id === id ? { ...item, enabled } : item));
+    if (sqlShortcutsHaveConflicts(next, editShortcuts.value)) {
+      toast(t("settings.shortcutConflict"), 3000);
+      return;
+    }
+  }
+  editSqlShortcuts.value[idx] = { ...editSqlShortcuts.value[idx], enabled };
+  void commitSqlShortcuts();
+}
+
+function deleteSqlShortcut(id: string) {
+  editSqlShortcuts.value = editSqlShortcuts.value.filter((item) => item.id !== id);
+  void commitSqlShortcuts();
+}
+
+function confirmDeleteSqlShortcut(action: SqlShortcutAction) {
+  if (window.confirm(t("settings.sqlShortcutsDeleteConfirm", { name: action.label }))) {
+    deleteSqlShortcut(action.id);
+  }
+}
+
+function onSqlShortcutBindingKeydown(id: string, event: KeyboardEvent) {
+  event.preventDefault();
+  event.stopPropagation();
+  if (editingSqlShortcutInputId.value !== id) return;
+  if (event.key === "Escape") {
+    editingSqlShortcutInputId.value = null;
+    return;
+  }
+  const shortcut = eventToShortcut(event);
+  if (!shortcut) return;
+  sqlShortcutForm.value = { ...sqlShortcutForm.value, shortcut };
+  editingSqlShortcutInputId.value = null;
+}
+
+function focusSqlShortcutInput(id: string) {
+  editingSqlShortcutInputId.value = id;
+  const input = document.querySelector<HTMLInputElement>(`[data-sql-shortcut-input="${id}"]`);
+  requestAnimationFrame(() => {
+    input?.focus();
+    input?.select();
+  });
+}
+
+function cancelSqlShortcutInputEdit() {
+  editingSqlShortcutInputId.value = null;
+}
+
+function clearSqlShortcutBinding() {
+  sqlShortcutForm.value = { ...sqlShortcutForm.value, shortcut: "" };
+}
+
+async function commitSqlShortcuts() {
+  const sqlShortcuts = editSqlShortcuts.value.map(editableSqlShortcut);
+  try {
+    await settingsStore.updateEditorSettingsAndPersist({ sqlShortcuts });
+    editEditorSettingsBase.value = {
+      ...editEditorSettingsBase.value,
+      sqlShortcuts: JSON.parse(JSON.stringify(sqlShortcuts)) as SqlShortcutAction[],
+    };
+  } catch (error) {
+    applySettingsErrorToast(error);
+  }
+}
+
 const uiFontPreviewValues = new Set([DEFAULT_UI_FONT_FAMILY, SYSTEM_UI_FONT_FAMILY]);
 
 const systemFontOptions = computed(() => {
@@ -834,6 +977,7 @@ function syncEditorSettingsDraftFromStore() {
   editCustomThemes.value = [...settingsStore.editorSettings.customThemes];
   editActiveCustomThemeId.value = settingsStore.editorSettings.activeCustomThemeId;
   editExecuteMode.value = settingsStore.editorSettings.executeMode;
+  editDefaultTransactionMode.value = settingsStore.editorSettings.defaultTransactionMode;
   editExecuteAllOnBlankLine.value = settingsStore.editorSettings.executeAllOnBlankLine;
   editShowExecutionTargetPicker.value = settingsStore.editorSettings.showExecutionTargetPicker;
   editShowStatementRunButtons.value = settingsStore.editorSettings.showStatementRunButtons;
@@ -868,8 +1012,10 @@ function syncEditorSettingsDraftFromStore() {
   editDataGridQuickEntry.value = settingsStore.editorSettings.dataGridQuickEntry;
   editDataGridFilterEditorView.value = settingsStore.editorSettings.dataGridFilterEditorView;
   editDataGridTextFilterPanelHeight.value = settingsStore.editorSettings.dataGridTextFilterPanelHeight;
+  editMultiStatementDefaultView.value = settingsStore.editorSettings.multiStatementDefaultView;
   editDataGridAutoTransposeSingleRow.value = settingsStore.editorSettings.dataGridAutoTransposeSingleRow;
   editDataGridCellDetailButtonVisible.value = settingsStore.editorSettings.dataGridCellDetailButtonVisible;
+  editDataGridCrosshairHighlight.value = settingsStore.editorSettings.dataGridCrosshairHighlight;
   editFlatteningMultiLineText.value = settingsStore.editorSettings.flatteningMultiLineText;
   editPageSize.value = settingsStore.editorSettings.pageSize;
   editTableOpenPageSize.value = settingsStore.editorSettings.tableOpenPageSize;
@@ -913,6 +1059,7 @@ function syncEditorSettingsDraftFromStore() {
   editUpdateDownloadSource.value = settingsStore.editorSettings.updateDownloadSource;
   editToolbarItems.value = { ...settingsStore.editorSettings.toolbarItems };
   editSnippets.value = settingsStore.editorSettings.snippets.map(editableSnippet);
+  editSqlShortcuts.value = settingsStore.editorSettings.sqlShortcuts.map(editableSqlShortcut);
   editSqlVariableSubstitutionEnabled.value = settingsStore.editorSettings.sqlVariableSubstitutionEnabled;
   editSqlVariableSyntaxOverrides.value = normalizeSqlVariableSyntaxOverrides(settingsStore.editorSettings.sqlVariableSyntaxOverrides);
   editClickTableNavigationTarget.value = settingsStore.editorSettings.clickTableNavigationTarget;
@@ -953,6 +1100,8 @@ const shortcutConflicts = computed(() =>
     return conflict ? [definition.id] : [];
   }),
 );
+const sqlShortcutConflicts = computed(() => findSqlShortcutConflicts(editSqlShortcuts.value, editShortcuts.value));
+const hasSqlShortcutConflicts = computed(() => sqlShortcutConflicts.value.length > 0);
 const shortcutSearchQuery = ref("");
 const formatterEditorShortcutIds: ShortcutActionId[] = [
   "formatSql",
@@ -990,8 +1139,13 @@ const filteredShortcutDefinitions = computed(() => {
 });
 const hasShortcutConflicts = computed(() => shortcutConflicts.value.length > 0);
 const shortcutsChanged = computed(() => JSON.stringify(editShortcuts.value) !== JSON.stringify(editEditorSettingsBase.value.shortcuts));
+const sqlShortcutsChanged = computed(() => JSON.stringify(editSqlShortcuts.value) !== JSON.stringify(editEditorSettingsBase.value.sqlShortcuts));
 const duckDbWorkerSettingsRequireRestart = computed(() => editDuckDbWorkerProcessIsolation.value !== startupDuckDbWorkerProcessIsolation.value || normalizeDuckDbWorkerMaxProcesses(editDuckDbWorkerMaxProcesses.value) !== startupDuckDbWorkerMaxProcesses.value);
-const hasBlockingShortcutConflicts = computed(() => shortcutsChanged.value && hasShortcutConflicts.value);
+const hasBlockingShortcutConflicts = computed(() => {
+  const shortcutDraftTouched = shortcutsChanged.value || sqlShortcutsChanged.value;
+  if (!shortcutDraftTouched) return false;
+  return hasShortcutConflicts.value || hasSqlShortcutConflicts.value;
+});
 const hasBlockingFormatterConfig = computed(() => activeSettingsTab.value === "formatter" && !sqlFormatterConfigValid.value);
 const hasBlockingQueryResultRowLimit = computed(() => editQueryResultMaxRowsEnabled.value && editQueryResultMaxRows.value < editPageSize.value);
 const hasApplyBlocker = computed(() => hasBlockingShortcutConflicts.value || hasBlockingFormatterConfig.value || hasBlockingQueryResultRowLimit.value);
@@ -1090,6 +1244,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editFontFamily.value = DEFAULT_EDITOR_SETTINGS.fontFamily;
     editFontSize.value = DEFAULT_EDITOR_SETTINGS.fontSize;
     editExecuteMode.value = DEFAULT_EDITOR_SETTINGS.executeMode;
+    editDefaultTransactionMode.value = DEFAULT_EDITOR_SETTINGS.defaultTransactionMode;
     editExecuteAllOnBlankLine.value = DEFAULT_EDITOR_SETTINGS.executeAllOnBlankLine;
     editShowExecutionTargetPicker.value = DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker;
     editShowStatementRunButtons.value = DEFAULT_EDITOR_SETTINGS.showStatementRunButtons;
@@ -1167,8 +1322,10 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editDataGridQuickEntry.value = DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry;
     editDataGridFilterEditorView.value = DEFAULT_EDITOR_SETTINGS.dataGridFilterEditorView;
     editDataGridTextFilterPanelHeight.value = DEFAULT_EDITOR_SETTINGS.dataGridTextFilterPanelHeight;
+    editMultiStatementDefaultView.value = DEFAULT_EDITOR_SETTINGS.multiStatementDefaultView;
     editDataGridAutoTransposeSingleRow.value = DEFAULT_EDITOR_SETTINGS.dataGridAutoTransposeSingleRow;
     editDataGridCellDetailButtonVisible.value = DEFAULT_EDITOR_SETTINGS.dataGridCellDetailButtonVisible;
+    editDataGridCrosshairHighlight.value = DEFAULT_EDITOR_SETTINGS.dataGridCrosshairHighlight;
     editFlatteningMultiLineText.value = DEFAULT_EDITOR_SETTINGS.flatteningMultiLineText;
     editPageSize.value = DEFAULT_EDITOR_SETTINGS.pageSize;
     editTableOpenPageSize.value = DEFAULT_EDITOR_SETTINGS.tableOpenPageSize;
@@ -1207,6 +1364,7 @@ function resetAllDefaults() {
   editCustomThemes.value = [...DEFAULT_EDITOR_SETTINGS.customThemes];
   editActiveCustomThemeId.value = DEFAULT_EDITOR_SETTINGS.activeCustomThemeId;
   editExecuteMode.value = DEFAULT_EDITOR_SETTINGS.executeMode;
+  editDefaultTransactionMode.value = DEFAULT_EDITOR_SETTINGS.defaultTransactionMode;
   editExecuteAllOnBlankLine.value = DEFAULT_EDITOR_SETTINGS.executeAllOnBlankLine;
   editShowExecutionTargetPicker.value = DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker;
   editShowStatementRunButtons.value = DEFAULT_EDITOR_SETTINGS.showStatementRunButtons;
@@ -1249,8 +1407,10 @@ function resetAllDefaults() {
   editDataGridQuickEntry.value = DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry;
   editDataGridFilterEditorView.value = DEFAULT_EDITOR_SETTINGS.dataGridFilterEditorView;
   editDataGridTextFilterPanelHeight.value = DEFAULT_EDITOR_SETTINGS.dataGridTextFilterPanelHeight;
+  editMultiStatementDefaultView.value = DEFAULT_EDITOR_SETTINGS.multiStatementDefaultView;
   editDataGridAutoTransposeSingleRow.value = DEFAULT_EDITOR_SETTINGS.dataGridAutoTransposeSingleRow;
   editDataGridCellDetailButtonVisible.value = DEFAULT_EDITOR_SETTINGS.dataGridCellDetailButtonVisible;
+  editDataGridCrosshairHighlight.value = DEFAULT_EDITOR_SETTINGS.dataGridCrosshairHighlight;
   editFlatteningMultiLineText.value = DEFAULT_EDITOR_SETTINGS.flatteningMultiLineText;
   editPageSize.value = DEFAULT_EDITOR_SETTINGS.pageSize;
   editTableOpenPageSize.value = DEFAULT_EDITOR_SETTINGS.tableOpenPageSize;
@@ -1293,6 +1453,7 @@ function resetAllDefaults() {
   editUpdateDownloadSource.value = DEFAULT_EDITOR_SETTINGS.updateDownloadSource;
   editToolbarItems.value = { ...DEFAULT_EDITOR_SETTINGS.toolbarItems };
   editSnippets.value = DEFAULT_SQL_SNIPPETS.map((s) => ({ ...s }));
+  editSqlShortcuts.value = [];
 }
 
 function addTableColumnTemplateRow() {
@@ -1421,6 +1582,10 @@ function isTableColumnTemplateLengthDisabled(row: TableColumnTemplateGridRow): b
 
 function onExecuteModeChange(v: any) {
   if (v === "all" || v === "current") editExecuteMode.value = v;
+}
+
+function onDefaultTransactionModeChange(v: any) {
+  if (v === "auto" || v === "manual") editDefaultTransactionMode.value = v;
 }
 
 function onCompletionTriggerModeChange(v: any) {
@@ -4025,6 +4190,24 @@ onUnmounted(() => {
                   </Select>
                 </div>
 
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2" data-editor-default-transaction-mode>
+                  <div class="min-w-0 space-y-1">
+                    <Label for="editor-default-transaction-mode">{{ t("settings.defaultTransactionMode") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.defaultTransactionModeDescription") }}
+                    </p>
+                  </div>
+                  <Select :model-value="editDefaultTransactionMode" @update:model-value="onDefaultTransactionModeChange">
+                    <SelectTrigger id="editor-default-transaction-mode" class="h-8 w-48 shrink-0">
+                      <SelectValue :placeholder="t('settings.defaultTransactionMode')" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="auto">{{ t("settings.defaultTransactionModeAuto") }}</SelectItem>
+                      <SelectItem value="manual">{{ t("settings.defaultTransactionModeManual") }}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2" :class="{ 'opacity-50': editExecuteMode !== 'current' }">
                   <div class="space-y-1">
                     <Label for="editor-execute-all-on-blank-line">{{ t("settings.executeAllOnBlankLine") }}</Label>
@@ -5362,6 +5545,21 @@ onUnmounted(() => {
                     @update:model-value="updatePageSizeDraft"
                   />
                 </div>
+                <div data-settings-search-id="multi-statement-default-view" :class="['flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2', settingsSearchTargetClass('multi-statement-default-view')]">
+                  <div class="min-w-0 space-y-1">
+                    <Label for="multi-statement-default-view">{{ t("settings.multiStatementDefaultView") }}</Label>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.multiStatementDefaultViewDescription") }}</p>
+                  </div>
+                  <Select v-model="editMultiStatementDefaultView">
+                    <SelectTrigger id="multi-statement-default-view" class="h-8 w-32 shrink-0">
+                      <SelectValue :placeholder="t('settings.multiStatementDefaultView')" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="result">{{ t("tabs.tableData") }}</SelectItem>
+                      <SelectItem value="summary">{{ t("tabs.executionSummary") }}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="query-result-max-rows-enabled">
@@ -5507,6 +5705,17 @@ onUnmounted(() => {
                     </p>
                   </div>
                   <Switch id="data-grid-cell-detail-button-visible" v-model="editDataGridCellDetailButtonVisible" />
+                </div>
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="data-grid-crosshair-highlight">
+                      {{ t("settings.dataGridCrosshairHighlight") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.dataGridCrosshairHighlightDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="data-grid-crosshair-highlight" v-model="editDataGridCrosshairHighlight" />
                 </div>
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
@@ -5913,6 +6122,70 @@ onUnmounted(() => {
                   </div>
                 </div>
               </div>
+
+              <div class="mt-6 border-t border-border/70 pt-6" data-settings-search-id="sql-shortcuts">
+                <div class="mb-4 flex items-center justify-between gap-3">
+                  <div class="min-w-0">
+                    <h3 class="text-sm font-medium">{{ t("settings.sqlShortcutsTitle") }}</h3>
+                    <p class="mt-1 text-sm text-muted-foreground">
+                      {{ t("settings.sqlShortcutsDescription") }}
+                    </p>
+                  </div>
+                  <Button variant="outline" size="sm" class="shrink-0" @click="openAddSqlShortcutDialog">
+                    <Plus class="mr-2 h-4 w-4" />
+                    {{ t("settings.sqlShortcutsAdd") }}
+                  </Button>
+                </div>
+
+                <div v-if="editSqlShortcuts.length === 0" class="rounded-md border border-dashed border-border/70 px-3 py-8 text-center text-sm text-muted-foreground">
+                  {{ t("settings.sqlShortcutsEmpty") }}
+                </div>
+                <div v-else class="overflow-x-auto rounded-md border">
+                  <table class="w-full min-w-[720px] text-sm">
+                    <thead>
+                      <tr class="border-b bg-muted/50">
+                        <th class="px-3 py-2 text-left font-medium whitespace-nowrap">{{ t("settings.sqlShortcutsLabel") }}</th>
+                        <th class="px-3 py-2 text-left font-medium whitespace-nowrap">{{ t("settings.shortcutPressShortcut") }}</th>
+                        <th class="px-3 py-2 text-left font-medium whitespace-nowrap">{{ t("settings.snippetsStatus") }}</th>
+                        <th class="px-3 py-2 text-left font-medium whitespace-nowrap">{{ t("settings.sqlShortcutsSql") }}</th>
+                        <th class="px-3 py-2 w-20"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="action in editSqlShortcuts" :key="action.id" class="border-b last:border-b-0 hover:bg-muted/30" :class="action.enabled === false ? 'text-muted-foreground' : ''">
+                        <td class="px-3 py-2">{{ action.label }}</td>
+                        <td class="px-3 py-2">
+                          <Badge variant="outline" class="h-5 rounded-md px-1.5 font-mono text-[11px] text-muted-foreground">
+                            {{ action.shortcut ? formatShortcutPill(action.shortcut) : t("settings.sqlShortcutsUnbound") }}
+                          </Badge>
+                        </td>
+                        <td class="px-3 py-2">
+                          <div class="flex items-center gap-2">
+                            <Switch :id="`sql-shortcut-enabled-${action.id}`" :model-value="action.enabled !== false" size="sm" :aria-label="t('settings.sqlShortcutsToggle')" @update:model-value="(value: boolean) => setSqlShortcutEnabled(action.id, value)" />
+                            <Label :for="`sql-shortcut-enabled-${action.id}`" class="text-xs font-normal text-muted-foreground">
+                              {{ action.enabled === false ? t("settings.snippetsDisabled") : t("settings.snippetsEnabled") }}
+                            </Label>
+                          </div>
+                        </td>
+                        <td class="max-w-[300px] truncate px-3 py-2 font-mono text-xs text-muted-foreground">{{ action.sql }}</td>
+                        <td class="px-3 py-2">
+                          <div class="flex items-center gap-1">
+                            <Button variant="ghost" size="icon-xs" @click="openEditSqlShortcutDialog(action)">
+                              <Pencil class="size-3.5" />
+                            </Button>
+                            <Button variant="ghost" size="icon-xs" @click="confirmDeleteSqlShortcut(action)">
+                              <Trash2 class="size-3.5" />
+                            </Button>
+                          </div>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <p v-if="hasSqlShortcutConflicts" class="mt-2 text-xs text-destructive">
+                  {{ t("settings.shortcutConflict") }}
+                </p>
+              </div>
             </section>
 
             <!-- Snippets Tab -->
@@ -6282,7 +6555,7 @@ onUnmounted(() => {
                           </Badge>
                         </div>
                         <div class="text-xs text-muted-foreground">
-                          {{ AI_PROVIDER_PRESETS[config.provider].label }}
+                          {{ aiProviderLabel(config.provider, t) }}
                         </div>
                       </div>
                     </div>
@@ -6531,8 +6804,8 @@ onUnmounted(() => {
                     <SelectTrigger class="col-span-2" inputClass="h-8 text-xs">
                       <SelectValue>
                         <span class="flex items-center gap-2">
-                          <AiProviderLogo :provider="selectedAiProviderPreset.provider" :label="selectedAiProviderPreset.label" :icon-slug="selectedAiProviderPreset.iconSlug" />
-                          <span>{{ selectedAiProviderPreset.label }}</span>
+                          <AiProviderLogo :provider="selectedAiProviderPreset.provider" :label="aiProviderLabel(selectedAiProviderPreset.provider, t)" :icon-slug="selectedAiProviderPreset.iconSlug" />
+                          <span>{{ aiProviderLabel(selectedAiProviderPreset.provider, t) }}</span>
                         </span>
                       </SelectValue>
                     </SelectTrigger>
@@ -6540,8 +6813,8 @@ onUnmounted(() => {
                       <SelectItem v-for="provider in aiProviderOptions" :key="provider.provider" :value="provider.provider">
                         <span class="flex w-full items-center justify-between gap-4">
                           <span class="flex items-center gap-2">
-                            <AiProviderLogo :provider="provider.provider" :label="provider.label" :icon-slug="provider.iconSlug" />
-                            <span>{{ provider.label }}</span>
+                            <AiProviderLogo :provider="provider.provider" :label="aiProviderLabel(provider.provider, t)" :icon-slug="provider.iconSlug" />
+                            <span>{{ aiProviderLabel(provider.provider, t) }}</span>
                           </span>
                         </span>
                       </SelectItem>
@@ -7479,6 +7752,68 @@ onUnmounted(() => {
         <DialogFooter>
           <Button variant="outline" @click="snippetDialogOpen = false">{{ t("settings.cancel") }}</Button>
           <Button @click="saveSnippet">{{ t("settings.save") }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <!-- SQL Shortcut Add/Edit Dialog -->
+    <Dialog :open="sqlShortcutDialogOpen" @update:open="sqlShortcutDialogOpen = $event">
+      <DialogContent class="sm:max-w-[560px]">
+        <DialogHeader>
+          <DialogTitle>
+            {{ sqlShortcutEditingId ? t("settings.sqlShortcutsEditTitle") : t("settings.sqlShortcutsAddTitle") }}
+          </DialogTitle>
+        </DialogHeader>
+        <div class="flex flex-col gap-4 py-2">
+          <div class="flex flex-col gap-1.5">
+            <Label for="sql-shortcut-label">{{ t("settings.sqlShortcutsLabel") }}</Label>
+            <Input id="sql-shortcut-label" v-model="sqlShortcutForm.label" :placeholder="t('settings.sqlShortcutsLabelPlaceholder')" />
+            <p v-if="sqlShortcutFormLabelError" class="text-xs text-destructive">
+              {{ sqlShortcutFormLabelError }}
+            </p>
+          </div>
+          <div class="flex flex-col gap-1.5">
+            <Label for="sql-shortcut-binding">{{ t("settings.shortcutPressShortcut") }}</Label>
+            <div class="flex items-center gap-2">
+              <input
+                id="sql-shortcut-binding"
+                data-sql-shortcut-input="dialog"
+                :value="editingSqlShortcutInputId === 'dialog' ? '' : formatShortcutPill(sqlShortcutForm.shortcut)"
+                :style="{ width: editingSqlShortcutInputId === 'dialog' ? shortcutPressShortcutInputWidth : `${Math.max(4, formatShortcutPill(sqlShortcutForm.shortcut).length + 3)}ch` }"
+                readonly
+                :placeholder="t('settings.shortcutPressShortcut')"
+                class="h-8 w-auto min-w-12 max-w-64 shrink-0 cursor-default rounded-[6px] border border-input bg-muted px-2.5 text-center font-mono text-[13px] font-semibold text-foreground/75 shadow-inner outline-none selection:bg-transparent placeholder:text-muted-foreground"
+                :class="editingSqlShortcutInputId === 'dialog' ? 'max-w-64 cursor-text border-border/80 bg-background text-left text-foreground shadow-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/35' : ''"
+                @keydown="(event: KeyboardEvent) => onSqlShortcutBindingKeydown('dialog', event)"
+              />
+              <Button v-if="editingSqlShortcutInputId !== 'dialog'" type="button" variant="ghost" size="icon" class="h-8 w-8 shrink-0" :aria-label="t('settings.shortcutPressShortcut')" @click="focusSqlShortcutInput('dialog')">
+                <Pencil class="h-4 w-4" />
+              </Button>
+              <Button v-else type="button" variant="ghost" size="sm" class="h-8 shrink-0 px-2 text-sm font-medium text-muted-foreground hover:text-foreground" @click="cancelSqlShortcutInputEdit">
+                {{ t("settings.cancel") }}
+              </Button>
+              <Button v-if="sqlShortcutForm.shortcut" type="button" variant="ghost" size="icon" class="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive" :aria-label="t('settings.shortcutClear')" @click="clearSqlShortcutBinding">
+                <X class="h-4 w-4" />
+              </Button>
+            </div>
+          </div>
+          <div class="flex flex-col gap-1.5">
+            <Label for="sql-shortcut-sql">{{ t("settings.sqlShortcutsSql") }}</Label>
+            <textarea
+              id="sql-shortcut-sql"
+              v-model="sqlShortcutForm.sql"
+              :placeholder="t('settings.sqlShortcutsSqlPlaceholder')"
+              rows="6"
+              class="flex min-h-[120px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm font-mono shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            />
+            <p class="text-xs text-muted-foreground">
+              {{ t("settings.sqlShortcutsVariableHint", { token: SQL_SHORTCUT_TABLE_TOKEN }) }}
+            </p>
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" @click="sqlShortcutDialogOpen = false">{{ t("settings.cancel") }}</Button>
+          <Button @click="saveSqlShortcut">{{ t("settings.save") }}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

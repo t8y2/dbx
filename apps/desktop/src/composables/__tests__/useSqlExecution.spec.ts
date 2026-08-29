@@ -7,6 +7,7 @@ import { useHistoryStore } from "@/stores/historyStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
+import * as objectMetadataCache from "@/lib/metadata/objectMetadataCache";
 import type { ConnectionConfig, QueryTab } from "@/types/database";
 
 vi.mock("vue-i18n", () => ({
@@ -17,7 +18,15 @@ vi.mock("vue-i18n", () => ({
 vi.mock("@/lib/backend/api", () => ({
   saveEditorSettings: vi.fn(),
   saveHistory: vi.fn(),
+  unlockConnectionWrites: vi.fn(),
+  lockConnectionWrites: vi.fn(),
+  connectionWriteUnlockState: vi.fn().mockResolvedValue(0),
 }));
+
+vi.mock("@/lib/metadata/objectMetadataCache", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/metadata/objectMetadataCache")>();
+  return { ...actual, invalidateObjectMetadataCache: vi.fn() };
+});
 
 function installLocalStorage() {
   const data = new Map<string, string>();
@@ -126,6 +135,7 @@ describe("useSqlExecution", () => {
   beforeEach(() => {
     installLocalStorage();
     setActivePinia(createPinia());
+    vi.mocked(objectMetadataCache.invalidateObjectMetadataCache).mockClear();
   });
 
   it("invalidates object metadata after successful connection-level DDL", async () => {
@@ -153,6 +163,35 @@ describe("useSqlExecution", () => {
 
     expect(invalidateMetadata).toHaveBeenCalledWith("conn-1");
     expect(loadDatabases).toHaveBeenCalledWith("conn-1", { force: true });
+  });
+
+  it("invalidates table facets after successful Kingbase constraint DDL", async () => {
+    const sql = "ALTER TABLE public.orders DISABLE CONSTRAINT orders_check";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), schema: "public", sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("kingbase"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const connectionStore = useConnectionStore();
+    useSettingsStore().editorSettings.confirmDangerousSqlExecution = false;
+    vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (activeTab.value) activeTab.value.result = { columns: [], rows: [], affected_rows: 0, execution_time_ms: 1 };
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+    const invalidateObjectMetadata = vi.mocked(objectMetadataCache.invalidateObjectMetadataCache).mockResolvedValue(undefined);
+    const refreshObjects = vi.spyOn(connectionStore, "refreshObjectListTreeNode").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+      requestDangerConfirmation: async () => true,
+    });
+
+    await execution.tryExecute();
+
+    expect(invalidateObjectMetadata).toHaveBeenCalledWith({ connectionId: "conn-1", database: "app", schema: "public" });
+    expect(refreshObjects).toHaveBeenCalledWith("conn-1", "app", "public");
   });
 
   it("sends every placeholder syntax and @set unchanged when substitution is disabled", async () => {
@@ -236,12 +275,36 @@ describe("useSqlExecution", () => {
     expect(executeCurrentSql).toHaveBeenCalledWith("SELECT * FROM patrol WHERE post_id = '224';", {});
   });
 
-  it("opens the execution summary for a multi-statement batch", async () => {
+  it("opens the result table for a multi-statement batch by default", async () => {
     const sql = "SELECT 1;\nSELECT 2;";
     const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });
     const activeConnection = ref<ConnectionConfig | undefined>(connection("mysql"));
     const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
     const queryStore = useQueryStore();
+    vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (activeTab.value) activeTab.value.result = { columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 };
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+
+    await execution.tryExecute();
+
+    expect(activeOutputView.value).toBe("result");
+  });
+
+  it("opens the execution summary for a multi-statement batch when configured", async () => {
+    const sql = "SELECT 1;\nSELECT 2;";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("mysql"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    useSettingsStore().editorSettings.multiStatementDefaultView = "summary";
     vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
       if (activeTab.value) activeTab.value.result = { columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 };
     });
@@ -429,7 +492,7 @@ GO`;
     expect(activeTab.value?.result?.execution_error).toBe(true);
   });
 
-  it("keeps ordinary SQL Server multi-result batches on their summary", async () => {
+  it("opens ordinary SQL Server multi-result batches in the result table by default", async () => {
     const sql = "SELECT 1 AS first_value; SELECT 2 AS second_value;";
     const activeTab = ref<QueryTab | undefined>({ ...queryTab("dbx_sqlserver_demo"), sql });
     const activeConnection = ref<ConnectionConfig | undefined>(connection("sqlserver"));
@@ -455,12 +518,12 @@ GO`;
 
     await execution.tryExecute();
 
-    expect(activeOutputView.value).toBe("summary");
+    expect(activeOutputView.value).toBe("result");
     expect(setActiveResultIndex).not.toHaveBeenCalled();
     expect(activeTab.value?.result?.rows).toEqual([[1]]);
   });
 
-  it("keeps the summary for ordinary SQL Server data aliased as Message", async () => {
+  it("opens ordinary SQL Server data aliased as Message in the result table by default", async () => {
     const sql = `DECLARE @value nvarchar(1) = N'x';
 SELECT @value AS Message;`;
     const activeTab = ref<QueryTab | undefined>({ ...queryTab("dbx_sqlserver_demo"), sql });
@@ -481,7 +544,7 @@ SELECT @value AS Message;`;
 
     await execution.tryExecute();
 
-    expect(activeOutputView.value).toBe("summary");
+    expect(activeOutputView.value).toBe("result");
     expect(activeTab.value?.result?.rows).toEqual([["x"]]);
   });
 
@@ -1199,8 +1262,9 @@ SELECT @value AS Message;`;
     });
 
     const pendingExecution = execution.tryExecute();
-    await Promise.resolve();
-    expect(productionSafetyStore.pending?.sql).toContain("UPDATE users");
+    await vi.waitFor(() => {
+      expect(productionSafetyStore.pending?.sql).toContain("UPDATE users");
+    });
     expect(executeCurrentSql).not.toHaveBeenCalled();
 
     productionSafetyStore.confirm();

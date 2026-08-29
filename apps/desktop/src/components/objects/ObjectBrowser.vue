@@ -40,6 +40,7 @@ import {
   Scissors,
   Search,
   ScrollText,
+  ShieldCheck,
   Square,
   Table2,
   TableProperties,
@@ -61,12 +62,13 @@ import ProcedureExecutionDialog from "@/components/objects/ProcedureExecutionDia
 import CustomTypeInfoPanel from "@/components/objects/CustomTypeInfoPanel.vue";
 import XlsxHeaderDialog from "@/components/export/XlsxHeaderDialog.vue";
 import * as api from "@/lib/backend/api";
-import type { ColumnInfo, ConnectionConfig, ForeignKeyInfo, IndexInfo, ObjectBrowserViewMode, ObjectBrowserViewport, ObjectInfo, ObjectSourceKind, ObjectStatistics, TableInfoTab, TreeNode, TriggerInfo } from "@/types/database";
+import type { ColumnInfo, ConnectionConfig, ConstraintInfo, ForeignKeyInfo, IndexInfo, ObjectBrowserViewMode, ObjectBrowserViewport, ObjectInfo, ObjectSourceKind, ObjectStatistics, TableInfoTab, TreeNode, TriggerInfo } from "@/types/database";
 import { sortTablesByFkDependency, type TableWithFk } from "@/lib/table/tableDependencySort";
 import { isSchemaAware, supportsTableVacuum, supportsTransfer } from "@/lib/database/databaseCapabilities";
 import { supportsSchemaDiagram, supportsTableImport, supportsTableStructureEditing, supportsTableTruncate } from "@/lib/database/databaseFeatureSupport";
 import { codeMirrorSqlDialect, connectionObjectTreeNodeSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { getTableMetadataCapabilities, type TableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
+import { constraintsForConstraintsTab } from "@/lib/table/constraintPresentation";
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
 import {
   buildDropObjectSql,
@@ -85,7 +87,7 @@ import { buildExecutableObjectSourceStatements, buildRoutineRenameObjectSourceSt
 import { buildRenameObjectSql, supportsObjectRename } from "@/lib/table/objectRenameSql";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { generateDatabaseExportId } from "@/lib/export/databaseExport";
-import { buildXlsxHeaderOverrides, hasXlsxHeaderComments, type XlsxHeaderMode } from "@/lib/export/xlsxHeader";
+import { buildXlsxHeaderOverrides, hasXlsxHeaderComments, type XlsxExportOptions, type XlsxHeaderMode } from "@/lib/export/xlsxHeader";
 import { copyToClipboard, eventTargetAllowsAppClipboardShortcut } from "@/lib/common/clipboard";
 import {
   defaultPasteTableMode,
@@ -111,6 +113,7 @@ import MySqlEventEditor from "@/components/objects/MySqlEventEditor.vue";
 import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { isCancelSearchShortcut } from "@/lib/editor/keyboardShortcuts";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
+import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { buildXuguCompileSql } from "@/lib/database/xuguCompileSql";
 import { formatShortcut } from "@/lib/editor/shortcutRegistry";
 import { batchTableEmptyFeedback, buildBatchTableEmptyPlan, runBatchTableEmpty, type BatchTableEmptyPlanItem } from "@/lib/sidebar/batchTableEmpty";
@@ -225,6 +228,12 @@ const tableForeignKeysLoaded = ref(false);
 const tableTriggers = ref<TriggerInfo[]>([]);
 const tableTriggersLoading = ref(false);
 const tableTriggersLoaded = ref(false);
+const tableConstraints = ref<ConstraintInfo[]>([]);
+const tableConstraintsLoading = ref(false);
+const tableConstraintsLoaded = ref(false);
+// The Constraints tab hides foreign keys when the dedicated Foreign Keys tab
+// is also shown, mirroring DataGrid/TableStructureEditor.
+const tableConstraintsForTab = computed(() => constraintsForConstraintsTab(tableConstraints.value, tableMetadataCapabilities.value.foreignKeys));
 const tableInfoSearchQuery = ref("");
 const tableInfoDdlPreRef = ref<HTMLPreElement | null>(null);
 const SIDE_PANEL_MIN_WIDTH = 280;
@@ -335,7 +344,7 @@ const canOpenStructureEditor = computed(() => supportsTableStructureEditing(tabl
 const canOpenDiagram = computed(() => !!props.database && supportsSchemaDiagram(effectiveDatabaseType.value));
 const canOpenTableImport = computed(() => !!props.database && supportsTableImport(effectiveDatabaseType.value));
 const supportsTruncateTable = computed(() => supportsTableTruncate(effectiveDatabaseType.value));
-const supportsVacuumTable = computed(() => !props.connection.read_only && supportsTableVacuum(effectiveDatabaseType.value));
+const supportsVacuumTable = computed(() => !connectionIsEffectivelyReadOnly(props.connection) && supportsTableVacuum(effectiveDatabaseType.value));
 const vacuumRiskMessage = computed(() => (vacuumExecuting.value ? t("contextMenu.vacuumTableRunningHint") : vacuumTableFull.value ? t("contextMenu.vacuumTableFullRisk") : vacuumTableAnalyze.value ? t("contextMenu.vacuumTableAnalyzeRisk") : t("contextMenu.vacuumTableDefaultRisk")));
 const sourceDialect = computed(() => codeMirrorSqlDialect(effectiveDatabaseType.value));
 const sourceFormatDialect = computed<SqlFormatDialect>(() => sqlFormatDialectForDbType(effectiveDatabaseType.value));
@@ -976,6 +985,9 @@ const tableInfoTabs = computed<TableInfoTabItem[]>(() => {
   if (tableMetadataCapabilities.value.foreignKeys) {
     tabs.push({ id: "foreignKeys", label: t("grid.tableInfoForeignKeys"), icon: Link2, count: tableForeignKeys.value.length });
   }
+  if (tableMetadataCapabilities.value.constraints) {
+    tabs.push({ id: "constraints", label: t("grid.tableInfoConstraints"), icon: ShieldCheck, count: tableConstraintsForTab.value.length });
+  }
   if (tableMetadataCapabilities.value.triggers) {
     tabs.push({ id: "triggers", label: t("grid.tableInfoTriggers"), icon: RotateCcw, count: tableTriggers.value.length });
   }
@@ -1006,6 +1018,13 @@ const filteredTableTriggers = computed(() => {
   return tableTriggers.value.filter((tr) => tr.name.toLowerCase().includes(q));
 });
 
+const filteredTableConstraints = computed(() => {
+  const base = tableConstraintsForTab.value;
+  if (!tableInfoSearchQuery.value) return base;
+  const q = tableInfoSearchQuery.value.toLowerCase();
+  return base.filter((c) => c.name.toLowerCase().includes(q) || c.constraint_type.toLowerCase().includes(q) || c.columns.some((col) => col.toLowerCase().includes(q)) || c.definition.toLowerCase().includes(q));
+});
+
 const filteredTableDdlContent = computed(() => {
   if (!tableDdlContent.value) return "";
   const html = highlight(tableDdlContent.value);
@@ -1032,11 +1051,13 @@ async function openTableInfo(row: ObjectBrowserRow, initialTab?: TableInfoTab) {
   tableIndexes.value = [];
   tableForeignKeys.value = [];
   tableTriggers.value = [];
+  tableConstraints.value = [];
   tableColumnsLoaded.value = false;
   tableDdlLoaded.value = false;
   tableIndexesLoaded.value = false;
   tableForeignKeysLoaded.value = false;
   tableTriggersLoaded.value = false;
+  tableConstraintsLoaded.value = false;
   tableInfoSearchQuery.value = "";
   // Determine initial tab: explicit request > previously activated
   const firstTab = initialTab ?? tableInfoTab.value;
@@ -1052,6 +1073,7 @@ async function selectTableInfoTab(tab: TableInfoTab) {
   else if (nextTab === "columns") await fetchTableColumns();
   else if (nextTab === "indexes") await fetchTableIndexes();
   else if (nextTab === "foreignKeys") await fetchTableForeignKeys();
+  else if (nextTab === "constraints") await fetchTableConstraints();
   else if (nextTab === "triggers") await fetchTableTriggers();
 }
 
@@ -1184,6 +1206,30 @@ async function fetchTableTriggers(force = false) {
   }
 }
 
+async function fetchTableConstraints(force = false) {
+  const row = sidePanelRow.value;
+  if (!row || (tableConstraintsLoaded.value && !force)) return;
+  const epoch = sidePanelGuard.capture();
+  tableConstraintsLoading.value = true;
+  let loadedSuccessfully = false;
+  try {
+    const request = tableMetadataRequest(row);
+    const { value: constraints } = await loadObjectMetadataFacet(request, "constraints", () => api.listConstraints(request.connectionId, request.database, request.schema || request.database, request.tableName, request.catalog), { force });
+    if (sidePanelGuard.isStale(epoch)) return;
+    tableConstraints.value = constraints;
+    loadedSuccessfully = true;
+  } catch (error) {
+    if (sidePanelGuard.isStale(epoch)) return;
+    tableConstraints.value = [];
+    toast(translateBackendError(t, error), 5000);
+  } finally {
+    if (sidePanelGuard.isFresh(epoch)) {
+      tableConstraintsLoaded.value = loadedSuccessfully;
+      tableConstraintsLoading.value = false;
+    }
+  }
+}
+
 async function refreshActiveTableInfo() {
   if (sidePanelMode.value !== "table-info" || !sidePanelRow.value) return;
   sidePanelGuard.bump();
@@ -1204,6 +1250,10 @@ async function refreshActiveTableInfo() {
     tableForeignKeys.value = [];
     tableForeignKeysLoaded.value = false;
     await fetchTableForeignKeys(true);
+  } else if (tableInfoTab.value === "constraints") {
+    tableConstraints.value = [];
+    tableConstraintsLoaded.value = false;
+    await fetchTableConstraints(true);
   } else if (tableInfoTab.value === "triggers") {
     tableTriggers.value = [];
     tableTriggersLoaded.value = false;
@@ -1999,16 +2049,17 @@ async function exportData(row: ObjectBrowserRow, format: "csv" | "json" | "sql")
   else await exportTableData(row, format);
 }
 
-function showObjectBrowserXlsxHeaderDialog(hasComments: boolean): Promise<XlsxHeaderMode | null> {
-  if (!hasComments) return Promise.resolve("name");
+function showObjectBrowserXlsxHeaderDialog(hasComments: boolean): Promise<XlsxExportOptions | null> {
+  if (typeof document === "undefined") return Promise.resolve({ headerMode: "name", autoFilter: false });
 
   return new Promise((resolve) => {
     const container = document.createElement("div");
     document.body.appendChild(container);
     const app = createApp(XlsxHeaderDialog, {
       open: true,
-      onConfirm: (mode: XlsxHeaderMode) => {
-        resolve(mode);
+      showHeaderOptions: hasComments,
+      onConfirm: (exportOptions: XlsxExportOptions) => {
+        resolve(exportOptions);
         app.unmount();
         document.body.removeChild(container);
       },
@@ -2025,22 +2076,20 @@ function showObjectBrowserXlsxHeaderDialog(hasComments: boolean): Promise<XlsxHe
 
 async function exportDataXlsx(row: ObjectBrowserRow) {
   const schema = row.schema || selectedSchema.value;
-  let headerMode: XlsxHeaderMode = "name";
   let columnInfos: ColumnInfo[] | undefined;
 
   try {
     columnInfos = await api.getColumns(props.connection.id, props.database, schema || props.database, row.name, props.catalog);
-    const result = await showObjectBrowserXlsxHeaderDialog(hasXlsxHeaderComments(columnInfos.map((column) => column.comment)));
-    if (result === null) return;
-    headerMode = result;
   } catch {
     // Export still works with field-name headers when column metadata is unavailable.
   }
 
-  await exportTableData(row, "xlsx", columnInfos, headerMode);
+  const exportOptions = await showObjectBrowserXlsxHeaderDialog(hasXlsxHeaderComments(columnInfos?.map((column) => column.comment)));
+  if (exportOptions === null) return;
+  await exportTableData(row, "xlsx", columnInfos, exportOptions.headerMode, exportOptions.autoFilter);
 }
 
-async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx" | "sql", columnInfos?: ColumnInfo[], headerMode: XlsxHeaderMode = "name") {
+async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx" | "sql", columnInfos?: ColumnInfo[], headerMode: XlsxHeaderMode = "name", autoFilter = true) {
   const schema = row.schema || selectedSchema.value;
 
   // Save dialog first
@@ -2080,7 +2129,7 @@ async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx" | "
       } else {
         const comments = result.columns.map((name) => columnInfos?.find((column) => column.name.toLocaleLowerCase() === name.toLocaleLowerCase())?.comment);
         const headerOverrides = buildXlsxHeaderOverrides(result.columns, comments, headerMode);
-        await api.exportQueryResultXlsx(filePath, row.name, result.columns, result.column_types ?? result.columns.map(() => ""), headerOverrides, result.rows);
+        await api.exportQueryResultXlsx(filePath, row.name, result.columns, result.column_types ?? result.columns.map(() => ""), headerOverrides, result.rows, undefined, autoFilter);
       }
       toast(t("grid.exported"));
       return;
@@ -2116,6 +2165,7 @@ async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx" | "
       format,
       columns,
       columnComments: format === "xlsx" ? columnComments : undefined,
+      autoFilter: format === "xlsx" ? autoFilter : undefined,
       batchSize: settingsStore.editorSettings.exportBatchSize,
       skipCount: format === "sql",
       rowLimit,
@@ -2212,7 +2262,7 @@ function canTransferTableClipboard(): boolean {
   if (isVictoriaMetrics.value) return false;
   const entries = normalizedObjectBrowserTableClipboardEntries();
   const target = pasteTableTargetContext();
-  if (entries.length === 0 || props.connection.read_only) return false;
+  if (entries.length === 0 || connectionIsEffectivelyReadOnly(props.connection)) return false;
   const source = tableClipboardSourceContext(entries);
   const sourceConfig = source ? connectionStore.getConfig(source.connectionId) : undefined;
   return !!source && !!sourceConfig && supportsTransfer(sourceConfig.db_type) && supportsTransfer(props.connection.db_type) && !tableClipboardMatchesTarget(entries, target);
@@ -3550,6 +3600,30 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
               <div v-for="fk in filteredTableForeignKeys" :key="`${fk.name}:${fk.column}`" class="p-3 text-xs">
                 <div class="font-medium truncate">{{ fk.name }}</div>
                 <div class="mt-1 font-mono text-[11px] text-muted-foreground break-all">{{ fk.column }} -> {{ fk.ref_table }}.{{ fk.ref_column }}</div>
+              </div>
+            </div>
+          </div>
+          <div v-else-if="tableInfoTab === 'constraints'" class="flex-1 min-h-0 overflow-auto">
+            <div v-if="tableConstraintsLoading" class="h-full flex items-center justify-center">
+              <Loader2 class="w-4 h-4 animate-spin text-muted-foreground" />
+            </div>
+            <div v-else-if="tableInfoSearchQuery && filteredTableConstraints.length === 0" class="p-6 text-center text-xs text-muted-foreground">
+              {{ t("grid.tableInfoNoResults") }}
+            </div>
+            <div v-else-if="tableConstraintsForTab.length === 0" class="p-6 text-center text-xs text-muted-foreground">
+              {{ t("grid.tableInfoEmpty") }}
+            </div>
+            <div v-else class="divide-y">
+              <div v-for="constraint in filteredTableConstraints" :key="constraint.name" class="p-3 text-xs" :class="constraint.enabled ? '' : 'opacity-60'">
+                <div class="flex flex-wrap items-center gap-1.5">
+                  <span class="font-medium truncate">{{ constraint.name }}</span>
+                  <span class="rounded border px-1 py-px text-[10px] text-muted-foreground">{{ constraint.constraint_type }}</span>
+                  <span v-if="!constraint.enabled" class="rounded border px-1 py-px text-[10px] text-muted-foreground">{{ t("grid.tableInfoConstraintDisabled") }}</span>
+                  <span v-else-if="!constraint.valid" class="rounded border px-1 py-px text-[10px] text-muted-foreground">{{ t("grid.tableInfoConstraintNotValidated") }}</span>
+                </div>
+                <div v-if="constraint.columns.length" class="mt-1 font-mono text-[11px] text-muted-foreground break-all">{{ constraint.columns.join(", ") }}</div>
+                <div v-if="constraint.ref_table" class="mt-1 font-mono text-[11px] text-muted-foreground break-all">-> {{ constraint.ref_schema ? `${constraint.ref_schema}.` : "" }}{{ constraint.ref_table }}{{ constraint.ref_columns.length ? `(${constraint.ref_columns.join(", ")})` : "" }}</div>
+                <div v-if="constraint.definition" class="mt-1 font-mono text-[11px] text-muted-foreground break-all whitespace-pre-wrap">{{ constraint.definition }}</div>
               </div>
             </div>
           </div>

@@ -76,6 +76,22 @@ pub async fn list_displayable_namespaces(
     }
 }
 
+fn is_rnacos_namespace_directory_unavailable(error: &str) -> bool {
+    error.contains("NACOS_ERROR[rnacosNamespaceDirectoryUnavailable]")
+}
+
+fn scoped_namespace(namespace: &str) -> NacosNamespaceInfo {
+    let namespace = namespace.trim().to_string();
+    NacosNamespaceInfo {
+        namespace_show_name: if namespace.is_empty() { "public".to_string() } else { namespace.clone() },
+        namespace,
+        namespace_desc: None,
+        config_count: None,
+        quota: None,
+        namespace_type: None,
+    }
+}
+
 async fn probe_displayable_namespaces(
     namespaces: Vec<NacosNamespaceInfo>,
     admin: Arc<dyn NacosAdmin>,
@@ -175,7 +191,8 @@ pub async fn sidebar_snapshot(
 }
 
 /// Applies a user-saved display scope without relying on Nacos role metadata.
-/// The scope only narrows the namespaces already returned by the server.
+/// For r-nacos deployments without a namespace directory, the saved IDs also
+/// provide the sidebar's explicit namespace list.
 pub async fn sidebar_snapshot_with_visible_scope(
     connection_id: &str,
     connection_fingerprint: String,
@@ -186,7 +203,16 @@ pub async fn sidebar_snapshot_with_visible_scope(
         return sidebar_snapshot(connection_id, connection_fingerprint, admin).await;
     };
 
-    let namespaces = admin.list_namespaces().await?;
+    let namespaces = match admin.list_namespaces().await {
+        Ok(namespaces) => namespaces,
+        // r-nacos's client OpenAPI does not guarantee a namespace directory.
+        // A user-selected scope is enough to render the tree, while every
+        // subsequent config request remains authorized by the server.
+        Err(error) if is_rnacos_namespace_directory_unavailable(&error) => {
+            visible_scope.iter().map(|namespace| scoped_namespace(namespace)).collect()
+        }
+        Err(error) => return Err(error),
+    };
     let visible = visible_scope.iter().map(|namespace| namespace_identity(namespace)).collect();
     Ok(NacosNamespaceSidebarSnapshot {
         namespaces: filter_namespaces(namespaces, &visible),

@@ -1308,6 +1308,8 @@ mod tests {
                 "relation customer_orders does not exist",
             )),
             server_message: false,
+            manual_transaction_proven_read_only: false,
+            manual_transaction_no_statement: false,
         };
 
         let response = execute_multi_response(vec![result], 17).unwrap();

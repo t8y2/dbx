@@ -343,6 +343,22 @@ jobs:
             echo "SCCACHE_S3_USE_SSL=true"
             echo "AWS_ACCESS_KEY_ID=${CACHE_ACCESS_KEY_ID}"
             echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
+            # Keep the server alive through the post-compile packaging tail so
+            # "Show sccache stats" reflects the real counters.
+            echo "SCCACHE_IDLE_TIMEOUT=0"
+            # Also cache the C/C++ compilation of -sys crates. All matrix legs
+            # are native builds, so plain CC/CXX select the target compiler;
+            # MSVC stays unwrapped. SCCACHE_PATH avoids depending on PATH.
+            case "${RUNNER_OS}" in
+              Linux)
+                echo "CC=${SCCACHE_PATH} cc"
+                echo "CXX=${SCCACHE_PATH} c++"
+                ;;
+              macOS)
+                echo "CC=${SCCACHE_PATH} clang"
+                echo "CXX=${SCCACHE_PATH} clang++"
+                ;;
+            esac
           } >> "$GITHUB_ENV"
 
       - name: Rust cache
@@ -561,6 +577,22 @@ jobs:
             echo "SCCACHE_S3_USE_SSL=true"
             echo "AWS_ACCESS_KEY_ID=${CACHE_ACCESS_KEY_ID}"
             echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
+            # Keep the server alive through the post-compile packaging tail so
+            # "Show sccache stats" reflects the real counters.
+            echo "SCCACHE_IDLE_TIMEOUT=0"
+            # Also cache the C/C++ compilation of -sys crates. All matrix legs
+            # are native builds, so plain CC/CXX select the target compiler;
+            # MSVC stays unwrapped. SCCACHE_PATH avoids depending on PATH.
+            case "${RUNNER_OS}" in
+              Linux)
+                echo "CC=${SCCACHE_PATH} cc"
+                echo "CXX=${SCCACHE_PATH} c++"
+                ;;
+              macOS)
+                echo "CC=${SCCACHE_PATH} clang"
+                echo "CXX=${SCCACHE_PATH} clang++"
+                ;;
+            esac
           } >> "$GITHUB_ENV"
 
       - name: Rust cache

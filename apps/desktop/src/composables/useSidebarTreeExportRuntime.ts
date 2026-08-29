@@ -16,7 +16,7 @@ import { translateBackendError } from "@/i18n/backend-errors";
 import { sidebarStructureExportTargets } from "@/lib/sidebar/sidebarExportRuntime";
 import { fetchTableDataForExport } from "@/lib/table/tableDataExport";
 import XlsxHeaderDialog from "@/components/export/XlsxHeaderDialog.vue";
-import { buildXlsxHeaderOverrides, hasXlsxHeaderComments, type XlsxHeaderMode } from "@/lib/export/xlsxHeader";
+import { buildXlsxHeaderOverrides, hasXlsxHeaderComments, type XlsxExportOptions, type XlsxHeaderMode } from "@/lib/export/xlsxHeader";
 import { isLoadingStructurePreview, showStructureDocCopyDialog, showStructurePreviewDialog, structureDocCopyText, structureDocCopyTitle, structurePreviewDefaultFileName, structurePreviewError, structurePreviewSql, structurePreviewTitle } from "@/components/sidebar/sidebarTreeDialogState";
 
 type StructureCopyFormat = "tsv" | "markdown";
@@ -255,16 +255,17 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
     }
   }
 
-  function showSidebarTreeXlsxHeaderDialog(hasComments: boolean): Promise<XlsxHeaderMode | null> {
-    if (!hasComments) return Promise.resolve("name");
+  function showSidebarTreeXlsxHeaderDialog(hasComments: boolean): Promise<XlsxExportOptions | null> {
+    if (typeof document === "undefined") return Promise.resolve({ headerMode: "name", autoFilter: false });
 
     return new Promise((resolve) => {
       const container = document.createElement("div");
       document.body.appendChild(container);
       const app = createApp(XlsxHeaderDialog, {
         open: true,
-        onConfirm: (mode: XlsxHeaderMode) => {
-          resolve(mode);
+        showHeaderOptions: hasComments,
+        onConfirm: (exportOptions: XlsxExportOptions) => {
+          resolve(exportOptions);
           app.unmount();
           document.body.removeChild(container);
         },
@@ -304,7 +305,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
     };
   }
 
-  async function exportTableData(target: SidebarTableExportTarget, format: "csv" | "xlsx" | "sql", columnInfos?: ColumnInfo[], headerMode: XlsxHeaderMode = "name") {
+  async function exportTableData(target: SidebarTableExportTarget, format: "csv" | "xlsx" | "sql", columnInfos?: ColumnInfo[], headerMode: XlsxHeaderMode = "name", autoFilter = true) {
     const { connectionId, database } = target;
 
     let task: ExportTask | null = null;
@@ -341,7 +342,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
         } else {
           const comments = result.columns.map((name) => exportColumnInfos?.find((column) => column.name.toLocaleLowerCase() === name.toLocaleLowerCase())?.comment);
           const headerOverrides = buildXlsxHeaderOverrides(result.columns, comments, headerMode);
-          await api.exportQueryResultXlsx(outputPath, target.tableName, result.columns, result.column_types ?? result.columns.map(() => ""), headerOverrides, result.rows);
+          await api.exportQueryResultXlsx(outputPath, target.tableName, result.columns, result.column_types ?? result.columns.map(() => ""), headerOverrides, result.rows, undefined, autoFilter);
         }
         currentTask.status = "Done";
         currentTask.rowsExported = result.rows.length;
@@ -368,6 +369,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
         format,
         columns: queryColumns,
         columnComments,
+        autoFilter: format === "xlsx" ? autoFilter : undefined,
         primaryKeys,
         batchSize: target.batchSize,
         skipCount: format === "sql",
@@ -408,9 +410,9 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
       // Export still works with field-name headers when column metadata is unavailable.
     }
 
-    const headerMode = await showSidebarTreeXlsxHeaderDialog(hasXlsxHeaderComments(columnInfos?.map((column) => column.comment)));
-    if (headerMode === null) return;
-    await exportTableData(target, "xlsx", columnInfos, headerMode);
+    const exportOptions = await showSidebarTreeXlsxHeaderDialog(hasXlsxHeaderComments(columnInfos?.map((column) => column.comment)));
+    if (exportOptions === null) return;
+    await exportTableData(target, "xlsx", columnInfos, exportOptions.headerMode, exportOptions.autoFilter);
   }
 
   return {

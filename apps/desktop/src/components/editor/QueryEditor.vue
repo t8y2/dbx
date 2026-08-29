@@ -97,24 +97,30 @@ import { analyzeMysqlRoutineSyntax, supportsMysqlRoutineSyntaxDiagnostics } from
 import {
   DBX_TABLE_REFERENCE_MIME,
   DBX_TABLE_REFERENCE_DROP_EVENT,
+  DBX_TABLE_REFERENCE_HOVER_EVENT,
+  DBX_TABLE_REFERENCE_DRAG_END_EVENT,
   activeTableReferencePayloadValue,
   clearActiveTableReferencePayload,
   hasTableReferencePayloadType,
   parseTableReferencePayload,
   tableReferenceInsertText,
   type QueryEditorTableReferenceDropDetail,
+  type QueryEditorTableReferenceHoverDetail,
   type QueryEditorTableReferencePayload,
 } from "@/lib/editor/queryEditorTableDrop";
+import { isPointOverElementRoot } from "@/lib/editor/tableReferenceDragFeedback";
 import type { SqlHighlighter } from "@/lib/sql/sqlHighlighter";
 import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, editorDiagnosticColors, editorThemeAppearanceFor, loadEditorTheme, editorFontTheme, shellLineCommentTheme, sqlCompletionTheme, sqlSemanticHighlightTheme } from "@/lib/editor/editorThemes";
 import { createStatementGutterMarkerDom, shouldShowStatementGutter } from "@/lib/editor/codemirrorStatementGutter";
+import { createQueryEditorSqlShortcutDomHandler, isCharacterProducingShortcut } from "@/lib/editor/queryEditorSqlShortcut";
 import { createQueryEditorReplaceShortcutBindings, createQueryEditorReplaceShortcutHandler, createQueryEditorSearchKeymap } from "@/lib/editor/queryEditorSearchKeymap";
-import { buildQueryEditorLineNumbersExtension } from "@/lib/editor/queryEditorLineNumbers";
+import { buildQueryEditorLineNumbersExtension, createQueryEditorLineNumberAlignmentExtension } from "@/lib/editor/queryEditorLineNumbers";
 import { searchKeymapWithoutModD } from "@/lib/editor/codemirrorSearchKeymap";
 import { defaultKeymapForGlobalShortcuts } from "@/lib/editor/codemirrorDefaultKeymap";
 import { appendSqlCompletionSpace } from "@/lib/editor/sqlCompletionInsertion";
 import { compareSqlCompletions, completionLabelPresentation } from "@/lib/editor/sqlCompletionPresentation";
 import { clampEditorFontSize, createEditorWheelZoomGestureGuard, createEditorZoomCommitScheduler, fontSizeFromGestureScale, fontSizeFromWheelDelta } from "@/lib/editor/editorZoom";
+import { enabledSqlShortcutActions, resolveSqlShortcutTemplate } from "@/lib/sql/sqlShortcutActions";
 import { normalizeShortcutSettings, shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLayer";
 import { currentStatementFrameLayer } from "@/lib/editor/codemirrorCurrentStatementFrameLayer";
@@ -1923,6 +1929,18 @@ function handleSqlIntentionActions(currentView: EditorViewType): boolean {
   }
 }
 
+function runSqlShortcutAction(action: ReturnType<typeof enabledSqlShortcutActions>[number], currentView: EditorViewType, event?: KeyboardEvent): boolean {
+  if (shouldBlockExecutionShortcut(event, currentView)) return true;
+  if (props.readOnly) return true;
+  const { from, to, empty } = currentView.state.selection.main;
+  if (empty) return false;
+  const selected = currentView.state.sliceDoc(from, to).trim();
+  if (!selected) return false;
+  const sql = resolveSqlShortcutTemplate(action.sql, selected);
+  emitExecutionRequest(sql);
+  return true;
+}
+
 function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view"))["keymap"]) {
   const shortcuts = normalizeShortcutSettings(settingsStore.editorSettings.shortcuts);
   const Prec = codeMirrorPrec;
@@ -1943,11 +1961,22 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
     openReplace,
     isReadOnly: () => !!props.readOnly,
   });
+  const sqlShortcutActions = enabledSqlShortcutActions(settingsStore.editorSettings.sqlShortcuts);
+  const sqlShortcutKeymapActions = sqlShortcutActions.filter((action) => !isCharacterProducingShortcut(action.shortcut));
+  const sqlShortcutBindings = sqlShortcutKeymapActions.flatMap((action) => binding(action.shortcut, (currentView) => runSqlShortcutAction(action, currentView)));
+  const sqlShortcutDomHandler = createQueryEditorSqlShortcutDomHandler(
+    () => settingsStore.editorSettings.sqlShortcuts,
+    (action, currentView, event) => runSqlShortcutAction(action, currentView, event),
+  );
+  const combinedDomKeydownHandler = (event: KeyboardEvent, view: EditorViewType) => {
+    if (replaceShortcutHandler(event)) return true;
+    return sqlShortcutDomHandler(event, view);
+  };
   return [
     editorViewModule
       ? (Prec?.high(
           editorViewModule.EditorView.domEventHandlers({
-            keydown: replaceShortcutHandler,
+            keydown: combinedDomKeydownHandler,
           }),
         ) ?? [])
       : [],
@@ -2014,6 +2043,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
           openReplace,
           isReadOnly: () => !!props.readOnly,
         }),
+        ...sqlShortcutBindings,
       ]),
     ) ?? [],
     codeMirrorKeymap.of(
@@ -3295,6 +3325,7 @@ function insertTableReferencePayload(currentView: EditorViewType, payload: Query
     userEvent: "input.drop",
   });
   clearActiveTableReferencePayload(payload);
+  hideQueryEditorDropCaret();
   currentView.focus();
   return true;
 }
@@ -3316,21 +3347,77 @@ function onTableReferenceDropEvent(event: Event) {
   if (!currentView || props.readOnly || !(event instanceof CustomEvent)) return;
   const detail = event.detail as QueryEditorTableReferenceDropDetail | undefined;
   if (!detail?.payload) return;
-  const target = document.elementFromPoint(detail.clientX, detail.clientY);
-  if (target instanceof Element && editorRef.value?.contains(target)) {
+  // elementFromPoint 被透明覆盖层拦截时回退为编辑器根节点包围盒判定（见 isPointOverElementRoot）。
+  if (isPointOverElementRoot(detail.clientX, detail.clientY, editorRef.value)) {
     insertTableReferencePayload(currentView, detail.payload, detail);
   }
+}
+
+// --- 表引用拖拽悬停时的插入光标线（指针模拟拖拽经 window 事件驱动） ---
+const queryEditorDropCaret = ref<{ left: number; top: number; height: number } | null>(null);
+const queryEditorDropCaretStyle = computed(() => {
+  const caret = queryEditorDropCaret.value;
+  return caret ? { left: `${caret.left}px`, top: `${caret.top}px`, height: `${caret.height}px` } : {};
+});
+
+function showQueryEditorDropCaretAt(clientX: number, clientY: number) {
+  const currentView = view.value;
+  if (!currentView || props.readOnly || !editorRef.value) {
+    hideQueryEditorDropCaret();
+    return;
+  }
+  let dropPos: number | null = null;
+  try {
+    dropPos = currentView.posAtCoords({ x: clientX, y: clientY });
+  } catch {
+    dropPos = null;
+  }
+  if (dropPos == null) {
+    hideQueryEditorDropCaret();
+    return;
+  }
+  const coords = currentView.coordsAtPos(dropPos);
+  if (!coords) {
+    hideQueryEditorDropCaret();
+    return;
+  }
+  const rect = editorRef.value.getBoundingClientRect();
+  queryEditorDropCaret.value = { left: coords.left - rect.left, top: coords.top - rect.top, height: Math.max(coords.bottom - coords.top, 0) };
+}
+
+function hideQueryEditorDropCaret() {
+  queryEditorDropCaret.value = null;
+}
+
+function onTableReferenceHoverEvent(event: Event) {
+  if (!(event instanceof CustomEvent)) return;
+  const detail = event.detail as QueryEditorTableReferenceHoverDetail | undefined;
+  if (!detail) return;
+  // elementFromPoint 被透明覆盖层拦截时回退为编辑器根节点包围盒判定（见 isPointOverElementRoot）。
+  if (!isPointOverElementRoot(detail.clientX, detail.clientY, editorRef.value)) {
+    hideQueryEditorDropCaret();
+    return;
+  }
+  showQueryEditorDropCaretAt(detail.clientX, detail.clientY);
+}
+
+function onTableReferenceDragEndEvent() {
+  hideQueryEditorDropCaret();
 }
 
 function registerTableReferenceDropListener() {
   if (tableReferenceDropListenerRegistered) return;
   window.addEventListener(DBX_TABLE_REFERENCE_DROP_EVENT, onTableReferenceDropEvent);
+  window.addEventListener(DBX_TABLE_REFERENCE_HOVER_EVENT, onTableReferenceHoverEvent);
+  window.addEventListener(DBX_TABLE_REFERENCE_DRAG_END_EVENT, onTableReferenceDragEndEvent);
   tableReferenceDropListenerRegistered = true;
 }
 
 function unregisterTableReferenceDropListener() {
   if (!tableReferenceDropListenerRegistered) return;
   window.removeEventListener(DBX_TABLE_REFERENCE_DROP_EVENT, onTableReferenceDropEvent);
+  window.removeEventListener(DBX_TABLE_REFERENCE_HOVER_EVENT, onTableReferenceHoverEvent);
+  window.removeEventListener(DBX_TABLE_REFERENCE_DRAG_END_EVENT, onTableReferenceDragEndEvent);
   tableReferenceDropListenerRegistered = false;
 }
 
@@ -5214,6 +5301,7 @@ onMounted(async () => {
       }),
       runGutterComp.of(runStatementGutterExtension()),
       lineNumbersComp.of(lineNumbersExtension(initialSettings.showLineNumbers)),
+      createQueryEditorLineNumberAlignmentExtension(ViewPlugin),
       currentStatementFrameExtension,
       highlightActiveLineGutter(),
       highlightSpecialChars(),
@@ -5374,12 +5462,21 @@ onMounted(async () => {
           return recoverLargeTauriPaste(event, currentView);
         },
         dragover(event) {
-          if (props.readOnly || !hasDroppedTableReference(event)) return false;
+          if (props.readOnly || !hasDroppedTableReference(event)) {
+            hideQueryEditorDropCaret();
+            return false;
+          }
           event.preventDefault();
           if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+          showQueryEditorDropCaretAt(event.clientX, event.clientY);
           return true;
         },
+        dragleave() {
+          hideQueryEditorDropCaret();
+          return false;
+        },
         drop(event, currentView) {
+          hideQueryEditorDropCaret();
           return insertDroppedTableReference(currentView, event);
         },
         blur(_event, currentView) {
@@ -5897,10 +5994,19 @@ watch(
 );
 
 watch(
-  () => settingsStore.editorSettings.shortcuts,
+  () => [settingsStore.editorSettings.shortcuts, settingsStore.editorSettings.sqlShortcuts],
   () => {
-    if (!view.value || !defaultKeymapComp) return;
-    view.value.dispatch({ effects: defaultKeymapComp.reconfigure(defaultKeymapExtension()) });
+    if (!view.value || !editorViewModule) return;
+    const effects = [];
+    if (defaultKeymapComp) {
+      effects.push(defaultKeymapComp.reconfigure(defaultKeymapExtension()));
+    }
+    if (runKeymapComp) {
+      effects.push(runKeymapComp.reconfigure(runKeymapExtension(editorViewModule.keymap)));
+    }
+    if (effects.length > 0) {
+      view.value.dispatch({ effects });
+    }
   },
   { deep: true },
 );
@@ -6187,6 +6293,7 @@ defineExpose({
         "
       />
     </CustomContextMenu>
+    <div v-show="queryEditorDropCaret" data-query-editor-drop-caret class="pointer-events-none absolute z-20 w-0.5 rounded-full bg-primary/70" :style="queryEditorDropCaretStyle" />
     <EditorSearchPanel ref="searchPanelRef" :view="view" />
     <SqlExecutionTargetPicker v-if="pickerVisible" :candidates="pickerCandidates" :active-index="pickerActiveIndex" :anchor="pickerAnchor" @update:active-index="onPickerActiveIndexChange" @confirm="onPickerConfirm" @cancel="closePicker" />
     <DelimitedListDialog v-model:open="delimitedListOpen" :selected-text="delimitedListSelectedText" @confirm="applyDelimitedListResult" />

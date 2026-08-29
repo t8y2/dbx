@@ -60,6 +60,7 @@ import {
   type DoltClientSessionScope,
 } from "@/lib/dolt/doltVersionControl";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { useQueryStore } from "@/stores/queryStore";
 import { useToast } from "@/composables/useToast";
 import { copyToClipboard } from "@/lib/common/clipboard";
@@ -240,7 +241,7 @@ const tableDiffPageSize = ref(DOLT_DIFF_DEFAULT_PAGE_SIZE);
 const tableDiffTotalRows = ref(0);
 const tableDiffMaximumPage = computed(() => Math.max(1, Math.ceil(tableDiffTotalRows.value / tableDiffPageSize.value)));
 const selectedRevisionKeySet = computed(() => new Set(selectedRevisionKeys.value));
-const connectionReadOnly = computed(() => connectionStore.getConfig(props.connectionId)?.read_only ?? false);
+const connectionReadOnly = computed(() => connectionIsEffectivelyReadOnly(connectionStore.getConfig(props.connectionId)));
 const createsNamedRef = computed(() => branchDialog.value === "create" || branchDialog.value === "create-tag");
 const mutationDialogTitle = computed(() => {
   if (branchDialog.value === "create") return t("doltVersionControl.createBranch");

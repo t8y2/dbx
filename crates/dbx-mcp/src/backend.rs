@@ -174,6 +174,15 @@ pub trait DbxBackend: Send + Sync {
         arguments: Value,
         permissions: AgentSqlPermissions,
     ) -> ToolResult;
+    #[cfg(feature = "mq-admin")]
+    async fn send_message(
+        &self,
+        connection: &ConnectionConfig,
+        request: dbx_core::mq::SendMessageRequest,
+    ) -> Result<dbx_core::mq::SendMessageResponse, String> {
+        let _ = (connection, request);
+        Err("Message queue sending is not supported by this backend.".to_string())
+    }
     async fn execute_query(
         &self,
         connection: &ConnectionConfig,
@@ -585,6 +594,15 @@ impl DbxBackend for LocalBackend {
         .await
     }
 
+    #[cfg(feature = "mq-admin")]
+    async fn send_message(
+        &self,
+        connection: &ConnectionConfig,
+        request: dbx_core::mq::SendMessageRequest,
+    ) -> Result<dbx_core::mq::SendMessageResponse, String> {
+        dbx_core::mq::service::mq_send_message_core(&self.state, &connection.id, request).await
+    }
+
     async fn execute_query(
         &self,
         connection: &ConnectionConfig,
@@ -820,6 +838,30 @@ impl DbxBackend for WebBackend {
             is_error: result.is_err(),
             explain_data: None,
         }
+    }
+
+    #[cfg(feature = "mq-admin")]
+    async fn send_message(
+        &self,
+        connection: &ConnectionConfig,
+        request: dbx_core::mq::SendMessageRequest,
+    ) -> Result<dbx_core::mq::SendMessageResponse, String> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct SendMessageBody {
+            connection_id: String,
+            req: dbx_core::mq::SendMessageRequest,
+        }
+
+        self.request(
+            reqwest::Method::POST,
+            "/api/mq/send-message",
+            Some(json!(SendMessageBody { connection_id: connection.id.clone(), req: request })),
+        )
+        .await?
+        .json()
+        .await
+        .map_err(|error| format!("Invalid message send response: {error}"))
     }
 
     async fn execute_query(

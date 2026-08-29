@@ -32,7 +32,6 @@ import {
   CalendarClock,
   Gauge,
   ShieldCheck,
-  Lock,
   Archive,
   Square,
   Minus,
@@ -46,6 +45,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import ConnectionErrorIndicator from "@/components/connection/ConnectionErrorIndicator.vue";
+import ReadOnlySessionControl from "@/components/connection/ReadOnlySessionControl.vue";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -53,8 +53,9 @@ import { Switch } from "@/components/ui/switch";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import type { ColumnInfo, ConnectionConfig, CustomTypeTreeMemberMeta, DatabaseType, TreeNode, TriggerInfo } from "@/types/database";
 import { alignedCommentLeadingWidth, canTreeNodePin, canTreeNodeShowExpander, sidebarTreeNodeComment, trailingCommentAvailableWidth, trailingCommentGapPx, treeItemPaddingLeft, treeLabelWidthClass, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
-import { clearActiveTableReferencePayload, createTableReferencePayload, createTableReferenceDropEvent, setActiveTableReferencePayload, type QueryEditorTableReferencePayload } from "@/lib/editor/queryEditorTableDrop";
+import { clearActiveTableReferencePayload, createTableReferenceDragEndEvent, createTableReferenceDropEvent, createTableReferenceHoverEvent, createTableReferencePayload, setActiveTableReferencePayload, type QueryEditorTableReferencePayload } from "@/lib/editor/queryEditorTableDrop";
 import { AI_ASSISTANT_TABLE_DROP_ROOT_SELECTOR } from "@/lib/ai/aiTableReferenceDrop";
+import { beginTableReferenceDragFeedback, isOverSqlEditorTarget, type TableReferenceDragFeedback } from "@/lib/editor/tableReferenceDragFeedback";
 import { formatSidebarObjectStorage } from "@/lib/sidebar/sidebarDatabaseStorage";
 import { dataTabOpenModeFromTreeClick } from "@/lib/sidebar/dataTabOpenPolicy";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
@@ -1126,8 +1127,6 @@ function clearTreeDragTarget() {
 
 const TABLE_REFERENCE_DRAG_THRESHOLD = 5;
 
-const TABLE_REFERENCE_DRAGGING_CLASS = "dbx-table-reference-dragging";
-
 const canDragTableReference = computed(() => {
   if (props.referenceDragDisabled || !activeNode.value.connectionId) return false;
   if (activeNode.value.type === "database") return typeof activeNode.value.database === "string" && activeNode.value.database.trim().length > 0;
@@ -1144,7 +1143,14 @@ let pendingTableReferenceDrag: {
 
 let draggingTableReferencePayload: QueryEditorTableReferencePayload | null = null;
 
+let referenceDragFeedback: TableReferenceDragFeedback | null = null;
+
 let suppressNextTableReferenceClick = false;
+
+function tableReferenceDragLabel(payload: QueryEditorTableReferencePayload): string {
+  if (payload.referenceType === "column" && payload.columnName) return payload.columnName;
+  return payload.tableName || payload.database;
+}
 
 function tableReferenceDragPayload(): QueryEditorTableReferencePayload | null {
   if (!canDragTableReference.value) return null;
@@ -1191,15 +1197,16 @@ function startTableReferenceDrag(payload: QueryEditorTableReferencePayload) {
   draggingTableReferencePayload = payload;
   setActiveTableReferencePayload(payload);
   document.getSelection()?.removeAllRanges();
-  document.body.style.cursor = "copy";
+  referenceDragFeedback = beginTableReferenceDragFeedback(tableReferenceDragLabel(payload));
 }
 
 function finishTableReferenceDrag() {
   clearActiveTableReferencePayload(draggingTableReferencePayload);
   pendingTableReferenceDrag = null;
   draggingTableReferencePayload = null;
-  document.body.classList.remove(TABLE_REFERENCE_DRAGGING_CLASS);
-  document.body.style.cursor = "";
+  referenceDragFeedback?.end();
+  referenceDragFeedback = null;
+  window.dispatchEvent(createTableReferenceDragEndEvent());
   document.removeEventListener("mousemove", onTableReferenceMouseMove, true);
   document.removeEventListener("mouseup", onTableReferenceMouseUp, true);
 }
@@ -1215,6 +1222,11 @@ function onTableReferenceMouseMove(event: MouseEvent) {
   if (draggingTableReferencePayload) {
     event.preventDefault();
     document.getSelection()?.removeAllRanges();
+    referenceDragFeedback?.update(event.clientX, event.clientY);
+    // 仅查询编辑器消费 hover 光标线事件；AI 面板不监听。命中判定含覆盖层拦截时的几何回退。
+    if (isOverSqlEditorTarget(event.clientX, event.clientY)) {
+      window.dispatchEvent(createTableReferenceHoverEvent({ clientX: event.clientX, clientY: event.clientY }));
+    }
   }
 }
 
@@ -1242,7 +1254,6 @@ function startTableReferenceMouseDrag(event: MouseEvent) {
   if (!payload) return;
   event.preventDefault();
   document.getSelection()?.removeAllRanges();
-  document.body.classList.add(TABLE_REFERENCE_DRAGGING_CLASS);
   pendingTableReferenceDrag = { payload, startX: event.clientX, startY: event.clientY };
   document.addEventListener("mousemove", onTableReferenceMouseMove, true);
   document.addEventListener("mouseup", onTableReferenceMouseUp, true);
@@ -1499,7 +1510,7 @@ function onKeydown(event: KeyboardEvent) {
         </div>
         <span v-if="node.type === 'connection' && node.connectionId && connectionStore.connectedIds.has(node.connectionId)" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
         <span v-if="databaseOpenVisual.showsIndicator" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
-        <Badge v-if="isConnectionReadonly" variant="secondary" class="h-4 px-1.5 text-[10px] gap-0.5"> <Lock class="w-2.5 h-2.5" />{{ t("connection.readOnlyBadge") }} </Badge>
+        <ReadOnlySessionControl v-if="isConnectionReadonly && activeNode.connectionId" :connection-id="activeNode.connectionId" show-label />
         <ConnectionErrorIndicator v-if="node.type === 'connection'" :connection-id="node.connectionId" trigger-class="h-4 w-4" />
         <span v-if="formattedObjectStorage()" class="ml-auto shrink-0 text-right text-xs tabular-nums text-muted-foreground">{{ formattedObjectStorage() }}</span>
         <button

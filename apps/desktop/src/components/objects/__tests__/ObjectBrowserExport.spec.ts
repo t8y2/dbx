@@ -17,19 +17,19 @@ function functionBody(name: string): string {
 }
 
 describe("ObjectBrowser XLSX export", () => {
-  it("asks for a header mode before opening the save dialog when comments exist", () => {
+  it("asks for export options before opening the save dialog", () => {
     const dialog = functionBody("showObjectBrowserXlsxHeaderDialog");
     const exportDataXlsx = functionBody("exportDataXlsx");
 
-    expect(dialog).toContain('if (!hasComments) return Promise.resolve("name")');
-    expect(exportDataXlsx).toContain("hasXlsxHeaderComments(columnInfos.map((column) => column.comment))");
-    expect(exportDataXlsx.indexOf("await showObjectBrowserXlsxHeaderDialog(")).toBeLessThan(exportDataXlsx.indexOf('await exportTableData(row, "xlsx", columnInfos, headerMode)'));
+    expect(dialog).toContain("showHeaderOptions: hasComments");
+    expect(exportDataXlsx).toContain("hasXlsxHeaderComments(columnInfos?.map((column) => column.comment))");
+    expect(exportDataXlsx.indexOf("await showObjectBrowserXlsxHeaderDialog(")).toBeLessThan(exportDataXlsx.indexOf('await exportTableData(row, "xlsx", columnInfos, exportOptions.headerMode, exportOptions.autoFilter)'));
   });
 
   it("falls back to field-name headers when column metadata is unavailable", () => {
     const exportDataXlsx = functionBody("exportDataXlsx");
 
     expect(exportDataXlsx).toContain("catch {\n    // Export still works with field-name headers when column metadata is unavailable.\n  }");
-    expect(exportDataXlsx).toContain('await exportTableData(row, "xlsx", columnInfos, headerMode)');
+    expect(exportDataXlsx).toContain('await exportTableData(row, "xlsx", columnInfos, exportOptions.headerMode, exportOptions.autoFilter)');
   });
 });

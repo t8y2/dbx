@@ -253,7 +253,18 @@ export function supportsTransaction(dbType?: string): boolean {
 /**
  * Default auto-commit mode when opening a query tab for the given database type.
  * Query tabs default to auto-commit; users can explicitly switch to manual transactions.
+ *
+ * When the user has configured `manual` as their default, manual mode only applies to
+ * databases that actually support explicit transaction control — otherwise the tab is
+ * forced back to auto-commit so it does not start in an unsupported state. (For
+ * non-transaction databases, `queryStore` also forces auto-commit on first execution,
+ * but that would leave the new tab's initial state misleading; gating here avoids that.)
+ *
+ * The `defaultMode` selector is the user-configured default (Settings > Editor);
+ * it is supplied by the caller rather than read here so this module stays free of
+ * any Pinia store dependency.
  */
-export function defaultAutoCommitForDbType(_dbType?: string): boolean {
-  return true;
+export function defaultAutoCommitForDbType(dbType: string | undefined, defaultMode: "auto" | "manual" = "auto"): boolean {
+  if (defaultMode !== "manual") return true;
+  return !supportsTransaction(dbType);
 }

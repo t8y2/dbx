@@ -99,6 +99,18 @@ describe("QueryEditor execution routing", () => {
     expect(queryEditorSource).toContain("const cursor = line.to + insertion.length");
     expect(queryEditorSource).not.toMatch(/key:\s*"Enter"[\s\S]{0,180}shift:\s*codeMirrorInsertNewlineKeepIndent/);
   });
+
+  it("routes custom SQL shortcuts through selection-aware execution with dual keymap and DOM handlers", () => {
+    expect(queryEditorSource).toContain("function runSqlShortcutAction(");
+    expect(queryEditorSource).toContain("resolveSqlShortcutTemplate(action.sql, selected)");
+    expect(queryEditorSource).toContain("enabledSqlShortcutActions(settingsStore.editorSettings.sqlShortcuts)");
+    expect(queryEditorSource).toContain("isCharacterProducingShortcut(action.shortcut)");
+    expect(queryEditorSource).toContain("createQueryEditorSqlShortcutDomHandler(");
+    expect(queryEditorSource).toContain("shouldBlockExecutionShortcut(event, currentView)");
+    expect(queryEditorSource).toContain("if (props.readOnly) return true;");
+    expect(queryEditorSource).toContain("settingsStore.editorSettings.sqlShortcuts");
+    expect(queryEditorSource).toContain("runKeymapComp.reconfigure(runKeymapExtension(editorViewModule.keymap))");
+  });
 });
 
 describe("QueryEditor execution viewport ownership", () => {

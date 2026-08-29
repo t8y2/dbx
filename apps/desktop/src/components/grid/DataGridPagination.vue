@@ -93,7 +93,7 @@ function handlePageInputKeydown(event: KeyboardEvent) {
         <span class="shrink-0">{{ t("grid.rows", { count: selectionSummary.rowCount }) }}</span>
       </div>
     </div>
-    <Loader2 v-if="loading" class="w-3 h-3 animate-spin text-muted-foreground" />
+    <Loader2 class="w-3 h-3 text-muted-foreground" :class="loading ? 'animate-spin' : 'invisible'" aria-hidden="true" />
     <template v-if="paginationEnabled && infiniteScrollEnabled">
       <span v-if="infiniteScrollAllLoaded" class="text-xs text-muted-foreground shrink-0">{{ t("grid.allLoaded") }}</span>
     </template>

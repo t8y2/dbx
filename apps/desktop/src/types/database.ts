@@ -21,6 +21,14 @@ export interface SqlSnippet {
   enabled?: boolean;
 }
 
+export interface SqlShortcutAction {
+  id: string;
+  label: string;
+  shortcut: string;
+  sql: string;
+  enabled?: boolean;
+}
+
 export type CompletionAssistantObjectKind = "database" | "schema" | "table" | "view" | "routine" | "procedure" | "function" | "column" | "sequence";
 
 export type CompletionAssistantCandidateKind = "database" | "schema" | "table" | "view" | "procedure" | "function" | "column" | "sequence" | "object";
@@ -523,6 +531,10 @@ export interface IndexInfo {
   key_is_expression?: boolean[] | null;
 }
 
+export interface ReferenceKeyInfo {
+  columns: string[];
+}
+
 export interface ForeignKeyInfo {
   name: string;
   column: string;
@@ -646,6 +658,13 @@ export interface QueryResult {
   execution_error?: true;
   /** Set only for SQL Server informational messages emitted by the backend. */
   server_message?: true;
+  /** Oracle-only manual-transaction UX marker: set on a manual-transaction result
+   *  whose statement DBX proved to be an ordinary top-level read. Absent for
+   *  every non-Oracle execution and every unproven Oracle statement. */
+  manual_transaction_proven_read_only?: true;
+  /** Oracle-only manual-transaction UX marker: set on the synthetic successful
+   *  result of an empty/whitespace/comments-only manual script. */
+  manual_transaction_no_statement?: true;
   /** Structured backend error; authoritative when execution_error is true. */
   error?: BackendError;
   /** Zero-based index of the submitted statement that produced this result. */
@@ -1242,6 +1261,7 @@ export interface QueryTab {
     editableSourceKey?: string;
     multiSource?: boolean;
     allowInsert?: boolean;
+    allowDelete?: boolean;
     allowInsertDelete?: boolean;
     distinct?: boolean;
     sources?: {
@@ -1311,6 +1331,10 @@ export interface QueryTab {
   txnSessionId?: string;
   /** Set to true when a manual transaction was auto-rolled back due to inactivity */
   txnAutoRolledBack?: boolean;
+  /** Oracle-only, non-persisted: whether the current manual Oracle session has
+   *  executed at least one statement DBX cannot prove read-only. Commit/Rollback
+   *  actions are hidden while a session is clean. Never cleared by a later read. */
+  oracleTxnPossiblyDirty?: boolean;
 }
 
 export interface SavedSqlFolder {

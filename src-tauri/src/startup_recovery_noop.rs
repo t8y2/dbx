@@ -2,7 +2,7 @@ pub(crate) fn initialize() {}
 
 pub(crate) fn record(_message: impl AsRef<str>) {}
 
-pub(crate) fn mark_frontend_ready() {}
+pub(crate) fn mark_frontend_ready(_main_window_visible: bool) {}
 
 pub(crate) fn record_run_event() {}
 

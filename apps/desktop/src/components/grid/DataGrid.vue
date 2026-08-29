@@ -16,6 +16,7 @@ import {
   Search,
   Inbox,
   SearchX,
+  ShieldCheck,
   Code2,
   Copy,
   Loader2,
@@ -38,6 +39,7 @@ import {
   PanelBottom,
   PanelRight,
   RefreshCw,
+  RefreshCcw,
   TableProperties,
   UserRound,
   Database,
@@ -46,6 +48,7 @@ import {
   PencilRuler,
   Settings2,
   WandSparkles,
+  Camera,
 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -75,7 +78,8 @@ import DataGridTextFilterWorkbench from "@/components/grid/DataGridTextFilterWor
 import TemporalCellEditor from "@/components/grid/TemporalCellEditor.vue";
 import EnumCellEditor from "@/components/grid/EnumCellEditor.vue";
 import DataGridReadonlyTextSelection from "@/components/grid/DataGridReadonlyTextSelection.vue";
-import type { QueryResult, ColumnInfo, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo, TableInfoTab, QueryResultSourceColumnRef } from "@/types/database";
+import GridSnapshotDialog from "@/components/grid/GridSnapshotDialog.vue";
+import type { QueryResult, ColumnInfo, ConstraintInfo, DatabaseType, ForeignKeyInfo, IndexInfo, ReferenceKeyInfo, TriggerInfo, TableInfoTab, QueryResultSourceColumnRef } from "@/types/database";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import { tableObjectSourceKind } from "@/lib/table/tableObjectSourceKind";
 import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPresentation";
@@ -178,6 +182,7 @@ import {
   resolveColumnFormatter,
   type ColumnFormatterConfig,
   type DateTimeFormatterUnit,
+  type ForeignKeyDisplayFilterConfig,
   DateTimePatterns,
 } from "@/lib/dataGrid/columnFormatter";
 import { temporalCellEditorConfig, type TemporalCellEditorConfig } from "@/lib/dataGrid/dataGridTemporalEditor";
@@ -200,7 +205,7 @@ import {
   isToggleTransposeShortcut,
 } from "@/lib/editor/keyboardShortcuts";
 import { dataGridHeaderContentWidth, scrollbarGutterWidth } from "@/lib/dataGrid/dataGridScrollGutter";
-import { canFetchNextDataGridSegment, canGoNextDataGridPage, dataGridTotalRowCountLabelKey, dataGridTruncationHintKey, hasCompleteLocalDataGridResult, resolveDataGridPaginationTotal, type DataGridInexactTotalRowCountMode } from "@/lib/dataGrid/dataGridPagination";
+import { canFetchNextDataGridSegment, canGoNextDataGridPage, dataGridTotalRowCountLabelKey, dataGridTruncationHintKey, hasCompleteLocalDataGridResult, resolveDataGridPaginationTotal, showDataGridRerunTotalCountAction, type DataGridInexactTotalRowCountMode } from "@/lib/dataGrid/dataGridPagination";
 import { dataGridCountQueryOptions } from "@/lib/dataGrid/dataGridQueryOptions";
 import {
   createResultScopedPendingRequests,
@@ -228,6 +233,7 @@ import {
 } from "@/lib/dataGrid/dataGridInfiniteScroll";
 import { resolveDataGridWheelScroll } from "@/lib/dataGrid/dataGridWheel";
 import { CANVAS_DATA_GRID_ROW_HEIGHT, MAX_CANVAS_DATA_GRID_PIXEL_RATIO, canvasDataGridActionOverlayWidth, canvasDataGridActionReservedWidth, dataGridSearchMatchKey, drawCanvasDataGrid, type CanvasDevicePixelSize } from "@/lib/dataGrid/canvasDataGridRenderer";
+import { resolveCrosshairTarget, type CrosshairTarget } from "@/lib/dataGrid/crosshairHighlight";
 import { DATA_GRID_DARK_STRIPED_ROW_BG, DATA_GRID_LIGHT_STRIPED_ROW_BG, dataGridActiveRowBackground } from "@/lib/dataGrid/dataGridPaintTheme";
 import { createRowLowerTextCache } from "@/lib/dataGrid/dataGridRowLowerText";
 import { dataGridPreviewLabelKey, dataGridSaveActionMode, dataGridSaveToolbarState } from "@/lib/dataGrid/dataGridSaveUi";
@@ -300,13 +306,16 @@ import { DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS, DATA_GRID_COPY_EXTRACTOR_IDS, DAT
 import { columnNamesForCopy } from "@/lib/dataGrid/dataGridColumnNameCopy";
 import { DATA_GRID_ROW_NUM_WIDTH, dataGridRowNumberColumnWidth, resolveDataGridMaxRowNumber, useDataGridColumnResize } from "@/composables/useDataGridColumnResize";
 import { createDataGridColumnStructureSignature } from "@/lib/dataGrid/dataGridColumnWidthState";
-import { useDataGridColumnLayout, useDataGridColumnLayoutState } from "@/composables/useDataGridColumnLayout";
+import { useDataGridColumnLayout, useDataGridColumnLayoutState, type ColumnHeaderReferenceDragController } from "@/composables/useDataGridColumnLayout";
+import { createColumnReferencePayload, createTableReferenceDragEndEvent, createTableReferenceDropEvent, createTableReferenceHoverEvent } from "@/lib/editor/queryEditorTableDrop";
+import { beginTableReferenceDragFeedback, isOverSqlEditorTarget, type TableReferenceDragFeedback } from "@/lib/editor/tableReferenceDragFeedback";
 import { dataGridCanvasDevicePixelSize, useDataGridCanvasRuntime, type DataGridCanvasRuntime } from "@/composables/useDataGridCanvasRuntime";
 import { useDataGridScrollbars, type DataGridScrollbarsRuntime } from "@/composables/useDataGridScrollbars";
 import { useDataGridSelection } from "@/composables/useDataGridSelection";
 import { dataGridNavigationOrigin, dataGridPageScrollTop, dataGridRowScrollTop, moveDataGridCell, navigateDataGridCell, type DataGridNavigationDirection, type DataGridScrollAlignment } from "@/lib/dataGrid/dataGridNavigation";
 import { dataGridInlineBulkEditValue } from "@/lib/dataGrid/dataGridInlineBulkEdit";
 import type { CellPosition } from "@/lib/dataGrid/gridSelection";
+import type { GridSnapshotSource } from "@/lib/gridSnapshot/gridSnapshot";
 import { createDataGridRuntimeScope } from "@/lib/dataGrid/dataGridRuntime";
 import { useDataGridEditor } from "@/composables/useDataGridEditor";
 import { useDataGridSort } from "@/composables/useDataGridSort";
@@ -337,6 +346,7 @@ import {
 } from "@/lib/dataGrid/dataGridToolbar";
 import { getTableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
 import { getTableStructureCapabilities } from "@/lib/table/tableStructureCapabilities";
+import { constraintsForConstraintsTab } from "@/lib/table/constraintPresentation";
 import { filterObjectBrowserTableColumns } from "@/lib/table/objectBrowserTableInfo";
 import { gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
 import { reserveDataGridHeaderLine } from "@/lib/dataGrid/dataGridHeaderLayout";
@@ -381,6 +391,7 @@ const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 const cellDetailButtonEnabled = computed(() => settingsStore.editorSettings.dataGridCellDetailButtonVisible);
+const dataGridCrosshairHighlight = computed(() => settingsStore.editorSettings.dataGridCrosshairHighlight);
 const tableFontSize = computed(() => settingsStore.editorSettings.tableFontSize);
 const rowNumberWidth = ref(DATA_GRID_ROW_NUM_WIDTH);
 const largeValueResolutionVersion = ref(0);
@@ -924,6 +935,8 @@ const insertPosition = ref<GridInsertRowPosition>("below");
 const generateIncrementDialogOpen = ref(false);
 const generateIncrementStartValue = ref("1");
 const generateIncrementTarget = ref<"selection" | "detail">("selection");
+const gridSnapshotOpen = ref(false);
+const gridSnapshotSource = ref<GridSnapshotSource | null>(null);
 const detailCell = ref<{ rowIndex: number; col: number } | null>(null);
 const hoveredDetailCell = ref<{ rowIndex: number; col: number } | null>(null);
 const quickDownloadMenuCell = ref<{ rowIndex: number; col: number } | null>(null);
@@ -1158,7 +1171,7 @@ const formatterForeignKeyManual = ref(false);
 const formatterForeignKeySchemas = ref<string[]>([]);
 const formatterForeignKeyTables = ref<string[]>([]);
 const formatterForeignKeyColumns = ref<ColumnInfo[]>([]);
-const formatterForeignKeyReferenceKeyColumns = ref<string[]>([]);
+const formatterForeignKeyReferenceKeys = ref<ReferenceKeyInfo[]>([]);
 const formatterForeignKeyReferenceMetadataStatus = ref<ManualReferenceMetadataStatus>("loading");
 const formatterForeignKeySchemasLoading = ref(false);
 const formatterForeignKeyTablesLoading = ref(false);
@@ -1178,8 +1191,18 @@ interface ForeignKeyDisplayLabelState {
   labels: Map<string, string>;
 }
 
-const formatterForeignKeyReferenceColumns = computed(() => (formatterForeignKeyManual.value ? manualReferenceKeyColumns(formatterForeignKeyColumns.value, formatterForeignKeyReferenceKeyColumns.value) : formatterForeignKeyColumns.value));
-const formatterForeignKeyReferenceValidation = computed(() => manualReferenceColumnValidation(formatterForeignKeyColumns.value, formatterForeignKeyReferenceKeyColumns.value, formatterForeignKeyRefColumn.value, formatterForeignKeyReferenceMetadataStatus.value));
+const formatterForeignKeyReferenceFilter = computed<ForeignKeyDisplayFilterConfig | undefined>(() =>
+  formatterForeignKeyFilterEnabled.value
+    ? {
+        column: formatterForeignKeyFilterColumn.value,
+        mode: formatterForeignKeyFilterMode.value,
+        value: formatterForeignKeyFilterValue.value,
+        endValue: formatterForeignKeyFilterEndValue.value,
+      }
+    : undefined,
+);
+const formatterForeignKeyReferenceColumns = computed(() => (formatterForeignKeyManual.value ? manualReferenceKeyColumns(formatterForeignKeyColumns.value, formatterForeignKeyReferenceKeys.value, formatterForeignKeyReferenceFilter.value) : formatterForeignKeyColumns.value));
+const formatterForeignKeyReferenceValidation = computed(() => manualReferenceColumnValidation(formatterForeignKeyColumns.value, formatterForeignKeyReferenceKeys.value, formatterForeignKeyRefColumn.value, formatterForeignKeyReferenceMetadataStatus.value, formatterForeignKeyReferenceFilter.value));
 const foreignKeyDisplayLabels = shallowRef(new Map<number, ForeignKeyDisplayLabelState>());
 const foreignKeyDisplayRequests = createForeignKeyDisplayRequestCoordinator();
 
@@ -1601,7 +1624,7 @@ function loadFormatterDraft(formatter: ColumnFormatterConfig | undefined) {
   formatterForeignKeySchemas.value = [];
   formatterForeignKeyTables.value = [];
   formatterForeignKeyColumns.value = [];
-  formatterForeignKeyReferenceKeyColumns.value = [];
+  formatterForeignKeyReferenceKeys.value = [];
   formatterForeignKeyReferenceMetadataStatus.value = "loading";
   formatterForeignKeyTargetError.value = "";
   formatterForeignKeyColumnsError.value = "";
@@ -1663,7 +1686,7 @@ function formatterForeignKeyForColumn(columnIndex: number): ForeignKeyInfo | und
 async function loadFormatterForeignKeyColumns(columnIndex: number) {
   const request = ++formatterForeignKeyColumnsRequest;
   formatterForeignKeyColumns.value = [];
-  formatterForeignKeyReferenceKeyColumns.value = [];
+  formatterForeignKeyReferenceKeys.value = [];
   formatterForeignKeyReferenceMetadataStatus.value = "loading";
   formatterForeignKeyColumnsError.value = "";
   formatterForeignKeyReferenceMetadataError.value = "";
@@ -1674,7 +1697,7 @@ async function loadFormatterForeignKeyColumns(columnIndex: number) {
     const manual = formatterForeignKeyManual.value;
     const [columnsResult, referenceKeysResult] = await Promise.allSettled([
       api.getColumns(props.connectionId, props.database || "", schema, formatterForeignKeyRefTable.value, props.tableMeta?.catalog),
-      manual ? api.listReferenceKeyColumns(props.connectionId, props.database || "", schema, formatterForeignKeyRefTable.value, props.tableMeta?.catalog) : Promise.resolve([] as string[]),
+      manual ? api.listReferenceKeys(props.connectionId, props.database || "", schema, formatterForeignKeyRefTable.value, props.tableMeta?.catalog) : Promise.resolve([] as ReferenceKeyInfo[]),
     ]);
     if (request !== formatterForeignKeyColumnsRequest || formatterOpenColumn.value !== columnIndex) return;
     if (columnsResult.status === "rejected") throw columnsResult.reason;
@@ -1684,10 +1707,10 @@ async function loadFormatterForeignKeyColumns(columnIndex: number) {
       formatterForeignKeyReferenceMetadataStatus.value = "unavailable";
       formatterForeignKeyReferenceMetadataError.value = String(referenceKeysResult.reason?.message || referenceKeysResult.reason);
     } else {
-      formatterForeignKeyReferenceKeyColumns.value = referenceKeysResult.status === "fulfilled" ? referenceKeysResult.value : [];
+      formatterForeignKeyReferenceKeys.value = referenceKeysResult.status === "fulfilled" ? referenceKeysResult.value : [];
       formatterForeignKeyReferenceMetadataStatus.value = "available";
     }
-    const referenceColumns = manualReferenceKeyColumns(columns, formatterForeignKeyReferenceKeyColumns.value);
+    const referenceColumns = manualReferenceKeyColumns(columns, formatterForeignKeyReferenceKeys.value, formatterForeignKeyReferenceFilter.value);
     const foreignKey = formatterForeignKeyForColumn(columnIndex);
     if (manual) {
       formatterForeignKeyRefColumn.value = reconcileManualReferenceColumn(formatterForeignKeyRefColumn.value, referenceColumns, formatterForeignKeyReferenceMetadataStatus.value);
@@ -1758,7 +1781,7 @@ function selectFormatterForeignKeySchema(value: string, columnIndex: number) {
   formatterForeignKeyDisplayColumn.value = "";
   formatterForeignKeyFilterColumn.value = "";
   formatterForeignKeyColumns.value = [];
-  formatterForeignKeyReferenceKeyColumns.value = [];
+  formatterForeignKeyReferenceKeys.value = [];
   formatterForeignKeyReferenceMetadataStatus.value = "loading";
   formatterForeignKeyReferenceMetadataError.value = "";
   void loadFormatterManualReferenceTables(columnIndex);
@@ -1770,7 +1793,7 @@ function selectFormatterForeignKeyTable(value: string, columnIndex: number) {
   formatterForeignKeyRefColumn.value = "";
   formatterForeignKeyDisplayColumn.value = "";
   formatterForeignKeyFilterColumn.value = "";
-  formatterForeignKeyReferenceKeyColumns.value = [];
+  formatterForeignKeyReferenceKeys.value = [];
   formatterForeignKeyReferenceMetadataStatus.value = "loading";
   formatterForeignKeyReferenceMetadataError.value = "";
   void loadFormatterForeignKeyColumns(columnIndex);
@@ -2851,6 +2874,62 @@ function unfreezeAllColumns() {
   applyColumnOrderChange(unfreezeAllColumnsInLayout);
 }
 
+// --- 表头拖拽进 SQL 编辑器：目标导向模式切换的控制器 ---
+// 按选择顺序（Set 插入序）取列名；被拖列未选中时仅拖该列。
+function columnReferenceDragNames(draggedVisibleColIdx: number): string[] | null {
+  const selected = [...selection.selectedColumnIndexes.value];
+  const ordered = selected.includes(draggedVisibleColIdx) ? selected : [draggedVisibleColIdx];
+  const names = ordered.map((index) => visibleColumns.value[index]).filter((name): name is string => !!name);
+  return names.length > 0 ? names : null;
+}
+
+function buildColumnReferencePayload(draggedVisibleColIdx: number) {
+  const columnNames = columnReferenceDragNames(draggedVisibleColIdx);
+  if (!columnNames) return null;
+  return createColumnReferencePayload({
+    connectionId: props.connectionId,
+    database: props.database,
+    schema: props.schema,
+    columnNames,
+    databaseType: resolvedDatabaseType.value,
+  });
+}
+
+let referenceDragFeedback: TableReferenceDragFeedback | null = null;
+
+// 拖拽 chip 文案：≤3 个列名直接平铺，更多时走 i18n 摘要模板。
+function columnReferenceDragLabel(names: string[]): string {
+  if (names.length <= 3) return names.join(", ");
+  return t("grid.columnDragChipMany", { names: names.slice(0, 2).join(", "), count: names.length });
+}
+
+const columnHeaderReferenceDragController: ColumnHeaderReferenceDragController = {
+  isOverEditorTarget: (clientX, clientY) => isOverSqlEditorTarget(clientX, clientY),
+  onEnter(sourceVisibleIndex) {
+    const names = columnReferenceDragNames(sourceVisibleIndex);
+    if (!names) return null;
+    const label = columnReferenceDragLabel(names);
+    referenceDragFeedback?.end();
+    referenceDragFeedback = beginTableReferenceDragFeedback(label);
+    return label;
+  },
+  onMove(_sourceVisibleIndex, clientX, clientY) {
+    referenceDragFeedback?.update(clientX, clientY);
+    window.dispatchEvent(createTableReferenceHoverEvent({ clientX, clientY }));
+  },
+  onDrop(sourceVisibleIndex, clientX, clientY) {
+    const payload = buildColumnReferencePayload(sourceVisibleIndex);
+    if (!payload) return false;
+    window.dispatchEvent(createTableReferenceDropEvent({ payload, clientX, clientY }));
+    return true;
+  },
+  onCancel() {
+    referenceDragFeedback?.end();
+    referenceDragFeedback = null;
+    window.dispatchEvent(createTableReferenceDragEndEvent());
+  },
+};
+
 const {
   renderedColumnOffsets,
   horizontalColumnWindow,
@@ -2889,6 +2968,7 @@ const {
   onRefreshMetrics: scheduleColumnLayoutRefresh,
   onPersistColumnOrder: persistDraggedColumnOrder,
   frozenColumnCount,
+  columnReferenceDrag: columnHeaderReferenceDragController,
 });
 
 function onHeaderClickCapture(event: MouseEvent) {
@@ -3483,6 +3563,13 @@ watch(
 );
 const canCalculateTotalRowCount = computed(() => !!props.countTotalRows || (!!props.connectionId && (!!props.tableMeta || !!props.countSql)));
 const showExactTotalCountAction = computed(() => canCalculateTotalRowCount.value && (totalRowCountIsExact.value === false || typeof displayedTotalRowCount.value !== "number"));
+const showRerunTotalCountAction = computed(() =>
+  showDataGridRerunTotalCountAction({
+    canCalculateTotalRowCount: canCalculateTotalRowCount.value,
+    displayedTotalRowCount: displayedTotalRowCount.value,
+    totalRowCountIsExact: totalRowCountIsExact.value,
+  }),
+);
 watch(
   [
     () =>
@@ -5104,6 +5191,7 @@ async function hydrateVisibleLargeValuePreviews(generation: number) {
     whereInput: predicates.map((predicate) => `(${predicate})`).join(" OR "),
     limit: requests.size,
     offset: 0,
+    includeRowId: usesSyntheticRowIdKey(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType),
   });
   if (!visibleLargeValuePreviewActive || generation !== visibleLargeValuePreviewRequestedGeneration || props.result !== sourceResult) return;
   const connection = connectionStore.getConfig(props.connectionId);
@@ -5270,6 +5358,7 @@ async function fetchLargeValueRequestChunk(columnIndex: number, requests: LargeV
     whereInput: predicates.map((predicate) => `(${predicate})`).join(" OR "),
     limit: requests.length,
     offset: 0,
+    includeRowId: usesSyntheticRowIdKey(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType),
   });
   const connection = props.connectionId ? connectionStore.getConfig(props.connectionId) : undefined;
   const results = await api.executeMulti(props.connectionId!, props.executionDatabase ?? props.database ?? "", sql, undefined, uuid(), {
@@ -5472,6 +5561,29 @@ const {
   handleDataCellMousedown,
   isRowSelected,
 } = selection;
+
+// 行列十字高亮目标：以 selectionFocus（原始坐标系）为中心解析，整行/整列选中时从
+// lastClickedRowIndex / selectedRowIds / selectedColumnIndexes 派生。开关关闭时恒为 null。
+const crosshairTarget = computed<CrosshairTarget | null>(() => {
+  if (!dataGridCrosshairHighlight.value) return null;
+  let fallbackRowIndex = selection.lastClickedRowIndex.value;
+  if (fallbackRowIndex === null && selectedRowIds.value.size > 0) {
+    const firstSelectedId = [...selectedRowIds.value][0];
+    const firstSelectedIndex = displayItems.value.findIndex((item) => item.id === firstSelectedId);
+    fallbackRowIndex = firstSelectedIndex >= 0 ? firstSelectedIndex : null;
+  }
+  if (fallbackRowIndex === null && transposeRowIndex.value !== null) fallbackRowIndex = transposeRowIndex.value;
+  const fallbackColumnIndex = selectedColumnIndexes.value.size > 0 ? [...selectedColumnIndexes.value][0] : null;
+  return resolveCrosshairTarget({
+    selectionFocus: selectionFocus.value,
+    selectionAnchor: selectionAnchor.value,
+    hasRowSelection: hasRowSelection.value,
+    hasColumnSelection: hasColumnSelection.value,
+    visibleColumnIndexes: visibleColumnIndexes.value,
+    fallbackRowIndex,
+    fallbackColumnIndex,
+  });
+});
 
 function selectionCaptureBase(): Omit<CaptureDataGridSelectionOptions, "selectedRowIds" | "selectedColumnIndexes" | "selectedCellKeys" | "selectionAnchor" | "selectionFocus" | "selectingAll" | "lastClickedRowIndex"> {
   return {
@@ -7597,6 +7709,7 @@ function drawCanvasGrid() {
     columnAligns: columnAligns.value,
     columnTypeVisualKinds: visibleColumnTypeVisualKinds.value,
     colorizeDataTypes: colorizeDataGridCellTypes.value,
+    crosshair: crosshairTarget.value,
     rightAlignedActionCell: canvasRightAlignedActionCell.value,
     columnIsBoolean: isBooleanGridColumn,
     booleanDisplayMode: booleanDisplayMode.value,
@@ -10043,6 +10156,11 @@ watch(
   () => props.result,
   (result, previousResult) => {
     const selectionSnapshot = preservedSelectionOnNextResult?.selection;
+    // The four preserved markers are armed together by prepareFullReload (toolbar
+    // refresh / rollback / row-save reload). Any of them being pending means the
+    // incoming result is an in-place refresh that must keep the viewport, so the
+    // check has to run before the markers are consumed below.
+    const inPlaceRefreshPending = preservedSelectionOnNextResult !== null || preservedViewportAnchorOnNextResult !== null || preservedDetailsOnNextResult !== null || preserveTransposeOnNextResult.value;
     preservedSelectionOnNextResult = null;
     const viewportAnchorSnapshot = preservedViewportAnchorOnNextResult?.anchor;
     preservedViewportAnchorOnNextResult = null;
@@ -10068,6 +10186,12 @@ watch(
     }
     if (getResetScrollAfterResult()) {
       clearResetScrollAfterResult();
+      resetGridVerticalScroll();
+    } else if (!inPlaceRefreshPending) {
+      // A result replaced without an internal grid action (e.g. SQL re-executed
+      // from the editor or a grid-embedded run button) is a brand-new dataset:
+      // start from the first row instead of stranding the viewport at the old
+      // scroll offset (#7341). In-place refreshes opt out via prepareFullReload.
       resetGridVerticalScroll();
     }
     closeReadonlyCellTextSelection();
@@ -10516,6 +10640,23 @@ const triggers = ref<TriggerInfo[]>([]);
 const triggersLoaded = ref(false);
 const triggersLoading = ref(false);
 const triggersError = ref("");
+const constraints = ref<ConstraintInfo[]>([]);
+const constraintsLoaded = ref(false);
+const constraintsLoading = ref(false);
+const constraintsError = ref("");
+const currentConstraintTableIdentity = computed(() =>
+  columnIndexTableIdentity({
+    connectionId: props.connectionId,
+    database: props.database,
+    catalog: props.tableMeta?.catalog,
+    schema: props.tableMeta?.schema,
+    tableName: props.tableMeta?.tableName,
+  }),
+);
+let constraintsRequestGeneration = 0;
+// The Constraints tab hides foreign keys when a dedicated Foreign Keys tab is
+// also shown (each constraint appears once; FK navigation stays in that tab).
+const constraintsForTab = computed(() => constraintsForConstraintsTab(constraints.value, tableMetadataCapabilities.value.foreignKeys));
 const searchQuery = ref("");
 const cellDetailPanelLayout = computed(() => settingsStore.editorSettings.cellDetailPanelLayout);
 const cellDetailPanelIsBottom = computed(() => cellDetailPanelLayout.value === "bottom");
@@ -10601,7 +10742,7 @@ function toggleCellDetailPanelLayout() {
   });
 }
 
-const tableMetadataCapabilities = computed(() => getTableMetadataCapabilities(props.databaseType));
+const tableMetadataCapabilities = computed(() => getTableMetadataCapabilities(resolvedDatabaseType.value));
 const canOpenTableStructureEditor = computed(() => !!props.connectionId && !!props.database && !!props.tableMeta?.tableName && supportsTableStructureEditing(resolvedDatabaseType.value));
 const mongoConnectionConfig = resolvedConnectionConfig;
 const canManageMongoIndexes = computed(() => resolvedDatabaseType.value === "mongodb" && !!props.connectionId && !!props.database && !!props.tableMeta?.tableName && supportsMongoIndexMutations(mongoConnectionConfig.value, props.tableMeta?.tableType));
@@ -10633,6 +10774,14 @@ const tableInfoTabs = computed(() => {
       label: t("grid.tableInfoForeignKeys"),
       icon: Link2,
       count: foreignKeys.value.length,
+    });
+  }
+  if (tableMetadataCapabilities.value.constraints) {
+    tabs.push({
+      id: "constraints",
+      label: t("grid.tableInfoConstraints"),
+      icon: ShieldCheck,
+      count: constraintsForTab.value.length,
     });
   }
   if (tableMetadataCapabilities.value.triggers) {
@@ -10670,6 +10819,7 @@ async function selectTableInfoTab(tab: TableInfoTab) {
   if (nextTab === "ddl") await fetchDdl();
   else if (nextTab === "indexes") await fetchIndexes();
   else if (nextTab === "foreignKeys") await fetchForeignKeys();
+  else if (nextTab === "constraints") await fetchConstraints();
   else if (nextTab === "triggers") await fetchTriggers();
 }
 
@@ -10832,6 +10982,54 @@ async function fetchTriggers() {
   }
 }
 
+async function fetchConstraints() {
+  const requestIdentity = currentConstraintTableIdentity.value;
+  if (!props.connectionId || !props.tableMeta || !requestIdentity || constraintsLoaded.value || constraintsLoading.value) return;
+  const connectionId = props.connectionId;
+  const database = props.database || "";
+  const schema = props.tableMeta.schema || props.database || "";
+  const tableName = props.tableMeta.tableName;
+  const catalog = props.tableMeta.catalog;
+  const requestGeneration = ++constraintsRequestGeneration;
+  constraintsLoading.value = true;
+  constraintsError.value = "";
+  try {
+    const nextConstraints = await api.listConstraints(connectionId, database, schema, tableName, catalog);
+    if (
+      !columnIndexMetadataRequestCurrent({
+        requestGeneration,
+        currentGeneration: constraintsRequestGeneration,
+        requestIdentity,
+        currentIdentity: currentConstraintTableIdentity.value,
+      })
+    )
+      return;
+    constraints.value = nextConstraints;
+    constraintsLoaded.value = true;
+  } catch (e: any) {
+    if (
+      !columnIndexMetadataRequestCurrent({
+        requestGeneration,
+        currentGeneration: constraintsRequestGeneration,
+        requestIdentity,
+        currentIdentity: currentConstraintTableIdentity.value,
+      })
+    )
+      return;
+    constraintsError.value = String(e?.message || e);
+  } finally {
+    if (
+      columnIndexMetadataRequestCurrent({
+        requestGeneration,
+        currentGeneration: constraintsRequestGeneration,
+        requestIdentity,
+        currentIdentity: currentConstraintTableIdentity.value,
+      })
+    )
+      constraintsLoading.value = false;
+  }
+}
+
 watch(
   () => [props.connectionId, props.database, props.tableMeta?.catalog, props.tableMeta?.schema, props.tableMeta?.tableName],
   () => {
@@ -10853,6 +11051,11 @@ watch(
     triggers.value = [];
     triggersLoaded.value = false;
     triggersError.value = "";
+    constraints.value = [];
+    constraintsLoaded.value = false;
+    constraintsLoading.value = false;
+    constraintsError.value = "";
+    constraintsRequestGeneration += 1;
     // 表身份变更后，主动触发索引加载，确保索引指示器在切换表后立即可见
     if (showIndexIndicatorsInHeader.value && canShowTableIndexes.value && currentIndexTableIdentity.value) {
       void fetchIndexes();
@@ -10918,12 +11121,12 @@ async function loadForeignKeyDisplayLabels() {
         const refColumnInfo = columns.find((column) => column.name === config.refColumn);
         if (!refColumnInfo) return;
         if (config.referenceMode === "manual") {
-          const referenceKeyColumns = await foreignKeyDisplayRequests.request(requestGeneration, JSON.stringify(["reference-key-columns", props.connectionId, props.database || "", props.tableMeta?.catalog || "", schema, config.refTable]), () =>
-            api.listReferenceKeyColumns(props.connectionId!, props.database || "", schema, config.refTable, props.tableMeta?.catalog),
+          const referenceKeys = await foreignKeyDisplayRequests.request(requestGeneration, JSON.stringify(["reference-keys", props.connectionId, props.database || "", props.tableMeta?.catalog || "", schema, config.refTable]), () =>
+            api.listReferenceKeys(props.connectionId!, props.database || "", schema, config.refTable, props.tableMeta?.catalog),
           );
-          if (!referenceKeyColumns || !foreignKeyDisplayRequests.isCurrent(requestGeneration)) return;
-          if (!manualReferenceKeyColumnIsUnique(columns, referenceKeyColumns, config.refColumn)) {
-            appendDebugLog("warn", "[DBX][DataGrid:foreign-key-display:non-unique-manual-reference]", {
+          if (!referenceKeys || !foreignKeyDisplayRequests.isCurrent(requestGeneration)) return;
+          if (!manualReferenceKeyColumnIsUnique(columns, referenceKeys, config.refColumn, config.filter)) {
+            appendDebugLog("warn", "[DBX][DataGrid:foreign-key-display:unsafe-manual-reference]", {
               column: props.result.columns[columnIndex],
               reference: `${schema}.${config.refTable}.${config.refColumn}`,
             });
@@ -11451,6 +11654,13 @@ const filteredTriggers = computed(() => {
   return triggers.value.filter((t) => t.name.toLowerCase().includes(q));
 });
 
+const filteredConstraints = computed(() => {
+  const base = constraintsForTab.value;
+  if (!searchQuery.value) return base;
+  const q = searchQuery.value.toLowerCase();
+  return base.filter((c) => c.name.toLowerCase().includes(q) || c.constraint_type.toLowerCase().includes(q) || c.columns.some((col) => col.toLowerCase().includes(q)) || c.definition.toLowerCase().includes(q));
+});
+
 const filteredDdlContent = computed(() => {
   if (!ddlContent.value) return "";
   const html = highlight(ddlContent.value);
@@ -11682,6 +11892,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
   const row = contextRowItem.value;
   const rowLabels = rowActionLabels();
   const hasEditableSelection = selectionHasEditableCells();
+  const gridSnapshotContext = contextHeaderColumn.value && hasColumnSelection.value ? "columns" : contextCell.value?.col === -1 && affectedRowIds().length > 0 ? "rows" : contextCell.value && hasCellSelection.value && selectedCellMatrix.value ? "cells" : null;
   const previewItems: ContextMenuItem[] = [];
   if (!contextHeaderColumn.value && contextCell.value) {
     const colType = props.result.column_types?.[contextCell.value.col];
@@ -11810,6 +12021,15 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
         children: generateSelectionMenuItems(!hasEditableSelection),
       },
     }),
+    [
+      { label: "", separator: true, visible: gridSnapshotContext !== null },
+      {
+        label: t(gridSnapshotContext === "rows" ? "gridSnapshot.openRows" : gridSnapshotContext === "columns" ? "gridSnapshot.openColumns" : "gridSnapshot.open"),
+        action: openGridSnapshot,
+        icon: Camera,
+        visible: gridSnapshotContext !== null,
+      },
+    ],
     createDataGridRowContextMenuItems({
       editable: props.editable,
       hasRow: !!row,
@@ -11843,6 +12063,40 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
 
 function currentGridContextMenuItems(): ContextMenuItem[] {
   return gridContextMenuItems.value;
+}
+
+function gridSnapshotVisibleColumnIndexes(): number[] {
+  if (selectedCellMatrix.value) return selectedCellMatrix.value.columnIndexes.slice();
+  if (selectedCellKeys.value.size > 0) {
+    return [...new Set([...selectedCellKeys.value].map((key) => Number(key.split(":")[1])).filter((index) => Number.isInteger(index) && index >= 0))].sort((a, b) => a - b);
+  }
+  if (hasColumnSelection.value) return [...selectedColumnIndexes.value].sort((a, b) => a - b);
+  const range = selectedRange.value;
+  return range ? Array.from({ length: range.endCol - range.startCol + 1 }, (_, index) => range.startCol + index) : [];
+}
+
+function openGridSnapshot() {
+  const rowSelection = contextCell.value?.col === -1 && hasRowSelection.value;
+  const selectedRows = rowSelection ? new Set(affectedRowIds()) : null;
+  const selection = rowSelection
+    ? {
+        columns: visibleColumns.value,
+        rows: visibleDisplayItems.value.filter((item) => selectedRows!.has(item.id)).map((item) => item.data),
+      }
+    : (selectedCellMatrix.value ?? selectedCells.value);
+  if (!selection.columns.length || !selection.rows.length) return;
+  const columnIndexes = rowSelection ? visibleColumns.value.map((_, index) => index) : gridSnapshotVisibleColumnIndexes();
+  gridSnapshotSource.value = {
+    columns: selection.columns.slice(),
+    columnTypes: columnIndexes.map((index) => {
+      const type = visibleColumnTypes.value[index];
+      return type ? shortTypeName(compactHeaderColumnType(type)) : undefined;
+    }),
+    columnDetails: columnIndexes.map((index) => visibleColumnComments.value[index]),
+    rows: selection.rows.map((row) => row.slice()),
+    title: props.exportFileBaseName || props.result.sourceLabel || undefined,
+  };
+  gridSnapshotOpen.value = true;
 }
 </script>
 
@@ -12163,6 +12417,7 @@ function currentGridContextMenuItems(): ContextMenuItem[] {
                         'transpose-record-header-selected text-primary font-semibold': transposeRecordUsesFramedHeader(recordIndex),
                         'transpose-record-header-active text-primary': transposeRecordUsesActiveHighlight(recordIndex) && !transposeRecordUsesFramedHeader(recordIndex),
                         'data-grid-header-cell': !transposeRecordUsesActiveHighlight(recordIndex) && !transposeRecordUsesFramedHeader(recordIndex),
+                        'crosshair-column': !!crosshairTarget?.rowCrosshair && crosshairTarget.rowIndex === recordIndex && !transposeRecordUsesFramedHeader(recordIndex) && !transposeRecordUsesActiveHighlight(recordIndex),
                       }"
                       :style="{
                         width: `${getTransposeRecordWidth(recordIndex)}px`,
@@ -12242,6 +12497,8 @@ function currentGridContextMenuItems(): ContextMenuItem[] {
                           'cell-selected-dirty--sparse': transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
                           'row-cell-selected': transposeRecordUsesSelectionVisual(cell.recordIndex) && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
                           'row-cell-selected-dirty': transposeRecordUsesSelectionVisual(cell.recordIndex) && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
+                          'crosshair-row':
+                            !!crosshairTarget?.columnCrosshair && cell.valueIndex === crosshairTarget.actualColIdx && !transposeRecordUsesSelectionVisual(cell.recordIndex) && !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex] && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex),
                           'bg-primary/15': transposeRecordUsesActiveHighlight(cell.recordIndex) && !transposeRecordUsesSelectionVisual(cell.recordIndex) && !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex] && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex),
                           'bg-yellow-500/10 cell-dirty': displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
                           'bg-yellow-200/60 dark:bg-yellow-500/20': cellIsSearchMatch(cell.recordIndex, cell.valueIndex),
@@ -12388,6 +12645,7 @@ function currentGridContextMenuItems(): ContextMenuItem[] {
                     :name="col.name"
                     :actual-column-index="col.actualColIdx"
                     :visible-column-index="col.visibleColIdx"
+                    :class="{ 'crosshair-column': !!crosshairTarget?.columnCrosshair && crosshairTarget.visibleColIdx === col.visibleColIdx }"
                     :selected="highlightedColumnIndex === col.actualColIdx || columnIsSelected(col.visibleColIdx)"
                     :search-match="currentSearchMatch?.kind === 'column' && currentSearchMatch.col === col.actualColIdx"
                     :dark="isDark"
@@ -13143,6 +13401,7 @@ function currentGridContextMenuItems(): ContextMenuItem[] {
                         'data-grid-row--draft': item.isDraft && !isRowActive(item.displayIndex),
                         'data-grid-row--striped': !item.isNew && !item.isDraft && !item.isDeleted && !isRowActive(item.displayIndex) && item.displayIndex % 2 === 1,
                         'active-row': isRowActive(item.displayIndex) && !item.isDeleted,
+                        'crosshair-row': !!crosshairTarget?.rowCrosshair && crosshairTarget.rowIndex === item.displayIndex && !item.isDeleted,
                         'relative z-20 overflow-visible': editingCell?.rowId === item.id || readonlyTextCell?.rowId === item.id,
                       }"
                       :style="dataGridRowStyle(item)"
@@ -13189,6 +13448,7 @@ function currentGridContextMenuItems(): ContextMenuItem[] {
                             'cell-selected-dirty--sparse': selectionFramesData.sparse && cellIsSelected(item.displayIndex, col.visibleColIdx) && item.isDirtyCol[col.actualColIdx],
                             'row-cell-selected': rowCellsUseSelectionVisual(item.id) && !cellIsSelected(item.displayIndex, col.visibleColIdx) && !item.isDirtyCol[col.actualColIdx],
                             'row-cell-selected-dirty': rowCellsUseSelectionVisual(item.id) && !cellIsSelected(item.displayIndex, col.visibleColIdx) && item.isDirtyCol[col.actualColIdx],
+                            'crosshair-column': !!crosshairTarget?.columnCrosshair && crosshairTarget.visibleColIdx === col.visibleColIdx && !item.isDeleted,
                             'cell-search-match': cellIsSearchMatch(item.displayIndex, col.actualColIdx),
                             'cell-current-search-match': cellIsCurrentMatch(item.displayIndex, col.actualColIdx),
                             'bg-yellow-200/60 dark:bg-yellow-500/20': cellIsSearchMatch(item.displayIndex, col.actualColIdx),
@@ -13582,6 +13842,34 @@ function currentGridContextMenuItems(): ContextMenuItem[] {
               </div>
             </div>
 
+            <div v-else-if="activeTableInfoTab === 'constraints'" class="flex-1 min-h-0 overflow-auto">
+              <div v-if="constraintsLoading" class="h-full flex items-center justify-center">
+                <Loader2 class="w-4 h-4 animate-spin text-muted-foreground" />
+              </div>
+              <div v-else-if="constraintsError" class="p-3 text-xs text-destructive">
+                {{ constraintsError }}
+              </div>
+              <div v-else-if="searchQuery && filteredConstraints.length === 0" class="p-6 text-center text-xs text-muted-foreground">
+                {{ t("grid.tableInfoNoResults") }}
+              </div>
+              <div v-else-if="constraintsForTab.length === 0" class="p-6 text-center text-xs text-muted-foreground">
+                {{ t("grid.tableInfoEmpty") }}
+              </div>
+              <div v-else class="divide-y">
+                <div v-for="constraint in filteredConstraints" :key="constraint.name" class="p-3 text-xs" :class="constraint.enabled ? '' : 'opacity-60'">
+                  <div class="flex flex-wrap items-center gap-1.5">
+                    <span class="font-medium truncate">{{ constraint.name }}</span>
+                    <span class="rounded border px-1 py-px text-[10px] text-muted-foreground">{{ constraint.constraint_type }}</span>
+                    <span v-if="!constraint.enabled" class="rounded border px-1 py-px text-[10px] text-muted-foreground">{{ t("grid.tableInfoConstraintDisabled") }}</span>
+                    <span v-else-if="!constraint.valid" class="rounded border px-1 py-px text-[10px] text-muted-foreground">{{ t("grid.tableInfoConstraintNotValidated") }}</span>
+                  </div>
+                  <div v-if="constraint.columns.length" class="mt-1 font-mono text-[11px] text-muted-foreground break-all">{{ constraint.columns.join(", ") }}</div>
+                  <div v-if="constraint.ref_table" class="mt-1 font-mono text-[11px] text-muted-foreground break-all">-> {{ constraint.ref_schema ? `${constraint.ref_schema}.` : "" }}{{ constraint.ref_table }}{{ constraint.ref_columns.length ? `(${constraint.ref_columns.join(", ")})` : "" }}</div>
+                  <div v-if="constraint.definition" class="mt-1 font-mono text-[11px] text-muted-foreground break-all whitespace-pre-wrap">{{ constraint.definition }}</div>
+                </div>
+              </div>
+            </div>
+
             <pre
               v-else-if="activeTableInfoTab === 'ddl' && !ddlLoading"
               ref="ddlPreRef"
@@ -13799,11 +14087,24 @@ function currentGridContextMenuItems(): ContextMenuItem[] {
             })
           }}
           <span v-if="typeof displayedTotalRowCount === 'number' && displayedTotalRowCount >= 0" class="text-muted-foreground/70">{{ t(totalRowCountLabelKey, { count: displayedTotalRowCount }) }}</span>
-          <span v-if="totalRowCountBusy" class="text-muted-foreground/70">
+          <span v-if="totalRowCountBusy && !(showRerunTotalCountAction && manualTotalRowCountLoading)" class="text-muted-foreground/70">
             {{ t("grid.totalRowCountLoading") }}
           </span>
           <button v-else-if="showExactTotalCountAction" type="button" class="text-muted-foreground/70 underline underline-offset-2 hover:text-foreground disabled:pointer-events-none" :disabled="manualTotalRowCountLoading" @click="calculateTotalRowCount">
             {{ t("grid.calculateTotalRowsInline") }}
+          </button>
+          <button
+            v-else-if="showRerunTotalCountAction"
+            type="button"
+            class="ml-1 inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-sm align-middle text-muted-foreground/70 hover:bg-gray-200 hover:text-foreground disabled:pointer-events-none disabled:opacity-50 dark:hover:bg-gray-800"
+            :disabled="manualTotalRowCountLoading"
+            :aria-busy="manualTotalRowCountLoading ? 'true' : undefined"
+            :title="manualTotalRowCountLoading ? t('grid.totalRowCountLoading') : t('grid.calculateTotalRows')"
+            :aria-label="manualTotalRowCountLoading ? t('grid.totalRowCountLoading') : t('grid.calculateTotalRows')"
+            @click="calculateTotalRowCount"
+          >
+            <Loader2 v-if="manualTotalRowCountLoading" aria-hidden="true" class="h-3 w-3 animate-spin" />
+            <RefreshCcw v-else aria-hidden="true" class="h-3 w-3" />
           </button>
         </span>
         <span v-if="showTruncationWarning" class="shrink-0 text-amber-500 text-xs">(truncated)</span>
@@ -13933,6 +14234,7 @@ function currentGridContextMenuItems(): ContextMenuItem[] {
 
     <DataGridExtractorDialog v-model:open="extractorConfigOpen" :preference="selectedCopyPreference" :options="settingsStore.editorSettings.dataGridExtractorOptions" :items="copyPreferenceMenuItems" :preview="previewWithPreference" @save="saveExtractorConfiguration" />
     <DataGridCopyColumnNamesDialog v-if="copyColumnNamesDialogMounted" v-model:open="copyColumnNamesDialogOpen" :column-names="copyColumnNamesDialogColumns" :database-type="resolvedDatabaseType" :column-comments="columnCommentMap" @copy="copyText" />
+    <GridSnapshotDialog v-model:open="gridSnapshotOpen" :source="gridSnapshotSource" />
 
     <Dialog v-model:open="generateIncrementDialogOpen">
       <DialogContent class="sm:max-w-[380px]">
@@ -14031,6 +14333,8 @@ function currentGridContextMenuItems(): ContextMenuItem[] {
   --data-grid-row-new-bg: rgb(243, 243, 243);
   --data-grid-row-deleted-bg: rgb(255, 244, 244);
   --data-grid-cell-active-bg: rgb(244, 248, 255);
+  --data-grid-cell-crosshair-row-bg: rgb(174, 195, 224);
+  --data-grid-cell-crosshair-col-bg: rgb(142, 170, 210);
   --data-grid-cell-dirty-bg: rgb(255, 248, 230);
   --data-grid-cell-selected-bg: rgb(239, 246, 255);
   --data-grid-cell-selected-single-bg: rgb(191, 219, 254);
@@ -14063,6 +14367,8 @@ function currentGridContextMenuItems(): ContextMenuItem[] {
   --data-grid-row-new-bg: rgb(51, 51, 55);
   --data-grid-row-deleted-bg: rgb(55, 31, 32);
   --data-grid-cell-active-bg: rgb(25, 34, 46);
+  --data-grid-cell-crosshair-row-bg: rgb(75, 84, 98);
+  --data-grid-cell-crosshair-col-bg: rgb(98, 111, 130);
   --data-grid-cell-dirty-bg: rgb(94, 75, 26);
   --data-grid-cell-selected-bg: rgb(20, 40, 60);
   --data-grid-cell-selected-single-bg: rgb(30, 64, 96);
@@ -14096,6 +14402,8 @@ function currentGridContextMenuItems(): ContextMenuItem[] {
     --data-grid-row-new-bg: color-mix(in oklab, var(--primary) 5%, transparent);
     --data-grid-row-deleted-bg: color-mix(in oklab, var(--destructive) 5%, transparent);
     --data-grid-cell-dirty-bg: color-mix(in oklab, rgb(240 177 0) 10%, transparent);
+    --data-grid-cell-crosshair-row-bg: color-mix(in srgb, var(--primary) 34%, var(--background));
+    --data-grid-cell-crosshair-col-bg: color-mix(in srgb, var(--primary) 50%, var(--background));
     --data-grid-cell-selected-bg: color-mix(in oklab, rgb(59 130 246) 12%, var(--background));
     --data-grid-cell-selected-single-bg: color-mix(in oklab, rgb(59 130 246) 30%, var(--background));
     --data-grid-cell-selected-dirty-bg: color-mix(in oklab, rgb(234 181 50) 30%, color-mix(in oklab, rgb(59 130 246) 18%, var(--background)));
@@ -14105,6 +14413,11 @@ function currentGridContextMenuItems(): ContextMenuItem[] {
     --data-grid-row-number-edited-bg: color-mix(in oklab, rgb(245 158 11) 15%, var(--background));
     --data-grid-row-number-deleted-bg: color-mix(in oklab, var(--destructive) 15%, var(--background));
     --data-grid-row-number-selected-bg: color-mix(in oklab, rgb(59 130 246) 30%, var(--background));
+  }
+  [data-grid-root].data-grid--dark,
+  :global(.dark) [data-grid-root] {
+    --data-grid-cell-crosshair-row-bg: color-mix(in srgb, var(--primary) 34%, var(--background));
+    --data-grid-cell-crosshair-col-bg: color-mix(in srgb, var(--primary) 50%, var(--background));
   }
   [data-grid-root].data-grid--has-save-error {
     --data-grid-cell-dirty-bg: rgb(250, 212, 216) !important;
@@ -14166,6 +14479,18 @@ function currentGridContextMenuItems(): ContextMenuItem[] {
 
 .data-grid-row {
   background-color: var(--data-grid-cell-bg);
+}
+
+/* 行列十字高亮：覆盖基础单元格变量而非只涂父行，避免不透明 data-grid-cell /
+ * frozen cell 遮住行高亮。选中、脏数据和搜索状态仍用各自的显式背景覆盖它。 */
+.crosshair-row {
+  --data-grid-cell-bg: var(--data-grid-cell-crosshair-row-bg) !important;
+  background-color: var(--data-grid-cell-crosshair-row-bg);
+}
+
+.crosshair-column {
+  --data-grid-cell-bg: var(--data-grid-cell-crosshair-col-bg) !important;
+  background-color: var(--data-grid-cell-crosshair-col-bg);
 }
 
 .data-grid-cell {

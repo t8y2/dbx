@@ -650,8 +650,14 @@ public final class KafkaAgent {
                 topics.add(topic);
             }
         } catch (Exception error) {
-            if (!isUnsupportedVersionError(error)) {
+            if (!isUnsupportedVersionError(error) && !isTimeoutError(error)) {
                 throw error;
+            }
+            if (isTimeoutError(error)) {
+                logger().warn(
+                    "Kafka topic descriptions timed out; returning topic names without partition metadata",
+                    error
+                );
             }
             for (TopicListing listing : listings) {
                 Map<String, Object> topic = new LinkedHashMap<>();
@@ -2576,6 +2582,21 @@ public final class KafkaAgent {
             String message = current.getMessage() == null ? "" : current.getMessage().toLowerCase(Locale.ROOT);
             if (className.contains("UnsupportedVersionException")
                 || message.contains("unsupported version")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * A topic listing is still useful when the broker cannot describe every topic before the
+     * request deadline. Keep timeout detection narrow so authorization, transport, and unknown
+     * topic failures remain visible to the caller instead of being mistaken for a partial result.
+     */
+    private static boolean isTimeoutError(Throwable error) {
+        for (Throwable current : causeChain(error)) {
+            if (current instanceof java.util.concurrent.TimeoutException
+                || current instanceof org.apache.kafka.common.errors.TimeoutException) {
                 return true;
             }
         }

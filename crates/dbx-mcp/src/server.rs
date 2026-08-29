@@ -153,6 +153,43 @@ pub struct ExecuteRedisCommandRequest {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SendMessageRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+    #[schemars(description = "Message queue topic name")]
+    pub topic: String,
+    #[schemars(description = "Message payload encoded as standard base64")]
+    pub payload_base64: String,
+    #[serde(default)]
+    #[schemars(description = "Optional message key used for partitioning")]
+    #[schemars(extend("type" = "string"))]
+    pub key: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Optional UTF-8 text preview of the payload")]
+    #[schemars(extend("type" = "string"))]
+    pub payload_text: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Optional message headers")]
+    pub headers: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    #[schemars(description = "Optional target partition")]
+    #[schemars(extend("type" = "integer"))]
+    pub partition: Option<i32>,
+    #[serde(default)]
+    #[schemars(description = "RabbitMQ exchange name")]
+    #[schemars(extend("type" = "string"))]
+    pub exchange: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "RabbitMQ routing key")]
+    #[schemars(extend("type" = "string"))]
+    pub routing_key: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "RabbitMQ virtual-host namespace")]
+    #[schemars(extend("type" = "string"))]
+    pub namespace: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SchemaContextRequest {
     #[serde(flatten)]
     pub selector: ConnectionSelector,
@@ -247,6 +284,10 @@ impl DbxMcpServer {
     }
 
     pub fn with_runtime_options(backend: Arc<dyn DbxBackend>, scope: McpScope, web_mode: bool) -> Self {
+        // The workspace enables more than one rustls crypto feature through
+        // transitive dependencies. Native MCP runs outside the desktop/web
+        // startup paths, so select the same provider before any TLS tool call.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let mut tool_router = Self::tool_router();
         if scope.enabled() {
             tool_router.disable_route("dbx_add_connection");
@@ -258,6 +299,8 @@ impl DbxMcpServer {
             tool_router.disable_route("dbx_open_table");
             tool_router.disable_route("dbx_execute_and_show");
         }
+        #[cfg(not(feature = "mq-admin"))]
+        tool_router.disable_route("dbx_send_message");
         Self { backend, scope, sessions: McpSessionStore::new(), tool_router }
     }
 
@@ -582,6 +625,70 @@ impl DbxMcpServer {
         {
             Ok(result) => text(format_redis_result(&result)),
             Err(error) => backend_tool_error("REDIS_COMMAND_ERROR", error),
+        }
+    }
+
+    #[tool(
+        name = "dbx_send_message",
+        description = "Send a base64-encoded message to a Kafka, RocketMQ, or RabbitMQ topic/queue"
+    )]
+    async fn send_message(&self, Parameters(request): Parameters<SendMessageRequest>) -> CallToolResult {
+        #[cfg(not(feature = "mq-admin"))]
+        {
+            let _ = request;
+            return tool_error("MQ_UNSUPPORTED", "Message queue support is not compiled into this DBX MCP build.");
+        }
+
+        #[cfg(feature = "mq-admin")]
+        {
+            let resolved = match self.resolve_connection(&request.selector).await {
+                Ok(resolved) => resolved,
+                Err(error) => return error,
+            };
+            let connection = &resolved.connection;
+            let mq_config = match dbx_core::mq::config::MqAdminConfig::from_connection(connection) {
+                Ok(config) => config,
+                Err(error) => return tool_error("MQ_UNSUPPORTED", error),
+            };
+            if request.topic.trim().is_empty() {
+                return tool_error("MESSAGE_TOPIC_REQUIRED", "Message topic must not be empty.");
+            }
+            if resolved.policy.read_only {
+                return tool_error(
+                    "MCP_READ_ONLY",
+                    "DBX global MCP read-only mode is enabled. Message sending is blocked.",
+                );
+            }
+            if connection.read_only {
+                return tool_error(
+                    "CONNECTION_READ_ONLY",
+                    format!(
+                        "Connection \"{}\" has read-only protection enabled. Message sending is blocked.",
+                        connection.name
+                    ),
+                );
+            }
+            if dbx_core::production_safety::is_production_database(
+                connection,
+                connection.database.as_deref().unwrap_or(""),
+            ) {
+                return tool_error("PRODUCTION_WRITE_BLOCKED", "MCP cannot send messages to a production database.");
+            }
+            let request = dbx_core::mq::SendMessageRequest {
+                topic: request.topic.trim().to_string(),
+                key: request.key,
+                payload_base64: request.payload_base64,
+                payload_text: request.payload_text,
+                headers: request.headers,
+                partition: request.partition,
+                exchange: request.exchange,
+                routing_key: request.routing_key,
+                namespace: request.namespace,
+            };
+            match self.backend.send_message(connection, request).await {
+                Ok(result) => text(format_send_message_result(&mq_config.system_kind, &result)),
+                Err(error) => backend_tool_error("MESSAGE_SEND_ERROR", error),
+            }
         }
     }
 
@@ -1198,6 +1305,24 @@ fn non_empty_env(name: &str) -> Option<String> {
     std::env::var(name).ok().map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
 }
 
+#[cfg(feature = "mq-admin")]
+fn format_send_message_result(
+    system_kind: &dbx_core::mq::MqSystemKind,
+    result: &dbx_core::mq::SendMessageResponse,
+) -> String {
+    let mut output = format!(
+        "Message sent to {}.\ntopic: {}\npartition: {}\noffset: {}",
+        system_kind.as_str(),
+        result.topic,
+        result.partition,
+        result.offset
+    );
+    if let Some(timestamp) = result.timestamp.as_deref() {
+        output.push_str(&format!("\ntimestamp: {timestamp}"));
+    }
+    output
+}
+
 fn scoped_connection_ids(value: Option<&str>) -> Vec<String> {
     let mut ids = Vec::new();
     for id in value.unwrap_or_default().split(',').map(str::trim).filter(|id| !id.is_empty()) {
@@ -1471,6 +1596,9 @@ mod tests {
         let server = DbxMcpServer::with_runtime_options(Arc::new(FakeBackend::default()), McpScope::default(), false);
         let tools = server.tool_router.list_all();
         let names = tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
+        #[cfg(feature = "mq-admin")]
+        assert_eq!(tools.len(), 14);
+        #[cfg(not(feature = "mq-admin"))]
         assert_eq!(tools.len(), 13);
         assert!(names.contains(&"dbx_list_connections"));
         assert!(names.contains(&"dbx_list_tables"));
@@ -1485,6 +1613,8 @@ mod tests {
         assert!(names.contains(&"dbx_execute_and_show"));
         assert!(names.contains(&"dbx_open_session"));
         assert!(names.contains(&"dbx_close_session"));
+        #[cfg(feature = "mq-admin")]
+        assert!(names.contains(&"dbx_send_message"));
     }
 
     #[test]
@@ -1552,7 +1682,8 @@ mod tests {
         let server = DbxMcpServer::with_runtime_options(Arc::new(FakeBackend::default()), McpScope::default(), false);
         let tools = server.tool_router.list_all();
 
-        let checks: &[(&str, &[&str])] = &[
+        #[allow(unused_mut)]
+        let mut checks: Vec<(&str, &[&str])> = vec![
             ("dbx_list_tables", &["database", "schema"]),
             ("dbx_describe_table", &["database", "schema"]),
             ("dbx_execute_query", &["database", "session_id", "cell_char_offset", "cell_char_limit"]),
@@ -1564,6 +1695,9 @@ mod tests {
             ("dbx_execute_redis_command", &["db"]),
             ("dbx_get_schema_context", &["database", "schema", "max_tables"]),
         ];
+        #[cfg(feature = "mq-admin")]
+        checks
+            .push(("dbx_send_message", &["key", "payload_text", "partition", "exchange", "routing_key", "namespace"]));
 
         for (tool_name, fields) in checks {
             let tool = tools.iter().find(|tool| tool.name == *tool_name).expect("tool should be registered");
@@ -1580,9 +1714,8 @@ mod tests {
                 .flatten()
                 .collect::<Vec<_>>();
 
-            for field in *fields {
-                let schema =
-                    properties.get(*field).unwrap_or_else(|| panic!("{tool_name}.{field} should be published"));
+            for &field in fields {
+                let schema = properties.get(field).unwrap_or_else(|| panic!("{tool_name}.{field} should be published"));
                 let type_value =
                     schema.get("type").unwrap_or_else(|| panic!("{tool_name}.{field} should publish a type"));
                 assert!(
@@ -1619,6 +1752,41 @@ mod tests {
         assert!(nested.to_string().contains("invalid type: map, expected a string"));
     }
 
+    #[cfg(feature = "mq-admin")]
+    #[test]
+    fn send_message_request_preserves_binary_payload_and_optional_fields() {
+        let request: SendMessageRequest = serde_json::from_str(
+            r#"{"connection_name":"events","topic":"orders","payload_base64":"AP8=","key":"order-1","partition":2,"headers":{"trace":"abc"}}"#,
+        )
+        .expect("send message request");
+
+        assert_eq!(request.selector.connection_name.as_deref(), Some("events"));
+        assert_eq!(request.topic, "orders");
+        assert_eq!(request.payload_base64, "AP8=");
+        assert_eq!(request.key.as_deref(), Some("order-1"));
+        assert_eq!(request.partition, Some(2));
+        assert_eq!(request.headers.get("trace").map(String::as_str), Some("abc"));
+    }
+
+    #[cfg(feature = "mq-admin")]
+    #[test]
+    fn format_send_message_result_is_concise_and_includes_delivery_metadata() {
+        let result = dbx_core::mq::SendMessageResponse {
+            topic: "orders".to_string(),
+            partition: 2,
+            offset: 41,
+            timestamp: Some("1700000000000".to_string()),
+        };
+        let output = format_send_message_result(&dbx_core::mq::MqSystemKind::Kafka, &result);
+
+        assert!(output.contains("Message sent to kafka."));
+        assert!(output.contains("topic: orders"));
+        assert!(output.contains("partition: 2"));
+        assert!(output.contains("offset: 41"));
+        assert!(output.contains("timestamp: 1700000000000"));
+        assert!(!output.contains("AP8="));
+    }
+
     #[test]
     fn schema_context_tables_preserve_optional_inputs() {
         let omitted: SchemaContextRequest = serde_json::from_str("{}").unwrap();
@@ -1640,6 +1808,9 @@ mod tests {
             false,
         );
         let names = server.tool_router.list_all().into_iter().map(|tool| tool.name).collect::<Vec<_>>();
+        #[cfg(feature = "mq-admin")]
+        assert_eq!(names.len(), 9);
+        #[cfg(not(feature = "mq-admin"))]
         assert_eq!(names.len(), 8);
         assert!(!names.iter().any(|name| name == "dbx_add_connection"));
         assert!(!names.iter().any(|name| name == "dbx_duplicate_connection"));
@@ -1648,6 +1819,8 @@ mod tests {
         assert!(!names.iter().any(|name| name == "dbx_execute_and_show"));
         assert!(names.iter().any(|name| name == "dbx_open_session"));
         assert!(names.iter().any(|name| name == "dbx_close_session"));
+        #[cfg(feature = "mq-admin")]
+        assert!(names.iter().any(|name| name == "dbx_send_message"));
     }
 
     #[test]

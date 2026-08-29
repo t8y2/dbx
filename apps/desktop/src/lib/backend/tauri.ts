@@ -37,6 +37,7 @@ import type {
   ColumnInfo,
   SqlServerColumnMetadata,
   IndexInfo,
+  ReferenceKeyInfo,
   ForeignKeyInfo,
   TriggerInfo,
   ConstraintInfo,
@@ -1022,6 +1023,24 @@ export async function saveConnectionDatabaseInfo(connectionId: string, databaseI
   });
 }
 
+export interface WriteUnlockState {
+  remainingMs: number;
+}
+
+export async function unlockConnectionWrites(connectionId: string, durationSecs: number): Promise<number> {
+  const state = await invokeBackend<WriteUnlockState>("unlock_connection_writes", { connectionId, durationSecs });
+  return state.remainingMs;
+}
+
+export async function lockConnectionWrites(connectionId: string): Promise<void> {
+  return invokeBackend("lock_connection_writes", { connectionId });
+}
+
+export async function connectionWriteUnlockState(connectionId: string): Promise<number> {
+  const state = await invokeBackend<WriteUnlockState>("connection_write_unlock_state", { connectionId });
+  return state.remainingMs;
+}
+
 export async function connectionFinalProxyPort(config: ConnectionConfig): Promise<number> {
   return invokeBackend("connection_final_proxy_port", { config });
 }
@@ -1482,7 +1501,7 @@ export async function beginManualTransaction(connectionId: string, database: str
   return invoke("begin_manual_transaction", { connectionId, database, schema, catalog });
 }
 
-export async function executeInManualTransaction(txnSessionId: string, sql: string, database: string, schema?: string, maxRows?: number, tableDataPreview?: boolean, pageSize?: number, resultSessionId?: string): Promise<QueryResult[]> {
+export async function executeInManualTransaction(txnSessionId: string, sql: string, database: string, schema?: string, maxRows?: number, tableDataPreview?: boolean, pageSize?: number, resultSessionId?: string, classificationSql?: string): Promise<QueryResult[]> {
   return invoke("execute_in_manual_transaction", {
     txnSessionId,
     sql,
@@ -1492,6 +1511,7 @@ export async function executeInManualTransaction(txnSessionId: string, sql: stri
     tableDataPreview,
     pageSize,
     resultSessionId,
+    classificationSql,
   });
 }
 
@@ -1798,6 +1818,16 @@ export async function listIndexes(connectionId: string, database: string, schema
 
 export async function listReferenceKeyColumns(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<string[]> {
   return invoke("list_reference_key_columns", {
+    connectionId,
+    database,
+    schema,
+    table,
+    catalog,
+  });
+}
+
+export async function listReferenceKeys(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<ReferenceKeyInfo[]> {
+  return invoke("list_reference_keys", {
     connectionId,
     database,
     schema,
@@ -4465,7 +4495,7 @@ export async function sortTablesByFkDependency(options: SortTablesByFkOptions): 
 export type TableImportMode = "append" | "truncate";
 export type TableImportStatus = "running" | "done" | "error" | "cancelled";
 export type TableImportPhase = "preparing" | "detectingEncoding" | "reading" | "writing" | "finalizing" | "done";
-export type TableImportSourceFormat = "csv" | "tsv" | "delimited" | "json" | "excel";
+export type TableImportSourceFormat = "csv" | "tsv" | "delimited" | "json" | "excel" | "sql";
 export type TableImportJsonShape = "auto" | "objects" | "arrays";
 export type TableImportTextEncoding = "auto" | "utf8" | "gbk" | "utf16Le" | "utf16Be";
 
@@ -4487,6 +4517,7 @@ export interface TableImportParseOptions {
   sheetName?: string | null;
   sheetIndex?: number | null;
   jsonShape?: TableImportJsonShape | null;
+  sqlDialect?: DatabaseType | null;
 }
 
 export interface TableImportPreviewRequest {
@@ -4658,6 +4689,7 @@ export interface TableExportRequest {
   rowLimit?: number | null;
   dateTimeFormat?: string;
   numericColumnRightAlign?: boolean;
+  autoFilter?: boolean;
 }
 
 export interface TableCsvExportOptions {
@@ -4706,6 +4738,7 @@ export interface QueryResultExportRequest {
   exportColumnTypes?: Array<string | null | undefined>;
   numericColumnRightAlign?: boolean;
   columnComments?: Array<string | null> | null;
+  autoFilter?: boolean;
   identifierQuote?: string;
 }
 
@@ -4845,7 +4878,16 @@ export async function exportTableDataCsv(options: TableCsvExportOptions): Promis
   return invoke("export_table_data_csv", { request: options });
 }
 
-export async function exportQueryResultXlsx(filePath: string, sheetName: string | undefined, columns: string[], columnTypes: string[], columnComments: readonly (string | null)[] | undefined, rows: readonly (readonly XlsxCellValue[])[], numericColumnRightAlign?: boolean): Promise<void> {
+export async function exportQueryResultXlsx(
+  filePath: string,
+  sheetName: string | undefined,
+  columns: string[],
+  columnTypes: string[],
+  columnComments: readonly (string | null)[] | undefined,
+  rows: readonly (readonly XlsxCellValue[])[],
+  numericColumnRightAlign?: boolean,
+  autoFilter?: boolean,
+): Promise<void> {
   return invoke("export_query_result_xlsx", {
     request: {
       filePath,
@@ -4855,6 +4897,7 @@ export async function exportQueryResultXlsx(filePath: string, sheetName: string 
       columnComments,
       rows,
       numericColumnRightAlign,
+      autoFilter,
     },
   });
 }
@@ -4868,12 +4911,15 @@ export async function exportQueryResultsXlsx(
     columnComments?: readonly (string | null)[];
     rows: readonly (readonly XlsxCellValue[])[];
     numericColumnRightAlign?: boolean;
+    autoFilter?: boolean;
   }[],
+  autoFilter?: boolean,
 ): Promise<void> {
   return invoke("export_query_results_xlsx", {
     request: {
       filePath,
       worksheets,
+      autoFilter,
     },
   });
 }

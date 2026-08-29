@@ -119,6 +119,20 @@
       <a href="https://www.atlascloud.ai/?ref=6YYXWA" target="_blank">访问 Atlas Cloud</a>
     </td>
   </tr>
+  <tr>
+    <td align="center" valign="middle" width="220">
+      <a href="https://www.trustasia.com/ssl/trustasia/code-signing" target="_blank">
+        <picture>
+          <source media="(prefers-color-scheme: dark)" srcset="docs/public/sponsors/trustasia-dark.svg" />
+          <img src="docs/public/sponsors/trustasia.png" alt="TrustAsia" height="44" />
+        </picture>
+      </a>
+    </td>
+    <td>
+      由 TrustAsia 提供代码签名云签服务，实现 CICD 自动化构建可信软件。
+      <a href="https://www.trustasia.com/ssl/trustasia/code-signing" target="_blank">访问 TrustAsia</a>
+    </td>
+  </tr>
 </table>
 
 ## 为什么选择 DBX？

@@ -147,7 +147,11 @@ jobs:
           for module in "${MODULES[@]}"; do
             TASKS+=(":${module}:shadowJar")
           done
-          ./gradlew "${TASKS[@]}" --parallel
+          # agents/common changes trigger a parallel mass rebuild of every
+          # packaged module; the Gradle daemon default heap is too small for
+          # ~25 shadowJar fat jars at once on a 16 GB runner.
+          ./gradlew "${TASKS[@]}" --parallel \
+            -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g"
         working-directory: agents
       - run: python3 scripts/validate_agent_jars.py
         working-directory: agents

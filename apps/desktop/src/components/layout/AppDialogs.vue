@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, watch, defineAsyncComponent } from "vue";
+import { computed, ref, watch, defineAsyncComponent } from "vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -24,6 +24,7 @@ const DataGenerateDialog = defineAsyncComponent(() => import("@/components/gener
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSqlExecutionDangerStore } from "@/stores/sqlExecutionDangerStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
+import { useReadOnlyUnlockStore, WRITE_UNLOCK_FIVE_MINUTES_SECS, WRITE_UNLOCK_ONE_MINUTE_SECS, type WriteUnlockDurationSecs } from "@/stores/readOnlyUnlockStore";
 import { useDialogSources } from "@/composables/useDialogSources";
 import type { ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
 import type { DriverStoreFocus } from "@/lib/connection/agentDriverInstallHint";
@@ -92,6 +93,8 @@ const emit = defineEmits<{
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
 const productionSafetyStore = useProductionSafetyStore();
+const readOnlyUnlockStore = useReadOnlyUnlockStore();
+const unlockDuration = ref<WriteUnlockDurationSecs>(WRITE_UNLOCK_ONE_MINUTE_SECS);
 const sqlExecutionDangerStore = useSqlExecutionDangerStore();
 const dialogs = useDialogSources();
 const productionConfirmationDetails = computed(() => {
@@ -103,6 +106,20 @@ const productionConfirmationDetails = computed(() => {
     source: request.source || "-",
   });
 });
+const readOnlyUnlockDetails = computed(() => {
+  const request = readOnlyUnlockStore.pending;
+  if (!request) return "";
+  return t("readOnlyUnlock.confirmDetails", {
+    connection: request.connectionName || "-",
+    source: request.source || "-",
+  });
+});
+watch(
+  () => readOnlyUnlockStore.pending,
+  (pending) => {
+    if (pending) unlockDuration.value = WRITE_UNLOCK_ONE_MINUTE_SECS;
+  },
+);
 const multiDbDangerDetails = computed(() => {
   const request = sqlExecutionDangerStore.pending;
   if (!request) return "";
@@ -178,6 +195,32 @@ watch(
     @update:open="(open) => !open && productionSafetyStore.cancel()"
     @confirm="productionSafetyStore.confirm()"
   />
+  <DangerConfirmDialog
+    v-if="readOnlyUnlockStore.pending"
+    :open="true"
+    :title="t('readOnlyUnlock.confirmTitle')"
+    :message="t('readOnlyUnlock.confirmMessage')"
+    :details-text="readOnlyUnlockDetails"
+    :sql="readOnlyUnlockStore.pending.sql"
+    :confirm-label="t('readOnlyUnlock.confirmAction')"
+    :close-on-confirm="false"
+    @update:open="(open) => !open && readOnlyUnlockStore.cancel()"
+    @confirm="readOnlyUnlockStore.confirm(unlockDuration)"
+  >
+    <template #options>
+      <fieldset class="mb-3 space-y-2 rounded-md border bg-muted/20 px-3 py-2">
+        <legend class="text-xs font-medium text-foreground">{{ t("readOnlyUnlock.durationLabel") }}</legend>
+        <label class="flex items-center gap-2 text-sm">
+          <input v-model="unlockDuration" type="radio" class="accent-primary" :value="WRITE_UNLOCK_ONE_MINUTE_SECS" />
+          {{ t("readOnlyUnlock.durationOneMinute") }}
+        </label>
+        <label class="flex items-center gap-2 text-sm">
+          <input v-model="unlockDuration" type="radio" class="accent-primary" :value="WRITE_UNLOCK_FIVE_MINUTES_SECS" />
+          {{ t("readOnlyUnlock.durationFiveMinutes") }}
+        </label>
+      </fieldset>
+    </template>
+  </DangerConfirmDialog>
   <DangerConfirmDialog
     v-if="sqlExecutionDangerStore.pending"
     :open="true"

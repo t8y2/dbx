@@ -367,6 +367,14 @@ export function connectionGroupDestinationRows(layout: SidebarLayout): Connectio
   return rows;
 }
 
+/** Resolve the group implied by a selected group, connection, or descendant node. */
+export function connectionGroupIdForSelection(layout: SidebarLayout, selectedNodeId?: string | null, selectedConnectionId?: string | null): string | null {
+  if (selectedNodeId && connectionGroupDestinationRows(layout).some((group) => group.id === selectedNodeId)) return selectedNodeId;
+  const connectionId = selectedConnectionId || selectedNodeId;
+  if (!connectionId) return null;
+  return findConnectionLocation(layout, connectionId)?.groupId ?? null;
+}
+
 function findGroupEntry(entries: SidebarOrderEntry[], groupId: string): Extract<SidebarOrderEntry, { type: "group" }> | null {
   for (const entry of entries) {
     if (entry.type !== "group") continue;

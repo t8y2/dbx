@@ -184,6 +184,7 @@ import { isSqlServerLinkedNode } from "@/lib/database/sqlServerLinkedServers";
 import { flattenTree } from "@/composables/useFlatTree";
 import { createDatabaseCollationOptionsForCharset, nextCreateDatabaseCollation, normalizeCreateDatabaseCharset, parseCreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
 import { executeWithProductionContextGuard, executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
+import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { buildXuguCompileSql } from "@/lib/database/xuguCompileSql";
 import type { SidebarDataOpenRequest } from "@/lib/sidebar/sidebarDataOpenCoordinator";
 import { createSidebarActionTarget, findSidebarActionTarget, releaseRemovedSidebarActionTarget, type SidebarActionTarget } from "@/lib/sidebar/sidebarActionTarget";
@@ -1153,7 +1154,7 @@ function canTransferTreeClipboardToCurrentNode(): boolean {
   const source = tableClipboardSourceContext(entries);
   const sourceConfig = source ? connectionStore.getConfig(source.connectionId) : undefined;
   const targetConfig = connectionStore.getConfig(target.connectionId);
-  return !!source && !!sourceConfig && !!targetConfig && supportsTransfer(sourceConfig.db_type) && supportsTransfer(targetConfig.db_type) && !targetConfig.read_only && !tableClipboardMatchesTarget(entries, target);
+  return !!source && !!sourceConfig && !!targetConfig && supportsTransfer(sourceConfig.db_type) && supportsTransfer(targetConfig.db_type) && !connectionIsEffectivelyReadOnly(targetConfig) && !tableClipboardMatchesTarget(entries, target);
 }
 
 function openTransferFromTreeClipboard(): boolean {
@@ -3013,7 +3014,7 @@ async function confirmBatchEmpty() {
 
 const canCreateTable = computed(() => {
   const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
-  const supportsHBaseTableCreation = config?.db_type === "hbase" && !config.read_only;
+  const supportsHBaseTableCreation = config?.db_type === "hbase" && !connectionIsEffectivelyReadOnly(config);
   return (
     (activeNode.value.type === "database" || activeNode.value.type === "schema" || activeNode.value.type === "group-tables") &&
     !isSqlServerLinkedNode(activeNode.value) &&
@@ -3029,13 +3030,13 @@ const canCreateDatabase = computed(() => {
 
 const canCreateNacosNamespace = computed(() => {
   const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
-  return activeNode.value.type === "connection" && config?.db_type === "nacos" && !config.read_only;
+  return activeNode.value.type === "connection" && config?.db_type === "nacos" && !connectionIsEffectivelyReadOnly(config);
 });
 
 const canEditNacosNamespace = computed(() => {
   if (activeNode.value.type !== "nacos-namespace" || !activeNode.value.connectionId || !activeNode.value.nacosNamespace) return false;
   const config = connectionStore.getConfig(activeNode.value.connectionId);
-  return config?.db_type === "nacos" && !config.read_only;
+  return config?.db_type === "nacos" && !connectionIsEffectivelyReadOnly(config);
 });
 
 const canDeleteNacosNamespace = computed(() => canEditNacosNamespace.value);
@@ -3083,7 +3084,7 @@ const canRenameDatabase = computed(() => {
   const node = activeNode.value;
   if (node.type !== "database" || !node.database) return false;
   const config = node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined;
-  return !!config && !config.read_only && supportsDatabaseRename(config.db_type);
+  return !!config && !connectionIsEffectivelyReadOnly(config) && supportsDatabaseRename(config.db_type);
 });
 
 const renameObjectDialogTitle = computed(() => {
@@ -3104,7 +3105,7 @@ const canDropSchema = computed(() => {
 
 const canEditSchemaComment = computed(() => {
   const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
-  return activeNode.value.type === "schema" && !!activeNode.value.database && !config?.read_only && supportsSchemaComment(effectiveDatabaseTypeForConnection(config));
+  return activeNode.value.type === "schema" && !!activeNode.value.database && !connectionIsEffectivelyReadOnly(config) && supportsSchemaComment(effectiveDatabaseTypeForConnection(config));
 });
 
 const canBatchDropCascade = computed(() => {
@@ -5221,7 +5222,7 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       icon: RefreshCw,
       shortcut: shortcutRefresh,
     });
-    if (!connectionStore.getConfig(node.connectionId || "")?.read_only) {
+    if (!connectionIsEffectivelyReadOnly(connectionStore.getConfig(node.connectionId || ""))) {
       items.push({ label: "", separator: true });
       items.push({
         label: t("hbase.deleteTable"),

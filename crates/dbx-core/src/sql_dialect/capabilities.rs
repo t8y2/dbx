@@ -91,8 +91,11 @@ pub fn pagination_strategy(database_type: Option<DatabaseType>, context: Paginat
         Some(DatabaseType::Oracle) if matches!(context, PaginationContext::TablePreview) => {
             TablePaginationStrategy::Rownum
         }
+        // Oracle's row-limiting clause (`FETCH FIRST`/`OFFSET ... FETCH`) was
+        // introduced in 12c. ROWNUM remains compatible with the supported 11g
+        // baseline while still providing a bounded read for newer servers.
         Some(DatabaseType::Oracle) if matches!(context, PaginationContext::BoundedRead) => {
-            TablePaginationStrategy::FetchFirst
+            TablePaginationStrategy::Rownum
         }
         Some(DatabaseType::Oracle) => TablePaginationStrategy::Unbounded,
         Some(DatabaseType::Oscar)

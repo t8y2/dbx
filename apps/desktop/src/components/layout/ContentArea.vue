@@ -162,6 +162,7 @@ import type { QueryTab, ConnectionConfig, TableInfoTab, TreeNode, VectorCollecti
 import type { SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
+import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 
 type DataGridHandle = DataGridColumnLayoutHandle & {
   onToolbarRefresh: () => Promise<void> | void;
@@ -1763,7 +1764,7 @@ defineExpose({
                 :mongo-update-target="mongoQueryResultSaveHandler && activeTab.result.mongo_copy_documents?.length === activeTab.result.rows.length ? activeTab.mongoEditTarget : undefined"
                 :query-editability-reason="activeTab.queryEditabilityReason"
                 :allow-insert-rows="activeTab.queryAnalysis?.allowInsert ?? activeTab.queryAnalysis?.allowInsertDelete !== false"
-                :allow-delete-rows="activeTab.queryAnalysis?.allowInsertDelete !== false"
+                :allow-delete-rows="activeTab.queryAnalysis?.allowDelete ?? activeTab.queryAnalysis?.allowInsertDelete !== false"
                 context="results"
                 :auto-transpose-single-row="settingsStore.editorSettings.dataGridAutoTransposeSingleRow"
                 :database-type="activeEffectiveDatabaseType"
@@ -2226,7 +2227,7 @@ defineExpose({
 
     <template v-else-if="activeTab.mode === 'nacos-access-control'">
       <div class="flex-1 min-h-0">
-        <NacosAccessControlConsole :key="activeTab.id" :connection-id="activeTab.connectionId" :read-only="activeConnection?.read_only ?? false" />
+        <NacosAccessControlConsole :key="activeTab.id" :connection-id="activeTab.connectionId" :read-only="connectionIsEffectivelyReadOnly(activeConnection)" />
       </div>
     </template>
 
@@ -2297,7 +2298,7 @@ defineExpose({
 
     <template v-else-if="activeTab.mode === 'mq'">
       <div class="flex-1 min-h-0">
-        <MqAdminConsole :key="activeTab.id" :connection-id="activeTab.connectionId" :initial-tenant="activeTab.mqTenant" :initial-tab="activeTab.mqInitialTab" :read-only="activeConnection?.read_only ?? false" />
+        <MqAdminConsole :key="activeTab.id" :connection-id="activeTab.connectionId" :initial-tenant="activeTab.mqTenant" :initial-tab="activeTab.mqInitialTab" :read-only="connectionIsEffectivelyReadOnly(activeConnection)" />
       </div>
     </template>
 
@@ -2318,7 +2319,7 @@ defineExpose({
           :target-group="activeTab.nacosTargetGroup"
           :target-keyword="activeTab.nacosTargetKeyword"
           :target-request-id="activeTab.nacosTargetRequestId"
-          :read-only="activeConnection?.read_only ?? false"
+          :read-only="connectionIsEffectivelyReadOnly(activeConnection)"
         />
       </div>
     </template>

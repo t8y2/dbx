@@ -13,9 +13,10 @@ const defaultCapabilities: TableMetadataCapabilities = {
   columns: true,
   indexes: true,
   foreignKeys: true,
-  // Structured PK/UNIQUE/CHECK constraint metadata (list_constraints) is only
-  // implemented by a handful of agent-backed drivers today; leave it off by
-  // default so every other dialect doesn't grow a permanently empty tab.
+  // Structured constraint metadata (list_constraints) is only enabled for
+  // drivers that implement it (PostgreSQL natively; Oracle/Xugu via agents);
+  // leave it off by default so every other dialect doesn't grow a permanently
+  // empty tab.
   constraints: false,
   triggers: true,
   ddl: true,
@@ -23,6 +24,20 @@ const defaultCapabilities: TableMetadataCapabilities = {
 
 const capabilityByType: Partial<Record<DatabaseType, Partial<TableMetadataCapabilities>>> = {
   oracle: {
+    constraints: true,
+  },
+  kingbase: {
+    constraints: true,
+  },
+  vastbase: {
+    constraints: true,
+  },
+  opengauss: {
+    constraints: true,
+  },
+  // PostgreSQL reports full pg_constraint metadata (PK/FK/UNIQUE/CHECK/
+  // EXCLUDE/NOT NULL) through list_constraints.
+  postgres: {
     constraints: true,
   },
   mongodb: {

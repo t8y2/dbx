@@ -260,6 +260,20 @@ const emit = defineEmits<{
 }>();
 
 const store = useConnectionStore();
+const UNGROUPED_CONNECTION_GROUP = "__dbx_ungrouped_connection_group__";
+const selectedConnectionGroupId = ref<string | null>(null);
+const connectionGroupSelectValue = computed({
+  get: () => selectedConnectionGroupId.value ?? UNGROUPED_CONNECTION_GROUP,
+  set: (value: string) => {
+    selectedConnectionGroupId.value = value === UNGROUPED_CONNECTION_GROUP ? null : value;
+  },
+});
+const connectionGroupOptions = computed(() => store.connectionGroupOptions.map((group) => ({ id: group.id, label: group.path.join(" / ") })));
+
+function initialConnectionGroupId(): string | null {
+  const preferred = store.newConnectionGroupId ?? store.selectedConnectionGroupId;
+  return preferred && connectionGroupOptions.value.some((group) => group.id === preferred) ? preferred : null;
+}
 const tunnelProfileStore = useTunnelProfileStore();
 const isTesting = ref(false);
 const isSaving = ref(false);
@@ -2582,6 +2596,7 @@ watch(
     } else {
       clearSavedDatabaseInfo();
       editingId.value = null;
+      selectedConnectionGroupId.value = initialConnectionGroupId();
       form.value = defaultForm();
       redisKeyTemplatesText.value = "";
       productionProtectionEnabled.value = false;
@@ -3094,7 +3109,7 @@ const agentDriverFocus = computed<DriverStoreFocus>(() => ({ target: "driver", d
 const canChooseVisibleNacosNamespaces = computed(() => form.value.db_type === "nacos");
 const isNacosV3AdminPlane = computed(() => nacosImplementation.value === "nacos" && nacosVersionMode.value === "v3" && nacosApiPlane.value === "admin");
 const isNacosV3ConsolePlane = computed(() => nacosImplementation.value === "nacos" && nacosVersionMode.value === "v3" && nacosApiPlane.value === "console");
-const canDetectNacosNamespaceAccess = computed(() => form.value.db_type === "nacos" && nacosImplementation.value === "nacos" && nacosAuthKind.value === "usernamePassword");
+const canDetectNacosNamespaceAccess = computed(() => form.value.db_type === "nacos" && nacosAuthKind.value === "usernamePassword");
 const nacosManualNamespaceLabelKey = computed(() => (isNacosV3AdminPlane.value ? "nacos.nacosManagedNamespaces" : "nacos.nacosManagedNamespacesNameOrId"));
 const nacosManualNamespacePlaceholderKey = computed(() => (isNacosV3AdminPlane.value ? "nacos.nacosManagedNamespacesIdPlaceholder" : "nacos.nacosManagedNamespacesPlaceholder"));
 const nacosManualNamespaceHintKey = computed(() => {
@@ -3308,7 +3323,8 @@ const shouldUseWideConnectionDialog = computed(() => dialogStep.value === "confi
 const connectionDialogContentClass = computed(() => {
   if (dialogStep.value === "select") return "connection-dialog-content--picker sm:h-[720px] sm:max-w-[880px]";
   const widthClass = shouldUseWideConnectionDialog.value ? "connection-dialog-content--wide sm:max-w-[660px]" : "connection-dialog-content--standard sm:max-w-[560px]";
-  return `${widthClass} connection-dialog-content--config`;
+  const scrollableAdvancedNacos = form.value.db_type === "nacos" && configTab.value === "advanced";
+  return `${widthClass} connection-dialog-content--config${scrollableAdvancedNacos ? " connection-dialog-content--scrollable" : ""}`;
 });
 const connectionLabelClass = "justify-self-start text-left";
 const connectionLabelSmallClass = `${connectionLabelClass} text-xs`;
@@ -4456,6 +4472,7 @@ async function resolveManualNacosNamespaceNames(namespaces: string[]): Promise<s
 
 function isNacosNamespaceListingPermissionError(error: unknown): boolean {
   const message = errorMessage(error);
+  if (/NACOS_ERROR\[rnacosNamespaceDirectoryUnavailable\]/.test(message)) return true;
   if (/NACOS_ERROR\[(?:v3ManagedNamespacesRequired|managedNamespacesRequired)\]/.test(message)) return true;
   return /\/v3\/(?:admin|console)\/core\/namespace\/list/.test(message) && /\b403\b/.test(message) && /authorization failed/i.test(message);
 }
@@ -4541,7 +4558,10 @@ async function saveVisibleNacosNamespaceSelection() {
   if (visibleNacosNamespaceAccessMode.value === "manual") {
     const manualNamespaces = parseNacosManagedNamespaces(nacosManagedNamespacesText.value);
     isResolvingManualNacosNamespaces.value = true;
-    const resolvedNamespaces = isNacosV3AdminPlane.value ? manualNamespaces : await resolveManualNacosNamespaceNames(manualNamespaces);
+    // r-nacos does not promise a namespace directory on its client OpenAPI.
+    // Preserve user-provided IDs directly so scoped config access does not
+    // require a separate console login.
+    const resolvedNamespaces = isNacosV3AdminPlane.value || nacosImplementation.value === "rnacos" ? manualNamespaces : await resolveManualNacosNamespaceNames(manualNamespaces);
     isResolvingManualNacosNamespaces.value = false;
     nacosManagedNamespacesText.value = resolvedNamespaces.join("\n");
     form.value.visible_databases = resolvedNamespaces;
@@ -4818,6 +4838,7 @@ function openJdbcDriverManagerFromError() {
 
 function resetForm(options: { preservePickerState?: boolean } = {}) {
   editingId.value = null;
+  selectedConnectionGroupId.value = initialConnectionGroupId();
   form.value = defaultForm();
   redisKeyTemplatesText.value = "";
   resetConnectionNoteVisibilityDraft(connectionNoteVisibilityDraft, settingsStore.editorSettings.sidebarShowConnectionNotes);
@@ -4975,6 +4996,10 @@ watch(
   },
   { immediate: true },
 );
+
+watch(connectionGroupOptions, (groups) => {
+  if (selectedConnectionGroupId.value && !groups.some((group) => group.id === selectedConnectionGroupId.value)) selectedConnectionGroupId.value = null;
+});
 
 watch(
   () => props.prefillConfig,
@@ -5231,7 +5256,7 @@ async function save() {
       await ensureRequiredAgentDriverInstalled(config);
       await ensureRequiredGaussdbMJdbcRuntime(config);
       await persistGlobalTimeoutDrafts();
-      await store.addConnection(config);
+      await store.addConnection(config, selectedConnectionGroupId.value);
       connectionSaved = true;
       await persistConnectionNoteVisibilityDraft();
       draftTestConnectionId.value = uuid();
@@ -5846,35 +5871,49 @@ function openExternalUrl(url: string) {
 
                 <div class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelClass">{{ t("connection.color") }}</Label>
-                  <div class="col-span-3 flex items-center gap-1.5">
-                    <button
-                      v-for="color in colorOptions"
-                      :key="color.value || 'none'"
-                      type="button"
-                      class="h-6 w-6 rounded-full border ring-offset-background transition hover:scale-105"
-                      :class="[color.class, form.color === color.value ? 'ring-2 ring-ring ring-offset-2' : 'border-border']"
-                      :title="t(color.labelKey)"
-                      @click="handlePresetClick(color.value)"
-                    />
-                    <Popover v-model:open="customColorOpen">
-                      <PopoverTrigger as-child>
-                        <button
-                          type="button"
-                          class="h-6 w-6 rounded-full border flex items-center justify-center hover:scale-105 transition"
-                          :class="[!isPresetColor(form.color) && form.color ? 'border-border ring-2 ring-ring ring-offset-2' : 'border-dashed border-border']"
-                          :style="!isPresetColor(form.color) && form.color ? { backgroundColor: form.color } : {}"
-                          :title="t('connection.colorCustom')"
-                        >
-                          <Pipette class="h-3.5 w-3.5" :class="!isPresetColor(form.color) && form.color ? 'text-white' : 'text-muted-foreground'" />
-                        </button>
-                      </PopoverTrigger>
-                      <PopoverContent class="w-auto p-2">
-                        <div class="flex items-center gap-2">
-                          <input type="color" :value="form.color" @input="handleCustomColorPicked(($event.target as HTMLInputElement).value)" class="h-6 w-6 cursor-pointer rounded border-0 p-0" />
-                          <Input type="text" :value="customColorInput || form.color" @input="handleCustomColorInput(($event.target as HTMLInputElement).value)" class="w-28 h-7 text-xs font-mono" :placeholder="t('connection.customColorPlaceholder')" />
-                        </div>
-                      </PopoverContent>
-                    </Popover>
+                  <div class="col-span-3 flex min-w-0 items-center">
+                    <div class="flex shrink-0 items-center gap-1.5">
+                      <button
+                        v-for="color in colorOptions"
+                        :key="color.value || 'none'"
+                        type="button"
+                        class="h-6 w-6 rounded-full border ring-offset-background transition hover:scale-105"
+                        :class="[color.class, form.color === color.value ? 'ring-2 ring-ring ring-offset-2' : 'border-border']"
+                        :title="t(color.labelKey)"
+                        @click="handlePresetClick(color.value)"
+                      />
+                      <Popover v-model:open="customColorOpen">
+                        <PopoverTrigger as-child>
+                          <button
+                            type="button"
+                            class="h-6 w-6 rounded-full border flex items-center justify-center hover:scale-105 transition"
+                            :class="[!isPresetColor(form.color) && form.color ? 'border-border ring-2 ring-ring ring-offset-2' : 'border-dashed border-border']"
+                            :style="!isPresetColor(form.color) && form.color ? { backgroundColor: form.color } : {}"
+                            :title="t('connection.colorCustom')"
+                          >
+                            <Pipette class="h-3.5 w-3.5" :class="!isPresetColor(form.color) && form.color ? 'text-white' : 'text-muted-foreground'" />
+                          </button>
+                        </PopoverTrigger>
+                        <PopoverContent class="w-auto p-2">
+                          <div class="flex items-center gap-2">
+                            <input type="color" :value="form.color" @input="handleCustomColorPicked(($event.target as HTMLInputElement).value)" class="h-6 w-6 cursor-pointer rounded border-0 p-0" />
+                            <Input type="text" :value="customColorInput || form.color" @input="handleCustomColorInput(($event.target as HTMLInputElement).value)" class="w-28 h-7 text-xs font-mono" :placeholder="t('connection.customColorPlaceholder')" />
+                          </div>
+                        </PopoverContent>
+                      </Popover>
+                    </div>
+                    <div v-if="!editingId && connectionGroupOptions.length > 0" class="ml-3 flex min-w-0 flex-1 items-center gap-2 border-l pl-3">
+                      <Label class="shrink-0 text-xs text-muted-foreground">{{ t("connectionGroup.group") }}</Label>
+                      <Select v-model="connectionGroupSelectValue">
+                        <SelectTrigger class="h-8 min-w-0 flex-1">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem :value="UNGROUPED_CONNECTION_GROUP">{{ t("connectionGroup.ungroupedLabel") }}</SelectItem>
+                          <SelectItem v-for="group in connectionGroupOptions" :key="group.id" :value="group.id">{{ group.label }}</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
                   </div>
                 </div>
 
@@ -7939,7 +7978,7 @@ function openExternalUrl(url: string) {
             </TabsContent>
 
             <TabsContent value="advanced" class="m-0 flex min-h-0 flex-1 flex-col overflow-hidden">
-              <div class="connection-form-body grid min-h-0 flex-1 scroll-pb-6 gap-4 overflow-y-auto pt-4 pr-2 pb-6">
+              <div class="connection-form-body grid min-h-0 flex-1 scroll-pb-6 gap-4 overflow-y-auto pt-4 pr-2 pb-6" :class="{ 'connection-form-body--nacos': form.db_type === 'nacos' }">
                 <div v-if="form.db_type === 'elasticsearch'" class="grid grid-cols-4 items-center gap-4">
                   <div class="flex items-center gap-1">
                     <Label :class="connectionLabelSmallClass">{{ t("connection.elasticsearchConnectivityCheckDisabled") }}</Label>
@@ -8943,6 +8982,10 @@ function openExternalUrl(url: string) {
 
 .connection-dialog-content--config {
   min-height: 0;
+}
+
+.connection-dialog-content--scrollable {
+  height: min(720px, calc(var(--dbx-viewport-height) - 2rem));
 }
 
 .connection-dialog-content--config .connection-form-body {

@@ -5597,7 +5597,20 @@ fn mysql_list_indexes_sql(database: &str, table: &str, include_expression: bool)
 }
 
 fn mysql_statistics_expression_is_unsupported(error: &mysql_async::Error) -> bool {
-    matches!(error, mysql_async::Error::Server(server_error) if server_error.code == 1054)
+    match error {
+        mysql_async::Error::Server(server_error) if server_error.code == 1054 => true,
+        mysql_async::Error::Server(server_error)
+            if server_error.code == 3009 && server_error.state.eq_ignore_ascii_case("HY000") =>
+        {
+            // PolarDB-X/DRDS wraps the unknown EXPRESSION column in TDDL error
+            // 3009. Require the complete diagnostic so unrelated HY000 errors
+            // (for example permissions or connectivity failures) are not retried
+            // with a different metadata query.
+            let message = server_error.message.to_ascii_lowercase();
+            message.contains("column") && message.contains("expression") && message.contains("not found")
+        }
+        _ => false,
+    }
 }
 
 pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<IndexInfo>, String> {
@@ -7526,6 +7539,29 @@ mod tests {
 
         assert!(mysql_statistics_expression_is_unsupported(&unsupported));
         assert!(!mysql_statistics_expression_is_unsupported(&permission_denied));
+    }
+
+    #[test]
+    fn mysql_index_metadata_accepts_drds_expression_error_only_with_matching_message() {
+        let unsupported = mysql_async::Error::Server(mysql_async::ServerError {
+            code: 3009,
+            message: "[TDDL-4518][ERR_VALIDATE] Column 'EXPRESSION' not found".to_string(),
+            state: "HY000".to_string(),
+        });
+        let unrelated = mysql_async::Error::Server(mysql_async::ServerError {
+            code: 3009,
+            message: "[TDDL-4518][ERR_VALIDATE] Column 'INDEX_NAME' not found".to_string(),
+            state: "HY000".to_string(),
+        });
+        let wrong_state = mysql_async::Error::Server(mysql_async::ServerError {
+            code: 3009,
+            message: "[TDDL-4518][ERR_VALIDATE] Column 'EXPRESSION' not found".to_string(),
+            state: "42S22".to_string(),
+        });
+
+        assert!(mysql_statistics_expression_is_unsupported(&unsupported));
+        assert!(!mysql_statistics_expression_is_unsupported(&unrelated));
+        assert!(!mysql_statistics_expression_is_unsupported(&wrong_state));
     }
 
     #[test]

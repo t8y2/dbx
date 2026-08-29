@@ -29,6 +29,10 @@ describe("data grid bottom anchoring", () => {
   it("does not anchor a user who is away from the bottom", () => {
     expect(isDataGridAtScrollBottom({ scrollTop: 700, scrollHeight: 1000, clientHeight: 260 })).toBe(false);
   });
+
+  it("does not treat an unmeasured non-scrollable grid as bottom-anchored", () => {
+    expect(isDataGridAtScrollBottom({ scrollTop: 0, scrollHeight: 500, clientHeight: 500 })).toBe(false);
+  });
 });
 
 describe("data grid horizontal restoration", () => {

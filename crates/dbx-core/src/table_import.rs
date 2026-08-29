@@ -16,6 +16,12 @@ use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader as XmlReader;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use sqlparser::ast::{
+    DataType, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Ident, Insert, ObjectName, ObjectNamePart,
+    SetExpr, Statement, TableObject, UnaryOperator, Value as SqlValue,
+};
+use sqlparser::dialect::{GenericDialect, MsSqlDialect, MySqlDialect, OracleDialect, PostgreSqlDialect, SQLiteDialect};
+use sqlparser::parser::Parser;
 
 use crate::connection::{task_client_session_id, AppState, PoolKind};
 use crate::models::connection::DatabaseType;
@@ -112,6 +118,7 @@ pub enum TableImportSourceFormat {
     Delimited,
     Json,
     Excel,
+    Sql,
 }
 
 impl TableImportSourceFormat {
@@ -122,6 +129,7 @@ impl TableImportSourceFormat {
             TableImportSourceFormat::Delimited => "txt",
             TableImportSourceFormat::Json => "json",
             TableImportSourceFormat::Excel => "excel",
+            TableImportSourceFormat::Sql => "sql",
         }
     }
 
@@ -184,6 +192,9 @@ pub struct TableImportParseOptions {
     pub sheet_name: Option<String>,
     pub sheet_index: Option<usize>,
     pub json_shape: Option<TableImportJsonShape>,
+    /// SQL 脚本的源方言（目标连接类型）。决定字符串转义、标识符大小写与语句拆分规则。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sql_dialect: Option<DatabaseType>,
 }
 
 impl Default for TableImportParseOptions {
@@ -200,6 +211,7 @@ impl Default for TableImportParseOptions {
             sheet_name: None,
             sheet_index: None,
             json_shape: Some(TableImportJsonShape::Auto),
+            sql_dialect: None,
         }
     }
 }
@@ -334,6 +346,7 @@ pub enum ImportFileKind {
     Txt,
     Json,
     Xlsx,
+    Sql,
 }
 
 impl ImportFileKind {
@@ -344,6 +357,7 @@ impl ImportFileKind {
             ImportFileKind::Txt => "txt",
             ImportFileKind::Json => "json",
             ImportFileKind::Xlsx => "xlsx",
+            ImportFileKind::Sql => "sql",
         }
     }
 }
@@ -360,6 +374,8 @@ pub fn import_file_kind(path: &str) -> Result<ImportFileKind, String> {
         Ok(ImportFileKind::Json)
     } else if lower.ends_with(".xlsx") || lower.ends_with(".xlsm") || lower.ends_with(".xls") {
         Ok(ImportFileKind::Xlsx)
+    } else if lower.ends_with(".sql") {
+        Ok(ImportFileKind::Sql)
     } else {
         Err("Unsupported import file type".to_string())
     }
@@ -372,6 +388,7 @@ pub fn source_format_for_path(path: &str) -> Result<TableImportSourceFormat, Str
         ImportFileKind::Txt => TableImportSourceFormat::Delimited,
         ImportFileKind::Json => TableImportSourceFormat::Json,
         ImportFileKind::Xlsx => TableImportSourceFormat::Excel,
+        ImportFileKind::Sql => TableImportSourceFormat::Sql,
     })
 }
 
@@ -1083,6 +1100,479 @@ pub fn parse_json_bytes_with_options(
 
 pub fn parse_json_bytes(bytes: &[u8], preview_limit: usize) -> Result<ParsedImportFile, String> {
     parse_json_bytes_with_options(bytes, &TableImportParseOptions::default(), preview_limit)
+}
+
+// ---------------------------------------------------------------------------
+// SQL 脚本导入：从 .sql 文件中提取 INSERT / REPLACE 语句的数据行
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+struct SqlInsertTarget {
+    table: String,
+    columns: Vec<String>,
+    columns_generated: bool,
+}
+
+/// 按选择的文本编码解码 SQL 脚本字节（未指定时自动检测），返回脚本文本与实际编码。
+fn decode_sql_script_bytes(
+    bytes: &[u8],
+    requested: Option<TableImportTextEncoding>,
+) -> Result<(String, TableImportTextEncoding), String> {
+    let (encoding, bom_len) = resolve_text_encoding_from_bytes(bytes, requested)?;
+    let charset = encoding.encoding().ok_or_else(|| "SQL import requires a resolved text encoding".to_string())?;
+    let (decoded, _, _) = charset.decode(&bytes[bom_len.min(bytes.len())..]);
+    Ok((decoded.into_owned(), encoding))
+}
+
+/// 源 SQL 方言家族：决定未加引号标识符的大小写折叠规则。
+/// 字符串/表达式/标识符的词法解析已交给 sqlparser（按方言正确解释反斜杠、E'...'、
+/// X'...' 等），这里只按方言决定标识符的显示与比较规则，避免把 PostgreSQL 的
+/// "Foo" 与 foo 错误合并。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SqlImportDialectFamily {
+    Postgres,
+    MySql,
+    Sqlite,
+    SqlServer,
+    Oracle,
+    Generic,
+}
+
+fn sql_import_dialect_family(db_type: DatabaseType) -> SqlImportDialectFamily {
+    if matches!(
+        db_type,
+        DatabaseType::Postgres
+            | DatabaseType::Redshift
+            | DatabaseType::Kingbase
+            | DatabaseType::Highgo
+            | DatabaseType::Uxdb
+            | DatabaseType::Vastbase
+            | DatabaseType::OpenGauss
+            | DatabaseType::Gaussdb
+            | DatabaseType::Kwdb
+            | DatabaseType::Iris
+    ) {
+        SqlImportDialectFamily::Postgres
+    } else if matches!(
+        db_type,
+        DatabaseType::Mysql
+            | DatabaseType::Doris
+            | DatabaseType::StarRocks
+            | DatabaseType::ManticoreSearch
+            | DatabaseType::Goldendb
+    ) {
+        SqlImportDialectFamily::MySql
+    } else if matches!(
+        db_type,
+        DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso | DatabaseType::CloudflareD1
+    ) {
+        SqlImportDialectFamily::Sqlite
+    } else if matches!(db_type, DatabaseType::SqlServer) {
+        SqlImportDialectFamily::SqlServer
+    } else if matches!(
+        db_type,
+        DatabaseType::Oracle
+            | DatabaseType::Dameng
+            | DatabaseType::OceanbaseOracle
+            | DatabaseType::Yashandb
+            | DatabaseType::Oscar
+            | DatabaseType::Xugu
+    ) {
+        SqlImportDialectFamily::Oracle
+    } else {
+        SqlImportDialectFamily::Generic
+    }
+}
+
+fn sql_import_parser_dialect(family: SqlImportDialectFamily) -> Box<dyn sqlparser::dialect::Dialect> {
+    match family {
+        SqlImportDialectFamily::Postgres => Box::new(PostgreSqlDialect {}),
+        SqlImportDialectFamily::MySql => Box::new(MySqlDialect {}),
+        SqlImportDialectFamily::Sqlite => Box::new(SQLiteDialect {}),
+        SqlImportDialectFamily::SqlServer => Box::new(MsSqlDialect {}),
+        SqlImportDialectFamily::Oracle => Box::new(OracleDialect {}),
+        SqlImportDialectFamily::Generic => Box::new(GenericDialect {}),
+    }
+}
+
+/// 标识符的展示名：PostgreSQL 未加引号标识符折叠为小写，加引号保留原样；
+/// 其它方言保留原文大小写。
+fn sql_import_ident_display(ident: &Ident, family: SqlImportDialectFamily) -> String {
+    if family == SqlImportDialectFamily::Postgres && ident.quote_style.is_none() {
+        ident.value.to_lowercase()
+    } else {
+        ident.value.clone()
+    }
+}
+
+/// 判断两组列名是否指向同一列清单。
+/// - PostgreSQL：未加引号已折叠为小写、加引号保留原样，精确比较即可区分 "Foo" 与 foo。
+/// - 其它方言（MySQL/SQLite/…）：列名大小写不敏感。
+fn sql_import_names_match(a: &[String], b: &[String], family: SqlImportDialectFamily) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(left, right)| {
+            if family == SqlImportDialectFamily::Postgres {
+                left == right
+            } else {
+                left.eq_ignore_ascii_case(right)
+            }
+        })
+}
+
+fn sql_import_table_matches(a: &str, b: &str, family: SqlImportDialectFamily) -> bool {
+    if family == SqlImportDialectFamily::Postgres {
+        a == b
+    } else {
+        a.eq_ignore_ascii_case(b)
+    }
+}
+
+/// 从 `ObjectName`（可能是 `schema.column`）取出最后一个标识符部分。
+fn sql_import_object_name_ident<'a>(name: &'a ObjectName, what: &str) -> Result<&'a Ident, String> {
+    let Some(last) = name.0.last() else {
+        return Err(format!("SQL import: empty {what} name"));
+    };
+    match last {
+        ObjectNamePart::Identifier(ident) => Ok(ident),
+        ObjectNamePart::Function(_) => Err(format!("SQL import: function-based {what} names are not supported")),
+    }
+}
+
+fn sql_import_number_value(raw: &str, context: &str) -> Result<serde_json::Value, String> {
+    // 优先保留整数精度；小数与科学计数法回退到浮点。
+    if let Ok(integer) = raw.parse::<i64>() {
+        return Ok(serde_json::Value::Number(integer.into()));
+    }
+    if let Ok(float) = raw.parse::<f64>() {
+        if float.is_finite() {
+            if float.fract() == 0.0 && float >= i64::MIN as f64 && float < -(i64::MIN as f64) {
+                let integer = float as i64;
+                if integer as f64 == float {
+                    return Ok(serde_json::Value::Number(integer.into()));
+                }
+            }
+            if let Some(number) = serde_json::Number::from_f64(float) {
+                return Ok(serde_json::Value::Number(number));
+            }
+        }
+    }
+    Err(format!("{context}: unsupported numeric literal '{raw}'"))
+}
+
+fn sql_import_expr_value(expr: &Expr, context: &str) -> Result<serde_json::Value, String> {
+    match expr {
+        Expr::Value(value) => match &value.value {
+            SqlValue::Number(raw, _) => sql_import_number_value(raw.as_str(), context),
+            SqlValue::Boolean(flag) => Ok(serde_json::Value::Bool(*flag)),
+            SqlValue::Null => Ok(serde_json::Value::Null),
+            // 二进制/十六进制字面量无法无损地作为文本导入，明确拒绝而非静默改写。
+            SqlValue::HexStringLiteral(_)
+            | SqlValue::SingleQuotedByteStringLiteral(_)
+            | SqlValue::DoubleQuotedByteStringLiteral(_) => {
+                Err(format!("{context}: binary/hex literals (X'..', B'..') are not supported for SQL import"))
+            }
+            SqlValue::Placeholder(_) => Err(format!("{context}: bind placeholders are not supported for SQL import")),
+            // 普通字符串字面量：转义已由 sqlparser 按源方言正确解码。
+            other => match other.clone().into_string() {
+                Some(text) => Ok(serde_json::Value::String(text)),
+                None => Err(format!("{context}: unsupported SQL literal")),
+            },
+        },
+        // 一元正负号作用于数值字面量：`-1.5`、`+3` 等是合法值，不能当表达式拒绝。
+        Expr::UnaryOp { op, expr } => match op {
+            UnaryOperator::Minus => {
+                if let Expr::Value(value) = expr.as_ref() {
+                    if let SqlValue::Number(raw, _) = &value.value {
+                        return sql_import_number_value(&format!("-{raw}"), context);
+                    }
+                }
+                Err(sql_import_unsupported_expression(context))
+            }
+            UnaryOperator::Plus => {
+                if let Expr::Value(value) = expr.as_ref() {
+                    if let SqlValue::Number(raw, _) = &value.value {
+                        return sql_import_number_value(raw.as_str(), context);
+                    }
+                }
+                Err(sql_import_unsupported_expression(context))
+            }
+            _ => Err(sql_import_unsupported_expression(context)),
+        },
+        // `DATE '...'`、`TIMESTAMP '...'`、`TIME '...'` 等标准字面量：值就是引号里的字符串，无损导入。
+        Expr::TypedString(typed) => sql_import_typed_string(typed, context),
+        // 白名单字面量日期函数（TO_DATE/TO_TIMESTAMP/...）：参数全为字符串字面量时按第一个参数导入。
+        Expr::Function(function) => sql_import_literal_temporal_function(function, context),
+        _ => Err(sql_import_unsupported_expression(context)),
+    }
+}
+
+/// `DATE '...'`、`TIMESTAMP '...'`、`TIME '...'` 这类标准字面量：值就是引号里的字符串，
+/// 无损地作为字符串导入。其它 TypedString（如 INTERVAL）语义更复杂，不展开。
+fn sql_import_typed_string(typed: &sqlparser::ast::TypedString, context: &str) -> Result<serde_json::Value, String> {
+    match &typed.data_type {
+        DataType::Date | DataType::Time(..) | DataType::Timestamp(..) => match typed.value.clone().into_string() {
+            Some(text) => Ok(serde_json::Value::String(text)),
+            None => Err(sql_import_unsupported_expression(context)),
+        },
+        _ => Err(sql_import_unsupported_expression(context)),
+    }
+}
+
+/// 白名单“字面量日期函数”：`TO_DATE('2021-09-08 09:06:25', 'YYYY-MM-DD HH24:MI:SS')` 这类调用，
+/// 当参数全部是字符串字面量时，其“值”就是第一个字符串实参表示的日期时间，按该字符串无损导入。
+/// 任何非字面量参数（列引用、表达式、命名参数、ORDER BY 子句等）都不展开，回退到“表达式不支持”，
+/// 避免静默改变语句语义。
+fn sql_import_literal_temporal_function(
+    function: &sqlparser::ast::Function,
+    context: &str,
+) -> Result<serde_json::Value, String> {
+    let name = function.name.to_string().to_ascii_lowercase();
+    if !matches!(name.as_str(), "to_date" | "to_timestamp" | "to_timestamp_tz") {
+        return Err(sql_import_unsupported_expression(context));
+    }
+    let FunctionArguments::List(list) = &function.args else {
+        return Err(sql_import_unsupported_expression(context));
+    };
+    if list.args.is_empty() || !list.clauses.is_empty() || list.duplicate_treatment.is_some() {
+        return Err(sql_import_unsupported_expression(context));
+    }
+
+    let mut first_value: Option<String> = None;
+    for arg in &list.args {
+        let FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(value))) = arg else {
+            return Err(sql_import_unsupported_expression(context));
+        };
+        let text = value.clone().into_string().ok_or_else(|| sql_import_unsupported_expression(context))?;
+        if first_value.is_none() {
+            first_value = Some(text);
+        }
+    }
+
+    let value = first_value.expect("args non-empty checked above");
+    Ok(serde_json::Value::String(value))
+}
+
+fn sql_import_unsupported_expression(context: &str) -> String {
+    format!(
+        "{context}: expressions (functions, operators, casts, ...) are not supported; \
+         SQL import only accepts literal values so statement semantics are preserved"
+    )
+}
+
+/// 解析单条 INSERT 语句，把值行登记到 `target`/`rows`。
+/// REPLACE、INSERT IGNORE、INSERT ... SELECT、INSERT ... SET、ON CONFLICT 等无法用
+/// 普通 INSERT 无损表达的构造一律拒绝。
+fn parse_sql_insert_statement(
+    insert: &Insert,
+    family: SqlImportDialectFamily,
+    target: &mut Option<SqlInsertTarget>,
+    rows: &mut Vec<Vec<serde_json::Value>>,
+    preview_limit: usize,
+    total_rows: &mut usize,
+) -> Result<(), String> {
+    if insert.replace_into {
+        return Err(
+            "SQL import does not support REPLACE; its delete-then-insert conflict semantics cannot be preserved"
+                .to_string(),
+        );
+    }
+    if insert.ignore {
+        return Err("SQL import does not support INSERT IGNORE".to_string());
+    }
+    if insert.or.is_some() {
+        return Err("SQL import does not support INSERT OR ... conflict clauses".to_string());
+    }
+    if insert.on.is_some() {
+        return Err("SQL import does not support ON DUPLICATE KEY / ON CONFLICT clauses".to_string());
+    }
+    if !insert.assignments.is_empty() {
+        return Err("SQL import does not support INSERT ... SET".to_string());
+    }
+    if insert.returning.is_some() || insert.output.is_some() {
+        return Err("SQL import does not support INSERT ... RETURNING / OUTPUT".to_string());
+    }
+
+    let table_ref = match &insert.table {
+        TableObject::TableName(name) => name,
+        TableObject::TableFunction(_) | TableObject::TableQuery(_) => {
+            return Err("SQL import only supports INSERT into a named table".to_string());
+        }
+    };
+    let table_ident = sql_import_object_name_ident(table_ref, "table")?;
+    let table_name = sql_import_ident_display(table_ident, family);
+
+    if let Some(existing) = target.as_ref() {
+        if !sql_import_table_matches(&existing.table, &table_name, family) {
+            return Err(format!(
+                "SQL import supports one table per file; found '{}' and '{}'",
+                existing.table, table_name
+            ));
+        }
+    }
+
+    let explicit_columns = insert
+        .columns
+        .iter()
+        .map(|column| {
+            sql_import_object_name_ident(column, "column").map(|ident| sql_import_ident_display(ident, family))
+        })
+        .collect::<Result<Vec<String>, String>>()?;
+
+    let Some(source) = insert.source.as_deref() else {
+        return Err("SQL import only supports INSERT ... VALUES".to_string());
+    };
+    let SetExpr::Values(values) = source.body.as_ref() else {
+        return Err("SQL import only supports INSERT ... VALUES; INSERT ... SELECT is not supported".to_string());
+    };
+
+    // 登记/校验列清单：显式列优先，无列清单时延后到首行按值数量推断（保留旧行为），
+    // 列名比较改为按方言规则（区分引号状态）。
+    if !explicit_columns.is_empty() {
+        match target.as_mut() {
+            None => {
+                *target = Some(SqlInsertTarget {
+                    table: table_name.clone(),
+                    columns: explicit_columns,
+                    columns_generated: false,
+                });
+            }
+            Some(existing) => {
+                if !sql_import_names_match(&existing.columns, &explicit_columns, family) {
+                    if existing.columns_generated && existing.columns.len() == explicit_columns.len() {
+                        existing.columns = explicit_columns;
+                        existing.columns_generated = false;
+                    } else {
+                        return Err(format!(
+                            "INSERT statements use different column lists for table '{}'",
+                            existing.table
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    for row in &values.rows {
+        let values = &row.content;
+        if target.is_none() {
+            if values.is_empty() {
+                return Err("INSERT statement has an empty value tuple".to_string());
+            }
+            let columns = (0..values.len()).map(|index| format!("column_{}", index + 1)).collect::<Vec<_>>();
+            *target = Some(SqlInsertTarget { table: table_name.clone(), columns, columns_generated: true });
+        }
+        let columns = &target.as_ref().expect("insert target registered above").columns;
+        if values.len() != columns.len() {
+            return Err(format!(
+                "INSERT row has {} values but table '{}' expects {} columns",
+                values.len(),
+                table_name,
+                columns.len()
+            ));
+        }
+        let mut converted = Vec::with_capacity(values.len());
+        for (index, value) in values.iter().enumerate() {
+            let context = format!("SQL import: table '{table_name}', column {}", columns[index]);
+            converted.push(sql_import_expr_value(value, &context)?);
+        }
+        *total_rows += 1;
+        if rows.len() < preview_limit {
+            rows.push(converted);
+        }
+    }
+    Ok(())
+}
+
+/// 跳过空白与 SQL 注释，返回第一个关键字（用于判断语句是否以 INSERT/REPLACE 开头）。
+fn sql_import_leading_keyword(statement: &str) -> Option<String> {
+    let bytes = statement.as_bytes();
+    let mut index = 0usize;
+    loop {
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index + 1 < bytes.len() && bytes[index] == b'-' && bytes[index + 1] == b'-' {
+            while index < bytes.len() && bytes[index] != b'\n' {
+                index += 1;
+            }
+            continue;
+        }
+        if index < bytes.len() && bytes[index] == b'#' {
+            while index < bytes.len() && bytes[index] != b'\n' {
+                index += 1;
+            }
+            continue;
+        }
+        if index + 1 < bytes.len() && bytes[index] == b'/' && bytes[index + 1] == b'*' {
+            index += 2;
+            while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/') {
+                index += 1;
+            }
+            index = (index + 2).min(bytes.len());
+            continue;
+        }
+        break;
+    }
+    let start = index;
+    while index < bytes.len() && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_') {
+        index += 1;
+    }
+    if index == start {
+        return None;
+    }
+    Some(statement[start..index].to_string())
+}
+
+pub fn parse_sql_bytes_with_options(
+    bytes: &[u8],
+    options: &TableImportParseOptions,
+    preview_limit: usize,
+) -> Result<ParsedImportFile, String> {
+    let (text, encoding) = decode_sql_script_bytes(bytes, options.encoding)?;
+    let family = options.sql_dialect.map(sql_import_dialect_family).unwrap_or(SqlImportDialectFamily::Generic);
+    let dialect = sql_import_parser_dialect(family);
+
+    // 复用 sql.rs 的方言感知拆分器：正确处理 MySQL DELIMITER、PostgreSQL 美元引用、
+    // SQL Server GO、Oracle / 等，替代原来按分号裸切的实现。
+    let statements = match options.sql_dialect {
+        Some(db_type) => crate::sql::split_sql_statements_for_database(&text, db_type),
+        None => crate::sql::split_sql_statements(&text),
+    };
+
+    let mut target: Option<SqlInsertTarget> = None;
+    let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
+    let mut total_rows = 0usize;
+
+    for statement_sql in statements {
+        let parsed = match Parser::parse_sql(dialect.as_ref(), &statement_sql) {
+            Ok(statements) => statements,
+            Err(error) => {
+                // 非 INSERT 语句（DDL、SET、……）不属于数据导入范畴，跳过；
+                // 以 INSERT/REPLACE 开头却解析失败的语句必须报错，不能静默丢弃。
+                let keyword = sql_import_leading_keyword(&statement_sql);
+                let is_insert = keyword
+                    .as_deref()
+                    .is_some_and(|word| word.eq_ignore_ascii_case("INSERT") || word.eq_ignore_ascii_case("REPLACE"));
+                if is_insert {
+                    return Err(format!("SQL import could not parse INSERT statement: {error}"));
+                }
+                continue;
+            }
+        };
+        for statement in parsed {
+            let Statement::Insert(insert) = statement else {
+                continue;
+            };
+            parse_sql_insert_statement(&insert, family, &mut target, &mut rows, preview_limit, &mut total_rows)?;
+        }
+    }
+
+    let target = target.ok_or_else(|| "No INSERT statements found in SQL file".to_string())?;
+    Ok(ParsedImportFile { columns: target.columns, rows, total_rows, effective_encoding: Some(encoding) })
+}
+
+pub fn parse_sql_bytes(bytes: &[u8], preview_limit: usize) -> Result<ParsedImportFile, String> {
+    parse_sql_bytes_with_options(bytes, &TableImportParseOptions::default(), preview_limit)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2963,6 +3453,16 @@ async fn parse_import_file_with_options_and_text_columns(
         TableImportSourceFormat::Json => {
             let bytes = tokio::fs::read(path).await.map_err(|e| e.to_string())?;
             parse_json_bytes_with_options(&bytes, options, preview_limit)
+        }
+        TableImportSourceFormat::Sql => {
+            let path = path.to_string();
+            let options = options.clone();
+            tokio::task::spawn_blocking(move || {
+                let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+                parse_sql_bytes_with_options(&bytes, &options, preview_limit)
+            })
+            .await
+            .map_err(|e| e.to_string())?
         }
         TableImportSourceFormat::Excel => {
             let path = path.to_string();
@@ -7683,6 +8183,226 @@ mod tests {
         let error = parse_json_bytes_with_options(br#"[["id","name"],[1,"Ada"]]"#, &options, 10).unwrap_err();
 
         assert!(error.contains("configured for object rows"));
+    }
+
+    fn sql_import_options(dialect: DatabaseType) -> TableImportParseOptions {
+        TableImportParseOptions { sql_dialect: Some(dialect), ..TableImportParseOptions::default() }
+    }
+
+    #[test]
+    fn parses_sql_insert_with_column_list_and_comments() {
+        let script = b"-- dump header comment\n\
+                       /*!40101 SET NAMES utf8mb4 */;\n\
+                       CREATE TABLE users (id INT, name TEXT);\n\
+                       /* block comment; with semicolon */\n\
+                       INSERT INTO `users` (`id`, `name`) VALUES (1, 'Ada'), (2, 'Bob');\n\
+                       INSERT INTO users (id, name) VALUES (3, 'Cathy');";
+        let options = sql_import_options(DatabaseType::Mysql);
+        let parsed = parse_sql_bytes_with_options(script, &options, 10).unwrap();
+
+        assert_eq!(parsed.columns, vec!["id", "name"]);
+        assert_eq!(parsed.total_rows, 3);
+        assert_eq!(parsed.rows[0], vec![serde_json::json!(1), serde_json::json!("Ada")]);
+        assert_eq!(parsed.rows[2], vec![serde_json::json!(3), serde_json::json!("Cathy")]);
+    }
+
+    #[test]
+    fn parses_sql_insert_without_column_list_using_generated_columns() {
+        let script = b"INSERT INTO users VALUES (1, 'it''s'), (2, 'back\\'slash');";
+        let options = sql_import_options(DatabaseType::Mysql);
+        let parsed = parse_sql_bytes_with_options(script, &options, 10).unwrap();
+
+        assert_eq!(parsed.columns, vec!["column_1", "column_2"]);
+        assert_eq!(parsed.total_rows, 2);
+        assert_eq!(parsed.rows[0], vec![serde_json::json!(1), serde_json::json!("it's")]);
+        assert_eq!(parsed.rows[1], vec![serde_json::json!(2), serde_json::json!("back'slash")]);
+    }
+
+    #[test]
+    fn parses_sql_insert_value_kinds() {
+        let script = b"INSERT INTO t (a, b, c, d, e, f) VALUES \
+                       (NULL, TRUE, FALSE, -1.5, 3, '2026-01-01 10:00:00');";
+        let parsed = parse_sql_bytes(script, 10).unwrap();
+
+        assert_eq!(parsed.total_rows, 1);
+        assert_eq!(
+            parsed.rows[0],
+            vec![
+                serde_json::Value::Null,
+                serde_json::json!(true),
+                serde_json::json!(false),
+                serde_json::json!(-1.5),
+                serde_json::json!(3),
+                serde_json::json!("2026-01-01 10:00:00"),
+            ]
+        );
+    }
+
+    #[test]
+    fn sql_import_rejects_replace() {
+        let error = parse_sql_bytes(b"REPLACE INTO users (id) VALUES (1);", 10).unwrap_err();
+        assert!(error.contains("REPLACE"));
+    }
+
+    #[test]
+    fn sql_import_rejects_expressions() {
+        let error = parse_sql_bytes(b"INSERT INTO t (a) VALUES (NOW());", 10).unwrap_err();
+        assert!(error.contains("not supported"));
+    }
+
+    #[test]
+    fn sql_import_expands_literal_temporal_functions() {
+        let options = sql_import_options(DatabaseType::Oracle);
+        let script = b"INSERT INTO t (a, b, c) VALUES \
+            (TO_DATE('2021-09-08 09:06:25', 'YYYY-MM-DD HH24:MI:SS'), \
+             TO_TIMESTAMP('2021-09-08 09:06:25', 'YYYY-MM-DD HH24:MI:SS'), \
+             TIMESTAMP '2021-09-08 09:06:25');";
+        let parsed = parse_sql_bytes_with_options(script, &options, 10).unwrap();
+
+        assert_eq!(parsed.rows[0][0], serde_json::json!("2021-09-08 09:06:25"));
+        assert_eq!(parsed.rows[0][1], serde_json::json!("2021-09-08 09:06:25"));
+        assert_eq!(parsed.rows[0][2], serde_json::json!("2021-09-08 09:06:25"));
+    }
+
+    #[test]
+    fn sql_import_expands_typed_date_literal() {
+        let script = b"INSERT INTO t (a) VALUES (DATE '2021-09-08');";
+        let parsed = parse_sql_bytes(script, 10).unwrap();
+        assert_eq!(parsed.rows[0][0], serde_json::json!("2021-09-08"));
+    }
+
+    #[test]
+    fn sql_import_expands_temporal_function_generic_dialect() {
+        // 未指定目标方言（Generic）时也按函数名展开。
+        let script = b"INSERT INTO t (a) VALUES (TO_DATE('2021-09-08 09:06:25', 'YYYY-MM-DD HH24:MI:SS'));";
+        let parsed = parse_sql_bytes(script, 10).unwrap();
+        assert_eq!(parsed.rows[0][0], serde_json::json!("2021-09-08 09:06:25"));
+    }
+
+    #[test]
+    fn sql_import_rejects_temporal_function_with_non_literal_args() {
+        let options = sql_import_options(DatabaseType::Oracle);
+        // 列引用作为参数：无法无损展开，应拒绝而非静默改写。
+        let error =
+            parse_sql_bytes_with_options(b"INSERT INTO t (a) VALUES (TO_DATE(col, 'YYYY-MM-DD'));", &options, 10)
+                .unwrap_err();
+        assert!(error.contains("not supported"));
+    }
+
+    #[test]
+    fn sql_import_rejects_unlisted_function_still() {
+        // 非白名单函数（如 NOW()）仍按表达式拒绝。
+        let options = sql_import_options(DatabaseType::Mysql);
+        let error = parse_sql_bytes_with_options(b"INSERT INTO t (a) VALUES (NOW());", &options, 10).unwrap_err();
+        assert!(error.contains("not supported"));
+    }
+
+    #[test]
+    fn sql_import_rejects_binary_literals() {
+        let error = parse_sql_bytes(b"INSERT INTO t (a) VALUES (X'1A2B');", 10).unwrap_err();
+        assert!(error.contains("binary/hex"));
+    }
+
+    #[test]
+    fn sql_import_rejects_insert_select() {
+        let error = parse_sql_bytes(b"INSERT INTO t (a) SELECT a FROM other;", 10).unwrap_err();
+        assert!(error.contains("VALUES"));
+    }
+
+    #[test]
+    fn sql_import_postgres_treats_backslash_as_literal() {
+        // PostgreSQL 普通字符串中的反斜杠是字面量，不解释为转义。
+        let script = b"INSERT INTO t (a) VALUES ('a\\nb');";
+        let options = sql_import_options(DatabaseType::Postgres);
+        let parsed = parse_sql_bytes_with_options(script, &options, 10).unwrap();
+        assert_eq!(parsed.rows[0], vec![serde_json::json!("a\\nb")]);
+    }
+
+    #[test]
+    fn sql_import_mysql_decodes_backslash_escapes() {
+        // MySQL 普通字符串中的反斜杠转义（\n → 换行）。
+        let script = b"INSERT INTO t (a) VALUES ('a\\nb');";
+        let options = sql_import_options(DatabaseType::Mysql);
+        let parsed = parse_sql_bytes_with_options(script, &options, 10).unwrap();
+        assert_eq!(parsed.rows[0], vec![serde_json::json!("a\nb")]);
+    }
+
+    #[test]
+    fn sql_import_postgres_distinguishes_quoted_identifiers() {
+        // 加引号的 "Foo" 与未加引号的 foo 在 PostgreSQL 中是不同标识符。
+        let script = b"INSERT INTO t (\"Foo\", foo) VALUES (1, 2);";
+        let options = sql_import_options(DatabaseType::Postgres);
+        let parsed = parse_sql_bytes_with_options(script, &options, 10).unwrap();
+        assert_eq!(parsed.columns, vec!["Foo", "foo"]);
+    }
+
+    #[test]
+    fn sql_import_postgres_rejects_mismatched_quoted_column_lists() {
+        // "Foo" 与 foo 不同，不能合并为同一张表的列清单。
+        let script = b"INSERT INTO t (\"Foo\") VALUES (1); INSERT INTO t (foo) VALUES (2);";
+        let options = sql_import_options(DatabaseType::Postgres);
+        let error = parse_sql_bytes_with_options(script, &options, 10).unwrap_err();
+        assert!(error.contains("different column lists"));
+    }
+
+    #[test]
+    fn sql_import_rejects_multiple_tables() {
+        let script = b"INSERT INTO a VALUES (1); INSERT INTO b VALUES (2);";
+        let error = parse_sql_bytes(script, 10).unwrap_err();
+
+        assert!(error.contains("one table per file"));
+    }
+
+    #[test]
+    fn sql_import_rejects_row_arity_mismatch() {
+        let script = b"INSERT INTO t (a, b) VALUES (1, 2), (3);";
+        let error = parse_sql_bytes(script, 10).unwrap_err();
+
+        assert!(error.contains("expects 2 columns"));
+    }
+
+    #[test]
+    fn sql_import_rejects_file_without_insert_statements() {
+        let error = parse_sql_bytes(b"CREATE TABLE t (id INT); SET NAMES utf8;", 10).unwrap_err();
+
+        assert!(error.contains("No INSERT statements found"));
+    }
+
+    #[test]
+    fn sql_import_caps_preview_rows_but_counts_total() {
+        let script = b"INSERT INTO t (id) VALUES (1), (2), (3), (4), (5);";
+        let parsed = parse_sql_bytes(script, 2).unwrap();
+
+        assert_eq!(parsed.total_rows, 5);
+        assert_eq!(parsed.rows.len(), 2);
+    }
+
+    #[test]
+    fn sql_import_decodes_gbk_script() {
+        // INSERT INTO t (name) VALUES ('中文'); encoded as GBK
+        let mut script = b"INSERT INTO t (name) VALUES ('".to_vec();
+        script.extend_from_slice(&[0xD6, 0xD0, 0xCE, 0xC4]);
+        script.extend_from_slice(b"');");
+        let options = TableImportParseOptions {
+            encoding: Some(TableImportTextEncoding::Gbk),
+            ..TableImportParseOptions::default()
+        };
+        let parsed = parse_sql_bytes_with_options(&script, &options, 10).unwrap();
+
+        assert_eq!(parsed.rows[0], vec![serde_json::json!("中文")]);
+        assert_eq!(parsed.effective_encoding, Some(TableImportTextEncoding::Gbk));
+    }
+
+    #[test]
+    fn parses_sql_insert_with_semicolon_and_quote_inside_comments() {
+        // 注释里的分号与引号不能作为语句边界；字符串里的分号同理
+        let script = b"-- note: don't split; here\n\
+                       INSERT INTO t (a) VALUES ('a;b'), ('it -- not a comment');";
+        let parsed = parse_sql_bytes(script, 10).unwrap();
+
+        assert_eq!(parsed.total_rows, 2);
+        assert_eq!(parsed.rows[0], vec![serde_json::json!("a;b")]);
+        assert_eq!(parsed.rows[1], vec![serde_json::json!("it -- not a comment")]);
     }
 
     #[test]

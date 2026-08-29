@@ -50,7 +50,26 @@ type ColumnHeaderDragState = {
   columnRects: { visibleIndex: number; left: number; width: number }[];
   previewElement: HTMLElement | null;
   dragging: boolean;
+  /** 指针进入 SQL 编辑器后切换为“插入列引用”模式，重排序预览挂起。 */
+  referenceMode: boolean;
+  /** 本次手势中 onEnter 已拒绝过该列（不可作为引用），不再重复试探。 */
+  referenceUnavailable: boolean;
 };
+
+/**
+ * 目标导向拖拽控制器：网格内保持列重排序手势；指针进入 SQL 编辑器区域时
+ * 由 DataGrid 提供的实现接管反馈与最终插入。
+ */
+export interface ColumnHeaderReferenceDragController {
+  isOverEditorTarget(clientX: number, clientY: number): boolean;
+  /** 进入编辑器目标时回调；返回 chip 文案，null 表示该列不可作为引用拖入。 */
+  onEnter(sourceVisibleIndex: number): string | null;
+  onMove(sourceVisibleIndex: number, clientX: number, clientY: number): void;
+  /** 在编辑器目标内释放时回调；返回 true 表示已处理插入。 */
+  onDrop(sourceVisibleIndex: number, clientX: number, clientY: number): boolean;
+  /** 引用模式结束（无论是否发生插入）时清理反馈。 */
+  onCancel(): void;
+}
 
 export function dataGridColumnOffsets(widths: readonly number[]): number[] {
   const offsets = Array.from({ length: widths.length + 1 }, () => 0);
@@ -427,6 +446,7 @@ export function useDataGridColumnLayout(options: {
   onRefreshMetrics?: () => void;
   onPersistColumnOrder?: (indexes: number[]) => void;
   frozenColumnCount?: MaybeRefOrGetter<number>;
+  columnReferenceDrag?: ColumnHeaderReferenceDragController;
 }) {
   const renderedColumnOffsets = computed(() => dataGridColumnOffsets(toValue(options.renderedColumnWidths)));
   const frozenColumnCount = computed(() => toValue(options.frozenColumnCount ?? 0));
@@ -706,6 +726,8 @@ export function useDataGridColumnLayout(options: {
     window.removeEventListener("pointerup", onColumnHeaderPointerUp, true);
     window.removeEventListener("pointercancel", onColumnHeaderPointerCancel, true);
     window.removeEventListener("blur", onColumnHeaderPointerCancel, true);
+    document.removeEventListener("selectstart", blockColumnHeaderNativeInteraction, true);
+    document.removeEventListener("dragstart", blockColumnHeaderNativeInteraction, true);
     cancelColumnHeaderDragPreview();
     removeColumnHeaderDragPreview(state);
     document.body.style.userSelect = "";
@@ -723,6 +745,36 @@ export function useDataGridColumnLayout(options: {
     options.onRefreshMetrics?.();
   }
 
+  function enterColumnReferenceMode(state: ColumnHeaderDragState, clientX: number, clientY: number): boolean {
+    const controller = options.columnReferenceDrag;
+    if (!controller) return false;
+    const label = controller.onEnter(state.sourceVisibleIndex);
+    if (label == null) return false;
+    state.referenceMode = true;
+    cancelColumnHeaderDragPreview();
+    removeColumnHeaderDragPreview(state);
+    controller.onMove(state.sourceVisibleIndex, clientX, clientY);
+    return true;
+  }
+
+  function exitColumnReferenceMode(state: ColumnHeaderDragState) {
+    const controller = options.columnReferenceDrag;
+    state.referenceMode = false;
+    state.referenceUnavailable = false;
+    if (state.dragging) createColumnHeaderDragPreview(state);
+    controller?.onCancel();
+  }
+
+  /** 指针是否仍在本网格区域内（滚动区或表头行），用于“拖出网格释放=取消”。 */
+  function pointerInsideGridArea(clientX: number, clientY: number): boolean {
+    const rects: DOMRect[] = [];
+    const scroller = options.getScrollElement?.();
+    if (scroller) rects.push(scroller.getBoundingClientRect());
+    const header = toValue(options.headerRef);
+    if (header) rects.push(header.getBoundingClientRect());
+    return rects.some((rect) => clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom);
+  }
+
   function onColumnHeaderPointerMove(event: PointerEvent) {
     const state = columnHeaderDragState.value;
     if (!state) return;
@@ -734,18 +786,57 @@ export function useDataGridColumnLayout(options: {
       createColumnHeaderDragPreview(state);
     }
     if (!state.dragging) return;
+    const controller = options.columnReferenceDrag;
+    if (controller && !state.referenceUnavailable) {
+      const overEditor = controller.isOverEditorTarget(event.clientX, event.clientY);
+      if (overEditor && !state.referenceMode) {
+        // 进入编辑器：尝试切换为列引用模式；不可引用（onEnter 返回 null）时保持重排序并不再试探。
+        if (enterColumnReferenceMode(state, event.clientX, event.clientY)) return;
+        state.referenceUnavailable = true;
+      } else if (!overEditor && state.referenceMode) {
+        exitColumnReferenceMode(state);
+      }
+    }
+    if (state.referenceMode) {
+      event.preventDefault();
+      controller?.onMove(state.sourceVisibleIndex, event.clientX, event.clientY);
+      return;
+    }
     event.preventDefault();
     scheduleColumnHeaderDragPreview(event.clientX);
   }
 
   function onColumnHeaderPointerUp(event: PointerEvent) {
+    const state = columnHeaderDragState.value;
+    if (state?.referenceMode) {
+      const controller = options.columnReferenceDrag!;
+      if (controller.isOverEditorTarget(event.clientX, event.clientY)) {
+        // 在编辑器内释放：插入列引用（onDrop 失败也只按取消收尾）。
+        controller.onDrop(state.sourceVisibleIndex, event.clientX, event.clientY);
+      }
+      controller.onCancel();
+      stopColumnHeaderDrag(false);
+      return;
+    }
     columnHeaderPendingClientX = event.clientX;
     flushColumnHeaderDragPreview();
+    // 目标导向手势启用时，把列拖出网格与编辑器之外释放=取消，不重排列。
+    if (state?.dragging && options.columnReferenceDrag && !options.columnReferenceDrag.isOverEditorTarget(event.clientX, event.clientY) && !pointerInsideGridArea(event.clientX, event.clientY)) {
+      stopColumnHeaderDrag(false);
+      return;
+    }
     stopColumnHeaderDrag(true);
   }
 
   function onColumnHeaderPointerCancel() {
+    const state = columnHeaderDragState.value;
+    if (state?.referenceMode) options.columnReferenceDrag?.onCancel();
     stopColumnHeaderDrag(false);
+  }
+
+  /** 拖拽期间拦截原生文本选择与 HTML5 拖拽启动，防止其抢占指针事件流。 */
+  function blockColumnHeaderNativeInteraction(event: Event) {
+    event.preventDefault();
   }
 
   function startColumnHeaderDrag(visibleColIdx: number, event: PointerEvent) {
@@ -755,6 +846,11 @@ export function useDataGridColumnLayout(options: {
     const columnRects = columnHeaderLayoutRects();
     const sourceRect = columnRects.find((rect) => rect.visibleIndex === visibleColIdx);
     const dragCenterClientOffsetX = sourceRect ? sourceRect.left + sourceRect.width / 2 - event.clientX : 0;
+    // 阻止原生文本选择/HTML5 拖拽抢占事件流：一旦发生会派发 pointercancel 并停发 pointermove，
+    // 手势将被冻结（表现为拖不动）。参照侧边栏表引用路径在起点即禁用。
+    event.preventDefault();
+    document.addEventListener("selectstart", blockColumnHeaderNativeInteraction, true);
+    document.addEventListener("dragstart", blockColumnHeaderNativeInteraction, true);
     columnHeaderDragState.value = {
       sourceVisibleIndex: visibleColIdx,
       targetVisibleIndex: visibleColIdx,
@@ -769,6 +865,8 @@ export function useDataGridColumnLayout(options: {
       columnRects,
       previewElement: null,
       dragging: false,
+      referenceMode: false,
+      referenceUnavailable: false,
     };
     columnHeaderPendingClientX = event.clientX;
     window.addEventListener("pointermove", onColumnHeaderPointerMove, true);
@@ -788,12 +886,12 @@ export function useDataGridColumnLayout(options: {
 
   function columnHeaderDragClass(visibleColIdx: number) {
     const state = columnHeaderDragState.value;
-    return { "opacity-0 pointer-events-none": state?.dragging && state.sourceVisibleIndex === visibleColIdx };
+    return { "opacity-0 pointer-events-none": state?.dragging && !state.referenceMode && state.sourceVisibleIndex === visibleColIdx };
   }
 
   function columnHeaderPreviewOffset(visibleColIdx: number): number {
     const state = columnHeaderDragState.value;
-    if (!state) return 0;
+    if (!state || state.referenceMode) return 0;
     const scrollCompensation = state.sourceVisibleIndex < frozenColumnCount.value ? 0 : state.currentScrollLeft - state.startScrollLeft;
     return columnHeaderPreviewOffsetForColumn({
       columnDragActive: state.dragging,
@@ -820,7 +918,7 @@ export function useDataGridColumnLayout(options: {
   const columnHeaderPreviewOffsets = computed(() => toValue(options.renderedColumnWidths).map((_, visibleColIdx) => columnHeaderPreviewOffset(visibleColIdx)));
   const columnHeaderPreviewSourceVisibleIndex = computed(() => {
     const state = columnHeaderDragState.value;
-    return state?.dragging ? state.sourceVisibleIndex : null;
+    return state?.dragging && !state.referenceMode ? state.sourceVisibleIndex : null;
   });
 
   function disposeColumnHeaderInteractions() {

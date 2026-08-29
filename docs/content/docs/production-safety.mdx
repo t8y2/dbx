@@ -12,7 +12,7 @@ DBX separates write safety into independent layers: database privileges, connect
 | Layer | Purpose | Can a higher-level tool bypass it? |
 | --- | --- | --- |
 | Database account privileges | The database server ultimately decides which objects can be read, changed, or administered | No |
-| Connection read-only | Blocks recognizable writes in the DBX core query path and disables multiple mutation entry points | AI, CLI, MCP, and the normal UI cannot widen it |
+| Connection read-only | Blocks recognizable writes in the DBX core query path and disables multiple mutation entry points | AI, CLI, and MCP cannot widen it. The workbench can unlock writes for 1 or 5 minutes after explicit confirmation; the saved setting stays on |
 | Production protection | Marks an entire connection or selected databases as production and requires a fresh confirmation for writes | Normal confirmation and Agent authorization cannot permanently skip it |
 | Dangerous SQL/command confirmation | Adds prompts or blocks for DDL, unbounded mutations, risky Redis commands, and similar operations | Controlled by its setting, but never widens read-only or production protection |
 | Global MCP policy | Restricts all MCP clients through a connection allowlist and three execution modes | Client environment variables cannot widen the saved central policy |
@@ -28,6 +28,18 @@ Read-only connections are useful for:
 - Connections exposed to the CLI, MCP, or AI where no data changes should be possible
 
 Read-only protection is not only a hidden button. DBX rejects recognizable SQL writes in the core execution path, while MCP, MongoDB, Redis, message queues, and multiple specialized workspaces recheck the connection state.
+
+### Temporary write unlock
+
+In the desktop and web workbench, a read-only connection does not silently drop writes. A mutating action opens a confirmation dialog. Choose **1 minute** or **5 minutes** (default 1 minute). After confirm:
+
+- Writes on that connection succeed without another prompt until the timer ends
+- Remaining time is shown on the read-only control; **Lock writes now** ends the window early
+- The saved **Read-only connection** setting stays on
+- Unlocking one connection does not unlock others
+- When the window expires, the next write prompts again
+
+MCP and CLI have no confirmation UI and keep using the saved read-only flag, so they cannot use this window.
 
 <Callout type="info">Read-only enforcement still depends on classifying SQL or commands. The most reliable boundary is a database account that has no write permission.</Callout>
 
@@ -68,14 +80,14 @@ Every production write requires a new explicit decision. Confirmation is not per
 
 | Entry point | Read-only connection | Production protection |
 | --- | --- | --- |
-| SQL editor | The core execution path rejects recognizable writes | Shows the target connection, database, source, and SQL for per-operation confirmation |
-| Data grid | Disables or rejects saves, deletes, and other mutations | Row saves and deletes enter the shared production confirmation flow |
-| Table structure and object actions | Hides or disables recognizable mutation entry points | DDL, source saves, and database administration enter the shared confirmation flow |
+| SQL editor | Rejects recognizable writes unless the user confirms a 1/5 minute unlock window | Shows the target connection, database, source, and SQL for per-operation confirmation |
+| Data grid | Disables or rejects saves, deletes, and other mutations until the same unlock window is confirmed | Row saves and deletes enter the shared production confirmation flow |
+| Table structure and object actions | Hides or disables recognizable mutation entry points until the unlock window is confirmed | DDL, source saves, and database administration enter the shared confirmation flow |
 | Schema diff, SQL files, and data generation | Cannot write to a read-only target | Generated SQL or scripts require production confirmation before execution |
 | Redis, MongoDB, etcd, message queues, and similar systems | Rechecks read-only state for system-specific commands and actions | Mutation entry points remain subject to production and specialized danger rules |
 | AI Ask | Does not execute SQL | Does not execute SQL |
 | AI Agent | Cannot bypass read-only state | Returns production SQL to the editor for human review and manual execution |
-| MCP | Connection read-only is an upper bound for every mode | Production protection remains an upper bound for MCP policy |
+| MCP | Connection read-only is an upper bound for every mode; the workbench unlock window does not apply | Production protection remains an upper bound for MCP policy |
 
 ## AI Execution Boundaries
 

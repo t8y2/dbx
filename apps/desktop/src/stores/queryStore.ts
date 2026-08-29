@@ -104,6 +104,8 @@ const QUERY_RESULT_EXPORT_UNSUPPORTED_ERROR = "Streaming export is unsupported f
 const BACKGROUND_CLIENT_SESSION_SUFFIXES = ["count", "explain", "export"] as const;
 const CANCEL_QUERY_TIMEOUT_MS = 10_000;
 const CANCEL_ACK_SETTLE_TIMEOUT_MS = 2_000;
+const ORACLE_QUERY_METADATA_PREFLIGHT_BUDGET_MS = 1_000;
+const ORACLE_QUERY_METADATA_PREFLIGHT_TIMEOUT = Symbol("oracle-query-metadata-preflight-timeout");
 const SAVED_SQL_EDITOR_POSITION_PERSIST_DELAY_MS = 500;
 type CloseConfirmContext = "tab" | "batch" | "app";
 
@@ -529,6 +531,20 @@ async function withCancelQueryTimeout<T>(promise: Promise<T>): Promise<T> {
   }
 }
 
+async function waitForOracleQueryMetadataPreflight<T>(promise: Promise<T>): Promise<T | typeof ORACLE_QUERY_METADATA_PREFLIGHT_TIMEOUT> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<typeof ORACLE_QUERY_METADATA_PREFLIGHT_TIMEOUT>((resolve) => {
+        timer = setTimeout(() => resolve(ORACLE_QUERY_METADATA_PREFLIGHT_TIMEOUT), ORACLE_QUERY_METADATA_PREFLIGHT_BUDGET_MS);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function normalizeUppercaseFoldedMetadataIdentifier(dbType: string, identifier: string | undefined, quoted?: boolean) {
   if (!identifier || quoted || !UPPERCASE_FOLDED_METADATA_TYPES.has(dbType)) return identifier;
   return identifier.toUpperCase();
@@ -717,6 +733,9 @@ export const useQueryStore = defineStore("query", () => {
   const t = getI18nT();
   const settingsStore = useSettingsStore();
   const tabs = ref<QueryTab[]>([]);
+  // Default auto-commit for a fresh query tab follows the user's global
+  // "默认事务提交方式" setting (Settings > Editor), not a hard-coded constant.
+  const defaultAutoCommitForDbTypeWithSetting = (dbType?: string) => defaultAutoCommitForDbType(dbType, settingsStore.editorSettings.defaultTransactionMode);
   // A stable Set of "connectionId\x00database" keys. Computed only from the
   // minimal tab identity fields so that it does NOT invalidate when other
   // properties change (isExecuting, result, sql, tableMeta...). Previously
@@ -1639,7 +1658,7 @@ export const useQueryStore = defineStore("query", () => {
     for (const tab of restored.tabs) {
       const connection = connectionStore.getConfig(tab.connectionId);
       if (tab.mode === "query" && tab.autoCommit === undefined) {
-        tab.autoCommit = defaultAutoCommitForDbType(connection?.db_type);
+        tab.autoCommit = defaultAutoCommitForDbTypeWithSetting(connection?.db_type);
       } else if (tab.mode === "data" && connection) {
         tab.schema = connectionObjectTreeNodeSchema(connection, tab.database, tab.schema);
       }
@@ -1821,7 +1840,7 @@ export const useQueryStore = defineStore("query", () => {
       isCancelling: false,
       isExplaining: false,
       mode,
-      ...(mode === "query" ? { autoCommit: defaultAutoCommitForDbType(dbType) } : {}),
+      ...(mode === "query" ? { autoCommit: defaultAutoCommitForDbTypeWithSetting(dbType) } : {}),
     };
     if (mode === "query") tab.originalSql = initialSql ?? "";
     const activeIndex = options.insertAfterActive ? tabs.value.findIndex((item) => item.id === activeTabId.value) : -1;
@@ -1915,7 +1934,7 @@ export const useQueryStore = defineStore("query", () => {
       isCancelling: false,
       isExplaining: false,
       mode: "query",
-      autoCommit: defaultAutoCommitForDbType(dbType),
+      autoCommit: defaultAutoCommitForDbTypeWithSetting(dbType),
     };
     tabs.value.push(tab);
     activeTabId.value = id;
@@ -3243,18 +3262,36 @@ export const useQueryStore = defineStore("query", () => {
         if (tab.txnSessionId) {
           void rollbackTransaction(id);
         } else {
-          tab.txnAutoRolledBack = false;
+          clearManualTransactionSession(tab);
         }
       }
     }
+  }
+
+  /** Reset only the Oracle sticky-dirty bit. Used when a session continues but
+   *  the old dirty state must be discarded (e.g. idle-expiry recovery where the
+   *  replacement session starts fresh). Full session cleanup goes through
+   *  `clearManualTransactionSession`. */
+  function clearOracleTxnPossiblyDirty(tab: { oracleTxnPossiblyDirty?: boolean }) {
+    if (tab.oracleTxnPossiblyDirty !== undefined) tab.oracleTxnPossiblyDirty = false;
+  }
+
+  /** Centralized manual-session cleanup. Clears every field tied to a manual
+   *  transaction session exactly when that session is conclusively ended or
+   *  discarded. Callers must not assign these fields individually. */
+  function clearManualTransactionSession(tab: QueryTab) {
+    tab.txnSessionId = undefined;
+    tab.txnAutoRolledBack = false;
+    if (tab.oracleTxnPossiblyDirty !== undefined) tab.oracleTxnPossiblyDirty = false;
   }
 
   function rollbackTabTransaction(tab: QueryTab, options?: { resetAutoCommit?: boolean }) {
     if (tab.txnSessionId) void rollbackTransaction(tab.id);
     if (options?.resetAutoCommit) {
       const dbType = useConnectionStore().getConfig(tab.connectionId)?.db_type;
-      tab.autoCommit = defaultAutoCommitForDbType(dbType);
+      tab.autoCommit = defaultAutoCommitForDbTypeWithSetting(dbType);
     }
+    clearOracleTxnPossiblyDirty(tab);
     tab.txnAutoRolledBack = false;
   }
 
@@ -3264,8 +3301,7 @@ export const useQueryStore = defineStore("query", () => {
     try {
       await api.commitManualTransaction(tab.txnSessionId);
     } finally {
-      tab.txnSessionId = undefined;
-      tab.txnAutoRolledBack = false;
+      clearManualTransactionSession(tab);
     }
   }
 
@@ -3275,8 +3311,7 @@ export const useQueryStore = defineStore("query", () => {
     try {
       await api.rollbackManualTransaction(tab.txnSessionId);
     } finally {
-      tab.txnSessionId = undefined;
-      tab.txnAutoRolledBack = false;
+      clearManualTransactionSession(tab);
     }
   }
 
@@ -3409,7 +3444,7 @@ export const useQueryStore = defineStore("query", () => {
       isCancelling: false,
       isExplaining: false,
       mode: "query",
-      autoCommit: defaultAutoCommitForDbType(dbType),
+      autoCommit: defaultAutoCommitForDbTypeWithSetting(dbType),
       editorSelection: restoredPosition.selection,
       editorViewport: restoredPosition.viewport,
     };
@@ -4035,9 +4070,19 @@ export const useQueryStore = defineStore("query", () => {
           traceLogger: (event) => queryExecutionLog("debug", "metadata:table-trace", { sourceTraceId: traceId, ...event }),
         });
         void fullMetadataPromise.catch((error) => queryExecutionLog("warn", "metadata:table-prefetch:failed", { traceId, error, elapsed: elapsed() }));
-        const indexes = await loadTableIndexes(target.request);
-        if (primaryKeyIndex(indexes) && projectsAllColumnsForSource(target.analysis, target.source.key) && tab.autoCommit !== false) {
-          return unchanged;
+        const wholeSourceAutoCommit = projectsAllColumnsForSource(target.analysis, target.source.key) && tab.autoCommit !== false;
+        if (wholeSourceAutoCommit) {
+          const indexes = await waitForOracleQueryMetadataPreflight(loadTableIndexes(target.request));
+          if (indexes === ORACLE_QUERY_METADATA_PREFLIGHT_TIMEOUT) {
+            queryExecutionLog("info", "metadata:preflight:timeout", {
+              traceId,
+              table: target.request.tableName,
+              budgetMs: ORACLE_QUERY_METADATA_PREFLIGHT_BUDGET_MS,
+              elapsed: elapsed(),
+            });
+            return unchanged;
+          }
+          if (primaryKeyIndex(indexes)) return unchanged;
         }
         loaded = loadedEditableSourceFromMetadata(target, (await fullMetadataPromise).metadata);
       }
@@ -4213,6 +4258,8 @@ export const useQueryStore = defineStore("query", () => {
       const allSourceColumns = loadedSources.map((source) => ({ source: source.source, columns: source.tableMeta.columns }));
       // Match DBeaver's safety model: a joined result is writable only when one
       // source table has a complete row identifier and at least one writable column.
+      // A keyless source has no row identifier: allPrimaryKeysPresent is vacuously
+      // true for an empty key set, so joined results must exclude such sources.
       const candidates = loadedSources
         .map((loaded) => {
           const metadataAnalysis = expandStarProjectionColumnsForSource(bindColumnsForSource(dbType, loaded.analysis, loaded.source, loaded.tableMeta.columns, allSourceColumns), loaded.source, loaded.tableMeta.columns);
@@ -4231,7 +4278,7 @@ export const useQueryStore = defineStore("query", () => {
             editableSourceColumnCount,
           };
         })
-        .filter((loaded) => (loaded.primaryKeysPresent || loaded.keylessAllowed) && !!loaded.sourceColumns && loaded.editableSourceColumnCount > 0);
+        .filter((loaded) => ((loaded.primaryKeysPresent && loaded.tableMeta.primaryKeys.length > 0) || loaded.keylessAllowed) && !!loaded.sourceColumns && loaded.editableSourceColumnCount > 0);
 
       if (loadedSources.length === 1) {
         const loaded = loadedSources[0]!;
@@ -4314,6 +4361,7 @@ export const useQueryStore = defineStore("query", () => {
       const queryAnalysis = {
         ...target.analysis,
         ...(target.analysis.distinct && canInsertIntoEditableQuerySource(tab, dbType as DatabaseType, target, target.sourceColumns) ? { allowInsert: true } : {}),
+        allowDelete: !target.analysis.distinct,
         allowInsertDelete: false,
         multiSource: true,
       };
@@ -5242,19 +5290,26 @@ export const useQueryStore = defineStore("query", () => {
         }
         queryExecutionLog("info", "execute-in-txn:invoke", { traceId, txnSessionId: tab.txnSessionId, elapsed: elapsed() });
         executionDispatched = true;
+        // Only an initial manual execution classifies the user SQL (Oracle-only).
+        // A later cursor-page fetch must neither set nor clear the sticky bit.
+        const isInitialOracleManualExecution = effectiveDbType === "oracle" && !options?.pagination?.sessionId;
+        const classificationSql = isInitialOracleManualExecution ? queryBaseSql : undefined;
         let manualTransactionRecoveryAttempted = false;
         executionPromise = (async () => {
           const txnSessionId = tab.txnSessionId;
           if (!txnSessionId) throw new Error("Manual transaction session was not initialized");
           const executeInTransaction = (sessionId: string) =>
             useAgentResultSession
-              ? api.executeInManualTransaction(sessionId, sqlToExecute, executionDatabase, executionSchema, agentProtocolQueryResultMaxRows(queryResultMaxRows), useOracleLobPreview, pageLimit, options?.pagination?.sessionId)
-              : api.executeInManualTransaction(sessionId, sqlToExecute, executionDatabase, executionSchema, pageLimit ?? agentProtocolQueryResultMaxRows(queryResultMaxRows), useOracleLobPreview);
+              ? api.executeInManualTransaction(sessionId, sqlToExecute, executionDatabase, executionSchema, agentProtocolQueryResultMaxRows(queryResultMaxRows), useOracleLobPreview, pageLimit, options?.pagination?.sessionId, classificationSql)
+              : api.executeInManualTransaction(sessionId, sqlToExecute, executionDatabase, executionSchema, pageLimit ?? agentProtocolQueryResultMaxRows(queryResultMaxRows), useOracleLobPreview, undefined, undefined, classificationSql);
           try {
             return await executeInTransaction(txnSessionId);
           } catch (error) {
             if (options?.pagination?.sessionId || manualTransactionRecoveryAttempted || !isManualTransactionSessionExpired(error)) throw error;
             manualTransactionRecoveryAttempted = true;
+            // The expired session was discarded by the backend; the replacement
+            // session starts fresh, so the old sticky state resets with it.
+            clearOracleTxnPossiblyDirty(tab);
             tab.txnSessionId = undefined;
             tab.txnAutoRolledBack = true;
             queryExecutionLog("info", "manual-txn:expired-recover", { traceId, elapsed: elapsed() });
@@ -5325,6 +5380,18 @@ export const useQueryStore = defineStore("query", () => {
       const annotatedResults = annotateQueryResultSources(markQueryResultsRowsRaw(await withFrontendQueryTimeout(executionPromise, frontendTimeoutSecs, t("editor.queryTimeoutError", { seconds: frontendTimeoutSecs }))), queryBaseSql, sourceLabelDatabase, effectiveDbType, options?.sourceOffset);
       const results = offsetBatchQueryResultIndexes(annotatedResults.results, batchResume?.startStatementIndex ?? 0);
       reconcileBatchSqlResults(tab, executionId, results);
+      // Oracle-only sticky state aggregation. Only the initial manual execution
+      // participates: a later cursor-page fetch (pagination.sessionId present)
+      // must neither set nor clear the bit, and the Core no-op (empty script)
+      // must neither set nor clear it. Otherwise any result that is not proven
+      // read-only dirties the session monotonically.
+      if (tab.autoCommit === false && effectiveDbType === "oracle" && !options?.pagination?.sessionId && tab.txnSessionId) {
+        const rawResults = annotatedResults.results;
+        const isCoreNoOp = rawResults.length > 0 && rawResults.every((result) => result.manual_transaction_no_statement === true);
+        if (!isCoreNoOp && rawResults.some((result) => result.manual_transaction_proven_read_only !== true)) {
+          tab.oracleTxnPossiblyDirty = true;
+        }
+      }
       const successfulOracleSchemaChanges = effectiveDbType === "oracle" ? results.filter((result) => result.execution_error !== true && isOracleCurrentSchemaStatement(result.sourceStatement)).length : 0;
       const successfulSapHanaSchemaChanges = effectiveDbType === "saphana" ? results.filter((result) => result.execution_error !== true && isSapHanaSetSchemaStatement(result.sourceStatement)).length : 0;
       const sqlServerUseDatabase = effectiveDbType === "sqlserver" ? annotatedResults.sqlServerUseDatabase : undefined;
@@ -5532,11 +5599,23 @@ export const useQueryStore = defineStore("query", () => {
         const errMsg: string = e?.message ?? String(e);
         const idleTimeout = /5 minutes of inactivity/i.test(errMsg) || errMsg.includes("5 分钟无操作") || errMsg.includes("已自动回滚");
         if (idleTimeout) {
+          // Backend session was removed and rolled back after idle expiry: clear
+          // the sticky dirty state together with the session.
+          clearOracleTxnPossiblyDirty(tab);
           tab.txnSessionId = undefined;
           tab.txnAutoRolledBack = true;
         } else if (/rolled.?back/i.test(errMsg) || /transaction session not found/i.test(errMsg) || /agent runtime terminated/i.test(errMsg)) {
+          // Statement failure that disposed the manual session: the `rolled back`
+          // message fragment is a frontend cleanup compatibility contract.
+          clearOracleTxnPossiblyDirty(tab);
           tab.txnSessionId = undefined;
           tab.txnAutoRolledBack = false;
+        } else if (tab.txnSessionId && executionDispatched && !options?.pagination?.sessionId && effectiveDatabaseTypeForConnection(useConnectionStore().getConfig(tab.connectionId)) === "oracle") {
+          // Frontend timeout/cancel or mid-script failure: the statement may still
+          // have executed server-side while the manual session survives, so keep
+          // the sticky dirty state fail-closed instead of a clean toolbar on a
+          // dirty session. Cursor-page fetches stay excluded like the aggregation.
+          tab.oracleTxnPossiblyDirty = true;
         }
       }
       const current = findExecutionTab(id);
@@ -6285,7 +6364,7 @@ export const useQueryStore = defineStore("query", () => {
       isCancelling: false,
       isExplaining: false,
       mode: "query",
-      autoCommit: defaultAutoCommitForDbType(dbType),
+      autoCommit: defaultAutoCommitForDbTypeWithSetting(dbType),
     };
     if (!restoreCachedResultPayload(tab, archive.snapshot)) return undefined;
     const activeRun = tab.resultRuns?.find((run) => run.id === tab.activeResultRunId) ?? tab.resultRuns?.[0];

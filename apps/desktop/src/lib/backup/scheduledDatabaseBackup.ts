@@ -79,7 +79,7 @@ function tablePatternRegex(pattern: string, caseSensitive: boolean): RegExp {
 export function databaseBackupTableMatchesPattern(table: string, patterns: readonly string[], database = "", schema = "", caseSensitive = true): boolean {
   const candidates = [table];
   if (schema) candidates.push(`${schema}.${table}`);
-  if (database && schema && database !== schema) candidates.push(`${database}.${schema}.${table}`);
+  if (database && schema) candidates.push(`${database}.${schema}.${table}`);
   return patterns.some((pattern) => {
     const matcher = tablePatternRegex(pattern, caseSensitive);
     return candidates.some((candidate) => matcher.test(candidate));

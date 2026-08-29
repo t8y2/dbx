@@ -119,6 +119,20 @@
       <a href="https://www.atlascloud.ai/?ref=6YYXWA" target="_blank">Visit Atlas Cloud</a>
     </td>
   </tr>
+  <tr>
+    <td align="center" valign="middle" width="220">
+      <a href="https://www.trustasia.com/ssl/trustasia/code-signing" target="_blank">
+        <picture>
+          <source media="(prefers-color-scheme: dark)" srcset="docs/public/sponsors/trustasia-dark.svg" />
+          <img src="docs/public/sponsors/trustasia.png" alt="TrustAsia" height="44" />
+        </picture>
+      </a>
+    </td>
+    <td>
+      TrustAsia provides cloud-based code signing service for DBX, enabling trusted software through automated CI/CD builds.
+      <a href="https://www.trustasia.com/ssl/trustasia/code-signing" target="_blank">Visit TrustAsia</a>
+    </td>
+  </tr>
 </table>
 
 ## Why DBX?

@@ -131,6 +131,7 @@ pub struct StreamingXlsxWriter<W: Write + Seek> {
     column_comments: Vec<Option<String>>,
     date_time_format: Option<String>,
     numeric_right_align: bool,
+    auto_filter: bool,
     row_buffer: String,
 }
 
@@ -229,7 +230,7 @@ pub(crate) fn start_streaming_xlsx_workbook<W: Write + Seek>(
     columns: &[String],
     column_types: &[String],
 ) -> Result<StreamingXlsxWriter<W>, String> {
-    start_streaming_xlsx_workbook_with_options(writer, sheet_name, columns, column_types, &[], &[], None, false)
+    start_streaming_xlsx_workbook_with_options(writer, sheet_name, columns, column_types, &[], &[], None, false, true)
 }
 
 #[cfg(test)]
@@ -249,6 +250,7 @@ pub(crate) fn start_streaming_xlsx_workbook_with_trailing_sheets<W: Write + Seek
         trailing_sheets,
         None,
         false,
+        true,
     )
 }
 
@@ -265,6 +267,7 @@ fn start_xlsx_writer_inner<W: Write + Seek>(
     trailing_sheets: &[XlsxWorksheetData],
     date_time_format: Option<&str>,
     numeric_right_align: bool,
+    auto_filter: bool,
     max_data_rows_per_sheet: usize,
 ) -> Result<StreamingXlsxWriter<W>, String> {
     let width_cache = estimate_header_widths(columns, column_comments);
@@ -306,6 +309,7 @@ fn start_xlsx_writer_inner<W: Write + Seek>(
         column_comments: column_comments.to_vec(),
         date_time_format: date_time_format.map(str::to_string),
         numeric_right_align,
+        auto_filter,
         row_buffer: String::with_capacity(columns.len().saturating_mul(48)),
     })
 }
@@ -319,6 +323,7 @@ pub(crate) fn start_streaming_xlsx_workbook_with_options<W: Write + Seek>(
     trailing_sheets: &[XlsxWorksheetData],
     date_time_format: Option<&str>,
     numeric_right_align: bool,
+    auto_filter: bool,
 ) -> Result<StreamingXlsxWriter<W>, String> {
     start_xlsx_writer_inner(
         writer,
@@ -329,6 +334,7 @@ pub(crate) fn start_streaming_xlsx_workbook_with_options<W: Write + Seek>(
         trailing_sheets,
         date_time_format,
         numeric_right_align,
+        auto_filter,
         XLSX_MAX_DATA_ROWS,
     )
 }
@@ -351,6 +357,7 @@ pub(crate) fn start_streaming_xlsx_workbook_with_max_rows<W: Write + Seek>(
         trailing_sheets,
         None,
         false,
+        true,
         max_data_rows_per_sheet,
     )
 }
@@ -380,14 +387,12 @@ impl<W: Write + Seek> StreamingXlsxWriter<W> {
         Ok(())
     }
 
-    /// Close the currently open data sheet XML: writes `</sheetData>`,
-    /// `<autoFilter>` and `</worksheet>`.
+    /// Close the currently open data sheet XML, optionally writing `<autoFilter>`.
     fn finish_current_sheet(&mut self) -> Result<(), String> {
         let row_count = self.next_row_number.saturating_sub(1);
         let range = sheet_range(self.columns.len(), row_count);
-        self.zip
-            .write_all(format!("</sheetData><autoFilter ref=\"{range}\"/></worksheet>").as_bytes())
-            .map_err(|err| err.to_string())
+        let auto_filter = if self.auto_filter { format!("<autoFilter ref=\"{range}\"/>") } else { String::new() };
+        self.zip.write_all(format!("</sheetData>{auto_filter}</worksheet>").as_bytes()).map_err(|err| err.to_string())
     }
 
     /// Start a new data sheet, reusing the same header row, column widths and
@@ -446,7 +451,7 @@ impl<W: Write + Seek> StreamingXlsxWriter<W> {
                 rows: &sheet.rows,
                 numeric_column_right_align: sheet.numeric_column_right_align,
             };
-            write_worksheet_xml(&mut self.zip, &segment)?;
+            write_worksheet_xml(&mut self.zip, &segment, self.auto_filter)?;
         }
 
         // 3. Write metadata files. These appear AFTER sheet data in the ZIP
@@ -774,7 +779,7 @@ fn push_typed_cell_xml(
     push_cell_xml(output, value, row_index, col_index, style);
 }
 
-fn write_worksheet_xml<W: Write>(writer: &mut W, segment: &WorksheetSegment) -> Result<(), String> {
+fn write_worksheet_xml<W: Write>(writer: &mut W, segment: &WorksheetSegment, auto_filter: bool) -> Result<(), String> {
     let total_rows = segment.rows.len() + 1;
     let range = sheet_range(segment.columns.len(), total_rows);
     let widths = estimate_column_widths(segment.columns, segment.column_comments, segment.rows);
@@ -817,9 +822,8 @@ fn write_worksheet_xml<W: Write>(writer: &mut W, segment: &WorksheetSegment) -> 
         writer.write_all(row_buffer.as_bytes()).map_err(|err| err.to_string())?;
     }
 
-    writer
-        .write_all(format!("</sheetData><autoFilter ref=\"{range}\"/></worksheet>").as_bytes())
-        .map_err(|err| err.to_string())
+    let auto_filter = if auto_filter { format!("<autoFilter ref=\"{range}\"/>") } else { String::new() };
+    writer.write_all(format!("</sheetData>{auto_filter}</worksheet>").as_bytes()).map_err(|err| err.to_string())
 }
 
 fn content_types_xml_for_sheet_count(sheet_count: usize) -> String {
@@ -1077,11 +1081,25 @@ fn split_sheets_for_max_rows<'a>(
 }
 
 pub fn build_xlsx_workbook(data: &XlsxWorksheetData) -> Result<Vec<u8>, String> {
-    build_xlsx_workbook_multi(std::slice::from_ref(data))
+    build_xlsx_workbook_with_auto_filter(data, true)
 }
 
 pub fn build_xlsx_workbook_multi(sheets: &[XlsxWorksheetData]) -> Result<Vec<u8>, String> {
-    build_xlsx_workbook_multi_with_max_rows(sheets, XLSX_MAX_DATA_ROWS)
+    build_xlsx_workbook_multi_with_auto_filter(sheets, true)
+}
+
+pub fn build_xlsx_workbook_with_auto_filter(data: &XlsxWorksheetData, auto_filter: bool) -> Result<Vec<u8>, String> {
+    build_xlsx_workbook_multi_with_auto_filter(std::slice::from_ref(data), auto_filter)
+}
+
+pub fn build_xlsx_workbook_multi_with_auto_filter(
+    sheets: &[XlsxWorksheetData],
+    auto_filter: bool,
+) -> Result<Vec<u8>, String> {
+    if auto_filter {
+        return build_xlsx_workbook_multi_with_max_rows(sheets, XLSX_MAX_DATA_ROWS);
+    }
+    build_xlsx_workbook_multi_with_max_rows_and_auto_filter(sheets, XLSX_MAX_DATA_ROWS, auto_filter)
 }
 
 /// Build an in-memory XLSX workbook with an explicit per-sheet data-row limit.
@@ -1091,6 +1109,14 @@ pub fn build_xlsx_workbook_multi(sheets: &[XlsxWorksheetData]) -> Result<Vec<u8>
 pub(crate) fn build_xlsx_workbook_multi_with_max_rows(
     sheets: &[XlsxWorksheetData],
     max_data_rows_per_sheet: usize,
+) -> Result<Vec<u8>, String> {
+    build_xlsx_workbook_multi_with_max_rows_and_auto_filter(sheets, max_data_rows_per_sheet, true)
+}
+
+fn build_xlsx_workbook_multi_with_max_rows_and_auto_filter(
+    sheets: &[XlsxWorksheetData],
+    max_data_rows_per_sheet: usize,
+    auto_filter: bool,
 ) -> Result<Vec<u8>, String> {
     if sheets.is_empty() {
         return Err("At least one worksheet is required".to_string());
@@ -1115,7 +1141,7 @@ pub(crate) fn build_xlsx_workbook_multi_with_max_rows(
     }
     for (index, segment) in segments.iter().enumerate() {
         zip.start_file(format!("xl/worksheets/sheet{}.xml", index + 1), options).map_err(|err| err.to_string())?;
-        write_worksheet_xml(&mut zip, segment)?;
+        write_worksheet_xml(&mut zip, segment, auto_filter)?;
     }
 
     let output = zip.finish().map_err(|err| err.to_string())?;
@@ -1125,10 +1151,10 @@ pub(crate) fn build_xlsx_workbook_multi_with_max_rows(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_xlsx_workbook, build_xlsx_workbook_multi, build_xlsx_workbook_multi_with_max_rows,
-        is_numeric_column_type, start_streaming_xlsx_workbook, start_streaming_xlsx_workbook_with_max_rows,
-        start_streaming_xlsx_workbook_with_options, start_streaming_xlsx_workbook_with_trailing_sheets,
-        write_worksheet_xml, WorksheetSegment, XlsxWorksheetData,
+        build_xlsx_workbook, build_xlsx_workbook_multi, build_xlsx_workbook_multi_with_auto_filter,
+        build_xlsx_workbook_multi_with_max_rows, is_numeric_column_type, start_streaming_xlsx_workbook,
+        start_streaming_xlsx_workbook_with_max_rows, start_streaming_xlsx_workbook_with_options,
+        start_streaming_xlsx_workbook_with_trailing_sheets, write_worksheet_xml, WorksheetSegment, XlsxWorksheetData,
     };
     use calamine::{open_workbook_auto, Reader};
     use serde_json::{json, Value};
@@ -1203,6 +1229,21 @@ mod tests {
         assert!(sheet.contains("Ada &amp; Bob"));
         assert!(sheet.contains("<c r=\"C2\" t=\"b\"><v>1</v></c>"));
         assert_all_entries_deflated(&workbook);
+    }
+
+    #[test]
+    fn omits_auto_filter_when_disabled() {
+        let worksheet = XlsxWorksheetData {
+            sheet_name: Some("Users".to_string()),
+            columns: vec!["id".to_string()],
+            column_types: vec![],
+            column_comments: vec![],
+            rows: vec![vec![json!(1)]],
+            numeric_column_right_align: false,
+        };
+        let workbook = build_xlsx_workbook_multi_with_auto_filter(&[worksheet], false).expect("build workbook");
+
+        assert!(!read_zip_entry(&workbook, "xl/worksheets/sheet1.xml").contains("<autoFilter"));
     }
 
     #[test]
@@ -1481,6 +1522,7 @@ mod tests {
                 &[],
                 Some("YYYY/MM/DD HH:mm:ss.SSS"),
                 false,
+                true,
             )
             .expect("start workbook");
             writer.write_row(&[json!("2024/02/25 13:02:15.125")]).expect("write temporal row");
@@ -1949,7 +1991,7 @@ mod tests {
         };
         let mut stats = WriteStats::default();
 
-        write_worksheet_xml(&mut stats, &segment).expect("write large worksheet");
+        write_worksheet_xml(&mut stats, &segment, true).expect("write large worksheet");
 
         assert!(stats.bytes_written > 10_000_000, "expected realistic worksheet size, got {}", stats.bytes_written);
         assert!(

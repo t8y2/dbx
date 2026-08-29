@@ -23,7 +23,7 @@ use crate::database_capabilities;
 use crate::db;
 use crate::db::agent_driver::{AgentCallError, AgentErrorStage, AgentOperationOutcome};
 use crate::models::connection::{ConnectionConfig, DatabaseType};
-use crate::query_execution_sql::{is_write_sql, strip_sql_comments_and_literals};
+use crate::query_execution_sql::{is_oracle_proven_read_only_statement, is_write_sql, strip_sql_comments_and_literals};
 use crate::sql::{split_sql_batches, split_sql_statements, starts_with_executable_sql_keyword_for_database};
 use crate::sql_dialect::{resolve_for_db, CAP_TRANSACTIONAL_DDL};
 use crate::sql_risk::{classify_sql_risk_for_database, SqlRisk};
@@ -197,6 +197,18 @@ pub struct ExecuteMultiResult {
     pub error: Option<crate::backend_error::BackendError>,
     #[serde(skip_serializing_if = "is_false")]
     pub server_message: bool,
+    /// Oracle-only manual-transaction UX metadata: true only for a statement
+    /// proven to be an ordinary top-level read. Absent/false for every other
+    /// Oracle statement and every non-Oracle execution. Not part of the
+    /// reusable database-result model (`db::QueryResult`).
+    #[serde(skip_serializing_if = "is_false")]
+    pub manual_transaction_proven_read_only: bool,
+    /// Oracle-only manual-transaction UX metadata: true on the synthetic
+    /// successful result when the manual-execution splitter found zero
+    /// statements (empty/whitespace/comments-only script). Lets the frontend
+    /// treat it as a no-op rather than an unproven statement.
+    #[serde(skip_serializing_if = "is_false")]
+    pub manual_transaction_no_statement: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -243,6 +255,8 @@ impl ExecuteMultiResult {
             statement_index: None,
             error,
             server_message: false,
+            manual_transaction_proven_read_only: false,
+            manual_transaction_no_statement: false,
         }
     }
 
@@ -256,6 +270,8 @@ impl ExecuteMultiResult {
             statement_index: Some(statement_index),
             error,
             server_message: false,
+            manual_transaction_proven_read_only: false,
+            manual_transaction_no_statement: false,
         }
     }
 
@@ -271,6 +287,8 @@ impl ExecuteMultiResult {
             statement_index,
             error: Some(error),
             server_message: false,
+            manual_transaction_proven_read_only: false,
+            manual_transaction_no_statement: false,
         }
     }
 
@@ -282,6 +300,8 @@ impl ExecuteMultiResult {
             statement_index: Some(statement_index),
             error: None,
             server_message: false,
+            manual_transaction_proven_read_only: false,
+            manual_transaction_no_statement: false,
         }
     }
 
@@ -304,6 +324,8 @@ impl ExecuteMultiResult {
             statement_index: Some(statement_index),
             error: None,
             server_message: false,
+            manual_transaction_proven_read_only: false,
+            manual_transaction_no_statement: false,
         }
     }
 
@@ -325,7 +347,19 @@ impl ExecuteMultiResult {
             statement_index: None,
             error: None,
             server_message: false,
+            manual_transaction_proven_read_only: false,
+            manual_transaction_no_statement: false,
         }
+    }
+
+    fn with_manual_transaction_proven_read_only(mut self) -> Self {
+        self.manual_transaction_proven_read_only = true;
+        self
+    }
+
+    fn with_manual_transaction_no_statement(mut self) -> Self {
+        self.manual_transaction_no_statement = true;
+        self
     }
 
     pub fn without_error_detail(mut self) -> Self {
@@ -600,6 +634,8 @@ impl From<db::QueryResult> for ExecuteMultiResult {
             statement_index: None,
             error: None,
             server_message: false,
+            manual_transaction_proven_read_only: false,
+            manual_transaction_no_statement: false,
         }
     }
 }
@@ -613,6 +649,8 @@ impl From<db::sqlserver::SqlServerBatchResult> for ExecuteMultiResult {
             statement_index: None,
             error: None,
             server_message: result.server_message,
+            manual_transaction_proven_read_only: false,
+            manual_transaction_no_statement: false,
         }
     }
 }
@@ -685,10 +723,12 @@ pub async fn check_read_only_for_connection(state: &AppState, pool_key: &str, sq
         let configs = state.configs.read().await;
         crate::connection::config_for_pool_key(pool_key, &configs)
             .filter(|config| config.read_only)
-            .map(|config| (config.name.clone(), config.db_type))
+            .map(|config| (config.id.clone(), config.name.clone(), config.db_type))
     };
-    if let Some((name, database_type)) = connection {
-        crate::query_execution_sql::check_read_only(sql, &name, database_type)?;
+    if let Some((connection_id, name, database_type)) = connection {
+        if !state.write_unlock_windows.is_active(&connection_id).await {
+            crate::query_execution_sql::check_read_only(sql, &name, database_type)?;
+        }
     }
     Ok(())
 }
@@ -703,11 +743,13 @@ pub async fn check_read_only_for_connection_multi(
         let configs = state.configs.read().await;
         crate::connection::config_for_pool_key(pool_key, &configs)
             .filter(|config| config.read_only)
-            .map(|config| (config.name.clone(), config.db_type))
+            .map(|config| (config.id.clone(), config.name.clone(), config.db_type))
     };
-    if let Some((name, database_type)) = connection {
-        for sql in statements {
-            crate::query_execution_sql::check_read_only(sql.as_ref(), &name, database_type)?;
+    if let Some((connection_id, name, database_type)) = connection {
+        if !state.write_unlock_windows.is_active(&connection_id).await {
+            for sql in statements {
+                crate::query_execution_sql::check_read_only(sql.as_ref(), &name, database_type)?;
+            }
         }
     }
     Ok(())
@@ -717,7 +759,14 @@ pub async fn check_read_only_for_connection_multi(
 /// This uses connection_id directly (not pool_key), so it is safe to call at command entry points
 /// before any pool key is constructed.
 pub async fn connection_readonly_name(state: &AppState, connection_id: &str) -> Option<String> {
-    state.configs.read().await.get(connection_id).filter(|c| c.read_only).map(|c| c.name.clone())
+    let name = {
+        let configs = state.configs.read().await;
+        configs.get(connection_id).filter(|c| c.read_only).map(|c| c.name.clone())?
+    };
+    if state.write_unlock_windows.is_active(connection_id).await {
+        return None;
+    }
+    Some(name)
 }
 
 async fn connection_is_mongodb(state: &AppState, connection_id: &str) -> bool {
@@ -776,14 +825,24 @@ fn schema_for_execution_context(db_type: Option<DatabaseType>, schema: Option<&s
     }
 }
 
+#[cfg(test)]
 fn sql_for_execution_context(db_type: Option<DatabaseType>, sql: &str, schema: Option<&str>) -> String {
+    sql_for_execution_context_with_identifier_quote(db_type, sql, schema, None)
+}
+
+fn sql_for_execution_context_with_identifier_quote(
+    db_type: Option<DatabaseType>,
+    sql: &str,
+    schema: Option<&str>,
+    identifier_quote: Option<&str>,
+) -> String {
     let Some(schema) = schema.map(str::trim).filter(|schema| !schema.is_empty()) else {
         return sql.to_string();
     };
     match db_type {
         Some(DatabaseType::Iris) => qualify_iris_unqualified_dml(sql, schema).unwrap_or_else(|| sql.to_string()),
         Some(DatabaseType::Kingbase) => {
-            qualify_kingbase_unqualified_relations(sql, schema).unwrap_or_else(|| sql.to_string())
+            qualify_kingbase_unqualified_relations(sql, schema, identifier_quote).unwrap_or_else(|| sql.to_string())
         }
         _ => sql.to_string(),
     }
@@ -813,7 +872,7 @@ fn qualify_iris_unqualified_dml(sql: &str, schema: &str) -> Option<String> {
     changed.then(|| statements.iter().map(ToString::to_string).collect::<Vec<_>>().join("; "))
 }
 
-fn qualify_kingbase_unqualified_relations(sql: &str, schema: &str) -> Option<String> {
+fn qualify_kingbase_unqualified_relations(sql: &str, schema: &str, identifier_quote: Option<&str>) -> Option<String> {
     let dialect = PostgreSqlDialect {};
     let mut statements = Parser::parse_sql(&dialect, sql).ok()?;
     if statements.is_empty() {
@@ -826,8 +885,13 @@ fn qualify_kingbase_unqualified_relations(sql: &str, schema: &str) -> Option<Str
             continue;
         }
         let cte_names = statement_cte_names(statement);
-        let mut qualifier =
-            KingbaseRelationQualifier { schema, cte_names: &cte_names, parameterized_table_depth: 0, changed: false };
+        let mut qualifier = KingbaseRelationQualifier {
+            schema,
+            identifier_quote: identifier_quote_char(identifier_quote),
+            cte_names: &cte_names,
+            parameterized_table_depth: 0,
+            changed: false,
+        };
         let _ = statement.visit(&mut qualifier);
         changed |= qualifier.changed;
     }
@@ -837,6 +901,7 @@ fn qualify_kingbase_unqualified_relations(sql: &str, schema: &str) -> Option<Str
 
 struct KingbaseRelationQualifier<'a> {
     schema: &'a str,
+    identifier_quote: char,
     cte_names: &'a HashSet<String>,
     parameterized_table_depth: usize,
     changed: bool,
@@ -861,7 +926,12 @@ impl VisitorMut for KingbaseRelationQualifier<'_> {
 
     fn post_visit_relation(&mut self, relation: &mut ObjectName) -> ControlFlow<Self::Break> {
         if self.parameterized_table_depth == 0
-            && qualify_unqualified_relation_name(relation, self.schema, self.cte_names)
+            && qualify_unqualified_relation_name_with_quote(
+                relation,
+                self.schema,
+                self.cte_names,
+                self.identifier_quote,
+            )
         {
             self.changed = true;
         }
@@ -881,6 +951,15 @@ fn statement_uses_schema_context(statement: &Statement) -> bool {
 }
 
 fn qualify_unqualified_relation_name(name: &mut ObjectName, schema: &str, cte_names: &HashSet<String>) -> bool {
+    qualify_unqualified_relation_name_with_quote(name, schema, cte_names, '"')
+}
+
+fn qualify_unqualified_relation_name_with_quote(
+    name: &mut ObjectName,
+    schema: &str,
+    cte_names: &HashSet<String>,
+    identifier_quote: char,
+) -> bool {
     let [ObjectNamePart::Identifier(table)] = name.0.as_slice() else {
         return false;
     };
@@ -889,8 +968,19 @@ fn qualify_unqualified_relation_name(name: &mut ObjectName, schema: &str, cte_na
     }
 
     let table = table.clone();
-    name.0 = vec![ObjectNamePart::Identifier(Ident::with_quote('"', schema)), ObjectNamePart::Identifier(table)];
+    name.0 = vec![
+        ObjectNamePart::Identifier(Ident::with_quote(identifier_quote, schema)),
+        ObjectNamePart::Identifier(table),
+    ];
     true
+}
+
+fn identifier_quote_char(identifier_quote: Option<&str>) -> char {
+    match identifier_quote.map(str::trim) {
+        Some("`") => '`',
+        Some("\"") => '"',
+        _ => '"',
+    }
 }
 
 fn statement_cte_names(statement: &Statement) -> HashSet<String> {
@@ -1655,15 +1745,11 @@ async fn do_execute_typed(
     let _activity_touch = state.pool_activity_touch(pool_key);
 
     let query_timeout = resolve_query_timeout(options.timeout_secs);
-    let read_only_connection = {
-        let configs = state.configs.read().await;
-        let config = crate::connection::config_for_pool_key(pool_key, &configs);
-        config.filter(|config| config.read_only).map(|config| (config.name.clone(), config.db_type))
-    };
+    // Re-check at statement start so a write that becomes ready after the
+    // temporary unlock window expires is still blocked, even if an earlier
+    // statement in the same batch is still running.
+    check_read_only_for_connection(state, pool_key, sql).await?;
     let operation_budget = operation_budget_for_pool_key(state, pool_key, query_timeout).await;
-    if let Some((name, database_type)) = read_only_connection {
-        crate::query_execution_sql::check_read_only(sql, &name, database_type)?;
-    }
     let pool_db_type = connection_database_type_for_pool_key(state, pool_key).await;
     let mysql_catalog_dialect = connection_mysql_catalog_dialect_for_pool_key(state, pool_key).await;
     let connections = state.connections.read().await;
@@ -2010,7 +2096,8 @@ async fn do_execute_typed(
         PoolKind::Agent(client) => {
             let client = client.clone();
             let source_client = client.clone();
-            let sql = sql_for_execution_context(pool_db_type, sql, schema);
+            let sql =
+                sql_for_execution_context_with_identifier_quote(pool_db_type, sql, schema, client.identifier_quote());
             let database = database.map(|s| s.to_string());
             let schema = schema_for_execution_context(pool_db_type, schema).map(|s| s.to_string());
             let max_rows = options.max_rows;
@@ -2083,14 +2170,17 @@ async fn do_execute_typed(
                         options.page_size.unwrap_or(MAX_ROWS),
                     );
                     session.invoke_with_timeout::<db::QueryResult>("fetchQueryPage", params, plugin_timeout).await
-                } else if options.page_size.is_some() {
-                    let params =
-                        external_driver_query_params(config.as_ref(), &sql, &database, schema.as_deref(), &options);
-                    invoke_external_driver_query_page(session.as_ref(), params, plugin_timeout).await
                 } else {
-                    let params =
-                        external_driver_query_params(config.as_ref(), &sql, &database, schema.as_deref(), &options);
-                    session.invoke_with_timeout::<db::QueryResult>("executeQuery", params, plugin_timeout).await
+                    invoke_external_driver_query_with_preview_retry(
+                        session.as_ref(),
+                        config.as_ref(),
+                        &sql,
+                        &database,
+                        schema.as_deref(),
+                        &options,
+                        plugin_timeout,
+                    )
+                    .await
                 }
             })
             .await
@@ -2173,6 +2263,226 @@ async fn invoke_external_driver_query_page(
         }
         Err(error) => Err(error),
     }
+}
+
+async fn invoke_external_driver_query_with_preview_retry(
+    session: &crate::plugins::PluginDriverSession,
+    config: &crate::models::connection::ConnectionConfig,
+    sql: &str,
+    database: &str,
+    schema: Option<&str>,
+    options: &QueryExecutionOptions,
+    plugin_timeout: Option<Duration>,
+) -> Result<db::QueryResult, String> {
+    let result = if options.page_size.is_some() {
+        let params = external_driver_query_params(config, sql, database, schema, options);
+        invoke_external_driver_query_page(session, params, plugin_timeout).await
+    } else {
+        let params = external_driver_query_params(config, sql, database, schema, options);
+        session.invoke_with_timeout::<db::QueryResult>("executeQuery", params, plugin_timeout).await
+    };
+
+    let Err(error) = result else {
+        return result;
+    };
+    if !options.table_data_preview || !is_external_driver_invalid_utf8_error(&error) {
+        return Err(error);
+    }
+    let Some(fallback_sql) = external_driver_preview_fallback_sql(sql) else {
+        return Err(error);
+    };
+
+    log::warn!(
+        "[query][external-driver] JDBC preview failed with invalid UTF-8; retrying without generated left() wrappers"
+    );
+    if options.page_size.is_some() {
+        let params = external_driver_query_params(config, &fallback_sql, database, schema, options);
+        invoke_external_driver_query_page(session, params, plugin_timeout).await
+    } else {
+        let params = external_driver_query_params(config, &fallback_sql, database, schema, options);
+        session.invoke_with_timeout::<db::QueryResult>("executeQuery", params, plugin_timeout).await
+    }
+}
+
+/// PostgreSQL can reject a character preview when legacy data contains an
+/// invalid UTF-8 byte exactly at the `left`/`substring` boundary.  JDBC can
+/// still return the unmodified text value, so table previews may safely retry
+/// without the generated `left(...)` wrappers and let the existing marker
+/// extraction truncate the value client-side.
+fn is_external_driver_invalid_utf8_error(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    normalized.contains("invalid byte sequence for encoding") && normalized.contains("utf8")
+}
+
+fn is_sql_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$')
+}
+
+fn sql_keyword_at(bytes: &[u8], index: usize, keyword: &[u8]) -> bool {
+    let end = index.saturating_add(keyword.len());
+    end <= bytes.len()
+        && bytes[index..end].eq_ignore_ascii_case(keyword)
+        && (index == 0 || !is_sql_word_byte(bytes[index - 1]))
+        && (end == bytes.len() || !is_sql_word_byte(bytes[end]))
+}
+
+/// Skip a quoted literal/identifier or SQL comment and return the first byte
+/// after it. This keeps keyword and parenthesis scans from interpreting commas
+/// or `FROM` text embedded in user predicates/literals.
+fn skip_sql_quoted_or_comment(bytes: &[u8], start: usize) -> Option<usize> {
+    let quote = *bytes.get(start)?;
+    let (end_byte, doubled) = match quote {
+        b'\'' => (b'\'', true),
+        b'"' => (b'"', true),
+        b'`' => (b'`', true),
+        b'[' => (b']', true),
+        b'-' if bytes.get(start + 1) == Some(&b'-') => {
+            return Some(
+                bytes[start + 2..].iter().position(|byte| *byte == b'\n').map_or(bytes.len(), |p| start + 2 + p + 1),
+            );
+        }
+        b'/' if bytes.get(start + 1) == Some(&b'*') => {
+            return Some(
+                bytes[start + 2..].windows(2).position(|pair| pair == b"*/").map_or(bytes.len(), |p| start + 2 + p + 2),
+            );
+        }
+        _ => return None,
+    };
+    let mut index = start + 1;
+    while index < bytes.len() {
+        if quote == b'\'' && bytes[index] == b'\\' {
+            index = (index + 2).min(bytes.len());
+        } else if bytes[index] == end_byte {
+            if doubled && bytes.get(index + 1) == Some(&end_byte) {
+                index += 2;
+            } else {
+                return Some(index + 1);
+            }
+        } else {
+            index += 1;
+        }
+    }
+    Some(bytes.len())
+}
+
+fn find_top_level_sql_keyword(sql: &str, start: usize, keyword: &[u8]) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let mut depth = 0usize;
+    let mut index = start;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(next) = skip_sql_quoted_or_comment(bytes, index) {
+            index = next;
+            continue;
+        }
+        match byte {
+            b'(' => depth = depth.saturating_add(1),
+            b')' => depth = depth.saturating_sub(1),
+            _ if depth == 0 && sql_keyword_at(bytes, index, keyword) => return Some(index),
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+fn find_preview_left_call(sql: &str, name_start: usize) -> Option<(usize, usize, usize)> {
+    let bytes = sql.as_bytes();
+    let mut open = name_start + 4;
+    while bytes.get(open).is_some_and(u8::is_ascii_whitespace) {
+        open += 1;
+    }
+    if bytes.get(open) != Some(&b'(') {
+        return None;
+    }
+
+    let mut depth = 0usize;
+    let mut comma = None;
+    let mut close = None;
+    let mut index = open;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(next) = skip_sql_quoted_or_comment(bytes, index) {
+            index = next;
+            continue;
+        }
+        match byte {
+            b'(' => depth = depth.saturating_add(1),
+            b')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    close = Some(index);
+                    break;
+                }
+            }
+            b',' if depth == 1 => {
+                if comma.is_some() {
+                    return None;
+                }
+                comma = Some(index);
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+
+    let close = close?;
+    let comma = comma?;
+    let first = &sql[open + 1..comma];
+    let second = &sql[comma + 1..close];
+    if first.trim().is_empty() || second.trim().is_empty() || !second.trim().bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let first_start = open + 1 + first.len() - first.trim_start().len();
+    let first_end = open + 1 + first.trim_end().len();
+    Some((close, first_start, first_end))
+}
+
+fn rewrite_external_driver_preview_projection(projection: &str) -> Option<String> {
+    let bytes = projection.as_bytes();
+    let mut replacements = Vec::new();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if let Some(next) = skip_sql_quoted_or_comment(bytes, index) {
+            index = next;
+            continue;
+        }
+        if sql_keyword_at(bytes, index, b"left") {
+            let previous = index.checked_sub(1).and_then(|position| bytes.get(position)).copied();
+            if previous != Some(b'.') {
+                if let Some((close, first_start, first_end)) = find_preview_left_call(projection, index) {
+                    replacements.push((index, close + 1, projection[first_start..first_end].to_string()));
+                    index = close + 1;
+                    continue;
+                }
+            }
+        }
+        index += 1;
+    }
+
+    if replacements.is_empty() {
+        return None;
+    }
+    let mut rewritten = projection.to_string();
+    for (start, end, replacement) in replacements.into_iter().rev() {
+        rewritten.replace_range(start..end, &replacement);
+    }
+    Some(rewritten)
+}
+
+fn external_driver_preview_fallback_sql(sql: &str) -> Option<String> {
+    let select_start = find_top_level_sql_keyword(sql, 0, b"select")?;
+    if !sql[..select_start].trim().is_empty() {
+        return None;
+    }
+    let select_end = select_start + b"select".len();
+    let from_start = find_top_level_sql_keyword(sql, select_end, b"from")?;
+    let projection = &sql[select_end..from_start];
+    if !projection.contains(crate::sql_dialect::DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX) {
+        return None;
+    }
+    let rewritten_projection = rewrite_external_driver_preview_projection(projection)?;
+    Some(format!("{}{}{}", &sql[..select_end], rewritten_projection, &sql[from_start..]))
 }
 
 fn is_external_driver_method_unsupported(error: &str, method: &str) -> bool {
@@ -3348,8 +3658,12 @@ pub async fn execute_statements(
         let execution_schema = schema_for_execution_context(db_type, schema);
         let rewritten_statements;
         let statements = if qualifies_unqualified_agent_relations(db_type) {
-            rewritten_statements =
-                statements.iter().map(|sql| sql_for_execution_context(db_type, sql, schema)).collect::<Vec<_>>();
+            rewritten_statements = statements
+                .iter()
+                .map(|sql| {
+                    sql_for_execution_context_with_identifier_quote(db_type, sql, schema, client.identifier_quote())
+                })
+                .collect::<Vec<_>>();
             rewritten_statements.as_slice()
         } else {
             statements
@@ -4224,8 +4538,10 @@ async fn exec_tx_agent_inner(
     let execution_schema = schema_for_execution_context(db_type, schema);
     let rewritten_statements;
     let statements = if qualifies_unqualified_agent_relations(db_type) {
-        rewritten_statements =
-            statements.iter().map(|sql| sql_for_execution_context(db_type, sql, schema)).collect::<Vec<_>>();
+        rewritten_statements = statements
+            .iter()
+            .map(|sql| sql_for_execution_context_with_identifier_quote(db_type, sql, schema, client.identifier_quote()))
+            .collect::<Vec<_>>();
         rewritten_statements.as_slice()
     } else {
         statements
@@ -4327,7 +4643,19 @@ fn mysql_transaction_isolation_sql(consistent_snapshot: bool) -> Option<&'static
 }
 
 fn mysql_error_is_syntax_error(error: &mysql_async::Error) -> bool {
-    matches!(error, mysql_async::Error::Server(server_error) if server_error.code == 1064)
+    match error {
+        mysql_async::Error::Server(server_error) if server_error.code == 1064 => true,
+        // Doris (and some other MySQL-compatible servers) report unsupported
+        // transaction clauses as ER_UNKNOWN_ERROR (1105) with a parser
+        // diagnostic instead of MySQL's ER_PARSE_ERROR (1064).  Only treat
+        // diagnostics that clearly identify a syntax/parser failure as
+        // retryable; generic 1105 errors may indicate a real server failure.
+        mysql_async::Error::Server(server_error) if server_error.code == 1105 => {
+            let message = server_error.message.to_ascii_lowercase();
+            message.contains("syntax error") && (message.contains("encountered:") || message.contains("expected"))
+        }
+        _ => false,
+    }
 }
 
 async fn begin_transaction_session(
@@ -4597,6 +4925,12 @@ pub struct ManualTransactionExecutionOptions {
     pub table_data_preview: bool,
     pub page_size: Option<usize>,
     pub result_session_id: Option<String>,
+    /// User-facing SQL to classify (Oracle-only). When present, the core
+    /// classifies each split statement of this SQL rather than the rewritten
+    /// execution SQL, pairing them by count and position so DBX-owned
+    /// read-preserving rewrites (hidden primary keys, sort wrappers,
+    /// pagination) do not change toolbar semantics. Fail-closed on mismatch.
+    pub classification_sql: Option<String>,
 }
 
 pub async fn execute_in_manual_transaction_with_options(
@@ -4624,10 +4958,18 @@ pub async fn execute_in_manual_transaction_with_options(
         |db_type| crate::sql::split_sql_statements_for_database(sql, db_type),
     );
     if statements.is_empty() {
-        return Ok(vec![ExecuteMultiResult::success_with_optional_server_large_values(
+        // Oracle-only UX marker: the no-op is Core's decision that the script
+        // (empty/whitespace/comments-only) has no statements, so the frontend
+        // must not treat it as an unproven statement. Every other database
+        // receives the plain empty result.
+        let mut result = ExecuteMultiResult::success_with_optional_server_large_values(
             empty_query_result(0),
             options.table_data_preview,
-        )]);
+        );
+        if db_type == Some(DatabaseType::Oracle) {
+            result = result.with_manual_transaction_no_statement();
+        }
+        return Ok(vec![result]);
     }
     // A result-session cursor can only track one result set, so pagination is
     // single-statement only. Multi-statement scripts predate pagination: keep
@@ -4680,6 +5022,30 @@ pub async fn execute_in_manual_transaction_with_options(
     let row_limit = options.max_rows.unwrap_or(MAX_ROWS).max(1);
     let mut results = Vec::with_capacity(statements.len());
 
+    // Oracle-only classification pairing. The core splits both the execution
+    // SQL and, when present, the user-facing classification SQL with the same
+    // Oracle-aware splitter. A marker is emitted only when both lists have the
+    // same non-zero count and every paired user statement is proven read-only;
+    // any mismatch is fail-closed (no marker). This is deliberately a
+    // trust-boundary count/position pairing, not a SQL-equivalence parser.
+    let classification: Vec<bool> = if db_type == Some(DatabaseType::Oracle) {
+        match options.classification_sql.as_deref() {
+            Some(classification_sql) => {
+                let user_statements =
+                    crate::sql::split_sql_statements_for_database(classification_sql, DatabaseType::Oracle);
+                let paired = user_statements.len() == statements.len() && !user_statements.is_empty();
+                if paired {
+                    user_statements.iter().map(|statement| is_oracle_proven_read_only_statement(statement)).collect()
+                } else {
+                    Vec::new()
+                }
+            }
+            None => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+
     let mut conn = connection.lock().await;
     for (i, statement) in statements.iter().enumerate() {
         let result = match &mut *conn {
@@ -4708,10 +5074,14 @@ pub async fn execute_in_manual_transaction_with_options(
         };
         match result {
             Ok(query_result) => {
-                results.push(ExecuteMultiResult::success_with_optional_server_large_values(
+                let mut executed = ExecuteMultiResult::success_with_optional_server_large_values(
                     query_result,
                     options.table_data_preview,
-                ));
+                );
+                if classification.get(i).copied().unwrap_or(false) {
+                    executed = executed.with_manual_transaction_proven_read_only();
+                }
+                results.push(executed);
             }
             Err(e) => {
                 // Statement failure ends the transaction. If another cleanup path
@@ -5042,7 +5412,7 @@ async fn execute_manual_txn_agent_statement(
     page_size: Option<usize>,
     result_session_id: Option<&str>,
 ) -> Result<db::QueryResult, String> {
-    let sql = sql_for_execution_context(db_type, statement, schema);
+    let sql = sql_for_execution_context_with_identifier_quote(db_type, statement, schema, client.identifier_quote());
     let execution_schema = schema_for_execution_context(db_type, schema);
     let options = manual_txn_agent_query_options(row_limit, table_data_preview, page_size, result_session_id);
     let request = manual_txn_agent_query_request(
@@ -5318,6 +5688,24 @@ mod tests {
         assert!(postgres_prefers_text_protocol(Some(DatabaseType::Redshift)));
         assert!(!postgres_prefers_text_protocol(Some(DatabaseType::Postgres)));
         assert!(!postgres_prefers_text_protocol(None));
+    }
+
+    #[test]
+    fn execute_multi_result_manual_transaction_markers_serialize_conditionally() {
+        let plain = ExecuteMultiResult::success_with_optional_server_large_values(empty_query_result(0), false);
+        let plain_value = serde_json::to_value(&plain).unwrap();
+        assert!(plain_value.get("manual_transaction_proven_read_only").is_none());
+        assert!(plain_value.get("manual_transaction_no_statement").is_none());
+
+        let proven = plain.clone().with_manual_transaction_proven_read_only();
+        let proven_value = serde_json::to_value(&proven).unwrap();
+        assert_eq!(proven_value.get("manual_transaction_proven_read_only"), Some(&serde_json::Value::Bool(true)));
+        assert!(proven_value.get("manual_transaction_no_statement").is_none());
+
+        let no_statement = plain.with_manual_transaction_no_statement();
+        let no_statement_value = serde_json::to_value(&no_statement).unwrap();
+        assert_eq!(no_statement_value.get("manual_transaction_no_statement"), Some(&serde_json::Value::Bool(true)));
+        assert!(no_statement_value.get("manual_transaction_proven_read_only").is_none());
     }
 
     #[test]
@@ -7040,6 +7428,155 @@ for line in sys.stdin:
         ));
     }
 
+    #[test]
+    fn external_driver_preview_fallback_rewrites_generated_postgres_projections() {
+        let sql = concat!(
+            "SELECT \"id\", left(\"description\", 140) AS \"description\", ",
+            "left(\"metadata\"::text, 141) AS \"metadata\", ",
+            "'left(\"literal\", 1)' AS \"note\", ",
+            "'T:139' AS \"__DBX_LARGE_VALUE_BYTES_T_1\" FROM \"job_details\" WHERE left(note, 1) = 'x' LIMIT 100"
+        );
+        assert_eq!(
+            external_driver_preview_fallback_sql(sql).as_deref(),
+            Some("SELECT \"id\", \"description\" AS \"description\", \"metadata\"::text AS \"metadata\", 'left(\"literal\", 1)' AS \"note\", 'T:139' AS \"__DBX_LARGE_VALUE_BYTES_T_1\" FROM \"job_details\" WHERE left(note, 1) = 'x' LIMIT 100")
+        );
+    }
+
+    #[test]
+    fn external_driver_preview_fallback_handles_nested_commas_without_touching_literals() {
+        let sql = concat!(
+            "SELECT left(coalesce(\"description\", concat('a,b', \"fallback\")), 140) AS \"description\", ",
+            "'FROM left(\"literal\", 1)' AS \"note\", ",
+            "'T:140' AS \"__DBX_LARGE_VALUE_BYTES_T_0\" FROM \"job_details\""
+        );
+        assert_eq!(
+            external_driver_preview_fallback_sql(sql).as_deref(),
+            Some("SELECT coalesce(\"description\", concat('a,b', \"fallback\")) AS \"description\", 'FROM left(\"literal\", 1)' AS \"note\", 'T:140' AS \"__DBX_LARGE_VALUE_BYTES_T_0\" FROM \"job_details\"")
+        );
+    }
+
+    #[test]
+    fn external_driver_preview_fallback_requires_generated_marker_and_select_shape() {
+        assert!(external_driver_preview_fallback_sql("SELECT left(value, 10) FROM t").is_none());
+        assert!(external_driver_preview_fallback_sql(
+            "WITH rows AS (SELECT left(value, 10) AS value FROM t) SELECT value FROM rows"
+        )
+        .is_none());
+        assert!(external_driver_preview_fallback_sql(
+            "SELECT left(value, 10) AS value FROM t WHERE note = '__DBX_LARGE_VALUE_BYTES_T_0'"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn external_driver_invalid_utf8_error_detection_is_narrow() {
+        assert!(is_external_driver_invalid_utf8_error("ERROR: invalid byte sequence for encoding \"UTF8\": 0xe2"));
+        assert!(is_external_driver_invalid_utf8_error(
+            "org.postgresql.util.PSQLException: ERROR: invalid byte sequence for encoding \"UTF8\": 0xe2"
+        ));
+        assert!(!is_external_driver_invalid_utf8_error("ERROR: invalid byte sequence for encoding \"LATIN1\": 0xe2"));
+        assert!(!is_external_driver_invalid_utf8_error("Incorrect syntax near SELECT"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn external_driver_preview_retry_preserves_marker_truncation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("dbx-jdbc-preview-retry-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let executable = dir.join("plugin.sh");
+        let calls = dir.join("calls.log");
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nwhile IFS= read -r line; do\n  id=$(printf '%s' \"$line\" | sed -E 's/.*\"id\":([0-9]+).*/\\1/')\n  case \"$line\" in\n    *'\"method\":\"executeQueryPage\"'*)\n      echo executeQueryPage >> '{}'\n      case \"$line\" in\n        *'left('*) printf '{{\"id\":%s,\"error\":{{\"message\":\"ERROR: invalid byte sequence for encoding \\\"UTF8\\\": 0xe2\"}}}}\\n' \"$id\" ;;\n        *) printf '{{\"id\":%s,\"result\":{{\"columns\":[\"id\",\"description\",\"__DBX_LARGE_VALUE_BYTES_T_1\"],\"column_types\":[\"integer\",\"text\",\"text\"],\"rows\":[[1,\"abcdef\",\"T:3\"]],\"affected_rows\":0,\"execution_time_ms\":1,\"truncated\":false}}}}\\n' \"$id\" ;;\n      esac\n      ;;\n    *'\"method\":\"executeQuery\"'*)\n      echo executeQuery >> '{}'\n      case \"$line\" in\n        *'left('*) printf '{{\"id\":%s,\"error\":{{\"message\":\"ERROR: invalid byte sequence for encoding \\\"UTF8\\\": 0xe2\"}}}}\\n' \"$id\" ;;\n        *) printf '{{\"id\":%s,\"result\":{{\"columns\":[\"id\",\"description\",\"__DBX_LARGE_VALUE_BYTES_T_1\"],\"column_types\":[\"integer\",\"text\",\"text\"],\"rows\":[[1,\"abcdef\",\"T:3\"]],\"affected_rows\":0,\"execution_time_ms\":1,\"truncated\":false}}}}\\n' \"$id\" ;;\n      esac\n      ;;\n  esac\ndone\n",
+                calls.display(),
+                calls.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+
+        let plugin = InstalledPlugin {
+            manifest: PluginManifest {
+                id: "jdbc".to_string(),
+                name: "JDBC".to_string(),
+                version: "preview-retry".to_string(),
+                protocol_version: 1,
+                description: String::new(),
+                executable: Some("plugin.sh".to_string()),
+                drivers: vec![PluginDriverManifest {
+                    id: "jdbc".to_string(),
+                    label: "JDBC".to_string(),
+                    kind: "external".to_string(),
+                    database_type: Some("jdbc".to_string()),
+                }],
+            },
+            path: dir.clone(),
+        };
+        let session = PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default())
+            .await
+            .expect("preview retry plugin should start");
+        let mut config = test_connection_config(DatabaseType::Jdbc);
+        config.id = "jdbc-preview".to_string();
+        config.connection_string = Some("jdbc:test".to_string());
+        let marker = format!("{}T_1", crate::sql_dialect::DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX);
+        let sql = format!(
+            "SELECT \"id\", left(\"description\", 140) AS \"description\", 'T:3' AS \"{marker}\" FROM \"job_details\""
+        );
+        let options = QueryExecutionOptions {
+            max_rows: Some(100),
+            page_size: Some(100),
+            table_data_preview: true,
+            ..Default::default()
+        };
+        let mut result = invoke_external_driver_query_with_preview_retry(
+            &session,
+            &config,
+            &sql,
+            "",
+            None,
+            &options,
+            Some(Duration::from_secs(5)),
+        )
+        .await
+        .expect("preview retry should return the unwrapped value");
+        let cells = extract_server_large_value_markers(&mut result);
+
+        assert_eq!(result.rows, vec![vec![serde_json::json!(1), serde_json::json!("abc...")]]);
+        assert_eq!(
+            cells,
+            vec![db::LargeValueCell {
+                row_index: 0,
+                column_index: 1,
+                original_bytes: SERVER_LARGE_VALUE_UNKNOWN_BYTES,
+            }]
+        );
+
+        let options = QueryExecutionOptions { max_rows: Some(100), table_data_preview: true, ..Default::default() };
+        let mut result = invoke_external_driver_query_with_preview_retry(
+            &session,
+            &config,
+            &sql,
+            "",
+            None,
+            &options,
+            Some(Duration::from_secs(5)),
+        )
+        .await
+        .expect("non-paged preview retry should return the unwrapped value");
+        let cells = extract_server_large_value_markers(&mut result);
+        assert_eq!(result.rows, vec![vec![serde_json::json!(1), serde_json::json!("abc...")]]);
+        assert_eq!(cells.len(), 1);
+        assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 4);
+
+        session.shutdown().await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn external_driver_manual_transaction_executes_commits_and_releases_session_pool() {
@@ -7893,6 +8430,37 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn kingbase_execution_context_uses_driver_identifier_quote() {
+        assert_eq!(
+            sql_for_execution_context_with_identifier_quote(
+                Some(DatabaseType::Kingbase),
+                "SELECT * FROM sys_user",
+                Some("audit-schema"),
+                Some("`"),
+            ),
+            "SELECT * FROM `audit-schema`.sys_user"
+        );
+        assert_eq!(
+            sql_for_execution_context_with_identifier_quote(
+                Some(DatabaseType::Kingbase),
+                "SELECT * FROM sys_user",
+                Some("audit-schema"),
+                Some("\""),
+            ),
+            "SELECT * FROM \"audit-schema\".sys_user"
+        );
+        assert_eq!(
+            sql_for_execution_context_with_identifier_quote(
+                Some(DatabaseType::Kingbase),
+                "SELECT * FROM sys_user",
+                Some("audit-schema"),
+                Some("unsupported"),
+            ),
+            "SELECT * FROM \"audit-schema\".sys_user"
+        );
+    }
+
+    #[test]
     fn parses_postgres_drop_database_target() {
         assert_eq!(parse_drop_database_target("DROP DATABASE vaultwarden;"), Some("vaultwarden".to_string()));
         assert_eq!(parse_drop_database_target("drop database if exists \"app db\";"), Some("app db".to_string()));
@@ -8512,5 +9080,22 @@ for line in sys.stdin:
 
         assert!(mysql_error_is_syntax_error(&syntax_error));
         assert!(!mysql_error_is_syntax_error(&permission_error));
+    }
+
+    #[test]
+    fn mysql_backup_transaction_falls_back_for_doris_parser_syntax_errors() {
+        let doris_syntax_error = mysql_async::Error::Server(mysql_async::ServerError {
+            code: 1105,
+            message: "Syntax error in line 1: START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY ^ Encountered: COMMA Expected: EOF".to_string(),
+            state: "HY000".to_string(),
+        });
+        let generic_unknown_error = mysql_async::Error::Server(mysql_async::ServerError {
+            code: 1105,
+            message: "Unknown error".to_string(),
+            state: "HY000".to_string(),
+        });
+
+        assert!(mysql_error_is_syntax_error(&doris_syntax_error));
+        assert!(!mysql_error_is_syntax_error(&generic_unknown_error));
     }
 }

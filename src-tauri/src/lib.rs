@@ -170,8 +170,8 @@ fn append_startup_probe(message: impl AsRef<str>) {
     startup_recovery::record(message);
 }
 
-pub(crate) fn clear_startup_probe_after_frontend_ready() {
-    startup_recovery::mark_frontend_ready();
+pub(crate) fn clear_startup_probe_after_frontend_ready(main_window_visible: bool) {
+    startup_recovery::mark_frontend_ready(main_window_visible);
 }
 
 fn should_confirm_app_exit_request(target_os: &str, exit_code: Option<i32>, confirmed_exit: bool) -> bool {
@@ -464,19 +464,6 @@ fn linux_webkit_environment_override<'a>(
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn linux_system_gtk3_immodules_cache_path() -> Option<&'static str> {
-    [
-        "/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules.cache",
-        "/usr/lib/aarch64-linux-gnu/gtk-3.0/3.0.0/immodules.cache",
-        "/usr/lib64/gtk-3.0/3.0.0/immodules.cache",
-        "/usr/lib/gtk-3.0/3.0.0/immodules.cache",
-    ]
-    .iter()
-    .copied()
-    .find(|path| std::path::Path::new(path).is_file())
-}
-
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn linux_appimage_wayland_backend_override(
     appimage: Option<&std::ffi::OsStr>,
     wayland_display: Option<&std::ffi::OsStr>,
@@ -514,31 +501,6 @@ fn linux_uses_native_wayland(
             .next()
             .is_some_and(|backend| backend.trim().eq_ignore_ascii_case("wayland"))
     })
-}
-
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn linux_appimage_system_gtk_immodules_cache(
-    appimage: Option<&std::ffi::OsStr>,
-    appdir: Option<&std::ffi::OsStr>,
-    gtk_im_module: Option<&std::ffi::OsStr>,
-    gtk_im_module_file: Option<&std::ffi::OsStr>,
-    system_cache_path: Option<&'static str>,
-) -> Option<&'static str> {
-    let system_cache_path = system_cache_path?;
-    if appimage.is_none() || gtk_im_module.is_none() {
-        return None;
-    }
-
-    let Some(gtk_im_module_file) = gtk_im_module_file else {
-        return Some(system_cache_path);
-    };
-    let appdir = appdir?;
-
-    if std::path::Path::new(gtk_im_module_file).starts_with(std::path::Path::new(appdir)) {
-        Some(system_cache_path)
-    } else {
-        None
-    }
 }
 
 #[cfg(target_os = "linux")]
@@ -579,18 +541,6 @@ fn apply_linux_webkit_rendering_workarounds() {
         std::env::var_os("GDK_BACKEND").as_deref(),
     ) {
         std::env::set_var("GDK_BACKEND", gdk_backend);
-    }
-    if let Some(gtk_im_module_file) = linux_appimage_system_gtk_immodules_cache(
-        std::env::var_os("APPIMAGE").as_deref(),
-        std::env::var_os("APPDIR").as_deref(),
-        std::env::var_os("GTK_IM_MODULE").as_deref(),
-        std::env::var_os("GTK_IM_MODULE_FILE").as_deref(),
-        linux_system_gtk3_immodules_cache_path(),
-    ) {
-        // linuxdeploy-plugin-gtk points GTK_IM_MODULE_FILE at the bundled
-        // cache. That hides host IM modules such as fcitx5/ibus, so prefer the
-        // host GTK cache when the user has configured a GTK input method.
-        std::env::set_var("GTK_IM_MODULE_FILE", gtk_im_module_file);
     }
 }
 
@@ -1003,21 +953,18 @@ pub(crate) fn apply_desktop_settings(app: &tauri::AppHandle, desktop_settings: &
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
-        app_menu_copy_support_info_label, app_menu_quit_label, linux_appimage_system_gtk_immodules_cache,
-        linux_appimage_wayland_backend_override, linux_drm_driver_is_software_only,
-        linux_drm_render_devices_from_paths, linux_nvidia_driver_from_state, linux_pci_id_from_sysfs_value,
-        linux_selected_drm_render_device, linux_uses_native_wayland, linux_webkit_environment_override,
-        linux_webkit_rendering_workarounds, native_window_decorations_override, should_confirm_app_exit_request,
-        should_enable_single_instance, should_fallback_to_native_quit, should_hide_window_on_close,
-        should_setup_desktop_tray, should_show_main_window_after_setup, should_show_main_window_before_setup_tasks,
-        startup_data_dir_mode, tray_menu_labels_for_locale, uses_application_level_icon, LinuxDrmRenderDevice,
-        LinuxNvidiaDriver,
+        app_menu_copy_support_info_label, app_menu_quit_label, linux_appimage_wayland_backend_override,
+        linux_drm_driver_is_software_only, linux_drm_render_devices_from_paths, linux_nvidia_driver_from_state,
+        linux_pci_id_from_sysfs_value, linux_selected_drm_render_device, linux_uses_native_wayland,
+        linux_webkit_environment_override, linux_webkit_rendering_workarounds, native_window_decorations_override,
+        should_confirm_app_exit_request, should_enable_single_instance, should_fallback_to_native_quit,
+        should_hide_window_on_close, should_setup_desktop_tray, should_show_main_window_after_setup,
+        should_show_main_window_before_setup_tasks, startup_data_dir_mode, tray_menu_labels_for_locale,
+        uses_application_level_icon, LinuxDrmRenderDevice, LinuxNvidiaDriver,
     };
     use crate::data_dir::DataDirMode;
     use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
-
-    const TEST_GTK3_IMMODULES_CACHE: &str = "/usr/lib/test/gtk-3.0/3.0.0/immodules.cache";
 
     #[test]
     fn tray_menu_labels_follow_locale() {
@@ -1437,78 +1384,6 @@ mod tests {
         assert_eq!(linux_appimage_wayland_backend_override(Some(OsStr::new("/tmp/DBX.AppImage")), None, None), None);
         assert_eq!(linux_appimage_wayland_backend_override(None, Some(OsStr::new("wayland-0")), None), None);
     }
-
-    #[test]
-    fn prefers_system_gtk_immodules_cache_for_appimage_input_methods() {
-        assert_eq!(
-            linux_appimage_system_gtk_immodules_cache(
-                Some(OsStr::new("/tmp/DBX.AppImage")),
-                Some(OsStr::new("/tmp/.mount_DBX123")),
-                Some(OsStr::new("fcitx5")),
-                Some(OsStr::new("/tmp/.mount_DBX123/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules.cache")),
-                Some(TEST_GTK3_IMMODULES_CACHE),
-            ),
-            Some(TEST_GTK3_IMMODULES_CACHE)
-        );
-        assert_eq!(
-            linux_appimage_system_gtk_immodules_cache(
-                Some(OsStr::new("/tmp/DBX.AppImage")),
-                Some(OsStr::new("/tmp/.mount_DBX123")),
-                Some(OsStr::new("ibus")),
-                None,
-                Some(TEST_GTK3_IMMODULES_CACHE),
-            ),
-            Some(TEST_GTK3_IMMODULES_CACHE)
-        );
-    }
-
-    #[test]
-    fn preserves_external_gtk_immodules_cache_overrides() {
-        assert_eq!(
-            linux_appimage_system_gtk_immodules_cache(
-                Some(OsStr::new("/tmp/DBX.AppImage")),
-                Some(OsStr::new("/tmp/.mount_DBX123")),
-                Some(OsStr::new("fcitx5")),
-                Some(OsStr::new("/opt/custom/immodules.cache")),
-                Some(TEST_GTK3_IMMODULES_CACHE),
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn skips_system_gtk_immodules_cache_without_required_context() {
-        assert_eq!(
-            linux_appimage_system_gtk_immodules_cache(
-                None,
-                Some(OsStr::new("/tmp/.mount_DBX123")),
-                Some(OsStr::new("fcitx5")),
-                Some(OsStr::new("/tmp/.mount_DBX123/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules.cache")),
-                Some(TEST_GTK3_IMMODULES_CACHE),
-            ),
-            None
-        );
-        assert_eq!(
-            linux_appimage_system_gtk_immodules_cache(
-                Some(OsStr::new("/tmp/DBX.AppImage")),
-                Some(OsStr::new("/tmp/.mount_DBX123")),
-                None,
-                Some(OsStr::new("/tmp/.mount_DBX123/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules.cache")),
-                Some(TEST_GTK3_IMMODULES_CACHE),
-            ),
-            None
-        );
-        assert_eq!(
-            linux_appimage_system_gtk_immodules_cache(
-                Some(OsStr::new("/tmp/DBX.AppImage")),
-                Some(OsStr::new("/tmp/.mount_DBX123")),
-                Some(OsStr::new("fcitx5")),
-                Some(OsStr::new("/tmp/.mount_DBX123/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules.cache")),
-                None,
-            ),
-            None
-        );
-    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1879,6 +1754,9 @@ pub fn run() {
             commands::connection::connection_identifier_quote,
             commands::connection::connection_database_info,
             commands::connection::save_connection_database_info,
+            commands::connection::unlock_connection_writes,
+            commands::connection::lock_connection_writes,
+            commands::connection::connection_write_unlock_state,
             commands::connection::save_connections,
             commands::connection::load_connections,
             commands::connection::save_sidebar_layout,
@@ -1925,6 +1803,7 @@ pub fn run() {
             commands::schema::get_sqlserver_column_metadata,
             commands::schema::list_indexes,
             commands::schema::list_reference_key_columns,
+            commands::schema::list_reference_keys,
             commands::schema::list_foreign_keys,
             commands::schema::list_triggers,
             commands::schema::list_constraints,

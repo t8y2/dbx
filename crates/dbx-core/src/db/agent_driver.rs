@@ -887,6 +887,9 @@ pub struct AgentDriverClient {
     shared_runtime: Option<Arc<AgentRuntimeClient>>,
     agent_session_id: Option<String>,
     cached_query: Option<CachedAgentQuery>,
+    /// Driver-reported identifier quoting, captured once after connect.
+    /// Keeping this on the client avoids a connection-info RPC on every query.
+    identifier_quote: Option<String>,
 }
 
 /// Keeps serialized session RPC access separate from the process-level fail-stop handle.
@@ -896,13 +899,19 @@ pub struct PooledAgentClient {
     client: tokio::sync::Mutex<AgentDriverClient>,
     shared_runtime: Option<Arc<AgentRuntimeClient>>,
     agent_session_id: Option<String>,
+    identifier_quote: Option<String>,
 }
 
 impl PooledAgentClient {
     pub fn new(client: AgentDriverClient) -> Self {
         let shared_runtime = client.shared_runtime.clone();
         let agent_session_id = client.agent_session_id.clone();
-        Self { client: tokio::sync::Mutex::new(client), shared_runtime, agent_session_id }
+        let identifier_quote = client.identifier_quote.clone();
+        Self { client: tokio::sync::Mutex::new(client), shared_runtime, agent_session_id, identifier_quote }
+    }
+
+    pub fn identifier_quote(&self) -> Option<&str> {
+        self.identifier_quote.as_deref()
     }
 
     pub async fn lock(&self) -> tokio::sync::MutexGuard<'_, AgentDriverClient> {
@@ -1632,6 +1641,7 @@ impl AgentDriverClient {
             shared_runtime: None,
             agent_session_id: None,
             cached_query: None,
+            identifier_quote: None,
         })
     }
 
@@ -1646,6 +1656,7 @@ impl AgentDriverClient {
             shared_runtime: Some(runtime),
             agent_session_id: Some(agent_session_id),
             cached_query: None,
+            identifier_quote: None,
         }
     }
 
@@ -1945,6 +1956,10 @@ impl AgentDriverClient {
 
     pub async fn connection_info(&mut self, timeout_duration: Option<Duration>) -> Result<AgentConnectionInfo, String> {
         self.call_method_with_timeout(AgentMethod::ConnectionInfo, serde_json::json!({}), timeout_duration).await
+    }
+
+    pub(crate) fn set_identifier_quote(&mut self, identifier_quote: Option<String>) {
+        self.identifier_quote = identifier_quote.filter(|quote| !quote.trim().is_empty());
     }
 
     pub async fn disconnect(&mut self) -> Result<Value, String> {
@@ -3026,6 +3041,13 @@ fn agent_java_args_with_extra_opts(
         );
     }
 
+    // DM's driver reflects into NetworkInterface.index when the host contains '%'
+    // (multi-NIC addresses or IPv6 zone suffixes); without this open such connects
+    // fail with InaccessibleObjectException on the managed JRE 21.
+    if agent_jar_path_matches_key(jar_path, "dameng") {
+        args.push("--add-opens=java.base/java.net=ALL-UNNAMED".to_string());
+    }
+
     // Hive/Kerberos JDBC drivers read JAAS and krb5 settings during JVM startup,
     // so users need a process-level escape hatch before the agent jar is loaded.
     if let Some(extra) = extra_opts {
@@ -3338,6 +3360,7 @@ impl AgentDriverClient {
             shared_runtime: None,
             agent_session_id: None,
             cached_query: None,
+            identifier_quote: None,
         }
     }
 
@@ -3809,6 +3832,20 @@ mod tests {
     }
 
     #[test]
+    fn agent_java_args_open_java_net_for_dameng() {
+        let args = agent_java_args("/tmp/dbx/drivers/dameng/agent.jar");
+
+        assert!(args.iter().any(|arg| arg == "--add-opens=java.base/java.net=ALL-UNNAMED"));
+    }
+
+    #[test]
+    fn agent_java_args_do_not_open_java_net_for_other_agents() {
+        let args = agent_java_args("/tmp/dbx/drivers/highgo/agent.jar");
+
+        assert!(!args.iter().any(|arg| arg == "--add-opens=java.base/java.net=ALL-UNNAMED"));
+    }
+
+    #[test]
     fn agent_java_args_open_jdk_internals_for_ignite() {
         let args = agent_java_args("/tmp/dbx/drivers/ignite/agent.jar");
 
@@ -4049,6 +4086,7 @@ mod tests {
             shared_runtime: None,
             agent_session_id: None,
             cached_query: None,
+            identifier_quote: None,
         };
 
         let started_at = std::time::Instant::now();

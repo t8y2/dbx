@@ -55,6 +55,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useTheme } from "@/composables/useTheme";
 import { executeWithProductionContextGuard } from "@/lib/database/productionExecutionGuard";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
+import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import type {
   NacosBatchPreview,
   NacosBatchReport,
@@ -280,7 +281,7 @@ const namespace = computed(() => props.namespace ?? connectionInfo.value?.namesp
 const nacosProductionContext = computed(() => productionContextForDatabase(connectionStore.getConfig(props.connectionId), namespace.value));
 const batchTargetConnections = computed<NacosConfigTransferTarget[]>(() =>
   connectionStore.connections
-    .filter((connection) => connection.db_type === "nacos" && !connection.read_only)
+    .filter((connection) => connection.db_type === "nacos" && !connectionIsEffectivelyReadOnly(connection))
     .map((connection) => {
       const address = [connection.host, connection.port].filter(Boolean).join(":");
       return { id: connection.id, label: connection.name ? `${connection.name} (${address})` : address || connection.id };

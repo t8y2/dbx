@@ -554,7 +554,7 @@ async fn get_admin_with_operation_fingerprint(
 
 pub(crate) async fn ensure_connection_writable(state: &AppState, conn_id: &str, action: &str) -> Result<(), String> {
     let cfg = state.configs.read().await.get(conn_id).cloned().ok_or("Connection not found")?;
-    if cfg.read_only {
+    if cfg.read_only && !state.write_unlock_windows.is_active(conn_id).await {
         Err(format!("{action} is blocked because this connection is read-only"))
     } else {
         Ok(())

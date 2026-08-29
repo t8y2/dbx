@@ -631,16 +631,25 @@ describe("TableStructureEditor data type options", () => {
 });
 
 describe("TableStructureEditor action column", () => {
-  it("shows the field shortcut hints in the toolbar", async () => {
+  it("moves delayed shortcut hints onto the add, copy, and delete controls", async () => {
     const root = await mountEditor("dameng");
 
-    expect(root.textContent).toContain("settings.shortcutsTab");
-    expect(root.textContent).toContain("Shift+Enter");
-    expect(root.textContent).toContain("⌘/Ctrl+D");
-    expect(root.querySelector("[data-field-shortcut-hints]")?.className).toContain("flex-col");
-    expect(root.querySelector("[data-field-shortcut-hints]")?.className).toContain("w-56");
-    expect(root.querySelector("[data-field-shortcut-hints]")?.className).toContain("!bg-secondary");
-    expect(root.querySelector("[data-field-shortcut-hints] kbd")?.className).toContain("text-primary");
+    expect(root.textContent).not.toContain("settings.shortcutsTab");
+    expect(root.querySelector("[data-field-shortcut-hints]")).toBeNull();
+
+    const addTooltip = root.querySelector<HTMLElement>("[data-add-column-shortcut-tooltip]");
+    const copyTooltip = root.querySelector<HTMLElement>("[data-copy-column-shortcut-tooltip]");
+    const deleteTooltip = root.querySelector<HTMLElement>("[data-delete-column-shortcut-tooltip]");
+    expect(addTooltip?.getAttribute("delay-duration")).toBe("500");
+    expect(copyTooltip?.getAttribute("delay-duration")).toBe("500");
+    expect(deleteTooltip?.getAttribute("delay-duration")).toBe("500");
+    expect(root.querySelector("[data-add-column-shortcut-content]")?.textContent).toBe("Shift+Enter");
+    expect(root.querySelector("[data-copy-column-shortcut-content]")?.textContent).toBe("⌘/Ctrl+D");
+    expect(root.querySelector("[data-delete-column-shortcut-content]")?.textContent?.trim()).toBe("⌘/Ctrl+Del");
+    expect(root.querySelector("[data-add-column-shortcut-content]")?.textContent).not.toContain("structureEditor.addColumn");
+    expect(root.querySelector("[data-copy-column-shortcut-content]")?.textContent).not.toContain("structureEditor.copyColumn");
+    expect(copyTooltip?.querySelector("button")?.hasAttribute("title")).toBe(false);
+    expect(deleteTooltip?.querySelector("button")?.hasAttribute("title")).toBe(false);
   });
 
   it("adds a field below the focused input on Shift+Enter", async () => {
@@ -669,6 +678,63 @@ describe("TableStructureEditor action column", () => {
     const copiedInput = root.querySelector<HTMLInputElement>('[data-column-row-index="1"] [data-column-name-input]');
     expect(copiedInput?.value).toBe(sourceInput.value);
     expect(document.activeElement).toBe(copiedInput);
+  });
+
+  it.each([
+    { label: "Ctrl+Delete", event: { key: "Delete", ctrlKey: true } },
+    { label: "Cmd+Delete", event: { key: "Backspace", metaKey: true } },
+  ])("removes a focused unsaved field on $label", async ({ event }) => {
+    const root = await mountEditor("dameng");
+    buttonWithText(root, "structureEditor.addColumn").click();
+    await vi.waitFor(() => expect(root.querySelector('[data-column-row-index="1"]')).not.toBeNull());
+    const addedInput = root.querySelector<HTMLInputElement>('[data-column-row-index="1"] [data-column-name-input]');
+    if (!addedInput) throw new Error("Missing added column name input");
+
+    addedInput.focus();
+    addedInput.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, ...event }));
+
+    await vi.waitFor(() => expect(root.querySelector('[data-column-row-index="1"]')).toBeNull());
+    expect(root.querySelector('[data-column-row-index="0"]')).not.toBeNull();
+  });
+
+  it("marks a focused persisted field for deletion on Mod+Delete", async () => {
+    const root = await mountEditor("dameng");
+    const sourceInput = root.querySelector<HTMLInputElement>('[data-column-row-index="0"] [data-column-name-input]');
+    if (!sourceInput) throw new Error("Missing source column name input");
+
+    sourceInput.focus();
+    sourceInput.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Delete", ctrlKey: true }));
+
+    await vi.waitFor(() => expect(root.querySelector('button[aria-label="structureEditor.restore"]')).not.toBeNull());
+  });
+
+  it("keeps Ctrl+Backspace available for editing field text", async () => {
+    const root = await mountEditor("dameng");
+    buttonWithText(root, "structureEditor.addColumn").click();
+    await vi.waitFor(() => expect(root.querySelector('[data-column-row-index="1"]')).not.toBeNull());
+    const addedInput = root.querySelector<HTMLInputElement>('[data-column-row-index="1"] [data-column-name-input]');
+    if (!addedInput) throw new Error("Missing added column name input");
+
+    addedInput.focus();
+    addedInput.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Backspace", ctrlKey: true }));
+
+    await nextTick();
+    expect(root.querySelector('[data-column-row-index="1"]')).not.toBeNull();
+  });
+
+  it("keeps Cmd+Backspace available for editing non-empty field text", async () => {
+    const root = await mountEditor("dameng");
+    buttonWithText(root, "structureEditor.addColumn").click();
+    await vi.waitFor(() => expect(root.querySelector('[data-column-row-index="1"]')).not.toBeNull());
+    const addedInput = root.querySelector<HTMLInputElement>('[data-column-row-index="1"] [data-column-name-input]');
+    if (!addedInput) throw new Error("Missing added column name input");
+
+    addedInput.value = "name";
+    addedInput.focus();
+    addedInput.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Backspace", metaKey: true }));
+
+    await nextTick();
+    expect(root.querySelector('[data-column-row-index="1"]')).not.toBeNull();
   });
 
   it("widens the ordinal indicator for a two-digit primary-key row", async () => {

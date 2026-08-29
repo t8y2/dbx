@@ -1417,7 +1417,7 @@ function showDropInside(targetId: string) {
         </DialogHeader>
         <DialogFooter>
           <Button variant="outline" size="sm" @click="showDeleteConfirm = false">{{ t("dangerDialog.cancel") }}</Button>
-          <Button variant="destructive" size="sm" @click="executeDelete">{{ t("dangerDialog.confirm") }}</Button>
+          <Button variant="destructive" size="sm" @click="executeDelete">{{ t("dangerDialog.deleteConfirm") }}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -1433,7 +1433,7 @@ function showDropInside(targetId: string) {
         </DialogHeader>
         <DialogFooter>
           <Button variant="outline" size="sm" @click="showBatchDeleteConfirm = false">{{ t("dangerDialog.cancel") }}</Button>
-          <Button variant="destructive" size="sm" @click="executeBatchDelete">{{ t("dangerDialog.confirm") }}</Button>
+          <Button variant="destructive" size="sm" @click="executeBatchDelete">{{ t("dangerDialog.deleteConfirm") }}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

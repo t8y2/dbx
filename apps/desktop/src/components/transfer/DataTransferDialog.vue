@@ -12,6 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import SearchableSelect from "@/components/ui/searchable-select/SearchableSelect.vue";
 import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { ensureReadOnlyWriteAccess } from "@/lib/database/readOnlyWriteAccess";
 import * as api from "@/lib/backend/api";
 import type { TransferContent, TransferMode, TransferObjectKind, TransferTableNameCase } from "@/lib/backend/api";
 import { crossFamilyTransferableKinds, isSameTransferFamily, transferObjectKindsForDatabase } from "@/lib/database/transferObjectKinds";
@@ -735,6 +736,9 @@ function swapSourceAndTarget() {
 
 async function startTransfer() {
   if (!canStart.value || isSubmitting.value) return;
+  if (!(await ensureReadOnlyWriteAccess({ connection: store.getConfig(targetConnectionId.value), source: t("readOnlyUnlock.sourceTransfer"), treatAsMutation: true }))) {
+    return;
+  }
   isSubmitting.value = true;
 
   const effectiveSourceSchema = sourceSchema.value || sourceDatabaseName.value;

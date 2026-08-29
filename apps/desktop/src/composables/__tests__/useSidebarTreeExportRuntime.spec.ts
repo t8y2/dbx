@@ -151,20 +151,20 @@ describe("useSidebarTreeExportRuntime", () => {
     expect(showStructurePreviewDialog.value).toBe(true);
   });
 
-  it("prompts for the header mode before it opens the save dialog when comments exist", () => {
+  it("prompts for export options before it opens the save dialog", () => {
     const exportDataXlsx = functionBody("exportDataXlsx");
 
     expect(source).toContain('import XlsxHeaderDialog from "@/components/export/XlsxHeaderDialog.vue"');
     expect(exportDataXlsx).toContain("await api.getColumns(");
     expect(exportDataXlsx).toContain("hasXlsxHeaderComments(columnInfos?.map((column) => column.comment))");
-    expect(exportDataXlsx.indexOf("await showSidebarTreeXlsxHeaderDialog(")).toBeLessThan(exportDataXlsx.indexOf('await exportTableData(target, "xlsx", columnInfos, headerMode)'));
+    expect(exportDataXlsx.indexOf("await showSidebarTreeXlsxHeaderDialog(")).toBeLessThan(exportDataXlsx.indexOf('await exportTableData(target, "xlsx", columnInfos, exportOptions.headerMode, exportOptions.autoFilter)'));
   });
 
   it("falls back to field-name headers when column metadata is unavailable", () => {
     const exportDataXlsx = functionBody("exportDataXlsx");
 
     expect(exportDataXlsx).toContain("catch {\n      // Export still works with field-name headers when column metadata is unavailable.\n    }");
-    expect(exportDataXlsx).toContain('await exportTableData(target, "xlsx", columnInfos, headerMode)');
+    expect(exportDataXlsx).toContain('await exportTableData(target, "xlsx", columnInfos, exportOptions.headerMode, exportOptions.autoFilter)');
   });
 
   it("sends the selected mode's header overrides to both XLSX export paths", () => {

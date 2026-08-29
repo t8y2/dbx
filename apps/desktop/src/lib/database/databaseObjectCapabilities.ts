@@ -69,7 +69,8 @@ const DATABASE_TYPE_OBJECTS = new Map<DatabaseType, SidebarObjectKind[]>([
   // MV support that the backend cannot route.
   ["doris", TABLE_VIEW_OBJECTS],
   ["starrocks", TABLE_VIEW_MV_OBJECTS],
-  ["hive", TABLE_VIEW_OBJECTS],
+  // Inceptor/Hive routines can be listed via JDBC plugin fallbacks (system.procedures_v/functions_v).
+  ["hive", ROUTINE_OBJECTS],
   ["kyuubi", TABLE_VIEW_OBJECTS],
   ["impala", TABLE_VIEW_OBJECTS],
   ["spark", TABLE_VIEW_OBJECTS],

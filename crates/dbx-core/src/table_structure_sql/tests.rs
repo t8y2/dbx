@@ -772,8 +772,8 @@ fn dameng_integer_column_omits_mysql_display_width() {
     assert_eq!(
         result.statements,
         vec![
-            "ALTER TABLE \"SYSDBA\".\"users\" ADD (\"age\" integer);",
-            "ALTER TABLE \"SYSDBA\".\"users\" ADD (\"amount\" number(10,0));",
+            "ALTER TABLE \"SYSDBA\".\"users\" ADD (\"age\" INTEGER);",
+            "ALTER TABLE \"SYSDBA\".\"users\" ADD (\"amount\" NUMBER(10,0));",
         ]
     );
 }
@@ -1746,7 +1746,7 @@ fn mysql_add_timestamp_column_drops_invalid_precision() {
     assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(
         result.statements,
-        vec!["ALTER TABLE `users` ADD COLUMN `created_at` timestamp DEFAULT CURRENT_TIMESTAMP;"]
+        vec!["ALTER TABLE `users` ADD COLUMN `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP;"]
     );
 }
 
@@ -1774,7 +1774,7 @@ fn mysql_add_timestamp_column_preserves_valid_precision() {
     assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(
         result.statements,
-        vec!["ALTER TABLE `users` ADD COLUMN `created_at` timestamp(3) DEFAULT CURRENT_TIMESTAMP(3);"]
+        vec!["ALTER TABLE `users` ADD COLUMN `created_at` timestamp(3) NULL DEFAULT CURRENT_TIMESTAMP(3);"]
     );
 }
 
@@ -2776,6 +2776,32 @@ fn dameng_add_column_with_identity() {
 
     assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(result.statements, vec!["ALTER TABLE \"SYSDBA\".\"TEST\" ADD (\"ID\" INT IDENTITY(10, 2));"]);
+}
+
+#[test]
+fn dameng_uppercases_lowercase_column_type() {
+    let mut status = column("STATUS");
+    status.data_type = "varchar(50)".to_string();
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Dameng),
+        schema: Some("SYSDBA".to_string()),
+        table_name: "TEST".to_string(),
+        columns: vec![status],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    // A lower-case type keyword must not reach the DDL: Dameng would store it
+    // as a USER-DEFINED type instead of the built-in VARCHAR (issue #7343).
+    assert_eq!(result.statements, vec!["ALTER TABLE \"SYSDBA\".\"TEST\" ADD (\"STATUS\" VARCHAR(50));"]);
 }
 
 #[test]
@@ -6524,4 +6550,121 @@ fn gaussdb_m_create_table_with_primary_key() {
     assert!(result.warnings.is_empty());
     let sql = result.statements.join("\n");
     assert!(sql.contains("PRIMARY KEY (`id`)"));
+}
+
+#[test]
+fn mysql_create_table_nullable_timestamp_without_default_gets_explicit_null() {
+    // A second (or later) MySQL TIMESTAMP column that is nullable but has no
+    // DEFAULT must carry an explicit NULL keyword — otherwise MySQL either
+    // silently rewrites it to NOT NULL or, with the still-common
+    // explicit_defaults_for_timestamp=OFF server default, rejects it outright
+    // with ERROR 1067 (42000): Invalid default value. See issue #7416.
+    let mut created_at = column("created_at");
+    created_at.data_type = "timestamp".to_string();
+    created_at.is_nullable = false;
+
+    let mut updated_at = column("updated_at");
+    updated_at.data_type = "timestamp".to_string();
+    updated_at.is_nullable = true;
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "u7_game_order_step".to_string(),
+        columns: vec![created_at, updated_at],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert!(result.statements[0].contains("`updated_at` timestamp NULL"));
+    assert!(!result.statements[0].contains("`updated_at` timestamp NULL DEFAULT"));
+}
+
+#[test]
+fn mysql_create_table_nullable_timestamp_with_default_still_gets_explicit_null() {
+    // Even with an explicit DEFAULT, MySQL still needs the NULL keyword to
+    // keep the column nullable — omitting it silently produces NOT NULL.
+    let mut updated_at = column("updated_at");
+    updated_at.data_type = "timestamp".to_string();
+    updated_at.is_nullable = true;
+    updated_at.default_value = "CURRENT_TIMESTAMP".to_string();
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "events".to_string(),
+        columns: vec![updated_at],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert!(result.statements[0].contains("`updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP"));
+}
+
+#[test]
+fn mysql_create_table_nullable_datetime_does_not_gain_null_keyword() {
+    // DATETIME is not subject to MySQL's TIMESTAMP-specific implicit-default
+    // quirk; the fix must not touch it.
+    let mut updated_at = column("updated_at");
+    updated_at.data_type = "datetime".to_string();
+    updated_at.is_nullable = true;
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "events".to_string(),
+        columns: vec![updated_at],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert!(!result.statements[0].contains("NULL"));
+}
+
+#[test]
+fn mysql_add_column_nullable_timestamp_without_default_gets_explicit_null() {
+    // The ADD COLUMN / MODIFY COLUMN / CHANGE COLUMN path shares
+    // column_definition() with CREATE TABLE and must carry the same fix.
+    let mut updated_at = column("updated_at");
+    updated_at.data_type = "timestamp".to_string();
+    updated_at.is_nullable = true;
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "u7_game_order_step".to_string(),
+        columns: vec![updated_at],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE `u7_game_order_step` ADD COLUMN `updated_at` timestamp NULL;"]);
 }

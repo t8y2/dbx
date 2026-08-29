@@ -87,6 +87,7 @@ describe("Nacos connection dialog layout", () => {
 
   it("guides namespace listing permission failures to manual scope entry", () => {
     expect(source).toContain("function isNacosNamespaceListingPermissionError(error: unknown): boolean");
+    expect(source).toContain("NACOS_ERROR\\[rnacosNamespaceDirectoryUnavailable\\]");
     expect(source).toContain("NACOS_ERROR\\[(?:v3ManagedNamespacesRequired|managedNamespacesRequired)\\]");
     expect(source).toContain("/\\/v3\\/(?:admin|console)\\/core\\/namespace\\/list/");
     expect(source).toContain("visibleNacosNamespaceListingPermissionDenied.value = isNacosNamespaceListingPermissionError(e)");
@@ -110,7 +111,9 @@ describe("Nacos connection dialog layout", () => {
     expect(source).toContain('if (isNacosV3AdminPlane.value) return "nacos.nacosV3AdminManagedNamespacesHint"');
     expect(source).toContain('if (isNacosV3ConsolePlane.value) return "nacos.nacosV3ConsoleManagedNamespacesHint"');
     expect(source).toContain('v-if="isNacosV3AdminPlane" class="flex gap-2 rounded-md border border-amber-500/30');
-    expect(source).toMatch(/const resolvedNamespaces = isNacosV3AdminPlane\.value\s*\?\s*manualNamespaces\s*:\s*await resolveManualNacosNamespaceNames\(manualNamespaces\);/);
+    expect(source).toContain('isNacosV3AdminPlane.value || nacosImplementation.value === "rnacos"');
+    expect(source).toContain("? manualNamespaces");
+    expect(source).toContain(": await resolveManualNacosNamespaceNames(manualNamespaces)");
   });
 
   it("opens namespace access setup instead of showing a save validation error", () => {

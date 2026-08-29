@@ -226,6 +226,12 @@ function selectAllHeader(host: HTMLElement): HTMLElement {
   return header;
 }
 
+function rowNumber(host: HTMLElement, rowIndex = 0): HTMLElement {
+  const cell = host.querySelector<HTMLElement>(`[data-row-index="${rowIndex}"] .data-grid-row-number`);
+  if (!cell) throw new Error(`Row number not found: ${rowIndex}`);
+  return cell;
+}
+
 function openContextMenu(target: HTMLElement) {
   target.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 12, clientY: 12 }));
 }
@@ -294,6 +300,32 @@ describe("DataGrid context menu target lifecycle", () => {
 
     expect(contextMenuLabels()).toContain("Copy Selected Column Names (2)");
     expect(contextMenuLabels()).toContain("Freeze Selected Columns");
+  });
+
+  it("offers snapshots for full-column selections from the column header", async () => {
+    const { host } = mountGrid(hydratedResult(1, "value"));
+    await settle();
+
+    openContextMenu(columnHeader(host, 1));
+    await settle();
+
+    expect(contextMenuLabels()).toContain("Screenshot selected columns");
+    contextMenuButton("Screenshot selected columns").click();
+    await settle();
+    expect(document.body.textContent).toContain("Grid Snapshot");
+  });
+
+  it("offers snapshots for full-row selections from the row number", async () => {
+    const { host } = mountGrid(hydratedResult(1, "value"));
+    await settle();
+
+    openContextMenu(rowNumber(host));
+    await settle();
+
+    expect(contextMenuLabels()).toContain("Screenshot selected rows");
+    contextMenuButton("Screenshot selected rows").click();
+    await settle();
+    expect(document.body.textContent).toContain("Grid Snapshot");
   });
 
   it.each(["WHERE", "ORDER BY"] as const)("keeps the native context menu for the %s condition editor", async (placeholder) => {
@@ -606,5 +638,36 @@ describe("DataGrid visible large-value preview lifecycle", () => {
     await settle();
 
     expect(visibleHydrationCalls()).toHaveLength(0);
+  });
+});
+
+describe("DataGrid DOM initial scroll position", () => {
+  it("keeps the first row visible while the virtual list finishes measuring", async () => {
+    const { host, replaceResult } = mountGrid(hydratedResult(1, "value"));
+    await settle();
+
+    const scroller = host.querySelector<HTMLElement>(".data-grid-scroller");
+    if (!scroller) throw new Error("Data grid scroller not found");
+    Object.defineProperties(scroller, {
+      scrollTop: { configurable: true, writable: true, value: 0 },
+      scrollWidth: { configurable: true, value: 1200 },
+      clientWidth: { configurable: true, value: 600 },
+      clientHeight: { configurable: true, value: 500 },
+      scrollHeight: {
+        configurable: true,
+        get: () => (scroller.classList.contains("has-horizontal-scrollbar") ? 2600 : 500),
+      },
+    });
+
+    replaceResult({
+      columns: ["id", "payload"],
+      rows: Array.from({ length: 100 }, (_, index) => [index + 1, `row-${index + 1}`]),
+      affected_rows: 0,
+      execution_time_ms: 0,
+    });
+    await settle();
+
+    expect(scroller.classList.contains("has-horizontal-scrollbar")).toBe(true);
+    expect(scroller.scrollTop).toBe(0);
   });
 });

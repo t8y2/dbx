@@ -22,6 +22,24 @@ class DamengAgentUrlTest {
     }
 
     @Test
+    void rebuildsLegacyDbxUrlFromConnectionFields() throws Exception {
+        ConnectParams params = new ConnectParams(
+            "127.0.0.1",
+            5236,
+            "MAIN",
+            "SYSDBA",
+            "pwd",
+            "",
+            "dm://SYSDBA:SYSDBA@legacy-host:5236/OLD",
+            false
+        );
+
+        String url = invokeBuildUrl(params);
+
+        Assertions.assertEquals("jdbc:dm://127.0.0.1:5236/MAIN", url);
+    }
+
+    @Test
     void usesCompleteCustomJdbcUrlWithoutRewritingIt() throws Exception {
         ConnectParams params = new ConnectParams(
             "ignored",

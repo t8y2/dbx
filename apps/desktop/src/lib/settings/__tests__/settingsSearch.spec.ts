@@ -66,6 +66,18 @@ describe("settings search", () => {
     expect(SETTINGS_SEARCH_DEFINITIONS.map((definition) => definition.id)).not.toContain("editor-global-query-timeout");
   });
 
+  it("indexes the multi-statement default view and its settings control", () => {
+    expect(SETTINGS_SEARCH_DEFINITIONS).toContainEqual({
+      id: "multi-statement-default-view",
+      category: "data",
+      titleKey: "settings.multiStatementDefaultView",
+      descriptionKey: "settings.multiStatementDefaultViewDescription",
+      targetId: "multi-statement-default-view",
+    });
+    expect(settingsDialogSource).toContain('data-settings-search-id="multi-statement-default-view"');
+    expect(settingsDialogSource).toContain('v-model="editMultiStatementDefaultView"');
+  });
+
   it("matches translated title, description, and category without changing declared order", () => {
     const entries = resolveSettingsSearchEntries(definitions, { isWeb: false, visibleCategories: allCategories }, translate, categoryLabels);
     expect(searchSettings(entries, "TYPEFACE", "en").map((entry) => entry.id)).toEqual(["font"]);

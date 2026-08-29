@@ -148,7 +148,7 @@ fn maps_table_pagination_strategy_by_database_type() {
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Oscar)), TablePaginationStrategy::Rownum);
     assert_eq!(
         pagination_strategy(Some(DatabaseType::Oracle), PaginationContext::BoundedRead),
-        TablePaginationStrategy::FetchFirst
+        TablePaginationStrategy::Rownum
     );
     assert_eq!(
         pagination_strategy(Some(DatabaseType::Oscar), PaginationContext::BoundedRead),
@@ -1331,6 +1331,31 @@ fn builds_oracle_and_neo4j_table_data_queries() {
             }),
             "MATCH (n:`Employee`) RETURN elementId(n) AS `__DBX_ELEMENT_ID`, n.`id` AS `id`, n.`first name` AS `first name`, n.`role` AS `role` LIMIT 100;"
         );
+}
+
+#[test]
+fn builds_oracle_rowid_wrapped_large_value_reload_sql() {
+    // The data-grid large-value reload selects the synthetic rowid key plus the
+    // target column with a rowid equality filter; `__DBX_ROWID` exists only as
+    // the inline-view alias, never as a base-table column (ORA-00904).
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Oracle),
+            schema: Some("APP".to_string()),
+            table_name: "T_TEST".to_string(),
+            table_type: Some("TABLE".to_string()),
+            primary_keys: vec![DBX_ROWID_COLUMN.to_string()],
+            columns: vec![DBX_ROWID_COLUMN.to_string(), "ELM_CONTENT".to_string()],
+            where_input: Some("ROWIDTOCHAR(ROWID) = 'AAAFd1AAFAAAABSAA/'".to_string()),
+            fallback_order_columns: Vec::new(),
+            order_by: None,
+            limit: Some(1),
+            offset: Some(0),
+            include_row_id: true,
+            ..Default::default()
+        }),
+        "SELECT \"__DBX_ROWID\", \"ELM_CONTENT\" FROM (SELECT ROWIDTOCHAR(t.ROWID) AS \"__DBX_ROWID\", t.* FROM \"APP\".\"T_TEST\" t WHERE (ROWIDTOCHAR(ROWID) = 'AAAFd1AAFAAAABSAA/')) WHERE ROWNUM <= 1"
+    );
 }
 
 #[test]

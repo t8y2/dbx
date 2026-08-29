@@ -250,6 +250,41 @@ describe("DataGridPagination", () => {
     expect(summaryText).toContain("grid.rows");
   });
 
+  it("keeps the loading icon mounted with a constant footprint and only animates while loading", async () => {
+    const mounted = mountComponent(DataGridPagination, {
+      selectionSummary: null,
+      selectionSummarySumText: "",
+      selectionSummaryAverageText: "",
+      loading: false,
+      infiniteScrollEnabled: false,
+      infiniteScrollAllLoaded: false,
+      pageSize: 100,
+      customPageSizeInput: "",
+      pageSizeMenuItems: [],
+      exportMenuItems: [],
+      currentPage: 1,
+      canGoNextPage: false,
+      canJumpLastPage: false,
+    });
+    // Stable within this file's mountComponent+findAll format: Loader2 is the only Icon
+    // combining text-muted-foreground with w-3 h-3 in the pagination bar. Filtering by
+    // both avoids matching a future muted icon without introducing data-testid.
+    const findLoader = () => findAll(mounted.root, (node) => node.props["data-stub"] === "Icon" && String(node.props.class).includes("text-muted-foreground") && String(node.props.class).includes("w-3 h-3"));
+
+    const idleLoaders = findLoader();
+    expect(idleLoaders).toHaveLength(1);
+    expect(String(idleLoaders[0].props.class)).toContain("invisible");
+    expect(String(idleLoaders[0].props.class)).not.toContain("animate-spin");
+    expect(String(idleLoaders[0].props["aria-hidden"])).toContain("true");
+
+    await mounted.setProps({ loading: true });
+    const busyLoaders = findLoader();
+    expect(busyLoaders).toHaveLength(1);
+    expect(String(busyLoaders[0].props.class)).toContain("animate-spin");
+    expect(String(busyLoaders[0].props.class)).not.toContain("invisible");
+    expect(String(busyLoaders[0].props["aria-hidden"])).toContain("true");
+  });
+
   it("enforces first/previous/next/last disabled boundaries", async () => {
     const firstPage = vi.fn();
     const previousPage = vi.fn();

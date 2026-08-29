@@ -157,7 +157,7 @@ describe("queryStore hidden primary key editing", () => {
     expect(tab.queryAnalysis).toBeDefined();
     expect(tab.queryAnalysis?.allowInsert).toBe(false);
     expect(tab.queryEditabilityReason).toBeUndefined();
-  });
+  }, 10_000);
 
   it("keeps MySQL expression columns read-only without disabling direct columns", async () => {
     const sql = "SELECT id, status, extra->>'$.mode' mode, extra->>'$.template' tmpl FROM items";
@@ -801,6 +801,68 @@ describe("queryStore hidden primary key editing", () => {
     await execution;
   });
 
+  it("starts an Oracle star query when index metadata exceeds the preflight budget", async () => {
+    vi.useFakeTimers();
+    const columnsGate = deferred<Awaited<ReturnType<typeof getColumns>>>();
+    const indexesGate = deferred<Awaited<ReturnType<typeof listIndexes>>>();
+    try {
+      getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", query_timeout_secs: 30 });
+      getColumns.mockReturnValue(columnsGate.promise);
+      listIndexes.mockReturnValue(indexesGate.promise);
+      analyzeEditableQueryEditability.mockImplementation(async () => ({
+        editable: true,
+        analysis: {
+          schema: "APP",
+          tableName: "SLOW_METADATA_TABLE",
+          selectStar: true,
+          columns: [],
+        },
+      }));
+      executeMulti.mockResolvedValue([
+        {
+          columns: ["ID", "NAME"],
+          rows: [[1, "Alice"]],
+          affected_rows: 0,
+          execution_time_ms: 12,
+        },
+      ]);
+
+      const { useQueryStore } = await import("@/stores/queryStore");
+      const store = useQueryStore();
+      const tabId = store.createTab("oracle-1", "ORCL", "Query");
+      store.setAutoCommit(tabId, true);
+
+      const execution = store.executeTabSql(tabId, "SELECT * FROM APP.SLOW_METADATA_TABLE");
+      await vi.waitFor(() => expect(listIndexes).toHaveBeenCalledOnce());
+      expect(executeMulti).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.waitFor(() => expect(executeMulti).toHaveBeenCalledOnce());
+      expect(executeMulti).toHaveBeenCalledWith("oracle-1", "ORCL", "SELECT * FROM APP.SLOW_METADATA_TABLE", undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
+      await execution;
+
+      indexesGate.resolve([{ name: "PK_SLOW_METADATA_TABLE", columns: ["ID"], is_unique: true, is_primary: true }]);
+      columnsGate.resolve([
+        { name: "ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+        { name: "NAME", data_type: "VARCHAR2(100)", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+      ]);
+      await vi.waitFor(() => expect(store.tabs.find((item) => item.id === tabId)?.tableMeta?.primaryKeys).toEqual(["ID"]));
+
+      await store.executeTabSql(tabId, "SELECT * FROM APP.SLOW_METADATA_TABLE");
+      expect(executeMulti).toHaveBeenCalledTimes(2);
+      expect(listIndexes).toHaveBeenCalledOnce();
+      expect(getColumns).toHaveBeenCalledOnce();
+    } finally {
+      indexesGate.resolve([{ name: "PK_SLOW_METADATA_TABLE", columns: ["ID"], is_unique: true, is_primary: true }]);
+      columnsGate.resolve([
+        { name: "ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+        { name: "NAME", data_type: "VARCHAR2(100)", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+      ]);
+      await vi.runAllTimersAsync();
+      vi.useRealTimers();
+    }
+  });
+
   it("waits for first-run Oracle XMLTYPE metadata before manual transaction execution", async () => {
     const columnsGate = deferred<Awaited<ReturnType<typeof getColumns>>>();
     getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", query_timeout_secs: 30 });
@@ -844,7 +906,7 @@ describe("queryStore hidden primary key editing", () => {
     await execution;
 
     expect(beginManualTransaction).toHaveBeenCalledWith("oracle-1", "ORCL", undefined, undefined);
-    expect(executeInManualTransaction).toHaveBeenCalledWith("txn-1", "SELECT t.* FROM APP.WIDE_TABLE t", "ORCL", undefined, expect.any(Number), true);
+    expect(executeInManualTransaction).toHaveBeenCalledWith("txn-1", "SELECT t.* FROM APP.WIDE_TABLE t", "ORCL", undefined, expect.any(Number), true, undefined, undefined, "SELECT t.* FROM APP.WIDE_TABLE t");
     expect(store.tabs.find((tab) => tab.id === tabId)?.result?.large_value_cells).toEqual([{ row_index: 0, column_index: 1, original_bytes: 81920 }]);
   });
 
@@ -890,7 +952,7 @@ describe("queryStore hidden primary key editing", () => {
     await store.executeTabSql(tabId, sql);
     const tab = store.tabs.find((item) => item.id === tabId)!;
     expect(tab.autoCommit).toBe(false);
-    expect(executeInManualTransaction).toHaveBeenNthCalledWith(1, "txn-1", sql, "ORCL", undefined, expect.any(Number), false, 100, undefined);
+    expect(executeInManualTransaction).toHaveBeenNthCalledWith(1, "txn-1", sql, "ORCL", undefined, expect.any(Number), false, 100, undefined, sql);
     expect(tab.result?.rows).toHaveLength(100);
 
     await store.executeTabSql(tabId, sql, {
@@ -902,7 +964,7 @@ describe("queryStore hidden primary key editing", () => {
       replaceActiveResultInGroup: true,
     });
 
-    expect(executeInManualTransaction).toHaveBeenNthCalledWith(2, "txn-1", sql, "ORCL", undefined, expect.any(Number), false, 100, "oracle-go-1");
+    expect(executeInManualTransaction).toHaveBeenNthCalledWith(2, "txn-1", sql, "ORCL", undefined, expect.any(Number), false, 100, "oracle-go-1", undefined);
     expect(tab.result?.rows).toHaveLength(200);
     expect(tab.result?.rows[100]).toEqual([101]);
   });
@@ -959,7 +1021,7 @@ describe("queryStore hidden primary key editing", () => {
 
     await store.executeTabSql(tabId, "SELECT name FROM users");
 
-    expect(executeInManualTransaction).toHaveBeenCalledWith("txn-1", "SELECT name, `id` AS `__DBX_PK_0` FROM users", "app", undefined, expect.any(Number), false);
+    expect(executeInManualTransaction).toHaveBeenCalledWith("txn-1", "SELECT name, `id` AS `__DBX_PK_0` FROM users", "app", undefined, expect.any(Number), false, undefined, undefined, undefined);
   });
 
   it("keeps a keyless Oracle query editable when its WHERE clause reads another table", async () => {

@@ -608,14 +608,21 @@ pub(super) fn build_select_columns(
             .collect::<Vec<_>>()
             .join(", ");
     }
-    if !matches!(database_type, Some(DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala)) {
+    if !matches!(
+        database_type,
+        Some(DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::InfluxDb)
+    ) {
         return "*".to_string();
     }
     columns
         .iter()
         .map(|column| {
             let ident = quote_table_identifier(database_type, column);
-            format!("{ident} AS {ident}")
+            if database_type == Some(DatabaseType::Hive) {
+                format!("{ident} AS {ident}")
+            } else {
+                ident
+            }
         })
         .collect::<Vec<_>>()
         .join(", ")

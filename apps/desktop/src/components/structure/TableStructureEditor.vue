@@ -1022,7 +1022,7 @@ const filteredIndexRowIds = computed(() => {
 });
 const indexSearchMatchCount = computed(() => (indexSearchText.value.trim() ? filteredIndexRowIds.value.size : 0));
 const foreignKeyActionOptions = ["", "CASCADE", "SET NULL", "RESTRICT", "NO ACTION"];
-const triggerTimingOptions = ["BEFORE", "AFTER"];
+const triggerTimingOptions = computed(() => (databaseType.value === "sqlserver" ? ["AFTER", "INSTEAD OF"] : ["BEFORE", "AFTER"]));
 const triggerEventOptions = ["INSERT", "UPDATE", "DELETE"];
 const metadataSchema = computed(() => connectionObjectTreeQuerySchema(connection.value, props.database, props.schema));
 const refreshVersion = computed(() => (props.connectionId && props.tableName ? queryStore.tableStructureRefreshVersion(props.connectionId, props.database, props.schema, props.tableName) : 0));
@@ -3269,8 +3269,9 @@ function canDropIndex(index: EditableStructureIndex): boolean {
 }
 
 const canEditForeignKeys = computed(() => structureCapabilities.value.foreignKey);
-const canEditTriggers = computed(() => structureDialect.value === "mysql" || structureDialect.value === "oracle");
+const canEditTriggers = computed(() => structureDialect.value === "mysql" || structureDialect.value === "oracle" || structureDialect.value === "sqlserver");
 const isOracleTriggerEditor = computed(() => structureDialect.value === "oracle");
+const isSqlServerTriggerEditor = computed(() => structureDialect.value === "sqlserver");
 
 function generatedForeignKeyName(column = ""): string {
   const table = structureIndexTableName() || "table";
@@ -3323,9 +3324,9 @@ function addTrigger() {
   triggers.value.push({
     id: `new:${uuid()}`,
     name: "",
-    timing: isOracleTriggerEditor.value ? "BEFORE EACH ROW" : "BEFORE",
+    timing: isOracleTriggerEditor.value ? "BEFORE EACH ROW" : isSqlServerTriggerEditor.value ? "AFTER" : "BEFORE",
     event: "INSERT",
-    statement: isOracleTriggerEditor.value ? "BEGIN\n  NULL;\nEND" : "BEGIN\n  \nEND",
+    statement: isOracleTriggerEditor.value ? "BEGIN\n  NULL;\nEND" : isSqlServerTriggerEditor.value ? "BEGIN\n  SET NOCOUNT ON;\nEND" : "BEGIN\n  \nEND",
     markedForDrop: false,
   });
 }
@@ -4725,7 +4726,7 @@ watch([activeTab, loading, ddlLoading, ddlContent], ([tab, structureIsLoading, d
                       <SelectItem v-for="timing in triggerTimingOptions" :key="timing" :value="timing">{{ timing }}</SelectItem>
                     </SelectContent>
                   </Select>
-                  <Input v-if="isOracleTriggerEditor" v-model="trigger.event" :class="structureControlClass" :disabled="!canEditTriggerDraft(trigger)" />
+                  <Input v-if="isOracleTriggerEditor || isSqlServerTriggerEditor" v-model="trigger.event" :class="structureControlClass" :disabled="!canEditTriggerDraft(trigger)" />
                   <Select v-else v-model="trigger.event" :disabled="!canEditTriggerDraft(trigger)">
                     <SelectTrigger class="h-[var(--structure-control-height)] rounded-[6px] px-[var(--structure-control-px)] text-[length:var(--structure-font-size)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25">
                       <SelectValue />
@@ -4735,6 +4736,9 @@ watch([activeTab, loading, ddlLoading, ddlContent], ([tab, structureIsLoading, d
                     </SelectContent>
                   </Select>
                   <div class="flex items-center justify-end gap-1">
+                    <Badge v-if="trigger.original && trigger.original.enabled !== undefined && trigger.original.enabled !== null" variant="outline" class="shrink-0 text-[length:var(--structure-font-size)]">
+                      {{ trigger.original.enabled ? t("damengJobAdmin.enabled") : t("damengJobAdmin.disabled") }}
+                    </Badge>
                     <Button v-if="trigger.original" variant="ghost" size="sm" :class="structureToolbarButtonClass" @click="toggleDropTrigger(trigger)">
                       <Trash2 :class="structureIconClass" />
                       {{ trigger.markedForDrop ? t("structureEditor.restore") : t("structureEditor.drop") }}

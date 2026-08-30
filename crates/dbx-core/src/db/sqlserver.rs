@@ -2849,7 +2849,7 @@ pub async fn list_triggers(
             level: None,
             condition: None,
             language: None,
-            enabled: None,
+            enabled: row.get::<bool, _>(4),
             valid: None,
             comment: None,
             created_at: None,
@@ -2860,10 +2860,16 @@ pub async fn list_triggers(
 
 fn sqlserver_triggers_sql(schema: &str, table: &str) -> String {
     format!(
-        "SELECT t.name, te.type_desc, CASE WHEN t.is_instead_of_trigger = 1 THEN 'INSTEAD OF' ELSE 'AFTER' END, \
-         OBJECT_DEFINITION(t.object_id) \
+        "SELECT t.name, \
+         STUFF((SELECT ', ' + te2.type_desc \
+                FROM sys.trigger_events te2 \
+                WHERE te2.object_id = t.object_id \
+                ORDER BY te2.type_desc \
+                FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, ''), \
+         CASE WHEN t.is_instead_of_trigger = 1 THEN 'INSTEAD OF' ELSE 'AFTER' END, \
+         OBJECT_DEFINITION(t.object_id), \
+         CASE WHEN t.is_disabled = 1 THEN CAST(0 AS bit) ELSE CAST(1 AS bit) END \
          FROM sys.triggers t \
-         JOIN sys.trigger_events te ON t.object_id = te.object_id \
          WHERE t.parent_id = OBJECT_ID('{s}.{t}') \
          ORDER BY t.name",
         s = schema.replace('\'', "''"),
@@ -4116,7 +4122,9 @@ mod tests {
         let sql = sqlserver_triggers_sql("d'bo", "t'able");
 
         assert!(sql.contains("OBJECT_DEFINITION(t.object_id)"));
-        assert!(sql.contains("JOIN sys.trigger_events te ON t.object_id = te.object_id"));
+        assert!(sql.contains("STUFF((SELECT ', ' + te2.type_desc"));
+        assert!(sql.contains("FOR XML PATH(''), TYPE"));
+        assert!(sql.contains("t.is_disabled"));
         assert!(sql.contains("OBJECT_ID('d''bo.t''able')"));
         assert!(sql.contains("ORDER BY t.name"));
         assert!(!sql.contains("STRING_AGG"));

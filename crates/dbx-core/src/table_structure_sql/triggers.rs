@@ -9,7 +9,7 @@ pub(super) fn build_trigger_sql(options: &TableStructureSqlOptions, warnings: &m
 
     let dialect = super::dialect::capabilities_for(options.database_type).dialect;
     let database_label = database_label(options.database_type);
-    if !matches!(dialect, StructureDialect::Mysql | StructureDialect::Oracle) {
+    if !matches!(dialect, StructureDialect::Mysql | StructureDialect::Oracle | StructureDialect::SqlServer) {
         if options.triggers.iter().any(has_trigger_edit) {
             warnings.push(format!("Editing triggers is not supported for {database_label} from this editor."));
         }
@@ -92,11 +92,100 @@ fn create_trigger_sql(
     }
     match dialect {
         StructureDialect::Mysql => create_mysql_trigger_sql(table, &name, &timing, &event, &statement, warnings),
+        StructureDialect::SqlServer => {
+            create_sqlserver_trigger_sql(schema, table, &name, &timing, &event, &statement, warnings)
+        }
         StructureDialect::Oracle => {
             create_oracle_trigger_sql(schema, table, &name, &timing, &event, &statement, warnings)
         }
         _ => None,
     }
+}
+
+fn create_sqlserver_trigger_sql(
+    schema: Option<&str>,
+    table: &str,
+    name: &str,
+    timing: &str,
+    event: &str,
+    statement: &str,
+    warnings: &mut Vec<String>,
+) -> Option<String> {
+    if !matches!(timing, "AFTER" | "INSTEAD OF") {
+        warnings.push(format!("Unsupported SQL Server trigger timing \"{timing}\"."));
+        return None;
+    }
+
+    let mut events = Vec::new();
+    for item in event.split([',', '\n']) {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+        let normalized_item = item.to_ascii_uppercase();
+        for event in normalized_item.split(" OR ") {
+            let event = event.trim().to_string();
+            if !matches!(event.as_str(), "INSERT" | "UPDATE" | "DELETE") {
+                warnings.push(format!("Unsupported SQL Server trigger event \"{}\".", item));
+                return None;
+            }
+            if !events.contains(&event) {
+                events.push(event);
+            }
+        }
+    }
+    if events.is_empty() {
+        warnings.push("SQL Server trigger event is required.".to_string());
+        return None;
+    }
+
+    let trigger_name = if schema.is_some_and(|schema| !schema.trim().is_empty()) {
+        format!(
+            "{}.{}",
+            quote_ident(StructureDialect::SqlServer, schema.unwrap()),
+            quote_ident(StructureDialect::SqlServer, name)
+        )
+    } else {
+        quote_ident(StructureDialect::SqlServer, name)
+    };
+    let body = sqlserver_trigger_body(statement);
+    if body.is_empty() {
+        warnings.push("SQL Server trigger statement is required.".to_string());
+        return None;
+    }
+    Some(format!(
+        "CREATE TRIGGER {trigger_name} ON {table} {timing} {} AS\n{};",
+        events.join(", "),
+        body.trim_end_matches(';').trim_end()
+    ))
+}
+
+fn sqlserver_trigger_body(statement: &str) -> &str {
+    let statement = statement.trim();
+    if statement.get(..2).is_some_and(|prefix| prefix.eq_ignore_ascii_case("AS")) {
+        return statement[2..].trim_start();
+    }
+    if !statement.to_ascii_uppercase().starts_with("CREATE TRIGGER") {
+        return statement;
+    }
+
+    let bytes = statement.as_bytes();
+    for index in 0..bytes.len().saturating_sub(1) {
+        if !bytes.get(index).is_some_and(|byte| byte.eq_ignore_ascii_case(&b'A'))
+            || !bytes.get(index + 1).is_some_and(|byte| byte.eq_ignore_ascii_case(&b'S'))
+        {
+            continue;
+        }
+        let before = index.checked_sub(1).and_then(|i| bytes.get(i)).copied();
+        let after = bytes.get(index + 2).copied();
+        if before.is_some_and(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            || after.is_some_and(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            continue;
+        }
+        return statement[index + 2..].trim_start();
+    }
+    statement
 }
 
 fn create_mysql_trigger_sql(

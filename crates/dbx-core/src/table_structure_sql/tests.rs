@@ -4950,6 +4950,75 @@ fn builds_mysql_trigger_changes() {
 }
 
 #[test]
+fn builds_sqlserver_trigger_with_multiple_events() {
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::SqlServer),
+        schema: Some("dbo".to_string()),
+        table_name: "orders".to_string(),
+        columns: Vec::new(),
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: vec![trigger("orders_audit", "AFTER", "INSERT, UPDATE", "BEGIN\n  SET NOCOUNT ON;\nEND")],
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "CREATE TRIGGER [dbo].[orders_audit] ON [dbo].[orders] AFTER INSERT, UPDATE AS\nBEGIN\n  SET NOCOUNT ON;\nEND;"
+        ]
+    );
+}
+
+#[test]
+fn rebuilds_changed_sqlserver_trigger_from_complete_metadata_source() {
+    let mut existing = trigger(
+        "orders_audit",
+        "AFTER",
+        "INSERT, UPDATE",
+        "CREATE TRIGGER dbo.orders_audit ON dbo.orders AFTER INSERT, UPDATE AS BEGIN SET NOCOUNT ON; INSERT INTO audit_log VALUES (1); END",
+    );
+    existing.original = Some(TriggerInfo {
+        name: "orders_audit".to_string(),
+        event: "INSERT, UPDATE".to_string(),
+        timing: "AFTER".to_string(),
+        statement: Some(
+            "CREATE TRIGGER dbo.orders_audit ON dbo.orders AFTER INSERT, UPDATE AS BEGIN SET NOCOUNT ON; INSERT INTO audit_log VALUES (0); END"
+                .to_string(),
+        ),
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::SqlServer),
+        schema: Some("dbo".to_string()),
+        table_name: "orders".to_string(),
+        columns: Vec::new(),
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: vec![existing],
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "DROP TRIGGER [dbo].[orders_audit];",
+            "CREATE TRIGGER [dbo].[orders_audit] ON [dbo].[orders] AFTER INSERT, UPDATE AS\nBEGIN SET NOCOUNT ON; INSERT INTO audit_log VALUES (1); END;"
+        ]
+    );
+}
+
+#[test]
 fn unchanged_postgres_trigger_does_not_block_column_rename() {
     let mut renamed = column("display_name");
     renamed.original = Some(ColumnInfo {

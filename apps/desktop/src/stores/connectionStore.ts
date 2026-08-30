@@ -148,7 +148,7 @@ import { appendConnectionErrorHints, isMysqlMissingPasswordFailure, isSqliteMiss
 import { connectionNeedsPasswordPrompt } from "@/lib/connection/connectionPassword";
 import { appendVisibleDatabaseSelection } from "@/lib/connection/connectionVisibleDatabases";
 import { buildXuguTypeMemberNodes, isXuguTypeMemberContainer } from "@/lib/sidebar/xuguTypeMembers";
-import { isXuguPublicSynonymScope, sortXuguSchemaInfos, xuguSchemaDisplayName, XUGU_PUBLIC_SYNONYM_SCOPE } from "@/lib/sidebar/xuguPublicSynonyms";
+import { isXuguPublicSynonymScope, isXuguSchedulerJobScope, isXuguSyntheticScope, sortXuguSchemaInfos, xuguSchemaDisplayName, XUGU_PUBLIC_SYNONYM_SCOPE, XUGU_SCHEDULER_JOB_SCOPE } from "@/lib/sidebar/xuguPublicSynonyms";
 import { filterNacosNamespacesForSidebar, normalizeNacosNamespacesForDisplay } from "@/lib/nacos/nacosNamespaceVisibility";
 import { buildPackageMemberNodes, markPackageNodesExpandable, packageMemberGroupOwnerId } from "@/lib/sidebar/packageMembers";
 import { configuredDatabaseProductName, connectionConfigFingerprint, normalizeDatabaseConnectionInfo } from "@/lib/connection/connectionDatabaseInfo";
@@ -1700,11 +1700,14 @@ export const useConnectionStore = defineStore("connection", () => {
     if (config?.db_type === "xugu" && isXuguPublicSynonymScope(schema)) {
       return ["SYNONYM"];
     }
+    if (config?.db_type === "xugu" && isXuguSchedulerJobScope(schema)) {
+      return ["JOB"];
+    }
     return supportedSidebarObjectTypes(config);
   }
 
   function objectTreeCacheVersion(config: ConnectionConfig | undefined, schema: string | undefined, baseVersion: string): string {
-    const scopedVersion = config?.db_type === "xugu" && isXuguPublicSynonymScope(schema) ? `${baseVersion}-public-synonyms` : baseVersion;
+    const scopedVersion = config?.db_type === "xugu" && isXuguPublicSynonymScope(schema) ? `${baseVersion}-public-synonyms` : config?.db_type === "xugu" && isXuguSchedulerJobScope(schema) ? `${baseVersion}-scheduler-jobs` : baseVersion;
     return ownerAwareMetadataCacheVersion(config, scopedVersion);
   }
 
@@ -3392,7 +3395,7 @@ export const useConnectionStore = defineStore("connection", () => {
   async function setDefaultSchema(connectionId: string, schema: string) {
     const config = getConfig(connectionId);
     const defaultSchema = schema.trim();
-    if (!config || !defaultSchema || config.default_schema === defaultSchema || (config.db_type === "xugu" && isXuguPublicSynonymScope(defaultSchema))) return;
+    if (!config || !defaultSchema || config.default_schema === defaultSchema || (config.db_type === "xugu" && isXuguSyntheticScope(defaultSchema))) return;
     await updateConnection({
       ...config,
       default_schema: defaultSchema,
@@ -5035,6 +5038,9 @@ export const useConnectionStore = defineStore("connection", () => {
           if (config?.db_type === "xugu" && schemas.some((schema) => isXuguPublicSynonymScope(schema.name))) {
             visibleSchemaNames.add(XUGU_PUBLIC_SYNONYM_SCOPE);
           }
+          if (config?.db_type === "xugu" && schemas.some((schema) => isXuguSchedulerJobScope(schema.name))) {
+            visibleSchemaNames.add(XUGU_SCHEDULER_JOB_SCOPE);
+          }
           const children: TreeNode[] = schemas
             .filter((schema) => visibleSchemaNames.has(schema.name))
             .map((schema) => {
@@ -5437,6 +5443,7 @@ export const useConnectionStore = defineStore("connection", () => {
           const config = getConfig(connectionId);
           const objectTreeProfile = driverProfileObjectTreeProfileForConnection(config);
           const isPublicSynonymScope = config?.db_type === "xugu" && isXuguPublicSynonymScope(schema);
+          const isSchedulerJobScope = config?.db_type === "xugu" && isXuguSchedulerJobScope(schema);
           const baseCacheVersion = objectTreeCacheVersion(config, schema, simpleObjectDisplay ? "objects-simple-v8" : "objects-grouped-v8");
           const cacheVersion = !simpleObjectDisplay && objectTreeProfile?.cacheKey ? `${baseCacheVersion}:${objectTreeProfile.cacheKey}` : baseCacheVersion;
           const cacheKey = schemaCacheKey(connectionId, database, schema || "", cacheVersion);
@@ -5460,7 +5467,7 @@ export const useConnectionStore = defineStore("connection", () => {
           const nonTableObjectTypes = simpleObjectDisplay ? sidebarObjectTypesForScope(config, schema).filter((objectType) => objectType !== "TABLE") : [];
           let children: TreeNode[];
           let nextObjectCount: number | undefined;
-          if (simpleObjectDisplay && !isPublicSynonymScope) {
+          if (simpleObjectDisplay && !isPublicSynonymScope && !isSchedulerJobScope) {
             const pageSize = sidebarObjectGroupPageSize();
             const page = await loadPagedSimpleTableChildren({
               nodeId,

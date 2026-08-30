@@ -55,10 +55,24 @@ const objectBrowserNodeTypes = new Set<TreeNodeType>(["database", "schema", "obj
 export function shouldOpenObjectBrowserOnSingleClick(type: TreeNodeType, enabled: boolean): boolean {
   return enabled && objectBrowserNodeTypes.has(type);
 }
-const sourceNodeTypes = new Set<TreeNodeType>(["materialized_view", "procedure", "function", "trigger", "event", "sequence", "synonym", "package", "package-body", "type", "type-body"]);
+const sourceNodeTypes = new Set<TreeNodeType>(["materialized_view", "procedure", "function", "trigger", "event", "sequence", "synonym", "job", "package", "package-body", "type", "type-body"]);
 const savedSqlNodeTypes = new Set<TreeNodeType>(["saved-sql-file"]);
 const tableChildGroupNodeTypes = new Set<TreeNodeType>(["group-columns", "group-indexes", "group-fkeys", "group-triggers", "group-constraints", "group-partitions", "group-table-partitions", "group-table-subpartitions"]);
-const databaseChildGroupNodeTypes = new Set<TreeNodeType>(["group-tables", "group-dolt-system-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-triggers", "group-events", "group-sequences", "group-synonyms", "group-packages", "group-types"]);
+const databaseChildGroupNodeTypes = new Set<TreeNodeType>([
+  "group-tables",
+  "group-dolt-system-tables",
+  "group-views",
+  "group-materialized-views",
+  "group-procedures",
+  "group-functions",
+  "group-triggers",
+  "group-events",
+  "group-sequences",
+  "group-synonyms",
+  "group-jobs",
+  "group-packages",
+  "group-types",
+]);
 const displayPathObjectNodeTypes = new Set<TreeNodeType>(["table", "view", "materialized_view", "procedure", "function", "trigger", "event"]);
 
 export function objectSourceKindForTreeNode(type: TreeNodeType): ObjectSourceKind | null {
@@ -70,6 +84,7 @@ export function objectSourceKindForTreeNode(type: TreeNodeType): ObjectSourceKin
   if (type === "event") return "EVENT";
   if (type === "sequence") return "SEQUENCE";
   if (type === "synonym") return "SYNONYM";
+  if (type === "job") return "JOB";
   if (type === "package") return "PACKAGE";
   if (type === "package-body") return "PACKAGE_BODY";
   if (type === "type") return "TYPE";

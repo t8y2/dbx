@@ -112,6 +112,8 @@ export function getTreeNodeIconInfo(node: TreeNode): TreeNodeIconInfo | null {
       return { icon: ListTree, colorClass: "text-emerald-500" };
     case "synonym":
       return { icon: Link2, colorClass: "text-sky-500" };
+    case "job":
+      return { icon: Clock, colorClass: "text-orange-400" };
     case "package":
       return { icon: Package, colorClass: "text-cyan-500" };
     case "package-body":
@@ -132,6 +134,8 @@ export function getTreeNodeIconInfo(node: TreeNode): TreeNodeIconInfo | null {
       return { icon: ListTree, colorClass: "text-emerald-500" };
     case "group-synonyms":
       return { icon: Link2, colorClass: "text-sky-500" };
+    case "group-jobs":
+      return { icon: Clock, colorClass: "text-orange-400" };
     case "group-packages":
       return { icon: Package, colorClass: "text-cyan-500" };
     case "group-partitions":

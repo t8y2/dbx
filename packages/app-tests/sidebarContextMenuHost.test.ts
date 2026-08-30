@@ -66,7 +66,7 @@ test("query-tab object source uses canonical identity and honors backend editabi
 
   assert.match(openObjectSourceBody, /queryStore\.openObjectSourceTab\(\{/);
   assert.match(openObjectSourceBody, /raw\.editable !== false/);
-  assert.match(openObjectSourceBody, /!\["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY"\]\.includes\(resolvedType\)/);
+  assert.match(openObjectSourceBody, /!\["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY", "JOB"\]\.includes\(resolvedType\)/);
   assert.match(openObjectSourceBody, /objectType: resolvedType/);
   assert.match(openObjectSourceBody, /signature: node\.signature/);
   assert.match(openObjectSourceBody, /createTab\(connectionId, database, `Source - \$\{node\.label\}`, "query", schema, editableSource, node\.catalog, \{ forceNew: true \}\)/);

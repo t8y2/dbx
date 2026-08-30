@@ -775,6 +775,13 @@ const groupDefs: Array<{
     childType: "synonym",
   },
   {
+    key: "__jobs",
+    label: "tree.schedulerJobs",
+    objectTypes: ["JOB"],
+    nodeType: "group-jobs",
+    childType: "job",
+  },
+  {
     key: "__packages",
     label: "tree.packages",
     objectTypes: ["PACKAGE", "PACKAGE_BODY"],
@@ -790,7 +797,7 @@ const groupDefs: Array<{
   },
 ];
 
-const objectGroupNodeTypes = new Set<TreeNodeType>(["group-tables", "group-dolt-system-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-triggers", "group-events", "group-sequences", "group-synonyms", "group-packages", "group-types"]);
+const objectGroupNodeTypes = new Set<TreeNodeType>(["group-tables", "group-dolt-system-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-triggers", "group-events", "group-sequences", "group-synonyms", "group-jobs", "group-packages", "group-types"]);
 
 export function buildObjectGroupPlaceholderNodes({
   nodeId,

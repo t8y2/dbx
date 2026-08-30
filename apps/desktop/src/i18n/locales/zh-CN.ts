@@ -3283,6 +3283,7 @@ export default withEnglishFallback({
     procedures: "存储过程",
     functions: "函数",
     sequences: "序列",
+    schedulerJobs: "定时作业",
     synonyms: "同义词",
     packages: "包",
     types: "类型",
@@ -3595,6 +3596,14 @@ export default withEnglishFallback({
     applySql: "执行 SQL",
     applySuccess: "作业操作已执行",
     applyFailed: "执行失败：{message}",
+  },
+  xuguSchedulerJob: {
+    enable: "启用",
+    disable: "禁用",
+    run: "立即运行",
+    drop: "删除作业",
+    confirmDrop: "确认删除定时作业「{name}」？此操作不可撤销。",
+    actionSuccess: "已对「{name}」完成{action}。",
   },
   damengUserAdmin: {
     title: "达梦用户",

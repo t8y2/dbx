@@ -1919,7 +1919,9 @@ function onMcpQueryTimeoutInput() {
     return;
   }
   const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed < 0 || !Number.isInteger(parsed)) {
+  // Backend stores the value as u64; keep out-of-range integers on the
+  // invalid-value path instead of failing serde later with a generic error.
+  if (!Number.isFinite(parsed) || parsed < 0 || !Number.isInteger(parsed) || parsed > Number("18446744073709551615")) {
     toast(t("settings.mcpQueryTimeoutInvalid"), 5000);
     mcpQueryTimeoutInput.value = settingsStore.mcpGlobalPolicy.queryTimeoutSecs === null ? "" : String(settingsStore.mcpGlobalPolicy.queryTimeoutSecs);
     return;

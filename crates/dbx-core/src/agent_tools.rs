@@ -1120,8 +1120,18 @@ async fn execute_explain_query(
         }
     };
 
-    // Execute the EXPLAIN query
-    let options = QueryExecutionOptions { max_rows: Some(100), timeout_secs: Some(30), ..Default::default() };
+    // Execute the EXPLAIN query. Timeout resolves like the execute path
+    // (per-call `timeout_secs` > connection effective timeout) so the global
+    // MCP timeout override covers EXPLAIN too.
+    let connection_config = state.configs.read().await.get(connection_id).cloned();
+    let options = QueryExecutionOptions {
+        max_rows: Some(100),
+        timeout_secs: Some(agent_query_timeout_secs(
+            tool_call.arguments.get("timeout_secs").and_then(Value::as_u64),
+            connection_config.as_ref(),
+        )),
+        ..Default::default()
+    };
     let result = match crate::query::execute_sql_statement_with_options(
         state,
         connection_id,

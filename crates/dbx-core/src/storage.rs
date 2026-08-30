@@ -45,11 +45,20 @@ const USER_DATA_TABLES: &[&str] = &[
     "connections",
     "connection_secrets",
     "history",
+    "ai_config",
+    "ai_provider_configs",
     "ai_conversations",
     "ai_runs",
+    "sidebar_layout",
+    "app_settings",
+    "app_state",
+    "tunnel_profiles",
     "mq_token_records",
     "saved_sql_folders",
     "saved_sql_files",
+    "ai_configs",
+    "state_store",
+    "prompt_templates",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5520,16 +5529,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn import_user_data_db_recognizes_settings_and_snippets_as_user_data() {
+        let source_dir = temp_data_dir("import-settings-only-source");
+        let source_storage = Storage::open(&source_dir.join("dbx.db")).await.unwrap();
+        source_storage
+            .save_desktop_settings(&DesktopSettings { debug_logging_enabled: true, ..DesktopSettings::default() })
+            .await
+            .unwrap();
+        source_storage
+            .save_editor_settings(&serde_json::json!({
+                "snippets": [{ "id": "custom", "prefix": "selc", "body": "SELECT 42" }]
+            }))
+            .await
+            .unwrap();
+        drop(source_storage);
+        let target_dir = temp_data_dir("import-settings-only-target");
+
+        let result = maybe_import_user_data_db(&target_dir, Some(&source_dir)).unwrap();
+
+        assert_eq!(result, DataDbImportResult::Imported);
+        let storage = Storage::open(&target_dir.join("dbx.db")).await.unwrap();
+        assert!(storage.load_desktop_settings().await.unwrap().debug_logging_enabled);
+        assert_eq!(storage.load_editor_settings().await.unwrap().unwrap()["snippets"][0]["body"], "SELECT 42");
+    }
+
+    #[tokio::test]
+    async fn import_user_data_db_does_not_overwrite_target_with_settings() {
+        let source_dir =
+            create_data_dir_with_connection("import-source-settings-target", "source-connection", "source-token").await;
+        let target_dir = temp_data_dir("import-target-settings-only");
+        let target_storage = Storage::open(&target_dir.join("dbx.db")).await.unwrap();
+        target_storage
+            .save_editor_settings(&serde_json::json!({
+                "snippets": [{ "id": "target", "prefix": "tgt", "body": "SELECT 7" }]
+            }))
+            .await
+            .unwrap();
+        drop(target_storage);
+
+        let result = maybe_import_user_data_db(&target_dir, Some(&source_dir)).unwrap();
+
+        assert_eq!(result, DataDbImportResult::SkippedTargetHasData);
+        let storage = Storage::open(&target_dir.join("dbx.db")).await.unwrap();
+        assert_eq!(storage.load_editor_settings().await.unwrap().unwrap()["snippets"][0]["body"], "SELECT 7");
+    }
+
+    #[tokio::test]
     async fn import_user_data_db_replaces_empty_target_schema() {
         let source_dir =
             create_data_dir_with_connection("import-source-empty-target", "source-connection", "source-token").await;
         let target_dir = temp_data_dir("import-empty-target");
-        let target_storage = Storage::open(&target_dir.join("dbx.db")).await.unwrap();
-        target_storage
-            .save_desktop_settings(&DesktopSettings { debug_logging_enabled: true, ..DesktopSettings::default() })
-            .await
-            .unwrap();
-        drop(target_storage);
+        let _target_storage = Storage::open(&target_dir.join("dbx.db")).await.unwrap();
 
         let result = maybe_import_user_data_db(&target_dir, Some(&source_dir)).unwrap();
 

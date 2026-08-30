@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { beforeEach, describe, expect, it } from "vitest";
-import { EXTERNAL_SQL_FILE_TARGETS_STORAGE_KEY, MAX_EXTERNAL_SQL_FILE_TARGETS, rememberExternalSqlFileTarget, resolveExternalSqlFileTarget, unassociatedExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
+import { EXTERNAL_SQL_FILE_TARGETS_STORAGE_KEY, MAX_EXTERNAL_SQL_FILE_TARGETS, forgetExternalSqlFileTarget, moveExternalSqlFileTarget, rememberExternalSqlFileTarget, resolveExternalSqlFileTarget, unassociatedExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
 
 describe("external SQL file targets", () => {
   beforeEach(() => {
@@ -52,6 +52,20 @@ describe("external SQL file targets", () => {
       database: "",
       catalog: undefined,
     });
+  });
+
+  it("moves and removes saved targets when a managed file is renamed or deleted", () => {
+    rememberExternalSqlFileTarget("C:\\work\\draft.sql", { connectionId: "saved-connection", database: "sales" });
+
+    moveExternalSqlFileTarget("C:/work/draft.sql", "C:/work/report.sql");
+    expect(resolveExternalSqlFileTarget("C:/work/draft.sql", () => true, unassociatedExternalSqlFileTarget())).toEqual(unassociatedExternalSqlFileTarget());
+    expect(resolveExternalSqlFileTarget("C:/work/report.sql", () => true, unassociatedExternalSqlFileTarget())).toMatchObject({
+      connectionId: "saved-connection",
+      database: "sales",
+    });
+
+    forgetExternalSqlFileTarget("C:/work/report.sql");
+    expect(resolveExternalSqlFileTarget("C:/work/report.sql", () => true, unassociatedExternalSqlFileTarget())).toEqual(unassociatedExternalSqlFileTarget());
   });
 
   it("ignores malformed persisted state", () => {

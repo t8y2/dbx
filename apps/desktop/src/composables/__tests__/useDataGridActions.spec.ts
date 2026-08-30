@@ -1,4 +1,4 @@
-import { computed } from "vue";
+import { computed, reactive } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useDataGridActions } from "@/composables/useDataGridActions";
 import { clearTableMetadataCache } from "@/lib/metadata/tableMetadataCache";
@@ -130,6 +130,7 @@ describe("useDataGridActions", () => {
   beforeEach(() => {
     clearTableMetadataCache();
     vi.clearAllMocks();
+    mocks.executeTabSql.mockReset();
     mocks.tabs.length = 0;
     mocks.tableOpenPageSize = 100;
     mocks.infiniteScroll = true;
@@ -541,6 +542,71 @@ describe("useDataGridActions", () => {
         },
       }),
     );
+  });
+
+  it("advances Elasticsearch cursors when jumping across pages", async () => {
+    mocks.infiniteScroll = false;
+    mocks.getConfig.mockReturnValue({ id: "elasticsearch-1", db_type: "elasticsearch" });
+    const tab = reactive({
+      id: "tab-1",
+      connectionId: "elasticsearch-1",
+      database: "",
+      title: "Query",
+      sql: "SELECT * FROM `dbx-app-logs-v1` AS dalv",
+      resultBaseSql: "SELECT * FROM `dbx-app-logs-v1` AS dalv",
+      resultPageLimit: 100,
+      resultPageOffset: 0,
+      resultSessionId: "cursor-1",
+      resultClientSessionId: "client-1",
+      result: {
+        columns: ["message"],
+        rows: [["page-1"]],
+        affected_rows: 100_000,
+        execution_time_ms: 1,
+        session_id: "cursor-1",
+        has_more: true,
+      },
+      mode: "query",
+      isDirty: false,
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+    } as QueryTab);
+    mocks.executeTabSql.mockImplementation(async (_id, _sql, options) => {
+      const pagination = options.pagination as { offset: number };
+      expect(tab.resultPageJumpProgress).toEqual({
+        completedRequests: pagination.offset / 100 - 1,
+        totalRequests: 3,
+        targetPage: 4,
+      });
+      if (options.retainDisplayedResult) {
+        expect(tab.resultPageOffset).toBe(0);
+        tab.resultSessionId = `cursor-${pagination.offset / 100 + 1}`;
+        return;
+      }
+      tab.resultPageOffset = pagination.offset;
+      tab.resultSessionId = `cursor-${pagination.offset / 100 + 1}`;
+      tab.result = {
+        columns: ["message"],
+        rows: [[`page-${pagination.offset / 100 + 1}`]],
+        affected_rows: 100_000,
+        execution_time_ms: 1,
+        session_id: `cursor-${pagination.offset / 100 + 1}`,
+        has_more: true,
+      };
+    });
+    const actions = useDataGridActions(computed(() => tab));
+
+    await actions.onPaginate(300, 100);
+
+    expect(mocks.executeTabSql.mock.calls.map((call) => call[2].pagination)).toEqual([
+      { offset: 100, limit: 100, sessionId: "cursor-1", clientSessionId: "client-1" },
+      { offset: 200, limit: 100, sessionId: "cursor-2", clientSessionId: "client-1" },
+      { offset: 300, limit: 100, sessionId: "cursor-3", clientSessionId: "client-1" },
+    ]);
+    expect(mocks.executeTabSql.mock.calls.map((call) => call[2].retainDisplayedResult)).toEqual([true, true, undefined]);
+    expect(tab.resultPageOffset).toBe(300);
+    expect(tab.resultPageJumpProgress).toBeUndefined();
   });
 
   it("uses the active multi-database result target for pagination", async () => {

@@ -81,6 +81,14 @@
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "localFile": true,
+      "managedDrivers": [
+        {
+          "key": "sqlite-worker",
+          "label": "SQLite SSH Worker",
+          "storeVisible": true,
+          "storeOrder": 48
+        }
+      ],
       "traits": {
         "diagramSql": true
       },

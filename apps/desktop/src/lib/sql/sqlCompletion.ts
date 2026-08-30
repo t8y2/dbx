@@ -1291,6 +1291,10 @@ export interface SqlCompletionItem {
   boost: number;
   exactMatch?: boolean;
   dedupeKey?: string;
+  /** Enables the query editor's checkbox-based batch insertion for this column. */
+  batchSelectionMode?: "select" | "insert";
+  /** Qualifier to prepend to every batch-selected column after the first one. */
+  batchSelectionQualifier?: string;
 }
 
 export function shouldChainSqlCompletionAfterAccept(item: { type?: string; apply?: string }): boolean {
@@ -4505,6 +4509,8 @@ function buildColumnItems(context: SqlCompletionContext, columnsByTable: Map<str
     .sort((left, right) => right.boost - left.boost || left.index - right.index)
     .slice(0, context.insertTable || !context.prefix ? 50 : context.qualifier ? 30 : 20);
 
+  const batchSelectionMode = context.insertTable ? "insert" : context.statementKind === "select" && context.selectListColumnContext ? "select" : undefined;
+
   return rankedColumns.map(({ column, boost }) => {
     return {
       label: column.displayLabel,
@@ -4514,6 +4520,11 @@ function buildColumnItems(context: SqlCompletionContext, columnsByTable: Map<str
       info: buildColumnInfo(column),
       apply: buildColumnApply(column, context, dialect),
       boost,
+      batchSelectionMode,
+      // The first selected column keeps the qualifier already present in the
+      // document. Subsequent columns must use that same user-typed qualifier,
+      // not a referenced-table alias which may be different from it.
+      batchSelectionQualifier: batchSelectionMode === "select" && context.qualifier ? (context.qualifierParts ?? context.qualifier.split(".").filter(Boolean)).map((part) => quoteCompletionApplyIdentifier(part, dialect)).join(".") : undefined,
     };
   });
 }

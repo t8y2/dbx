@@ -969,6 +969,63 @@ describe("queryStore hidden primary key editing", () => {
     expect(tab.result?.rows[100]).toEqual([101]);
   });
 
+  it("advances an Elasticsearch cursor without replacing the displayed page", async () => {
+    getConnectionConfig.mockReturnValue({ id: "elasticsearch-1", name: "Elasticsearch", db_type: "elasticsearch", query_timeout_secs: 30 });
+    analyzeEditableQueryEditability.mockResolvedValue({ editable: false, reason: "complex-query" });
+    prepareQueryPaginationExecutionPlan.mockImplementation(async (options) => ({
+      sqlToExecute: options.sql,
+      pageSql: options.sql,
+      pageLimit: options.pagination.limit,
+      pageOffset: options.pagination.offset,
+      countSql: undefined,
+      useAgentResultSession: true,
+    }));
+    executeMulti
+      .mockResolvedValueOnce([
+        {
+          columns: ["message"],
+          rows: [["page-1"]],
+          affected_rows: 20_000,
+          execution_time_ms: 1,
+          session_id: "cursor-1",
+          has_more: true,
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
+          columns: ["message"],
+          rows: [["page-2"]],
+          affected_rows: 20_000,
+          execution_time_ms: 1,
+          session_id: "cursor-2",
+          has_more: true,
+        },
+      ]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("elasticsearch-1", "", "Query");
+    const sql = "SELECT * FROM `dbx-app-logs-v1` AS dalv";
+
+    await store.executeTabSql(tabId, sql, { pagination: { limit: 100, offset: 0 } });
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    const displayedResult = tab.result;
+
+    await store.executeTabSql(tabId, sql, {
+      resultBaseSql: sql,
+      pagination: { limit: 100, offset: 100, sessionId: "cursor-1", clientSessionId: tab.resultClientSessionId },
+      preserveResultDuringExecution: true,
+      preserveTotalRowCountDuringExecution: true,
+      replaceActiveResultInGroup: true,
+      retainDisplayedResult: true,
+    });
+
+    expect(tab.result).toBe(displayedResult);
+    expect(tab.result?.rows).toEqual([["page-1"]]);
+    expect(tab.resultPageOffset).toBe(0);
+    expect(tab.resultSessionId).toBe("cursor-2");
+  });
+
   it("does not start an Oracle manual transaction after cancellation during metadata loading", async () => {
     const columnsGate = deferred<Awaited<ReturnType<typeof getColumns>>>();
     getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", query_timeout_secs: 30 });

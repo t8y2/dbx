@@ -123,6 +123,9 @@ fn preview_agent_offline_export_unlocked(am: &AgentManager) -> AgentOfflineExpor
     let mut candidates = Vec::new();
 
     for (db_type, label) in agent_catalog::driver_store_entries() {
+        if db_type == crate::agent_manager::SQLITE_WORKER_DRIVER_KEY {
+            continue;
+        }
         let has_artifact = am.driver_launch_config_path(db_type).exists()
             || am.driver_native_path(db_type).exists()
             || am.driver_jar_path(db_type).exists();

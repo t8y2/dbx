@@ -224,6 +224,8 @@ pub struct McpGlobalPolicy {
     #[serde(default)]
     pub allow_dangerous_sql: bool,
     pub allowed_connection_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub query_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -233,6 +235,8 @@ pub struct McpGlobalPolicyState {
     pub read_only: bool,
     pub allow_dangerous_sql: bool,
     pub allowed_connection_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub query_timeout_secs: Option<u64>,
 }
 
 impl McpGlobalPolicyState {
@@ -241,6 +245,7 @@ impl McpGlobalPolicyState {
             read_only: self.read_only,
             allow_dangerous_sql: self.allow_dangerous_sql,
             allowed_connection_ids: self.allowed_connection_ids.clone(),
+            query_timeout_secs: self.query_timeout_secs,
         }
     }
 }
@@ -1639,6 +1644,7 @@ impl Storage {
                         read_only: policy.read_only,
                         allow_dangerous_sql: policy.allow_dangerous_sql,
                         allowed_connection_ids: policy.allowed_connection_ids,
+                        query_timeout_secs: policy.query_timeout_secs,
                     });
                 };
                 let settings = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json)
@@ -1650,6 +1656,7 @@ impl Storage {
                         read_only: policy.read_only,
                         allow_dangerous_sql: policy.allow_dangerous_sql,
                         allowed_connection_ids: policy.allowed_connection_ids,
+                        query_timeout_secs: policy.query_timeout_secs,
                     });
                 };
                 let policy = serde_json::from_value::<McpGlobalPolicy>(value.clone())
@@ -1659,6 +1666,7 @@ impl Storage {
                     read_only: policy.read_only,
                     allow_dangerous_sql: policy.allow_dangerous_sql,
                     allowed_connection_ids: policy.allowed_connection_ids,
+                    query_timeout_secs: policy.query_timeout_secs,
                 })
             })
             .await;
@@ -6020,6 +6028,7 @@ mod tests {
                 read_only: false,
                 allow_dangerous_sql: false,
                 allowed_connection_ids: None,
+                query_timeout_secs: None,
             }
         );
 
@@ -6029,6 +6038,7 @@ mod tests {
                 read_only: true,
                 allow_dangerous_sql: true,
                 allowed_connection_ids: Some(vec!["conn-1".to_string(), "conn-2".to_string()]),
+                query_timeout_secs: Some(120),
             })
             .await
             .unwrap();
@@ -6040,6 +6050,7 @@ mod tests {
                 read_only: true,
                 allow_dangerous_sql: true,
                 allowed_connection_ids: Some(vec!["conn-1".to_string(), "conn-2".to_string()]),
+                query_timeout_secs: Some(120),
             }
         );
         assert_eq!(storage.load_password_hash().await.unwrap().as_deref(), Some("preserved"));
@@ -6047,6 +6058,7 @@ mod tests {
         assert_eq!(settings[MCP_GLOBAL_POLICY_KEY]["readOnly"], true);
         assert_eq!(settings[MCP_GLOBAL_POLICY_KEY]["allowDangerousSql"], true);
         assert_eq!(settings[MCP_GLOBAL_POLICY_KEY]["allowedConnectionIds"][0], "conn-1");
+        assert_eq!(settings[MCP_GLOBAL_POLICY_KEY]["queryTimeoutSecs"], 120);
         assert!(settings[MCP_GLOBAL_POLICY_KEY].get("configured").is_none());
 
         storage.save_desktop_settings(&DesktopSettings::default()).await.unwrap();
@@ -6119,6 +6131,7 @@ mod tests {
         let policy = storage.load_mcp_global_policy().await.unwrap();
         assert!(policy.configured);
         assert!(!policy.allow_dangerous_sql);
+        assert_eq!(policy.query_timeout_secs, None);
     }
 
     #[tokio::test]
@@ -6134,6 +6147,7 @@ mod tests {
                 read_only: false,
                 allow_dangerous_sql: false,
                 allowed_connection_ids: Some(vec![kept.id.clone()]),
+                query_timeout_secs: None,
             })
             .await
             .unwrap();
@@ -6157,6 +6171,7 @@ mod tests {
                 read_only: true,
                 allow_dangerous_sql: false,
                 allowed_connection_ids: None,
+                query_timeout_secs: None,
             })
             .await
             .unwrap();

@@ -28,6 +28,9 @@ export const DateTimePatterns = [
   "YYYY/MM/DDTHH:mm:ssZ",
   "YYYY/MM/DDTHH:mm:ss.SSSZ",
 ];
+// Keep global date-time formats compatible with the backend; the data grid can
+// additionally render Day.js 12-hour display patterns locally.
+export const DataGridDateTimePatterns = [...DateTimePatterns, "YYYY-MM-DD hh:mm:ss A"];
 const SUPPORTED_DATE_TIME_PATTERN_TOKENS = ["YYYY", "SSS", "ZZ", "MM", "DD", "HH", "mm", "ss", "M", "D", "H", "m", "s", "Z"];
 const STRICT_LOCAL_DATETIME_INPUT_PATTERNS = [
   "YYYY-MM-DD",
@@ -70,6 +73,14 @@ export interface ForeignKeyDisplayFilterConfig {
 
 interface IntlTimeZoneSupport {
   supportedValuesOf?: (key: "timeZone") => string[];
+}
+
+const TIME_ZONE_DISPLAY_ALIASES: Record<string, string> = {
+  "Asia/Calcutta": "Asia/Kolkata",
+};
+
+export function displayTimeZoneOption(timeZone: string): string {
+  return TIME_ZONE_DISPLAY_ALIASES[timeZone] ?? timeZone;
 }
 
 export function getSupportedTimeZoneOptions(intl: IntlTimeZoneSupport, fallbackTimeZone = "UTC"): string[] {

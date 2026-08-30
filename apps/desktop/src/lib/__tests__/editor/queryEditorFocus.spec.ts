@@ -51,7 +51,7 @@ describe("QueryEditor auto focus wiring", () => {
 
 describe("QueryEditor toolbar focus", () => {
   it("does not move focus from the editor when clicking execute", () => {
-    expect(editorToolbarSource).toMatch(/:disabled="activeTab\.isCancelling[\s\S]*?@mousedown\.prevent[\s\S]*?@click="activeTab\.isExecuting \? emit\('cancel'\) : emit\('execute'\)"/);
+    expect(editorToolbarSource).toMatch(/:disabled="activeTab\.isCancelling[\s\S]*?@mousedown\.prevent="onExecutePointerDown"[\s\S]*?@click="onExecuteClick"/);
     expect(queryEditorSource).toMatch(/function requestExecute\([\s\S]*?const currentView = view\.value;[\s\S]*?currentView\.focus\(\);[\s\S]*?requestExecuteFromView\(currentView/);
   });
 });

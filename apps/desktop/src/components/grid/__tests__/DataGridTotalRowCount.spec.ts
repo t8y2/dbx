@@ -12,7 +12,7 @@ const statusRenderSource = (() => {
 })();
 
 const rerunBranch = (() => {
-  const start = statusRenderSource.indexOf("} else if ($setup.showRerunTotalCountAction) {");
+  const start = statusRenderSource.indexOf("$setup.showRerunTotalCountAction && !($setup.totalRowCountBusy && !$setup.manualTotalRowCountLoading)");
   return start === -1 ? "" : statusRenderSource.slice(start, statusRenderSource.indexOf("</button>", start));
 })();
 
@@ -48,19 +48,21 @@ describe("DataGrid rerun total row count action", () => {
     expect(showDataGridRerunTotalCountAction({ canCalculateTotalRowCount: true, displayedTotalRowCount: NaN, totalRowCountIsExact: true })).toBe(false);
   });
 
-  it("keeps the numeric total outside the action chain and orders busy, inline link, then rerun icon", () => {
+  it("places the rerun icon before the numeric total and keeps the other actions ordered", () => {
     const numericTotal = statusRenderSource.indexOf('typeof $setup.displayedTotalRowCount === "number" && $setup.displayedTotalRowCount >= 0');
+    const rerunAction = statusRenderSource.indexOf("$setup.showRerunTotalCountAction && !($setup.totalRowCountBusy && !$setup.manualTotalRowCountLoading)");
     const busyBranch = statusRenderSource.indexOf("if ($setup.totalRowCountBusy && !($setup.showRerunTotalCountAction && $setup.manualTotalRowCountLoading)) {");
     const inlineLink = statusRenderSource.indexOf("} else if ($setup.showExactTotalCountAction) {");
-    const rerunAction = statusRenderSource.indexOf("} else if ($setup.showRerunTotalCountAction) {");
     expect(numericTotal).toBeGreaterThan(-1);
+    expect(rerunAction).toBeGreaterThan(-1);
+    expect(rerunAction).toBeLessThan(numericTotal);
     expect(busyBranch).toBeGreaterThan(numericTotal);
     expect(inlineLink).toBeGreaterThan(busyBranch);
-    expect(rerunAction).toBeGreaterThan(inlineLink);
   });
 
   it("renders a spaced rerun icon labelled for the total-count action and disabled while counting", () => {
-    expect(rerunBranch).toContain('<button type="button" class="ml-1 inline-flex h-3.5 w-3.5');
+    expect(statusRenderSource).toContain('keypath: "grid.totalRowCountWithAction"');
+    expect(rerunBranch).toContain('<button type="button" class="mr-1 inline-flex h-3.5 w-3.5');
     expect(rerunBranch).toContain("disabled:pointer-events-none");
     expect(rerunBranch).toContain("disabled:opacity-50");
     // title/aria-label toggle between idle and busy copy

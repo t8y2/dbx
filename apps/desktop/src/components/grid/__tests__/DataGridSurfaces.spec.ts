@@ -135,6 +135,19 @@ beforeEach(() => {
   localStorage.removeItem("dbx-filter-builder-value-shortcut-hint-days");
 });
 describe("DataGrid canvas surfaces", () => {
+  it("asks before an expensive Elasticsearch cursor jump", () => {
+    expect(dataGridSource).toContain("requestCount >= ELASTICSEARCH_PAGE_JUMP_WARNING_REQUESTS");
+    expect(dataGridSource).toContain('t("grid.esDeepPageJumpConfirmMessage"');
+    expect(dataGridSource).toContain('@click="confirmEsDeepPageJump"');
+  });
+
+  it("shows stable request progress while an Elasticsearch page jump is running", () => {
+    expect(dataGridSource).toContain('t("grid.pageJumpLoading", { page: pageJumpProgress.targetPage })');
+    expect(dataGridSource).toContain('t("grid.pageJumpProgress", { current: pageJumpProgress.completedRequests, total: pageJumpProgress.totalRequests })');
+    expect(dataGridSource).toContain('role="progressbar"');
+    expect(dataGridSource).toContain(':style="{ width: `${pageJumpProgressPercent}%` }"');
+  });
+
   it("uses the stable overlay for viewport and device-pixel measurement", () => {
     expect(dataGridSource).toContain("function canvasMeasurementSurface(): HTMLElement | null");
     expect(dataGridSource).toContain("return canvasOverlayRef.value ?? null;");
@@ -650,6 +663,7 @@ describe("DataGridFilterBuilder", () => {
     const filterBuilder = findOne(mounted.root, (node) => String(node.props.class).includes("w-fit max-w-full"));
     const ruleGrid = findOne(mounted.root, (node) => String(node.props.class).includes("grid-cols-[18px_var(--filter-builder-column-width)_92px_var(--filter-builder-value-width)_auto]"));
     const searchInput = findOne(mounted.root, (node) => node.type === "input" && node.props.placeholder === "grid.filterBuilderSearchColumns");
+    const columnSearch = findOne(mounted.root, (node) => node.props["data-filter-column-search"] === "");
     const valueEditor = findOne(mounted.root, (node) => node.props["data-filter-value-editor"] === "");
 
     expect(selects).toHaveLength(2);
@@ -661,6 +675,8 @@ describe("DataGridFilterBuilder", () => {
     expect(items).toHaveLength(2);
     expect(items.every((item) => String(item.props.class).includes("rounded-none"))).toBe(true);
     expect(searchInput.props.placeholder).toBe("grid.filterBuilderSearchColumns");
+    expect(searchInput.props["aria-label"]).toBe("grid.filterBuilderSearchColumns");
+    expect(String(columnSearch.props.class)).toContain("border-b");
     expect(valueEditor.props.placeholder).toBe("grid.filterBuilderValue");
     expect(filterBuilder.props.style).toEqual({ "--filter-builder-column-width": "178px", "--filter-builder-value-width": "178px" });
     expect(String(ruleGrid.props.class)).toContain("grid-cols-[18px_var(--filter-builder-column-width)_92px_var(--filter-builder-value-width)_auto]");

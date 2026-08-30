@@ -66,6 +66,11 @@ export function mongoCollectionTableTypeFromNode(node: Pick<TreeNode, "meta">): 
   return kind === "view" ? "VIEW" : kind === "timeseries" ? "TIMESERIES" : "TABLE";
 }
 
+/** MongoDB materializes a database when its initialization collection is created. */
+export function mongoCreateDatabasePreview(database: string): string {
+  return `db.getSiblingDB(${JSON.stringify(database)}).createCollection("dbx_init");`;
+}
+
 export function toMongoCollectionKind(kind?: string | null): MongoCollectionKind {
   const normalized = (kind || "collection").toLowerCase();
   if (normalized === "view") return "view";

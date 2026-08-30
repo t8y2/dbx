@@ -2,11 +2,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 
 use serde_json::json;
+use serde_json::Value;
 
 use crate::agent_events::{ToolCall, ToolDefinition, ToolResult};
 use crate::connection::AppState;
 use crate::db::vector_driver;
 use crate::models::connection::DatabaseType;
+use crate::models::connection::{ConnectionConfig, SPANNER_MIN_QUERY_TIMEOUT_SECS};
 use crate::query::QueryExecutionOptions;
 use crate::query_execution_sql::{build_explain_sql, supports_explain_plan, supports_sql_query, ExplainSqlOptions};
 use crate::sql_dialect::{build_table_data_select_sql, TableDataSelectSqlOptions};
@@ -62,6 +64,33 @@ fn tool_uses_database(tool_name: &str) -> bool {
             | "explain_query"
     )
 }
+
+/// Resolve the query timeout (seconds) for an agent/MCP query.
+///
+/// Precedence: an explicit per-call `requested` value wins; otherwise inherit
+/// the connection's `effective_query_timeout_secs()`; the legacy 30s survives
+/// only when no connection config is available to resolve against. `Some(0)`
+/// from either source means "no limit" (unlimited, and it bypasses the Spanner
+/// floor — see `ConnectionConfig::effective_query_timeout_secs`). A finite
+/// value on a Spanner connection gets the 120s floor.
+pub fn agent_query_timeout_secs(requested: Option<u64>, connection: Option<&ConnectionConfig>) -> u64 {
+    match requested {
+        Some(0) => 0,
+        Some(n) => {
+            if connection.is_some_and(|config| config.db_type == DatabaseType::Spanner) {
+                n.max(SPANNER_MIN_QUERY_TIMEOUT_SECS)
+            } else {
+                n
+            }
+        }
+        None => connection.map_or(QUERY_TIMEOUT_SECS, ConnectionConfig::effective_query_timeout_secs),
+    }
+}
+
+/// Legacy fallback query timeout for agent queries. Matches the current fixed
+/// `Some(30)` behavior and remains the last resort when no connection config
+/// can be resolved (that path fails the query at pool lookup anyway).
+const QUERY_TIMEOUT_SECS: u64 = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueryCellWindow {
@@ -833,10 +862,16 @@ async fn execute_execute_query(
     let client_session_id =
         tool_call.arguments.get("client_session_id").and_then(|v| v.as_str()).map(str::trim).filter(|v| !v.is_empty());
 
-    // Execute query using existing infrastructure
+    // Execute query using existing infrastructure. Timeout resolves as
+    // per-call `timeout_secs` > connection effective timeout (see
+    // `agent_query_timeout_secs`); MCP injects the policy value as
+    // `timeout_secs` in the arguments.
     let options = QueryExecutionOptions {
         max_rows: Some(limit),
-        timeout_secs: Some(30),
+        timeout_secs: Some(agent_query_timeout_secs(
+            tool_call.arguments.get("timeout_secs").and_then(Value::as_u64),
+            connection_config.as_ref(),
+        )),
         client_session_id: client_session_id.map(str::to_string),
         ..Default::default()
     };
@@ -1085,8 +1120,18 @@ async fn execute_explain_query(
         }
     };
 
-    // Execute the EXPLAIN query
-    let options = QueryExecutionOptions { max_rows: Some(100), timeout_secs: Some(30), ..Default::default() };
+    // Execute the EXPLAIN query. Timeout resolves like the execute path
+    // (per-call `timeout_secs` > connection effective timeout) so the global
+    // MCP timeout override covers EXPLAIN too.
+    let connection_config = state.configs.read().await.get(connection_id).cloned();
+    let options = QueryExecutionOptions {
+        max_rows: Some(100),
+        timeout_secs: Some(agent_query_timeout_secs(
+            tool_call.arguments.get("timeout_secs").and_then(Value::as_u64),
+            connection_config.as_ref(),
+        )),
+        ..Default::default()
+    };
     let result = match crate::query::execute_sql_statement_with_options(
         state,
         connection_id,
@@ -1279,6 +1324,50 @@ async fn resolve_chroma_collection_uuid(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_query_timeout_resolves_by_precedence() {
+        // Explicit per-call value wins.
+        assert_eq!(agent_query_timeout_secs(Some(45), Some(&postgres_connection(60))), 45);
+        // 0 = unlimited bypasses the Spanner floor.
+        assert_eq!(agent_query_timeout_secs(Some(0), Some(&spanner_connection(60))), 0);
+        // Finite value on Spanner gets the 120s floor.
+        assert_eq!(agent_query_timeout_secs(Some(60), Some(&spanner_connection(60))), 120);
+        // No request + connection => inherit the connection's effective timeout.
+        assert_eq!(agent_query_timeout_secs(None, Some(&postgres_connection(60))), 60);
+        assert_eq!(agent_query_timeout_secs(None, Some(&postgres_connection(120))), 120);
+        assert_eq!(agent_query_timeout_secs(None, Some(&postgres_connection(0))), 0);
+        // No request, no connection => legacy 30s fallback.
+        assert_eq!(agent_query_timeout_secs(None, None), 30);
+    }
+
+    fn postgres_connection(query_timeout_secs: u64) -> ConnectionConfig {
+        let mut config = test_connection();
+        config.db_type = DatabaseType::Postgres;
+        config.query_timeout_secs = query_timeout_secs;
+        config
+    }
+
+    fn spanner_connection(query_timeout_secs: u64) -> ConnectionConfig {
+        let mut config = test_connection();
+        config.db_type = DatabaseType::Spanner;
+        config.query_timeout_secs = query_timeout_secs;
+        config
+    }
+
+    fn test_connection() -> ConnectionConfig {
+        serde_json::from_value(json!({
+            "id": "agent-timeout-test",
+            "name": "timeout-test",
+            "db_type": "postgres",
+            "host": "127.0.0.1",
+            "port": 5432,
+            "username": "",
+            "password": "",
+            "ssl": false,
+        }))
+        .expect("test connection config")
+    }
 
     #[tokio::test]
     async fn database_tool_locks_are_connection_scoped_and_cancel_safe() {

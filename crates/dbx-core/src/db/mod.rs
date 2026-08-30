@@ -39,6 +39,7 @@ pub mod questdb;
 pub mod redis_driver;
 pub mod rqlite_driver;
 pub mod sqlite;
+pub mod sqlite_worker;
 pub mod sqlserver;
 pub mod ssh_host_key;
 pub mod ssh_prompt;

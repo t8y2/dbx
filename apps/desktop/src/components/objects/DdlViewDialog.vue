@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onUnmounted, ref, shallowRef, watch } from "vue";
+import { computed, nextTick, onUnmounted, ref, shallowRef, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Clipboard, Loader2, RefreshCw } from "@lucide/vue";
 import { useToast } from "@/composables/useToast";
@@ -51,9 +51,60 @@ const ddlEditorContainer = ref<HTMLDivElement>();
 const ddlSearchPanelRef = ref<InstanceType<typeof EditorSearchPanel>>();
 const ddlEditorView = shallowRef<EditorView | null>(null);
 
+// Keep the dialog movable for the duration of one open cycle. This mirrors the
+// existing draggable dialogs without persisting a potentially off-screen position.
+const dragOffset = ref({ x: 0, y: 0 });
+const isDragging = ref(false);
+const dragStartPosition = ref({ x: 0, y: 0 });
+const dragStartOffset = ref({ x: 0, y: 0 });
+const activePointerId = ref<number | null>(null);
+const dialogContentStyle = computed(() => {
+  if (isDragging.value || dragOffset.value.x !== 0 || dragOffset.value.y !== 0) {
+    return {
+      transform: `translate(${dragOffset.value.x}px, ${dragOffset.value.y}px)`,
+      transition: isDragging.value ? "none" : "transform 0.15s ease-out",
+    };
+  }
+  return {};
+});
+
 // The CodeMirror editor (if any) that was focused when this dialog opened, so focus can be
 // restored to it on close. Not a ref: read/written outside of render, never needs reactivity.
 let editorRootToRestoreFocus: HTMLElement | null = null;
+
+function resetDialogDragOffset() {
+  dragOffset.value = { x: 0, y: 0 };
+  isDragging.value = false;
+  activePointerId.value = null;
+}
+
+function startDialogDrag(event: PointerEvent) {
+  if (event.button !== undefined && event.button !== 0) return;
+  isDragging.value = true;
+  activePointerId.value = event.pointerId;
+  dragStartPosition.value = { x: event.clientX, y: event.clientY };
+  dragStartOffset.value = { ...dragOffset.value };
+  (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+}
+
+function moveDialogDrag(event: PointerEvent) {
+  if (!isDragging.value || event.pointerId !== activePointerId.value) return;
+  dragOffset.value = {
+    x: dragStartOffset.value.x + event.clientX - dragStartPosition.value.x,
+    y: dragStartOffset.value.y + event.clientY - dragStartPosition.value.y,
+  };
+}
+
+function endDialogDrag(event: PointerEvent) {
+  if (!isDragging.value || event.pointerId !== activePointerId.value) return;
+  isDragging.value = false;
+  activePointerId.value = null;
+  try {
+    (event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId);
+  } catch {
+    // Pointer capture may already have been released by the browser.
+  }
+}
 
 async function loadDdl(force = false) {
   ddlError.value = "";
@@ -84,6 +135,7 @@ async function loadDdl(force = false) {
 watch(
   () => props.open,
   async (open) => {
+    resetDialogDragOffset();
     if (!open) return;
     const active = document.activeElement;
     editorRootToRestoreFocus = active instanceof HTMLElement ? active.closest(".cm-editor") : null;
@@ -224,8 +276,8 @@ function onClose() {
 
 <template>
   <Dialog :open="props.open" @update:open="onClose">
-    <DialogContent class="dbx-ddl-view-dialog sm:max-w-190" @close-auto-focus="onDdlDialogCloseAutoFocus">
-      <DialogHeader>
+    <DialogContent :style="dialogContentStyle" class="dbx-ddl-view-dialog sm:max-w-190" @close-auto-focus="onDdlDialogCloseAutoFocus">
+      <DialogHeader class="cursor-move select-none" @pointerdown="startDialogDrag" @pointermove="moveDialogDrag" @pointerup="endDialogDrag" @pointercancel="endDialogDrag">
         <DialogTitle>DDL - {{ props.tableName }}</DialogTitle>
       </DialogHeader>
       <div class="grid gap-3">

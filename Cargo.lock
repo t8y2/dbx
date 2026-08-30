@@ -2063,6 +2063,7 @@ dependencies = [
  "async-trait",
  "dbx-core",
  "dbx-mcp",
+ "rustls 0.23.43",
  "serde",
  "serde_json",
  "tempfile",
@@ -2086,6 +2087,7 @@ dependencies = [
  "cbc 0.1.2",
  "chrono",
  "csv",
+ "dbx-sqlite-worker",
  "deadpool-postgres",
  "encoding_rs",
  "flate2",
@@ -2169,6 +2171,16 @@ dependencies = [
  "tokio-rustls 0.26.4",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "dbx-sqlite-worker"
+version = "0.1.1"
+dependencies = [
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sqlparser",
 ]
 
 [[package]]

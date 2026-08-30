@@ -16,6 +16,7 @@ const assetIcons: Record<string, string> = {
   cloudberry: "cloudberry",
   opentenbase: "opentenbase",
   sqlite: "sqlite",
+  "sqlite-worker": "sqlite",
   rqlite: "rqlite.png",
   turso: "turso.png",
   cloudflare_d1: "cloudflare-d1",

@@ -494,6 +494,14 @@ impl DbxMcpServer {
         if let Some(limit) = request.cell_char_limit {
             arguments["cell_char_limit"] = json!(limit);
         }
+        // Surface the global MCP query timeout as a per-query argument. It is
+        // re-read on every tool call, so a settings-page change takes effect on
+        // the next MCP query with no client-config regeneration. A future
+        // per-call `timeout_secs` tool parameter can slot in above this by not
+        // being clobbered when set by the model.
+        if let Some(secs) = resolved.policy.query_timeout_secs {
+            arguments["timeout_secs"] = json!(secs);
+        }
         let result =
             self.backend.execute_agent_tool(connection, &database, "execute_query", arguments, permissions).await;
         agent_result(result)
@@ -1905,7 +1913,12 @@ mod tests {
     fn local_mongo_aggregate_cannot_write_to_a_production_database() {
         let mut mongo = connection("mongo", "mongo", "mongodb", "staging");
         mongo.production_databases = vec!["production".to_string()];
-        let policy = McpGlobalPolicy { read_only: false, allow_dangerous_sql: true, allowed_connection_ids: None };
+        let policy = McpGlobalPolicy {
+            read_only: false,
+            allow_dangerous_sql: true,
+            allowed_connection_ids: None,
+            query_timeout_secs: None,
+        };
 
         let error = validate_mongo_command(
             &mongo,
@@ -1927,9 +1940,24 @@ mod tests {
         let source = r#"db.runCommand({ping: 1})"#;
 
         for policy in [
-            McpGlobalPolicy { read_only: true, allow_dangerous_sql: false, allowed_connection_ids: None },
-            McpGlobalPolicy { read_only: false, allow_dangerous_sql: false, allowed_connection_ids: None },
-            McpGlobalPolicy { read_only: false, allow_dangerous_sql: true, allowed_connection_ids: None },
+            McpGlobalPolicy {
+                read_only: true,
+                allow_dangerous_sql: false,
+                allowed_connection_ids: None,
+                query_timeout_secs: None,
+            },
+            McpGlobalPolicy {
+                read_only: false,
+                allow_dangerous_sql: false,
+                allowed_connection_ids: None,
+                query_timeout_secs: None,
+            },
+            McpGlobalPolicy {
+                read_only: false,
+                allow_dangerous_sql: true,
+                allowed_connection_ids: None,
+                query_timeout_secs: None,
+            },
         ] {
             let error = validate_mongo_command(&mongo, &policy, "staging", source).unwrap_err();
             assert!(result_text(&error).contains("SQL_BLOCKED"));
@@ -1958,8 +1986,12 @@ mod tests {
         assert_eq!(normalize_confirmed_write_sql(Some(" \n ".to_string())), None);
 
         let read_only = ConnectionConfig { read_only: true, ..connection("readonly", "readonly", "postgres", "app") };
-        let writable_policy =
-            McpGlobalPolicy { read_only: false, allow_dangerous_sql: true, allowed_connection_ids: None };
+        let writable_policy = McpGlobalPolicy {
+            read_only: false,
+            allow_dangerous_sql: true,
+            allowed_connection_ids: None,
+            query_timeout_secs: None,
+        };
         let read_only_error =
             validate_sql_policy(&read_only, &writable_policy, "app", "DELETE FROM sessions", false).unwrap_err();
         assert!(result_text(&read_only_error).contains("CONNECTION_READ_ONLY"));
@@ -2009,7 +2041,12 @@ mod tests {
         // An exact confirmation remains available as a narrowing constraint,
         // but cannot turn the central safe-write policy into full access.
         let _guard = EnvGuard::set("DBX_MCP_CONFIRMED_WRITE_SQL", "CREATE TABLE metrics (id INT)");
-        let safe_write = McpGlobalPolicy { read_only: false, allow_dangerous_sql: false, allowed_connection_ids: None };
+        let safe_write = McpGlobalPolicy {
+            read_only: false,
+            allow_dangerous_sql: false,
+            allowed_connection_ids: None,
+            query_timeout_secs: None,
+        };
         let permissions = mcp_permissions(&connection, &safe_write);
         assert!(!permissions.allow_dangerous, "confirmed SQL must NOT elevate allow_dangerous for Redis/Mongo paths");
         assert!(permissions.allow_writes);
@@ -2031,7 +2068,12 @@ mod tests {
         // Full access still permits an exact confirmed DDL statement and keeps
         // the binding for the execution-time anti-replay check.
         let _guard = EnvGuard::set("DBX_MCP_CONFIRMED_WRITE_SQL", "CREATE TABLE metrics (id INT)");
-        let full_access = McpGlobalPolicy { read_only: false, allow_dangerous_sql: true, allowed_connection_ids: None };
+        let full_access = McpGlobalPolicy {
+            read_only: false,
+            allow_dangerous_sql: true,
+            allowed_connection_ids: None,
+            query_timeout_secs: None,
+        };
         let permissions =
             validate_sql_policy(&connection, &full_access, "app", "CREATE TABLE metrics (id INT)", false).unwrap();
         assert!(permissions.allow_writes);
@@ -2040,8 +2082,12 @@ mod tests {
 
         // A global read-only policy is still authoritative even for the exact
         // confirmed statement, while read queries remain available.
-        let read_only_policy =
-            McpGlobalPolicy { read_only: true, allow_dangerous_sql: false, allowed_connection_ids: None };
+        let read_only_policy = McpGlobalPolicy {
+            read_only: true,
+            allow_dangerous_sql: false,
+            allowed_connection_ids: None,
+            query_timeout_secs: None,
+        };
         let error = validate_sql_policy(&connection, &read_only_policy, "app", "CREATE TABLE metrics (id INT)", false)
             .unwrap_err();
         assert!(result_text(&error).contains("MCP_READ_ONLY"), "confirmed SQL must not bypass global read_only");
@@ -2061,7 +2107,12 @@ mod tests {
     #[test]
     fn use_statements_require_a_session() {
         let starrocks = connection("sr", "sr", "starrocks", "default_catalog");
-        let policy = McpGlobalPolicy { read_only: false, allow_dangerous_sql: false, allowed_connection_ids: None };
+        let policy = McpGlobalPolicy {
+            read_only: false,
+            allow_dangerous_sql: false,
+            allowed_connection_ids: None,
+            query_timeout_secs: None,
+        };
 
         let blocked = validate_sql_policy(&starrocks, &policy, "default_catalog", "USE analytics", false).unwrap_err();
         assert!(result_text(&blocked).contains("SQL_BLOCKED"));

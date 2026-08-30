@@ -30,3 +30,19 @@ describe("SqlFilePanel folder headers", () => {
     expect(panelSource).not.toContain("bg-muted/10 sticky top-0");
   });
 });
+
+describe("SqlFilePanel file renaming", () => {
+  it("does not re-read a successfully renamed file before refreshing the tree", () => {
+    const renameFunction = panelSource.match(/async function renameSqlFile\(\) \{[\s\S]*?\n\}/)?.[0];
+
+    expect(renameFunction).toBeDefined();
+    expect(renameFunction).toContain("queryStore.relocateExternalSqlFilePath(target.entry.path, nextPath)");
+    expect(renameFunction).not.toContain("readExternalSqlFileSnapshot(nextPath)");
+  });
+});
+
+describe("SqlFilePanel directory actions", () => {
+  it("shows a new SQL file icon for nested directories", () => {
+    expect(panelSource).toContain('@click.stop="openCreateDialog(folder.path, entry.path)"');
+  });
+});

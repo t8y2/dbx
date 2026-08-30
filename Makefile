@@ -113,7 +113,7 @@ cargo-check-fast:
 	cargo check --no-default-features --features sqlite-bundled
 
 cargo-test-fast:
-	cargo test --no-default-features --features sqlite-bundled
+	RUST_MIN_STACK=8388608 cargo test --no-default-features --features sqlite-bundled
 
 db-list:
 	@$(PNPM) db:env -- list

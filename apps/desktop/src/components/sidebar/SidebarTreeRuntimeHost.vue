@@ -111,7 +111,7 @@ import {
 } from "@/lib/database/databaseCapabilities";
 import { copyDisplayPathForTreeNode, copyNameForTreeNode, isDirectNavigationTreeNode, isDocumentBrowserTreeNode, isRepeatableNavigationTreeNode, objectSourceTargetForTreeNode, shouldRunTreeNodeRowAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "@/lib/sidebar/treeNodeClick";
 import { customTypeCapabilities, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
-import { mongoCollectionTableTypeFromNode, mongoDropIndexFailureCount } from "@/lib/sidebar/mongoCollectionMutation";
+import { mongoCollectionTableTypeFromNode, mongoCreateDatabasePreview, mongoDropIndexFailureCount } from "@/lib/sidebar/mongoCollectionMutation";
 import { dataTabOpenModeFromTreeClick, type DataTabOpenMode } from "@/lib/sidebar/dataTabOpenPolicy";
 import { isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut } from "@/lib/editor/keyboardShortcuts";
 import { handleSidebarTreeDeleteShortcut } from "@/lib/sidebar/sidebarTreeDeleteShortcut";
@@ -424,6 +424,7 @@ const {
   revealDatabaseFile,
   canBackupSqliteDatabase,
   backupSqliteDatabase,
+  restoreSqliteDatabase,
   disconnectConnection,
   connectionDisconnectMenuLabel,
   canDisconnectConnection,
@@ -1504,15 +1505,19 @@ async function confirmDeleteSavedSqlFile() {
   releaseActiveNodeReference([node.id]);
 }
 
-async function openObjectBrowser(eventReadOnly = false, openEventEditor = false) {
+async function openObjectBrowser(eventReadOnly = false, openEventEditor: boolean | "create" = false) {
   const node = activeNode.value;
   if (!node.connectionId) return;
   try {
     await connectionStore.ensureConnected(node.connectionId);
     connectionStore.activeConnectionId = node.connectionId;
 
+    const eventName = openEventEditor === true && node.type === "event" ? node.objectName || node.label : undefined;
+    const eventCreateRequestId = openEventEditor === "create" && node.type === "group-events" ? ++mysqlEventCreateRequestSeq : undefined;
+    const objectFilter = node.type === "event" || node.type === "group-events" ? "events" : undefined;
+
     if (hasTreeNodeDatabaseContext(node)) {
-      queryStore.openObjectBrowser(node.connectionId, node.database, node.schema, node.catalog, openEventEditor && node.type === "event" ? node.objectName || node.label : undefined, eventReadOnly, node.type === "event" || node.type === "group-events" ? "events" : undefined);
+      queryStore.openObjectBrowser(node.connectionId, node.database, node.schema, node.catalog, eventName, eventReadOnly, objectFilter, eventCreateRequestId);
       return;
     }
 
@@ -1521,7 +1526,7 @@ async function openObjectBrowser(eventReadOnly = false, openEventEditor = false)
     const options = await getDatabaseOptions(node.connectionId);
     const database = resolveDefaultDatabase(connection, options);
     if (database) {
-      queryStore.openObjectBrowser(node.connectionId, database, undefined, undefined, openEventEditor && node.type === "event" ? node.objectName || node.label : undefined, eventReadOnly, node.type === "event" || node.type === "group-events" ? "events" : undefined);
+      queryStore.openObjectBrowser(node.connectionId, database, undefined, undefined, eventName, eventReadOnly, objectFilter, eventCreateRequestId);
     } else {
       await toggle();
     }
@@ -1529,6 +1534,14 @@ async function openObjectBrowser(eventReadOnly = false, openEventEditor = false)
     toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
     openDriverStoreForInstallError(e?.message || String(e));
   }
+}
+
+// 每次"新建事件"菜单点击都会分配一个单调递增的请求号，保证同一个
+// ObjectBrowser tab 被复用时也能重新进入 MySQL Event 的 CREATE 编辑器。
+let mysqlEventCreateRequestSeq = 0;
+
+function openMysqlEventCreateEditor() {
+  void openObjectBrowser(false, "create");
 }
 
 async function openDatabaseBrowser() {
@@ -3591,11 +3604,23 @@ async function confirmCreateDatabase() {
     await connectionStore.ensureConnected(node.connectionId);
     const config = connectionStore.getConfig(node.connectionId);
     if (config?.db_type === "mongodb") {
+      const plan: AuthorizationPlan = {
+        steps: [
+          {
+            id: "create-database",
+            label: `create database ${name}`,
+            database: "",
+            sql: mongoCreateDatabasePreview(name),
+            operation: "createDatabase",
+            targetDatabase: name,
+          },
+        ],
+      };
+      createDatabaseAuthorizationPlan.value = plan;
+      createDatabasePreviewSql.value = authorizationPlanSql(plan);
+      createDatabaseAuthorizationResults.value = [];
       showCreateDatabaseDialog.value = false;
-      await api.mongoCreateDatabase(node.connectionId, name);
-      toast(t("contextMenu.createDatabaseSuccess", { name }), 3000);
-      await connectionStore.ensureVisibleDatabase(node.connectionId, name);
-      await connectionStore.loadMongoDatabases(node.connectionId);
+      showCreateDatabasePreviewDialog.value = true;
       return;
     }
     const sql = await buildCreateDatabaseSql({
@@ -3628,13 +3653,30 @@ async function applyCreateDatabaseAuthorizationPlan() {
   createDatabaseAuthorizationApplying.value = true;
   try {
     const config = connectionStore.getConfig(node.connectionId);
-    const results = await executeWithProductionSqlGuard({
-      connection: config,
-      database: "",
-      sql: createDatabasePreviewSql.value,
-      source: t("production.sourceSidebar"),
-      execute: () => executeAuthorizationPlan(plan, (step) => api.executeMulti(node.connectionId!, step.database, step.sql, undefined, undefined, { maxRows: 1000, continueOnError: true })),
-    });
+    const isMongoDatabaseCreation = config?.db_type === "mongodb";
+    const executePlan = () =>
+      executeAuthorizationPlan(plan, async (step) => {
+        if (isMongoDatabaseCreation && step.operation === "createDatabase") {
+          await api.mongoCreateDatabase(node.connectionId!, name);
+          return [];
+        }
+        return api.executeMulti(node.connectionId!, step.database, step.sql, undefined, undefined, { maxRows: 1000, continueOnError: true });
+      });
+    const results = isMongoDatabaseCreation
+      ? await executeWithProductionContextGuard({
+          connection: config,
+          database: name,
+          reviewText: createDatabasePreviewSql.value,
+          source: t("production.sourceSidebar"),
+          execute: executePlan,
+        })
+      : await executeWithProductionSqlGuard({
+          connection: config,
+          database: "",
+          sql: createDatabasePreviewSql.value,
+          source: t("production.sourceSidebar"),
+          execute: executePlan,
+        });
     if (!results) return;
     const displayResults = results.map((result) => ({
       ...result,
@@ -3645,7 +3687,11 @@ async function applyCreateDatabaseAuthorizationPlan() {
     const status = authorizationPlanStatus(displayResults);
     if (created) {
       await connectionStore.ensureVisibleDatabase(node.connectionId, name);
-      await connectionStore.loadDatabases(node.connectionId, { force: true });
+      if (isMongoDatabaseCreation) {
+        await connectionStore.loadMongoDatabases(node.connectionId);
+      } else {
+        await connectionStore.loadDatabases(node.connectionId, { force: true });
+      }
     }
     toast(t(status === "success" ? "contextMenu.createDatabaseSuccess" : status === "partial" ? "contextMenu.createDatabasePartial" : "contextMenu.createDatabaseFailed", { name }), status === "success" ? 3000 : 5000);
   } catch (error: any) {
@@ -4962,11 +5008,20 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
       });
     }
     if (canBackupSqliteDatabase.value) {
+      const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
+      const usesSsh = (config?.transport_layers || []).some((layer) => layer.enabled !== false && layer.type === "ssh");
       items.push({
         label: t("contextMenu.backupSqliteDatabase"),
         action: backupSqliteDatabase,
         icon: HardDriveDownload,
       });
+      if (usesSsh) {
+        items.push({
+          label: t("contextMenu.restoreSqliteDatabase"),
+          action: restoreSqliteDatabase,
+          icon: HardDriveDownload,
+        });
+      }
     }
     items.push({ label: connectionDuplicateMenuLabel(), action: duplicateConnection, icon: CopyPlus });
     items.push({ label: "", separator: true });
@@ -5705,7 +5760,7 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
       items.push({ label: t("contextMenu.createView"), action: createView, icon: Plus });
     }
     if (node.type === "group-events" && node.connectionId && node.database) {
-      items.push({ label: t("contextMenu.createEvent"), action: openObjectBrowser, icon: Plus });
+      items.push({ label: t("contextMenu.createEvent"), action: openMysqlEventCreateEditor, icon: Plus });
     }
     if (mysqlObjectTemplate) {
       items.push({ label: t(mysqlObjectTemplate.titleKey), action: createMysqlObjectTemplate, icon: Plus });

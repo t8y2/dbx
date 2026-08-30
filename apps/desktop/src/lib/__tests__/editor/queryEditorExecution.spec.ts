@@ -4,6 +4,7 @@ import { createQueryEditorExecutionViewportOwnership, isQueryEditorPositionVisib
 
 const queryEditorSource = readFileSync(new URL("../../../components/editor/QueryEditor.vue", import.meta.url), "utf8");
 const contentAreaSource = readFileSync(new URL("../../../components/layout/ContentArea.vue", import.meta.url), "utf8");
+const editorToolbarSource = readFileSync(new URL("../../../components/layout/EditorToolbar.vue", import.meta.url), "utf8");
 const appSource = readFileSync(new URL("../../../App.vue", import.meta.url), "utf8");
 const sqlExecutionSource = readFileSync(new URL("../../../composables/useSqlExecution.ts", import.meta.url), "utf8");
 const queryStoreSource = readFileSync(new URL("../../../stores/queryStore.ts", import.meta.url), "utf8");
@@ -48,6 +49,21 @@ describe("QueryEditor execution routing", () => {
 
     expect(selectionBranch).toBeGreaterThan(-1);
     expect(executeModeBranch).toBeGreaterThan(selectionBranch);
+  });
+
+  it("captures the toolbar selection before the click event can change focus", () => {
+    expect(queryEditorSource).toContain("function captureExecutionSnapshot(): SqlExecutionSnapshot | undefined");
+    expect(queryEditorSource).toContain("return sqlExecutionSnapshotFromView(currentView);");
+    expect(contentAreaSource).toContain("function captureQueryEditorExecutionSnapshot()");
+    expect(contentAreaSource).toContain("queryEditorRef.value?.captureExecutionSnapshot();");
+    expect(appSource).toContain("const pendingToolbarExecutionSnapshot = ref<SqlExecutionSnapshot>();");
+    expect(appSource).toContain("pendingToolbarExecutionSnapshot.value = contentAreaRef.value?.captureQueryEditorExecutionSnapshot?.();");
+    expect(appSource).toContain('if (source === "pointer")');
+    expect(appSource).toContain("pendingToolbarExecutionSnapshot.value = undefined;");
+    expect(appSource).toContain("void tryExecute(snapshot);");
+    expect(appSource).toContain('@execute-pointer-down="captureActiveEditorExecutionSnapshot()"');
+    expect(appSource).toContain('@execute="requestActiveEditorExecute($event)"');
+    expect(editorToolbarSource).toContain("function onExecutePointerDown(event: MouseEvent)");
   });
 
   it("uses the opt-in blank-line fallback and otherwise reports the missing cursor statement", () => {

@@ -26,6 +26,21 @@ describe("useDataGridSearch", () => {
     expect(search.matches.value).toEqual([{ kind: "cell", displayRow: 0, col: 1 }]);
     // matchSet 用数值 key：(displayRow+1)*65536+col
     expect(search.matchSet.value.has((0 + 1) * 65536 + 1)).toBe(true);
+    expect(search.matchCount.value).toBe(1);
+    expect(search.matchAt(0)).toEqual({ kind: "cell", displayRow: 0, col: 1 });
+  });
+
+  it("shares one scan between match keys, set, and current-match access", async () => {
+    vi.useFakeTimers();
+    const getCellSearchText = vi.fn((row: string[], column: number) => row[column]);
+    const search = useDataGridSearch({ columns: ["left", "right"], rows: [["hit", "hit"]], getCellSearchText });
+    search.searchText.value = "hit";
+    await flushSearchDebounce();
+
+    expect(search.matchSet.value.size).toBe(2);
+    expect(search.currentMatch.value).toEqual({ kind: "cell", displayRow: 0, col: 0 });
+    expect(search.matchCount.value).toBe(2);
+    expect(getCellSearchText).toHaveBeenCalledTimes(2);
   });
 
   it("keys column-name matches with displayRow -1", async () => {

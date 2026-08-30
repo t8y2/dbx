@@ -59,6 +59,7 @@ pub async fn document_find_documents(
     sort: Option<String>,
     collation: Option<String>,
     cursor: Option<String>,
+    cursor_pagination: Option<bool>,
     execution_id: Option<String>,
 ) -> Result<DocumentQueryResult, String> {
     let app = state.inner().clone();
@@ -77,6 +78,7 @@ pub async fn document_find_documents(
             sort.as_deref(),
             collation.as_deref(),
             cursor.as_deref(),
+            cursor_pagination.unwrap_or(false),
         ),
     )
     .await

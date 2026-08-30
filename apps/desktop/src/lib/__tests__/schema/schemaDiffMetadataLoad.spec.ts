@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { createConcurrencyLimiter, mapWithConcurrency, schemaDiffMetadataConcurrency, schemaDiffMetadataLoadPlan, shouldFetchSchemaDiffDdl } from "@/lib/schema/schemaDiffMetadataLoad";
+import { createConcurrencyLimiter, loadSchemaDetails, mapWithConcurrency, schemaDiffMetadataConcurrency, schemaDiffMetadataLoadPlan, shouldFetchSchemaDiffDdl, type SchemaDiffMetadataApi, type SchemaDiffMetadataProgress } from "../../schema/schemaDiffMetadataLoad";
+import { getSchemaDiffNextProgressStep, shouldLoadSchemaDiffExtraObjects } from "../../schema/schemaDiffProgress";
+import { DEFAULT_MYSQL_OPTIONS, DEFAULT_POSTGRES_OPTIONS } from "../../../types/schemaDiff";
+import type { TableInfo } from "../../../types/database";
 
 function wait(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -100,6 +103,40 @@ describe("schemaDiffMetadataLoad", () => {
     expect(maxActive).toBeLessThanOrEqual(2);
   });
 
+  it("reports each completed table while loading metadata", async () => {
+    const tables = ["orders", "customers", "events"].map((name) => ({ name, table_type: "TABLE" }) as TableInfo);
+    const progress: SchemaDiffMetadataProgress[] = [];
+    const api: SchemaDiffMetadataApi = {
+      getTableDdl: async (_connectionId, _database, _schema, table) => {
+        await wait(table === "orders" ? 10 : table === "customers" ? 1 : 5);
+        return `ddl:${table}`;
+      },
+      getColumns: async () => [],
+      listIndexes: async () => [],
+      listForeignKeys: async () => [],
+      listTriggers: async () => [],
+    };
+
+    const details = await loadSchemaDetails(
+      tables,
+      {
+        connectionId: "source",
+        database: "db",
+        schema: "public",
+        dbType: "mysql",
+        options: { ...DEFAULT_MYSQL_OPTIONS },
+        onProgress: (value) => progress.push(value),
+      },
+      api,
+    );
+
+    expect(details.map((detail) => detail.name)).toEqual(["orders", "customers", "events"]);
+    expect(details.map((detail) => detail.ddl)).toEqual(["ddl:orders", "ddl:customers", "ddl:events"]);
+    expect(progress.map((value) => value.current)).toEqual([1, 2, 3]);
+    expect(progress.map((value) => value.total)).toEqual([3, 3, 3]);
+    expect(new Set(progress.map((value) => value.objectName))).toEqual(new Set(["orders", "customers", "events"]));
+  });
+
   it("propagates the first worker error and stops scheduling new work", async () => {
     const started: number[] = [];
 
@@ -133,5 +170,32 @@ describe("schemaDiffMetadataLoad", () => {
 
     expect(result).toEqual([0, 1, 2, 3]);
     expect(maxActive).toBeLessThanOrEqual(2);
+  });
+
+  it("only enables extra objects for PostgreSQL-like databases with relevant options", () => {
+    expect(shouldLoadSchemaDiffExtraObjects("mysql", { ...DEFAULT_MYSQL_OPTIONS, functions: true })).toBe(false);
+    expect(shouldLoadSchemaDiffExtraObjects("postgres", DEFAULT_POSTGRES_OPTIONS)).toBe(true);
+    expect(shouldLoadSchemaDiffExtraObjects("opengauss", DEFAULT_POSTGRES_OPTIONS)).toBe(true);
+    expect(
+      shouldLoadSchemaDiffExtraObjects("postgres", {
+        ...DEFAULT_POSTGRES_OPTIONS,
+        functions: false,
+        sequences: false,
+        rules: false,
+        owners: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("maps phases to the next step on the actual comparison path", () => {
+    expect(getSchemaDiffNextProgressStep("loading-table-lists", false)).toBe("nextSourceDetails");
+    expect(getSchemaDiffNextProgressStep("loading-source-details", false)).toBe("nextTargetDetails");
+    expect(getSchemaDiffNextProgressStep("loading-target-details", false)).toBe("nextComparing");
+    expect(getSchemaDiffNextProgressStep("loading-target-details", true)).toBe("nextExtraObjects");
+    expect(getSchemaDiffNextProgressStep("loading-extra-objects", true)).toBe("nextComparing");
+    expect(getSchemaDiffNextProgressStep("comparing", false)).toBe("nextGenerating");
+    expect(getSchemaDiffNextProgressStep("generating", false)).toBe("nextComplete");
+    expect(getSchemaDiffNextProgressStep("complete", false)).toBeNull();
+    expect(getSchemaDiffNextProgressStep(undefined, false)).toBeNull();
   });
 });

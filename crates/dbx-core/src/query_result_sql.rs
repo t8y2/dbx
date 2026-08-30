@@ -167,8 +167,18 @@ pub fn build_query_pagination_execution_plan(
     }
 
     let can_use_first_page_cursor = options.use_agent_cursor && options.pagination.offset == 0;
-    let prefer_server_pagination = options.database_type == Some(DatabaseType::Kingbase)
-        && kingbase_server_pagination_is_stable(&options.query_base_sql);
+    // HighGo's PostgreSQL-compatible JDBC driver can buffer an unbounded result
+    // before the Agent has a chance to expose its cursor page. Prefer an actual
+    // LIMIT/OFFSET query whenever it can be rewritten safely. For an unordered
+    // query, independent pages are not guaranteed to preserve row order; this is
+    // an intentional tradeoff to keep HighGo execution bounded. Kingbase keeps
+    // the cursor for unordered queries because separate executions may not
+    // preserve row order there.
+    let prefer_server_pagination = match options.database_type {
+        Some(DatabaseType::Highgo) => true,
+        Some(DatabaseType::Kingbase) => kingbase_server_pagination_is_stable(&options.query_base_sql),
+        _ => false,
+    };
     if can_use_first_page_cursor && !prefer_server_pagination {
         if !options.first_page_uses_actual_sql && options.sql == options.query_base_sql {
             plan.sql_to_execute = options.query_base_sql;
@@ -190,11 +200,15 @@ pub fn build_query_pagination_execution_plan(
         plan.page_sql = paginated.sql;
         plan.page_limit = Some(options.pagination.limit);
         plan.page_offset = Some(options.pagination.offset);
-    } else if can_use_first_page_cursor {
+    } else if can_use_first_page_cursor && options.database_type != Some(DatabaseType::Highgo) {
         // Kingbase JDBC may buffer an entire result in auto-commit mode, so use
         // LIMIT/OFFSET whenever the statement can be rewritten safely. Keep the
         // Agent cursor as a bounded fallback for multi-statement or dialect-
-        // specific SQL that the pagination parser cannot transform.
+        // specific SQL that the pagination parser cannot transform. HighGo does
+        // not take this fallback: its JDBC driver may materialize the unbounded
+        // result before cursor paging starts. Leaving the page metadata unset
+        // routes it through regular execution and the configured JDBC maxRows
+        // safeguard instead.
         if !options.first_page_uses_actual_sql && options.sql == options.query_base_sql {
             plan.sql_to_execute = options.query_base_sql;
         }
@@ -4122,6 +4136,58 @@ WHERE u.id = picked.id;
         assert_eq!(plan.page_offset, Some(0));
         assert!(plan.page_sql.is_none());
         assert!(plan.use_agent_result_session);
+    }
+
+    #[test]
+    fn highgo_prefers_server_pagination_over_agent_cursor() {
+        let first_page = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+            sql: "SELECT * FROM events".to_string(),
+            query_base_sql: "SELECT * FROM events".to_string(),
+            database_type: Some(DatabaseType::Highgo),
+            pagination: QueryPagination { limit: 500, offset: 0, session_id: None },
+            use_agent_cursor: true,
+            first_page_uses_actual_sql: false,
+        });
+
+        assert_eq!(first_page.sql_to_execute, "SELECT * FROM events LIMIT 500;");
+        assert_eq!(first_page.page_sql, Some(first_page.sql_to_execute.clone()));
+        assert_eq!(first_page.page_limit, Some(500));
+        assert_eq!(first_page.page_offset, Some(0));
+        assert!(!first_page.use_agent_result_session);
+
+        let second_page = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+            sql: "SELECT * FROM events".to_string(),
+            query_base_sql: "SELECT * FROM events".to_string(),
+            database_type: Some(DatabaseType::Highgo),
+            pagination: QueryPagination { limit: 500, offset: 500, session_id: None },
+            use_agent_cursor: true,
+            first_page_uses_actual_sql: false,
+        });
+
+        assert_eq!(second_page.sql_to_execute, "SELECT * FROM events LIMIT 500 OFFSET 500;");
+        assert_eq!(second_page.page_sql, Some(second_page.sql_to_execute.clone()));
+        assert_eq!(second_page.page_limit, Some(500));
+        assert_eq!(second_page.page_offset, Some(500));
+        assert!(!second_page.use_agent_result_session);
+    }
+
+    #[test]
+    fn highgo_avoids_agent_cursor_for_unrewritable_queries() {
+        let sql = "SELECT * FROM events; SELECT 1";
+        let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+            sql: sql.to_string(),
+            query_base_sql: sql.to_string(),
+            database_type: Some(DatabaseType::Highgo),
+            pagination: QueryPagination { limit: 500, offset: 0, session_id: None },
+            use_agent_cursor: true,
+            first_page_uses_actual_sql: false,
+        });
+
+        assert_eq!(plan.sql_to_execute, sql);
+        assert!(plan.page_sql.is_none());
+        assert!(plan.page_limit.is_none());
+        assert!(plan.page_offset.is_none());
+        assert!(!plan.use_agent_result_session);
     }
 
     #[test]

@@ -1997,7 +1997,11 @@ async fn do_execute_typed(
             let result = wait_for_query_opt(
                 cancel_token,
                 query_timeout,
-                db::elasticsearch_driver::execute_rest_query(&client, &sql),
+                db::elasticsearch_driver::execute_rest_query_with_cursor(
+                    &client,
+                    &sql,
+                    options.result_session_id.as_deref(),
+                ),
             )
             .await
             .map(|result| truncate_result_with_max_rows(result, max_rows));
@@ -2014,7 +2018,11 @@ async fn do_execute_typed(
             let result = wait_for_query_opt(
                 cancel_token,
                 query_timeout,
-                db::easysearch_driver::execute_rest_query(&client, &sql),
+                db::easysearch_driver::execute_rest_query_with_cursor(
+                    &client,
+                    &sql,
+                    options.result_session_id.as_deref(),
+                ),
             )
             .await
             .map(|result| truncate_result_with_max_rows(result, max_rows));
@@ -2762,6 +2770,18 @@ pub async fn close_query_session(
                 .invoke::<serde_json::Value>("closeQuerySession", params)
                 .await
                 .map(|value| value.get("ok").and_then(|ok| ok.as_bool()).unwrap_or(false))
+        }
+        PoolKind::Elasticsearch(client) => {
+            let client = client.clone();
+            drop(connections);
+            db::elasticsearch_driver::close_cursor(&client, session_id).await?;
+            Ok(true)
+        }
+        PoolKind::Easysearch(client) => {
+            let client = client.clone();
+            drop(connections);
+            db::easysearch_driver::close_cursor(&client, session_id).await?;
+            Ok(true)
         }
         _ => Ok(false),
     }

@@ -41,11 +41,46 @@ describe("SchemaDiffDialog fullscreen layout", () => {
     expect(dialogSource).toMatch(/<SchemaDiffConfigStep\n[\s\S]*?class="shrink-0"/);
   });
 
-  it("clears stale result state whenever a new dialog session opens", () => {
+  it("clears stale result and progress state whenever a new dialog session opens", () => {
     expect(dialogSource).toContain("function resetComparisonResultState() {");
     expect(dialogSource).toMatch(/if \(isOpen\) \{\s+resetComparisonResultState\(\);/);
     expect(dialogSource).toContain("diffObjects.value = [];");
     expect(dialogSource).toContain("lastDiffResult.value = null;");
+    expect(dialogSource).toContain("schemaDiffProgress.value = null;");
+  });
+
+  it("shows real metadata progress and indeterminate comparison phases without fabricated percentages", () => {
+    expect(dialogSource).toContain('phase: "loading-table-lists"');
+    expect(dialogSource).toContain('phase: "loading-source-details"');
+    expect(dialogSource).toContain('phase: "loading-target-details"');
+    expect(dialogSource).toContain('phase: "loading-extra-objects"');
+    expect(dialogSource).toContain('phase: "comparing"');
+    expect(dialogSource).toContain('phase: "generating"');
+    expect(dialogSource).toContain("onProgress: (progress) =>");
+    expect(dialogSource).toContain("schemaDiffProgressCount");
+    expect(dialogSource).toContain('role="progressbar"');
+    expect(dialogSource).toContain("schema-diff-progress-indeterminate");
+    expect(dialogSource).not.toMatch(/\b(?:20|40|60|80)%/);
+  });
+
+  it("renders a localized next-step label alongside the current progress state", () => {
+    expect(dialogSource).toContain("getSchemaDiffNextProgressStep");
+    expect(dialogSource).toContain("schemaDiffNextProgressLabel");
+    expect(dialogSource).toContain('t("diff.progress.next"');
+    expect(dialogSource).toContain('v-if="schemaDiffNextProgressLabel"');
+    expect(dialogSource).toContain("shouldLoadSchemaDiffExtraObjects");
+  });
+
+  it("clears progress before preserving the existing comparison error flow", () => {
+    expect(dialogSource).toMatch(/\} catch \(e: any\) \{\s+if \(!isCurrentRequest\(\)\) return;\s+schemaDiffProgress\.value = null;/);
+    expect(dialogSource).toContain("toast(e?.message || String(e), 5000);");
+    expect(dialogSource).toContain('step.value = "config";');
+  });
+
+  it("invalidates an active comparison when the dialog closes", () => {
+    expect(dialogSource).toContain("const requestId = ++comparisonRequestId;");
+    expect(dialogSource).toContain("if (!isCurrentRequest()) return;");
+    expect(dialogSource).toMatch(/\} else \{\s+comparisonRequestId\+\+;\s+loading\.value = false;\s+schemaDiffProgress\.value = null;/);
   });
 
   it("does not restore persisted table matches before source and target identities are ready", () => {
@@ -70,5 +105,22 @@ describe("SchemaDiffDialog fullscreen layout", () => {
     expect(tableSelector).toBeLessThan(options);
     expect(targetMatch).toBeGreaterThan(comparisonScope);
     expect(targetMatch).toBeLessThan(options);
+  });
+
+  it("keeps focused and selected deployment SQL projections separate", () => {
+    expect(dialogSource).toContain('const focusedDeploySql = ref("");');
+    expect(dialogSource).toContain('const selectedDeploySql = ref("");');
+    expect(dialogSource).toContain("const input = selectSchemaDiffInputForObject(result, diffObjects.value, objectId);");
+    expect(dialogSource).toContain(':deploy-sql="focusedDeploySql"');
+    expect(dialogSource).toContain(':deploy-sql-all="selectedDeploySql"');
+    expect(dialogSource).not.toContain("deploySqlAll.value = result.syncSql");
+  });
+
+  it("executes the selected SQL rather than the focused preview", () => {
+    expect(dialogSource).toContain("sql: selectedDeploySql.value");
+    expect(dialogSource).toContain("[selectedDeploySql.value]");
+    expect(dialogSource).toContain("selectedObjectId.value !== objectId");
+    expect(dialogSource).toContain('selectedDeploySql.value = "";');
+    expect(dialogSource).toContain("const sql = selectedDeploySql.value.trim();");
   });
 });

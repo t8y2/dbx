@@ -13,6 +13,11 @@ describe("connection dialog scrolling", () => {
     expect(dialogSource).toMatch(/\.connection-dialog-content--config \.connection-form-body\s*\{[\s\S]*?align-content:\s*start;/);
   });
 
+  it("hides proxy and HTTP tunnel controls for SQLite", () => {
+    expect(dialogSource).toContain('v-if="!sqliteSshOnlyTransport"');
+    expect(dialogSource).toContain('v-if="!selectedLayerProfileId && !sqliteSshOnlyTransport"');
+  });
+
   it("keeps the transport form inside a shrinkable scroll viewport", () => {
     expect(dialogSource).toContain('<TabsContent v-if="canUseTransportLayers" value="transport" class="m-0 flex min-h-0 flex-1 flex-col overflow-hidden">');
     expect(dialogSource).toContain('class="connection-form-body grid min-h-0 flex-1 scroll-pb-6 gap-4 overflow-y-auto overflow-x-hidden pt-4 pr-2 pb-6"');

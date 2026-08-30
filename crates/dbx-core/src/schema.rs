@@ -7027,6 +7027,9 @@ async fn list_foreign_keys_core_for_session(
                     db::mysql::list_foreign_keys(p, mysql_table_metadata_catalog(database, schema), table).await
                 }
             }
+            PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_opengauss_constraint_config) => {
+                db::postgres::list_opengauss_foreign_keys(p, schema, table).await
+            }
             PoolKind::Postgres(p) => db::postgres::list_foreign_keys(p, schema, table).await,
             PoolKind::Sqlite(p) => db::sqlite::list_foreign_keys(p, schema, table).await,
             PoolKind::Rqlite(client) => db::rqlite_driver::list_foreign_keys(client, schema, table).await,

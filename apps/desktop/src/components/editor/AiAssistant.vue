@@ -24,6 +24,7 @@ import {
   GitBranch,
   HelpCircle,
   History,
+  ArrowDownToLine,
   Loader2,
   Maximize2,
   MessageSquarePlus,
@@ -31,7 +32,6 @@ import {
   Pencil,
   Plus,
   RefreshCw,
-  Replace,
   Server,
   ShieldCheck,
   Table2,
@@ -242,7 +242,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  replaceSql: [sql: string];
+  appendSql: [sql: string];
   executeSql: [sql: string];
   tempRunSql: [sql: string];
   requestAutoExecuteSql: [sql: string];
@@ -1197,7 +1197,7 @@ function sendProposalReply(positive: boolean) {
   const isWriteConfirmation = isActionableWriteProposalMessage(target);
   if (positive && productionContext.value.active && (target.kind === "writeSqlConfirmation" || looksLikeWriteSqlProposal(target.content))) {
     const sql = extractFirstSqlCodeBlock(target.content);
-    if (sql) emit("replaceSql", sql);
+    if (sql) emit("appendSql", sql);
     toast(t("production.aiReviewRequired"), 5000);
     return;
   }
@@ -3477,7 +3477,7 @@ function applySql(code: string) {
     emit("insertRedisCommand", code);
     return;
   }
-  emit("replaceSql", code);
+  emit("appendSql", code);
 }
 
 function executeSql(code: string) {
@@ -4604,7 +4604,7 @@ async function openExternalUrl(url: string) {
                           <Play class="h-3.5 w-3.5" />
                         </button>
                         <button v-if="!seg.pending && (seg.isSql || isRedisConnection)" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.apply')" @click="applySql(seg.content)">
-                          <Replace class="h-3.5 w-3.5" />
+                          <ArrowDownToLine class="h-3.5 w-3.5" />
                         </button>
                         <button
                           class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"

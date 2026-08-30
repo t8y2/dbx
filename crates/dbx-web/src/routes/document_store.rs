@@ -68,6 +68,8 @@ pub struct DocumentFindRequest {
     pub sort: Option<String>,
     pub collation: Option<String>,
     pub cursor: Option<String>,
+    #[serde(default)]
+    pub cursor_pagination: bool,
     pub execution_id: Option<String>,
 }
 
@@ -330,6 +332,7 @@ pub async fn find_documents(
             req.sort.as_deref(),
             req.collation.as_deref(),
             req.cursor.as_deref(),
+            req.cursor_pagination,
         ),
     )
     .await?;

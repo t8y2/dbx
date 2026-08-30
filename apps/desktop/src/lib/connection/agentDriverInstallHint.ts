@@ -8,6 +8,14 @@ export interface AgentDriverInstallState {
   update_available?: boolean;
 }
 
+export type AgentDriverInstallContext = {
+  ssh?: boolean;
+};
+
+export function connectionUsesSsh(config: { transport_layers?: Array<{ type?: string; enabled?: boolean }> } | undefined): boolean {
+  return (config?.transport_layers ?? []).some((layer) => layer.enabled !== false && layer.type === "ssh");
+}
+
 /** Returns whether a locally installed native Agent meets a required release. */
 export function hasInstalledAgentVersion(drivers: readonly AgentDriverInstallState[], driverKey: string, minimumVersion: string): boolean {
   const installedVersion = drivers.find((driver) => driver.db_type === driverKey && driver.installed)?.installed_version;
@@ -23,7 +31,8 @@ export function hasInstalledAgentVersion(drivers: readonly AgentDriverInstallSta
   return installed[0] > minimum[0] || (installed[0] === minimum[0] && (installed[1] > minimum[1] || (installed[1] === minimum[1] && installed[2] >= minimum[2])));
 }
 
-export function agentDriverInstallKey(dbType: DatabaseType | undefined, driverProfile?: string): string | undefined {
+export function agentDriverInstallKey(dbType: DatabaseType | undefined, driverProfile?: string, context?: AgentDriverInstallContext): string | undefined {
+  if (dbType === "sqlite") return context?.ssh ? "sqlite-worker" : undefined;
   if (dbType === "kyuubi" || dbType === "impala") return "hive";
   if (dbType === "oracle") return "oracle";
   if (dbType === "h2") return "h2";
@@ -39,23 +48,24 @@ export function agentDriverInstallKey(dbType: DatabaseType | undefined, driverPr
   return driverProfile && driverProfile !== dbType ? driverProfile : dbType;
 }
 
-function usesManagedAgentDriver(dbType: DatabaseType | undefined, driverProfile?: string): boolean {
+function usesManagedAgentDriver(dbType: DatabaseType | undefined, driverProfile?: string, context?: AgentDriverInstallContext): boolean {
+  if (dbType === "sqlite") return context?.ssh === true;
   if (supportsDriverManagement(dbType)) return true;
   if (dbType !== "mongodb") return false;
   const profile = driverProfile?.trim().toLowerCase();
   return profile === "mongodb-legacy" || profile === "mongodb_legacy" || profile === "legacy";
 }
 
-export function showAgentDriverInstallHint(dbType: DatabaseType | undefined, drivers: readonly AgentDriverInstallState[], driverProfile?: string): boolean {
-  if (!usesManagedAgentDriver(dbType, driverProfile)) return false;
-  const driverKey = agentDriverInstallKey(dbType, driverProfile);
+export function showAgentDriverInstallHint(dbType: DatabaseType | undefined, drivers: readonly AgentDriverInstallState[], driverProfile?: string, context?: AgentDriverInstallContext): boolean {
+  if (!usesManagedAgentDriver(dbType, driverProfile, context)) return false;
+  const driverKey = agentDriverInstallKey(dbType, driverProfile, context);
   if (!driverKey) return false;
   return drivers.find((driver) => driver.db_type === driverKey)?.installed !== true;
 }
 
-export function hasAgentDriverUpdate(dbType: DatabaseType | undefined, drivers: readonly AgentDriverInstallState[], driverProfile?: string): boolean {
-  if (!usesManagedAgentDriver(dbType, driverProfile)) return false;
-  const driverKey = agentDriverInstallKey(dbType, driverProfile);
+export function hasAgentDriverUpdate(dbType: DatabaseType | undefined, drivers: readonly AgentDriverInstallState[], driverProfile?: string, context?: AgentDriverInstallContext): boolean {
+  if (!usesManagedAgentDriver(dbType, driverProfile, context)) return false;
+  const driverKey = agentDriverInstallKey(dbType, driverProfile, context);
   return drivers.find((driver) => driver.db_type === driverKey)?.update_available === true;
 }
 
@@ -73,5 +83,6 @@ export type DriverStoreFocus = { target: "driver"; driver?: string } | { target:
 export function driverStoreFocusForInstallError(message: string, dbType?: DatabaseType, driverProfile?: string): DriverStoreFocus | null {
   if (message.includes("JRE") && message.includes("not installed")) return { target: "jre" };
   if (!message.includes("is not installed") && !message.includes("reinstall it from the Driver Manager")) return null;
-  return { target: "driver", driver: agentDriverInstallKey(dbType, driverProfile) };
+  if (message.includes("sqlite-worker")) return { target: "driver", driver: "sqlite-worker" };
+  return { target: "driver", driver: agentDriverInstallKey(dbType, driverProfile, { ssh: dbType === "sqlite" }) };
 }

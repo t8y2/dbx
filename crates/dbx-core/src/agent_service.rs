@@ -10,7 +10,8 @@ use sha2::{Digest, Sha256};
 use crate::agent_catalog;
 use crate::agent_manager::{
     AgentDriverInfo, AgentInstallCancellation, AgentManager, AgentRegistry, ArtifactFormat, ArtifactInfo,
-    InstalledDriver, JavaRuntimeMode, OperationLockHandle, DEFAULT_JRE_KEY,
+    InstalledDriver, JavaRuntimeMode, OperationLockHandle, DEFAULT_JRE_KEY, SQLITE_WORKER_DRIVER_KEY,
+    SQLITE_WORKER_NATIVE_PLATFORMS,
 };
 use crate::DownloadSource;
 
@@ -213,7 +214,7 @@ pub fn build_agent_list(am: &AgentManager, registry: Option<&AgentRegistry>) -> 
     agent_catalog::driver_store_entries()
         .map(|(key, label)| {
             let jar_valid = am.is_driver_jar_valid(key);
-            let native_installed = am.driver_native_path(key).exists();
+            let native_installed = am.driver_native_installed(key);
             let launch_config_installed = am.driver_launch_config_path(key).exists();
             let installed = jar_valid || native_installed || launch_config_installed;
             let local = local_state.installed_drivers.get(key);
@@ -239,7 +240,7 @@ pub fn build_agent_list(am: &AgentManager, registry: Option<&AgentRegistry>) -> 
                 db_type: key.to_string(),
                 label: label.to_string(),
                 version: remote.map(|r| r.version.clone()).unwrap_or_default(),
-                size: remote.and_then(driver_download_artifact).map(|artifact| artifact.size).unwrap_or(0),
+                size: remote.map(|driver| driver_download_size(key, driver)).unwrap_or(0),
                 installed,
                 installed_version: local.map(|l| l.version.clone()),
                 update_available: match (local, remote) {
@@ -254,12 +255,27 @@ pub fn build_agent_list(am: &AgentManager, registry: Option<&AgentRegistry>) -> 
         .collect()
 }
 
+fn usable_driver_jar(driver: &crate::agent_manager::DriverInfo) -> Option<&crate::agent_manager::ArtifactInfo> {
+    driver.jar.as_ref().filter(|artifact| artifact.size > 0)
+}
+
 fn driver_download_artifact(driver: &crate::agent_manager::DriverInfo) -> Option<&crate::agent_manager::ArtifactInfo> {
-    driver.native.get(AgentManager::current_platform()).or(driver.jar.as_ref())
+    driver.native.get(AgentManager::current_platform()).or_else(|| usable_driver_jar(driver))
+}
+
+fn driver_download_size(db_type: &str, driver: &crate::agent_manager::DriverInfo) -> u64 {
+    if AgentManager::is_sqlite_worker_driver(db_type) {
+        return SQLITE_WORKER_NATIVE_PLATFORMS
+            .iter()
+            .filter_map(|platform| driver.native.get(*platform))
+            .map(|artifact| artifact.size)
+            .sum();
+    }
+    driver_download_artifact(driver).map(|artifact| artifact.size).unwrap_or(0)
 }
 
 fn remote_driver_requires_java_runtime(driver: &crate::agent_manager::DriverInfo) -> bool {
-    driver.jar.is_some() && !driver.native.contains_key(AgentManager::current_platform())
+    usable_driver_jar(driver).is_some() && !driver.native.contains_key(AgentManager::current_platform())
 }
 
 fn installed_jre_version<'a>(state: &'a crate::agent_manager::AgentState, jre_key: &str) -> Option<&'a String> {
@@ -487,6 +503,22 @@ pub async fn install_agent_driver(
     progress: impl Fn(AgentProgressEvent),
 ) -> Result<(), String> {
     install_agent_driver_from(am, db_type, DownloadSource::Official, progress).await
+}
+
+/// Ensure both Linux worker binaries are available for remote SQLite over SSH.
+///
+/// Unlike a regular native Agent, this driver is selected by the remote SSH
+/// host's architecture rather than by the desktop application's platform.
+pub async fn ensure_sqlite_worker_driver_ready(am: &AgentManager) -> Result<(), String> {
+    if am.driver_native_installed(SQLITE_WORKER_DRIVER_KEY) {
+        return Ok(());
+    }
+    install_agent_driver(am, SQLITE_WORKER_DRIVER_KEY, |_| {}).await?;
+    if am.driver_native_installed(SQLITE_WORKER_DRIVER_KEY) {
+        Ok(())
+    } else {
+        Err("SQLite SSH worker installation completed without both Linux binaries".to_string())
+    }
 }
 
 /// Like `install_agent_driver`, but using a command-scoped cancellation token
@@ -1325,6 +1357,81 @@ async fn install_local_agent_with_registry_jre(
     Ok(())
 }
 
+async fn install_sqlite_worker_from_registry(
+    am: &AgentManager,
+    source: DownloadSource,
+    db_type: &str,
+    driver: &crate::agent_manager::DriverInfo,
+    progress: &impl Fn(AgentProgressEvent),
+    current: Option<u32>,
+    total_drivers: Option<u32>,
+    cancellations: &[&AgentInstallCancellation],
+) -> Result<(), String> {
+    let jre_key = &driver.jre;
+    std::fs::create_dir_all(am.driver_dir(db_type))
+        .map_err(|err| format!("Failed to create driver directory: {err}"))?;
+    for platform in SQLITE_WORKER_NATIVE_PLATFORMS {
+        let artifact = driver
+            .native
+            .get(*platform)
+            .ok_or_else(|| format!("SQLite SSH worker registry is missing the {platform} native package"))?;
+        let target_path = am.driver_native_platform_path(db_type, platform);
+        let download_path = driver_artifact_download_path(&target_path, artifact.format);
+        progress(AgentProgressEvent::transfer("driver", 0, artifact.size).with_batch(
+            Some(db_type),
+            current,
+            total_drivers,
+        ));
+        download_with_progress(
+            am,
+            progress,
+            "driver",
+            source,
+            &artifact.url,
+            &r2_path_with_cache_buster(&github_url_to_r2_path(&artifact.url, "driver"), &driver.version),
+            &download_path,
+            artifact.size,
+            artifact.sha256.as_deref(),
+            Some(CacheIdentity::Driver { db_type, version: &driver.version }),
+            Some(db_type),
+            current,
+            total_drivers,
+            cancellations,
+        )
+        .await?;
+        if cancellations.iter().any(|token| token.is_cancelled()) {
+            std::fs::remove_file(&download_path).ok();
+            return Err(AGENT_DOWNLOAD_CANCELED_ERROR.to_string());
+        }
+        install_downloaded_driver_artifact(
+            &download_path,
+            &target_path,
+            artifact.format,
+            DriverArtifactKind::Native,
+            db_type,
+            &driver.version,
+            Some(platform),
+        )?;
+        mark_executable(&target_path)?;
+    }
+    std::fs::remove_file(am.driver_jar_path(db_type)).ok();
+    std::fs::remove_file(am.driver_native_path(db_type)).ok();
+    am.mutate_state(|state| {
+        state.installed_drivers.insert(
+            db_type.to_string(),
+            InstalledDriver {
+                version: driver.version.clone(),
+                installed_at: chrono::Utc::now().to_rfc3339(),
+                jre: jre_key.clone(),
+            },
+        );
+    })?;
+    am.stop_daemon_by_key(db_type).await;
+    cleanup_driver_download_cache_after_success(am, db_type);
+    progress(AgentProgressEvent::step("done").with_batch(Some(db_type), current, total_drivers));
+    Ok(())
+}
+
 async fn install_agent_driver_from_registry(
     am: &AgentManager,
     registry: &AgentRegistry,
@@ -1353,9 +1460,22 @@ async fn install_agent_driver_from_registry(
         }
         return Err(format!("Unknown driver type: {db_type}"));
     };
+    if AgentManager::is_sqlite_worker_driver(db_type) {
+        return install_sqlite_worker_from_registry(
+            am,
+            source,
+            db_type,
+            driver,
+            progress,
+            current,
+            total_drivers,
+            cancellations,
+        )
+        .await;
+    }
     let jre_key = &driver.jre;
     let native_artifact = driver.native.get(AgentManager::current_platform());
-    let jar_artifact = driver.jar.as_ref();
+    let jar_artifact = usable_driver_jar(driver);
     let requires_java_runtime = native_artifact.is_none();
     let needs_jre = requires_java_runtime && jre_needs_install(am, registry, jre_key);
 
@@ -1421,6 +1541,7 @@ async fn install_agent_driver_from_registry(
         artifact_kind,
         db_type,
         &driver.version,
+        is_native_artifact.then_some(AgentManager::current_platform()),
     )?;
     // Some drivers publish both a native agent and a legacy JAR fallback. Only
     // validate the artifact type that was actually installed.
@@ -1479,12 +1600,18 @@ fn install_downloaded_driver_artifact(
     artifact_kind: DriverArtifactKind,
     db_type: &str,
     expected_version: &str,
+    native_platform: Option<&str>,
 ) -> Result<(), String> {
     let result = match format {
         None => replace_download(download_path, target_path),
-        Some(ArtifactFormat::TarZstd) => {
-            install_driver_from_tar_zstd_package(download_path, target_path, artifact_kind, db_type, expected_version)
-        }
+        Some(ArtifactFormat::TarZstd) => install_driver_from_tar_zstd_package(
+            download_path,
+            target_path,
+            artifact_kind,
+            db_type,
+            expected_version,
+            native_platform,
+        ),
     };
     if result.is_ok() {
         std::fs::remove_file(download_path).ok();
@@ -1498,6 +1625,7 @@ fn install_driver_from_tar_zstd_package(
     expected_kind: DriverArtifactKind,
     db_type: &str,
     expected_version: &str,
+    native_platform: Option<&str>,
 ) -> Result<(), String> {
     let info = tar_zstd_driver_package_info(package_path)?;
     if info.db_type != db_type {
@@ -1525,7 +1653,10 @@ fn install_driver_from_tar_zstd_package(
                 return Err(format!("Packaged driver jar is invalid or corrupt: {}", info.entry_name));
             }
             DriverArtifactKind::Native => {
-                validate_native_agent_binary(&staging_path)?;
+                let platform = native_platform
+                    .or(info.native_platform.as_deref())
+                    .unwrap_or_else(|| AgentManager::current_platform());
+                validate_native_agent_binary_for_platform(&staging_path, platform)?;
                 mark_executable(&staging_path)?;
             }
             DriverArtifactKind::Jar => {}
@@ -2276,6 +2407,7 @@ struct TarZstdDriverPackageInfo {
     version: String,
     jre: String,
     kind: DriverArtifactKind,
+    native_platform: Option<String>,
     entry_name: String,
     size: u64,
 }
@@ -2313,9 +2445,23 @@ async fn import_tar_zstd_driver_package(
     });
     let target_path = match info.kind {
         DriverArtifactKind::Jar => am.driver_jar_path(&info.db_type),
+        DriverArtifactKind::Native if AgentManager::is_sqlite_worker_driver(&info.db_type) => {
+            let platform = info
+                .native_platform
+                .as_deref()
+                .ok_or_else(|| "SQLite SSH worker package is missing its Linux platform".to_string())?;
+            am.driver_native_platform_path(&info.db_type, platform)
+        }
         DriverArtifactKind::Native => am.driver_native_path(&info.db_type),
     };
-    install_driver_from_tar_zstd_package(package_path, &target_path, info.kind, &info.db_type, &info.version)?;
+    install_driver_from_tar_zstd_package(
+        package_path,
+        &target_path,
+        info.kind,
+        &info.db_type,
+        &info.version,
+        info.native_platform.as_deref(),
+    )?;
     match info.kind {
         DriverArtifactKind::Jar => {
             std::fs::remove_file(am.driver_native_path(&info.db_type)).ok();
@@ -2324,16 +2470,20 @@ async fn import_tar_zstd_driver_package(
             std::fs::remove_file(am.driver_jar_path(&info.db_type)).ok();
         }
     }
-    am.mutate_state(|state| {
-        state.installed_drivers.insert(
-            info.db_type.clone(),
-            InstalledDriver {
-                version: info.version.clone(),
-                installed_at: chrono::Utc::now().to_rfc3339(),
-                jre: info.jre.clone(),
-            },
-        );
-    })?;
+    let record_install =
+        !AgentManager::is_sqlite_worker_driver(&info.db_type) || am.driver_native_installed(&info.db_type);
+    if record_install {
+        am.mutate_state(|state| {
+            state.installed_drivers.insert(
+                info.db_type.clone(),
+                InstalledDriver {
+                    version: info.version.clone(),
+                    installed_at: chrono::Utc::now().to_rfc3339(),
+                    jre: info.jre.clone(),
+                },
+            );
+        })?;
+    }
     am.stop_daemon_by_key(&info.db_type).await;
     result.drivers_installed.push(info.db_type);
     Ok(result)
@@ -2346,9 +2496,16 @@ fn tar_zstd_driver_package_info(package_path: &Path) -> Result<TarZstdDriverPack
     }
     let (db_type, driver) = registry.drivers.iter().next().expect("checked one driver");
     validate_offline_driver_key(db_type)?;
-    let platform = AgentManager::current_platform();
-    let native_artifact = driver.native.get(platform);
-    let jar_artifact = driver.jar.as_ref();
+    let current_platform = AgentManager::current_platform();
+    let (native_platform, native_artifact) = if let Some(artifact) = driver.native.get(current_platform) {
+        (Some(current_platform.to_string()), Some(artifact))
+    } else if driver.native.len() == 1 {
+        let (platform, artifact) = driver.native.iter().next().expect("checked one native platform");
+        (Some(platform.clone()), Some(artifact))
+    } else {
+        (None, None)
+    };
+    let jar_artifact = usable_driver_jar(driver);
     let (kind, artifact) = match (native_artifact, jar_artifact) {
         (Some(_), Some(_)) => {
             return Err("A tar.zst driver package must contain exactly one driver artifact".to_string());
@@ -2356,7 +2513,7 @@ fn tar_zstd_driver_package_info(package_path: &Path) -> Result<TarZstdDriverPack
         (Some(artifact), None) => (DriverArtifactKind::Native, artifact),
         (None, Some(artifact)) => (DriverArtifactKind::Jar, artifact),
         (None, None) if !driver.native.is_empty() => {
-            return Err(format!("Driver package does not support platform: {platform}"));
+            return Err(format!("Driver package does not support platform: {current_platform}"));
         }
         (None, None) => return Err("A tar.zst driver package contains no driver artifact".to_string()),
     };
@@ -2376,6 +2533,7 @@ fn tar_zstd_driver_package_info(package_path: &Path) -> Result<TarZstdDriverPack
         version: driver.version.clone(),
         jre: driver.jre.clone(),
         kind,
+        native_platform: native_platform.filter(|_| kind == DriverArtifactKind::Native),
         entry_name,
         size: artifact.size,
     })
@@ -3089,26 +3247,30 @@ fn jre_dir_contains_java(path: &Path) -> bool {
 }
 
 pub(crate) fn validate_native_agent_binary(path: &Path) -> Result<(), String> {
+    validate_native_agent_binary_for_platform(path, AgentManager::current_platform())
+}
+
+pub(crate) fn validate_native_agent_binary_for_platform(path: &Path, platform: &str) -> Result<(), String> {
     let mut file = std::fs::File::open(path).map_err(|e| format!("Failed to read native agent: {e}"))?;
     let mut magic = [0_u8; 4];
     file.read_exact(&mut magic).map_err(|e| format!("Failed to read native agent header: {e}"))?;
-    let valid = if cfg!(target_os = "windows") {
-        is_windows_binary_for_current_arch(&mut file, &magic)
-    } else if cfg!(target_os = "linux") {
-        is_elf_binary_for_current_arch(&mut file, &magic)
-    } else if cfg!(target_os = "macos") {
-        is_macho_binary_for_current_arch(&mut file, &magic)
-    } else {
-        false
+    let valid = match platform {
+        "linux-x64" => is_elf_binary_for_machine(&mut file, &magic, 62),
+        "linux-aarch64" => is_elf_binary_for_machine(&mut file, &magic, 183),
+        "macos-x64" => is_macho_binary_for_cpu(&mut file, &magic, 0x0100_0007),
+        "macos-aarch64" => is_macho_binary_for_cpu(&mut file, &magic, 0x0100_000c),
+        "windows-x64" => is_windows_binary_for_machine(&mut file, &magic, 0x8664),
+        "windows-aarch64" => is_windows_binary_for_machine(&mut file, &magic, 0xaa64),
+        _ => false,
     };
     if valid {
         Ok(())
     } else {
-        Err(format!("The selected file is not a {} native agent for this platform", AgentManager::current_platform()))
+        Err(format!("The selected file is not a {platform} native agent"))
     }
 }
 
-fn is_elf_binary_for_current_arch(file: &mut std::fs::File, magic: &[u8; 4]) -> bool {
+fn is_elf_binary_for_machine(file: &mut std::fs::File, magic: &[u8; 4], expected_machine: u16) -> bool {
     if magic != b"\x7fELF" || file.seek(SeekFrom::Start(4)).is_err() {
         return false;
     }
@@ -3121,14 +3283,10 @@ fn is_elf_binary_for_current_arch(file: &mut std::fs::File, magic: &[u8; 4]) -> 
         2 => u16::from_be_bytes([header[14], header[15]]),
         _ => return false,
     };
-    (cfg!(target_arch = "x86_64") && machine == 62) || (cfg!(target_arch = "aarch64") && machine == 183)
+    machine == expected_machine
 }
 
-fn is_macho_binary_for_current_arch(file: &mut std::fs::File, magic: &[u8; 4]) -> bool {
-    const CPU_TYPE_X86_64: u32 = 0x0100_0007;
-    const CPU_TYPE_ARM64: u32 = 0x0100_000c;
-    let expected = if cfg!(target_arch = "aarch64") { CPU_TYPE_ARM64 } else { CPU_TYPE_X86_64 };
-
+fn is_macho_binary_for_cpu(file: &mut std::fs::File, magic: &[u8; 4], expected: u32) -> bool {
     let thin_endian = match magic {
         [0xce, 0xfa, 0xed, 0xfe] | [0xcf, 0xfa, 0xed, 0xfe] => Some(true),
         [0xfe, 0xed, 0xfa, 0xce] | [0xfe, 0xed, 0xfa, 0xcf] => Some(false),
@@ -3182,7 +3340,7 @@ fn is_macho_binary_for_current_arch(file: &mut std::fs::File, magic: &[u8; 4]) -
     false
 }
 
-fn is_windows_binary_for_current_arch(file: &mut std::fs::File, magic: &[u8; 4]) -> bool {
+fn is_windows_binary_for_machine(file: &mut std::fs::File, magic: &[u8; 4], expected_machine: u16) -> bool {
     if &magic[..2] != b"MZ" || file.seek(SeekFrom::Start(0x3c)).is_err() {
         return false;
     }
@@ -3197,7 +3355,7 @@ fn is_windows_binary_for_current_arch(file: &mut std::fs::File, magic: &[u8; 4])
         return false;
     }
     let machine = u16::from_le_bytes([pe_header[4], pe_header[5]]);
-    (cfg!(target_arch = "x86_64") && machine == 0x8664) || (cfg!(target_arch = "aarch64") && machine == 0xaa64)
+    machine == expected_machine
 }
 
 // ──────────── Tests ────────────
@@ -3236,11 +3394,11 @@ mod agent_download_url_tests {
 
         std::fs::write(&path, test_pe_binary(expected_machine)).unwrap();
         let mut file = std::fs::File::open(&path).unwrap();
-        assert!(is_windows_binary_for_current_arch(&mut file, b"MZ\0\0"));
+        assert!(is_windows_binary_for_machine(&mut file, b"MZ\0\0", expected_machine));
 
         std::fs::write(&path, test_pe_binary(wrong_machine)).unwrap();
         let mut file = std::fs::File::open(&path).unwrap();
-        assert!(!is_windows_binary_for_current_arch(&mut file, b"MZ\0\0"));
+        assert!(!is_windows_binary_for_machine(&mut file, b"MZ\0\0", expected_machine));
         std::fs::remove_file(path).ok();
     }
 
@@ -3913,6 +4071,81 @@ mod agent_registry_install_tests {
         assert_eq!(std::fs::read(&native_path).unwrap(), native_bytes);
         assert!(!cache_path.exists());
         assert!(!manager.driver_jar_path(db_type).exists());
+        assert_eq!(manager.load_state().installed_drivers.get(db_type).unwrap().version, version);
+        assert!(events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| event.step == "done" && event.db_type.as_deref() == Some(db_type)));
+    }
+
+    #[tokio::test]
+    async fn registry_install_sqlite_worker_downloads_both_linux_platforms() {
+        let manager = test_manager("sqlite-worker-both-linux-platforms");
+        let db_type = "sqlite-worker";
+        let version = "0.1.0";
+        let x64_url = "https://example.com/dbx-agent-sqlite-worker-linux-x64";
+        let arm_url = "https://example.com/dbx-agent-sqlite-worker-linux-aarch64";
+        let x64_bytes = b"sqlite-worker-linux-x64";
+        let arm_bytes = b"sqlite-worker-linux-aarch64";
+        let mut native = std::collections::HashMap::new();
+        native.insert(
+            "linux-x64".to_string(),
+            ArtifactInfo { url: x64_url.to_string(), sha256: None, size: x64_bytes.len() as u64, format: None },
+        );
+        native.insert(
+            "linux-aarch64".to_string(),
+            ArtifactInfo { url: arm_url.to_string(), sha256: None, size: arm_bytes.len() as u64, format: None },
+        );
+        let mut drivers = std::collections::HashMap::new();
+        drivers.insert(
+            db_type.to_string(),
+            DriverInfo {
+                version: version.to_string(),
+                label: "SQLite SSH Worker".to_string(),
+                min_app_version: "0.1.0".to_string(),
+                jre: DEFAULT_JRE_KEY.to_string(),
+                jar: Some(ArtifactInfo {
+                    url: "https://example.com/dbx-agent-sqlite-worker-legacy-placeholder.jar".to_string(),
+                    sha256: None,
+                    size: 0,
+                    format: None,
+                }),
+                native,
+            },
+        );
+        let registry = AgentRegistry { jre: None, jres: std::collections::HashMap::new(), drivers };
+        let x64_path = manager.driver_native_platform_path(db_type, "linux-x64");
+        let arm_path = manager.driver_native_platform_path(db_type, "linux-aarch64");
+        std::fs::create_dir_all(manager.driver_dir(db_type)).unwrap();
+        write_cached_driver_download(&manager, db_type, version, x64_url, &x64_path, x64_bytes);
+        write_cached_driver_download(&manager, db_type, version, arm_url, &arm_path, arm_bytes);
+        let events = std::sync::Mutex::new(Vec::new());
+        let progress = |event| events.lock().unwrap().push(event);
+
+        install_agent_driver_from_registry(
+            &manager,
+            &registry,
+            DownloadSource::Official,
+            db_type,
+            &progress,
+            None,
+            None,
+            &[],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(std::fs::read(&x64_path).unwrap(), x64_bytes);
+        assert_eq!(std::fs::read(&arm_path).unwrap(), arm_bytes);
+        assert!(manager.driver_native_installed(db_type));
+        assert!(!manager.driver_native_path(db_type).exists());
+        assert!(!manager.driver_jar_path(db_type).exists());
+        assert!(!remote_driver_requires_java_runtime(registry.drivers.get(db_type).unwrap()));
+        assert_eq!(
+            driver_download_size(db_type, registry.drivers.get(db_type).unwrap()),
+            (x64_bytes.len() + arm_bytes.len()) as u64
+        );
         assert_eq!(manager.load_state().installed_drivers.get(db_type).unwrap().version, version);
         assert!(events
             .lock()

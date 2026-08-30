@@ -48,6 +48,7 @@ openssl = { version = "0.10", features = ["vendored"] }
 webpki-roots = "0.26"
 rusqlite = { version = "0.32", default-features = false, features = ["load_extension", "backup", "functions", "column_decltype"] }
 libsqlite3-hotbundle = { git = "https://github.com/zipg/libsqlite3-hotbundle.git", rev = "7f12f203b4f4694a273410bd9b02d77f82b6114e", features = ["cipher-sqlcipher"], optional = true }
+dbx-sqlite-worker = { path = "../dbx-sqlite-worker", default-features = false }
 mysql_async = { version = "0.37", default-features = false, features = ["default-rustls", "client_ed25519", "chrono", "rust_decimal"] }
 sqlparser = { version = "0.62.0", features = ["visitor"] }
 redis = { version = "0.32.2", features = ["tokio-comp", "tls-rustls", "tls-rustls-insecure", "tokio-rustls-comp", "sentinel", "cluster-async"] }

@@ -14,6 +14,8 @@ use crate::db::agent_driver::{
 use crate::models::connection::DatabaseType;
 
 pub const DEFAULT_JRE_KEY: &str = "21";
+pub const SQLITE_WORKER_DRIVER_KEY: &str = "sqlite-worker";
+pub const SQLITE_WORKER_NATIVE_PLATFORMS: &[&str] = &["linux-x64", "linux-aarch64"];
 pub const DOWNLOAD_CACHE_DIR_NAME: &str = "download-cache";
 pub const DOWNLOAD_CACHE_MAX_AGE_DAYS: u64 = 7;
 
@@ -777,6 +779,24 @@ impl AgentManager {
         self.driver_dir(db_type).join(executable_name)
     }
 
+    pub fn driver_native_platform_path(&self, db_type: &str, platform: &str) -> PathBuf {
+        self.driver_dir(db_type).join(platform)
+    }
+
+    pub fn is_sqlite_worker_driver(db_type: &str) -> bool {
+        db_type == SQLITE_WORKER_DRIVER_KEY
+    }
+
+    pub fn driver_native_installed(&self, db_type: &str) -> bool {
+        if Self::is_sqlite_worker_driver(db_type) {
+            SQLITE_WORKER_NATIVE_PLATFORMS
+                .iter()
+                .all(|platform| self.driver_native_platform_path(db_type, platform).is_file())
+        } else {
+            self.driver_native_path(db_type).exists()
+        }
+    }
+
     pub fn driver_launch_config_path(&self, db_type: &str) -> PathBuf {
         self.driver_dir(db_type).join("agent-launch.json")
     }
@@ -813,7 +833,7 @@ impl AgentManager {
 
     pub fn is_driver_installed(&self, db_type: &str) -> bool {
         self.is_driver_jar_valid(db_type)
-            || self.driver_native_path(db_type).exists()
+            || self.driver_native_installed(db_type)
             || self.driver_launch_config_path(db_type).exists()
     }
 
@@ -823,7 +843,7 @@ impl AgentManager {
 
     pub fn driver_requires_java_runtime(&self, db_type: &str) -> bool {
         self.is_driver_jar_valid(db_type)
-            && !self.driver_native_path(db_type).exists()
+            && !self.driver_native_installed(db_type)
             && !self.driver_launch_config_path(db_type).exists()
     }
 

@@ -73,7 +73,7 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
 
     @Override
     protected String buildJdbcUrl(ConnectParams params) {
-        return legacyTlsUrl(params);
+        return sqlServer2000Mode ? jtdsUrl(params) : legacyTlsUrl(params);
     }
 
     @Override
@@ -90,33 +90,32 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
             if (isSqlServer2000Unsupported(error)) {
                 logConnectionEvent("switching to jTDS 1.3.1 fallback", params, null);
                 try {
-                    Class.forName(JTDS_DRIVER_CLASS);
-                    Connection connection = DriverManager.getConnection(
-                        jtdsUrl(params),
-                        params.getUsername(),
-                        params.getPassword()
-                    );
+                    super.loadDriver(jtdsDriverParams());
                     sqlServer2000Mode = true;
+                    Connection connection = super.openConnection(params);
                     logConnectionEvent("jTDS 1.3.1 connected", params, null);
                     return connection;
                 } catch (SQLException fallbackError) {
+                    sqlServer2000Mode = false;
                     logConnectionEvent("jTDS 1.3.1 failed", params, fallbackError);
                     fallbackError.addSuppressed(error);
                     throw withLegacyTlsDiagnostics(fallbackError, "jTDS 1.3.1");
-                } catch (ClassNotFoundException fallbackError) {
-                    logConnectionEvent("jTDS 1.3.1 class missing", params, fallbackError);
-                    SQLException wrapped = new SQLException(
-                        "SQL Server 2000 fallback driver is not available",
-                        error.getSQLState(),
-                        error.getErrorCode(),
-                        fallbackError
-                    );
-                    wrapped.addSuppressed(error);
-                    throw withLegacyTlsDiagnostics(wrapped, "jTDS unavailable");
+                } catch (Exception fallbackError) {
+                    sqlServer2000Mode = false;
+                    logConnectionEvent("jTDS 1.3.1 failed", params, fallbackError);
+                    fallbackError.addSuppressed(error);
+                    throw fallbackError;
                 }
             }
             throw withLegacyTlsDiagnostics(error);
         }
+    }
+
+    private static ConnectParams jtdsDriverParams() {
+        ConnectParams params = new ConnectParams();
+        params.setJdbc_driver_class(JTDS_DRIVER_CLASS);
+        params.setJdbc_driver_paths(Collections.emptyList());
+        return params;
     }
 
     @Override
@@ -124,6 +123,11 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
         // jTDS can establish a SQL Server 2000 session but its JDBC 4
         // isValid() implementation is not reliable on this legacy endpoint.
         return "SELECT 1";
+    }
+
+    @Override
+    protected void afterDisconnect() {
+        sqlServer2000Mode = false;
     }
 
     @Override
@@ -183,15 +187,6 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
             .replaceAll("(?i)(password|passwd|pwd)\\s*[=:]\\s*[^;,&\\s]+", "$1=<redacted>")
             .replace('\r', ' ')
             .replace('\n', ' ');
-    }
-
-    @Override
-    public void disconnect() {
-        try {
-            super.disconnect();
-        } finally {
-            sqlServer2000Mode = false;
-        }
     }
 
     static boolean isSqlServer2000Unsupported(Throwable error) {

@@ -1664,7 +1664,7 @@ fn is_external_driver_method_unsupported(error: &str, method: &str) -> bool {
             || normalized.contains("method not found"))
 }
 
-fn external_driver_query_params(
+pub(crate) fn external_driver_query_params(
     config: &crate::models::connection::ConnectionConfig,
     sql: &str,
     database: &str,

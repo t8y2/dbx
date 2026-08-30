@@ -141,6 +141,17 @@ describe("jdbc dialect inference", () => {
     expect(inferJdbcDialect(damengConnection)).toBe("dameng");
   });
 
+  it("detects GBase JDBC connections for transfer dialect selection", () => {
+    const gbaseConnection = {
+      db_type: "jdbc" as const,
+      connection_string: "jdbc:gbase://localhost:5258/dbx_test",
+      jdbc_driver_class: "cn.gbase.Driver",
+    };
+
+    expect(inferJdbcDialect(gbaseConnection)).toBe("gbase");
+    expect(effectiveDatabaseTypeForConnection(gbaseConnection)).toBe("gbase");
+  });
+
   it("uses Hive tree and execution semantics for Inceptor JDBC metadata", () => {
     const connection = {
       db_type: "jdbc" as const,

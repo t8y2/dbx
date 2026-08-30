@@ -19,6 +19,7 @@ import { crossFamilyTransferableKinds, isSameTransferFamily, transferObjectKinds
 import ObjectSelectionTree from "@/components/transfer/ObjectSelectionTree.vue";
 import type { DatabaseType } from "@/types/database";
 import { isSchemaAware, supportsTransfer } from "@/lib/database/databaseCapabilities";
+import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { isDorisFamilyCatalogCapable } from "@/lib/database/databaseFeatureSupport";
 import { isSameTransferDatabase, normalizeTransferCatalog } from "@/lib/database/dataTransferSelection";
 import { databaseOptionsForConnection, fetchCatalogNamespaceOptions, fetchNamespaceOptionsForConnection, namespaceOptionsAreSchemas } from "@/composables/useDatabaseOptions";
@@ -43,7 +44,7 @@ const props = defineProps<{
 
 const store = useConnectionStore();
 
-const sqlConnections = computed(() => store.connections.filter((c) => supportsTransfer(c.db_type)));
+const sqlConnections = computed(() => store.connections.filter((c) => supportsTransfer(effectiveDatabaseTypeForConnection(c))));
 
 // Source state
 const sourceConnectionId = ref("");
@@ -98,7 +99,7 @@ const treeDisabledGroups = computed<TransferObjectKind[]>(() => {
   }
   const sourceConfig = store.getConfig(sourceConnectionId.value);
   const targetConfig = store.getConfig(targetConnectionId.value);
-  const allowed = crossFamilyTransferableKinds(sourceConfig?.db_type, targetConfig?.db_type);
+  const allowed = crossFamilyTransferableKinds(effectiveDatabaseTypeForConnection(sourceConfig), effectiveDatabaseTypeForConnection(targetConfig));
   return presentKinds.filter((k) => k !== "TABLE" && !allowed.includes(k));
 });
 
@@ -116,9 +117,9 @@ const showCrossFamilyViewHint = computed(() => {
   const targetConfig = store.getConfig(targetConnectionId.value);
   if (transferContent.value === "dataOnly") return false;
   if (!sourceConfig || !targetConfig) return false;
-  const allowed = crossFamilyTransferableKinds(sourceConfig.db_type, targetConfig.db_type);
+  const allowed = crossFamilyTransferableKinds(effectiveDatabaseTypeForConnection(sourceConfig), effectiveDatabaseTypeForConnection(targetConfig));
   if (!allowed.includes("VIEW")) return false;
-  return !isSameTransferFamily(sourceConfig.db_type, targetConfig.db_type) && (selectedObjects.value.VIEW?.size ?? 0) > 0;
+  return !isSameTransferFamily(effectiveDatabaseTypeForConnection(sourceConfig), effectiveDatabaseTypeForConnection(targetConfig)) && (selectedObjects.value.VIEW?.size ?? 0) > 0;
 });
 const pendingSourceSchemaPrefill = ref("");
 const pendingSelectedTablesPrefill = ref<string[] | null>(null);
@@ -310,7 +311,7 @@ async function loadObjects() {
     const needsSchema = isSchemaAware(config?.db_type);
     const schema = needsSchema && sourceSchema.value ? sourceSchema.value : sourceDatabase.value;
     const catalog = sourceCatalog.value || undefined;
-    const kinds = transferObjectKindsForDatabase(config?.db_type);
+    const kinds = transferObjectKindsForDatabase(effectiveDatabaseTypeForConnection(config));
     const groups: Partial<Record<TransferObjectKind, string[]>> = {};
     for (const kind of kinds) {
       try {

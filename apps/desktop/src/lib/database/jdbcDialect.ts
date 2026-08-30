@@ -18,6 +18,7 @@ const JDBC_DIALECT_MATCHERS: Array<{ type: DatabaseType; patterns: RegExp[] }> =
   { type: "starrocks", patterns: [/starrocks/i] },
   { type: "doris", patterns: [/doris/i] },
   { type: "goldendb", patterns: [/jdbc:goldendb:/i, /goldendb/i] },
+  { type: "gbase", patterns: [/jdbc:gbase:/i, /cn\.gbase\./i, /gbase.*jdbc/i] },
   { type: "mysql", patterns: [/kyuubi/i] },
   { type: "hive", patterns: [/inceptor/i, /\bapache\s+hive\b/i, /org\.apache\.hive\.jdbc\.HiveDriver/i, /hive-jdbc/i] },
   { type: "mysql", patterns: [/jdbc:mysql:/i, /mysql/i, /mariadb/i, /hive2/i] },

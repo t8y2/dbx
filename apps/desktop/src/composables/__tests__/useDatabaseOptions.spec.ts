@@ -135,6 +135,22 @@ describe("namespace options", () => {
     ).toEqual(["analytics"]);
   });
 
+  it("falls back to the configured database when JDBC metadata returns no databases", () => {
+    expect(
+      databaseOptionsForConnection([], {
+        db_type: "jdbc",
+        database: "gbase_demo",
+      }),
+    ).toEqual(["gbase_demo"]);
+
+    expect(
+      databaseOptionsForConnection([], {
+        db_type: "jdbc",
+        database_info: { currentDatabase: "gbase_from_metadata" },
+      }),
+    ).toEqual(["gbase_from_metadata"]);
+  });
+
   it("preserves visible database filtering for catalog-scoped transfer options", async () => {
     mocks.listDorisCatalogDatabases.mockResolvedValue([{ name: "app" }, { name: "analytics" }]);
 

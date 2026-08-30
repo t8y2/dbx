@@ -3269,6 +3269,7 @@ export default withEnglishFallback({
     procedures: "Procedimentos",
     functions: "Funções",
     sequences: "Sequências",
+    schedulerJobs: "Trabalhos agendados",
     synonyms: "Sinônimos",
     packages: "Pacotes",
     partitions: "Partições",
@@ -7364,6 +7365,14 @@ export default withEnglishFallback({
     installed: "Instaladas",
     noAvailable: "Todas as extensões disponíveis já estão instaladas.",
     noInstalled: "Nenhuma extensão instalada.",
+  },
+  xuguSchedulerJob: {
+    enable: "Habilitar",
+    disable: "Desabilitar",
+    run: "Executar agora",
+    drop: "Excluir trabalho",
+    confirmDrop: 'Excluir o trabalho agendado "{name}"? Esta ação não pode ser desfeita.',
+    actionSuccess: '{action} concluído para "{name}".',
   },
   sqlFileTree: {
     title: "Arquivos SQL",

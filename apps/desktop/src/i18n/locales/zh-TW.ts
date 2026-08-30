@@ -3267,6 +3267,7 @@ export default withEnglishFallback({
     procedures: "預存程序",
     functions: "函式",
     sequences: "序列",
+    schedulerJobs: "排程工作",
     synonyms: "同義詞",
     packages: "套件",
     partitions: "分割區",
@@ -7352,6 +7353,14 @@ export default withEnglishFallback({
     installed: "已安裝",
     noAvailable: "所有可用擴展均已安裝。",
     noInstalled: "暫無已安裝的擴展。",
+  },
+  xuguSchedulerJob: {
+    enable: "啟用",
+    disable: "停用",
+    run: "立即執行",
+    drop: "刪除工作",
+    confirmDrop: "確定要刪除排程工作「{name}」嗎？此操作無法復原。",
+    actionSuccess: "已完成對「{name}」的{action}。",
   },
   sqlFileTree: {
     title: "SQL 檔案",

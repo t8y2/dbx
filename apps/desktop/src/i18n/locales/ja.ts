@@ -3291,6 +3291,7 @@ export default withEnglishFallback({
     procedures: "プロシージャ",
     functions: "関数",
     sequences: "シーケンス",
+    schedulerJobs: "スケジュール済みジョブ",
     synonyms: "シノニム",
     packages: "パッケージ",
     partitions: "パーティション",
@@ -7414,6 +7415,14 @@ export default withEnglishFallback({
     installed: "インストール済み",
     noAvailable: "すべての利用可能な拡張機能がインストールされています。",
     noInstalled: "インストールされている拡張機能はありません。",
+  },
+  xuguSchedulerJob: {
+    enable: "有効化",
+    disable: "無効化",
+    run: "今すぐ実行",
+    drop: "ジョブを削除",
+    confirmDrop: "スケジュール済みジョブ「{name}」を削除しますか？この操作は元に戻せません。",
+    actionSuccess: "「{name}」の{action}が完了しました。",
   },
   sqlFileTree: {
     title: "SQL ファイル",

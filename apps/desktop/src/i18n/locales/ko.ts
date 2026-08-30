@@ -3145,6 +3145,7 @@ export default withEnglishFallback({
     procedures: "프로시저",
     functions: "함수",
     sequences: "시퀀스",
+    schedulerJobs: "예약된 작업",
     synonyms: "동의어",
     packages: "패키지",
     types: "타입",
@@ -3170,6 +3171,14 @@ export default withEnglishFallback({
     installed: "설치됨",
     noAvailable: "사용 가능한 모든 확장이 이미 설치되어 있습니다.",
     noInstalled: "설치된 확장이 없습니다.",
+  },
+  xuguSchedulerJob: {
+    enable: "활성화",
+    disable: "비활성화",
+    run: "지금 실행",
+    drop: "작업 삭제",
+    confirmDrop: '예약된 작업 "{name}"을(를) 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.',
+    actionSuccess: '"{name}"에 대한 {action}이(가) 완료되었습니다.',
   },
   processList: {
     title: "프로세스 목록",

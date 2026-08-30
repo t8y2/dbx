@@ -24,6 +24,7 @@ import {
   GitBranch,
   HelpCircle,
   History,
+  ArrowDownToLine,
   Loader2,
   Maximize2,
   MessageSquarePlus,
@@ -31,7 +32,6 @@ import {
   Pencil,
   Plus,
   RefreshCw,
-  Replace,
   Server,
   ShieldCheck,
   Table2,
@@ -4604,7 +4604,7 @@ async function openExternalUrl(url: string) {
                           <Play class="h-3.5 w-3.5" />
                         </button>
                         <button v-if="!seg.pending && (seg.isSql || isRedisConnection)" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.apply')" @click="applySql(seg.content)">
-                          <Replace class="h-3.5 w-3.5" />
+                          <ArrowDownToLine class="h-3.5 w-3.5" />
                         </button>
                         <button
                           class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"

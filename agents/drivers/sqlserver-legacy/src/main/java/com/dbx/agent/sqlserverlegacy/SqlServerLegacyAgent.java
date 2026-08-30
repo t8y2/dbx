@@ -16,6 +16,7 @@ import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Types;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -122,6 +123,42 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
         // jTDS can establish a SQL Server 2000 session but its JDBC 4
         // isValid() implementation is not reliable on this legacy endpoint.
         return "SELECT 1";
+    }
+
+    @Override
+    protected Object resultValue(ResultSet resultSet, int index, int sqlType) {
+        Object value = super.resultValue(resultSet, index, sqlType);
+        return normalizeSqlServer2000ResultValue(value, sqlType, sqlServer2000Mode);
+    }
+
+    static Object normalizeSqlServer2000ResultValue(Object value, int sqlType, boolean sqlServer2000Mode) {
+        if (!sqlServer2000Mode || !(value instanceof String) || !isCharacterType(sqlType)) {
+            return value;
+        }
+        String text = (String) value;
+        if (text.isEmpty()) {
+            return text;
+        }
+        for (int index = 0; index < text.length(); index++) {
+            if (text.charAt(index) != '\0') {
+                return text;
+            }
+        }
+        // jTDS can expose an empty SQL Server 2000 varchar as NUL padding up to
+        // the declared column length. Keep SQL NULL and mixed binary-like text
+        // distinct, but restore an all-NUL character value to the empty string.
+        return "";
+    }
+
+    private static boolean isCharacterType(int sqlType) {
+        return sqlType == Types.CHAR
+            || sqlType == Types.VARCHAR
+            || sqlType == Types.LONGVARCHAR
+            || sqlType == Types.NCHAR
+            || sqlType == Types.NVARCHAR
+            || sqlType == Types.LONGNVARCHAR
+            || sqlType == Types.CLOB
+            || sqlType == Types.NCLOB;
     }
 
     private static void logConnectionEvent(String stage, ConnectParams params, Throwable error) {

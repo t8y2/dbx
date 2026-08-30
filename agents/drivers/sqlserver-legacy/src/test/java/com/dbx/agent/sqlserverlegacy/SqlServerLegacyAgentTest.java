@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 
 import java.security.Security;
 import java.sql.SQLException;
+import java.sql.Types;
 
 class SqlServerLegacyAgentTest {
     @Test
@@ -108,6 +109,37 @@ class SqlServerLegacyAgentTest {
     @Test
     void usesSelectOneForLegacyConnectionValidation() {
         Assertions.assertEquals("SELECT 1", new SqlServerLegacyAgent().connectionValidationQuery());
+    }
+
+    @Test
+    void sqlServer2000AllNulCharacterPaddingBecomesEmptyString() {
+        Assertions.assertEquals(
+            "",
+            SqlServerLegacyAgent.normalizeSqlServer2000ResultValue("\0".repeat(20), Types.VARCHAR, true)
+        );
+        Assertions.assertEquals(
+            "",
+            SqlServerLegacyAgent.normalizeSqlServer2000ResultValue("", Types.VARCHAR, true)
+        );
+    }
+
+    @Test
+    void sqlServer2000NulNormalizationPreservesNullMixedTextAndOtherModes() {
+        Assertions.assertNull(
+            SqlServerLegacyAgent.normalizeSqlServer2000ResultValue(null, Types.VARCHAR, true)
+        );
+        Assertions.assertEquals(
+            "A\0B",
+            SqlServerLegacyAgent.normalizeSqlServer2000ResultValue("A\0B", Types.VARCHAR, true)
+        );
+        Assertions.assertEquals(
+            "\0\0",
+            SqlServerLegacyAgent.normalizeSqlServer2000ResultValue("\0\0", Types.VARBINARY, true)
+        );
+        Assertions.assertEquals(
+            "\0\0",
+            SqlServerLegacyAgent.normalizeSqlServer2000ResultValue("\0\0", Types.VARCHAR, false)
+        );
     }
 
     @Test

@@ -8,6 +8,7 @@ import com.dbx.agent.ForeignKeyInfo;
 import com.dbx.agent.IndexInfo;
 import com.dbx.agent.JdbcAgentProfile;
 import com.dbx.agent.MultiSessionJsonRpcServer;
+import com.dbx.agent.ObjectSource;
 
 import java.security.Security;
 import java.sql.Connection;
@@ -327,6 +328,52 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
         return super.listForeignKeys(metadataSchema(schema, table), table);
     }
 
+    @Override
+    public ObjectSource getObjectSource(String schema, String name, String objectType) {
+        String normalizedType = objectType == null ? "" : objectType.trim().toUpperCase(Locale.ROOT);
+        String objectXtype = sqlServer2000ObjectXtype(normalizedType);
+        if (objectXtype == null) {
+            throw new IllegalArgumentException("Unsupported object type: " + objectType);
+        }
+        return unchecked(() -> {
+            String resolvedSchema = metadataSchema(schema, name);
+            StringBuilder source = new StringBuilder();
+            try (PreparedStatement statement = requireConnection().prepareStatement(sqlServer2000ObjectSourceSql())) {
+                statement.setString(1, resolvedSchema);
+                statement.setString(2, name);
+                statement.setString(3, objectXtype);
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    while (resultSet.next()) {
+                        String chunk = resultSet.getString("source_text");
+                        if (chunk != null) {
+                            source.append(chunk);
+                        }
+                    }
+                }
+            }
+            // SQL Server 2000 exposes syscomments as source chunks. The legacy
+            // editor is read-only because rewriting old procedure syntax safely
+            // needs a separate DDL compatibility path.
+            return new ObjectSource(name, objectType, resolvedSchema, source.toString(), false);
+        });
+    }
+
+    static String sqlServer2000ObjectSourceSql() {
+        return "SELECT c.text AS source_text FROM syscomments c "
+            + "JOIN sysobjects o ON c.id = o.id "
+            + "JOIN sysusers u ON o.uid = u.uid "
+            + "WHERE u.name = ? AND o.name = ? AND o.xtype = ? "
+            + "ORDER BY c.colid";
+    }
+
+    private static String sqlServer2000ObjectXtype(String objectType) {
+        return switch (objectType) {
+            case "PROCEDURE" -> "P";
+            case "FUNCTION" -> "FN";
+            default -> null;
+        };
+    }
+
     private String metadataSchema(String schema, String table) {
         if (schema != null && !schema.trim().isEmpty()) {
             return schema;
@@ -350,7 +397,7 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
     static String sqlServer2000ObjectSchemaSql() {
         return "SELECT TOP 1 u.name AS schema_name FROM sysobjects o "
             + "JOIN sysusers u ON o.uid = u.uid "
-            + "WHERE o.name = ? AND o.xtype IN ('U', 'V') "
+            + "WHERE o.name = ? AND o.xtype IN ('U', 'V', 'P', 'FN', 'IF', 'TF') "
             + "ORDER BY CASE WHEN u.name = 'dbo' THEN 0 ELSE 1 END, u.name";
     }
 

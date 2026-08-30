@@ -75,9 +75,19 @@ class SqlServerLegacyAgentTest {
         );
         Assertions.assertEquals(
             "SELECT TOP 1 u.name AS schema_name FROM sysobjects o JOIN sysusers u ON o.uid = u.uid "
-                + "WHERE o.name = ? AND o.xtype IN ('U', 'V') "
+                + "WHERE o.name = ? AND o.xtype IN ('U', 'V', 'P', 'FN', 'IF', 'TF') "
                 + "ORDER BY CASE WHEN u.name = 'dbo' THEN 0 ELSE 1 END, u.name",
             SqlServerLegacyAgent.sqlServer2000ObjectSchemaSql()
+        );
+    }
+
+    @Test
+    void sqlServer2000ObjectSourceReadsOrderedProcedureChunks() {
+        Assertions.assertEquals(
+            "SELECT c.text AS source_text FROM syscomments c JOIN sysobjects o ON c.id = o.id "
+                + "JOIN sysusers u ON o.uid = u.uid WHERE u.name = ? AND o.name = ? AND o.xtype = ? "
+                + "ORDER BY c.colid",
+            SqlServerLegacyAgent.sqlServer2000ObjectSourceSql()
         );
     }
 

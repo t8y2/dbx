@@ -25,7 +25,8 @@
           "x": 16,
           "y": 18
         },
-        "hiddenTitle": true
+        "hiddenTitle": true,
+        "acceptFirstMouse": true
       }
     ],
     "security": {

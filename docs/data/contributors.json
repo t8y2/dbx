@@ -1,16 +1,16 @@
 {
   "repository": "t8y2/dbx",
-  "generatedAt": "2026-08-29T20:17:46.770Z",
-  "stars": 17401,
+  "generatedAt": "2026-08-30T20:24:13.247Z",
+  "stars": 17473,
   "contributors": [
     {
       "login": "t8y2",
       "avatarUrl": "https://avatars.githubusercontent.com/u/77960507?v=4",
       "profileUrl": "https://github.com/t8y2",
-      "commits": 3306,
-      "mergedPullRequests": 19,
+      "commits": 3310,
+      "mergedPullRequests": 23,
       "firstContributionAt": "2026-04-30T08:14:51Z",
-      "latestContributionAt": "2026-08-29T19:54:16Z"
+      "latestContributionAt": "2026-08-30T05:30:01Z"
     },
     {
       "login": "zipg",
@@ -25,10 +25,10 @@
       "login": "eryajf",
       "avatarUrl": "https://avatars.githubusercontent.com/u/33259379?v=4",
       "profileUrl": "https://github.com/eryajf",
-      "commits": 187,
-      "mergedPullRequests": 186,
+      "commits": 191,
+      "mergedPullRequests": 190,
       "firstContributionAt": "2026-06-08T11:45:45Z",
-      "latestContributionAt": "2026-08-29T19:05:44Z"
+      "latestContributionAt": "2026-08-30T04:26:07Z"
     },
     {
       "login": "q396921921",
@@ -43,10 +43,10 @@
       "login": "Abeautifulsnow",
       "avatarUrl": "https://avatars.githubusercontent.com/u/28704977?v=4",
       "profileUrl": "https://github.com/Abeautifulsnow",
-      "commits": 103,
-      "mergedPullRequests": 91,
+      "commits": 104,
+      "mergedPullRequests": 92,
       "firstContributionAt": "2026-05-06T03:16:57Z",
-      "latestContributionAt": "2026-08-28T04:37:11Z"
+      "latestContributionAt": "2026-08-30T04:26:55Z"
     },
     {
       "login": "CN-Scars",
@@ -107,7 +107,7 @@
       "avatarUrl": "https://avatars.githubusercontent.com/u/45232878?v=4",
       "profileUrl": "https://github.com/mapan0424",
       "commits": 36,
-      "mergedPullRequests": 37,
+      "mergedPullRequests": 36,
       "firstContributionAt": "2026-07-17T05:42:50Z",
       "latestContributionAt": "2026-08-25T07:15:42Z"
     },
@@ -193,6 +193,15 @@
       "latestContributionAt": "2026-06-26T10:48:46Z"
     },
     {
+      "login": "amwps290",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18211479?v=4",
+      "profileUrl": "https://github.com/amwps290",
+      "commits": 15,
+      "mergedPullRequests": 15,
+      "firstContributionAt": "2026-07-21T05:32:24Z",
+      "latestContributionAt": "2026-08-30T01:59:24Z"
+    },
+    {
       "login": "jischeng",
       "avatarUrl": "https://avatars.githubusercontent.com/u/49861575?v=4",
       "profileUrl": "https://github.com/jischeng",
@@ -200,15 +209,6 @@
       "mergedPullRequests": 15,
       "firstContributionAt": "2026-06-24T12:52:59Z",
       "latestContributionAt": "2026-07-29T12:41:10Z"
-    },
-    {
-      "login": "amwps290",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/18211479?v=4",
-      "profileUrl": "https://github.com/amwps290",
-      "commits": 14,
-      "mergedPullRequests": 14,
-      "firstContributionAt": "2026-07-21T05:32:24Z",
-      "latestContributionAt": "2026-08-28T04:14:04Z"
     },
     {
       "login": "AndrewDi",
@@ -364,6 +364,15 @@
       "latestContributionAt": "2026-07-29T16:27:55Z"
     },
     {
+      "login": "difagume",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/5271339?v=4",
+      "profileUrl": "https://github.com/difagume",
+      "commits": 7,
+      "mergedPullRequests": 7,
+      "firstContributionAt": "2026-07-31T04:15:42Z",
+      "latestContributionAt": "2026-08-29T20:17:33Z"
+    },
+    {
       "login": "hanxuanyu",
       "avatarUrl": "https://avatars.githubusercontent.com/u/21254318?v=4",
       "profileUrl": "https://github.com/hanxuanyu",
@@ -407,15 +416,6 @@
       "mergedPullRequests": 6,
       "firstContributionAt": "2026-06-11T15:15:39Z",
       "latestContributionAt": "2026-07-28T19:47:20Z"
-    },
-    {
-      "login": "difagume",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/5271339?v=4",
-      "profileUrl": "https://github.com/difagume",
-      "commits": 6,
-      "mergedPullRequests": 6,
-      "firstContributionAt": "2026-07-31T04:15:42Z",
-      "latestContributionAt": "2026-08-28T03:12:41Z"
     },
     {
       "login": "jeeinn",
@@ -1300,6 +1300,15 @@
       "latestContributionAt": "2026-07-02T08:37:21Z"
     },
     {
+      "login": "debugzhao",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/32617253?v=4",
+      "profileUrl": "https://github.com/debugzhao",
+      "commits": 1,
+      "mergedPullRequests": 1,
+      "firstContributionAt": "2026-08-28T14:35:35Z",
+      "latestContributionAt": "2026-08-30T04:25:55Z"
+    },
+    {
       "login": "Dhevenddra",
       "avatarUrl": "https://avatars.githubusercontent.com/u/121691114?v=4",
       "profileUrl": "https://github.com/Dhevenddra",
@@ -1658,6 +1667,15 @@
       "mergedPullRequests": 1,
       "firstContributionAt": "2026-07-14T11:25:31Z",
       "latestContributionAt": "2026-07-28T20:32:27Z"
+    },
+    {
+      "login": "mmorella-dev",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/4561733?v=4",
+      "profileUrl": "https://github.com/mmorella-dev",
+      "commits": 1,
+      "mergedPullRequests": 1,
+      "firstContributionAt": "2026-08-28T19:54:04Z",
+      "latestContributionAt": "2026-08-29T20:36:35Z"
     },
     {
       "login": "monellin",

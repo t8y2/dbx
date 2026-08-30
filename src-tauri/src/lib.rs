@@ -115,6 +115,18 @@ fn should_hide_window_on_close(target_os: &str) -> bool {
     matches!(target_os, "macos" | "windows")
 }
 
+/// How long to keep the app off-screen after hiding it and before the process
+/// exits, so WindowServer has removed the window before WKWebView teardown.
+#[cfg(target_os = "macos")]
+pub(crate) const EXIT_HIDE_GRACE_MS: u64 = 250;
+
+/// On macOS, tearing down WKWebView while the window is still on screen can
+/// paint the window red for a frame before the process exits, so the app is
+/// hidden first. Windows and Linux keep their existing exit behavior.
+fn should_hide_window_before_exit(target_os: &str) -> bool {
+    target_os == "macos"
+}
+
 fn should_setup_desktop_tray(target_os: &str, show_tray_icon: bool, linux_appindicator_available: bool) -> bool {
     show_tray_icon
         && (matches!(target_os, "macos" | "windows") || (target_os == "linux" && linux_appindicator_available))
@@ -958,9 +970,9 @@ mod tests {
         linux_pci_id_from_sysfs_value, linux_selected_drm_render_device, linux_uses_native_wayland,
         linux_webkit_environment_override, linux_webkit_rendering_workarounds, native_window_decorations_override,
         should_confirm_app_exit_request, should_enable_single_instance, should_fallback_to_native_quit,
-        should_hide_window_on_close, should_setup_desktop_tray, should_show_main_window_after_setup,
-        should_show_main_window_before_setup_tasks, startup_data_dir_mode, tray_menu_labels_for_locale,
-        uses_application_level_icon, LinuxDrmRenderDevice, LinuxNvidiaDriver,
+        should_hide_window_before_exit, should_hide_window_on_close, should_setup_desktop_tray,
+        should_show_main_window_after_setup, should_show_main_window_before_setup_tasks, startup_data_dir_mode,
+        tray_menu_labels_for_locale, uses_application_level_icon, LinuxDrmRenderDevice, LinuxNvidiaDriver,
     };
     use crate::data_dir::DataDirMode;
     use std::ffi::OsStr;
@@ -1009,6 +1021,13 @@ mod tests {
     #[test]
     fn does_not_hide_window_on_close_for_other_platforms() {
         assert!(!should_hide_window_on_close("linux"));
+    }
+
+    #[test]
+    fn hides_window_before_exit_only_on_macos() {
+        assert!(should_hide_window_before_exit("macos"));
+        assert!(!should_hide_window_before_exit("windows"));
+        assert!(!should_hide_window_before_exit("linux"));
     }
 
     #[test]
@@ -2486,6 +2505,14 @@ pub fn run() {
                     api.prevent_exit();
                     request_app_close(app_handle, "quit");
                 } else {
+                    // Restart exits and the no-frontend native quit bypass
+                    // `complete_app_close`, so hide the window here too; the
+                    // shutdown below gives WindowServer time to remove it.
+                    if should_hide_window_before_exit(std::env::consts::OS) {
+                        if let Some(window) = app_handle.get_webview_window("main") {
+                            let _ = window.hide();
+                        }
+                    }
                     tauri::async_runtime::block_on(async {
                         if let Some(server) = app_handle.try_state::<commands::redis_pubsub_server::PubSubServerState>()
                         {

@@ -86,6 +86,15 @@ pub async fn complete_app_close(app: AppHandle, window: Window, action: String) 
             if let Some(state) = app.try_state::<CloseBehaviorState>() {
                 state.allow_next_exit();
             }
+            #[cfg(target_os = "macos")]
+            {
+                // Take the whole app off-screen first so WKWebView teardown during
+                // process exit cannot flash the window red on macOS 12. `AppHandle::hide`
+                // is macOS-only, so this block is compiled per-platform.
+                let _ = window.hide();
+                let _ = app.hide();
+                tokio::time::sleep(std::time::Duration::from_millis(crate::EXIT_HIDE_GRACE_MS)).await;
+            }
             app.exit(0);
         }
         "hide" => {

@@ -9,8 +9,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $os = [System.Environment]::OSVersion.Version
-if ($os.Major -ne 6 -or $os.Minor -ne 3) {
-  throw "The installer smoke test requires Windows kernel 6.3, detected $($os.ToString())."
+if ($os.Major -ne 6 -or ($os.Minor -ne 1 -and $os.Minor -ne 3)) {
+  throw "The installer smoke test requires Windows 7 or Server 2012 R2 (kernel 6.1/6.3), detected $($os.ToString())."
 }
 
 $installerPath = (Resolve-Path -LiteralPath $InstallerPath).Path

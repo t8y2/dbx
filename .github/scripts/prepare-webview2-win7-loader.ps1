@@ -4,11 +4,16 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-# Newer WebView2 static loaders import EventSetInformation, which does not exist on Windows 7.
-# The loader entry points are stable, so the Win7 bundle uses the last verified compatible SDK loader.
-$sdkVersion = "1.0.1054.31"
-$sdkPackageSha256 = "0afe683aa3d143a5f6330db1ce833c69278b38fe5e1eadec52f26910ad26e22f"
-$loaderSha256 = "76314119685bbf4c2b2423a44e81b57beadc914c943d0e772fd6bc78c8e6b0e8"
+# WebView2 static loaders newer than SDK 1.0.1054 import EventSetInformation, which does
+# not exist on Windows 7, while 1.0.1054.31 itself fails on Server 2012 R2 with
+# ERROR_NOT_SUPPORTED (0x80070032, MicrosoftEdge/WebView2Feedback#2025). SDK 1.0.902.49 is
+# the loader verified on both Windows 7 SP1 and Server 2012 R2 real machines, so the single
+# win7 + server 2012 r2 offline bundle links it instead of the webview2-com-sys default.
+$sdkVersion = "1.0.902.49"
+$sdkPackageSha256 = "b483c906b03690267108f4304d456eac0e718131ef994e69aaa5a21532b512c6"
+$loaderSha256 = "aa5c26670f1b18d0fa2a56ac3f1ae30110c332a8bfbd555a7be3e548d1b0da3d"
+$loaderDllSha256 = "fdf978ba706578b05967d7f0181f462147864a5aa74f36016a62cb3d3dbe6909"
+$legacy1054LoaderSha256 = "76314119685bbf4c2b2423a44e81b57beadc914c943d0e772fd6bc78c8e6b0e8"
 $webView2ComSysVersion = "0.38.2"
 $upstreamLoaderSha256 = "0659b741bde6348d4c4a6ec4ceb9af50e3d0048ed9cd3c8659bccbb61fde55ee"
 
@@ -19,9 +24,10 @@ $extractedPath = Join-Path $temporaryRoot "extracted"
 
 try {
   New-Item -ItemType Directory -Path $extractedPath -Force | Out-Null
+  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
   $packageUrl = "https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2/$sdkVersion"
-  Write-Host "Downloading WebView2 SDK $sdkVersion for the Windows 7 loader..."
+  Write-Host "Downloading WebView2 SDK $sdkVersion for the Windows 7 / Server 2012 R2 loader..."
   Invoke-WebRequest -Uri $packageUrl -OutFile $packagePath -UseBasicParsing
 
   $actualPackageSha256 = (Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -44,7 +50,12 @@ try {
 
   $actualLoaderSha256 = (Get-FileHash -LiteralPath $legacyLoader -Algorithm SHA256).Hash.ToLowerInvariant()
   if ($actualLoaderSha256 -ne $loaderSha256) {
-    throw "Unexpected Windows 7 WebView2 loader SHA256: $actualLoaderSha256"
+    throw "Unexpected Windows 7 / Server 2012 R2 WebView2 loader SHA256: $actualLoaderSha256"
+  }
+
+  $actualLoaderDllSha256 = (Get-FileHash -LiteralPath $legacyLoaderDll -Algorithm SHA256).Hash.ToLowerInvariant()
+  if ($actualLoaderDllSha256 -ne $loaderDllSha256) {
+    throw "Unexpected Windows 7 / Server 2012 R2 WebView2 loader DLL SHA256: $actualLoaderDllSha256"
   }
 
   Push-Location $repositoryRoot
@@ -78,7 +89,7 @@ try {
   }
 
   $existingLoaderSha256 = (Get-FileHash -LiteralPath $loaderDestination -Algorithm SHA256).Hash.ToLowerInvariant()
-  $knownLoaderHashes = @($upstreamLoaderSha256, $loaderSha256)
+  $knownLoaderHashes = @($upstreamLoaderSha256, $legacy1054LoaderSha256, $loaderSha256)
   if ($existingLoaderSha256 -notin $knownLoaderHashes) {
     throw "Refusing to replace an unknown webview2-com-sys loader SHA256: $existingLoaderSha256"
   }
@@ -96,7 +107,7 @@ try {
   $probeLoader = Join-Path $probeDirectory "WebView2Loader.dll"
   Copy-Item -LiteralPath $legacyLoaderDll -Destination $probeLoader -Force
 
-  Write-Host "Prepared WebView2 SDK $sdkVersion static loader for Windows 7: $loaderDestination"
+  Write-Host "Prepared WebView2 SDK $sdkVersion static loader for Windows 7 / Server 2012 R2: $loaderDestination"
   Write-Host "Prepared WebView2 SDK $sdkVersion loader probe DLL: $probeLoader"
 }
 finally {

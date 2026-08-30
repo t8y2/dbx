@@ -21,8 +21,8 @@ env:
   RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
 
 jobs:
-  build-server-2012-r2-offline:
-    name: Build Server 2012 R2 Offline Installer
+  build-win7-server2012r2-offline:
+    name: Build Win7 / Server 2012 R2 Offline Installer
     runs-on: windows-2022
     timeout-minutes: 90
     steps:
@@ -52,9 +52,9 @@ jobs:
         shell: pwsh
         run: ./.github/scripts/prepare-webview2-win7-runtime.ps1
 
-      - name: Install validated Server 2012 R2 Loader candidate
+      - name: Prepare Win7 / Server 2012 R2 WebView2 loader
         shell: pwsh
-        run: ./.github/scripts/prepare-webview2-server2012-loader.ps1 -InstallStaticLoader
+        run: ./.github/scripts/prepare-webview2-win7-loader.ps1
 
       - name: Build frontend
         run: pnpm build
@@ -62,48 +62,48 @@ jobs:
       - name: Build DBX compatibility binary
         shell: pwsh
         run: |
-          $env:TAURI_CONFIG = Get-Content src-tauri/tauri.webview2-server-2012-r2-fixed.conf.json -Raw
+          $env:TAURI_CONFIG = Get-Content src-tauri/tauri.webview2-win7-fixed.conf.json -Raw
           cargo build --locked --package dbx --release --features custom-protocol --target x86_64-win7-windows-msvc -Z build-std=std,panic_abort
 
       - name: Audit compatibility PE imports
         shell: pwsh
         run: ./.github/scripts/assert-win7-pe-compat.ps1 -BinaryPath target/x86_64-win7-windows-msvc/release/dbx.exe
 
-      - name: Bundle Server 2012 R2 offline installer
+      - name: Bundle Win7 / Server 2012 R2 offline installer
         shell: pwsh
         run: |
           $bundleDir = "target/x86_64-win7-windows-msvc/release/bundle/nsis"
           pnpm tauri bundle --bundles nsis --target x86_64-win7-windows-msvc `
-            --config src-tauri/tauri.webview2-server-2012-r2-fixed.conf.json
+            --config src-tauri/tauri.webview2-win7-fixed.conf.json
           $installer = Get-ChildItem $bundleDir -Filter "*.exe" |
             Sort-Object LastWriteTimeUtc -Descending |
             Select-Object -First 1
           if (!$installer) {
-            throw "Missing Server 2012 R2 fixed-runtime installer in $bundleDir"
+            throw "Missing Win7 / Server 2012 R2 fixed-runtime installer in $bundleDir"
           }
           Copy-Item -LiteralPath $installer.FullName `
-            -Destination "DBX_${{ github.sha }}_x64-windows-server-2012-r2-webview2-109-offline-setup.exe" `
+            -Destination "DBX_${{ github.sha }}_x64-win7-server2012r2-webview2-109-offline-setup.exe" `
             -Force
 
       - name: Audit installer contents
         shell: pwsh
         run: |
-          $installer = Get-ChildItem -Filter "DBX_*_x64-windows-server-2012-r2-webview2-109-offline-setup.exe" |
+          $installer = Get-ChildItem -Filter "DBX_*_x64-win7-server2012r2-webview2-109-offline-setup.exe" |
             Select-Object -First 1
           ./.github/scripts/assert-win7-installer-content.ps1 -InstallerPath $installer.FullName
 
-      - name: Upload Server 2012 R2 test installer
+      - name: Upload Win7 / Server 2012 R2 test installer
         uses: actions/upload-artifact@v4
         with:
-          name: DBX-server-2012-r2-offline-test
-          path: DBX_*_x64-windows-server-2012-r2-webview2-109-offline-setup.exe
+          name: DBX-win7-server2012r2-offline-test
+          path: DBX_*_x64-win7-server2012r2-webview2-109-offline-setup.exe
           if-no-files-found: error
           retention-days: 7
 
   smoke-test-on-server-2012-r2:
     name: Smoke Test Installer on Server 2012 R2
     if: ${{ inputs.run_remote_smoke_test }}
-    needs: build-server-2012-r2-offline
+    needs: build-win7-server2012r2-offline
     runs-on: [self-hosted, Windows, X64, server-2012-r2-controller]
     environment: windows-server-2012-r2-testing
     timeout-minutes: 30
@@ -113,7 +113,7 @@ jobs:
       - name: Download test installer
         uses: actions/download-artifact@v5
         with:
-          name: DBX-server-2012-r2-offline-test
+          name: DBX-win7-server2012r2-offline-test
           path: installer
 
       - name: Install and start DBX on Server 2012 R2
@@ -126,7 +126,7 @@ jobs:
         run: |
           $installer = Get-ChildItem installer -Filter "*.exe" | Select-Object -First 1
           if (!$installer) {
-            throw "The Server 2012 R2 installer artifact is missing."
+            throw "The Win7 / Server 2012 R2 installer artifact is missing."
           }
           ./.github/scripts/invoke-server2012-remote-validation.ps1 `
             -ComputerName $env:SERVER2012_HOST `
@@ -134,10 +134,10 @@ jobs:
             -Mode Installer `
             -InstallerPath $installer.FullName
 
-      - name: Upload verified Server 2012 R2 installer
+      - name: Upload verified Win7 / Server 2012 R2 installer
         uses: actions/upload-artifact@v4
         with:
-          name: DBX-server-2012-r2-offline-verified
+          name: DBX-win7-server2012r2-offline-verified
           path: installer/*.exe
           if-no-files-found: error
           retention-days: 14

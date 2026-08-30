@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
   [string]$RuntimeDirectory = (Join-Path $PSScriptRoot "..\..\src-tauri\webview2-fixed-runtime"),
-  [string]$LoaderPath = (Join-Path ([System.IO.Path]::GetTempPath()) "dbx-server2012-webview2-loader-probe\WebView2Loader.dll"),
+  [string]$LoaderPath = (Join-Path ([System.IO.Path]::GetTempPath()) "dbx-win7-webview2-loader-probe\WebView2Loader.dll"),
   [string]$ExpectedVersion = "109.0.1518.78"
 )
 
@@ -9,8 +9,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $os = [System.Environment]::OSVersion.Version
-if ($os.Major -ne 6 -or $os.Minor -ne 3) {
-  throw "The Server 2012 R2 runtime probe requires Windows kernel 6.3, detected $($os.ToString())."
+if ($os.Major -ne 6 -or ($os.Minor -ne 1 -and $os.Minor -ne 3)) {
+  throw "The offline runtime probe requires Windows 7 or Server 2012 R2 (kernel 6.1/6.3), detected $($os.ToString())."
 }
 
 $runtimeDirectory = (Resolve-Path -LiteralPath $RuntimeDirectory).Path

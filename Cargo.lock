@@ -2024,6 +2024,7 @@ dependencies = [
  "percent-encoding",
  "portpicker",
  "redis",
+ "regex",
  "reqwest 0.12.28",
  "russh",
  "rust_decimal",

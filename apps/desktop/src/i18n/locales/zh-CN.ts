@@ -5732,6 +5732,10 @@ export default withEnglishFallback({
     executeSqlFile: "执行 SQL 文件",
     expandAll: "全部展开",
     collapseAll: "全部折叠",
+    filterSettings: "文件过滤",
+    fileFilter: "文件名过滤规则",
+    fileFilterPlaceholder: "文件名过滤规则",
+    fileFilterHint: "支持通配符（如 *.sql、*.sh）或正则表达式（如 {regex}）。",
   },
   diff: {
     title: "比较架构",

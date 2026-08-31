@@ -1,8 +1,11 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from "vue";
 import { useI18n } from "vue-i18n";
-import { FolderOpen, FileCode, FolderClosed, ChevronRight, ChevronDown, X, Trash2, RefreshCw, FolderSearch, Copy, Play, ChevronsUpDown, ChevronsDownUp } from "@lucide/vue";
+import { FolderOpen, FileCode, FolderClosed, ChevronRight, ChevronDown, X, Trash2, RefreshCw, FolderSearch, Copy, Play, ChevronsUpDown, ChevronsDownUp, Settings } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { useQueryStore } from "@/stores/queryStore";
@@ -15,7 +18,7 @@ import { resolveExternalSqlFileTarget, unassociatedExternalSqlFileTarget } from 
 import { externalSqlFileOpenErrorMessage, formatSqlFileSize, isExternalSqlFileTooLargeError } from "@/lib/sql/sqlFileOpen";
 import * as api from "@/lib/backend/api";
 import type { SqlFileEntry } from "@/lib/backend/api";
-import { getSqlFileFolderPaths, saveSqlFileFolderPaths, notifySqlFileFoldersChanged } from "@/lib/sqlFile/sqlFileFolders";
+import { getSqlFileFilter, getSqlFileFolderPaths, saveSqlFileFilter, saveSqlFileFolderPaths, notifySqlFileFoldersChanged } from "@/lib/sqlFile/sqlFileFolders";
 import { orderedListRangeAnchorIndex, orderedListSelectionIntent, type OrderedListSelectionItem } from "@/lib/selection/orderedListSelection";
 
 const emit = defineEmits<{
@@ -36,6 +39,10 @@ interface FolderState {
 }
 
 const folders = ref<FolderState[]>([]);
+const filterSettingsOpen = ref(false);
+const fileFilterDraft = ref(getSqlFileFilter());
+const fileFilterPlaceholder = "*.sql / *.sh / .*[.](sql|sh|py)$";
+const fileFilterRegexExample = ".*[.](sql|sh|py)$";
 
 // Right-click target. `kind` discriminates between a folder header, a tree
 // directory entry, and a tree file entry. `folderPath` is the owning top-level
@@ -108,7 +115,7 @@ async function loadFolderEntries(folderPath: string) {
   if (idx === -1) return;
   folders.value[idx].loading = true;
   try {
-    const entries = await api.listSqlFilesInFolder(folderPath);
+    const entries = await api.listSqlFilesInFolder(folderPath, getSqlFileFilter());
     const target = folders.value.findIndex((f) => f.path === folderPath);
     if (target !== -1) {
       folders.value[target].entries = entries;
@@ -149,6 +156,12 @@ async function refreshAll() {
   await Promise.all(folders.value.map((f) => loadFolderEntries(f.path)));
   notifySqlFileFoldersChanged();
   toast(t("sqlFileTree.refreshed"), 1500);
+}
+
+async function saveFileFilter() {
+  saveSqlFileFilter(fileFilterDraft.value);
+  filterSettingsOpen.value = false;
+  await refreshAll();
 }
 
 async function removeFolder(index: number) {
@@ -417,6 +430,19 @@ function clearContextTarget() {
     <div class="h-9 flex items-center gap-1 px-2 border-b shrink-0 bg-muted/20">
       <span class="text-[13px] font-medium">{{ t("sqlFileTree.title") }}</span>
       <span class="flex-1" />
+      <LightTooltip :text="t('sqlFileTree.filterSettings')" side="bottom" :delay="0" :close-delay="0" nowrap>
+        <Button
+          variant="ghost"
+          size="icon"
+          class="h-5 w-5"
+          @click="
+            fileFilterDraft = getSqlFileFilter();
+            filterSettingsOpen = true;
+          "
+        >
+          <Settings class="h-3 w-3" />
+        </Button>
+      </LightTooltip>
       <LightTooltip v-if="folders.length > 0" :text="t('sqlFileTree.refreshAll')" side="bottom" :delay="0" :close-delay="0" nowrap>
         <Button variant="ghost" size="icon" class="h-5 w-5" @click="refreshAll">
           <RefreshCw class="h-3 w-3" />
@@ -534,5 +560,22 @@ function clearContextTarget() {
         </div>
       </template>
     </CustomContextMenu>
+
+    <Dialog v-model:open="filterSettingsOpen">
+      <DialogContent class="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>{{ t("sqlFileTree.filterSettings") }}</DialogTitle>
+        </DialogHeader>
+        <div class="grid gap-2 py-2">
+          <Label for="sql-file-filter">{{ t("sqlFileTree.fileFilter") }}</Label>
+          <Input id="sql-file-filter" v-model="fileFilterDraft" :placeholder="fileFilterPlaceholder" @keydown.enter="saveFileFilter" />
+          <p class="text-xs text-muted-foreground">{{ t("sqlFileTree.fileFilterHint", { regex: fileFilterRegexExample }) }}</p>
+        </div>
+        <DialogFooter>
+          <Button type="button" variant="outline" @click="filterSettingsOpen = false">{{ t("common.cancel") }}</Button>
+          <Button type="button" @click="saveFileFilter">{{ t("common.save") }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   </div>
 </template>

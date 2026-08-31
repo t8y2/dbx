@@ -55,6 +55,7 @@ portpicker = "0.1.1"
 tiberius = { version = "0.12.3", default-features = false, features = ["tds73", "chrono", "rust_decimal", "rustls", "sql-browser-tokio"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }
+regex = "1"
 futures = "0.3"
 mongodb = { version = "3.2.5", features = ["socks5-proxy"] }
 percent-encoding = "2"

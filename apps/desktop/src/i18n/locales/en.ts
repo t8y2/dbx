@@ -5747,6 +5747,10 @@ export default {
     executeSqlFile: "Execute SQL file",
     expandAll: "Expand all",
     collapseAll: "Collapse all",
+    filterSettings: "File Filter",
+    fileFilter: "File name filter",
+    fileFilterPlaceholder: "File name filter",
+    fileFilterHint: "Use a glob such as *.sql or *.sh, or a regular expression such as {regex}.",
   },
   diff: {
     title: "Compare Schemas",

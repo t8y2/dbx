@@ -2,6 +2,8 @@ import { ref } from "vue";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 
 const STORAGE_KEY = "dbx-sql-file-folders";
+const FILTER_STORAGE_KEY = "dbx-sql-file-filter";
+export const DEFAULT_SQL_FILE_FILTER = "*.sql";
 
 /**
  * Shared reactive version counter — bumped whenever SQL file folder paths change.
@@ -20,6 +22,18 @@ export function getSqlFileFolderPaths(): string[] {
   } catch {
     return [];
   }
+}
+
+/** Read the file-name filter used by the external SQL file browser. */
+export function getSqlFileFilter(): string {
+  const filter = safeLocalStorageGet(FILTER_STORAGE_KEY)?.trim();
+  return filter || DEFAULT_SQL_FILE_FILTER;
+}
+
+/** Persist the file-name filter and invalidate cached external file listings. */
+export function saveSqlFileFilter(filter: string): void {
+  safeLocalStorageSet(FILTER_STORAGE_KEY, filter.trim() || DEFAULT_SQL_FILE_FILTER);
+  sqlFileFoldersVersion.value++;
 }
 
 /** Persist folder paths to localStorage and notify subscribers. */

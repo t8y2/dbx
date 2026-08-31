@@ -67,7 +67,7 @@ describe("DataTransferDialog transfer prefill", () => {
   });
 
   it("routes table-only database kinds through the table-list request", () => {
-    expect(dialogSource).toContain("const kinds = transferObjectKindsForDatabase(config?.db_type)");
+    expect(dialogSource).toContain("const kinds = transferObjectKindsForDatabase(effectiveDatabaseTypeForConnection(config))");
     expect(dialogSource).toContain("for (const kind of kinds)");
     expect(dialogSource).toContain('if (kind === "TABLE")');
     expect(dialogSource).toContain("await api.listTables(connectionId, database, schema");
@@ -75,7 +75,7 @@ describe("DataTransferDialog transfer prefill", () => {
 
   it("keeps MongoDB collection loading ahead of the generic object-kind path", () => {
     const mongoCollectionBranch = dialogSource.indexOf("if (isMongoConnection(connectionId))");
-    const genericObjectKinds = dialogSource.indexOf("const kinds = transferObjectKindsForDatabase(config?.db_type)");
+    const genericObjectKinds = dialogSource.indexOf("const kinds = transferObjectKindsForDatabase(effectiveDatabaseTypeForConnection(config))");
 
     expect(mongoCollectionBranch).toBeGreaterThan(-1);
     expect(dialogSource).toContain("await api.mongoListCollections(connectionId, database)");

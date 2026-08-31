@@ -2428,7 +2428,7 @@ function applyProfile(val: string, preserveConnectionFields = false) {
       form.value.connection_string = undefined;
       form.value.url_params = "";
     }
-    resetHiveKerberosFields(profile.type === "hive" || profile.type === "kyuubi" || profile.type === "impala" ? form.value : undefined);
+    resetHiveKerberosFields(profile.type === "hive" || profile.type === "argo" || profile.type === "kyuubi" || profile.type === "impala" ? form.value : undefined);
   }
   if (profile.type === "meilisearch") {
     syncMeilisearchHostInput(form.value);
@@ -2566,7 +2566,7 @@ watch(
         resetVictoriaMetricsFields();
       }
       resetElasticsearchProxyFields(config.db_type === "elasticsearch" ? config.external_config : undefined);
-      resetHiveKerberosFields(config.db_type === "hive" || config.db_type === "kyuubi" || config.db_type === "impala" ? config : undefined);
+      resetHiveKerberosFields(config.db_type === "hive" || config.db_type === "argo" || config.db_type === "kyuubi" || config.db_type === "impala" ? config : undefined);
       resetDamengJvmOptions(config.db_type === "dameng" ? config : undefined);
       h2ConnectionMode.value = h2ConnectionModeForConfig(config);
       customColorInput.value = config.color || "";
@@ -3790,7 +3790,7 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     config.ssl = !!config.ssl || damengSsl.enabled;
     config.url_params = applyDamengSslUrlParams(config.url_params, config.ssl, damengSsl.sslFilesPath, damengSsl.sslKeystorePassword, damengSsl.sslProtocol);
   }
-  if (config.db_type === "hive" || config.db_type === "kyuubi" || config.db_type === "impala") {
+  if (config.db_type === "hive" || config.db_type === "argo" || config.db_type === "kyuubi" || config.db_type === "impala") {
     if (hiveAuthMode.value === "kerberos" && !hivePrincipal.value.trim()) {
       throw new Error(t("connection.hiveKerberosPrincipalRequired"));
     }

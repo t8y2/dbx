@@ -68,6 +68,7 @@ export const DATABASE_NAMESPACE_CREATION_MATRIX = {
   trino: { database: "schema" },
   prestosql: { database: "schema" },
   hive: { deferred: "Hive database creation needs agent metadata validation first" },
+  argo: { deferred: "ArgoDB database creation needs agent metadata validation first" },
   kyuubi: { deferred: "Kyuubi database creation needs dedicated metadata validation first" },
   impala: { deferred: "Impala database creation needs dedicated metadata validation first" },
   spark: { deferred: "Spark database creation needs agent metadata validation first" },

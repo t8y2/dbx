@@ -1,13 +1,13 @@
 schemaVersion: 1
-order: 510
-dbType: hive
-rustVariant: Hive
-label: Apache Hive
+order: 515
+dbType: argo
+rustVariant: Argo
+label: ArgoDB (Transwarp)
 runtimeMode: agent
 mcpMode: bridge
 agentKey: hive
-driverStoreVisible: true
-driverStoreOrder: 22
+driverStoreVisible: false
+driverStoreOrder: 23
 singleConnectionPool: false
 metadataConnectionScoped: false
 skipTcpProbe: true
@@ -19,7 +19,7 @@ capabilities:
   queryExecution: true
   metadataBrowse: true
   objectBrowser: true
-  objectSource: false
+  objectSource: true
   schemaSearch: true
   diagram: false
   tableDataEdit: true

@@ -1843,6 +1843,41 @@
       }
     },
     {
+      "dbType": "argo",
+      "label": "ArgoDB (Transwarp)",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "hive",
+      "driverStoreVisible": false,
+      "driverStoreOrder": 23,
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 10000,
+      "traits": {
+        "schemaAware": true
+      },
+      "supportLevel": "operate",
+      "capabilities": {
+        "queryExecution": true,
+        "metadataBrowse": true,
+        "objectBrowser": true,
+        "objectSource": true,
+        "schemaSearch": true,
+        "diagram": false,
+        "tableDataEdit": true,
+        "tableStructureEdit": false,
+        "tableImport": false,
+        "dataTransfer": true,
+        "sqlFileExecution": true,
+        "databaseCreate": false,
+        "fieldLineage": false,
+        "sqlExplain": false,
+        "userAdmin": false,
+        "driverManagement": true
+      }
+    },
+    {
       "dbType": "kyuubi",
       "label": "Apache Kyuubi",
       "runtimeMode": "agent",

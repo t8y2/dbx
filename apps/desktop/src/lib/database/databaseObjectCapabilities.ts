@@ -71,6 +71,9 @@ const DATABASE_TYPE_OBJECTS = new Map<DatabaseType, SidebarObjectKind[]>([
   ["starrocks", TABLE_VIEW_MV_OBJECTS],
   // Inceptor/Hive routines can be listed via JDBC plugin fallbacks (system.procedures_v/functions_v).
   ["hive", ROUTINE_OBJECTS],
+  // ArgoDB (Transwarp) shares the Hive agent; its catalog views
+  // (system.procedures_v / system.functions_v) expose routines natively.
+  ["argo", ROUTINE_OBJECTS],
   ["kyuubi", TABLE_VIEW_OBJECTS],
   ["impala", TABLE_VIEW_OBJECTS],
   ["spark", TABLE_VIEW_OBJECTS],

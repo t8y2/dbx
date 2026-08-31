@@ -438,7 +438,7 @@ func showViewsUnsupported(err error) bool {
 }
 
 func (server *server) listObjects(schema string, constraints metadataListConstraints) ([]objectInfo, error) {
-	if !acceptsHiveTable(constraints.ObjectTypes) && !acceptsHiveRoutine(constraints.ObjectTypes) {
+	if !acceptsHiveTable(constraints.ObjectTypes) && !(server.supportsRoutines() && acceptsHiveRoutine(constraints.ObjectTypes)) {
 		return []objectInfo{}, nil
 	}
 	schema = firstNonEmpty(schema, server.config.Database)
@@ -452,14 +452,14 @@ func (server *server) listObjects(schema string, constraints metadataListConstra
 			values = append(values, objectInfo{Name: table.Name, ObjectType: table.TableType, Schema: schema, Comment: table.Comment})
 		}
 	}
-	if acceptsRoutineType(constraints.ObjectTypes, "PROCEDURE") {
+	if server.supportsRoutines() && acceptsRoutineType(constraints.ObjectTypes, "PROCEDURE") {
 		procedures, err := server.listRoutines(schema, constraints, "PROCEDURE")
 		if err != nil {
 			return nil, err
 		}
 		values = append(values, procedures...)
 	}
-	if acceptsRoutineType(constraints.ObjectTypes, "FUNCTION") {
+	if server.supportsRoutines() && acceptsRoutineType(constraints.ObjectTypes, "FUNCTION") {
 		functions, err := server.listRoutines(schema, constraints, "FUNCTION")
 		if err != nil {
 			return nil, err
@@ -468,6 +468,20 @@ func (server *server) listObjects(schema string, constraints metadataListConstra
 	}
 	sort.Slice(values, func(first, second int) bool { return values[first].Name < values[second].Name })
 	return applyMetadataWindow(values, constraints.Offset, constraints.Limit), nil
+}
+
+// supportsRoutines reports whether the connected server is known to expose the
+// Hive procedure / function catalog views (system.procedures_v /
+// system.functions_v). ArgoDB / Inceptor / Transwarp forks ship these views;
+// vanilla Apache Hive does not, so routine listing is gated on the connection's
+// database_type to avoid firing unsupported queries against plain Hive.
+func (server *server) supportsRoutines() bool {
+	switch strings.ToLower(strings.TrimSpace(server.params.DatabaseType)) {
+	case "argo", "inceptor", "inceptor2", "transwarp":
+		return true
+	default:
+		return false
+	}
 }
 
 // listRoutines queries the server's procedure / function catalog views when the
@@ -486,9 +500,19 @@ func (server *server) listRoutines(schema string, constraints metadataListConstr
 		nameColumn = "function_name"
 		viewName = "system.functions_v"
 	}
+	// Routine listings are pinned to the active schema (or the connection's default
+	// database when the caller passes an empty schema). system.procedures_v /
+	// system.functions_v only contain rows for one specific database per query;
+	// there is no wildcard form. Falling back to the connection default keeps
+	// callers like the sidebar schema tree happy when they pass "" as the schema.
+	targetSchema := firstNonEmpty(schema, server.config.Database)
 	likePattern := buildRoutineLikePattern(constraints.Filter)
+	// database_name is a string column, so the schema filter must be a single-quoted
+	// literal — not a backtick-quoted identifier. ArgoDB/Inceptor reject lower(`ods`)
+	// against system.procedures_v with an ERROR_STATUS, while lower('ods') works.
+	schemaLiteral := "'" + strings.ReplaceAll(targetSchema, "'", "''") + "'"
 	sql := "SELECT " + nameColumn + " FROM " + viewName +
-		" WHERE lower(database_name) = lower(" + quoteHiveIdentifier(schema) + ")" +
+		" WHERE lower(database_name) = lower(" + schemaLiteral + ")" +
 		" AND lower(" + nameColumn + ") LIKE " + likePattern +
 		" ORDER BY " + nameColumn
 	result, err := server.executeQuery(queryOptions{SQL: sql, MaxRows: metadataQueryLimit})
@@ -673,10 +697,11 @@ func (server *server) getObjectSource(schema, name, objectType string) (objectSo
 	var source string
 	var err error
 	switch strings.ToUpper(objectType) {
-	case "PROCEDURE":
-		source, err = server.getRoutineSource(schema, name, "PROCEDURE")
-	case "FUNCTION":
-		source, err = server.getRoutineSource(schema, name, "FUNCTION")
+	case "PROCEDURE", "FUNCTION":
+		if !server.supportsRoutines() {
+			return objectSource{}, fmt.Errorf("routine source is not supported for %s connections", server.params.DatabaseType)
+		}
+		source, err = server.getRoutineSource(schema, name, strings.ToUpper(objectType))
 	default:
 		source, err = server.getTableDDL(schema, name)
 	}
@@ -704,8 +729,8 @@ func (server *server) getRoutineSource(schema, name, routineType string) (string
 		viewName = "system.functions_v"
 	}
 	sql := "SELECT full_text FROM " + viewName +
-		" WHERE lower(database_name) = lower(" + quoteHiveIdentifier(schema) + ")" +
-		" AND " + nameColumn + " = " + quoteHiveIdentifier(name)
+		" WHERE lower(database_name) = lower('" + strings.ReplaceAll(schema, "'", "''") + "')" +
+		" AND " + nameColumn + " = '" + strings.ReplaceAll(name, "'", "''") + "'"
 	result, err := server.executeQuery(queryOptions{SQL: sql, MaxRows: metadataQueryLimit})
 	if err != nil {
 		return "", nil

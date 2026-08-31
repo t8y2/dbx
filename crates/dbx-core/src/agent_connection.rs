@@ -661,7 +661,8 @@ fn append_agent_url_params(base: String, params: Option<&str>) -> String {
 }
 
 pub fn hive_uses_zookeeper_discovery(config: &ConnectionConfig) -> bool {
-    if !matches!(config.db_type, DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala) {
+    if !matches!(config.db_type, DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo)
+    {
         return false;
     }
 

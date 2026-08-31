@@ -608,7 +608,10 @@ pub(super) fn build_select_columns(
             .collect::<Vec<_>>()
             .join(", ");
     }
-    if !matches!(database_type, Some(DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala)) {
+    if !matches!(
+        database_type,
+        Some(DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo)
+    ) {
         return "*".to_string();
     }
     columns

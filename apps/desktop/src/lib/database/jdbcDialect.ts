@@ -15,7 +15,7 @@ const GAUSSDB_COUNT_QUERY_DOP_KEY = "gaussdbCountQueryDop";
 export const GAUSSDB_M_JDBC_DRIVER_PROFILE = "gaussdb-m";
 export const GAUSSDB_M_JDBC_DRIVER_CLASS = "com.huawei.gaussdb.jdbc.Driver";
 
-const DATABASE_AS_EXECUTION_SCHEMA_TYPES = new Set<DatabaseType>(["hive", "kyuubi", "impala", "spark"]);
+const DATABASE_AS_EXECUTION_SCHEMA_TYPES = new Set<DatabaseType>(["hive", "kyuubi", "impala", "argo", "spark"]);
 const CONNECTION_ROOT_SCHEMA_TYPES = new Set<DatabaseType>(["oracle", "dameng", "oceanbase-oracle"]);
 
 const JDBC_DIALECT_MATCHERS: Array<{ type: DatabaseType; patterns: RegExp[] }> = [

@@ -249,6 +249,7 @@ macro_rules! agent_connection_pool_database_type {
             | DatabaseType::Hive
             | DatabaseType::Kyuubi
             | DatabaseType::Impala
+            | DatabaseType::Argo
             | DatabaseType::Spark
             | DatabaseType::Db2
             | DatabaseType::Informix

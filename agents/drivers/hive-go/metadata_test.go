@@ -481,8 +481,8 @@ func metadataResult(columns []string, rows ...[]driver.Value) gohive.MetadataRes
 }
 
 func TestListObjectsIncludesProceduresAndFunctionsFromSystemViews(t *testing.T) {
-	proceduresQuery := "SELECT procedure_name FROM system.procedures_v WHERE lower(database_name) = lower(`ods`) AND lower(procedure_name) LIKE '%sp%' ORDER BY procedure_name"
-	functionsQuery := "SELECT function_name FROM system.functions_v WHERE lower(database_name) = lower(`ods`) AND lower(function_name) LIKE '%sp%' ORDER BY function_name"
+	proceduresQuery := "SELECT procedure_name FROM system.procedures_v WHERE lower(database_name) = lower('ods') AND lower(procedure_name) LIKE '%sp%' ORDER BY procedure_name"
+	functionsQuery := "SELECT function_name FROM system.functions_v WHERE lower(database_name) = lower('ods') AND lower(function_name) LIKE '%sp%' ORDER BY function_name"
 	behavior := &scriptedBehavior{
 		query: func(_ context.Context, query string) (driver.Rows, error) {
 			switch query {
@@ -500,6 +500,7 @@ func TestListObjectsIncludesProceduresAndFunctionsFromSystemViews(t *testing.T) 
 		},
 	}
 	server := newScriptedServer(t, behavior)
+	server.params.DatabaseType = "argo"
 	defer server.disconnect()
 
 	values, err := server.listObjects("ods", metadataListConstraints{
@@ -540,7 +541,7 @@ func TestListObjectsIncludesProceduresAndFunctionsFromSystemViews(t *testing.T) 
 }
 
 func TestGetObjectSourceRoutesProceduresToSystemProceduresView(t *testing.T) {
-	expectedSQL := "SELECT full_text FROM system.procedures_v WHERE lower(database_name) = lower(`ods`) AND procedure_name = `sp_daily_etl`"
+	expectedSQL := "SELECT full_text FROM system.procedures_v WHERE lower(database_name) = lower('ods') AND procedure_name = 'sp_daily_etl'"
 	behavior := &scriptedBehavior{
 		query: func(_ context.Context, query string) (driver.Rows, error) {
 			if query != expectedSQL {
@@ -553,6 +554,7 @@ func TestGetObjectSourceRoutesProceduresToSystemProceduresView(t *testing.T) {
 		},
 	}
 	server := newScriptedServer(t, behavior)
+	server.params.DatabaseType = "argo"
 	defer server.disconnect()
 
 	result, _, err := server.dispatch("get_object_source", map[string]json.RawMessage{
@@ -577,7 +579,7 @@ func TestGetObjectSourceRoutesProceduresToSystemProceduresView(t *testing.T) {
 }
 
 func TestGetObjectSourceRoutesFunctionsToSystemFunctionsView(t *testing.T) {
-	expectedSQL := "SELECT full_text FROM system.functions_v WHERE lower(database_name) = lower(`ods`) AND function_name = `fn_clean`"
+	expectedSQL := "SELECT full_text FROM system.functions_v WHERE lower(database_name) = lower('ods') AND function_name = 'fn_clean'"
 	behavior := &scriptedBehavior{
 		query: func(_ context.Context, query string) (driver.Rows, error) {
 			if query != expectedSQL {
@@ -589,6 +591,7 @@ func TestGetObjectSourceRoutesFunctionsToSystemFunctionsView(t *testing.T) {
 		},
 	}
 	server := newScriptedServer(t, behavior)
+	server.params.DatabaseType = "argo"
 	defer server.disconnect()
 
 	result, _, err := server.dispatch("get_object_source", map[string]json.RawMessage{
@@ -605,5 +608,31 @@ func TestGetObjectSourceRoutesFunctionsToSystemFunctionsView(t *testing.T) {
 	}
 	if source.Source != "-- cleanup helper\n" {
 		t.Fatalf("unexpected function source: %q", source.Source)
+	}
+}
+
+func TestListObjectsDoesNotQueryRoutinesForVanillaHive(t *testing.T) {
+	behavior := &scriptedBehavior{
+		query: func(ctx context.Context, query string) (driver.Rows, error) {
+			if strings.Contains(strings.ToUpper(query), "PROCEDURES_V") || strings.Contains(strings.ToUpper(query), "FUNCTIONS_V") {
+				t.Fatalf("vanilla Hive must not query routine views, got: %s", query)
+			}
+			return newScriptedRows(ctx, []string{"tab_name"}, []string{"STRING"}, [][]driver.Value{{"events"}}), nil
+		},
+	}
+	server := newScriptedServer(t, behavior)
+	server.params.DatabaseType = "hive"
+	defer server.disconnect()
+
+	values, err := server.listObjects("ods", metadataListConstraints{
+		ObjectTypes: []string{"PROCEDURE", "FUNCTION"},
+	})
+	if err != nil {
+		t.Fatalf("listObjects: %v", err)
+	}
+	for _, v := range values {
+		if v.ObjectType == "PROCEDURE" || v.ObjectType == "FUNCTION" {
+			t.Fatalf("vanilla Hive should not surface routines, got: %+v", v)
+		}
 	}
 }

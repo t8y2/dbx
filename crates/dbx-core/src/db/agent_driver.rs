@@ -2052,6 +2052,10 @@ impl AgentDriverClient {
         }
         if let Some(object_types) = object_types {
             params["object_types"] = serde_json::json!(object_types);
+            // Agent drivers (hive-go, oracle-go, etc.) read the object-type
+            // filter from a camelCase field; keep both spellings so existing
+            // agents don't need a coordinated rollout.
+            params["objectTypes"] = serde_json::json!(object_types);
         }
         self.call_method_with_timeout(AgentMethod::ListTables, params, timeout_duration).await
     }
@@ -2087,6 +2091,7 @@ impl AgentDriverClient {
         }
         if let Some(object_types) = object_types {
             params["object_types"] = serde_json::json!(object_types);
+            params["objectTypes"] = serde_json::json!(object_types);
         }
         self.call_method_with_timeout(AgentMethod::ListObjects, params, timeout_duration).await
     }

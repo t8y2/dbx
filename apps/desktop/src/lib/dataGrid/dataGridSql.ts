@@ -168,7 +168,7 @@ export function buildHiveTablePropertiesSql(options: HiveTablePropertiesSqlOptio
 
 export function normalizeDataGridSaveError(databaseType: DatabaseType | undefined, error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
-  if (databaseType === "hive" && /Attempt to do update or delete|Error 10294/i.test(message)) {
+  if ((databaseType === "hive" || databaseType === "argo") && /Attempt to do update or delete|Error 10294/i.test(message)) {
     return "Hive UPDATE/DELETE are not enabled for this table or server. Add rows with INSERT, or enable ACID transactional tables in Hive before editing/deleting existing rows.";
   }
   return message;

@@ -3,7 +3,7 @@ import { qualifiedTableName, quoteTableIdentifier } from "@/lib/table/tableSelec
 import { requiresMysqlIdentifierQuote, requiresPostgresIdentifierQuote } from "@/lib/sql/sqlIdentifier.ts";
 
 /** 智能引号使用反引号的方言族。 */
-const SMART_QUOTE_BACKTICK_TYPES = new Set<DatabaseType>(["mysql", "clickhouse", "hive", "kyuubi", "impala", "spark", "databricks", "databend", "tdengine", "access", "doris", "starrocks", "goldendb"]);
+const SMART_QUOTE_BACKTICK_TYPES = new Set<DatabaseType>(["mysql", "clickhouse", "hive", "argo", "kyuubi", "impala", "spark", "databricks", "databend", "tdengine", "access", "doris", "starrocks", "goldendb"]);
 /** 智能引号使用双引号的方言族（SQL Server 方括号除外）。 */
 const SMART_QUOTE_DOUBLE_TYPES = new Set<DatabaseType>(["postgres", "gaussdb", "opengauss"]);
 /** SQL Server 族智能引号使用方括号。 */

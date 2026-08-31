@@ -707,9 +707,9 @@ pub fn profile_for(db_type: DatabaseType) -> DdlDialectProfile {
 
         ClickHouse => clickhouse_profile(),
 
-        DuckDb | Questdb | SapHana | Teradata | Snowflake | Trino | PrestoSql | Hive | Kyuubi | Impala | Spark
-        | Db2 | Informix | Bigquery | Spanner | Kylin | Ignite | Ignite3 | Oscar | Tdengine | Iotdb | Databricks
-        | Jdbc => conservative_ansi(db_type),
+        DuckDb | Questdb | SapHana | Teradata | Snowflake | Trino | PrestoSql | Hive | Kyuubi | Impala | Argo
+        | Spark | Db2 | Informix | Bigquery | Spanner | Kylin | Ignite | Ignite3 | Oscar | Tdengine | Iotdb
+        | Databricks | Jdbc => conservative_ansi(db_type),
 
         // Non-tabular / not applicable for relational CREATE TABLE
         Redis | MongoDb | DynamoDb | Elasticsearch | Easysearch | Meilisearch | Qdrant | Milvus | Weaviate

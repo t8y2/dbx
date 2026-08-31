@@ -843,6 +843,35 @@ async function startNativeTabDragPreview(payload: TabWindowTransferPayload, even
   }
 }
 
+async function reorderNativeDropInSourceTabBar(payload: TabWindowTransferPayload, release: NativeTabDragPreviewRelease): Promise<boolean> {
+  try {
+    const currentWindow = getCurrentWindow();
+    const [innerPosition, scaleFactor] = await Promise.all([currentWindow.innerPosition(), currentWindow.scaleFactor()]);
+    const clientX = (release.cursorX - innerPosition.x) / scaleFactor;
+    const clientY = (release.cursorY - innerPosition.y) / scaleFactor;
+    const tabBarRect = tabBarRef.value?.getBoundingClientRect();
+    if (!tabBarRect || clientX < tabBarRect.left || clientX > tabBarRect.right || clientY < tabBarRect.top || clientY > tabBarRect.bottom) return false;
+
+    const tabTarget = document.elementFromPoint(clientX, clientY)?.closest<HTMLElement>("[data-tab-id]");
+    const targetId = tabTarget?.dataset.tabId;
+    // Dropping back on an empty part of A's tab strip keeps the tab in place.
+    if (!targetId || targetId === payload.tab.id) return true;
+
+    const draggedTab = queryStore.tabs.find((tab) => tab.id === payload.tab.id);
+    const targetTab = queryStore.tabs.find((tab) => tab.id === targetId);
+    // A return to the source strip must never turn into a detached window,
+    // including when the requested pinned/unpinned reorder is invalid.
+    if (!draggedTab || !targetTab || draggedTab.pinned !== targetTab.pinned) return true;
+
+    const targetRect = tabTarget.getBoundingClientRect();
+    queryStore.reorderTab(payload.tab.id, targetId, clientX - targetRect.left < targetRect.width / 2 ? "before" : "after");
+    return true;
+  } catch {
+    // If the source window is closing, fall through to the normal transfer path.
+    return false;
+  }
+}
+
 async function handleNativeTabDragPreviewRelease(release: NativeTabDragPreviewRelease) {
   const drag = nativeTabDrag.value;
   if (!drag || drag.payload.transferId !== release.transferId) return;
@@ -855,7 +884,14 @@ async function handleNativeTabDragPreviewRelease(release: NativeTabDragPreviewRe
   tabDrag.cancelDrag();
   const monitor = await monitorFromPoint(release.left, release.top).catch(() => null);
   const placement = new PhysicalPosition(release.left, release.top).toLogical(monitor?.scaleFactor ?? 1);
-  await finishTabWindowTransfer(drag.payload, placement);
+  // A visible target window wins in overlap cases. Only when the pointer is
+  // not over B/C do we interpret a drop back on A's strip as a local reorder.
+  const targetWindowLabel = await tabWindowAtCursor();
+  if (!targetWindowLabel && (await reorderNativeDropInSourceTabBar(drag.payload, release))) {
+    clearTabWindowTransfer(drag.payload.transferId);
+    return;
+  }
+  await finishTabWindowTransfer(drag.payload, placement, targetWindowLabel, { x: release.cursorX, y: release.cursorY });
 }
 
 function handleTabPointerMove(tabId: string, event: MouseEvent) {
@@ -893,8 +929,35 @@ function handleTabPointerEnd(tabId: string, event: MouseEvent): boolean {
   return true;
 }
 
-function acceptTabWindowTransfer(payload: TabWindowTransferPayload): boolean {
+async function targetTabDropFromTransfer(payload: TabWindowTransferPayload): Promise<{ targetId: string; position: "before" | "after" } | null> {
+  if (!payload.dropCursorPhysical) return null;
+  try {
+    const currentWindow = getCurrentWindow();
+    const [innerPosition, scaleFactor] = await Promise.all([currentWindow.innerPosition(), currentWindow.scaleFactor()]);
+    const clientX = (payload.dropCursorPhysical.x - innerPosition.x) / scaleFactor;
+    const clientY = (payload.dropCursorPhysical.y - innerPosition.y) / scaleFactor;
+    const tabBarRect = tabBarRef.value?.getBoundingClientRect();
+    if (!tabBarRect || clientX < tabBarRect.left || clientX > tabBarRect.right || clientY < tabBarRect.top || clientY > tabBarRect.bottom) return null;
+
+    const tabTarget = document.elementFromPoint(clientX, clientY)?.closest<HTMLElement>("[data-tab-id]");
+    const targetId = tabTarget?.dataset.tabId;
+    const targetTab = targetId ? queryStore.tabs.find((tab) => tab.id === targetId) : null;
+    const transferredPinned = payload.liveTab?.pinned ?? payload.tab.pinned;
+    if (!targetId || !targetTab || !!targetTab.pinned !== !!transferredPinned) return null;
+
+    const targetRect = tabTarget.getBoundingClientRect();
+    return {
+      targetId,
+      position: clientX - targetRect.left < targetRect.width / 2 ? "before" : "after",
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function acceptTabWindowTransfer(payload: TabWindowTransferPayload): Promise<boolean> {
   if (payload.sourceWindowLabel === currentWindowLabel.value) return false;
+  const dropTarget = await targetTabDropFromTransfer(payload);
   const importedTabId = queryStore.importTransferredTab(payload.tab, payload.liveTab);
   if (!importedTabId) {
     // A retried native event can arrive after the first delivery succeeded.
@@ -902,6 +965,7 @@ function acceptTabWindowTransfer(payload: TabWindowTransferPayload): boolean {
     if (!queryStore.tabs.some((tab) => tab.id === payload.tab.id)) return false;
     queryStore.switchTab(payload.tab.id);
   }
+  if (importedTabId && dropTarget) queryStore.reorderTab(importedTabId, dropTarget.targetId, dropTarget.position);
   // The actual destination tab is now rendered, so any optimistic drag chip
   // in this WebView must disappear even if its final hide event was delayed.
   clearRemoteTabWindowPreview(payload.transferId);
@@ -911,15 +975,17 @@ function acceptTabWindowTransfer(payload: TabWindowTransferPayload): boolean {
 }
 
 function handleIncomingTabWindowTransfer(payload: TabWindowTransferPayload) {
-  acceptTabWindowTransfer(payload);
+  void acceptTabWindowTransfer(payload);
 }
 
-async function finishTabWindowTransfer(payload: TabWindowTransferPayload, placement?: TabWindowPlacement) {
+async function finishTabWindowTransfer(payload: TabWindowTransferPayload, placement?: TabWindowPlacement, knownTargetWindowLabel?: string | null, dropCursorPhysical?: { x: number; y: number }) {
   // Resolve the destination from the OS cursor after pointer capture releases.
   // This keeps the move path independent from WebView2 HTML5 drag delivery.
-  const targetWindowLabel = await tabWindowAtCursor();
+  const targetWindowLabel = knownTargetWindowLabel === undefined ? await tabWindowAtCursor() : knownTargetWindowLabel;
   if (targetWindowLabel) {
-    const delivered = await sendTabWindowTransfer(targetWindowLabel, payload);
+    const cursor = dropCursorPhysical ?? (await cursorPosition().catch(() => null));
+    const deliveredPayload = cursor ? { ...payload, dropCursorPhysical: { x: cursor.x, y: cursor.y } } : payload;
+    const delivered = await sendTabWindowTransfer(targetWindowLabel, deliveredPayload);
     if (delivered && (await waitForTabWindowTransferAccepted(payload.transferId))) {
       queryStore.detachTabForTransfer(payload.tab.id);
       clearTabWindowTransfer(payload.transferId);

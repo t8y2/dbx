@@ -34,6 +34,8 @@ pub struct StartTabDragPreviewRequest {
 struct TabDragPreviewRelease {
     transfer_id: String,
     source_window_label: String,
+    cursor_x: i32,
+    cursor_y: i32,
     left: i32,
     top: i32,
 }
@@ -157,6 +159,8 @@ mod windows {
 
     fn run_drag_loop(app: AppHandle, request: StartTabDragPreviewRequest, hwnd: isize, cancelled: Arc<AtomicBool>) {
         let mut released = false;
+        let mut final_cursor_x = request.left + request.grab_x;
+        let mut final_cursor_y = request.top + request.grab_y;
         let mut final_left = request.left;
         let mut final_top = request.top;
         while !cancelled.load(Ordering::Acquire) {
@@ -164,6 +168,8 @@ mod windows {
             unsafe {
                 GetCursorPos(&mut cursor);
             }
+            final_cursor_x = cursor.x;
+            final_cursor_y = cursor.y;
             final_left = cursor.x - request.grab_x;
             final_top = cursor.y - request.grab_y;
             let left = final_left;
@@ -193,6 +199,8 @@ mod windows {
                 TabDragPreviewRelease {
                     transfer_id: request.transfer_id,
                     source_window_label: request.source_window_label,
+                    cursor_x: final_cursor_x,
+                    cursor_y: final_cursor_y,
                     left: final_left,
                     top: final_top,
                 },

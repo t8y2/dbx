@@ -24,6 +24,8 @@ export interface TabWindowTransferPayload {
   tab: SavedOpenTab;
   /** Live state is kept separately from persisted tab state so results and editor context survive a move. */
   liveTab?: QueryTab;
+  /** Physical release position used by the destination tab strip to preserve insertion order. */
+  dropCursorPhysical?: { x: number; y: number };
 }
 
 /** Temporary cursor state broadcast while a tab is being dragged between DBX windows. */
@@ -45,6 +47,8 @@ export interface TabWindowPlacement {
 export interface NativeTabDragPreviewRelease {
   transferId: string;
   sourceWindowLabel: string;
+  cursorX: number;
+  cursorY: number;
   left: number;
   top: number;
 }

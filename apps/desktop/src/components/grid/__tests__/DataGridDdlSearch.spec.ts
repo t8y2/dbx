@@ -12,8 +12,10 @@ describe("DataGrid DDL search navigation", () => {
     expect(dataGridSource).toContain('from "@/lib/metadata/objectDdlCache"');
     expect(dataGridSource).toContain("async function fetchDdl(force = settingsStore.editorSettings.refreshDdlOnOpen)");
     expect(dataGridSource).toMatch(/loadObjectDdl\([\s\S]*?objectType: tableObjectSourceKind\(props\.tableMeta\.tableType\),[\s\S]*?\{ force \},/);
-    expect(dataGridSource).toMatch(/async function refreshActiveTableInfo\(\)[\s\S]*?fetchDdl\(true\)[\s\S]*?fetchTableInfoColumns\(\)[\s\S]*?fetchIndexes\(\)[\s\S]*?fetchForeignKeys\(\)[\s\S]*?fetchTriggers\(\)/);
+    expect(dataGridSource).toMatch(/async function refreshActiveTableInfo\(\)[\s\S]*?fetchDdl\(true\)[\s\S]*?fetchTableInfoColumns\(true\)[\s\S]*?fetchIndexes\(\)[\s\S]*?fetchForeignKeys\(\)[\s\S]*?fetchConstraints\(\)[\s\S]*?fetchTriggers\(\)/);
     expect(dataGridSource).toContain('@click="refreshActiveTableInfo"');
+    expect(dataGridSource).toMatch(/loadObjectMetadataFacet\(request, "columns"/);
+    expect(dataGridSource).toMatch(/activeTableInfoTab\.value === "constraints"\) return constraintsLoading\.value/);
     expect(dataGridSource).not.toContain("setTableInfoRefreshDdlOnOpen");
   });
 });

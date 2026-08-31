@@ -10952,6 +10952,7 @@ const activeTableInfoLoading = computed(() => {
   if (activeTableInfoTab.value === "columns") return tableInfoColumnsLoading.value;
   if (activeTableInfoTab.value === "indexes") return indexesLoading.value;
   if (activeTableInfoTab.value === "foreignKeys") return foreignKeysLoading.value;
+  if (activeTableInfoTab.value === "constraints") return constraintsLoading.value;
   return activeTableInfoTab.value === "triggers" && triggersLoading.value;
 });
 const cellDetailPanelLayout = computed(() => settingsStore.editorSettings.cellDetailPanelLayout);
@@ -11152,12 +11153,22 @@ async function fetchDdl(force = settingsStore.editorSettings.refreshDdlOnOpen) {
   }
 }
 
-async function fetchTableInfoColumns() {
+async function fetchTableInfoColumns(force = false) {
   if (!props.connectionId || !props.tableMeta) return;
   const requestGeneration = ++tableInfoColumnsRequestGeneration;
   tableInfoColumnsLoading.value = true;
   try {
-    const columns = await api.getColumns(props.connectionId, props.database || "", props.tableMeta.schema || props.database || "", props.tableMeta.tableName, props.tableMeta.catalog);
+    // Route through the shared metadata facet cache so a grid-side refresh
+    // invalidates/populates the same cache the sidebar and hover views read.
+    const request = {
+      connectionId: props.connectionId,
+      database: props.database || "",
+      schema: props.tableMeta.schema || props.database || "",
+      tableName: props.tableMeta.tableName,
+      objectType: tableObjectSourceKind(props.tableMeta.tableType),
+      catalog: props.tableMeta.catalog,
+    };
+    const { value: columns } = await loadObjectMetadataFacet(request, "columns", () => api.getColumns(request.connectionId, request.database, request.schema, request.tableName, request.catalog), { force });
     if (requestGeneration !== tableInfoColumnsRequestGeneration) return;
     tableInfoColumns.value = columns;
   } catch (error) {
@@ -11173,13 +11184,16 @@ async function refreshActiveTableInfo() {
   if (canShowTableOwner.value) void fetchTableOwner(true);
 
   if (activeTableInfoTab.value === "ddl") await fetchDdl(true);
-  else if (activeTableInfoTab.value === "columns") await fetchTableInfoColumns();
+  else if (activeTableInfoTab.value === "columns") await fetchTableInfoColumns(true);
   else if (activeTableInfoTab.value === "indexes") {
     indexesLoaded.value = false;
     await fetchIndexes();
   } else if (activeTableInfoTab.value === "foreignKeys") {
     foreignKeysLoaded.value = false;
     await fetchForeignKeys();
+  } else if (activeTableInfoTab.value === "constraints") {
+    constraintsLoaded.value = false;
+    await fetchConstraints();
   } else if (activeTableInfoTab.value === "triggers") {
     triggersLoaded.value = false;
     await fetchTriggers();

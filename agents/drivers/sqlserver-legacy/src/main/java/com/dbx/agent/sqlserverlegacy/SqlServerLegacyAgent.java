@@ -195,10 +195,15 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
             String message = current.getMessage();
             if (message != null) {
                 String normalized = message.toLowerCase(Locale.ROOT);
-                if (normalized.contains("sql server 8")
-                    && (normalized.contains("does not support")
-                        || normalized.contains("not support")
-                        || normalized.contains("不支持"))) {
+                // mssql-jdbc rejects SQL Server 2000 (major version 8) during
+                // prelogin with "SQL Server version 8 is not supported by
+                // this driver." — the version word breaks a plain
+                // "sql server 8" substring match, so accept both shapes.
+                boolean version8Rejection = (normalized.contains("sql server 8") || normalized.contains("sql server version 8"))
+                    && (normalized.contains("not support") || normalized.contains("不支持"));
+                // Other driver wordings name the supported floor instead.
+                boolean floor2005Rejection = normalized.contains("sql server 2005 or later");
+                if (version8Rejection || floor2005Rejection) {
                     return true;
                 }
             }

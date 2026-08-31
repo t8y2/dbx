@@ -1,9 +1,6 @@
 name: SQL Server 2000 Windows User Test Build
 
 on:
-  push:
-    branches:
-      - codex/sqlserver2000-support
   workflow_dispatch:
 
 permissions:

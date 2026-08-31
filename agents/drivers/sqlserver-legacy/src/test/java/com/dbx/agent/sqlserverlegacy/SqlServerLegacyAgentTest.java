@@ -11,6 +11,16 @@ import java.sql.Types;
 class SqlServerLegacyAgentTest {
     @Test
     void onlySqlServer8UnsupportedErrorsTriggerTheOldDriverFallback() {
+        // Real mssql-jdbc prelogin rejection for SQL Server 2000
+        // (R_unsupportedServerVersion, English-only resources).
+        Assertions.assertTrue(SqlServerLegacyAgent.isSqlServer2000Unsupported(
+            new SQLException("SQL Server version 8 is not supported by this driver.")
+        ));
+        // Older driver wordings name the supported floor instead
+        // (mssql-jdbc R_notSQLServer family).
+        Assertions.assertTrue(SqlServerLegacyAgent.isSqlServer2000Unsupported(
+            new SQLException("This version of the driver can be used only with SQL Server 2005 or later.")
+        ));
         Assertions.assertTrue(SqlServerLegacyAgent.isSqlServer2000Unsupported(
             new SQLException("该驱动程序不支持 SQL Server 8 版")
         ));

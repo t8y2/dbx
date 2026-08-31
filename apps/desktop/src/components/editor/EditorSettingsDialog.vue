@@ -4800,7 +4800,7 @@ onUnmounted(() => {
               <div class="settings-appearance-theme-grid">
                 <div class="settings-appearance-group min-w-0">
                   <Label>{{ t("settings.theme") }}</Label>
-                  <div class="settings-appearance-button-row flex flex-wrap gap-2">
+                  <div class="settings-appearance-button-row flex gap-2">
                     <Button v-for="option in appThemeModeOptions" :key="option.value" type="button" variant="outline" size="sm" class="settings-choice-button h-8 gap-1.5 px-3" :class="themeMode === option.value ? 'dbx-choice-selected' : 'text-foreground'" @click="setThemeMode(option.value)">
                       <component :is="option.icon" class="h-3.5 w-3.5" />
                       {{ option.label }}
@@ -4824,38 +4824,6 @@ onUnmounted(() => {
                     >
                       {{ option.label }}
                     </Button>
-                  </div>
-                </div>
-
-                <div class="settings-appearance-group min-w-0">
-                  <Label>{{ t("settings.iconTheme") }}</Label>
-                  <div class="settings-appearance-button-row flex flex-wrap gap-2">
-                    <TooltipProvider>
-                      <Tooltip>
-                        <TooltipTrigger as-child>
-                          <Button type="button" variant="outline" size="sm" class="settings-choice-button h-8 gap-1.5 px-3" :class="editIconTheme === 'default' ? 'dbx-choice-selected' : 'text-foreground'" @click="setIconTheme('default')">
-                            <img :src="webPath('/icon-preview-default.png')" alt="DBX" class="h-7 w-7 shrink-0" />
-                            {{ t("settings.iconThemeDefault") }}
-                          </Button>
-                        </TooltipTrigger>
-                        <TooltipContent class="max-w-[320px] text-xs leading-relaxed">
-                          {{ t("settings.iconThemeDefaultDescription") }}
-                        </TooltipContent>
-                      </Tooltip>
-                    </TooltipProvider>
-                    <TooltipProvider>
-                      <Tooltip>
-                        <TooltipTrigger as-child>
-                          <Button type="button" variant="outline" size="sm" class="settings-choice-button h-8 gap-1.5 px-3" :class="editIconTheme === 'black' ? 'dbx-choice-selected' : 'text-foreground'" @click="setIconTheme('black')">
-                            <img :src="webPath('/icon-preview-black.png')" alt="DBX" class="h-7 w-7 shrink-0" />
-                            {{ t("settings.iconThemeBlack") }}
-                          </Button>
-                        </TooltipTrigger>
-                        <TooltipContent class="max-w-[320px] text-xs leading-relaxed">
-                          {{ iconThemeBlackDescriptionText }}
-                        </TooltipContent>
-                      </Tooltip>
-                    </TooltipProvider>
                   </div>
                 </div>
               </div>
@@ -4983,6 +4951,38 @@ onUnmounted(() => {
                   </Button>
                   <Button type="button" variant="outline" size="sm" @click="exportDebugLogs">
                     {{ debugLogDownloaded ? t("settings.debugLogsDownloaded") : t("settings.debugLogsDownload") }}
+                  </Button>
+                </div>
+              </div>
+
+              <div class="settings-appearance-group" data-icon-theme-settings>
+                <Label>{{ t("settings.iconTheme") }}</Label>
+                <div class="settings-appearance-choice-grid settings-icon-theme-grid">
+                  <Button type="button" variant="outline" class="settings-choice-card h-auto min-w-0 justify-start overflow-hidden whitespace-normal border p-3" :class="editIconTheme === 'default' ? 'dbx-choice-selected' : ''" @click="setIconTheme('default')">
+                    <div class="flex w-full min-w-0 items-center gap-3 text-left">
+                      <img :src="webPath('/icon-preview-default.png')" alt="DBX" class="h-12 w-12 shrink-0" />
+                      <div class="min-w-0 text-left">
+                        <div class="text-sm font-medium">
+                          {{ t("settings.iconThemeDefault") }}
+                        </div>
+                        <div class="break-words whitespace-normal text-xs text-muted-foreground">
+                          {{ t("settings.iconThemeDefaultDescription") }}
+                        </div>
+                      </div>
+                    </div>
+                  </Button>
+                  <Button type="button" variant="outline" class="settings-choice-card h-auto min-w-0 justify-start overflow-hidden whitespace-normal border p-3" :class="editIconTheme === 'black' ? 'dbx-choice-selected' : ''" @click="setIconTheme('black')">
+                    <div class="flex w-full min-w-0 items-center gap-3 text-left">
+                      <img :src="webPath('/icon-preview-black.png')" alt="DBX" class="h-12 w-12 shrink-0" />
+                      <div class="min-w-0 text-left">
+                        <div class="text-sm font-medium">
+                          {{ t("settings.iconThemeBlack") }}
+                        </div>
+                        <div class="break-words whitespace-normal text-xs text-muted-foreground">
+                          {{ iconThemeBlackDescriptionText }}
+                        </div>
+                      </div>
+                    </div>
                   </Button>
                 </div>
               </div>
@@ -7898,6 +7898,10 @@ onUnmounted(() => {
   row-gap: 1rem;
 }
 
+.settings-appearance-section {
+  container-type: inline-size;
+}
+
 .settings-appearance-field > * + * {
   margin-top: 0.5rem;
 }
@@ -7920,8 +7924,20 @@ onUnmounted(() => {
 
 .settings-appearance-theme-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.75rem;
+}
+
+@container (max-width: 34rem) {
+  .settings-appearance-theme-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@container (max-width: 36rem) {
+  .settings-icon-theme-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .settings-option-stack > * + * {

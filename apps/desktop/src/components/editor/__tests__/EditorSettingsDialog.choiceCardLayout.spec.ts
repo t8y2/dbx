@@ -118,12 +118,13 @@ describe("EditorSettingsDialog choice card containment", () => {
     }
   });
 
-  it("keeps icon theme choices compact beside the corner style controls", () => {
-    expect(dialogSource).toContain("grid-template-columns: repeat(3, minmax(0, 1fr));");
+  it("restores large icon theme choices below the debug log controls", () => {
+    expect(sourceIndexForKey("iconTheme")).toBeGreaterThan(sourceIndexForKey("debugLoggingEnabled"));
+    expect(templateSource).toContain("data-icon-theme-settings");
     for (const key of ["iconThemeDefault", "iconThemeBlack"] as const) {
       const block = buttonBlockForKey(key);
-      expectClassTokens(classNameFromTag(openingTag(block, "Button")), ["settings-choice-button", "h-8"]);
-      expect(block).toContain('class="h-7 w-7 shrink-0"');
+      expectClassTokens(classNameFromTag(openingTag(block, "Button")), ["settings-choice-card", "h-auto", "min-w-0", "whitespace-normal", "overflow-hidden"]);
+      expect(block).toContain('class="h-12 w-12 shrink-0"');
     }
   });
 });

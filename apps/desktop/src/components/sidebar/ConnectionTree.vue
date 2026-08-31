@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, shallowRef, computed, nextTick, watch, provide, onMounted, onUnmounted, type Component, type ComponentPublicInstance, type CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { Search, X, SlidersHorizontal, ListOrdered, ArrowDownAZ, ArrowUpZA, LocateFixed, Server, Database, FolderTree, Table2, Eye, RotateCcw, Loader2, Unplug } from "@lucide/vue";
+import { Search, X, ListOrdered, ArrowDownAZ, ArrowUpZA, Server, Database, FolderTree, Table2, Eye, RotateCcw, Loader2, Unplug } from "@lucide/vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
@@ -56,6 +56,9 @@ import { insertSidebarTableSearchControls, isSidebarTableSearchControlNode } fro
 import { createSidebarTableSearchDebouncer, invalidateSidebarTableSearchBuild, loadOrBuildSidebarTableSearchIndex, scheduleExclusiveSidebarTableSearchDebounce } from "@/lib/sidebar/sidebarTableSearchIndex";
 import TreeItem from "./TreeItem.vue";
 import ActiveConnectionFilterButton from "./ActiveConnectionFilterButton.vue";
+import SidebarListOptionsIcon from "./SidebarListOptionsIcon.vue";
+import SidebarLocateButton from "./SidebarLocateButton.vue";
+import SidebarRegexToggleButton from "./SidebarRegexToggleButton.vue";
 import SidebarTreeRuntimeHost from "./SidebarTreeRuntimeHost.vue";
 import SidebarTreeItemDialogs from "./SidebarTreeItemDialogs.vue";
 import InstallExtensionDialog from "@/components/objects/InstallExtensionDialog.vue";
@@ -2430,16 +2433,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
               <X class="h-3 w-3" />
             </button>
             <LightTooltip :text="t('sidebar.regexSearchTooltip')" side="top" :delay="300">
-              <button
-                type="button"
-                class="flex h-5 min-w-5 items-center justify-center rounded-sm px-0.5 text-[10px] font-mono text-muted-foreground hover:bg-accent hover:text-foreground"
-                :class="{ 'text-primary bg-primary/10': regexMode, 'text-destructive': regexMode && compileSearchRegex(searchQuery).invalid }"
-                :aria-label="t('sidebar.regexSearch')"
-                :aria-pressed="regexMode"
-                @click="regexMode = !regexMode"
-              >
-                .*
-              </button>
+              <SidebarRegexToggleButton :label="t('sidebar.regexSearch')" :pressed="regexMode" :invalid="regexMode && compileSearchRegex(searchQuery).invalid" @toggle="regexMode = !regexMode" />
             </LightTooltip>
             <LightTooltip :text="t('sidebar.globalLocalSearchTooltip')" side="top" :delay="300">
               <Switch size="sm" :model-value="settingsStore.editorSettings.sidebarGlobalSearchLocal" :disabled="regexMode" :aria-label="t('sidebar.globalLocalSearch')" @update:model-value="settingsStore.updateEditorSettings({ sidebarGlobalSearchLocal: Boolean($event) })" />
@@ -2447,9 +2441,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
           </div>
         </div>
         <LightTooltip :text="t('sidebar.locateActiveTab')" side="top" :delay="300" nowrap>
-          <button type="button" class="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-border text-muted-foreground hover:bg-accent hover:text-foreground" :aria-label="t('sidebar.locateActiveTab')" @click="locateActiveTabInSidebar">
-            <LocateFixed class="h-3.5 w-3.5" />
-          </button>
+          <SidebarLocateButton :label="t('sidebar.locateActiveTab')" @locate="locateActiveTabInSidebar" />
         </LightTooltip>
         <LightTooltip :text="sidebarListOptionsLabel" side="top" :delay="300" nowrap>
           <span class="inline-flex">
@@ -2458,9 +2450,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
               :items="sidebarListOptionItems"
               :selected-values="selectedSidebarListOptions"
               :aria-label="sidebarListOptionsLabel"
-              :trigger-icon="SlidersHorizontal"
               :trigger-class="['shrink-0 h-6 w-6 flex items-center justify-center rounded border border-border hover:bg-accent', hasCustomSidebarListOptions ? 'text-primary bg-primary/10 border-primary/30' : 'text-muted-foreground'].join(' ')"
-              trigger-icon-class="h-3.5 w-3.5"
               item-icon-class="h-3.5 w-3.5"
               content-class="w-max min-w-0"
               selected-item-class="bg-primary/10 text-primary"
@@ -2470,7 +2460,11 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
               :close-on-select="false"
               align="end"
               @update:model-value="selectSidebarListOption"
-            />
+            >
+              <template #trigger-icon="{ open }">
+                <SidebarListOptionsIcon :filtered="hasSearchScopeFilter" :open="open" />
+              </template>
+            </LightDropdown>
           </span>
         </LightTooltip>
         <ActiveConnectionFilterButton :active-connection-count="store.connectedIds.size" :pressed="showConnectedConnectionsOnly" @toggle="showConnectedConnectionsOnly = !showConnectedConnectionsOnly" />

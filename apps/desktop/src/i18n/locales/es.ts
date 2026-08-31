@@ -7409,6 +7409,10 @@ export default withEnglishFallback({
     deleteFailed: "No se pudo eliminar el archivo SQL: {message}",
     expandAll: "Expandir todo",
     collapseAll: "Contraer todo",
+    filterSettings: "Filtro de archivos",
+    fileFilter: "Filtro de nombre de archivo",
+    fileFilterPlaceholder: "Filtro de nombre de archivo",
+    fileFilterHint: "Use un comodín como *.sql o *.sh, o una expresión regular como {regex}.",
   },
   mqTopics: {
     title: "Administración de temas",

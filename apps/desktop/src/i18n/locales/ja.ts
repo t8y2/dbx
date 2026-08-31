@@ -7461,6 +7461,10 @@ export default withEnglishFallback({
     deleteFailed: "SQLファイルを削除できませんでした: {message}",
     expandAll: "すべて展開",
     collapseAll: "すべて折りたたむ",
+    filterSettings: "ファイルフィルター",
+    fileFilter: "ファイル名フィルター",
+    fileFilterPlaceholder: "ファイル名フィルター",
+    fileFilterHint: "*.sql や *.sh のようなワイルドカード、または {regex} のような正規表現を使用できます。",
   },
   mqTopics: {
     title: "トピック管理",

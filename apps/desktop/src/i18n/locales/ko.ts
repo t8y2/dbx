@@ -5228,6 +5228,10 @@ export default withEnglishFallback({
     deleteFailed: "SQL 파일을 삭제하지 못했습니다: {message}",
     expandAll: "모두 펼치기",
     collapseAll: "모두 접기",
+    filterSettings: "파일 필터",
+    fileFilter: "파일 이름 필터",
+    fileFilterPlaceholder: "파일 이름 필터",
+    fileFilterHint: "*.sql 또는 *.sh 같은 와일드카드나 {regex} 같은 정규식을 사용할 수 있습니다.",
   },
   diff: {
     progress: {

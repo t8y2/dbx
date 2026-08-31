@@ -1648,7 +1648,8 @@ function onKeydown(event: KeyboardEvent) {
 }
 
 .tree-connection-label {
-  font-weight: 350;
+  font-weight: 400;
+  font-variation-settings: "wght" 480;
 }
 
 .tree-item-connection-tint {

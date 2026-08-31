@@ -778,6 +778,22 @@ mod tests {
     }
 
     #[test]
+    fn influxdb_table_select_quotes_explicit_columns() {
+        // InfluxQL needs double-quoted identifiers and only permits ORDER BY on
+        // the time column; explicit column lists must not fall back to "*".
+        assert_eq!(
+            build_table_data_select_sql(TableDataSelectSqlOptions {
+                database_type: Some(DatabaseType::InfluxDb),
+                database: Some("monitor".to_string()),
+                table_name: "cpu".to_string(),
+                columns: vec!["time".to_string(), "host".to_string(), "value".to_string()],
+                ..Default::default()
+            }),
+            "SELECT \"time\", \"host\", \"value\" FROM \"cpu\" ORDER BY time DESC LIMIT 100;"
+        );
+    }
+
+    #[test]
     fn databricks_table_select_uses_backtick_identifiers() {
         assert_eq!(
             build_table_data_select_sql(TableDataSelectSqlOptions {

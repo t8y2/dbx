@@ -738,10 +738,19 @@ impl MysqlDumpBinaryLiteralNormalizer {
                     }
 
                     if byte == b'-' && self.pending.get(index + 1) == Some(&b'-') {
+                        // MySQL requires whitespace or a control character after `--`
+                        // to open a line comment: `5--1` is subtraction, matching the
+                        // splitter's dash_dash_starts_line_comment rule.
+                        let byte_after_dashes = self.pending.get(index + 2).copied();
+                        if byte_after_dashes.is_none() && !eof {
+                            break;
+                        }
                         output.extend_from_slice(b"--");
-                        self.state = MysqlDumpBinaryLiteralState::LineComment;
                         self.previous_source_byte = Some(b'-');
                         index += 2;
+                        if byte_after_dashes.is_none_or(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control()) {
+                            self.state = MysqlDumpBinaryLiteralState::LineComment;
+                        }
                     } else if byte == b'-' && self.pending.get(index + 1).is_none() && !eof {
                         break;
                     } else if byte == b'#' {
@@ -2188,6 +2197,24 @@ mod tests {
         assert_eq!(decoded, "INSERT INTO t VALUES (X'ACED0005');\n");
     }
 
+    #[tokio::test]
+    async fn streaming_decoder_recovers_gzip_mysql_dump_with_raw_binary_bytes() {
+        // Encoding detection and binary-literal validation must run on the
+        // decompressed bytes, not on the raw gzip stream.
+        let mut bytes = b"-- MySQL dump\nINSERT INTO t VALUES (_binary '".to_vec();
+        bytes.extend_from_slice(&[0xAC, b'\\', 0xED, b'\\', b'0', 0x05]);
+        bytes.extend_from_slice(b"', '\xE4\xB8\xAD\xE6\x96\x87');\n");
+        let path = temporary_gzip_sql_file(&bytes).await;
+        let mut decoder = SqlFileStreamDecoder::open(&path).await.unwrap();
+        let mut decoded = String::new();
+        while let Some(chunk) = decoder.next_chunk().await.unwrap() {
+            decoded.push_str(&chunk);
+        }
+        tokio::fs::remove_file(path).await.unwrap();
+
+        assert_eq!(decoded, "-- MySQL dump\nINSERT INTO t VALUES (X'ACED0005', '中文');\n");
+    }
+
     #[test]
     fn mysql_binary_literal_normalizer_does_not_rewrite_comments_or_strings() {
         let source = b"-- _binary '\xAC'\nSELECT '_binary \'x\'', `col_binary`; /* _binary '\xAC' */";
@@ -2203,6 +2230,21 @@ mod tests {
         let error = normalizer.normalize(b"SELECT _binary 'abc", true).unwrap_err();
 
         assert_eq!(error, "Unterminated MySQL binary literal");
+    }
+
+    #[test]
+    fn mysql_binary_literal_normalizer_treats_dash_dash_digit_as_subtraction() {
+        // MySQL treats `--` as a comment opener only when followed by whitespace
+        // or a control character, so `5--1` is subtraction and the `_binary`
+        // literal later on the same line must still be normalized.
+        let mut source = b"SELECT 5--1, _binary '".to_vec();
+        source.extend_from_slice(&[0xAC, 0x05]);
+        source.extend_from_slice(b"';\n");
+
+        let mut normalizer = MysqlDumpBinaryLiteralNormalizer::default();
+        let normalized = normalizer.normalize(&source, true).unwrap();
+
+        assert_eq!(normalized, b"SELECT 5--1, X'AC05';\n".to_vec());
     }
 
     #[test]

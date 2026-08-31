@@ -514,6 +514,46 @@ describe("useDataGridEditor appendPastedRowsToNewRow", () => {
 
     expect(editor.newRows.value[1]).toEqual(["Ada", "full payload", "Lovelace"]);
   });
+
+  it("places a cloned source row below its source row", () => {
+    const editor = createEditor(undefined, true, undefined, undefined, [
+      ["Ada", null, "Lovelace"],
+      ["Grace", null, "Hopper"],
+    ]);
+    editor.newRows.value = [];
+    editor.newRowMeta.value = [];
+
+    editor.cloneRow(1);
+
+    expect(editor.newRowMeta.value[0]?.placement).toEqual({ anchorId: 1, position: "below" });
+  });
+
+  it("places a cloned pending row below the pending source row", () => {
+    const editor = createEditor();
+    editor.newRows.value = [];
+    editor.newRowMeta.value = [];
+    editor.addRows(1);
+
+    editor.cloneRow(-1);
+
+    expect(editor.newRowMeta.value[1]?.placement).toEqual({ anchorId: -1, position: "below" });
+  });
+
+  it("places each multi-row clone below its corresponding source row", () => {
+    const editor = createEditor(undefined, true, undefined, undefined, [
+      ["Ada", null, "Lovelace"],
+      ["Grace", null, "Hopper"],
+    ]);
+    editor.newRows.value = [];
+    editor.newRowMeta.value = [];
+
+    editor.cloneRows([1, 0]);
+
+    expect(editor.newRowMeta.value.map((meta) => meta.placement)).toEqual([
+      { anchorId: 1, position: "below" },
+      { anchorId: 0, position: "below" },
+    ]);
+  });
 });
 
 describe("useDataGridEditor saveChanges reload", () => {

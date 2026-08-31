@@ -272,7 +272,8 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
         if (value !== baseline[column]) edited.add(column);
       });
     }
-    return allocateNewRowMeta(null, sourceIndex, [...edited]);
+    const placement = item.isNew && item.newIndex !== undefined ? (inherited ? { anchorId: -inherited.token, position: "below" as const } : null) : sourceIndex === undefined ? null : { anchorId: sourceIndex, position: "below" as const };
+    return allocateNewRowMeta(placement, sourceIndex, [...edited]);
   }
   // Restore a metadata snapshot and resume token allocation past its maximum so
   // newly created rows never collide with tokens held by restored rows (a fresh

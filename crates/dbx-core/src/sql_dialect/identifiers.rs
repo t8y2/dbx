@@ -131,6 +131,7 @@ pub fn quote_table_identifier(database_type: Option<DatabaseType>, name: &str) -
             | DatabaseType::Hive
             | DatabaseType::Kyuubi
             | DatabaseType::Impala
+            | DatabaseType::Argo
             | DatabaseType::Spark
             | DatabaseType::Databricks
             | DatabaseType::Databend
@@ -388,6 +389,7 @@ pub(crate) fn quote_transfer_identifier(name: &str, database_type: &DatabaseType
         | DatabaseType::Hive
         | DatabaseType::Kyuubi
         | DatabaseType::Impala
+        | DatabaseType::Argo
         | DatabaseType::Spark
         | DatabaseType::Questdb => format!("`{}`", name.replace('`', "``")),
         DatabaseType::SqlServer => format!("[{}]", name.replace(']', "]]")),

@@ -610,7 +610,13 @@ pub(super) fn build_select_columns(
     }
     if !matches!(
         database_type,
-        Some(DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo | DatabaseType::InfluxDb)
+        Some(
+            DatabaseType::Hive
+                | DatabaseType::Kyuubi
+                | DatabaseType::Impala
+                | DatabaseType::Argo
+                | DatabaseType::InfluxDb
+        )
     ) {
         return "*".to_string();
     }

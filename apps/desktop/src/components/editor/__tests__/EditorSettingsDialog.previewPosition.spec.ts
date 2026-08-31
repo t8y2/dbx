@@ -125,12 +125,12 @@ describe("EditorSettingsDialog live preview placement", () => {
     const tableSearch = navigationSection.indexOf('id="sidebar-table-search-enabled"');
     const activeNodeSelection = navigationSection.indexOf('id="auto-select-active-sidebar-node"');
 
-    expect(adjacentDataTabs).toBeGreaterThanOrEqual(0);
+    expect(browseObjectsOnDatabaseActivation).toBeGreaterThanOrEqual(0);
+    expect(adjacentDataTabs).toBeGreaterThan(browseObjectsOnDatabaseActivation);
     expect(objectDisplay).toBeGreaterThan(adjacentDataTabs);
     expect(routineOpenMode).toBeGreaterThan(objectDisplay);
     expect(tableNavigation).toBeGreaterThan(routineOpenMode);
-    expect(browseObjectsOnDatabaseActivation).toBeGreaterThan(tableNavigation);
-    expect(tableSearch).toBeGreaterThan(browseObjectsOnDatabaseActivation);
+    expect(tableSearch).toBeGreaterThan(tableNavigation);
     expect(activeNodeSelection).toBeGreaterThan(tableSearch);
   });
 

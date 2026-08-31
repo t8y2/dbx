@@ -48,10 +48,27 @@ pub(super) fn build_trigger_sql(options: &TableStructureSqlOptions, warnings: &m
 
         if let Some(sql) = create_trigger_sql(dialect, options.schema.as_deref(), &table, trigger, warnings) {
             statements.push(sql);
+            // SQL Server rebuilds via DROP + CREATE, which resets is_disabled to
+            // enabled; restore the catalog-reported disabled state explicitly.
+            if dialect == StructureDialect::SqlServer
+                && trigger.original.as_ref().is_some_and(|original| original.enabled == Some(false))
+            {
+                let schema = options.schema.as_deref();
+                let qualify = |name: &str| qualified_trigger_object_name(dialect, schema, name);
+                statements.push(format!("DISABLE TRIGGER {} ON {};", qualify(&trigger.name), qualify(&table)));
+            }
         }
     }
 
     statements
+}
+
+fn qualified_trigger_object_name(dialect: StructureDialect, schema: Option<&str>, name: &str) -> String {
+    if schema.is_some_and(|schema| !schema.trim().is_empty()) {
+        format!("{}.{}", quote_ident(dialect, schema.unwrap()), quote_ident(dialect, name))
+    } else {
+        quote_ident(dialect, name)
+    }
 }
 
 fn has_trigger_edit(trigger: &EditableStructureTrigger) -> bool {
@@ -169,21 +186,28 @@ fn sqlserver_trigger_body(statement: &str) -> &str {
         return statement;
     }
 
-    let bytes = statement.as_bytes();
-    for index in 0..bytes.len().saturating_sub(1) {
-        if !bytes.get(index).is_some_and(|byte| byte.eq_ignore_ascii_case(&b'A'))
-            || !bytes.get(index + 1).is_some_and(|byte| byte.eq_ignore_ascii_case(&b'S'))
-        {
-            continue;
+    // The body separator is the standalone AS that follows the event list
+    // (`... AFTER INSERT, UPDATE AS <body>`); earlier AS tokens can appear in
+    // trigger options such as `WITH EXECUTE AS OWNER`, so the first standalone
+    // AS alone is not a reliable split point.
+    let mut seen_event = false;
+    let mut token = String::new();
+    let mut char_indices = statement.char_indices().peekable();
+    while let Some((index, ch)) = char_indices.next() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            token.push(ch);
+            if !char_indices.peek().is_some_and(|(_, next)| next.is_ascii_alphanumeric() || *next == '_') {
+                if token.eq_ignore_ascii_case("AS") && seen_event {
+                    return statement[index + 1..].trim_start();
+                }
+                if matches!(token.to_ascii_uppercase().as_str(), "INSERT" | "UPDATE" | "DELETE" | "LOGON") {
+                    seen_event = true;
+                }
+                token.clear();
+            }
+        } else {
+            token.clear();
         }
-        let before = index.checked_sub(1).and_then(|i| bytes.get(i)).copied();
-        let after = bytes.get(index + 2).copied();
-        if before.is_some_and(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-            || after.is_some_and(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-        {
-            continue;
-        }
-        return statement[index + 2..].trim_start();
     }
     statement
 }
@@ -279,4 +303,20 @@ fn normalize_keyword(value: &str) -> String {
 
 fn normalize_statement(value: &str) -> String {
     clean(value).trim_end_matches(';').trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sqlserver_trigger_body_splits_after_event_list_not_execute_as() {
+        // The AS inside `WITH EXECUTE AS OWNER` must not be treated as the body separator.
+        let source = "CREATE TRIGGER dbo.t ON dbo.tbl WITH EXECUTE AS OWNER AFTER INSERT AS PRINT 'x'";
+        assert_eq!(sqlserver_trigger_body(source), "PRINT 'x'");
+        let no_options = "CREATE TRIGGER dbo.t ON dbo.tbl AFTER UPDATE AS SELECT 1 AS a";
+        assert_eq!(sqlserver_trigger_body(no_options), "SELECT 1 AS a");
+        let leading_as = "AS SELECT 2";
+        assert_eq!(sqlserver_trigger_body(leading_as), "SELECT 2");
+    }
 }

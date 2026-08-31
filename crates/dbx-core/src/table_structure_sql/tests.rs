@@ -4922,6 +4922,7 @@ fn builds_mysql_trigger_changes() {
         event: "UPDATE".to_string(),
         timing: "BEFORE".to_string(),
         statement: Some("SET NEW.updated_at = CURRENT_TIMESTAMP".to_string()),
+        enabled: None,
     });
 
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
@@ -4991,6 +4992,7 @@ fn rebuilds_changed_sqlserver_trigger_from_complete_metadata_source() {
             "CREATE TRIGGER dbo.orders_audit ON dbo.orders AFTER INSERT, UPDATE AS BEGIN SET NOCOUNT ON; INSERT INTO audit_log VALUES (0); END"
                 .to_string(),
         ),
+        enabled: None,
     });
 
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
@@ -5019,6 +5021,39 @@ fn rebuilds_changed_sqlserver_trigger_from_complete_metadata_source() {
 }
 
 #[test]
+fn sqlserver_trigger_edit_restores_disabled_state() {
+    let mut existing =
+        trigger("orders_audit", "AFTER", "INSERT", "BEGIN SET NOCOUNT ON; INSERT INTO audit_log VALUES (1); END");
+    existing.original = Some(TriggerInfo {
+        name: "orders_audit".to_string(),
+        event: "INSERT".to_string(),
+        timing: "AFTER".to_string(),
+        statement: Some("CREATE TRIGGER dbo.orders_audit ON dbo.orders AFTER INSERT AS PRINT 'old'".to_string()),
+        enabled: Some(false),
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::SqlServer),
+        schema: Some("dbo".to_string()),
+        table_name: "orders".to_string(),
+        columns: Vec::new(),
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: vec![existing],
+        table_comment: None,
+        original_table_comment: None,
+        partitioned: false,
+        mysql_engine: None,
+        is_gaussdb_m_mode: false,
+    });
+
+    assert_eq!(
+        result.statements.last().map(String::as_str),
+        Some("DISABLE TRIGGER [dbo].[orders_audit] ON [dbo].[orders];")
+    );
+}
+
+#[test]
 fn unchanged_postgres_trigger_does_not_block_column_rename() {
     let mut renamed = column("display_name");
     renamed.original = Some(ColumnInfo {
@@ -5037,6 +5072,7 @@ fn unchanged_postgres_trigger_does_not_block_column_rename() {
         event: "UPDATE".to_string(),
         timing: "AFTER".to_string(),
         statement: Some("EXECUTE FUNCTION audit_users()".to_string()),
+        enabled: None,
     });
 
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
@@ -5066,6 +5102,7 @@ fn changed_postgres_trigger_remains_unsupported() {
         event: "UPDATE".to_string(),
         timing: "AFTER".to_string(),
         statement: Some("EXECUTE FUNCTION audit_users()".to_string()),
+        enabled: None,
     });
 
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
@@ -5100,6 +5137,7 @@ fn rejects_editing_existing_oracle_trigger_without_complete_source() {
         event: "INSERT OR UPDATE OR DELETE".to_string(),
         timing: "AFTER EACH ROW".to_string(),
         statement: Some("BEGIN\n  NULL;\nEND;".to_string()),
+        enabled: None,
     });
 
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
@@ -5158,6 +5196,7 @@ fn drops_existing_oracle_trigger_without_reconstructing_it() {
         event: "INSERT".to_string(),
         timing: "AFTER EACH ROW".to_string(),
         statement: Some("BEGIN\n  NULL;\nEND;".to_string()),
+        enabled: None,
     });
     existing.marked_for_drop = true;
 

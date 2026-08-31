@@ -4382,6 +4382,7 @@ export default withEnglishFallback({
     overallProgress: "整體進度",
     dataTransfer: "資料傳輸",
     targetTableNameCase: "目標資料表名稱大小寫",
+    quoteTargetColumnNames: "引用目標欄位名稱",
     tableNameCasePreserve: "保留",
     tableNameCaseLower: "小寫",
     tableNameCaseUpper: "大寫",

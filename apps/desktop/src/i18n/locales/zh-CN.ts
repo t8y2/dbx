@@ -5280,6 +5280,7 @@ export default withEnglishFallback({
     modeOverwrite: "覆盖 (TRUNCATE + INSERT)",
     modeUpsert: "更新插入 (按主键 INSERT 或 UPDATE)",
     targetTableNameCase: "目标表名大小写",
+    quoteTargetColumnNames: "引用目标字段名",
     tableNameCasePreserve: "保持原样",
     tableNameCaseLower: "转为小写",
     tableNameCaseUpper: "转为大写",

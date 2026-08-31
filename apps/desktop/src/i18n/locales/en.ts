@@ -5296,6 +5296,7 @@ export default {
     modeOverwrite: "Overwrite (TRUNCATE + INSERT)",
     modeUpsert: "Upsert (INSERT or UPDATE by PK)",
     targetTableNameCase: "Target table name case",
+    quoteTargetColumnNames: "Quote target column names",
     tableNameCasePreserve: "Preserve",
     tableNameCaseLower: "Lowercase",
     tableNameCaseUpper: "Uppercase",

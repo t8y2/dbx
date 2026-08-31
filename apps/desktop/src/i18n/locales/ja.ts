@@ -5065,6 +5065,7 @@ export default withEnglishFallback({
     modeOverwrite: "上書き (TRUNCATE + INSERT)",
     modeUpsert: "アップサート (主キーでINSERT or UPDATE)",
     targetTableNameCase: "対象テーブル名の大小文字",
+    quoteTargetColumnNames: "対象列名を引用",
     tableNameCasePreserve: "そのまま",
     tableNameCaseLower: "小文字に変換",
     tableNameCaseUpper: "大文字に変換",

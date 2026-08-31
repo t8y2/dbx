@@ -9,6 +9,7 @@ import { createTaskLoadTracker } from "./taskLoadTracker";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import SearchableSelect from "@/components/ui/searchable-select/SearchableSelect.vue";
 import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -155,6 +156,7 @@ const pendingTargetSchemaPrefill = ref("");
 // Options
 const transferMode = ref<TransferMode>("append");
 const targetTableNameCase = ref<TransferTableNameCase>("preserve");
+const quoteTargetColumnNames = ref(true);
 const batchSize = ref(1000);
 const isSubmitting = ref(false);
 const showStartConfirm = ref(false);
@@ -180,6 +182,8 @@ function connectionType(id: string): DatabaseType | undefined {
 function isMongoConnection(id: string): boolean {
   return connectionType(id) === "mongodb";
 }
+
+const showTargetColumnQuoteOption = computed(() => ["gaussdb", "opengauss"].includes(connectionType(targetConnectionId.value) ?? ""));
 
 function isCatalogCapable(id: string): boolean {
   const config = store.getConfig(id);
@@ -639,6 +643,7 @@ function resetState(cancelTaskLoad = true) {
   transferContent.value = "structureAndData";
   transferMode.value = "append";
   targetTableNameCase.value = "preserve";
+  quoteTargetColumnNames.value = true;
   batchSize.value = 1000;
   isSubmitting.value = false;
   showStartConfirm.value = false;
@@ -764,6 +769,7 @@ async function startTransfer() {
     objects: buildTransferObjectSelections(selectedObjects.value, treeDisabledGroups.value),
     mode: transferMode.value,
     targetTableNameCase: targetTableNameCase.value,
+    quoteTargetColumnNames: quoteTargetColumnNames.value,
     ownershipPolicy: "preserve",
     batchSize: batchSize.value,
   };
@@ -849,6 +855,7 @@ function currentConfig(): TransferTaskConfig {
     content: transferContent.value,
     mode: transferMode.value,
     targetTableNameCase: targetTableNameCase.value,
+    quoteTargetColumnNames: quoteTargetColumnNames.value,
     batchSize: batchSize.value,
   };
 }
@@ -877,6 +884,7 @@ async function loadTaskIntoForm(task: TransferTask) {
   transferContent.value = config.content;
   transferMode.value = config.mode;
   targetTableNameCase.value = config.targetTableNameCase;
+  quoteTargetColumnNames.value = config.quoteTargetColumnNames;
   batchSize.value = config.batchSize;
   pendingSelectedObjectsPrefill.value = Object.keys(config.objects).length > 0 ? JSON.parse(JSON.stringify(config.objects)) : null;
 
@@ -1261,6 +1269,10 @@ async function saveConfigTask() {
                     <SelectItem value="upper">{{ t("transfer.tableNameCaseUpper") }}</SelectItem>
                   </SelectContent>
                 </Select>
+              </div>
+              <div v-if="showTargetColumnQuoteOption" class="flex items-center gap-3">
+                <Label for="transfer-quote-target-column-names" class="text-xs shrink-0">{{ t("transfer.quoteTargetColumnNames") }}</Label>
+                <Switch id="transfer-quote-target-column-names" v-model="quoteTargetColumnNames" size="sm" />
               </div>
               <div class="flex items-center gap-3">
                 <Label class="text-xs shrink-0">{{ t("transfer.batchSize") }}</Label>

@@ -5035,6 +5035,7 @@ export default withEnglishFallback({
     modeOverwrite: "Sobrescribir (TRUNCATE + INSERT)",
     modeUpsert: "Upsert (INSERT o UPDATE por PK)",
     targetTableNameCase: "Mayúsculas/minúsculas de tabla destino",
+    quoteTargetColumnNames: "Citar columnas de destino",
     tableNameCasePreserve: "Conservar",
     tableNameCaseLower: "Convertir a minúsculas",
     tableNameCaseUpper: "Convertir a mayúsculas",

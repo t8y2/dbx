@@ -4721,6 +4721,7 @@ export default withEnglishFallback({
     modeOverwrite: "덮어쓰기 (TRUNCATE + INSERT)",
     modeUpsert: "Upsert (PK 기준 INSERT 또는 UPDATE)",
     targetTableNameCase: "대상 테이블 이름 대소문자",
+    quoteTargetColumnNames: "대상 열 이름 인용",
     tableNameCasePreserve: "유지",
     tableNameCaseLower: "소문자",
     tableNameCaseUpper: "대문자",

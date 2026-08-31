@@ -744,10 +744,10 @@ func TestXuguListSchemasExposesPublicScopeWithoutGUESTCollision(t *testing.T) {
 		public       bool
 		want         []string
 	}{
-		{name: "private only", want: []string{"APP_TEST", "SYSDBA"}},
-		{name: "public without real guest", public: true, want: []string{"APP_TEST", "SYSDBA", xuguPublicSynonymScope}},
-		{name: "public with real guest", realGuest: true, public: true, want: []string{"APP_TEST", "GUEST", "SYSDBA", xuguPublicSynonymScope}},
-		{name: "public with former reserved schema", realReserved: true, public: true, want: []string{"APP_TEST", "__DBX_XUGU_PUBLIC_SYNONYMS__", "SYSDBA", xuguPublicSynonymScope}},
+		{name: "private only", want: []string{"APP_TEST", "SYSDBA", xuguSchedulerJobScope}},
+		{name: "public synonyms", public: true, want: []string{"APP_TEST", "SYSDBA", xuguPublicSynonymScope, xuguSchedulerJobScope}},
+		{name: "public with real guest", realGuest: true, public: true, want: []string{"APP_TEST", "GUEST", "SYSDBA", xuguPublicSynonymScope, xuguSchedulerJobScope}},
+		{name: "public with former reserved schema", realReserved: true, public: true, want: []string{"APP_TEST", "__DBX_XUGU_PUBLIC_SYNONYMS__", "SYSDBA", xuguPublicSynonymScope, xuguSchedulerJobScope}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -799,7 +799,7 @@ func TestXuguListSchemasFallsBackWhenCombinedQueryIsUnavailable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listSchemas() error: %v", err)
 	}
-	if want := []string{"APP_TEST", "GUEST", "SYSDBA"}; !reflect.DeepEqual(got, want) {
+	if want := []string{"APP_TEST", "GUEST", "SYSDBA", xuguSchedulerJobScope}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("listSchemas() = %v, want %v", got, want)
 	}
 	xuguSchemaListingState.Lock()
@@ -1479,6 +1479,100 @@ func TestGetSequenceSourceReconstructsExecutableDDL(t *testing.T) {
 	}
 	if !strings.HasSuffix(strings.TrimSpace(ddl), ";") {
 		t.Fatalf("sequence DDL must end with a statement terminator:\n%s", ddl)
+	}
+}
+
+func TestRenderXuguSchedulerJobDDLReconstructsEscapedReplayableCall(t *testing.T) {
+	ddl := renderXuguSchedulerJobDDL(xuguSchedulerJobMetadata{
+		Name:           `DBX_JOB_'A`,
+		JobType:        "plsql_block",
+		ParameterCount: 2,
+		Action:         `BEGIN do_work('x'); END;`,
+		BeginTime:      "2026-08-29 10:15:00",
+		RepeatInterval: "FREQ=DAILY;INTERVAL=2",
+		EndTime:        nil,
+		Enabled:        true,
+		AutoDrop:       false,
+		Comments:       `owner's scheduled task`,
+	})
+
+	for _, want := range []string{
+		"EXEC DBMS_SCHEDULER.CREATE_JOB(",
+		"'DBX_JOB_''A'",
+		"'plsql_block'",
+		"'BEGIN do_work(''x''); END;'",
+		"2",
+		"'2026-08-29 10:15:00'",
+		"'FREQ=DAILY;INTERVAL=2'",
+		"NULL",
+		"'default_class'",
+		"true",
+		"false",
+		"'owner''s scheduled task'",
+		");",
+	} {
+		if !strings.Contains(ddl, want) {
+			t.Fatalf("scheduler DDL is missing %q:\n%s", want, ddl)
+		}
+	}
+}
+
+func TestXuguSchedulerJobQueriesRemainInCurrentDatabase(t *testing.T) {
+	listQuery := xuguSchedulerJobsQuery(metadataListConstraints{ObjectTypes: []string{"JOB"}})
+	if !strings.Contains(listQuery.SQL, "DB_ID = CURRENT_DB_ID") || !strings.Contains(listQuery.SQL, "'JOB'") {
+		t.Fatalf("job list must remain current-database scoped: %s", listQuery.SQL)
+	}
+
+	metadataQuery := xuguSchedulerJobMetadataQuery("DbxJob")
+	if !strings.Contains(metadataQuery, "DB_ID = CURRENT_DB_ID") || !strings.Contains(metadataQuery, "JOB_NAME = 'DbxJob'") {
+		t.Fatalf("job metadata must remain exact-name and current-database scoped: %s", metadataQuery)
+	}
+	if !strings.Contains(metadataQuery, "TO_CHAR(BEGIN_T)") || !strings.Contains(metadataQuery, "TO_CHAR(END_T)") {
+		t.Fatalf("scheduler timestamps must be read as text to preserve SQL NULL values: %s", metadataQuery)
+	}
+
+	exact := xuguCatalogSchedulerJobNameQuery("DbxJob", false)
+	folded := xuguCatalogSchedulerJobNameQuery("DbxJob", true)
+	if strings.Contains(exact, "UPPER(JOB_NAME)") || !strings.Contains(folded, "UPPER(JOB_NAME)") {
+		t.Fatalf("job source lookup must prefer exact case before folded fallback: exact=%s folded=%s", exact, folded)
+	}
+}
+
+func TestXuguNullableSchedulerLiteralTreatsEmptyCatalogValueAsNull(t *testing.T) {
+	if got := xuguNullableSchedulerLiteral(""); got != "NULL" {
+		t.Fatalf("empty optional scheduler metadata should render as NULL, got %q", got)
+	}
+	if got := xuguNullableSchedulerLiteral(" "); got != "NULL" {
+		t.Fatalf("whitespace-only optional scheduler metadata should render as NULL, got %q", got)
+	}
+	if got := xuguNullableSchedulerLiteral("FREQ=DAILY"); got != "'FREQ=DAILY'" {
+		t.Fatalf("non-empty scheduler metadata should remain quoted, got %q", got)
+	}
+}
+
+func TestXuguNullableSchedulerEndTimeTreatsCatalogSentinelsAsNull(t *testing.T) {
+	for _, value := range []any{
+		"1816-03-30T05:56:08.065277376Z",
+		"9999-12-31 23:59:59",
+		"9999-12-31T23:59:59Z",
+	} {
+		if got := xuguNullableSchedulerEndTimeLiteral(value); got != "NULL" {
+			t.Fatalf("Xugu no-end sentinel %v should render as NULL, got %q", value, got)
+		}
+	}
+	if got := xuguNullableSchedulerEndTimeLiteral("2029-01-01 01:00:00"); got != "'2029-01-01 01:00:00'" {
+		t.Fatalf("real scheduler end time should remain quoted, got %q", got)
+	}
+}
+
+func TestXuguSchedulerJobCatalogErrorsDegradeWithoutBreakingSchemaDiscovery(t *testing.T) {
+	for _, message := range []string{
+		"[E5021] 表或视图 ALL_JOBS 不存在",
+		"permission denied for ALL_JOBS",
+	} {
+		if !isXuguMetadataUnavailableError(errors.New(message)) {
+			t.Fatalf("scheduler catalog error should be treated as optional metadata: %q", message)
+		}
 	}
 }
 

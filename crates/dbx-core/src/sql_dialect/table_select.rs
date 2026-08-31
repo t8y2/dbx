@@ -610,7 +610,7 @@ pub(super) fn build_select_columns(
     }
     if !matches!(
         database_type,
-        Some(DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo)
+        Some(DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo | DatabaseType::InfluxDb)
     ) {
         return "*".to_string();
     }
@@ -618,7 +618,11 @@ pub(super) fn build_select_columns(
         .iter()
         .map(|column| {
             let ident = quote_table_identifier(database_type, column);
-            format!("{ident} AS {ident}")
+            if database_type == Some(DatabaseType::Hive) {
+                format!("{ident} AS {ident}")
+            } else {
+                ident
+            }
         })
         .collect::<Vec<_>>()
         .join(", ")
@@ -771,6 +775,22 @@ mod tests {
             where_input: None,
             include_row_id: false,
         }
+    }
+
+    #[test]
+    fn influxdb_table_select_quotes_explicit_columns() {
+        // InfluxQL needs double-quoted identifiers and only permits ORDER BY on
+        // the time column; explicit column lists must not fall back to "*".
+        assert_eq!(
+            build_table_data_select_sql(TableDataSelectSqlOptions {
+                database_type: Some(DatabaseType::InfluxDb),
+                database: Some("monitor".to_string()),
+                table_name: "cpu".to_string(),
+                columns: vec!["time".to_string(), "host".to_string(), "value".to_string()],
+                ..Default::default()
+            }),
+            "SELECT \"time\", \"host\", \"value\" FROM \"cpu\" ORDER BY time DESC LIMIT 100;"
+        );
     }
 
     #[test]

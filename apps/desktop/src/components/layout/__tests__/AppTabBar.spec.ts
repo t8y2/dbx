@@ -108,6 +108,27 @@ describe("AppTabBar right-side close action", () => {
   });
 });
 
+describe("AppTabBar left-side close action", () => {
+  it("places the action after close-other, before close-right, and disables it when the target has no tabs to its left", () => {
+    expect(tabBarSource).toContain('label: t("contextMenu.closeLeftTabs")');
+    expect(tabBarSource).toContain("action: () => closeTabsToLeftFromTab(tab)");
+    expect(tabBarSource).toContain("disabled: !hasTabsToLeft(tab)");
+
+    const closeOtherPositions = [...tabBarSource.matchAll(/label: closeOtherLabel,/g)].map((match) => match.index);
+    const closeLeftPositions = [...tabBarSource.matchAll(/label: t\("contextMenu\.closeLeftTabs"\),/g)].map((match) => match.index);
+    const closeRightPositions = [...tabBarSource.matchAll(/label: t\("contextMenu\.closeRightTabs"\),/g)].map((match) => match.index);
+    expect(closeOtherPositions).toHaveLength(2);
+    // The special-surface menu has no left-side action: settings and the
+    // driver store sit at the rightmost end of the tab bar, so nothing can be
+    // to the left of them. Only the regular/pinned tab menu gets the item.
+    expect(closeLeftPositions).toHaveLength(1);
+    expect(closeRightPositions).toHaveLength(2);
+    const closeLeftPosition = closeLeftPositions[0];
+    expect(closeLeftPosition).toBeGreaterThan(closeOtherPositions[1]);
+    expect(closeLeftPosition).toBeLessThan(closeRightPositions[1]);
+  });
+});
+
 describe("AppTabBar special page selection", () => {
   it("shows the active settings or driver-manager tab with the same ring used by regular tabs", () => {
     expect(tabBarSource).toContain("function specialTabActiveStyle(active: boolean | undefined)");

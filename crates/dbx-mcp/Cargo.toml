@@ -1,13 +1,14 @@
 [package]
 name = "dbx-mcp"
-version = "0.4.75"
+version = "0.4.76"
 edition = "2021"
 license = "Apache-2.0"
 
 [features]
-default = ["duckdb-sidecar", "mq-admin"]
+default = ["duckdb-sidecar", "mq-admin", "sqlite-bundled"]
 duckdb-sidecar = ["dbx-core/duckdb-sidecar"]
 mq-admin = ["dbx-core/mq-admin"]
+sqlite-bundled = ["dbx-core/sqlite-bundled"]
 
 [[bin]]
 name = "dbx-mcp"
@@ -15,15 +16,19 @@ path = "src/main.rs"
 
 [dependencies]
 async-trait = "0.1"
-dbx-core = { path = "../dbx-core", default-features = false, features = ["sqlite-bundled"] }
+dbx-core = { path = "../dbx-core", default-features = false }
 dirs = "6"
-rmcp = { version = "2.2.0", features = ["client", "transport-io"] }
+log = "0.4"
+axum = "0.8"
+rmcp = { version = "2.2.0", features = ["client", "transport-io", "transport-streamable-http-server"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "socks"] }
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["fs", "macros", "net", "rt-multi-thread", "signal"] }
+tokio-util = "0.7"
+tower-http = { version = "0.6", features = ["cors"] }
 uuid = { version = "1", features = ["v4"] }
 url = "2"
 

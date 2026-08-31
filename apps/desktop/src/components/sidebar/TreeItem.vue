@@ -68,6 +68,7 @@ import { filterSidebarModifierSelectionIds, supportsSidebarModifierSelection, tr
 import { applyConnectionMultiSelection, applyTreeNodeSelection, connectionMultiSelectionAfterToggle } from "@/lib/sidebar/sidebarConnectionMultiSelect";
 import { connectionBearingGroupIdsUnder, connectionIdsUnderGroup } from "@/lib/sidebar/sidebarLayout";
 import { isSidebarDatabaseOpenForVisual } from "@/lib/sidebar/sidebarDatabaseOpenState";
+import { isLoginUserSchemaNode } from "@/lib/sidebar/loginUserNode";
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
 import { connectionCanConfigureSidebarVisibleDatabases } from "@/lib/sidebar/sidebarVisibleFilterMenu";
 import { supportsSidebarObjectNameFilter } from "@/lib/sidebar/sidebarObjectNameFilter";
@@ -78,7 +79,7 @@ import { focusSidebarRenameInput } from "@/lib/sidebar/sidebarRenameFocus";
 import { ensureSqlExtension, stripSqlExtension } from "@/lib/savedSql/savedSqlFileName";
 import { savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
-import { isXuguPublicSynonymTreeNode } from "@/lib/sidebar/xuguPublicSynonyms";
+import { isXuguPublicSynonymTreeNode, isXuguSchedulerJobTreeNode, xuguSchemaDisplayName } from "@/lib/sidebar/xuguPublicSynonyms";
 // --- Drag and Drop ---
 import { useDragSort } from "@/composables/useDragSort";
 import { sidebarTreeRuntimeKey } from "@/lib/sidebar/sidebarTreeRuntime";
@@ -239,6 +240,7 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
     case "schema": {
       const databaseType = node.connectionId ? effectiveDatabaseTypeForConnection(connectionStore.getConfig(node.connectionId)) : undefined;
       if (isXuguPublicSynonymTreeNode(databaseType, node.type, node.schema)) return { icon: Link2, colorClass: "text-sky-500" };
+      if (isXuguSchedulerJobTreeNode(databaseType, node.type, node.schema)) return { icon: CalendarClock, colorClass: "text-primary" };
       return { icon: FolderOpen, colorClass: "text-sky-400" };
     }
     case "table":
@@ -344,6 +346,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: ListTree, colorClass: "text-emerald-500" };
     case "synonym":
       return { icon: Link2, colorClass: "text-sky-500" };
+    case "job":
+      return { icon: Clock, colorClass: "text-orange-400" };
     case "package":
       return { icon: Package, colorClass: "text-cyan-500" };
     case "package-body":
@@ -370,6 +374,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: ListTree, colorClass: "text-emerald-500" };
     case "group-synonyms":
       return { icon: Link2, colorClass: "text-sky-500" };
+    case "group-jobs":
+      return { icon: Clock, colorClass: "text-orange-400" };
     case "group-packages":
       return { icon: Package, colorClass: "text-cyan-500" };
     case "group-types":
@@ -392,6 +398,13 @@ function isGroupLabel(node: TreeNode): boolean {
 }
 
 function displayLabel(node: TreeNode): string {
+  // Synthetic Xugu scopes are persisted with their reserved protocol value.
+  // Resolve them at render time as well, so an already-cached tree never
+  // exposes that implementation detail after the feature is introduced.
+  if (node.type === "schema" && node.connectionId) {
+    const databaseType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(node.connectionId));
+    if (databaseType === "xugu") return xuguSchemaDisplayName(node.schema ?? node.label);
+  }
   if (node.type === "load-more") return t(node.label);
   if (node.type === "object-browser") return t(node.label, { count: node.objectCount ?? 0 });
   // Use the canonical key for persisted trees created before this label was
@@ -757,6 +770,14 @@ const isNodeDefaultDatabase = computed(
 );
 function isNodeDefaultSchema(): boolean {
   return activeNode.value.type === "schema" && !!activeNode.value.connectionId && !!activeNode.value.schema && connectionStore.isDefaultSchema(activeNode.value.connectionId, activeNode.value.schema);
+}
+
+// #7490: on Oracle-family connections whose schemas are database users, bold the
+// schema node matching the login user so it stands out among many user schemas.
+// Kept as a plain function call (not a computed) so TreeItem stays within the
+// top-level computed budget asserted by sidebarRuntimeDecomposition.
+function isLoginUserNode(): boolean {
+  return isLoginUserSchemaNode(activeNode.value, activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined);
 }
 
 const trailingComment = computed(() => {
@@ -1457,7 +1478,20 @@ function onKeydown(event: KeyboardEvent) {
               @keydown.escape.prevent="cancelRename"
               @click.stop
             />
-            <span v-else ref="labelRef" :class="[labelWidthClass, { 'flex-1': node.type === 'connection' && !trailingComment }]">{{ visibleLabel(node) }}</span>
+            <span
+              v-else
+              ref="labelRef"
+              :class="[
+                labelWidthClass,
+                {
+                  'flex-1': node.type === 'connection' && !trailingComment,
+                  'tree-connection-label': node.type === 'connection' || node.type === 'connection-group',
+                  'tree-object-label': node.type !== 'connection' && node.type !== 'connection-group',
+                  'font-semibold': isLoginUserNode(),
+                },
+              ]"
+              >{{ visibleLabel(node) }}</span
+            >
             <span v-if="treeNodeSecondaryValue(node)" class="min-w-0 max-w-[55%] shrink truncate text-xs text-muted-foreground" :title="treeNodeSecondaryValue(node)">{{ treeNodeSecondaryValue(node) }}</span>
             <button
               v-if="canDragPinnedOrder()"
@@ -1485,6 +1519,7 @@ function onKeydown(event: KeyboardEvent) {
                   node.type === 'group-events' ||
                   node.type === 'group-sequences' ||
                   node.type === 'group-synonyms' ||
+                  node.type === 'group-jobs' ||
                   node.type === 'group-packages' ||
                   node.type === 'group-types' ||
                   node.type === 'group-partitions' ||
@@ -1611,6 +1646,21 @@ function onKeydown(event: KeyboardEvent) {
   font-size: 1em;
   font-weight: 500;
   opacity: 1;
+}
+
+.tree-connection-label {
+  font-weight: 400;
+  font-variation-settings: "wght" 480;
+}
+
+.tree-object-label {
+  font-weight: 400;
+  font-variation-settings: "wght" 430;
+}
+
+.tree-object-label.font-semibold {
+  font-weight: 600;
+  font-variation-settings: "wght" 600;
 }
 
 .tree-item-connection-tint {

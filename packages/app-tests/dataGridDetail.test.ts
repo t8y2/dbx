@@ -222,7 +222,7 @@ test("dataGridRowDetailJson and dataGridRowDetailTsv format copy payloads", () =
 
   assert.equal(dataGridRowDetailJson(detail), '{\n  "id": 1,\n  "name": "Ada",\n  "nickname": null\n}');
   assert.equal(dataGridRowDetailJson(detail, { id: 1, profile: { city: "Shanghai" } }), '{\n  "id": 1,\n  "profile": {\n    "city": "Shanghai"\n  }\n}');
-  assert.equal(dataGridRowDetailTsv(detail), "1\tAda\tNULL");
+  assert.equal(dataGridRowDetailTsv(detail), "1\tAda\t");
 });
 
 test("dataGridRowDetailJson uses the original MongoDB document for nested values", () => {
@@ -305,7 +305,7 @@ test("dataGridColumnDetailJson and dataGridColumnDetailTsv format copy payloads"
 
   assert.ok(detail);
   assert.equal(dataGridColumnDetailJson(detail), '[\n  {\n    "row": 1,\n    "value": "Ada"\n  },\n  {\n    "row": 2,\n    "value": null\n  }\n]');
-  assert.equal(dataGridColumnDetailTsv(detail), "Ada\nNULL");
+  assert.equal(dataGridColumnDetailTsv(detail), "Ada\n");
 });
 
 const detailFields: DataGridCellDetail[] = [

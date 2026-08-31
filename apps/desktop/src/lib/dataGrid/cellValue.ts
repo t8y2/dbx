@@ -10,6 +10,10 @@ export function displayCellValue(value: CellValue): string {
   return String(value);
 }
 
+export function clipboardCellValue(value: CellValue): string {
+  return value === null ? "" : displayCellValue(value);
+}
+
 export function firstLineCellDisplayValue(value: string, flatteningMultiLine: boolean): string {
   const lineBreakPattern = /\r\n|\r|\n/g;
   if (flatteningMultiLine) {

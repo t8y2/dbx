@@ -1101,6 +1101,91 @@ pub async fn count_documents(client: &EsClient, index: &str, filter: Option<&str
     Ok(result.count)
 }
 
+/// `GET /{index}/_mapping` —— 字段映射。
+pub async fn get_index_mapping(client: &EsClient, index: &str) -> Result<Value, String> {
+    get_index_metadata(client, index, "_mapping").await
+}
+
+/// `GET /{index}/_settings` —— 索引配置（分片数、副本数、analysis 等）。
+pub async fn get_index_settings(client: &EsClient, index: &str) -> Result<Value, String> {
+    get_index_metadata(client, index, "_settings").await
+}
+
+/// `GET /{index}/_stats` —— 索引统计（文档数、存储大小、各类操作计数）。
+pub async fn get_index_stats(client: &EsClient, index: &str) -> Result<Value, String> {
+    get_index_metadata(client, index, "_stats").await
+}
+
+/// 侧边栏的索引节点可能是 `index_grouping` 折叠出的通配模式（如 `logs-*`）。
+/// 这三个端点都原生接受通配，`elasticsearch_path_segment` 也不转义 `*`，
+/// 因此聚合节点会如实返回该模式命中的全部索引。
+async fn get_index_metadata(client: &EsClient, index: &str, endpoint: &str) -> Result<Value, String> {
+    let path = elasticsearch_index_path(index, endpoint);
+    let resp = client.get(&path).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
+    if !client.response_status(&resp).is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Elasticsearch error: {body}"));
+    }
+    resp.json().await.map_err(|e| format!("Elasticsearch parse error: {e}"))
+}
+
+/// 清空索引数据的结果。文档删除可能部分失败（分片错误、并发写入），
+/// 所以返回计数与失败明细，让调用方能如实告知用户而不是笼统报成功。
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ElasticsearchDeleteByQueryResult {
+    /// 匹配到的文档数。
+    pub total: u64,
+    /// 实际删除的文档数。
+    pub deleted: u64,
+    /// 因并发写入导致的版本冲突数（`conflicts=proceed` 下会被跳过而非中断）。
+    pub version_conflicts: u64,
+    /// 请求是否在删完前超时。
+    pub timed_out: bool,
+    /// 分片级失败的原始 JSON，逐条保留以便排查。
+    pub failures: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct DeleteByQueryResponse {
+    #[serde(default)]
+    total: u64,
+    #[serde(default)]
+    deleted: u64,
+    #[serde(default)]
+    version_conflicts: u64,
+    #[serde(default)]
+    timed_out: bool,
+    #[serde(default)]
+    failures: Vec<Value>,
+}
+
+/// 清空索引数据：`POST /{index}/_delete_by_query` + `match_all`，只删文档，
+/// 保留 mapping、settings、别名。
+///
+/// `conflicts=proceed` 让并发写入引起的版本冲突被跳过而不是中断整批删除；
+/// `refresh=true` 让删除立即对随后的搜索与计数可见，否则清空后刷新数据页
+/// 仍会看到旧文档。
+pub async fn delete_all_documents(client: &EsClient, index: &str) -> Result<ElasticsearchDeleteByQueryResult, String> {
+    let path = format!("{}?conflicts=proceed&refresh=true", elasticsearch_index_path(index, "_delete_by_query"));
+    let body = serde_json::json!({ "query": { "match_all": {} } });
+    let resp = client.post(&path).json(&body).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
+    if !client.response_status(&resp).is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Elasticsearch error: {body}"));
+    }
+
+    let result: DeleteByQueryResponse =
+        resp.json().await.map_err(|e| format!("Elasticsearch delete-by-query parse error: {e}"))?;
+    Ok(ElasticsearchDeleteByQueryResult {
+        total: result.total,
+        deleted: result.deleted,
+        version_conflicts: result.version_conflicts,
+        timed_out: result.timed_out,
+        failures: result.failures.iter().map(Value::to_string).collect(),
+    })
+}
+
 fn search_response_to_document_result(result: SearchResponse) -> Result<DocumentQueryResult, String> {
     // A 200 search response can still omit failed shards. Only expose an
     // exact total when both the total relation and shard metadata agree.
@@ -4224,6 +4309,107 @@ mod tests {
         assert_eq!(result.columns, vec!["status", "response"]);
         assert_eq!(result.rows[0][0], json!(200));
         assert_eq!(result.rows[0][1].as_str(), Some(response_body));
+    }
+
+    #[tokio::test]
+    async fn index_metadata_endpoints_read_their_index_scoped_paths() {
+        use tokio::io::AsyncWriteExt;
+
+        for (kind, endpoint) in [("mapping", "_mapping"), ("settings", "_settings"), ("stats", "_stats")] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let expected = format!("GET /my-index/{endpoint} ");
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let request = read_http_request(&mut socket).await;
+                assert!(request.starts_with(&expected), "unexpected request: {request}");
+                let body = r#"{"my-index":{}}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            });
+
+            let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+            let value = match kind {
+                "mapping" => super::get_index_mapping(&client, "my-index").await.unwrap(),
+                "settings" => super::get_index_settings(&client, "my-index").await.unwrap(),
+                _ => super::get_index_stats(&client, "my-index").await.unwrap(),
+            };
+            server.await.unwrap();
+            assert_eq!(value, json!({ "my-index": {} }));
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_all_documents_posts_match_all_and_reports_skipped_documents() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            // The index itself must survive: this is a delete-by-query, not a DELETE /index.
+            assert!(
+                request.starts_with("POST /logs/_delete_by_query?conflicts=proceed&refresh=true "),
+                "unexpected request: {request}"
+            );
+            assert!(request.contains(r#""match_all""#), "unexpected body: {request}");
+            let body =
+                r#"{"total":10,"deleted":8,"version_conflicts":2,"timed_out":false,"failures":[{"index":"logs"}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        let result = super::delete_all_documents(&client, "logs").await.unwrap();
+        server.await.unwrap();
+
+        assert_eq!(result.total, 10);
+        assert_eq!(result.deleted, 8);
+        assert_eq!(result.version_conflicts, 2);
+        assert!(!result.timed_out);
+        assert_eq!(result.failures, vec![r#"{"index":"logs"}"#.to_string()]);
+    }
+
+    /// ES 6.x through 9.x all answer `_delete_by_query` with the same counter
+    /// names wrapped in a larger, version-dependent envelope (`retries`,
+    /// `throttled_millis`, `slices`, …). Parsing must ignore the envelope
+    /// instead of failing on fields a given server happens to add.
+    #[tokio::test]
+    async fn delete_all_documents_ignores_version_specific_response_fields() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_http_request(&mut socket).await;
+            let body = r#"{"took":42,"timed_out":false,"total":5,"deleted":5,"batches":1,"version_conflicts":0,"noops":0,"retries":{"bulk":0,"search":0},"throttled_millis":0,"requests_per_second":-1.0,"throttled_until_millis":0,"slices":[],"failures":[]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        let result = super::delete_all_documents(&client, "logs").await.unwrap();
+        server.await.unwrap();
+
+        assert_eq!(result.total, 5);
+        assert_eq!(result.deleted, 5);
+        assert_eq!(result.version_conflicts, 0);
+        assert!(!result.timed_out);
+        assert!(result.failures.is_empty());
     }
 
     #[tokio::test]

@@ -173,7 +173,9 @@ onBeforeUnmount(close);
 
 <template>
   <button ref="triggerRef" type="button" :class="triggerClass" :title="triggerTitle ?? selectedItem?.title" :aria-label="ariaLabel" :aria-expanded="open" :disabled="disabled" @click="toggle">
-    <component :is="triggerIcon" v-if="triggerIcon" :class="triggerIconClass" />
+    <slot name="trigger-icon" :open="open">
+      <component :is="triggerIcon" v-if="triggerIcon" :class="triggerIconClass" />
+    </slot>
     <span v-if="showTriggerLabel">{{ triggerLabel ?? selectedItem?.label }}</span>
     <ChevronDown v-if="showChevron" class="h-3 w-3 opacity-50" />
   </button>

@@ -25,6 +25,7 @@ pub mod keychain;
 pub mod list_sql_files;
 pub mod mcp;
 pub mod mcp_bridge;
+pub mod mcp_http_server;
 pub mod mongo_cmd;
 #[cfg(feature = "mq-admin")]
 pub mod mq_cmd;

@@ -730,6 +730,66 @@ describe("useDataGridExport prepared row statements", () => {
     expect(copyToClipboard).toHaveBeenCalledWith(text);
   });
 
+  it("copies a NULL cell as an empty clipboard value", async () => {
+    const state = createExportState(editableTable, ["id", "name"], undefined, [1, null], undefined, undefined, [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, 1, 1);
+
+    await state.copyCell();
+
+    expect(copyToClipboard).toHaveBeenCalledWith("");
+  });
+
+  it("copies all rows with empty fields for NULL cells", async () => {
+    const text = "id\tname\n1\t\n2\tAda";
+    const state = createExportState(editableTable, ["id", "name"], undefined, undefined, undefined, [
+      [1, null],
+      [2, "Ada"],
+    ]);
+
+    await state.copyAll();
+
+    expect(copyToClipboard).toHaveBeenCalledWith(text);
+    expect(parseDataGridClipboard(text)).toEqual([
+      ["id", "name"],
+      ["1", null],
+      ["2", "Ada"],
+    ]);
+  });
+
+  it("copies a NULL smart single-cell selection as an empty value", async () => {
+    const matrix: CellSelectionMatrix = {
+      rowIndexes: [0],
+      columnIndexes: [1],
+      columns: ["name"],
+      rows: [[null]],
+    };
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "", mimeType: "text/plain", fileExtension: "txt", rowCount: 1, columnCount: 1 });
+    const state = createExportState(editableTable, ["id", "name"], matrix, [1, null]);
+
+    await expect(state.copyWithPreference("smart")).resolves.toBe(true);
+
+    expect(copyToClipboard).toHaveBeenCalledWith("");
+  });
+
+  it("uses an empty default NULL text for TSV clipboard output", async () => {
+    const matrix: CellSelectionMatrix = {
+      rowIndexes: [0],
+      columnIndexes: [0, 1],
+      columns: ["id", "name"],
+      rows: [[1, null]],
+    };
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "1\t", mimeType: "text/tab-separated-values", fileExtension: "tsv", rowCount: 1, columnCount: 2 });
+    const state = createExportState(editableTable, ["id", "name"], matrix, [1, null]);
+
+    await expect(state.copyWithExtractor("tsv")).resolves.toBe(true);
+
+    expect(extractDataGridSelection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        options: expect.objectContaining({ dsv: expect.objectContaining({ nullText: "" }) }),
+      }),
+    );
+    expect(copyToClipboard).toHaveBeenCalledWith("1\t");
+  });
+
   it("preserves JSON-column text in a single-cell smart copy", async () => {
     const tableMeta: DataGridTableMeta = {
       tableName: "events",

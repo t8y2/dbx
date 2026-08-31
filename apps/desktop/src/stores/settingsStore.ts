@@ -50,9 +50,20 @@ export interface McpGlobalPolicy {
   readOnly: boolean;
   allowDangerousSql: boolean;
   allowedConnectionIds: string[] | null;
+  allowedToolNames: string[] | null;
+  connectionPolicies: McpConnectionPolicy[];
   configured: boolean;
   /** MCP query timeout override in seconds. null/undefined = inherit the connection; 0 = no limit. */
   queryTimeoutSecs: number | null;
+}
+
+export interface McpConnectionPolicy {
+  connectionId: string;
+  readOnly: boolean;
+  allowDangerousSql: boolean;
+  executionModeConfigured: boolean;
+  databaseScope: "all" | "selected" | "none";
+  allowedDatabases: string[];
 }
 
 export type DesktopIconTheme = "default" | "black";
@@ -91,12 +102,29 @@ export const DEFAULT_MCP_GLOBAL_POLICY: McpGlobalPolicy = {
   readOnly: false,
   allowDangerousSql: false,
   allowedConnectionIds: null,
+  allowedToolNames: null,
+  connectionPolicies: [],
   configured: false,
   queryTimeoutSecs: null,
 };
 
 export function normalizeMcpGlobalPolicy(policy: Partial<McpGlobalPolicy> | null | undefined): McpGlobalPolicy {
   const allowedConnectionIds = policy?.allowedConnectionIds === null || policy?.allowedConnectionIds === undefined ? null : [...new Set(policy.allowedConnectionIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0).map((id) => id.trim()))];
+  const allowedToolNames = policy?.allowedToolNames === null || policy?.allowedToolNames === undefined ? null : [...new Set(policy.allowedToolNames.filter((name): name is string => typeof name === "string" && name.trim().length > 0).map((name) => name.trim()))];
+  const connectionPolicies = Object.values(
+    (policy?.connectionPolicies ?? []).reduce<Record<string, McpConnectionPolicy>>((rules, rule) => {
+      if (!rule || typeof rule.connectionId !== "string" || !rule.connectionId.trim()) return rules;
+      rules[rule.connectionId.trim()] = {
+        connectionId: rule.connectionId.trim(),
+        readOnly: rule.readOnly === true,
+        allowDangerousSql: rule.readOnly !== true && rule.allowDangerousSql === true,
+        executionModeConfigured: rule.executionModeConfigured !== false,
+        databaseScope: rule.databaseScope === "selected" || rule.databaseScope === "none" ? rule.databaseScope : "all",
+        allowedDatabases: rule.databaseScope === "selected" ? [...new Set((rule.allowedDatabases ?? []).filter((database): database is string => typeof database === "string" && database.trim().length > 0).map((database) => database.trim()))] : [],
+      };
+      return rules;
+    }, {}),
+  );
   // null / undefined / non-positive => null (inherit connection). 0 is preserved
   // as an explicit "no limit" only here; the UI maps "no limit" <=> 0 and
   // "inherit" <=> null.
@@ -105,6 +133,8 @@ export function normalizeMcpGlobalPolicy(policy: Partial<McpGlobalPolicy> | null
     readOnly: policy?.readOnly === true,
     allowDangerousSql: policy?.allowDangerousSql === true,
     allowedConnectionIds,
+    allowedToolNames,
+    connectionPolicies,
     configured: policy?.configured === true,
     queryTimeoutSecs,
   };
@@ -353,6 +383,17 @@ export function normalizeAiEnv(value: unknown): Record<string, string> {
   return result;
 }
 
+export function normalizeAiHeaders(value: unknown): Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const result: Record<string, string> = {};
+  for (const [rawName, rawValue] of Object.entries(value as Record<string, unknown>)) {
+    const name = rawName.trim();
+    if (!name) continue;
+    result[name] = rawValue == null ? "" : String(rawValue);
+  }
+  return result;
+}
+
 export function normalizeAiConfig(config: Partial<AiConfig> | null | undefined): AiConfig {
   const provider = config?.provider && config.provider in AI_PROVIDER_PRESETS ? config.provider : inferAiProviderFromConfig(config);
   return {
@@ -361,6 +402,7 @@ export function normalizeAiConfig(config: Partial<AiConfig> | null | undefined):
     provider,
     apiKey: (config?.apiKey ?? "").trim(),
     apiStyle: config?.apiStyle ?? defaultConfigs[provider].apiStyle,
+    customHeaders: normalizeAiHeaders(config?.customHeaders),
     authMethod: config?.authMethod ?? defaultConfigs[provider].authMethod,
     proxyEnabled: !!config?.proxyEnabled,
     proxyUrl: config?.proxyUrl ?? "",
@@ -1530,6 +1572,8 @@ export const useSettingsStore = defineStore("settings", () => {
         readOnly: next.readOnly,
         allowDangerousSql: next.allowDangerousSql,
         allowedConnectionIds: next.allowedConnectionIds,
+        allowedToolNames: next.allowedToolNames,
+        connectionPolicies: next.connectionPolicies,
         queryTimeoutSecs: next.queryTimeoutSecs,
       });
     } catch (error) {

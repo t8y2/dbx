@@ -89,6 +89,7 @@ function normalizeTask(raw: unknown): TransferTask | null {
       content: config.content ?? "structureAndData",
       mode: config.mode ?? "append",
       targetTableNameCase: config.targetTableNameCase ?? "preserve",
+      quoteTargetColumnNames: config.quoteTargetColumnNames ?? true,
       batchSize: typeof config.batchSize === "number" && config.batchSize > 0 ? config.batchSize : 1000,
     },
     createdAt: candidate.createdAt || nowIso(),

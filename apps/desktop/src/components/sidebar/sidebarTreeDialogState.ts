@@ -163,6 +163,10 @@ export function resetMongoIndexManager() {
   mongoIndexManagerMode.value = "view";
   mongoEditIndexOriginalName.value = "";
 }
+export const showClearElasticsearchIndexConfirm = ref(false);
+export const clearElasticsearchIndexLoading = ref(false);
+/** Name typed back by the operator before a wildcard index node may be cleared. */
+export const clearElasticsearchIndexTypedName = ref("");
 export const showFlushRedisDbConfirm = ref(false);
 export const showRedisDatabaseAliasDialog = ref(false);
 export const redisDatabaseAliasInput = ref("");
@@ -213,6 +217,7 @@ const openFlags = [
   showDropAllMongoIndexesConfirm,
   showCreateMongoIndexDialog,
   showMongoIndexManagerDialog,
+  showClearElasticsearchIndexConfirm,
   showFlushRedisDbConfirm,
   showRedisDatabaseAliasDialog,
   showCreateSchemaDialog,
@@ -232,6 +237,8 @@ export function resetSidebarTreeDialogState() {
   createDatabasePreviewSql.value = "";
   createDatabaseAuthorizationResults.value = [];
   createDatabaseAuthorizationApplying.value = false;
+  clearElasticsearchIndexLoading.value = false;
+  clearElasticsearchIndexTypedName.value = "";
   redisDatabaseAliasInput.value = "";
   redisDatabaseAliasSaving.value = false;
   cloneMongoCollectionName.value = "";

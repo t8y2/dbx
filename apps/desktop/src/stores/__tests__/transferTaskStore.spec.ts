@@ -31,6 +31,7 @@ function makeConfig(overrides: Partial<TransferTaskConfig> = {}): TransferTaskCo
     content: "structureAndData",
     mode: "append",
     targetTableNameCase: "preserve",
+    quoteTargetColumnNames: true,
     batchSize: 1000,
     ...overrides,
   };
@@ -64,6 +65,21 @@ describe("transferTaskStore", () => {
     expect(store.folders).toHaveLength(1);
     expect(store.tasks).toHaveLength(1);
     expect(store.listTasks("folder-1").map((task) => task.id)).toEqual(["task-1"]);
+  });
+
+  it("keeps target column quoting enabled for saved tasks created before the option existed", async () => {
+    const legacyConfig = makeConfig() as Partial<TransferTaskConfig>;
+    delete legacyConfig.quoteTargetColumnNames;
+    vi.mocked(api.loadTransferTaskLibrary).mockResolvedValue({
+      version: 1,
+      folders: [],
+      tasks: [{ id: "legacy", name: "legacy", config: legacyConfig, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }],
+    } as unknown as TransferTaskLibrary);
+
+    const store = useTransferTaskStore();
+    await store.initFromStorage();
+
+    expect(store.tasks[0]?.config.quoteTargetColumnNames).toBe(true);
   });
 
   it("refuses to overwrite a persisted library with invalid entries", async () => {

@@ -227,6 +227,7 @@ async fn live_postgres_transfer_upserts_generated_always_identity_values() {
         objects: Vec::new(),
         mode: TransferMode::Upsert,
         target_table_name_case: TransferTableNameCase::Preserve,
+        quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
         batch_size: 100,
     };
@@ -390,6 +391,7 @@ async fn live_postgres_structure_only_preserves_table_indexes() {
         objects: Vec::new(),
         mode: TransferMode::Append,
         target_table_name_case: TransferTableNameCase::Preserve,
+        quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
         batch_size: 100,
     };
@@ -634,6 +636,7 @@ async fn live_postgres_transfer_preserves_data_and_schema_objects() {
         objects: Vec::new(),
         mode: TransferMode::Append,
         target_table_name_case: TransferTableNameCase::Preserve,
+        quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
         batch_size: 100,
     };
@@ -921,6 +924,7 @@ async fn live_postgres_transfer_skips_create_ddl_for_existing_target_table() {
         objects: Vec::new(),
         mode: TransferMode::Append,
         target_table_name_case: TransferTableNameCase::Preserve,
+        quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
         batch_size: 100,
     };
@@ -1043,6 +1047,7 @@ async fn live_postgres_transfer_creates_selected_sequence_before_referencing_tab
         ],
         mode: TransferMode::Append,
         target_table_name_case: TransferTableNameCase::Preserve,
+        quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
         batch_size: 100,
     };

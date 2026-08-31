@@ -163,6 +163,13 @@ pub trait DbxBackend: Send + Sync {
     async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String>;
 
     async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String>;
+    /// Return database names visible to the DBX connection itself. The MCP
+    /// server applies its own database-scope policy before exposing these
+    /// names to a client.
+    async fn list_databases(&self, connection: &ConnectionConfig) -> Result<Vec<String>, String> {
+        let _ = connection;
+        Err("Database metadata is not supported by this backend.".to_string())
+    }
     async fn load_connection_group_paths(&self) -> Result<HashMap<String, Vec<String>>, String> {
         Ok(HashMap::new())
     }
@@ -474,6 +481,12 @@ impl WebBackend {
 }
 
 impl LocalBackend {
+    /// Reuse an already initialized DBX application state, for hosts that
+    /// embed MCP alongside their own HTTP server.
+    pub fn from_app_state(state: Arc<AppState>, data_dir: PathBuf) -> Self {
+        Self { state, data_dir }
+    }
+
     pub async fn open(path: &Path) -> Result<Self, String> {
         let storage = Storage::open(path).await?;
         let configs = storage.load_connections().await?;
@@ -565,6 +578,16 @@ impl DbxBackend for LocalBackend {
         // and a manual MCP reload is needed to recover).
         self.sync_runtime_configs(&configs).await;
         Ok(configs)
+    }
+
+    async fn list_databases(&self, connection: &ConnectionConfig) -> Result<Vec<String>, String> {
+        // `list_databases_core` supports many database engines and therefore
+        // produces a very large future. Boxing it here keeps the async-trait
+        // implementation below Rust's type-layout recursion limit in desktop
+        // builds without changing its execution behaviour.
+        Box::pin(dbx_core::schema::list_databases_core(&self.state, &connection.id))
+            .await
+            .map(|databases| databases.into_iter().map(|database| database.name).collect())
     }
 
     async fn load_connection_group_paths(&self) -> Result<HashMap<String, Vec<String>>, String> {
@@ -761,6 +784,51 @@ impl DbxBackend for WebBackend {
             .json()
             .await
             .map_err(|error| format!("Invalid connection list response: {error}"))
+    }
+
+    async fn list_databases(&self, connection: &ConnectionConfig) -> Result<Vec<String>, String> {
+        self.ensure_connected(connection).await?;
+        match connection.db_type {
+            DatabaseType::MongoDb => self
+                .request(
+                    reqwest::Method::POST,
+                    "/api/mongo/list-databases",
+                    Some(json!({ "connectionId": connection.id })),
+                )
+                .await?
+                .json::<Vec<String>>()
+                .await
+                .map_err(|error| format!("Invalid MongoDB database list response: {error}")),
+            DatabaseType::Redis => {
+                let databases = self
+                    .request(
+                        reqwest::Method::POST,
+                        "/api/redis/list-databases",
+                        Some(json!({ "connectionId": connection.id })),
+                    )
+                    .await?
+                    .json::<Vec<Value>>()
+                    .await
+                    .map_err(|error| format!("Invalid Redis database list response: {error}"))?;
+                Ok(databases
+                    .into_iter()
+                    .filter_map(|database| {
+                        database.get("db").and_then(Value::as_u64).map(|database| database.to_string())
+                    })
+                    .collect())
+            }
+            _ => self
+                .request(
+                    reqwest::Method::GET,
+                    &format!("/api/schema/databases?connection_id={}", url_encode(&connection.id)),
+                    None,
+                )
+                .await?
+                .json::<Vec<dbx_core::db::DatabaseInfo>>()
+                .await
+                .map(|databases| databases.into_iter().map(|database| database.name).collect())
+                .map_err(|error| format!("Invalid database list response: {error}")),
+        }
     }
 
     async fn load_connection_group_paths(&self) -> Result<HashMap<String, Vec<String>>, String> {
@@ -1869,6 +1937,8 @@ mod tests {
             read_only,
             allow_dangerous_sql: false,
             allowed_connection_ids: None,
+            allowed_tool_names: None,
+            connection_policies: Vec::new(),
             query_timeout_secs: None,
         }
     }

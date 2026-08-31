@@ -27,6 +27,15 @@ pub struct MongoGridFsBucketInfo {
     pub total_bytes: i64,
 }
 
+/// 侧边栏「查看索引 Mapping / 索引配置 / 索引统计」请求的只读元数据端点。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ElasticsearchIndexMetadataKind {
+    Mapping,
+    Settings,
+    Stats,
+}
+
 fn cmp_names(left: &str, right: &str) -> std::cmp::Ordering {
     let left_lower = left.to_lowercase();
     let right_lower = right.to_lowercase();
@@ -563,6 +572,66 @@ pub async fn count_elasticsearch_documents_core(
             let client = client.clone();
             drop(connections);
             easysearch_driver::count_documents(&client, index, filter).await
+        }
+        _ => Err("Not an Elasticsearch connection".to_string()),
+    }
+}
+
+/// Elasticsearch/Easysearch 索引的只读元数据端点。`kind` 选择 `_mapping`
+/// （字段映射）、`_settings`（索引配置）或 `_stats`（索引统计）。
+pub async fn elasticsearch_get_index_metadata_core(
+    state: &AppState,
+    connection_id: &str,
+    index: &str,
+    kind: ElasticsearchIndexMetadataKind,
+) -> Result<serde_json::Value, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::Elasticsearch(client) => {
+            let client = client.clone();
+            drop(connections);
+            match kind {
+                ElasticsearchIndexMetadataKind::Mapping => {
+                    elasticsearch_driver::get_index_mapping(&client, index).await
+                }
+                ElasticsearchIndexMetadataKind::Settings => {
+                    elasticsearch_driver::get_index_settings(&client, index).await
+                }
+                ElasticsearchIndexMetadataKind::Stats => elasticsearch_driver::get_index_stats(&client, index).await,
+            }
+        }
+        PoolKind::Easysearch(client) => {
+            let client = client.clone();
+            drop(connections);
+            match kind {
+                ElasticsearchIndexMetadataKind::Mapping => easysearch_driver::get_index_mapping(&client, index).await,
+                ElasticsearchIndexMetadataKind::Settings => easysearch_driver::get_index_settings(&client, index).await,
+                ElasticsearchIndexMetadataKind::Stats => easysearch_driver::get_index_stats(&client, index).await,
+            }
+        }
+        _ => Err("Not an Elasticsearch connection".to_string()),
+    }
+}
+
+/// 清空索引数据：删除全部文档，保留 mapping、settings 与别名。
+pub async fn elasticsearch_delete_all_documents_core(
+    state: &AppState,
+    connection_id: &str,
+    index: &str,
+) -> Result<elasticsearch_driver::ElasticsearchDeleteByQueryResult, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::Elasticsearch(client) => {
+            let client = client.clone();
+            drop(connections);
+            elasticsearch_driver::delete_all_documents(&client, index).await
+        }
+        PoolKind::Easysearch(client) => {
+            let client = client.clone();
+            drop(connections);
+            easysearch_driver::delete_all_documents(&client, index).await
         }
         _ => Err("Not an Elasticsearch connection".to_string()),
     }
@@ -1169,5 +1238,25 @@ mod tests {
         let error = parse_gridfs_bucket_sort(Some(r#"{"createdAt":-1}"#)).unwrap_err();
 
         assert!(error.contains("Unsupported GridFS bucket sort field"));
+    }
+
+    /// The desktop and web frontends send these three literals for the index
+    /// metadata menu items. A rename on either side silently breaks all three
+    /// actions, so pin the wire strings here.
+    #[test]
+    fn elasticsearch_index_metadata_kind_matches_the_frontend_wire_strings() {
+        use super::ElasticsearchIndexMetadataKind;
+
+        for (kind, wire) in [
+            (ElasticsearchIndexMetadataKind::Mapping, "mapping"),
+            (ElasticsearchIndexMetadataKind::Settings, "settings"),
+            (ElasticsearchIndexMetadataKind::Stats, "stats"),
+        ] {
+            assert_eq!(serde_json::to_value(kind).unwrap(), serde_json::json!(wire));
+            assert_eq!(
+                serde_json::from_value::<ElasticsearchIndexMetadataKind>(serde_json::json!(wire)).unwrap(),
+                kind
+            );
+        }
     }
 }

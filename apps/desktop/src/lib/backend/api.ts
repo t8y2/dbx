@@ -790,6 +790,8 @@ export const mongoFindOneAndDelete = forward("mongoFindOneAndDelete");
 
 // Elasticsearch
 export const elasticsearchListIndices = forward("elasticsearchListIndices");
+export const elasticsearchGetIndexMetadata = forward("elasticsearchGetIndexMetadata");
+export const elasticsearchDeleteAllDocuments = forward("elasticsearchDeleteAllDocuments");
 export const vectorListCollections = forward("vectorListCollections");
 
 // History
@@ -806,6 +808,11 @@ export const deleteHistoryEntry = forward("deleteHistoryEntry");
 export const checkMcpServerStatus = forward("checkMcpServerStatus");
 export const installMcpServer = forward("installMcpServer");
 export const uninstallMcpServer = forward("uninstallMcpServer");
+export const loadMcpHttpServerSettings = forward("loadMcpHttpServerSettings");
+export const saveMcpHttpServerSettings = forward("saveMcpHttpServerSettings");
+export const mcpHttpServerStatus = forward("mcpHttpServerStatus");
+export const rotateMcpHttpServerToken = forward("rotateMcpHttpServerToken");
+export const loadWebMcpHttpStatus = forward("loadWebMcpHttpStatus");
 export const checkForUpdates = forward("checkForUpdates");
 export const fetchChangelog = forward("fetchChangelog");
 export const getSystemProxyUrl = forward("getSystemProxyUrl");
@@ -865,6 +872,9 @@ export type {
   SnippetDownloadResult,
   SnippetTokenStatus,
   McpServerStatus,
+  McpHttpServerSettings,
+  McpHttpServerStatus,
+  WebMcpHttpStatus,
   UpdateInfo,
   RedisBlob,
   RedisCollectionPage,

@@ -245,8 +245,19 @@ export interface McpGlobalPolicy {
   readOnly: boolean;
   allowDangerousSql: boolean;
   allowedConnectionIds: string[] | null;
+  allowedToolNames: string[] | null;
+  connectionPolicies: McpConnectionPolicy[];
   configured: boolean;
   queryTimeoutSecs: number | null;
+}
+
+export interface McpConnectionPolicy {
+  connectionId: string;
+  readOnly: boolean;
+  allowDangerousSql: boolean;
+  executionModeConfigured: boolean;
+  databaseScope: "all" | "selected" | "none";
+  allowedDatabases: string[];
 }
 
 export interface SavedSqlSyncEntry {
@@ -634,6 +645,53 @@ export async function saveMcpGlobalPolicy(policy: Omit<McpGlobalPolicy, "configu
   return invoke("save_mcp_global_policy", { policy });
 }
 
+export interface McpHttpServerSettings {
+  enabled: boolean;
+  host: string;
+  port: number;
+  path: string;
+  allowRemote: boolean;
+  allowedHosts: string[];
+  allowedOrigins: string[];
+}
+
+export interface McpHttpServerStatus {
+  enabled: boolean;
+  running: boolean;
+  endpoint: string | null;
+  accessToken: string | null;
+  lastError: string | null;
+  recentLogs: string[];
+}
+
+export interface WebMcpHttpStatus {
+  enabled: boolean;
+  endpointPath: string;
+  tokenSource: "environment" | "file" | null;
+  allowedHosts: string[];
+  allowedOrigins: string[];
+}
+
+export async function loadMcpHttpServerSettings(): Promise<McpHttpServerSettings> {
+  return invoke("load_mcp_http_server_settings");
+}
+
+export async function saveMcpHttpServerSettings(settings: McpHttpServerSettings): Promise<McpHttpServerStatus> {
+  return invoke("save_mcp_http_server_settings", { settings });
+}
+
+export async function mcpHttpServerStatus(): Promise<McpHttpServerStatus> {
+  return invoke("mcp_http_server_status");
+}
+
+export async function rotateMcpHttpServerToken(): Promise<McpHttpServerStatus> {
+  return invoke("rotate_mcp_http_server_token");
+}
+
+export async function loadWebMcpHttpStatus(): Promise<WebMcpHttpStatus> {
+  return { enabled: false, endpointPath: "/mcp", tokenSource: null, allowedHosts: [], allowedOrigins: [] };
+}
+
 export async function loadMaxAgentTurns(): Promise<number> {
   return invoke("load_max_agent_turns");
 }
@@ -888,8 +946,8 @@ export interface SqlFileEntry {
   children: SqlFileEntry[];
 }
 
-export async function listSqlFilesInFolder(folderPath: string): Promise<SqlFileEntry[]> {
-  return invoke("list_sql_files_in_folder", { folderPath });
+export async function listSqlFilesInFolder(folderPath: string, fileFilter?: string): Promise<SqlFileEntry[]> {
+  return invoke("list_sql_files_in_folder", { folderPath, fileFilter });
 }
 
 export async function createSqlFileInFolder(rootPath: string, directoryPath: string, fileName: string): Promise<string> {
@@ -3859,6 +3917,33 @@ export async function elasticsearchCountDocuments(connectionId: string, index: s
   });
 }
 
+/** Read-only index metadata endpoints exposed on the Elasticsearch index context menu. */
+export type ElasticsearchIndexMetadataKind = "mapping" | "settings" | "stats";
+
+/** Outcome of clearing an index: mapping and settings are kept, documents are not. */
+export interface ElasticsearchDeleteByQueryResult {
+  total: number;
+  deleted: number;
+  versionConflicts: number;
+  timedOut: boolean;
+  failures: string[];
+}
+
+export async function elasticsearchGetIndexMetadata(connectionId: string, index: string, kind: ElasticsearchIndexMetadataKind): Promise<Record<string, any>> {
+  return invoke("elasticsearch_get_index_metadata", {
+    connectionId,
+    index,
+    kind,
+  });
+}
+
+export async function elasticsearchDeleteAllDocuments(connectionId: string, index: string): Promise<ElasticsearchDeleteByQueryResult> {
+  return invoke("elasticsearch_delete_all_documents", {
+    connectionId,
+    index,
+  });
+}
+
 export async function mongoCountDocuments(connectionId: string, database: string, collection: string, filter?: string, mode?: "accurate" | "legacy", executionId?: string): Promise<number> {
   return invoke("mongo_count_documents", {
     connectionId,
@@ -4451,6 +4536,7 @@ export interface TransferRequest {
   objects: TransferObjectSelection[];
   mode: TransferMode;
   targetTableNameCase: TransferTableNameCase;
+  quoteTargetColumnNames: boolean;
   ownershipPolicy?: TransferOwnershipPolicy;
   batchSize: number;
 }

@@ -94,6 +94,20 @@ describe("read-only write unlock", () => {
     expect(connectionWriteUnlockState).not.toHaveBeenCalled();
   });
 
+  it("does not prompt for Elasticsearch searches on a read-only connection", async () => {
+    const store = useReadOnlyUnlockStore();
+    const connection = { id: "es", name: "es-prod", read_only: true, db_type: "elasticsearch" as const };
+
+    await expect(ensureReadOnlyWriteAccess({ connection, sql: 'POST /demo/_search\n{\n  "size": 100\n}' })).resolves.toBe(true);
+    await expect(ensureReadOnlyWriteAccess({ connection, sql: "GET /demo/_doc/1" })).resolves.toBe(true);
+    expect(store.pending).toBeUndefined();
+
+    const pending = ensureReadOnlyWriteAccess({ connection, sql: "DELETE /demo" });
+    await waitForPending("es");
+    store.cancel();
+    await expect(pending).resolves.toBe(false);
+  });
+
   it("reuses an existing backend window without prompting again", async () => {
     connectionWriteUnlockState.mockResolvedValue(45_000);
     const connection = { id: "prod", name: "prod-db", read_only: true, db_type: "mysql" as const };

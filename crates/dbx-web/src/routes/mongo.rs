@@ -986,7 +986,7 @@ mod tests {
             read_only: false,
             allow_dangerous_sql: false,
             allowed_connection_ids: Some(vec![connection.id.clone()]),
-            query_timeout_secs: None,
+            ..Default::default()
         };
         state.app.storage.save_mcp_global_policy(&writable_policy).await.unwrap();
 
@@ -1033,7 +1033,7 @@ mod tests {
                 read_only: false,
                 allow_dangerous_sql: true,
                 allowed_connection_ids: Some(vec!["different-connection".to_string()]),
-                query_timeout_secs: None,
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -1058,7 +1058,7 @@ mod tests {
                 read_only: false,
                 allow_dangerous_sql: false,
                 allowed_connection_ids: Some(vec![connection.id.clone()]),
-                query_timeout_secs: None,
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -1088,7 +1088,7 @@ mod tests {
                 read_only: false,
                 allow_dangerous_sql: false,
                 allowed_connection_ids: Some(vec![connection.id.clone()]),
-                query_timeout_secs: None,
+                ..Default::default()
             })
             .await
             .unwrap();

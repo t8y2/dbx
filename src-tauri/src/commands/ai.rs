@@ -665,6 +665,7 @@ mod tests {
             model: model.to_string(),
             models: vec![],
             api_style: AiApiStyle::AnthropicMessages,
+            custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: false,

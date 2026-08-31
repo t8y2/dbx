@@ -33,6 +33,11 @@ const maxAgentSessions = 256
 // synonyms. It is deliberately not a real schema name (and must never be
 // interpreted as one by metadata queries).
 const xuguPublicSynonymScope = "\x00DBX_XUGU_PUBLIC_SYNONYMS"
+
+// xuguSchedulerJobScope is a protocol-only namespace for database-scoped
+// scheduler jobs. Jobs are not schema objects in Xugu, so keeping them out of
+// a user schema prevents an owner from being implied where none exists.
+const xuguSchedulerJobScope = "\x00DBX_XUGU_SCHEDULER_JOBS"
 const xuguListDatabasesSQL = `
 SELECT DB_NAME
 FROM ALL_DATABASES
@@ -1726,7 +1731,7 @@ func isXuguMetadataAccessError(err error) bool {
 	catalogObject := false
 	for _, object := range []string{
 		"DATABASES", "SCHEMAS", "TABLES", "VIEWS", "COLUMNS", "CONSTRAINTS", "INDEXES",
-		"TRIGGERS", "PARTIS", "SUBPARTIS", "IDX_PARTIS", "IDX_SUBPARTIS", "SEQUENCES", "SYNONYMS", "PROCEDURES", "PACKAGES", "TYPES",
+		"TRIGGERS", "PARTIS", "SUBPARTIS", "IDX_PARTIS", "IDX_SUBPARTIS", "SEQUENCES", "SYNONYMS", "JOBS", "PROCEDURES", "PACKAGES", "TYPES",
 	} {
 		if strings.Contains(message, "ALL_"+object) || strings.Contains(message, "SYS_"+object) {
 			catalogObject = true
@@ -1798,9 +1803,26 @@ func (s *server) listSchemas() ([]string, error) {
 			}
 			return nil, err
 		}
-		return s.scanXuguSchemaRows(rows, false)
+		result, scanErr := s.scanXuguSchemaRows(rows, false)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		return s.appendXuguSchedulerJobScope(result)
 	}
-	return s.scanXuguSchemaRows(rows, true)
+	result, scanErr := s.scanXuguSchemaRows(rows, true)
+	if scanErr != nil {
+		return nil, scanErr
+	}
+	return s.appendXuguSchedulerJobScope(result)
+}
+
+// appendXuguSchedulerJobScope exposes the database-global scheduler job group.
+// Scheduler jobs are discovered from the role-scoped *_JOBS catalog when the
+// group is expanded. Keep the group even if that catalog is empty so users can
+// distinguish an empty database from an unavailable navigator capability.
+func (s *server) appendXuguSchedulerJobScope(schemas []string) ([]string, error) {
+	schemas = append(schemas, xuguSchedulerJobScope)
+	return dedupeXuguSchemaNames(schemas), nil
 }
 
 func (s *server) scanXuguSchemaRows(rows *sql.Rows, includesPublicScope bool) ([]string, error) {
@@ -1845,6 +1867,10 @@ func dedupeXuguSchemaNames(names []string) []string {
 
 func isXuguPublicSynonymScope(schema string) bool {
 	return strings.TrimSpace(schema) == xuguPublicSynonymScope
+}
+
+func isXuguSchedulerJobScope(schema string) bool {
+	return strings.TrimSpace(schema) == xuguSchedulerJobScope
 }
 
 func (s *server) currentSchema() (string, error) {
@@ -2019,6 +2045,9 @@ func (s *server) listObjects(schema string, constraints metadataListConstraints)
 	if isOnlyXuguObjectType(constraints, "TRIGGER") {
 		return s.listSchemaTriggers(schema, constraints)
 	}
+	if isXuguSchedulerJobScope(schema) {
+		return s.listSchedulerJobs(constraints)
+	}
 	query := xuguListObjectsQuery(schema, constraints)
 	rows, err := s.queryRows(query.SQL, query.Args)
 	if err != nil {
@@ -2087,6 +2116,19 @@ func (s *server) listObjects(schema string, constraints metadataListConstraints)
 	}
 	defer s.closeRows(rows)
 	return readXuguObjectRows(rows, schema)
+}
+
+func (s *server) listSchedulerJobs(constraints metadataListConstraints) ([]objectInfo, error) {
+	query := xuguSchedulerJobsQuery(constraints)
+	rows, err := s.queryRows(query.SQL, query.Args)
+	if err != nil {
+		if isXuguMetadataUnavailableError(err) {
+			return []objectInfo{}, nil
+		}
+		return nil, err
+	}
+	defer s.closeRows(rows)
+	return readXuguObjectRows(rows, xuguSchedulerJobScope)
 }
 
 func isOnlyXuguObjectType(constraints metadataListConstraints, objectType string) bool {
@@ -2430,6 +2472,16 @@ WHERE s.DB_ID = CURRENT_DB_ID
 	)
 }
 
+func xuguSchedulerJobsQuery(constraints metadataListConstraints) xuguMetadataListQuery {
+	return xuguConstrainedMetadataListQuery(`
+SELECT j.JOB_NAME AS OBJECT_NAME, 'JOB' AS OBJECT_TYPE, j.COMMENTS,
+       NULL AS VALID, NULL AS XUGU_TYPE_MEMBERS_EXPANDABLE
+FROM ALL_JOBS j
+WHERE j.DB_ID = CURRENT_DB_ID`,
+		"OBJECT_NAME, OBJECT_TYPE, COMMENTS, VALID, XUGU_TYPE_MEMBERS_EXPANDABLE",
+		"OBJECT_NAME", "OBJECT_TYPE", nil, constraints)
+}
+
 func xuguConstrainedMetadataListQuery(baseSQL, selectList, nameColumn, typeColumn string, baseArgs []any, constraints metadataListConstraints) xuguMetadataListQuery {
 	args := append([]any{}, baseArgs...)
 	where := make([]string, 0, 2)
@@ -2490,7 +2542,7 @@ func normalizedXuguObjectTypes(values []string) []string {
 			normalized = "TABLE"
 		case "VIEW":
 			normalized = "VIEW"
-		case "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "SYNONYM", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY":
+		case "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "SYNONYM", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY", "JOB":
 			// Already normalized.
 		default:
 			continue
@@ -2930,6 +2982,13 @@ func (s *server) listSubpartitions(schema, table string) ([]subpartitionInfo, er
 }
 
 func (s *server) getObjectSource(schema, name, objectType string) (map[string]any, error) {
+	if strings.EqualFold(strings.TrimSpace(objectType), "JOB") {
+		result, err := s.getSchedulerJobSource(schema, name)
+		if err != nil && isXuguMetadataUnavailableError(err) {
+			return xuguUnavailableObjectSource(schema, name, objectType), nil
+		}
+		return result, err
+	}
 	if strings.EqualFold(strings.TrimSpace(objectType), "SEQUENCE") {
 		result, err := s.getSequenceSource(schema, name)
 		if err != nil && isXuguMetadataAccessError(err) {
@@ -2976,6 +3035,188 @@ func (s *server) getObjectSource(schema, name, objectType string) (map[string]an
 		result["editable"] = false
 	}
 	return result, rows.Err()
+}
+
+type xuguSchedulerJobMetadata struct {
+	Name           string
+	JobType        any
+	ParameterCount any
+	Action         any
+	BeginTime      any
+	RepeatInterval any
+	EndTime        any
+	Enabled        any
+	AutoDrop       any
+	Comments       any
+}
+
+const xuguCatalogSchedulerJobNameSelectSQL = `
+SELECT JOB_NAME
+FROM ALL_JOBS
+WHERE DB_ID = CURRENT_DB_ID`
+
+// getSchedulerJobSource reconstructs a replayable DBMS_SCHEDULER.CREATE_JOB
+// call from the catalog. Xugu stores jobs at database scope rather than under
+// a schema, so the returned synthetic scope is retained for sidebar routing.
+func (s *server) getSchedulerJobSource(schema, name string) (map[string]any, error) {
+	if !isXuguSchedulerJobScope(schema) {
+		return nil, errors.New("scheduler jobs must be read from the scheduler job scope")
+	}
+	jobName, err := s.resolveCatalogSchedulerJobName(name)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.queryRows(xuguSchedulerJobMetadataQuery(jobName), nil)
+	if err != nil {
+		return nil, err
+	}
+	defer s.closeRows(rows)
+
+	result := map[string]any{
+		"name":        jobName,
+		"object_type": "JOB",
+		"schema":      xuguSchedulerJobScope,
+		"source":      "",
+		"editable":    false,
+	}
+	if !rows.Next() {
+		return result, rows.Err()
+	}
+	var job xuguSchedulerJobMetadata
+	if err := rows.Scan(
+		&job.Name, &job.JobType, &job.ParameterCount, &job.Action, &job.BeginTime,
+		&job.RepeatInterval, &job.EndTime, &job.Enabled, &job.AutoDrop, &job.Comments,
+	); err != nil {
+		return nil, err
+	}
+	result["name"] = job.Name
+	result["source"] = renderXuguSchedulerJobDDL(job)
+	return result, rows.Err()
+}
+
+func (s *server) resolveCatalogSchedulerJobName(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", errors.New("scheduler job name is required")
+	}
+	candidates, err := s.catalogSchedulerJobNameCandidates(xuguCatalogSchedulerJobNameQuery(name, false))
+	if err != nil {
+		return "", err
+	}
+	if len(candidates) == 0 {
+		candidates, err = s.catalogSchedulerJobNameCandidates(xuguCatalogSchedulerJobNameQuery(name, true))
+		if err != nil {
+			return "", err
+		}
+	}
+	for _, candidate := range candidates {
+		if candidate == name {
+			return candidate, nil
+		}
+	}
+	if len(candidates) == 1 {
+		return candidates[0], nil
+	}
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("scheduler job not found: %s", name)
+	}
+	return "", fmt.Errorf("scheduler job name is ambiguous: %s; specify the catalog's exact case", name)
+}
+
+func xuguCatalogSchedulerJobNameQuery(name string, caseInsensitive bool) string {
+	expr := quoteStringLiteral(name)
+	if caseInsensitive {
+		expr = quoteStringLiteral(strings.ToUpper(name))
+		return xuguCatalogSchedulerJobNameSelectSQL + "\n  AND UPPER(JOB_NAME) = " + expr
+	}
+	return xuguCatalogSchedulerJobNameSelectSQL + "\n  AND JOB_NAME = " + expr
+}
+
+func (s *server) catalogSchedulerJobNameCandidates(query string) ([]string, error) {
+	rows, err := s.queryRows(strings.TrimSpace(query), nil)
+	if err != nil {
+		return nil, err
+	}
+	defer s.closeRows(rows)
+	var result []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		result = append(result, name)
+	}
+	return result, rows.Err()
+}
+
+func xuguSchedulerJobMetadataQuery(name string) string {
+	// Keep DATETIME values on the textual path. The Go driver decodes a raw
+	// DATETIME catalog value before database/sql can preserve its NULL state;
+	// TO_CHAR lets SQL NULL pass through as nil instead of becoming a bogus
+	// time.Time value in the reconstructed CREATE_JOB call.
+	return `
+SELECT JOB_NAME, JOB_TYPE, JOB_PARAM_NUM, TO_CHAR(JOB_ACTION),
+       TO_CHAR(BEGIN_T), REPET_INTERVAL, TO_CHAR(END_T), ENABLE, AUTO_DROP, COMMENTS
+FROM ALL_JOBS
+WHERE DB_ID = CURRENT_DB_ID
+  AND JOB_NAME = ` + quoteStringLiteral(name)
+}
+
+func xuguNullableSchedulerLiteral(value any) string {
+	normalized := normalizeValue(value)
+	if normalized == nil {
+		return "NULL"
+	}
+	// TO_CHAR(NULL) should arrive as nil, but some Xugu versions expose an
+	// empty string for optional catalog values. Treat both representations as
+	// SQL NULL so the generated call remains replayable.
+	if text, ok := normalized.(string); ok && strings.TrimSpace(text) == "" {
+		return "NULL"
+	}
+	return quoteStringLiteral(xuguString(normalized))
+}
+
+// Xugu stores an END_T/END_DATE value supplied as SQL NULL using a catalog
+// sentinel. The native driver exposes that sentinel as an 1816 timestamp when
+// the raw DATETIME column is scanned, while TO_CHAR(END_T) exposes the same
+// value as 9999-12-31. Neither value is a real user-specified end date; both
+// mean that the scheduler job has no end time and must be replayed as NULL.
+func xuguNullableSchedulerEndTimeLiteral(value any) string {
+	normalized := normalizeValue(value)
+	if normalized == nil {
+		return "NULL"
+	}
+	text := strings.TrimSpace(fmt.Sprint(normalized))
+	if text == "" || strings.HasPrefix(text, "1816-03-30") || strings.HasPrefix(text, "9999-12-31") {
+		return "NULL"
+	}
+	return xuguNullableSchedulerLiteral(normalized)
+}
+
+func renderXuguSchedulerJobDDL(job xuguSchedulerJobMetadata) string {
+	var builder strings.Builder
+	builder.WriteString("EXEC DBMS_SCHEDULER.CREATE_JOB(\n  ")
+	builder.WriteString(quoteStringLiteral(job.Name))
+	builder.WriteString(",\n  ")
+	builder.WriteString(xuguNullableSchedulerLiteral(job.JobType))
+	builder.WriteString(",\n  ")
+	builder.WriteString(xuguNullableSchedulerLiteral(job.Action))
+	builder.WriteString(",\n  ")
+	builder.WriteString(strconv.Itoa(xuguInt(job.ParameterCount)))
+	builder.WriteString(",\n  ")
+	builder.WriteString(xuguNullableSchedulerLiteral(job.BeginTime))
+	builder.WriteString(",\n  ")
+	builder.WriteString(xuguNullableSchedulerLiteral(job.RepeatInterval))
+	builder.WriteString(",\n  ")
+	builder.WriteString(xuguNullableSchedulerEndTimeLiteral(job.EndTime))
+	builder.WriteString(",\n  'default_class',\n  ")
+	builder.WriteString(strconv.FormatBool(truthy(job.Enabled)))
+	builder.WriteString(",\n  ")
+	builder.WriteString(strconv.FormatBool(truthy(job.AutoDrop)))
+	builder.WriteString(",\n  ")
+	builder.WriteString(xuguNullableSchedulerLiteral(job.Comments))
+	builder.WriteString("\n);")
+	return builder.String()
 }
 
 func xuguUnavailableObjectSource(schema, name, objectType string) map[string]any {

@@ -52,10 +52,10 @@ const downloadArtifacts: DownloadArtifact[] = [
   {
     id: "windows-7-offline",
     iconId: "windows",
-    labels: { en: "Windows 7 offline installer", cn: "Windows 7 离线安装包" },
+    labels: { en: "Windows 7 / Server 2012 R2 offline installer", cn: "Windows 7 / Server 2012 R2 离线安装包" },
     descriptions: { en: "Includes WebView2 109 · x64 only", cn: "内置 WebView2 109 · 仅支持 x64" },
     badges: { en: "Legacy", cn: "旧系统" },
-    suffix: "x64-win7-webview2-109-offline-setup.exe",
+    suffix: "x64-win7-server2012r2-webview2-109-offline-setup.exe",
   },
   {
     id: "linux",

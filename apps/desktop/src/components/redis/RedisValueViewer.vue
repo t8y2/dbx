@@ -2820,11 +2820,11 @@ defineExpose({ focusSearch });
           @save="saveString"
         />
         <div v-else-if="activeStructuredStringDetail && stringValueView !== 'hex' && stringValueView !== 'base64'" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-4 text-sm leading-6">
-          <JsonTree v-if="stringValueView === 'json'" :value="activeStructuredStringDetail.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" />
+          <JsonTree v-if="stringValueView === 'json'" :value="activeStructuredStringDetail.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" virtualized />
           <pre v-else class="w-full min-w-0 max-w-full" :class="redisJsonWordWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'">{{ stringDecodedText }}</pre>
         </div>
         <div v-else-if="stringValueCodec === 'base64' && stringBase64Detail" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-4 text-sm leading-6">
-          <JsonTree v-if="stringValueView === 'json' && stringBase64Detail.json" :value="stringBase64Detail.json.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" />
+          <JsonTree v-if="stringValueView === 'json' && stringBase64Detail.json" :value="stringBase64Detail.json.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" virtualized />
           <pre v-else class="w-full min-w-0 max-w-full" :class="redisJsonWordWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'">{{ stringDecodedText }}</pre>
         </div>
         <div v-else-if="stringCodecMismatch" class="min-h-0 flex-1 flex flex-col overflow-hidden">
@@ -2848,8 +2848,8 @@ defineExpose({ focusSearch });
             {{ t("redis.decompressedLoading") }}
           </div>
           <div v-else-if="decompressedState.status === 'success'" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background">
-            <div v-if="stringValueView === 'json' && decompressedJsonDetail" class="p-4">
-              <JsonTree :value="decompressedJsonDetail.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" />
+            <div v-if="stringValueView === 'json' && decompressedJsonDetail" class="h-full p-4">
+              <JsonTree :value="decompressedJsonDetail.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" virtualized />
             </div>
             <pre v-else class="w-full min-w-0 max-w-full p-4 text-sm leading-6" :class="detailTextClass('utf8')">{{ stringDecodedText }}</pre>
           </div>
@@ -3563,14 +3563,14 @@ defineExpose({ focusSearch });
           </div>
           <RedisJsonEditor v-if="isEditingHashJson" ref="memberJsonEditorRef" v-model="memberEditValue" class="min-h-0 flex-1" :save-disabled="savingMember || !memberValueChanged" :read-only="savingMember" :word-wrap="redisJsonWordWrap" :enable-builtin-find="false" @save="saveMemberEdit" />
           <div v-else-if="memberValueView === 'json' && selectedMemberDetail.json && memberValueCodec === 'none'" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-5 text-[13px] leading-6">
-            <JsonTree :value="selectedMemberDetail.json.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" />
+            <JsonTree :value="selectedMemberDetail.json.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" virtualized />
           </div>
           <div v-else-if="activeStructuredMemberDetail && memberValueView !== 'hex' && memberValueView !== 'base64'" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-5 text-[13px] leading-6">
-            <JsonTree v-if="memberValueView === 'json'" :value="activeStructuredMemberDetail.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" />
+            <JsonTree v-if="memberValueView === 'json'" :value="activeStructuredMemberDetail.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" virtualized />
             <pre v-else class="w-full min-w-0 max-w-full" :class="redisJsonWordWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'">{{ memberDecodedText }}</pre>
           </div>
           <div v-else-if="memberValueCodec === 'base64' && memberBase64Detail" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-5 text-[13px] leading-6">
-            <JsonTree v-if="memberValueView === 'json' && memberBase64Detail.json" :value="memberBase64Detail.json.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" />
+            <JsonTree v-if="memberValueView === 'json' && memberBase64Detail.json" :value="memberBase64Detail.json.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" virtualized />
             <pre v-else class="w-full min-w-0 max-w-full" :class="redisJsonWordWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'">{{ memberDecodedText }}</pre>
           </div>
           <div v-else-if="memberCodecMismatch" class="min-h-0 flex-1 flex flex-col overflow-hidden">
@@ -3594,8 +3594,8 @@ defineExpose({ focusSearch });
               {{ t("redis.decompressedLoading") }}
             </div>
             <div v-else-if="decompressedState.status === 'success'" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background">
-              <div v-if="memberValueView === 'json' && decompressedJsonDetail" class="p-5">
-                <JsonTree :value="decompressedJsonDetail.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" />
+              <div v-if="memberValueView === 'json' && decompressedJsonDetail" class="h-full p-5">
+                <JsonTree :value="decompressedJsonDetail.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" virtualized />
               </div>
               <pre v-else class="w-full min-w-0 max-w-full p-5 text-[13px] leading-6" :class="detailTextClass('utf8')">{{ memberDecodedText }}</pre>
             </div>

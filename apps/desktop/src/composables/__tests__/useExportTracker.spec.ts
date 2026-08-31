@@ -27,6 +27,7 @@ function transferRequest(transferId: string, tables = ["users"]): TransferReques
     createTable: true,
     mode: "append",
     targetTableNameCase: "preserve",
+    quoteTargetColumnNames: true,
     batchSize: 1000,
   };
 }

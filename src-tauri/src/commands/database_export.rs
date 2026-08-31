@@ -34,7 +34,9 @@ pub async fn export_database_sql(
     let state = state.inner().clone();
     let export_id = request.export_id.clone();
 
-    tokio::spawn(async move {
+    // Exports interleave async fetches with synchronous row formatting and
+    // buffered disk writes; run them off the async workers (see spawn_export_task).
+    dbx_core::export_runtime::spawn_export_task(async move {
         let result = dbx_core::database_export::export_database_sql_core(&state, &request, |progress| {
             emit_progress(&app, progress)
         })

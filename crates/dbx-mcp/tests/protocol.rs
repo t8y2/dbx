@@ -199,6 +199,7 @@ async fn execute_query_injects_and_omits_timeout_secs_from_policy() {
             allow_dangerous_sql: false,
             allowed_connection_ids: None,
             query_timeout_secs: Some(300),
+            ..Default::default()
         },
         connections: vec![test_connection("scoped", "shared-db")],
         calls: Mutex::new(Vec::new()),
@@ -215,6 +216,7 @@ async fn execute_query_injects_and_omits_timeout_secs_from_policy() {
             allow_dangerous_sql: false,
             allowed_connection_ids: None,
             query_timeout_secs: None,
+            ..Default::default()
         },
         connections: vec![test_connection("scoped", "shared-db")],
         calls: Mutex::new(Vec::new()),
@@ -283,10 +285,11 @@ async fn initializes_lists_tools_and_calls_a_tool() {
     let tools = client.peer().list_tools(None).await.expect("list tools");
     let names = tools.tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
     #[cfg(feature = "mq-admin")]
-    assert_eq!(names.len(), 14);
+    assert_eq!(names.len(), 15);
     #[cfg(not(feature = "mq-admin"))]
-    assert_eq!(names.len(), 13);
+    assert_eq!(names.len(), 14);
     assert!(names.contains(&"dbx_list_connections"));
+    assert!(names.contains(&"dbx_list_databases"));
     assert!(names.contains(&"dbx_duplicate_connection"));
     assert!(names.contains(&"dbx_execute_redis_command"));
     assert!(names.contains(&"dbx_execute_and_show"));
@@ -304,13 +307,45 @@ async fn initializes_lists_tools_and_calls_a_tool() {
 }
 
 #[tokio::test]
+async fn remove_connection_respects_global_connection_scope() {
+    let backend = PolicyBackend {
+        policy: McpGlobalPolicy {
+            read_only: false,
+            allow_dangerous_sql: false,
+            allowed_connection_ids: Some(vec!["allowed".to_string()]),
+            ..Default::default()
+        },
+        connections: vec![test_connection("allowed", "allowed-db"), test_connection("blocked", "blocked-db")],
+        group_paths: Ok(HashMap::new()),
+    };
+    let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
+    let server = DbxMcpServer::with_runtime_options(Arc::new(backend), McpScope::default(), false);
+    let server_task = tokio::spawn(async move { server.serve(server_transport).await });
+    let client = ().serve(client_transport).await.expect("initialize MCP client");
+
+    let result = client
+        .peer()
+        .call_tool(
+            CallToolRequestParams::new("dbx_remove_connection")
+                .with_arguments(json!({ "connection_id": "blocked" }).as_object().cloned().unwrap_or_else(Map::new)),
+        )
+        .await
+        .expect("call blocked connection removal");
+    assert_eq!(result.is_error, Some(true));
+    assert!(result.content[0].as_text().expect("blocked removal result").text.contains("CONNECTION_OUT_OF_SCOPE"));
+
+    client.cancel().await.expect("close MCP client");
+    server_task.abort();
+}
+
+#[tokio::test]
 async fn enforces_global_connection_scope_and_read_only_policy() {
     let backend = PolicyBackend {
         policy: McpGlobalPolicy {
             read_only: true,
             allow_dangerous_sql: false,
             allowed_connection_ids: Some(vec!["allowed".to_string(), "allowed-staging".to_string()]),
-            query_timeout_secs: None,
+            ..Default::default()
         },
         connections: vec![
             test_connection("allowed", "shared-db"),
@@ -383,7 +418,7 @@ async fn read_only_policy_blocks_write_capable_sql_the_keyword_scan_misses() {
                 read_only: true,
                 allow_dangerous_sql,
                 allowed_connection_ids: None,
-                query_timeout_secs: None,
+                ..Default::default()
             },
             connections: vec![mysql_connection("mysql", "reporting")],
             group_paths: Ok(HashMap::new()),
@@ -428,7 +463,7 @@ async fn read_only_policy_allows_read_only_show_statements() {
                 read_only: true,
                 allow_dangerous_sql: false,
                 allowed_connection_ids: None,
-                query_timeout_secs: None,
+                ..Default::default()
             },
             connections: vec![connection],
             group_paths: Ok(HashMap::new()),

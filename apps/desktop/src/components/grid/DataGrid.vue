@@ -245,7 +245,7 @@ import {
   type DataGridScrollPosition,
 } from "@/lib/dataGrid/dataGridInfiniteScroll";
 import { resolveDataGridWheelScroll } from "@/lib/dataGrid/dataGridWheel";
-import { CANVAS_DATA_GRID_ROW_HEIGHT, MAX_CANVAS_DATA_GRID_PIXEL_RATIO, canvasDataGridActionOverlayWidth, canvasDataGridActionReservedWidth, dataGridSearchMatchKey, drawCanvasDataGrid, type CanvasDevicePixelSize } from "@/lib/dataGrid/canvasDataGridRenderer";
+import { CANVAS_DATA_GRID_ROW_HEIGHT, MAX_CANVAS_DATA_GRID_PIXEL_RATIO, canvasDataGridActionOverlayWidth, canvasDataGridActionReservedWidth, dataGridSearchMatchKey, drawCanvasDataGrid, resolveCanvasCellTextLayout, type CanvasDevicePixelSize } from "@/lib/dataGrid/canvasDataGridRenderer";
 import { resolveCrosshairTarget, type CrosshairTarget } from "@/lib/dataGrid/crosshairHighlight";
 import { DATA_GRID_DARK_STRIPED_ROW_BG, DATA_GRID_LIGHT_STRIPED_ROW_BG, dataGridActiveRowBackground } from "@/lib/dataGrid/dataGridPaintTheme";
 import { createRowLowerTextCache } from "@/lib/dataGrid/dataGridRowLowerText";
@@ -701,6 +701,8 @@ const columnCommentMap = computed(() => {
 });
 const dataGridTopbarWidth = ref(0);
 const dataGridViewportWidth = ref(0);
+const dataGridTopbarOverflowCompact = ref(false);
+const dataGridTopbarExpandedRequiredWidth = ref(0);
 const showColumnCommentsInHeader = computed(() => settingsStore.editorSettings.showColumnCommentsInHeader);
 const showColumnTypesInHeader = computed(() => settingsStore.editorSettings.showColumnTypesInHeader);
 const showTransposeFieldMetadata = computed(() => settingsStore.editorSettings.dataGridShowTransposeFieldMetadata);
@@ -720,7 +722,7 @@ const columnIndexMap = computed(() => buildColumnIndexMap(indexes.value, primary
 const compactColumnHeaderActions = computed(() => settingsStore.editorSettings.compactColumnHeaderActions);
 const dataGridRenderMode = computed(() => settingsStore.editorSettings.dataGridRenderMode);
 const dataGridSearchMode = computed(() => settingsStore.editorSettings.dataGridSearchMode);
-const compactDataGridToolbar = computed(() => isDataGridToolbarCompact(dataGridTopbarWidth.value, dataGridViewportWidth.value, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH));
+const compactDataGridToolbar = computed(() => dataGridTopbarOverflowCompact.value || isDataGridToolbarCompact(dataGridTopbarWidth.value, dataGridViewportWidth.value, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH));
 const infiniteScrollEnabled = computed(() => props.paginationEnabled && settingsStore.editorSettings.infiniteScroll);
 const queryResultMaxRows = computed(() => effectiveQueryResultMaxRows(settingsStore.editorSettings.queryResultMaxRowsEnabled, settingsStore.editorSettings.queryResultMaxRows));
 const paginationMaxRows = computed(() => (isResultsContext.value ? queryResultMaxRows.value : undefined));
@@ -2535,6 +2537,8 @@ let gridVerticalScrollbarThumbTopPercent = 0;
 let gridVerticalScrollbarThumbHeightPercent = 100;
 let gridScrollbarsRuntime: DataGridScrollbarsRuntime;
 let dataGridTopbarResizeObserver: ResizeObserver | null = null;
+let dataGridTopbarMutationObserver: MutationObserver | null = null;
+let dataGridTopbarRecheckTimer: ReturnType<typeof setTimeout> | null = null;
 let cellEditResizeObserver: ResizeObserver | null = null;
 // vue-virtual-scroller's @resize only fires in pageMode (it observes window),
 // so in container-scroll mode (transpose uses RecycleScroller without pageMode)
@@ -3183,18 +3187,67 @@ function observeGridHorizontalScrollbarScroller() {
 }
 
 function updateDataGridTopbarWidth() {
-  dataGridTopbarWidth.value = dataGridTopbarRef.value?.clientWidth ?? 0;
+  const topbar = dataGridTopbarRef.value;
+  dataGridTopbarWidth.value = topbar?.clientWidth ?? 0;
   dataGridViewportWidth.value = typeof window === "undefined" ? 0 : window.innerWidth;
+
+  if (!topbar) return;
+
+  const fixedBreakpointCompact = isDataGridToolbarCompact(dataGridTopbarWidth.value, dataGridViewportWidth.value, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH);
+  if (fixedBreakpointCompact) return;
+
+  if (dataGridTopbarOverflowCompact.value) {
+    if (dataGridTopbarWidth.value >= dataGridTopbarExpandedRequiredWidth.value) {
+      dataGridTopbarOverflowCompact.value = false;
+      dataGridTopbarExpandedRequiredWidth.value = 0;
+    }
+    return;
+  }
+
+  // The action list gains preview/save/rollback controls in editable grids. The
+  // fixed breakpoint cannot see that extra width, so capture the full layout
+  // width before the overflow-clip wrapper can hide the trailing action.
+  if (topbar.scrollWidth > topbar.clientWidth + 1) {
+    dataGridTopbarExpandedRequiredWidth.value = topbar.scrollWidth;
+    dataGridTopbarOverflowCompact.value = true;
+  }
+}
+
+function resetDataGridTopbarOverflowCompact() {
+  if (!dataGridTopbarOverflowCompact.value) return;
+  dataGridTopbarOverflowCompact.value = false;
+  dataGridTopbarExpandedRequiredWidth.value = 0;
+  if (dataGridTopbarRecheckTimer) clearTimeout(dataGridTopbarRecheckTimer);
+  // Wait for the label-width transition to finish before measuring the newly
+  // shortened action list. If it still overflows, updateDataGridTopbarWidth
+  // captures its new, smaller expanded width.
+  dataGridTopbarRecheckTimer = setTimeout(() => {
+    dataGridTopbarRecheckTimer = null;
+    updateDataGridTopbarWidth();
+  }, 360);
+}
+
+function clearDataGridTopbarRecheckTimer() {
+  if (!dataGridTopbarRecheckTimer) return;
+  clearTimeout(dataGridTopbarRecheckTimer);
+  dataGridTopbarRecheckTimer = null;
 }
 
 function observeDataGridTopbarWidth() {
   dataGridTopbarResizeObserver?.disconnect();
   dataGridTopbarResizeObserver = null;
+  dataGridTopbarMutationObserver?.disconnect();
+  dataGridTopbarMutationObserver = null;
+  clearDataGridTopbarRecheckTimer();
   const topbar = dataGridTopbarRef.value;
   updateDataGridTopbarWidth();
   if (topbar && typeof ResizeObserver !== "undefined") {
     dataGridTopbarResizeObserver = new ResizeObserver(updateDataGridTopbarWidth);
     dataGridTopbarResizeObserver.observe(topbar);
+  }
+  if (topbar && typeof MutationObserver !== "undefined") {
+    dataGridTopbarMutationObserver = new MutationObserver(updateDataGridTopbarWidth);
+    dataGridTopbarMutationObserver.observe(topbar, { childList: true, characterData: true, subtree: true });
   }
 }
 
@@ -3451,6 +3504,7 @@ function onScrollerScroll(e: Event) {
   } else {
     syncHeaderScroll(e);
   }
+  if (editingCell.value) scheduleActiveCellEditTextareaResize();
   markGridScrolling();
 }
 
@@ -3764,7 +3818,8 @@ function currentWhereInput(): string | undefined {
 }
 
 function currentOrderBy(): string | undefined {
-  return orderByInput.value.trim() || (sortCol.value ? `${queryColumnRef(sortCol.value)} ${sortDir.value.toUpperCase()}` : undefined);
+  const structuredOrderBy = sortMode.value === "database" && sortCol.value ? `${queryColumnRef(sortCol.value)} ${sortDir.value.toUpperCase()}` : undefined;
+  return orderByInput.value.trim() || structuredOrderBy;
 }
 
 function executeServerPageJump(targetPage: number, updateCurrentPage = false) {
@@ -4420,6 +4475,7 @@ async function startCellEdit(rowId: number, columnIndex: number, expanded: boole
 }
 
 async function startDomCellEdit(rowId: number, columnIndex: number, displayText: string, event: MouseEvent) {
+  const target = event.currentTarget;
   if (!(await hydrateLargeValueCell(rowId, columnIndex))) return;
   const item = getRowItem(rowId);
   const editText = item ? cellEditorTextForValue(item.data[columnIndex], columnIndex) : displayText;
@@ -4429,7 +4485,7 @@ async function startDomCellEdit(rowId: number, columnIndex: number, displayText:
     cellEditContentNeedsExpandedEditor({
       displayText,
       editText,
-      target: event.currentTarget,
+      target,
     }),
   );
 }
@@ -4841,6 +4897,21 @@ const previewToolbarCapability = computed<DataGridToolbarActionCapability>(() =>
   loading: isPreviewLoading.value,
   onTrigger: openSqlPreview,
 }));
+watch(
+  () => previewToolbarCapability.value.visible,
+  (visible, previousVisible) => {
+    if (previousVisible && !visible) resetDataGridTopbarOverflowCompact();
+  },
+);
+// Save/rollback disappear with saveToolbarState.showActions (committing or
+// discarding all pending edits), which shortens the action list while compact
+// just like the preview action disappearing does.
+watch(
+  () => saveToolbarState.value.showActions,
+  (showActions, previousShowActions) => {
+    if (previousShowActions && !showActions) resetDataGridTopbarOverflowCompact();
+  },
+);
 const layerPreviewToolbarCapability = computed<DataGridToolbarActionCapability>(() => {
   const action = previewActions.value.find((candidate) => candidate.id === "geometry-map-preview");
   return {
@@ -7409,6 +7480,7 @@ function onCanvasScroll(event: Event) {
   }
   if (headerRef.value && headerRef.value.scrollLeft !== scrollLeft) headerRef.value.scrollLeft = scrollLeft;
   recordScrollPosition({ top: scrollTop, left: scrollLeft });
+  if (editingCell.value) scheduleActiveCellEditTextareaResize();
   markGridScrolling();
   scheduleCanvasDraw();
 }
@@ -7643,8 +7715,29 @@ function canvasCellContentOverflows(item: RowItem, actualColIdx: number, visible
   const displayText = formatCellCached(item.data[actualColIdx], actualColIdx);
   const editText = cellEditorTextForValue(item.data[actualColIdx], actualColIdx);
   if (editText.includes("\n") || editText.includes("\r") || editText.length > displayText.length) return true;
-  const textWidth = measureCellTextWidth(displayText, `400 ${tableFontSize.value}px ${tableFontFamily.value}`);
-  return textWidth > Math.max(0, cellWidth - 24);
+  const canvas = activeCanvasSurface();
+  const context = canvas?.getContext("2d");
+  if (!context) {
+    const textWidth = measureCellTextWidth(displayText, `400 ${tableFontSize.value}px ${tableFontFamily.value}`);
+    return textWidth > Math.max(0, cellWidth - 24);
+  }
+
+  const isRightAlign = columnAligns.value[visibleColIdx] === "right";
+  const actionCell = canvasRightAlignedActionCell.value;
+  const reservedWidth = actionCell?.rowIndex === item.displayIndex && actionCell.visibleColIdx === visibleColIdx ? actionCell.reservedWidth : 0;
+  const { maxWidth } = resolveCanvasCellTextLayout({
+    drawX: 0,
+    colWidth: cellWidth,
+    dpr: 1,
+    isRightAlign,
+    reservedWidth,
+  });
+  context.save();
+  context.font = `400 ${tableFontSize.value}px ${tableFontFamily.value}`;
+  if ("fontVariantNumeric" in context) (context as CanvasRenderingContext2D & { fontVariantNumeric?: string }).fontVariantNumeric = "tabular-nums";
+  const textWidth = context.measureText(displayText).width;
+  context.restore();
+  return textWidth > maxWidth;
 }
 
 function canvasCellViewportRect(rowIndex: number, visibleColIdx: number) {
@@ -7922,6 +8015,9 @@ function pauseCanvasGridWork() {
   disconnectCellEditResizeObserver();
   dataGridTopbarResizeObserver?.disconnect();
   dataGridTopbarResizeObserver = null;
+  dataGridTopbarMutationObserver?.disconnect();
+  dataGridTopbarMutationObserver = null;
+  clearDataGridTopbarRecheckTimer();
   disconnectTransposeViewportObserver();
   canvasPixelRatioMediaQueryCleanup?.();
   canvasPixelRatioMediaQueryCleanup = null;
@@ -7992,6 +8088,8 @@ onUnmounted(() => {
   canvasRuntime.dispose();
   gridScrollbarsRuntime.dispose();
   dataGridTopbarResizeObserver?.disconnect();
+  dataGridTopbarMutationObserver?.disconnect();
+  clearDataGridTopbarRecheckTimer();
   disconnectCellEditResizeObserver();
   disconnectTransposeViewportObserver();
   stopGridHorizontalScrollbarDrag();
@@ -8511,10 +8609,11 @@ function showTransposeCellDetails(rowIndex: number, actualColIdx: number) {
 }
 
 async function onTransposeCellDblClick(rowIndex: number, actualColIdx: number, displayText: string, event: MouseEvent) {
+  const target = event.currentTarget;
   const item = displayItemAt(rowIndex);
   if (!item) return;
   if (!canEditCellItem(item, actualColIdx)) {
-    await startReadonlyCellTextSelection(item.id, actualColIdx, displayText, cellEditContentNeedsExpandedEditor({ displayText, editText: cellEditorTextForValue(item.data[actualColIdx], actualColIdx), target: event.currentTarget }));
+    await startReadonlyCellTextSelection(item.id, actualColIdx, displayText, cellEditContentNeedsExpandedEditor({ displayText, editText: cellEditorTextForValue(item.data[actualColIdx], actualColIdx), target }));
     return;
   }
   await startDomCellEdit(item.id, actualColIdx, displayText, event);
@@ -10490,19 +10589,45 @@ function onCellEditTextareaPaste(event: ClipboardEvent) {
 
 function resizeCellEditTextareaElement(textarea: HTMLTextAreaElement | null) {
   if (!textarea) return;
-  const textareaRect = textarea.getBoundingClientRect();
+  // The result grid is a scroll container, so an absolutely positioned editor
+  // cannot escape its bottom clipping edge. Use the cell's viewport rect as the
+  // anchor and position the editor itself in the viewport instead.
+  const anchorRect = textarea.parentElement?.getBoundingClientRect();
+  if (!anchorRect) return;
   const visibleBottom = cellEditVisibleBottom(textarea);
-  const availableHeight = Math.max(36, Math.floor(visibleBottom - textareaRect.top - 10));
+  const visibleTop = cellEditVisibleTop(textarea);
   const metrics = cellEditTextMetrics(textarea);
   const maxVisibleHeight = Math.ceil(metrics.lineHeight * 9.5 + metrics.verticalChrome);
-  const maxHeight = Math.min(maxVisibleHeight, availableHeight);
   const naturalHeight = cellEditNaturalHeight(textarea, metrics);
   const targetMinHeight = Math.max(64, Math.min(naturalHeight, 120));
+  const preferredHeight = Math.min(maxVisibleHeight, Math.max(targetMinHeight, naturalHeight));
+  const spaceBelow = Math.max(0, Math.floor(visibleBottom - anchorRect.top - 10));
+  const spaceAbove = Math.max(0, Math.floor(anchorRect.bottom - visibleTop - 10));
+  const placeAbove = spaceBelow < preferredHeight && spaceAbove > spaceBelow;
+  const availableHeight = placeAbove ? spaceAbove : spaceBelow;
+  const maxHeight = Math.min(maxVisibleHeight, Math.max(36, availableHeight));
   const minHeight = Math.min(targetMinHeight, maxHeight);
+  const height = Math.max(minHeight, Math.min(textarea.scrollHeight, maxHeight));
+  const top = placeAbove ? Math.max(visibleTop, Math.min(anchorRect.top, visibleBottom - height)) : anchorRect.top;
+  const horizontalInset = 7;
+  const desiredWidth = Math.max(0, anchorRect.width - horizontalInset * 2);
+  const maxViewportWidth = Math.max(0, window.innerWidth - horizontalInset * 2);
+  const width = Math.min(desiredWidth, maxViewportWidth);
+  const left = Math.min(Math.max(horizontalInset, anchorRect.left + horizontalInset), Math.max(horizontalInset, window.innerWidth - width - horizontalInset));
   textarea.style.setProperty("--cell-edit-min-height", `${minHeight}px`);
   textarea.style.setProperty("--cell-edit-max-height", `${maxHeight}px`);
+  textarea.style.left = `${left}px`;
+  textarea.style.width = `${width}px`;
   textarea.style.height = "auto";
-  textarea.style.height = `${Math.max(minHeight, Math.min(textarea.scrollHeight, maxHeight))}px`;
+  textarea.style.height = `${height}px`;
+  textarea.style.top = `${top}px`;
+  // Virtualized and contained scrollers can establish a fixed-position
+  // containing block in either viewport or scrolled-content coordinates. Use
+  // the rendered rect to correct that implementation detail back to viewport
+  // coordinates instead of guessing from the ancestor tree.
+  const positionedRect = textarea.getBoundingClientRect();
+  textarea.style.left = `${left + (left - positionedRect.left)}px`;
+  textarea.style.top = `${top + (top - positionedRect.top)}px`;
   if (resetCellEditTextareaScrollOnResize) {
     textarea.scrollTop = 0;
     textarea.setSelectionRange?.(0, 0);
@@ -10548,6 +10673,16 @@ function cellEditVisibleBottom(textarea: HTMLTextAreaElement): number {
   }
 
   return Math.min(...bottoms.filter((bottom) => Number.isFinite(bottom)));
+}
+
+function cellEditVisibleTop(textarea: HTMLTextAreaElement): number {
+  const tops: number[] = [];
+  const scroller = cellEditScrollerElement(textarea);
+  const root = gridRef.value;
+  if (scroller) tops.push(scroller.getBoundingClientRect().top);
+  if (root) tops.push(root.getBoundingClientRect().top);
+  if (typeof window !== "undefined") tops.push(0);
+  return Math.max(...tops.filter((top) => Number.isFinite(top)));
 }
 
 function scheduleCellEditTextareaResize(textarea: HTMLTextAreaElement | null) {
@@ -12731,6 +12866,7 @@ function openGridSnapshot() {
                           @input="onCellEditTextareaInput"
                           @keydown.stop="onCellEditKeydown"
                           @paste.stop="onCellEditTextareaPaste"
+                          @wheel.stop
                         />
                         <input
                           v-else
@@ -13473,6 +13609,7 @@ function openGridSnapshot() {
                         @input="onCellEditTextareaInput"
                         @keydown.stop="onCellEditKeydown"
                         @paste.stop="onCellEditTextareaPaste"
+                        @wheel.stop
                       />
                       <input
                         v-else
@@ -13682,6 +13819,7 @@ function openGridSnapshot() {
                             @input="onCellEditTextareaInput"
                             @keydown.stop="onCellEditKeydown"
                             @paste.stop="onCellEditTextareaPaste"
+                            @wheel.stop
                           />
                           <input
                             v-else
@@ -15008,11 +15146,13 @@ function openGridSnapshot() {
 }
 
 .cell-edit-input--expanded {
+  position: fixed;
   left: 7px;
   width: calc(100% - 14px);
   min-height: var(--cell-edit-min-height, 54px);
   max-height: var(--cell-edit-max-height, calc(9.5lh + 10px));
   overflow-y: auto;
+  overscroll-behavior: contain;
   scrollbar-width: thin;
   scrollbar-color: color-mix(in oklab, var(--foreground) 24%, transparent) transparent;
   resize: none;

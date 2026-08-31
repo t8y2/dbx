@@ -46,3 +46,16 @@ describe("SqlFilePanel directory actions", () => {
     expect(panelSource).toContain('@click.stop="openCreateDialog(folder.path, entry.path)"');
   });
 });
+
+describe("SqlFilePanel file filter", () => {
+  it("restores the previous filter when the backend rejects the saved pattern", () => {
+    expect(panelSource).toContain('message?.startsWith("Invalid file filter")');
+    expect(panelSource).toContain("saveSqlFileFilter(previousFilter)");
+    expect(panelSource).toContain('t("sqlFileTree.filterInvalid"');
+  });
+
+  it("renders the translated filter placeholder", () => {
+    expect(panelSource).toContain("t('sqlFileTree.fileFilterPlaceholder')");
+    expect(panelSource).not.toContain("const fileFilterPlaceholder =");
+  });
+});

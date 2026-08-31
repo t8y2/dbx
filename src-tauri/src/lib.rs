@@ -1617,6 +1617,12 @@ pub fn run() {
             }));
             let state = Arc::new(state);
             app.manage(state.clone());
+            let mcp_http_server = Arc::new(commands::mcp_http_server::McpHttpServerState::new(data_dir.clone()));
+            app.manage(mcp_http_server.clone());
+            let mcp_http_state = state.clone();
+            tauri::async_runtime::spawn(async move {
+                commands::mcp_http_server::start_if_enabled(mcp_http_state, mcp_http_server).await;
+            });
             app.manage(commands::redis_pubsub_server::start_pubsub_server(state.clone()));
             app.manage(commands::saved_sql::SavedSqlStorageState { data_dir: data_dir.clone() });
             app.manage(commands::external_sql::ExternalSqlOpenState::default());
@@ -1735,6 +1741,10 @@ pub fn run() {
             commands::app_settings::save_pinned_tree_node_ids,
             commands::app_settings::load_mcp_global_policy,
             commands::app_settings::save_mcp_global_policy,
+            commands::mcp_http_server::load_mcp_http_server_settings,
+            commands::mcp_http_server::save_mcp_http_server_settings,
+            commands::mcp_http_server::mcp_http_server_status,
+            commands::mcp_http_server::rotate_mcp_http_server_token,
             commands::app_settings::load_editor_settings,
             commands::app_settings::save_editor_settings,
             commands::app_settings::load_open_tabs_state,
@@ -2198,6 +2208,8 @@ pub fn run() {
             commands::document_cmd::document_count_documents,
             commands::document_cmd::dynamodb_describe_table,
             commands::document_cmd::elasticsearch_count_documents,
+            commands::document_cmd::elasticsearch_get_index_metadata,
+            commands::document_cmd::elasticsearch_delete_all_documents,
             commands::document_cmd::document_list_gridfs_buckets,
             commands::document_cmd::document_create_gridfs_bucket,
             commands::document_cmd::document_delete_gridfs_bucket,

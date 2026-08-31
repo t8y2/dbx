@@ -147,6 +147,8 @@ import type {
   PromptTemplate,
   SshPromptResolution,
   MeilisearchIndexOverview,
+  ElasticsearchIndexMetadataKind,
+  ElasticsearchDeleteByQueryResult,
 } from "@/lib/backend/tauri";
 import type { QueryEditability } from "@/lib/sql/sqlAnalysis";
 import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
@@ -1806,6 +1808,26 @@ export async function saveMcpGlobalPolicy(policy: Omit<McpGlobalPolicy, "configu
   if (!res.ok) throw await backendResponseError(res);
 }
 
+export async function loadMcpHttpServerSettings(): Promise<import("@/lib/backend/tauri").McpHttpServerSettings> {
+  return { enabled: false, host: "127.0.0.1", port: 5225, path: "/mcp", allowRemote: false, allowedHosts: [], allowedOrigins: [] };
+}
+
+export async function saveMcpHttpServerSettings(_settings: import("@/lib/backend/tauri").McpHttpServerSettings): Promise<import("@/lib/backend/tauri").McpHttpServerStatus> {
+  throw new Error("The MCP HTTP server is available only in DBX Desktop");
+}
+
+export async function mcpHttpServerStatus(): Promise<import("@/lib/backend/tauri").McpHttpServerStatus> {
+  return { enabled: false, running: false, endpoint: null, accessToken: null, lastError: null, recentLogs: [] };
+}
+
+export async function rotateMcpHttpServerToken(): Promise<import("@/lib/backend/tauri").McpHttpServerStatus> {
+  throw new Error("The MCP HTTP server is available only in DBX Desktop");
+}
+
+export async function loadWebMcpHttpStatus(): Promise<import("@/lib/backend/tauri").WebMcpHttpStatus> {
+  return get("/api/app-settings/mcp-http-status");
+}
+
 export async function loadMaxAgentTurns(): Promise<number> {
   return get("/api/app-settings/max-agent-turns");
 }
@@ -2221,7 +2243,7 @@ export interface SqlFileEntry {
   children: SqlFileEntry[];
 }
 
-export async function listSqlFilesInFolder(_folderPath: string): Promise<SqlFileEntry[]> {
+export async function listSqlFilesInFolder(_folderPath: string, _fileFilter?: string): Promise<SqlFileEntry[]> {
   throw new Error("Listing SQL files in a folder is only available in the desktop app");
 }
 
@@ -3866,6 +3888,21 @@ export async function elasticsearchCountDocuments(connectionId: string, index: s
     index,
     filter,
     executionId,
+  });
+}
+
+export async function elasticsearchGetIndexMetadata(connectionId: string, index: string, kind: ElasticsearchIndexMetadataKind): Promise<Record<string, any>> {
+  return post("/api/document-store/elasticsearch/index-metadata", {
+    connectionId,
+    index,
+    kind,
+  });
+}
+
+export async function elasticsearchDeleteAllDocuments(connectionId: string, index: string): Promise<ElasticsearchDeleteByQueryResult> {
+  return post("/api/document-store/elasticsearch/documents/delete-all", {
+    connectionId,
+    index,
   });
 }
 

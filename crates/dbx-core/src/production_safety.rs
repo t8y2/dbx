@@ -4,12 +4,25 @@ use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 const IDENTIFIER_PATTERN: &str = r"[A-Za-z0-9_@$#-]*[A-Za-z_@$#][A-Za-z0-9_@$#-]*";
-const TARGET_NAME_PATTERN: &str = r"[A-Za-z0-9_@$#-]*[A-Za-z_@$#][A-Za-z0-9_@$#-]*(?:\s*\.\s*(?:\*|[A-Za-z0-9_@$#-]*[A-Za-z_@$#][A-Za-z0-9_@$#-]*)){0,2}";
-const QUALIFIED_NAME_PATTERN: &str = r"[A-Za-z0-9_@$#-]*[A-Za-z_@$#][A-Za-z0-9_@$#-]*\s*\.\s*(?:\*|[A-Za-z0-9_@$#-]*[A-Za-z_@$#][A-Za-z0-9_@$#-]*)(?:\s*\.\s*(?:\*|[A-Za-z0-9_@$#-]*[A-Za-z_@$#][A-Za-z0-9_@$#-]*))?";
+const TARGET_NAME_PATTERN: &str = r"[A-Za-z0-9_@$#-]*[A-Za-z_@$#][A-Za-z0-9_@$#-]*(?:\s*\.\s*(?:\*|[A-Za-z0-9_@$#-]*[A-Za-z_@$#][A-Za-z0-9_@$#-]*)){0,3}";
+const QUALIFIED_NAME_PATTERN: &str = r"[A-Za-z0-9_@$#-]*[A-Za-z_@$#][A-Za-z0-9_@$#-]*(?:\s*\.\s*(?:\*|[A-Za-z0-9_@$#-]*[A-Za-z_@$#][A-Za-z0-9_@$#-]*)){1,3}";
 
 static DML_TARGET_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&format!(r"(?is)\b(?:FROM|JOIN|UPDATE|INTO|REFERENCES)\s+({TARGET_NAME_PATTERN})"))
         .expect("valid DML target regex")
+});
+static APPLY_TARGET_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(r"(?is)\b(?:CROSS|OUTER)\s+APPLY\s+({TARGET_NAME_PATTERN})")).expect("valid APPLY target regex")
+});
+static APPLY_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?is)\b(?:CROSS|OUTER)\s+APPLY\b").expect("valid APPLY regex"));
+static FROM_CLAUSE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?is)\bFROM\s+(.+?)(?:\b(?:WHERE|GROUP\s+BY|HAVING|ORDER\s+BY|LIMIT|OFFSET|FETCH|FOR|UNION|EXCEPT|INTERSECT|JOIN)\b|$)")
+        .expect("valid FROM clause regex")
+});
+static LEADING_TARGET_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(r"(?is)^\s*({TARGET_NAME_PATTERN})(?:\s+(?:AS\s+)?{IDENTIFIER_PATTERN})?\s*$"))
+        .expect("valid leading target regex")
 });
 static DDL_OBJECT_TARGET_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&format!(
@@ -192,15 +205,42 @@ pub fn targets_production_database(config: &ConnectionConfig, active_database: &
         return false;
     }
 
-    let assessment = referenced_databases(sql, &config.db_type, active_database);
+    let assessment = referenced_databases(sql, &config.db_type, active_database, false);
     assessment.databases.into_iter().any(|database| marked.contains(&database)) || assessment.uncertain
+}
+
+/// Returns whether a statement references a database outside an MCP database
+/// allowlist. Unlike production protection this examines read queries too:
+/// `SELECT * FROM other_db.users` must not bypass a scope that was selected via
+/// the request's `database` argument.
+///
+/// The caller is responsible for checking the active database itself. This
+/// helper only adds protection for object references qualified in SQL.
+pub fn sql_references_disallowed_database(
+    sql: &str,
+    db_type: &DatabaseType,
+    active_database: &str,
+    allowed_databases: &[String],
+) -> bool {
+    let allowed = allowed_databases
+        .iter()
+        .map(|database| normalize_database_name(database))
+        .filter(|database| !database.is_empty())
+        .collect::<HashSet<_>>();
+    let assessment = referenced_databases(sql, db_type, active_database, true);
+    assessment.uncertain || assessment.databases.into_iter().any(|database| !allowed.contains(&database))
 }
 
 fn normalize_database_name(value: &str) -> String {
     value.trim().trim_matches(|ch| matches!(ch, '`' | '"' | '[' | ']')).to_ascii_lowercase()
 }
 
-fn referenced_databases(sql: &str, db_type: &DatabaseType, active_database: &str) -> ReferencedDatabaseAssessment {
+fn referenced_databases(
+    sql: &str,
+    db_type: &DatabaseType,
+    active_database: &str,
+    include_read_references: bool,
+) -> ReferencedDatabaseAssessment {
     let mut assessment = ReferencedDatabaseAssessment::default();
     let cleaned = sql_target_safety_text(sql);
     let mut use_database = String::new();
@@ -220,7 +260,7 @@ fn referenced_databases(sql: &str, db_type: &DatabaseType, active_database: &str
             continue;
         }
 
-        if !statement_is_mutation {
+        if !statement_is_mutation && !include_read_references {
             continue;
         }
 
@@ -235,6 +275,7 @@ fn referenced_databases(sql: &str, db_type: &DatabaseType, active_database: &str
             &mut statement_databases,
             &[
                 &DML_TARGET_RE,
+                &APPLY_TARGET_RE,
                 &DDL_OBJECT_TARGET_RE,
                 &INDEX_ON_TARGET_RE,
                 &TRUNCATE_TARGET_RE,
@@ -244,6 +285,22 @@ fn referenced_databases(sql: &str, db_type: &DatabaseType, active_database: &str
                 &PRIVILEGE_TARGET_RE,
             ],
         );
+        if include_read_references
+            && collect_comma_separated_from_databases(
+                statement,
+                db_type,
+                &cleaned.quoted_identifiers,
+                current_database,
+                &mut statement_databases,
+            )
+        {
+            assessment.uncertain = true;
+        }
+        if include_read_references
+            && APPLY_RE.find_iter(statement).count() != APPLY_TARGET_RE.captures_iter(statement).count()
+        {
+            assessment.uncertain = true;
+        }
         collect_qualified_target_database_groups(
             statement,
             db_type,
@@ -316,6 +373,57 @@ fn collect_qualified_target_databases(
     }
 }
 
+/// Collects every table factor in a comma-separated FROM list. Table aliases
+/// are accepted, while derived tables and other forms this lightweight parser
+/// cannot safely resolve are reported to the caller as uncertain.
+fn collect_comma_separated_from_databases(
+    statement: &str,
+    db_type: &DatabaseType,
+    quoted_identifiers: &HashMap<String, String>,
+    current_database: &str,
+    databases: &mut HashSet<String>,
+) -> bool {
+    let mut uncertain = false;
+    for capture in FROM_CLAUSE_RE.captures_iter(statement) {
+        let Some(from_body) = capture.get(1).map(|value| value.as_str()) else {
+            continue;
+        };
+        let factors = split_top_level_comma_separated_targets(from_body);
+        if factors.len() < 2 {
+            continue;
+        }
+        for factor in factors {
+            let Some(target) = LEADING_TARGET_RE.captures(factor).and_then(|target| target.get(1)).and_then(|target| {
+                database_from_qualified_name(target.as_str(), db_type, quoted_identifiers, current_database)
+            }) else {
+                uncertain = true;
+                continue;
+            };
+            databases.insert(target);
+        }
+    }
+    uncertain
+}
+
+fn split_top_level_comma_separated_targets(value: &str) -> Vec<&str> {
+    let mut targets = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (index, ch) in value.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                targets.push(value[start..index].trim());
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    targets.push(value[start..].trim());
+    targets
+}
+
 fn collect_qualified_target_database_groups(
     statement: &str,
     db_type: &DatabaseType,
@@ -353,6 +461,12 @@ fn database_from_qualified_name(
         .collect();
     if parts.len() < 2 {
         return (!current_database.is_empty()).then(|| current_database.to_string());
+    }
+    // SQL Server accepts four-part names as `server.database.schema.object`.
+    // The database scope must use the second component in that form, otherwise
+    // a linked-server name that matches an allowed database could bypass it.
+    if matches!(db_type, DatabaseType::SqlServer) && parts.len() >= 4 {
+        return parts.get(1).cloned();
     }
     if qualified_first_part_is_database(db_type, parts.len()) {
         return parts.first().cloned();
@@ -624,7 +738,10 @@ fn append_quoted_identifier_token(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_production_database, mongo_pipeline_targets_production_database, targets_production_database};
+    use super::{
+        is_production_database, mongo_pipeline_targets_production_database, sql_references_disallowed_database,
+        targets_production_database,
+    };
     use crate::models::connection::{ConnectionConfig, DatabaseType};
     use serde::Deserialize;
 
@@ -735,6 +852,76 @@ mod tests {
             "SELECT * FROM prod_app.users; DELETE FROM staging.users WHERE id = 1"
         ));
         assert!(targets_production_database(&config(), "staging", "USE prod_app"));
+    }
+
+    #[test]
+    fn detects_cross_database_references_for_mcp_database_scope() {
+        let allowed = vec!["reporting".to_string()];
+        let mysql = DatabaseType::Mysql;
+        assert!(!sql_references_disallowed_database(
+            "SELECT * FROM reporting.users JOIN reporting.audit_log ON 1 = 1",
+            &mysql,
+            "reporting",
+            &allowed,
+        ));
+        assert!(sql_references_disallowed_database("SELECT * FROM production.users", &mysql, "reporting", &allowed,));
+        assert!(sql_references_disallowed_database(
+            "INSERT INTO reporting.audit_log SELECT * FROM production.users",
+            &mysql,
+            "reporting",
+            &allowed,
+        ));
+        assert!(!sql_references_disallowed_database(
+            "SELECT * FROM reporting.users AS users, reporting.audit_log AS audit_log",
+            &mysql,
+            "reporting",
+            &allowed,
+        ));
+        assert!(sql_references_disallowed_database(
+            "SELECT * FROM reporting.users, production.secrets",
+            &mysql,
+            "reporting",
+            &allowed,
+        ));
+        assert!(sql_references_disallowed_database(
+            "SELECT * FROM (SELECT * FROM reporting.users) AS users, reporting.audit_log AS audit_log",
+            &mysql,
+            "reporting",
+            &allowed,
+        ));
+
+        let sqlserver = DatabaseType::SqlServer;
+        assert!(sql_references_disallowed_database(
+            "SELECT * FROM production.dbo.users",
+            &sqlserver,
+            "reporting",
+            &allowed,
+        ));
+        assert!(sql_references_disallowed_database(
+            "SELECT * FROM reporting.production.dbo.users",
+            &sqlserver,
+            "reporting",
+            &allowed,
+        ));
+        assert!(!sql_references_disallowed_database(
+            "SELECT * FROM reporting.dbo.users AS users CROSS APPLY reporting.dbo.visible_data(users.id) AS data",
+            &sqlserver,
+            "reporting",
+            &allowed,
+        ));
+        assert!(sql_references_disallowed_database(
+            "SELECT * FROM reporting.dbo.users AS users OUTER APPLY production.dbo.sensitive_data(users.id) AS data",
+            &sqlserver,
+            "reporting",
+            &allowed,
+        ));
+        assert!(sql_references_disallowed_database(
+            "SELECT * FROM reporting.dbo.users AS users CROSS APPLY (SELECT users.id) AS data",
+            &sqlserver,
+            "reporting",
+            &allowed,
+        ));
+        assert!(!sql_references_disallowed_database("SELECT * FROM dbo.users", &sqlserver, "reporting", &allowed,));
     }
 
     #[test]

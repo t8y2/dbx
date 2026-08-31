@@ -67,7 +67,9 @@ pub async fn start_database_export(
     let cancelled = Arc::new(AtomicBool::new(false));
     let cancelled_progress = cancelled.clone();
 
-    tokio::spawn(async move {
+    // Exports interleave async fetches with synchronous row formatting and
+    // buffered disk writes; run them off the async workers (see spawn_export_task).
+    dbx_core::export_runtime::spawn_export_task(async move {
         let result = database_export::export_database_sql_core(&app, &req, |progress| {
             if matches!(progress.status, ExportStatus::Cancelled) {
                 cancelled_progress.store(true, Ordering::SeqCst);

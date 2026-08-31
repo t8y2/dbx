@@ -94,6 +94,7 @@ import { buildHoverTableSql, ddlForHoverPreview, hoverTableMatchesScope, normali
 import { constrainSqlHoverLayout } from "@/lib/editor/sqlHoverLayout";
 import { lineColumnToOffset, sqlErrorDecorationRange as resolveSqlErrorDecorationRange } from "@/lib/sql/sqlDiagnostics";
 import { analyzeMysqlRoutineSyntax, supportsMysqlRoutineSyntaxDiagnostics } from "@/lib/sql/mysqlRoutineSyntaxDiagnostics";
+import { buildOracleSyntaxDiagnostics } from "@/lib/sql/oracleSyntaxDiagnostics";
 import {
   DBX_TABLE_REFERENCE_MIME,
   DBX_TABLE_REFERENCE_DROP_EVENT,
@@ -3175,6 +3176,13 @@ async function refreshSemanticDiagnostics(options: { preserveOutsideRanges?: boo
   }
 
   const nextDiagnostics: SqlSemanticDiagnostic[] = [];
+  const oracleSyntaxDiagnostics = buildOracleSyntaxDiagnostics(sql, props.databaseType);
+  nextDiagnostics.push(
+    ...oracleSyntaxDiagnostics.filter((diagnostic) => {
+      const diagnosticRange = sqlTextSpanToRange(sql, diagnostic.span);
+      return !!diagnosticRange && diagnosticRanges.some((range) => rangesOverlap(diagnosticRange, range));
+    }),
+  );
   const mysqlRoutineAnalysis = props.databaseType === "mysql" && supportsMysqlRoutineSyntaxDiagnostics(sqlDriverProfile.value) ? analyzeMysqlRoutineSyntax(sql) : null;
   if (mysqlRoutineAnalysis) {
     nextDiagnostics.push(

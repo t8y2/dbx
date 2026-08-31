@@ -82,6 +82,25 @@ pub async fn count_documents(client: &EasysearchClient, index: &str, filter: Opt
     elasticsearch_driver::count_documents(&client.inner, index, filter).await.map_err(easysearch_error)
 }
 
+pub async fn get_index_mapping(client: &EasysearchClient, index: &str) -> Result<Value, String> {
+    elasticsearch_driver::get_index_mapping(&client.inner, index).await.map_err(easysearch_error)
+}
+
+pub async fn get_index_settings(client: &EasysearchClient, index: &str) -> Result<Value, String> {
+    elasticsearch_driver::get_index_settings(&client.inner, index).await.map_err(easysearch_error)
+}
+
+pub async fn get_index_stats(client: &EasysearchClient, index: &str) -> Result<Value, String> {
+    elasticsearch_driver::get_index_stats(&client.inner, index).await.map_err(easysearch_error)
+}
+
+pub async fn delete_all_documents(
+    client: &EasysearchClient,
+    index: &str,
+) -> Result<elasticsearch_driver::ElasticsearchDeleteByQueryResult, String> {
+    elasticsearch_driver::delete_all_documents(&client.inner, index).await.map_err(easysearch_error)
+}
+
 pub async fn insert_document(
     client: &EasysearchClient,
     index: &str,

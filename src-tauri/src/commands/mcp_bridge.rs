@@ -7,7 +7,7 @@ use tokio::net::TcpListener;
 
 use super::connection::AppState;
 
-use dbx_core::storage::McpGlobalPolicy;
+use dbx_core::storage::{McpDatabaseScope, McpGlobalPolicy};
 
 const BIND_ADDR: &str = "127.0.0.1:0";
 const MCP_BRIDGE_PORT_FILE: &str = "mcp-bridge-port";
@@ -424,7 +424,7 @@ mod tests {
             read_only: false,
             allow_dangerous_sql: false,
             allowed_connection_ids: None,
-            query_timeout_secs: None,
+            ..Default::default()
         };
         assert!(ensure_connection_in_mcp_scope(&all, "conn-1").is_ok());
 
@@ -432,7 +432,7 @@ mod tests {
             read_only: false,
             allow_dangerous_sql: false,
             allowed_connection_ids: Some(vec!["conn-1".to_string()]),
-            query_timeout_secs: None,
+            ..Default::default()
         };
         assert!(ensure_connection_in_mcp_scope(&subset, "conn-1").is_ok());
         assert!(ensure_connection_in_mcp_scope(&subset, "conn-2").unwrap_err().starts_with("CONNECTION_OUT_OF_SCOPE:"));
@@ -441,7 +441,7 @@ mod tests {
             read_only: false,
             allow_dangerous_sql: false,
             allowed_connection_ids: Some(Vec::new()),
-            query_timeout_secs: None,
+            ..Default::default()
         };
         assert!(ensure_connection_in_mcp_scope(&none, "conn-1").is_err());
     }
@@ -568,6 +568,35 @@ fn ensure_connection_in_mcp_scope(policy: &McpGlobalPolicy, connection_id: &str)
     Ok(())
 }
 
+fn ensure_database_in_mcp_scope(policy: &McpGlobalPolicy, connection_id: &str, database: &str) -> Result<(), String> {
+    let Some(rule) = policy.connection_policies.iter().find(|rule| rule.connection_id == connection_id) else {
+        return Ok(());
+    };
+    let allowed = match rule.database_scope {
+        McpDatabaseScope::All => true,
+        McpDatabaseScope::Selected => rule.allowed_databases.iter().any(|allowed| allowed == database),
+        McpDatabaseScope::None => false,
+    };
+    if allowed {
+        Ok(())
+    } else {
+        Err(format!(
+            "DATABASE_OUT_OF_SCOPE: database '{database}' is not allowed by DBX MCP settings for connection '{connection_id}'"
+        ))
+    }
+}
+
+fn effective_connection_execution_policy(policy: &McpGlobalPolicy, connection_id: &str) -> (bool, bool) {
+    let Some(rule) = policy
+        .connection_policies
+        .iter()
+        .find(|rule| rule.connection_id == connection_id && rule.execution_mode_configured)
+    else {
+        return (policy.read_only, policy.allow_dangerous_sql);
+    };
+    (policy.read_only || rule.read_only, policy.allow_dangerous_sql && !rule.read_only && rule.allow_dangerous_sql)
+}
+
 async fn ensure_mcp_write_allowed(
     state: &Arc<AppState>,
     config: &crate::models::connection::ConnectionConfig,
@@ -586,10 +615,12 @@ async fn ensure_mcp_write_allowed_with_risk(
 ) -> Result<(), String> {
     let policy = load_mcp_policy(state).await?;
     ensure_connection_in_mcp_scope(&policy, &config.id)?;
-    if policy.read_only {
+    ensure_database_in_mcp_scope(&policy, &config.id, database)?;
+    let (read_only, allow_dangerous_sql) = effective_connection_execution_policy(&policy, &config.id);
+    if read_only {
         return Err(format!("MCP_READ_ONLY: DBX MCP read-only mode is enabled. {action} blocked."));
     }
-    if dangerous && !policy.allow_dangerous_sql {
+    if dangerous && !allow_dangerous_sql {
         return Err(format!("SQL_BLOCKED: High-risk operation '{action}' is disabled in DBX MCP settings."));
     }
     if config.read_only {
@@ -611,6 +642,7 @@ pub(crate) async fn ensure_mcp_read_allowed_by_id(
 ) -> Result<(), String> {
     let policy = load_mcp_policy(state).await?;
     ensure_connection_in_mcp_scope(&policy, connection_id)?;
+    ensure_database_in_mcp_scope(&policy, connection_id, database)?;
     let configs = state.storage.load_connections().await.map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))?;
     let config = configs
         .iter()
@@ -643,6 +675,11 @@ async fn ensure_mcp_mongo_pipeline_target_allowed_by_id(
     database: &str,
     pipeline_json: &str,
 ) -> Result<(), String> {
+    let policy = load_mcp_policy(state).await?;
+    ensure_connection_in_mcp_scope(&policy, connection_id)?;
+    for target_database in mongo_pipeline_output_databases(pipeline_json, database)? {
+        ensure_database_in_mcp_scope(&policy, connection_id, &target_database)?;
+    }
     let configs = state.storage.load_connections().await.map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))?;
     let config = configs
         .iter()
@@ -654,6 +691,34 @@ async fn ensure_mcp_mongo_pipeline_target_allowed_by_id(
         );
     }
     Ok(())
+}
+
+fn mongo_pipeline_output_databases(pipeline_json: &str, active_database: &str) -> Result<Vec<String>, String> {
+    let stages = serde_json::from_str::<serde_json::Value>(pipeline_json)
+        .ok()
+        .and_then(|value| value.as_array().cloned())
+        .ok_or_else(|| "QUERY_ERROR: MongoDB aggregate pipeline must be a JSON array.".to_string())?;
+    let mut databases = Vec::new();
+    for stage in stages {
+        let Some(stage) = stage.as_object() else { continue };
+        for key in ["$out", "$merge"] {
+            let Some(target) = stage.get(key) else { continue };
+            let database = match target {
+                serde_json::Value::String(_) => active_database.to_string(),
+                serde_json::Value::Object(target) => target
+                    .get("db")
+                    .or_else(|| {
+                        target.get("into").and_then(serde_json::Value::as_object).and_then(|into| into.get("db"))
+                    })
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(active_database)
+                    .to_string(),
+                _ => return Err("QUERY_ERROR: MongoDB aggregate output target must be a string or object.".to_string()),
+            };
+            databases.push(database);
+        }
+    }
+    Ok(databases)
 }
 
 async fn ensure_mcp_write_allowed_by_id_with_risk(
@@ -920,12 +985,29 @@ async fn ensure_mcp_sql_allowed(
 ) -> Result<(), String> {
     let policy = load_mcp_policy(state).await?;
     ensure_connection_in_mcp_scope(&policy, &config.id)?;
+    ensure_database_in_mcp_scope(&policy, &config.id, database)?;
+    if let Some(rule) = policy.connection_policies.iter().find(|rule| rule.connection_id == config.id) {
+        if rule.database_scope == McpDatabaseScope::Selected
+            && dbx_core::production_safety::sql_references_disallowed_database(
+                sql,
+                &config.db_type,
+                database,
+                &rule.allowed_databases,
+            )
+        {
+            return Err(
+                "DATABASE_OUT_OF_SCOPE: SQL references a database that is not allowed by DBX MCP settings for this connection."
+                    .to_string(),
+            );
+        }
+    }
     ensure_mcp_sql_database_switch_allowed(config.db_type, sql)?;
     let is_write = dbx_core::query_execution_sql::is_write_sql_for_database(sql, config.db_type);
-    if policy.read_only && is_write {
+    let (read_only, allow_dangerous_sql) = effective_connection_execution_policy(&policy, &config.id);
+    if read_only && is_write {
         return Err("MCP_READ_ONLY: DBX MCP read-only mode is enabled. SQL write blocked.".to_string());
     }
-    if !policy.allow_dangerous_sql && dbx_core::sql_risk::is_dangerous_sql_for_database(sql, config.db_type) {
+    if !allow_dangerous_sql && dbx_core::sql_risk::is_dangerous_sql_for_database(sql, config.db_type) {
         return Err("SQL_BLOCKED: High-risk SQL is disabled in DBX MCP settings.".to_string());
     }
     ensure_mcp_connection_sql_write_allowed(config, is_write)?;

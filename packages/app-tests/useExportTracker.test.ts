@@ -297,6 +297,7 @@ test("starts independent data transfer background tasks and routes progress by t
     createTable: true,
     mode: "append",
     targetTableNameCase: "preserve",
+    quoteTargetColumnNames: true,
     batchSize: 1000,
   };
   const secondRequest = {
@@ -376,6 +377,7 @@ test("blocks concurrent data transfers that write the same target table", () => 
     createTable: true,
     mode: "append",
     targetTableNameCase: "preserve",
+    quoteTargetColumnNames: true,
     batchSize: 1000,
   };
   const secondRequest = {

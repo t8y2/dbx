@@ -58,6 +58,15 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     return quoteTableDataIdentifier(effectiveDatabaseTypeForConnection(config), name, connectionStore.connectionIdentifierQuote?.(tab.connectionId));
   }
 
+  function tableDataPageLimit(tab: QueryTab): number {
+    return tab.resultPageLimit ?? tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize);
+  }
+
+  function resultSortPagination(tab: QueryTab): { limit: number; offset: number } | undefined {
+    const limit = tab.resultPageLimit;
+    return typeof limit === "number" && limit > 0 ? { limit, offset: 0 } : undefined;
+  }
+
   function buildTableSql(tab: QueryTab, options: { orderBy?: string; limit?: number; offset?: number; whereInput?: string } = {}): Promise<string> {
     const config = connectionStore.getConfig(tab.connectionId);
     const effectiveDbType = effectiveDatabaseTypeForConnection(config);
@@ -68,7 +77,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     // 结果（可能是失败结果的 ["Error"]），进入 SQL 会生成非法投影；
     // 真实列缺失时省略 columns 让 builder 生成 SELECT *
     const realColumns = tab.tableMeta?.columns.length ? tab.tableMeta.columns : undefined;
-    const limit = options.limit ?? tab.resultPageLimit ?? tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize);
+    const limit = options.limit ?? tableDataPageLimit(tab);
     return buildTableSelectSql({
       databaseType: effectiveDbType,
       driverProfile: config?.driver_profile,
@@ -435,7 +444,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
 
     if (!tableMetaForDataTab(tab)) return;
     tab.whereInput = whereInput ?? "";
-    const sql = await buildTableSql(tab, { limit, offset, whereInput, orderBy });
+    const sql = await buildTableSql(tab, { limit, offset, whereInput, orderBy: orderBy ?? tab.orderByInput });
     queryStore.updateSql(tab.id, sql);
     await queryStore.executeTabSql(tab.id, sql, {
       pagination: { offset, limit },
@@ -468,20 +477,29 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       const config = connectionStore.getConfig(tab.connectionId);
       const quotedColumn = quoteIdent(tab, column);
       const orderBy = direction ? `${config?.db_type === "neo4j" ? `n.${quotedColumn}` : quotedColumn} ${direction.toUpperCase()}` : undefined;
-      const sql = await buildTableSql(tab, { orderBy, whereInput });
+      const limit = tableDataPageLimit(tab);
+      const pagination = { limit, offset: 0 };
+      tab.orderByInput = orderBy;
+      const sql = await buildTableSql(tab, { orderBy, whereInput, limit, offset: pagination.offset });
       queryStore.updateSql(tab.id, sql);
-      await queryStore.executeTabSql(tab.id, sql, { preserveResultDuringExecution: true });
+      await queryStore.executeTabSql(tab.id, sql, {
+        pagination,
+        preserveResultDuringExecution: true,
+        preserveTotalRowCountDuringExecution: true,
+      });
       return;
     }
 
     const baseSql = queryResultBaseSql(tab);
     if (!baseSql.trim()) return;
+    const pagination = resultSortPagination(tab);
 
     if (!direction) {
       await queryStore.executeTabSql(tab.id, baseSql, {
         ...activeQueryTargetOptions(tab),
         resultBaseSql: baseSql,
         resultSortedSql: undefined,
+        ...(pagination ? { pagination } : {}),
         preserveResultDuringExecution: true,
         preserveTotalRowCountDuringExecution: true,
         replaceActiveResultInGroup: true,
@@ -502,6 +520,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
         ...activeQueryTargetOptions(tab),
         resultBaseSql: baseSql,
         resultSortedSql: sortedSql,
+        ...(pagination ? { pagination } : {}),
         preserveResultDuringExecution: true,
         preserveTotalRowCountDuringExecution: true,
         replaceActiveResultInGroup: true,
@@ -531,6 +550,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
         ...activeQueryTargetOptions(tab),
         resultBaseSql: baseSql,
         resultSortedSql: built.sql,
+        ...(pagination ? { pagination } : {}),
         preserveResultDuringExecution: true,
         preserveTotalRowCountDuringExecution: true,
         replaceActiveResultInGroup: true,
@@ -546,6 +566,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
         column,
         direction,
       },
+      ...(pagination ? { pagination } : {}),
       preserveResultDuringExecution: true,
       preserveTotalRowCountDuringExecution: true,
       replaceActiveResultInGroup: true,

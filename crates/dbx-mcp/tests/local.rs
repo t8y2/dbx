@@ -99,7 +99,7 @@ async fn duplicate_connection_preserves_secrets_ssh_and_sidebar_group() {
             read_only: false,
             allow_dangerous_sql: false,
             allowed_connection_ids: None,
-            query_timeout_secs: None,
+            ..Default::default()
         })
         .await
         .expect("enable MCP connection management");
@@ -234,7 +234,7 @@ async fn duplicate_connection_preserves_secrets_ssh_and_sidebar_group() {
             read_only: true,
             allow_dangerous_sql: false,
             allowed_connection_ids: None,
-            query_timeout_secs: None,
+            ..Default::default()
         })
         .await
         .expect("enable MCP read-only policy");

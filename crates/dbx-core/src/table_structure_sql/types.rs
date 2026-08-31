@@ -188,6 +188,10 @@ pub struct TriggerInfo {
     pub timing: String,
     #[serde(default)]
     pub statement: Option<String>,
+    /// Carries the catalog-reported enabled state so SQL Server edits can
+    /// restore it after the DROP + CREATE rebuild (`DISABLE TRIGGER`).
+    #[serde(default)]
+    pub enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

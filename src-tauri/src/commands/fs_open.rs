@@ -6,7 +6,8 @@ use dbx_core::path_utils::expand_tilde;
 /// Reveal a file in the platform's file manager.
 ///
 /// - macOS: `open -R <path>` highlights the file in Finder.
-/// - Windows: `explorer.exe /select,<path>` opens Explorer with the file selected.
+/// - Windows: selects the file in Explorer via the opener plugin (COM
+///   `SHOpenFolderAndSelectItems`, the same approach Electron uses).
 /// - Linux: opens the parent directory with `xdg-open`. (DBus
 ///   `org.freedesktop.FileManager1.ShowItems` would be a higher-fidelity
 ///   alternative; deferred to a follow-up to avoid a new dependency.)
@@ -26,15 +27,13 @@ pub fn reveal_in_file_manager(path: &Path) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
-        // `/select,<path>` must be passed as a single argument with no space
-        // after the comma. `Command::arg` does not invoke a shell, so the path
-        // is forwarded as-is — spaces and non-ASCII characters survive.
-        let arg = format!("/select,{}", path.display());
-        dbx_core::process::new_std_command("explorer")
-            .arg(arg)
-            .spawn()
-            .map(|_| ())
-            .map_err(|e| format!("failed to launch Explorer: {e}"))
+        // Explorer does not parse its command line with the usual MSVC rules:
+        // passing `explorer /select,<path>` through `Command::arg` wraps the
+        // whole argument in quotes as soon as the path contains a space, and
+        // Explorer then silently falls back to opening the default shell
+        // folder (Documents). The opener plugin selects the item via COM
+        // instead, which has no command-line parsing involved.
+        tauri_plugin_opener::reveal_item_in_dir(path).map_err(|e| format!("failed to reveal in Explorer: {e}"))
     }
 
     #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]

@@ -11,7 +11,9 @@ import { useSidebarTreeToolRuntime } from "@/composables/useSidebarTreeToolRunti
 import { useI18n } from "vue-i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
 import {
+  BarChart3,
   BookOpen,
+  Braces,
   Database,
   ChevronsDown,
   FolderOpen,
@@ -70,6 +72,7 @@ import { useToast } from "@/composables/useToast";
 import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
 import type { ColumnInfo, DatabaseType, TreeNode, TreeNodeType } from "@/types/database";
 import * as api from "@/lib/backend/api";
+import type { ElasticsearchIndexMetadataKind } from "@/lib/backend/tauri";
 import { queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { connectionUsesVisibleSchemaFilter } from "@/lib/database/visibleDatabases";
@@ -80,7 +83,9 @@ import { connectionGroupDestinationRows } from "@/lib/sidebar/sidebarLayout";
 import { objectTypesForGroupNode } from "@/lib/table/tableTree";
 import { loadSidebarObjectGroup } from "@/lib/sidebar/sidebarObjectGroupRouting";
 import { isXuguTypeMemberContainer } from "@/lib/sidebar/xuguTypeMembers";
-import { isXuguPublicSynonymTreeNode } from "@/lib/sidebar/xuguPublicSynonyms";
+import { isXuguSyntheticTreeNode } from "@/lib/sidebar/xuguPublicSynonyms";
+import { buildXuguSchedulerJobSql, type XuguSchedulerJobAction } from "@/lib/database/xuguSchedulerJobSql";
+import { elasticsearchClearIndexPreview, isElasticsearchClearConfirmed, isElasticsearchIndexPattern } from "@/lib/sidebar/elasticsearchIndexActions";
 import { mysqlObjectTemplateForGroup } from "@/lib/sidebar/mysqlObjectTemplates";
 import { buildTableDeleteTemplate, buildTableInsertTemplate, buildTableSelectTemplate, buildTableUpdateTemplate } from "@/lib/table/tableSqlTemplates";
 import { qualifiedTableName } from "@/lib/table/tableSelectSql";
@@ -295,6 +300,9 @@ import {
   mongoIndexManagerSelectedName,
   mongoIndexManagerMode,
   mongoEditIndexOriginalName,
+  showClearElasticsearchIndexConfirm,
+  clearElasticsearchIndexLoading,
+  clearElasticsearchIndexTypedName,
   showFlushRedisDbConfirm,
   showCreateSchemaDialog,
   createSchemaName,
@@ -392,6 +400,7 @@ const emit = defineEmits<{
   "search-toggle": [node: TreeNode];
   "context-menu": [event: MouseEvent, node: TreeNode, items: ContextMenuItem[]];
   "open-ddl": [node: TreeNode];
+  "open-elasticsearch-index-metadata": [node: TreeNode, kind: ElasticsearchIndexMetadataKind];
   "open-object-source": [node: TreeNode, initialEditing: boolean];
   "open-procedure": [node: TreeNode];
   "open-settings": [initialTab: string];
@@ -526,6 +535,9 @@ const {
   dropMilvusCollection,
   dropMongoIndex,
   dropAllMongoIndexes,
+  canManageElasticsearchIndex,
+  clearElasticsearchIndex,
+  confirmClearElasticsearchIndex,
   flushRedisDb,
   prepareRedisDatabaseAliasDialog,
   confirmRedisDatabaseAlias,
@@ -649,6 +661,7 @@ const groupTypes: Set<TreeNodeType> = new Set([
   "group-functions",
   "group-sequences",
   "group-synonyms",
+  "group-jobs",
   "group-packages",
   "group-types",
   "group-partitions",
@@ -1916,6 +1929,10 @@ async function openDdl() {
   emit("open-ddl", targets[0]!);
 }
 
+function openElasticsearchIndexMetadata(kind: ElasticsearchIndexMetadataKind) {
+  emit("open-elasticsearch-index-metadata", createSidebarActionTarget(activeNode.value), kind);
+}
+
 async function refresh() {
   const node = activeNode.value;
   try {
@@ -2218,7 +2235,7 @@ function openObjectSourceDialog(initialEditing: boolean, viewPackageBody = false
           databaseType,
           signature: sourceNode.signature,
         });
-        const sourceIsEditable = raw.editable !== false && !["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY"].includes(resolvedType);
+        const sourceIsEditable = raw.editable !== false && !["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY", "JOB"].includes(resolvedType);
         if (sourceIsEditable) {
           queryStore.openObjectSourceTab({
             connectionId,
@@ -2270,6 +2287,26 @@ async function compileXuguObject() {
     const executed = await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
     if (!executed) return;
     toast(t("contextMenu.compileObjectSuccess", { name: node.label }), 3000);
+    await connectionStore.refreshTreeNode(node);
+  } catch (e: any) {
+    toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
+async function executeXuguSchedulerJobAction(action: XuguSchedulerJobAction) {
+  const node = activeNode.value;
+  if (currentDatabaseType() !== "xugu" || node.type !== "job" || !node.connectionId || !node.database) return;
+  const sql = buildXuguSchedulerJobSql(action, node.objectName || node.label);
+  if (!sql) return;
+  if (action === "drop" && !window.confirm(t("xuguSchedulerJob.confirmDrop", { name: node.label }))) return;
+  try {
+    await connectionStore.ensureConnected(node.connectionId);
+    const executed = await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
+    if (!executed) return;
+    toast(t("xuguSchedulerJob.actionSuccess", { action: t(`xuguSchedulerJob.${action}`), name: node.label }), 3000);
+    // A job belongs to the synthetic scheduler-job group. `refreshTreeNode`
+    // already walks a child back to that group, so this refreshes the list
+    // after a destructive action without retaining a stale job node.
     await connectionStore.refreshTreeNode(node);
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
@@ -3113,12 +3150,12 @@ const canCreateSchema = computed(() => {
 const canDropSchema = computed(() => {
   const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
   const dbType = effectiveDatabaseTypeForConnection(config);
-  return activeNode.value.type === "schema" && !isXuguPublicSynonymTreeNode(config?.db_type, activeNode.value.type, activeNode.value.schema) && !isSqlServerLinkedNode(activeNode.value) && (usesTreeSchemaMode(dbType) || dbType === "dameng") && !connectionUsesDatabaseObjectTreeMode(config);
+  return activeNode.value.type === "schema" && !isXuguSyntheticTreeNode(config?.db_type, activeNode.value.type, activeNode.value.schema) && !isSqlServerLinkedNode(activeNode.value) && (usesTreeSchemaMode(dbType) || dbType === "dameng") && !connectionUsesDatabaseObjectTreeMode(config);
 });
 
 const canEditSchemaComment = computed(() => {
   const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
-  return activeNode.value.type === "schema" && !!activeNode.value.database && !connectionIsEffectivelyReadOnly(config) && supportsSchemaComment(effectiveDatabaseTypeForConnection(config));
+  return activeNode.value.type === "schema" && !!activeNode.value.database && !isXuguSyntheticTreeNode(config?.db_type, activeNode.value.type, activeNode.value.schema) && !connectionIsEffectivelyReadOnly(config) && supportsSchemaComment(effectiveDatabaseTypeForConnection(config));
 });
 
 const canBatchDropCascade = computed(() => {
@@ -3813,7 +3850,7 @@ async function confirmCreateSchema() {
 function dropSchema() {
   const node = sidebarDangerTarget.value ?? activeNode.value;
   const config = node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined;
-  if (isXuguPublicSynonymTreeNode(config?.db_type, node.type, node.schema)) return;
+  if (isXuguSyntheticTreeNode(config?.db_type, node.type, node.schema)) return;
   void refreshDropSchemaPreviewSql();
   showDropSchemaConfirm.value = true;
 }
@@ -3823,7 +3860,7 @@ async function confirmDropSchema() {
   if (!node.connectionId || !node.database) return;
   try {
     const config = connectionStore.getConfig(node.connectionId);
-    if (isXuguPublicSynonymTreeNode(config?.db_type, node.type, node.schema)) return;
+    if (isXuguSyntheticTreeNode(config?.db_type, node.type, node.schema)) return;
     await connectionStore.ensureConnected(node.connectionId);
     const dbType = effectiveDatabaseTypeForConnection(config);
     let dropExecutionSchema: string | undefined;
@@ -4533,6 +4570,51 @@ routeDangerDialog(showDropAllMongoIndexesConfirm, () =>
   }),
 );
 
+routeDangerDialog(showClearElasticsearchIndexConfirm, () => {
+  // Pin the label for the life of this dialog. `activeNode` follows the tree
+  // selection, which the confirmation must not, and the typed-name gate below
+  // has to compare against the index the operator actually opened.
+  const index = activeNode.value.label;
+  const isPattern = isElasticsearchIndexPattern(index);
+  clearElasticsearchIndexTypedName.value = "";
+  return dangerRequest({
+    title: t("contextMenu.elasticsearchClearIndex"),
+    // A grouped node is a wildcard covering many indexes, so it gets its own
+    // wording rather than one that reads as a single index.
+    message: t(isPattern ? "contextMenu.elasticsearchClearIndexPatternMessage" : "contextMenu.elasticsearchClearIndexMessage", { index }),
+    detailsText: t("contextMenu.elasticsearchClearIndexDetails"),
+    sql: elasticsearchClearIndexPreview(index),
+    confirmLabel: t("contextMenu.elasticsearchClearIndexConfirm"),
+    get loading() {
+      return clearElasticsearchIndexLoading.value;
+    },
+    // A wildcard node clears every index it matches, so the pattern has to be
+    // typed back before the button unlocks. Concrete index names skip this.
+    ...(isPattern
+      ? {
+          textInput: {
+            value: "",
+            label: t("contextMenu.elasticsearchClearIndexTypeToConfirm", { index }),
+            placeholder: index,
+            onInput(value: string) {
+              clearElasticsearchIndexTypedName.value = value;
+            },
+          },
+        }
+      : {}),
+    // Declared directly on this literal, never inside the spread above: object
+    // spread evaluates an accessor once and copies the resulting value, which
+    // would freeze the gate shut at its construction-time answer. Concrete
+    // index names need no gate, and `isElasticsearchClearConfirmed` already
+    // returns true for them, so this stays unlocked for them.
+    get confirmDisabled() {
+      return !isElasticsearchClearConfirmed(index, clearElasticsearchIndexTypedName.value);
+    },
+    closeOnConfirm: false,
+    confirm: confirmClearElasticsearchIndex,
+  });
+});
+
 routeDangerDialog(showFlushRedisDbConfirm, () =>
   dangerRequest({
     title: t("redis.flushDb"),
@@ -5071,7 +5153,7 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   const { node, items } = context;
   // 4. Database / Schema
   if (node.type === "database" || node.type === "schema") {
-    if (isXuguPublicSynonymTreeNode(currentDatabaseType(), node.type, node.schema)) {
+    if (isXuguSyntheticTreeNode(currentDatabaseType(), node.type, node.schema)) {
       items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
       items.push({ label: "", separator: true });
       items.push({
@@ -5406,6 +5488,14 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     if (canRenameMongoCollection.value) {
       items.push({ label: t("contextMenu.renameObject"), action: openRenameMongoCollectionDialog, icon: Pencil, shortcut: shortcutRename });
     }
+    if (canManageElasticsearchIndex.value) {
+      items.push({ label: "", separator: true });
+      items.push({ label: t("contextMenu.elasticsearchViewMapping"), action: () => openElasticsearchIndexMetadata("mapping"), icon: Braces });
+      items.push({ label: t("contextMenu.elasticsearchViewSettings"), action: () => openElasticsearchIndexMetadata("settings"), icon: Settings2 });
+      items.push({ label: t("contextMenu.elasticsearchViewStats"), action: () => openElasticsearchIndexMetadata("stats"), icon: BarChart3 });
+      items.push({ label: "", separator: true });
+      items.push({ label: t("contextMenu.elasticsearchClearIndex"), action: clearElasticsearchIndex, icon: Eraser, variant: "destructive" as const });
+    }
     if (canDropMilvusCollection.value) {
       items.push({ label: "", separator: true });
       items.push({ label: t("contextMenu.dropCollection"), action: dropMilvusCollection, icon: Trash2, shortcut: shortcutDelete, variant: "destructive" as const });
@@ -5680,6 +5770,22 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
     items.push({ label: t("contextMenu.changeOpenMode"), action: () => emit("open-settings", "navigation"), icon: Settings2 });
+    return true;
+  }
+
+  if (node.type === "job") {
+    items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
+    items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+    if (currentDatabaseType() === "xugu") {
+      items.push({ label: "", separator: true });
+      items.push({ label: t("xuguSchedulerJob.enable"), action: () => executeXuguSchedulerJobAction("enable"), icon: Play });
+      items.push({ label: t("xuguSchedulerJob.disable"), action: () => executeXuguSchedulerJobAction("disable"), icon: Wrench });
+      items.push({ label: t("xuguSchedulerJob.run"), action: () => executeXuguSchedulerJobAction("run"), icon: Play });
+      items.push({ label: "", separator: true });
+      items.push({ label: t("xuguSchedulerJob.drop"), action: () => executeXuguSchedulerJobAction("drop"), icon: Trash2, variant: "destructive" as const });
+    }
+    items.push({ label: "", separator: true });
+    items.push({ label: t("contextMenu.refreshChildren"), action: refresh, icon: RefreshCw, shortcut: shortcutRefresh });
     return true;
   }
 

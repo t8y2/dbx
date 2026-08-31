@@ -431,7 +431,7 @@ test("cloning a row preserves its source and edited columns for custom saves", a
   assert.deepEqual(savedMeta, [
     {
       token: 1,
-      placement: null,
+      placement: { anchorId: 0, position: "below" },
       sourceIndex: 0,
       editedColumns: [1],
     },

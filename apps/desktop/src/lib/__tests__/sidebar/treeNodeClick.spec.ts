@@ -5,7 +5,7 @@ import {
   objectSourceKindForTreeNode,
   objectSourceTargetForTreeNode,
   shouldActivateTreeNodeOnSingleClick,
-  shouldOpenObjectBrowserOnSingleClick,
+  shouldBrowseObjectsOnDatabaseActivation,
   shouldRunTreeNodeRowAction,
   treeNodeRowAction,
   treeNodeRowDoubleClickAction,
@@ -90,51 +90,55 @@ describe("treeNodeClick", () => {
     expect(treeNodeRowDoubleClickAction("connection", false, "double", false, "postgres", true)).toBe("none");
   });
 
-  it("opens the object browser on single click when the database single-click switch is on", () => {
+  it("browses objects on single-click activation only when enabled", () => {
     expect(treeNodeRowAction("database", true, "single", "postgres", true, true)).toBe("open-object-browser-and-expand");
     expect(treeNodeRowAction("database", false, "single", "postgres", true, true)).toBe("open-object-browser");
     expect(treeNodeRowAction("schema", true, "single", "postgres", true, true)).toBe("open-object-browser-and-expand");
-    expect(treeNodeRowAction("object-browser", false, "single", "postgres", true, true)).toBe("open-object-browser");
+    expect(treeNodeRowAction("database", true, "single", "postgres", false, true)).toBe("toggle");
+    expect(treeNodeRowAction("schema", true, "single", "postgres", false, true)).toBe("toggle");
   });
 
-  it("lets the database single-click switch override double-click activation", () => {
-    expect(treeNodeRowAction("database", true, "double", "postgres", true, true)).toBe("open-object-browser-and-expand");
-    expect(treeNodeRowAction("schema", false, "double", "postgres", true, true)).toBe("open-object-browser");
+  it("keeps the first click selection-only in double-click activation", () => {
+    expect(treeNodeRowAction("database", true, "double", "postgres", true, true)).toBe("none");
+    expect(treeNodeRowAction("schema", true, "double", "postgres", true, true)).toBe("none");
+    expect(treeNodeRowAction("database", true, "double", "postgres", false, true)).toBe("none");
   });
 
-  it("does not reopen the object browser when the single-click switch already handled the gesture", () => {
+  it("does not run a second database action after single-click activation", () => {
     expect(treeNodeRowDoubleClickAction("database", true, "single", true, "postgres", false, true)).toBe("none");
-    expect(treeNodeRowDoubleClickAction("schema", true, "double", true, "postgres", false, true)).toBe("none");
-    expect(treeNodeRowDoubleClickAction("object-browser", true, "single", false, "postgres", false, true)).toBe("none");
+    expect(treeNodeRowDoubleClickAction("database", true, "single", true, "postgres", false, false)).toBe("none");
+    expect(treeNodeRowDoubleClickAction("schema", true, "single", true, "postgres", false, true)).toBe("none");
   });
 
-  it("keeps the existing double-click fallback when single-click browsing is unavailable", () => {
-    expect(treeNodeRowDoubleClickAction("database", true, "single", true, "postgres", false, false)).toBe("open-object-browser");
+  it("browses objects on double-click activation only when enabled", () => {
+    expect(treeNodeRowDoubleClickAction("database", true, "double", true, "postgres", false, true)).toBe("open-object-browser-and-expand");
+    expect(treeNodeRowDoubleClickAction("schema", true, "double", false, "postgres", false, true)).toBe("open-object-browser");
+    expect(treeNodeRowDoubleClickAction("database", true, "double", true, "postgres", false, false)).toBe("toggle");
+    expect(treeNodeRowDoubleClickAction("schema", true, "double", false, "postgres", false, false)).toBe("none");
+  });
+
+  it("falls back to expansion when object browsing is unsupported", () => {
+    expect(treeNodeRowAction("database", true, "single", "postgres", true, false)).toBe("toggle");
+    expect(treeNodeRowAction("database", true, "double", "postgres", true, false)).toBe("none");
     expect(treeNodeRowDoubleClickAction("database", false, "double", true, "postgres", false, true)).toBe("toggle");
   });
 
-  it("keeps the original single-click behavior when the database single-click switch is off or unsupported", () => {
-    expect(treeNodeRowAction("database", true, "single", "postgres", false, true)).toBe("toggle");
-    expect(treeNodeRowAction("database", true, "double", "postgres", false, true)).toBe("none");
-    // Capability off (e.g. unsupported database type) falls back to the previous behavior.
-    expect(treeNodeRowAction("database", true, "single", "postgres", true, false)).toBe("toggle");
-    expect(treeNodeRowAction("database", true, "double", "postgres", true, false)).toBe("none");
-  });
-
-  it("does not route non-database nodes through the database single-click switch", () => {
+  it("does not route non-database nodes through the database activation switch", () => {
     expect(treeNodeRowAction("table", false, "single", "postgres", true, true)).toBe("open-data");
     expect(treeNodeRowAction("table", false, "double", "postgres", true, true)).toBe("none");
-    expect(shouldOpenObjectBrowserOnSingleClick("table", true)).toBe(false);
-    expect(shouldOpenObjectBrowserOnSingleClick("database", true)).toBe(true);
-    expect(shouldOpenObjectBrowserOnSingleClick("database", false)).toBe(false);
-    expect(shouldOpenObjectBrowserOnSingleClick("mongo-db", true)).toBe(true);
-    expect(shouldOpenObjectBrowserOnSingleClick("mongo-db", false)).toBe(false);
+    expect(shouldBrowseObjectsOnDatabaseActivation("table", true)).toBe(false);
+    expect(shouldBrowseObjectsOnDatabaseActivation("database", true)).toBe(true);
+    expect(shouldBrowseObjectsOnDatabaseActivation("database", false)).toBe(false);
+    expect(shouldBrowseObjectsOnDatabaseActivation("mongo-db", true)).toBe(true);
+    expect(shouldBrowseObjectsOnDatabaseActivation("object-browser", true)).toBe(false);
+    expect(treeNodeRowDoubleClickAction("object-browser", true, "double", false, "postgres", false, false)).toBe("open-object-browser");
   });
 
   it("opens the MongoDB object browser from mongo-db nodes like SQL databases", () => {
     expect(treeNodeRowAction("mongo-db", true, "single", "mongodb", true, true)).toBe("open-object-browser-and-expand");
     expect(treeNodeRowAction("mongo-db", true, "single", "mongodb", false, true)).toBe("toggle");
-    expect(treeNodeRowDoubleClickAction("mongo-db", true, "single", true, "mongodb")).toBe("open-object-browser");
+    expect(treeNodeRowDoubleClickAction("mongo-db", true, "single", true, "mongodb", false, true)).toBe("none");
+    expect(treeNodeRowDoubleClickAction("mongo-db", true, "double", true, "mongodb", false, true)).toBe("open-object-browser-and-expand");
   });
 
   it("expands package containers while preserving source behavior for leaf packages", () => {

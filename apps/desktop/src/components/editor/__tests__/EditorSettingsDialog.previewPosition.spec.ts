@@ -121,7 +121,7 @@ describe("EditorSettingsDialog live preview placement", () => {
     const objectDisplay = navigationSection.indexOf('t("settings.sidebarObjectDisplay")');
     const routineOpenMode = navigationSection.indexOf('t("settings.routineSourceOpenMode")');
     const tableNavigation = navigationSection.indexOf('id="editor-click-table-navigation-ddl"');
-    const openDatabaseOnClick = navigationSection.indexOf('id="sidebar-open-database-on-single-click"');
+    const browseObjectsOnDatabaseActivation = navigationSection.indexOf('id="sidebar-browse-objects-on-database-activation"');
     const tableSearch = navigationSection.indexOf('id="sidebar-table-search-enabled"');
     const activeNodeSelection = navigationSection.indexOf('id="auto-select-active-sidebar-node"');
 
@@ -129,8 +129,8 @@ describe("EditorSettingsDialog live preview placement", () => {
     expect(objectDisplay).toBeGreaterThan(adjacentDataTabs);
     expect(routineOpenMode).toBeGreaterThan(objectDisplay);
     expect(tableNavigation).toBeGreaterThan(routineOpenMode);
-    expect(openDatabaseOnClick).toBeGreaterThan(tableNavigation);
-    expect(tableSearch).toBeGreaterThan(openDatabaseOnClick);
+    expect(browseObjectsOnDatabaseActivation).toBeGreaterThan(tableNavigation);
+    expect(tableSearch).toBeGreaterThan(browseObjectsOnDatabaseActivation);
     expect(activeNodeSelection).toBeGreaterThan(tableSearch);
   });
 

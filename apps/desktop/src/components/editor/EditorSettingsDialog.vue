@@ -493,7 +493,7 @@ const dataTabReuseModeHelp = ref<DataTabReuseMode | null>(null);
 const editRoutineSourceOpenMode = ref(settingsStore.editorSettings.routineSourceOpenMode);
 const editSidebarTableSearchEnabled = ref(settingsStore.editorSettings.sidebarTableSearchEnabled);
 const editAutoSelectActiveSidebarNode = ref(settingsStore.editorSettings.autoSelectActiveSidebarNode);
-const editSidebarOpenDatabaseOnSingleClick = ref(settingsStore.editorSettings.sidebarOpenDatabaseOnSingleClick);
+const editSidebarBrowseObjectsOnDatabaseActivation = ref(settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation);
 const editOpenTabsRestoreMode = ref<OpenTabsRestoreMode>(settingsStore.editorSettings.openTabsRestoreMode);
 const editDisconnectTabHandlingMode = ref<DisconnectTabHandlingMode>(settingsStore.editorSettings.disconnectTabHandlingMode);
 const editDataTabReuseMode = ref<DataTabReuseMode>(settingsStore.editorSettings.dataTabReuseMode);
@@ -637,7 +637,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     routineSourceOpenMode: editRoutineSourceOpenMode.value,
     sidebarTableSearchEnabled: editSidebarTableSearchEnabled.value,
     autoSelectActiveSidebarNode: editAutoSelectActiveSidebarNode.value,
-    sidebarOpenDatabaseOnSingleClick: editSidebarOpenDatabaseOnSingleClick.value,
+    sidebarBrowseObjectsOnDatabaseActivation: editSidebarBrowseObjectsOnDatabaseActivation.value,
     openTabsRestoreMode: editOpenTabsRestoreMode.value,
     disconnectTabHandlingMode: editDisconnectTabHandlingMode.value,
     dataTabReuseMode: editDataTabReuseMode.value,
@@ -1033,7 +1033,7 @@ function syncEditorSettingsDraftFromStore() {
   editRoutineSourceOpenMode.value = settingsStore.editorSettings.routineSourceOpenMode;
   editSidebarTableSearchEnabled.value = settingsStore.editorSettings.sidebarTableSearchEnabled;
   editAutoSelectActiveSidebarNode.value = settingsStore.editorSettings.autoSelectActiveSidebarNode;
-  editSidebarOpenDatabaseOnSingleClick.value = settingsStore.editorSettings.sidebarOpenDatabaseOnSingleClick;
+  editSidebarBrowseObjectsOnDatabaseActivation.value = settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation;
   editOpenTabsRestoreMode.value = settingsStore.editorSettings.openTabsRestoreMode;
   editDisconnectTabHandlingMode.value = settingsStore.editorSettings.disconnectTabHandlingMode;
   editDataTabReuseMode.value = settingsStore.editorSettings.dataTabReuseMode;
@@ -1294,7 +1294,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editRoutineSourceOpenMode.value = DEFAULT_EDITOR_SETTINGS.routineSourceOpenMode;
     editSidebarTableSearchEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled;
     editAutoSelectActiveSidebarNode.value = DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode;
-    editSidebarOpenDatabaseOnSingleClick.value = DEFAULT_EDITOR_SETTINGS.sidebarOpenDatabaseOnSingleClick;
+    editSidebarBrowseObjectsOnDatabaseActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarBrowseObjectsOnDatabaseActivation;
     editOpenTabsRestoreMode.value = DEFAULT_EDITOR_SETTINGS.openTabsRestoreMode;
     editDisconnectTabHandlingMode.value = DEFAULT_EDITOR_SETTINGS.disconnectTabHandlingMode;
     editDataTabReuseMode.value = DEFAULT_EDITOR_SETTINGS.dataTabReuseMode;
@@ -1428,7 +1428,7 @@ function resetAllDefaults() {
   editRoutineSourceOpenMode.value = DEFAULT_EDITOR_SETTINGS.routineSourceOpenMode;
   editSidebarTableSearchEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled;
   editAutoSelectActiveSidebarNode.value = DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode;
-  editSidebarOpenDatabaseOnSingleClick.value = DEFAULT_EDITOR_SETTINGS.sidebarOpenDatabaseOnSingleClick;
+  editSidebarBrowseObjectsOnDatabaseActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarBrowseObjectsOnDatabaseActivation;
   editOpenTabsRestoreMode.value = DEFAULT_EDITOR_SETTINGS.openTabsRestoreMode;
   editDisconnectTabHandlingMode.value = DEFAULT_EDITOR_SETTINGS.disconnectTabHandlingMode;
   editDataTabReuseMode.value = DEFAULT_EDITOR_SETTINGS.dataTabReuseMode;
@@ -5202,12 +5202,12 @@ onUnmounted(() => {
               </div>
               <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">
-                  <Label for="sidebar-open-database-on-single-click">{{ t("settings.sidebarOpenDatabaseOnSingleClick") }}</Label>
-                  <HelpTooltip :label="t('settings.sidebarOpenDatabaseOnSingleClick')">
-                    {{ t("settings.sidebarOpenDatabaseOnSingleClickDescription") }}
+                  <Label for="sidebar-browse-objects-on-database-activation">{{ t("settings.sidebarBrowseObjectsOnDatabaseActivation") }}</Label>
+                  <HelpTooltip :label="t('settings.sidebarBrowseObjectsOnDatabaseActivation')">
+                    {{ t("settings.sidebarBrowseObjectsOnDatabaseActivationDescription") }}
                   </HelpTooltip>
                 </div>
-                <Switch id="sidebar-open-database-on-single-click" v-model="editSidebarOpenDatabaseOnSingleClick" />
+                <Switch id="sidebar-browse-objects-on-database-activation" v-model="editSidebarBrowseObjectsOnDatabaseActivation" />
               </div>
               <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">

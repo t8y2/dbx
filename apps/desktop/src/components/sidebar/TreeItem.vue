@@ -1478,7 +1478,19 @@ function onKeydown(event: KeyboardEvent) {
               @keydown.escape.prevent="cancelRename"
               @click.stop
             />
-            <span v-else ref="labelRef" :class="[labelWidthClass, { 'flex-1': node.type === 'connection' && !trailingComment, 'font-semibold': isLoginUserNode }]">{{ visibleLabel(node) }}</span>
+            <span
+              v-else
+              ref="labelRef"
+              :class="[
+                labelWidthClass,
+                {
+                  'flex-1': node.type === 'connection' && !trailingComment,
+                  'tree-connection-label': node.type === 'connection' || node.type === 'connection-group',
+                  'font-semibold': isLoginUserNode,
+                },
+              ]"
+              >{{ visibleLabel(node) }}</span
+            >
             <span v-if="treeNodeSecondaryValue(node)" class="min-w-0 max-w-[55%] shrink truncate text-xs text-muted-foreground" :title="treeNodeSecondaryValue(node)">{{ treeNodeSecondaryValue(node) }}</span>
             <button
               v-if="canDragPinnedOrder()"
@@ -1633,6 +1645,10 @@ function onKeydown(event: KeyboardEvent) {
   font-size: 1em;
   font-weight: 500;
   opacity: 1;
+}
+
+.tree-connection-label {
+  font-weight: 350;
 }
 
 .tree-item-connection-tint {

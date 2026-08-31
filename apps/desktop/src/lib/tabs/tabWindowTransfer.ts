@@ -12,6 +12,7 @@ export const TAB_WINDOW_DRAG_PREVIEW_EVENT = "dbx:tab-window-drag-preview";
 export const TAB_NATIVE_DRAG_PREVIEW_RELEASE_EVENT = "dbx:tab-drag-preview-release";
 export const TAB_DRAG_PREVIEW_WINDOW_PREFIX = "dbx-tab-drag-preview-";
 const DETACHED_TAB_QUERY = "dbxTransfer";
+const DETACHED_TAB_WINDOW_SESSION_KEY = "dbx-detached-tab-window";
 const TRANSFER_STORAGE_PREFIX = "dbx-tab-window-transfer:";
 const ACCEPTED_STORAGE_PREFIX = "dbx-tab-window-transfer-accepted:";
 const ACTIVE_TRANSFER_STORAGE_KEY = "dbx-active-tab-window-transfer";
@@ -66,7 +67,12 @@ function activeTransferStorageValue(transferId: string): string {
 
 export function isDetachedTabWindow(): boolean {
   if (typeof window === "undefined") return false;
-  return new URLSearchParams(window.location.search).has(DETACHED_TAB_QUERY);
+  if (new URLSearchParams(window.location.search).has(DETACHED_TAB_QUERY)) return true;
+  try {
+    return window.sessionStorage.getItem(DETACHED_TAB_WINDOW_SESSION_KEY) === "1";
+  } catch {
+    return false;
+  }
 }
 
 export function detachedTabTransferToken(): string | null {
@@ -152,6 +158,14 @@ export function clearTabWindowTransfer(transferId: string): void {
 export function consumeDetachedTabTransfer(): TabWindowTransferPayload | null {
   const token = detachedTabTransferToken();
   if (!token) return null;
+  // The transfer token is intentionally removed from the URL after startup.
+  // Keep the detached-window role for the lifetime of this WebView so it
+  // cannot later overwrite the main window's global open-tabs state.
+  try {
+    window.sessionStorage.setItem(DETACHED_TAB_WINDOW_SESSION_KEY, "1");
+  } catch {
+    // The URL token remains sufficient for this startup if session storage is unavailable.
+  }
   const payload = readTabWindowTransfer(token);
   clearTabWindowTransfer(token);
   if (typeof window !== "undefined") {

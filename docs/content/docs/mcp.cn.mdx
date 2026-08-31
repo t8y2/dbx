@@ -87,7 +87,7 @@ DeepSeek Harness 通过 Cordis 插件条目加载 MCP Server，不读取 `mcpSer
 
 ## 工具列表
 
-DBX MCP 当前提供 15 个工具：
+DBX MCP 当前提供 16 个工具：
 
 | 工具 | 说明 |
 | --- | --- |
@@ -100,6 +100,7 @@ DBX MCP 当前提供 15 个工具：
 | `dbx_describe_table` | 返回列定义和表元数据 |
 | `dbx_get_schema_context` | 返回适合 AI 使用的紧凑 Schema 上下文 |
 | `dbx_execute_query` | 执行 SQL 或支持的 MongoDB shell 命令，最多返回 100 行 |
+| `dbx_execute_batch` | 一次执行包含多条语句的 SQL 脚本，按语句返回结果（多语句脚本搭配 `use_transaction` 时返回单个合并结果） |
 | `dbx_open_session` | 为 SQL 连接打开固定后端连接的有状态查询会话 |
 | `dbx_close_session` | 关闭会话并释放固定连接资源 |
 | `dbx_execute_redis_command` | 执行 Redis 命令 |
@@ -109,9 +110,20 @@ DBX MCP 当前提供 15 个工具：
 
 启用连接作用域后，修改连接和桌面 UI 工具会被隐藏。
 
+## 批量 SQL 执行
+
+`dbx_execute_batch` 在单次调用内执行包含多条语句的 SQL 脚本。默认（自动提交）模式下按语句返回结果，因此调用方可以清楚看到哪条失败、每条影响多少行、各自返回什么；使用 `use_transaction` 且脚本包含多条语句时，只返回一个合并的事务结果。
+
+- 脚本通过方言感知的解析器拆分成独立语句，字符串、注释、存储过程中出现分号也不会破坏批次。
+- 默认遇到第一条失败语句即停止；传入 `continue_on_error` 可让批内在单条语句出错后继续执行（连接级错误仍会终止）。
+- 传入 `use_transaction` 可把多条语句放入同一个 `BEGIN … COMMIT`，使整批要么全部成功要么回滚；这要求脚本包含多条语句（单语句脚本会忽略该选项，按普通自动提交执行）。此模式下调用只返回一个合并结果（而非逐语句结果），且 `use_transaction` 不能与 `session_id` 同时使用——事务批处理运行在池连接上，会丢弃会话状态；也不能与 `continue_on_error` 同时使用——事务批处理在第一条失败时即回滚并停止。SQL Server、Turso、CloudflareD1 会忽略 `use_transaction`。
+- SQL 策略（只读、危险 SQL、生产保护、切换数据库）作为整体在匹配前重新检查，与 `dbx_execute_query` 一致；只要批内含一条写入或 DDL，在只读策略下整次调用都会被拒绝。
+- 每个批次在其完整执行期间都会使用独占连接，因此临时表和 `SET` 状态可在批内语句之间保留。若要跨多次 MCP 调用保留这些状态，先用 `dbx_open_session` 打开会话，再传入其 `session_id`。
+- Redis 和 MongoDB 连接不支持 `dbx_execute_batch`。
+
 ## 有状态查询会话
 
-普通 `dbx_execute_query` 调用彼此独立。需要保持数据库 Session 状态时，先调用 `dbx_open_session`，再把返回的 `sessionId` 传给后续 `dbx_execute_query`：
+普通 `dbx_execute_query` 调用彼此独立。需要保持数据库 Session 状态时，先调用 `dbx_open_session`，再把返回的 `sessionId` 传给后续 `dbx_execute_query` 或 `dbx_execute_batch`：
 
 - `USE` 或数据库上下文切换
 - 临时表

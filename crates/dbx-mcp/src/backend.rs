@@ -145,6 +145,74 @@ fn effective_mcp_policy_with_legacy_allow_writes(
     policy
 }
 
+/// Wire-level result for one statement within a `dbx_execute_batch` call.
+///
+/// Mirrors the per-statement metadata the Web `/api/query/execute-multi` route
+/// returns. `dbx_core::query::ExecuteMultiResult` only derives `Serialize`, so
+/// a separate type that also derives `Deserialize` lets the Web backend decode
+/// the JSON response while LocalBackend adapts from the core type. The error is
+/// kept as an optional message string so `Deserialize` never has to handle the
+/// private-field `BackendError` envelope.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchStatementResult {
+    #[serde(flatten)]
+    pub result: dbx_core::db::QueryResult,
+    #[serde(skip_serializing_if = "is_false")]
+    pub execution_error: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub statement_index: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    /// True when this entry is the single merged outcome of a `use_transaction`
+    /// batch rather than an auto-commit per-statement result. Set by the MCP
+    /// server, which knows the requested mode; the wire decoders default to
+    /// false.
+    #[serde(skip_serializing_if = "is_false")]
+    pub merged: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+impl From<dbx_core::query::ExecuteMultiResult> for BatchStatementResult {
+    fn from(result: dbx_core::query::ExecuteMultiResult) -> Self {
+        let error_message = result.error.as_ref().and_then(|error| error.detail().map(str::to_owned)).or_else(|| {
+            result.result.rows.first().and_then(|row| row.first()).and_then(Value::as_str).map(str::to_owned)
+        });
+        Self {
+            result: result.result,
+            execution_error: result.execution_error,
+            statement_index: result.statement_index,
+            error_message,
+            merged: false,
+        }
+    }
+}
+
+/// Optionally decode a loose per-statement JSON object from the Web
+/// `/api/query/execute-multi` response into a `BatchStatementResult`.
+///
+/// The Web route serializes `dbx_core::query::ExecuteMultiResult`, whose fields
+/// are flattened onto the `QueryResult` and whose `error` is a `BackendError`
+/// envelope with private fields and no `Deserialize` impl. This decodes only
+/// the fields the MCP renderer needs instead of reconstructing the envelope.
+/// Returns an explicit error when the response shape is not what this client
+/// expects, so a protocol drift fails loudly instead of silently dropping
+/// statements from the batch.
+fn batch_statement_result_from_json(value: &Value) -> Result<BatchStatementResult, String> {
+    let result: dbx_core::db::QueryResult = serde_json::from_value(value.clone())
+        .map_err(|error| format!("Invalid execute-multi statement envelope: {error} (element: {value})"))?;
+    let execution_error = value.get("execution_error").and_then(Value::as_bool).unwrap_or(false);
+    let statement_index = value.get("statement_index").and_then(Value::as_u64).map(|index| index as usize);
+    let error_message = value
+        .pointer("/error/detail")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| value.pointer("/rows/0/0").and_then(Value::as_str).map(str::to_owned));
+    Ok(BatchStatementResult { result, execution_error, statement_index, error_message, merged: false })
+}
+
 /// Wire-level options for a documentation snapshot. Mirrors
 /// `dbx_core::docs::CollectOptions` minus the fields the backend fills in.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -200,6 +268,24 @@ pub trait DbxBackend: Send + Sync {
     ) -> Result<dbx_core::db::QueryResult, String> {
         let _ = (connection, database, sql, max_rows, timeout_secs);
         Err("SQL queries are not supported by this backend.".to_string())
+    }
+    /// Execute a multi-statement SQL script, returning one result per statement.
+    ///
+    /// The script text is split using the database-dialect-aware splitter so
+    /// semicolons inside strings, comments, and stored procedures are handled.
+    /// `schema` carries the configured scope schema when present. `continue_on_error`
+    /// / `use_transaction` / `client_session_id` are carried through `options`.
+    /// Mirrors the Web `/api/query/execute-multi` route.
+    async fn execute_batch(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        schema: Option<&str>,
+        sql: &str,
+        options: dbx_core::query::QueryExecutionOptions,
+    ) -> Result<Vec<BatchStatementResult>, String> {
+        let _ = (connection, database, schema, sql, options);
+        Err("SQL batch execution is not supported by this backend.".to_string())
     }
     async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String>;
     async fn duplicate_connection_for_mcp(
@@ -646,6 +732,27 @@ impl DbxBackend for LocalBackend {
         .await
     }
 
+    async fn execute_batch(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        schema: Option<&str>,
+        sql: &str,
+        options: dbx_core::query::QueryExecutionOptions,
+    ) -> Result<Vec<BatchStatementResult>, String> {
+        let results = dbx_core::query::execute_multi_core_with_options_for_client(
+            &self.state,
+            &connection.id,
+            database,
+            sql,
+            schema,
+            None,
+            options,
+        )
+        .await?;
+        Ok(results.into_iter().map(BatchStatementResult::from).collect())
+    }
+
     async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
         let config = self.state.storage.add_connection_for_mcp(config).await?;
         self.state.configs.write().await.insert(config.id.clone(), config.clone());
@@ -962,6 +1069,55 @@ impl DbxBackend for WebBackend {
         .json()
         .await
         .map_err(|error| format!("Invalid query response: {error}"))
+    }
+
+    async fn execute_batch(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        schema: Option<&str>,
+        sql: &str,
+        options: dbx_core::query::QueryExecutionOptions,
+    ) -> Result<Vec<BatchStatementResult>, String> {
+        if connection.db_type == DatabaseType::MongoDb {
+            return Err("MongoDB batch execution in DBX Web mode is not implemented by the Rust CLI yet.".to_string());
+        }
+        self.ensure_connected(connection).await?;
+        let mut body = json!({
+            "connectionId": connection.id,
+            "database": database,
+            "sql": sql,
+            // Keep Web-mode structured results within the MCP 100-row contract.
+            "maxRows": options.max_rows,
+            "timeoutSecs": agent_tools::agent_query_timeout_secs(options.timeout_secs, Some(connection)),
+        });
+        if let Some(schema) = schema.map(str::trim).filter(|schema| !schema.is_empty()) {
+            body["schema"] = json!(schema);
+        }
+        if let Some(client_session_id) = options.client_session_id.as_deref().filter(|id| !id.trim().is_empty()) {
+            body["clientSessionId"] = json!(client_session_id);
+        }
+        if options.continue_on_error {
+            body["continueOnError"] = json!(true);
+        }
+        if options.use_transaction == Some(true) {
+            body["useTransaction"] = json!(true);
+        }
+        let value: Value = self
+            .request(reqwest::Method::POST, "/api/query/execute-multi", Some(body))
+            .await?
+            .json()
+            .await
+            .map_err(|error| format!("Invalid execute-multi response: {error}"))?;
+        // Fail loudly on any element that does not match the expected envelope
+        // instead of silently dropping statements from the batch.
+        let results = value
+            .as_array()
+            .ok_or_else(|| "Invalid execute-multi response: expected an array of per-statement results".to_string())?
+            .iter()
+            .map(batch_statement_result_from_json)
+            .collect::<Result<Vec<BatchStatementResult>, String>>()?;
+        Ok(results)
     }
 
     async fn close_client_session(
@@ -2191,6 +2347,109 @@ mod tests {
         let (_request_line, second_body) = request_receiver.recv().unwrap();
         let second_request: Value = serde_json::from_str(&second_body).unwrap();
         assert_eq!(second_request["timeoutSecs"], 300);
+    }
+
+    #[tokio::test]
+    async fn web_execute_batch_hits_execute_multi_and_decodes_statement_results() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (request_sender, request_receiver) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            let header_end = loop {
+                let count = stream.read(&mut buffer).unwrap();
+                request.extend_from_slice(&buffer[..count]);
+                if let Some(position) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break position + 4;
+                }
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length").then_some(value.trim())
+                })
+                .unwrap()
+                .parse::<usize>()
+                .unwrap();
+            while request.len() < header_end + content_length {
+                let count = stream.read(&mut buffer).unwrap();
+                request.extend_from_slice(&buffer[..count]);
+            }
+            let request = String::from_utf8(request).unwrap();
+            let body = request[header_end..header_end + content_length].to_string();
+            request_sender.send((request.lines().next().unwrap().to_string(), body)).unwrap();
+
+            let response_body = r#"[{"columns":["id"],"column_types":[],"column_sortables":[],"rows":[["1"],["2"]],"affected_rows":0,"execution_time_ms":1,"truncated":false,"has_more":false,"statement_index":0},{"columns":[],"column_types":[],"column_sortables":[],"rows":[],"affected_rows":2,"execution_time_ms":1,"truncated":false,"has_more":false,"statement_index":1}]"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            )
+            .unwrap();
+        });
+
+        // The mock is a loopback server, so it must not inherit a contributor's
+        // outbound proxy configuration.
+        let backend =
+            WebBackend::new_with_config(format!("http://{address}"), String::new(), None, None, None, false, None)
+                .unwrap();
+        backend.auth.lock().await.checked = true;
+        let connection = new_connection_config(
+            "web-batch".to_string(),
+            "web-batch".to_string(),
+            DatabaseType::Postgres,
+            "localhost".to_string(),
+            5432,
+            String::new(),
+            String::new(),
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        // Pre-seed so the mock only needs to answer /api/query/execute-multi.
+        backend.connected.lock().await.insert(connection.id.clone(), connection.clone());
+
+        let results = backend
+            .execute_batch(
+                &connection,
+                "postgres",
+                None,
+                "SELECT 1; INSERT INTO t VALUES (1)",
+                dbx_core::query::QueryExecutionOptions {
+                    max_rows: Some(100),
+                    timeout_secs: Some(0),
+                    continue_on_error: true,
+                    use_transaction: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        // Two metadata fields are transferred from the JSON envelope.
+        assert_eq!(results[0].result.columns, vec!["id".to_string()]);
+        assert_eq!(results[0].result.rows.len(), 2);
+        assert_eq!(results[1].statement_index, Some(1));
+        assert_eq!(results[1].result.affected_rows, 2);
+
+        let (request_line, body) = request_receiver.recv().unwrap();
+        assert_eq!(request_line, "POST /api/query/execute-multi HTTP/1.1");
+        let request: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(request["sql"], "SELECT 1; INSERT INTO t VALUES (1)");
+        assert_eq!(request["continueOnError"], true);
+        assert_eq!(request["useTransaction"], true);
+        assert_eq!(request["maxRows"], 100);
+        assert_eq!(request["timeoutSecs"], 0);
+
+        server.join().unwrap();
     }
 
     #[test]

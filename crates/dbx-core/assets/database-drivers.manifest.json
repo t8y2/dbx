@@ -1585,7 +1585,7 @@
         "tableDataEdit": true,
         "tableStructureEdit": true,
         "tableImport": false,
-        "dataTransfer": true,
+        "dataTransfer": false,
         "sqlFileExecution": true,
         "databaseCreate": false,
         "fieldLineage": false,

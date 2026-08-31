@@ -31,10 +31,7 @@ export function databaseAfterCatalogChange(currentDatabase: string, databaseOpti
   return databaseOptions.includes(currentDatabase) ? currentDatabase : "";
 }
 
-export function databaseOptionsForConnection(
-  databaseNames: string[],
-  connection: Pick<ConnectionConfig, "db_type" | "visible_databases"> & Partial<Pick<ConnectionConfig, "database" | "database_info">> | undefined,
-): string[] {
+export function databaseOptionsForConnection(databaseNames: string[], connection: (Pick<ConnectionConfig, "db_type" | "visible_databases"> & Partial<Pick<ConnectionConfig, "database" | "database_info">>) | undefined): string[] {
   const names = filterDatabaseNamesForConnection(databaseNames, connection);
   const configuredDatabase = connection?.database?.trim() || connection?.database_info?.currentDatabase?.trim();
   if (names.length === 0 && configuredDatabase) return [configuredDatabase];

@@ -209,10 +209,18 @@ describe("jdbc dialect inference", () => {
       db_type: "jdbc" as const,
       driver_profile: "gbase8s",
     };
+    const gbase8sProfileWithLegacyGbaseUrl = {
+      db_type: "jdbc" as const,
+      driver_profile: "gbase8s",
+      connection_string: "jdbc:gbase://localhost:5258/dbx_test",
+      jdbc_driver_class: "cn.gbase.Driver",
+    };
     expect(inferJdbcDialect(gbase8sByUrl)).toBe("informix");
     expect(effectiveDatabaseTypeForConnection(gbase8sByUrl)).toBe("informix");
     expect(inferJdbcDialect(gbase8sByProfile)).toBeUndefined();
     expect(effectiveDatabaseTypeForConnection(gbase8sByProfile)).toBe("jdbc");
+    expect(inferJdbcDialect(gbase8sProfileWithLegacyGbaseUrl)).toBeUndefined();
+    expect(effectiveDatabaseTypeForConnection(gbase8sProfileWithLegacyGbaseUrl)).toBe("jdbc");
   });
 
   it("uses Hive tree and execution semantics for Inceptor JDBC metadata", () => {

@@ -4911,6 +4911,9 @@ fn effective_transfer_database_type(config: &ConnectionConfig) -> DatabaseType {
     if config.db_type != DatabaseType::Jdbc {
         return config.db_type;
     }
+    if config.driver_profile.as_deref().is_some_and(|profile| profile.eq_ignore_ascii_case("gbase8s")) {
+        return DatabaseType::Jdbc;
+    }
 
     let jdbc_identity = [
         config.driver_profile.as_deref().unwrap_or(""),
@@ -8181,7 +8184,6 @@ mod tests {
         );
     }
 
-    use super::*;
     use serde_json::json;
 
     fn test_column(name: &str, data_type: &str) -> db::ColumnInfo {

@@ -1592,6 +1592,7 @@ pub fn run() {
     builder
         .manage(CloseBehaviorState::new())
         .manage(AppLocaleState::new())
+        .manage(commands::tab_drag_preview::TabDragPreviewState::default())
         .on_page_load(|webview, payload| {
             if payload.event() == PageLoadEvent::Started {
                 if let Some(state) = webview.app_handle().try_state::<CloseBehaviorState>() {
@@ -2049,6 +2050,8 @@ pub fn run() {
             commands::table_import::preview_table_import_file,
             commands::table_import::import_table_file,
             commands::table_import::cancel_table_import,
+            commands::tab_drag_preview::start_tab_drag_preview,
+            commands::tab_drag_preview::stop_tab_drag_preview,
             commands::redis_cmd::redis_list_databases,
             commands::redis_cmd::redis_scan_keys,
             commands::redis_cmd::redis_scan_keys_batch,

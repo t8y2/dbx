@@ -1,27 +1,27 @@
 // @vitest-environment happy-dom
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { TAB_DRAG_HORIZONTAL_THRESHOLD, useTabDrag } from "@/composables/useTabDrag";
+import { TAB_DRAG_HORIZONTAL_THRESHOLD, type TabDragOptions, useTabDrag } from "@/composables/useTabDrag";
 
-function createDragHarness(onDrop = vi.fn(() => true)) {
-  const drag = useTabDrag(onDrop);
+function createDragHarness(onDrop = vi.fn(() => true), options: TabDragOptions = {}) {
+  const drag = useTabDrag(onDrop, options);
   const source = document.createElement("div");
   source.innerHTML = '<span class="truncate">Source</span>';
-  source.addEventListener("pointerdown", (event) => drag.startDrag(event as PointerEvent, "source"));
+  source.addEventListener("mousedown", (event) => drag.startDrag(event, "source"));
   document.body.appendChild(source);
   return { drag, source, onDrop };
 }
 
-function beginDrag(source: HTMLElement, x = 100, y = 20, pointerType = "mouse") {
-  source.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, clientX: x, clientY: y, pointerType }));
+function beginDrag(source: HTMLElement, x = 100, y = 20) {
+  source.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0, clientX: x, clientY: y }));
 }
 
-function movePointer(x: number, y = 20, pointerType = "mouse") {
-  document.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, clientX: x, clientY: y, pointerType }));
+function movePointer(x: number, y = 20) {
+  document.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: x, clientY: y }));
 }
 
 function releasePointer() {
-  document.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+  document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
 }
 
 function enterDropTarget(drag: ReturnType<typeof useTabDrag>, tabId = "target", x = 10) {
@@ -102,14 +102,23 @@ describe("useTabDrag", () => {
     expect(onDrop).not.toHaveBeenCalled();
   });
 
-  it("never arms a drag for touch input, even past the horizontal threshold", () => {
-    const { drag, source, onDrop } = createDragHarness();
-    beginDrag(source, 100, 20, "touch");
+  it("reports active mouse movement and allows an external drop to suppress the click", () => {
+    const onMove = vi.fn();
+    const onEnd = vi.fn(() => true);
+    const { drag, source, onDrop } = createDragHarness(
+      vi.fn(() => true),
+      { onMove, onEnd },
+    );
+    beginDrag(source);
 
-    movePointer(100 + TAB_DRAG_HORIZONTAL_THRESHOLD + 20, 20, "touch");
+    movePointer(100 + TAB_DRAG_HORIZONTAL_THRESHOLD, 44);
+    releasePointer();
 
-    expect(drag.state.active).toBe(false);
-    expect(drag.state.suppressClick).toBe(false);
+    expect(drag.state.currentX).toBe(0);
+    expect(drag.state.currentY).toBe(0);
+    expect(onMove).toHaveBeenCalledOnce();
+    expect(onEnd).toHaveBeenCalledOnce();
     expect(onDrop).not.toHaveBeenCalled();
+    expect(drag.state.suppressClick).toBe(true);
   });
 });

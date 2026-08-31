@@ -8,6 +8,9 @@ import type { QueryTab } from "@/types/database";
 export const TAB_WINDOW_TRANSFER_MIME = "application/x-dbx-tab";
 export const TAB_WINDOW_TRANSFER_TEXT_PREFIX = "dbx-tab-transfer:";
 export const TAB_WINDOW_TRANSFER_EVENT = "dbx:tab-window-transfer";
+export const TAB_WINDOW_DRAG_PREVIEW_EVENT = "dbx:tab-window-drag-preview";
+export const TAB_NATIVE_DRAG_PREVIEW_RELEASE_EVENT = "dbx:tab-drag-preview-release";
+export const TAB_DRAG_PREVIEW_WINDOW_PREFIX = "dbx-tab-drag-preview-";
 const DETACHED_TAB_QUERY = "dbxTransfer";
 const TRANSFER_STORAGE_PREFIX = "dbx-tab-window-transfer:";
 const ACCEPTED_STORAGE_PREFIX = "dbx-tab-window-transfer-accepted:";
@@ -20,6 +23,29 @@ export interface TabWindowTransferPayload {
   tab: SavedOpenTab;
   /** Live state is kept separately from persisted tab state so results and editor context survive a move. */
   liveTab?: QueryTab;
+}
+
+/** Temporary cursor state broadcast while a tab is being dragged between DBX windows. */
+export interface TabWindowDragPreviewPayload {
+  transferId: string;
+  sourceWindowLabel: string;
+  title: string;
+  cursorPhysical: { x: number; y: number };
+  sequence: number;
+  visible: boolean;
+}
+
+export interface TabWindowPlacement {
+  /** Desktop logical coordinates expected by Tauri's WebviewWindow options. */
+  x: number;
+  y: number;
+}
+
+export interface NativeTabDragPreviewRelease {
+  transferId: string;
+  sourceWindowLabel: string;
+  left: number;
+  top: number;
 }
 
 function jsonSafeReplacer(_key: string, value: unknown): unknown {
@@ -169,7 +195,9 @@ export async function tabWindowAtCursor(): Promise<string | null> {
   const windows = await getAllWindows();
   const candidates = await Promise.all(
     windows
-      .filter((window) => window.label !== sourceWindowLabel)
+      // The native preview follows the cursor, so it would always win this hit
+      // test unless it is explicitly excluded from transferable destinations.
+      .filter((window) => window.label !== sourceWindowLabel && !window.label.startsWith(TAB_DRAG_PREVIEW_WINDOW_PREFIX))
       .map(async (window) => {
         try {
           const [position, size, focused] = await Promise.all([window.outerPosition(), window.outerSize(), window.isFocused()]);
@@ -202,13 +230,31 @@ export async function listenForTabWindowTransfer(handler: (payload: TabWindowTra
   return listen<TabWindowTransferPayload>(TAB_WINDOW_TRANSFER_EVENT, (event) => handler(event.payload));
 }
 
+export async function emitTabWindowDragPreview(payload: TabWindowDragPreviewPayload): Promise<void> {
+  if (!isTauriRuntime()) return;
+  const { emit } = await import("@tauri-apps/api/event");
+  await emit(TAB_WINDOW_DRAG_PREVIEW_EVENT, payload);
+}
+
+export async function listenForTabWindowDragPreview(handler: (payload: TabWindowDragPreviewPayload) => void): Promise<() => void> {
+  if (!isTauriRuntime()) return () => {};
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<TabWindowDragPreviewPayload>(TAB_WINDOW_DRAG_PREVIEW_EVENT, (event) => handler(event.payload));
+}
+
+export async function listenForNativeTabDragPreviewRelease(handler: (payload: NativeTabDragPreviewRelease) => void): Promise<() => void> {
+  if (!isTauriRuntime()) return () => {};
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<NativeTabDragPreviewRelease>(TAB_NATIVE_DRAG_PREVIEW_RELEASE_EVENT, (event) => handler(event.payload));
+}
+
 export async function currentTabWindowLabel(): Promise<string> {
   if (!isTauriRuntime()) return "web";
   const { getCurrentWebviewWindow } = await import("@tauri-apps/api/webviewWindow");
   return getCurrentWebviewWindow().label;
 }
 
-export async function createDetachedTabWindow(payload: TabWindowTransferPayload): Promise<boolean> {
+export async function createDetachedTabWindow(payload: TabWindowTransferPayload, placement?: TabWindowPlacement): Promise<boolean> {
   if (!isTauriRuntime()) return false;
   storeDetachedTabTransfer(payload);
 
@@ -219,7 +265,8 @@ export async function createDetachedTabWindow(payload: TabWindowTransferPayload)
   const child = new WebviewWindow(label, {
     url: url.toString(),
     title: "DBX",
-    width: 1280,
+    // Keep the real native window equal to the drag outline dimensions.
+    width: 1200,
     height: 800,
     minWidth: 900,
     minHeight: 600,
@@ -228,6 +275,7 @@ export async function createDetachedTabWindow(payload: TabWindowTransferPayload)
     decorations: !navigator.userAgent.toLowerCase().includes("windows"),
     titleBarStyle: "overlay",
     hiddenTitle: true,
+    ...(placement ? { x: placement.x, y: placement.y } : {}),
   });
 
   return new Promise((resolve) => {

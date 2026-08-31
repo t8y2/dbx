@@ -48,6 +48,7 @@ pub mod ssh_config;
 pub mod ssh_prompt;
 pub mod support_info;
 pub mod system_fonts;
+pub mod tab_drag_preview;
 pub mod tab_runtime_cache;
 pub mod table_export;
 pub mod table_import;

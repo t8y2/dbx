@@ -2,6 +2,11 @@ import { reactive, readonly } from "vue";
 
 export type TabDropPosition = "before" | "after";
 
+export interface TabDragOptions {
+  onMove?: (draggedId: string, event: MouseEvent) => void;
+  onEnd?: (draggedId: string, event: MouseEvent) => boolean;
+}
+
 interface TabDragState {
   active: boolean;
   draggedId: string | null;
@@ -10,6 +15,8 @@ interface TabDragState {
   suppressClick: boolean;
   startX: number;
   startY: number;
+  currentX: number;
+  currentY: number;
 }
 
 // Many touchscreen digitizers report to the OS/webview as a plain HID mouse
@@ -26,6 +33,8 @@ const state = reactive<TabDragState>({
   suppressClick: false,
   startX: 0,
   startY: 0,
+  currentX: 0,
+  currentY: 0,
 });
 
 let pending: {
@@ -35,6 +44,8 @@ let pending: {
   sourceEl: HTMLElement | null;
 } | null = null;
 let onDropCallback: ((draggedId: string, targetId: string, position: TabDropPosition) => boolean) | null = null;
+let onMoveCallback: ((draggedId: string, event: MouseEvent) => void) | null = null;
+let onEndCallback: ((draggedId: string, event: MouseEvent) => boolean) | null = null;
 let ghostEl: HTMLElement | null = null;
 
 function createGhost(sourceEl: HTMLElement, x: number, y: number) {
@@ -78,7 +89,7 @@ function removeGhost() {
   }
 }
 
-function onPointerMove(event: PointerEvent) {
+function onMouseMove(event: MouseEvent) {
   if (!pending && !state.active) return;
 
   if (pending && !state.active) {
@@ -88,6 +99,8 @@ function onPointerMove(event: PointerEvent) {
     state.draggedId = pending.id;
     state.startX = pending.x;
     state.startY = pending.y;
+    state.currentX = event.clientX;
+    state.currentY = event.clientY;
     if (pending.sourceEl) {
       ghostEl = createGhost(pending.sourceEl, event.clientX, event.clientY);
     }
@@ -97,14 +110,20 @@ function onPointerMove(event: PointerEvent) {
   }
 
   if (state.active) {
+    state.currentX = event.clientX;
+    state.currentY = event.clientY;
     moveGhost(event.clientX, event.clientY);
+    if (state.draggedId) onMoveCallback?.(state.draggedId, event);
   }
 }
 
-function onMouseUp() {
+function onMouseUp(event: MouseEvent) {
   state.suppressClick = false;
-  if (state.active && state.draggedId && state.targetId && state.dropPosition && onDropCallback) {
-    state.suppressClick = onDropCallback(state.draggedId, state.targetId, state.dropPosition);
+  if (state.active && state.draggedId) {
+    if (state.targetId && state.dropPosition && onDropCallback) {
+      state.suppressClick = onDropCallback(state.draggedId, state.targetId, state.dropPosition);
+    }
+    state.suppressClick = onEndCallback?.(state.draggedId, event) || state.suppressClick;
   }
   reset();
 }
@@ -116,6 +135,8 @@ function reset() {
   state.dropPosition = null;
   state.startX = 0;
   state.startY = 0;
+  state.currentX = 0;
+  state.currentY = 0;
   pending = null;
   removeGhost();
   document.body.style.cursor = "";
@@ -126,23 +147,19 @@ let listenersAttached = false;
 
 function ensureListeners() {
   if (listenersAttached) return;
-  document.addEventListener("pointermove", onPointerMove, true);
-  document.addEventListener("pointerup", onMouseUp, true);
+  document.addEventListener("mousemove", onMouseMove, true);
+  document.addEventListener("mouseup", onMouseUp, true);
   listenersAttached = true;
 }
 
-export function useTabDrag(onDrop: (draggedId: string, targetId: string, position: TabDropPosition) => boolean) {
+export function useTabDrag(onDrop: (draggedId: string, targetId: string, position: TabDropPosition) => boolean, options: TabDragOptions = {}) {
   ensureListeners();
   onDropCallback = onDrop;
+  onMoveCallback = options.onMove ?? null;
+  onEndCallback = options.onEnd ?? null;
 
-  function startDrag(event: PointerEvent, tabId: string) {
+  function startDrag(event: MouseEvent, tabId: string) {
     if (event.button !== 0) return;
-    // Touch input has no reliable equivalent of mouse jitter: a real finger's
-    // contact point commonly drifts well past TAB_DRAG_HORIZONTAL_THRESHOLD
-    // during an ordinary tap, which would misread the tap as a drag. Skip
-    // arming the drag for touch entirely and let the tab strip's native
-    // horizontal scroll handle the gesture instead.
-    if (event.pointerType === "touch") return;
     const target = event.target as HTMLElement;
     if (target.closest("button, input, [data-tab-title-input]")) return;
     state.suppressClick = false;
@@ -168,8 +185,8 @@ export function useTabDrag(onDrop: (draggedId: string, targetId: string, positio
     state.dropPosition = x < rect.width / 2 ? "before" : "after";
   }
 
-  function clearTarget(tabId: string) {
-    if (state.targetId === tabId) {
+  function clearTarget(tabId?: string) {
+    if (!tabId || state.targetId === tabId) {
       state.targetId = null;
       state.dropPosition = null;
     }

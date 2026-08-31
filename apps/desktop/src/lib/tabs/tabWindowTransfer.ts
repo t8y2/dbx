@@ -10,6 +10,8 @@ export const TAB_WINDOW_TRANSFER_TEXT_PREFIX = "dbx-tab-transfer:";
 export const TAB_WINDOW_TRANSFER_EVENT = "dbx:tab-window-transfer";
 export const TAB_WINDOW_DRAG_PREVIEW_EVENT = "dbx:tab-window-drag-preview";
 export const TAB_NATIVE_DRAG_PREVIEW_RELEASE_EVENT = "dbx:tab-drag-preview-release";
+export const TAB_WINDOW_INFO_REQUEST_EVENT = "dbx:tab-window-info-request";
+export const TAB_WINDOW_INFO_RESPONSE_EVENT = "dbx:tab-window-info-response";
 export const TAB_DRAG_PREVIEW_WINDOW_PREFIX = "dbx-tab-drag-preview-";
 const DETACHED_TAB_QUERY = "dbxTransfer";
 const DETACHED_TAB_WINDOW_SESSION_KEY = "dbx-detached-tab-window";
@@ -17,6 +19,10 @@ const TRANSFER_STORAGE_PREFIX = "dbx-tab-window-transfer:";
 const ACCEPTED_STORAGE_PREFIX = "dbx-tab-window-transfer-accepted:";
 const ACTIVE_TRANSFER_STORAGE_KEY = "dbx-active-tab-window-transfer";
 const ACTIVE_TRANSFER_MAX_AGE_MS = 20_000;
+
+function isTransferableTabWindowLabel(label: string): boolean {
+  return label === "main" || (label.startsWith("dbx-tab-") && !label.startsWith(TAB_DRAG_PREVIEW_WINDOW_PREFIX));
+}
 
 export interface TabWindowTransferPayload {
   transferId: string;
@@ -44,6 +50,12 @@ export interface TabWindowPlacement {
   y: number;
 }
 
+/** 供显式标签转移选择的 DBX 窗口。 */
+export interface TabWindowTarget {
+  label: string;
+  title: string;
+}
+
 export interface NativeTabDragPreviewRelease {
   transferId: string;
   sourceWindowLabel: string;
@@ -51,6 +63,17 @@ export interface NativeTabDragPreviewRelease {
   cursorY: number;
   left: number;
   top: number;
+}
+
+export interface TabWindowInfoRequest {
+  requestId: string;
+  sourceWindowLabel: string;
+}
+
+export interface TabWindowInfoResponse {
+  requestId: string;
+  windowLabel: string;
+  activeTabTitle: string;
 }
 
 function jsonSafeReplacer(_key: string, value: unknown): unknown {
@@ -231,6 +254,26 @@ export async function tabWindowAtCursor(): Promise<string | null> {
   return candidates.filter((candidate): candidate is { label: string; focused: boolean } => !!candidate).sort((a, b) => Number(b.focused) - Number(a.focused))[0]?.label ?? null;
 }
 
+/** 列出其他可接收标签转移的 DBX 窗口。 */
+export async function listOtherTabWindows(): Promise<TabWindowTarget[]> {
+  if (!isTauriRuntime()) return [];
+  const { getAllWindows, getCurrentWindow } = await import("@tauri-apps/api/window");
+  const sourceWindowLabel = getCurrentWindow().label;
+  const windows = await getAllWindows();
+  const targets = await Promise.all(
+    windows
+      .filter((window) => window.label !== sourceWindowLabel && isTransferableTabWindowLabel(window.label))
+      .map(async (window) => {
+        try {
+          return { label: window.label, title: await window.title() };
+        } catch {
+          return null;
+        }
+      }),
+  );
+  return targets.filter((target): target is TabWindowTarget => !!target).sort((left, right) => left.label.localeCompare(right.label));
+}
+
 export async function sendTabWindowTransfer(targetWindowLabel: string, payload: TabWindowTransferPayload): Promise<boolean> {
   if (!isTauriRuntime()) return false;
   try {
@@ -242,10 +285,44 @@ export async function sendTabWindowTransfer(targetWindowLabel: string, payload: 
   }
 }
 
+export async function requestTabWindowInfo(targetWindowLabel: string, payload: TabWindowInfoRequest): Promise<boolean> {
+  if (!isTauriRuntime()) return false;
+  try {
+    const { emitTo } = await import("@tauri-apps/api/event");
+    await emitTo({ kind: "WebviewWindow", label: targetWindowLabel }, TAB_WINDOW_INFO_REQUEST_EVENT, payload);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function sendTabWindowInfoResponse(targetWindowLabel: string, payload: TabWindowInfoResponse): Promise<boolean> {
+  if (!isTauriRuntime()) return false;
+  try {
+    const { emitTo } = await import("@tauri-apps/api/event");
+    await emitTo({ kind: "WebviewWindow", label: targetWindowLabel }, TAB_WINDOW_INFO_RESPONSE_EVENT, payload);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function listenForTabWindowTransfer(handler: (payload: TabWindowTransferPayload) => void): Promise<() => void> {
   if (!isTauriRuntime()) return () => {};
   const { listen } = await import("@tauri-apps/api/event");
   return listen<TabWindowTransferPayload>(TAB_WINDOW_TRANSFER_EVENT, (event) => handler(event.payload));
+}
+
+export async function listenForTabWindowInfoRequest(handler: (payload: TabWindowInfoRequest) => void): Promise<() => void> {
+  if (!isTauriRuntime()) return () => {};
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<TabWindowInfoRequest>(TAB_WINDOW_INFO_REQUEST_EVENT, (event) => handler(event.payload));
+}
+
+export async function listenForTabWindowInfoResponse(handler: (payload: TabWindowInfoResponse) => void): Promise<() => void> {
+  if (!isTauriRuntime()) return () => {};
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<TabWindowInfoResponse>(TAB_WINDOW_INFO_RESPONSE_EVENT, (event) => handler(event.payload));
 }
 
 export async function emitTabWindowDragPreview(payload: TabWindowDragPreviewPayload): Promise<void> {

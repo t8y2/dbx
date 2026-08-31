@@ -505,6 +505,14 @@ describe("normalizeEditorSettings - tabLayout", () => {
   });
 });
 
+describe("normalizeEditorSettings - crossWindowTabDragPreviewEnabled", () => {
+  it("defaults to enabled and only accepts booleans", () => {
+    expect(normalizeEditorSettings({}).crossWindowTabDragPreviewEnabled).toBe(true);
+    expect(normalizeEditorSettings({ crossWindowTabDragPreviewEnabled: false }).crossWindowTabDragPreviewEnabled).toBe(false);
+    expect(normalizeEditorSettings({ crossWindowTabDragPreviewEnabled: "false" } as any).crossWindowTabDragPreviewEnabled).toBe(true);
+  });
+});
+
 // --- Helpers for Pinia store tests ---
 
 function makeTestConfig(overrides: Partial<AiConfigItem> & { id: string }): AiConfigItem {

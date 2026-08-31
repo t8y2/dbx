@@ -542,6 +542,7 @@ export interface EditorSettings {
   appCloseUnsavedTabsMode: AppCloseUnsavedTabsMode;
   savedSqlOpenTargetMode: SavedSqlOpenTargetMode;
   compactTabTitle: boolean;
+  crossWindowTabDragPreviewEnabled: boolean;
   tabLayout: TabLayoutMode;
   appLayout: "separated" | "classic";
   pageSize: number;
@@ -753,6 +754,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   appCloseUnsavedTabsMode: "keep-drafts",
   savedSqlOpenTargetMode: "saved",
   compactTabTitle: false,
+  crossWindowTabDragPreviewEnabled: true,
   tabLayout: "scroll",
   appLayout: "classic",
   pageSize: 100,
@@ -1128,6 +1130,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     appCloseUnsavedTabsMode: normalizeAppCloseUnsavedTabsMode(settings.appCloseUnsavedTabsMode),
     savedSqlOpenTargetMode: settings.savedSqlOpenTargetMode === "current" ? "current" : DEFAULT_EDITOR_SETTINGS.savedSqlOpenTargetMode,
     compactTabTitle: settings.compactTabTitle ?? DEFAULT_EDITOR_SETTINGS.compactTabTitle,
+    crossWindowTabDragPreviewEnabled: typeof settings.crossWindowTabDragPreviewEnabled === "boolean" ? settings.crossWindowTabDragPreviewEnabled : DEFAULT_EDITOR_SETTINGS.crossWindowTabDragPreviewEnabled,
     tabLayout: normalizeTabLayout(settings.tabLayout),
     appLayout: settings.appLayout ?? DEFAULT_EDITOR_SETTINGS.appLayout,
     pageSize: normalizeResultPageSize(settings.pageSize),
@@ -1734,6 +1737,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.appCloseUnsavedTabsMode !== undefined) editorSettings.value.appCloseUnsavedTabsMode = normalizeAppCloseUnsavedTabsMode(partial.appCloseUnsavedTabsMode);
     if (partial.savedSqlOpenTargetMode !== undefined) editorSettings.value.savedSqlOpenTargetMode = partial.savedSqlOpenTargetMode === "current" ? "current" : "saved";
     if (partial.compactTabTitle !== undefined) editorSettings.value.compactTabTitle = partial.compactTabTitle;
+    if (partial.crossWindowTabDragPreviewEnabled !== undefined) editorSettings.value.crossWindowTabDragPreviewEnabled = partial.crossWindowTabDragPreviewEnabled === true;
     if (partial.tabLayout !== undefined) editorSettings.value.tabLayout = normalizeTabLayout(partial.tabLayout);
     if (partial.appLayout !== undefined) editorSettings.value.appLayout = partial.appLayout;
     if (partial.pageSize !== undefined) editorSettings.value.pageSize = normalizeResultPageSize(partial.pageSize);

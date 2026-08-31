@@ -344,6 +344,7 @@ const editConfirmUnsavedSqlClose = ref(settingsStore.editorSettings.confirmUnsav
 const editAppCloseUnsavedTabsMode = ref<AppCloseUnsavedTabsMode>(settingsStore.editorSettings.appCloseUnsavedTabsMode);
 const editSavedSqlOpenTargetMode = ref<SavedSqlOpenTargetMode>(settingsStore.editorSettings.savedSqlOpenTargetMode);
 const editAppLayout = ref(settingsStore.editorSettings.appLayout);
+const editCrossWindowTabDragPreviewEnabled = ref(settingsStore.editorSettings.crossWindowTabDragPreviewEnabled);
 const editTabLayout = ref(settingsStore.editorSettings.tabLayout);
 const editShowTrayIcon = ref(settingsStore.desktopSettings.show_tray_icon);
 const editQuitOnClose = ref(settingsStore.desktopSettings.quit_on_close);
@@ -547,6 +548,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     appCloseUnsavedTabsMode: editAppCloseUnsavedTabsMode.value,
     savedSqlOpenTargetMode: editSavedSqlOpenTargetMode.value,
     appLayout: editAppLayout.value,
+    crossWindowTabDragPreviewEnabled: editCrossWindowTabDragPreviewEnabled.value,
     tabLayout: editTabLayout.value,
     showColumnCommentsInHeader: editShowColumnCommentsInHeader.value,
     showColumnTypesInHeader: editShowColumnTypesInHeader.value,
@@ -837,6 +839,7 @@ function syncEditorSettingsDraftFromStore() {
   editAppCloseUnsavedTabsMode.value = settingsStore.editorSettings.appCloseUnsavedTabsMode;
   editSavedSqlOpenTargetMode.value = settingsStore.editorSettings.savedSqlOpenTargetMode;
   editAppLayout.value = settingsStore.editorSettings.appLayout;
+  editCrossWindowTabDragPreviewEnabled.value = settingsStore.editorSettings.crossWindowTabDragPreviewEnabled;
   editTabLayout.value = settingsStore.editorSettings.tabLayout;
   editShowColumnCommentsInHeader.value = settingsStore.editorSettings.showColumnCommentsInHeader;
   editShowColumnTypesInHeader.value = settingsStore.editorSettings.showColumnTypesInHeader;
@@ -1104,6 +1107,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editCustomThemes.value = [...DEFAULT_EDITOR_SETTINGS.customThemes];
     editActiveCustomThemeId.value = DEFAULT_EDITOR_SETTINGS.activeCustomThemeId;
     editAppLayout.value = DEFAULT_EDITOR_SETTINGS.appLayout;
+    editCrossWindowTabDragPreviewEnabled.value = DEFAULT_EDITOR_SETTINGS.crossWindowTabDragPreviewEnabled;
     editTabLayout.value = DEFAULT_EDITOR_SETTINGS.tabLayout;
     editShowTrayIcon.value = DEFAULT_DESKTOP_SETTINGS.show_tray_icon;
     editQuitOnClose.value = DEFAULT_DESKTOP_SETTINGS.quit_on_close;
@@ -4649,6 +4653,16 @@ onUnmounted(() => {
                     </div>
                   </Button>
                 </div>
+              </div>
+
+              <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="space-y-1">
+                  <Label for="editor-cross-window-tab-drag-preview">{{ t("settings.crossWindowTabDragPreview") }}</Label>
+                  <p class="text-xs text-muted-foreground">
+                    {{ t("settings.crossWindowTabDragPreviewDescription") }}
+                  </p>
+                </div>
+                <Switch id="editor-cross-window-tab-drag-preview" v-model="editCrossWindowTabDragPreviewEnabled" class="mt-0.5" />
               </div>
 
               <!-- <div v-if="!isWeb" class="space-y-2"> -->

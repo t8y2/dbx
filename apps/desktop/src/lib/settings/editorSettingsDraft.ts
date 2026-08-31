@@ -31,6 +31,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "appCloseUnsavedTabsMode",
   "savedSqlOpenTargetMode",
   "appLayout",
+  "crossWindowTabDragPreviewEnabled",
   "tabLayout",
   "showColumnCommentsInHeader",
   "showColumnTypesInHeader",

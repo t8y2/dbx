@@ -2,7 +2,7 @@
 import { computed, ref, watch, nextTick, onMounted, onUnmounted } from "vue";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { X, Pin, ChevronDown, Search, Table2, Code2, TableProperties, PencilRuler, KeyRound, Pencil, Package, Lock, Copy, AlertTriangle, Network, Minimize2, Maximize2, Settings, CalendarClock, Activity, Gauge, ShieldCheck, Database, GitBranch, Crosshair } from "@lucide/vue";
+import { X, Pin, ChevronDown, Search, Table2, Code2, TableProperties, PencilRuler, KeyRound, Pencil, Package, Lock, Copy, AlertTriangle, Network, Minimize2, Maximize2, Settings, CalendarClock, Activity, Gauge, ShieldCheck, Database, GitBranch, Crosshair, ExternalLink } from "@lucide/vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -19,6 +19,7 @@ import { useTabDrag } from "@/composables/useTabDrag";
 import { connectionColor, isConnectionReadonly, tabDisplayTitle, tabTooltipLines } from "@/lib/tabs/tabPresentation";
 import { hexToRgba } from "@/lib/common/color";
 import { copyToClipboard } from "@/lib/common/clipboard";
+import { uuid } from "@/lib/common/utils";
 import { useToast } from "@/composables/useToast";
 import { activeTabSidebarTarget } from "@/lib/sidebar/sidebarActiveTabTarget";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
@@ -30,6 +31,9 @@ import {
   createDetachedTabWindow,
   createTabWindowTransfer,
   currentTabWindowLabel,
+  listOtherTabWindows,
+  listenForTabWindowInfoRequest,
+  listenForTabWindowInfoResponse,
   emitTabWindowDragPreview,
   markTabWindowTransferAccepted,
   storeDetachedTabTransfer,
@@ -38,10 +42,15 @@ import {
   listenForNativeTabDragPreviewRelease,
   listenForTabWindowTransfer,
   sendTabWindowTransfer,
+  requestTabWindowInfo,
+  sendTabWindowInfoResponse,
   tabWindowAtCursor,
   waitForTabWindowTransferAccepted,
   type TabWindowPlacement,
   type TabWindowDragPreviewPayload,
+  type TabWindowInfoRequest,
+  type TabWindowInfoResponse,
+  type TabWindowTarget,
   type NativeTabDragPreviewRelease,
   type TabWindowTransferPayload,
 } from "@/lib/tabs/tabWindowTransfer";
@@ -88,13 +97,18 @@ const tabDrag = useTabDrag(
 // keeps early drags from mistaking two newly opened windows for the same one.
 const currentWindowLabel = ref(`dbx-webview-${Math.random().toString(36).slice(2)}`);
 const nativeTabDrag = ref<{ payload: TabWindowTransferPayload } | null>(null);
+const otherTabWindows = ref<TabWindowTarget[]>([]);
 const nativeTabDragPreviewActive = ref(false);
 let nativeTabDragPreviewTransferId: string | null = null;
 let removeTabWindowTransferListener: (() => void) | null = null;
+let removeTabWindowInfoRequestListener: (() => void) | null = null;
+let removeTabWindowInfoResponseListener: (() => void) | null = null;
 let removeTabWindowDragPreviewListener: (() => void) | null = null;
 let removeNativeTabDragPreviewReleaseListener: (() => void) | null = null;
 let tabWindowTransferListenerUnmounted = false;
+let tabWindowInfoListenerUnmounted = false;
 let tabWindowDragPreviewListenerUnmounted = false;
+const pendingTabWindowInfoRequests = new Map<string, { targetWindowLabel: string; resolve: (title: string | null) => void; timer: number }>();
 
 const remoteTabWindowPreview = ref<{ transferId: string; title: string; sequence: number; rect: ReturnType<typeof tabDragPreviewRect> } | null>(null);
 const remoteTabWindowPreviewSequences = new Map<string, number>();
@@ -140,6 +154,7 @@ const editingTabId = ref<string | null>(null);
 const editingTitle = ref("");
 const isClassicLayout = computed(() => settingsStore.editorSettings.appLayout === "classic");
 const isWrapLayout = computed(() => settingsStore.editorSettings.tabLayout === "wrap");
+const crossWindowTabDragPreviewEnabled = computed(() => settingsStore.editorSettings.crossWindowTabDragPreviewEnabled);
 const fixedTabs = computed(() => queryStore.tabs.filter((tab) => tab.pinned));
 const regularTabs = computed(() => queryStore.tabs.filter((tab) => !tab.pinned));
 const hasFixedTabs = computed(() => fixedTabs.value.length > 0);
@@ -190,6 +205,7 @@ function scheduleCloseConfirmListClose() {
 
 onUnmounted(() => {
   tabWindowTransferListenerUnmounted = true;
+  tabWindowInfoListenerUnmounted = true;
   tabWindowDragPreviewListenerUnmounted = true;
   const activeTransferId = nativeTabDrag.value?.payload.transferId;
   nativeTabDrag.value = null;
@@ -198,6 +214,15 @@ onUnmounted(() => {
   if (activeTransferId) void invoke("stop_tab_drag_preview", { transferId: activeTransferId }).catch(() => undefined);
   removeTabWindowTransferListener?.();
   removeTabWindowTransferListener = null;
+  removeTabWindowInfoRequestListener?.();
+  removeTabWindowInfoRequestListener = null;
+  removeTabWindowInfoResponseListener?.();
+  removeTabWindowInfoResponseListener = null;
+  for (const request of pendingTabWindowInfoRequests.values()) {
+    window.clearTimeout(request.timer);
+    request.resolve(null);
+  }
+  pendingTabWindowInfoRequests.clear();
   removeTabWindowDragPreviewListener?.();
   removeTabWindowDragPreviewListener = null;
   removeNativeTabDragPreviewReleaseListener?.();
@@ -212,16 +237,30 @@ onUnmounted(() => {
 
 onMounted(() => {
   tabWindowTransferListenerUnmounted = false;
+  tabWindowInfoListenerUnmounted = false;
   tabWindowDragPreviewListenerUnmounted = false;
   void currentTabWindowLabel().then((label) => {
     currentWindowLabel.value = label;
   });
+  void refreshOtherTabWindows();
   void listenForTabWindowTransfer(handleIncomingTabWindowTransfer)
     .then((unlisten) => {
       if (tabWindowTransferListenerUnmounted) unlisten();
       else removeTabWindowTransferListener = unlisten;
     })
     .catch((error) => console.warn("[DBX][tab-window-transfer:listen:error]", error));
+  void listenForTabWindowInfoRequest(handleIncomingTabWindowInfoRequest)
+    .then((unlisten) => {
+      if (tabWindowInfoListenerUnmounted) unlisten();
+      else removeTabWindowInfoRequestListener = unlisten;
+    })
+    .catch((error) => console.warn("[DBX][tab-window-info-request:listen:error]", error));
+  void listenForTabWindowInfoResponse(handleIncomingTabWindowInfoResponse)
+    .then((unlisten) => {
+      if (tabWindowInfoListenerUnmounted) unlisten();
+      else removeTabWindowInfoResponseListener = unlisten;
+    })
+    .catch((error) => console.warn("[DBX][tab-window-info-response:listen:error]", error));
   void listenForTabWindowDragPreview(handleIncomingTabWindowDragPreview)
     .then((unlisten) => {
       if (tabWindowDragPreviewListenerUnmounted) unlisten();
@@ -432,6 +471,21 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
       action: () => queryStore.duplicateTab(tab.id),
       icon: Copy,
       visible: canRenameTab(tab),
+    },
+    {
+      label: t("contextMenu.openTabInNewWindow"),
+      action: () => void openTabInNewWindow(tab),
+      icon: ExternalLink,
+      visible: isTauriRuntime(),
+    },
+    {
+      label: t("contextMenu.moveTabToAnotherWindow"),
+      icon: ExternalLink,
+      visible: otherTabWindows.value.length > 0,
+      children: otherTabWindows.value.map((window) => ({
+        label: tabWindowTargetLabel(window),
+        action: () => void moveTabToWindow(tab, window.label),
+      })),
     },
     {
       label: t("contextMenu.copyName"),
@@ -895,6 +949,7 @@ async function handleNativeTabDragPreviewRelease(release: NativeTabDragPreviewRe
 }
 
 function handleTabPointerMove(tabId: string, event: MouseEvent) {
+  if (!crossWindowTabDragPreviewEnabled.value) return;
   if (!isPointerOutsideTabBar(event)) return;
   const tab = queryStore.tabs.find((item) => item.id === tabId);
   if (!tab) return;
@@ -978,6 +1033,28 @@ function handleIncomingTabWindowTransfer(payload: TabWindowTransferPayload) {
   void acceptTabWindowTransfer(payload);
 }
 
+function activeTabWindowTitle(): string {
+  const activeTab = queryStore.tabs.find((tab) => tab.id === queryStore.activeTabId);
+  return activeTab ? tabTitleText(activeTab) : "";
+}
+
+function handleIncomingTabWindowInfoRequest(payload: TabWindowInfoRequest) {
+  if (payload.sourceWindowLabel === currentWindowLabel.value) return;
+  void sendTabWindowInfoResponse(payload.sourceWindowLabel, {
+    requestId: payload.requestId,
+    windowLabel: currentWindowLabel.value,
+    activeTabTitle: activeTabWindowTitle(),
+  });
+}
+
+function handleIncomingTabWindowInfoResponse(payload: TabWindowInfoResponse) {
+  const pending = pendingTabWindowInfoRequests.get(payload.requestId);
+  if (!pending || pending.targetWindowLabel !== payload.windowLabel) return;
+  pendingTabWindowInfoRequests.delete(payload.requestId);
+  window.clearTimeout(pending.timer);
+  pending.resolve(payload.activeTabTitle || null);
+}
+
 async function finishTabWindowTransfer(payload: TabWindowTransferPayload, placement?: TabWindowPlacement, knownTargetWindowLabel?: string | null, dropCursorPhysical?: { x: number; y: number }) {
   // Resolve the destination from the OS cursor after pointer capture releases.
   // This keeps the move path independent from WebView2 HTML5 drag delivery.
@@ -1003,6 +1080,66 @@ async function finishTabWindowTransfer(payload: TabWindowTransferPayload, placem
 
   const created = await createDetachedTabWindow(payload, placement);
   if (created) queryStore.detachTabForTransfer(payload.tab.id);
+}
+
+async function openTabInNewWindow(tab: QueryTab) {
+  if (!isTauriRuntime()) return;
+  const payload = createTabWindowTransfer(tab, currentWindowLabel.value);
+  const created = await createDetachedTabWindow(payload);
+  if (created) queryStore.detachTabForTransfer(tab.id);
+}
+
+function tabWindowTargetLabel(window: TabWindowTarget): string {
+  const detachedWindowIndex = otherTabWindows.value.filter((target) => target.label !== "main").findIndex((target) => target.label === window.label) + 1;
+  const windowName = window.label === "main" ? t("contextMenu.mainWindow") : t("contextMenu.detachedWindow", { number: detachedWindowIndex });
+  return window.title && window.title !== "DBX" ? `${windowName} · ${window.title}` : windowName;
+}
+
+async function refreshOtherTabWindows() {
+  const windows = await listOtherTabWindows().catch(() => []);
+  otherTabWindows.value = await Promise.all(
+    windows.map(async (window) => ({
+      ...window,
+      title: (await requestOtherTabWindowTitle(window.label)) ?? window.title,
+    })),
+  );
+}
+
+async function requestOtherTabWindowTitle(targetWindowLabel: string): Promise<string | null> {
+  const requestId = uuid();
+  return new Promise((resolve) => {
+    const timer = window.setTimeout(() => {
+      const pending = pendingTabWindowInfoRequests.get(requestId);
+      if (!pending) return;
+      pendingTabWindowInfoRequests.delete(requestId);
+      resolve(null);
+    }, 300);
+    pendingTabWindowInfoRequests.set(requestId, { targetWindowLabel, resolve, timer });
+    void requestTabWindowInfo(targetWindowLabel, { requestId, sourceWindowLabel: currentWindowLabel.value }).then((sent) => {
+      if (sent) return;
+      const pending = pendingTabWindowInfoRequests.get(requestId);
+      if (!pending) return;
+      pendingTabWindowInfoRequests.delete(requestId);
+      window.clearTimeout(timer);
+      resolve(null);
+    });
+  });
+}
+
+async function openTabContextMenu(event: MouseEvent, onContextMenu: (event: MouseEvent, items?: ContextMenuItem[]) => void, tab: QueryTab) {
+  event.preventDefault();
+  event.stopPropagation();
+  await refreshOtherTabWindows();
+  onContextMenu(event, getTabMenuItems(tab));
+}
+
+async function moveTabToWindow(tab: QueryTab, targetWindowLabel: string) {
+  const payload = createTabWindowTransfer(tab, currentWindowLabel.value);
+  const delivered = await sendTabWindowTransfer(targetWindowLabel, payload);
+  if (delivered && (await waitForTabWindowTransferAccepted(payload.transferId))) {
+    queryStore.detachTabForTransfer(tab.id);
+  }
+  clearTabWindowTransfer(payload.transferId);
 }
 
 function handleTabDragTarget(event: MouseEvent, tab: QueryTab) {
@@ -1114,7 +1251,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
           @wheel="onTabsWheel"
         >
           <CustomContextMenu v-for="tab in regularTabs" :key="tab.id" :items="getTabMenuItems(tab)" v-slot="{ onContextMenu }">
-            <div :class="isClassicLayout ? 'h-full' : ''" @contextmenu="onContextMenu">
+            <div :class="isClassicLayout ? 'h-full' : ''" @contextmenu="openTabContextMenu($event, onContextMenu, tab)">
               <Tooltip>
                 <TooltipTrigger as-child>
                   <div
@@ -1277,7 +1414,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                   role="menuitem"
                   tabindex="0"
                   @click="activateTabFromOverflow(tab.id, 'regular')"
-                  @contextmenu="onContextMenu"
+                  @contextmenu="openTabContextMenu($event, onContextMenu, tab)"
                   @keydown="onOverflowItemKeydown($event, tab.id, 'regular')"
                 >
                   <TabExecutionStatus :tab="tab">
@@ -1325,7 +1462,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
           @wheel="onFixedTabsWheel"
         >
           <CustomContextMenu v-for="tab in fixedTabs" :key="tab.id" :items="getTabMenuItems(tab)" v-slot="{ onContextMenu }">
-            <div :class="isClassicLayout ? 'h-full' : ''" @contextmenu="onContextMenu">
+            <div :class="isClassicLayout ? 'h-full' : ''" @contextmenu="openTabContextMenu($event, onContextMenu, tab)">
               <Tooltip>
                 <TooltipTrigger as-child>
                   <div
@@ -1434,7 +1571,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                   role="menuitem"
                   tabindex="0"
                   @click="activateTabFromOverflow(tab.id, 'fixed')"
-                  @contextmenu="onContextMenu"
+                  @contextmenu="openTabContextMenu($event, onContextMenu, tab)"
                   @keydown="onOverflowItemKeydown($event, tab.id, 'fixed')"
                 >
                   <TabExecutionStatus :tab="tab">

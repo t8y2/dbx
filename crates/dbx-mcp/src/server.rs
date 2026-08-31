@@ -256,7 +256,7 @@ pub struct ExecuteBatchQueryRequest {
     #[schemars(extend("type" = "boolean"))]
     pub continue_on_error: Option<bool>,
     #[schemars(
-        description = "When true and the script has more than one statement, all statements run inside one transaction (BEGIN … COMMIT) so the whole batch succeeds or rolls back, and the call returns a single merged result. For a single-statement script the option is ignored and the statement runs as normal auto-commit. Not supported by all drivers (SQL Server, Turso, CloudflareD1 ignore it). Cannot be combined with session_id. Default is auto-commit for each statement."
+        description = "When true and the script has more than one statement, all statements run inside one transaction (BEGIN … COMMIT) so the whole batch succeeds or rolls back, and the call returns a single merged result. For a single-statement script the option is ignored and the statement runs as normal auto-commit. Not supported by all drivers (SQL Server, Turso, CloudflareD1 ignore it). Cannot be combined with session_id or continue_on_error. Rejected for MySQL-family DDL scripts because DDL implicitly commits and cannot be rolled back. Default is auto-commit for each statement."
     )]
     #[schemars(extend("type" = "boolean"))]
     pub use_transaction: Option<bool>,
@@ -600,7 +600,7 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_execute_batch",
-        description = "Execute a SQL script containing multiple statements in one call and return a result per statement. Statements are split with a database-dialect-aware parser, so semicolons inside strings, comments and stored procedures are handled. Stops at the first failing statement unless continue_on_error is true. Pass session_id (from dbx_open_session) when statements must share one connection (e.g. temporary tables, USE/SET). When use_transaction is true and the script has multiple statements, the whole script runs in one transaction and the call returns a single merged result instead of one result per statement (single-statement scripts run normally and return that one result); use_transaction cannot be combined with session_id or continue_on_error."
+        description = "Execute a SQL script containing multiple statements in one call and return a result per statement. Statements are split with a database-dialect-aware parser, so semicolons inside strings, comments and stored procedures are handled. Stops at the first failing statement unless continue_on_error is true. Pass session_id (from dbx_open_session) when statements must share one connection (e.g. temporary tables, USE/SET). When use_transaction is true and the script has multiple statements, the whole script runs in one transaction and the call returns a single merged result instead of one result per statement (single-statement scripts run normally and return that one result); use_transaction cannot be combined with session_id or continue_on_error, and is rejected for MySQL-family DDL scripts (DDL implicitly commits and cannot be rolled back)."
     )]
     async fn execute_batch(&self, Parameters(request): Parameters<ExecuteBatchQueryRequest>) -> CallToolResult {
         let resolved = match self.resolve_connection(&request.selector).await {
@@ -678,6 +678,24 @@ impl DbxMcpServer {
             return tool_error(
                 "TRANSACTION_WITH_CONTINUE_UNSUPPORTED",
                 "use_transaction cannot be combined with continue_on_error: a transactional batch stops and rolls back at the first failure, so continue_on_error would be ignored. Run the batch either without use_transaction (auto-commit, one result per statement, may continue on error) or without continue_on_error.",
+            );
+        }
+        // MySQL-family engines implicitly commit before DDL statements, so the
+        // transaction wrapper cannot roll back a DDL that already committed
+        // (e.g. "CREATE TABLE a; INSERT INTO missing" leaves the table behind
+        // after the failed INSERT rolls back). A DDL script would therefore
+        // over-promise atomicity — reject use_transaction for it instead.
+        let mysql_family = matches!(
+            connection.db_type,
+            DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch
+        );
+        if request.use_transaction == Some(true)
+            && mysql_family
+            && matches!(classify_sql_risk_for_database(sql, connection.db_type), Ok(SqlRisk::Ddl))
+        {
+            return tool_error(
+                "TRANSACTION_WITH_DDL_UNSUPPORTED",
+                "use_transaction cannot be used with a MySQL-family DDL script: DDL statements implicitly commit and cannot be rolled back, so the batch would not be atomic. Run the batch without use_transaction (auto-commit, one result per statement) or split the DDL and DML into separate calls.",
             );
         }
         // Classify the whole script as a unit so a single write/DDL statement in
@@ -2054,6 +2072,7 @@ mod tests {
         closed_sessions: std::sync::Mutex<Vec<String>>,
         pinned_sessions: std::sync::Mutex<HashSet<String>>,
         close_failures_remaining: std::sync::Mutex<usize>,
+        policy: McpGlobalPolicy,
     }
 
     impl Default for FakeBackend {
@@ -2065,6 +2084,7 @@ mod tests {
                 closed_sessions: std::sync::Mutex::new(Vec::new()),
                 pinned_sessions: std::sync::Mutex::new(HashSet::new()),
                 close_failures_remaining: std::sync::Mutex::new(0),
+                policy: McpGlobalPolicy::default(),
             }
         }
     }
@@ -3098,8 +3118,15 @@ mod tests {
             let recorded = backend.recorded_arguments.lock().unwrap();
             let (_, arguments) = recorded.iter().find(|(name, _)| name == "execute_batch").unwrap();
             assert_eq!(arguments["continue_on_error"], true);
-            assert!(arguments["use_transaction"].is_null(), "use_transaction must be forwarded as null, got: {}", arguments["use_transaction"]);
-            arguments["client_session_id"].as_str().expect("auto-commit batch must use an ephemeral session").to_string()
+            assert!(
+                arguments["use_transaction"].is_null(),
+                "use_transaction must be forwarded as null, got: {}",
+                arguments["use_transaction"]
+            );
+            arguments["client_session_id"]
+                .as_str()
+                .expect("auto-commit batch must use an ephemeral session")
+                .to_string()
         };
         assert!(ephemeral_session_id.starts_with("mcp-batch-"));
         assert_eq!(backend.closed_sessions.lock().unwrap().as_slice(), [ephemeral_session_id]);
@@ -3245,6 +3272,63 @@ mod tests {
             .await;
         assert!(result_text(&result).contains("TRANSACTION_WITH_CONTINUE_UNSUPPORTED"));
         assert!(backend.recorded_arguments.lock().unwrap().iter().all(|(name, _)| name != "execute_batch"));
+    }
+
+    #[tokio::test]
+    async fn execute_batch_rejects_mysql_ddl_with_transaction() {
+        // MySQL-family engines implicitly commit before DDL, so a DDL batch
+        // with use_transaction cannot roll back a DDL that already committed.
+        // Reject the combination instead of over-promising atomicity. Plain
+        // DML batches and transactional DDL engines (PostgreSQL) still accept
+        // use_transaction.
+        let mysql = connection("my", "my", "mysql", "app");
+        let backend = Arc::new(FakeBackend { connections: vec![mysql], ..Default::default() });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+
+        let ddl = server
+            .execute_batch(Parameters(ExecuteBatchQueryRequest {
+                selector: selector("my"),
+                database: None,
+                sql: "CREATE TABLE a (id INT); INSERT INTO missing VALUES (1)".to_string(),
+                session_id: None,
+                continue_on_error: None,
+                use_transaction: Some(true),
+            }))
+            .await;
+        assert!(result_text(&ddl).contains("TRANSACTION_WITH_DDL_UNSUPPORTED"));
+        assert!(backend.recorded_arguments.lock().unwrap().iter().all(|(name, _)| name != "execute_batch"));
+
+        let dml = server
+            .execute_batch(Parameters(ExecuteBatchQueryRequest {
+                selector: selector("my"),
+                database: None,
+                sql: "INSERT INTO t VALUES (1); INSERT INTO t VALUES (2)".to_string(),
+                session_id: None,
+                continue_on_error: None,
+                use_transaction: Some(true),
+            }))
+            .await;
+        assert!(result_text(&dml).contains("Transaction outcome"));
+        assert!(backend.recorded_arguments.lock().unwrap().iter().any(|(name, _)| name == "execute_batch"));
+
+        let postgres = connection("pg", "pg", "postgres", "app");
+        let postgres_backend = Arc::new(FakeBackend {
+            connections: vec![postgres],
+            policy: McpGlobalPolicy { read_only: false, allow_dangerous_sql: true, ..Default::default() },
+            ..Default::default()
+        });
+        let postgres_server = DbxMcpServer::with_runtime_options(postgres_backend.clone(), McpScope::default(), false);
+        let pg_ddl = postgres_server
+            .execute_batch(Parameters(ExecuteBatchQueryRequest {
+                selector: selector("pg"),
+                database: None,
+                sql: "CREATE TABLE a (id INT); INSERT INTO t VALUES (1)".to_string(),
+                session_id: None,
+                continue_on_error: None,
+                use_transaction: Some(true),
+            }))
+            .await;
+        assert!(result_text(&pg_ddl).contains("Transaction outcome"));
     }
 
     #[tokio::test]

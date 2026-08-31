@@ -1,4 +1,4 @@
-import { computed, ref, type Ref } from "vue";
+import { computed, nextTick, ref, type Ref } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { clearDataGridPendingSnapshot, DATA_GRID_QUICK_ENTRY_DRAFT_ROW_ID, useDataGridEditor } from "@/composables/useDataGridEditor";
 import type { CellValue } from "@/lib/dataGrid/cellValue";
@@ -513,6 +513,69 @@ describe("useDataGridEditor appendPastedRowsToNewRow", () => {
     editor.cloneRow(-1, new Map([[1, "full payload"]]));
 
     expect(editor.newRows.value[1]).toEqual(["Ada", "full payload", "Lovelace"]);
+  });
+
+  it("places a cloned source row below its source row", () => {
+    const editor = createEditor(undefined, true, undefined, undefined, [
+      ["Ada", null, "Lovelace"],
+      ["Grace", null, "Hopper"],
+    ]);
+    editor.newRows.value = [];
+    editor.newRowMeta.value = [];
+
+    editor.cloneRow(1);
+
+    expect(editor.newRowMeta.value[0]?.placement).toEqual({ anchorId: 1, position: "below" });
+  });
+
+  it("keeps the scroll position when the cloned row anchors below its source row", async () => {
+    class ScrollerStub {
+      scrollTop = 0;
+      scrollHeight = 4_000;
+    }
+    vi.stubGlobal("HTMLElement", ScrollerStub);
+    const editor = createEditor(undefined, true, undefined, undefined, [
+      ["Ada", null, "Lovelace"],
+      ["Grace", null, "Hopper"],
+    ]);
+    editor.newRows.value = [];
+    editor.newRowMeta.value = [];
+    const scroller = new ScrollerStub();
+    editor.scrollerRef.value = scroller as unknown as NonNullable<typeof editor.scrollerRef.value>;
+
+    editor.cloneRow(1);
+    await nextTick();
+    vi.unstubAllGlobals();
+
+    expect(editor.newRowMeta.value[0]?.placement).toEqual({ anchorId: 1, position: "below" });
+    expect(scroller.scrollTop).toBe(0);
+  });
+
+  it("places a cloned pending row below the pending source row", () => {
+    const editor = createEditor();
+    editor.newRows.value = [];
+    editor.newRowMeta.value = [];
+    editor.addRows(1);
+
+    editor.cloneRow(-1);
+
+    expect(editor.newRowMeta.value[1]?.placement).toEqual({ anchorId: -1, position: "below" });
+  });
+
+  it("places each multi-row clone below its corresponding source row", () => {
+    const editor = createEditor(undefined, true, undefined, undefined, [
+      ["Ada", null, "Lovelace"],
+      ["Grace", null, "Hopper"],
+    ]);
+    editor.newRows.value = [];
+    editor.newRowMeta.value = [];
+
+    editor.cloneRows([1, 0]);
+
+    expect(editor.newRowMeta.value.map((meta) => meta.placement)).toEqual([
+      { anchorId: 1, position: "below" },
+      { anchorId: 0, position: "below" },
+    ]);
   });
 });
 

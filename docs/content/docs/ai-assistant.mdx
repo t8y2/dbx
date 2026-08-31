@@ -24,7 +24,7 @@ DBX includes presets for:
 - Anthropic Compatible
 - Custom
 
-Compatible and custom configurations can set the endpoint, model, API style, authentication method, proxy, and context window. API styles include OpenAI-style completions, the Responses API, and Anthropic Messages. When supported, DBX discovers models and filters out endpoints that are not suitable for assistant or Agent use.
+Compatible and custom configurations can set the endpoint, model, API style, authentication method, proxy, context window, and extra HTTP headers. API styles include OpenAI-style completions, the Responses API, and Anthropic Messages. When supported, DBX discovers models and filters out endpoints that are not suitable for assistant or Agent use.
 
 ### Local CLI Agents
 
@@ -54,7 +54,7 @@ You can configure the executable path and additional environment variables. CLI 
   <Step>
     ### Configure Authentication and Reasoning
 
-    API modes accept an API key, auth method, endpoint, and proxy. Supported models expose effort, reasoning, or thinking controls based on provider capabilities rather than one universal setting.
+    API modes accept an API key, auth method, endpoint, proxy, and custom HTTP headers. Use headers for gateway authentication or tenant routing, for example `X-GoModel-User-Path: /dbx-assistant`; they are sent for model discovery, connection tests, chat, and Agent requests. Supported models expose effort, reasoning, or thinking controls based on provider capabilities rather than one universal setting.
 
   </Step>
   <Step>
@@ -65,7 +65,7 @@ You can configure the executable path and additional environment variables. CLI 
   </Step>
 </Steps>
 
-API keys, CLI environment variables, and custom endpoints may be sensitive. Do not share configuration screenshots, exports, or debug logs with untrusted parties.
+API keys, custom header values, CLI environment variables, and custom endpoints may be sensitive. Do not share configuration screenshots, exports, or debug logs with untrusted parties.
 
 ## Ask and Agent
 

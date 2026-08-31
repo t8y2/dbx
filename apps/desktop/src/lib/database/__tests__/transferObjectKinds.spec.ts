@@ -4,7 +4,7 @@ import { manifestDatabaseTypes } from "@/lib/database/databaseDriverManifest";
 import { supportsTransfer } from "@/lib/database/databaseFeatureSupport";
 import type { DatabaseType } from "@/types/database";
 
-const TABLE_ONLY_TRANSFER_DATABASES: DatabaseType[] = ["sqlite", "rqlite", "turso", "cloudflare-d1", "duckdb", "clickhouse", "mongodb", "goldendb", "questdb", "hive", "kyuubi", "impala", "spark"];
+const TABLE_ONLY_TRANSFER_DATABASES: DatabaseType[] = ["sqlite", "rqlite", "turso", "cloudflare-d1", "duckdb", "clickhouse", "mongodb", "goldendb", "questdb", "hive", "argo", "kyuubi", "impala", "spark"];
 
 describe("transferObjectKinds", () => {
   it("groups databases into transfer families", () => {

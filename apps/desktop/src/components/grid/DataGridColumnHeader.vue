@@ -82,7 +82,7 @@ const emit = defineEmits<{
           }}</span>
         </span>
         <template #content>
-          <div class="grid min-w-56 grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-1 px-3 py-2">
+          <div class="dbx-column-info-tooltip grid min-w-56 grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-1 px-3 py-2">
             <span class="text-background/70">{{ columnNameLabel }}</span>
             <span class="flex min-w-0 items-center gap-2">
               <span class="min-w-0 flex-1 truncate font-mono">{{ name }}</span>

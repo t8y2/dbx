@@ -197,6 +197,156 @@ func openVastbaseCustomTypesDB(t *testing.T, state *vastbaseCustomTypesTestState
 	return db
 }
 
+func TestVastbaseConstraintStatusParsing(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		raw     any
+		valid   bool
+		enabled bool
+	}{
+		{name: "boolean true", raw: true, valid: true, enabled: true},
+		{name: "boolean false", raw: false, valid: false, enabled: false},
+		{name: "text true", raw: "t", valid: true, enabled: true},
+		{name: "text false", raw: "f", valid: false, enabled: false},
+		{name: "one", raw: "1", valid: true, enabled: true},
+		{name: "zero", raw: "0", valid: false, enabled: false},
+		{name: "oracle enabled", raw: "E", valid: true, enabled: true},
+		{name: "oracle disabled", raw: "D", valid: true, enabled: false},
+		{name: "enabled label", raw: "enabled", valid: true, enabled: true},
+		{name: "disabled label", raw: "disabled", valid: true, enabled: false},
+		{name: "not validated", raw: "N", valid: false, enabled: true},
+		{name: "no", raw: "no", valid: false, enabled: true},
+		{name: "bytes false", raw: []byte("false"), valid: false, enabled: false},
+		{name: "null defaults true", raw: nil, valid: true, enabled: true},
+		{name: "unknown defaults true", raw: "future-state", valid: true, enabled: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if actual := parseVastbaseConstraintValid(test.raw); actual != test.valid {
+				t.Fatalf("parseVastbaseConstraintValid(%#v) = %v, want %v", test.raw, actual, test.valid)
+			}
+			if actual := parseVastbaseConstraintEnabled(test.raw); actual != test.enabled {
+				t.Fatalf("parseVastbaseConstraintEnabled(%#v) = %v, want %v", test.raw, actual, test.enabled)
+			}
+		})
+	}
+}
+
+func TestVastbaseConstraintAttributeNumbersAreStrict(t *testing.T) {
+	for _, raw := range []string{"1 2", "{3,2}", "[4, 5]", ""} {
+		if _, err := parseVastbaseConstraintAttributeNumbers(raw); err != nil {
+			t.Fatalf("valid vector %q failed: %v", raw, err)
+		}
+	}
+	if _, err := parseVastbaseConstraintAttributeNumbers("1 bad 3"); err == nil {
+		t.Fatal("invalid constraint vector must return an error")
+	}
+}
+
+func TestVastbaseConstraintQueryNormalizesCatalogCapabilities(t *testing.T) {
+	query := vastbaseConstraintsQuery("pg_catalog", "pg", "public", "orders", false, false, false)
+	for _, expected := range []string{
+		"pg_catalog.pg_get_constraintdef",
+		"COALESCE(CAST(c.convalidated AS text), 'T')",
+		"CAST(c.conkey AS text)",
+		"CAST(c.confkey AS text)",
+	} {
+		if !strings.Contains(query, expected) {
+			t.Fatalf("constraint query missing %q: %s", expected, query)
+		}
+	}
+	fallback := vastbaseConstraintsQuery("pg_catalog", "pg", "public", "orders", true, true, true)
+	if strings.Contains(fallback, "pg_get_constraintdef") || strings.Contains(fallback, "convalidated") || strings.Contains(fallback, "conenable") {
+		t.Fatalf("fallback constraint query still contains unsupported fields: %s", fallback)
+	}
+}
+
+func TestVastbaseConstraintRelationResolvesFoldedNames(t *testing.T) {
+	state := &vastbaseCustomTypesTestState{query: func(query string) (driver.Rows, error) {
+		if !strings.Contains(query, "LOWER(n.nspname) = LOWER('app')") || !strings.Contains(query, "LOWER(c.relname) = LOWER('orders')") {
+			return nil, fmt.Errorf("unexpected query: %s", query)
+		}
+		return &valueRows{columns: []string{"nspname", "relname"}, rows: [][]driver.Value{{"APP", "ORDERS"}}}, nil
+	}}
+	server := newServer()
+	server.db = openVastbaseCustomTypesDB(t, state)
+
+	schema, table, err := server.resolveConstraintRelation("pg_catalog", "pg", "app", "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if schema != "APP" || table != "ORDERS" {
+		t.Fatalf("folded relation was not resolved: %s.%s", schema, table)
+	}
+}
+
+func TestVastbaseConstraintRelationRejectsAmbiguousFoldedNames(t *testing.T) {
+	state := &vastbaseCustomTypesTestState{query: func(string) (driver.Rows, error) {
+		return &valueRows{columns: []string{"nspname", "relname"}, rows: [][]driver.Value{{"APP", "ORDERS"}, {"App", "Orders"}}}, nil
+	}}
+	server := newServer()
+	server.db = openVastbaseCustomTypesDB(t, state)
+
+	if _, _, err := server.resolveConstraintRelation("pg_catalog", "pg", "app", "orders"); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("ambiguous folded relation must fail, got %v", err)
+	}
+}
+
+func TestVastbaseListConstraintsResolvesCatalogVectors(t *testing.T) {
+	state := &vastbaseCustomTypesTestState{query: func(query string) (driver.Rows, error) {
+		switch {
+		case strings.Contains(query, "LOWER(n.nspname) = LOWER('public')") && strings.Contains(query, "LOWER(c.relname) = LOWER('orders')"):
+			return &valueRows{columns: []string{"nspname", "relname"}, rows: [][]driver.Value{{"public", "orders"}}}, nil
+		case strings.Contains(query, "FROM pg_catalog.pg_constraint c"):
+			return &valueRows{
+				columns: []string{"conname", "contype", "definition", "conkey", "ref_schema", "ref_table", "confkey", "match_type", "on_update", "on_delete", "condeferrable", "condeferred", "valid", "enabled"},
+				rows: [][]driver.Value{
+					{"orders_check", "c", "CHECK (amount > 0)", "{4}", nil, nil, nil, nil, nil, nil, false, false, []byte("t"), []byte("D")},
+					{"orders_customer_fkey", "f", "FOREIGN KEY (customer_id, region_id) REFERENCES customers(id, region_id)", "{2,3}", "public", "customers", "{1,2}", "s", "a", "c", true, true, "f", true},
+				},
+			}, nil
+		case strings.Contains(query, "SELECT a.attnum, a.attname") && strings.Contains(query, "c.relname = 'orders'"):
+			return &valueRows{columns: []string{"attnum", "attname"}, rows: [][]driver.Value{{int64(2), "customer_id"}, {int64(3), "region_id"}, {int64(4), "amount"}}}, nil
+		case strings.Contains(query, "SELECT a.attnum, a.attname") && strings.Contains(query, "c.relname = 'customers'"):
+			return &valueRows{columns: []string{"attnum", "attname"}, rows: [][]driver.Value{{int64(1), "id"}, {int64(2), "region_id"}}}, nil
+		default:
+			return nil, fmt.Errorf("unexpected query: %s", query)
+		}
+	}}
+	server := newServer()
+	server.db = openVastbaseCustomTypesDB(t, state)
+	server.mode.postgresCatalog = true
+
+	constraints, err := server.listConstraints("public", "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(constraints) != 2 {
+		t.Fatalf("unexpected constraints: %#v", constraints)
+	}
+	check, fk := constraints[0], constraints[1]
+	if check.ConstraintType != "CHECK" || !check.Valid || check.Enabled || !equalVastbaseStrings(check.Columns, []string{"amount"}) {
+		t.Fatalf("unexpected check constraint: %#v", check)
+	}
+	if fk.ConstraintType != "FOREIGN KEY" || fk.Valid || !fk.Enabled || !fk.Deferrable || !fk.InitiallyDeferred || !equalVastbaseStrings(fk.Columns, []string{"customer_id", "region_id"}) || !equalVastbaseStrings(fk.RefColumns, []string{"id", "region_id"}) {
+		t.Fatalf("unexpected foreign key constraint: %#v", fk)
+	}
+	if fk.MatchType == nil || *fk.MatchType != "SIMPLE" || fk.OnUpdate == nil || *fk.OnUpdate != "NO ACTION" || fk.OnDelete == nil || *fk.OnDelete != "CASCADE" {
+		t.Fatalf("unexpected foreign key actions: %#v", fk)
+	}
+}
+
+func equalVastbaseStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestVastbaseGetColumnsResolvesVisibleRelationSchemaInCatalogQuery(t *testing.T) {
 	queries := []string{}
 	state := &vastbaseCustomTypesTestState{query: func(query string) (driver.Rows, error) {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { connectionIdsInGroups, deleteGroups, findConnectionGroupPath, reorderEntries } from "@/lib/sidebar/sidebarLayout";
+import { connectionGroupDestinationRows, connectionGroupIdForSelection, connectionIdsInGroups, deleteGroups, findConnectionGroupPath, reorderEntries } from "@/lib/sidebar/sidebarLayout";
 import type { SidebarLayout } from "@/types/database";
 
 const layout: SidebarLayout = {
@@ -201,5 +201,26 @@ describe("sorted sidebar move-only drops", () => {
         },
       ],
     });
+  });
+});
+
+describe("connection group selection", () => {
+  it("lists nested groups in sidebar order with complete paths", () => {
+    expect(connectionGroupDestinationRows(layout)).toEqual([
+      { id: "project", name: "Project", depth: 0, path: ["Project"] },
+      { id: "staging", name: "Staging", depth: 1, path: ["Project", "Staging"] },
+    ]);
+  });
+
+  it("uses the focused group or the group containing a focused connection", () => {
+    expect(connectionGroupIdForSelection(layout, "staging")).toBe("staging");
+    expect(connectionGroupIdForSelection(layout, "nested", "nested")).toBe("staging");
+    expect(connectionGroupIdForSelection(layout, "grouped")).toBe("project");
+  });
+
+  it("falls back to ungrouped for root or unknown selections", () => {
+    expect(connectionGroupIdForSelection(layout, "root", "root")).toBeNull();
+    expect(connectionGroupIdForSelection(layout, "missing")).toBeNull();
+    expect(connectionGroupIdForSelection(layout)).toBeNull();
   });
 });

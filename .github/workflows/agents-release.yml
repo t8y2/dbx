@@ -666,6 +666,7 @@ jobs:
       CARGO_INCREMENTAL: "0"
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/duckdb-driver
       RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.97.1
@@ -685,6 +686,36 @@ jobs:
       - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
         with:
           version: "v0.10.0"
+      - name: Configure S3 sccache
+        if: env.SCCACHE_GHA_ENABLED != 'true'
+        shell: bash
+        env:
+          CACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
+          CACHE_ENDPOINT: ${{ secrets.SCCACHE_S3_ENDPOINT }}
+          CACHE_REGION: ${{ secrets.SCCACHE_S3_REGION }}
+          CACHE_KEY_PREFIX: ${{ secrets.SCCACHE_S3_KEY_PREFIX }}
+          CACHE_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
+          CACHE_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
+        run: |
+          {
+            echo "SCCACHE_BUCKET=${CACHE_BUCKET}"
+            echo "SCCACHE_ENDPOINT=${CACHE_ENDPOINT}"
+            echo "SCCACHE_REGION=${CACHE_REGION}"
+            echo "SCCACHE_S3_KEY_PREFIX=${CACHE_KEY_PREFIX}"
+            echo "SCCACHE_S3_USE_SSL=true"
+            echo "AWS_ACCESS_KEY_ID=${CACHE_ACCESS_KEY_ID}"
+            echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
+            echo "SCCACHE_IDLE_TIMEOUT=0"
+            # libduckdb C++ compilation dominates this build. The manylinux
+            # legs build inside a container and enable CC/CXX wrapping there;
+            # MSVC stays unwrapped.
+            case "${RUNNER_OS}" in
+              macOS)
+                echo "CC=${SCCACHE_PATH} clang"
+                echo "CXX=${SCCACHE_PATH} clang++"
+                ;;
+            esac
+          } >> "$GITHUB_ENV"
       - name: Build DuckDB native driver
         shell: bash
         run: |
@@ -697,6 +728,15 @@ jobs:
               -e HOME=/tmp/dbx-rust-home \
               -e CARGO_INCREMENTAL=0 \
               -e CARGO_TARGET_DIR=/workspace/target/duckdb-driver \
+              -e RUSTC_WRAPPER \
+              -e SCCACHE_BUCKET \
+              -e SCCACHE_ENDPOINT \
+              -e SCCACHE_REGION \
+              -e SCCACHE_S3_KEY_PREFIX \
+              -e SCCACHE_S3_USE_SSL \
+              -e AWS_ACCESS_KEY_ID \
+              -e AWS_SECRET_ACCESS_KEY \
+              -e SCCACHE_IDLE_TIMEOUT \
               -v "${{ github.workspace }}:/workspace" \
               -w /workspace/agents/drivers/duckdb \
               "${{ matrix.manylinux_image }}" \
@@ -704,12 +744,27 @@ jobs:
                 mkdir -p "$HOME"
                 curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.97.1
                 source "$HOME/.cargo/env"
+                if [ -n "${SCCACHE_BUCKET:-}" ]; then
+                  case "$(uname -m)" in
+                    x86_64) SCCACHE_ARCH=x86_64-unknown-linux-musl ;;
+                    aarch64) SCCACHE_ARCH=aarch64-unknown-linux-musl ;;
+                  esac
+                  curl -sSfL "https://github.com/mozilla/sccache/releases/download/v0.10.0/sccache-v0.10.0-${SCCACHE_ARCH}.tar.gz" \
+                    | tar -xz --strip-components=1 -C "$HOME/.cargo/bin"
+                  export CC="sccache cc" CXX="sccache c++"
+                  sccache --version
+                else
+                  unset RUSTC_WRAPPER
+                fi
                 cargo build \
                   --manifest-path Cargo.toml \
                   --locked \
                   --release \
                   --bin dbx-duckdb-driver \
                   --target "${{ matrix.target }}"
+                if [ -n "${SCCACHE_BUCKET:-}" ]; then
+                  sccache --show-stats || true
+                fi
               '
           else
             BUILD_STD=()
@@ -741,10 +796,66 @@ jobs:
               "${{ matrix.manylinux_image }}" \
               "/driver/dbx-agent-duckdb-${{ matrix.platform }}" < /dev/null
           fi
+      - name: Show sccache stats
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: ${SCCACHE_PATH} --show-stats
       - uses: actions/upload-artifact@v4
         with:
           name: duckdb-native-${{ matrix.platform }}
           path: "release-native/dbx-agent-duckdb-*"
+
+  build-sqlite-worker-native:
+    needs: [bump-versions]
+    if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'sqlite-worker') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+            platform: linux-x64
+            rustflags: "-C target-feature=+crt-static"
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-musl
+            platform: linux-aarch64
+            rustflags: "-C target-feature=+crt-static -C link-arg=-z -C link-arg=max-page-size=65536"
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cargo-zigbuild
+        run: pip3 install cargo-zigbuild
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./ -> target"
+          shared-key: sqlite-worker-${{ matrix.target }}
+          cache-on-failure: true
+
+      - name: Build musl SQLite SSH worker
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: cargo zigbuild --release -p dbx-sqlite-worker --target ${{ matrix.target }}
+
+      - name: Stage SQLite SSH worker
+        run: |
+          mkdir -p release-native
+          cp \
+            "target/${{ matrix.target }}/release/dbx-sqlite-worker" \
+            "release-native/dbx-agent-sqlite-worker-${{ matrix.platform }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sqlite-worker-native-${{ matrix.platform }}
+          path: "release-native/dbx-agent-sqlite-worker-*"
 
   build-tdengine-native:
     needs: [bump-versions]
@@ -788,6 +899,7 @@ jobs:
       CARGO_INCREMENTAL: "0"
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/tdengine-driver
       RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.97.1
@@ -803,6 +915,36 @@ jobs:
       - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
         with:
           version: "v0.10.0"
+      - name: Configure S3 sccache
+        if: env.SCCACHE_GHA_ENABLED != 'true'
+        shell: bash
+        env:
+          CACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
+          CACHE_ENDPOINT: ${{ secrets.SCCACHE_S3_ENDPOINT }}
+          CACHE_REGION: ${{ secrets.SCCACHE_S3_REGION }}
+          CACHE_KEY_PREFIX: ${{ secrets.SCCACHE_S3_KEY_PREFIX }}
+          CACHE_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
+          CACHE_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
+        run: |
+          {
+            echo "SCCACHE_BUCKET=${CACHE_BUCKET}"
+            echo "SCCACHE_ENDPOINT=${CACHE_ENDPOINT}"
+            echo "SCCACHE_REGION=${CACHE_REGION}"
+            echo "SCCACHE_S3_KEY_PREFIX=${CACHE_KEY_PREFIX}"
+            echo "SCCACHE_S3_USE_SSL=true"
+            echo "AWS_ACCESS_KEY_ID=${CACHE_ACCESS_KEY_ID}"
+            echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
+            echo "SCCACHE_IDLE_TIMEOUT=0"
+            # taos client C/C++ compilation dominates this build. The manylinux
+            # legs build inside a container and enable CC/CXX wrapping there;
+            # MSVC stays unwrapped.
+            case "${RUNNER_OS}" in
+              macOS)
+                echo "CC=${SCCACHE_PATH} clang"
+                echo "CXX=${SCCACHE_PATH} clang++"
+                ;;
+            esac
+          } >> "$GITHUB_ENV"
       - name: Build TDengine native driver
         shell: bash
         run: |
@@ -812,6 +954,15 @@ jobs:
               -e HOME=/tmp/dbx-rust-home \
               -e CARGO_INCREMENTAL=0 \
               -e CARGO_TARGET_DIR=/workspace/target/tdengine-driver \
+              -e RUSTC_WRAPPER \
+              -e SCCACHE_BUCKET \
+              -e SCCACHE_ENDPOINT \
+              -e SCCACHE_REGION \
+              -e SCCACHE_S3_KEY_PREFIX \
+              -e SCCACHE_S3_USE_SSL \
+              -e AWS_ACCESS_KEY_ID \
+              -e AWS_SECRET_ACCESS_KEY \
+              -e SCCACHE_IDLE_TIMEOUT \
               -v "${{ github.workspace }}:/workspace" \
               -w /workspace \
               "${{ matrix.manylinux_image }}" \
@@ -819,12 +970,27 @@ jobs:
                 mkdir -p "$HOME"
                 curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.97.1
                 source "$HOME/.cargo/env"
+                if [ -n "${SCCACHE_BUCKET:-}" ]; then
+                  case "$(uname -m)" in
+                    x86_64) SCCACHE_ARCH=x86_64-unknown-linux-musl ;;
+                    aarch64) SCCACHE_ARCH=aarch64-unknown-linux-musl ;;
+                  esac
+                  curl -sSfL "https://github.com/mozilla/sccache/releases/download/v0.10.0/sccache-v0.10.0-${SCCACHE_ARCH}.tar.gz" \
+                    | tar -xz --strip-components=1 -C "$HOME/.cargo/bin"
+                  export CC="sccache cc" CXX="sccache c++"
+                  sccache --version
+                else
+                  unset RUSTC_WRAPPER
+                fi
                 cargo build \
                   --manifest-path agents/drivers/tdengine/Cargo.toml \
                   --locked \
                   --release \
                   --bin dbx-tdengine-driver \
                   --target "${{ matrix.target }}"
+                if [ -n "${SCCACHE_BUCKET:-}" ]; then
+                  sccache --show-stats || true
+                fi
               '
           else
             BUILD_STD=()
@@ -852,6 +1018,11 @@ jobs:
           elif [ "${{ matrix.smoke }}" = "true" ]; then
             "release-native/dbx-agent-tdengine-${{ matrix.platform }}${{ matrix.extension }}" < /dev/null
           fi
+      - name: Show sccache stats
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: ${SCCACHE_PATH} --show-stats
       - uses: actions/upload-artifact@v4
         with:
           name: tdengine-native-${{ matrix.platform }}
@@ -966,7 +1137,7 @@ jobs:
           retention-days: 1
 
   release:
-    needs: [bump-versions, commit-versions, build-agents, build-oracle-native, build-xugu-native, build-rabbitmq-native, build-rocketmq-native, build-zookeeper-native, build-cassandra-native, build-hive-native, build-kingbase-native, build-vastbase-native, build-neo4j-native, build-iotdb-native, build-duckdb-native, build-tdengine-native, build-jre, reuse-previous-assets]
+    needs: [bump-versions, commit-versions, build-agents, build-oracle-native, build-xugu-native, build-rabbitmq-native, build-rocketmq-native, build-zookeeper-native, build-cassandra-native, build-hive-native, build-kingbase-native, build-vastbase-native, build-neo4j-native, build-iotdb-native, build-duckdb-native, build-sqlite-worker-native, build-tdengine-native, build-jre, reuse-previous-assets]
     if: ${{ always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     runs-on: ubuntu-latest
     steps:
@@ -1091,6 +1262,7 @@ jobs:
               kingbase) echo "金仓KingbaseES" ;;
               vastbase) echo "Vastbase" ;;
               duckdb) echo "DuckDB" ;;
+              sqlite-worker) echo "SQLite SSH Worker" ;;
               xugu) echo "虚谷 XuguDB" ;;
               rabbitmq) echo "RabbitMQ" ;;
               rocketmq) echo "Apache RocketMQ" ;;
@@ -1163,7 +1335,7 @@ jobs:
             [ -n "$DRIVERS" ] && DRIVERS="${DRIVERS},"$'\n'
             DRIVERS="${DRIVERS}$(generate_jar_entry "$name" "$label" "$f" "$jre_key" "$version" "$external_driver" "$native_json")"
           done
-          for name in oracle xugu kingbase vastbase neo4j iotdb duckdb rabbitmq rocketmq zookeeper cassandra hive tdengine; do
+          for name in oracle xugu kingbase vastbase neo4j iotdb duckdb sqlite-worker rabbitmq rocketmq zookeeper cassandra hive tdengine; do
             version=$(get_module_version "$name")
             [ -f "release/dbx-agent-${name}-${version}.jar" ] && continue
             native_json=$(generate_native_platforms "$name" "$version")
@@ -1243,6 +1415,7 @@ jobs:
               kingbase) echo "金仓KingbaseES" ;;
               vastbase) echo "Vastbase" ;;
               duckdb) echo "DuckDB" ;;
+              sqlite-worker) echo "SQLite SSH Worker" ;;
               oracle) echo "Oracle" ;;
               xugu) echo "虚谷 XuguDB" ;;
               rabbitmq) echo "RabbitMQ" ;;
@@ -1285,6 +1458,8 @@ jobs:
               LOG_PATH="agents/drivers/neo4j-go/"
             elif [ "$name" = "iotdb" ]; then
               LOG_PATH="agents/drivers/iotdb/"
+            elif [ "$name" = "sqlite-worker" ]; then
+              LOG_PATH="crates/dbx-sqlite-worker/"
             elif [ -d "agents/drivers/$name" ]; then
               LOG_PATH="agents/drivers/$name/"
             else

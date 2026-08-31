@@ -2056,7 +2056,7 @@ pub(crate) fn supports_connection_level_database_bootstrap_target(
             .is_some_and(|profile| is_mysql_compatible_import_profile(&profile) && profile != "manticoresearch")
 }
 
-fn is_mysql_compatible_import_target(db_type: &DatabaseType, driver_profile: Option<&str>) -> bool {
+pub(crate) fn is_mysql_compatible_import_target(db_type: &DatabaseType, driver_profile: Option<&str>) -> bool {
     matches!(
         db_type,
         DatabaseType::Mysql

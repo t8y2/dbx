@@ -22,6 +22,7 @@ use dbx_core::connection::AppState;
 use dbx_core::sql_dialect::dialect_loader::{register_core_dialects, DialectPluginLoader, DialectRegistry};
 use dbx_core::sql_dialect::hot_reload::DialectHotReload;
 use dbx_core::storage::Storage;
+use dbx_mcp::{streamable_http_router, DbxBackend, HttpAuth, LocalBackend};
 use state::WebState;
 use tokio::sync::RwLock;
 use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Predicate};
@@ -145,6 +146,56 @@ fn mount_public_base_path(mut app: Router, public_base_path: &str, static_dir: O
         app = app.route_service(&format!("{public_base_path}/"), ServeFile::new(static_dir.join("index.html")));
     }
     app
+}
+
+/// Builds the native Web MCP endpoint. It is intentionally opt-in: exposing a
+/// token-bearing MCP server on a Web listener must never happen merely because
+/// DBX Web itself was started.
+fn web_mcp_router(web_state: &Arc<WebState>) -> Result<Option<Router>, String> {
+    let token = web_mcp_token()?;
+    let Some(token) = token else {
+        return Ok(None);
+    };
+
+    let allowed_hosts = comma_separated_env("DBX_WEB_MCP_ALLOWED_HOSTS");
+    if allowed_hosts.is_empty() {
+        return Err("DBX_WEB_MCP_ALLOWED_HOSTS is required when DBX Web MCP is enabled".into());
+    }
+
+    let allowed_origins = comma_separated_env("DBX_WEB_MCP_ALLOWED_ORIGINS");
+    let auth = HttpAuth::new(token, allowed_origins, false)?;
+    let backend: Arc<dyn DbxBackend> =
+        Arc::new(LocalBackend::from_app_state(web_state.app.clone(), web_state.data_dir.clone()));
+
+    Ok(Some(streamable_http_router(backend, "/mcp", auth, allowed_hosts, true)))
+}
+
+fn web_mcp_token() -> Result<Option<String>, String> {
+    let inline_token = std::env::var("DBX_WEB_MCP_TOKEN").ok();
+    let token_file = std::env::var("DBX_WEB_MCP_TOKEN_FILE").ok();
+    match (inline_token, token_file) {
+        (Some(_), Some(_)) => Err("set only one of DBX_WEB_MCP_TOKEN or DBX_WEB_MCP_TOKEN_FILE".into()),
+        (Some(token), None) if !token.trim().is_empty() => Ok(Some(token)),
+        (Some(_), None) => Err("DBX_WEB_MCP_TOKEN must not be empty".into()),
+        (None, Some(path)) => std::fs::read_to_string(&path)
+            .map_err(|error| format!("failed to read DBX_WEB_MCP_TOKEN_FILE: {error}"))
+            .map(|token| token.trim_end_matches(['\r', '\n']).to_owned())
+            .and_then(|token| {
+                (!token.is_empty()).then_some(token).ok_or_else(|| "DBX_WEB_MCP_TOKEN_FILE is empty".into())
+            })
+            .map(Some),
+        (None, None) => Ok(None),
+    }
+}
+
+fn comma_separated_env(name: &str) -> Vec<String> {
+    std::env::var(name)
+        .ok()
+        .into_iter()
+        .flat_map(|value| {
+            value.split(',').map(str::trim).filter(|value| !value.is_empty()).map(ToOwned::to_owned).collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 #[cfg(feature = "mq-admin")]
@@ -406,6 +457,7 @@ async fn main() {
         .route("/schema/databases", get(routes::schema::list_databases))
         .route("/schema/database-metadata", get(routes::schema::list_database_metadata))
         .route("/schema/database-storage", post(routes::schema::list_database_storage))
+        .route("/schema/xugu/tablespaces", get(routes::schema::list_xugu_tablespaces))
         .route("/schema/sqlserver/completion-context", get(routes::schema::get_sqlserver_completion_context))
         .route("/schema/doris/catalogs", get(routes::schema::list_doris_catalogs))
         .route("/schema/doris/catalog-databases", get(routes::schema::list_doris_catalog_databases))
@@ -818,6 +870,14 @@ async fn main() {
             "/document-store/elasticsearch-count-documents",
             post(routes::document_store::elasticsearch_count_documents),
         )
+        .route(
+            "/document-store/elasticsearch/index-metadata",
+            post(routes::document_store::elasticsearch_get_index_metadata),
+        )
+        .route(
+            "/document-store/elasticsearch/documents/delete-all",
+            post(routes::document_store::elasticsearch_delete_all_documents),
+        )
         .route("/document-store/list-gridfs-buckets", post(routes::document_store::list_gridfs_buckets))
         .route("/document-store/create-gridfs-bucket", post(routes::document_store::create_gridfs_bucket))
         .route("/document-store/delete-gridfs-bucket", post(routes::document_store::delete_gridfs_bucket))
@@ -986,6 +1046,7 @@ async fn main() {
             "/app-settings/mcp-policy",
             get(routes::app_settings::load_mcp_global_policy).put(routes::app_settings::save_mcp_global_policy),
         )
+        .route("/app-settings/mcp-http-status", get(routes::app_settings::load_web_mcp_http_status))
         .route(
             "/app-settings/max-agent-turns",
             get(routes::app_settings::load_max_agent_turns).put(routes::app_settings::save_max_agent_turns),
@@ -1036,6 +1097,11 @@ async fn main() {
         .layer(DefaultBodyLimit::max(web_body_limit_bytes()))
         .layer(CompressionLayer::new().compress_when(web_compression_predicate()))
         .layer(tower_http::trace::TraceLayer::new_for_http());
+
+    if let Some(mcp_router) = web_mcp_router(&web_state).expect("Invalid DBX Web MCP configuration") {
+        app = app.merge(mcp_router);
+        tracing::info!("DBX Web MCP is enabled at /mcp");
+    }
 
     let static_dir = std::env::var_os("DBX_STATIC_DIR").map(std::path::PathBuf::from);
     app = mount_public_base_path(app, &public_base_path, static_dir.as_deref());

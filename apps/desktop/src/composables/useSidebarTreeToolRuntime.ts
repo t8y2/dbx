@@ -3,7 +3,7 @@ import type { useConnectionStore } from "@/stores/connectionStore";
 import type { useQueryStore } from "@/stores/queryStore";
 import type { useSettingsStore } from "@/stores/settingsStore";
 import type { TreeNode } from "@/types/database";
-import { allDatabasesExportSourceForNode, databaseExportSourceForNode } from "@/lib/sidebar/sidebarExportRuntime";
+import { allDatabasesExportSourceForNode, databaseExportSourceForNode, sidebarSameSchemaStructureTargets } from "@/lib/sidebar/sidebarExportRuntime";
 
 interface SidebarTreeToolRuntimeOptions {
   activeNode: ShallowRef<TreeNode>;
@@ -11,6 +11,7 @@ interface SidebarTreeToolRuntimeOptions {
   queryStore: ReturnType<typeof useQueryStore>;
   settingsStore: ReturnType<typeof useSettingsStore>;
   tableChildObjectName: (node: TreeNode) => string;
+  acceptedSelectionIds?: () => readonly string[] | null;
 }
 
 export function useSidebarTreeToolRuntime(options: SidebarTreeToolRuntimeOptions) {
@@ -52,14 +53,21 @@ export function useSidebarTreeToolRuntime(options: SidebarTreeToolRuntimeOptions
     };
   }
 
+  function selectedSameSchemaStructureTargets() {
+    return sidebarSameSchemaStructureTargets(activeNode.value, connectionStore.treeNodes, options.acceptedSelectionIds?.() ?? connectionStore.selectedTreeNodeIds);
+  }
+
   function openDiagram() {
     const node = activeNode.value;
     if (!node.connectionId || !node.database) return;
+    const tables = selectedSameSchemaStructureTargets().filter((target) => target.type === "table");
+    const tableNames = tables.length > 1 ? tables.map((target) => target.label) : undefined;
     connectionStore.diagramSource = {
       connectionId: node.connectionId,
       database: node.database,
       schema: node.schema,
-      tableName: node.type === "table" ? node.label : undefined,
+      tableName: tableNames?.length ? tableNames[0] : node.type === "table" ? node.label : undefined,
+      tableNames,
     };
   }
 
@@ -86,7 +94,18 @@ export function useSidebarTreeToolRuntime(options: SidebarTreeToolRuntimeOptions
   }
 
   function openDatabaseExport() {
-    connectionStore.databaseExportSource = databaseExportSourceForNode(activeNode.value);
+    const node = activeNode.value;
+    const tables = selectedSameSchemaStructureTargets().filter((target) => target.type === "table");
+    if (tables.length > 1 && node.connectionId && node.database) {
+      connectionStore.databaseExportSource = {
+        connectionId: node.connectionId,
+        database: node.database,
+        schema: node.schema,
+        tableNames: tables.map((target) => target.label),
+      };
+      return;
+    }
+    connectionStore.databaseExportSource = databaseExportSourceForNode(node);
   }
 
   function openAllDatabasesExport() {

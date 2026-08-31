@@ -427,6 +427,8 @@ jobs:
     env:
       # sccache cannot reuse Cargo incremental artifacts, so avoid generating them in CI.
       CARGO_INCREMENTAL: "0"
+      # Deep async export tests exceed the Rust test harness's default thread stack on Linux.
+      RUST_MIN_STACK: 8388608
       RUSTC_WRAPPER: sccache
       # The fast lane skips only system font discovery while retaining the other default capabilities.
       RUST_FEATURE_MODE: ${{ github.event_name == 'pull_request' && needs.changes.outputs.rust_full != 'true' && 'fast' || 'full' }}

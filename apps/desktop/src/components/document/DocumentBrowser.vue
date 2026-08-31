@@ -22,7 +22,7 @@ import type { DynamoDbIndexInfo, DynamoDbTableDescription } from "@/lib/backend/
 import { useConnectionStore } from "@/stores/connectionStore";
 import { clampSearchSplitWidth } from "@/lib/dataGrid/dataGridSearchSplit";
 import { documentViewerFontStyle } from "@/lib/document/documentViewerFontStyle";
-import { clampDocumentPage, clampElasticsearchRequestLimit, documentPageRequestLimit, resetElasticsearchDocumentTotals, resolveElasticsearchDocumentTotals } from "@/lib/document/elasticsearchDocumentTotals";
+import { ELASTICSEARCH_DEFAULT_MAX_RESULT_WINDOW, clampDocumentPage, resetElasticsearchDocumentTotals, resolveElasticsearchDocumentTotals } from "@/lib/document/elasticsearchDocumentTotals";
 import { canGoNextDocumentPage, isSameDocumentQueryTotalCountRequest, resolveDocumentQueryTotals, type DocumentQueryTotalCountRequest } from "@/lib/document/documentQueryTotals";
 import {
   arrayObjectAncestorPathForDocumentField,
@@ -88,6 +88,7 @@ import type { GridNewRowMeta } from "@/lib/dataGrid/gridNewRowPlacement";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { documentDataGridColumnLayoutScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 import { documentGridColumnVisibilityScopeKey, migrateDocumentGridColumnVisibilityToLayout } from "@/lib/document/documentGridColumnVisibilityStorage";
+import { matchesElasticsearchIndexPattern, subscribeElasticsearchIndexCleared, type ElasticsearchIndexClearedDetail } from "@/lib/sidebar/elasticsearchIndexActions";
 import { TABLE_FONT_SIZE_MAX, TABLE_FONT_SIZE_MIN, useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import JsonEditNode from "./JsonEditNode.vue";
@@ -238,6 +239,7 @@ const pageTotal = computed(() => paginationTotal.value);
 const documentPageCount = computed(() => (pageTotal.value === undefined ? undefined : Math.max(1, Math.ceil(pageTotal.value / pageSize.value))));
 const canGoNextPage = computed(() => {
   if (documentStoreProvider.value.kind === "dynamodb") return dynamodbHasNextCursor.value;
+  if (documentStoreProvider.value.kind === "elasticsearch") return elasticsearchHasNextCursor.value;
   return canGoNextDocumentPage({
     page: page.value,
     pageSize: pageSize.value,
@@ -247,7 +249,7 @@ const canGoNextPage = computed(() => {
 });
 const documentRequestLimit = computed(() => {
   if (documentStoreProvider.value.kind !== "elasticsearch") return pageSize.value;
-  return documentPageRequestLimit(page.value, pageSize.value, paginationTotal.value);
+  return Math.min(pageSize.value, ELASTICSEARCH_DEFAULT_MAX_RESULT_WINDOW);
 });
 
 const tableFindPaneStyle = computed(() => {
@@ -289,6 +291,8 @@ const dynamodbIndexName = ref("__table__");
 const dynamodbPageCursors = ref<Array<string | undefined>>([undefined]);
 const dynamodbHasNextCursor = ref(false);
 const dynamodbExactTotal = ref<number | undefined>();
+const elasticsearchPageCursors = ref<Array<string | undefined>>([undefined]);
+const elasticsearchHasNextCursor = ref(false);
 let dynamodbExactCountKey: string | null = null;
 
 const dynamodbIndexOptions = computed<Array<{ value: string; label: string; index?: DynamoDbIndexInfo }>>(() => [
@@ -440,7 +444,7 @@ const gridResult = computed<QueryResult>(() => {
 
 async function exportAllDocumentStoreDocuments(onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void): Promise<QueryResult | undefined> {
   const kind = documentStoreProvider.value.kind;
-  if (kind !== "mongodb" && kind !== "dynamodb") return undefined;
+  if (kind !== "mongodb" && kind !== "dynamodb" && kind !== "elasticsearch") return undefined;
 
   const connectionId = props.connectionId;
   const database = props.database;
@@ -456,44 +460,53 @@ async function exportAllDocumentStoreDocuments(onProgress?: (info: { rowsExporte
   let exportedCopyDocuments: JsonRecord[] | undefined = kind === "mongodb" ? [] : undefined;
   let totalRows: number | null = null;
   let cursor: string | undefined;
+  let lastCursor: string | undefined;
   const seenCursors = new Set<string>();
 
-  while (exportedDocuments.length < rowLimit) {
-    const requestLimit = Math.min(batchSize, kind === "dynamodb" ? 1000 : Number.POSITIVE_INFINITY, rowLimit - exportedDocuments.length);
-    if (requestLimit <= 0) break;
-    const result = await api.documentFindDocuments(connectionId, database, collection, kind === "dynamodb" ? 0 : exportedDocuments.length, requestLimit, filter, undefined, sort, undefined, exportExecutionId, cursor);
-    const pageDocuments = result.documents.slice(0, requestLimit).map(asRecord);
-    exportedDocuments.push(...pageDocuments);
+  try {
+    while (exportedDocuments.length < rowLimit) {
+      const requestLimit = Math.min(batchSize, kind === "dynamodb" ? 1000 : kind === "elasticsearch" ? ELASTICSEARCH_DEFAULT_MAX_RESULT_WINDOW : Number.POSITIVE_INFINITY, rowLimit - exportedDocuments.length);
+      if (requestLimit <= 0) break;
+      if (cursor) lastCursor = cursor;
+      const result = await api.documentFindDocuments(connectionId, database, collection, kind === "dynamodb" || kind === "elasticsearch" ? 0 : exportedDocuments.length, requestLimit, filter, undefined, sort, undefined, exportExecutionId, cursor, kind === "elasticsearch");
+      const pageDocuments = result.documents.slice(0, requestLimit).map(asRecord);
+      exportedDocuments.push(...pageDocuments);
 
-    if (kind === "mongodb" && exportedCopyDocuments) {
-      if (result.extended_documents?.length === result.documents.length) {
-        exportedCopyDocuments.push(...result.extended_documents.slice(0, pageDocuments.length).map(asRecord));
-      } else {
-        exportedCopyDocuments = undefined;
+      if (kind === "mongodb" && exportedCopyDocuments) {
+        if (result.extended_documents?.length === result.documents.length) {
+          exportedCopyDocuments.push(...result.extended_documents.slice(0, pageDocuments.length).map(asRecord));
+        } else {
+          exportedCopyDocuments = undefined;
+        }
       }
+
+      if ((kind === "mongodb" || kind === "elasticsearch") && result.total_is_exact !== false) totalRows = Math.min(result.total, rowLimit);
+      onProgress?.({ rowsExported: exportedDocuments.length, totalRows });
+
+      if (kind === "dynamodb" || kind === "elasticsearch") {
+        cursor = result.next_cursor;
+        if (!cursor) break;
+        if (seenCursors.has(cursor)) throw new Error(kind === "dynamodb" ? t("dynamodb.repeatedCursor") : "Elasticsearch cursor repeated during export");
+        seenCursors.add(cursor);
+        continue;
+      }
+
+      const reachedExactTotal = result.total_is_exact !== false && exportedDocuments.length >= result.total;
+      if (pageDocuments.length === 0 || pageDocuments.length < requestLimit || reachedExactTotal) break;
     }
-
-    if (kind === "mongodb" && result.total_is_exact !== false) totalRows = Math.min(result.total, rowLimit);
-    onProgress?.({ rowsExported: exportedDocuments.length, totalRows });
-
-    if (kind === "dynamodb") {
-      cursor = result.next_cursor;
-      if (!cursor) break;
-      if (seenCursors.has(cursor)) throw new Error(t("dynamodb.repeatedCursor"));
-      seenCursors.add(cursor);
-      continue;
+  } finally {
+    if (kind === "elasticsearch") {
+      const cursorToClose = lastCursor ?? cursor;
+      if (cursorToClose) void closeElasticsearchCursor(cursorToClose);
     }
-
-    const reachedExactTotal = result.total_is_exact !== false && exportedDocuments.length >= result.total;
-    if (pageDocuments.length === 0 || pageDocuments.length < requestLimit || reachedExactTotal) break;
   }
 
-  if (kind === "dynamodb") {
+  if (kind === "dynamodb" || kind === "elasticsearch") {
     const truncatedByLimit = !!cursor && exportedDocuments.length >= rowLimit;
     totalRows = truncatedByLimit ? null : exportedDocuments.length;
     onProgress?.({ rowsExported: exportedDocuments.length, totalRows });
     if (truncatedByLimit) {
-      toast(t("dynamodb.exportLimitReached", { count: rowLimit }), 6000);
+      toast(kind === "dynamodb" ? t("dynamodb.exportLimitReached", { count: rowLimit }) : `Elasticsearch export limit reached (${rowLimit})`, 6000);
     }
   }
 
@@ -501,7 +514,7 @@ async function exportAllDocumentStoreDocuments(onProgress?: (info: { rowsExporte
   if (result.columns.length === 0) result.columns = gridResult.value.columns;
   result.column_types = kind === "mongodb" ? mongoDocumentGridColumnTypes(exportedDocuments, result.columns) : undefined;
   result.affected_rows = exportedDocuments.length;
-  result.truncated = kind === "dynamodb" && !!cursor && exportedDocuments.length >= rowLimit;
+  result.truncated = (kind === "dynamodb" || kind === "elasticsearch") && !!cursor && exportedDocuments.length >= rowLimit;
   result.has_more = result.truncated;
   return result;
 }
@@ -744,6 +757,22 @@ function resetDynamoDbPagination(options: { preserveExactCount?: boolean } = {})
   if (!options.preserveExactCount) resetDynamoDbExactCount();
 }
 
+async function closeElasticsearchCursor(cursor?: string) {
+  if (!cursor) return;
+  try {
+    await api.closeQuerySession(props.connectionId, props.database, cursor);
+  } catch (error) {
+    console.warn("[DBX] failed to close Elasticsearch cursor", error);
+  }
+}
+
+function resetElasticsearchPagination() {
+  const cursor = [...elasticsearchPageCursors.value].reverse().find((candidate): candidate is string => !!candidate);
+  if (cursor) void closeElasticsearchCursor(cursor);
+  elasticsearchPageCursors.value = [undefined];
+  elasticsearchHasNextCursor.value = false;
+}
+
 function currentDocumentFilter(): string | undefined {
   const filter = currentDocumentFilterJson(filterInput.value, appliedDocumentFilter.value, documentStoreProvider.value.kind);
   if (documentStoreProvider.value.kind !== "dynamodb" || dynamodbIndexName.value === "__table__") return filter;
@@ -808,7 +837,7 @@ const documentQueryPreview = computed(() => {
     collection: props.collection,
     filterJson: filter,
     sortJson: sortInput.value.trim(),
-    skip: page.value * pageSize.value,
+    skip: documentStoreProvider.value.kind === "elasticsearch" ? 0 : page.value * pageSize.value,
     limit: documentRequestLimit.value,
   });
 });
@@ -1248,6 +1277,7 @@ function resetElasticsearchTotals(options: { preservePaginationTotal?: boolean }
   paginationTotal.value = nextTotals.paginationTotal;
   total.value = nextTotals.total;
   totalIsExact.value = nextTotals.totalIsExact;
+  resetElasticsearchPagination();
 }
 
 function clampPageToPaginationTotal(): number | undefined {
@@ -1352,16 +1382,18 @@ async function load(options: { page?: number; append?: boolean; offset?: number;
       resetElasticsearchTotals();
     }
     const sort = currentDocumentSortJson(sortInput.value);
-    const cursor = storeKind === "dynamodb" ? dynamodbPageCursors.value[requestPage] : undefined;
-    if (storeKind === "dynamodb" && requestPage > 0 && !cursor) {
-      throw new Error(t("dynamodb.pageCursorUnavailable"));
+    const cursor = storeKind === "dynamodb" ? dynamodbPageCursors.value[requestPage] : storeKind === "elasticsearch" ? elasticsearchPageCursors.value[requestPage] : undefined;
+    if ((storeKind === "dynamodb" || storeKind === "elasticsearch") && requestPage > 0 && !cursor) {
+      throw new Error(storeKind === "dynamodb" ? t("dynamodb.pageCursorUnavailable") : "Elasticsearch page cursor unavailable; go back to the first page and page forward again");
     }
-    const skip = storeKind === "dynamodb" ? 0 : (options.offset ?? requestPage * pageSize.value);
-    const requestedLimit = options.limit ?? (storeKind === "elasticsearch" ? documentPageRequestLimit(requestPage, pageSize.value, paginationTotal.value) : pageSize.value);
-    // Elasticsearch rejects from+size beyond index.max_result_window even when an explicit limit
-    // (e.g. from the per-tab page size control) bypassed the default-path clamp above.
-    const requestLimit = storeKind === "elasticsearch" ? clampElasticsearchRequestLimit(skip, requestedLimit) : requestedLimit;
-    const result = await api.documentFindDocuments(connectionId, database, collection, skip, requestLimit, filter, undefined, sort, undefined, executionId, cursor);
+    // Starting a fresh ES first page invalidates any previous PIT cursor stack.
+    if (storeKind === "elasticsearch" && !cursor && requestPage === 0) {
+      resetElasticsearchPagination();
+    }
+    const skip = storeKind === "dynamodb" || storeKind === "elasticsearch" ? 0 : (options.offset ?? requestPage * pageSize.value);
+    const requestedLimit = options.limit ?? pageSize.value;
+    const requestLimit = storeKind === "elasticsearch" ? Math.min(requestedLimit, ELASTICSEARCH_DEFAULT_MAX_RESULT_WINDOW) : requestedLimit;
+    const result = await api.documentFindDocuments(connectionId, database, collection, skip, requestLimit, filter, undefined, sort, undefined, executionId, cursor, storeKind === "elasticsearch");
     if (documentLoadExecutionId.value !== executionId) return;
     if (connectionId !== props.connectionId || database !== props.database || collection !== props.collection || storeKind !== documentStoreProvider.value.kind) return;
     const nextDocuments =
@@ -1387,6 +1419,10 @@ async function load(options: { page?: number; append?: boolean; offset?: number;
       dynamodbHasNextCursor.value = !!result.next_cursor;
     }
     if (storeKind === "elasticsearch") {
+      const nextCursors = elasticsearchPageCursors.value.slice(0, requestPage + 1);
+      nextCursors[requestPage + 1] = result.next_cursor ?? undefined;
+      elasticsearchPageCursors.value = nextCursors;
+      elasticsearchHasNextCursor.value = !!result.next_cursor;
       applyElasticsearchSearchTotal(result.total, result.total_is_exact !== false, filter);
     } else if (storeKind === "dynamodb") {
       cancelElasticsearchCount();
@@ -1501,28 +1537,34 @@ async function paginate(offset: number, limit: number) {
   }
   const pageSizeChanged = normalizedLimit !== pageSize.value;
   pageSize.value = normalizedLimit;
-  if (documentStoreProvider.value.kind === "dynamodb" && pageSizeChanged) {
+  if (pageSizeChanged && (documentStoreProvider.value.kind === "dynamodb" || documentStoreProvider.value.kind === "elasticsearch")) {
     page.value = 0;
-    resetDynamoDbPagination({ preserveExactCount: true });
+    if (documentStoreProvider.value.kind === "dynamodb") {
+      resetDynamoDbPagination({ preserveExactCount: true });
+    } else {
+      resetElasticsearchPagination();
+    }
     await load({ page: 0 });
     return;
   }
   const requestedPage = Math.floor(normalizedOffset / normalizedLimit);
   const nextPage = clampDocumentPage(requestedPage, normalizedLimit, paginationTotal.value);
-  if (documentStoreProvider.value.kind !== "dynamodb") {
+  if (documentStoreProvider.value.kind !== "dynamodb" && documentStoreProvider.value.kind !== "elasticsearch") {
     await load({ page: nextPage, offset: nextPage * normalizedLimit, limit: normalizedLimit });
     return;
   }
   for (let cursorPage = 0; cursorPage <= nextPage; cursorPage += 1) {
-    if (cursorPage > 0 && !dynamodbPageCursors.value[cursorPage]) {
-      error.value = t("dynamodb.pageCursorUnavailable");
+    const pageCursor = documentStoreProvider.value.kind === "dynamodb" ? dynamodbPageCursors.value[cursorPage] : elasticsearchPageCursors.value[cursorPage];
+    if (cursorPage > 0 && !pageCursor) {
+      error.value = documentStoreProvider.value.kind === "dynamodb" ? t("dynamodb.pageCursorUnavailable") : "Elasticsearch page cursor unavailable; go back to the first page and page forward again";
       return;
     }
     if (cursorPage === nextPage) {
       await load({ page: cursorPage });
       return;
     }
-    if (!dynamodbPageCursors.value[cursorPage + 1]) {
+    const nextCursor = documentStoreProvider.value.kind === "dynamodb" ? dynamodbPageCursors.value[cursorPage + 1] : elasticsearchPageCursors.value[cursorPage + 1];
+    if (!nextCursor) {
       await load({ page: cursorPage });
     }
   }
@@ -2021,8 +2063,24 @@ async function loadDynamoDbTableDescription() {
   }
 }
 
+/**
+ * The sidebar's "clear index data" action deletes documents behind this tab's
+ * back, so an open browser would keep listing rows that no longer exist.
+ * Reload when the cleared index is the one on screen.
+ */
+function handleElasticsearchIndexCleared(detail: ElasticsearchIndexClearedDetail) {
+  if (detail.connectionId !== props.connectionId) return;
+  // Clearing a grouped node deletes from every index its pattern matches, so a
+  // tab open on any concrete index under the pattern must refresh as well.
+  if (detail.index !== props.collection && !matchesElasticsearchIndexPattern(detail.index, props.collection)) return;
+  void refreshDocuments();
+}
+
+let unsubscribeElasticsearchIndexCleared: (() => void) | undefined;
+
 onMounted(async () => {
   window.addEventListener("pointerdown", handleDocumentBrowserPointerDown, true);
+  unsubscribeElasticsearchIndexCleared = subscribeElasticsearchIndexCleared(handleElasticsearchIndexCleared);
   try {
     await connectionStore.ensureConnected(props.connectionId);
   } catch (e) {
@@ -2037,10 +2095,13 @@ onMounted(async () => {
 });
 onBeforeUnmount(() => {
   window.removeEventListener("pointerdown", handleDocumentBrowserPointerDown, true);
+  unsubscribeElasticsearchIndexCleared?.();
+  unsubscribeElasticsearchIndexCleared = undefined;
   if (documentLoadExecutionId.value) void api.cancelQuery(documentLoadExecutionId.value);
   documentRequestGeneration++;
   loadedDocumentQueryTotalCountRequest = undefined;
   cancelElasticsearchCount();
+  resetElasticsearchPagination();
   stopDocumentLoadingTimer();
   endTableSearchSplitResize();
 });
@@ -2148,7 +2209,7 @@ defineExpose({ focusSearch });
             <Wrench class="h-4 w-4" />
           </Button>
         </PopoverTrigger>
-        <PopoverContent align="end" class="w-max min-w-44 max-w-[calc(100vw-2rem)] gap-0 overflow-hidden rounded-md border bg-popover p-0 text-popover-foreground shadow-xl" @click.stop @keydown.stop>
+        <PopoverContent align="end" :collision-padding="8" class="w-max min-w-44 max-h-[var(--reka-popover-content-available-height)] max-w-[calc(100vw-2rem)] gap-0 overflow-x-hidden overflow-y-auto rounded-md border bg-popover p-0 text-popover-foreground shadow-xl" @click.stop @keydown.stop>
           <div class="border-b bg-muted/40 px-3 py-2">
             <div class="text-xs font-semibold">{{ t("grid.viewOptions") }}</div>
           </div>
@@ -2317,7 +2378,7 @@ defineExpose({ focusSearch });
       :inexact-total-row-count-mode="documentStoreProvider.kind === 'mongodb' ? 'estimated' : 'at-least'"
       :pagination-total-row-count="pageTotal"
       :count-total-rows="countExactDocumentTotal"
-      :full-export-result="documentStoreProvider.kind === 'mongodb' || documentStoreProvider.kind === 'dynamodb' ? exportAllDocumentStoreDocuments : undefined"
+      :full-export-result="documentStoreProvider.kind === 'mongodb' || documentStoreProvider.kind === 'dynamodb' || documentStoreProvider.kind === 'elasticsearch' ? exportAllDocumentStoreDocuments : undefined"
       @sort="onSort"
       @reload="refreshDocuments"
       @paginate="(offset: number, limit: number) => paginate(offset, limit)"

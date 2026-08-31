@@ -1,0 +1,73 @@
+name: SQL Server 2000 Windows User Test Build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows-x64:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.13.0
+          cache: pnpm
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./ -> target"
+          shared-key: sqlserver2000-windows-x64
+          cache-on-failure: true
+
+      - name: Build SQL Server legacy agent
+        run: .\\gradlew.bat :sqlserver-legacy:shadowJar --no-daemon
+        working-directory: agents
+
+      - name: Stage SQL Server legacy agent
+        shell: pwsh
+        run: |
+          $agent = Get-ChildItem "agents/drivers/sqlserver-legacy/build/libs/dbx-agent-sqlserver-legacy.jar" | Select-Object -First 1
+          if (!$agent) {
+            Write-Error "Missing SQL Server legacy agent JAR"
+            exit 1
+          }
+          Copy-Item $agent.FullName "sqlserver-legacy-agent.jar" -Force
+
+      - name: Build Windows x64 installer
+        run: pnpm tauri build --bundles nsis --target x86_64-pc-windows-msvc --ci --no-sign
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: DBX-SQLServer2000-Windows-x64
+          path: |
+            target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+            sqlserver-legacy-agent.jar
+          if-no-files-found: error
+          retention-days: 7

@@ -9,6 +9,7 @@ import { createTaskLoadTracker } from "./taskLoadTracker";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import SearchableSelect from "@/components/ui/searchable-select/SearchableSelect.vue";
 import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -21,6 +22,7 @@ import TransferTaskTree from "@/components/transfer/TransferTaskTree.vue";
 import type { DatabaseType } from "@/types/database";
 import type { TransferTask, TransferTaskConfig } from "@/types/database";
 import { isSchemaAware, supportsTransfer } from "@/lib/database/databaseCapabilities";
+import { transferDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { isDorisFamilyCatalogCapable } from "@/lib/database/databaseFeatureSupport";
 import { decodeTransferDatabaseOption, encodeTransferDatabaseOptions, isSameTransferDatabase, isTransferDatabaseSelected, normalizeTransferCatalog } from "@/lib/database/dataTransferSelection";
 import { formatDatabaseLabel } from "@/lib/database/defaultDatabase";
@@ -59,7 +61,7 @@ const transferDialogStyle = {
 
 const store = useConnectionStore();
 
-const sqlConnections = computed(() => store.connections.filter((c) => supportsTransfer(c.db_type)));
+const sqlConnections = computed(() => store.connections.filter((c) => supportsTransfer(transferDatabaseTypeForConnection(c))));
 
 // Source state
 const sourceConnectionId = ref("");
@@ -114,7 +116,7 @@ const treeDisabledGroups = computed<TransferObjectKind[]>(() => {
   }
   const sourceConfig = store.getConfig(sourceConnectionId.value);
   const targetConfig = store.getConfig(targetConnectionId.value);
-  const allowed = crossFamilyTransferableKinds(sourceConfig?.db_type, targetConfig?.db_type);
+  const allowed = crossFamilyTransferableKinds(transferDatabaseTypeForConnection(sourceConfig), transferDatabaseTypeForConnection(targetConfig));
   return presentKinds.filter((k) => k !== "TABLE" && !allowed.includes(k));
 });
 
@@ -132,9 +134,9 @@ const showCrossFamilyViewHint = computed(() => {
   const targetConfig = store.getConfig(targetConnectionId.value);
   if (transferContent.value === "dataOnly") return false;
   if (!sourceConfig || !targetConfig) return false;
-  const allowed = crossFamilyTransferableKinds(sourceConfig.db_type, targetConfig.db_type);
+  const allowed = crossFamilyTransferableKinds(transferDatabaseTypeForConnection(sourceConfig), transferDatabaseTypeForConnection(targetConfig));
   if (!allowed.includes("VIEW")) return false;
-  return !isSameTransferFamily(sourceConfig.db_type, targetConfig.db_type) && (selectedObjects.value.VIEW?.size ?? 0) > 0;
+  return !isSameTransferFamily(transferDatabaseTypeForConnection(sourceConfig), transferDatabaseTypeForConnection(targetConfig)) && (selectedObjects.value.VIEW?.size ?? 0) > 0;
 });
 const pendingSourceSchemaPrefill = ref("");
 const pendingSelectedTablesPrefill = ref<string[] | null>(null);
@@ -155,6 +157,7 @@ const pendingTargetSchemaPrefill = ref("");
 // Options
 const transferMode = ref<TransferMode>("append");
 const targetTableNameCase = ref<TransferTableNameCase>("preserve");
+const quoteTargetColumnNames = ref(true);
 const batchSize = ref(1000);
 const isSubmitting = ref(false);
 const showStartConfirm = ref(false);
@@ -180,6 +183,8 @@ function connectionType(id: string): DatabaseType | undefined {
 function isMongoConnection(id: string): boolean {
   return connectionType(id) === "mongodb";
 }
+
+const showTargetColumnQuoteOption = computed(() => ["gaussdb", "opengauss"].includes(connectionType(targetConnectionId.value) ?? ""));
 
 function isCatalogCapable(id: string): boolean {
   const config = store.getConfig(id);
@@ -408,7 +413,7 @@ async function loadObjects(isCancelled: () => boolean = () => false) {
     const config = store.getConfig(connectionId);
     const needsSchema = isSchemaAware(config?.db_type);
     const schema = needsSchema && schemaValue ? schemaValue : database;
-    const kinds = transferObjectKindsForDatabase(config?.db_type);
+    const kinds = transferObjectKindsForDatabase(transferDatabaseTypeForConnection(config));
     const groups: Partial<Record<TransferObjectKind, string[]>> = {};
     for (const kind of kinds) {
       try {
@@ -639,6 +644,7 @@ function resetState(cancelTaskLoad = true) {
   transferContent.value = "structureAndData";
   transferMode.value = "append";
   targetTableNameCase.value = "preserve";
+  quoteTargetColumnNames.value = true;
   batchSize.value = 1000;
   isSubmitting.value = false;
   showStartConfirm.value = false;
@@ -764,6 +770,7 @@ async function startTransfer() {
     objects: buildTransferObjectSelections(selectedObjects.value, treeDisabledGroups.value),
     mode: transferMode.value,
     targetTableNameCase: targetTableNameCase.value,
+    quoteTargetColumnNames: quoteTargetColumnNames.value,
     ownershipPolicy: "preserve",
     batchSize: batchSize.value,
   };
@@ -849,6 +856,7 @@ function currentConfig(): TransferTaskConfig {
     content: transferContent.value,
     mode: transferMode.value,
     targetTableNameCase: targetTableNameCase.value,
+    quoteTargetColumnNames: quoteTargetColumnNames.value,
     batchSize: batchSize.value,
   };
 }
@@ -877,6 +885,7 @@ async function loadTaskIntoForm(task: TransferTask) {
   transferContent.value = config.content;
   transferMode.value = config.mode;
   targetTableNameCase.value = config.targetTableNameCase;
+  quoteTargetColumnNames.value = config.quoteTargetColumnNames;
   batchSize.value = config.batchSize;
   pendingSelectedObjectsPrefill.value = Object.keys(config.objects).length > 0 ? JSON.parse(JSON.stringify(config.objects)) : null;
 
@@ -1261,6 +1270,10 @@ async function saveConfigTask() {
                     <SelectItem value="upper">{{ t("transfer.tableNameCaseUpper") }}</SelectItem>
                   </SelectContent>
                 </Select>
+              </div>
+              <div v-if="showTargetColumnQuoteOption" class="flex items-center gap-3">
+                <Label for="transfer-quote-target-column-names" class="text-xs shrink-0">{{ t("transfer.quoteTargetColumnNames") }}</Label>
+                <Switch id="transfer-quote-target-column-names" v-model="quoteTargetColumnNames" size="sm" />
               </div>
               <div class="flex items-center gap-3">
                 <Label class="text-xs shrink-0">{{ t("transfer.batchSize") }}</Label>

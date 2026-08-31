@@ -385,6 +385,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sqlite_ssh_config_does_not_open_the_remote_path_as_a_local_file() {
+        let mut config = sqlite_config(std::path::Path::new("/remote/data/app.db"), "");
+        config.transport_layers = serde_json::from_value(serde_json::json!([{
+            "type": "ssh",
+            "id": "hop-1",
+            "enabled": true,
+            "host": "203.0.113.10",
+            "port": 22,
+            "user": "testuser"
+        }]))
+        .expect("ssh layer");
+
+        let error = match connect_sqlite_from_config(&config).await {
+            Ok(_) => panic!("SSH SQLite must not open a remote path on the local filesystem"),
+            Err(error) => error,
+        };
+        assert!(error.contains("SSH") || error.contains("Desktop") || error.contains("worker"), "{error}");
+        assert!(!error.contains("File does not exist"), "{error}");
+    }
+
+    #[tokio::test]
     async fn saving_memory_sqlite_attachments_keeps_the_live_pool_intact() {
         let dir = std::env::temp_dir().join(format!("dbx-tauri-sqlite-memory-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -869,7 +890,7 @@ pub async fn save_connections(state: State<'_, Arc<AppState>>, configs: Vec<Conn
 
 async fn save_connection_configs(state: &AppState, configs: &[ConnectionConfig]) -> Result<(), String> {
     for config in configs {
-        if config.db_type == DatabaseType::Sqlite {
+        if config.db_type == DatabaseType::Sqlite && !db::sqlite_worker::sqlite_ssh_worker_requested(config) {
             db::sqlite::validate_persistent_attachments(
                 &config.host,
                 &config.password,
@@ -1003,7 +1024,34 @@ fn sqlite_extension_specs_from_config(config: &ConnectionConfig) -> Vec<db::sqli
         .collect()
 }
 
+// Thin wrapper for the test suite below: production callers all go through
+// `connect_sqlite_from_config_with_state` with a real AppState.
+#[cfg(test)]
 async fn connect_sqlite_from_config(config: &ConnectionConfig) -> Result<db::sqlite::SqliteHandle, String> {
+    connect_sqlite_from_config_with_state(None, config.id.as_str(), config).await
+}
+
+async fn connect_sqlite_from_config_with_state(
+    state: Option<&AppState>,
+    connection_id: &str,
+    config: &ConnectionConfig,
+) -> Result<db::sqlite::SqliteHandle, String> {
+    if db::sqlite_worker::sqlite_ssh_worker_requested(config) {
+        let state =
+            state.ok_or_else(|| "Remote SQLite over SSH is only available in the DBX Desktop app".to_string())?;
+        let transport_layers = state.resolved_transport_layers(config).await?;
+        let worker = db::sqlite_worker::connect_sqlite_worker(
+            &state.tunnels,
+            &state.agent_manager,
+            state.storage.data_dir(),
+            connection_id,
+            config,
+            &transport_layers,
+        )
+        .await?;
+        return Ok(db::sqlite::SqliteHandle::from_worker(worker));
+    }
+
     let sqlite_path = expand_tilde(&config.host);
     db::sqlite::validate_persistent_attachments(&sqlite_path, &config.password, !config.attached_databases.is_empty())?;
     let pool = db::sqlite::connect_path_with_cipher_key_and_extensions(
@@ -1180,10 +1228,15 @@ async fn test_connection_with_info_inner(
                 }
                 Err(e) => Err(e),
             },
-            DatabaseType::Sqlite => match connect_sqlite_from_config(&config).await {
-                Ok(_) => Ok("Connection successful".to_string()),
-                Err(e) => Err(e),
-            },
+            DatabaseType::Sqlite => {
+                match connect_sqlite_from_config_with_state(Some(state.as_ref()), connection_id, &config).await {
+                    Ok(pool) => {
+                        pool.shutdown().await;
+                        Ok("Connection successful".to_string())
+                    }
+                    Err(e) => Err(e),
+                }
+            }
             DatabaseType::Redis => {
                 // Keep the result inside the outer lifecycle so temporary transports
                 // are reset after both successful and failed Redis tests.
@@ -1573,7 +1626,7 @@ pub async fn connect_db(
     client_attempt: Option<u64>,
 ) -> Result<String, String> {
     let config = config.canonicalized();
-    if config.db_type == DatabaseType::Sqlite {
+    if config.db_type == DatabaseType::Sqlite && !db::sqlite_worker::sqlite_ssh_worker_requested(&config) {
         db::sqlite::validate_persistent_attachments(
             &config.host,
             &config.password,
@@ -1627,7 +1680,9 @@ pub async fn connect_db(
         | DatabaseType::Kwdb
         | DatabaseType::Questdb
         | DatabaseType::OpenGauss => PoolKind::Postgres(db::postgres::connect(&url, connect_timeout).await?),
-        DatabaseType::Sqlite => PoolKind::Sqlite(connect_sqlite_from_config(&db_config).await?),
+        DatabaseType::Sqlite => PoolKind::Sqlite(
+            connect_sqlite_from_config_with_state(Some(state.inner().as_ref()), &id, &db_config).await?,
+        ),
         DatabaseType::Redis => {
             let con = if db_config.uses_redis_cluster() {
                 PoolKind::Redis(db::redis_driver::RedisConnection::Cluster(
@@ -1969,7 +2024,9 @@ pub async fn connection_final_proxy_port(
     if !runtime_config.has_effective_transport_layers() {
         return Err("Connection has no configured transport layers".to_string());
     }
-    if runtime_config.db_type == DatabaseType::Sqlite {
+    if runtime_config.db_type == DatabaseType::Sqlite
+        && !db::sqlite_worker::sqlite_ssh_worker_requested(&runtime_config)
+    {
         db::sqlite::validate_persistent_attachments(
             &runtime_config.host,
             &runtime_config.password,

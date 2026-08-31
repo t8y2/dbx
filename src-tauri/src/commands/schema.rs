@@ -37,6 +37,15 @@ pub async fn list_database_storage(
 }
 
 #[tauri::command]
+pub async fn list_xugu_tablespaces(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: Option<String>,
+) -> Result<Vec<db::XuguTablespaceInfo>, String> {
+    dbx_core::schema::list_xugu_tablespaces_core(&state, &connection_id, database.as_deref()).await
+}
+
+#[tauri::command]
 pub async fn get_sqlserver_completion_context(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
@@ -497,7 +506,9 @@ pub async fn list_constraints(
     database: String,
     schema: String,
     table: String,
+    catalog: Option<String>,
 ) -> Result<Vec<dbx_core::db::ConstraintInfo>, String> {
+    let _ = catalog;
     dbx_core::schema::list_constraints_core(&state, &connection_id, &database, &schema, &table).await
 }
 

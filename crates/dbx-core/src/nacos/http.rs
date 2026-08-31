@@ -647,11 +647,6 @@ impl NacosOpenApiAdmin {
         }
     }
 
-    async fn list_rnacos_console_namespaces(&self) -> Result<Vec<NacosNamespaceInfo>, String> {
-        let value = self.get_rnacos_console_json("/rnacos/api/console/v2/namespaces/list", Vec::new()).await?;
-        Ok(parse_namespaces(value))
-    }
-
     /// The Nacos-compatible discovery endpoint intentionally hides disabled
     /// instances. r-nacos's own management console exposes the complete
     /// administrative view instead, including `enabled = false` instances.
@@ -1786,7 +1781,15 @@ impl NacosAdmin for NacosOpenApiAdmin {
         let is_rnacos = self.is_explicit_rnacos() || state.as_ref().is_some_and(|state| state.is_rnacos_compatible);
         self.detected_rnacos.store(is_rnacos, Ordering::Relaxed);
         let _ = self.access_token().await?;
-        self.list_namespaces().await?;
+        if let Err(error) = self.list_namespaces().await {
+            // r-nacos can authenticate and serve configuration reads without
+            // exposing a namespace directory. The connection dialog will
+            // collect an explicit display scope instead of rejecting this
+            // otherwise valid OpenAPI connection.
+            if !(is_rnacos && error.contains("NACOS_ERROR[rnacosNamespaceDirectoryUnavailable]")) {
+                return Err(error);
+            }
+        }
         let mut capabilities =
             NacosCapabilities { service_management: self.service_capabilities(), ..Default::default() };
         if is_rnacos {
@@ -2270,20 +2273,27 @@ impl NacosAdmin for NacosOpenApiAdmin {
 
     async fn list_namespaces(&self) -> Result<Vec<NacosNamespaceInfo>, String> {
         if self.is_rnacos_compatible() {
-            // r-nacos v0.6.12 exposes the Nacos-compatible namespace API on
-            // the main OpenAPI service. This keeps the connection tree usable
-            // without a separately configured console, including consoles
-            // that require an interactive CAPTCHA.
+            // Namespace discovery is not part of r-nacos' client OpenAPI
+            // contract. Do not turn a failed optional console login into a
+            // prerequisite for normal OpenAPI configuration access: console
+            // deployments can require CAPTCHA, OAuth, or different credentials.
+            // The caller can still use an explicitly configured namespace
+            // scope, whose individual config requests remain server-authorized.
             match self.get_json("/v1/console/namespaces", Vec::new()).await {
                 Ok(value) => return Ok(parse_namespaces(value)),
-                Err(openapi_error) if self.cfg.rnacos_console_addr.is_empty() => return Err(openapi_error),
-                Err(openapi_error) => {
-                    return self.list_rnacos_console_namespaces().await.map_err(|console_error| {
-                        format!(
-                            "Failed to list r-nacos namespaces through the OpenAPI endpoint ({openapi_error}) or console fallback ({console_error})"
-                        )
-                    });
+                Err(openapi_error) if rnacos_namespace_directory_endpoint_unavailable(&openapi_error) => {
+                    return Err(classified_error(
+                        "rnacosNamespaceDirectoryUnavailable",
+                        &format!(
+                            "r-nacos could not list namespaces through its OpenAPI endpoint: {openapi_error}. Configure the namespace IDs to display instead of relying on console authentication"
+                        ),
+                    ));
                 }
+                // A reachable endpoint that rejects the current API token, or
+                // a transport/server failure, is not evidence that the
+                // directory is optional. Propagate it so connection testing
+                // cannot report success for an unusable OpenAPI session.
+                Err(openapi_error) => return Err(openapi_error),
             }
         }
         match self
@@ -3806,6 +3816,12 @@ async fn response_json_or_text(resp: reqwest::Response) -> Result<Value, String>
         return Ok(Value::Null);
     }
     Ok(serde_json::from_slice(&bytes).unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).to_string())))
+}
+
+fn rnacos_namespace_directory_endpoint_unavailable(error: &str) -> bool {
+    ["404 Not Found", "405 Method Not Allowed", "410 Gone"]
+        .iter()
+        .any(|status| error.contains(&format!("returned {status}")))
 }
 
 async fn error_for_status(resp: reqwest::Response, path: &str) -> Result<reqwest::Response, String> {
@@ -6442,23 +6458,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_rnacos_falls_back_to_console_namespace_api() {
+    async fn explicit_rnacos_reports_unavailable_openapi_namespace_directory() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             assert_eq!(read_request_target(&mut socket).await, "/v1/console/namespaces");
             write_not_found_response(&mut socket).await;
-
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let request = read_http_request(&mut socket).await;
-            assert_eq!(request.split_whitespace().nth(1), Some("/rnacos/api/console/v2/namespaces/list"));
-            assert!(request.to_ascii_lowercase().contains("token: console-token"));
-            write_json_response(
-                &mut socket,
-                r#"{"success":true,"data":[{"namespaceId":"prod","namespaceName":"production"}]}"#,
-            )
-            .await;
         });
         let mut config = test_admin_config(format!("http://{address}"));
         config.implementation = Some(NacosImplementation::RNacos);
@@ -6473,8 +6479,61 @@ mod tests {
             expires_at: Instant::now() + Duration::from_secs(300),
         });
 
-        let namespaces = admin.list_namespaces().await.unwrap();
-        assert_eq!(namespaces[1].namespace, "prod");
+        let error = admin.list_namespaces().await.unwrap_err();
+        assert!(error.contains("NACOS_ERROR[rnacosNamespaceDirectoryUnavailable]"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rnacos_connection_accepts_a_missing_namespace_directory() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/health");
+            write_json_response(&mut socket, "success").await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v1/console/namespaces");
+            write_not_found_response(&mut socket).await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::RNacos);
+        config.context_path = "/nacos".to_string();
+
+        NacosOpenApiAdmin::new(config).unwrap().test_connection().await.unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rnacos_connection_rejects_namespace_directory_authorization_failures() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/health");
+            write_json_response(&mut socket, "success").await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v1/auth/users/login");
+            write_json_response(&mut socket, r#"{"accessToken":"rnacos-token","tokenTtl":18000}"#).await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let target = read_request_target(&mut socket).await;
+            assert!(target.starts_with("/nacos/v1/console/namespaces?"));
+            assert!(target.contains("accessToken=rnacos-token"));
+            write_forbidden_response(&mut socket).await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::RNacos);
+        config.context_path = "/nacos".to_string();
+        config.auth =
+            NacosAuthConfig::UsernamePassword { username: "ordinary".to_string(), password: "secret".to_string() };
+
+        let error = NacosOpenApiAdmin::new(config).unwrap().test_connection().await.unwrap_err();
+
+        assert!(error.contains("/v1/console/namespaces returned 403 Forbidden"));
+        assert!(!error.contains("NACOS_ERROR[rnacosNamespaceDirectoryUnavailable]"));
         server.await.unwrap();
     }
 

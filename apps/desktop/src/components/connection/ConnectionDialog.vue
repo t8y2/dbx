@@ -55,7 +55,7 @@ import { doltSystemTablesVisible, isDoltDriverProfile, setDoltSystemTablesVisibl
 import { DamengJvmSystemPropertyError, damengJvmSystemPropertiesText, parseDamengJvmSystemProperties } from "@/lib/database/damengJvmOptions";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { configuredDatabaseProductName, connectionConfigFingerprint, databaseInfoCopyText, databaseInfoRows, normalizeDatabaseConnectionInfo, type DatabaseInfoField } from "@/lib/connection/connectionDatabaseInfo";
-import { agentDriverInstallKey, appendAgentDriverUpdateHint, hasAgentDriverUpdate, showAgentDriverInstallHint, type AgentDriverInstallState, type DriverStoreFocus } from "@/lib/connection/agentDriverInstallHint";
+import { agentDriverInstallKey, appendAgentDriverUpdateHint, connectionUsesSsh, hasAgentDriverUpdate, showAgentDriverInstallHint, type AgentDriverInstallState, type DriverStoreFocus } from "@/lib/connection/agentDriverInstallHint";
 import { prestoSqlBuiltinDriverPaths } from "@/lib/database/prestoSqlBuiltinDriver";
 import { JDBCX_DEFAULT_URL, JDBCX_DRIVER_PROFILE, JDBCX_JDBC_DRIVER_CLASS, ensureJdbcxRuntimeDrivers, isJdbcxRuntimeBundle, isJdbcxRuntimePath, jdbcxHighPrivilegeExtensionsEnabled, setJdbcxHighPrivilegeExtensionsEnabled } from "@/lib/database/jdbcxBuiltinDriver";
 import { SQLITE_DATABASE_FILE_EXTENSIONS } from "@/lib/database/databaseFileDetection";
@@ -260,6 +260,20 @@ const emit = defineEmits<{
 }>();
 
 const store = useConnectionStore();
+const UNGROUPED_CONNECTION_GROUP = "__dbx_ungrouped_connection_group__";
+const selectedConnectionGroupId = ref<string | null>(null);
+const connectionGroupSelectValue = computed({
+  get: () => selectedConnectionGroupId.value ?? UNGROUPED_CONNECTION_GROUP,
+  set: (value: string) => {
+    selectedConnectionGroupId.value = value === UNGROUPED_CONNECTION_GROUP ? null : value;
+  },
+});
+const connectionGroupOptions = computed(() => store.connectionGroupOptions.map((group) => ({ id: group.id, label: group.path.join(" / ") })));
+
+function initialConnectionGroupId(): string | null {
+  const preferred = store.newConnectionGroupId ?? store.selectedConnectionGroupId;
+  return preferred && connectionGroupOptions.value.some((group) => group.id === preferred) ? preferred : null;
+}
 const tunnelProfileStore = useTunnelProfileStore();
 const isTesting = ref(false);
 const isSaving = ref(false);
@@ -1712,7 +1726,7 @@ function errorMessage(error: unknown): string {
 
 function connectionErrorWithDriverUpdateHint(config: ConnectionConfig, message: string): string {
   message = appendConnectionErrorHints(config, message, t);
-  if (!hasAgentDriverUpdate(config.db_type, agentDrivers.value, config.driver_profile)) return message;
+  if (!hasAgentDriverUpdate(config.db_type, agentDrivers.value, config.driver_profile, { ssh: connectionUsesSsh(config) })) return message;
   return appendAgentDriverUpdateHint(message, t("connection.agentDriverUpdateConnectionHint"));
 }
 
@@ -1824,11 +1838,11 @@ async function ensureRequiredAgentDriverInstalled(config: ConnectionConfig): Pro
     await installSqlServerLegacyCompatibilityComponentIfNeeded();
   }
 
-  const driverKey = agentDriverInstallKey(config.db_type, config.driver_profile);
+  const driverKey = agentDriverInstallKey(config.db_type, config.driver_profile, { ssh: connectionUsesSsh(config) });
   if (!driverKey) return;
 
   let drivers = agentDrivers.value.length ? agentDrivers.value : await refreshLocalAgentDrivers();
-  if (!showAgentDriverInstallHint(config.db_type, drivers, config.driver_profile)) return;
+  if (!showAgentDriverInstallHint(config.db_type, drivers, config.driver_profile, { ssh: connectionUsesSsh(config) })) return;
   if (installedAgentDriver(drivers, driverKey)?.installed === true) return;
 
   drivers = await refreshLocalAgentDrivers();
@@ -2414,7 +2428,7 @@ function applyProfile(val: string, preserveConnectionFields = false) {
       form.value.connection_string = undefined;
       form.value.url_params = "";
     }
-    resetHiveKerberosFields(profile.type === "hive" || profile.type === "kyuubi" || profile.type === "impala" ? form.value : undefined);
+    resetHiveKerberosFields(profile.type === "hive" || profile.type === "argo" || profile.type === "kyuubi" || profile.type === "impala" ? form.value : undefined);
   }
   if (profile.type === "meilisearch") {
     syncMeilisearchHostInput(form.value);
@@ -2552,7 +2566,7 @@ watch(
         resetVictoriaMetricsFields();
       }
       resetElasticsearchProxyFields(config.db_type === "elasticsearch" ? config.external_config : undefined);
-      resetHiveKerberosFields(config.db_type === "hive" || config.db_type === "kyuubi" || config.db_type === "impala" ? config : undefined);
+      resetHiveKerberosFields(config.db_type === "hive" || config.db_type === "argo" || config.db_type === "kyuubi" || config.db_type === "impala" ? config : undefined);
       resetDamengJvmOptions(config.db_type === "dameng" ? config : undefined);
       h2ConnectionMode.value = h2ConnectionModeForConfig(config);
       customColorInput.value = config.color || "";
@@ -2582,6 +2596,7 @@ watch(
     } else {
       clearSavedDatabaseInfo();
       editingId.value = null;
+      selectedConnectionGroupId.value = initialConnectionGroupId();
       form.value = defaultForm();
       redisKeyTemplatesText.value = "";
       productionProtectionEnabled.value = false;
@@ -2644,7 +2659,11 @@ const selectedSshLayer = computed(() => (selectedTransportLayer.value?.type === 
 const selectedProxyLayer = computed(() => (selectedTransportLayer.value?.type === "proxy" ? selectedTransportLayer.value : null));
 const selectedHttpTunnelLayer = computed(() => (selectedTransportLayer.value?.type === "http_tunnel" ? selectedTransportLayer.value : null));
 
-const tunnelProfiles = computed(() => tunnelProfileStore.profiles);
+const tunnelProfiles = computed(() => {
+  const profiles = tunnelProfileStore.profiles;
+  if (!sqliteSshOnlyTransport.value) return profiles;
+  return profiles.filter((profile) => profile.type === "ssh");
+});
 const selectedLayerProfileId = computed(() => selectedTransportLayer.value?.profile_id || "");
 const selectedLayerProfile = computed(() => tunnelProfileStore.profileById(selectedLayerProfileId.value));
 
@@ -3087,14 +3106,67 @@ const zookeeperAuthScheme = computed<ZooKeeperAuthScheme>({
     resetTestState();
   },
 });
-const canUseTransportLayers = computed(() => form.value.db_type !== "sqlite" && form.value.db_type !== "access" && !isCloudflareD1Connection(form.value) && !isH2FileMode.value && !(form.value.db_type === "oracle" && form.value.oracle_connection_type === "tns"));
-const shouldShowAgentDriverInstallHint = computed(() => showAgentDriverInstallHint(form.value.db_type, agentDrivers.value, form.value.driver_profile));
+const canUseTransportLayers = computed(() => {
+  if (form.value.db_type === "access" || isCloudflareD1Connection(form.value) || isH2FileMode.value || (form.value.db_type === "oracle" && form.value.oracle_connection_type === "tns")) {
+    return false;
+  }
+  if (form.value.db_type === "sqlite") {
+    return isDesktop;
+  }
+  return true;
+});
+const sqliteSshOnlyTransport = computed(() => form.value.db_type === "sqlite");
+const sqliteUsesSsh = computed(() => form.value.db_type === "sqlite" && connectionUsesSsh(form.value));
+const sqliteWorkerPlacement = computed({
+  get: () => getUrlParam(form.value.url_params, "dbx_sqlite_worker") || "session",
+  set: (value: string) => {
+    const next = value === "session" ? "" : value;
+    form.value.url_params = setUrlParam(form.value.url_params, "dbx_sqlite_worker", next);
+    if (value !== "preplaced" && !getUrlParam(form.value.url_params, "dbx_sqlite_worker_path")) {
+      return;
+    }
+    if (value === "session") {
+      form.value.url_params = setUrlParam(form.value.url_params, "dbx_sqlite_worker_path", "");
+    }
+  },
+});
+const sqliteWorkerPath = computed({
+  get: () => getUrlParam(form.value.url_params, "dbx_sqlite_worker_path"),
+  set: (value: string) => {
+    form.value.url_params = setUrlParam(form.value.url_params, "dbx_sqlite_worker_path", value);
+  },
+});
+const sqliteWorkerPlacementOptions = [
+  {
+    value: "session",
+    labelKey: "connection.sqliteWorkerPlacementSession",
+    hintKey: "connection.sqliteWorkerPlacementSessionHint",
+    recommended: true,
+  },
+  {
+    value: "persist",
+    labelKey: "connection.sqliteWorkerPlacementPersist",
+    hintKey: "connection.sqliteWorkerPlacementPersistHint",
+    recommended: false,
+  },
+  {
+    value: "preplaced",
+    labelKey: "connection.sqliteWorkerPlacementPreplaced",
+    hintKey: "connection.sqliteWorkerPlacementPreplacedHint",
+    recommended: false,
+  },
+] as const;
+const shouldShowSqliteSshWorkerInstallHint = computed(() => form.value.db_type === "sqlite" && sqliteUsesSsh.value && showAgentDriverInstallHint("sqlite", agentDrivers.value, form.value.driver_profile, { ssh: true }));
+const shouldShowAgentDriverInstallHint = computed(() => {
+  if (form.value.db_type === "sqlite" && sqliteUsesSsh.value) return false;
+  return showAgentDriverInstallHint(form.value.db_type, agentDrivers.value, form.value.driver_profile, { ssh: sqliteUsesSsh.value });
+});
+const agentDriverFocus = computed<DriverStoreFocus>(() => ({ target: "driver", driver: agentDriverInstallKey(form.value.db_type, form.value.driver_profile, { ssh: sqliteUsesSsh.value }) }));
 const h2DriverMissing = computed(() => form.value.db_type === "h2" && isH2FileMode.value && agentDrivers.value.find((d) => d.db_type === "h2")?.installed !== true);
-const agentDriverFocus = computed<DriverStoreFocus>(() => ({ target: "driver", driver: agentDriverInstallKey(form.value.db_type, form.value.driver_profile) }));
 const canChooseVisibleNacosNamespaces = computed(() => form.value.db_type === "nacos");
 const isNacosV3AdminPlane = computed(() => nacosImplementation.value === "nacos" && nacosVersionMode.value === "v3" && nacosApiPlane.value === "admin");
 const isNacosV3ConsolePlane = computed(() => nacosImplementation.value === "nacos" && nacosVersionMode.value === "v3" && nacosApiPlane.value === "console");
-const canDetectNacosNamespaceAccess = computed(() => form.value.db_type === "nacos" && nacosImplementation.value === "nacos" && nacosAuthKind.value === "usernamePassword");
+const canDetectNacosNamespaceAccess = computed(() => form.value.db_type === "nacos" && nacosAuthKind.value === "usernamePassword");
 const nacosManualNamespaceLabelKey = computed(() => (isNacosV3AdminPlane.value ? "nacos.nacosManagedNamespaces" : "nacos.nacosManagedNamespacesNameOrId"));
 const nacosManualNamespacePlaceholderKey = computed(() => (isNacosV3AdminPlane.value ? "nacos.nacosManagedNamespacesIdPlaceholder" : "nacos.nacosManagedNamespacesPlaceholder"));
 const nacosManualNamespaceHintKey = computed(() => {
@@ -3308,7 +3380,8 @@ const shouldUseWideConnectionDialog = computed(() => dialogStep.value === "confi
 const connectionDialogContentClass = computed(() => {
   if (dialogStep.value === "select") return "connection-dialog-content--picker sm:h-[720px] sm:max-w-[880px]";
   const widthClass = shouldUseWideConnectionDialog.value ? "connection-dialog-content--wide sm:max-w-[660px]" : "connection-dialog-content--standard sm:max-w-[560px]";
-  return `${widthClass} connection-dialog-content--config`;
+  const scrollableAdvancedNacos = form.value.db_type === "nacos" && configTab.value === "advanced";
+  return `${widthClass} connection-dialog-content--config${scrollableAdvancedNacos ? " connection-dialog-content--scrollable" : ""}`;
 });
 const connectionLabelClass = "justify-self-start text-left";
 const connectionLabelSmallClass = `${connectionLabelClass} text-xs`;
@@ -3717,7 +3790,7 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     config.ssl = !!config.ssl || damengSsl.enabled;
     config.url_params = applyDamengSslUrlParams(config.url_params, config.ssl, damengSsl.sslFilesPath, damengSsl.sslKeystorePassword, damengSsl.sslProtocol);
   }
-  if (config.db_type === "hive" || config.db_type === "kyuubi" || config.db_type === "impala") {
+  if (config.db_type === "hive" || config.db_type === "argo" || config.db_type === "kyuubi" || config.db_type === "impala") {
     if (hiveAuthMode.value === "kerberos" && !hivePrincipal.value.trim()) {
       throw new Error(t("connection.hiveKerberosPrincipalRequired"));
     }
@@ -4456,6 +4529,7 @@ async function resolveManualNacosNamespaceNames(namespaces: string[]): Promise<s
 
 function isNacosNamespaceListingPermissionError(error: unknown): boolean {
   const message = errorMessage(error);
+  if (/NACOS_ERROR\[rnacosNamespaceDirectoryUnavailable\]/.test(message)) return true;
   if (/NACOS_ERROR\[(?:v3ManagedNamespacesRequired|managedNamespacesRequired)\]/.test(message)) return true;
   return /\/v3\/(?:admin|console)\/core\/namespace\/list/.test(message) && /\b403\b/.test(message) && /authorization failed/i.test(message);
 }
@@ -4541,7 +4615,10 @@ async function saveVisibleNacosNamespaceSelection() {
   if (visibleNacosNamespaceAccessMode.value === "manual") {
     const manualNamespaces = parseNacosManagedNamespaces(nacosManagedNamespacesText.value);
     isResolvingManualNacosNamespaces.value = true;
-    const resolvedNamespaces = isNacosV3AdminPlane.value ? manualNamespaces : await resolveManualNacosNamespaceNames(manualNamespaces);
+    // r-nacos does not promise a namespace directory on its client OpenAPI.
+    // Preserve user-provided IDs directly so scoped config access does not
+    // require a separate console login.
+    const resolvedNamespaces = isNacosV3AdminPlane.value || nacosImplementation.value === "rnacos" ? manualNamespaces : await resolveManualNacosNamespaceNames(manualNamespaces);
     isResolvingManualNacosNamespaces.value = false;
     nacosManagedNamespacesText.value = resolvedNamespaces.join("\n");
     form.value.visible_databases = resolvedNamespaces;
@@ -4818,6 +4895,7 @@ function openJdbcDriverManagerFromError() {
 
 function resetForm(options: { preservePickerState?: boolean } = {}) {
   editingId.value = null;
+  selectedConnectionGroupId.value = initialConnectionGroupId();
   form.value = defaultForm();
   redisKeyTemplatesText.value = "";
   resetConnectionNoteVisibilityDraft(connectionNoteVisibilityDraft, settingsStore.editorSettings.sidebarShowConnectionNotes);
@@ -4976,6 +5054,10 @@ watch(
   { immediate: true },
 );
 
+watch(connectionGroupOptions, (groups) => {
+  if (selectedConnectionGroupId.value && !groups.some((group) => group.id === selectedConnectionGroupId.value)) selectedConnectionGroupId.value = null;
+});
+
 watch(
   () => props.prefillConfig,
   (draft) => {
@@ -5031,6 +5113,15 @@ watch(canUseTransportLayers, (value) => {
   }
 });
 
+watch(sqliteSshOnlyTransport, (sshOnly) => {
+  if (!sshOnly) return;
+  const layers = form.value.transport_layers || [];
+  const next = layers.filter((layer) => layer.type === "ssh");
+  if (next.length === layers.length) return;
+  form.value.transport_layers = next;
+  selectedTransportLayerId.value = next[0]?.id || null;
+});
+
 watch(supportsTlsToggle, (value) => {
   if (!value && configTab.value === "tls") {
     configTab.value = "connection";
@@ -5052,6 +5143,7 @@ function addSshTunnel() {
 }
 
 function addProxyTunnel() {
+  if (sqliteSshOnlyTransport.value) return;
   const next: TransportLayerConfig = { type: "proxy", ...defaultProxyTunnel() };
   next.name = `Proxy ${transportLayers.value.length + 1}`;
   form.value.transport_layers = [...transportLayers.value, next];
@@ -5060,6 +5152,7 @@ function addProxyTunnel() {
 }
 
 function addHttpTunnel() {
+  if (sqliteSshOnlyTransport.value) return;
   const next: TransportLayerConfig = { type: "http_tunnel", ...defaultHttpTunnel() };
   next.name = t("connection.httpTunnelDefaultName", { index: 1 });
   form.value.transport_layers = [next, ...transportLayers.value];
@@ -5068,6 +5161,7 @@ function addHttpTunnel() {
 }
 
 function duplicateTransportLayer(layer: TransportLayerConfig) {
+  if (sqliteSshOnlyTransport.value && layer.type !== "ssh") return;
   const next = normalizeTransportLayer({ ...layer, id: uuid(), name: layer.name ? `${layer.name} copy` : "" });
   form.value.transport_layers = [...transportLayers.value, next];
   selectedTransportLayerId.value = next.id;
@@ -5107,6 +5201,7 @@ function dropTransportLayer(targetId: string) {
 function changeSelectedTransportLayerType(type: "ssh" | "proxy" | "http_tunnel") {
   const selected = selectedTransportLayer.value;
   if (!selected || selected.type === type) return;
+  if (sqliteSshOnlyTransport.value && type !== "ssh") return;
   const replacement: TransportLayerConfig =
     type === "proxy" ? { type: "proxy", ...defaultProxyTunnel(), id: selected.id, name: selected.name } : type === "http_tunnel" ? { type: "http_tunnel", ...defaultHttpTunnel(), id: selected.id, name: selected.name } : { type: "ssh", ...defaultSshTunnel(), id: selected.id, name: selected.name };
   form.value.transport_layers = transportLayers.value.map((layer) => (layer.id === selected.id ? replacement : layer));
@@ -5129,6 +5224,9 @@ function updateSelectedSshAuthMethod(value: unknown) {
 
 function validateTransportLayers(config: LegacyConnectionConfig) {
   const layers = config.transport_layers || [];
+  if (config.db_type === "sqlite" && layers.some((layer) => layer.enabled !== false && layer.type !== "ssh")) {
+    throw new Error(t("connection.sqliteTransportSshOnly"));
+  }
   layers.forEach((layer, index) => {
     if (layer.enabled === false) return;
     // Profile-referencing layers are stubs: the shared profile supplies the
@@ -5231,7 +5329,7 @@ async function save() {
       await ensureRequiredAgentDriverInstalled(config);
       await ensureRequiredGaussdbMJdbcRuntime(config);
       await persistGlobalTimeoutDrafts();
-      await store.addConnection(config);
+      await store.addConnection(config, selectedConnectionGroupId.value);
       connectionSaved = true;
       await persistConnectionNoteVisibilityDraft();
       draftTestConnectionId.value = uuid();
@@ -5785,7 +5883,7 @@ function openExternalUrl(url: string) {
 
             <TabsContent value="connection" class="m-0 flex min-h-0 flex-1 flex-col overflow-hidden">
               <div class="connection-form-body grid min-h-0 flex-1 scroll-pb-6 gap-4 overflow-y-auto pt-4 pr-2 pb-6" :class="{ 'connection-form-body--nacos': form.db_type === 'nacos' }">
-                <div v-if="!isJdbcConnection && form.db_type !== 'nacos' && form.db_type !== 'consul'" class="grid grid-cols-4 items-center gap-4">
+                <div v-if="!isJdbcConnection && form.db_type !== 'nacos' && form.db_type !== 'consul' && form.db_type !== 'mq'" class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelClass">{{ t("connection.connectionUrlOptional") }}</Label>
                   <div class="col-span-3 flex items-center gap-1">
                     <Input v-model="connectionUrlInput" class="flex-1" :placeholder="connectionUrlPlaceholder" @keydown.enter.prevent="applyConnectionUrl" />
@@ -5846,35 +5944,49 @@ function openExternalUrl(url: string) {
 
                 <div class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelClass">{{ t("connection.color") }}</Label>
-                  <div class="col-span-3 flex items-center gap-1.5">
-                    <button
-                      v-for="color in colorOptions"
-                      :key="color.value || 'none'"
-                      type="button"
-                      class="h-6 w-6 rounded-full border ring-offset-background transition hover:scale-105"
-                      :class="[color.class, form.color === color.value ? 'ring-2 ring-ring ring-offset-2' : 'border-border']"
-                      :title="t(color.labelKey)"
-                      @click="handlePresetClick(color.value)"
-                    />
-                    <Popover v-model:open="customColorOpen">
-                      <PopoverTrigger as-child>
-                        <button
-                          type="button"
-                          class="h-6 w-6 rounded-full border flex items-center justify-center hover:scale-105 transition"
-                          :class="[!isPresetColor(form.color) && form.color ? 'border-border ring-2 ring-ring ring-offset-2' : 'border-dashed border-border']"
-                          :style="!isPresetColor(form.color) && form.color ? { backgroundColor: form.color } : {}"
-                          :title="t('connection.colorCustom')"
-                        >
-                          <Pipette class="h-3.5 w-3.5" :class="!isPresetColor(form.color) && form.color ? 'text-white' : 'text-muted-foreground'" />
-                        </button>
-                      </PopoverTrigger>
-                      <PopoverContent class="w-auto p-2">
-                        <div class="flex items-center gap-2">
-                          <input type="color" :value="form.color" @input="handleCustomColorPicked(($event.target as HTMLInputElement).value)" class="h-6 w-6 cursor-pointer rounded border-0 p-0" />
-                          <Input type="text" :value="customColorInput || form.color" @input="handleCustomColorInput(($event.target as HTMLInputElement).value)" class="w-28 h-7 text-xs font-mono" :placeholder="t('connection.customColorPlaceholder')" />
-                        </div>
-                      </PopoverContent>
-                    </Popover>
+                  <div class="col-span-3 flex min-w-0 items-center">
+                    <div class="flex shrink-0 items-center gap-1.5">
+                      <button
+                        v-for="color in colorOptions"
+                        :key="color.value || 'none'"
+                        type="button"
+                        class="h-6 w-6 rounded-full border ring-offset-background transition hover:scale-105"
+                        :class="[color.class, form.color === color.value ? 'ring-2 ring-ring ring-offset-2' : 'border-border']"
+                        :title="t(color.labelKey)"
+                        @click="handlePresetClick(color.value)"
+                      />
+                      <Popover v-model:open="customColorOpen">
+                        <PopoverTrigger as-child>
+                          <button
+                            type="button"
+                            class="h-6 w-6 rounded-full border flex items-center justify-center hover:scale-105 transition"
+                            :class="[!isPresetColor(form.color) && form.color ? 'border-border ring-2 ring-ring ring-offset-2' : 'border-dashed border-border']"
+                            :style="!isPresetColor(form.color) && form.color ? { backgroundColor: form.color } : {}"
+                            :title="t('connection.colorCustom')"
+                          >
+                            <Pipette class="h-3.5 w-3.5" :class="!isPresetColor(form.color) && form.color ? 'text-white' : 'text-muted-foreground'" />
+                          </button>
+                        </PopoverTrigger>
+                        <PopoverContent class="w-auto p-2">
+                          <div class="flex items-center gap-2">
+                            <input type="color" :value="form.color" @input="handleCustomColorPicked(($event.target as HTMLInputElement).value)" class="h-6 w-6 cursor-pointer rounded border-0 p-0" />
+                            <Input type="text" :value="customColorInput || form.color" @input="handleCustomColorInput(($event.target as HTMLInputElement).value)" class="w-28 h-7 text-xs font-mono" :placeholder="t('connection.customColorPlaceholder')" />
+                          </div>
+                        </PopoverContent>
+                      </Popover>
+                    </div>
+                    <div v-if="!editingId && connectionGroupOptions.length > 0" class="ml-3 flex min-w-0 flex-1 items-center gap-2 border-l pl-3">
+                      <Label class="shrink-0 text-xs text-muted-foreground">{{ t("connectionGroup.group") }}</Label>
+                      <Select v-model="connectionGroupSelectValue">
+                        <SelectTrigger class="h-8 min-w-0 flex-1">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem :value="UNGROUPED_CONNECTION_GROUP">{{ t("connectionGroup.ungroupedLabel") }}</SelectItem>
+                          <SelectItem v-for="group in connectionGroupOptions" :key="group.id" :value="group.id">{{ group.label }}</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
                   </div>
                 </div>
 
@@ -6080,10 +6192,10 @@ function openExternalUrl(url: string) {
                     <Label :class="connectionLabelClass">{{ t("connection.filePath") }}</Label>
                     <div class="col-span-3 space-y-1">
                       <div class="flex items-center gap-1">
-                        <Input v-model="form.host" class="flex-1" :placeholder="filePathPlaceholder" />
+                        <Input v-model="form.host" class="flex-1" :placeholder="sqliteUsesSsh ? t('connection.sqliteRemotePathPlaceholder') : filePathPlaceholder" />
                         <Tooltip v-if="isDesktop">
                           <TooltipTrigger as-child>
-                            <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" @click="browseDbFilePath">
+                            <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" :disabled="sqliteUsesSsh" @click="browseDbFilePath">
                               <FolderOpen class="h-4 w-4" />
                             </Button>
                           </TooltipTrigger>
@@ -6099,23 +6211,54 @@ function openExternalUrl(url: string) {
                         </Tooltip>
                         <Tooltip v-if="isDesktop && form.db_type === 'sqlite'">
                           <TooltipTrigger as-child>
-                            <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" @click="createSqliteFilePath">
+                            <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" :disabled="sqliteUsesSsh" @click="createSqliteFilePath">
                               <FilePlus2 class="h-4 w-4" />
                             </Button>
                           </TooltipTrigger>
                           <TooltipContent>{{ t("connection.createSqliteFile") }}</TooltipContent>
                         </Tooltip>
                       </div>
-                      <p v-if="supportsMemoryDatabasePath" class="text-xs text-muted-foreground">
+                      <p v-if="sqliteUsesSsh" class="text-xs text-muted-foreground">
+                        {{ t("connection.sqliteRemotePathHint") }}
+                      </p>
+                      <p v-else-if="supportsMemoryDatabasePath" class="text-xs text-muted-foreground">
                         {{ t("connection.memoryDatabasePathHint") }}
                       </p>
                     </div>
                   </div>
-                  <div v-if="form.db_type === 'sqlite'" class="grid grid-cols-4 items-center gap-4">
+                  <div v-if="form.db_type === 'sqlite' && sqliteUsesSsh" class="grid grid-cols-4 items-start gap-4">
+                    <Label :class="connectionLabelTopClass">{{ t("connection.sqliteWorkerPlacement") }}</Label>
+                    <div class="col-span-3 space-y-2">
+                      <div class="flex min-h-9 flex-wrap items-center gap-x-5 gap-y-2">
+                        <Tooltip v-for="option in sqliteWorkerPlacementOptions" :key="option.value" :delay-duration="0">
+                          <TooltipTrigger as-child>
+                            <label class="flex cursor-pointer items-center gap-1.5 text-sm">
+                              <input type="radio" name="sqlite-worker-placement" class="h-3.5 w-3.5 accent-primary" :value="option.value" v-model="sqliteWorkerPlacement" />
+                              <span>{{ t(option.labelKey) }}</span>
+                              <Badge v-if="option.recommended" class="h-4 rounded-full px-1.5 text-[10px] leading-none">{{ t("connection.sqliteWorkerPlacementDefault") }}</Badge>
+                            </label>
+                          </TooltipTrigger>
+                          <TooltipContent side="bottom" class="max-w-[18rem] flex-col items-start gap-1 py-2 text-left">
+                            <div class="flex items-center gap-1.5 font-medium">
+                              <span>{{ t(option.labelKey) }}</span>
+                              <Badge v-if="option.recommended" class="h-4 rounded-full px-1.5 text-[10px] leading-none">{{ t("connection.sqliteWorkerPlacementDefault") }}</Badge>
+                            </div>
+                            <p class="text-[11px] leading-relaxed text-background/80">{{ t(option.hintKey) }}</p>
+                          </TooltipContent>
+                        </Tooltip>
+                      </div>
+                      <Input v-if="sqliteWorkerPlacement !== 'session'" v-model="sqliteWorkerPath" :placeholder="sqliteWorkerPlacement === 'persist' ? t('connection.sqliteWorkerPersistPathPlaceholder') : t('connection.sqliteWorkerPreplacedPathPlaceholder')" />
+                      <p v-if="shouldShowSqliteSshWorkerInstallHint" class="text-xs text-muted-foreground">
+                        {{ t("connection.driverInstallHintPrefix") }}<a class="underline cursor-pointer text-primary hover:text-primary/80" @click="emit('openDriverStore', agentDriverFocus)">{{ t("toolbar.driverManager") }}</a
+                        >{{ t("connection.driverInstallHintSuffix") }}
+                      </p>
+                    </div>
+                  </div>
+                  <div v-if="form.db_type === 'sqlite' && !sqliteUsesSsh" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ t("connection.sqliteCipherKey") }}</Label>
                     <PasswordInput v-model="form.password" class="col-span-3" :placeholder="t('connection.sqliteCipherKeyPlaceholder')" />
                   </div>
-                  <div v-if="form.db_type === 'sqlite'" class="grid grid-cols-4 items-start gap-4">
+                  <div v-if="form.db_type === 'sqlite' && !sqliteUsesSsh" class="grid grid-cols-4 items-start gap-4">
                     <Label :class="connectionLabelTopClass">{{ t("connection.sqliteExtensions") }}</Label>
                     <div class="col-span-3 space-y-1">
                       <div class="flex items-start gap-1">
@@ -7939,7 +8082,7 @@ function openExternalUrl(url: string) {
             </TabsContent>
 
             <TabsContent value="advanced" class="m-0 flex min-h-0 flex-1 flex-col overflow-hidden">
-              <div class="connection-form-body grid min-h-0 flex-1 scroll-pb-6 gap-4 overflow-y-auto pt-4 pr-2 pb-6">
+              <div class="connection-form-body grid min-h-0 flex-1 scroll-pb-6 gap-4 overflow-y-auto pt-4 pr-2 pb-6" :class="{ 'connection-form-body--nacos': form.db_type === 'nacos' }">
                 <div v-if="form.db_type === 'elasticsearch'" class="grid grid-cols-4 items-center gap-4">
                   <div class="flex items-center gap-1">
                     <Label :class="connectionLabelSmallClass">{{ t("connection.elasticsearchConnectivityCheckDisabled") }}</Label>
@@ -8380,11 +8523,11 @@ function openExternalUrl(url: string) {
                         <Plus class="mr-1.5 h-3.5 w-3.5" />
                         {{ t("connection.sshHopAdd") }}
                       </Button>
-                      <Button type="button" variant="outline" size="sm" @click="addProxyTunnel">
+                      <Button v-if="!sqliteSshOnlyTransport" type="button" variant="outline" size="sm" @click="addProxyTunnel">
                         <Plus class="mr-1.5 h-3.5 w-3.5" />
                         {{ t("connection.proxy") }}
                       </Button>
-                      <Button type="button" variant="outline" size="sm" @click="addHttpTunnel">
+                      <Button v-if="!sqliteSshOnlyTransport" type="button" variant="outline" size="sm" @click="addHttpTunnel">
                         <Plus class="mr-1.5 h-3.5 w-3.5" />
                         {{ t("connection.httpTunnelAdd") }}
                       </Button>
@@ -8433,7 +8576,7 @@ function openExternalUrl(url: string) {
                       <span v-else class="text-red-500">{{ t("connection.tunnelProfileMissing") }}</span>
                     </div>
                   </div>
-                  <div v-if="!selectedLayerProfileId" class="grid grid-cols-4 items-center gap-4">
+                  <div v-if="!selectedLayerProfileId && !sqliteSshOnlyTransport" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelSmallClass">Type</Label>
                     <Select :model-value="selectedTransportLayer.type" @update:model-value="(value: any) => changeSelectedTransportLayerType(value)">
                       <SelectTrigger class="col-span-3 h-9">
@@ -8943,6 +9086,10 @@ function openExternalUrl(url: string) {
 
 .connection-dialog-content--config {
   min-height: 0;
+}
+
+.connection-dialog-content--scrollable {
+  height: min(720px, calc(var(--dbx-viewport-height) - 2rem));
 }
 
 .connection-dialog-content--config .connection-form-body {

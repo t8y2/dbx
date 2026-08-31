@@ -47,6 +47,7 @@ class DriverReleasePackagesTest(unittest.TestCase):
                 "cassandra": "0.1.37",
                 "hive": "0.1.43",
                 "tdengine": "0.1.0",
+                "sqlite-worker": "0.1.0",
             }
 
             renamed = version_agent_artifacts(release_dir, versions)
@@ -314,6 +315,25 @@ class DriverReleasePackagesTest(unittest.TestCase):
             self.assertEqual(renamed, [versioned])
             self.assertFalse(source.exists())
             self.assertEqual(versioned.read_bytes(), b"\x7fELFtest-zookeeper-agent")
+
+    def test_versions_sqlite_worker_native_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            release_dir = Path(temp_dir)
+            x64 = release_dir / "dbx-agent-sqlite-worker-linux-x64"
+            arm = release_dir / "dbx-agent-sqlite-worker-linux-aarch64"
+            x64.write_bytes(b"\x7fELFtest-sqlite-worker-x64")
+            arm.write_bytes(b"\x7fELFtest-sqlite-worker-arm")
+            versions = {driver: "0.1.0" for driver in NATIVE_DRIVERS}
+
+            renamed = version_agent_artifacts(release_dir, versions)
+            versioned_x64 = release_dir / "dbx-agent-sqlite-worker-0.1.0-linux-x64"
+            versioned_arm = release_dir / "dbx-agent-sqlite-worker-0.1.0-linux-aarch64"
+
+            self.assertEqual(renamed, [versioned_arm, versioned_x64])
+            self.assertFalse(x64.exists())
+            self.assertFalse(arm.exists())
+            self.assertEqual(versioned_x64.read_bytes(), b"\x7fELFtest-sqlite-worker-x64")
+            self.assertEqual(versioned_arm.read_bytes(), b"\x7fELFtest-sqlite-worker-arm")
 
     def test_full_offline_bundle_includes_supported_windows_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

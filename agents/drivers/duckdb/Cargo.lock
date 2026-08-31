@@ -1243,6 +1243,7 @@ dependencies = [
  "cbc 0.1.2",
  "chrono",
  "csv",
+ "dbx-sqlite-worker",
  "deadpool-postgres",
  "encoding_rs",
  "flate2",
@@ -1315,6 +1316,14 @@ dependencies = [
  "tokio",
  "tokio-util",
  "uuid",
+]
+
+[[package]]
+name = "dbx-sqlite-worker"
+version = "0.1.1"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

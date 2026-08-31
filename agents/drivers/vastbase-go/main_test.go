@@ -149,6 +149,34 @@ func TestVastbaseMetadataErrorClassificationUsesOpenGaussCodes(t *testing.T) {
 		t.Fatal("undefined Vastbase function was not recognized")
 	}
 }
+func TestVastbaseCompatibilityNormalization(t *testing.T) {
+	for _, test := range []struct {
+		raw       string
+		mode      string
+		mysql     bool
+		sqlServer bool
+		disable   bool
+	}{
+		{raw: "A", mode: "oracle"},
+		{raw: "O", mode: "oracle", disable: true},
+		{raw: "ORA", mode: "oracle", disable: true},
+		{raw: "ORACLE", mode: "oracle", disable: true},
+		{raw: "B", mode: "mysql", mysql: true},
+		{raw: "M", mode: "mysql", mysql: true},
+		{raw: "MYSQL", mode: "mysql", mysql: true},
+		{raw: "PG", mode: "postgres"},
+		{raw: "POSTGRESQL", mode: "postgres"},
+		{raw: "MSSQL", mode: "sqlserver", sqlServer: true},
+		{raw: "SQL_SERVER", mode: "sqlserver", sqlServer: true},
+	} {
+		t.Run(test.raw, func(t *testing.T) {
+			actual := normalizeVastbaseCompatibility(test.raw)
+			if actual.mode != test.mode || actual.mysqlCompat != test.mysql || actual.sqlServer != test.sqlServer || actual.supportsDisableConstraint != test.disable {
+				t.Fatalf("normalizeVastbaseCompatibility(%q) = %+v", test.raw, actual)
+			}
+		})
+	}
+}
 
 func TestVastbaseModeUsesPostgresCatalog(t *testing.T) {
 	mode := detectAgentMode(nil, false)
@@ -158,6 +186,34 @@ func TestVastbaseModeUsesPostgresCatalog(t *testing.T) {
 	mysqlMode := detectAgentMode(nil, true)
 	if mysqlMode.compatibilityMode != "mysql" || !mysqlMode.postgresCatalog || !mysqlMode.mysqlCompat {
 		t.Fatalf("unexpected MySQL-compatible Vastbase mode: %+v", mysqlMode)
+	}
+	for _, compatibility := range []string{"M", "B", "MYSQL"} {
+		resolved := vastbaseMode{compatibilityMode: strings.ToLower(compatibility), postgresCatalog: true}
+		resolved.mysqlCompat = resolved.compatibilityMode == "m" || resolved.compatibilityMode == "b" || resolved.compatibilityMode == "mysql"
+		if !resolved.mysqlCompat {
+			t.Fatalf("compatibility %q must use MySQL identifier rules: %+v", compatibility, resolved)
+		}
+	}
+}
+
+func TestVastbaseDisableConstraintMode(t *testing.T) {
+	for _, mode := range []struct {
+		raw  string
+		want bool
+	}{
+		{raw: "A", want: false},
+		{raw: "O", want: true},
+		{raw: "ORA", want: true},
+		{raw: "oracle", want: true},
+		{raw: "B", want: false},
+		{raw: "M", want: false},
+		{raw: "mysql", want: false},
+		{raw: "C", want: false},
+	} {
+		compatibility := normalizeVastbaseCompatibility(mode.raw)
+		if actual := vastbaseSupportsDisableConstraint(vastbaseMode{supportsDisableConstraint: compatibility.supportsDisableConstraint}); actual != mode.want {
+			t.Fatalf("vastbaseSupportsDisableConstraint(%q) = %v, want %v", mode.raw, actual, mode.want)
+		}
 	}
 }
 
@@ -219,6 +275,18 @@ func TestDisconnectResetsInformationSchemaCapabilityCache(t *testing.T) {
 	}
 	if server.infoColumnTypeUnsupported || server.infoUdtNameUnsupported {
 		t.Fatal("disconnect must reset cached information_schema capabilities")
+	}
+}
+
+func TestDisconnectResetsConstraintCapabilityCache(t *testing.T) {
+	server := newServer()
+	server.constraintDefinitionUnsupported = true
+	server.constraintValidatedUnsupported = true
+	if err := server.disconnect(); err != nil {
+		t.Fatal(err)
+	}
+	if server.constraintDefinitionUnsupported || server.constraintValidatedUnsupported {
+		t.Fatal("disconnect must reset cached constraint capabilities")
 	}
 }
 

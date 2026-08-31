@@ -1,4 +1,6 @@
+use std::io::Read as StdRead;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, BufReader};
@@ -429,7 +431,11 @@ pub async fn execute_sql_file_paths(
 
         let mut splitter = StreamingSqlFileSplitter::new(database_type, options);
         let mut pending_statements = Vec::with_capacity(SQL_FILE_STATEMENT_BATCH_SIZE);
-        let mut decoder = match SqlFileStreamDecoder::open(file_path).await {
+        let normalize_mysql_binary_literals = import_target.as_ref().is_some_and(|target| {
+            crate::sql::is_mysql_compatible_import_target(&target.db_type, target.driver_profile.as_deref())
+        });
+        let mut decoder = match SqlFileStreamDecoder::open_for_target(file_path, normalize_mysql_binary_literals).await
+        {
             Ok(decoder) => decoder,
             Err(error) => {
                 emit(sql_file_execution_error_progress(&request.execution_id, started_at, &progress, error.clone()));
@@ -535,40 +541,116 @@ pub async fn read_sql_file_preview(file_path: &Path, max_chars: usize) -> Result
 }
 
 struct SqlFileStreamDecoder {
-    reader: BufReader<tokio::fs::File>,
+    reader: SqlFileByteReader,
     decoder: encoding_rs::Decoder,
+    mysql_binary_normalizer: Option<MysqlDumpBinaryLiteralNormalizer>,
     pending_bytes: Vec<u8>,
+    pending_decoded_bytes: Vec<u8>,
     reached_eof: bool,
 }
 
-impl SqlFileStreamDecoder {
+enum SqlFileByteReader {
+    Plain(BufReader<tokio::fs::File>),
+    Gzip(Arc<Mutex<flate2::read::GzDecoder<std::io::BufReader<std::fs::File>>>>),
+}
+
+impl SqlFileByteReader {
     async fn open(file_path: &Path) -> Result<Self, String> {
-        Self::open_with_detection_limit(file_path, None).await
+        if is_gzip_sql_file_path(file_path) {
+            let path = file_path.to_path_buf();
+            let reader = tokio::task::spawn_blocking(move || {
+                let file = std::fs::File::open(&path).map_err(|error| error.to_string())?;
+                Ok::<_, String>(flate2::read::GzDecoder::new(std::io::BufReader::new(file)))
+            })
+            .await
+            .map_err(|error| format!("Failed to open compressed SQL file: {error}"))??;
+            return Ok(Self::Gzip(Arc::new(Mutex::new(reader))));
+        }
+
+        let file = tokio::fs::File::open(file_path).await.map_err(|error| error.to_string())?;
+        Ok(Self::Plain(BufReader::with_capacity(SQL_FILE_READ_CHUNK_BYTES, file)))
+    }
+
+    async fn read(&mut self, buffer: &mut [u8]) -> Result<usize, String> {
+        match self {
+            Self::Plain(reader) => reader.read(buffer).await.map_err(|error| error.to_string()),
+            Self::Gzip(reader) => {
+                let reader = reader.clone();
+                let capacity = buffer.len();
+                let (chunk, read) = tokio::task::spawn_blocking(move || {
+                    let mut chunk = vec![0; capacity];
+                    let mut reader =
+                        reader.lock().map_err(|_| "Compressed SQL reader lock was poisoned".to_string())?;
+                    let read =
+                        reader.read(&mut chunk).map_err(|error| format!("Failed to decompress SQL file: {error}"))?;
+                    Ok::<_, String>((chunk, read))
+                })
+                .await
+                .map_err(|error| format!("Failed to read compressed SQL file: {error}"))??;
+                buffer[..read].copy_from_slice(&chunk[..read]);
+                Ok(read)
+            }
+        }
+    }
+}
+
+fn is_gzip_sql_file_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("gz"))
+        && path
+            .file_stem()
+            .and_then(|stem| Path::new(stem).extension())
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("sql"))
+}
+
+impl SqlFileStreamDecoder {
+    #[cfg(test)]
+    async fn open(file_path: &Path) -> Result<Self, String> {
+        Self::open_with_options(file_path, None, false).await
     }
 
     async fn open_with_detection_limit(file_path: &Path, detection_limit: Option<usize>) -> Result<Self, String> {
-        let (encoding, bom_len) = detect_sql_file_encoding(file_path, detection_limit).await?;
-        let mut file = tokio::fs::File::open(file_path).await.map_err(|error| error.to_string())?;
+        Self::open_with_options(file_path, detection_limit, false).await
+    }
+
+    async fn open_for_target(file_path: &Path, normalize_mysql_binary_literals: bool) -> Result<Self, String> {
+        Self::open_with_options(file_path, None, normalize_mysql_binary_literals).await
+    }
+
+    async fn open_with_options(
+        file_path: &Path,
+        detection_limit: Option<usize>,
+        normalize_mysql_binary_literals: bool,
+    ) -> Result<Self, String> {
+        let (encoding, bom_len, detected_mysql_binary_literals) =
+            detect_sql_file_encoding(file_path, detection_limit).await?;
+        let mut reader = SqlFileByteReader::open(file_path).await?;
         let mut prefix = [0u8; 3];
-        let prefix_len = file.read(&mut prefix).await.map_err(|error| error.to_string())?;
+        let prefix_len = reader.read(&mut prefix).await?;
         let prefix = &prefix[..prefix_len];
         let mut pending_bytes = prefix[bom_len..].to_vec();
         pending_bytes.reserve(SQL_FILE_READ_CHUNK_BYTES);
         Ok(Self {
-            reader: BufReader::with_capacity(SQL_FILE_READ_CHUNK_BYTES, file),
+            reader,
             decoder: encoding.new_decoder_without_bom_handling(),
+            mysql_binary_normalizer: (encoding == encoding_rs::UTF_8
+                && (normalize_mysql_binary_literals || detected_mysql_binary_literals))
+                .then(MysqlDumpBinaryLiteralNormalizer::default),
             pending_bytes,
+            pending_decoded_bytes: Vec::new(),
             reached_eof: false,
         })
     }
 
     async fn next_chunk(&mut self) -> Result<Option<String>, String> {
-        if self.reached_eof && self.pending_bytes.is_empty() {
+        if self.reached_eof && self.pending_bytes.is_empty() && self.pending_decoded_bytes.is_empty() {
             return Ok(None);
         }
         while !self.reached_eof && self.pending_bytes.len() < SQL_FILE_READ_CHUNK_BYTES {
             let mut buffer = vec![0u8; SQL_FILE_READ_CHUNK_BYTES - self.pending_bytes.len()];
-            let read = self.reader.read(&mut buffer).await.map_err(|error| error.to_string())?;
+            let read = self.reader.read(&mut buffer).await?;
             if read == 0 {
                 self.reached_eof = true;
                 break;
@@ -576,14 +658,22 @@ impl SqlFileStreamDecoder {
             self.pending_bytes.extend_from_slice(&buffer[..read]);
         }
 
+        let normalized = if let Some(normalizer) = self.mysql_binary_normalizer.as_mut() {
+            let input = normalizer.normalize(&self.pending_bytes, self.reached_eof)?;
+            self.pending_bytes.clear();
+            input
+        } else {
+            std::mem::take(&mut self.pending_bytes)
+        };
+        let mut input = std::mem::take(&mut self.pending_decoded_bytes);
+        input.extend_from_slice(&normalized);
         let mut output = String::with_capacity(
-            self.decoder
-                .max_utf8_buffer_length_without_replacement(self.pending_bytes.len())
-                .unwrap_or(self.pending_bytes.len()),
+            self.decoder.max_utf8_buffer_length_without_replacement(input.len()).unwrap_or(input.len()),
         );
-        let (result, read) =
-            self.decoder.decode_to_string_without_replacement(&self.pending_bytes, &mut output, self.reached_eof);
-        self.pending_bytes.drain(..read);
+        let (result, read) = self.decoder.decode_to_string_without_replacement(&input, &mut output, self.reached_eof);
+        if read < input.len() {
+            self.pending_decoded_bytes.extend_from_slice(&input[read..]);
+        }
         match result {
             encoding_rs::DecoderResult::InputEmpty => Ok((!output.is_empty()).then_some(output)),
             encoding_rs::DecoderResult::OutputFull => Ok(Some(output)),
@@ -592,29 +682,256 @@ impl SqlFileStreamDecoder {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum MysqlDumpBinaryLiteralState {
+    #[default]
+    Normal,
+    SingleQuoted,
+    DoubleQuoted,
+    BacktickQuoted,
+    LineComment,
+    BlockComment,
+    BinaryQuoted,
+}
+
+#[derive(Debug, Default)]
+struct MysqlDumpBinaryLiteralNormalizer {
+    state: MysqlDumpBinaryLiteralState,
+    pending: Vec<u8>,
+    previous_source_byte: Option<u8>,
+    quoted_escape_pending: bool,
+}
+
+impl MysqlDumpBinaryLiteralNormalizer {
+    fn normalize(&mut self, input: &[u8], eof: bool) -> Result<Vec<u8>, String> {
+        self.pending.extend_from_slice(input);
+        let mut output = Vec::with_capacity(self.pending.len());
+        let mut index = 0;
+
+        while index < self.pending.len() {
+            let byte = self.pending[index];
+            match self.state {
+                MysqlDumpBinaryLiteralState::Normal => {
+                    if byte == b'_' {
+                        if self.pending.len() - index < b"_binary".len() {
+                            if !eof {
+                                break;
+                            }
+                        } else if self.pending[index..index + 7].eq_ignore_ascii_case(b"_binary")
+                            && !is_sql_identifier_byte(self.source_byte_before(index))
+                        {
+                            let mut quote_index = index + 7;
+                            while quote_index < self.pending.len() && self.pending[quote_index].is_ascii_whitespace() {
+                                quote_index += 1;
+                            }
+                            if quote_index == self.pending.len() && !eof {
+                                break;
+                            }
+                            if self.pending.get(quote_index) == Some(&b'\'') {
+                                output.extend_from_slice(b"X'");
+                                self.state = MysqlDumpBinaryLiteralState::BinaryQuoted;
+                                self.previous_source_byte = Some(b'\'');
+                                index = quote_index + 1;
+                                continue;
+                            }
+                        }
+                    }
+
+                    if byte == b'-' && self.pending.get(index + 1) == Some(&b'-') {
+                        // MySQL requires whitespace or a control character after `--`
+                        // to open a line comment: `5--1` is subtraction, matching the
+                        // splitter's dash_dash_starts_line_comment rule.
+                        let byte_after_dashes = self.pending.get(index + 2).copied();
+                        if byte_after_dashes.is_none() && !eof {
+                            break;
+                        }
+                        output.extend_from_slice(b"--");
+                        self.previous_source_byte = Some(b'-');
+                        index += 2;
+                        if byte_after_dashes.is_none_or(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control()) {
+                            self.state = MysqlDumpBinaryLiteralState::LineComment;
+                        }
+                    } else if byte == b'-' && self.pending.get(index + 1).is_none() && !eof {
+                        break;
+                    } else if byte == b'#' {
+                        output.push(byte);
+                        self.state = MysqlDumpBinaryLiteralState::LineComment;
+                        self.previous_source_byte = Some(byte);
+                        index += 1;
+                    } else if byte == b'/' && self.pending.get(index + 1) == Some(&b'*') {
+                        output.extend_from_slice(b"/*");
+                        self.state = MysqlDumpBinaryLiteralState::BlockComment;
+                        self.previous_source_byte = Some(b'*');
+                        index += 2;
+                    } else if byte == b'/' && self.pending.get(index + 1).is_none() && !eof {
+                        break;
+                    } else {
+                        output.push(byte);
+                        self.previous_source_byte = Some(byte);
+                        self.state = match byte {
+                            b'\'' => MysqlDumpBinaryLiteralState::SingleQuoted,
+                            b'"' => MysqlDumpBinaryLiteralState::DoubleQuoted,
+                            b'`' => MysqlDumpBinaryLiteralState::BacktickQuoted,
+                            _ => MysqlDumpBinaryLiteralState::Normal,
+                        };
+                        index += 1;
+                    }
+                }
+                MysqlDumpBinaryLiteralState::SingleQuoted
+                | MysqlDumpBinaryLiteralState::DoubleQuoted
+                | MysqlDumpBinaryLiteralState::BacktickQuoted => {
+                    let quote = match self.state {
+                        MysqlDumpBinaryLiteralState::SingleQuoted => b'\'',
+                        MysqlDumpBinaryLiteralState::DoubleQuoted => b'"',
+                        MysqlDumpBinaryLiteralState::BacktickQuoted => b'`',
+                        _ => unreachable!(),
+                    };
+                    if byte == quote && self.pending.get(index + 1).is_none() && !eof {
+                        break;
+                    }
+                    output.push(byte);
+                    self.previous_source_byte = Some(byte);
+                    index += 1;
+                    if self.quoted_escape_pending {
+                        self.quoted_escape_pending = false;
+                    } else if byte == b'\\' {
+                        if let Some(escaped) = self.pending.get(index) {
+                            output.push(*escaped);
+                            self.previous_source_byte = Some(*escaped);
+                            index += 1;
+                        } else if !eof {
+                            self.quoted_escape_pending = true;
+                        }
+                    } else if byte == quote {
+                        if self.pending.get(index) == Some(&quote) {
+                            output.push(quote);
+                            self.previous_source_byte = Some(quote);
+                            index += 1;
+                        } else {
+                            self.state = MysqlDumpBinaryLiteralState::Normal;
+                        }
+                    }
+                }
+                MysqlDumpBinaryLiteralState::LineComment => {
+                    output.push(byte);
+                    self.previous_source_byte = Some(byte);
+                    index += 1;
+                    if byte == b'\n' {
+                        self.state = MysqlDumpBinaryLiteralState::Normal;
+                    }
+                }
+                MysqlDumpBinaryLiteralState::BlockComment => {
+                    if byte == b'*' && self.pending.get(index + 1).is_none() && !eof {
+                        break;
+                    }
+                    output.push(byte);
+                    self.previous_source_byte = Some(byte);
+                    index += 1;
+                    if byte == b'*' && self.pending.get(index) == Some(&b'/') {
+                        output.push(b'/');
+                        self.previous_source_byte = Some(b'/');
+                        index += 1;
+                        self.state = MysqlDumpBinaryLiteralState::Normal;
+                    }
+                }
+                MysqlDumpBinaryLiteralState::BinaryQuoted => {
+                    if byte == b'\\' {
+                        let Some(escaped) = self.pending.get(index + 1).copied() else {
+                            if !eof {
+                                break;
+                            }
+                            return Err("Unterminated MySQL binary literal".to_string());
+                        };
+                        let value = match escaped {
+                            b'0' => 0x00,
+                            b'b' => 0x08,
+                            b'n' => b'\n',
+                            b'r' => b'\r',
+                            b't' => b'\t',
+                            b'Z' => 0x1A,
+                            b'\\' => b'\\',
+                            b'\'' => b'\'',
+                            b'"' => b'"',
+                            other => other,
+                        };
+                        append_hex(&mut output, value);
+                        self.previous_source_byte = Some(escaped);
+                        index += 2;
+                    } else if byte == b'\'' && self.pending.get(index + 1).is_none() && !eof {
+                        break;
+                    } else if byte == b'\'' {
+                        if self.pending.get(index + 1) == Some(&b'\'') {
+                            append_hex(&mut output, b'\'');
+                            self.previous_source_byte = Some(b'\'');
+                            index += 2;
+                        } else {
+                            output.push(b'\'');
+                            self.previous_source_byte = Some(b'\'');
+                            self.state = MysqlDumpBinaryLiteralState::Normal;
+                            index += 1;
+                        }
+                    } else {
+                        append_hex(&mut output, byte);
+                        self.previous_source_byte = Some(byte);
+                        index += 1;
+                    }
+                }
+            }
+        }
+
+        self.pending.drain(..index);
+        if eof {
+            if self.state == MysqlDumpBinaryLiteralState::BinaryQuoted {
+                return Err("Unterminated MySQL binary literal".to_string());
+            }
+            if !self.pending.is_empty() {
+                output.extend_from_slice(&self.pending);
+                self.pending.clear();
+            }
+        }
+        Ok(output)
+    }
+
+    fn source_byte_before(&self, index: usize) -> Option<u8> {
+        if index > 0 {
+            self.pending.get(index - 1).copied()
+        } else {
+            self.previous_source_byte
+        }
+    }
+}
+
+fn is_sql_identifier_byte(byte: Option<u8>) -> bool {
+    byte.is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$'))
+}
+
+fn append_hex(output: &mut Vec<u8>, byte: u8) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    output.push(HEX[(byte >> 4) as usize]);
+    output.push(HEX[(byte & 0x0F) as usize]);
+}
+
 async fn detect_sql_file_encoding(
     file_path: &Path,
     detection_limit: Option<usize>,
-) -> Result<(&'static encoding_rs::Encoding, usize), String> {
-    let mut file = tokio::fs::File::open(file_path).await.map_err(|error| error.to_string())?;
+) -> Result<(&'static encoding_rs::Encoding, usize, bool), String> {
+    let mut file = SqlFileByteReader::open(file_path).await?;
     let mut prefix = [0u8; 3];
     let prefix_len = file.read(&mut prefix).await.map_err(|error| error.to_string())?;
     let prefix = &prefix[..prefix_len];
-    if prefix.starts_with(&[0xEF, 0xBB, 0xBF]) {
-        return Ok((encoding_rs::UTF_8, 3));
-    }
     if prefix.starts_with(&[0xFF, 0xFE]) {
-        return Ok((encoding_rs::UTF_16LE, 2));
+        return Ok((encoding_rs::UTF_16LE, 2, false));
     }
     if prefix.starts_with(&[0xFE, 0xFF]) {
-        return Ok((encoding_rs::UTF_16BE, 2));
+        return Ok((encoding_rs::UTF_16BE, 2, false));
     }
+    let bom_len = usize::from(prefix.starts_with(&[0xEF, 0xBB, 0xBF])) * 3;
 
     // SQL dumps often begin with ASCII comments even when the remaining file
     // is GBK. Validate the entire stream as UTF-8 with bounded buffers before
     // falling back to the legacy GBK behavior.
     let mut decoder = encoding_rs::UTF_8.new_decoder_without_bom_handling();
-    let mut input = prefix.to_vec();
+    let mut input = prefix[bom_len..].to_vec();
     let mut inspected_bytes = prefix.len();
     let mut reached_eof = false;
     loop {
@@ -623,7 +940,7 @@ async fn detect_sql_file_encoding(
             let remaining =
                 detection_limit.map(|limit| limit.saturating_sub(inspected_bytes)).unwrap_or(SQL_FILE_READ_CHUNK_BYTES);
             let mut buffer = vec![0u8; SQL_FILE_READ_CHUNK_BYTES.min(remaining.max(1))];
-            let read = file.read(&mut buffer).await.map_err(|error| error.to_string())?;
+            let read = file.read(&mut buffer).await?;
             if read == 0 {
                 reached_eof = true;
             } else {
@@ -637,11 +954,66 @@ async fn detect_sql_file_encoding(
         let (result, read) = decoder.decode_to_string_without_replacement(&input, &mut output, reached_eof);
         input.drain(..read);
         match result {
-            encoding_rs::DecoderResult::Malformed(_, _) => return Ok((encoding_rs::GBK, 0)),
+            encoding_rs::DecoderResult::Malformed(_, _) => {
+                if validate_utf8_with_mysql_binary_literals(file_path, detection_limit).await? {
+                    return Ok((encoding_rs::UTF_8, bom_len, true));
+                }
+                return Ok(if bom_len > 0 {
+                    (encoding_rs::UTF_8, bom_len, false)
+                } else {
+                    (encoding_rs::GBK, 0, false)
+                });
+            }
             encoding_rs::DecoderResult::InputEmpty if reached_eof || reached_detection_limit => {
-                return Ok((encoding_rs::UTF_8, 0));
+                return Ok((encoding_rs::UTF_8, bom_len, false));
             }
             encoding_rs::DecoderResult::InputEmpty | encoding_rs::DecoderResult::OutputFull => {}
+        }
+    }
+}
+
+async fn validate_utf8_with_mysql_binary_literals(
+    file_path: &Path,
+    detection_limit: Option<usize>,
+) -> Result<bool, String> {
+    let mut file = SqlFileByteReader::open(file_path).await?;
+    let mut normalizer = MysqlDumpBinaryLiteralNormalizer::default();
+    let mut decoder = encoding_rs::UTF_8.new_decoder_without_bom_handling();
+    let mut input = Vec::new();
+    let mut inspected_bytes = 0;
+    let mut reached_eof = false;
+
+    loop {
+        let reached_detection_limit = detection_limit.is_some_and(|limit| inspected_bytes >= limit);
+        if !reached_eof && !reached_detection_limit {
+            let remaining =
+                detection_limit.map(|limit| limit.saturating_sub(inspected_bytes)).unwrap_or(SQL_FILE_READ_CHUNK_BYTES);
+            let mut buffer = vec![0u8; SQL_FILE_READ_CHUNK_BYTES.min(remaining.max(1))];
+            let read = file.read(&mut buffer).await?;
+            if read == 0 {
+                reached_eof = true;
+            } else {
+                inspected_bytes += read;
+                input.extend_from_slice(&buffer[..read]);
+            }
+        }
+
+        let normalized = match normalizer.normalize(&input, reached_eof) {
+            Ok(normalized) => normalized,
+            Err(_) => return Ok(false),
+        };
+        input.clear();
+        let mut output = String::with_capacity(
+            decoder
+                .max_utf8_buffer_length_without_replacement(normalized.len())
+                .unwrap_or(normalized.len().saturating_mul(3)),
+        );
+        let (result, _) = decoder.decode_to_string_without_replacement(&normalized, &mut output, reached_eof);
+        if !matches!(result, encoding_rs::DecoderResult::InputEmpty) {
+            return Ok(false);
+        }
+        if reached_eof || reached_detection_limit {
+            return Ok(true);
         }
     }
 }
@@ -1512,6 +1884,27 @@ mod tests {
         path
     }
 
+    async fn temporary_gzip_sql_file(bytes: &[u8]) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "dbx-sql-file-{}-{}.sql.gz",
+            std::process::id(),
+            TEMP_SQL_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let bytes = bytes.to_vec();
+        let output = path.clone();
+        tokio::task::spawn_blocking(move || {
+            use std::io::Write;
+
+            let file = std::fs::File::create(&output).unwrap();
+            let mut writer = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+            writer.write_all(&bytes).unwrap();
+            writer.finish().unwrap();
+        })
+        .await
+        .unwrap();
+        path
+    }
+
     fn test_progress(status: SqlFileStatus, statement_index: usize) -> SqlFileProgress {
         SqlFileProgress {
             execution_id: "test-execution".to_string(),
@@ -1705,6 +2098,153 @@ mod tests {
         tokio::fs::remove_file(path).await.unwrap();
 
         assert_eq!(decoded, "SELECT '中文';");
+    }
+
+    #[tokio::test]
+    async fn streaming_decoder_reads_gzip_sql_files() {
+        let path = temporary_gzip_sql_file(b"SELECT 'compressed';\n").await;
+        let mut decoder = SqlFileStreamDecoder::open(&path).await.unwrap();
+        let mut decoded = String::new();
+        while let Some(chunk) = decoder.next_chunk().await.unwrap() {
+            decoded.push_str(&chunk);
+        }
+        tokio::fs::remove_file(path).await.unwrap();
+
+        assert_eq!(decoded, "SELECT 'compressed';\n");
+    }
+
+    #[tokio::test]
+    async fn mysql_target_decoder_preserves_utf16le_bom_files() {
+        let mut bytes = vec![0xFF, 0xFE];
+        for unit in "SELECT _binary 'abc', '中文';".encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        let path = temporary_sql_file(&bytes).await;
+        let mut decoder = SqlFileStreamDecoder::open_for_target(&path, true).await.unwrap();
+        let mut decoded = String::new();
+        while let Some(chunk) = decoder.next_chunk().await.unwrap() {
+            decoded.push_str(&chunk);
+        }
+        tokio::fs::remove_file(path).await.unwrap();
+
+        assert_eq!(decoded, "SELECT _binary 'abc', '中文';");
+    }
+
+    #[tokio::test]
+    async fn mysql_target_decoder_preserves_gbk_files() {
+        let sql = "INSERT INTO t VALUES ('中文');";
+        let (encoded, _, _) = encoding_rs::GBK.encode(sql);
+        let path = temporary_sql_file(encoded.as_ref()).await;
+        let mut decoder = SqlFileStreamDecoder::open_for_target(&path, true).await.unwrap();
+        let mut decoded = String::new();
+        while let Some(chunk) = decoder.next_chunk().await.unwrap() {
+            decoded.push_str(&chunk);
+        }
+        tokio::fs::remove_file(path).await.unwrap();
+
+        assert_eq!(decoded, sql);
+    }
+
+    #[test]
+    fn mysql_binary_literal_normalizer_preserves_bytes_and_mysql_escapes() {
+        let mut source = b"INSERT INTO t VALUES (_binary '".to_vec();
+        source.extend_from_slice(&[0xAC, b'\\', 0xED, b'\\', b'0', b'\\', b'n', b'\\', b'\'', b'\\', b'\\']);
+        source.extend_from_slice(b"'); -- _binary '\\xFF'\nSELECT 'not _binary x';");
+
+        let mut normalizer = MysqlDumpBinaryLiteralNormalizer::default();
+        let mut normalized = Vec::new();
+        for chunk in source.chunks(3) {
+            normalized.extend(normalizer.normalize(chunk, false).unwrap());
+        }
+        normalized.extend(normalizer.normalize(&[], true).unwrap());
+
+        assert_eq!(
+            String::from_utf8(normalized).unwrap(),
+            "INSERT INTO t VALUES (X'ACED000A275C'); -- _binary '\\xFF'\nSELECT 'not _binary x';"
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_decoder_recovers_utf8_mysql_dump_with_raw_binary_bytes() {
+        let mut bytes = b"-- MySQL dump\nINSERT INTO t VALUES (_binary '".to_vec();
+        bytes.extend_from_slice(&[0xAC, b'\\', 0xED, b'\\', b'0', 0x05]);
+        bytes.extend_from_slice(b"', '\xE4\xB8\xAD\xE6\x96\x87');\n");
+        let path = temporary_sql_file(&bytes).await;
+        let mut decoder = SqlFileStreamDecoder::open(&path).await.unwrap();
+        let mut decoded = String::new();
+        while let Some(chunk) = decoder.next_chunk().await.unwrap() {
+            decoded.push_str(&chunk);
+        }
+        tokio::fs::remove_file(path).await.unwrap();
+
+        assert_eq!(decoded, "-- MySQL dump\nINSERT INTO t VALUES (X'ACED0005', '中文');\n");
+    }
+
+    #[tokio::test]
+    async fn streaming_decoder_recovers_bom_utf8_mysql_dump_with_raw_binary_bytes() {
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(b"INSERT INTO t VALUES (_binary '");
+        bytes.extend_from_slice(&[0xAC, b'\\', 0xED, b'\\', b'0', 0x05]);
+        bytes.extend_from_slice(b"');\n");
+        let path = temporary_sql_file(&bytes).await;
+        let mut decoder = SqlFileStreamDecoder::open(&path).await.unwrap();
+        let mut decoded = String::new();
+        while let Some(chunk) = decoder.next_chunk().await.unwrap() {
+            decoded.push_str(&chunk);
+        }
+        tokio::fs::remove_file(path).await.unwrap();
+
+        assert_eq!(decoded, "INSERT INTO t VALUES (X'ACED0005');\n");
+    }
+
+    #[tokio::test]
+    async fn streaming_decoder_recovers_gzip_mysql_dump_with_raw_binary_bytes() {
+        // Encoding detection and binary-literal validation must run on the
+        // decompressed bytes, not on the raw gzip stream.
+        let mut bytes = b"-- MySQL dump\nINSERT INTO t VALUES (_binary '".to_vec();
+        bytes.extend_from_slice(&[0xAC, b'\\', 0xED, b'\\', b'0', 0x05]);
+        bytes.extend_from_slice(b"', '\xE4\xB8\xAD\xE6\x96\x87');\n");
+        let path = temporary_gzip_sql_file(&bytes).await;
+        let mut decoder = SqlFileStreamDecoder::open(&path).await.unwrap();
+        let mut decoded = String::new();
+        while let Some(chunk) = decoder.next_chunk().await.unwrap() {
+            decoded.push_str(&chunk);
+        }
+        tokio::fs::remove_file(path).await.unwrap();
+
+        assert_eq!(decoded, "-- MySQL dump\nINSERT INTO t VALUES (X'ACED0005', '中文');\n");
+    }
+
+    #[test]
+    fn mysql_binary_literal_normalizer_does_not_rewrite_comments_or_strings() {
+        let source = b"-- _binary '\xAC'\nSELECT '_binary \'x\'', `col_binary`; /* _binary '\xAC' */";
+        let mut normalizer = MysqlDumpBinaryLiteralNormalizer::default();
+        let normalized = normalizer.normalize(source, true).unwrap();
+
+        assert_eq!(normalized, source);
+    }
+
+    #[test]
+    fn mysql_binary_literal_normalizer_rejects_unterminated_literal() {
+        let mut normalizer = MysqlDumpBinaryLiteralNormalizer::default();
+        let error = normalizer.normalize(b"SELECT _binary 'abc", true).unwrap_err();
+
+        assert_eq!(error, "Unterminated MySQL binary literal");
+    }
+
+    #[test]
+    fn mysql_binary_literal_normalizer_treats_dash_dash_digit_as_subtraction() {
+        // MySQL treats `--` as a comment opener only when followed by whitespace
+        // or a control character, so `5--1` is subtraction and the `_binary`
+        // literal later on the same line must still be normalized.
+        let mut source = b"SELECT 5--1, _binary '".to_vec();
+        source.extend_from_slice(&[0xAC, 0x05]);
+        source.extend_from_slice(b"';\n");
+
+        let mut normalizer = MysqlDumpBinaryLiteralNormalizer::default();
+        let normalized = normalizer.normalize(&source, true).unwrap();
+
+        assert_eq!(normalized, b"SELECT 5--1, X'AC05';\n".to_vec());
     }
 
     #[test]

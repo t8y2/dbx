@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { databaseBackupRunsToPrune, databaseBackupTableMatchesPattern, normalizeDatabaseBackupRun, resolveScheduledDatabaseBackupTableScope, type DatabaseBackupRun } from "../../backup/scheduledDatabaseBackup";
+import { databaseBackupFilePath, databaseBackupRunsToPrune, databaseBackupTableMatchesPattern, normalizeDatabaseBackupRun, resolveScheduledDatabaseBackupTableScope, type DatabaseBackupRun } from "../../backup/scheduledDatabaseBackup";
 
 const startedAt = "2026-08-12T00:00:00.000Z";
 
@@ -19,6 +19,10 @@ function run(overrides: Record<string, unknown> = {}) {
 }
 
 describe("database backup run persistence", () => {
+  it("uses a gzip extension when the backup output is compressed", () => {
+    expect(databaseBackupFilePath("/backups", "Nightly", "app", startedAt, "run-12345678", "gzip")).toMatch(/\.sql\.gz$/);
+  });
+
   it("accepts a one-shot run without a schedule id", () => {
     const normalized = normalizeDatabaseBackupRun(run());
 

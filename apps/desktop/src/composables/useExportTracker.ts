@@ -3,7 +3,7 @@ import * as api from "@/lib/backend/api";
 import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
 
 export type BackgroundTaskKind = "table-export" | "database-export" | "sql-file" | "data-transfer" | "multi-db-execution";
-export type BackgroundTaskStatus = "Running" | "Writing" | "Done" | "Error" | "Cancelled";
+export type BackgroundTaskStatus = "Running" | "Writing" | "Cancelling" | "Done" | "Error" | "Cancelled";
 export type DatabaseExportSource = "manual" | "scheduled";
 
 export interface DataTransferFailure {
@@ -249,7 +249,7 @@ function findActiveOverlappingTransfer(request: api.TransferRequest): string[] {
 export function useExportTracker() {
   const tasks = computed(() => Array.from(taskMap.values()));
 
-  const activeCount = computed(() => tasks.value.filter((t) => t.status === "Running" || t.status === "Writing").length);
+  const activeCount = computed(() => tasks.value.filter((t) => t.status === "Running" || t.status === "Writing" || t.status === "Cancelling").length);
 
   const hasActive = computed(() => activeCount.value > 0);
 
@@ -470,7 +470,8 @@ export function useExportTracker() {
     task.preparing = !!progress.preparing;
     task.rowsExported = progress.rowsExported;
     task.totalRows = progress.totalRows;
-    task.status = normalizeExportStatus(progress.status);
+    const nextStatus = normalizeExportStatus(progress.status);
+    task.status = task.status === "Cancelling" && nextStatus === "Running" ? "Cancelling" : nextStatus;
     task.errorMessage = progress.error || null;
     task.objectIndex = progress.objectIndex;
     task.totalObjects = progress.totalObjects;
@@ -478,6 +479,18 @@ export function useExportTracker() {
       task.overallPercent = Math.max(0, Math.min(100, Math.round(progress.overallPercent)));
     }
     if (task.status === "Done" || task.status === "Error" || task.status === "Cancelled") finishExportTask(task);
+  }
+
+  function markDatabaseExportTaskCancelling(exportId: string) {
+    const task = taskMap.get(exportId);
+    if (!task || task.kind !== "database-export" || task.status === "Done" || task.status === "Error" || task.status === "Cancelled") return;
+    task.status = "Cancelling";
+    task.preparing = false;
+  }
+
+  function restoreDatabaseExportTaskRunning(exportId: string) {
+    const task = taskMap.get(exportId);
+    if (task?.kind === "database-export" && task.status === "Cancelling") task.status = "Running";
   }
 
   function updateSqlFileTask(executionId: string, progress: api.SqlFileProgress) {
@@ -577,6 +590,8 @@ export function useExportTracker() {
     startDataTransferTask,
     updateTableExportTask,
     updateDatabaseExportTask,
+    markDatabaseExportTaskCancelling,
+    restoreDatabaseExportTaskRunning,
     updateSqlFileTask,
     updateDataTransferTask,
     registerTaskCancelHandler,

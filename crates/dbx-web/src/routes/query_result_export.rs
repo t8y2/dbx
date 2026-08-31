@@ -69,7 +69,9 @@ pub async fn start_query_result_export(
     let cancelled = Arc::new(AtomicBool::new(false));
     let cancelled_progress = cancelled.clone();
 
-    tokio::spawn(async move {
+    // Exports interleave async fetches with synchronous row formatting and
+    // buffered disk writes; run them off the async workers (see spawn_export_task).
+    dbx_core::export_runtime::spawn_export_task(async move {
         let execution_id = req.execution_id.clone().filter(|id| !id.trim().is_empty());
         let registered_query = execution_id.as_ref().map(|id| {
             app.running_queries.register_task(

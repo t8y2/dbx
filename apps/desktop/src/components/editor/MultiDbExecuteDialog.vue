@@ -4,6 +4,7 @@ import { useI18n } from "vue-i18n";
 import { AlertTriangle, Check, CheckSquare, ChevronDown, ChevronRight, FolderOpen, Layers, Loader2, MinusSquare, Pencil, Play, RefreshCw, Search, Settings2, Square, Trash2, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -43,6 +44,9 @@ const selectedTargets = ref<MultiDbExecutionTarget[]>([]);
 const validationResults = ref<SqlExecutionTargetValidation[]>([]);
 const searchText = ref("");
 const selectedGroupId = ref<string>();
+// reka-ui Select throws on SelectItem value="" — the "no group" entry uses this
+// sentinel and the change handler maps it back to "".
+const NO_GROUP_VALUE = "__none__";
 const manageGroups = ref(false);
 const expandedConnections = ref<Set<string>>(new Set());
 const expandedCatalogs = ref<Set<string>>(new Set());
@@ -808,10 +812,13 @@ watch(
               <span>{{ t("multiDbExecute.selectGroup") }}</span>
               <Button variant="ghost" size="sm" class="h-6 px-1.5 text-xs" @click="manageGroups = true"><Settings2 class="mr-1 h-3.5 w-3.5" />{{ t("multiDbExecute.manageGroups") }}</Button>
             </div>
-            <select class="h-8 w-full rounded-md border border-input bg-background px-2 text-sm" :value="selectedGroupId || ''" :disabled="isExecuting" @change="requestGroupSelection(($event.target as HTMLSelectElement).value)">
-              <option value="">{{ t("multiDbExecute.noGroupSelected") }}</option>
-              <option v-for="group in compatibleGroups" :key="group.id" :value="group.id">{{ group.name }} · {{ group.targets.length }}</option>
-            </select>
+            <Select :model-value="selectedGroupId ?? NO_GROUP_VALUE" :disabled="isExecuting" @update:model-value="(value: any) => requestGroupSelection(value === NO_GROUP_VALUE ? '' : String(value))">
+              <SelectTrigger class="h-8 w-full text-sm"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem :value="NO_GROUP_VALUE">{{ t("multiDbExecute.noGroupSelected") }}</SelectItem>
+                <SelectItem v-for="group in compatibleGroups" :key="group.id" :value="group.id">{{ group.name }} · {{ group.targets.length }}</SelectItem>
+              </SelectContent>
+            </Select>
             <div class="flex items-center justify-between text-xs text-muted-foreground">
               <span
                 >{{ t("multiDbExecute.databaseType") }}: <strong class="text-foreground">{{ databaseType || "-" }}</strong></span

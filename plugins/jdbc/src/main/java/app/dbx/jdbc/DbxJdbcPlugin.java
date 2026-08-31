@@ -3452,7 +3452,7 @@ public final class DbxJdbcPlugin {
     private static Set<String> safePrimaryKeys(DatabaseMetaData meta, String database, String schema, String table) {
         try {
             return primaryKeys(meta, database, schema, table);
-        } catch (SQLException ignored) {
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
             return Collections.emptySet();
         }
     }
@@ -3733,13 +3733,12 @@ public final class DbxJdbcPlugin {
             }
             return result;
         } catch (SQLException e) {
-            try (ResultSet rs = conn.getMetaData().getSchemas()) {
-                while (rs.next()) {
-                    String schema = rs.getString("TABLE_SCHEM");
-                    if (schema != null && !schema.isBlank()) {
-                        result.add(schema);
-                    }
+            result.removeAll();
+            try {
+                try (ResultSet rs = conn.getMetaData().getSchemas()) {
+                    appendSchemas(result, rs, false);
                 }
+            } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
             }
             return result;
         }
@@ -3765,9 +3764,16 @@ public final class DbxJdbcPlugin {
                     putNullable(item, "comment", rs.getString("comments"));
                     result.add(item);
                 }
+                return result;
             }
+        } catch (SQLException e) {
+            result.removeAll();
+            try {
+                appendTables(result, conn.getMetaData(), null, owner, new String[]{"TABLE", "VIEW"}, null, 0, 0);
+            } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+            }
+            return result;
         }
-        return result;
     }
 
     private static JsonNode oracleListObjects(Connection conn, String owner, String schemaLabel) throws SQLException {
@@ -3787,6 +3793,12 @@ public final class DbxJdbcPlugin {
                     result.add(item);
                 }
             }
+        } catch (SQLException e) {
+            result.removeAll();
+            try {
+                appendTableObjects(result, conn.getMetaData(), null, owner, schemaLabel, new String[]{"TABLE", "VIEW"});
+            } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+            }
         }
         String procSql =
             "SELECT object_name AS name, object_type " +
@@ -3804,6 +3816,21 @@ public final class DbxJdbcPlugin {
                     result.add(item);
                 }
             }
+        } catch (SQLException e) {
+            try {
+                DatabaseMetaData meta = conn.getMetaData();
+                try (ResultSet rs = meta.getProcedures(null, owner, "%")) {
+                    while (rs != null && rs.next()) {
+                        ObjectNode item = MAPPER.createObjectNode();
+                        item.put("name", rs.getString("PROCEDURE_NAME"));
+                        item.put("object_type", "PROCEDURE");
+                        putNullable(item, "schema", schemaLabel);
+                        putNullable(item, "comment", rs.getString("REMARKS"));
+                        result.add(item);
+                    }
+                }
+            } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+            }
         }
         String packageSql =
             "SELECT object_name AS name, CASE object_type WHEN 'PACKAGE BODY' THEN 'PACKAGE_BODY' ELSE object_type END AS object_type " +
@@ -3820,6 +3847,7 @@ public final class DbxJdbcPlugin {
                     result.add(item);
                 }
             }
+        } catch (SQLException ignored) {
         }
         String sequenceSql = "SELECT sequence_name AS name FROM all_sequences WHERE sequence_owner = ? ORDER BY sequence_name";
         try (PreparedStatement ps = conn.prepareStatement(sequenceSql)) {
@@ -3834,6 +3862,7 @@ public final class DbxJdbcPlugin {
                     result.add(item);
                 }
             }
+        } catch (SQLException ignored) {
         }
         String synonymSql = "SELECT synonym_name AS name FROM all_synonyms WHERE owner = ? ORDER BY synonym_name";
         try (PreparedStatement ps = conn.prepareStatement(synonymSql)) {
@@ -3847,6 +3876,11 @@ public final class DbxJdbcPlugin {
                     item.putNull("comment");
                     result.add(item);
                 }
+            }
+        } catch (SQLException e) {
+            try {
+                appendTableObjects(result, conn.getMetaData(), null, owner, schemaLabel, new String[]{"SYNONYM", "ALIAS"});
+            } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
             }
         }
         return result;
@@ -3885,6 +3919,31 @@ public final class DbxJdbcPlugin {
                         ((ArrayNode) item.path("columns")).add(column);
                     }
                 }
+            }
+        } catch (SQLException e) {
+            indexes.clear();
+            try {
+                DatabaseMetaData meta = conn.getMetaData();
+                Set<String> primaryIndexNames = new HashSet<>();
+                Map<Integer, String> primaryColumnsBySequence = new TreeMap<>();
+                try (ResultSet rs = meta.getPrimaryKeys(null, owner, table)) {
+                    while (rs != null && rs.next()) {
+                        String name = rs.getString("PK_NAME");
+                        if (name != null && !name.isBlank()) {
+                            primaryIndexNames.add(name);
+                        }
+                        String column = rs.getString("COLUMN_NAME");
+                        if (column != null && !column.isBlank()) {
+                            primaryColumnsBySequence.put((int) rs.getShort("KEY_SEQ"), column);
+                        }
+                    }
+                } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+                }
+                try (ResultSet rs = meta.getIndexInfo(null, owner, table, false, false)) {
+                    appendJdbcIndexes(indexes, primaryIndexNames, rs);
+                }
+                markPrimaryIndexByColumns(indexes.values(), new ArrayList<>(primaryColumnsBySequence.values()));
+            } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
             }
         }
         ArrayNode result = MAPPER.createArrayNode();
@@ -4012,13 +4071,21 @@ public final class DbxJdbcPlugin {
                     putNullableInt(item, "numeric_scale", rs.getObject("data_scale"));
                     putNullableInt(item, "character_maximum_length", rs.getObject("char_length"));
                 }
+                return result;
             }
+        } catch (SQLException e) {
+            result.removeAll();
+            try {
+                DatabaseMetaData meta = conn.getMetaData();
+                appendColumns(result, meta, null, owner, resolvedTable);
+                markPrimaryKeyColumns(result, pks);
+            } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+            }
+            return result;
         }
-        return result;
     }
 
     private static Set<String> oraclePrimaryKeys(Connection conn, String owner, String table) throws SQLException {
-        Set<String> keys = new HashSet<>();
         String sql =
             "SELECT cols.column_name FROM all_constraints cons " +
             "JOIN all_cons_columns cols ON cons.constraint_name = cols.constraint_name AND cons.owner = cols.owner " +
@@ -4027,12 +4094,15 @@ public final class DbxJdbcPlugin {
             ps.setString(1, owner);
             ps.setString(2, table);
             try (ResultSet rs = ps.executeQuery()) {
+                Set<String> keys = new HashSet<>();
                 while (rs.next()) {
                     keys.add(rs.getString("column_name"));
                 }
+                return keys;
             }
+        } catch (SQLException e) {
+            return safePrimaryKeys(conn.getMetaData(), null, owner, table);
         }
-        return keys;
     }
 
     private static Object readValue(

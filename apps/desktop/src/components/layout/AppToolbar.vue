@@ -2,12 +2,13 @@
 import { computed, ref, onMounted, onBeforeUnmount, h, nextTick, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { invoke } from "@tauri-apps/api/core";
-import { DatabaseZap, FilePlus2, Loader2, Moon, Sun, SunMoon, History, Bot, ArrowLeftRight, FileCode, BookMarked, GitCompareArrows, TableProperties, Settings, CloudDownload, Package, FileDown, FolderTree } from "@lucide/vue";
+import { DatabaseZap, FilePlus2, Moon, Sun, SunMoon, History, Bot, ArrowLeftRight, FileCode, BookMarked, GitCompareArrows, TableProperties, Settings, CloudDownload, Package, FileDown, FolderTree } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
 import WindowControls from "@/components/layout/WindowControls.vue";
 import ExportProgressPopover from "@/components/export/ExportProgressPopover.vue";
+import ToolbarUpdateIcon from "@/components/layout/ToolbarUpdateIcon.vue";
 import { MAC_TRAFFIC_LIGHT_X, macTrafficLightInsetPaddingForScale, shouldReserveMacTrafficLightInset, useWindowControls } from "@/composables/useWindowControls";
 import { useToast } from "@/composables/useToast";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -584,9 +585,8 @@ const toolbarStyle = computed(() => {
       <template v-if="toolbarItems.checkUpdates">
         <Tooltip>
           <TooltipTrigger as-child>
-            <Button v-show="isRightItemVisible('checkUpdates')" variant="ghost" size="icon" class="relative h-8 w-8 shrink-0" :disabled="checkingUpdates" @click="emit('check-updates')">
-              <Loader2 v-if="checkingUpdates" class="h-4 w-4 animate-spin" />
-              <CloudDownload v-else class="h-4 w-4" />
+            <Button v-show="isRightItemVisible('checkUpdates')" data-toolbar-update-trigger variant="ghost" size="icon" class="toolbar-action-button relative h-8 w-8 shrink-0" :disabled="checkingUpdates" @click="emit('check-updates')">
+              <ToolbarUpdateIcon :loading="checkingUpdates" />
               <span v-if="hasUpdateAvailable" class="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-red-500 ring-2 ring-background" />
             </Button>
           </TooltipTrigger>
@@ -600,7 +600,15 @@ const toolbarStyle = computed(() => {
 
       <Tooltip v-if="toolbarItems.sqlLibrary">
         <TooltipTrigger as-child>
-          <Button v-show="isRightItemVisible('sqlLibrary')" data-sql-library-trigger variant="ghost" size="icon" class="relative h-8 w-8 shrink-0" :class="{ 'bg-accent': showSqlLibrary, 'sql-library-save-feedback': sqlLibrarySaveFeedbackActive }" @click="emit('toggle-sql-library')">
+          <Button
+            v-show="isRightItemVisible('sqlLibrary')"
+            data-sql-library-trigger
+            variant="ghost"
+            size="icon"
+            class="toolbar-action-button relative h-8 w-8 shrink-0"
+            :class="{ 'toolbar-action-button--active bg-accent': showSqlLibrary, 'sql-library-save-feedback': sqlLibrarySaveFeedbackActive }"
+            @click="emit('toggle-sql-library')"
+          >
             <svg
               aria-hidden="true"
               xmlns="http://www.w3.org/2000/svg"
@@ -612,8 +620,8 @@ const toolbarStyle = computed(() => {
               stroke-width="2"
               stroke-linecap="round"
               stroke-linejoin="round"
-              class="sql-library-icon h-4 w-4"
-              :class="{ 'sql-library-save-feedback-icon text-primary': sqlLibrarySaveFeedbackActive }"
+              class="sql-library-icon toolbar-action-icon h-4 w-4"
+              :class="{ 'toolbar-action-icon--active': showSqlLibrary, 'sql-library-save-feedback-icon text-primary': sqlLibrarySaveFeedbackActive }"
             >
               <path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H19a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6.5a1 1 0 0 1 0-5H20" />
               <path ref="sqlLibraryIconPathRef" :d="SQL_LIBRARY_BOOKMARK_PATH">
@@ -621,6 +629,7 @@ const toolbarStyle = computed(() => {
                 <animate ref="sqlLibraryMorphToBookmarkRef" attributeName="d" :values="`${SQL_LIBRARY_CHECK_PATH};${SQL_LIBRARY_BOOKMARK_PATH}`" dur="180ms" begin="indefinite" fill="freeze" calcMode="spline" keyTimes="0;1" keySplines="0.22 1 0.36 1" />
               </path>
             </svg>
+            <span v-if="showSqlLibrary" class="toolbar-panel-status" aria-hidden="true" />
           </Button>
         </TooltipTrigger>
         <TooltipContent>{{ t("sqlLibrary.title") }}</TooltipContent>
@@ -628,8 +637,9 @@ const toolbarStyle = computed(() => {
 
       <Tooltip v-if="toolbarItems.sqlFileTree">
         <TooltipTrigger as-child>
-          <Button v-show="isRightItemVisible('sqlFileTree')" variant="ghost" size="icon" class="h-8 w-8 shrink-0" :class="{ 'bg-accent': showSqlFilePanel }" @click="emit('toggle-sql-file-panel')">
-            <FolderTree class="h-4 w-4" />
+          <Button v-show="isRightItemVisible('sqlFileTree')" variant="ghost" size="icon" class="toolbar-action-button relative h-8 w-8 shrink-0" :class="{ 'toolbar-action-button--active bg-accent': showSqlFilePanel }" @click="emit('toggle-sql-file-panel')">
+            <FolderTree class="toolbar-action-icon h-4 w-4" :class="{ 'toolbar-action-icon--active': showSqlFilePanel }" />
+            <span v-if="showSqlFilePanel" class="toolbar-panel-status" aria-hidden="true" />
           </Button>
         </TooltipTrigger>
         <TooltipContent>{{ t("sqlFileTree.title") }}</TooltipContent>
@@ -637,8 +647,9 @@ const toolbarStyle = computed(() => {
 
       <Tooltip v-if="toolbarItems.history">
         <TooltipTrigger as-child>
-          <Button v-show="isRightItemVisible('history')" variant="ghost" size="icon" class="h-8 w-8 shrink-0" :class="{ 'bg-accent': showHistory }" @click="emit('toggle-history')">
-            <History class="h-4 w-4" />
+          <Button v-show="isRightItemVisible('history')" variant="ghost" size="icon" class="toolbar-action-button relative h-8 w-8 shrink-0" :class="{ 'toolbar-action-button--active bg-accent': showHistory }" @click="emit('toggle-history')">
+            <History class="toolbar-action-icon h-4 w-4" :class="{ 'toolbar-action-icon--active': showHistory }" />
+            <span v-if="showHistory" class="toolbar-panel-status" aria-hidden="true" />
           </Button>
         </TooltipTrigger>
         <TooltipContent>{{ t("history.title") }}</TooltipContent>
@@ -646,8 +657,8 @@ const toolbarStyle = computed(() => {
 
       <Tooltip v-if="toolbarItems.ai">
         <TooltipTrigger as-child>
-          <Button v-show="isRightItemVisible('ai')" variant="ghost" size="icon" class="relative h-8 w-8 shrink-0" :class="{ 'bg-accent': showAiPanel }" @click="emit('toggle-ai')">
-            <Bot class="h-4 w-4" />
+          <Button v-show="isRightItemVisible('ai')" variant="ghost" size="icon" class="toolbar-action-button relative h-8 w-8 shrink-0" :class="{ 'toolbar-action-button--active bg-accent': showAiPanel }" @click="emit('toggle-ai')">
+            <Bot class="toolbar-action-icon h-4 w-4" :class="{ 'toolbar-action-icon--active': showAiPanel }" />
             <span
               v-if="awaitingAiRunCount > 0"
               class="absolute right-0.5 top-0.5 flex h-3 min-w-3 items-center justify-center rounded-full bg-amber-500 px-0.5 text-[8px] font-semibold leading-none text-white"
@@ -659,6 +670,7 @@ const toolbarStyle = computed(() => {
             <span v-else-if="activeAiRunCount > 0" class="absolute right-0.5 top-0.5 flex h-3 min-w-3 items-center justify-center rounded-full bg-primary px-0.5 text-[8px] font-semibold leading-none text-primary-foreground">
               {{ activeAiRunCount > 9 ? "9+" : activeAiRunCount }}
             </span>
+            <span v-if="showAiPanel" class="toolbar-panel-status" aria-hidden="true" />
           </Button>
         </TooltipTrigger>
         <TooltipContent>AI</TooltipContent>
@@ -666,8 +678,8 @@ const toolbarStyle = computed(() => {
 
       <Tooltip v-if="toolbarItems.theme">
         <TooltipTrigger as-child>
-          <Button v-show="isRightItemVisible('theme')" variant="ghost" size="icon" class="h-8 w-8 shrink-0" :aria-label="t('toolbar.theme')" @click="cycleThemeMode">
-            <component :is="themeTriggerIcon" class="h-4 w-4" />
+          <Button v-show="isRightItemVisible('theme')" variant="ghost" size="icon" class="toolbar-action-button h-8 w-8 shrink-0" :aria-label="t('toolbar.theme')" @click="cycleThemeMode">
+            <component :is="themeTriggerIcon" :key="themeMode" class="toolbar-action-icon toolbar-theme-icon h-4 w-4" />
           </Button>
         </TooltipTrigger>
         <TooltipContent>{{ t("toolbar.theme") }}</TooltipContent>
@@ -675,8 +687,8 @@ const toolbarStyle = computed(() => {
 
       <Tooltip v-if="toolbarItems.github">
         <TooltipTrigger as-child>
-          <Button v-show="isRightItemVisible('github')" variant="ghost" size="icon" class="h-8 w-8 shrink-0" @click="emit('open-github')">
-            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="currentColor">
+          <Button v-show="isRightItemVisible('github')" variant="ghost" size="icon" class="toolbar-action-button h-8 w-8 shrink-0" @click="emit('open-github')">
+            <svg class="toolbar-action-icon h-4 w-4" viewBox="0 0 24 24" fill="currentColor">
               <path
                 d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.438 9.8 8.205 11.387.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61-.546-1.387-1.333-1.756-1.333-1.756-1.09-.745.083-.729.083-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 21.795 24 17.295 24 12 24 5.37 18.627 0 12 0z"
               />
@@ -690,8 +702,9 @@ const toolbarStyle = computed(() => {
 
     <Tooltip>
       <TooltipTrigger as-child>
-        <Button variant="ghost" size="icon" class="relative h-8 w-8 shrink-0" :class="{ 'bg-accent': showSettingsPage }" @click="emit('open-settings')">
-          <Settings class="h-4 w-4" />
+        <Button variant="ghost" size="icon" class="toolbar-action-button relative h-8 w-8 shrink-0" :class="{ 'toolbar-action-button--active bg-accent': showSettingsPage }" @click="emit('open-settings')">
+          <Settings class="toolbar-action-icon h-4 w-4" :class="{ 'toolbar-action-icon--active': showSettingsPage }" />
+          <span v-if="showSettingsPage" class="toolbar-panel-status" aria-hidden="true" />
           <span v-if="hasMcpUpdateAvailable" class="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-red-500 ring-2 ring-background" :aria-label="t('toolbar.mcpUpdateAvailable')" :title="t('toolbar.mcpUpdateAvailable')" />
         </Button>
       </TooltipTrigger>
@@ -703,6 +716,64 @@ const toolbarStyle = computed(() => {
 </template>
 
 <style scoped>
+.toolbar-action-icon {
+  transform: translateY(0) scale(1);
+  transition:
+    color 180ms ease,
+    transform 200ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.toolbar-action-button:active:not(:disabled) .toolbar-action-icon,
+.toolbar-action-button:active:not(:disabled) :deep([data-toolbar-update-icon]) {
+  transform: scale(0.82);
+}
+
+.toolbar-action-icon--active {
+  color: var(--primary);
+  transform: translateY(-1px) scale(1.06);
+}
+
+.toolbar-panel-status {
+  position: absolute;
+  bottom: 3px;
+  left: 50%;
+  width: 3px;
+  height: 3px;
+  border-radius: 9999px;
+  background: var(--primary);
+  transform: translateX(-50%);
+  animation: toolbar-panel-status-in 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.toolbar-theme-icon {
+  animation: toolbar-theme-icon-in 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes toolbar-panel-status-in {
+  0% {
+    opacity: 0;
+    transform: translateX(-50%) translateY(2px) scale(0);
+  }
+  70% {
+    transform: translateX(-50%) translateY(0) scale(1.3);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0) scale(1);
+  }
+}
+
+@keyframes toolbar-theme-icon-in {
+  0% {
+    opacity: 0;
+    transform: rotate(-18deg) scale(0.72);
+  }
+  100% {
+    opacity: 1;
+    transform: rotate(0) scale(1);
+  }
+}
+
 @keyframes sql-library-save-confirm-button {
   0%,
   100% {
@@ -746,6 +817,13 @@ const toolbarStyle = computed(() => {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .toolbar-action-icon,
+  .toolbar-panel-status,
+  .toolbar-theme-icon {
+    animation: none;
+    transition: none;
+  }
+
   .sql-library-save-feedback,
   .sql-library-save-feedback-icon {
     animation: none;

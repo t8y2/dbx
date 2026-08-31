@@ -163,6 +163,13 @@ pub trait DbxBackend: Send + Sync {
     async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String>;
 
     async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String>;
+    /// Return database names visible to the DBX connection itself. The MCP
+    /// server applies its own database-scope policy before exposing these
+    /// names to a client.
+    async fn list_databases(&self, connection: &ConnectionConfig) -> Result<Vec<String>, String> {
+        let _ = connection;
+        Err("Database metadata is not supported by this backend.".to_string())
+    }
     async fn load_connection_group_paths(&self) -> Result<HashMap<String, Vec<String>>, String> {
         Ok(HashMap::new())
     }
@@ -174,6 +181,15 @@ pub trait DbxBackend: Send + Sync {
         arguments: Value,
         permissions: AgentSqlPermissions,
     ) -> ToolResult;
+    #[cfg(feature = "mq-admin")]
+    async fn send_message(
+        &self,
+        connection: &ConnectionConfig,
+        request: dbx_core::mq::SendMessageRequest,
+    ) -> Result<dbx_core::mq::SendMessageResponse, String> {
+        let _ = (connection, request);
+        Err("Message queue sending is not supported by this backend.".to_string())
+    }
     async fn execute_query(
         &self,
         connection: &ConnectionConfig,
@@ -465,6 +481,12 @@ impl WebBackend {
 }
 
 impl LocalBackend {
+    /// Reuse an already initialized DBX application state, for hosts that
+    /// embed MCP alongside their own HTTP server.
+    pub fn from_app_state(state: Arc<AppState>, data_dir: PathBuf) -> Self {
+        Self { state, data_dir }
+    }
+
     pub async fn open(path: &Path) -> Result<Self, String> {
         let storage = Storage::open(path).await?;
         let configs = storage.load_connections().await?;
@@ -558,6 +580,16 @@ impl DbxBackend for LocalBackend {
         Ok(configs)
     }
 
+    async fn list_databases(&self, connection: &ConnectionConfig) -> Result<Vec<String>, String> {
+        // `list_databases_core` supports many database engines and therefore
+        // produces a very large future. Boxing it here keeps the async-trait
+        // implementation below Rust's type-layout recursion limit in desktop
+        // builds without changing its execution behaviour.
+        Box::pin(dbx_core::schema::list_databases_core(&self.state, &connection.id))
+            .await
+            .map(|databases| databases.into_iter().map(|database| database.name).collect())
+    }
+
     async fn load_connection_group_paths(&self) -> Result<HashMap<String, Vec<String>>, String> {
         Ok(self.state.storage.load_sidebar_layout().await?.map(connection_group_paths).unwrap_or_default())
     }
@@ -583,6 +615,15 @@ impl DbxBackend for LocalBackend {
             permissions,
         )
         .await
+    }
+
+    #[cfg(feature = "mq-admin")]
+    async fn send_message(
+        &self,
+        connection: &ConnectionConfig,
+        request: dbx_core::mq::SendMessageRequest,
+    ) -> Result<dbx_core::mq::SendMessageResponse, String> {
+        dbx_core::mq::service::mq_send_message_core(&self.state, &connection.id, request).await
     }
 
     async fn execute_query(
@@ -745,6 +786,51 @@ impl DbxBackend for WebBackend {
             .map_err(|error| format!("Invalid connection list response: {error}"))
     }
 
+    async fn list_databases(&self, connection: &ConnectionConfig) -> Result<Vec<String>, String> {
+        self.ensure_connected(connection).await?;
+        match connection.db_type {
+            DatabaseType::MongoDb => self
+                .request(
+                    reqwest::Method::POST,
+                    "/api/mongo/list-databases",
+                    Some(json!({ "connectionId": connection.id })),
+                )
+                .await?
+                .json::<Vec<String>>()
+                .await
+                .map_err(|error| format!("Invalid MongoDB database list response: {error}")),
+            DatabaseType::Redis => {
+                let databases = self
+                    .request(
+                        reqwest::Method::POST,
+                        "/api/redis/list-databases",
+                        Some(json!({ "connectionId": connection.id })),
+                    )
+                    .await?
+                    .json::<Vec<Value>>()
+                    .await
+                    .map_err(|error| format!("Invalid Redis database list response: {error}"))?;
+                Ok(databases
+                    .into_iter()
+                    .filter_map(|database| {
+                        database.get("db").and_then(Value::as_u64).map(|database| database.to_string())
+                    })
+                    .collect())
+            }
+            _ => self
+                .request(
+                    reqwest::Method::GET,
+                    &format!("/api/schema/databases?connection_id={}", url_encode(&connection.id)),
+                    None,
+                )
+                .await?
+                .json::<Vec<dbx_core::db::DatabaseInfo>>()
+                .await
+                .map(|databases| databases.into_iter().map(|database| database.name).collect())
+                .map_err(|error| format!("Invalid database list response: {error}")),
+        }
+    }
+
     async fn load_connection_group_paths(&self) -> Result<HashMap<String, Vec<String>>, String> {
         let layout = self
             .request(reqwest::Method::GET, "/api/layout/sidebar", None)
@@ -804,6 +890,15 @@ impl DbxBackend for WebBackend {
             if let Some(client_session_id) = arguments.get("client_session_id").and_then(Value::as_str) {
                 body["clientSessionId"] = json!(client_session_id);
             }
+            // The query timeout is resolved once here and carried on every
+            // request: policy > connection effective timeout (see
+            // `agent_query_timeout_secs`). `arguments["timeout_secs"]` holds the
+            // global MCP policy value injected by the server; an absent value
+            // means inherit the connection's setting.
+            body["timeoutSecs"] = json!(agent_tools::agent_query_timeout_secs(
+                arguments.get("timeout_secs").and_then(Value::as_u64),
+                Some(connection),
+            ));
             let response = self.request(reqwest::Method::POST, "/api/query/execute", Some(body)).await?;
             let query_result: dbx_core::db::QueryResult =
                 response.json().await.map_err(|error| format!("Invalid query response: {error}"))?;
@@ -822,13 +917,37 @@ impl DbxBackend for WebBackend {
         }
     }
 
+    #[cfg(feature = "mq-admin")]
+    async fn send_message(
+        &self,
+        connection: &ConnectionConfig,
+        request: dbx_core::mq::SendMessageRequest,
+    ) -> Result<dbx_core::mq::SendMessageResponse, String> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct SendMessageBody {
+            connection_id: String,
+            req: dbx_core::mq::SendMessageRequest,
+        }
+
+        self.request(
+            reqwest::Method::POST,
+            "/api/mq/send-message",
+            Some(json!(SendMessageBody { connection_id: connection.id.clone(), req: request })),
+        )
+        .await?
+        .json()
+        .await
+        .map_err(|error| format!("Invalid message send response: {error}"))
+    }
+
     async fn execute_query(
         &self,
         connection: &ConnectionConfig,
         database: &str,
         sql: &str,
         _max_rows: Option<usize>,
-        _timeout_secs: Option<u64>,
+        timeout_secs: Option<u64>,
     ) -> Result<dbx_core::db::QueryResult, String> {
         if connection.db_type == DatabaseType::MongoDb {
             return Err("MongoDB shell commands in DBX Web mode are not implemented by the Rust CLI yet.".to_string());
@@ -837,7 +956,7 @@ impl DbxBackend for WebBackend {
         self.request(
             reqwest::Method::POST,
             "/api/query/execute",
-            Some(json!({ "connectionId": connection.id, "database": database, "sql": sql })),
+            Some(json!({ "connectionId": connection.id, "database": database, "sql": sql, "timeoutSecs": agent_tools::agent_query_timeout_secs(timeout_secs, Some(connection)) })),
         )
         .await?
         .json()
@@ -1813,7 +1932,15 @@ mod tests {
     };
 
     fn policy_state(configured: bool, read_only: bool) -> McpGlobalPolicyState {
-        McpGlobalPolicyState { configured, read_only, allow_dangerous_sql: false, allowed_connection_ids: None }
+        McpGlobalPolicyState {
+            configured,
+            read_only,
+            allow_dangerous_sql: false,
+            allowed_connection_ids: None,
+            allowed_tool_names: None,
+            connection_policies: Vec::new(),
+            query_timeout_secs: None,
+        }
     }
 
     #[test]
@@ -1917,6 +2044,153 @@ mod tests {
         server.join().unwrap();
         assert_eq!(request_receiver.recv().unwrap(), "GET /api/layout/sidebar HTTP/1.1");
         assert_eq!(paths.get("web-db"), Some(&vec!["Project".to_string()]));
+    }
+
+    #[test]
+    fn agent_query_timeout_web_policy_applies_over_connection_effective_timeout() {
+        // Unset policy inherits the connection's effective timeout
+        let mut conn = new_connection_config(
+            "timeout".to_string(),
+            "timeout".to_string(),
+            DatabaseType::Postgres,
+            "localhost".to_string(),
+            5432,
+            String::new(),
+            String::new(),
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        conn.query_timeout_secs = 60;
+        assert_eq!(agent_tools::agent_query_timeout_secs(None, Some(&conn)), 60);
+
+        conn.query_timeout_secs = 0;
+        assert_eq!(agent_tools::agent_query_timeout_secs(None, Some(&conn)), 0);
+
+        // Policy 300 overrides both a 60 and a 0 connection.
+        assert_eq!(agent_tools::agent_query_timeout_secs(Some(300), Some(&conn)), 300);
+
+        // Spanner floor applies to a finite policy but not to 0.
+        let mut spanner = new_connection_config(
+            "spanner".to_string(),
+            "spanner".to_string(),
+            DatabaseType::Spanner,
+            "localhost".to_string(),
+            5432,
+            String::new(),
+            String::new(),
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        spanner.query_timeout_secs = 60;
+        assert_eq!(agent_tools::agent_query_timeout_secs(Some(60), Some(&spanner)), 120);
+        assert_eq!(agent_tools::agent_query_timeout_secs(Some(0), Some(&spanner)), 0);
+        assert_eq!(agent_tools::agent_query_timeout_secs(None, Some(&spanner)), 120);
+    }
+
+    #[tokio::test]
+    async fn web_execute_agent_tool_carries_resolved_timeout_secs_in_body() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (request_sender, request_receiver) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                let header_end = loop {
+                    let count = stream.read(&mut buffer).unwrap();
+                    request.extend_from_slice(&buffer[..count]);
+                    if let Some(position) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                        break position + 4;
+                    }
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length").then_some(value.trim())
+                    })
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap();
+                while request.len() < header_end + content_length {
+                    let count = stream.read(&mut buffer).unwrap();
+                    request.extend_from_slice(&buffer[..count]);
+                }
+                let request = String::from_utf8(request).unwrap();
+                let body = request[header_end..header_end + content_length].to_string();
+                request_sender.send((request.lines().next().unwrap().to_string(), body)).unwrap();
+
+                let response_body = r#"{"columns":["?"],"column_types":[],"column_sortables":[],"rows":[["1"]],"affected_rows":0,"execution_time_ms":0,"truncated":false,"has_more":false}"#;
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response_body.len(),
+                    response_body
+                )
+                .unwrap();
+            }
+        });
+
+        let backend = WebBackend::new(format!("http://{address}"), String::new()).unwrap();
+        backend.auth.lock().await.checked = true;
+        let mut connection = new_connection_config(
+            "web-timeout".to_string(),
+            "web-timeout".to_string(),
+            DatabaseType::Postgres,
+            "localhost".to_string(),
+            5432,
+            String::new(),
+            String::new(),
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        connection.query_timeout_secs = 60;
+        // ensure_connected only POSTs /api/connection/connect when the backend has
+        // no cached config; pre-seed the cache so the mock needs to answer only the
+        // /api/query/execute request.
+        backend.connected.lock().await.insert(connection.id.clone(), connection.clone());
+
+        // No policy argument -> inherit the connection's effective timeout (60).
+        let result = backend
+            .execute_agent_tool(
+                &connection,
+                "postgres",
+                "execute_query",
+                json!({ "sql": "SELECT 1", "limit": 10 }),
+                AgentSqlPermissions { allow_writes: false, allow_dangerous: false, confirmed_write_sql: None },
+            )
+            .await;
+        assert!(!result.is_error, "{:?}", result);
+        let (request_line, body) = request_receiver.recv().unwrap();
+        assert_eq!(request_line, "POST /api/query/execute HTTP/1.1");
+        let request: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(request["timeoutSecs"], 60);
+
+        // Policy argument 300 overrides the connection.
+        let result = backend
+            .execute_agent_tool(
+                &connection,
+                "postgres",
+                "execute_query",
+                json!({ "sql": "SELECT 1", "limit": 10, "timeout_secs": 300 }),
+                AgentSqlPermissions { allow_writes: false, allow_dangerous: false, confirmed_write_sql: None },
+            )
+            .await;
+        assert!(!result.is_error, "{:?}", result);
+
+        server.join().unwrap();
+        let (_request_line, second_body) = request_receiver.recv().unwrap();
+        let second_request: Value = serde_json::from_str(&second_body).unwrap();
+        assert_eq!(second_request["timeoutSecs"], 300);
     }
 
     #[test]

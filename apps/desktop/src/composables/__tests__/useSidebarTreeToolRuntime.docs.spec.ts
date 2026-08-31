@@ -4,15 +4,22 @@ import type { TreeNode } from "@/types/database";
 
 import { useSidebarTreeToolRuntime } from "@/composables/useSidebarTreeToolRuntime";
 
-function setup(node: Partial<TreeNode>) {
+function setup(node: Partial<TreeNode>, options: { treeNodes?: TreeNode[]; selectedTreeNodeIds?: string[]; acceptedSelectionIds?: readonly string[] | null } = {}) {
   const activeNode = shallowRef({ id: "n-1", label: "node", children: [], ...node } as TreeNode);
-  const connectionStore = { docsSource: null as unknown };
+  const connectionStore = {
+    docsSource: null as unknown,
+    diagramSource: null as unknown,
+    databaseExportSource: null as unknown,
+    treeNodes: options.treeNodes ?? [],
+    selectedTreeNodeIds: options.selectedTreeNodeIds ?? [],
+  };
   const runtime = useSidebarTreeToolRuntime({
     activeNode,
     connectionStore: connectionStore as never,
     queryStore: {} as never,
     settingsStore: {} as never,
     tableChildObjectName: () => "",
+    acceptedSelectionIds: () => options.acceptedSelectionIds ?? null,
   });
   return { connectionStore, runtime };
 }
@@ -41,5 +48,62 @@ describe("useSidebarTreeToolRuntime openDocs", () => {
     runtime.openDocs();
 
     expect(connectionStore.docsSource).toBeNull();
+  });
+});
+
+describe("useSidebarTreeToolRuntime diagram and database export", () => {
+  const publicUsers: TreeNode = { id: "t1", label: "users", type: "table", connectionId: "c1", database: "db", schema: "public" };
+  const publicOrders: TreeNode = { id: "t2", label: "orders", type: "table", connectionId: "c1", database: "db", schema: "public" };
+  const salesUsers: TreeNode = { id: "t3", label: "users", type: "table", connectionId: "c1", database: "db", schema: "sales" };
+  const publicView: TreeNode = { id: "v1", label: "active_users", type: "view", connectionId: "c1", database: "db", schema: "public" };
+  const group: TreeNode = { id: "group", label: "Tables", type: "group-tables", children: [publicUsers, publicOrders, salesUsers, publicView] };
+
+  it("opens a multi-table diagram only for tables in the active schema", () => {
+    const { connectionStore, runtime } = setup(publicUsers, {
+      treeNodes: [group],
+      selectedTreeNodeIds: [publicOrders.id, publicUsers.id, salesUsers.id],
+    });
+
+    runtime.openDiagram();
+
+    expect(connectionStore.diagramSource).toEqual({
+      connectionId: "c1",
+      database: "db",
+      schema: "public",
+      tableName: "users",
+      tableNames: ["users", "orders"],
+    });
+  });
+
+  it("prefills database export with same-schema tables only", () => {
+    const { connectionStore, runtime } = setup(publicUsers, {
+      treeNodes: [group],
+      selectedTreeNodeIds: [publicOrders.id, publicUsers.id, publicView.id],
+    });
+
+    runtime.openDatabaseExport();
+
+    expect(connectionStore.databaseExportSource).toEqual({
+      connectionId: "c1",
+      database: "db",
+      schema: "public",
+      tableNames: ["users", "orders"],
+    });
+  });
+
+  it("falls back to single-table database export when the selection spans schemas", () => {
+    const { connectionStore, runtime } = setup(publicUsers, {
+      treeNodes: [group],
+      selectedTreeNodeIds: [salesUsers.id, publicUsers.id],
+    });
+
+    runtime.openDatabaseExport();
+
+    expect(connectionStore.databaseExportSource).toEqual({
+      connectionId: "c1",
+      database: "db",
+      schema: "public",
+      tableName: "users",
+    });
   });
 });

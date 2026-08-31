@@ -8,6 +8,9 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+use flate2::write::GzEncoder;
+use flate2::Compression;
+
 use crate::connection::task_client_session_id;
 use crate::models::connection::DatabaseType;
 use crate::mysql_ddl_normalize::DdlNormalizeOptions;
@@ -28,6 +31,14 @@ const EXPORT_CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 pub fn database_export_client_session_id(export_id: &str) -> String {
     task_client_session_id("database-export", export_id)
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DatabaseExportOutputCompression {
+    #[default]
+    None,
+    Gzip,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,8 +71,41 @@ pub struct DatabaseExportRequest {
     #[serde(default)]
     pub fail_on_error: bool,
     #[serde(default)]
+    pub output_compression: DatabaseExportOutputCompression,
+    #[serde(default)]
     pub snapshot_session_id: Option<String>,
     pub batch_size: usize,
+}
+
+enum DatabaseExportWriter {
+    Plain(BufWriter<std::fs::File>),
+    Gzip(Box<GzEncoder<BufWriter<std::fs::File>>>),
+}
+
+impl Write for DatabaseExportWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Plain(writer) => writer.write(buffer),
+            Self::Gzip(writer) => writer.write(buffer),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Plain(writer) => writer.flush(),
+            Self::Gzip(writer) => writer.flush(),
+        }
+    }
+}
+
+impl DatabaseExportWriter {
+    fn finish(self) -> Result<(), String> {
+        match self {
+            Self::Plain(mut writer) => writer.flush(),
+            Self::Gzip(writer) => writer.finish().and_then(|mut output| output.flush()),
+        }
+        .map_err(|error| format!("Failed to finalize export file: {error}"))
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -1624,10 +1668,19 @@ async fn get_export_table_ddl_isolated(
     database: String,
     schema: String,
     table: String,
+    client_session_id: String,
 ) -> Result<String, String> {
     let task = tokio::spawn(async move {
-        crate::schema::get_table_relation_export_ddl_core(&state, &connection_id, &database, &schema, &table, None)
-            .await
+        crate::schema::get_table_relation_export_ddl_core_for_session(
+            &state,
+            &connection_id,
+            &database,
+            &schema,
+            &table,
+            None,
+            Some(&client_session_id),
+        )
+        .await
     });
     let _abort_on_drop = AbortExportTaskOnDrop(task.abort_handle());
     task.await.map_err(|error| format!("Database export metadata task failed: {error}"))?
@@ -1639,9 +1692,18 @@ async fn get_export_table_columns_isolated(
     database: String,
     schema: String,
     table: String,
+    client_session_id: String,
 ) -> Result<Vec<crate::db::ColumnInfo>, String> {
     let task = tokio::spawn(async move {
-        crate::schema::get_columns_core(&state, &connection_id, &database, &schema, &table).await
+        crate::schema::get_columns_core_for_session(
+            &state,
+            &connection_id,
+            &database,
+            &schema,
+            &table,
+            Some(&client_session_id),
+        )
+        .await
     });
     let _abort_on_drop = AbortExportTaskOnDrop(task.abort_handle());
     task.await.map_err(|error| format!("Database export metadata task failed: {error}"))?
@@ -1692,6 +1754,20 @@ pub async fn begin_database_backup_snapshot_core(
     connection_id: &str,
     database: &str,
 ) -> Result<DatabaseBackupSnapshot, String> {
+    begin_database_backup_snapshot_core_for_export(state, connection_id, database, None).await
+}
+
+/// Opens the consistent-snapshot transaction used by a scheduled backup.
+///
+/// When the snapshot is being created for an export run, `export_id` keeps
+/// pool checkout and transaction creation cancellable even before a child
+/// database export has been created.
+pub async fn begin_database_backup_snapshot_core_for_export(
+    state: &crate::connection::AppState,
+    connection_id: &str,
+    database: &str,
+    export_id: Option<&str>,
+) -> Result<DatabaseBackupSnapshot, String> {
     let db_type = state
         .configs
         .read()
@@ -1703,22 +1779,51 @@ pub async fn begin_database_backup_snapshot_core(
         return Err("Consistent database backup snapshots are only supported for MySQL and PostgreSQL".to_string());
     }
 
-    let session_id = crate::query::begin_database_backup_snapshot(state, connection_id, database).await?;
-    let schemas = if matches!(db_type, DatabaseType::Postgres) {
+    let session_id = if let Some(export_id) = export_id {
+        // Do not use `await_export_operation` here: if the transaction is
+        // created at exactly the same time as cancellation, we still need the
+        // returned session id to roll it back rather than leaking it.
+        let operation = crate::query::begin_database_backup_snapshot(state, connection_id, database);
+        tokio::pin!(operation);
+        loop {
+            if is_export_cancelled_now(export_id) {
+                return Err(EXPORT_CANCELLED_ERROR.to_string());
+            }
+            tokio::select! {
+                biased;
+                result = &mut operation => {
+                    let session_id = result?;
+                    if is_export_cancelled_now(export_id) {
+                        let _ = crate::query::rollback_manual_transaction(state, &session_id).await;
+                        return Err(EXPORT_CANCELLED_ERROR.to_string());
+                    }
+                    break session_id;
+                },
+                _ = tokio::time::sleep(EXPORT_CANCEL_POLL_INTERVAL) => {}
+            }
+        }
+    } else {
+        crate::query::begin_database_backup_snapshot(state, connection_id, database).await?
+    };
+
+    let schemas_result = if matches!(db_type, DatabaseType::Postgres) {
         const POSTGRES_BACKUP_SCHEMAS_SQL: &str = "SELECT n.nspname FROM pg_catalog.pg_namespace n \
              WHERE n.nspname NOT IN ('information_schema', 'pg_catalog', 'pg_toast') \
              AND n.nspname NOT LIKE 'pg_toast_temp_%' \
              AND n.nspname NOT LIKE 'pg_temp_%' ORDER BY n.nspname";
-        let results = crate::query::execute_in_manual_transaction(
+        let operation = crate::query::execute_in_manual_transaction(
             state,
             &session_id,
             POSTGRES_BACKUP_SCHEMAS_SQL,
             database,
             None,
             Some(10_000),
-        )
-        .await?;
-        results
+        );
+        let results = match export_id {
+            Some(export_id) => await_export_operation(export_id, Box::pin(operation)).await,
+            None => operation.await,
+        }?;
+        Ok(results
             .into_iter()
             .next()
             .map(|result| {
@@ -1729,9 +1834,20 @@ pub async fn begin_database_backup_snapshot_core(
                     .filter_map(|value| value.as_str().map(str::to_string))
                     .collect()
             })
-            .unwrap_or_default()
+            .unwrap_or_default())
     } else {
-        vec![database.to_string()]
+        Ok(vec![database.to_string()])
+    };
+    let schemas = match schemas_result {
+        Ok(schemas) => schemas,
+        Err(error) => {
+            let _ = crate::query::rollback_manual_transaction(state, &session_id).await;
+            return Err(error);
+        }
+    };
+    if export_id.map(is_export_cancelled_now).unwrap_or(false) {
+        let _ = crate::query::rollback_manual_transaction(state, &session_id).await;
+        return Err(EXPORT_CANCELLED_ERROR.to_string());
     };
     if schemas.is_empty() {
         let _ = crate::query::rollback_manual_transaction(state, &session_id).await;
@@ -1958,6 +2074,76 @@ fn export_destination_state_key(dir: &std::path::Path) -> String {
     format!("database_export_destination:{}", dir.to_string_lossy())
 }
 
+const EXPORT_DESTINATION_IDENTITY_MAGIC: &[u8; 5] = b"DBXEI";
+const EXPORT_DESTINATION_IDENTITY_VERSION: u8 = 1;
+const EXPORT_DESTINATION_IDENTITY_DEVICE_KIND: u8 = 1;
+const EXPORT_DESTINATION_IDENTITY_VOLUME_UUID_KIND: u8 = 2;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ExportDestinationIdentity {
+    Device(u64),
+    PersistentVolumeUuid([u8; 16]),
+    LegacyDevice(u64),
+}
+
+impl ExportDestinationIdentity {
+    fn encode(&self) -> Vec<u8> {
+        let mut encoded = Vec::with_capacity(EXPORT_DESTINATION_IDENTITY_MAGIC.len() + 2 + 16);
+        encoded.extend_from_slice(EXPORT_DESTINATION_IDENTITY_MAGIC);
+        encoded.push(EXPORT_DESTINATION_IDENTITY_VERSION);
+        match self {
+            Self::Device(device) => {
+                encoded.push(EXPORT_DESTINATION_IDENTITY_DEVICE_KIND);
+                encoded.extend_from_slice(&device.to_le_bytes());
+            }
+            Self::PersistentVolumeUuid(uuid) => {
+                encoded.push(EXPORT_DESTINATION_IDENTITY_VOLUME_UUID_KIND);
+                encoded.extend_from_slice(uuid);
+            }
+            Self::LegacyDevice(_) => unreachable!("legacy identities are decoded for migration, never written"),
+        }
+        encoded
+    }
+
+    fn decode(encoded: &[u8]) -> Result<Option<Self>, String> {
+        if encoded.is_empty() {
+            return Ok(None);
+        }
+        if let Ok(bytes) = <[u8; 8]>::try_from(encoded) {
+            return Ok(Some(Self::LegacyDevice(u64::from_le_bytes(bytes))));
+        }
+        let Some((header, payload)) = encoded.split_at_checked(EXPORT_DESTINATION_IDENTITY_MAGIC.len() + 2) else {
+            return Err("Stored database export destination identity is truncated".to_string());
+        };
+        if &header[..EXPORT_DESTINATION_IDENTITY_MAGIC.len()] != EXPORT_DESTINATION_IDENTITY_MAGIC {
+            return Err("Stored database export destination identity has an unknown format".to_string());
+        }
+        if header[EXPORT_DESTINATION_IDENTITY_MAGIC.len()] != EXPORT_DESTINATION_IDENTITY_VERSION {
+            return Err("Stored database export destination identity uses an unsupported version".to_string());
+        }
+        match header[EXPORT_DESTINATION_IDENTITY_MAGIC.len() + 1] {
+            EXPORT_DESTINATION_IDENTITY_DEVICE_KIND => <[u8; 8]>::try_from(payload)
+                .map(|bytes| Some(Self::Device(u64::from_le_bytes(bytes))))
+                .map_err(|_| "Stored database export destination device identity has an invalid length".to_string()),
+            EXPORT_DESTINATION_IDENTITY_VOLUME_UUID_KIND => <[u8; 16]>::try_from(payload)
+                .map(|bytes| Some(Self::PersistentVolumeUuid(bytes)))
+                .map_err(|_| "Stored database export destination volume UUID has an invalid length".to_string()),
+            _ => Err("Stored database export destination identity has an unknown kind".to_string()),
+        }
+    }
+
+    fn matches(&self, current: &Self) -> bool {
+        match (self, current) {
+            (Self::Device(expected), Self::Device(actual))
+            | (Self::LegacyDevice(expected), Self::Device(actual))
+            | (Self::Device(expected), Self::LegacyDevice(actual))
+            | (Self::LegacyDevice(expected), Self::LegacyDevice(actual)) => expected == actual,
+            (Self::PersistentVolumeUuid(expected), Self::PersistentVolumeUuid(actual)) => expected == actual,
+            _ => false,
+        }
+    }
+}
+
 /// Records the destination identity for a scheduled backup as soon as it is
 /// configured, not just after its first successful export. Scheduled plans
 /// live in the frontend and may not run for hours after being saved; without
@@ -1978,17 +2164,16 @@ pub async fn record_export_destination_identity(
             dir.display()
         ));
     }
-    save_export_destination_dir_device_id(state, dir).await
+    let identity = export_destination_identity_for_path(dir);
+    save_export_destination_identity(state, dir, identity.as_ref()).await
 }
 
-async fn save_export_destination_dir_device_id(
+async fn save_export_destination_identity(
     state: &crate::connection::AppState,
     dir: &std::path::Path,
+    identity: Option<&ExportDestinationIdentity>,
 ) -> Result<(), String> {
-    let value = match export_destination_device_id_for_path(dir) {
-        Some(dev) => dev.to_le_bytes().to_vec(),
-        None => Vec::new(),
-    };
+    let value = identity.map(ExportDestinationIdentity::encode).unwrap_or_default();
     state.storage.save_state(&export_destination_state_key(dir), &value, "application/octet-stream").await
 }
 
@@ -2013,30 +2198,32 @@ async fn save_export_destination_dir_device_id(
 async fn ensure_export_destination_dir(
     state: &crate::connection::AppState,
     dir: &std::path::Path,
-) -> Result<Option<u64>, String> {
+) -> Result<Option<ExportDestinationIdentity>, String> {
     let key = export_destination_state_key(dir);
-    let recorded_dev: Option<Option<u64>> = state
+    let recorded_identity = state
         .storage
         .load_state(&key)
         .await?
-        .map(|(bytes, _content_type)| <[u8; 8]>::try_from(bytes.as_slice()).ok().map(u64::from_le_bytes));
+        .map(|(bytes, _content_type)| ExportDestinationIdentity::decode(&bytes))
+        .transpose()?;
 
     if dir.is_dir() {
-        if let Some(Some(recorded_dev)) = recorded_dev {
-            if let Some(current_dev) = export_destination_device_id_for_path(dir) {
-                if current_dev != recorded_dev {
-                    return Err(format!(
-                        "Backup directory {} now resolves to a different filesystem than the last \
-                         successful export to this location. Refusing to write here automatically -- \
-                         if this directory is on a removable or network drive, make sure the correct \
-                         drive is connected before running the backup.",
-                        dir.display()
-                    ));
-                }
+        let current_identity = export_destination_identity_for_path(dir);
+        if let Some(Some(recorded_identity)) = recorded_identity.as_ref() {
+            if recorded_export_destination_identity_mismatch(recorded_identity, current_identity.as_ref()) {
+                return Err(format!(
+                    "Backup directory {} now resolves to a different filesystem than the last \
+                     successful export to this location. Refusing to write here automatically -- \
+                     if this directory is on a removable or network drive, make sure the correct \
+                     drive is connected before running the backup.",
+                    dir.display()
+                ));
             }
         }
+        save_export_destination_identity(state, dir, current_identity.as_ref()).await?;
+        return Ok(current_identity);
     } else {
-        if recorded_dev.is_some() {
+        if recorded_identity.is_some() {
             return Err(format!(
                 "Backup directory {} is missing. It was configured or previously used for exports to \
                  this location, so dbx will not recreate it automatically -- if this is on a removable \
@@ -2047,8 +2234,25 @@ async fn ensure_export_destination_dir(
         std::fs::create_dir_all(dir).map_err(|e| format!("Failed to create backup directory: {e}"))?;
     }
 
-    save_export_destination_dir_device_id(state, dir).await?;
-    Ok(export_destination_device_id_for_path(dir))
+    let current_identity = export_destination_identity_for_path(dir);
+    save_export_destination_identity(state, dir, current_identity.as_ref()).await?;
+    Ok(current_identity)
+}
+
+fn recorded_export_destination_identity_mismatch(
+    recorded: &ExportDestinationIdentity,
+    current: Option<&ExportDestinationIdentity>,
+) -> bool {
+    #[cfg(target_os = "macos")]
+    if matches!(recorded, ExportDestinationIdentity::LegacyDevice(_)) {
+        // Legacy macOS state contains a transient st_dev value, not a durable
+        // volume identity. Even an equal number after remount cannot prove it
+        // is the volume the user selected, so only an explicit record action
+        // may replace it with the persistent UUID.
+        return true;
+    }
+
+    export_destination_identity_mismatch(Some(recorded), current)
 }
 
 /// Whether a destination's identity, checked once via [`ensure_export_destination_dir`]
@@ -2056,47 +2260,101 @@ async fn ensure_export_destination_dir(
 /// changed in between. An unknown expected identity has nothing to compare,
 /// but once an expected identity is known, failing to identify the opened
 /// handle must fail closed rather than allowing an unverified write.
-fn export_destination_identity_mismatch(expected: Option<u64>, actual: Option<u64>) -> bool {
-    expected.is_some_and(|expected| actual != Some(expected))
+fn export_destination_identity_mismatch(
+    expected: Option<&ExportDestinationIdentity>,
+    actual: Option<&ExportDestinationIdentity>,
+) -> bool {
+    expected.is_some_and(|expected| actual.is_none_or(|actual| !expected.matches(actual)))
 }
 
-#[cfg(unix)]
-fn export_destination_device_id_for_path(dir: &std::path::Path) -> Option<u64> {
+#[cfg(all(unix, not(target_os = "macos")))]
+fn export_destination_identity_for_path(dir: &std::path::Path) -> Option<ExportDestinationIdentity> {
     use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(dir).ok().map(|metadata| metadata.dev())
+    std::fs::metadata(dir).ok().map(|metadata| ExportDestinationIdentity::Device(metadata.dev()))
 }
 
-#[cfg(unix)]
-fn export_destination_device_id_for_file(file: &std::fs::File) -> Option<u64> {
+#[cfg(all(unix, not(target_os = "macos")))]
+fn export_destination_identity_for_file(file: &std::fs::File) -> Option<ExportDestinationIdentity> {
     use std::os::unix::fs::MetadataExt;
-    file.metadata().ok().map(|metadata| metadata.dev())
+    file.metadata().ok().map(|metadata| ExportDestinationIdentity::Device(metadata.dev()))
+}
+
+#[cfg(target_os = "macos")]
+fn export_destination_identity_for_path(dir: &std::path::Path) -> Option<ExportDestinationIdentity> {
+    let directory = std::fs::File::open(dir).ok()?;
+    export_destination_identity_for_file(&directory)
+}
+
+#[cfg(target_os = "macos")]
+fn export_destination_identity_for_file(file: &std::fs::File) -> Option<ExportDestinationIdentity> {
+    macos_export_destination::persistent_volume_uuid(file).map(ExportDestinationIdentity::PersistentVolumeUuid).or_else(
+        || {
+            use std::os::unix::fs::MetadataExt;
+            file.metadata().ok().map(|metadata| ExportDestinationIdentity::Device(metadata.dev()))
+        },
+    )
 }
 
 #[cfg(windows)]
-fn export_destination_device_id_for_path(dir: &std::path::Path) -> Option<u64> {
-    windows_export_destination::device_id_for_path(dir)
+fn export_destination_identity_for_path(dir: &std::path::Path) -> Option<ExportDestinationIdentity> {
+    windows_export_destination::device_id_for_path(dir).map(ExportDestinationIdentity::Device)
 }
 
 #[cfg(windows)]
-fn export_destination_device_id_for_file(file: &std::fs::File) -> Option<u64> {
-    windows_export_destination::device_id_for_handle(file)
+fn export_destination_identity_for_file(file: &std::fs::File) -> Option<ExportDestinationIdentity> {
+    windows_export_destination::device_id_for_handle(file).map(ExportDestinationIdentity::Device)
 }
 
 #[cfg(not(any(unix, windows)))]
-fn export_destination_device_id_for_path(_dir: &std::path::Path) -> Option<u64> {
+fn export_destination_identity_for_path(_dir: &std::path::Path) -> Option<ExportDestinationIdentity> {
     None
 }
 
 #[cfg(not(any(unix, windows)))]
-fn export_destination_device_id_for_file(_file: &std::fs::File) -> Option<u64> {
+fn export_destination_identity_for_file(_file: &std::fs::File) -> Option<ExportDestinationIdentity> {
     None
+}
+
+#[cfg(target_os = "macos")]
+mod macos_export_destination {
+    use std::os::fd::AsRawFd;
+
+    #[repr(C)]
+    struct VolumeUuidBuffer {
+        length: u32,
+        uuid: [u8; 16],
+    }
+
+    pub(super) fn persistent_volume_uuid(file: &std::fs::File) -> Option<[u8; 16]> {
+        let mut attributes = nix::libc::attrlist {
+            bitmapcount: nix::libc::ATTR_BIT_MAP_COUNT,
+            reserved: 0,
+            commonattr: 0,
+            volattr: nix::libc::ATTR_VOL_INFO | nix::libc::ATTR_VOL_UUID,
+            dirattr: 0,
+            fileattr: 0,
+            forkattr: 0,
+        };
+        let mut buffer = VolumeUuidBuffer { length: 0, uuid: [0; 16] };
+        let result = unsafe {
+            nix::libc::fgetattrlist(
+                file.as_raw_fd(),
+                std::ptr::from_mut(&mut attributes).cast(),
+                std::ptr::from_mut(&mut buffer).cast(),
+                std::mem::size_of::<VolumeUuidBuffer>(),
+                0,
+            )
+        };
+        (result == 0 && buffer.length as usize >= std::mem::size_of::<VolumeUuidBuffer>() && buffer.uuid != [0; 16])
+            .then_some(buffer.uuid)
+    }
 }
 
 /// Windows has no stable `std` API for a directory or file's volume identity
 /// (`MetadataExt::volume_serial_number` is still gated behind the unstable
 /// `windows_by_handle` feature), so this queries `dwVolumeSerialNumber` from
 /// `BY_HANDLE_FILE_INFORMATION` directly. Using the *handle* rather than
-/// re-resolving the path is what makes `export_destination_device_id_for_file`
+/// re-resolving the path is what makes `export_destination_identity_for_file`
 /// safe to call on an already-open `File`: it reports the volume the handle
 /// was actually opened against, not whatever currently sits at that path.
 #[cfg(windows)]
@@ -2152,6 +2410,16 @@ pub async fn export_database_sql_core(
     // caller future small, this prevents the metadata-prefetch locals from
     // exhausting the bounded stack used by test and runtime worker threads.
     let result = Box::pin(export_database_sql_core_inner(state, request, &on_progress)).await;
+    let metadata_session_id = database_export_client_session_id(&request.export_id);
+    if let Err(error) =
+        state.close_metadata_session_pool(&request.connection_id, Some(&request.database), &metadata_session_id).await
+    {
+        log::warn!(
+            "[database-export] failed to close metadata session '{}' for '{}': {error}",
+            metadata_session_id,
+            request.connection_id
+        );
+    }
     if result.as_ref().err().is_some_and(|error| error == EXPORT_CANCELLED_ERROR) {
         // Every caller (Tauri and web SSE) needs a terminal Cancelled event;
         // returning the marker as an error would leave the web EventSource
@@ -2209,10 +2477,10 @@ async fn export_database_sql_core_inner(
     ))
     .await?;
     // 4. Create file
-    let mut expected_destination_dev = None;
+    let mut expected_destination_identity = None;
     if let Some(parent) = std::path::Path::new(&request.file_path).parent() {
         if !parent.as_os_str().is_empty() {
-            expected_destination_dev = ensure_export_destination_dir(state, parent).await?;
+            expected_destination_identity = ensure_export_destination_dir(state, parent).await?;
         }
     }
     let file = std::fs::File::create(&request.file_path).map_err(|e| format!("Failed to write file: {e}"))?;
@@ -2221,7 +2489,11 @@ async fn export_database_sql_core_inner(
     // at the same path in between. Re-check the identity of the handle we
     // actually opened, not just the path, and refuse to keep a backup that
     // landed on the wrong filesystem. See #6327.
-    if export_destination_identity_mismatch(expected_destination_dev, export_destination_device_id_for_file(&file)) {
+    let opened_destination_identity = export_destination_identity_for_file(&file);
+    if export_destination_identity_mismatch(
+        expected_destination_identity.as_ref(),
+        opened_destination_identity.as_ref(),
+    ) {
         drop(file);
         let _ = std::fs::remove_file(&request.file_path);
         return Err(format!(
@@ -2231,7 +2503,12 @@ async fn export_database_sql_core_inner(
             request.file_path
         ));
     }
-    let mut file = BufWriter::new(file);
+    let mut file = match request.output_compression {
+        DatabaseExportOutputCompression::None => DatabaseExportWriter::Plain(BufWriter::new(file)),
+        DatabaseExportOutputCompression::Gzip => {
+            DatabaseExportWriter::Gzip(Box::new(GzEncoder::new(BufWriter::new(file), Compression::default())))
+        }
+    };
 
     let create_database_preamble = if request.include_create_database && matches!(db_type, DatabaseType::Mysql) {
         Some(mysql_database_export_preamble_for_request(state, request).await)
@@ -2455,6 +2732,7 @@ async fn export_database_sql_core_inner(
         let prefetch_targets: Vec<(usize, String)> =
             tables.iter().enumerate().map(|(index, table_info)| (index, table_info.name.clone())).collect();
         let mut prefetch_stream = futures::stream::iter(prefetch_targets.into_iter().map(|(index, table_name)| {
+            let client_session_id = client_session_id.clone();
             Box::pin(async move {
                 if is_export_cancelled_now(&request.export_id) {
                     return (index, PrefetchedTableMetadata { ddl: None, columns: None });
@@ -2469,6 +2747,7 @@ async fn export_database_sql_core_inner(
                                 request.database.clone(),
                                 request.schema.clone(),
                                 table_name.clone(),
+                                client_session_id.clone(),
                             )),
                         )
                         .await,
@@ -2489,6 +2768,7 @@ async fn export_database_sql_core_inner(
                                 request.database.clone(),
                                 request.schema.clone(),
                                 table_name.clone(),
+                                client_session_id.clone(),
                             )),
                         )
                         .await,
@@ -2641,6 +2921,7 @@ async fn export_database_sql_core_inner(
                             request.database.clone(),
                             request.schema.clone(),
                             table_name.clone(),
+                            client_session_id.clone(),
                         )),
                     )
                     .await
@@ -2688,6 +2969,7 @@ async fn export_database_sql_core_inner(
                             request.database.clone(),
                             request.schema.clone(),
                             table_name.clone(),
+                            client_session_id.clone(),
                         )),
                     )
                     .await
@@ -2726,9 +3008,8 @@ async fn export_database_sql_core_inner(
                             batch_size,
                             Some(cancel_token.clone()),
                             |rows| {
-                                // PostgreSQL cancellation must unwind through its CancelRequest path so the
-                                // connection reaches ReadyForQuery before rollback. Other snapshot streams do
-                                // not consume the token yet, so retain their existing next-batch cancellation.
+                                // PostgreSQL and MySQL consume the token while waiting for rows. Retain this
+                                // batch-boundary check so cancellation also wins while a batch is being written.
                                 if snapshot_batch_cancelled(&db_type, &request.export_id) {
                                     return Err(EXPORT_CANCELLED_ERROR.to_string());
                                 }
@@ -3062,7 +3343,7 @@ async fn export_database_sql_core_inner(
         writeln!(file, "SET FOREIGN_KEY_CHECKS = 1;").map_err(|e| format!("Failed to write file: {e}"))?;
     }
 
-    file.flush().map_err(|e| format!("Failed to finalize export file: {e}"))?;
+    file.finish()?;
 
     // Emit Done progress
     on_progress(ExportProgress {
@@ -3139,9 +3420,9 @@ mod tests {
         mysql_view_dependencies_sql, normalize_export_table_ddl, record_export_destination_identity,
         record_export_error, replace_database_export_select_list, sort_export_views_by_dependencies,
         split_postgres_export_table_triggers, write_database_export_rows, BuildDatabaseSqlExportOptions,
-        BuildExportInsertStatementsOptions, DatabaseExportObjectCounts, DatabaseExportRequest, DdlNormalizeOptions,
-        ExportedTableSql, PostgresExportExtension, PostgresExportSequence, PostgresExtensionMembers,
-        DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT,
+        BuildExportInsertStatementsOptions, DatabaseExportObjectCounts, DatabaseExportRequest, DatabaseExportWriter,
+        DdlNormalizeOptions, ExportedTableSql, PostgresExportExtension, PostgresExportSequence,
+        PostgresExtensionMembers, DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT,
     };
     use crate::connection::AppState;
     use crate::models::connection::DatabaseType;
@@ -3149,6 +3430,7 @@ mod tests {
     use crate::types::SpatialColumn;
     use crate::types::{ObjectInfo, ObjectSourceKind, TableInfo};
     use serde_json::{json, Value};
+    use std::io::{Read, Write};
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -3324,9 +3606,27 @@ mod tests {
             drop_table_if_exists: false,
             omit_auto_increment: false,
             fail_on_error: false,
+            output_compression: Default::default(),
             snapshot_session_id: None,
             batch_size: 1000,
         }
+    }
+
+    #[test]
+    fn gzip_export_writer_finishes_a_readable_stream() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("backup.sql.gz");
+        let file = std::fs::File::create(&path).unwrap();
+        let mut writer = DatabaseExportWriter::Gzip(Box::new(flate2::write::GzEncoder::new(
+            std::io::BufWriter::new(file),
+            flate2::Compression::default(),
+        )));
+        writer.write_all(b"SELECT 1;\n").unwrap();
+        writer.finish().unwrap();
+
+        let mut output = String::new();
+        flate2::read::GzDecoder::new(std::fs::File::open(path).unwrap()).read_to_string(&mut output).unwrap();
+        assert_eq!(output, "SELECT 1;\n");
     }
 
     #[test]
@@ -5040,6 +5340,47 @@ mod tests {
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn ensure_export_destination_dir_refuses_a_changed_recorded_identity() {
+        let scratch = std::env::temp_dir().join(format!("dbx-export-dest-changed-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let state = test_app_state(&scratch).await;
+        let destination = scratch.join("backups");
+        std::fs::create_dir_all(&destination).unwrap();
+
+        let current = super::export_destination_identity_for_path(&destination)
+            .expect("the platform should identify a local export destination");
+        let different = match current {
+            super::ExportDestinationIdentity::Device(device) => {
+                super::ExportDestinationIdentity::Device(device.wrapping_add(1))
+            }
+            super::ExportDestinationIdentity::PersistentVolumeUuid(mut uuid) => {
+                uuid[0] ^= 0xff;
+                super::ExportDestinationIdentity::PersistentVolumeUuid(uuid)
+            }
+            super::ExportDestinationIdentity::LegacyDevice(_) => {
+                unreachable!("freshly resolved identities are never legacy values")
+            }
+        };
+        state
+            .storage
+            .save_state(
+                &super::export_destination_state_key(&destination),
+                &different.encode(),
+                "application/octet-stream",
+            )
+            .await
+            .unwrap();
+
+        let error = ensure_export_destination_dir(&state, &destination)
+            .await
+            .expect_err("an unattended export must reject a changed persistent destination identity");
+
+        assert!(error.contains("different filesystem"));
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
     // Regression test for review feedback on #6327: the directory identity
     // check and the later `File::create` are separate operations, so the
     // mount can disappear and be replaced by something else at the same path
@@ -5049,17 +5390,110 @@ mod tests {
     // mid-write is not something a portable unit test can simulate.
     #[test]
     fn export_destination_identity_mismatch_detects_a_changed_device() {
-        assert!(export_destination_identity_mismatch(Some(1), Some(2)));
-        assert!(!export_destination_identity_mismatch(Some(1), Some(1)));
+        let device_one = super::ExportDestinationIdentity::Device(1);
+        let same_device = super::ExportDestinationIdentity::Device(1);
+        let device_two = super::ExportDestinationIdentity::Device(2);
+        assert!(export_destination_identity_mismatch(Some(&device_one), Some(&device_two)));
+        assert!(!export_destination_identity_mismatch(Some(&device_one), Some(&same_device)));
         assert!(
-            !export_destination_identity_mismatch(None, Some(2)),
+            !export_destination_identity_mismatch(None, Some(&device_two)),
             "an unknown expected device has nothing to compare against"
         );
         assert!(
-            export_destination_identity_mismatch(Some(1), None),
+            export_destination_identity_mismatch(Some(&device_one), None),
             "an opened file with unknown identity must not bypass a known expected device"
         );
         assert!(!export_destination_identity_mismatch(None, None));
+    }
+
+    #[test]
+    fn export_destination_identity_encoding_distinguishes_legacy_devices_and_volume_uuids() {
+        let device = super::ExportDestinationIdentity::Device(42);
+        let uuid = super::ExportDestinationIdentity::PersistentVolumeUuid([7; 16]);
+
+        assert_eq!(
+            super::ExportDestinationIdentity::decode(&device.encode()).unwrap(),
+            Some(device),
+            "new device identities should use the tagged format"
+        );
+        assert_eq!(
+            super::ExportDestinationIdentity::decode(&uuid.encode()).unwrap(),
+            Some(uuid),
+            "persistent UUID identities should round trip"
+        );
+        assert_eq!(
+            super::ExportDestinationIdentity::decode(&42_u64.to_le_bytes()).unwrap(),
+            Some(super::ExportDestinationIdentity::LegacyDevice(42)),
+            "existing untagged state must remain recognizable as legacy data"
+        );
+        assert!(super::ExportDestinationIdentity::decode(b"invalid").is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn explicitly_recording_a_macos_destination_replaces_legacy_device_state() {
+        use std::os::unix::fs::MetadataExt;
+
+        let scratch = std::env::temp_dir().join(format!("dbx-export-dest-macos-migration-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let state = test_app_state(&scratch).await;
+        let destination = scratch.join("backups");
+        std::fs::create_dir_all(&destination).unwrap();
+
+        state
+            .storage
+            .save_state(
+                &super::export_destination_state_key(&destination),
+                &std::fs::metadata(&destination).unwrap().dev().to_le_bytes(),
+                "application/octet-stream",
+            )
+            .await
+            .unwrap();
+        assert!(
+            ensure_export_destination_dir(&state, &destination).await.is_err(),
+            "an unattended export must not silently replace legacy identity state, even when st_dev still matches"
+        );
+
+        record_export_destination_identity(&state, &destination)
+            .await
+            .expect("explicitly confirming the destination should replace legacy state");
+        ensure_export_destination_dir(&state, &destination)
+            .await
+            .expect("the confirmed persistent volume identity should match");
+
+        let (encoded, _) =
+            state.storage.load_state(&super::export_destination_state_key(&destination)).await.unwrap().unwrap();
+        assert!(matches!(
+            super::ExportDestinationIdentity::decode(&encoded).unwrap(),
+            Some(super::ExportDestinationIdentity::PersistentVolumeUuid(_))
+        ));
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn export_destination_identity_for_path_and_open_file_agree_on_macos() {
+        let scratch = std::env::temp_dir().join(format!("dbx-export-dest-macos-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&scratch).unwrap();
+
+        let dir_identity = super::export_destination_identity_for_path(&scratch);
+        assert!(
+            matches!(dir_identity, Some(super::ExportDestinationIdentity::PersistentVolumeUuid(_))),
+            "a local macOS directory should report its persistent volume UUID"
+        );
+
+        let file_path = scratch.join("probe.txt");
+        let file = std::fs::File::create(&file_path).unwrap();
+        let file_identity = super::export_destination_identity_for_file(&file);
+        drop(file);
+
+        assert_eq!(
+            dir_identity, file_identity,
+            "an open file and its parent directory must resolve to the same volume"
+        );
+
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 
     // Regression test for review feedback on #6327: the non-Unix path used
@@ -5074,12 +5508,12 @@ mod tests {
         let scratch = std::env::temp_dir().join(format!("dbx-export-dest-win-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&scratch).unwrap();
 
-        let dir_dev = super::export_destination_device_id_for_path(&scratch);
+        let dir_dev = super::export_destination_identity_for_path(&scratch);
         assert!(dir_dev.is_some(), "a real local directory should report a volume serial number");
 
         let file_path = scratch.join("probe.txt");
         let file = std::fs::File::create(&file_path).unwrap();
-        let file_dev = super::export_destination_device_id_for_file(&file);
+        let file_dev = super::export_destination_identity_for_file(&file);
         drop(file);
 
         assert_eq!(dir_dev, file_dev, "a file and its parent directory must resolve to the same volume");

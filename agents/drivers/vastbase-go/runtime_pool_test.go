@@ -219,6 +219,25 @@ func (conn *runtimePoolTestConn) Ping(context.Context) error {
 	return nil
 }
 
+func (*runtimePoolTestConn) QueryContext(context.Context, string, []driver.NamedValue) (driver.Rows, error) {
+	return &runtimePoolTestModeRows{}, nil
+}
+
+type runtimePoolTestModeRows struct {
+	read bool
+}
+
+func (*runtimePoolTestModeRows) Columns() []string { return []string{"datcompatibility"} }
+func (*runtimePoolTestModeRows) Close() error      { return nil }
+func (rows *runtimePoolTestModeRows) Next(destination []driver.Value) error {
+	if rows.read {
+		return io.EOF
+	}
+	rows.read = true
+	destination[0] = "A"
+	return nil
+}
+
 type runtimePoolTestStmt struct {
 	state *runtimePoolTestState
 }

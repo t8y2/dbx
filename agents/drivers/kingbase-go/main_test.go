@@ -1006,6 +1006,8 @@ func TestParseCatalogAttributeNumbers(t *testing.T) {
 		{name: "int2vector string", raw: "1 2 4", expected: "1,2,4"},
 		{name: "array string", raw: "{3,5}", expected: "3,5"},
 		{name: "bytes", raw: []byte("6 7"), expected: "6,7"},
+		{name: "bracketed array string", raw: "[8 9]", expected: "8,9"},
+		{name: "int16 slice", raw: []int16{10, 11}, expected: "10,11"},
 		{name: "empty", raw: nil, expected: ""},
 		{name: "invalid", raw: "1 bad", wantErr: true},
 	}
@@ -1027,6 +1029,32 @@ func TestParseCatalogAttributeNumbers(t *testing.T) {
 			}
 			if actual := strings.Join(parts, ","); actual != test.expected {
 				t.Fatalf("unexpected numbers: %q", actual)
+			}
+		})
+	}
+}
+
+func TestParseConstraintEnabled(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		raw  any
+		want bool
+	}{
+		{name: "boolean true", raw: true, want: true},
+		{name: "boolean false", raw: false, want: false},
+		{name: "enabled string", raw: "E", want: true},
+		{name: "disabled string", raw: "D", want: false},
+		{name: "enabled bytes", raw: []byte("enabled"), want: true},
+		{name: "disabled bytes", raw: []byte("disabled"), want: false},
+		{name: "one", raw: int64(1), want: true},
+		{name: "zero", raw: int64(0), want: false},
+		{name: "null", raw: nil, want: true},
+		{name: "unknown", raw: "future-state", want: true},
+		{name: "not validated label defaults enabled", raw: "N", want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if actual := parseConstraintEnabled(test.raw); actual != test.want {
+				t.Fatalf("parseConstraintEnabled(%#v) = %v, want %v", test.raw, actual, test.want)
 			}
 		})
 	}
@@ -1207,6 +1235,262 @@ func TestListForeignKeysKeepsEmptyInformationSchemaResultOnV8(t *testing.T) {
 	}
 	if len(keys) != 0 || len(state.snapshotQueries()) != 1 {
 		t.Fatalf("unexpected foreign keys or query count: keys=%#v queries=%v", keys, state.snapshotQueries())
+	}
+}
+
+func TestListConstraintsResolvesColumnsAndForeignKeyDetails(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		switch {
+		case strings.Contains(query, "FROM sys_catalog.sys_constraint c"):
+			return &valueRows{
+				columns: []string{"conname", "contype", "definition", "conkey", "ref_schema", "ref_table", "confkey", "match_type", "on_update", "on_delete", "condeferrable", "condeferred", "convalidated", "constatus"},
+				rows: [][]driver.Value{
+					{"orders_amount_check", "c", "CHECK (amount > 0)", "{4}", nil, nil, nil, " ", " ", " ", false, false, []byte("f"), []byte("D")},
+					{"orders_customer_fkey", "f", "FOREIGN KEY (customer_id, customer_region) REFERENCES customers(id, region) ON DELETE CASCADE", "{2,3}", "PUBLIC", "customers", "{1,2}", "s", "a", "c", true, true, "t", "E"},
+				},
+			}, nil
+		case strings.Contains(query, "SELECT a.attnum, a.attname") && strings.Contains(query, "c.relname = 'orders'"):
+			return &valueRows{columns: []string{"attnum", "attname"}, rows: [][]driver.Value{{int64(2), "customer_id"}, {int64(3), "customer_region"}, {int64(4), "amount"}}}, nil
+		case strings.Contains(query, "SELECT a.attnum, a.attname") && strings.Contains(query, "c.relname = 'customers'"):
+			return &valueRows{columns: []string{"attnum", "attname"}, rows: [][]driver.Value{{int64(1), "id"}, {int64(2), "region"}}}, nil
+		default:
+			return nil, errors.New("unexpected query: " + query)
+		}
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	constraints, err := server.listConstraints("PUBLIC", "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(constraints) != 2 {
+		t.Fatalf("unexpected constraints: %#v", constraints)
+	}
+	check, foreignKey := constraints[0], constraints[1]
+	if check.ConstraintType != "CHECK" || !equalStringSlices(check.Columns, []string{"amount"}) || check.Valid || check.Enabled {
+		t.Fatalf("unexpected check constraint: %#v", check)
+	}
+	if foreignKey.ConstraintType != "FOREIGN KEY" || !foreignKey.Valid || !foreignKey.Enabled || !equalStringSlices(foreignKey.Columns, []string{"customer_id", "customer_region"}) || !equalStringSlices(foreignKey.RefColumns, []string{"id", "region"}) {
+		t.Fatalf("unexpected foreign key columns: %#v", foreignKey)
+	}
+	if foreignKey.RefSchema == nil || *foreignKey.RefSchema != "PUBLIC" || foreignKey.RefTable == nil || *foreignKey.RefTable != "customers" || foreignKey.MatchType == nil || *foreignKey.MatchType != "SIMPLE" || foreignKey.OnUpdate == nil || *foreignKey.OnUpdate != "NO ACTION" || foreignKey.OnDelete == nil || *foreignKey.OnDelete != "CASCADE" || !foreignKey.Deferrable || !foreignKey.InitiallyDeferred {
+		t.Fatalf("unexpected foreign key details: %#v", foreignKey)
+	}
+	queries := strings.Join(state.snapshotQueries(), "\n")
+	if !strings.Contains(queries, "sys_catalog.sys_get_constraintdef") {
+		t.Fatalf("constraints must use the active catalog deparser: %s", queries)
+	}
+}
+
+func TestKingbaseConstraintQueryHasLegacyV7Fallback(t *testing.T) {
+	modern := kingbaseConstraintsQuery("sys_catalog", "sys", "public", "orders", false, false, false)
+	if !strings.Contains(modern, "sys_catalog.sys_get_constraintdef") || !strings.Contains(modern, "c.convalidated") || !strings.Contains(modern, "COALESCE(c.conname, '')") {
+		t.Fatalf("modern constraint query missing metadata fields: %s", modern)
+	}
+	if !strings.Contains(modern, "COALESCE(CAST(c.convalidated AS text), 'T')") {
+		t.Fatalf("modern constraint query must normalize convalidated to text: %s", modern)
+	}
+	if !strings.Contains(modern, "COALESCE(CAST(c.constatus AS text), 'E')") {
+		t.Fatalf("modern constraint query must normalize constatus to text: %s", modern)
+	}
+	legacy := kingbaseConstraintsQuery("sys_catalog", "sys", "public", "orders", true, true, true)
+	if strings.Contains(legacy, "sys_get_constraintdef") || strings.Contains(legacy, "c.convalidated") || !strings.Contains(legacy, "''") || !strings.Contains(legacy, "COALESCE(c.conname, '')") {
+		t.Fatalf("legacy V7 constraint query is not safe: %s", legacy)
+	}
+}
+
+func TestListConstraintsFallsBackWhenValidatedColumnIsUnsupported(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		if strings.Contains(query, "c.convalidated") {
+			return nil, &gokb.Error{Code: gokb.ErrorCode("42703"), Message: "column c.convalidated does not exist"}
+		}
+		if strings.Contains(query, "FROM sys_catalog.sys_constraint c") {
+			return &valueRows{
+				columns: []string{"conname", "contype", "definition", "conkey", "ref_schema", "ref_table", "confkey", "match_type", "on_update", "on_delete", "condeferrable", "condeferred", "valid", "enabled"},
+				rows:    [][]driver.Value{{"orders_pkey", "p", "PRIMARY KEY (id)", "{1}", nil, nil, nil, nil, nil, nil, false, false, true, true}},
+			}, nil
+		}
+		if strings.Contains(query, "SELECT a.attnum, a.attname") {
+			return &valueRows{columns: []string{"attnum", "attname"}, rows: [][]driver.Value{{int64(1), "id"}}}, nil
+		}
+		return nil, errors.New("unexpected query: " + query)
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	constraints, err := server.listConstraints("PUBLIC", "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(constraints) != 1 || constraints[0].Definition != "PRIMARY KEY (id)" || !constraints[0].Valid {
+		t.Fatalf("unexpected fallback constraints: %#v", constraints)
+	}
+	if !server.constraintValidatedUnsupported {
+		t.Fatal("validated-column fallback was not cached")
+	}
+	if len(state.snapshotQueries()) != 3 {
+		t.Fatalf("expected failed modern query, fallback query and attribute query: %v", state.snapshotQueries())
+	}
+
+	if _, err := server.listConstraints("PUBLIC", "orders"); err != nil {
+		t.Fatal(err)
+	}
+	queries := state.snapshotQueries()
+	for _, query := range queries[3:] {
+		if strings.Contains(query, "c.convalidated") {
+			t.Fatalf("cached fallback queried unsupported convalidated column: %s", query)
+		}
+	}
+}
+
+func TestListConstraintsLegacyV7KeepsStructuralMetadata(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		switch {
+		case strings.Contains(query, "FROM sys_catalog.sys_constraint c"):
+			if strings.Contains(query, "c.convalidated") {
+				return nil, errors.New("V7 query used unsupported constraint metadata: " + query)
+			}
+			if strings.Contains(query, "sys_get_constraintdef") {
+				return nil, &gokb.Error{Code: gokb.ErrorCode("42883"), Message: "function sys_get_constraintdef does not exist"}
+			}
+			return &valueRows{
+				columns: []string{"conname", "contype", "definition", "conkey", "ref_schema", "ref_table", "confkey", "match_type", "on_update", "on_delete", "condeferrable", "condeferred", "valid", "enabled"},
+				rows:    [][]driver.Value{{"orders_pkey", "p", "", "[1]", nil, nil, nil, nil, nil, nil, false, false, true, true}},
+			}, nil
+		case strings.Contains(query, "SELECT a.attnum, a.attname"):
+			return &valueRows{columns: []string{"attnum", "attname"}, rows: [][]driver.Value{{int64(1), "id"}}}, nil
+		default:
+			return nil, errors.New("unexpected query: " + query)
+		}
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+	server.mode.legacyV7 = true
+
+	constraints, err := server.listConstraints("PUBLIC", "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(constraints) != 1 || constraints[0].Name != "orders_pkey" || constraints[0].Definition != "" || !constraints[0].Valid || !equalStringSlices(constraints[0].Columns, []string{"id"}) || !server.constraintDefinitionUnsupported {
+		t.Fatalf("unexpected V7 constraints: %#v", constraints)
+	}
+}
+
+func TestListConstraintsLegacyV7UsesSupportedDeparser(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		switch {
+		case strings.Contains(query, "FROM sys_catalog.sys_constraint c"):
+			if !strings.Contains(query, "sys_catalog.sys_get_constraintdef") || strings.Contains(query, "COALESCE(CAST(c.convalidated AS text)") || strings.Contains(query, "c.constatus") {
+				return nil, errors.New("unexpected V7 constraint query: " + query)
+			}
+			return &valueRows{
+				columns: []string{"conname", "contype", "definition", "conkey", "ref_schema", "ref_table", "confkey", "match_type", "on_update", "on_delete", "condeferrable", "condeferred", "valid", "enabled"},
+				rows:    [][]driver.Value{{"orders_pkey", "p", "PRIMARY KEY (id)", "[1]", nil, nil, nil, nil, nil, nil, false, false, true, "E"}},
+			}, nil
+		case strings.Contains(query, "SELECT a.attnum, a.attname"):
+			return &valueRows{columns: []string{"attnum", "attname"}, rows: [][]driver.Value{{int64(1), "id"}}}, nil
+		default:
+			return nil, errors.New("unexpected query: " + query)
+		}
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+	server.mode.legacyV7 = true
+
+	constraints, err := server.listConstraints("PUBLIC", "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(constraints) != 1 || constraints[0].Definition != "PRIMARY KEY (id)" || !constraints[0].Enabled || server.constraintDefinitionUnsupported {
+		t.Fatalf("unexpected V7 constraints: %#v", constraints)
+	}
+}
+
+func TestKingbaseConstraintQueryUsesPostgresCatalog(t *testing.T) {
+	query := kingbaseConstraintsQuery("pg_catalog", "pg", "public", "orders", false, false, false)
+	if !strings.Contains(query, "pg_catalog.pg_get_constraintdef") || strings.Contains(query, "sys_get_constraintdef") {
+		t.Fatalf("PostgreSQL catalog query used the wrong deparser: %s", query)
+	}
+	if !strings.Contains(query, "FROM pg_catalog.pg_constraint") || !strings.Contains(query, "pg_catalog.pg_namespace") {
+		t.Fatalf("PostgreSQL catalog query used the wrong catalog tables: %s", query)
+	}
+}
+
+func TestListConstraintsHandlesNullAttributeVectors(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		switch {
+		case strings.Contains(query, "FROM sys_catalog.sys_constraint c"):
+			return &valueRows{
+				columns: []string{"conname", "contype", "definition", "conkey", "ref_schema", "ref_table", "confkey", "match_type", "on_update", "on_delete", "condeferrable", "condeferred", "valid", "enabled"},
+				rows:    [][]driver.Value{{"table_check", "c", "CHECK (true)", nil, nil, nil, nil, nil, nil, nil, false, false, true, true}},
+			}, nil
+		case strings.Contains(query, "SELECT a.attnum, a.attname"):
+			return &valueRows{columns: []string{"attnum", "attname"}}, nil
+		default:
+			return nil, errors.New("unexpected query: " + query)
+		}
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	constraints, err := server.listConstraints("PUBLIC", "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(constraints) != 1 || len(constraints[0].Columns) != 0 || len(constraints[0].RefColumns) != 0 {
+		t.Fatalf("NULL attribute vectors should decode as empty lists: %#v", constraints)
+	}
+}
+
+func TestListConstraintsCachesReferencedAttributes(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		switch {
+		case strings.Contains(query, "FROM sys_catalog.sys_constraint c"):
+			return &valueRows{
+				columns: []string{"conname", "contype", "definition", "conkey", "ref_schema", "ref_table", "confkey", "match_type", "on_update", "on_delete", "condeferrable", "condeferred", "valid", "enabled"},
+				rows: [][]driver.Value{
+					{"orders_customer_fkey", "f", "FOREIGN KEY (customer_id) REFERENCES customers(id)", "{2}", "PUBLIC", "customers", "{1}", "s", "a", "a", false, false, true, true},
+					{"orders_region_fkey", "f", "FOREIGN KEY (customer_region) REFERENCES customers(region)", "{3}", "PUBLIC", "customers", "{2}", "s", "a", "a", false, false, true, true},
+				},
+			}, nil
+		case strings.Contains(query, "SELECT a.attnum, a.attname") && strings.Contains(query, "c.relname = 'orders'"):
+			return &valueRows{columns: []string{"attnum", "attname"}, rows: [][]driver.Value{{int64(2), "customer_id"}, {int64(3), "customer_region"}}}, nil
+		case strings.Contains(query, "SELECT a.attnum, a.attname") && strings.Contains(query, "c.relname = 'customers'"):
+			return &valueRows{columns: []string{"attnum", "attname"}, rows: [][]driver.Value{{int64(1), "id"}, {int64(2), "region"}}}, nil
+		default:
+			return nil, errors.New("unexpected query: " + query)
+		}
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	constraints, err := server.listConstraints("PUBLIC", "orders")
+	if err != nil || len(constraints) != 2 {
+		t.Fatalf("unexpected constraints: %v %#v", err, constraints)
+	}
+	var referencedAttributeQueries int
+	for _, query := range state.snapshotQueries() {
+		if strings.Contains(query, "SELECT a.attnum, a.attname") && strings.Contains(query, "c.relname = 'customers'") {
+			referencedAttributeQueries++
+		}
+	}
+	if referencedAttributeQueries != 1 {
+		t.Fatalf("referenced relation attributes were not cached: %v", state.snapshotQueries())
+	}
+}
+
+func TestKingbaseConstraintLabels(t *testing.T) {
+	for input, expected := range map[string]string{"p": "PRIMARY KEY", "f": "FOREIGN KEY", "u": "UNIQUE", "c": "CHECK", "t": "CONSTRAINT TRIGGER", "x": "EXCLUDE", "n": "NOT NULL", "custom": "custom"} {
+		if actual := kingbaseConstraintTypeName(input); actual != expected {
+			t.Fatalf("type %q: expected %q, got %q", input, expected, actual)
+		}
+	}
+	for input, expected := range map[string]string{"a": "NO ACTION", "r": "RESTRICT", "c": "CASCADE", "n": "SET NULL", "d": "SET DEFAULT"} {
+		actual := kingbaseConstraintAction(sql.NullString{String: input, Valid: true})
+		if actual == nil || *actual != expected {
+			t.Fatalf("action %q: expected %q, got %v", input, expected, actual)
+		}
 	}
 }
 
@@ -3322,6 +3606,32 @@ func TestConnectionLifecycleResetsCatalogOIDCapability(t *testing.T) {
 	}
 }
 
+func TestConnectionLifecycleResetsConstraintCapabilityCache(t *testing.T) {
+	state := &connectionAttemptState{pingErrors: map[string]error{}}
+	server := newServer()
+	server.openDatabase = state.open
+	server.constraintDefinitionUnsupported = true
+	server.constraintValidatedUnsupported = true
+	server.constraintStatusUnsupported = true
+
+	if err := server.connect(connectParams{MySQLCompatMode: true, URLParams: "sslmode=disable"}); err != nil {
+		t.Fatal(err)
+	}
+	if server.constraintDefinitionUnsupported || server.constraintValidatedUnsupported || server.constraintStatusUnsupported {
+		t.Fatal("connect must reset cached constraint capabilities")
+	}
+
+	server.constraintDefinitionUnsupported = true
+	server.constraintValidatedUnsupported = true
+	server.constraintStatusUnsupported = true
+	if err := server.disconnect(); err != nil {
+		t.Fatal(err)
+	}
+	if server.constraintDefinitionUnsupported || server.constraintValidatedUnsupported || server.constraintStatusUnsupported {
+		t.Fatal("disconnect must reset cached constraint capabilities")
+	}
+}
+
 func TestAppendDDLStatementEnsuresSingleTerminator(t *testing.T) {
 	got := appendDDLStatement("CREATE TABLE \"public\".\"orders\" (\n  \"id\" integer\n)\n", "CREATE INDEX orders_id_idx ON public.orders (id)")
 	want := "CREATE TABLE \"public\".\"orders\" (\n  \"id\" integer\n);\n\nCREATE INDEX orders_id_idx ON public.orders (id);"
@@ -3641,6 +3951,39 @@ func TestSchemaConnResetsOnceAfterExplicitSchema(t *testing.T) {
 	}
 	if len(state.execConnIDs) != len(expected) || state.execConnIDs[0] != state.execConnIDs[1] {
 		t.Fatalf("schema transitions used different connections: %v", state.execConnIDs)
+	}
+}
+
+func TestSchemaConnUsesBackticksInMySQLCompatMode(t *testing.T) {
+	db, state := openFakeDB(t, 0)
+	server := newServer()
+	server.db = db
+	server.mode.mysqlCompat = true
+
+	conn, err := server.schemaConn(context.Background(), "audit-schema")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.execStatements) != 1 || state.execStatements[0] != "SET search_path TO `audit-schema`" {
+		t.Fatalf("unexpected MySQL compatibility schema setup: %v", state.execStatements)
+	}
+}
+
+func TestKingbaseIdentifierQuoteEscapesModeSpecificDelimiter(t *testing.T) {
+	server := newServer()
+	server.mode.mysqlCompat = true
+	if got := server.quoteIdentifier("audit`schema"); got != "`audit``schema`" {
+		t.Fatalf("unexpected MySQL compatibility identifier: %s", got)
+	}
+	server.mode.mysqlCompat = false
+	if got := server.quoteIdentifier(`audit"schema`); got != `"audit""schema"` {
+		t.Fatalf("unexpected PostgreSQL-compatible identifier: %s", got)
 	}
 }
 

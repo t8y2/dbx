@@ -235,6 +235,8 @@ pub struct DataGridColumnDistinctValuesSqlOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_type: Option<DatabaseType>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identifier_quote: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog: Option<String>,
@@ -892,6 +894,9 @@ pub fn build_data_grid_column_distinct_values_sql(options: DataGridColumnDistinc
     let from_clause = format!(" FROM {table}{where_clause}{group_by}{order_by}");
 
     match table_pagination_strategy(options.database_type) {
+        TablePaginationStrategy::SqlServerTop if is_sqlserver_legacy_profile(options.driver_profile.as_deref()) => {
+            format!("SELECT {select_list}{from_clause}")
+        }
         TablePaginationStrategy::SqlServerTop => format!("SELECT TOP ({limit}) {select_list}{from_clause}"),
         TablePaginationStrategy::IrisTop => format!("SELECT TOP {limit} {select_list}{from_clause}"),
         TablePaginationStrategy::InformixFirst => format!("SELECT FIRST {limit} {select_list}{from_clause}"),
@@ -913,6 +918,10 @@ pub fn build_data_grid_column_distinct_values_sql(options: DataGridColumnDistinc
             format!("SELECT {select_list}{from_clause} LIMIT {limit}")
         }
     }
+}
+
+fn is_sqlserver_legacy_profile(driver_profile: Option<&str>) -> bool {
+    driver_profile.is_some_and(|profile| profile.trim().eq_ignore_ascii_case("sqlserver-legacy"))
 }
 
 pub fn build_data_grid_count_sql(options: DataGridCountSqlOptions) -> String {
@@ -4730,6 +4739,7 @@ mod tests {
         assert_eq!(
             build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
                 database_type: Some(DatabaseType::Postgres),
+                driver_profile: None,
                 identifier_quote: None,
                 catalog: None,
                 database: None,
@@ -4747,6 +4757,7 @@ mod tests {
         assert_eq!(
             build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
                 database_type: Some(DatabaseType::SqlServer),
+                driver_profile: None,
                 identifier_quote: None,
                 catalog: None,
                 database: None,
@@ -4764,6 +4775,7 @@ mod tests {
         assert_eq!(
             build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
                 database_type: Some(DatabaseType::SqlServer),
+                driver_profile: None,
                 identifier_quote: None,
                 catalog: None,
                 database: None,
@@ -4780,7 +4792,26 @@ mod tests {
         );
         assert_eq!(
             build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
+                database_type: Some(DatabaseType::SqlServer),
+                driver_profile: Some(" SQLSERVER-LEGACY ".to_string()),
+                identifier_quote: None,
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "users".to_string(),
+                column_name: "status".to_string(),
+                column_info: Some(column("status", "nvarchar", true, None)),
+                where_input: None,
+                search_value: None,
+                limit: Some(25),
+                include_counts: true,
+            }),
+            "SELECT [status] AS dbx_value, COUNT(*) AS dbx_count FROM [users] GROUP BY [status] ORDER BY dbx_count DESC, dbx_value"
+        );
+        assert_eq!(
+            build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
                 database_type: Some(DatabaseType::Oracle),
+                driver_profile: None,
                 identifier_quote: None,
                 catalog: None,
                 database: None,
@@ -4798,6 +4829,7 @@ mod tests {
         assert_eq!(
             build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
                 database_type: Some(DatabaseType::Firebird),
+                driver_profile: None,
                 identifier_quote: None,
                 catalog: None,
                 database: None,
@@ -4816,6 +4848,7 @@ mod tests {
         assert_eq!(
             build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
                 database_type: Some(DatabaseType::Doris),
+                driver_profile: None,
                 identifier_quote: None,
                 catalog: Some("iceberg_catalog".to_string()),
                 database: None,
@@ -4833,6 +4866,7 @@ mod tests {
         assert_eq!(
             build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
                 database_type: Some(DatabaseType::StarRocks),
+                driver_profile: None,
                 identifier_quote: None,
                 catalog: Some("hive_catalog".to_string()),
                 database: None,
@@ -4851,6 +4885,7 @@ mod tests {
         assert_eq!(
             build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
                 database_type: Some(DatabaseType::Doris),
+                driver_profile: None,
                 identifier_quote: None,
                 catalog: Some("internal".to_string()),
                 database: None,

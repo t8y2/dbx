@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, shallowRef, watch } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
@@ -13,6 +13,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
+import EditorSearchPanel from "@/components/editor/EditorSearchPanel.vue";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
@@ -21,6 +22,8 @@ import { useQueryStore } from "@/stores/queryStore";
 import { useHistoryStore } from "@/stores/historyStore";
 import { useSettingsStore, type StructureEditorDensity } from "@/stores/settingsStore";
 import { useTheme } from "@/composables/useTheme";
+import { editorFontTheme, loadEditorTheme } from "@/lib/editor/editorThemes";
+import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
 import { useToast } from "@/composables/useToast";
 import { type SqlHighlighter, createShikiSqlHighlighter } from "@/lib/sql/sqlHighlighter";
 import { joinSqlStatementsForScript } from "@/lib/sql/sqlBatchScript";
@@ -39,12 +42,13 @@ import { getMysqlDataTypeHelp } from "@/lib/table/mysqlDataTypeHelp";
 import { getPostgresDataTypeHelp, gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
 import { getSqliteDataTypeHelp } from "@/lib/table/sqliteDataTypeHelp";
 import { getTableMetadataCapabilities, firstStructureMetadataTab, isStructureMetadataTabSupported } from "@/lib/table/tableMetadataCapabilities";
+import { constraintsForConstraintsTab } from "@/lib/table/constraintPresentation";
 import { hasTableStructureRefreshWork, unloadedTableStructureRefreshScope, visibleTableStructureRefreshScope, type TableStructureRefreshScope } from "@/lib/table/tableStructureMetadataLoading";
 import { canAddTableStructureColumn, getTableStructureCapabilities, hasLocalTableColumnOrderChange, isPhysicalTableColumnOrderChange, sanitizeStructureIndexesForCapabilities, supportsLocalTableColumnReorder } from "@/lib/table/tableStructureCapabilities";
 import { getConcurrentIndexAvailability, concurrentIndexNamesInStatements, normalizeUnsupportedConcurrentIndexes, type ConcurrentIndexAvailability } from "@/lib/table/concurrentIndexAvailability";
 import { orderedColumnIndexes, uniqueDataGridColumnOrderKeys } from "@/lib/dataGrid/dataGridColumnOrder";
 import { loadTableDataGridColumnOrder, notifyTableDataGridColumnOrderChanged, removeTableDataGridColumnOrder, saveTableDataGridColumnOrder, tableDataGridColumnOrderScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
-import { connectionObjectTreeQuerySchema, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { codeMirrorSqlDialectForConnection, connectionObjectTreeQuerySchema, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { postgresListRolesSql, usersFromPostgresRolesResult } from "@/lib/database/databaseUserAdmin";
 import type { ColumnInfo, ConstraintInfo, TableInfo, TableInfoTab, TableStructureEditorDraft, TableStructureEditorTarget, TableStructureEditorViewport } from "@/types/database";
 import {
@@ -93,9 +97,10 @@ import {
 import { CREATE_DATABASE_CHARSET_OPTIONS, createDatabaseCollationOptionsForCharset, fallbackCreateDatabaseCharsetMetadata, normalizeCreateDatabaseCharsetKey, parseCreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
 import type { CreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
 import * as api from "@/lib/backend/api";
+import type { EditorView } from "@codemirror/view";
 
 const { t } = useI18n();
-const { isDark } = useTheme();
+const { isDark, themePalette } = useTheme();
 const store = useConnectionStore();
 const productionSafetyStore = useProductionSafetyStore();
 const queryStore = useQueryStore();
@@ -161,22 +166,120 @@ const constraintsLoading = ref(false);
 const triggersLoading = ref(false);
 const ddlContent = ref("");
 const ddlLoading = ref(false);
+const ddlEditorContainer = ref<HTMLDivElement>();
+const ddlSearchPanelRef = ref<InstanceType<typeof EditorSearchPanel>>();
+const ddlSearchOpen = ref(false);
+const ddlEditorView = shallowRef<EditorView | null>(null);
+let ddlEditorInitRequestId = 0;
+let ddlEditorScrollCleanup: (() => void) | null = null;
 const loadedMetadataFacets = new Set<ObjectMetadataFacet>();
 let structureEditorReady = false;
-const ddlPreRef = ref<HTMLPreElement | null>(null);
-function onDdlKeydown(e: KeyboardEvent) {
-  if ((e.ctrlKey || e.metaKey) && e.key === "a") {
-    e.preventDefault();
-    const el = ddlPreRef.value;
-    if (!el) return;
-    const range = document.createRange();
-    range.selectNodeContents(el);
-    const sel = window.getSelection();
-    sel?.removeAllRanges();
-    sel?.addRange(range);
-  }
-}
 const ddlFetched = ref(false);
+
+function ddlEditorDocument(): string {
+  return ddlContent.value || t("structureEditor.emptyReadonly");
+}
+
+function destroyDdlEditor() {
+  ddlEditorInitRequestId += 1;
+  ddlEditorScrollCleanup?.();
+  ddlEditorScrollCleanup = null;
+  ddlEditorView.value?.destroy();
+  ddlEditorView.value = null;
+}
+
+function updateDdlEditorContent(content: string): boolean {
+  const view = ddlEditorView.value;
+  if (!view) return false;
+  if (view.state.doc.toString() !== content) {
+    view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: content },
+    });
+  }
+  return true;
+}
+
+function observeDdlEditorScroll(view: EditorView) {
+  ddlEditorScrollCleanup?.();
+  const scrollDOM = view.scrollDOM;
+  const onScroll = (event: Event) => onStructureContentScroll("ddl", event);
+  scrollDOM.addEventListener("scroll", onScroll, { passive: true });
+  ddlEditorScrollCleanup = () => scrollDOM.removeEventListener("scroll", onScroll);
+}
+
+async function initDdlEditor(content: string) {
+  const container = ddlEditorContainer.value;
+  if (!container) return;
+
+  const existingView = ddlEditorView.value;
+  if (existingView?.dom.parentElement === container) {
+    updateDdlEditorContent(content);
+    existingView.focus();
+    return;
+  }
+  if (existingView) destroyDdlEditor();
+
+  const requestId = ++ddlEditorInitRequestId;
+  const [{ EditorView, keymap }, { EditorState, Prec }, langSql, { basicSetup }, { search: cmSearch }] = await Promise.all([import("@codemirror/view"), import("@codemirror/state"), import("@codemirror/lang-sql"), import("codemirror"), import("@codemirror/search")]);
+  if (requestId !== ddlEditorInitRequestId || activeTab.value !== "ddl" || loading.value || ddlLoading.value || ddlEditorContainer.value !== container) return;
+
+  const editorSettings = settingsStore.editorSettings;
+  const themeExt = await loadEditorTheme(editorSettings.theme, isDark.value ? "dark" : "light", undefined, themePalette.value);
+  if (requestId !== ddlEditorInitRequestId || activeTab.value !== "ddl" || loading.value || ddlLoading.value || ddlEditorContainer.value !== container) return;
+
+  const fontExt = editorFontTheme(EditorView, editorSettings.fontSize, editorSettings.fontFamily, { fixedHeight: true, scrollable: true });
+  const dialect = createDbxCodeMirrorSqlDialect(langSql, codeMirrorSqlDialectForConnection(connection.value), databaseType.value, connection.value?.driver_profile);
+  const state = EditorState.create({
+    doc: content,
+    extensions: [
+      cmSearch({
+        top: true,
+        createPanel: () => {
+          const dom = document.createElement("span");
+          dom.style.display = "none";
+          return { dom };
+        },
+        scrollToMatch: (range) => EditorView.scrollIntoView(range, { y: "center" }),
+      }),
+      basicSetup,
+      EditorState.allowMultipleSelections.of(true),
+      langSql.sql({ dialect }),
+      themeExt,
+      fontExt,
+      Prec.highest(keymap.of([{ key: "Mod-f", run: () => ddlSearchPanelRef.value?.openSearch() ?? false, preventDefault: true }])),
+      EditorView.theme({
+        "&.cm-focused": { outline: "none" },
+        ".cm-content": {
+          cursor: "text",
+          padding: "0.75rem",
+          userSelect: "text",
+          WebkitUserSelect: "text",
+        },
+        ".cm-line": {
+          userSelect: "text",
+          WebkitUserSelect: "text",
+        },
+      }),
+      EditorState.readOnly.of(true),
+    ],
+  });
+  const editorView = new EditorView({ state, parent: container });
+  if (requestId !== ddlEditorInitRequestId || activeTab.value !== "ddl" || loading.value || ddlLoading.value || ddlEditorContainer.value !== container) {
+    editorView.destroy();
+    return;
+  }
+  ddlEditorView.value = editorView;
+  observeDdlEditorScroll(editorView);
+  editorView.focus();
+  restoreStructureScrollPosition("ddl");
+}
+
+function scheduleDdlEditorInit() {
+  void nextTick(() => {
+    if (activeTab.value !== "ddl" || loading.value || ddlLoading.value) return;
+    void initDdlEditor(ddlEditorDocument());
+  });
+}
 
 function ddlRequest() {
   return {
@@ -190,6 +293,7 @@ function ddlRequest() {
 
 async function fetchDdl(force = false) {
   if (!props.connectionId || !props.database || !props.tableName || (!force && ddlFetched.value) || !tableMetadataCapabilities.value.ddl) return;
+  if (force) destroyDdlEditor();
   ddlLoading.value = true;
   try {
     const { ddl } = await loadObjectDdl(ddlRequest(), { force });
@@ -203,6 +307,7 @@ async function fetchDdl(force = false) {
   }
 }
 const errorMessage = ref("");
+const secondaryMetadataErrors = ref<Partial<Record<ObjectMetadataFacet, string>>>({});
 const columns = ref<EditableStructureColumn[]>([]);
 const copyColumnsDialogOpen = ref(false);
 const copySourceTables = ref<TableInfo[]>([]);
@@ -244,6 +349,9 @@ const sqliteSchemaRevision = ref<string>();
 const foreignKeys = ref<EditableStructureForeignKey[]>([]);
 const constraints = ref<ConstraintInfo[]>([]);
 const constraintsLoaded = ref(false);
+// The Constraints tab hides foreign keys when the dedicated Foreign Keys tab
+// is also shown, mirroring DataGrid/ObjectBrowser.
+const constraintsForTab = computed(() => constraintsForConstraintsTab(constraints.value, tableMetadataCapabilities.value.foreignKeys));
 const triggers = ref<EditableStructureTrigger[]>([]);
 const triggersLoaded = ref(false);
 const secondaryMetadataLoading = computed(() => indexesLoading.value || foreignKeysLoading.value || constraintsLoading.value || triggersLoading.value);
@@ -914,7 +1022,7 @@ const filteredIndexRowIds = computed(() => {
 });
 const indexSearchMatchCount = computed(() => (indexSearchText.value.trim() ? filteredIndexRowIds.value.size : 0));
 const foreignKeyActionOptions = ["", "CASCADE", "SET NULL", "RESTRICT", "NO ACTION"];
-const triggerTimingOptions = ["BEFORE", "AFTER"];
+const triggerTimingOptions = computed(() => (databaseType.value === "sqlserver" ? ["AFTER", "INSTEAD OF"] : ["BEFORE", "AFTER"]));
 const triggerEventOptions = ["INSERT", "UPDATE", "DELETE"];
 const metadataSchema = computed(() => connectionObjectTreeQuerySchema(connection.value, props.database, props.schema));
 const refreshVersion = computed(() => (props.connectionId && props.tableName ? queryStore.tableStructureRefreshVersion(props.connectionId, props.database, props.schema, props.tableName) : 0));
@@ -1136,6 +1244,11 @@ function restoreStructureScrollPosition(tab = activeTab.value) {
   const position = structureScrollPositions.value[tab];
   if (!position) return;
   nextTick(() => {
+    if (tab === "ddl" && ddlEditorView.value) {
+      ddlEditorView.value.scrollDOM.scrollTop = Math.max(0, position.scrollTop);
+      ddlEditorView.value.scrollDOM.scrollLeft = Math.max(0, position.scrollLeft);
+      return;
+    }
     const scroller = structureScrollerForTab(tab);
     if (!scroller) return;
     scroller.scrollTop = Math.max(0, position.scrollTop);
@@ -1561,6 +1674,7 @@ function resetState() {
   constraintsLoading.value = false;
   triggersLoading.value = false;
   errorMessage.value = "";
+  secondaryMetadataErrors.value = {};
   isPartitionedParent.value = false;
   partitionStatusKnown.value = true;
   concurrentAvailabilityInvalidated.value = false;
@@ -1799,6 +1913,7 @@ async function loadStructure(
   if (!silent) loading.value = true;
   setSecondaryMetadataLoading(effectiveScope, true);
   errorMessage.value = "";
+  secondaryMetadataErrors.value = {};
   let secondaryMetadataScheduled = false;
   let loadedSuccessfully = false;
   try {
@@ -1886,8 +2001,30 @@ async function loadStructure(
       }
     }
     const applySecondaryMetadata = async () => {
-      const [nextIndexes, nextForeignKeys, nextConstraints, nextTriggers] = await Promise.all([indexesPromise, foreignKeysPromise, constraintsPromise, triggersPromise]);
+      const [indexesResult, foreignKeysResult, constraintsResult, triggersResult] = await Promise.allSettled([indexesPromise, foreignKeysPromise, constraintsPromise, triggersPromise]);
       if (requestId !== structureLoadRequestId) return;
+
+      type SecondaryMetadataResult = { facet: ObjectMetadataFacet; result: PromiseSettledResult<unknown> };
+      const secondaryResults: SecondaryMetadataResult[] = [
+        { facet: "indexes", result: indexesResult },
+        { facet: "foreign-keys", result: foreignKeysResult },
+        { facet: "constraints", result: constraintsResult },
+        { facet: "triggers", result: triggersResult },
+      ];
+      const failedFacets = secondaryResults.filter((entry): entry is { facet: ObjectMetadataFacet; result: PromiseRejectedResult } => entry.result.status === "rejected");
+      for (const { facet, result } of failedFacets) {
+        console.warn(`[DBX][structure-editor:${facet}-metadata-failed]`, result.reason);
+      }
+      if (showErrors && failedFacets.length > 0) {
+        for (const { facet, result } of failedFacets) {
+          secondaryMetadataErrors.value[facet] = result.reason?.message || String(result.reason);
+        }
+      }
+
+      const nextIndexes = indexesResult.status === "fulfilled" ? indexesResult.value : undefined;
+      const nextForeignKeys = foreignKeysResult.status === "fulfilled" ? foreignKeysResult.value : undefined;
+      const nextConstraints = constraintsResult.status === "fulfilled" ? constraintsResult.value : undefined;
+      const nextTriggers = triggersResult.status === "fulfilled" ? triggersResult.value : undefined;
       if (nextIndexes) {
         indexes.value = createIndexDrafts(nextIndexes);
         loadedMetadataFacets.add("indexes");
@@ -1912,7 +2049,6 @@ async function loadStructure(
     const secondaryMetadataPromise = applySecondaryMetadata()
       .catch((error) => {
         console.warn("[DBX][structure-editor:secondary-metadata-failed]", error);
-        if (showErrors && requestId === structureLoadRequestId) errorMessage.value = error?.message || String(error);
       })
       .finally(() => {
         if (requestId === structureLoadRequestId) setSecondaryMetadataLoading(effectiveScope, false);
@@ -3133,8 +3269,9 @@ function canDropIndex(index: EditableStructureIndex): boolean {
 }
 
 const canEditForeignKeys = computed(() => structureCapabilities.value.foreignKey);
-const canEditTriggers = computed(() => structureDialect.value === "mysql" || structureDialect.value === "oracle");
+const canEditTriggers = computed(() => structureDialect.value === "mysql" || structureDialect.value === "oracle" || structureDialect.value === "sqlserver");
 const isOracleTriggerEditor = computed(() => structureDialect.value === "oracle");
+const isSqlServerTriggerEditor = computed(() => structureDialect.value === "sqlserver");
 
 function generatedForeignKeyName(column = ""): string {
   const table = structureIndexTableName() || "table";
@@ -3187,9 +3324,9 @@ function addTrigger() {
   triggers.value.push({
     id: `new:${uuid()}`,
     name: "",
-    timing: isOracleTriggerEditor.value ? "BEFORE EACH ROW" : "BEFORE",
+    timing: isOracleTriggerEditor.value ? "BEFORE EACH ROW" : isSqlServerTriggerEditor.value ? "AFTER" : "BEFORE",
     event: "INSERT",
-    statement: isOracleTriggerEditor.value ? "BEGIN\n  NULL;\nEND" : "BEGIN\n  \nEND",
+    statement: isOracleTriggerEditor.value ? "BEGIN\n  NULL;\nEND" : isSqlServerTriggerEditor.value ? "BEGIN\n  SET NOCOUNT ON;\nEND" : "BEGIN\n  \nEND",
     markedForDrop: false,
   });
 }
@@ -3413,6 +3550,7 @@ function isPlainModDeleteShortcut(event: KeyboardEvent): boolean {
 }
 
 function onStructureEditorKeydown(event: KeyboardEvent) {
+  if (event.defaultPrevented) return;
   const focusedColumn = activeTab.value === "columns" ? focusedEditableColumn(event.target) : undefined;
   if (focusedColumn && isShiftEnterShortcut(event) && canAddColumn.value) {
     event.preventDefault();
@@ -3437,6 +3575,7 @@ function onStructureEditorKeydown(event: KeyboardEvent) {
     event.preventDefault();
     event.stopPropagation();
     if (activeTab.value === "columns") focusColumnSearch();
+    else if (activeTab.value === "ddl") ddlSearchPanelRef.value?.openSearch();
     return;
   }
   if (isPlainModShortcut(event, "s")) {
@@ -3519,6 +3658,7 @@ onActivated(() => {
     });
   }
   restoreStructureScrollPosition();
+  if (activeTab.value === "ddl") scheduleDdlEditorInit();
 });
 onDeactivated(() => {
   unregisterStructureEditorShortcuts();
@@ -3526,6 +3666,7 @@ onDeactivated(() => {
   structureHorizontalScrollbarResizeObserver?.disconnect();
   structureHorizontalScrollbarResizeObserver = null;
   stopStructureHorizontalScrollbarDrag();
+  destroyDdlEditor();
 });
 onBeforeUnmount(() => {
   clearCopySourceTableSearchTimer();
@@ -3534,6 +3675,7 @@ onBeforeUnmount(() => {
   structureHorizontalScrollbarObserverGeneration += 1;
   structureHorizontalScrollbarResizeObserver?.disconnect();
   unregisterStructureEditorShortcuts();
+  destroyDdlEditor();
   clearSqlPreviewState();
   if (columnHighlightTimer) window.clearTimeout(columnHighlightTimer);
   if (indexHighlightTimer) window.clearTimeout(indexHighlightTimer);
@@ -3656,6 +3798,7 @@ watch(
 
 watch(activeTab, () => {
   stopStructureHorizontalScrollbarDrag();
+  if (activeTab.value !== "ddl") destroyDdlEditor();
   clearColumnSelection();
   highlightedColumnId.value = null;
   highlightedIndexId.value = null;
@@ -3726,12 +3869,8 @@ async function loadActiveTableStructureMetadataIfNeeded() {
 
 watch([activeTab, loading, secondaryMetadataLoading], () => void loadActiveTableStructureMetadataIfNeeded(), { flush: "sync" });
 
-watch([activeTab, ddlLoading], ([tab, loading]) => {
-  if (tab === "ddl" && !loading) {
-    void nextTick(() => {
-      ddlPreRef.value?.focus();
-    });
-  }
+watch([activeTab, loading, ddlLoading, ddlContent], ([tab, structureIsLoading, ddlIsLoading]) => {
+  if (tab === "ddl" && !structureIsLoading && !ddlIsLoading) scheduleDdlEditorInit();
 });
 </script>
 
@@ -4371,6 +4510,9 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("common.loading") }}
             </div>
+            <div v-else-if="secondaryMetadataErrors.indexes" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              {{ secondaryMetadataErrors.indexes }}
+            </div>
             <table v-else class="structure-edit-grid border-separate border-spacing-0 text-[length:var(--structure-font-size)] leading-[var(--structure-line-height)]" :style="{ minWidth: indexColWidths.reduce((a, w) => a + w, 0) + 'px' }">
               <thead class="sticky top-0 z-10 bg-background">
                 <tr>
@@ -4486,6 +4628,9 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("common.loading") }}
             </div>
+            <div v-else-if="secondaryMetadataErrors['foreign-keys']" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              {{ secondaryMetadataErrors["foreign-keys"] }}
+            </div>
             <div v-else-if="foreignKeys.length === 0" class="py-10 text-center text-muted-foreground">
               {{ t("structureEditor.emptyReadonly") }}
             </div>
@@ -4536,11 +4681,14 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("common.loading") }}
             </div>
-            <div v-else-if="constraints.length === 0" class="py-10 text-center text-muted-foreground">
+            <div v-else-if="secondaryMetadataErrors.constraints" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              {{ secondaryMetadataErrors.constraints }}
+            </div>
+            <div v-else-if="constraintsForTab.length === 0" class="py-10 text-center text-muted-foreground">
               {{ t("structureEditor.emptyReadonly") }}
             </div>
             <div v-else class="space-y-1.5">
-              <div v-for="constraint in constraints" :key="constraint.name" class="rounded-md border px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-[length:var(--structure-font-size)]" :class="constraint.enabled ? '' : 'opacity-60'">
+              <div v-for="constraint in constraintsForTab" :key="constraint.name" class="rounded-md border px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-[length:var(--structure-font-size)]" :class="constraint.enabled ? '' : 'opacity-60'">
                 <div class="flex flex-wrap items-center gap-1.5">
                   <span class="font-mono font-medium">{{ constraint.name }}</span>
                   <Badge variant="outline" class="shrink-0">{{ constraint.constraint_type }}</Badge>
@@ -4559,6 +4707,9 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("common.loading") }}
             </div>
+            <div v-else-if="secondaryMetadataErrors.triggers" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              {{ secondaryMetadataErrors.triggers }}
+            </div>
             <div v-else-if="triggers.length === 0" class="py-10 text-center text-muted-foreground">
               {{ t("structureEditor.emptyReadonly") }}
             </div>
@@ -4575,7 +4726,7 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                       <SelectItem v-for="timing in triggerTimingOptions" :key="timing" :value="timing">{{ timing }}</SelectItem>
                     </SelectContent>
                   </Select>
-                  <Input v-if="isOracleTriggerEditor" v-model="trigger.event" :class="structureControlClass" :disabled="!canEditTriggerDraft(trigger)" />
+                  <Input v-if="isOracleTriggerEditor || isSqlServerTriggerEditor" v-model="trigger.event" :class="structureControlClass" :disabled="!canEditTriggerDraft(trigger)" />
                   <Select v-else v-model="trigger.event" :disabled="!canEditTriggerDraft(trigger)">
                     <SelectTrigger class="h-[var(--structure-control-height)] rounded-[6px] px-[var(--structure-control-px)] text-[length:var(--structure-font-size)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25">
                       <SelectValue />
@@ -4585,6 +4736,9 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                     </SelectContent>
                   </Select>
                   <div class="flex items-center justify-end gap-1">
+                    <Badge v-if="trigger.original && trigger.original.enabled !== undefined && trigger.original.enabled !== null" variant="outline" class="shrink-0 text-[length:var(--structure-font-size)]">
+                      {{ trigger.original.enabled ? t("damengJobAdmin.enabled") : t("damengJobAdmin.disabled") }}
+                    </Badge>
                     <Button v-if="trigger.original" variant="ghost" size="sm" :class="structureToolbarButtonClass" @click="toggleDropTrigger(trigger)">
                       <Trash2 :class="structureIconClass" />
                       {{ trigger.markedForDrop ? t("structureEditor.restore") : t("structureEditor.drop") }}
@@ -4611,11 +4765,12 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
               {{ t("common.loading") }}
             </div>
             <template v-else>
-              <Button v-if="ddlContent" variant="outline" size="sm" class="absolute right-3 top-3 z-10 h-7 gap-1 px-2" :title="t('grid.copyDdl')" @click="copyDdlContent">
+              <Button v-if="ddlContent && !ddlSearchOpen" variant="outline" size="sm" class="absolute right-3 top-3 z-10 h-7 gap-1 px-2" :title="t('grid.copyDdl')" @click="copyDdlContent">
                 <Copy class="h-3.5 w-3.5" />
                 {{ t("grid.copyDdl") }}
               </Button>
-              <pre ref="ddlPreRef" tabindex="0" class="m-0 min-h-0 flex-1 whitespace-pre p-3 font-mono text-xs leading-5 select-text outline-none" v-html="ddlContent ? (sqlHighlighter?.(ddlContent) ?? ddlContent) : t('structureEditor.emptyReadonly')" @keydown="onDdlKeydown"></pre>
+              <div ref="ddlEditorContainer" class="structure-ddl-editor h-full min-h-full min-w-0 w-full"></div>
+              <EditorSearchPanel v-if="ddlEditorView" ref="ddlSearchPanelRef" :view="ddlEditorView" @open="ddlSearchOpen = true" @close="ddlSearchOpen = false" />
             </template>
           </TabsContent>
         </Tabs>
@@ -4786,6 +4941,27 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
 </template>
 
 <style scoped>
+.structure-ddl-editor :deep(.cm-editor) {
+  min-height: 100%;
+  background: transparent;
+}
+
+.structure-ddl-editor :deep(.cm-content),
+.structure-ddl-editor :deep(.cm-line) {
+  cursor: text;
+  user-select: text !important;
+  -webkit-user-select: text !important;
+}
+
+.structure-ddl-editor :deep(.cm-selectionBackground),
+.structure-ddl-editor :deep(.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground) {
+  background: var(--dbx-editor-selection-background, rgba(59, 130, 246, 0.35)) !important;
+}
+
+.structure-ddl-editor :deep(.cm-content ::selection) {
+  background: var(--dbx-editor-selection-background, rgba(59, 130, 246, 0.35)) !important;
+}
+
 .structure-table-scroller::-webkit-scrollbar {
   width: 8px;
   height: 0;

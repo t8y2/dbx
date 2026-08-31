@@ -35,6 +35,8 @@ const props = withDefaults(
     closeOnConfirm?: boolean;
     cancelable?: boolean;
     cancelRunningLoading?: boolean;
+    /** Holds the confirm button back until the caller's own precondition is met (e.g. the operator typed the target name). */
+    confirmDisabled?: boolean;
   }>(),
   {
     sql: "",
@@ -49,6 +51,7 @@ const props = withDefaults(
     closeOnConfirm: true,
     cancelable: false,
     cancelRunningLoading: false,
+    confirmDisabled: false,
   },
 );
 
@@ -71,7 +74,9 @@ const dialogOpen = computed({
 });
 
 function onConfirm() {
-  if (props.loading) return;
+  // Guard here as well as on the button: a disabled button still fires on some
+  // synthetic/keyboard paths, and this one gates a destructive operation.
+  if (props.loading || props.confirmDisabled) return;
   if (props.closeOnConfirm) open.value = false;
   emit("confirm");
 }
@@ -129,7 +134,7 @@ async function copyFullCode() {
           {{ t("dangerDialog.cancelRunning") }}
         </Button>
         <Button v-else variant="outline" :disabled="loading" @click="open = false">{{ t("dangerDialog.cancel") }}</Button>
-        <Button variant="destructive" class="gap-1.5" :disabled="loading" @click="onConfirm">
+        <Button variant="destructive" class="gap-1.5" :disabled="loading || confirmDisabled" @click="onConfirm">
           <Loader2 v-if="loading" class="h-3.5 w-3.5 animate-spin" />
           {{ confirmLabel || t("dangerDialog.confirm") }}
         </Button>

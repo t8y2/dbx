@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildDeleteRowConfirmDetails } from "../dataGridDetail";
+import { buildDeleteRowConfirmDetails, dataGridColumnDetailTsv, dataGridRowDetailTsv, type DataGridColumnDetail, type DataGridRowDetail } from "../dataGridDetail";
 
 type TestRow = string[];
 
@@ -129,5 +129,16 @@ describe("buildDeleteRowConfirmDetails", () => {
 
     expect(calls).toBe(columns.length);
     expect(result).toBe('Table: people\n{"id":"custom:1","name":"custom:Alice"}');
+  });
+});
+
+describe("data grid detail TSV", () => {
+  it("leaves NULL cells empty while preserving literal NULL text", () => {
+    const fields = [{ value: null }, { value: "NULL" }] as unknown as DataGridRowDetail["fields"];
+    const rowDetail = { fields } as DataGridRowDetail;
+    const columnDetail = { fields } as DataGridColumnDetail;
+
+    expect(dataGridRowDetailTsv(rowDetail)).toBe("\tNULL");
+    expect(dataGridColumnDetailTsv(columnDetail)).toBe("\nNULL");
   });
 });

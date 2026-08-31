@@ -3,6 +3,11 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, normalizeDataGridCopyPreference, normalizeDataGridExtractorOptions, resolveDataGridCopyPreference, validateDataGridExtractorOptions } from "@/lib/dataGrid/dataGridCopyExtractor";
 
 describe("data-grid extractor options", () => {
+  it("defaults DSV NULL output to an empty spreadsheet field", () => {
+    expect(DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.dsv.nullText).toBe("");
+    expect(normalizeDataGridExtractorOptions({}).dsv.nullText).toBe("");
+  });
+
   it("resolves smart copy to raw for one cell and TSV otherwise", () => {
     expect(normalizeDataGridCopyPreference(undefined)).toBe("smart");
     expect(normalizeDataGridCopyPreference("smart")).toBe("smart");

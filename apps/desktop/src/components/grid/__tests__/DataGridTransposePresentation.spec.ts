@@ -33,4 +33,25 @@ describe("DataGrid transpose presentation", () => {
     expect(dataGridSource).toContain("whitespace-pre-wrap break-words select-text");
     expect(dataGridSource).not.toContain("data-grid-transpose-field-popover");
   });
+
+  it("stops clipping the cell while the long-text editor or readonly text selection is active", () => {
+    // Transposed rows are compact (30px by default) while the expanded editor
+    // grows well beyond that; the cell must switch to overflow-visible while the
+    // editor / readonly text selection is active, mirroring the normal grid cell.
+    expect(dataGridSource).toContain("'overflow-visible z-20 border-r-transparent': transposeCellEditorActive(cell.recordIndex, cell.valueIndex)");
+    expect(dataGridSource).toContain("'overflow-hidden text-ellipsis whitespace-nowrap': !transposeCellEditorActive(cell.recordIndex, cell.valueIndex)");
+    expect(dataGridSource).toContain("function transposeCellEditorActive");
+    expect(dataGridSource).toContain("readonlyTextCellMatches(rowId, valueIndex)");
+    // The transposed cell no longer unconditionally truncates (overflow: hidden),
+    // which would crop the expanded editor below the compact row bounds.
+    expect(dataGridSource).not.toContain('class="relative flex shrink-0 items-center border-r border-border/70 px-2 py-0 truncate"');
+  });
+
+  it("shares the normal grid cell's editor overlay contract while editing", () => {
+    // Normal grid cells switch to the same overflow/z/border contract while the
+    // cell editor or readonly text selection is active, so long-text editing
+    // looks identical across both views.
+    expect(dataGridSource).toContain("'overflow-visible z-20 border-r-transparent': (editingCell?.rowId === item.id && editingCell?.col === col.actualColIdx) || readonlyTextCellMatches(item.id, col.actualColIdx),");
+    expect(dataGridSource).toContain("'overflow-hidden': !((editingCell?.rowId === item.id && editingCell?.col === col.actualColIdx) || readonlyTextCellMatches(item.id, col.actualColIdx)),");
+  });
 });

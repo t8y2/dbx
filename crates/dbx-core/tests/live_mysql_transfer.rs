@@ -88,6 +88,7 @@ fn transfer_request(
         objects: Vec::new(),
         mode,
         target_table_name_case: TransferTableNameCase::Preserve,
+        quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
         batch_size: 2,
     }
@@ -167,6 +168,7 @@ async fn live_mysql_transfer_downgrades_unsupported_source_collations() {
         objects: Vec::new(),
         mode: TransferMode::Append,
         target_table_name_case: TransferTableNameCase::Preserve,
+        quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
         batch_size: 10,
     };
@@ -227,6 +229,7 @@ async fn live_mysql_transfer_downgrades_unsupported_source_collations() {
             objects: Vec::new(),
             mode: TransferMode::Append,
             target_table_name_case: TransferTableNameCase::Preserve,
+            quote_target_column_names: true,
             ownership_policy: TransferOwnershipPolicy::Preserve,
             batch_size: 10,
         };
@@ -527,6 +530,7 @@ async fn live_mysql_transfer_structure_overwrite_rejects_incompatible_target_col
         objects: Vec::new(),
         mode: TransferMode::Overwrite,
         target_table_name_case: TransferTableNameCase::Preserve,
+        quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
         batch_size: 10,
     };
@@ -579,6 +583,7 @@ async fn live_mysql_transfer_structure_overwrite_rejects_incompatible_target_col
             objects: Vec::new(),
             mode: TransferMode::Overwrite,
             target_table_name_case: TransferTableNameCase::Preserve,
+            quote_target_column_names: true,
             ownership_policy: TransferOwnershipPolicy::Preserve,
             batch_size: 10,
         };

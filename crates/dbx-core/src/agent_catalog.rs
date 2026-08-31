@@ -94,6 +94,13 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_ssh_worker_is_available_in_driver_store_without_using_agent_runtime() {
+        assert!(driver_store_entries().any(|(key, label)| key == "sqlite-worker" && label == "SQLite SSH Worker"));
+        assert_eq!(label_for_key("sqlite-worker"), Some("SQLite SSH Worker"));
+        assert!(!is_agent_type(&DatabaseType::Sqlite));
+    }
+
+    #[test]
     fn impala_reuses_hive_agent_without_duplicate_store_entry() {
         assert_eq!(agent_key(&DatabaseType::Impala, None), Some("hive"));
         assert_eq!(driver_store_entries().filter(|(key, _)| *key == "hive").count(), 1);

@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"net/url"
 	"strings"
+	"time"
 
 	_ "gitcode.com/opengauss/openGauss-connector-go-pq"
 )
@@ -29,11 +31,79 @@ func agentDataTypes() []string {
 	return vastbaseDataTypes
 }
 
-func detectAgentMode(_ *sql.DB, configuredMySQL bool) vastbaseMode {
-	if configuredMySQL {
-		return vastbaseMode{compatibilityMode: "mysql", mysqlCompat: true, postgresCatalog: true}
+type vastbaseCompatibility struct {
+	mode                      string
+	raw                       string
+	mysqlCompat               bool
+	sqlServer                 bool
+	supportsDisableConstraint bool
+}
+
+func normalizeVastbaseCompatibility(raw string) vastbaseCompatibility {
+	normalizedRaw := strings.ToUpper(strings.TrimSpace(raw))
+	compact := strings.NewReplacer("_", "", "-", "", " ", "").Replace(normalizedRaw)
+	result := vastbaseCompatibility{mode: "postgres", raw: normalizedRaw}
+	switch compact {
+	case "A":
+		result.mode = "oracle"
+	case "O", "ORA", "ORACLE":
+		result.mode = "oracle"
+		result.supportsDisableConstraint = true
+	case "B", "M", "MYSQL":
+		result.mode = "mysql"
+		result.mysqlCompat = true
+	case "MSSQL", "SQLSERVER":
+		result.mode = "sqlserver"
+		result.sqlServer = true
+	case "", "P", "PG", "POSTGRES", "POSTGRESQL":
+		result.mode = "postgres"
+	default:
+		result.mode = strings.ToLower(strings.TrimSpace(raw))
 	}
-	return vastbaseMode{compatibilityMode: "postgres", postgresCatalog: true}
+	return result
+}
+
+func detectAgentMode(db *sql.DB, configuredMySQL bool) vastbaseMode {
+	raw := "PG"
+	if db != nil {
+		var detected string
+		if err := db.QueryRow("SELECT datcompatibility FROM pg_catalog.pg_database WHERE datname = current_database()").Scan(&detected); err == nil && strings.TrimSpace(detected) != "" {
+			raw = detected
+		}
+	}
+	compatibility := normalizeVastbaseCompatibility(raw)
+	if configuredMySQL {
+		compatibility = normalizeVastbaseCompatibility("MYSQL")
+	}
+	mode := vastbaseMode{
+		compatibilityMode:         compatibility.mode,
+		compatibilityModeRaw:      compatibility.raw,
+		mysqlCompat:               compatibility.mysqlCompat,
+		sqlServerIdentity:         compatibility.sqlServer,
+		supportsDisableConstraint: compatibility.supportsDisableConstraint,
+	}
+	if db == nil {
+		mode.postgresCatalog = true
+		return mode
+	}
+	postgresCatalog := catalogExists(db, "pg_catalog.pg_namespace")
+	systemCatalog := catalogExists(db, "sys_catalog.sys_namespace")
+	mode.postgresCatalog = postgresCatalog || !systemCatalog
+	return mode
+}
+
+func catalogExists(db *sql.DB, catalog string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	rows, err := db.QueryContext(ctx, "SELECT 1 FROM "+catalog+" WHERE 1 = 0")
+	if err != nil {
+		return false
+	}
+	return rows.Close() == nil
+}
+
+func vastbaseSupportsDisableConstraint(mode vastbaseMode) bool {
+	return mode.supportsDisableConstraint
 }
 
 func agentSSLModeAttempts(sslMode string) []string {

@@ -26,6 +26,8 @@ pub enum SshPromptKind {
     HostKeyVerify,
     /// Collect a secret typed by the user (e.g. a dynamic verification code).
     SecretInput,
+    /// Confirm uploading the SQLite worker binary onto the file host.
+    WorkerUploadConsent,
 }
 
 /// A request for user input, sent from the backend to the UI.

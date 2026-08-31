@@ -733,6 +733,9 @@ export const useQueryStore = defineStore("query", () => {
   const t = getI18nT();
   const settingsStore = useSettingsStore();
   const tabs = ref<QueryTab[]>([]);
+  // Default auto-commit for a fresh query tab follows the user's global
+  // "默认事务提交方式" setting (Settings > Editor), not a hard-coded constant.
+  const defaultAutoCommitForDbTypeWithSetting = (dbType?: string) => defaultAutoCommitForDbType(dbType, settingsStore.editorSettings.defaultTransactionMode);
   // A stable Set of "connectionId\x00database" keys. Computed only from the
   // minimal tab identity fields so that it does NOT invalidate when other
   // properties change (isExecuting, result, sql, tableMeta...). Previously
@@ -1655,7 +1658,7 @@ export const useQueryStore = defineStore("query", () => {
     for (const tab of restored.tabs) {
       const connection = connectionStore.getConfig(tab.connectionId);
       if (tab.mode === "query" && tab.autoCommit === undefined) {
-        tab.autoCommit = defaultAutoCommitForDbType(connection?.db_type);
+        tab.autoCommit = defaultAutoCommitForDbTypeWithSetting(connection?.db_type);
       } else if (tab.mode === "data" && connection) {
         tab.schema = connectionObjectTreeNodeSchema(connection, tab.database, tab.schema);
       }
@@ -1837,7 +1840,7 @@ export const useQueryStore = defineStore("query", () => {
       isCancelling: false,
       isExplaining: false,
       mode,
-      ...(mode === "query" ? { autoCommit: defaultAutoCommitForDbType(dbType) } : {}),
+      ...(mode === "query" ? { autoCommit: defaultAutoCommitForDbTypeWithSetting(dbType) } : {}),
     };
     if (mode === "query") tab.originalSql = initialSql ?? "";
     const activeIndex = options.insertAfterActive ? tabs.value.findIndex((item) => item.id === activeTabId.value) : -1;
@@ -1931,7 +1934,7 @@ export const useQueryStore = defineStore("query", () => {
       isCancelling: false,
       isExplaining: false,
       mode: "query",
-      autoCommit: defaultAutoCommitForDbType(dbType),
+      autoCommit: defaultAutoCommitForDbTypeWithSetting(dbType),
     };
     tabs.value.push(tab);
     activeTabId.value = id;
@@ -1939,15 +1942,27 @@ export const useQueryStore = defineStore("query", () => {
     return id;
   }
 
-  function openObjectBrowser(connectionId: string, database: string, schema?: string, catalog?: string, eventName?: string, eventReadOnly = false, initialObjectFilter?: "tables" | "events") {
+  function openObjectBrowser(connectionId: string, database: string, schema?: string, catalog?: string, eventName?: string, eventReadOnly = false, initialObjectFilter?: "tables" | "events", eventCreateRequestId?: number) {
     const title = catalog ? `${catalog}.${database} objects` : schema ? `${schema} objects` : `${database} objects`;
     const existing = tabs.value.find((tab) => tab.mode === "objects" && tab.connectionId === connectionId && tab.database === database && (tab.objectBrowser?.catalog || "") === (catalog || "") && (tab.objectBrowser?.schema || "") === (schema || ""));
     if (existing) {
-      if (eventName) {
+      if (eventCreateRequestId !== undefined) {
+        // 新建事件：显式 CREATE 请求优先，并清掉可能残留的"编辑已有事件"状态，
+        // 保证同一 tab 被复用时每次点击都能重新进入 CREATE 编辑器（请求号单调递增）。
+        existing.objectBrowser = {
+          ...existing.objectBrowser,
+          eventName: undefined,
+          eventReadOnly: false,
+          eventOpenRequestId: undefined,
+          eventCreateRequestId,
+          initialObjectFilter: initialObjectFilter ?? "events",
+        };
+      } else if (eventName) {
         existing.objectBrowser = {
           ...existing.objectBrowser,
           eventName,
           eventReadOnly,
+          eventCreateRequestId: undefined,
           initialObjectFilter: initialObjectFilter ?? (eventName ? "events" : existing.objectBrowser?.initialObjectFilter),
           eventOpenRequestId: (existing.objectBrowser?.eventOpenRequestId ?? 0) + 1,
         };
@@ -1972,10 +1987,11 @@ export const useQueryStore = defineStore("query", () => {
         catalog,
         schema,
         objectType: "tables",
-        eventName,
-        eventReadOnly,
-        initialObjectFilter: initialObjectFilter ?? (eventName ? "events" : undefined),
+        eventName: eventCreateRequestId !== undefined ? undefined : eventName,
+        eventReadOnly: eventCreateRequestId !== undefined ? false : eventReadOnly,
+        initialObjectFilter: initialObjectFilter ?? (eventName || eventCreateRequestId !== undefined ? "events" : undefined),
         eventOpenRequestId: eventName ? 1 : undefined,
+        eventCreateRequestId,
       },
     };
     tabs.value.push(tab);
@@ -2547,6 +2563,29 @@ export const useQueryStore = defineStore("query", () => {
     tab.externalSqlFileMissing = true;
   }
 
+  function relocateExternalSqlFilePath(previousPath: string, nextPath: string, version?: QueryTab["externalSqlFileVersion"]) {
+    const previous = normalizeExternalSqlPath(previousPath);
+    if (!previous) return;
+    for (const tab of tabs.value) {
+      if (tab.mode !== "query" || !tab.externalSqlPath || normalizeExternalSqlPath(tab.externalSqlPath) !== previous) continue;
+      tab.externalSqlPath = nextPath;
+      if (version) tab.externalSqlFileVersion = version;
+      tab.externalSqlIgnoredFileVersion = undefined;
+      tab.externalSqlFileMissing = undefined;
+    }
+    refreshExternalSqlFileTitles();
+  }
+
+  function markExternalSqlFileMissingForPath(path: string) {
+    const normalizedPath = normalizeExternalSqlPath(path);
+    if (!normalizedPath) return;
+    for (const tab of tabs.value) {
+      if (tab.mode === "query" && tab.externalSqlPath && normalizeExternalSqlPath(tab.externalSqlPath) === normalizedPath) {
+        tab.externalSqlFileMissing = true;
+      }
+    }
+  }
+
   function persistSavedSqlEditorPosition(tab: QueryTab | undefined) {
     if (!tab?.savedSqlId || tab.mode !== "query") return;
     const pending = savedSqlEditorPositionTimers.get(tab.savedSqlId);
@@ -2817,6 +2856,22 @@ export const useQueryStore = defineStore("query", () => {
       tabs.value.filter((tab) => tab.id !== id).map((tab) => tab.id),
       id,
     );
+  }
+
+  function closeLeftTabs(id: string, onComplete?: () => void) {
+    const target = tabs.value.find((tab) => tab.id === id);
+    if (!target) return;
+
+    const groupedTabs = tabs.value.filter((tab) => Boolean(tab.pinned) === Boolean(target.pinned));
+    const targetIndex = groupedTabs.findIndex((tab) => tab.id === id);
+    const ids = groupedTabs.slice(0, targetIndex).map((tab) => tab.id);
+    if (ids.length === 0) {
+      onComplete?.();
+      return;
+    }
+
+    const finalActiveTabId = activeTabId.value && !ids.includes(activeTabId.value) ? activeTabId.value : id;
+    beginBatchClose(ids, finalActiveTabId, onComplete);
   }
 
   function closeRightTabs(id: string, onComplete?: () => void) {
@@ -3286,7 +3341,7 @@ export const useQueryStore = defineStore("query", () => {
     if (tab.txnSessionId) void rollbackTransaction(tab.id);
     if (options?.resetAutoCommit) {
       const dbType = useConnectionStore().getConfig(tab.connectionId)?.db_type;
-      tab.autoCommit = defaultAutoCommitForDbType(dbType);
+      tab.autoCommit = defaultAutoCommitForDbTypeWithSetting(dbType);
     }
     clearOracleTxnPossiblyDirty(tab);
     tab.txnAutoRolledBack = false;
@@ -3441,7 +3496,7 @@ export const useQueryStore = defineStore("query", () => {
       isCancelling: false,
       isExplaining: false,
       mode: "query",
-      autoCommit: defaultAutoCommitForDbType(dbType),
+      autoCommit: defaultAutoCommitForDbTypeWithSetting(dbType),
       editorSelection: restoredPosition.selection,
       editorViewport: restoredPosition.viewport,
     };
@@ -4510,6 +4565,7 @@ export const useQueryStore = defineStore("query", () => {
       preserveTotalRowCountDuringExecution?: boolean;
       preserveActiveResultIndex?: boolean;
       replaceActiveResultInGroup?: boolean;
+      retainDisplayedResult?: boolean;
       skipRedisSafetyCheck?: boolean;
       sourceOffset?: number;
       sourceTraceId?: string;
@@ -4658,7 +4714,7 @@ export const useQueryStore = defineStore("query", () => {
       const targetDatabase = resumedExecutionTarget ? resumedExecutionTarget.database : targetContext?.scope === "connection" ? "" : (contextDatabase ?? executionTarget?.database ?? tab.database);
       const targetSchema = resumedExecutionTarget ? resumedExecutionTarget.schema : targetContext?.scope === "connection" ? undefined : (databaseTargetContext?.schema ?? executionTarget?.schema ?? tab.schema);
       const executionDatabase = dataTabExecutionDatabase(conn, targetDatabase, executionCatalog);
-      const useAgentCursor = usesAgentCursorForQuery(conn?.db_type);
+      const useAgentCursor = usesAgentCursorForQuery(conn?.db_type, conn?.driver_profile);
       const queryTimeoutSecs = queryTimeoutSecsForConnection(conn, settingsStore.editorSettings.globalQueryTimeoutSecs);
       if (!batchResume) {
         const statementExecution =
@@ -5266,6 +5322,7 @@ export const useQueryStore = defineStore("query", () => {
         const pagination = limitQueryPagination(requestedPagination, queryResultMaxRows);
         pageLimit = pagination.limit;
         pageOffset = pagination.offset;
+        useAgentResultSession = conn?.db_type === "sqlserver" && conn?.driver_profile?.trim().toLowerCase() === "sqlserver-legacy";
       }
 
       const executionSchema = connectionQueryExecutionSchema(conn, targetDatabase, targetSchema, tab.mode === "data");
@@ -5438,6 +5495,15 @@ export const useQueryStore = defineStore("query", () => {
         const activeGroupResults = current.results;
         const shouldAppendResult = !!options?.appendResult && !!current.result;
         const shouldReplaceActiveResultInGroup = options?.replaceActiveResultInGroup === true && results.length === 1 && Array.isArray(activeGroupResults) && typeof activeGroupIndex === "number" && activeGroupIndex >= 0 && activeGroupIndex < activeGroupResults.length;
+        const retainedPaginationResult = options?.retainDisplayedResult === true && results.length === 1 && !isQueryExecutionErrorResult(results[0]!) ? results[0] : undefined;
+        if (retainedPaginationResult) {
+          // Cursor-only fetches advance the backend session without publishing
+          // intermediate rows or page offsets to the visible result grid.
+          current.resultSessionId = retainedPaginationResult.session_id ?? undefined;
+          current.resultClientSessionId = current.resultSessionId ? executionClientSessionId : undefined;
+          producedResult = true;
+          return producedResult;
+        }
         if (batchResume) {
           const mergedResults = mergeBatchQueryResults(batchResume.previousResults, results);
           const preferredResult = results.find((result) => isQueryExecutionErrorResult(result)) ?? results[results.length - 1] ?? mergedResults[mergedResults.length - 1];
@@ -6361,7 +6427,7 @@ export const useQueryStore = defineStore("query", () => {
       isCancelling: false,
       isExplaining: false,
       mode: "query",
-      autoCommit: defaultAutoCommitForDbType(dbType),
+      autoCommit: defaultAutoCommitForDbTypeWithSetting(dbType),
     };
     if (!restoreCachedResultPayload(tab, archive.snapshot)) return undefined;
     const activeRun = tab.resultRuns?.find((run) => run.id === tab.activeResultRunId) ?? tab.resultRuns?.[0];
@@ -6430,6 +6496,8 @@ export const useQueryStore = defineStore("query", () => {
       let offset = 0;
       const clientSessionId = tabClientSessionId(tab, "export");
       const exportExecutionId = uuid();
+      const useAgentCursor = conn?.db_type === "sqlserver" && conn?.driver_profile?.trim().toLowerCase() === "sqlserver-legacy";
+      let sessionId: string | undefined;
 
       try {
         while (true) {
@@ -6449,23 +6517,43 @@ export const useQueryStore = defineStore("query", () => {
             limit: pageLimit,
             offset,
           });
-          const results = await api.executeMulti(tab.connectionId, executionDatabase, sql, undefined, exportExecutionId, {
-            maxRows: pageLimit,
-            fetchSize: pageLimit,
-            clientSessionId,
-            catalog: tableMeta.catalog,
-            timeoutSecs: queryTimeoutSecs,
-          });
+          const results = await api.executeMulti(
+            tab.connectionId,
+            executionDatabase,
+            sql,
+            undefined,
+            exportExecutionId,
+            useAgentCursor
+              ? {
+                  maxRows: 2_147_483_647,
+                  fetchSize: pageLimit,
+                  pageSize: pageLimit,
+                  resultSessionId: sessionId,
+                  clientSessionId,
+                  catalog: tableMeta.catalog,
+                  timeoutSecs: queryTimeoutSecs,
+                }
+              : {
+                  maxRows: pageLimit,
+                  fetchSize: pageLimit,
+                  clientSessionId,
+                  catalog: tableMeta.catalog,
+                  timeoutSecs: queryTimeoutSecs,
+                },
+          );
           const result = results[0];
           if (!result) break;
           if (columns.length === 0) columns = result.columns;
           rows.push(...result.rows);
           executionTimeMs += result.execution_time_ms ?? 0;
           onProgress?.({ rowsExported: rows.length, totalRows });
-          if (result.rows.length < pageLimit) break;
+          sessionId = result.session_id ?? undefined;
+          const shouldFetchNextPage = useAgentCursor ? result.has_more === true : result.rows.length >= pageLimit;
+          if (!shouldFetchNextPage) break;
           offset += result.rows.length;
         }
       } finally {
+        if (sessionId) void api.closeQuerySession(tab.connectionId, executionDatabase, sessionId, clientSessionId, tableMeta.catalog);
         void closeClientSessionId(tab.connectionId, executionDatabase, clientSessionId, tableMeta.catalog, { tabId: tab.id });
       }
 
@@ -6493,7 +6581,7 @@ export const useQueryStore = defineStore("query", () => {
     // main 引入全局查询超时：queryTimeoutSecsForConnection 现需传入全局默认值；
     // settingsStore 取 defineStore 顶层声明的实例（本函数无局部覆盖）。
     const queryTimeoutSecs = queryTimeoutSecsForConnection(conn, settingsStore.editorSettings.globalQueryTimeoutSecs);
-    const useAgentCursor = usesAgentCursorForQuery(conn?.db_type);
+    const useAgentCursor = usesAgentCursorForQuery(conn?.db_type, conn?.driver_profile);
     const queryBaseSql = queryResultBaseSql(tab);
     const exportSettings = useSettingsStore().editorSettings;
     const exportRowLimit = exportSettings.exportRowLimitEnabled ? exportSettings.exportRowLimit : Number.POSITIVE_INFINITY;
@@ -6634,7 +6722,7 @@ export const useQueryStore = defineStore("query", () => {
     const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
     if (!effectiveDbType) return undefined;
     if (effectiveDbType === "mongodb") return undefined;
-    const useAgentCursor = usesAgentCursorForQuery(conn?.db_type);
+    const useAgentCursor = usesAgentCursorForQuery(conn?.db_type, conn?.driver_profile);
     const queryBaseSql = queryResultBaseSql(tab);
     const resultStatementIndex = tab.result.statement_index;
     const batchSql = tab.resultBaseSql ?? tab.lastExecutedSql ?? tab.sql;
@@ -6692,7 +6780,7 @@ export const useQueryStore = defineStore("query", () => {
       sql,
       queryBaseSql: sql,
       databaseType: effectiveDbType,
-      useAgentCursor: usesAgentCursorForQuery(conn?.db_type),
+      useAgentCursor: usesAgentCursorForQuery(conn?.db_type, conn?.driver_profile),
       filePath,
       format,
       pageSize: settings.exportBatchSize,
@@ -6759,9 +6847,12 @@ export const useQueryStore = defineStore("query", () => {
     updateExternalSqlFileVersion,
     ignoreExternalSqlFileVersion,
     acknowledgeExternalSqlFileMissing,
+    relocateExternalSqlFilePath,
+    markExternalSqlFileMissingForPath,
     discardTabChanges,
     requestAppCloseConfirmation,
     closeOtherTabs,
+    closeLeftTabs,
     closeRightTabs,
     closeOtherRegularTabs,
     closeRegularTabs,

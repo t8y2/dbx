@@ -3,11 +3,10 @@ use serde::Serialize;
 use crate::models::connection::SshTunnelConfig;
 use crate::path_utils::expand_tilde;
 
-/// Sentinel values the frontend fills in when the user leaves a field blank
-/// (see `normalizeSshTunnel` / `defaultSshTunnel` in ConnectionDialog.vue).
-/// There is no way to distinguish "user explicitly typed 22" from "field was
-/// left empty and defaulted to 22", so we treat these as "unset" for the
-/// purpose of filling in values from `~/.ssh/config`.
+/// Legacy sentinel values used by connection payloads that predate the
+/// explicit SSH authentication method field. Current connection forms always
+/// set `auth_method`, so their user and port values must be treated as
+/// explicit, including the valid defaults `root` and `22`.
 const DEFAULT_USER_SENTINEL: &str = "root";
 const DEFAULT_PORT_SENTINEL: u16 = 22;
 
@@ -40,9 +39,10 @@ pub fn find_host(alias: &str) -> Option<SshConfigHostEntry> {
 /// `Host` block, without overwriting values the user has explicitly set.
 ///
 /// Only `ssh.host` is matched against config aliases; `user`/`port`/`key_path`
-/// are filled in from that same matched entry. Values already present on
-/// `ssh` win, except for `user`/`port` which use the sentinel defaults above
-/// to detect "not actually set by the user".
+/// are filled in from that same matched entry. Older payloads without an
+/// `auth_method` retain the legacy default-filling behavior so imported
+/// connections continue to resolve their aliases. Payloads produced by the
+/// current connection form keep all user and port values as entered.
 pub fn resolve_ssh_tunnel_config(ssh: &SshTunnelConfig) -> SshTunnelConfig {
     match find_host(&ssh.host) {
         Some(entry) => apply_host_entry(ssh, entry),
@@ -51,20 +51,22 @@ pub fn resolve_ssh_tunnel_config(ssh: &SshTunnelConfig) -> SshTunnelConfig {
 }
 
 /// Applies a resolved `~/.ssh/config` entry onto `ssh`, without overwriting
-/// values the user has explicitly set. `user`/`port` use the sentinel
-/// defaults above to detect "not actually set by the user".
+/// values the user has explicitly set. The empty `auth_method` identifies
+/// legacy payloads where default values cannot be distinguished from fields
+/// that were left blank in the old form.
 fn apply_host_entry(ssh: &SshTunnelConfig, entry: SshConfigHostEntry) -> SshTunnelConfig {
     let mut resolved = ssh.clone();
+    let is_legacy_payload = ssh.auth_method.is_empty();
 
     if let Some(host_name) = entry.host_name {
         resolved.host = host_name;
     }
-    if resolved.user == DEFAULT_USER_SENTINEL {
+    if is_legacy_payload && resolved.user == DEFAULT_USER_SENTINEL {
         if let Some(user) = entry.user {
             resolved.user = user;
         }
     }
-    if resolved.port == DEFAULT_PORT_SENTINEL {
+    if is_legacy_payload && resolved.port == DEFAULT_PORT_SENTINEL {
         if let Some(port) = entry.port {
             resolved.port = port;
         }
@@ -193,7 +195,7 @@ mod tests {
             expose_lan: false,
             use_ssh_agent: false,
             ssh_agent_sock_path: String::new(),
-            auth_method: "password".to_string(),
+            auth_method: String::new(),
             allow_exec_channel_proxy: false,
         }
     }
@@ -260,9 +262,22 @@ mod tests {
     fn resolve_keeps_password_auth_when_password_is_present() {
         let mut ssh = config("myserver");
         ssh.password = "secret".to_string();
+        ssh.auth_method = "password".to_string();
         let resolved = apply_host_entry(&ssh, entry("myserver"));
         assert_eq!(resolved.key_path, "~/.ssh/id_ed25519");
         assert_eq!(resolved.auth_method, "password");
+    }
+
+    #[test]
+    fn resolve_keeps_default_user_and_port_for_current_payloads() {
+        let mut ssh = config("myserver");
+        ssh.auth_method = "password".to_string();
+
+        let resolved = apply_host_entry(&ssh, entry("myserver"));
+
+        assert_eq!(resolved.host, "10.0.0.5");
+        assert_eq!(resolved.user, DEFAULT_USER_SENTINEL);
+        assert_eq!(resolved.port, DEFAULT_PORT_SENTINEL);
     }
 
     #[test]

@@ -77,6 +77,8 @@ export function sqlFormatDialectForDbType(dbType: string | null | undefined): Sq
     case "sqlserver":
       return "sqlserver";
     case "oracle":
+    // OceanBase Oracle mode speaks Oracle SQL, so it reuses the PL/SQL grammar.
+    case "oceanbase-oracle":
       return "oracle";
     case "clickhouse":
       return "clickhouse";

@@ -329,7 +329,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       const request = await resolveRequestSourceValues(initialRequest);
       const mongoResult = await resolveMongoExtractorResult(extractor, request);
       const result = mongoResult ?? (await api.extractDataGridSelection(request));
-      if (!result.text) return false;
+      if (!result.text && !extractorAllowsEmptyOutput(extractor)) return false;
       // Derive the grid paste-back payload from the effective request schema so
       // hidden support columns, row headers, NULLs, tabs, and newlines keep the
       // same shape and values as the rendered raw text or TSV.
@@ -365,7 +365,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     const request = await resolveRequestSourceValues(initialRequest, previewRowCount);
     const mongoResult = await resolveMongoExtractorResult(extractor, request, previewRowCount);
     const result = mongoResult ?? (await api.extractDataGridSelection(request));
-    if (!result.text) throw new Error(t("grid.copyExtractorEmptySelection"));
+    if (!result.text && !extractorAllowsEmptyOutput(extractor)) throw new Error(t("grid.copyExtractorEmptySelection"));
     return { ...result, sourceRowCount, truncated: sourceRowCount > result.rowCount };
   }
 
@@ -394,6 +394,10 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
   }
 
   return { copyWithExtractor, copyWithPreference, previewWithExtractor, previewWithPreference, canCopyWithExtractor };
+}
+
+function extractorAllowsEmptyOutput(extractor: DataGridCopyExtractorId): boolean {
+  return DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS[extractor].category === "raw" || DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS[extractor].category === "delimited";
 }
 
 function compactTableMeta(tableMeta: DataGridTableMeta | undefined, requiredColumns: string[]): DataGridTableMeta | undefined {

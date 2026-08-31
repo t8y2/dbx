@@ -251,6 +251,7 @@ async fn live_postgres_backup_snapshot_exports_wide_jsonb_then_next_table_inner(
         drop_table_if_exists: false,
         omit_auto_increment: false,
         fail_on_error: true,
+        output_compression: Default::default(),
         snapshot_session_id: Some(snapshot.session_id.clone()),
         batch_size: 1000,
     };
@@ -363,6 +364,7 @@ async fn live_postgres_backup_snapshot_cancel_interrupts_pending_row_inner() {
         drop_table_if_exists: false,
         omit_auto_increment: false,
         fail_on_error: true,
+        output_compression: Default::default(),
         snapshot_session_id: Some(snapshot.session_id.clone()),
         batch_size: 1,
     };
@@ -477,6 +479,7 @@ async fn live_mysql_database_backup_refreshes_an_idle_snapshot_before_export() {
         drop_table_if_exists: false,
         omit_auto_increment: false,
         fail_on_error: true,
+        output_compression: Default::default(),
         snapshot_session_id: Some(snapshot.session_id.clone()),
         batch_size: 100,
     };

@@ -8,7 +8,7 @@ import { type CellSelectionMatrix, type CellSelectionRange, type SelectionData }
 import type { DataGridExtractRequest, DataGridExtractorOptions } from "@/lib/dataGrid/dataGridCopyExtractor";
 import { useToast } from "@/composables/useToast";
 import { useExportTracker } from "@/composables/useExportTracker";
-import { displayCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
+import { clipboardCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
 import { tryStartExclusiveActivation, type ActionActivationGuard } from "@/lib/connection/actionActivation";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { clearDataGridClipboardCopy, rememberDataGridClipboardCopy } from "@/lib/dataGrid/dataGridClipboard";
@@ -529,7 +529,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     const sourceIndex = visibleColumnIndexes.value[contextCell.value.col] ?? contextCell.value.col;
     const [resolvedItem] = await resolveVisibleRowValues([item], [sourceIndex]);
     const val = resolvedItem?.data[contextCell.value.col] ?? null;
-    await copyText(displayCellValue(val), { rows: [[val]] });
+    await copyText(clipboardCellValue(val), { rows: [[val]] });
   }
 
   async function copyRow() {
@@ -671,10 +671,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   });
 
   async function copyAll() {
-    const header = columns.value.join("\t");
     const rows = (await resolveVisibleRowValues(displayItems.value.filter((item) => !item.isDraft))).map((item) => item.data);
-    const body = rows.map((row) => row.map((cell) => displayCellValue(cell)).join("\t")).join("\n");
-    await copyText(`${header}\n${body}`, { rows, header: columns.value });
+    await copyText(formatTsv(columns.value, rows), { rows, header: columns.value });
   }
 
   // --- Export functions ---

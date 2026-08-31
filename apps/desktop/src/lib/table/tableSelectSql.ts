@@ -69,6 +69,7 @@ export function quoteTableIdentifier(databaseType: DatabaseType | undefined, nam
     databaseType === "mysql" ||
     databaseType === "clickhouse" ||
     databaseType === "hive" ||
+    databaseType === "argo" ||
     databaseType === "kyuubi" ||
     databaseType === "impala" ||
     databaseType === "spark" ||

@@ -463,6 +463,15 @@ pub fn default_connect_timeout_secs() -> u64 {
     10
 }
 
+/// Cloud Spanner schema changes are long-running operations rather than plain
+/// statements. Measured against the real service, `CREATE INDEX` on an *empty*
+/// table took 22.9-33.6s over seven runs, so the generic default fails
+/// intermittently — and the failure is misleading, because the operation keeps
+/// running server-side and completes, leaving a retry to report
+/// `Duplicate name in schema`. Raising a floor mirrors what
+/// `connection::agent_connect_timeout` already does for Access.
+pub const SPANNER_MIN_QUERY_TIMEOUT_SECS: u64 = 120;
+
 pub fn default_query_timeout_secs() -> u64 {
     60
 }
@@ -824,21 +833,12 @@ impl ConnectionConfig {
         }
     }
 
-    /// Cloud Spanner schema changes are long-running operations rather than plain
-    /// statements. Measured against the real service, `CREATE INDEX` on an *empty*
-    /// table took 22.9-33.6s over seven runs, so the generic default fails
-    /// intermittently — and the failure is misleading, because the operation keeps
-    /// running server-side and completes, leaving a retry to report
-    /// `Duplicate name in schema`. Raising a floor mirrors what
-    /// `connection::agent_connect_timeout` already does for Access.
-    const SPANNER_MIN_QUERY_TIMEOUT_SECS: u64 = 120;
-
     pub fn effective_query_timeout_secs(&self) -> u64 {
         if self.query_timeout_secs == 0 {
             // An explicit 0 is the UI's "no limit"; a floor must not impose one.
             return 0;
         }
-        let floor = if self.db_type == DatabaseType::Spanner { Self::SPANNER_MIN_QUERY_TIMEOUT_SECS } else { 1 };
+        let floor = if self.db_type == DatabaseType::Spanner { SPANNER_MIN_QUERY_TIMEOUT_SECS } else { 1 };
         self.query_timeout_secs.max(floor)
     }
 
@@ -1089,7 +1089,7 @@ impl ConnectionConfig {
             DatabaseType::Snowflake => format!("snowflake://{host}/{db_part}"),
             DatabaseType::Trino => format!("trino://{host}:{port}{db_part}"),
             DatabaseType::PrestoSql => format!("prestosql://{host}:{port}{db_part}"),
-            DatabaseType::Hive => format!("hive://{host}:{port}{db_part}"),
+            DatabaseType::Hive | DatabaseType::Argo => format!("hive://{host}:{port}{db_part}"),
             DatabaseType::Kyuubi => format!("kyuubi://{host}:{port}{db_part}"),
             DatabaseType::Impala => format!("impala://{host}:{port}{db_part}"),
             DatabaseType::Spark => format!("spark://{host}:{port}{db_part}"),
@@ -1315,7 +1315,7 @@ impl ConnectionConfig {
             DatabaseType::PrestoSql => {
                 format!("prestosql://{}:{}@{host}:{port}{db_part}", username, password)
             }
-            DatabaseType::Hive => {
+            DatabaseType::Hive | DatabaseType::Argo => {
                 format!("hive://{}:{}@{host}:{port}{db_part}", username, password)
             }
             DatabaseType::Kyuubi => {

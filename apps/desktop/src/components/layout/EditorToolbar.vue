@@ -43,7 +43,8 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  execute: [];
+  execute: [source: "pointer" | "keyboard"];
+  executePointerDown: [];
   cancel: [];
   explain: [];
   "update:explainMode": [mode: "explain" | "autotrace"];
@@ -251,6 +252,20 @@ function databaseOptionIsProduction(database: string): boolean {
   if (!database || props.activeConnection?.is_production) return false;
   return productionContextForDatabase(props.activeConnection, database).reason === "database";
 }
+
+function onExecutePointerDown(event: MouseEvent) {
+  if (props.activeTab.isExecuting || event.button !== 0) return;
+  emit("executePointerDown");
+}
+
+function onExecuteClick(event: MouseEvent) {
+  if (props.activeTab.isExecuting) {
+    emit("cancel");
+    return;
+  }
+  emit("execute", event.detail > 0 ? "pointer" : "keyboard");
+}
+
 async function changeCatalog(selectedCatalog: string) {
   const connection = props.activeConnection;
   if (!connection) return;
@@ -276,8 +291,8 @@ async function changeCatalog(selectedCatalog: string) {
             class="h-6 w-6"
             :class="executeButtonClass"
             :disabled="activeTab.isCancelling || activeTab.isExplaining || (!activeTab.isExecuting && !executableSql.trim())"
-            @mousedown.prevent
-            @click="activeTab.isExecuting ? emit('cancel') : emit('execute')"
+            @mousedown.prevent="onExecutePointerDown"
+            @click="onExecuteClick"
           >
             <Loader2 v-if="activeTab.isCancelling" class="h-3.5 w-3.5 animate-spin" />
             <Square v-else-if="activeTab.isExecuting" class="h-3.5 w-3.5 fill-current" />

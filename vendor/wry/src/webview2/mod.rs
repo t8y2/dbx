@@ -1913,7 +1913,13 @@ pub fn platform_webview_version() -> Result<String> {
 
 fn configured_browser_executable_folder() -> Option<HSTRING> {
   let folder = std::env::var_os("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER");
-  browser_executable_folder_from(folder.as_deref(), cfg!(target_vendor = "win7"))
+  let version = windows_version::OsVersion::current();
+  let fixed_runtime_enabled = should_use_fixed_runtime(
+    cfg!(target_vendor = "win7"),
+    version.major,
+    version.minor,
+  );
+  browser_executable_folder_from(folder.as_deref(), fixed_runtime_enabled)
 }
 
 /// Builds a structured [`WebView2ProcessFailedInfo`] from the WebView2 event
@@ -2059,6 +2065,21 @@ mod tests {
   use super::*;
 
   #[test]
+  fn win7_target_uses_fixed_runtime_on_windows_7() {
+    assert!(should_use_fixed_runtime(true, 6, 1));
+  }
+
+  #[test]
+  fn compatibility_target_uses_fixed_runtime_on_server_2012_r2() {
+    assert!(should_use_fixed_runtime(true, 6, 3));
+  }
+
+  #[test]
+  fn standard_windows_target_uses_system_runtime_on_windows_7() {
+    assert!(!should_use_fixed_runtime(false, 6, 1));
+  }
+
+  #[test]
   fn missing_or_empty_browser_folder_uses_system_runtime() {
     assert!(browser_executable_folder_from(None, true).is_none());
     assert!(browser_executable_folder_from(Some(OsStr::new("")), true).is_none());
@@ -2154,6 +2175,12 @@ mod tests {
 #[inline]
 fn is_windows_7() -> bool {
   let v = windows_version::OsVersion::current();
-  // windows 7 is 6.1
+  // Windows 7 的内核版本是 6.1。
   v.major == 6 && v.minor == 1
+}
+
+fn should_use_fixed_runtime(is_win7_target: bool, os_major: u32, os_minor: u32) -> bool {
+  // Windows 7 与 Server 2012 R2 专用离线包都必须使用随包 Runtime，
+  // 避免旧系统依赖机器级 Evergreen 注册状态。
+  is_win7_target && os_major == 6 && matches!(os_minor, 1 | 3)
 }

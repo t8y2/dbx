@@ -272,7 +272,7 @@ export function importDataTypeForDatabase(inferredType: ImportInferredType, data
       if (databaseType === "sqlserver") return "NVARCHAR(MAX)";
       if (databaseType === "oracle" || databaseType === "oceanbase-oracle" || databaseType === "dameng") return "CLOB";
       if (databaseType === "clickhouse") return "String";
-      if (["hive", "trino", "prestosql", "databricks"].includes(databaseType || "")) return "STRING";
+      if (["hive", "argo", "trino", "prestosql", "databricks"].includes(databaseType || "")) return "STRING";
       return "TEXT";
   }
 }

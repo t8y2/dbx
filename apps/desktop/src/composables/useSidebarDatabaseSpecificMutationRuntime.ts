@@ -32,6 +32,7 @@ import {
   type MongoCreateIndexRequest,
   type MongoIndexSpecSnapshot,
 } from "@/lib/sidebar/mongoCollectionMutation";
+import { elasticsearchClearIndexPreview, isElasticsearchProtocolIndex, isPartialElasticsearchClear, notifyElasticsearchIndexCleared } from "@/lib/sidebar/elasticsearchIndexActions";
 import { supportsMongoAllDriverMutations, supportsMongoIndexMutations, supportsNativeMongoDriverMutations } from "@/lib/mongo/mongoCapabilities";
 import { runMongoSidebarMutation } from "@/lib/sidebar/runMongoSidebarMutation";
 import { executeWithProductionContextGuard } from "@/lib/database/productionExecutionGuard";
@@ -60,6 +61,8 @@ import {
   dropAllMongoIndexesLoading,
   showDropDatabaseConfirm,
   dropDatabaseLoading,
+  showClearElasticsearchIndexConfirm,
+  clearElasticsearchIndexLoading,
   showFlushRedisDbConfirm,
   showRedisDatabaseAliasDialog,
   redisDatabaseAliasInput,
@@ -147,6 +150,13 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
   function canCloneMongoCollectionNode(node: TreeNode): boolean {
     return canMutateMongoCollectionNode(node) && isCloneableMongoCollection(node.label, mongoCollectionKindFromNode(node));
   }
+
+  function canMutateElasticsearchIndexNode(node: TreeNode): boolean {
+    if (!node.connectionId) return false;
+    return isElasticsearchProtocolIndex(node.type, connectionStore.getConfig(node.connectionId)?.db_type);
+  }
+
+  const canManageElasticsearchIndex = computed(() => canMutateElasticsearchIndexNode(activeNode.value));
 
   const canDropMongoCollection = computed(() => canMutateMongoCollectionNode(activeNode.value));
   const canDropMilvusCollection = computed(() => activeNode.value.type === "vector-collection" && !!activeNode.value.connectionId && !!activeNode.value.database && connectionStore.getConfig(activeNode.value.connectionId)?.db_type === "milvus");
@@ -898,6 +908,49 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     showFlushRedisDbConfirm.value = true;
   }
 
+  function clearElasticsearchIndex() {
+    clearElasticsearchIndexLoading.value = false;
+    showClearElasticsearchIndexConfirm.value = true;
+  }
+
+  async function confirmClearElasticsearchIndex() {
+    const node = sidebarDangerTarget.value ?? activeNode.value;
+    const connectionId = node.connectionId;
+    if (!canMutateElasticsearchIndexNode(node) || !connectionId || clearElasticsearchIndexLoading.value) return;
+    const index = node.label;
+    // Only the mutation is guarded. Reporting the outcome sits outside the try
+    // so a failure in a post-success side effect can never make a completed
+    // deletion look like it failed.
+    let executed: { result: Awaited<ReturnType<typeof api.elasticsearchDeleteAllDocuments>> } | undefined;
+    try {
+      executed = await executeWithProductionContextGuard({
+        connection: connectionStore.getConfig(connectionId),
+        database: node.database,
+        reviewText: elasticsearchClearIndexPreview(index),
+        source: t("production.sourceSidebar"),
+        execute: async () => {
+          clearElasticsearchIndexLoading.value = true;
+          await connectionStore.ensureConnected(connectionId);
+          return { result: await api.elasticsearchDeleteAllDocuments(connectionId, index) };
+        },
+      });
+    } catch (error: unknown) {
+      toast(t("contextMenu.tableOperationFailed", { message: translateBackendError(t, error) }), 5000);
+      return;
+    } finally {
+      clearElasticsearchIndexLoading.value = false;
+    }
+    // The guard returns undefined only when the user declines confirmation.
+    if (executed === undefined) return;
+    const result = executed.result;
+    if (isPartialElasticsearchClear(result)) {
+      toast(t("contextMenu.elasticsearchClearIndexPartial", { index, deleted: result.deleted, total: result.total }), 6000);
+    } else {
+      toast(t("contextMenu.elasticsearchClearIndexDone", { index, deleted: result.deleted }), 3000);
+    }
+    notifyElasticsearchIndexCleared(connectionId, index);
+  }
+
   function prepareRedisDatabaseAliasDialog() {
     const node = activeNode.value;
     redisDatabaseAliasInput.value = node.connectionId && node.database != null ? connectionStore.getRedisDatabaseAlias(node.connectionId, node.database) || "" : "";
@@ -1190,6 +1243,9 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     dropMongoCollection,
     dropMongoIndex,
     dropAllMongoIndexes,
+    canManageElasticsearchIndex,
+    clearElasticsearchIndex,
+    confirmClearElasticsearchIndex,
     flushRedisDb,
     prepareRedisDatabaseAliasDialog,
     confirmRedisDatabaseAlias,

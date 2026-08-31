@@ -438,19 +438,127 @@ func showViewsUnsupported(err error) bool {
 }
 
 func (server *server) listObjects(schema string, constraints metadataListConstraints) ([]objectInfo, error) {
-	if !acceptsHiveTable(constraints.ObjectTypes) {
+	if !acceptsHiveTable(constraints.ObjectTypes) && !(server.supportsRoutines() && acceptsHiveRoutine(constraints.ObjectTypes)) {
 		return []objectInfo{}, nil
 	}
-	tables, err := server.listTables(schema, constraints)
-	if err != nil {
-		return nil, err
-	}
 	schema = firstNonEmpty(schema, server.config.Database)
-	values := make([]objectInfo, 0, len(tables))
-	for _, table := range tables {
-		values = append(values, objectInfo{Name: table.Name, ObjectType: table.TableType, Schema: schema, Comment: table.Comment})
+	values := make([]objectInfo, 0)
+	if acceptsHiveTable(constraints.ObjectTypes) {
+		tables, err := server.listTables(schema, constraints)
+		if err != nil {
+			return nil, err
+		}
+		for _, table := range tables {
+			values = append(values, objectInfo{Name: table.Name, ObjectType: table.TableType, Schema: schema, Comment: table.Comment})
+		}
+	}
+	if server.supportsRoutines() && acceptsRoutineType(constraints.ObjectTypes, "PROCEDURE") {
+		procedures, err := server.listRoutines(schema, constraints, "PROCEDURE")
+		if err != nil {
+			return nil, err
+		}
+		values = append(values, procedures...)
+	}
+	if server.supportsRoutines() && acceptsRoutineType(constraints.ObjectTypes, "FUNCTION") {
+		functions, err := server.listRoutines(schema, constraints, "FUNCTION")
+		if err != nil {
+			return nil, err
+		}
+		values = append(values, functions...)
+	}
+	sort.Slice(values, func(first, second int) bool { return values[first].Name < values[second].Name })
+	return applyMetadataWindow(values, constraints.Offset, constraints.Limit), nil
+}
+
+// supportsRoutines reports whether the connected server is known to expose the
+// Hive procedure / function catalog views (system.procedures_v /
+// system.functions_v). ArgoDB / Inceptor / Transwarp forks ship these views;
+// vanilla Apache Hive does not, so routine listing is gated on the connection's
+// database_type to avoid firing unsupported queries against plain Hive.
+func (server *server) supportsRoutines() bool {
+	switch strings.ToLower(strings.TrimSpace(server.params.DatabaseType)) {
+	case "argo", "inceptor", "inceptor2", "transwarp":
+		return true
+	default:
+		return false
+	}
+}
+
+// listRoutines queries the server's procedure / function catalog views when the
+// driver supports them. Hive and most forks (ArgoDB, Inceptor, Transwarp) expose
+// stored procedures / functions through the system.procedures_v / system.functions_v
+// views, with columns (procedure_name | function_name, database_name, full_text, ...).
+// The full_text column carries the routine source used by getObjectSource.
+//
+// The query is best-effort: when the view is missing or the server rejects it
+// (older Hive without procedure support), the call returns an empty slice and
+// nil error so the caller can fall back to listing tables.
+func (server *server) listRoutines(schema string, constraints metadataListConstraints, routineType string) ([]objectInfo, error) {
+	nameColumn := "procedure_name"
+	viewName := "system.procedures_v"
+	if strings.EqualFold(routineType, "FUNCTION") {
+		nameColumn = "function_name"
+		viewName = "system.functions_v"
+	}
+	// Routine listings are pinned to the active schema (or the connection's default
+	// database when the caller passes an empty schema). system.procedures_v /
+	// system.functions_v only contain rows for one specific database per query;
+	// there is no wildcard form. Falling back to the connection default keeps
+	// callers like the sidebar schema tree happy when they pass "" as the schema.
+	targetSchema := firstNonEmpty(schema, server.config.Database)
+	likePattern := buildRoutineLikePattern(constraints.Filter)
+	// database_name is a string column, so the schema filter must be a single-quoted
+	// literal — not a backtick-quoted identifier. ArgoDB/Inceptor reject lower(`ods`)
+	// against system.procedures_v with an ERROR_STATUS, while lower('ods') works.
+	schemaLiteral := "'" + strings.ReplaceAll(targetSchema, "'", "''") + "'"
+	sql := "SELECT " + nameColumn + " FROM " + viewName +
+		" WHERE lower(database_name) = lower(" + schemaLiteral + ")" +
+		" AND lower(" + nameColumn + ") LIKE " + likePattern +
+		" ORDER BY " + nameColumn
+	result, err := server.executeQuery(queryOptions{SQL: sql, MaxRows: metadataQueryLimit})
+	if err != nil {
+		// View missing or not supported — silently return empty list.
+		return []objectInfo{}, nil
+	}
+	values := make([]objectInfo, 0, len(result.Rows))
+	for _, row := range result.Rows {
+		name := rowString(row, 0)
+		if name == "" {
+			continue
+		}
+		values = append(values, objectInfo{Name: name, ObjectType: strings.ToUpper(routineType), Schema: schema, Comment: nil})
 	}
 	return values, nil
+}
+
+// buildRoutineLikePattern turns a user-supplied filter into a Hive-safe LIKE
+// literal: wraps with %, escapes \, %, _ (the LIKE metacharacters), and quotes
+// the whole literal so it can be concatenated directly into SQL.
+func buildRoutineLikePattern(filter string) string {
+	escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(filter)
+	return "'%" + escaped + "%'"
+}
+
+// acceptsHiveRoutine reports whether the requested object types include any
+// routine (PROCEDURE / FUNCTION) that hive-go needs to surface through listObjects.
+func acceptsHiveRoutine(objectTypes []string) bool {
+	for _, objectType := range objectTypes {
+		if strings.EqualFold(objectType, "PROCEDURE") || strings.EqualFold(objectType, "FUNCTION") {
+			return true
+		}
+	}
+	return false
+}
+
+// acceptsRoutineType reports whether the requested object types include the
+// given routine kind (case-insensitive).
+func acceptsRoutineType(objectTypes []string, routineType string) bool {
+	for _, objectType := range objectTypes {
+		if strings.EqualFold(objectType, routineType) {
+			return true
+		}
+	}
+	return false
 }
 
 func (server *server) getColumns(schema, table string) ([]columnInfo, error) {
@@ -585,7 +693,18 @@ func (server *server) getTableDDL(schema, table string) (string, error) {
 }
 
 func (server *server) getObjectSource(schema, name, objectType string) (objectSource, error) {
-	source, err := server.getTableDDL(schema, name)
+	schema = firstNonEmpty(schema, server.config.Database)
+	var source string
+	var err error
+	switch strings.ToUpper(objectType) {
+	case "PROCEDURE", "FUNCTION":
+		if !server.supportsRoutines() {
+			return objectSource{}, fmt.Errorf("routine source is not supported for %s connections", server.params.DatabaseType)
+		}
+		source, err = server.getRoutineSource(schema, name, strings.ToUpper(objectType))
+	default:
+		source, err = server.getTableDDL(schema, name)
+	}
 	if err != nil {
 		return objectSource{}, err
 	}
@@ -595,6 +714,37 @@ func (server *server) getObjectSource(schema, name, objectType string) (objectSo
 		Schema:     optionalString(schema),
 		Source:     source,
 	}, nil
+}
+
+// getRoutineSource fetches a procedure or function's full source from the
+// server's system.procedures_v / system.functions_v view. Returns an empty
+// string when the view is missing or the routine is not found, so callers can
+// fall back to other sources. full_text may span multiple rows (the underlying
+// query driver splits long strings), so we join them like getTableDDL does.
+func (server *server) getRoutineSource(schema, name, routineType string) (string, error) {
+	nameColumn := "procedure_name"
+	viewName := "system.procedures_v"
+	if strings.EqualFold(routineType, "FUNCTION") {
+		nameColumn = "function_name"
+		viewName = "system.functions_v"
+	}
+	sql := "SELECT full_text FROM " + viewName +
+		" WHERE lower(database_name) = lower('" + strings.ReplaceAll(schema, "'", "''") + "')" +
+		" AND " + nameColumn + " = '" + strings.ReplaceAll(name, "'", "''") + "'"
+	result, err := server.executeQuery(queryOptions{SQL: sql, MaxRows: metadataQueryLimit})
+	if err != nil {
+		return "", nil
+	}
+	lines := make([]string, 0, len(result.Rows))
+	for _, row := range result.Rows {
+		if line := firstRowValue(row); line != "" {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) == 0 {
+		return "", nil
+	}
+	return strings.Join(lines, "\n") + "\n", nil
 }
 
 func (server *server) getExplainInfo(sqlText string) (string, error) {

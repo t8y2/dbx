@@ -538,6 +538,7 @@ pub fn build_empty_table_sql(options: TableAdminSqlOptions) -> String {
             DatabaseType::Cassandra
             | DatabaseType::Hive
             | DatabaseType::Kyuubi
+            | DatabaseType::Argo
             | DatabaseType::Kylin
             | DatabaseType::Questdb,
         ) => {
@@ -739,20 +740,22 @@ pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOp
     );
     let target =
         qualified_duplicate_target_name(options.database_type, options.schema.as_deref(), &options.target_name);
-    let structure_sql =
-        if matches!(options.database_type, Some(DatabaseType::Mysql | DatabaseType::Kyuubi | DatabaseType::Impala)) {
-            format!("CREATE TABLE {target} LIKE {source};")
-        } else if options.database_type == Some(DatabaseType::Questdb) {
-            format!("CREATE TABLE {target} (LIKE {source});")
-        } else if options.database_type.is_some_and(is_postgres_like_structure_copy) {
-            format!("CREATE TABLE {target} (LIKE {source} INCLUDING ALL);")
-        } else if options.database_type == Some(DatabaseType::SqlServer) {
-            format!("SELECT TOP 0 * INTO {target} FROM {source};")
-        } else if options.database_type.is_some_and(uses_false_predicate_duplicate_structure) {
-            format!("CREATE TABLE {target} AS SELECT * FROM {source} WHERE 1=0")
-        } else {
-            format!("CREATE TABLE {target} AS SELECT * FROM {source} WHERE 0;")
-        };
+    let structure_sql = if matches!(
+        options.database_type,
+        Some(DatabaseType::Mysql | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo)
+    ) {
+        format!("CREATE TABLE {target} LIKE {source};")
+    } else if options.database_type == Some(DatabaseType::Questdb) {
+        format!("CREATE TABLE {target} (LIKE {source});")
+    } else if options.database_type.is_some_and(is_postgres_like_structure_copy) {
+        format!("CREATE TABLE {target} (LIKE {source} INCLUDING ALL);")
+    } else if options.database_type == Some(DatabaseType::SqlServer) {
+        format!("SELECT TOP 0 * INTO {target} FROM {source};")
+    } else if options.database_type.is_some_and(uses_false_predicate_duplicate_structure) {
+        format!("CREATE TABLE {target} AS SELECT * FROM {source} WHERE 1=0")
+    } else {
+        format!("CREATE TABLE {target} AS SELECT * FROM {source} WHERE 0;")
+    };
 
     let mut comment_sql = Vec::new();
     if let Some(database_type) =

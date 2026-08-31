@@ -12,4 +12,14 @@ describe("add to AI database context", () => {
     expect(addToAiSource).toContain("else if (hasTreeNodeDatabaseContext(node))");
     expect(addToAiSource).not.toContain("else if (node.database)");
   });
+
+  it("adds every selected table as an AI mention", () => {
+    const addToAiStart = appSource.indexOf("async function addToAi");
+    const addToAiEnd = appSource.indexOf("function openAiPanel", addToAiStart);
+    const addToAiSource = appSource.slice(addToAiStart, addToAiEnd);
+
+    expect(addToAiSource).toContain("Array.isArray(nodesInput) ? nodesInput : [nodesInput]");
+    expect(addToAiSource).toContain('entry.type === "table"');
+    expect(addToAiSource).toContain("for (const mention of tableMentions) handle.addTableMention(mention)");
+  });
 });

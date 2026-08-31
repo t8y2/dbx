@@ -304,6 +304,34 @@ describe("semantic SQL completion candidates", () => {
     expect(columns.find((item) => item.label === "tl.villageId")).toMatchObject({ filterText: "villageId", apply: "tl.villageId" });
   });
 
+  it("marks SELECT projection columns as batch-selectable", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["users", ["id", "name"].map((name) => ({ name, table: "users" }))]]);
+
+    const { items } = semanticCompletion("SELECT | FROM users", { columnsByTable });
+
+    expect(items.filter((item) => item.type === "column")).toEqual(expect.arrayContaining([expect.objectContaining({ label: "id", apply: "id", batchSelectionMode: "select" }), expect.objectContaining({ label: "name", apply: "name", batchSelectionMode: "select" })]));
+  });
+
+  it("retains a typed table alias for batch-selected projection columns", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["users", ["id", "name"].map((name) => ({ name, table: "users" }))]]);
+
+    const { items } = semanticCompletion("SELECT u.| FROM users u", { columnsByTable });
+
+    expect(items.filter((item) => item.type === "column")).toEqual(
+      expect.arrayContaining([expect.objectContaining({ label: "id", apply: "id", batchSelectionMode: "select", batchSelectionQualifier: "u" }), expect.objectContaining({ label: "name", apply: "name", batchSelectionMode: "select", batchSelectionQualifier: "u" })]),
+    );
+  });
+
+  it("retains a typed table name when the referenced table also has an alias", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["users", ["id", "name"].map((name) => ({ name, table: "users" }))]]);
+
+    const { items } = semanticCompletion("SELECT users.| FROM users u", { columnsByTable });
+
+    expect(items.filter((item) => item.type === "column")).toEqual(
+      expect.arrayContaining([expect.objectContaining({ label: "id", apply: "id", batchSelectionMode: "select", batchSelectionQualifier: "users" }), expect.objectContaining({ label: "name", apply: "name", batchSelectionMode: "select", batchSelectionQualifier: "users" })]),
+    );
+  });
+
   it("completes columns for aliases in comma-separated table lists", () => {
     const columnsByTable = new Map<string, SqlCompletionColumn[]>([
       ["table_a", ["id", "name"].map((name) => ({ name, table: "table_a" }))],
@@ -470,6 +498,14 @@ WHERE a.id = b.fk_kpi_set_score_id`,
     const allColumns = items.find((item) => item.type === "snippet" && item.label === "users.*");
     expect(allColumns?.apply).toBe("id, name, email) VALUES (${1:value}, ${2:value}, ${3:value})");
     expect(allColumns?.detail).toBe("3 columns: id, name, email) VALUES (value, value, value)");
+  });
+
+  it("marks INSERT target columns as batch-selectable", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["users", ["id", "name"].map((name) => ({ name, table: "users" }))]]);
+
+    const { items } = semanticCompletion("INSERT INTO users (|", { columnsByTable });
+
+    expect(items.filter((item) => item.type === "column")).toEqual(expect.arrayContaining([expect.objectContaining({ label: "id", apply: "id", batchSelectionMode: "insert" }), expect.objectContaining({ label: "name", apply: "name", batchSelectionMode: "insert" })]));
   });
 
   it("uses the configured keyword case for INSERT all-column snippets", () => {

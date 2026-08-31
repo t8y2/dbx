@@ -10,6 +10,7 @@ import { supportsConnectionScopedQueryExecution } from "@/lib/database/databaseF
 import { supportsConnectionLevelSqlExecution } from "@/lib/connection/connectionLevelDatabaseBootstrap";
 import { classifySqlActivityKind } from "@/lib/history/historyActivityKind";
 import { sqlMetadataRefreshTarget } from "@/lib/sql/sqlMetadataRefresh";
+import { invalidateObjectMetadataCache } from "@/lib/metadata/objectMetadataCache";
 import { defaultViewForResult } from "@/lib/query/queryResultDefaultView";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import { classifyRedisCommandSafety } from "@/lib/redis/redisCommandSafety";
@@ -293,7 +294,7 @@ export function useSqlExecution(deps: {
       return;
     }
     const statementCount = splitSqlStatementRanges(sql, executionDatabaseType).length;
-    deps.activeOutputView.value = statementCount > 1 ? "summary" : "result";
+    deps.activeOutputView.value = statementCount > 1 ? settingsStore.editorSettings.multiStatementDefaultView : "result";
     const connName = executionConnection?.name || "";
     const start = Date.now();
     const isRedis = executionDatabaseType === "redis";
@@ -333,8 +334,10 @@ export function useSqlExecution(deps: {
       const refreshTarget = sqlMetadataRefreshTarget(sql, tab.schema);
       if (refreshTarget.scope === "connection") {
         connectionStore.invalidateMetadataCache(tab.connectionId);
+        await invalidateObjectMetadataCache({ connectionId: tab.connectionId });
         await connectionStore.loadDatabases(tab.connectionId, { force: true });
       } else if (refreshTarget.scope === "database") {
+        await invalidateObjectMetadataCache({ connectionId: tab.connectionId, database: tab.database, schema: refreshTarget.schema });
         await connectionStore.refreshObjectListTreeNode(tab.connectionId, tab.database, refreshTarget.schema);
       }
     }
@@ -478,8 +481,10 @@ export function useSqlExecution(deps: {
         const refreshTarget = sqlMetadataRefreshTarget(sql, executionTab.schema);
         if (refreshTarget.scope === "connection") {
           connectionStore.invalidateMetadataCache(executionTab.connectionId);
+          await invalidateObjectMetadataCache({ connectionId: executionTab.connectionId });
           await connectionStore.loadDatabases(executionTab.connectionId, { force: true });
         } else if (refreshTarget.scope === "database") {
+          await invalidateObjectMetadataCache({ connectionId: executionTab.connectionId, database: executionTab.database, schema: refreshTarget.schema });
           await connectionStore.refreshObjectListTreeNode(executionTab.connectionId, executionTab.database, refreshTarget.schema);
         }
       }

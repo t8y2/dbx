@@ -8,6 +8,7 @@ import com.dbx.agent.ForeignKeyInfo;
 import com.dbx.agent.IndexInfo;
 import com.dbx.agent.JdbcAgentProfile;
 import com.dbx.agent.MultiSessionJsonRpcServer;
+import com.dbx.agent.ObjectSource;
 
 import java.security.Security;
 import java.sql.Connection;
@@ -16,6 +17,7 @@ import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Types;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -27,6 +29,9 @@ import java.util.Objects;
 import java.util.Set;
 
 public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
+    private static final String JTDS_DRIVER_CLASS = "net.sourceforge.jtds.jdbc.Driver";
+    private static final String SQLSERVER_JDBC_PREFIX = "jdbc:sqlserver://";
+    private static final String JTDS_JDBC_PREFIX = "jdbc:jtds:sqlserver://";
     private static final String TLS_DISABLED_ALGORITHMS_KEY = "jdk.tls.disabledAlgorithms";
     private static final Set<String> LEGACY_TLS_ALGORITHMS_TO_ALLOW = Set.of(
         "TLSV1",
@@ -57,6 +62,7 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
         Set.of("INFORMATION_SCHEMA", "SYS"),
         Arrays.asList("TABLE", "VIEW", "SYSTEM TABLE")
     );
+    private volatile boolean sqlServer2000Mode;
 
     public SqlServerLegacyAgent() {
         super(PROFILE);
@@ -67,20 +73,231 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
 
     @Override
     protected String buildJdbcUrl(ConnectParams params) {
-        return legacyTlsUrl(params);
+        return sqlServer2000Mode ? jtdsUrl(params) : legacyTlsUrl(params);
     }
 
     @Override
     protected Connection openConnection(ConnectParams params) throws Exception {
+        sqlServer2000Mode = false;
+        logConnectionEvent("mssql-jdbc attempt", params, null);
         try {
-            return super.openConnection(params);
+            Connection connection = super.openConnection(params);
+            sqlServer2000Mode = false;
+            logConnectionEvent("mssql-jdbc connected", params, null);
+            return connection;
         } catch (SQLException error) {
+            logConnectionEvent("mssql-jdbc failed", params, error);
+            if (isSqlServer2000Unsupported(error)) {
+                logConnectionEvent("switching to jTDS 1.3.1 fallback", params, null);
+                try {
+                    super.loadDriver(jtdsDriverParams());
+                    sqlServer2000Mode = true;
+                    Connection connection = super.openConnection(params);
+                    logConnectionEvent("jTDS 1.3.1 connected", params, null);
+                    return connection;
+                } catch (SQLException fallbackError) {
+                    sqlServer2000Mode = false;
+                    logConnectionEvent("jTDS 1.3.1 failed", params, fallbackError);
+                    fallbackError.addSuppressed(error);
+                    throw withLegacyTlsDiagnostics(fallbackError, "jTDS 1.3.1");
+                } catch (Exception fallbackError) {
+                    sqlServer2000Mode = false;
+                    logConnectionEvent("jTDS 1.3.1 failed", params, fallbackError);
+                    fallbackError.addSuppressed(error);
+                    throw fallbackError;
+                }
+            }
             throw withLegacyTlsDiagnostics(error);
         }
     }
 
+    private static ConnectParams jtdsDriverParams() {
+        ConnectParams params = new ConnectParams();
+        params.setJdbc_driver_class(JTDS_DRIVER_CLASS);
+        params.setJdbc_driver_paths(Collections.emptyList());
+        return params;
+    }
+
+    @Override
+    protected String connectionValidationQuery() {
+        // jTDS can establish a SQL Server 2000 session but its JDBC 4
+        // isValid() implementation is not reliable on this legacy endpoint.
+        return "SELECT 1";
+    }
+
+    @Override
+    protected void afterDisconnect() {
+        sqlServer2000Mode = false;
+    }
+
+    @Override
+    protected Object resultValue(ResultSet resultSet, int index, int sqlType) {
+        Object value = super.resultValue(resultSet, index, sqlType);
+        return normalizeSqlServer2000ResultValue(value, sqlType, sqlServer2000Mode);
+    }
+
+    static Object normalizeSqlServer2000ResultValue(Object value, int sqlType, boolean sqlServer2000Mode) {
+        if (!sqlServer2000Mode || !(value instanceof String) || !isCharacterType(sqlType)) {
+            return value;
+        }
+        String text = (String) value;
+        if (text.isEmpty()) {
+            return text;
+        }
+        for (int index = 0; index < text.length(); index++) {
+            if (text.charAt(index) != '\0') {
+                return text;
+            }
+        }
+        // jTDS can expose an empty SQL Server 2000 varchar as NUL padding up to
+        // the declared column length. Keep SQL NULL and mixed binary-like text
+        // distinct, but restore an all-NUL character value to the empty string.
+        return "";
+    }
+
+    private static boolean isCharacterType(int sqlType) {
+        return sqlType == Types.CHAR
+            || sqlType == Types.VARCHAR
+            || sqlType == Types.LONGVARCHAR
+            || sqlType == Types.NCHAR
+            || sqlType == Types.NVARCHAR
+            || sqlType == Types.LONGNVARCHAR
+            || sqlType == Types.CLOB
+            || sqlType == Types.NCLOB;
+    }
+
+    private static void logConnectionEvent(String stage, ConnectParams params, Throwable error) {
+        String detail = error == null ? "" : ", error=" + sanitizeDiagnostic(error.getClass().getSimpleName() + ": " + error.getMessage());
+        System.err.println(
+            "[sqlserver-legacy] " + stage
+                + ", host=" + sanitizeDiagnostic(params.getHost())
+                + ", port=" + params.getPort()
+                + ", portExplicit=" + params.isPort_explicit()
+                + ", database=" + sanitizeDiagnostic(params.getDatabase())
+                + ", usernamePresent=" + (params.getUsername() != null && !params.getUsername().isBlank())
+                + detail
+        );
+    }
+
+    private static String sanitizeDiagnostic(String value) {
+        if (value == null || value.isBlank()) {
+            return "<empty>";
+        }
+        return value
+            .replaceAll("(?i)(password|passwd|pwd)\\s*[=:]\\s*[^;,&\\s]+", "$1=<redacted>")
+            .replace('\r', ' ')
+            .replace('\n', ' ');
+    }
+
+    static boolean isSqlServer2000Unsupported(Throwable error) {
+        Throwable current = error;
+        while (current != null) {
+            String message = current.getMessage();
+            if (message != null) {
+                String normalized = message.toLowerCase(Locale.ROOT);
+                // mssql-jdbc rejects SQL Server 2000 (major version 8) during
+                // prelogin with "SQL Server version 8 is not supported by
+                // this driver." — the version word breaks a plain
+                // "sql server 8" substring match, so accept both shapes.
+                boolean version8Rejection = (normalized.contains("sql server 8") || normalized.contains("sql server version 8"))
+                    && (normalized.contains("not support") || normalized.contains("不支持"));
+                // Other driver wordings name the supported floor instead.
+                boolean floor2005Rejection = normalized.contains("sql server 2005 or later");
+                if (version8Rejection || floor2005Rejection) {
+                    return true;
+                }
+            }
+            if (current instanceof SQLException) {
+                SQLException next = ((SQLException) current).getNextException();
+                if (next != null && next != current.getCause()) {
+                    if (isSqlServer2000Unsupported(next)) {
+                        return true;
+                    }
+                }
+            }
+            current = current.getCause();
+        }
+        return false;
+    }
+
+    static String jtdsUrl(ConnectParams params) {
+        String explicit = params.getConnection_string() == null ? "" : params.getConnection_string().trim();
+        if (explicit.toLowerCase(Locale.ROOT).startsWith(JTDS_JDBC_PREFIX)) {
+            return appendProperties(trimSqlServerUrl(explicit), jtdsConnectionProperties(params));
+        }
+
+        String sqlServerUrl = baseJdbcUrl(params);
+        String body = sqlServerUrl.substring(SQLSERVER_JDBC_PREFIX.length());
+        String[] parts = body.split(";", -1);
+        String authority = parts[0].trim();
+        String database = "";
+        for (int i = 1; i < parts.length; i++) {
+            int separator = parts[i].indexOf('=');
+            if (separator <= 0) {
+                continue;
+            }
+            String key = parts[i].substring(0, separator).trim();
+            if ("databaseName".equalsIgnoreCase(key)) {
+                database = parts[i].substring(separator + 1).trim();
+                break;
+            }
+        }
+
+        StringBuilder url = new StringBuilder(JTDS_JDBC_PREFIX);
+        String namedInstance = namedInstance(authority);
+        if (namedInstance != null && !params.isPort_explicit()) {
+            url.append(namedInstance.substring(0, namedInstance.indexOf('\\')));
+        } else {
+            url.append(authority);
+        }
+        if (database.length() > 0) {
+            url.append('/').append(database);
+        }
+        if (namedInstance != null && !params.isPort_explicit()) {
+            url.append(";instance=")
+                .append(namedInstance.substring(namedInstance.indexOf('\\') + 1));
+        }
+        return appendProperties(url.toString(), jtdsConnectionProperties(params));
+    }
+
+    private static String namedInstance(String authority) {
+        int separator = authority.indexOf('\\');
+        if (separator <= 0 || separator >= authority.length() - 1) {
+            return null;
+        }
+        return authority;
+    }
+
+    private static Map<String, String> jtdsConnectionProperties(ConnectParams params) {
+        Map<String, String> properties = new LinkedHashMap<>();
+        String urlParams = params.getUrl_params();
+        if (urlParams == null || urlParams.trim().isEmpty()) {
+            return properties;
+        }
+        for (String pair : urlParams.trim().split("[&;]")) {
+            String value = pair.trim();
+            int separator = value.indexOf('=');
+            if (separator <= 0) {
+                continue;
+            }
+            String key = value.substring(0, separator).trim();
+            String property = value.substring(separator + 1).trim();
+            if ("applicationName".equalsIgnoreCase(key)) {
+                properties.put("appName", property);
+            } else if ("ssl".equalsIgnoreCase(key)
+                || "socketTimeout".equalsIgnoreCase(key)
+                || "loginTimeout".equalsIgnoreCase(key)) {
+                properties.put(key, property);
+            }
+        }
+        return properties;
+    }
+
     @Override
     public String getTableComment(String schema, String table) {
+        if (sqlServer2000Mode) {
+            return null;
+        }
         return unchecked(() -> {
             try (PreparedStatement statement = requireConnection().prepareStatement(tableCommentSql())) {
                 statement.setString(1, schema);
@@ -111,12 +328,59 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
         return super.listForeignKeys(metadataSchema(schema, table), table);
     }
 
+    @Override
+    public ObjectSource getObjectSource(String schema, String name, String objectType) {
+        String normalizedType = objectType == null ? "" : objectType.trim().toUpperCase(Locale.ROOT);
+        String objectXtype = sqlServer2000ObjectXtype(normalizedType);
+        if (objectXtype == null) {
+            throw new IllegalArgumentException("Unsupported object type: " + objectType);
+        }
+        return unchecked(() -> {
+            String resolvedSchema = metadataSchema(schema, name);
+            StringBuilder source = new StringBuilder();
+            try (PreparedStatement statement = requireConnection().prepareStatement(sqlServer2000ObjectSourceSql())) {
+                statement.setString(1, resolvedSchema);
+                statement.setString(2, name);
+                statement.setString(3, objectXtype);
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    while (resultSet.next()) {
+                        String chunk = resultSet.getString("source_text");
+                        if (chunk != null) {
+                            source.append(chunk);
+                        }
+                    }
+                }
+            }
+            // SQL Server 2000 exposes syscomments as source chunks. The legacy
+            // editor is read-only because rewriting old procedure syntax safely
+            // needs a separate DDL compatibility path.
+            return new ObjectSource(name, objectType, resolvedSchema, source.toString(), false);
+        });
+    }
+
+    static String sqlServer2000ObjectSourceSql() {
+        return "SELECT c.text AS source_text FROM syscomments c "
+            + "JOIN sysobjects o ON c.id = o.id "
+            + "JOIN sysusers u ON o.uid = u.uid "
+            + "WHERE u.name = ? AND o.name = ? AND o.xtype = ? "
+            + "ORDER BY c.colid";
+    }
+
+    private static String sqlServer2000ObjectXtype(String objectType) {
+        return switch (objectType) {
+            case "PROCEDURE" -> "P";
+            case "FUNCTION" -> "FN";
+            default -> null;
+        };
+    }
+
     private String metadataSchema(String schema, String table) {
         if (schema != null && !schema.trim().isEmpty()) {
             return schema;
         }
         return unchecked(() -> {
-            try (PreparedStatement statement = requireConnection().prepareStatement(unqualifiedObjectSchemaSql())) {
+            String schemaSql = sqlServer2000Mode ? sqlServer2000ObjectSchemaSql() : unqualifiedObjectSchemaSql();
+            try (PreparedStatement statement = requireConnection().prepareStatement(schemaSql)) {
                 statement.setString(1, table);
                 try (ResultSet resultSet = statement.executeQuery()) {
                     return normalizeMetadataSchema(schema, resultSet.next() ? resultSet.getString("schema_name") : null);
@@ -128,6 +392,13 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
     static String unqualifiedObjectSchemaSql() {
         return "SELECT COALESCE(OBJECT_SCHEMA_NAME(OBJECT_ID(QUOTENAME(?))), "
             + "NULLIF(SCHEMA_NAME(), N''), N'dbo') AS schema_name";
+    }
+
+    static String sqlServer2000ObjectSchemaSql() {
+        return "SELECT TOP 1 u.name AS schema_name FROM sysobjects o "
+            + "JOIN sysusers u ON o.uid = u.uid "
+            + "WHERE o.name = ? AND o.xtype IN ('U', 'V', 'P', 'FN', 'IF', 'TF') "
+            + "ORDER BY CASE WHEN u.name = 'dbo' THEN 0 ELSE 1 END, u.name";
     }
 
     static String normalizeMetadataSchema(String schema, String defaultSchema) {
@@ -224,10 +495,14 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
     }
 
     static String legacyTlsDiagnostics() {
+        return legacyTlsDiagnostics(jdbcDriverVersion());
+    }
+
+    private static String legacyTlsDiagnostics(String jdbcVersion) {
         String disabledAlgorithms = Security.getProperty(TLS_DISABLED_ALGORITHMS_KEY);
         return "DBX SQL Server legacy TLS diagnostics: java=" + System.getProperty("java.version", "unknown")
             + ", javaVendor=" + System.getProperty("java.vendor", "unknown")
-            + ", jdbc=" + jdbcDriverVersion()
+            + ", jdbc=" + jdbcVersion
             + ", sslProtocol=TLSv1"
             + ", tlsV1Disabled=" + isDisabled(disabledAlgorithms, "TLSV1")
             + ", tlsRsaDisabled=" + isDisabled(disabledAlgorithms, "TLS_RSA_*")
@@ -238,9 +513,13 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
     }
 
     static SQLException withLegacyTlsDiagnostics(SQLException error) {
+        return withLegacyTlsDiagnostics(error, jdbcDriverVersion());
+    }
+
+    static SQLException withLegacyTlsDiagnostics(SQLException error, String jdbcVersion) {
         String message = error.getMessage() == null ? error.toString() : error.getMessage();
         return new SQLException(
-            message + "\n\n" + legacyTlsDiagnostics(),
+            message + "\n\n" + legacyTlsDiagnostics(jdbcVersion),
             error.getSQLState(),
             error.getErrorCode(),
             error

@@ -90,14 +90,26 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         return unchecked(() -> {
             loadDriver(params);
             try (Connection conn = openTestConnection(params)) {
+                String validationQuery = connectionValidationQuery();
                 boolean valid = isConnectionValid(conn, 5);
                 Map<String, Object> result = new LinkedHashMap<>();
                 result.put("ok", valid);
+                result.put(
+                    "validation",
+                    validationQuery == null || validationQuery.isBlank() ? "jdbc_connection_isValid" : validationQuery
+                );
                 if (valid) {
                     Map<String, String> databaseInfo = JdbcDatabaseInfo.from(conn);
                     if (!databaseInfo.isEmpty()) {
                         result.put("databaseInfo", databaseInfo);
                     }
+                } else {
+                    result.put(
+                        "error",
+                        "Connection opened, but validation failed (method: "
+                            + (validationQuery == null || validationQuery.isBlank() ? "Connection.isValid" : validationQuery)
+                            + ")"
+                    );
                 }
                 return result;
             }

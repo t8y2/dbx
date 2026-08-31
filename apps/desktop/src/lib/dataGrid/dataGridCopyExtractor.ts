@@ -136,7 +136,7 @@ export const DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS: DataGridExtractorOptions = {
   dsv: {
     columnSeparator: ",",
     rowSeparator: "\n",
-    nullText: "NULL",
+    nullText: "",
     quote: '"',
     quotePolicy: "minimal",
     includeColumnHeader: false,

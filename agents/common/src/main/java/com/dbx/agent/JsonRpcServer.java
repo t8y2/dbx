@@ -162,7 +162,8 @@ public final class JsonRpcServer {
         if (AgentProtocol.METHOD_TEST_CONNECTION.equals(method)) {
             Map<String, Object> result = agent.testConnectionWithInfo(gson.fromJson(params, ConnectParams.class));
             if (!Boolean.TRUE.equals(result.get("ok"))) {
-                throw new RuntimeException("Connection failed");
+                Object error = result.get("error");
+                throw new RuntimeException(error == null ? "Connection failed" : String.valueOf(error));
             }
             return result;
         }

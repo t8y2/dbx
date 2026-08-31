@@ -2098,7 +2098,8 @@ public final class DamengAgent extends AbstractJdbcAgent {
 
     private static String buildUrl(ConnectParams params) {
         String connectionString = params.getConnection_string() == null ? "" : params.getConnection_string().trim();
-        if (!connectionString.isEmpty()) {
+        if (!connectionString.isEmpty()
+            && !connectionString.regionMatches(true, 0, "dm://", 0, "dm://".length())) {
             return connectionString;
         }
         String database = params.getDatabase() == null ? "" : params.getDatabase().trim();

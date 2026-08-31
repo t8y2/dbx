@@ -32,4 +32,11 @@ describe("DataGrid infinite-scroll sorting", () => {
     expect(sortSource).toContain("} else {\n    currentPage.value = 1;\n    resetGridVerticalScroll(true);\n  }");
     expect(sortSource.match(/emit\("sort"/g)).toHaveLength(1);
   });
+
+  it("does not expose an explicit local sort as a database order for refresh or pagination", () => {
+    const orderSource = functionSource("currentOrderBy", "executeServerPageJump");
+
+    expect(orderSource).toContain('sortMode.value === "database"');
+    expect(orderSource).toContain("return orderByInput.value.trim() || structuredOrderBy;");
+  });
 });

@@ -272,6 +272,7 @@ const props = defineProps<{
   prefillDatabase?: string;
   prefillSchema?: string;
   focusTableName?: string;
+  focusTableNames?: string[];
 }>();
 
 const emit = defineEmits<{
@@ -395,6 +396,8 @@ const tableMap = computed(() => new Map(tables.value.map((table) => [table.name,
 const allRelationships = computed(() => buildDiagramRelationships(tables.value, customRelationships.value));
 
 const relatedTableNames = computed(() => {
+  const selected = props.focusTableNames?.filter((name) => name.trim());
+  if (selected && selected.length > 1) return new Set(selected);
   const focus = props.focusTableName;
   const names = new Set<string>();
   if (!focus) return names;
@@ -411,6 +414,9 @@ const visibleTables = computed(() => {
     tables.value.filter((table) => !table.pendingDrop),
     tableSearch.value,
   );
+  if ((props.focusTableNames?.length ?? 0) > 1 && !showAllTables.value && !tableSearch.value.trim()) {
+    return filtered.filter((table) => relatedTableNames.value.has(table.name));
+  }
   if (props.focusTableName && !showAllTables.value && !tableSearch.value.trim()) {
     return filtered.filter((table) => relatedTableNames.value.has(table.name));
   }
@@ -1788,7 +1794,7 @@ function handleKeydown(e: KeyboardEvent) {
       return;
     }
   }
-  if (e.key === " " || e.key === "Spacebar") {
+  if (!typing && (e.key === " " || e.key === "Spacebar")) {
     e.preventDefault();
     isSpacePressed.value = true;
   }
@@ -1859,7 +1865,7 @@ onUnmounted(() => {
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent class="gap-0 p-0 overflow-hidden flex flex-col min-w-0" :class="isFullscreen ? '' : 'sm:max-w-[94vw] md:max-w-[94vw] lg:max-w-[94vw] xl:max-w-[94vw]'" :style="dialogStyle" :portal-class="isFullscreen ? 'p-0' : undefined">
+    <DialogContent class="gap-0 p-0 overflow-hidden flex flex-col min-w-0" :class="isFullscreen ? 'dbx-diagram-fullscreen' : 'sm:max-w-[94vw] md:max-w-[94vw] lg:max-w-[94vw] xl:max-w-[94vw]'" :style="dialogStyle" :portal-class="isFullscreen ? 'p-0' : undefined">
       <DialogHeader class="px-4 py-3 border-b">
         <DialogTitle class="flex items-center gap-2">
           <Network class="w-4 h-4" />

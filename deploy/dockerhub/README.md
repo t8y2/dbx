@@ -60,8 +60,28 @@ docker compose up -d --pull always
 | `DBX_DATA_DIR` | `/app/data` | Directory containing the DBX database, plugins, drivers, and other persistent data. |
 | `DBX_PORT` | `4224` | HTTP port inside the container. |
 | `DBX_PUBLIC_BASE_PATH` | `/` | URL prefix for reverse-proxy deployments, for example `/dbx`. |
+| `DBX_WEB_MCP_TOKEN` | Not set | Enables native Streamable HTTP MCP with this bearer token. Keep it secret. |
+| `DBX_WEB_MCP_TOKEN_FILE` | Not set | Read the native MCP bearer token from a file, for example a mounted Docker secret. Cannot be combined with `DBX_WEB_MCP_TOKEN`. |
+| `DBX_WEB_MCP_ALLOWED_HOSTS` | Not set | Required when native MCP is enabled. Comma-separated public Host authorities, including ports when present. |
+| `DBX_WEB_MCP_ALLOWED_ORIGINS` | Not set | Comma-separated browser Origins allowed to call native MCP. Optional for non-browser MCP clients. |
 
 Persist `/app/data` with a named volume or bind mount. Removing this data removes saved connections and other DBX application data.
+
+## Native HTTP MCP
+
+Native MCP is disabled by default. When enabled, it is served by the existing DBX Web listener at `/mcp`; no second container port is required. With a host mapping of `4225:4224`, configure the public authority clients use:
+
+```yaml
+environment:
+  DBX_WEB_MCP_TOKEN: replace-with-a-long-random-secret
+  DBX_WEB_MCP_ALLOWED_HOSTS: localhost:4225
+ports:
+  - "4225:4224"
+```
+
+The MCP endpoint is `http://localhost:4225/mcp` and requires `Authorization: Bearer <DBX_WEB_MCP_TOKEN>`. For a reverse proxy, set `DBX_WEB_MCP_ALLOWED_HOSTS` to the public hostname (and port if non-default); with `DBX_PUBLIC_BASE_PATH: /dbx`, the endpoint becomes `/dbx/mcp`. Browser-based clients must also set `DBX_WEB_MCP_ALLOWED_ORIGINS` to their exact `https://host[:port]` origin.
+
+The token is a deployment credential: rotate it through your secret manager and restart the container. DBX Desktop offers a local **Rotate Token** action for its separately managed loopback HTTP MCP service.
 
 DuckDB is delivered as a standalone native driver instead of being embedded in `dbx-web`. Install the DuckDB driver from Driver Manager after the first launch. It is stored under `/app/data/agents` and remains available across container upgrades when `/app/data` is persisted.
 

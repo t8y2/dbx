@@ -30,7 +30,7 @@ function mountEditor(kind: DataGridConditionHistoryKind, initialValue: string, o
   );
   app.mount(host);
   mountedApps.push({ app, host });
-  return { value, input: host.querySelector("textarea") as HTMLTextAreaElement };
+  return { value, input: host.querySelector("textarea") as HTMLTextAreaElement, host };
 }
 
 function mockTextareaMetrics(input: HTMLTextAreaElement, options: { clientWidth: number; scrollWidth?: number; clientHeight?: number; scrollHeight?: number }) {
@@ -119,6 +119,44 @@ describe("DataGridConditionEditor quote completion", () => {
 
     expect(event.defaultPrevented).toBe(false);
     expect(value.value).toBe("name");
+  });
+
+  it.each([
+    ["where", "z", { ctrlKey: true }],
+    ["orderBy", "z", { metaKey: true }],
+    ["where", "z", { ctrlKey: true, shiftKey: true }],
+    ["orderBy", "y", { ctrlKey: true }],
+  ] as const)("keeps %s undo/redo shortcuts in the condition editor", (kind, key, modifiers) => {
+    const { input, host } = mountEditor(kind, "id = 123");
+    let bubbled = 0;
+    host.addEventListener("keydown", () => bubbled++);
+
+    const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...modifiers });
+    input.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(bubbled).toBe(0);
+  });
+
+  it("keeps WHERE and ORDER BY undo history independent", async () => {
+    const where = mountEditor("where", "id = 123");
+    const orderBy = mountEditor("orderBy", "id ASC");
+
+    where.input.value = "id = 456";
+    where.input.dispatchEvent(new Event("input", { bubbles: true }));
+    orderBy.input.value = "id DESC";
+    orderBy.input.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+
+    orderBy.input.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true, bubbles: true, cancelable: true }));
+    await nextTick();
+    expect(where.value.value).toBe("id = 456");
+    expect(orderBy.value.value).toBe("id ASC");
+
+    orderBy.input.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true, shiftKey: true, bubbles: true, cancelable: true }));
+    await nextTick();
+    expect(where.value.value).toBe("id = 456");
+    expect(orderBy.value.value).toBe("id DESC");
   });
 
   it("passes the textarea caret range through when accepting a suggestion", async () => {

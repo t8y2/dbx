@@ -55,6 +55,9 @@ const suggestionPosition = ref({ left: 0, top: 0, width: 180 });
 const historyPreview = ref<{ value: string; left: number; top: number; maxWidth: number; arrowTop: number; side: "left" | "right" } | null>(null);
 const pointerMovedSuggestionIndex = ref(-1);
 const editorFocused = ref(false);
+const conditionUndoStack = ref<string[]>([]);
+const conditionRedoStack = ref<string[]>([]);
+let conditionLastValue = modelValue.value;
 let collapseTimer: ReturnType<typeof setTimeout> | undefined;
 let resizeObserver: ResizeObserver | undefined;
 let expandAfterComposition = false;
@@ -370,6 +373,43 @@ function onInput(event: Event) {
   scheduleCaretIntoView();
 }
 
+function isConditionUndoRedoShortcut(event: KeyboardEvent) {
+  const key = event.key.toLowerCase();
+  return ((event.metaKey || event.ctrlKey) && !event.altKey && key === "z") || (event.ctrlKey && !event.metaKey && !event.altKey && key === "y");
+}
+
+function isConditionRedoShortcut(event: KeyboardEvent) {
+  return ((event.metaKey || event.ctrlKey) && !event.altKey && event.shiftKey && event.key.toLowerCase() === "z") || (event.ctrlKey && !event.metaKey && !event.altKey && event.key.toLowerCase() === "y");
+}
+
+function applyConditionHistoryValue(value: string) {
+  conditionLastValue = value;
+  modelValue.value = value;
+  void nextTick(() => {
+    const target = activeEditor.value;
+    if (!target) return;
+    target.focus({ preventScroll: true });
+    target.setSelectionRange(value.length, value.length);
+    syncSelection(target);
+  });
+}
+
+function handleConditionUndoRedo(event: KeyboardEvent) {
+  if (!isConditionUndoRedoShortcut(event)) return false;
+
+  event.preventDefault();
+  event.stopPropagation();
+  const source = isConditionRedoShortcut(event) ? conditionRedoStack.value : conditionUndoStack.value;
+  const targetValue = source.pop();
+  if (targetValue === undefined) return true;
+
+  const currentValue = modelValue.value;
+  const destination = isConditionRedoShortcut(event) ? conditionUndoStack.value : conditionRedoStack.value;
+  destination.push(currentValue);
+  applyConditionHistoryValue(targetValue);
+  return true;
+}
+
 async function applyCondition() {
   editor.dismiss();
   const applied = props.apply ? await props.apply(modelValue.value) : emit("apply", modelValue.value);
@@ -385,6 +425,7 @@ async function clearCondition() {
 }
 
 function onKeydown(event: KeyboardEvent) {
+  if (handleConditionUndoRedo(event)) return;
   if (completeQuote(event)) return;
   const action = editor.handleKeydown(event);
   if (action === "apply") void applyCondition();
@@ -471,7 +512,14 @@ function hideHistoryPreview() {
   historyPreview.value = null;
 }
 
-watch(modelValue, () => resizeEditor());
+watch(modelValue, (value) => {
+  if (value !== conditionLastValue) {
+    conditionUndoStack.value.push(conditionLastValue);
+    conditionRedoStack.value = [];
+    conditionLastValue = value;
+  }
+  resizeEditor();
+});
 watch(suggestionPreferredWidth, () => {
   if (editor.dropdownOpen.value) updateSuggestionPosition();
 });

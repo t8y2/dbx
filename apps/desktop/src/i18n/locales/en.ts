@@ -5806,6 +5806,7 @@ export default {
     filterSettings: "File Filter",
     fileFilter: "File name filter",
     fileFilterPlaceholder: "File name filter",
+    filterInvalid: "Invalid file filter, kept the previous one: {message}",
     fileFilterHint: "Use a glob such as *.sql or *.sh, or a regular expression such as {regex}.",
   },
   diff: {

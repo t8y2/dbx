@@ -7412,6 +7412,7 @@ export default withEnglishFallback({
     filterSettings: "Filtro de archivos",
     fileFilter: "Filtro de nombre de archivo",
     fileFilterPlaceholder: "Filtro de nombre de archivo",
+    filterInvalid: "Filtro de archivos no válido; se conserva el anterior: {message}",
     fileFilterHint: "Use un comodín como *.sql o *.sh, o una expresión regular como {regex}.",
   },
   mqTopics: {

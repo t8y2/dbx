@@ -7414,6 +7414,7 @@ export default withEnglishFallback({
     filterSettings: "Filtro de arquivos",
     fileFilter: "Filtro de nome de arquivo",
     fileFilterPlaceholder: "Filtro de nome de arquivo",
+    filterInvalid: "Filtro de arquivo inválido; o anterior foi mantido: {message}",
     fileFilterHint: "Use um curinga como *.sql ou *.sh, ou uma expressão regular como {regex}.",
   },
   mqTopics: {

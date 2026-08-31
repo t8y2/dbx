@@ -5790,6 +5790,7 @@ export default withEnglishFallback({
     filterSettings: "文件过滤",
     fileFilter: "文件名过滤规则",
     fileFilterPlaceholder: "文件名过滤规则",
+    filterInvalid: "文件过滤规则无效，已保留原规则：{message}",
     fileFilterHint: "支持通配符（如 *.sql、*.sh）或正则表达式（如 {regex}）。",
   },
   diff: {

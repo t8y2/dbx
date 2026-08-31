@@ -7413,6 +7413,7 @@ export default withEnglishFallback({
     filterSettings: "Filtro file",
     fileFilter: "Filtro nome file",
     fileFilterPlaceholder: "Filtro nome file",
+    filterInvalid: "Filtro file non valido; viene mantenuto il precedente: {message}",
     fileFilterHint: "Usa un carattere jolly come *.sql o *.sh oppure un'espressione regolare come {regex}.",
   },
   mqTopics: {

@@ -107,10 +107,21 @@ fn glob_to_regex(glob: &str) -> String {
 }
 
 fn is_glob_filter(file_filter: &str) -> bool {
-    file_filter.contains('*')
-        && !file_filter
-            .chars()
-            .any(|character| matches!(character, '\\' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '$' | '|' | '+'))
+    let characters: Vec<char> = file_filter.chars().collect();
+    if !characters.contains(&'*') && !characters.contains(&'?') {
+        return false;
+    }
+    for (index, character) in characters.iter().enumerate() {
+        if matches!(character, '\\' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '$' | '|' | '+') {
+            return false;
+        }
+        // A wildcard directly after `.` is a regex quantifier (`.*`, `.?`),
+        // not a glob wildcard: `.*sql` must stay a regex while `*.sql` is a glob.
+        if matches!(character, '*' | '?') && index > 0 && characters[index - 1] == '.' {
+            return false;
+        }
+    }
+    true
 }
 
 fn compile_file_filter(file_filter: &str) -> Result<Regex, String> {
@@ -329,6 +340,25 @@ mod tests {
         assert!(filter.is_match("script.sh"));
         assert!(filter.is_match("SCRIPT.SH"));
         assert!(!filter.is_match("script.py"));
+    }
+
+    #[test]
+    fn compile_file_filter_keeps_dot_prefixed_wildcards_as_regex() {
+        // `.*sql` is a regex ("anything ending in sql"), not a glob that would
+        // match only literal dots before "sql".
+        let filter = compile_file_filter(".*sql").unwrap();
+
+        assert!(filter.is_match("notes.sql"));
+        assert!(filter.is_match("mysql-dump.txt"));
+        assert!(!filter.is_match("readme.txt"));
+    }
+
+    #[test]
+    fn compile_file_filter_accepts_question_mark_globs() {
+        let filter = compile_file_filter("file?.sql").unwrap();
+
+        assert!(filter.is_match("file1.sql"));
+        assert!(!filter.is_match("file12.sql"));
     }
 
     #[test]

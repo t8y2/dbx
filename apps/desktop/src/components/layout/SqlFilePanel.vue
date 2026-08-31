@@ -41,7 +41,6 @@ interface FolderState {
 const folders = ref<FolderState[]>([]);
 const filterSettingsOpen = ref(false);
 const fileFilterDraft = ref(getSqlFileFilter());
-const fileFilterPlaceholder = "*.sql / *.sh / .*[.](sql|sh|py)$";
 const fileFilterRegexExample = ".*[.](sql|sh|py)$";
 
 // Right-click target. `kind` discriminates between a folder header, a tree
@@ -117,9 +116,9 @@ async function addFolder(folderPath: string) {
 // Re-scan a single top-level folder and replace its entries. Mutated via the
 // reactive proxy (folders.value[idx]) so Vue tracks the change — see the note
 // in addFolder above.
-async function loadFolderEntries(folderPath: string) {
+async function loadFolderEntries(folderPath: string): Promise<string | null> {
   const idx = folders.value.findIndex((f) => f.path === folderPath);
-  if (idx === -1) return;
+  if (idx === -1) return null;
   folders.value[idx].loading = true;
   try {
     const entries = await api.listSqlFilesInFolder(folderPath, getSqlFileFilter());
@@ -137,13 +136,16 @@ async function loadFolderEntries(folderPath: string) {
       folders.value[target].expanded = nextExpanded;
     }
   } catch (e: any) {
-    toast(t("sqlFileTree.loadFailed", { message: e?.message || String(e) }), 5000);
+    const message = e?.message || String(e);
+    toast(t("sqlFileTree.loadFailed", { message }), 5000);
+    return message;
   } finally {
     const target = folders.value.findIndex((f) => f.path === folderPath);
     if (target !== -1) {
       folders.value[target].loading = false;
     }
   }
+  return null;
 }
 
 function collectPaths(entries: SqlFileEntry[], into: Set<string>) {
@@ -166,9 +168,21 @@ async function refreshAll() {
 }
 
 async function saveFileFilter() {
+  const previousFilter = getSqlFileFilter();
   saveSqlFileFilter(fileFilterDraft.value);
+  const errors = await Promise.all(folders.value.map((f) => loadFolderEntries(f.path)));
+  // An unparsable pattern must not survive in localStorage: it would fail
+  // every later refresh and silently empty Quick Open until it is fixed.
+  const invalidFilter = errors.find((message) => message?.startsWith("Invalid file filter"));
+  if (invalidFilter) {
+    saveSqlFileFilter(previousFilter);
+    await Promise.all(folders.value.map((f) => loadFolderEntries(f.path)));
+    toast(t("sqlFileTree.filterInvalid", { message: invalidFilter }), 5000);
+    return;
+  }
   filterSettingsOpen.value = false;
-  await refreshAll();
+  notifySqlFileFoldersChanged();
+  toast(t("sqlFileTree.refreshed"), 1500);
 }
 
 async function reloadFolderAfterMutation(folderPath: string) {
@@ -680,7 +694,7 @@ function clearContextTarget() {
         </DialogHeader>
         <div class="grid gap-2 py-2">
           <Label for="sql-file-filter">{{ t("sqlFileTree.fileFilter") }}</Label>
-          <Input id="sql-file-filter" v-model="fileFilterDraft" :placeholder="fileFilterPlaceholder" @keydown.enter="saveFileFilter" />
+          <Input id="sql-file-filter" v-model="fileFilterDraft" :placeholder="t('sqlFileTree.fileFilterPlaceholder')" @keydown.enter="saveFileFilter" />
           <p class="text-xs text-muted-foreground">{{ t("sqlFileTree.fileFilterHint", { regex: fileFilterRegexExample }) }}</p>
         </div>
         <DialogFooter>

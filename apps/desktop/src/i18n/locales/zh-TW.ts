@@ -7402,6 +7402,7 @@ export default withEnglishFallback({
     filterSettings: "檔案篩選",
     fileFilter: "檔案名稱篩選規則",
     fileFilterPlaceholder: "檔案名稱篩選規則",
+    filterInvalid: "檔案篩選規則無效，已保留原規則：{message}",
     fileFilterHint: "支援萬用字元（如 *.sql、*.sh）或正則表示式（如 {regex}）。",
   },
   mqTopics: {

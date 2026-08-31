@@ -3182,6 +3182,7 @@ export default withEnglishFallback({
     createFunction: "Nuova funzione",
     createTrigger: "Nuovo trigger",
     changeOpenMode: "Modifica modalità apertura",
+    closeLeftTabs: "Chiudi le schede a sinistra",
     closeRightTabs: "Chiudi le schede a destra",
     viewObject: "View",
     eventEditorTitle: "MySQL Event",

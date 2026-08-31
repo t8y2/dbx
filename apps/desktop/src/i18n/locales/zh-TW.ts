@@ -3181,6 +3181,7 @@ export default withEnglishFallback({
     createFunction: "新增函數",
     createTrigger: "新增觸發器",
     changeOpenMode: "修改開啟方式",
+    closeLeftTabs: "關閉左側標籤頁",
     closeRightTabs: "關閉右側標籤頁",
     viewObject: "View",
     eventEditorTitle: "MySQL Event",

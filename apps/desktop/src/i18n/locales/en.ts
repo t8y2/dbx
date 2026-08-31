@@ -2971,6 +2971,7 @@ export default {
     fullTabTitle: "Show Full Tab Titles",
     closeTab: "Close Tab",
     closeFixedTab: "Close Fixed Tab",
+    closeLeftTabs: "Close Tabs to the Left",
     closeRightTabs: "Close Tabs to the Right",
     closeOtherTabs: "Close Other Tabs",
     closeOtherRegularTabs: "Close Other Regular Tabs",

@@ -3208,6 +3208,7 @@ export default withEnglishFallback({
     createFunction: "新規関数",
     createTrigger: "新規トリガー",
     changeOpenMode: "開き方を変更",
+    closeLeftTabs: "左側のタブを閉じる",
     closeRightTabs: "右側のタブを閉じる",
     viewObject: "View",
     eventEditorTitle: "MySQL Event",

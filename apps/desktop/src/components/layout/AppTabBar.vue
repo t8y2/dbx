@@ -209,6 +209,20 @@ function closeTabsToRightFromTab(tab: QueryTab) {
   });
 }
 
+function tabsToLeftInGroup(tab: QueryTab) {
+  const groupedTabs = tab.pinned ? fixedTabs.value : regularTabs.value;
+  const targetIndex = groupedTabs.findIndex((item) => item.id === tab.id);
+  return targetIndex < 0 ? [] : groupedTabs.slice(0, targetIndex);
+}
+
+function hasTabsToLeft(tab: QueryTab) {
+  return tabsToLeftInGroup(tab).length > 0;
+}
+
+function closeTabsToLeftFromTab(tab: QueryTab) {
+  queryStore.closeLeftTabs(tab.id);
+}
+
 function hasSpecialRegularSurfaceToRight(surface: SpecialRegularSurface) {
   return surface === "settings" && !!props.driverStoreOpen;
 }
@@ -344,6 +358,12 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
       disabled: closeOtherDisabled,
       icon: X,
       shortcut: settingsStore.editorSettings.shortcuts.closeOtherTabs,
+    },
+    {
+      label: t("contextMenu.closeLeftTabs"),
+      action: () => closeTabsToLeftFromTab(tab),
+      disabled: !hasTabsToLeft(tab),
+      icon: X,
     },
     {
       label: t("contextMenu.closeRightTabs"),

@@ -9,7 +9,10 @@ test("Tauri AI agent stream events carry their session id", () => {
   assert.match(tauriAiCommandSource, /struct AiAgentEventPayload \{/);
   assert.match(tauriAiCommandSource, /session_id: String/);
   assert.match(tauriAiCommandSource, /#\[serde\(flatten\)\]\s*event: AgentEvent/);
-  assert.match(tauriAiCommandSource, /AiAgentEventPayload \{ session_id: self\.session_id\.clone\(\), event \}/);
+  assert.match(
+    tauriAiCommandSource,
+    /AiAgentEventPayload \{ session_id: self\.session_id\.clone\(\), event \}/,
+  );
   assert.match(tauriAiCommandSource, /app\.emit\("ai-agent-event", &payload\)/);
 });
 

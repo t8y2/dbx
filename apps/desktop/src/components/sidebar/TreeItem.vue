@@ -1486,7 +1486,7 @@ function onKeydown(event: KeyboardEvent) {
                 {
                   'flex-1': node.type === 'connection' && !trailingComment,
                   'tree-connection-label': node.type === 'connection' || node.type === 'connection-group',
-                  'font-semibold': isLoginUserNode,
+                  'font-semibold': isLoginUserNode(),
                 },
               ]"
               >{{ visibleLabel(node) }}</span

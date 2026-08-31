@@ -5040,6 +5040,15 @@ onUnmounted(() => {
                   </Button>
                 </div>
               </div>
+              <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="flex items-center gap-2">
+                  <Label for="sidebar-browse-objects-on-database-activation">{{ t("settings.sidebarBrowseObjectsOnDatabaseActivation") }}</Label>
+                  <HelpTooltip :label="t('settings.sidebarBrowseObjectsOnDatabaseActivation')">
+                    {{ t("settings.sidebarBrowseObjectsOnDatabaseActivationDescription") }}
+                  </HelpTooltip>
+                </div>
+                <Switch id="sidebar-browse-objects-on-database-activation" v-model="editSidebarBrowseObjectsOnDatabaseActivation" />
+              </div>
               <div class="space-y-2">
                 <div class="flex items-center gap-2">
                   <Label>{{ t("settings.reuseDataTab") }}</Label>
@@ -5199,15 +5208,6 @@ onUnmounted(() => {
                   </div>
                   <Switch id="editor-prefill-new-query" v-model="editPrefillNewQueryWithSelect" class="mt-0.5" />
                 </div>
-              </div>
-              <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                <div class="flex items-center gap-2">
-                  <Label for="sidebar-browse-objects-on-database-activation">{{ t("settings.sidebarBrowseObjectsOnDatabaseActivation") }}</Label>
-                  <HelpTooltip :label="t('settings.sidebarBrowseObjectsOnDatabaseActivation')">
-                    {{ t("settings.sidebarBrowseObjectsOnDatabaseActivationDescription") }}
-                  </HelpTooltip>
-                </div>
-                <Switch id="sidebar-browse-objects-on-database-activation" v-model="editSidebarBrowseObjectsOnDatabaseActivation" />
               </div>
               <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">

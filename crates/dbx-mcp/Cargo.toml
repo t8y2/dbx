@@ -1,6 +1,6 @@
 [package]
 name = "dbx-mcp"
-version = "0.4.74"
+version = "0.4.75"
 edition = "2021"
 license = "Apache-2.0"
 

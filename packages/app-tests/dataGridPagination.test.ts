@@ -214,10 +214,14 @@ test("auto-redirect: total is undefined — guard prevents redirect attempt", ()
   assert.equal(!total || (total as any) <= 0, true, "guard should prevent redirect when total is unknown");
 });
 
-test("only an explicit last-page COUNT blocks the grid surface", () => {
+test("explicit loads, last-page COUNTs, and page jumps block the grid surface; background counts do not", () => {
   const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
   assert.match(source, /const totalRowCountBusy = computed\(\(\) => props\.totalRowCountLoading === true \|\| manualTotalRowCountLoading\.value\)/);
-  assert.match(source, /const gridSurfaceBusy = computed\(\(\) => isRefreshingData\.value \|\| props\.loading === true \|\| manualTotalRowCountLoading\.value\)/);
+  assert.match(source, /const gridSurfaceBusy = computed\(\(\) => isRefreshingData\.value \|\| props\.loading === true \|\| manualTotalRowCountLoading\.value \|\| pageJumpBusy\.value\)/);
+  assert.match(source, /const pageJumpBusy = computed\(\(\) => !!props\.pageJumpProgress && props\.pageJumpProgress\.totalRequests > 1\)/);
+  // totalRowCountBusy must stay out of gridSurfaceBusy so background counts keep the grid interactive (#5967)
+  const busyLine = source.match(/const gridSurfaceBusy = computed\([^\n]*/)?.[0] ?? "";
+  assert.ok(!busyLine.includes("totalRowCountBusy"), "background counts must not block the grid surface");
   assert.match(source, /const gridPaginationBusy = computed\(\(\) => gridSurfaceBusy\.value \|\| totalRowCountBusy\.value\)/);
   assert.match(source, /v-if="gridSurfaceBusy"/);
   assert.match(source, /:loading="gridPaginationBusy"/);
@@ -244,7 +248,10 @@ test("jumping to last page does not rewrite indexes before the new page loads", 
   const jumpFn = source.match(/function jumpToCountedLastPage\(total: number\) \{[\s\S]*?\n\}/)?.[0] ?? "";
   assert.match(jumpFn, /resolveDataGridPaginationTotal/);
   assert.match(jumpFn, /maxRows: paginationMaxRows\.value/);
-  assert.match(jumpFn, /emit\("paginate"/);
+  // Last-page jumps delegate to requestServerPageJump (ES deep-jump confirm) which still emits "paginate" without bumping currentPage
+  assert.match(jumpFn, /requestServerPageJump\(lastPageNum\)/);
+  const executeJumpFn = source.match(/function executeServerPageJump[\s\S]*?\n\}/)?.[0] ?? "";
+  assert.match(executeJumpFn, /emit\("paginate"/);
   assert.doesNotMatch(jumpFn, /currentPage\.value\s*=/);
   assert.match(source, /function rowNumberPageOffset/);
 });
@@ -269,7 +276,7 @@ test("rerun total-count visibility comes from the shared rule and triggers the m
   assert.match(rerunComputed, /canCalculateTotalRowCount: canCalculateTotalRowCount\.value/);
   assert.match(rerunComputed, /displayedTotalRowCount: displayedTotalRowCount\.value/);
   assert.match(rerunComputed, /totalRowCountIsExact: totalRowCountIsExact\.value/);
-  const rerunButton = source.match(/<button\s+v-else-if="showRerunTotalCountAction"[\s\S]*?<\/button>/)?.[0] ?? "";
+  const rerunButton = source.match(/<i18n-t v-if="showRerunTotalCountAction[\s\S]*?<template #button>[\s\S]*?<button[\s\S]*?<\/button>/)?.[0] ?? "";
   assert.match(rerunButton, /@click="calculateTotalRowCount"/);
 });
 

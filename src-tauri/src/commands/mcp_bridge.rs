@@ -420,19 +420,29 @@ mod tests {
 
     #[test]
     fn mcp_allowlist_distinguishes_all_subset_and_none() {
-        let all = McpGlobalPolicy { read_only: false, allow_dangerous_sql: false, allowed_connection_ids: None };
+        let all = McpGlobalPolicy {
+            read_only: false,
+            allow_dangerous_sql: false,
+            allowed_connection_ids: None,
+            query_timeout_secs: None,
+        };
         assert!(ensure_connection_in_mcp_scope(&all, "conn-1").is_ok());
 
         let subset = McpGlobalPolicy {
             read_only: false,
             allow_dangerous_sql: false,
             allowed_connection_ids: Some(vec!["conn-1".to_string()]),
+            query_timeout_secs: None,
         };
         assert!(ensure_connection_in_mcp_scope(&subset, "conn-1").is_ok());
         assert!(ensure_connection_in_mcp_scope(&subset, "conn-2").unwrap_err().starts_with("CONNECTION_OUT_OF_SCOPE:"));
 
-        let none =
-            McpGlobalPolicy { read_only: false, allow_dangerous_sql: false, allowed_connection_ids: Some(Vec::new()) };
+        let none = McpGlobalPolicy {
+            read_only: false,
+            allow_dangerous_sql: false,
+            allowed_connection_ids: Some(Vec::new()),
+            query_timeout_secs: None,
+        };
         assert!(ensure_connection_in_mcp_scope(&none, "conn-1").is_err());
     }
 

@@ -492,7 +492,7 @@ fn builds_table_data_where_and_schema_queries() {
             include_row_id: false,
             ..Default::default()
         }),
-        "SELECT `id` AS `id`, `name` AS `name` FROM `dbx_demo`.`connection_test` ORDER BY 1 LIMIT 2 OFFSET 1;"
+        "SELECT `id`, `name` FROM `dbx_demo`.`connection_test` ORDER BY 1 LIMIT 2 OFFSET 1;"
     );
     assert_eq!(
         build_table_data_select_sql(TableDataSelectSqlOptions {

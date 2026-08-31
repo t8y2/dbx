@@ -100,6 +100,10 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridTextFilterPanelHeight");
   });
 
+  it("includes the multi-statement default view", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("multiStatementDefaultView");
+  });
+
   it("includes the cell detail button visibility", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridCellDetailButtonVisible");
   });
@@ -183,6 +187,10 @@ describe("editorSettingsDraftFromSettings", () => {
     const draft = editorSettingsDraftFromSettings(makeSettings({ dataGridFilterEditorView: "text", dataGridTextFilterPanelHeight: 224 }));
     expect(draft.dataGridFilterEditorView).toBe("text");
     expect(draft.dataGridTextFilterPanelHeight).toBe(224);
+  });
+
+  it("maps the multi-statement default view from settings", () => {
+    expect(editorSettingsDraftFromSettings(makeSettings({ multiStatementDefaultView: "summary" })).multiStatementDefaultView).toBe("summary");
   });
 
   it("preserves the table-open default for legacy settings", () => {
@@ -305,6 +313,13 @@ describe("editorSettingsPatchFromDraft", () => {
     expect(editorSettingsPatchFromDraft(hidden, visible)).toEqual({ dataGridCellDetailButtonVisible: false });
     expect(editorSettingsPatchFromDraft(visible, visible)).toEqual({});
     expect(editorSettingsPatchFromDraft(visible, hidden)).toEqual({ dataGridCellDetailButtonVisible: true });
+  });
+
+  it("includes the multi-statement default view when changed", () => {
+    const result = editorSettingsDraftFromSettings(makeSettings({ multiStatementDefaultView: "result" }));
+    const summary = editorSettingsDraftFromSettings(makeSettings({ multiStatementDefaultView: "summary" }));
+
+    expect(editorSettingsPatchFromDraft(summary, result)).toEqual({ multiStatementDefaultView: "summary" });
   });
 
   it("includes continueOnErrorOnBatch in patch when changed", () => {

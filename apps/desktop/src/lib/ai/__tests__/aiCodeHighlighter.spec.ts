@@ -25,4 +25,21 @@ describe("createAiShikiBlockCodeHighlighter", () => {
     expect(html).not.toContain("<pre");
     expect(html).not.toContain("<code");
   });
+
+  it("can build the oniguruma WASM engine used on legacy WebViews", async () => {
+    // Mirrors the exact wiring loadAiShikiHighlighter uses on WebKit engines
+    // that cannot compile the JavaScript engine's lookbehind patterns, so a
+    // broken shiki/wasm integration fails here instead of on a packaged app.
+    const [{ createHighlighterCore }, { createOnigurumaEngine }, { default: sql }, { default: githubLight }] = await Promise.all([import("shiki/core"), import("shiki/engine/oniguruma"), import("shiki/langs/sql.mjs"), import("shiki/themes/github-light.mjs")]);
+    const highlighter = await createHighlighterCore({
+      engine: await createOnigurumaEngine(import("shiki/wasm")),
+      langs: [sql],
+      themes: [githubLight],
+    });
+
+    const html = highlighter.codeToHtml("SELECT id FROM users", { lang: "sql", structure: "classic", theme: "github-light" });
+
+    expect(html).toContain('class="line"');
+    expect(html).toMatch(/style="color:#/);
+  }, 30_000);
 });

@@ -80,7 +80,8 @@ import { connectionGroupDestinationRows } from "@/lib/sidebar/sidebarLayout";
 import { objectTypesForGroupNode } from "@/lib/table/tableTree";
 import { loadSidebarObjectGroup } from "@/lib/sidebar/sidebarObjectGroupRouting";
 import { isXuguTypeMemberContainer } from "@/lib/sidebar/xuguTypeMembers";
-import { isXuguPublicSynonymTreeNode } from "@/lib/sidebar/xuguPublicSynonyms";
+import { isXuguSyntheticTreeNode } from "@/lib/sidebar/xuguPublicSynonyms";
+import { buildXuguSchedulerJobSql, type XuguSchedulerJobAction } from "@/lib/database/xuguSchedulerJobSql";
 import { mysqlObjectTemplateForGroup } from "@/lib/sidebar/mysqlObjectTemplates";
 import { buildTableDeleteTemplate, buildTableInsertTemplate, buildTableSelectTemplate, buildTableUpdateTemplate } from "@/lib/table/tableSqlTemplates";
 import { qualifiedTableName } from "@/lib/table/tableSelectSql";
@@ -111,7 +112,7 @@ import {
 } from "@/lib/database/databaseCapabilities";
 import { copyDisplayPathForTreeNode, copyNameForTreeNode, isDirectNavigationTreeNode, isDocumentBrowserTreeNode, isRepeatableNavigationTreeNode, objectSourceTargetForTreeNode, shouldRunTreeNodeRowAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "@/lib/sidebar/treeNodeClick";
 import { customTypeCapabilities, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
-import { mongoCollectionTableTypeFromNode, mongoDropIndexFailureCount } from "@/lib/sidebar/mongoCollectionMutation";
+import { mongoCollectionTableTypeFromNode, mongoCreateDatabasePreview, mongoDropIndexFailureCount } from "@/lib/sidebar/mongoCollectionMutation";
 import { dataTabOpenModeFromTreeClick, type DataTabOpenMode } from "@/lib/sidebar/dataTabOpenPolicy";
 import { isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut } from "@/lib/editor/keyboardShortcuts";
 import { handleSidebarTreeDeleteShortcut } from "@/lib/sidebar/sidebarTreeDeleteShortcut";
@@ -424,6 +425,7 @@ const {
   revealDatabaseFile,
   canBackupSqliteDatabase,
   backupSqliteDatabase,
+  restoreSqliteDatabase,
   disconnectConnection,
   connectionDisconnectMenuLabel,
   canDisconnectConnection,
@@ -648,6 +650,7 @@ const groupTypes: Set<TreeNodeType> = new Set([
   "group-functions",
   "group-sequences",
   "group-synonyms",
+  "group-jobs",
   "group-packages",
   "group-types",
   "group-partitions",
@@ -1504,15 +1507,19 @@ async function confirmDeleteSavedSqlFile() {
   releaseActiveNodeReference([node.id]);
 }
 
-async function openObjectBrowser(eventReadOnly = false, openEventEditor = false) {
+async function openObjectBrowser(eventReadOnly = false, openEventEditor: boolean | "create" = false) {
   const node = activeNode.value;
   if (!node.connectionId) return;
   try {
     await connectionStore.ensureConnected(node.connectionId);
     connectionStore.activeConnectionId = node.connectionId;
 
+    const eventName = openEventEditor === true && node.type === "event" ? node.objectName || node.label : undefined;
+    const eventCreateRequestId = openEventEditor === "create" && node.type === "group-events" ? ++mysqlEventCreateRequestSeq : undefined;
+    const objectFilter = node.type === "event" || node.type === "group-events" ? "events" : undefined;
+
     if (hasTreeNodeDatabaseContext(node)) {
-      queryStore.openObjectBrowser(node.connectionId, node.database, node.schema, node.catalog, openEventEditor && node.type === "event" ? node.objectName || node.label : undefined, eventReadOnly, node.type === "event" || node.type === "group-events" ? "events" : undefined);
+      queryStore.openObjectBrowser(node.connectionId, node.database, node.schema, node.catalog, eventName, eventReadOnly, objectFilter, eventCreateRequestId);
       return;
     }
 
@@ -1521,7 +1528,7 @@ async function openObjectBrowser(eventReadOnly = false, openEventEditor = false)
     const options = await getDatabaseOptions(node.connectionId);
     const database = resolveDefaultDatabase(connection, options);
     if (database) {
-      queryStore.openObjectBrowser(node.connectionId, database, undefined, undefined, openEventEditor && node.type === "event" ? node.objectName || node.label : undefined, eventReadOnly, node.type === "event" || node.type === "group-events" ? "events" : undefined);
+      queryStore.openObjectBrowser(node.connectionId, database, undefined, undefined, eventName, eventReadOnly, objectFilter, eventCreateRequestId);
     } else {
       await toggle();
     }
@@ -1529,6 +1536,14 @@ async function openObjectBrowser(eventReadOnly = false, openEventEditor = false)
     toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
     openDriverStoreForInstallError(e?.message || String(e));
   }
+}
+
+// 每次"新建事件"菜单点击都会分配一个单调递增的请求号，保证同一个
+// ObjectBrowser tab 被复用时也能重新进入 MySQL Event 的 CREATE 编辑器。
+let mysqlEventCreateRequestSeq = 0;
+
+function openMysqlEventCreateEditor() {
+  void openObjectBrowser(false, "create");
 }
 
 async function openDatabaseBrowser() {
@@ -2205,7 +2220,7 @@ function openObjectSourceDialog(initialEditing: boolean, viewPackageBody = false
           databaseType,
           signature: sourceNode.signature,
         });
-        const sourceIsEditable = raw.editable !== false && !["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY"].includes(resolvedType);
+        const sourceIsEditable = raw.editable !== false && !["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY", "JOB"].includes(resolvedType);
         if (sourceIsEditable) {
           queryStore.openObjectSourceTab({
             connectionId,
@@ -2257,6 +2272,26 @@ async function compileXuguObject() {
     const executed = await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
     if (!executed) return;
     toast(t("contextMenu.compileObjectSuccess", { name: node.label }), 3000);
+    await connectionStore.refreshTreeNode(node);
+  } catch (e: any) {
+    toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
+async function executeXuguSchedulerJobAction(action: XuguSchedulerJobAction) {
+  const node = activeNode.value;
+  if (currentDatabaseType() !== "xugu" || node.type !== "job" || !node.connectionId || !node.database) return;
+  const sql = buildXuguSchedulerJobSql(action, node.objectName || node.label);
+  if (!sql) return;
+  if (action === "drop" && !window.confirm(t("xuguSchedulerJob.confirmDrop", { name: node.label }))) return;
+  try {
+    await connectionStore.ensureConnected(node.connectionId);
+    const executed = await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
+    if (!executed) return;
+    toast(t("xuguSchedulerJob.actionSuccess", { action: t(`xuguSchedulerJob.${action}`), name: node.label }), 3000);
+    // A job belongs to the synthetic scheduler-job group. `refreshTreeNode`
+    // already walks a child back to that group, so this refreshes the list
+    // after a destructive action without retaining a stale job node.
     await connectionStore.refreshTreeNode(node);
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
@@ -3100,12 +3135,12 @@ const canCreateSchema = computed(() => {
 const canDropSchema = computed(() => {
   const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
   const dbType = effectiveDatabaseTypeForConnection(config);
-  return activeNode.value.type === "schema" && !isXuguPublicSynonymTreeNode(config?.db_type, activeNode.value.type, activeNode.value.schema) && !isSqlServerLinkedNode(activeNode.value) && (usesTreeSchemaMode(dbType) || dbType === "dameng") && !connectionUsesDatabaseObjectTreeMode(config);
+  return activeNode.value.type === "schema" && !isXuguSyntheticTreeNode(config?.db_type, activeNode.value.type, activeNode.value.schema) && !isSqlServerLinkedNode(activeNode.value) && (usesTreeSchemaMode(dbType) || dbType === "dameng") && !connectionUsesDatabaseObjectTreeMode(config);
 });
 
 const canEditSchemaComment = computed(() => {
   const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
-  return activeNode.value.type === "schema" && !!activeNode.value.database && !connectionIsEffectivelyReadOnly(config) && supportsSchemaComment(effectiveDatabaseTypeForConnection(config));
+  return activeNode.value.type === "schema" && !!activeNode.value.database && !isXuguSyntheticTreeNode(config?.db_type, activeNode.value.type, activeNode.value.schema) && !connectionIsEffectivelyReadOnly(config) && supportsSchemaComment(effectiveDatabaseTypeForConnection(config));
 });
 
 const canBatchDropCascade = computed(() => {
@@ -3591,11 +3626,23 @@ async function confirmCreateDatabase() {
     await connectionStore.ensureConnected(node.connectionId);
     const config = connectionStore.getConfig(node.connectionId);
     if (config?.db_type === "mongodb") {
+      const plan: AuthorizationPlan = {
+        steps: [
+          {
+            id: "create-database",
+            label: `create database ${name}`,
+            database: "",
+            sql: mongoCreateDatabasePreview(name),
+            operation: "createDatabase",
+            targetDatabase: name,
+          },
+        ],
+      };
+      createDatabaseAuthorizationPlan.value = plan;
+      createDatabasePreviewSql.value = authorizationPlanSql(plan);
+      createDatabaseAuthorizationResults.value = [];
       showCreateDatabaseDialog.value = false;
-      await api.mongoCreateDatabase(node.connectionId, name);
-      toast(t("contextMenu.createDatabaseSuccess", { name }), 3000);
-      await connectionStore.ensureVisibleDatabase(node.connectionId, name);
-      await connectionStore.loadMongoDatabases(node.connectionId);
+      showCreateDatabasePreviewDialog.value = true;
       return;
     }
     const sql = await buildCreateDatabaseSql({
@@ -3628,13 +3675,30 @@ async function applyCreateDatabaseAuthorizationPlan() {
   createDatabaseAuthorizationApplying.value = true;
   try {
     const config = connectionStore.getConfig(node.connectionId);
-    const results = await executeWithProductionSqlGuard({
-      connection: config,
-      database: "",
-      sql: createDatabasePreviewSql.value,
-      source: t("production.sourceSidebar"),
-      execute: () => executeAuthorizationPlan(plan, (step) => api.executeMulti(node.connectionId!, step.database, step.sql, undefined, undefined, { maxRows: 1000, continueOnError: true })),
-    });
+    const isMongoDatabaseCreation = config?.db_type === "mongodb";
+    const executePlan = () =>
+      executeAuthorizationPlan(plan, async (step) => {
+        if (isMongoDatabaseCreation && step.operation === "createDatabase") {
+          await api.mongoCreateDatabase(node.connectionId!, name);
+          return [];
+        }
+        return api.executeMulti(node.connectionId!, step.database, step.sql, undefined, undefined, { maxRows: 1000, continueOnError: true });
+      });
+    const results = isMongoDatabaseCreation
+      ? await executeWithProductionContextGuard({
+          connection: config,
+          database: name,
+          reviewText: createDatabasePreviewSql.value,
+          source: t("production.sourceSidebar"),
+          execute: executePlan,
+        })
+      : await executeWithProductionSqlGuard({
+          connection: config,
+          database: "",
+          sql: createDatabasePreviewSql.value,
+          source: t("production.sourceSidebar"),
+          execute: executePlan,
+        });
     if (!results) return;
     const displayResults = results.map((result) => ({
       ...result,
@@ -3645,7 +3709,11 @@ async function applyCreateDatabaseAuthorizationPlan() {
     const status = authorizationPlanStatus(displayResults);
     if (created) {
       await connectionStore.ensureVisibleDatabase(node.connectionId, name);
-      await connectionStore.loadDatabases(node.connectionId, { force: true });
+      if (isMongoDatabaseCreation) {
+        await connectionStore.loadMongoDatabases(node.connectionId);
+      } else {
+        await connectionStore.loadDatabases(node.connectionId, { force: true });
+      }
     }
     toast(t(status === "success" ? "contextMenu.createDatabaseSuccess" : status === "partial" ? "contextMenu.createDatabasePartial" : "contextMenu.createDatabaseFailed", { name }), status === "success" ? 3000 : 5000);
   } catch (error: any) {
@@ -3767,7 +3835,7 @@ async function confirmCreateSchema() {
 function dropSchema() {
   const node = sidebarDangerTarget.value ?? activeNode.value;
   const config = node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined;
-  if (isXuguPublicSynonymTreeNode(config?.db_type, node.type, node.schema)) return;
+  if (isXuguSyntheticTreeNode(config?.db_type, node.type, node.schema)) return;
   void refreshDropSchemaPreviewSql();
   showDropSchemaConfirm.value = true;
 }
@@ -3777,7 +3845,7 @@ async function confirmDropSchema() {
   if (!node.connectionId || !node.database) return;
   try {
     const config = connectionStore.getConfig(node.connectionId);
-    if (isXuguPublicSynonymTreeNode(config?.db_type, node.type, node.schema)) return;
+    if (isXuguSyntheticTreeNode(config?.db_type, node.type, node.schema)) return;
     await connectionStore.ensureConnected(node.connectionId);
     const dbType = effectiveDatabaseTypeForConnection(config);
     let dropExecutionSchema: string | undefined;
@@ -4962,11 +5030,20 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
       });
     }
     if (canBackupSqliteDatabase.value) {
+      const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
+      const usesSsh = (config?.transport_layers || []).some((layer) => layer.enabled !== false && layer.type === "ssh");
       items.push({
         label: t("contextMenu.backupSqliteDatabase"),
         action: backupSqliteDatabase,
         icon: HardDriveDownload,
       });
+      if (usesSsh) {
+        items.push({
+          label: t("contextMenu.restoreSqliteDatabase"),
+          action: restoreSqliteDatabase,
+          icon: HardDriveDownload,
+        });
+      }
     }
     items.push({ label: connectionDuplicateMenuLabel(), action: duplicateConnection, icon: CopyPlus });
     items.push({ label: "", separator: true });
@@ -5016,7 +5093,7 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   const { node, items } = context;
   // 4. Database / Schema
   if (node.type === "database" || node.type === "schema") {
-    if (isXuguPublicSynonymTreeNode(currentDatabaseType(), node.type, node.schema)) {
+    if (isXuguSyntheticTreeNode(currentDatabaseType(), node.type, node.schema)) {
       items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
       items.push({ label: "", separator: true });
       items.push({
@@ -5628,6 +5705,22 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     return true;
   }
 
+  if (node.type === "job") {
+    items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
+    items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+    if (currentDatabaseType() === "xugu") {
+      items.push({ label: "", separator: true });
+      items.push({ label: t("xuguSchedulerJob.enable"), action: () => executeXuguSchedulerJobAction("enable"), icon: Play });
+      items.push({ label: t("xuguSchedulerJob.disable"), action: () => executeXuguSchedulerJobAction("disable"), icon: Wrench });
+      items.push({ label: t("xuguSchedulerJob.run"), action: () => executeXuguSchedulerJobAction("run"), icon: Play });
+      items.push({ label: "", separator: true });
+      items.push({ label: t("xuguSchedulerJob.drop"), action: () => executeXuguSchedulerJobAction("drop"), icon: Trash2, variant: "destructive" as const });
+    }
+    items.push({ label: "", separator: true });
+    items.push({ label: t("contextMenu.refreshChildren"), action: refresh, icon: RefreshCw, shortcut: shortcutRefresh });
+    return true;
+  }
+
   if (node.type === "trigger" || node.type === "package" || node.type === "package-body") {
     if (currentDatabaseType() === "xugu" && buildXuguCompileSql({ objectType: node.type, schema: node.schema, name: node.objectName || node.label })) {
       items.push({ label: t("contextMenu.compileObject"), action: compileXuguObject, icon: Wrench });
@@ -5705,7 +5798,7 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
       items.push({ label: t("contextMenu.createView"), action: createView, icon: Plus });
     }
     if (node.type === "group-events" && node.connectionId && node.database) {
-      items.push({ label: t("contextMenu.createEvent"), action: openObjectBrowser, icon: Plus });
+      items.push({ label: t("contextMenu.createEvent"), action: openMysqlEventCreateEditor, icon: Plus });
     }
     if (mysqlObjectTemplate) {
       items.push({ label: t(mysqlObjectTemplate.titleKey), action: createMysqlObjectTemplate, icon: Plus });

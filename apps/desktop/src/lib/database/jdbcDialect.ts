@@ -26,6 +26,8 @@ const JDBC_DIALECT_MATCHERS: Array<{ type: DatabaseType; patterns: RegExp[] }> =
   { type: "jdbc", patterns: [/phoenix/i] },
   { type: "doris", patterns: [/doris/i] },
   { type: "goldendb", patterns: [/jdbc:goldendb:/i, /goldendb/i] },
+  // GBase 8a only: 8s (`gbasedbt`/`jdbc:gbasedbt-sqli`) is Informix-based and must stay on jdbc.
+  { type: "gbase", patterns: [/jdbc:gbase:/i, /cn\.gbase\./i, /gbase(?!dbt)(?!8s).*jdbc/i] },
   { type: "mysql", patterns: [/kyuubi/i] },
   { type: "hive", patterns: [/inceptor/i, /\bapache\s+hive\b/i, /org\.apache\.hive\.jdbc\.HiveDriver/i, /hive-jdbc/i] },
   { type: "mysql", patterns: [/jdbc:mysql:/i, /mysql/i, /mariadb/i, /hive2/i] },
@@ -50,6 +52,7 @@ const JDBC_ASE_PROFILE_PATTERNS = [/(?:^|[\s_-])ase(?:$|[\s_-])/i, /\bsap[\s_-]+
 
 export function inferJdbcDialect(connection?: JdbcDialectConnection): DatabaseType | undefined {
   if (!connection || connection.db_type !== "jdbc") return undefined;
+  if (isGbase8sProfile(connection.driver_profile)) return undefined;
   const haystack = [connection.driver_profile, connection.driver_label, connection.connection_string, connection.jdbc_driver_class, ...(connection.jdbc_driver_paths ?? []), connection.database_info?.productName, connection.database_info?.serverComment, connection.database_info?.driverName]
     .filter(Boolean)
     .join("\n");

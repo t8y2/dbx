@@ -825,14 +825,24 @@ fn schema_for_execution_context(db_type: Option<DatabaseType>, schema: Option<&s
     }
 }
 
+#[cfg(test)]
 fn sql_for_execution_context(db_type: Option<DatabaseType>, sql: &str, schema: Option<&str>) -> String {
+    sql_for_execution_context_with_identifier_quote(db_type, sql, schema, None)
+}
+
+fn sql_for_execution_context_with_identifier_quote(
+    db_type: Option<DatabaseType>,
+    sql: &str,
+    schema: Option<&str>,
+    identifier_quote: Option<&str>,
+) -> String {
     let Some(schema) = schema.map(str::trim).filter(|schema| !schema.is_empty()) else {
         return sql.to_string();
     };
     match db_type {
         Some(DatabaseType::Iris) => qualify_iris_unqualified_dml(sql, schema).unwrap_or_else(|| sql.to_string()),
         Some(DatabaseType::Kingbase) => {
-            qualify_kingbase_unqualified_relations(sql, schema).unwrap_or_else(|| sql.to_string())
+            qualify_kingbase_unqualified_relations(sql, schema, identifier_quote).unwrap_or_else(|| sql.to_string())
         }
         _ => sql.to_string(),
     }
@@ -862,7 +872,7 @@ fn qualify_iris_unqualified_dml(sql: &str, schema: &str) -> Option<String> {
     changed.then(|| statements.iter().map(ToString::to_string).collect::<Vec<_>>().join("; "))
 }
 
-fn qualify_kingbase_unqualified_relations(sql: &str, schema: &str) -> Option<String> {
+fn qualify_kingbase_unqualified_relations(sql: &str, schema: &str, identifier_quote: Option<&str>) -> Option<String> {
     let dialect = PostgreSqlDialect {};
     let mut statements = Parser::parse_sql(&dialect, sql).ok()?;
     if statements.is_empty() {
@@ -875,8 +885,13 @@ fn qualify_kingbase_unqualified_relations(sql: &str, schema: &str) -> Option<Str
             continue;
         }
         let cte_names = statement_cte_names(statement);
-        let mut qualifier =
-            KingbaseRelationQualifier { schema, cte_names: &cte_names, parameterized_table_depth: 0, changed: false };
+        let mut qualifier = KingbaseRelationQualifier {
+            schema,
+            identifier_quote: identifier_quote_char(identifier_quote),
+            cte_names: &cte_names,
+            parameterized_table_depth: 0,
+            changed: false,
+        };
         let _ = statement.visit(&mut qualifier);
         changed |= qualifier.changed;
     }
@@ -886,6 +901,7 @@ fn qualify_kingbase_unqualified_relations(sql: &str, schema: &str) -> Option<Str
 
 struct KingbaseRelationQualifier<'a> {
     schema: &'a str,
+    identifier_quote: char,
     cte_names: &'a HashSet<String>,
     parameterized_table_depth: usize,
     changed: bool,
@@ -910,7 +926,12 @@ impl VisitorMut for KingbaseRelationQualifier<'_> {
 
     fn post_visit_relation(&mut self, relation: &mut ObjectName) -> ControlFlow<Self::Break> {
         if self.parameterized_table_depth == 0
-            && qualify_unqualified_relation_name(relation, self.schema, self.cte_names)
+            && qualify_unqualified_relation_name_with_quote(
+                relation,
+                self.schema,
+                self.cte_names,
+                self.identifier_quote,
+            )
         {
             self.changed = true;
         }
@@ -930,6 +951,15 @@ fn statement_uses_schema_context(statement: &Statement) -> bool {
 }
 
 fn qualify_unqualified_relation_name(name: &mut ObjectName, schema: &str, cte_names: &HashSet<String>) -> bool {
+    qualify_unqualified_relation_name_with_quote(name, schema, cte_names, '"')
+}
+
+fn qualify_unqualified_relation_name_with_quote(
+    name: &mut ObjectName,
+    schema: &str,
+    cte_names: &HashSet<String>,
+    identifier_quote: char,
+) -> bool {
     let [ObjectNamePart::Identifier(table)] = name.0.as_slice() else {
         return false;
     };
@@ -938,8 +968,19 @@ fn qualify_unqualified_relation_name(name: &mut ObjectName, schema: &str, cte_na
     }
 
     let table = table.clone();
-    name.0 = vec![ObjectNamePart::Identifier(Ident::with_quote('"', schema)), ObjectNamePart::Identifier(table)];
+    name.0 = vec![
+        ObjectNamePart::Identifier(Ident::with_quote(identifier_quote, schema)),
+        ObjectNamePart::Identifier(table),
+    ];
     true
+}
+
+fn identifier_quote_char(identifier_quote: Option<&str>) -> char {
+    match identifier_quote.map(str::trim) {
+        Some("`") => '`',
+        Some("\"") => '"',
+        _ => '"',
+    }
 }
 
 fn statement_cte_names(statement: &Statement) -> HashSet<String> {
@@ -1956,7 +1997,11 @@ async fn do_execute_typed(
             let result = wait_for_query_opt(
                 cancel_token,
                 query_timeout,
-                db::elasticsearch_driver::execute_rest_query(&client, &sql),
+                db::elasticsearch_driver::execute_rest_query_with_cursor(
+                    &client,
+                    &sql,
+                    options.result_session_id.as_deref(),
+                ),
             )
             .await
             .map(|result| truncate_result_with_max_rows(result, max_rows));
@@ -1973,7 +2018,11 @@ async fn do_execute_typed(
             let result = wait_for_query_opt(
                 cancel_token,
                 query_timeout,
-                db::easysearch_driver::execute_rest_query(&client, &sql),
+                db::easysearch_driver::execute_rest_query_with_cursor(
+                    &client,
+                    &sql,
+                    options.result_session_id.as_deref(),
+                ),
             )
             .await
             .map(|result| truncate_result_with_max_rows(result, max_rows));
@@ -2055,7 +2104,8 @@ async fn do_execute_typed(
         PoolKind::Agent(client) => {
             let client = client.clone();
             let source_client = client.clone();
-            let sql = sql_for_execution_context(pool_db_type, sql, schema);
+            let sql =
+                sql_for_execution_context_with_identifier_quote(pool_db_type, sql, schema, client.identifier_quote());
             let database = database.map(|s| s.to_string());
             let schema = schema_for_execution_context(pool_db_type, schema).map(|s| s.to_string());
             let max_rows = options.max_rows;
@@ -2452,7 +2502,7 @@ fn is_external_driver_method_unsupported(error: &str, method: &str) -> bool {
             || normalized.contains("method not found"))
 }
 
-fn external_driver_query_params(
+pub(crate) fn external_driver_query_params(
     config: &crate::models::connection::ConnectionConfig,
     sql: &str,
     database: &str,
@@ -2720,6 +2770,18 @@ pub async fn close_query_session(
                 .invoke::<serde_json::Value>("closeQuerySession", params)
                 .await
                 .map(|value| value.get("ok").and_then(|ok| ok.as_bool()).unwrap_or(false))
+        }
+        PoolKind::Elasticsearch(client) => {
+            let client = client.clone();
+            drop(connections);
+            db::elasticsearch_driver::close_cursor(&client, session_id).await?;
+            Ok(true)
+        }
+        PoolKind::Easysearch(client) => {
+            let client = client.clone();
+            drop(connections);
+            db::easysearch_driver::close_cursor(&client, session_id).await?;
+            Ok(true)
         }
         _ => Ok(false),
     }
@@ -3616,8 +3678,12 @@ pub async fn execute_statements(
         let execution_schema = schema_for_execution_context(db_type, schema);
         let rewritten_statements;
         let statements = if qualifies_unqualified_agent_relations(db_type) {
-            rewritten_statements =
-                statements.iter().map(|sql| sql_for_execution_context(db_type, sql, schema)).collect::<Vec<_>>();
+            rewritten_statements = statements
+                .iter()
+                .map(|sql| {
+                    sql_for_execution_context_with_identifier_quote(db_type, sql, schema, client.identifier_quote())
+                })
+                .collect::<Vec<_>>();
             rewritten_statements.as_slice()
         } else {
             statements
@@ -4492,8 +4558,10 @@ async fn exec_tx_agent_inner(
     let execution_schema = schema_for_execution_context(db_type, schema);
     let rewritten_statements;
     let statements = if qualifies_unqualified_agent_relations(db_type) {
-        rewritten_statements =
-            statements.iter().map(|sql| sql_for_execution_context(db_type, sql, schema)).collect::<Vec<_>>();
+        rewritten_statements = statements
+            .iter()
+            .map(|sql| sql_for_execution_context_with_identifier_quote(db_type, sql, schema, client.identifier_quote()))
+            .collect::<Vec<_>>();
         rewritten_statements.as_slice()
     } else {
         statements
@@ -4682,7 +4750,7 @@ async fn begin_transaction_session(
             if !syntax_errors.is_empty() {
                 return Err(format!("START TRANSACTION failed for all compatible forms: {}", syntax_errors.join("; ")));
             }
-            (TxnConnection::Mysql(conn), probe_pool_key.clone())
+            (TxnConnection::Mysql(Some(conn)), probe_pool_key.clone())
         }
         TxnPoolHandle::Agent => {
             let client_session_id = format!("manual-txn-{}", uuid::Uuid::new_v4());
@@ -5004,7 +5072,14 @@ pub async fn execute_in_manual_transaction_with_options(
             TxnConnection::Postgres(conn) => {
                 execute_manual_txn_postgres_statement(conn.as_ref(), statement, row_limit).await
             }
-            TxnConnection::Mysql(conn) => execute_manual_txn_mysql_statement(conn, statement, row_limit).await,
+            TxnConnection::Mysql(conn) => {
+                execute_manual_txn_mysql_statement(
+                    conn.as_mut().ok_or_else(|| MANUAL_TRANSACTION_SESSION_NOT_FOUND_ERROR.to_string())?,
+                    statement,
+                    row_limit,
+                )
+                .await
+            }
             TxnConnection::Agent { client, .. } => {
                 execute_manual_txn_agent_statement(
                     client,
@@ -5167,45 +5242,85 @@ where
                 Err(error) => Err(error),
             }
         }
-        TxnConnection::Mysql(conn) => match conn.query_iter(sql).await {
-            Ok(mut result) => match result.stream::<mysql_async::Row>().await {
-                Ok(Some(mut stream)) => {
-                    let mut batch = Vec::with_capacity(batch_size);
-                    let mut total_rows = 0_u64;
-                    let mut error = None;
-                    while let Some(row_result) = stream.next().await {
-                        match row_result {
-                            Ok(row) => {
-                                batch.push(
-                                    (0..row.len()).map(|index| db::mysql::mysql_value_to_json(&row, index)).collect(),
-                                );
-                                total_rows += 1;
-                                if batch.len() >= batch_size {
-                                    if let Err(err) = on_batch(std::mem::take(&mut batch)) {
-                                        error = Some(err);
+        TxnConnection::Mysql(Some(conn)) => {
+            let query_result = match cancel_token.as_ref() {
+                Some(cancel_token) => {
+                    tokio::select! {
+                        _ = cancel_token.cancelled() => Err(QUERY_CANCELED.to_string()),
+                        result = conn.query_iter(sql) => result.map_err(|error| format!("Query failed: {error}")),
+                    }
+                }
+                None => conn.query_iter(sql).await.map_err(|error| format!("Query failed: {error}")),
+            };
+            match query_result {
+                Ok(mut result) => {
+                    let stream_result = match cancel_token.as_ref() {
+                        Some(cancel_token) => {
+                            tokio::select! {
+                                _ = cancel_token.cancelled() => Err(QUERY_CANCELED.to_string()),
+                                stream = result.stream::<mysql_async::Row>() => stream.map_err(|error| format!("Query failed: {error}")),
+                            }
+                        }
+                        None => {
+                            result.stream::<mysql_async::Row>().await.map_err(|error| format!("Query failed: {error}"))
+                        }
+                    };
+                    match stream_result {
+                        Ok(Some(mut stream)) => {
+                            let mut batch = Vec::with_capacity(batch_size);
+                            let mut total_rows = 0_u64;
+                            let mut error = None;
+                            loop {
+                                let next_row = match cancel_token.as_ref() {
+                                    Some(cancel_token) => {
+                                        tokio::select! {
+                                            _ = cancel_token.cancelled() => {
+                                                error = Some(QUERY_CANCELED.to_string());
+                                                break;
+                                            }
+                                            row = stream.next() => row,
+                                        }
+                                    }
+                                    None => stream.next().await,
+                                };
+                                let Some(row_result) = next_row else { break };
+                                match row_result {
+                                    Ok(row) => {
+                                        batch.push(
+                                            (0..row.len())
+                                                .map(|index| db::mysql::mysql_value_to_json(&row, index))
+                                                .collect(),
+                                        );
+                                        total_rows += 1;
+                                        if batch.len() >= batch_size {
+                                            if let Err(err) = on_batch(std::mem::take(&mut batch)) {
+                                                error = Some(err);
+                                                break;
+                                            }
+                                            batch = Vec::with_capacity(batch_size);
+                                        }
+                                    }
+                                    Err(err) => {
+                                        error = Some(format!("Query failed: {err}"));
                                         break;
                                     }
-                                    batch = Vec::with_capacity(batch_size);
                                 }
                             }
-                            Err(err) => {
-                                error = Some(format!("Query failed: {err}"));
-                                break;
+                            if error.is_none() && !batch.is_empty() {
+                                if let Err(err) = on_batch(batch) {
+                                    error = Some(err);
+                                }
                             }
+                            error.map_or(Ok(total_rows), Err)
                         }
+                        Ok(None) => Err("Empty result set stream".to_string()),
+                        Err(error) => Err(error),
                     }
-                    if error.is_none() && !batch.is_empty() {
-                        if let Err(err) = on_batch(batch) {
-                            error = Some(err);
-                        }
-                    }
-                    error.map_or(Ok(total_rows), Err)
                 }
-                Ok(None) => Err("Empty result set stream".to_string()),
-                Err(err) => Err(format!("Query failed: {err}")),
-            },
-            Err(err) => Err(format!("Query failed: {err}")),
-        },
+                Err(error) => Err(error),
+            }
+        }
+        TxnConnection::Mysql(None) => Err(MANUAL_TRANSACTION_SESSION_NOT_FOUND_ERROR.to_string()),
         TxnConnection::Agent { .. } => {
             Err("Streaming rows inside an agent manual transaction is not supported".to_string())
         }
@@ -5220,9 +5335,12 @@ where
             sessions.remove(txn_session_id)
         };
         if let Some(session) = removed {
-            let rollback_result =
+            let rollback_result = if err == QUERY_CANCELED {
+                discard_mysql_manual_txn_connection(&mut conn, operation_budget.cleanup_timeout).await
+            } else {
                 rollback_manual_txn_connection_with_postgres_timeout(&mut conn, Some(operation_budget.cleanup_timeout))
-                    .await;
+                    .await
+            };
             release_manual_txn_session_pool(state, &session.connection_id, &mut conn).await;
             if let Err(rollback_error) = rollback_result {
                 return Err(format!("{err}. Transaction cleanup failed: {rollback_error}"));
@@ -5266,9 +5384,10 @@ async fn rollback_manual_txn_connection_with_postgres_timeout(
                 conn.execute_typed("ROLLBACK", &[]).await.map_err(|e| format!("ROLLBACK failed: {e}"))?;
             }
         }
-        TxnConnection::Mysql(conn) => {
+        TxnConnection::Mysql(Some(conn)) => {
             conn.query_drop("ROLLBACK").await.map_err(|e| format!("ROLLBACK failed: {e}"))?;
         }
+        TxnConnection::Mysql(None) => return Ok(()),
         TxnConnection::Agent { client, .. } => {
             let mut locked = client.lock().await;
             match locked.rollback_manual_transaction::<serde_json::Value>().await {
@@ -5296,6 +5415,24 @@ async fn rollback_manual_txn_connection_with_postgres_timeout(
         }
     }
     Ok(())
+}
+
+/// A cancelled MySQL row stream may still have unread result packets.  Do not
+/// send ROLLBACK on that connection: mysql_async only consumes a dropped stream
+/// when the next result set is requested.  Discarding the dedicated connection
+/// makes MySQL roll the transaction back and prevents protocol desynchronization.
+async fn discard_mysql_manual_txn_connection(conn: &mut TxnConnection, timeout: Duration) -> Result<(), String> {
+    let TxnConnection::Mysql(conn) = conn else {
+        return rollback_manual_txn_connection_with_postgres_timeout(conn, Some(timeout)).await;
+    };
+    let Some(conn) = conn.take() else {
+        return Ok(());
+    };
+    match tokio::time::timeout(timeout, conn.disconnect()).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(format!("Failed to discard cancelled MySQL connection: {error}")),
+        Err(_) => Err(format!("Discarding cancelled MySQL connection timed out after {} seconds", timeout.as_secs())),
+    }
 }
 
 async fn release_manual_txn_session_pool(state: &AppState, connection_id: &str, conn: &mut TxnConnection) {
@@ -5364,7 +5501,7 @@ async fn execute_manual_txn_agent_statement(
     page_size: Option<usize>,
     result_session_id: Option<&str>,
 ) -> Result<db::QueryResult, String> {
-    let sql = sql_for_execution_context(db_type, statement, schema);
+    let sql = sql_for_execution_context_with_identifier_quote(db_type, statement, schema, client.identifier_quote());
     let execution_schema = schema_for_execution_context(db_type, schema);
     let options = manual_txn_agent_query_options(row_limit, table_data_preview, page_size, result_session_id);
     let request = manual_txn_agent_query_request(
@@ -5560,9 +5697,10 @@ pub async fn commit_manual_transaction(state: &AppState, txn_session_id: &str) -
         TxnConnection::Postgres(conn) => {
             conn.execute_typed("COMMIT", &[]).await.map_err(|e| format!("COMMIT failed: {e}"))?;
         }
-        TxnConnection::Mysql(conn) => {
+        TxnConnection::Mysql(Some(conn)) => {
             conn.query_drop("COMMIT").await.map_err(|e| format!("COMMIT failed: {e}"))?;
         }
+        TxnConnection::Mysql(None) => return Err(MANUAL_TRANSACTION_SESSION_NOT_FOUND_ERROR.to_string()),
         TxnConnection::Agent { client, .. } => {
             let mut locked = client.lock().await;
             locked
@@ -8378,6 +8516,37 @@ for line in sys.stdin:
         assert_eq!(
             sql_for_execution_context(Some(DatabaseType::Kingbase), "SELECT * FROM", Some("APP")),
             "SELECT * FROM"
+        );
+    }
+
+    #[test]
+    fn kingbase_execution_context_uses_driver_identifier_quote() {
+        assert_eq!(
+            sql_for_execution_context_with_identifier_quote(
+                Some(DatabaseType::Kingbase),
+                "SELECT * FROM sys_user",
+                Some("audit-schema"),
+                Some("`"),
+            ),
+            "SELECT * FROM `audit-schema`.sys_user"
+        );
+        assert_eq!(
+            sql_for_execution_context_with_identifier_quote(
+                Some(DatabaseType::Kingbase),
+                "SELECT * FROM sys_user",
+                Some("audit-schema"),
+                Some("\""),
+            ),
+            "SELECT * FROM \"audit-schema\".sys_user"
+        );
+        assert_eq!(
+            sql_for_execution_context_with_identifier_quote(
+                Some(DatabaseType::Kingbase),
+                "SELECT * FROM sys_user",
+                Some("audit-schema"),
+                Some("unsupported"),
+            ),
+            "SELECT * FROM \"audit-schema\".sys_user"
         );
     }
 

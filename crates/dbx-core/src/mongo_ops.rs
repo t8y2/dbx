@@ -225,6 +225,7 @@ pub async fn mongo_find_documents_core(
         sort,
         collation,
         None,
+        false,
     )
     .await
 }

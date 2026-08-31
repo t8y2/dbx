@@ -60,9 +60,63 @@ describe("sqlFormatter", () => {
     expect(sqlFormatDialectForDbType("duckdb")).toBe("duckdb");
   });
 
-  it("maps only Oracle to the PL/SQL formatter dialect", () => {
+  it("maps Oracle and OceanBase Oracle mode to the PL/SQL formatter dialect", () => {
     expect(sqlFormatDialectForDbType("oracle")).toBe("oracle");
-    expect(sqlFormatDialectForDbType("oceanbase-oracle")).toBe("generic");
+    // OceanBase Oracle mode speaks Oracle SQL — issue #7540: it must reuse the
+    // Oracle dialect so view DDL previews are formatted instead of one line.
+    expect(sqlFormatDialectForDbType("oceanbase-oracle")).toBe("oracle");
+  });
+
+  it("formats an OceanBase Oracle single-line view DDL into readable multi-line SQL (issue #7540)", async () => {
+    const singleLine = `CREATE OR REPLACE VIEW "APP"."ACTIVE_USERS" AS SELECT ID, NAME FROM USERS WHERE STATUS = 'ACTIVE'`;
+    const formatted = await formatSqlForDisplay(singleLine, sqlFormatDialectForDbType("oceanbase-oracle"));
+
+    expect(formatted).not.toBe(singleLine);
+    expect(formatted.split("\n").length).toBeGreaterThan(1);
+    expect(formatted).toContain("CREATE OR REPLACE VIEW");
+    expect(formatted).toMatch(/\bSELECT\b/);
+    expect(formatted).toMatch(/\bFROM\b/);
+    expect(formatted).toMatch(/\bWHERE\b/);
+    // String literals and quoted identifiers must survive formatting untouched.
+    expect(formatted).toContain("'ACTIVE'");
+    expect(formatted).toContain('"ACTIVE_USERS"');
+  });
+
+  it("formats a bare OceanBase Oracle view source wrapped as CREATE VIEW (issue #7540)", async () => {
+    // Mirrors the backend build_view_ddl_sql output for a fallback ALL_VIEWS.TEXT
+    // body: `CREATE VIEW <name> AS <single-line SELECT>`.
+    const wrapped = `CREATE VIEW "APP"."ACTIVE_USERS" AS
+SELECT ID, NAME FROM USERS WHERE STATUS = 'ACTIVE';`;
+    const formatted = await formatSqlForDisplay(wrapped, sqlFormatDialectForDbType("oceanbase-oracle"));
+
+    expect(formatted.split("\n").length).toBeGreaterThan(2);
+    expect(formatted).toMatch(/\bSELECT\b/);
+    expect(formatted).toMatch(/\bFROM\b/);
+    expect(formatted).toMatch(/\bWHERE\b/);
+    expect(formatted).toContain("'ACTIVE'");
+  });
+
+  it("does not split string literals when formatting an OceanBase Oracle view (issue #7540)", async () => {
+    const singleLine = `CREATE OR REPLACE VIEW "APP"."V" AS SELECT 'SELECT X FROM Y' AS TXT FROM DUAL`;
+    const formatted = await formatSqlForDisplay(singleLine, sqlFormatDialectForDbType("oceanbase-oracle"));
+
+    expect(formatted).toContain("'SELECT X FROM Y'");
+  });
+
+  it("leaves an already multi-line OceanBase Oracle view DDL semantically intact (issue #7540)", async () => {
+    const multiLine = `CREATE OR REPLACE VIEW "APP"."ACTIVE_USERS" AS
+SELECT
+  ID,
+  NAME
+FROM USERS
+WHERE STATUS = 'ACTIVE';`;
+    const formatted = await formatSqlForDisplay(multiLine, sqlFormatDialectForDbType("oceanbase-oracle"));
+
+    expect(formatted).toContain('"ACTIVE_USERS"');
+    expect(formatted).toContain("'ACTIVE'");
+    expect(formatted).toMatch(/\bID\b/);
+    expect(formatted).toMatch(/\bNAME\b/);
+    expect(formatted).toMatch(/\bWHERE\b/);
   });
 
   it("keeps issue #7138 Oracle hierarchy clauses intact", async () => {

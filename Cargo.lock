@@ -2002,7 +2002,7 @@ dependencies = [
 
 [[package]]
 name = "dbx"
-version = "0.5.97"
+version = "0.5.98"
 dependencies = [
  "anyhow",
  "axum",
@@ -2059,11 +2059,12 @@ dependencies = [
 
 [[package]]
 name = "dbx-cli"
-version = "0.4.74"
+version = "0.4.75"
 dependencies = [
  "async-trait",
  "dbx-core",
  "dbx-mcp",
+ "rustls 0.23.43",
  "serde",
  "serde_json",
  "tempfile",
@@ -2087,6 +2088,7 @@ dependencies = [
  "cbc 0.1.2",
  "chrono",
  "csv",
+ "dbx-sqlite-worker",
  "deadpool-postgres",
  "encoding_rs",
  "flate2",
@@ -2153,7 +2155,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-mcp"
-version = "0.4.74"
+version = "0.4.75"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -2173,8 +2175,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbx-sqlite-worker"
+version = "0.1.1"
+dependencies = [
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sqlparser",
+]
+
+[[package]]
 name = "dbx-web"
-version = "0.5.97"
+version = "0.5.98"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",

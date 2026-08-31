@@ -1,6 +1,6 @@
 import type { DatabaseType } from "@/types/database";
 
-export type SidebarObjectKind = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" | "SEQUENCE" | "SYNONYM" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
+export type SidebarObjectKind = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" | "SEQUENCE" | "SYNONYM" | "JOB" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
 
 export interface DatabaseObjectCapabilities {
   sidebarObjects: SidebarObjectKind[];
@@ -168,6 +168,7 @@ export function normalizeSidebarObjectKind(type: string): SidebarObjectKind {
   if (value.includes("VIEW")) return "VIEW";
   if (value.includes("SEQ")) return "SEQUENCE";
   if (value.includes("SYNONYM")) return "SYNONYM";
+  if (value.includes("JOB")) return "JOB";
   if (value.includes("PROC")) return "PROCEDURE";
   if (value.includes("FUNC")) return "FUNCTION";
   return "TABLE";

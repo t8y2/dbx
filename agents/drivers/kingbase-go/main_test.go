@@ -3954,6 +3954,39 @@ func TestSchemaConnResetsOnceAfterExplicitSchema(t *testing.T) {
 	}
 }
 
+func TestSchemaConnUsesBackticksInMySQLCompatMode(t *testing.T) {
+	db, state := openFakeDB(t, 0)
+	server := newServer()
+	server.db = db
+	server.mode.mysqlCompat = true
+
+	conn, err := server.schemaConn(context.Background(), "audit-schema")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.execStatements) != 1 || state.execStatements[0] != "SET search_path TO `audit-schema`" {
+		t.Fatalf("unexpected MySQL compatibility schema setup: %v", state.execStatements)
+	}
+}
+
+func TestKingbaseIdentifierQuoteEscapesModeSpecificDelimiter(t *testing.T) {
+	server := newServer()
+	server.mode.mysqlCompat = true
+	if got := server.quoteIdentifier("audit`schema"); got != "`audit``schema`" {
+		t.Fatalf("unexpected MySQL compatibility identifier: %s", got)
+	}
+	server.mode.mysqlCompat = false
+	if got := server.quoteIdentifier(`audit"schema`); got != `"audit""schema"` {
+		t.Fatalf("unexpected PostgreSQL-compatible identifier: %s", got)
+	}
+}
+
 func TestSchemaConnPropagatesSchemaErrors(t *testing.T) {
 	tests := []struct {
 		name          string

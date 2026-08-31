@@ -47,6 +47,26 @@ export function rememberExternalSqlFileTarget(path: string, target: ExternalSqlF
   saveExternalSqlFileTargets([{ path: normalizedPath, ...target, updatedAt: Date.now() }, ...remaining].slice(0, MAX_EXTERNAL_SQL_FILE_TARGETS));
 }
 
+export function moveExternalSqlFileTarget(previousPath: string, nextPath: string) {
+  const previous = normalizeExternalSqlPath(previousPath);
+  const next = normalizeExternalSqlPath(nextPath);
+  if (!previous || !next || previous === next) return;
+  const targets = loadExternalSqlFileTargets();
+  const target = targets.find((item) => item.path === previous);
+  const remaining = targets.filter((item) => item.path !== previous && item.path !== next);
+  if (!target) {
+    saveExternalSqlFileTargets(remaining);
+    return;
+  }
+  saveExternalSqlFileTargets([{ ...target, path: next, updatedAt: Date.now() }, ...remaining].slice(0, MAX_EXTERNAL_SQL_FILE_TARGETS));
+}
+
+export function forgetExternalSqlFileTarget(path: string) {
+  const normalizedPath = normalizeExternalSqlPath(path);
+  if (!normalizedPath) return;
+  saveExternalSqlFileTargets(loadExternalSqlFileTargets().filter((item) => item.path !== normalizedPath));
+}
+
 export function resolveExternalSqlFileTarget(path: string, connectionExists: (connectionId: string) => boolean, fallback: ExternalSqlFileTarget): ExternalSqlFileTarget {
   const normalizedPath = normalizeExternalSqlPath(path);
   const saved = loadExternalSqlFileTargets().find((item) => item.path === normalizedPath);

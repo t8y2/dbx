@@ -45,6 +45,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "dataGridQuickEntry",
   "dataGridFilterEditorView",
   "dataGridTextFilterPanelHeight",
+  "multiStatementDefaultView",
   "dataGridAutoTransposeSingleRow",
   "dataGridCellDetailButtonVisible",
   "dataGridCrosshairHighlight",

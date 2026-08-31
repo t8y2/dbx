@@ -243,7 +243,9 @@ jobs:
         if: startsWith(matrix.platform, 'ubuntu')
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev xdg-utils
+          # Bundle GTK input-method modules from the same Jammy ABI baseline
+          # instead of loading potentially incompatible modules from the host.
+          sudo apt-get install -y fcitx5-frontend-gtk3 ibus-gtk3 libwebkit2gtk-4.1-dev libgtk-3-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev xdg-utils
 
       - name: Setup Tauri signing key
         shell: bash
@@ -268,6 +270,11 @@ jobs:
           releaseDraft: true
           args: --target ${{ matrix.target }}
 
+      - name: Verify AppImage input methods
+        if: startsWith(matrix.platform, 'ubuntu')
+        shell: bash
+        run: ./.github/scripts/verify-appimage-input-methods.sh "target/${{ matrix.target }}/release/bundle/appimage"
+
       - name: Show sccache stats
         if: always()
         continue-on-error: true
@@ -283,10 +290,8 @@ jobs:
         include:
           - target: x86_64-pc-windows-msvc
             arch: x64
-            sign_windows: true
           - target: aarch64-pc-windows-msvc
             arch: arm64
-            sign_windows: false
     runs-on: windows-2022
     env:
       CARGO_INCREMENTAL: "0"
@@ -392,7 +397,6 @@ jobs:
           fi
 
       - name: Setup TrustAsia VSign
-        if: matrix.sign_windows
         shell: pwsh
         env:
           VSIGN_OPERATOR_PFX_B64: ${{ secrets.VSIGN_OPERATOR_PFX_B64 }}
@@ -400,7 +404,6 @@ jobs:
         run: ./.github/scripts/setup-vsign.ps1
 
       - name: Build and sign Tauri app
-        if: matrix.sign_windows
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -410,16 +413,6 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseDraft: true
           args: --target ${{ matrix.target }} --config src-tauri/tauri.vsign.conf.json
-
-      - name: Build unsigned Tauri app
-        if: ${{ !matrix.sign_windows }}
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tagName: ${{ github.ref_name }}
-          releaseDraft: true
-          args: --target ${{ matrix.target }}
 
       - name: Verify Windows bundles
         shell: pwsh
@@ -437,19 +430,17 @@ jobs:
           if ($msiInstallers.Count -eq 0) {
             throw "No MSI installer was produced for ${{ matrix.target }}"
           }
-          if ("${{ matrix.sign_windows }}" -eq "true") {
-            ./.github/scripts/assert-authenticode.ps1 -Path @(
-              $nsisInstallers.FullName
-              $msiInstallers.FullName
-            )
-          }
+          ./.github/scripts/assert-authenticode.ps1 -Path @(
+            $nsisInstallers.FullName
+            $msiInstallers.FullName
+          )
 
       - name: Upload Windows WebView2 offline installer
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SSIGNCODE_OPERATOR_PWD: ${{ matrix.sign_windows && secrets.VSIGN_OPERATOR_PWD || '' }}
-          VSIGN_KEY_PIN: ${{ matrix.sign_windows && secrets.VSIGN_KEY_PIN || '' }}
+          SSIGNCODE_OPERATOR_PWD: ${{ secrets.VSIGN_OPERATOR_PWD }}
+          VSIGN_KEY_PIN: ${{ secrets.VSIGN_KEY_PIN }}
         run: |
           $version = "${env:GITHUB_REF_NAME}".TrimStart("v")
           $arch = "${{ matrix.arch }}"
@@ -461,14 +452,9 @@ jobs:
             Get-ChildItem $bundleDir -Filter "*.exe" | ForEach-Object { $before[$_.FullName] = $_.LastWriteTimeUtc }
           }
 
-          if ("${{ matrix.sign_windows }}" -eq "true") {
-            pnpm tauri bundle --bundles nsis --target ${{ matrix.target }} `
-              --config src-tauri/tauri.webview2-offline.conf.json `
-              --config src-tauri/tauri.vsign.conf.json
-          } else {
-            pnpm tauri bundle --bundles nsis --target ${{ matrix.target }} `
-              --config src-tauri/tauri.webview2-offline.conf.json
-          }
+          pnpm tauri bundle --bundles nsis --target ${{ matrix.target }} `
+            --config src-tauri/tauri.webview2-offline.conf.json `
+            --config src-tauri/tauri.vsign.conf.json
 
           $installer = Get-ChildItem $bundleDir -Filter "*.exe" |
             Where-Object { !$before.ContainsKey($_.FullName) -or $_.LastWriteTimeUtc -gt $before[$_.FullName] } |
@@ -479,9 +465,7 @@ jobs:
             throw "Missing WebView2 offline installer in ${bundleDir}"
           }
 
-          if ("${{ matrix.sign_windows }}" -eq "true") {
-            ./.github/scripts/assert-authenticode.ps1 -Path $installer.FullName
-          }
+          ./.github/scripts/assert-authenticode.ps1 -Path $installer.FullName
           Copy-Item $installer.FullName $offlineName -Force
           gh release upload "${env:GITHUB_REF_NAME}" $offlineName --repo "${env:GITHUB_REPOSITORY}" --clobber
 
@@ -490,8 +474,8 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SSIGNCODE_OPERATOR_PWD: ${{ matrix.sign_windows && secrets.VSIGN_OPERATOR_PWD || '' }}
-          VSIGN_KEY_PIN: ${{ matrix.sign_windows && secrets.VSIGN_KEY_PIN || '' }}
+          SSIGNCODE_OPERATOR_PWD: ${{ secrets.VSIGN_OPERATOR_PWD }}
+          VSIGN_KEY_PIN: ${{ secrets.VSIGN_KEY_PIN }}
         run: |
           $version = "${env:GITHUB_REF_NAME}".TrimStart("v")
           $arch = "${{ matrix.arch }}"
@@ -509,10 +493,8 @@ jobs:
             throw "Release tag version $version does not match the built DBX package version $appVersion"
           }
 
-          if ("${{ matrix.sign_windows }}" -eq "true") {
-            ./.github/scripts/vsign-sign.ps1 -FilePath $exePath
-            ./.github/scripts/assert-authenticode.ps1 -Path $exePath
-          }
+          ./.github/scripts/vsign-sign.ps1 -FilePath $exePath
+          ./.github/scripts/assert-authenticode.ps1 -Path $exePath
 
           New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
           Copy-Item $exePath (Join-Path $portableDir "DBX.exe") -Force
@@ -553,7 +535,7 @@ jobs:
         run: ${SCCACHE_PATH} --show-stats
 
       - name: Remove temporary VSign files
-        if: ${{ always() && matrix.sign_windows }}
+        if: always()
         shell: pwsh
         run: |
           $workDir = if ([string]::IsNullOrWhiteSpace($env:VSIGN_WORK_DIR)) {

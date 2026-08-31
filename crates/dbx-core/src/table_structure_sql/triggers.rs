@@ -9,7 +9,7 @@ pub(super) fn build_trigger_sql(options: &TableStructureSqlOptions, warnings: &m
 
     let dialect = super::dialect::capabilities_for(options.database_type).dialect;
     let database_label = database_label(options.database_type);
-    if !matches!(dialect, StructureDialect::Mysql | StructureDialect::Oracle) {
+    if !matches!(dialect, StructureDialect::Mysql | StructureDialect::Oracle | StructureDialect::SqlServer) {
         if options.triggers.iter().any(has_trigger_edit) {
             warnings.push(format!("Editing triggers is not supported for {database_label} from this editor."));
         }
@@ -48,10 +48,28 @@ pub(super) fn build_trigger_sql(options: &TableStructureSqlOptions, warnings: &m
 
         if let Some(sql) = create_trigger_sql(dialect, options.schema.as_deref(), &table, trigger, warnings) {
             statements.push(sql);
+            // SQL Server rebuilds via DROP + CREATE, which resets is_disabled to
+            // enabled; restore the catalog-reported disabled state explicitly.
+            // `table` is already qualified the same way the CREATE's ON clause is.
+            if dialect == StructureDialect::SqlServer
+                && trigger.original.as_ref().is_some_and(|original| original.enabled == Some(false))
+            {
+                let schema = options.schema.as_deref();
+                let trigger_name = qualified_trigger_object_name(dialect, schema, &trigger.name);
+                statements.push(format!("DISABLE TRIGGER {trigger_name} ON {table};"));
+            }
         }
     }
 
     statements
+}
+
+fn qualified_trigger_object_name(dialect: StructureDialect, schema: Option<&str>, name: &str) -> String {
+    if schema.is_some_and(|schema| !schema.trim().is_empty()) {
+        format!("{}.{}", quote_ident(dialect, schema.unwrap()), quote_ident(dialect, name))
+    } else {
+        quote_ident(dialect, name)
+    }
 }
 
 fn has_trigger_edit(trigger: &EditableStructureTrigger) -> bool {
@@ -92,11 +110,107 @@ fn create_trigger_sql(
     }
     match dialect {
         StructureDialect::Mysql => create_mysql_trigger_sql(table, &name, &timing, &event, &statement, warnings),
+        StructureDialect::SqlServer => {
+            create_sqlserver_trigger_sql(schema, table, &name, &timing, &event, &statement, warnings)
+        }
         StructureDialect::Oracle => {
             create_oracle_trigger_sql(schema, table, &name, &timing, &event, &statement, warnings)
         }
         _ => None,
     }
+}
+
+fn create_sqlserver_trigger_sql(
+    schema: Option<&str>,
+    table: &str,
+    name: &str,
+    timing: &str,
+    event: &str,
+    statement: &str,
+    warnings: &mut Vec<String>,
+) -> Option<String> {
+    if !matches!(timing, "AFTER" | "INSTEAD OF") {
+        warnings.push(format!("Unsupported SQL Server trigger timing \"{timing}\"."));
+        return None;
+    }
+
+    let mut events = Vec::new();
+    for item in event.split([',', '\n']) {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+        let normalized_item = item.to_ascii_uppercase();
+        for event in normalized_item.split(" OR ") {
+            let event = event.trim().to_string();
+            if !matches!(event.as_str(), "INSERT" | "UPDATE" | "DELETE") {
+                warnings.push(format!("Unsupported SQL Server trigger event \"{}\".", item));
+                return None;
+            }
+            if !events.contains(&event) {
+                events.push(event);
+            }
+        }
+    }
+    if events.is_empty() {
+        warnings.push("SQL Server trigger event is required.".to_string());
+        return None;
+    }
+
+    let trigger_name = if schema.is_some_and(|schema| !schema.trim().is_empty()) {
+        format!(
+            "{}.{}",
+            quote_ident(StructureDialect::SqlServer, schema.unwrap()),
+            quote_ident(StructureDialect::SqlServer, name)
+        )
+    } else {
+        quote_ident(StructureDialect::SqlServer, name)
+    };
+    let body = sqlserver_trigger_body(statement);
+    if body.is_empty() {
+        warnings.push("SQL Server trigger statement is required.".to_string());
+        return None;
+    }
+    Some(format!(
+        "CREATE TRIGGER {trigger_name} ON {table} {timing} {} AS\n{};",
+        events.join(", "),
+        body.trim_end_matches(';').trim_end()
+    ))
+}
+
+fn sqlserver_trigger_body(statement: &str) -> &str {
+    let statement = statement.trim();
+    if statement.get(..2).is_some_and(|prefix| prefix.eq_ignore_ascii_case("AS")) {
+        return statement[2..].trim_start();
+    }
+    if !statement.to_ascii_uppercase().starts_with("CREATE TRIGGER") {
+        return statement;
+    }
+
+    // The body separator is the standalone AS that follows the event list
+    // (`... AFTER INSERT, UPDATE AS <body>`); earlier AS tokens can appear in
+    // trigger options such as `WITH EXECUTE AS OWNER`, so the first standalone
+    // AS alone is not a reliable split point.
+    let mut seen_event = false;
+    let mut token = String::new();
+    let mut char_indices = statement.char_indices().peekable();
+    while let Some((index, ch)) = char_indices.next() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            token.push(ch);
+            if !char_indices.peek().is_some_and(|(_, next)| next.is_ascii_alphanumeric() || *next == '_') {
+                if token.eq_ignore_ascii_case("AS") && seen_event {
+                    return statement[index + 1..].trim_start();
+                }
+                if matches!(token.to_ascii_uppercase().as_str(), "INSERT" | "UPDATE" | "DELETE" | "LOGON") {
+                    seen_event = true;
+                }
+                token.clear();
+            }
+        } else {
+            token.clear();
+        }
+    }
+    statement
 }
 
 fn create_mysql_trigger_sql(
@@ -190,4 +304,20 @@ fn normalize_keyword(value: &str) -> String {
 
 fn normalize_statement(value: &str) -> String {
     clean(value).trim_end_matches(';').trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sqlserver_trigger_body_splits_after_event_list_not_execute_as() {
+        // The AS inside `WITH EXECUTE AS OWNER` must not be treated as the body separator.
+        let source = "CREATE TRIGGER dbo.t ON dbo.tbl WITH EXECUTE AS OWNER AFTER INSERT AS PRINT 'x'";
+        assert_eq!(sqlserver_trigger_body(source), "PRINT 'x'");
+        let no_options = "CREATE TRIGGER dbo.t ON dbo.tbl AFTER UPDATE AS SELECT 1 AS a";
+        assert_eq!(sqlserver_trigger_body(no_options), "SELECT 1 AS a");
+        let leading_as = "AS SELECT 2";
+        assert_eq!(sqlserver_trigger_body(leading_as), "SELECT 2");
+    }
 }

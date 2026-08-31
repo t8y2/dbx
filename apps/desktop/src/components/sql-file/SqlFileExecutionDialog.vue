@@ -308,7 +308,7 @@ async function selectFile() {
     const { open } = await import("@tauri-apps/plugin-dialog");
     const selected = await open({
       multiple: true,
-      filters: [{ name: "SQL", extensions: ["sql"] }],
+      filters: [{ name: "SQL", extensions: ["sql", "gz"] }],
     });
     const paths = Array.isArray(selected) ? selected : selected ? [selected] : [];
     if (paths.length > 0) {
@@ -570,7 +570,7 @@ watch(
           </div>
 
           <div class="flex items-center gap-2">
-            <input ref="fileInput" type="file" accept=".sql,text/sql" multiple class="hidden" @change="handleFileInputChange" />
+            <input ref="fileInput" type="file" accept=".sql,.sql.gz,text/sql,application/gzip" multiple class="hidden" @change="handleFileInputChange" />
             <Input :model-value="filePathDisplay" readonly class="h-8 text-xs font-mono" :placeholder="t('sqlFile.selectSqlFile')" />
             <Button variant="outline" size="sm" class="h-8 shrink-0" :disabled="running || selectingFile" @click="selectFile">
               <Loader2 v-if="selectingFile || loadingPreview" class="w-3.5 h-3.5 mr-1.5 animate-spin" />

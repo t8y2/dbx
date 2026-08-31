@@ -767,6 +767,10 @@ export async function backupSqliteDatabase(_connectionId: string, _destinationPa
   throw new Error("SQLite backup is only available in the desktop app.");
 }
 
+export async function restoreSqliteDatabase(_connectionId: string, _sourcePath: string): Promise<void> {
+  throw new Error("Remote SQLite restore is only available in the desktop app.");
+}
+
 export async function syncSavedSqlDirectory(_request: SavedSqlSyncRequest): Promise<void> {
   throw new Error("SQL directory sync is only available in the desktop app.");
 }
@@ -2221,6 +2225,18 @@ export async function listSqlFilesInFolder(_folderPath: string, _fileFilter?: st
   throw new Error("Listing SQL files in a folder is only available in the desktop app");
 }
 
+export async function createSqlFileInFolder(_rootPath: string, _directoryPath: string, _fileName: string): Promise<string> {
+  throw new Error("Managing SQL files in folders is only available in the desktop app");
+}
+
+export async function renameSqlFileInFolder(_rootPath: string, _filePath: string, _fileName: string): Promise<string> {
+  throw new Error("Managing SQL files in folders is only available in the desktop app");
+}
+
+export async function deleteSqlFileInFolder(_rootPath: string, _filePath: string): Promise<void> {
+  throw new Error("Managing SQL files in folders is only available in the desktop app");
+}
+
 // ---------------------------------------------------------------------------
 // Data Transfer
 // ---------------------------------------------------------------------------
@@ -2360,7 +2376,7 @@ export async function releaseTableImportSource(sourceRef: string): Promise<boole
 // Database Export
 // ---------------------------------------------------------------------------
 
-export async function beginDatabaseBackupSnapshot(_connectionId: string, _database: string): Promise<DatabaseBackupSnapshot> {
+export async function beginDatabaseBackupSnapshot(_connectionId: string, _database: string, _exportId?: string): Promise<DatabaseBackupSnapshot> {
   throw new Error("Consistent database backup snapshots are only available in the desktop app.");
 }
 
@@ -2404,6 +2420,10 @@ function downloadDatabaseExportFile(exportId: string): void {
 
 export async function cancelDatabaseExport(exportId: string): Promise<void> {
   await post("/api/export/database/cancel", { exportId });
+}
+
+export async function clearDatabaseExportCancellation(_exportId: string): Promise<void> {
+  // The web exporter owns and clears its cancellation marker on completion.
 }
 
 export async function recordDatabaseExportDestination(_directory: string): Promise<void> {
@@ -3797,7 +3817,20 @@ export async function mongoFindOne(connectionId: string, database: string, colle
   });
 }
 
-export async function documentFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, projection?: string, sort?: string, collation?: string, executionId?: string, cursor?: string): Promise<DocumentQueryResult> {
+export async function documentFindDocuments(
+  connectionId: string,
+  database: string,
+  collection: string,
+  skip: number,
+  limit: number,
+  filter?: string,
+  projection?: string,
+  sort?: string,
+  collation?: string,
+  executionId?: string,
+  cursor?: string,
+  cursorPagination?: boolean,
+): Promise<DocumentQueryResult> {
   return post("/api/document-store/find-documents", {
     connectionId,
     database,
@@ -3809,6 +3842,7 @@ export async function documentFindDocuments(connectionId: string, database: stri
     sort,
     collation,
     cursor,
+    cursorPagination,
     executionId,
   });
 }

@@ -294,7 +294,7 @@ export function useSqlExecution(deps: {
       return;
     }
     const statementCount = splitSqlStatementRanges(sql, executionDatabaseType).length;
-    deps.activeOutputView.value = statementCount > 1 ? "summary" : "result";
+    deps.activeOutputView.value = statementCount > 1 ? settingsStore.editorSettings.multiStatementDefaultView : "result";
     const connName = executionConnection?.name || "";
     const start = Date.now();
     const isRedis = executionDatabaseType === "redis";

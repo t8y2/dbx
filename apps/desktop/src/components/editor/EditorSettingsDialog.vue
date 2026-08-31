@@ -71,6 +71,7 @@ import {
   type DisconnectTabHandlingMode,
   type DataTabReuseMode,
   type DataGridFilterEditorView,
+  type MultiStatementDefaultView,
   type OpenTabsRestoreMode,
   type AppCloseUnsavedTabsMode,
   type SidebarObjectInfoMode,
@@ -415,6 +416,7 @@ const editDataGridQuickEntry = ref(settingsStore.editorSettings.dataGridQuickEnt
 const editDataGridFilterEditorView = ref<DataGridFilterEditorView>(settingsStore.editorSettings.dataGridFilterEditorView);
 const dataGridFilterViewPreviewExpanded = ref(true);
 const editDataGridTextFilterPanelHeight = ref(settingsStore.editorSettings.dataGridTextFilterPanelHeight);
+const editMultiStatementDefaultView = ref<MultiStatementDefaultView>(settingsStore.editorSettings.multiStatementDefaultView);
 const editDataGridAutoTransposeSingleRow = ref(settingsStore.editorSettings.dataGridAutoTransposeSingleRow);
 const editDataGridCellDetailButtonVisible = ref(settingsStore.editorSettings.dataGridCellDetailButtonVisible);
 const editDataGridCrosshairHighlight = ref(settingsStore.editorSettings.dataGridCrosshairHighlight);
@@ -615,6 +617,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     dataGridQuickEntry: editDataGridQuickEntry.value,
     dataGridFilterEditorView: editDataGridFilterEditorView.value,
     dataGridTextFilterPanelHeight: editDataGridTextFilterPanelHeight.value,
+    multiStatementDefaultView: editMultiStatementDefaultView.value,
     dataGridAutoTransposeSingleRow: editDataGridAutoTransposeSingleRow.value,
     dataGridCellDetailButtonVisible: editDataGridCellDetailButtonVisible.value,
     dataGridCrosshairHighlight: editDataGridCrosshairHighlight.value,
@@ -1009,6 +1012,7 @@ function syncEditorSettingsDraftFromStore() {
   editDataGridQuickEntry.value = settingsStore.editorSettings.dataGridQuickEntry;
   editDataGridFilterEditorView.value = settingsStore.editorSettings.dataGridFilterEditorView;
   editDataGridTextFilterPanelHeight.value = settingsStore.editorSettings.dataGridTextFilterPanelHeight;
+  editMultiStatementDefaultView.value = settingsStore.editorSettings.multiStatementDefaultView;
   editDataGridAutoTransposeSingleRow.value = settingsStore.editorSettings.dataGridAutoTransposeSingleRow;
   editDataGridCellDetailButtonVisible.value = settingsStore.editorSettings.dataGridCellDetailButtonVisible;
   editDataGridCrosshairHighlight.value = settingsStore.editorSettings.dataGridCrosshairHighlight;
@@ -1318,6 +1322,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editDataGridQuickEntry.value = DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry;
     editDataGridFilterEditorView.value = DEFAULT_EDITOR_SETTINGS.dataGridFilterEditorView;
     editDataGridTextFilterPanelHeight.value = DEFAULT_EDITOR_SETTINGS.dataGridTextFilterPanelHeight;
+    editMultiStatementDefaultView.value = DEFAULT_EDITOR_SETTINGS.multiStatementDefaultView;
     editDataGridAutoTransposeSingleRow.value = DEFAULT_EDITOR_SETTINGS.dataGridAutoTransposeSingleRow;
     editDataGridCellDetailButtonVisible.value = DEFAULT_EDITOR_SETTINGS.dataGridCellDetailButtonVisible;
     editDataGridCrosshairHighlight.value = DEFAULT_EDITOR_SETTINGS.dataGridCrosshairHighlight;
@@ -1402,6 +1407,7 @@ function resetAllDefaults() {
   editDataGridQuickEntry.value = DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry;
   editDataGridFilterEditorView.value = DEFAULT_EDITOR_SETTINGS.dataGridFilterEditorView;
   editDataGridTextFilterPanelHeight.value = DEFAULT_EDITOR_SETTINGS.dataGridTextFilterPanelHeight;
+  editMultiStatementDefaultView.value = DEFAULT_EDITOR_SETTINGS.multiStatementDefaultView;
   editDataGridAutoTransposeSingleRow.value = DEFAULT_EDITOR_SETTINGS.dataGridAutoTransposeSingleRow;
   editDataGridCellDetailButtonVisible.value = DEFAULT_EDITOR_SETTINGS.dataGridCellDetailButtonVisible;
   editDataGridCrosshairHighlight.value = DEFAULT_EDITOR_SETTINGS.dataGridCrosshairHighlight;
@@ -2047,6 +2053,31 @@ const mcpInstallError = ref(false);
 const mcpExecutionMode = computed(() => mcpExecutionModeFromPolicy(settingsStore.mcpGlobalPolicy));
 const mcpExecutionModeOptions: McpExecutionMode[] = ["read_only", "safe_write", "high_risk_write"];
 const mcpAllowedConnectionIds = computed(() => settingsStore.mcpGlobalPolicy.allowedConnectionIds);
+const mcpQueryTimeoutInput = ref<string>(settingsStore.mcpGlobalPolicy.queryTimeoutSecs === null ? "" : String(settingsStore.mcpGlobalPolicy.queryTimeoutSecs));
+
+watch(
+  () => settingsStore.mcpGlobalPolicy.queryTimeoutSecs,
+  (value) => {
+    mcpQueryTimeoutInput.value = value === null ? "" : String(value);
+  },
+);
+
+function onMcpQueryTimeoutInput() {
+  const raw = mcpQueryTimeoutInput.value.trim();
+  if (raw === "") {
+    void saveMcpPolicy({ queryTimeoutSecs: null });
+    return;
+  }
+  const parsed = Number(raw);
+  // Backend stores the value as u64; keep out-of-range integers on the
+  // invalid-value path instead of failing serde later with a generic error.
+  if (!Number.isFinite(parsed) || parsed < 0 || !Number.isInteger(parsed) || parsed > Number("18446744073709551615")) {
+    toast(t("settings.mcpQueryTimeoutInvalid"), 5000);
+    mcpQueryTimeoutInput.value = settingsStore.mcpGlobalPolicy.queryTimeoutSecs === null ? "" : String(settingsStore.mcpGlobalPolicy.queryTimeoutSecs);
+    return;
+  }
+  void saveMcpPolicy({ queryTimeoutSecs: parsed });
+}
 const mcpSelectableConnections = computed(() => connectionStore.connections);
 const mcpPolicyControlsDisabled = computed(() =>
   isMcpPolicyMutationBlocked({
@@ -2056,7 +2087,7 @@ const mcpPolicyControlsDisabled = computed(() =>
   }),
 );
 
-async function saveMcpPolicy(partial: { readOnly?: boolean; allowDangerousSql?: boolean; allowedConnectionIds?: string[] | null }) {
+async function saveMcpPolicy(partial: { readOnly?: boolean; allowDangerousSql?: boolean; allowedConnectionIds?: string[] | null; queryTimeoutSecs?: number | null }) {
   if (mcpPolicyControlsDisabled.value) return;
   mcpPolicySaving.value = true;
   try {
@@ -5539,6 +5570,21 @@ onUnmounted(() => {
                     @update:model-value="updatePageSizeDraft"
                   />
                 </div>
+                <div data-settings-search-id="multi-statement-default-view" :class="['flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2', settingsSearchTargetClass('multi-statement-default-view')]">
+                  <div class="min-w-0 space-y-1">
+                    <Label for="multi-statement-default-view">{{ t("settings.multiStatementDefaultView") }}</Label>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.multiStatementDefaultViewDescription") }}</p>
+                  </div>
+                  <Select v-model="editMultiStatementDefaultView">
+                    <SelectTrigger id="multi-statement-default-view" class="h-8 w-32 shrink-0">
+                      <SelectValue :placeholder="t('settings.multiStatementDefaultView')" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="result">{{ t("tabs.tableData") }}</SelectItem>
+                      <SelectItem value="summary">{{ t("tabs.executionSummary") }}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="query-result-max-rows-enabled">
@@ -7167,6 +7213,15 @@ onUnmounted(() => {
                       <AlertTriangle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
                       <span>{{ t("settings.mcpExecutionModeHighRiskWriteDescription") }}</span>
                     </p>
+                  </div>
+                  <div class="space-y-1.5">
+                    <div class="space-y-0.5">
+                      <Label id="mcp-query-timeout-label">{{ t("settings.mcpQueryTimeout") }}</Label>
+                      <p class="text-[11px] text-muted-foreground">
+                        {{ t("settings.mcpQueryTimeoutDescription") }}
+                      </p>
+                    </div>
+                    <Input id="mcp-query-timeout" v-model="mcpQueryTimeoutInput" type="number" min="0" step="1" inputmode="numeric" placeholder="0" :disabled="mcpPolicyControlsDisabled" @change="onMcpQueryTimeoutInput" />
                   </div>
                   <div class="space-y-1.5">
                     <div class="space-y-0.5">

@@ -934,7 +934,7 @@ func (s *server) setSchema(ctx context.Context, conn *sql.Conn, schema string) e
 	if schema != "" {
 		// Kingbase implicitly prioritizes its system catalog when it is not
 		// listed explicitly, matching the JDBC agent and DBeaver behavior.
-		statement = "SET search_path TO " + quoteIdentifier(schema)
+		statement = "SET search_path TO " + s.quoteIdentifier(schema)
 	}
 	if _, err := conn.ExecContext(ctx, statement); err != nil {
 		return err
@@ -1891,6 +1891,13 @@ func isSQLDollarTagByte(value byte) bool {
 
 func quoteIdentifier(value string) string {
 	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
+}
+
+func (s *server) quoteIdentifier(value string) string {
+	if s.mode.mysqlCompat {
+		return "`" + strings.ReplaceAll(value, "`", "``") + "`"
+	}
+	return quoteIdentifier(value)
 }
 
 func quoteLiteral(value string) string {

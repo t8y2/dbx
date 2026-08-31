@@ -101,7 +101,8 @@ pub fn mark_frontend_ready(app: AppHandle) -> Result<(), String> {
     let state =
         app.try_state::<CloseBehaviorState>().ok_or_else(|| "close behavior state is unavailable".to_string())?;
     state.set_frontend_ready(true);
-    clear_startup_probe_after_frontend_ready();
+    let main_window_visible = app.get_webview_window("main").is_some_and(|window| window.is_visible().unwrap_or(false));
+    clear_startup_probe_after_frontend_ready(main_window_visible);
     Ok(())
 }
 

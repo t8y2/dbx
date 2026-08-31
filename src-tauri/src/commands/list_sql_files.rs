@@ -1,7 +1,7 @@
 use regex::Regex;
 use serde::Serialize;
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const MAX_SCAN_DEPTH: usize = 10;
 const DEFAULT_FILE_FILTER: &str = "*.sql";
@@ -33,6 +33,60 @@ pub struct SqlFileEntry {
     pub path: String,
     pub is_dir: bool,
     pub children: Vec<SqlFileEntry>,
+}
+
+fn validate_sql_file_name(file_name: &str) -> Result<&str, String> {
+    let file_name = file_name.trim();
+    if file_name.is_empty() || file_name == "." || file_name == ".." || file_name.contains(['/', '\\']) {
+        return Err("SQL file name must not contain a path".to_string());
+    }
+    if !file_name.to_ascii_lowercase().ends_with(".sql") || file_name.len() <= 4 {
+        return Err("Only .sql files can be managed here".to_string());
+    }
+    Ok(file_name)
+}
+
+fn renamed_sql_file_display_path(file_path: &str, file_name: &str) -> Result<String, String> {
+    #[cfg(windows)]
+    let parent_end = file_path.rfind(['/', '\\']).map(|index| index + 1);
+    #[cfg(not(windows))]
+    let parent_end = file_path.rfind('/').map(|index| index + 1);
+
+    Ok(parent_end.map_or_else(|| file_name.to_owned(), |index| format!("{}{}", &file_path[..index], file_name)))
+}
+
+fn canonical_directory(path: &Path, label: &str) -> Result<PathBuf, String> {
+    let path = std::fs::canonicalize(path).map_err(|error| format!("Failed to resolve {label}: {error}"))?;
+    if !path.is_dir() {
+        return Err(format!("{label} is not a directory"));
+    }
+    Ok(path)
+}
+
+fn managed_directory(root_path: &str, directory_path: &str) -> Result<PathBuf, String> {
+    let root = canonical_directory(Path::new(root_path), "SQL root folder")?;
+    let directory = canonical_directory(Path::new(directory_path), "SQL folder")?;
+    if !directory.starts_with(&root) {
+        return Err("SQL folder is outside the opened root folder".to_string());
+    }
+    Ok(directory)
+}
+
+fn managed_sql_file(root_path: &str, file_path: &str) -> Result<PathBuf, String> {
+    let root = canonical_directory(Path::new(root_path), "SQL root folder")?;
+    let file = std::fs::canonicalize(file_path).map_err(|error| format!("Failed to resolve SQL file: {error}"))?;
+    if !file.starts_with(&root) {
+        return Err("SQL file is outside the opened root folder".to_string());
+    }
+    if !file.is_file()
+        || !file
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("sql"))
+    {
+        return Err("Only .sql files can be managed here".to_string());
+    }
+    Ok(file)
 }
 
 fn is_pruned_dir(name: &str) -> bool {
@@ -153,6 +207,65 @@ pub async fn list_sql_files_in_folder(
     .map_err(|e| format!("Failed to scan folder: {e}"))?
 }
 
+#[tauri::command]
+pub async fn create_sql_file_in_folder(
+    root_path: String,
+    directory_path: String,
+    file_name: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let file_name = validate_sql_file_name(&file_name)?.to_owned();
+        let directory = managed_directory(&root_path, &directory_path)?;
+        let path = directory.join(&file_name);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|error| format!("Failed to create SQL file: {error}"))?;
+        // Keep the path form used by the file tree. `canonicalize` returns a
+        // Windows extended-length path, which is a different frontend identity.
+        Ok(Path::new(&directory_path).join(file_name).to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|error| format!("Failed to create SQL file: {error}"))?
+}
+
+#[tauri::command]
+pub async fn rename_sql_file_in_folder(
+    root_path: String,
+    file_path: String,
+    file_name: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let file_name = validate_sql_file_name(&file_name)?.to_owned();
+        let display_path = renamed_sql_file_display_path(&file_path, &file_name)?;
+        let file = managed_sql_file(&root_path, &file_path)?;
+        let target =
+            file.parent().ok_or_else(|| "Failed to resolve SQL file parent folder".to_string())?.join(&file_name);
+        if target.exists() {
+            let existing = std::fs::canonicalize(&target)
+                .map_err(|error| format!("Failed to resolve SQL file target: {error}"))?;
+            if existing != file {
+                return Err("A SQL file with this name already exists".to_string());
+            }
+        }
+        std::fs::rename(&file, &target).map_err(|error| format!("Failed to rename SQL file: {error}"))?;
+        Ok(display_path)
+    })
+    .await
+    .map_err(|error| format!("Failed to rename SQL file: {error}"))?
+}
+
+#[tauri::command]
+pub async fn delete_sql_file_in_folder(root_path: String, file_path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let file = managed_sql_file(&root_path, &file_path)?;
+        std::fs::remove_file(file).map_err(|error| format!("Failed to delete SQL file: {error}"))
+    })
+    .await
+    .map_err(|error| format!("Failed to delete SQL file: {error}"))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,5 +329,85 @@ mod tests {
         assert!(filter.is_match("script.sh"));
         assert!(filter.is_match("SCRIPT.SH"));
         assert!(!filter.is_match("script.py"));
+    }
+
+    #[test]
+    fn validates_single_sql_file_names() {
+        assert_eq!(validate_sql_file_name("query.sql").unwrap(), "query.sql");
+        assert!(validate_sql_file_name("query.txt").is_err());
+        assert!(validate_sql_file_name("nested/query.sql").is_err());
+        assert!(validate_sql_file_name("nested\\query.sql").is_err());
+        assert_eq!(renamed_sql_file_display_path("draft.sql", "report.sql").unwrap(), "report.sql");
+    }
+
+    #[tokio::test]
+    async fn manages_sql_files_within_the_opened_root() {
+        let root = std::env::temp_dir().join(format!("dbx-sql-file-manage-{}", uuid::Uuid::new_v4()));
+        let nested = root.join("queries");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let created = create_sql_file_in_folder(
+            root.to_string_lossy().into_owned(),
+            nested.to_string_lossy().into_owned(),
+            "draft.sql".to_string(),
+        )
+        .await
+        .unwrap();
+        assert!(Path::new(&created).is_file());
+
+        let renamed = rename_sql_file_in_folder(root.to_string_lossy().into_owned(), created, "report.sql".to_string())
+            .await
+            .unwrap();
+        assert!(Path::new(&renamed).is_file());
+
+        delete_sql_file_in_folder(root.to_string_lossy().into_owned(), renamed.clone()).await.unwrap();
+        assert!(!Path::new(&renamed).exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn keeps_the_file_tree_path_representation_for_managed_files() {
+        let root = std::env::temp_dir().join(format!("dbx-sql-file-path-{}", uuid::Uuid::new_v4()));
+        let nested = root.join("queries");
+        let displayed_root = root.join(".");
+        let displayed_directory = nested.join(".");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let created = create_sql_file_in_folder(
+            displayed_root.to_string_lossy().into_owned(),
+            displayed_directory.to_string_lossy().into_owned(),
+            "draft.sql".to_string(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(created, displayed_directory.join("draft.sql").to_string_lossy());
+
+        let renamed =
+            rename_sql_file_in_folder(displayed_root.to_string_lossy().into_owned(), created, "report.sql".to_string())
+                .await
+                .unwrap();
+        assert_eq!(renamed, displayed_directory.join("report.sql").to_string_lossy());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn renames_files_when_only_the_case_changes() {
+        let root = std::env::temp_dir().join(format!("dbx-sql-file-case-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("draft.sql");
+        std::fs::write(&source, "SELECT 1;").unwrap();
+
+        let renamed = rename_sql_file_in_folder(
+            root.to_string_lossy().into_owned(),
+            source.to_string_lossy().into_owned(),
+            "DRAFT.sql".to_string(),
+        )
+        .await
+        .unwrap();
+
+        assert!(Path::new(&renamed).is_file());
+        assert_eq!(Path::new(&renamed).file_name().unwrap(), "DRAFT.sql");
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

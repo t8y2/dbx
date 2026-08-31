@@ -74,6 +74,7 @@ import {
   isExecuteSqlInNewResultTabShortcut,
   isExecuteSqlShortcut,
   isFocusSearchShortcut,
+  isGoToColumnShortcut,
   isModRShortcut,
   handleTabHistoryNavigationShortcut,
   isNewQueryShortcut,
@@ -101,7 +102,7 @@ import { createTabSwitcherKeyboardController } from "@/lib/tabs/tabSwitcherKeybo
 import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
 import { supportsSqlFileExecution } from "@/lib/database/databaseCapabilities";
 import { classifyAiSqlExecution } from "@/lib/ai/aiSqlExecutionPolicy";
-import { buildAppendedEditorSql } from "@/lib/ai/aiSqlAppend";
+import { buildAppendedEditorSql, buildDeduplicatedAppendedEditorSql } from "@/lib/ai/aiSqlAppend";
 import { assessProductionSql } from "@/lib/database/productionSafety";
 import { normalizeSqlExecutionTarget, sqlExecutionTargetCapabilities } from "@/lib/database/sqlExecutionTargetCapabilities";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
@@ -422,6 +423,7 @@ async function resolveActiveExecutableSql(snapshot?: SqlExecutionSnapshot) {
 const blockDangerousRedisCommands = ref(true);
 const databaseRequiredSignal = ref(0);
 const databaseRequiredTabId = ref<string | null>(null);
+const pendingToolbarExecutionSnapshot = ref<SqlExecutionSnapshot>();
 const sqlExecutionDangerStore = useSqlExecutionDangerStore();
 const productionSafetyStore = useProductionSafetyStore();
 
@@ -465,7 +467,19 @@ const {
   onExecutionStarted: (editorViewportRequestId) => contentAreaRef.value?.acceptQueryEditorExecutionViewport(editorViewportRequestId),
 });
 
-function requestActiveEditorExecute() {
+function captureActiveEditorExecutionSnapshot() {
+  pendingToolbarExecutionSnapshot.value = contentAreaRef.value?.captureQueryEditorExecutionSnapshot?.();
+}
+
+function requestActiveEditorExecute(source?: "pointer" | "keyboard") {
+  const snapshot = pendingToolbarExecutionSnapshot.value;
+  pendingToolbarExecutionSnapshot.value = undefined;
+  if (source === "pointer") {
+    if (snapshot) {
+      void tryExecute(snapshot);
+      return;
+    }
+  }
   if (contentAreaRef.value?.requestQueryEditorExecute?.()) return;
   void tryExecute();
 }
@@ -2227,10 +2241,12 @@ function routeAiRedisCommand(command: string, execute: boolean): boolean {
   return true;
 }
 
-function onAiReplaceSql(sql: string) {
+function onAiAppendSql(sql: string) {
   if (routeAiRedisCommand(sql, false)) return;
   const tabId = ensureQueryTab();
-  queryStore.updateSql(tabId, sql);
+  const currentSql = queryStore.tabs.find((tab) => tab.id === tabId)?.sql ?? "";
+  const appendedSql = buildDeduplicatedAppendedEditorSql(currentSql, sql);
+  if (appendedSql !== currentSql) queryStore.updateSql(tabId, appendedSql);
 }
 
 function runAiGeneratedSql(sql: string) {
@@ -2241,7 +2257,9 @@ function runAiGeneratedSql(sql: string) {
 function onAiExecuteSql(sql: string) {
   if (routeAiRedisCommand(sql, true)) return;
   const tabId = ensureQueryTab();
-  queryStore.updateSql(tabId, buildAppendedEditorSql(activeTab.value?.sql || "", sql));
+  const currentSql = queryStore.tabs.find((tab) => tab.id === tabId)?.sql ?? "";
+  const appendedSql = buildDeduplicatedAppendedEditorSql(currentSql, sql);
+  if (appendedSql !== currentSql) queryStore.updateSql(tabId, appendedSql);
   runAiGeneratedSql(sql);
 }
 
@@ -2570,8 +2588,17 @@ async function handleKeydown(e: KeyboardEvent) {
   if (e.defaultPrevented) return;
 
   const shortcuts = settingsStore.editorSettings.shortcuts;
-  const tabSwitcherDirection = tabSwitcherDirectionFromShortcut(e, shortcuts);
   if (showTabSwitcher.value) return;
+  // Grid-scoped shortcuts normally win inside DataGrid. Keep that precedence
+  // for a data tab even when focus is in a sibling input, where the grid's
+  // local listener intentionally leaves native editing untouched.
+  if (isGoToColumnShortcut(e, shortcuts) && contentAreaRef.value?.openGoToColumn()) {
+    e.preventDefault();
+    e.stopPropagation();
+    return;
+  }
+
+  const tabSwitcherDirection = tabSwitcherDirectionFromShortcut(e, shortcuts);
   if (tabSwitcherDirection) {
     e.preventDefault();
     e.stopPropagation();
@@ -3078,7 +3105,8 @@ onUnmounted(() => {
                   @commit="activeTab && queryStore.commitTransaction(activeTab.id)"
                   @rollback="activeTab && queryStore.rollbackTransaction(activeTab.id)"
                   @dismiss-txn-rolled-back="activeTab && (activeTab.txnAutoRolledBack = false)"
-                  @execute="requestActiveEditorExecute()"
+                  @execute-pointer-down="captureActiveEditorExecutionSnapshot()"
+                  @execute="requestActiveEditorExecute($event)"
                   @multi-execute="requestMultiDbExecute()"
                   @cancel="cancelActiveExecution()"
                   @explain="tryExplain()"
@@ -3201,7 +3229,7 @@ onUnmounted(() => {
                 :tab="activeTab"
                 :connection="activeConnection"
                 :maximized="isAiPanelMaximized"
-                @replace-sql="onAiReplaceSql"
+                @append-sql="onAiAppendSql"
                 @execute-sql="onAiExecuteSql"
                 @temp-run-sql="onAiTempRunSql"
                 @request-auto-execute-sql="onAiRequestAutoExecuteSql"

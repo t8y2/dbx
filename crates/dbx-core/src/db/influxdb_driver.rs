@@ -1,6 +1,7 @@
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use reqwest::{Certificate, Client as HttpClient, Response};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::time::{Duration, Instant};
 
@@ -21,6 +22,7 @@ pub struct InfluxdbClient {
     username: Option<String>,
     password: Option<String>,
     url_params: Option<String>,
+    default_database: Option<String>,
     version: InfluxdbApiVersion,
     org: Option<String>,
 }
@@ -40,6 +42,7 @@ impl InfluxdbClient {
             username,
             password,
             url_params,
+            default_database: None,
             version: InfluxdbApiVersion::V1,
             org: None,
         }
@@ -60,6 +63,7 @@ impl InfluxdbClient {
             username,
             password,
             url_params,
+            default_database: None,
             version: InfluxdbApiVersion::V1,
             org: None,
         })
@@ -77,12 +81,15 @@ impl InfluxdbClient {
             InfluxdbApiVersion::V2 => (None, (!config.password.is_empty()).then_some(config.password.clone())),
         };
         let http = build_http_client(Some(&config.ca_cert_path), timeout)?;
+        let default_database =
+            config.database.as_deref().map(str::trim).filter(|database| !database.is_empty()).map(str::to_string);
         Ok(Self {
             http,
             base_url: url.trim_end_matches('/').to_string(),
             username,
             password,
             url_params: config.url_params.clone(),
+            default_database,
             version,
             org,
         })
@@ -152,6 +159,7 @@ impl Clone for InfluxdbClient {
             username: self.username.clone(),
             password: self.password.clone(),
             url_params: self.url_params.clone(),
+            default_database: self.default_database.clone(),
             version: self.version,
             org: self.org.clone(),
         }
@@ -192,6 +200,8 @@ struct InfluxSeries {
     name: String,
     columns: Vec<String>,
     values: Vec<Vec<serde_json::Value>>,
+    #[serde(default)]
+    tags: BTreeMap<String, String>,
 }
 
 #[derive(Deserialize)]
@@ -335,11 +345,20 @@ pub async fn test_connection(client: &InfluxdbClient, timeout: Duration) -> Resu
         req.send().await.map_err(|e| format!("InfluxDB connection failed: {e}"))
     })
     .await?;
-    if !resp.status().is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("InfluxDB error: {body}"));
+    if resp.status().is_success() {
+        return Ok(());
     }
-    Ok(())
+    let body = resp.text().await.unwrap_or_default();
+    if let Some(database) = client.default_database.as_deref() {
+        // Some Influx-compatible gateways require db on every request and do
+        // not expose SHOW DATABASES. A configured database is enough to prove
+        // the connection in that mode.
+        let probe = influx_query_with_timeout(client, "SHOW MEASUREMENTS", Some(database), timeout).await;
+        if probe.is_ok() {
+            return Ok(());
+        }
+    }
+    Err(format!("InfluxDB error: {body}"))
 }
 
 pub async fn list_databases(client: &InfluxdbClient) -> Result<Vec<DatabaseInfo>, String> {
@@ -350,7 +369,18 @@ pub async fn list_databases(client: &InfluxdbClient) -> Result<Vec<DatabaseInfo>
             .map(|bucket| DatabaseInfo { name: bucket.name, ..Default::default() })
             .collect());
     }
-    let result = influx_query(client, "SHOW DATABASES", None).await?;
+    let result = match influx_query(client, "SHOW DATABASES", None).await {
+        Ok(result) => result,
+        Err(error) => {
+            if let Some(database) = client.default_database.as_deref() {
+                // Only hide the unsupported SHOW DATABASES response when the configured database is usable.
+                if influx_query(client, "SHOW MEASUREMENTS", Some(database)).await.is_ok() {
+                    return Ok(vec![DatabaseInfo { name: database.to_string(), ..Default::default() }]);
+                }
+            }
+            return Err(error);
+        }
+    };
     Ok(result
         .results
         .iter()
@@ -470,39 +500,93 @@ pub async fn execute_query(client: &InfluxdbClient, database: &str, sql: &str) -
     }
     let start = Instant::now();
     let json = influx_query(client, sql, Some(database)).await?;
-    let series = json.results.iter().flat_map(|r| &r.series).next();
-    match series {
-        Some(s) => Ok(QueryResult {
-            columns: s.columns.clone(),
+    let series = json.results.iter().flat_map(|r| r.series.iter()).collect::<Vec<_>>();
+    if !series.is_empty() {
+        let (columns, rows) = merge_v1_series(&series);
+        return Ok(QueryResult {
+            column_sortables: columns.iter().map(|_| false).collect(),
+            columns,
             column_types: vec![],
-            column_sortables: s.columns.iter().map(|_| false).collect(),
             spatial_columns: vec![],
             spatial_values: vec![],
-            rows: s.values.clone(),
-            affected_rows: s.values.len() as u64,
+            affected_rows: rows.len() as u64,
+            rows,
             execution_time_ms: start.elapsed().as_millis(),
             truncated: false,
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
             messages: Vec::new(),
-        }),
-        None => Ok(QueryResult {
-            columns: vec![],
-            column_types: vec![],
-            column_sortables: vec![],
-            spatial_columns: vec![],
-            spatial_values: vec![],
-            rows: vec![],
-            affected_rows: 0,
-            execution_time_ms: start.elapsed().as_millis(),
-            truncated: false,
-            session_id: None,
-            has_more: false,
-            elasticsearch_raw_body: None,
-            messages: Vec::new(),
-        }),
+        });
     }
+    Ok(QueryResult {
+        columns: vec![],
+        column_types: vec![],
+        column_sortables: vec![],
+        spatial_columns: vec![],
+        spatial_values: vec![],
+        rows: vec![],
+        affected_rows: 0,
+        execution_time_ms: start.elapsed().as_millis(),
+        truncated: false,
+        session_id: None,
+        has_more: false,
+        elasticsearch_raw_body: None,
+        messages: Vec::new(),
+    })
+}
+
+fn merge_v1_series(series: &[&InfluxSeries]) -> (Vec<String>, Vec<Vec<serde_json::Value>>) {
+    let mut columns = Vec::new();
+    let mut column_indexes = BTreeMap::new();
+    let mut tag_keys = Vec::new();
+    let mut tag_indexes = BTreeMap::new();
+    for item in series {
+        for column in &item.columns {
+            if !column_indexes.contains_key(column) {
+                column_indexes.insert(column.clone(), columns.len());
+                columns.push(column.clone());
+            }
+        }
+        for tag in item.tags.keys() {
+            if !tag_indexes.contains_key(tag) {
+                tag_indexes.insert(tag.clone(), tag_keys.len());
+                tag_keys.push(tag.clone());
+            }
+        }
+    }
+    columns.extend(tag_keys.iter().cloned());
+    let mut rows = Vec::new();
+    for item in series {
+        let source_indexes =
+            item.columns.iter().enumerate().map(|(index, name)| (name, index)).collect::<BTreeMap<_, _>>();
+        for source_row in &item.values {
+            let mut row = columns[..column_indexes.len()]
+                .iter()
+                .map(|name| {
+                    source_indexes
+                        .get(name)
+                        .and_then(|index| source_row.get(*index))
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null)
+                })
+                .collect::<Vec<_>>();
+            row.extend(tag_keys.iter().map(|tag| {
+                item.tags.get(tag).cloned().map(serde_json::Value::String).unwrap_or(serde_json::Value::Null)
+            }));
+            rows.push(row);
+        }
+    }
+    (columns, rows)
+}
+
+async fn influx_query_with_timeout(
+    client: &InfluxdbClient,
+    sql: &str,
+    database: Option<&str>,
+    timeout: Duration,
+) -> Result<InfluxJsonResult, String> {
+    with_connection_timeout("InfluxDB", timeout, influx_query(client, sql, database)).await
 }
 
 async fn get_columns_v2(client: &InfluxdbClient, bucket: &str, measurement: &str) -> Result<Vec<ColumnInfo>, String> {
@@ -707,6 +791,7 @@ mod tests {
             username: None,
             password: None,
             url_params: None,
+            default_database: None,
             version: InfluxdbApiVersion::V1,
             org: None,
         }
@@ -718,6 +803,33 @@ mod tests {
         let url = build_query_url(&client, Some("sample"), "SHOW DATABASES");
 
         assert_eq!(url, "http://localhost:8086/query?db=sample&q=SHOW%20DATABASES");
+    }
+
+    #[test]
+    fn merges_v1_series_and_promotes_tags_to_columns() {
+        let first = InfluxSeries {
+            name: "dbx_smoke".to_string(),
+            columns: vec!["time".to_string(), "mean".to_string()],
+            values: vec![vec![json!("2026-08-31T00:00:00Z"), json!(10)]],
+            tags: BTreeMap::from([(String::from("host"), String::from("a"))]),
+        };
+        let second = InfluxSeries {
+            name: "dbx_smoke".to_string(),
+            columns: vec!["time".to_string(), "mean".to_string()],
+            values: vec![vec![json!("2026-08-31T00:01:00Z"), json!(20)]],
+            tags: BTreeMap::from([(String::from("host"), String::from("b"))]),
+        };
+
+        let (columns, rows) = merge_v1_series(&[&first, &second]);
+
+        assert_eq!(columns, vec!["time", "mean", "host"]);
+        assert_eq!(
+            rows,
+            vec![
+                vec![json!("2026-08-31T00:00:00Z"), json!(10), json!("a")],
+                vec![json!("2026-08-31T00:01:00Z"), json!(20), json!("b")],
+            ]
+        );
     }
 
     #[test]

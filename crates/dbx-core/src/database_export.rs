@@ -8,6 +8,9 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+use flate2::write::GzEncoder;
+use flate2::Compression;
+
 use crate::connection::task_client_session_id;
 use crate::models::connection::DatabaseType;
 use crate::mysql_ddl_normalize::DdlNormalizeOptions;
@@ -28,6 +31,14 @@ const EXPORT_CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 pub fn database_export_client_session_id(export_id: &str) -> String {
     task_client_session_id("database-export", export_id)
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DatabaseExportOutputCompression {
+    #[default]
+    None,
+    Gzip,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,8 +71,41 @@ pub struct DatabaseExportRequest {
     #[serde(default)]
     pub fail_on_error: bool,
     #[serde(default)]
+    pub output_compression: DatabaseExportOutputCompression,
+    #[serde(default)]
     pub snapshot_session_id: Option<String>,
     pub batch_size: usize,
+}
+
+enum DatabaseExportWriter {
+    Plain(BufWriter<std::fs::File>),
+    Gzip(Box<GzEncoder<BufWriter<std::fs::File>>>),
+}
+
+impl Write for DatabaseExportWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Plain(writer) => writer.write(buffer),
+            Self::Gzip(writer) => writer.write(buffer),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Plain(writer) => writer.flush(),
+            Self::Gzip(writer) => writer.flush(),
+        }
+    }
+}
+
+impl DatabaseExportWriter {
+    fn finish(self) -> Result<(), String> {
+        match self {
+            Self::Plain(mut writer) => writer.flush(),
+            Self::Gzip(writer) => writer.finish().and_then(|mut output| output.flush()),
+        }
+        .map_err(|error| format!("Failed to finalize export file: {error}"))
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -1624,10 +1668,19 @@ async fn get_export_table_ddl_isolated(
     database: String,
     schema: String,
     table: String,
+    client_session_id: String,
 ) -> Result<String, String> {
     let task = tokio::spawn(async move {
-        crate::schema::get_table_relation_export_ddl_core(&state, &connection_id, &database, &schema, &table, None)
-            .await
+        crate::schema::get_table_relation_export_ddl_core_for_session(
+            &state,
+            &connection_id,
+            &database,
+            &schema,
+            &table,
+            None,
+            Some(&client_session_id),
+        )
+        .await
     });
     let _abort_on_drop = AbortExportTaskOnDrop(task.abort_handle());
     task.await.map_err(|error| format!("Database export metadata task failed: {error}"))?
@@ -1639,9 +1692,18 @@ async fn get_export_table_columns_isolated(
     database: String,
     schema: String,
     table: String,
+    client_session_id: String,
 ) -> Result<Vec<crate::db::ColumnInfo>, String> {
     let task = tokio::spawn(async move {
-        crate::schema::get_columns_core(&state, &connection_id, &database, &schema, &table).await
+        crate::schema::get_columns_core_for_session(
+            &state,
+            &connection_id,
+            &database,
+            &schema,
+            &table,
+            Some(&client_session_id),
+        )
+        .await
     });
     let _abort_on_drop = AbortExportTaskOnDrop(task.abort_handle());
     task.await.map_err(|error| format!("Database export metadata task failed: {error}"))?
@@ -1692,6 +1754,20 @@ pub async fn begin_database_backup_snapshot_core(
     connection_id: &str,
     database: &str,
 ) -> Result<DatabaseBackupSnapshot, String> {
+    begin_database_backup_snapshot_core_for_export(state, connection_id, database, None).await
+}
+
+/// Opens the consistent-snapshot transaction used by a scheduled backup.
+///
+/// When the snapshot is being created for an export run, `export_id` keeps
+/// pool checkout and transaction creation cancellable even before a child
+/// database export has been created.
+pub async fn begin_database_backup_snapshot_core_for_export(
+    state: &crate::connection::AppState,
+    connection_id: &str,
+    database: &str,
+    export_id: Option<&str>,
+) -> Result<DatabaseBackupSnapshot, String> {
     let db_type = state
         .configs
         .read()
@@ -1703,22 +1779,51 @@ pub async fn begin_database_backup_snapshot_core(
         return Err("Consistent database backup snapshots are only supported for MySQL and PostgreSQL".to_string());
     }
 
-    let session_id = crate::query::begin_database_backup_snapshot(state, connection_id, database).await?;
-    let schemas = if matches!(db_type, DatabaseType::Postgres) {
+    let session_id = if let Some(export_id) = export_id {
+        // Do not use `await_export_operation` here: if the transaction is
+        // created at exactly the same time as cancellation, we still need the
+        // returned session id to roll it back rather than leaking it.
+        let operation = crate::query::begin_database_backup_snapshot(state, connection_id, database);
+        tokio::pin!(operation);
+        loop {
+            if is_export_cancelled_now(export_id) {
+                return Err(EXPORT_CANCELLED_ERROR.to_string());
+            }
+            tokio::select! {
+                biased;
+                result = &mut operation => {
+                    let session_id = result?;
+                    if is_export_cancelled_now(export_id) {
+                        let _ = crate::query::rollback_manual_transaction(state, &session_id).await;
+                        return Err(EXPORT_CANCELLED_ERROR.to_string());
+                    }
+                    break session_id;
+                },
+                _ = tokio::time::sleep(EXPORT_CANCEL_POLL_INTERVAL) => {}
+            }
+        }
+    } else {
+        crate::query::begin_database_backup_snapshot(state, connection_id, database).await?
+    };
+
+    let schemas_result = if matches!(db_type, DatabaseType::Postgres) {
         const POSTGRES_BACKUP_SCHEMAS_SQL: &str = "SELECT n.nspname FROM pg_catalog.pg_namespace n \
              WHERE n.nspname NOT IN ('information_schema', 'pg_catalog', 'pg_toast') \
              AND n.nspname NOT LIKE 'pg_toast_temp_%' \
              AND n.nspname NOT LIKE 'pg_temp_%' ORDER BY n.nspname";
-        let results = crate::query::execute_in_manual_transaction(
+        let operation = crate::query::execute_in_manual_transaction(
             state,
             &session_id,
             POSTGRES_BACKUP_SCHEMAS_SQL,
             database,
             None,
             Some(10_000),
-        )
-        .await?;
-        results
+        );
+        let results = match export_id {
+            Some(export_id) => await_export_operation(export_id, Box::pin(operation)).await,
+            None => operation.await,
+        }?;
+        Ok(results
             .into_iter()
             .next()
             .map(|result| {
@@ -1729,9 +1834,20 @@ pub async fn begin_database_backup_snapshot_core(
                     .filter_map(|value| value.as_str().map(str::to_string))
                     .collect()
             })
-            .unwrap_or_default()
+            .unwrap_or_default())
     } else {
-        vec![database.to_string()]
+        Ok(vec![database.to_string()])
+    };
+    let schemas = match schemas_result {
+        Ok(schemas) => schemas,
+        Err(error) => {
+            let _ = crate::query::rollback_manual_transaction(state, &session_id).await;
+            return Err(error);
+        }
+    };
+    if export_id.map(is_export_cancelled_now).unwrap_or(false) {
+        let _ = crate::query::rollback_manual_transaction(state, &session_id).await;
+        return Err(EXPORT_CANCELLED_ERROR.to_string());
     };
     if schemas.is_empty() {
         let _ = crate::query::rollback_manual_transaction(state, &session_id).await;
@@ -2152,6 +2268,16 @@ pub async fn export_database_sql_core(
     // caller future small, this prevents the metadata-prefetch locals from
     // exhausting the bounded stack used by test and runtime worker threads.
     let result = Box::pin(export_database_sql_core_inner(state, request, &on_progress)).await;
+    let metadata_session_id = database_export_client_session_id(&request.export_id);
+    if let Err(error) =
+        state.close_metadata_session_pool(&request.connection_id, Some(&request.database), &metadata_session_id).await
+    {
+        log::warn!(
+            "[database-export] failed to close metadata session '{}' for '{}': {error}",
+            metadata_session_id,
+            request.connection_id
+        );
+    }
     if result.as_ref().err().is_some_and(|error| error == EXPORT_CANCELLED_ERROR) {
         // Every caller (Tauri and web SSE) needs a terminal Cancelled event;
         // returning the marker as an error would leave the web EventSource
@@ -2231,7 +2357,12 @@ async fn export_database_sql_core_inner(
             request.file_path
         ));
     }
-    let mut file = BufWriter::new(file);
+    let mut file = match request.output_compression {
+        DatabaseExportOutputCompression::None => DatabaseExportWriter::Plain(BufWriter::new(file)),
+        DatabaseExportOutputCompression::Gzip => {
+            DatabaseExportWriter::Gzip(Box::new(GzEncoder::new(BufWriter::new(file), Compression::default())))
+        }
+    };
 
     let create_database_preamble = if request.include_create_database && matches!(db_type, DatabaseType::Mysql) {
         Some(mysql_database_export_preamble_for_request(state, request).await)
@@ -2455,6 +2586,7 @@ async fn export_database_sql_core_inner(
         let prefetch_targets: Vec<(usize, String)> =
             tables.iter().enumerate().map(|(index, table_info)| (index, table_info.name.clone())).collect();
         let mut prefetch_stream = futures::stream::iter(prefetch_targets.into_iter().map(|(index, table_name)| {
+            let client_session_id = client_session_id.clone();
             Box::pin(async move {
                 if is_export_cancelled_now(&request.export_id) {
                     return (index, PrefetchedTableMetadata { ddl: None, columns: None });
@@ -2469,6 +2601,7 @@ async fn export_database_sql_core_inner(
                                 request.database.clone(),
                                 request.schema.clone(),
                                 table_name.clone(),
+                                client_session_id.clone(),
                             )),
                         )
                         .await,
@@ -2489,6 +2622,7 @@ async fn export_database_sql_core_inner(
                                 request.database.clone(),
                                 request.schema.clone(),
                                 table_name.clone(),
+                                client_session_id.clone(),
                             )),
                         )
                         .await,
@@ -2641,6 +2775,7 @@ async fn export_database_sql_core_inner(
                             request.database.clone(),
                             request.schema.clone(),
                             table_name.clone(),
+                            client_session_id.clone(),
                         )),
                     )
                     .await
@@ -2688,6 +2823,7 @@ async fn export_database_sql_core_inner(
                             request.database.clone(),
                             request.schema.clone(),
                             table_name.clone(),
+                            client_session_id.clone(),
                         )),
                     )
                     .await
@@ -2726,9 +2862,8 @@ async fn export_database_sql_core_inner(
                             batch_size,
                             Some(cancel_token.clone()),
                             |rows| {
-                                // PostgreSQL cancellation must unwind through its CancelRequest path so the
-                                // connection reaches ReadyForQuery before rollback. Other snapshot streams do
-                                // not consume the token yet, so retain their existing next-batch cancellation.
+                                // PostgreSQL and MySQL consume the token while waiting for rows. Retain this
+                                // batch-boundary check so cancellation also wins while a batch is being written.
                                 if snapshot_batch_cancelled(&db_type, &request.export_id) {
                                     return Err(EXPORT_CANCELLED_ERROR.to_string());
                                 }
@@ -3062,7 +3197,7 @@ async fn export_database_sql_core_inner(
         writeln!(file, "SET FOREIGN_KEY_CHECKS = 1;").map_err(|e| format!("Failed to write file: {e}"))?;
     }
 
-    file.flush().map_err(|e| format!("Failed to finalize export file: {e}"))?;
+    file.finish()?;
 
     // Emit Done progress
     on_progress(ExportProgress {
@@ -3139,9 +3274,9 @@ mod tests {
         mysql_view_dependencies_sql, normalize_export_table_ddl, record_export_destination_identity,
         record_export_error, replace_database_export_select_list, sort_export_views_by_dependencies,
         split_postgres_export_table_triggers, write_database_export_rows, BuildDatabaseSqlExportOptions,
-        BuildExportInsertStatementsOptions, DatabaseExportObjectCounts, DatabaseExportRequest, DdlNormalizeOptions,
-        ExportedTableSql, PostgresExportExtension, PostgresExportSequence, PostgresExtensionMembers,
-        DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT,
+        BuildExportInsertStatementsOptions, DatabaseExportObjectCounts, DatabaseExportRequest, DatabaseExportWriter,
+        DdlNormalizeOptions, ExportedTableSql, PostgresExportExtension, PostgresExportSequence,
+        PostgresExtensionMembers, DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT,
     };
     use crate::connection::AppState;
     use crate::models::connection::DatabaseType;
@@ -3149,6 +3284,7 @@ mod tests {
     use crate::types::SpatialColumn;
     use crate::types::{ObjectInfo, ObjectSourceKind, TableInfo};
     use serde_json::{json, Value};
+    use std::io::{Read, Write};
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -3324,9 +3460,27 @@ mod tests {
             drop_table_if_exists: false,
             omit_auto_increment: false,
             fail_on_error: false,
+            output_compression: Default::default(),
             snapshot_session_id: None,
             batch_size: 1000,
         }
+    }
+
+    #[test]
+    fn gzip_export_writer_finishes_a_readable_stream() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("backup.sql.gz");
+        let file = std::fs::File::create(&path).unwrap();
+        let mut writer = DatabaseExportWriter::Gzip(Box::new(flate2::write::GzEncoder::new(
+            std::io::BufWriter::new(file),
+            flate2::Compression::default(),
+        )));
+        writer.write_all(b"SELECT 1;\n").unwrap();
+        writer.finish().unwrap();
+
+        let mut output = String::new();
+        flate2::read::GzDecoder::new(std::fs::File::open(path).unwrap()).read_to_string(&mut output).unwrap();
+        assert_eq!(output, "SELECT 1;\n");
     }
 
     #[test]

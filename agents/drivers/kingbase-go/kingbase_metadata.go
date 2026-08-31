@@ -222,10 +222,7 @@ func (s *server) identifierQuote() string {
 // schema/table names containing hyphens or other special characters render as
 // valid SQL instead of being parsed as operators or bare tokens.
 func (s *server) quoteDDLIdentifier(value string) string {
-	if s.mode.mysqlCompat {
-		return "`" + strings.ReplaceAll(value, "`", "``") + "`"
-	}
-	return quoteIdentifier(value)
+	return s.quoteIdentifier(value)
 }
 
 func (s *server) connectionInfo() (map[string]any, error) {

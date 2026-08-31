@@ -40,7 +40,7 @@ const visibleTasks = computed(() => {
 
 const hasMore = computed(() => tasks.value.length > MAX_VISIBLE);
 
-const isActive = (status: string) => status === "Running" || status === "Writing";
+const isActive = (status: string) => status === "Running" || status === "Writing" || status === "Cancelling";
 const isFinished = (status: string) => status === "Done" || status === "Error" || status === "Cancelled";
 
 const finishedCount = computed(() => tasks.value.filter((t) => isFinished(t.status)).length);
@@ -142,6 +142,8 @@ const rowsText = (task: ExportTask) => {
   return `${task.rowsExported.toLocaleString()} ${t("exportProgress.rowsShort")}`;
 };
 
+const taskStatusText = (task: ExportTask) => (task.status === "Cancelling" ? t("databaseBackup.cancelling") : "");
+
 const elapsedText = (task: ExportTask) => {
   if (task.startedAt === undefined) return "";
   const finishedAt = task.finishedAt ?? currentTime.value;
@@ -170,6 +172,7 @@ const statusIcon = (task: ExportTask) => {
   switch (task.status) {
     case "Running":
     case "Writing":
+    case "Cancelling":
       return Loader2;
     case "Done":
       return CheckCircle2;
@@ -186,6 +189,7 @@ const statusColor = (status: string) => {
   switch (status) {
     case "Running":
     case "Writing":
+    case "Cancelling":
       return "text-primary";
     case "Done":
       return "text-green-500";
@@ -257,7 +261,7 @@ function openTask(task: ExportTask): void {
         <div v-for="task in visibleTasks" :key="task.exportId" class="flex items-start gap-3 border-b px-4 py-3 text-xs last:border-b-0">
           <div class="flex-1 min-w-0 flex flex-col gap-1.5">
             <div class="flex items-center gap-1.5">
-              <component :is="statusIcon(task)" :class="[statusColor(task.status), task.kind === 'table-export' && isActive(task.status) ? 'animate-spin' : '']" class="h-3.5 w-3.5 shrink-0" />
+              <component :is="statusIcon(task)" :class="[statusColor(task.status), (task.kind === 'table-export' || task.status === 'Cancelling') && isActive(task.status) ? 'animate-spin' : '']" class="h-3.5 w-3.5 shrink-0" />
               <span class="truncate font-medium" :title="task.filePath || undefined">{{ taskTitle(task) }}</span>
             </div>
 
@@ -283,6 +287,7 @@ function openTask(task: ExportTask): void {
             <div class="min-w-0 text-muted-foreground">
               <span class="break-words tabular-nums">{{ rowsText(task) }}</span>
               <span v-if="task.kind !== 'data-transfer' && task.startedAt !== undefined" class="ml-1 tabular-nums">{{ elapsedText(task) }}</span>
+              <span v-if="taskStatusText(task)" class="ml-1 font-medium text-primary">{{ taskStatusText(task) }}</span>
               <span v-if="task.status === 'Error' && task.errorMessage" class="mt-1 block whitespace-normal break-words text-destructive" :title="translateBackendError(t, task.errorMessage)">
                 {{ translateBackendError(t, task.errorMessage) }}
               </span>
@@ -311,8 +316,15 @@ function openTask(task: ExportTask): void {
             <button v-if="canRevealTaskFile(task)" class="flex h-6 w-6 items-center justify-center rounded hover:bg-muted disabled:opacity-50" :title="t('exportProgress.openFolder')" :disabled="revealingTaskIds.includes(task.exportId)" @click="revealTaskFile(task)">
               <FolderOpen class="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" />
             </button>
-            <button v-if="isActive(task.status)" class="flex h-6 w-6 items-center justify-center rounded hover:bg-muted" :title="t('exportProgress.cancel')" @click="cancelTask(task.exportId)">
-              <X class="h-3.5 w-3.5 text-muted-foreground hover:text-destructive" />
+            <button
+              v-if="isActive(task.status)"
+              class="flex h-6 w-6 items-center justify-center rounded hover:bg-muted disabled:cursor-not-allowed"
+              :disabled="task.status === 'Cancelling'"
+              :title="task.status === 'Cancelling' ? t('databaseBackup.cancelling') : t('exportProgress.cancel')"
+              @click="cancelTask(task.exportId)"
+            >
+              <Loader2 v-if="task.status === 'Cancelling'" class="h-3.5 w-3.5 animate-spin text-primary" />
+              <X v-else class="h-3.5 w-3.5 text-muted-foreground hover:text-destructive" />
             </button>
             <button v-else class="flex h-6 w-6 items-center justify-center rounded hover:bg-muted" :title="t('exportProgress.delete')" @click="removeTask(task.exportId)">
               <X class="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" />

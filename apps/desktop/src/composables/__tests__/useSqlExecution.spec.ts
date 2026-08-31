@@ -275,12 +275,36 @@ describe("useSqlExecution", () => {
     expect(executeCurrentSql).toHaveBeenCalledWith("SELECT * FROM patrol WHERE post_id = '224';", {});
   });
 
-  it("opens the execution summary for a multi-statement batch", async () => {
+  it("opens the result table for a multi-statement batch by default", async () => {
     const sql = "SELECT 1;\nSELECT 2;";
     const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });
     const activeConnection = ref<ConnectionConfig | undefined>(connection("mysql"));
     const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
     const queryStore = useQueryStore();
+    vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (activeTab.value) activeTab.value.result = { columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 };
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+
+    await execution.tryExecute();
+
+    expect(activeOutputView.value).toBe("result");
+  });
+
+  it("opens the execution summary for a multi-statement batch when configured", async () => {
+    const sql = "SELECT 1;\nSELECT 2;";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("mysql"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    useSettingsStore().editorSettings.multiStatementDefaultView = "summary";
     vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
       if (activeTab.value) activeTab.value.result = { columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 };
     });
@@ -468,7 +492,7 @@ GO`;
     expect(activeTab.value?.result?.execution_error).toBe(true);
   });
 
-  it("keeps ordinary SQL Server multi-result batches on their summary", async () => {
+  it("opens ordinary SQL Server multi-result batches in the result table by default", async () => {
     const sql = "SELECT 1 AS first_value; SELECT 2 AS second_value;";
     const activeTab = ref<QueryTab | undefined>({ ...queryTab("dbx_sqlserver_demo"), sql });
     const activeConnection = ref<ConnectionConfig | undefined>(connection("sqlserver"));
@@ -494,12 +518,12 @@ GO`;
 
     await execution.tryExecute();
 
-    expect(activeOutputView.value).toBe("summary");
+    expect(activeOutputView.value).toBe("result");
     expect(setActiveResultIndex).not.toHaveBeenCalled();
     expect(activeTab.value?.result?.rows).toEqual([[1]]);
   });
 
-  it("keeps the summary for ordinary SQL Server data aliased as Message", async () => {
+  it("opens ordinary SQL Server data aliased as Message in the result table by default", async () => {
     const sql = `DECLARE @value nvarchar(1) = N'x';
 SELECT @value AS Message;`;
     const activeTab = ref<QueryTab | undefined>({ ...queryTab("dbx_sqlserver_demo"), sql });
@@ -520,7 +544,7 @@ SELECT @value AS Message;`;
 
     await execution.tryExecute();
 
-    expect(activeOutputView.value).toBe("summary");
+    expect(activeOutputView.value).toBe("result");
     expect(activeTab.value?.result?.rows).toEqual([["x"]]);
   });
 

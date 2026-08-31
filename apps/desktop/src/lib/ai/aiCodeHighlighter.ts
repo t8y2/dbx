@@ -1,4 +1,5 @@
 import type { AppThemeAppearance } from "@/lib/app/appTheme";
+import { supportsRegExpLookbehind } from "@/lib/ui/legacyWebView";
 
 export type AiCodeHighlighter = (content: string, lang: string, appearance?: AppThemeAppearance) => string;
 
@@ -96,9 +97,15 @@ function getAiShikiHighlighter(): Promise<ShikiHighlighter> {
 }
 
 async function loadAiShikiHighlighter(): Promise<ShikiHighlighter> {
-  const [{ createHighlighterCore }, { createJavaScriptRegexEngine }, githubDark, githubLight, bash, css, go, html, java, javascript, json, markdown, php, python, rust, shellscript, sql, tsx, typescript, vue, xml, yaml] = await Promise.all([
+  const [{ createHighlighterCore }, { createJavaScriptRegexEngine }, onigurumaEngineModules, githubDark, githubLight, bash, css, go, html, java, javascript, json, markdown, php, python, rust, shellscript, sql, tsx, typescript, vue, xml, yaml] = await Promise.all([
     import("shiki/core"),
     import("shiki/engine/javascript"),
+    // Old WebKit (Safari < 16.4) throws SyntaxError while compiling the
+    // lookbehind / named-group patterns the JavaScript engine generates from
+    // TextMate grammars (code snapshots and AI code blocks then lose all
+    // highlighting). Only fetch the heavier inlined-Oniguruma WASM bundle on
+    // engines that need it.
+    supportsRegExpLookbehind() ? Promise.resolve(null) : Promise.all([import("shiki/engine/oniguruma"), import("shiki/wasm")]),
     import("shiki/themes/github-dark.mjs"),
     import("shiki/themes/github-light.mjs"),
     import("shiki/langs/bash.mjs"),
@@ -122,7 +129,7 @@ async function loadAiShikiHighlighter(): Promise<ShikiHighlighter> {
   ]);
 
   return createHighlighterCore({
-    engine: createJavaScriptRegexEngine(),
+    engine: onigurumaEngineModules ? await onigurumaEngineModules[0].createOnigurumaEngine(onigurumaEngineModules[1]) : createJavaScriptRegexEngine(),
     langs: [bash.default, css.default, go.default, html.default, java.default, javascript.default, json.default, markdown.default, php.default, python.default, rust.default, shellscript.default, sql.default, tsx.default, typescript.default, vue.default, xml.default, yaml.default],
     themes: [githubDark.default, githubLight.default],
   });

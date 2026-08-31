@@ -60,6 +60,7 @@ function createHarness(options: {
   acceptCompletion?: (view: MockView) => boolean;
   selectedCompletionIndex?: (state: MockState) => number | null;
   selectFirstCompletion?: (view: MockView) => boolean;
+  applySelectedBatchColumnSelection?: (view: MockView) => boolean;
   closeCompletion?: (view: MockView) => boolean;
   insertNewlineKeepIndent?: (view: MockView) => boolean;
   nextSnippetField?: (view: MockView) => boolean;
@@ -94,11 +95,13 @@ function createHarness(options: {
   }).outputText;
   const factory = new Function(
     "codeMirrorCompletionStatus",
+    "isBatchColumnSelectionCompletionActive",
     "codeMirrorAcceptCompletion",
     "codeMirrorSelectedCompletionIndex",
     "codeMirrorSelectFirstCompletion",
     "acceptSelectedCompletionWithRetry",
     "acceptSelectedOrFirstCompletion",
+    "applySelectedBatchColumnSelection",
     "codeMirrorCloseCompletion",
     "codeMirrorInsertNewlineKeepIndent",
     "insertQueryEditorNewline",
@@ -112,11 +115,13 @@ function createHarness(options: {
   );
   return factory(
     options.completionStatus,
+    (status: "active" | "pending" | null) => status === "active",
     options.acceptCompletion ?? (() => false),
     options.selectedCompletionIndex ?? (() => 0),
     options.selectFirstCompletion ?? (() => false),
     acceptSelectedCompletionWithRetry,
     acceptSelectedOrFirstCompletion,
+    options.applySelectedBatchColumnSelection ?? (() => false),
     options.closeCompletion ?? (() => false),
     options.insertNewlineKeepIndent ?? (() => false),
     (view: MockView, fallback: ((view: MockView) => boolean) | null | undefined) => fallback?.(view) ?? false,
@@ -161,6 +166,9 @@ afterEach(() => {
 });
 
 describe("QueryEditor completion Tab keymap", () => {
+  it("guards the batch INSERT snippet factory before applying", () => {
+    expect(queryEditorSource).toContain('if (session.mode === "insert" && !codeMirrorSnippetCompletion)');
+  });
   it("closes completion and suppresses its restart for the Enter newline", () => {
     const closeCompletion = vi.fn(() => true);
     let harness: TabHarness;
@@ -194,6 +202,26 @@ describe("QueryEditor completion Tab keymap", () => {
     expect(harness.consumeSqlCompletionAutoStartSuppression()).toBe(false);
   });
 
+  it("does not apply a stale batch selection after the completion popup closes", () => {
+    const applySelectedBatchColumnSelection = vi.fn(() => true);
+    const insertNewlineKeepIndent = vi.fn(() => true);
+    const harness = createHarness({ completionStatus: () => null, applySelectedBatchColumnSelection, insertNewlineKeepIndent, acceptCompletionShortcut: "Tab" });
+    const view = createView();
+
+    expect(harness.handleEnter(view)).toBe(true);
+    expect(harness.handleTab(view)).toBe(true);
+    expect(applySelectedBatchColumnSelection).not.toHaveBeenCalled();
+    expect(insertNewlineKeepIndent).toHaveBeenCalled();
+  });
+
+  it("applies a batch selection only while the completion popup is active", () => {
+    const applySelectedBatchColumnSelection = vi.fn(() => true);
+    const harness = createHarness({ completionStatus: () => "active", applySelectedBatchColumnSelection });
+
+    expect(harness.handleEnter(createView())).toBe(true);
+    expect(applySelectedBatchColumnSelection).toHaveBeenCalledOnce();
+  });
+
   it("keeps CodeMirror prefix filtering enabled for SQL completion results", () => {
     const javascript = ts.transpileModule(extractFunction("buildCompletionResult"), {
       compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
@@ -207,7 +235,7 @@ describe("QueryEditor completion Tab keymap", () => {
   });
 
   it("keeps ASCII single-character filtering while allowing Han pinyin matches", () => {
-    const source = [extractFunction("completionItemsForBypassedFilter"), extractFunction("shouldBypassCompletionFilter"), extractFunction("buildCompletionResult")].join("\n");
+    const source = [extractFunction("isBatchColumnSelectionAction"), extractFunction("completionItemsForBypassedFilter"), extractFunction("shouldBypassCompletionFilter"), extractFunction("buildCompletionResult")].join("\n");
     const javascript = ts.transpileModule(source, {
       compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
     }).outputText;

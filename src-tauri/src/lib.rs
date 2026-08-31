@@ -170,8 +170,8 @@ fn append_startup_probe(message: impl AsRef<str>) {
     startup_recovery::record(message);
 }
 
-pub(crate) fn clear_startup_probe_after_frontend_ready() {
-    startup_recovery::mark_frontend_ready();
+pub(crate) fn clear_startup_probe_after_frontend_ready(main_window_visible: bool) {
+    startup_recovery::mark_frontend_ready(main_window_visible);
 }
 
 fn should_confirm_app_exit_request(target_os: &str, exit_code: Option<i32>, confirmed_exit: bool) -> bool {
@@ -464,19 +464,10 @@ fn linux_webkit_environment_override<'a>(
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn linux_system_gtk3_immodules_cache_path() -> Option<&'static str> {
-    [
-        "/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules.cache",
-        "/usr/lib/aarch64-linux-gnu/gtk-3.0/3.0.0/immodules.cache",
-        "/usr/lib64/gtk-3.0/3.0.0/immodules.cache",
-        "/usr/lib/gtk-3.0/3.0.0/immodules.cache",
-    ]
-    .iter()
-    .copied()
-    .find(|path| std::path::Path::new(path).is_file())
+fn linux_appimage_requires_dmabuf_workaround(appimage: Option<&std::ffi::OsStr>) -> bool {
+    appimage.is_some_and(|value| !value.is_empty())
 }
 
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn linux_appimage_wayland_backend_override(
     appimage: Option<&std::ffi::OsStr>,
     wayland_display: Option<&std::ffi::OsStr>,
@@ -516,34 +507,10 @@ fn linux_uses_native_wayland(
     })
 }
 
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn linux_appimage_system_gtk_immodules_cache(
-    appimage: Option<&std::ffi::OsStr>,
-    appdir: Option<&std::ffi::OsStr>,
-    gtk_im_module: Option<&std::ffi::OsStr>,
-    gtk_im_module_file: Option<&std::ffi::OsStr>,
-    system_cache_path: Option<&'static str>,
-) -> Option<&'static str> {
-    let system_cache_path = system_cache_path?;
-    if appimage.is_none() || gtk_im_module.is_none() {
-        return None;
-    }
-
-    let Some(gtk_im_module_file) = gtk_im_module_file else {
-        return Some(system_cache_path);
-    };
-    let appdir = appdir?;
-
-    if std::path::Path::new(gtk_im_module_file).starts_with(std::path::Path::new(appdir)) {
-        Some(system_cache_path)
-    } else {
-        None
-    }
-}
-
 #[cfg(target_os = "linux")]
 fn apply_linux_webkit_rendering_workarounds() {
     let render_devices = linux_drm_render_devices();
+    let appimage = std::env::var_os("APPIMAGE");
     let explicit_device_file = std::env::var_os("WEBKIT_WEB_RENDER_DEVICE_FILE")
         .filter(|path| !path.is_empty())
         .map(std::path::PathBuf::from)
@@ -558,11 +525,21 @@ fn apply_linux_webkit_rendering_workarounds() {
     let has_hardware_render_device =
         render_devices.iter().any(|device| !linux_drm_driver_is_software_only(device.driver.as_deref()));
     let uses_native_wayland = linux_uses_native_wayland(
-        std::env::var_os("APPIMAGE").as_deref(),
+        appimage.as_deref(),
         std::env::var_os("WAYLAND_DISPLAY").as_deref(),
         std::env::var_os("XDG_SESSION_TYPE").as_deref(),
         std::env::var_os("GDK_BACKEND").as_deref(),
     );
+    // AppImages bundle WebKitGTK/GTK but use the host EGL/GL stack. On some
+    // combinations, WebKit's DMABUF initialization aborts the WebProcess
+    // before it can fall back to software rendering. Keep this opt-out
+    // user-overridable and use the stable shared-memory renderer instead.
+    if linux_appimage_requires_dmabuf_workaround(appimage.as_deref())
+        && linux_webkit_environment_override(std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").as_deref(), "1")
+            .is_some()
+    {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
     for (key, value) in linux_webkit_rendering_workarounds(
         nvidia_driver,
         has_hardware_render_device,
@@ -574,23 +551,11 @@ fn apply_linux_webkit_rendering_workarounds() {
         }
     }
     if let Some(gdk_backend) = linux_appimage_wayland_backend_override(
-        std::env::var_os("APPIMAGE").as_deref(),
+        appimage.as_deref(),
         std::env::var_os("WAYLAND_DISPLAY").as_deref(),
         std::env::var_os("GDK_BACKEND").as_deref(),
     ) {
         std::env::set_var("GDK_BACKEND", gdk_backend);
-    }
-    if let Some(gtk_im_module_file) = linux_appimage_system_gtk_immodules_cache(
-        std::env::var_os("APPIMAGE").as_deref(),
-        std::env::var_os("APPDIR").as_deref(),
-        std::env::var_os("GTK_IM_MODULE").as_deref(),
-        std::env::var_os("GTK_IM_MODULE_FILE").as_deref(),
-        linux_system_gtk3_immodules_cache_path(),
-    ) {
-        // linuxdeploy-plugin-gtk points GTK_IM_MODULE_FILE at the bundled
-        // cache. That hides host IM modules such as fcitx5/ibus, so prefer the
-        // host GTK cache when the user has configured a GTK input method.
-        std::env::set_var("GTK_IM_MODULE_FILE", gtk_im_module_file);
     }
 }
 
@@ -1003,7 +968,7 @@ pub(crate) fn apply_desktop_settings(app: &tauri::AppHandle, desktop_settings: &
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
-        app_menu_copy_support_info_label, app_menu_quit_label, linux_appimage_system_gtk_immodules_cache,
+        app_menu_copy_support_info_label, app_menu_quit_label, linux_appimage_requires_dmabuf_workaround,
         linux_appimage_wayland_backend_override, linux_drm_driver_is_software_only,
         linux_drm_render_devices_from_paths, linux_nvidia_driver_from_state, linux_pci_id_from_sysfs_value,
         linux_selected_drm_render_device, linux_uses_native_wayland, linux_webkit_environment_override,
@@ -1016,8 +981,6 @@ mod tests {
     use crate::data_dir::DataDirMode;
     use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
-
-    const TEST_GTK3_IMMODULES_CACHE: &str = "/usr/lib/test/gtk-3.0/3.0.0/immodules.cache";
 
     #[test]
     fn tray_menu_labels_follow_locale() {
@@ -1320,6 +1283,13 @@ mod tests {
     }
 
     #[test]
+    fn enables_appimage_dmabuf_workaround_only_for_real_appimage_values() {
+        assert!(linux_appimage_requires_dmabuf_workaround(Some(OsStr::new("/opt/DBX.AppImage"))));
+        assert!(!linux_appimage_requires_dmabuf_workaround(Some(OsStr::new(""))));
+        assert!(!linux_appimage_requires_dmabuf_workaround(None));
+    }
+
+    #[test]
     fn disables_linux_webkit_dmabuf_only_for_strix_halo_on_native_wayland() {
         let strix_halo = drm_pci_render_device("/dev/dri/renderD128", "amdgpu", true, 0x1002, 0x1586);
         let mut strix_halo_without_driver = strix_halo.clone();
@@ -1436,78 +1406,6 @@ mod tests {
         );
         assert_eq!(linux_appimage_wayland_backend_override(Some(OsStr::new("/tmp/DBX.AppImage")), None, None), None);
         assert_eq!(linux_appimage_wayland_backend_override(None, Some(OsStr::new("wayland-0")), None), None);
-    }
-
-    #[test]
-    fn prefers_system_gtk_immodules_cache_for_appimage_input_methods() {
-        assert_eq!(
-            linux_appimage_system_gtk_immodules_cache(
-                Some(OsStr::new("/tmp/DBX.AppImage")),
-                Some(OsStr::new("/tmp/.mount_DBX123")),
-                Some(OsStr::new("fcitx5")),
-                Some(OsStr::new("/tmp/.mount_DBX123/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules.cache")),
-                Some(TEST_GTK3_IMMODULES_CACHE),
-            ),
-            Some(TEST_GTK3_IMMODULES_CACHE)
-        );
-        assert_eq!(
-            linux_appimage_system_gtk_immodules_cache(
-                Some(OsStr::new("/tmp/DBX.AppImage")),
-                Some(OsStr::new("/tmp/.mount_DBX123")),
-                Some(OsStr::new("ibus")),
-                None,
-                Some(TEST_GTK3_IMMODULES_CACHE),
-            ),
-            Some(TEST_GTK3_IMMODULES_CACHE)
-        );
-    }
-
-    #[test]
-    fn preserves_external_gtk_immodules_cache_overrides() {
-        assert_eq!(
-            linux_appimage_system_gtk_immodules_cache(
-                Some(OsStr::new("/tmp/DBX.AppImage")),
-                Some(OsStr::new("/tmp/.mount_DBX123")),
-                Some(OsStr::new("fcitx5")),
-                Some(OsStr::new("/opt/custom/immodules.cache")),
-                Some(TEST_GTK3_IMMODULES_CACHE),
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn skips_system_gtk_immodules_cache_without_required_context() {
-        assert_eq!(
-            linux_appimage_system_gtk_immodules_cache(
-                None,
-                Some(OsStr::new("/tmp/.mount_DBX123")),
-                Some(OsStr::new("fcitx5")),
-                Some(OsStr::new("/tmp/.mount_DBX123/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules.cache")),
-                Some(TEST_GTK3_IMMODULES_CACHE),
-            ),
-            None
-        );
-        assert_eq!(
-            linux_appimage_system_gtk_immodules_cache(
-                Some(OsStr::new("/tmp/DBX.AppImage")),
-                Some(OsStr::new("/tmp/.mount_DBX123")),
-                None,
-                Some(OsStr::new("/tmp/.mount_DBX123/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules.cache")),
-                Some(TEST_GTK3_IMMODULES_CACHE),
-            ),
-            None
-        );
-        assert_eq!(
-            linux_appimage_system_gtk_immodules_cache(
-                Some(OsStr::new("/tmp/DBX.AppImage")),
-                Some(OsStr::new("/tmp/.mount_DBX123")),
-                Some(OsStr::new("fcitx5")),
-                Some(OsStr::new("/tmp/.mount_DBX123/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules.cache")),
-                None,
-            ),
-            None
-        );
     }
 }
 
@@ -1707,6 +1605,7 @@ pub fn run() {
             } else {
                 AppState::new_with_plugin_dir_and_app_version(storage, plugin_dir, env!("CARGO_PKG_VERSION"))
             };
+            dbx_core::db::sqlite_worker::enable_sqlite_ssh_runtime(env!("CARGO_PKG_VERSION"));
             state.set_duckdb_worker_process_isolation_enabled(desktop_settings.duckdb_worker_process_isolation);
             state.set_duckdb_worker_max_processes(desktop_settings.duckdb_worker_max_processes);
             let oidc_app_handle = app.handle().clone();
@@ -2043,6 +1942,9 @@ pub fn run() {
             commands::external_sql::write_external_sql_file,
             commands::external_sql::save_external_sql_file,
             commands::list_sql_files::list_sql_files_in_folder,
+            commands::list_sql_files::create_sql_file_in_folder,
+            commands::list_sql_files::rename_sql_file_in_folder,
+            commands::list_sql_files::delete_sql_file_in_folder,
             commands::external_db::pending_open_db_files,
             commands::keychain::read_keychain_password,
             commands::keychain::read_keychain_passwords,
@@ -2273,6 +2175,7 @@ pub fn run() {
             commands::fs_open::is_sqlite_database_file,
             commands::fs_open::delete_database_backup_files,
             commands::sqlite_backup::backup_sqlite_database,
+            commands::sqlite_backup::restore_sqlite_database,
             commands::mongo_cmd::mongo_list_databases,
             commands::mongo_cmd::mongo_list_collections,
             commands::vector_cmd::vector_collection_detail,
@@ -2543,6 +2446,7 @@ pub fn run() {
             commands::database_export::begin_database_backup_snapshot,
             commands::database_export::export_database_sql,
             commands::database_export::cancel_database_export,
+            commands::database_export::clear_database_export_cancellation,
             commands::database_export::record_database_export_destination,
             commands::table_export::start_table_export,
             commands::table_export::cancel_table_export,

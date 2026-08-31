@@ -572,14 +572,19 @@ async fn download_jdbc_plugin_zip_with_progress(progress: &impl Fn(AgentProgress
     progress(AgentProgressEvent::transfer("jdbc-plugin", 0, total));
     let mut downloaded = 0;
     let mut bytes = Vec::with_capacity(total.try_into().unwrap_or(0));
+    // Emit transfer progress at most once per whole percent (or 500ms on slow
+    // links) instead of once per HTTP chunk; see TransferProgressGate.
+    let mut transfer_gate = crate::agent_service::TransferProgressGate::new(total);
     while let Some(chunk) = resp.chunk().await.map_err(|err| err.to_string())? {
         downloaded += chunk.len() as u64;
         bytes.extend_from_slice(&chunk);
-        progress(AgentProgressEvent::transfer("jdbc-plugin", downloaded, total));
+        if transfer_gate.record(downloaded, std::time::Instant::now()) {
+            progress(AgentProgressEvent::transfer("jdbc-plugin", downloaded, total));
+        }
     }
-    if total == 0 {
-        progress(AgentProgressEvent::transfer("jdbc-plugin", downloaded, downloaded));
-    }
+    // The gate may have suppressed the final chunk; always publish the
+    // completed transfer so the UI reaches 100% before extraction starts.
+    progress(AgentProgressEvent::transfer("jdbc-plugin", downloaded, if total == 0 { downloaded } else { total }));
     Ok(bytes)
 }
 

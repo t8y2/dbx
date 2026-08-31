@@ -55,6 +55,21 @@ const POSTGRES_IDENTIFIER_LIKE_KEYWORDS = new Set("COMMENT COUNT DATA DAY HOUR I
 // SQL Server table-valued parameters require READONLY in procedure/function declarations.
 const SQLSERVER_KEYWORDS = "readonly";
 
+// CodeMirror's MSSQL builtin list registers a few T-SQL clause words as functions:
+// `set` arrives with the query hint terms, while `next`/`for` come from the
+// `NEXT VALUE FOR` sequence expression being split into single words. Builtin terms are
+// applied after keywords when the dialect vocabulary is built, so those entries shadow the
+// reserved-keyword highlighting for statements like `UPDATE ... SET` and `SET NOCOUNT ON`.
+// None of them is callable on its own, so drop them and let the keyword classification win.
+const SQLSERVER_NON_FUNCTION_BUILTIN_TERMS = new Set(["set", "next", "for"]);
+
+export function sqlServerBuiltinSyntaxTerms(builtin: string): string {
+  return builtin
+    .split(/\s+/)
+    .filter((term) => term && !SQLSERVER_NON_FUNCTION_BUILTIN_TERMS.has(term.toLowerCase()))
+    .join(" ");
+}
+
 const CLICKHOUSE_KEYWORDS = [
   "ATTACH",
   "DETACH",
@@ -216,12 +231,13 @@ export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModu
   const baseKeywords = isClickHouse ? standardSqlKeywordSyntaxTerms(langSql) : isPostgres ? postgresKeywordSyntaxTerms(baseDialect.spec.keywords || "") : baseDialect.spec.keywords || "";
   const baseTypes = isClickHouse ? STANDARD_SQL_TYPES : baseDialect.spec.types || "";
   const commonKeywords = isClickHouse ? DBX_COMMON_SQL_KEYWORDS.toLowerCase() : DBX_COMMON_SQL_KEYWORDS;
+  const baseBuiltin = isSqlServer ? sqlServerBuiltinSyntaxTerms(baseDialect.spec.builtin || "") : baseDialect.spec.builtin || "";
 
   return langSql.SQLDialect.define({
     ...baseDialect.spec,
     keywords: [baseKeywords, commonKeywords, isClickHouse ? CLICKHOUSE_KEYWORDS : "", isPostgres ? POSTGRES_PLPGSQL_KEYWORDS : "", isSqlServer ? SQLSERVER_KEYWORDS : ""].filter(Boolean).join(" "),
     types: [baseTypes, isClickHouse ? CLICKHOUSE_TYPES : "", isPostgres ? POSTGRES_PLPGSQL_TYPES : ""].filter(Boolean).join(" ") || undefined,
-    builtin: [baseDialect.spec.builtin || "", isClickHouse ? CLICKHOUSE_BUILTINS : "", isPostgres ? `${POSTGRES_BUILTINS} ${POSTGRES_PLPGSQL_BUILTIN}` : "", isMysql ? MYSQL_BUILTINS : "", driverProfileSqlBuiltinTerms(driverProfile)].filter(Boolean).join(" ") || undefined,
+    builtin: [baseBuiltin, isClickHouse ? CLICKHOUSE_BUILTINS : "", isPostgres ? `${POSTGRES_BUILTINS} ${POSTGRES_PLPGSQL_BUILTIN}` : "", isMysql ? MYSQL_BUILTINS : "", driverProfileSqlBuiltinTerms(driverProfile)].filter(Boolean).join(" ") || undefined,
     ...(isClickHouse
       ? {
           identifierQuotes: '"`',

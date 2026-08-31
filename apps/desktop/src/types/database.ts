@@ -377,7 +377,7 @@ export interface TableInfo {
   parent_name?: string | null;
 }
 
-export type DatabaseObjectType = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" | "SEQUENCE" | "SYNONYM" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
+export type DatabaseObjectType = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" | "SEQUENCE" | "SYNONYM" | "JOB" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
 
 export interface ObjectInfo {
   name: string;
@@ -406,7 +406,7 @@ export interface ObjectStatistics {
   total_bytes?: number | null;
 }
 
-export type ObjectSourceKind = "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" | "SEQUENCE" | "SYNONYM" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
+export type ObjectSourceKind = "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" | "SEQUENCE" | "SYNONYM" | "JOB" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
 
 export interface ObjectSource {
   name: string;
@@ -878,6 +878,7 @@ export type TreeNodeType =
   | "type-member"
   | "sequence"
   | "synonym"
+  | "job"
   | "package"
   | "package-body"
   | "group-columns"
@@ -897,6 +898,7 @@ export type TreeNodeType =
   | "group-types"
   | "group-sequences"
   | "group-synonyms"
+  | "group-jobs"
   | "group-packages"
   | "group-partitions"
   | "group-extensions"
@@ -1076,6 +1078,12 @@ export interface ExternalSqlFileVersion {
   contentHash: string;
 }
 
+export interface QueryPageJumpProgress {
+  completedRequests: number;
+  totalRequests: number;
+  targetPage: number;
+}
+
 export interface QueryTab {
   id: string;
   title: string;
@@ -1119,6 +1127,8 @@ export interface QueryTab {
   resultTotalRowCountLoading?: boolean;
   resultSessionId?: string;
   resultClientSessionId?: string;
+  /** Ephemeral UI progress for sequential Elasticsearch cursor requests. */
+  resultPageJumpProgress?: QueryPageJumpProgress;
   resultAccessedAt?: number;
   resultEstimatedBytes?: number;
   resultCacheKey?: string;
@@ -1218,6 +1228,8 @@ export interface QueryTab {
     eventName?: string;
     eventReadOnly?: boolean;
     eventOpenRequestId?: number;
+    /** 显式的"新建事件"请求：单调递增，用于让已复用 tab 也能重复进入 CREATE 编辑器 */
+    eventCreateRequestId?: number;
     initialObjectFilter?: "tables" | "events";
     viewport?: ObjectBrowserViewport;
   };

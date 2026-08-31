@@ -7,7 +7,7 @@ use crate::connection::{config_for_pool_key, AppState, PoolKind};
 use crate::db;
 use crate::db::agent_driver::AgentTableReadStartParams;
 use crate::db::mongo_driver::MongoDocumentResult;
-use crate::models::connection::DatabaseType;
+use crate::models::connection::{ConnectionConfig, DatabaseType};
 use crate::object_source_sql::{build_executable_object_source_statements, EditableObjectSourceSqlInput};
 use crate::query::{
     agent_execute_query_params, pool_error_action, PoolErrorAction, QueryExecutionOptions, AGENT_PROTOCOL_MAX_ROWS,
@@ -125,7 +125,7 @@ pub enum TransferObjectFamily {
 
 pub fn transfer_object_family(db_type: &DatabaseType) -> Option<TransferObjectFamily> {
     match db_type {
-        DatabaseType::Mysql => Some(TransferObjectFamily::Mysql),
+        DatabaseType::Mysql | DatabaseType::Gbase => Some(TransferObjectFamily::Mysql),
         DatabaseType::Postgres
         | DatabaseType::Kingbase
         | DatabaseType::Gaussdb
@@ -4864,6 +4864,19 @@ async fn execute_on_pool_once(
             );
             client.execute_query(params).await
         }
+        PoolKind::ExternalDriver { config, session, .. } => {
+            let database = database_from_pool_key(pool_key)
+                .map(str::to_string)
+                .unwrap_or_else(|| config.effective_database().unwrap_or("").to_string());
+            let params = crate::query::external_driver_query_params(
+                config.as_ref(),
+                sql,
+                &database,
+                None,
+                &QueryExecutionOptions { max_rows, fetch_size: max_rows, ..QueryExecutionOptions::default() },
+            );
+            session.invoke_with_timeout("executeQuery", params, None).await
+        }
         #[cfg(feature = "duckdb-sidecar")]
         PoolKind::DuckDbWorker(client) => {
             let client = client.clone();
@@ -4888,7 +4901,39 @@ fn catalog_from_pool_key(pool_key: &str) -> Option<&str> {
 
 pub async fn get_db_type(state: &AppState, connection_id: &str) -> Result<DatabaseType, String> {
     let configs = state.configs.read().await;
-    configs.get(connection_id).map(|c| c.db_type).ok_or_else(|| format!("Connection config not found: {connection_id}"))
+    configs
+        .get(connection_id)
+        .map(effective_transfer_database_type)
+        .ok_or_else(|| format!("Connection config not found: {connection_id}"))
+}
+
+fn effective_transfer_database_type(config: &ConnectionConfig) -> DatabaseType {
+    if config.db_type != DatabaseType::Jdbc {
+        return config.db_type;
+    }
+    if config.driver_profile.as_deref().is_some_and(|profile| profile.eq_ignore_ascii_case("gbase8s")) {
+        return DatabaseType::Jdbc;
+    }
+
+    let jdbc_identity = [
+        config.driver_profile.as_deref().unwrap_or(""),
+        config.connection_string.as_deref().unwrap_or(""),
+        config.jdbc_driver_class.as_deref().unwrap_or(""),
+    ]
+    .join("\n")
+    .to_ascii_lowercase();
+    // GBase 8a only: 8s (`gbasedbt`/`jdbc:gbasedbt-sqli`) is Informix-based and
+    // must not be mapped into the MySQL transfer family.
+    let is_gbase_8a = jdbc_identity.contains("jdbc:gbase:")
+        || jdbc_identity.contains("cn.gbase.")
+        || (jdbc_identity.contains("gbase")
+            && !jdbc_identity.contains("gbasedbt")
+            && !jdbc_identity.contains("gbase8s"));
+    if is_gbase_8a {
+        DatabaseType::Gbase
+    } else {
+        DatabaseType::Jdbc
+    }
 }
 
 pub async fn get_columns_for_transfer(
@@ -4942,6 +4987,26 @@ pub async fn get_columns_for_transfer(
         drop(connections);
         let mut client = client.lock().await;
         return client.get_columns(&database, &schema, &table, None).await;
+    }
+    if let Some(PoolKind::ExternalDriver { config, session, .. }) = connections.get(pool_key) {
+        let config = config.clone();
+        let session = session.clone();
+        let database = database.to_string();
+        let schema = schema.to_string();
+        let table = table.to_string();
+        drop(connections);
+        return session
+            .invoke_with_timeout(
+                "getColumns",
+                serde_json::json!({
+                    "connection": config.as_ref(),
+                    "database": database,
+                    "schema": schema,
+                    "table": table,
+                }),
+                None,
+            )
+            .await;
     }
     let pool = connections.get(pool_key).ok_or("Pool not found")?;
     let schema = schema.to_string();
@@ -8028,6 +8093,97 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn jdbc_transfer_config(connection_string: &str, driver_class: &str, profile: &str) -> ConnectionConfig {
+        ConnectionConfig {
+            id: "test-jdbc".to_string(),
+            name: "Test JDBC".to_string(),
+            note: String::new(),
+            db_type: DatabaseType::Jdbc,
+            driver_profile: if profile.is_empty() { None } else { Some(profile.to_string()) },
+            driver_label: None,
+            url_params: None,
+            agent_java_options: Vec::new(),
+            host: String::new(),
+            port: 0,
+            username: String::new(),
+            password: String::new(),
+            database: None,
+            default_schema: None,
+            visible_databases: None,
+            visible_database_patterns: None,
+            visible_schemas: None,
+            show_system_schemas: false,
+            attached_databases: Vec::new(),
+            init_script: None,
+            color: None,
+            transport_layers: Vec::new(),
+            connect_timeout_secs: 5,
+            query_timeout_secs: 30,
+            idle_timeout_secs: 60,
+            keepalive_interval_secs: 0,
+            ssl: false,
+            ca_cert_path: String::new(),
+            client_cert_path: String::new(),
+            client_key_path: String::new(),
+            sysdba: false,
+            oracle_connection_type: None,
+            connection_string: if connection_string.is_empty() { None } else { Some(connection_string.to_string()) },
+            redis_connection_mode: None,
+            redis_sentinel_master: String::new(),
+            redis_sentinel_nodes: String::new(),
+            redis_sentinel_username: String::new(),
+            redis_sentinel_password: String::new(),
+            redis_sentinel_tls: false,
+            redis_cluster_nodes: String::new(),
+            redis_key_separator: crate::models::connection::default_redis_key_separator(),
+            redis_scan_page_size: None,
+            redis_database_aliases: Default::default(),
+            redis_key_templates: Vec::new(),
+            etcd_endpoints: String::new(),
+            gbase_server: String::new(),
+            informix_server: String::new(),
+            external_config: None,
+            jdbc_driver_class: if driver_class.is_empty() { None } else { Some(driver_class.to_string()) },
+            jdbc_driver_paths: Vec::new(),
+            one_time: false,
+            save_password: true,
+            read_only: false,
+            is_production: false,
+            production_databases: vec![],
+            database_info: None,
+            docs_notes_path: None,
+        }
+    }
+
+    #[test]
+    fn gbase_8s_jdbc_stays_generic_for_transfer() {
+        assert_eq!(
+            effective_transfer_database_type(&jdbc_transfer_config(
+                "jdbc:gbasedbt-sqli://localhost:9088/dbx_test:INFORMIXSERVER=ol_gbasedbt",
+                "com.gbasedbt.jdbc.Driver",
+                ""
+            )),
+            DatabaseType::Jdbc
+        );
+        assert_eq!(
+            effective_transfer_database_type(&jdbc_transfer_config(
+                "jdbc:gbase://localhost:5258/dbx_test",
+                "cn.gbase.Driver",
+                "gbase8s"
+            )),
+            DatabaseType::Jdbc
+        );
+        assert_eq!(
+            effective_transfer_database_type(&jdbc_transfer_config(
+                "jdbc:gbase://localhost:5258/dbx_test",
+                "com.gbase.jdbc.Driver",
+                ""
+            )),
+            DatabaseType::Gbase
+        );
+    }
+
     use serde_json::json;
 
     fn test_column(name: &str, data_type: &str) -> db::ColumnInfo {
@@ -8345,6 +8501,7 @@ mod tests {
             assert!(same.contains(&Event));
             // unsupported databases
             assert!(cross_family_transferable_object_kinds(&DatabaseType::Sqlite, &DatabaseType::Mysql).is_empty());
+            assert_eq!(transfer_object_family(&DatabaseType::Gbase), Some(TransferObjectFamily::Mysql));
             // postgres is not a validated cross-family source or target:
             // the executor rejects postgres sources and no dialect-aware
             // conversion exists for it (postgres <-> postgres stays same-family)
@@ -12069,6 +12226,19 @@ SELECT 1 FROM dual"#
             production_databases: vec![],
             database_info: None,
         };
+        let mut gbase_jdbc = config.clone();
+        gbase_jdbc.db_type = DatabaseType::Jdbc;
+        gbase_jdbc.connection_string = Some("jdbc:gbase://127.0.0.1:5258/dbx_test".to_string());
+        gbase_jdbc.jdbc_driver_class = Some("cn.gbase.Driver".to_string());
+        assert_eq!(effective_transfer_database_type(&gbase_jdbc), DatabaseType::Gbase);
+        assert_eq!(
+            transfer_object_family(&effective_transfer_database_type(&gbase_jdbc)),
+            Some(TransferObjectFamily::Mysql)
+        );
+
+        gbase_jdbc.connection_string = Some("jdbc:unknown://127.0.0.1:1234/dbx_test".to_string());
+        gbase_jdbc.jdbc_driver_class = Some("com.example.Driver".to_string());
+        assert_eq!(effective_transfer_database_type(&gbase_jdbc), DatabaseType::Jdbc);
         assert_eq!(resolve_external_transfer_catalog_for_config(Some("paimon"), &config), Some("paimon"));
         assert_eq!(resolve_external_transfer_catalog_for_config(Some("default_catalog"), &config), None);
     }

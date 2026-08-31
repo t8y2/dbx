@@ -62,7 +62,10 @@ const nativeDriverDirectories = {
   zookeeper: "zookeeper",
   tdengine: "tdengine",
 };
-const nativeDriverModules = new Set(["cassandra", "duckdb", "hive", "oracle", "xugu", "kingbase", "iotdb", "neo4j", "vastbase", "rabbitmq", "rocketmq", "zookeeper", "tdengine"]);
+const crateNativeDriverDirectories = {
+  "sqlite-worker": "crates/dbx-sqlite-worker",
+};
+const nativeDriverModules = new Set(["cassandra", "duckdb", "hive", "oracle", "xugu", "kingbase", "iotdb", "neo4j", "vastbase", "rabbitmq", "rocketmq", "zookeeper", "tdengine", "sqlite-worker"]);
 const nativeDriverSharedPaths = {
   hive: [
     "agents/go-common/go-gssapi",
@@ -76,6 +79,18 @@ const nativeDriverSharedPaths = {
 };
 
 function resolveAgentModule(moduleName, { legacyStandaloneModules, moduleExists, readModuleFile }) {
+  const cratePath = crateNativeDriverDirectories[moduleName];
+  if (cratePath && moduleExists(cratePath)) {
+    return {
+      checkDir: cratePath,
+      modulePath: cratePath,
+      sharedPaths: [],
+      javaBuild: false,
+      nativeBuild: true,
+      commonDependent: false,
+    };
+  }
+
   let checkDir = null;
   const nativeDriverDirectory = nativeDriverDirectories[moduleName];
   if (nativeDriverDirectory && moduleExists(`agents/drivers/${nativeDriverDirectory}`)) {

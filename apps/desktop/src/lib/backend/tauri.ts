@@ -246,6 +246,7 @@ export interface McpGlobalPolicy {
   allowDangerousSql: boolean;
   allowedConnectionIds: string[] | null;
   configured: boolean;
+  queryTimeoutSecs: number | null;
 }
 
 export interface SavedSqlSyncEntry {
@@ -889,6 +890,18 @@ export interface SqlFileEntry {
 
 export async function listSqlFilesInFolder(folderPath: string, fileFilter?: string): Promise<SqlFileEntry[]> {
   return invoke("list_sql_files_in_folder", { folderPath, fileFilter });
+}
+
+export async function createSqlFileInFolder(rootPath: string, directoryPath: string, fileName: string): Promise<string> {
+  return invoke("create_sql_file_in_folder", { rootPath, directoryPath, fileName });
+}
+
+export async function renameSqlFileInFolder(rootPath: string, filePath: string, fileName: string): Promise<string> {
+  return invoke("rename_sql_file_in_folder", { rootPath, filePath, fileName });
+}
+
+export async function deleteSqlFileInFolder(rootPath: string, filePath: string): Promise<void> {
+  return invoke("delete_sql_file_in_folder", { rootPath, filePath });
 }
 
 // --- AI Conversations ---
@@ -2272,6 +2285,10 @@ export async function isSqliteDatabaseFile(path: string): Promise<boolean> {
 
 export async function backupSqliteDatabase(connectionId: string, destinationPath: string): Promise<void> {
   return invoke("backup_sqlite_database", { connectionId, destinationPath });
+}
+
+export async function restoreSqliteDatabase(connectionId: string, sourcePath: string): Promise<void> {
+  return invoke("restore_sqlite_database", { connectionId, sourcePath });
 }
 
 export async function syncSavedSqlDirectory(request: SavedSqlSyncRequest): Promise<void> {
@@ -3790,7 +3807,20 @@ export async function mongoParseShellCommand(source: string): Promise<MongoComma
   return normalizeRustMongoCommand(raw);
 }
 
-export async function documentFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, projection?: string, sort?: string, collation?: string, executionId?: string, cursor?: string): Promise<DocumentQueryResult> {
+export async function documentFindDocuments(
+  connectionId: string,
+  database: string,
+  collection: string,
+  skip: number,
+  limit: number,
+  filter?: string,
+  projection?: string,
+  sort?: string,
+  collation?: string,
+  executionId?: string,
+  cursor?: string,
+  cursorPagination?: boolean,
+): Promise<DocumentQueryResult> {
   return invoke("document_find_documents", {
     connectionId,
     database,
@@ -3802,6 +3832,7 @@ export async function documentFindDocuments(connectionId: string, database: stri
     sort,
     collation,
     cursor,
+    cursorPagination,
     executionId,
   });
 }
@@ -4644,6 +4675,7 @@ export interface DatabaseExportRequest {
   dropTableIfExists?: boolean;
   omitAutoIncrement?: boolean;
   failOnError?: boolean;
+  outputCompression?: "none" | "gzip";
   snapshotSessionId?: string;
   batchSize: number;
 }
@@ -4835,8 +4867,8 @@ export async function cancelQueryResultExport(exportId: string, executionId?: st
   });
 }
 
-export async function beginDatabaseBackupSnapshot(connectionId: string, database: string): Promise<DatabaseBackupSnapshot> {
-  return invoke("begin_database_backup_snapshot", { connectionId, database });
+export async function beginDatabaseBackupSnapshot(connectionId: string, database: string, exportId?: string): Promise<DatabaseBackupSnapshot> {
+  return invoke("begin_database_backup_snapshot", { connectionId, database, exportId: exportId || null });
 }
 
 export async function exportDatabaseSql(request: DatabaseExportRequest, onProgress: (progress: ExportProgress) => void): Promise<void> {
@@ -4858,6 +4890,10 @@ export async function exportDatabaseSql(request: DatabaseExportRequest, onProgre
 
 export async function cancelDatabaseExport(exportId: string): Promise<void> {
   await invoke("cancel_database_export", { exportId });
+}
+
+export async function clearDatabaseExportCancellation(exportId: string): Promise<void> {
+  await invoke("clear_database_export_cancellation", { exportId });
 }
 
 export async function recordDatabaseExportDestination(directory: string): Promise<void> {

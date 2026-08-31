@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildSqlCompletionThemeRules, editorDiagnosticColors, editorThemeAppearanceFor, resolveCustomThemeBackgrounds, resolveEditorTheme } from "@/lib/editor/editorThemes";
+import { buildEditorFontThemeRules, buildSqlCompletionThemeRules, editorDiagnosticColors, editorThemeAppearanceFor, resolveCustomThemeBackgrounds, resolveEditorTheme } from "@/lib/editor/editorThemes";
 import { DEFAULT_APP_CUSTOM_UI_COLORS, wcagContrastRatio, type AppThemePalette } from "@/lib/app/appTheme";
 import type { EditorTheme } from "@/stores/settingsStore";
 
@@ -161,5 +161,18 @@ describe("SQL completion theme", () => {
 
     expect(rules[".cm-completionLabel"]).toMatchObject({ flex: "0 1 auto" });
     expect(rules[".cm-completionDetail"]).toMatchObject({ flex: "1 1 0", minWidth: "0", textOverflow: "ellipsis" });
+  });
+});
+
+describe("editor gutters", () => {
+  it("anchors line numbers to the first visual row of wrapped lines", () => {
+    const rules = buildEditorFontThemeRules();
+
+    expect(rules[".cm-lineNumbers .cm-gutterElement"]).toMatchObject({
+      alignItems: "center",
+      display: "flex",
+      justifyContent: "flex-end",
+    });
+    expect(rules[".cm-lineNumbers .cm-gutterElement.cm-db-wrapped-line-number"]).toMatchObject({ alignItems: "flex-start" });
   });
 });

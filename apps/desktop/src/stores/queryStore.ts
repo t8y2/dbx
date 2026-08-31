@@ -1942,15 +1942,27 @@ export const useQueryStore = defineStore("query", () => {
     return id;
   }
 
-  function openObjectBrowser(connectionId: string, database: string, schema?: string, catalog?: string, eventName?: string, eventReadOnly = false, initialObjectFilter?: "tables" | "events") {
+  function openObjectBrowser(connectionId: string, database: string, schema?: string, catalog?: string, eventName?: string, eventReadOnly = false, initialObjectFilter?: "tables" | "events", eventCreateRequestId?: number) {
     const title = catalog ? `${catalog}.${database} objects` : schema ? `${schema} objects` : `${database} objects`;
     const existing = tabs.value.find((tab) => tab.mode === "objects" && tab.connectionId === connectionId && tab.database === database && (tab.objectBrowser?.catalog || "") === (catalog || "") && (tab.objectBrowser?.schema || "") === (schema || ""));
     if (existing) {
-      if (eventName) {
+      if (eventCreateRequestId !== undefined) {
+        // 新建事件：显式 CREATE 请求优先，并清掉可能残留的"编辑已有事件"状态，
+        // 保证同一 tab 被复用时每次点击都能重新进入 CREATE 编辑器（请求号单调递增）。
+        existing.objectBrowser = {
+          ...existing.objectBrowser,
+          eventName: undefined,
+          eventReadOnly: false,
+          eventOpenRequestId: undefined,
+          eventCreateRequestId,
+          initialObjectFilter: initialObjectFilter ?? "events",
+        };
+      } else if (eventName) {
         existing.objectBrowser = {
           ...existing.objectBrowser,
           eventName,
           eventReadOnly,
+          eventCreateRequestId: undefined,
           initialObjectFilter: initialObjectFilter ?? (eventName ? "events" : existing.objectBrowser?.initialObjectFilter),
           eventOpenRequestId: (existing.objectBrowser?.eventOpenRequestId ?? 0) + 1,
         };
@@ -1975,10 +1987,11 @@ export const useQueryStore = defineStore("query", () => {
         catalog,
         schema,
         objectType: "tables",
-        eventName,
-        eventReadOnly,
-        initialObjectFilter: initialObjectFilter ?? (eventName ? "events" : undefined),
+        eventName: eventCreateRequestId !== undefined ? undefined : eventName,
+        eventReadOnly: eventCreateRequestId !== undefined ? false : eventReadOnly,
+        initialObjectFilter: initialObjectFilter ?? (eventName || eventCreateRequestId !== undefined ? "events" : undefined),
         eventOpenRequestId: eventName ? 1 : undefined,
+        eventCreateRequestId,
       },
     };
     tabs.value.push(tab);
@@ -2548,6 +2561,29 @@ export const useQueryStore = defineStore("query", () => {
     const tab = tabs.value.find((candidate) => candidate.id === id);
     if (!tab?.externalSqlPath) return;
     tab.externalSqlFileMissing = true;
+  }
+
+  function relocateExternalSqlFilePath(previousPath: string, nextPath: string, version?: QueryTab["externalSqlFileVersion"]) {
+    const previous = normalizeExternalSqlPath(previousPath);
+    if (!previous) return;
+    for (const tab of tabs.value) {
+      if (tab.mode !== "query" || !tab.externalSqlPath || normalizeExternalSqlPath(tab.externalSqlPath) !== previous) continue;
+      tab.externalSqlPath = nextPath;
+      if (version) tab.externalSqlFileVersion = version;
+      tab.externalSqlIgnoredFileVersion = undefined;
+      tab.externalSqlFileMissing = undefined;
+    }
+    refreshExternalSqlFileTitles();
+  }
+
+  function markExternalSqlFileMissingForPath(path: string) {
+    const normalizedPath = normalizeExternalSqlPath(path);
+    if (!normalizedPath) return;
+    for (const tab of tabs.value) {
+      if (tab.mode === "query" && tab.externalSqlPath && normalizeExternalSqlPath(tab.externalSqlPath) === normalizedPath) {
+        tab.externalSqlFileMissing = true;
+      }
+    }
   }
 
   function persistSavedSqlEditorPosition(tab: QueryTab | undefined) {
@@ -4513,6 +4549,7 @@ export const useQueryStore = defineStore("query", () => {
       preserveTotalRowCountDuringExecution?: boolean;
       preserveActiveResultIndex?: boolean;
       replaceActiveResultInGroup?: boolean;
+      retainDisplayedResult?: boolean;
       skipRedisSafetyCheck?: boolean;
       sourceOffset?: number;
       sourceTraceId?: string;
@@ -5441,6 +5478,15 @@ export const useQueryStore = defineStore("query", () => {
         const activeGroupResults = current.results;
         const shouldAppendResult = !!options?.appendResult && !!current.result;
         const shouldReplaceActiveResultInGroup = options?.replaceActiveResultInGroup === true && results.length === 1 && Array.isArray(activeGroupResults) && typeof activeGroupIndex === "number" && activeGroupIndex >= 0 && activeGroupIndex < activeGroupResults.length;
+        const retainedPaginationResult = options?.retainDisplayedResult === true && results.length === 1 && !isQueryExecutionErrorResult(results[0]!) ? results[0] : undefined;
+        if (retainedPaginationResult) {
+          // Cursor-only fetches advance the backend session without publishing
+          // intermediate rows or page offsets to the visible result grid.
+          current.resultSessionId = retainedPaginationResult.session_id ?? undefined;
+          current.resultClientSessionId = current.resultSessionId ? executionClientSessionId : undefined;
+          producedResult = true;
+          return producedResult;
+        }
         if (batchResume) {
           const mergedResults = mergeBatchQueryResults(batchResume.previousResults, results);
           const preferredResult = results.find((result) => isQueryExecutionErrorResult(result)) ?? results[results.length - 1] ?? mergedResults[mergedResults.length - 1];
@@ -6762,6 +6808,8 @@ export const useQueryStore = defineStore("query", () => {
     updateExternalSqlFileVersion,
     ignoreExternalSqlFileVersion,
     acknowledgeExternalSqlFileMissing,
+    relocateExternalSqlFilePath,
+    markExternalSqlFileMissingForPath,
     discardTabChanges,
     requestAppCloseConfirmation,
     closeOtherTabs,

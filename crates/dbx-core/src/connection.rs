@@ -193,7 +193,9 @@ enum ConnectionDatabaseInfoSource {
 /// Held connection for a manual transaction session
 pub enum TxnConnection {
     Postgres(Box<deadpool_postgres::Object>),
-    Mysql(mysql_async::Conn),
+    /// A dedicated MySQL connection. Cancellation may consume and discard this
+    /// connection instead of trying to reuse it after an interrupted result set.
+    Mysql(Option<mysql_async::Conn>),
     /// Dedicated agent multi_session workload client with an open sticky TX.
     Agent {
         client: Arc<db::agent_driver::PooledAgentClient>,
@@ -2128,29 +2130,44 @@ impl AppState {
                 PoolKind::Postgres(pg_pool)
             }
             DatabaseType::Sqlite => {
-                let sqlite_path = expand_tilde(&db_config.host);
-                db::sqlite::validate_persistent_attachments(
-                    &sqlite_path,
-                    &db_config.password,
-                    !db_config.attached_databases.is_empty(),
-                )?;
-                let extensions = db::sqlite::sqlite_extension_specs_from_url_params(db_config.url_params.as_deref())
-                    .into_iter()
-                    .map(|mut extension| {
-                        extension.path = expand_tilde(&extension.path);
-                        extension
-                    })
-                    .collect();
-                let pool = db::sqlite::connect_path_with_cipher_key_and_extensions(
-                    &sqlite_path,
-                    &db_config.password,
-                    extensions,
-                )
-                .await?;
-                for attached in &db_config.attached_databases {
-                    db::sqlite::attach_database(&pool, &attached.name, &expand_tilde(&attached.path))?;
+                if db::sqlite_worker::sqlite_ssh_worker_requested(&db_config) {
+                    let transport_layers = self.resolved_transport_layers(&db_config).await?;
+                    let worker = db::sqlite_worker::connect_sqlite_worker(
+                        &self.tunnels,
+                        &self.agent_manager,
+                        self.storage.data_dir(),
+                        connection_id,
+                        &db_config,
+                        &transport_layers,
+                    )
+                    .await?;
+                    PoolKind::Sqlite(db::sqlite::SqliteHandle::from_worker(worker))
+                } else {
+                    let sqlite_path = expand_tilde(&db_config.host);
+                    db::sqlite::validate_persistent_attachments(
+                        &sqlite_path,
+                        &db_config.password,
+                        !db_config.attached_databases.is_empty(),
+                    )?;
+                    let extensions =
+                        db::sqlite::sqlite_extension_specs_from_url_params(db_config.url_params.as_deref())
+                            .into_iter()
+                            .map(|mut extension| {
+                                extension.path = expand_tilde(&extension.path);
+                                extension
+                            })
+                            .collect();
+                    let pool = db::sqlite::connect_path_with_cipher_key_and_extensions(
+                        &sqlite_path,
+                        &db_config.password,
+                        extensions,
+                    )
+                    .await?;
+                    for attached in &db_config.attached_databases {
+                        db::sqlite::attach_database(&pool, &attached.name, &expand_tilde(&attached.path))?;
+                    }
+                    PoolKind::Sqlite(pool)
                 }
-                PoolKind::Sqlite(pool)
             }
             DatabaseType::Rqlite => {
                 let client = db::rqlite_driver::RqliteClient::new(
@@ -2455,7 +2472,7 @@ impl AppState {
                             }
                         }
                     }
-                    let client = match initial_result {
+                    let mut client = match initial_result {
                         Ok(client) => client,
                         Err(err) => {
                             let alternate_configs = oracle_alternate_connect_configs(&db_config, &err);
@@ -2529,6 +2546,14 @@ impl AppState {
                             }
                         }
                     };
+                    if db_config.db_type == DatabaseType::Kingbase {
+                        let identifier_quote = client
+                            .connection_info(Some(agent_connect_timeout(&db_config)))
+                            .await
+                            .ok()
+                            .map(|info| info.identifier_quote);
+                        client.set_identifier_quote(identifier_quote);
+                    }
                     PoolKind::agent(client)
                 } else {
                     // ZooKeeper JVM properties are connection-scoped; shared agent daemons must not inherit them.
@@ -2809,7 +2834,7 @@ impl AppState {
         config: &ConnectionConfig,
     ) -> Result<(String, u16), String> {
         let transport_layers = self.resolved_transport_layers(config).await?;
-        if transport_layers.is_empty() {
+        if transport_layers.is_empty() || db::sqlite_worker::sqlite_ssh_worker_requested(config) {
             return Ok((config.host.clone(), config.port));
         }
         if config.uses_oracle_tns() {
@@ -4431,6 +4456,8 @@ impl AppState {
         self.tunnels.stop_tunnels_with_prefix(&redis_sentinel_prefix).await;
         self.proxy_tunnels.stop_tunnels_with_prefix(&redis_sentinel_prefix).await;
         self.http_tunnels.stop_tunnels_with_prefix(&redis_sentinel_prefix).await;
+        let sqlite_worker_prefix = db::sqlite_worker::sqlite_worker_chain_id(connection_id);
+        self.tunnels.stop_tunnels_with_prefix(&sqlite_worker_prefix).await;
         db::transport_layer_tunnel::stop_transport_layers(
             connection_id,
             layer_count,
@@ -5463,7 +5490,9 @@ async fn close_pool_kind(pool: PoolKind) -> Result<(), String> {
             let _ = p.disconnect().await;
         }
         PoolKind::Postgres(p) => p.close(),
-        PoolKind::Sqlite(_) => {}
+        PoolKind::Sqlite(pool) => {
+            pool.shutdown().await;
+        }
         PoolKind::Rqlite(_) => {}
         PoolKind::Turso(_) => {}
         PoolKind::CloudflareD1(_) => {}

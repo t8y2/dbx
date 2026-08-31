@@ -27,6 +27,9 @@ NATIVE_ONLY_AGENT_MODULES = {
     "rocketmq": "drivers/rocketmq",
     "zookeeper": "drivers/zookeeper",
 }
+CRATE_NATIVE_AGENT_MODULES = {
+    "sqlite-worker": Path("..") / "crates" / "dbx-sqlite-worker",
+}
 AUTO_VERSIONED_NATIVE_MODULES = {"duckdb"}
 JDBC_ARCHITECTURE_ALLOWLIST = {
     "h2-legacy": "reuses the H2 agent implementation with an isolated legacy driver version",
@@ -73,14 +76,24 @@ def included_agent_modules(root: Path) -> set[str]:
     return included - INFRA_MODULES
 
 
+def crate_native_modules(root: Path) -> set[str]:
+    return {name for name, path in CRATE_NATIVE_AGENT_MODULES.items() if (root / path).exists()}
+
+
+def skipped_native_modules() -> set[str]:
+    return set(NATIVE_ONLY_AGENT_MODULES) | set(CRATE_NATIVE_AGENT_MODULES)
+
+
 def agent_modules(root: Path) -> set[str]:
     native = {name for name, path in NATIVE_ONLY_AGENT_MODULES.items() if (root / path).exists()}
-    return included_agent_modules(root) | native
+    return included_agent_modules(root) | native | crate_native_modules(root)
 
 
 def module_dir(root: Path, module: str) -> Path:
     if module in NATIVE_ONLY_AGENT_MODULES:
         return root / NATIVE_ONLY_AGENT_MODULES[module]
+    if module in CRATE_NATIVE_AGENT_MODULES:
+        return root / CRATE_NATIVE_AGENT_MODULES[module]
     nested = root / "drivers" / module
     if nested.exists():
         return nested
@@ -137,7 +150,7 @@ def validate_manifest_fields(root: Path, modules: set[str]) -> list[str]:
         root_build_text,
     )
     for module in sorted(modules):
-        if module in NATIVE_ONLY_AGENT_MODULES:
+        if module in skipped_native_modules():
             continue
         build_file = module_relative_path(root, module, "build.gradle")
         relative = build_file.relative_to(root)
@@ -172,7 +185,7 @@ def validate_manifest_fields(root: Path, modules: set[str]) -> list[str]:
 
 def validate_jdbc_architecture(root: Path, modules: set[str]) -> list[str]:
     problems: list[str] = []
-    for module in sorted(modules - NON_JDBC_AGENT_MODULES - set(NATIVE_ONLY_AGENT_MODULES)):
+    for module in sorted(modules - NON_JDBC_AGENT_MODULES - skipped_native_modules()):
         source = main_class_source(root, module)
         if source is None or not source.exists():
             continue
@@ -204,7 +217,7 @@ def validate_jdbc_pool_coverage(root: Path, modules: set[str]) -> list[str]:
     if match is None:
         return ["build.gradle: missing pooledJdbcProjects set"]
     pooled = set(re.findall(r"['\"]([^'\"]+)['\"]", match.group(1)))
-    expected = modules - NON_JDBC_AGENT_MODULES - set(NATIVE_ONLY_AGENT_MODULES)
+    expected = modules - NON_JDBC_AGENT_MODULES - skipped_native_modules()
     return (
         [f"JDBC module missing pooled runtime dependency: {module}" for module in sorted(expected - pooled)]
         + [f"non-JDBC module listed as pooled JDBC runtime: {module}" for module in sorted(pooled - expected)]

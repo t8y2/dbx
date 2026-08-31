@@ -1486,6 +1486,7 @@ function onKeydown(event: KeyboardEvent) {
                 {
                   'flex-1': node.type === 'connection' && !trailingComment,
                   'tree-connection-label': node.type === 'connection' || node.type === 'connection-group',
+                  'tree-object-label': node.type !== 'connection' && node.type !== 'connection-group',
                   'font-semibold': isLoginUserNode(),
                 },
               ]"
@@ -1650,6 +1651,16 @@ function onKeydown(event: KeyboardEvent) {
 .tree-connection-label {
   font-weight: 400;
   font-variation-settings: "wght" 480;
+}
+
+.tree-object-label {
+  font-weight: 400;
+  font-variation-settings: "wght" 430;
+}
+
+.tree-object-label.font-semibold {
+  font-weight: 600;
+  font-variation-settings: "wght" 600;
 }
 
 .tree-item-connection-tint {

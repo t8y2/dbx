@@ -125,6 +125,7 @@ describe("TreeItem login user highlighting", () => {
 
     const label = await mountSchema("postgres");
 
+    expect(label.classList.contains("tree-object-label")).toBe(true);
     expect(label.classList.contains("font-semibold")).toBe(false);
   });
 
@@ -134,7 +135,9 @@ describe("TreeItem login user highlighting", () => {
     const loginSchema = await mountSchema("SCOTT");
     const otherSchema = await mountSchema("SYSTEM");
 
+    expect(loginSchema.classList.contains("tree-object-label")).toBe(true);
     expect(loginSchema.classList.contains("font-semibold")).toBe(true);
+    expect(otherSchema.classList.contains("tree-object-label")).toBe(true);
     expect(otherSchema.classList.contains("font-semibold")).toBe(false);
   });
 });

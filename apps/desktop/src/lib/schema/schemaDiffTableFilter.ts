@@ -49,8 +49,16 @@ function isSchemaDiffObjectEnabled(table: TableInfo, options: Pick<SchemaDiffCom
   return isSchemaDiffView(table) ? options.views : options.tables;
 }
 
-export function filterSchemaDiffTables(sourceTables: TableInfo[], targetTables: TableInfo[], filter: CompiledSchemaDiffTableFilter, options: Pick<SchemaDiffCompareOptions, "tables" | "views"> = { tables: true, views: true }): FilteredSchemaDiffTables {
-  const includeTable = (table: TableInfo) => isSchemaDiffObjectEnabled(table, options) && matchesSchemaDiffTableFilter(table.name, filter);
+export function filterSchemaDiffTables(sourceTables: TableInfo[], targetTables: TableInfo[], filter: CompiledSchemaDiffTableFilter, options: Pick<SchemaDiffCompareOptions, "tables" | "views"> = { tables: true, views: true }, selectedTables?: string[]): FilteredSchemaDiffTables {
+  // Visual (explicit) table selection is applied first, then the existing include/exclude
+  // regex filter. Source and target use the SAME selected table set, so targets are matched
+  // by the same name and any target missing a same-name table simply drops out (surfaced to
+  // the user in the UI as "missing"). Semantics:
+  //   - `undefined`: no visual restriction — legacy all-tables behavior + regex filter.
+  //   - `[]`: restriction explicitly enabled with an empty selection — compare nothing.
+  //   - `["a", "b"]`: restrict to exactly those table names.
+  const selectedSet = selectedTables === undefined ? null : new Set(selectedTables);
+  const includeTable = (table: TableInfo) => isSchemaDiffObjectEnabled(table, options) && (!selectedSet || selectedSet.has(table.name)) && matchesSchemaDiffTableFilter(table.name, filter);
 
   return {
     sourceTables: sourceTables.filter(includeTable),

@@ -27,14 +27,20 @@ const props = defineProps<{
   isDark: boolean;
   themeMode: AppThemeMode;
   showAiPanel: boolean;
+  activeAiRunCount: number;
+  /** Runs awaiting a write confirmation; the badge turns amber to outrank the
+   *  plain active count (parent PRD §4 line 71). */
+  awaitingAiRunCount: number;
   showHistory: boolean;
   showSqlLibrary: boolean;
+  sqlLibrarySaveFeedbackId: number;
   showSqlFilePanel: boolean;
   showDriverStore: boolean;
   showSettingsPage: boolean;
   checkingUpdates: boolean;
   hasUpdateAvailable: boolean;
   agentDriverUpdateCount: number;
+  hasMcpUpdateAvailable: boolean;
   hasConnections: boolean;
   hasSqlFileConnections: boolean;
 }>();
@@ -63,6 +69,41 @@ const settingsStore = useSettingsStore();
 const toolbarItems = computed(() => settingsStore.editorSettings.toolbarItems);
 const { isMac, isDesktop, showControls, isMaximized, isFullscreen, minimize, toggleMaximize, close } = useWindowControls();
 const checkingUpdates = computed(() => props.checkingUpdates);
+const sqlLibrarySaveFeedbackActive = ref(false);
+const SQL_LIBRARY_BOOKMARK_PATH = "M10 2 L10 10 L13 7 L16 10 L16 2";
+const SQL_LIBRARY_CHECK_PATH = "M9 9.5 L9 9.5 L11 11.5 L15 7.5 L15 7.5";
+type SvgAnimateElement = SVGElement & { beginElement?: () => void };
+const sqlLibraryIconPathRef = ref<SVGPathElement | null>(null);
+const sqlLibraryMorphToCheckRef = ref<SvgAnimateElement | null>(null);
+const sqlLibraryMorphToBookmarkRef = ref<SvgAnimateElement | null>(null);
+let sqlLibrarySaveFeedbackTimer = 0;
+
+watch(
+  () => props.sqlLibrarySaveFeedbackId,
+  async (id, previousId) => {
+    if (id <= 0 || id === previousId) return;
+    sqlLibrarySaveFeedbackActive.value = false;
+    await nextTick();
+    sqlLibrarySaveFeedbackActive.value = true;
+    window.clearTimeout(sqlLibrarySaveFeedbackTimer);
+    sqlLibrarySaveFeedbackTimer = window.setTimeout(() => {
+      sqlLibrarySaveFeedbackActive.value = false;
+    }, 850);
+  },
+);
+
+watch(sqlLibrarySaveFeedbackActive, async (active) => {
+  await nextTick();
+  const path = sqlLibraryIconPathRef.value;
+  const animation = active ? sqlLibraryMorphToCheckRef.value : sqlLibraryMorphToBookmarkRef.value;
+  const destination = active ? SQL_LIBRARY_CHECK_PATH : SQL_LIBRARY_BOOKMARK_PATH;
+  if (!path) return;
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches || !animation?.beginElement) {
+    path.setAttribute("d", destination);
+    return;
+  }
+  animation.beginElement();
+});
 
 const themeTriggerIcon = computed(() => {
   if (isSystemAppThemeMode(props.themeMode)) return SunMoon;
@@ -350,6 +391,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   if (toolbarLayoutRaf) cancelAnimationFrame(toolbarLayoutRaf);
   if (trafficLightSyncRaf) cancelAnimationFrame(trafficLightSyncRaf);
+  window.clearTimeout(sqlLibrarySaveFeedbackTimer);
   resizeObserver?.disconnect();
   window.removeEventListener("resize", handleWindowResize);
 });
@@ -558,8 +600,27 @@ const toolbarStyle = computed(() => {
 
       <Tooltip v-if="toolbarItems.sqlLibrary">
         <TooltipTrigger as-child>
-          <Button v-show="isRightItemVisible('sqlLibrary')" variant="ghost" size="icon" class="h-8 w-8 shrink-0" :class="{ 'bg-accent': showSqlLibrary }" @click="emit('toggle-sql-library')">
-            <BookMarked class="h-4 w-4" />
+          <Button v-show="isRightItemVisible('sqlLibrary')" data-sql-library-trigger variant="ghost" size="icon" class="relative h-8 w-8 shrink-0" :class="{ 'bg-accent': showSqlLibrary, 'sql-library-save-feedback': sqlLibrarySaveFeedbackActive }" @click="emit('toggle-sql-library')">
+            <svg
+              aria-hidden="true"
+              xmlns="http://www.w3.org/2000/svg"
+              width="24"
+              height="24"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              class="sql-library-icon h-4 w-4"
+              :class="{ 'sql-library-save-feedback-icon text-primary': sqlLibrarySaveFeedbackActive }"
+            >
+              <path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H19a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6.5a1 1 0 0 1 0-5H20" />
+              <path ref="sqlLibraryIconPathRef" :d="SQL_LIBRARY_BOOKMARK_PATH">
+                <animate ref="sqlLibraryMorphToCheckRef" attributeName="d" :values="`${SQL_LIBRARY_BOOKMARK_PATH};${SQL_LIBRARY_CHECK_PATH}`" dur="180ms" begin="indefinite" fill="freeze" calcMode="spline" keyTimes="0;1" keySplines="0.22 1 0.36 1" />
+                <animate ref="sqlLibraryMorphToBookmarkRef" attributeName="d" :values="`${SQL_LIBRARY_CHECK_PATH};${SQL_LIBRARY_BOOKMARK_PATH}`" dur="180ms" begin="indefinite" fill="freeze" calcMode="spline" keyTimes="0;1" keySplines="0.22 1 0.36 1" />
+              </path>
+            </svg>
           </Button>
         </TooltipTrigger>
         <TooltipContent>{{ t("sqlLibrary.title") }}</TooltipContent>
@@ -585,8 +646,19 @@ const toolbarStyle = computed(() => {
 
       <Tooltip v-if="toolbarItems.ai">
         <TooltipTrigger as-child>
-          <Button v-show="isRightItemVisible('ai')" variant="ghost" size="icon" class="h-8 w-8 shrink-0" :class="{ 'bg-accent': showAiPanel }" @click="emit('toggle-ai')">
+          <Button v-show="isRightItemVisible('ai')" variant="ghost" size="icon" class="relative h-8 w-8 shrink-0" :class="{ 'bg-accent': showAiPanel }" @click="emit('toggle-ai')">
             <Bot class="h-4 w-4" />
+            <span
+              v-if="awaitingAiRunCount > 0"
+              class="absolute right-0.5 top-0.5 flex h-3 min-w-3 items-center justify-center rounded-full bg-amber-500 px-0.5 text-[8px] font-semibold leading-none text-white"
+              :aria-label="t('ai.toolbarAwaitingConfirmation', { count: awaitingAiRunCount })"
+              :title="t('ai.toolbarAwaitingConfirmation', { count: awaitingAiRunCount })"
+            >
+              {{ awaitingAiRunCount > 9 ? "9+" : awaitingAiRunCount }}
+            </span>
+            <span v-else-if="activeAiRunCount > 0" class="absolute right-0.5 top-0.5 flex h-3 min-w-3 items-center justify-center rounded-full bg-primary px-0.5 text-[8px] font-semibold leading-none text-primary-foreground">
+              {{ activeAiRunCount > 9 ? "9+" : activeAiRunCount }}
+            </span>
           </Button>
         </TooltipTrigger>
         <TooltipContent>AI</TooltipContent>
@@ -618,13 +690,69 @@ const toolbarStyle = computed(() => {
 
     <Tooltip>
       <TooltipTrigger as-child>
-        <Button variant="ghost" size="icon" class="h-8 w-8 shrink-0" :class="{ 'bg-accent': showSettingsPage }" @click="emit('open-settings')">
+        <Button variant="ghost" size="icon" class="relative h-8 w-8 shrink-0" :class="{ 'bg-accent': showSettingsPage }" @click="emit('open-settings')">
           <Settings class="h-4 w-4" />
+          <span v-if="hasMcpUpdateAvailable" class="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-red-500 ring-2 ring-background" :aria-label="t('toolbar.mcpUpdateAvailable')" :title="t('toolbar.mcpUpdateAvailable')" />
         </Button>
       </TooltipTrigger>
-      <TooltipContent>{{ t("settings.title") }}</TooltipContent>
+      <TooltipContent>{{ hasMcpUpdateAvailable ? t("toolbar.mcpUpdateAvailable") : t("settings.title") }}</TooltipContent>
     </Tooltip>
 
     <WindowControls v-if="showControls" :is-maximized="isMaximized" @minimize="minimize" @toggle-maximize="toggleMaximize" @close="close" />
   </div>
 </template>
+
+<style scoped>
+@keyframes sql-library-save-confirm-button {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+  36% {
+    box-shadow:
+      inset 0 0 0 1px color-mix(in srgb, var(--primary) 38%, transparent),
+      0 0 0 3px color-mix(in srgb, var(--primary) 8%, transparent);
+  }
+}
+
+@keyframes sql-library-save-confirm-icon {
+  0% {
+    opacity: 0.75;
+    transform: scale(0.92);
+  }
+  38% {
+    opacity: 1;
+    transform: translateY(-1px) scale(1.12);
+  }
+  68% {
+    transform: scale(0.98);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.sql-library-save-feedback {
+  animation: sql-library-save-confirm-button 760ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.sql-library-icon {
+  transition: color 180ms ease;
+}
+
+.sql-library-save-feedback-icon {
+  animation: sql-library-save-confirm-icon 760ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sql-library-save-feedback,
+  .sql-library-save-feedback-icon {
+    animation: none;
+  }
+
+  .sql-library-icon {
+    transition: none;
+  }
+}
+</style>

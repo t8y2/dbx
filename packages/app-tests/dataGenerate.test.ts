@@ -1,8 +1,17 @@
 import { strict as assert } from "node:assert";
-import { test } from "vitest";
-import { defaultGeneratorParams, displayGeneratedValue, generateTableData, generateValue, supportsGeneratedMultiRowValues } from "../../apps/desktop/src/lib/dataGrid/dataGenerate.ts";
+import { test, vi } from "vitest";
+import { defaultGeneratorParams, displayGeneratedValue, findGeneratorKey, generateTableData, generateValue, supportsGeneratedMultiRowValues } from "../../apps/desktop/src/lib/dataGrid/dataGenerate.ts";
 
-test("enables default values for columns with schema defaults", () => {
+test("recognizes Oracle-compatible NUMBER column types as numeric", () => {
+  assert.equal(findGeneratorKey("value", "NUMBER"), "number");
+  assert.equal(findGeneratorKey("value", "NUMBER(10)"), "number");
+  assert.equal(findGeneratorKey("value", "NUMBER(18, 2)"), "number");
+  assert.equal(findGeneratorKey("value", "NUMBER(10)", true), "sequence");
+  assert.equal(findGeneratorKey("value", "serial_number_code"), "text");
+  assert.equal(findGeneratorKey("value", "NUMBER CODE"), "text");
+});
+
+test("keeps schema defaults optional for generated columns", () => {
   const params = defaultGeneratorParams(
     "status",
     {
@@ -12,8 +21,16 @@ test("enables default values for columns with schema defaults", () => {
     "text",
   );
 
-  assert.equal(params.includeDefault, true);
+  assert.equal(params.includeDefault, false);
   assert.equal(params.defaultPercent, 100);
+});
+
+test("does not let schema defaults override generated values unless enabled", () => {
+  const generated = generateValue("age", "bigint", "sequence", 4, { startValue: 1, increment: 1 }, "0");
+  const explicitDefault = generateValue("age", "bigint", "sequence", 4, { includeDefault: true, defaultPercent: 100 }, "0");
+
+  assert.equal(generated, 5);
+  assert.equal(explicitDefault, 0);
 });
 
 test("uses string column defaults instead of random generated values", () => {
@@ -99,6 +116,171 @@ test("includeDefault without a schema default no longer emits NULL", () => {
   assert.notEqual(value, undefined);
 });
 
+test("fails before producing SQL when an explicitly unique generator is exhausted", () => {
+  assert.throws(
+    () =>
+      generateTableData(
+        {
+          tableName: "users",
+          schema: "public",
+          database: "app",
+          rowCount: 2,
+          columns: [
+            {
+              columnName: "status",
+              dataType: "text",
+              rowCount: 2,
+              generatorKey: "enum",
+              generatorParams: { values: "active", unique: true },
+            },
+          ],
+        },
+        "postgres",
+      ),
+    /unique value.*status.*users/i,
+  );
+});
+
+test("retries collisions for an explicitly unique generator", () => {
+  const random = vi.spyOn(Math, "random").mockReturnValueOnce(0).mockReturnValueOnce(0).mockReturnValueOnce(0.99);
+  try {
+    const result = generateTableData(
+      {
+        tableName: "users",
+        schema: "public",
+        database: "app",
+        rowCount: 2,
+        columns: [
+          {
+            columnName: "rank",
+            dataType: "integer",
+            rowCount: 2,
+            generatorKey: "number",
+            generatorParams: { min: 1, max: 2, unique: true },
+          },
+        ],
+      },
+      "postgres",
+    );
+
+    assert.deepEqual(result.rows, [[1], [2]]);
+  } finally {
+    random.mockRestore();
+  }
+});
+
+test("keeps explicit uniqueness scoped independently to each column", () => {
+  const result = generateTableData(
+    {
+      tableName: "pairs",
+      schema: "public",
+      database: "app",
+      rowCount: 2,
+      columns: ["left_id", "right_id"].map((columnName) => ({
+        columnName,
+        dataType: "integer",
+        rowCount: 2,
+        generatorKey: "sequence",
+        generatorParams: { startValue: 1, increment: 1, unique: true },
+      })),
+    },
+    "postgres",
+  );
+
+  assert.deepEqual(result.rows, [
+    [1, 1],
+    [2, 2],
+  ]);
+});
+
+test("keeps duplicate values unchanged when explicit uniqueness is disabled", () => {
+  const result = generateTableData(
+    {
+      tableName: "users",
+      schema: "public",
+      database: "app",
+      rowCount: 2,
+      columns: [
+        {
+          columnName: "status",
+          dataType: "text",
+          rowCount: 2,
+          generatorKey: "enum",
+          generatorParams: { values: "active", unique: false },
+        },
+      ],
+    },
+    "postgres",
+  );
+
+  assert.deepEqual(result.rows, [["active"], ["active"]]);
+});
+
+test("generates 1000 distinct emails when explicit uniqueness is enabled", () => {
+  const result = generateTableData(
+    {
+      tableName: "users",
+      schema: "public",
+      database: "app",
+      rowCount: 1000,
+      columns: [
+        {
+          columnName: "email",
+          dataType: "text",
+          rowCount: 1000,
+          generatorKey: "email",
+          generatorParams: { unique: true },
+        },
+      ],
+    },
+    "postgres",
+  );
+
+  assert.equal(new Set(result.rows.map((row) => row[0])).size, 1000);
+});
+
+test("treats repeated null, default, and SQL expression values as unique-domain exhaustion", () => {
+  const cases = [
+    {
+      columnName: "optional_name",
+      dataType: "text",
+      generatorKey: "text",
+      generatorParams: { includeNull: true, nullPercent: 100, unique: true },
+    },
+    {
+      columnName: "status",
+      dataType: "text",
+      generatorKey: "text",
+      generatorParams: { includeDefault: true, defaultPercent: 100, unique: true },
+      columnDefault: "active",
+    },
+    {
+      columnName: "created_at",
+      dataType: "timestamp",
+      generatorKey: "datetime",
+      generatorParams: { includeDefault: true, defaultPercent: 100, unique: true },
+      columnDefault: "CURRENT_TIMESTAMP",
+    },
+  ];
+
+  for (const column of cases) {
+    assert.throws(
+      () =>
+        generateTableData(
+          {
+            tableName: "events",
+            schema: "public",
+            database: "app",
+            rowCount: 2,
+            columns: [{ ...column, rowCount: 2 }],
+          },
+          "postgres",
+        ),
+      new RegExp(`unique value.*${column.columnName}.*events`, "i"),
+    );
+  }
+});
+
 test("generates Oracle-compatible single-row inserts with explicit temporal literals", () => {
   const result = generateTableData(
     {
@@ -154,7 +336,7 @@ test("batches large Oracle data generation statements", () => {
           dataType: "NUMBER",
           rowCount: 101,
           generatorKey: "sequence",
-          generatorParams: { startValue: 1, increment: 1 },
+          generatorParams: { startValue: 1, increment: 1, unique: true },
         },
       ],
     },
@@ -194,7 +376,7 @@ test("generates TDengine stable rows with one child table identity and stable ta
           dataType: "BINARY(64)",
           rowCount: 2,
           generatorKey: "sequence",
-          generatorParams: { startValue: 100, increment: 1 },
+          generatorParams: { startValue: 100, increment: 1, unique: true },
           isTag: true,
         },
       ],

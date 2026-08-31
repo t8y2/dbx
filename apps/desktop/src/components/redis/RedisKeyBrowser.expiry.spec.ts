@@ -22,9 +22,17 @@ const mocks = vi.hoisted(() => ({
   redisCheckJsonModule: vi.fn(),
   redisDeleteKey: vi.fn(),
   redisDeleteKeys: vi.fn(),
+  redisExecuteCommand: vi.fn(),
+  saveHistory: vi.fn(),
   canBuildRedisFuzzyTree: vi.fn((loadedKeyCount: number) => loadedKeyCount <= 200_000),
   toast: vi.fn(),
   updateRedisDbKeyStats: vi.fn(),
+  listRedisCompletionCommandDocs: vi.fn(),
+  listRedisCompletionKeys: vi.fn(),
+  redisScanPageSize: 100,
+  infiniteScroll: false,
+  queryResultMaxRowsEnabled: true,
+  queryResultMaxRows: 5000,
 }));
 
 vi.mock("@/lib/backend/api", () => ({
@@ -42,6 +50,8 @@ vi.mock("@/lib/backend/api", () => ({
   redisCheckJsonModule: mocks.redisCheckJsonModule,
   redisDeleteKey: mocks.redisDeleteKey,
   redisDeleteKeys: mocks.redisDeleteKeys,
+  redisExecuteCommand: mocks.redisExecuteCommand,
+  saveHistory: mocks.saveHistory,
 }));
 
 vi.mock("@/lib/redis/redisKeyTree", async (importOriginal) => {
@@ -52,10 +62,22 @@ vi.mock("@/lib/redis/redisKeyTree", async (importOriginal) => {
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     ensureConnected: vi.fn().mockResolvedValue(undefined),
-    getConfig: () => ({ name: "Redis", redis_key_separator: ":", redis_scan_page_size: 100 }),
+    getConfig: () => ({ name: "Redis", redis_key_separator: ":", redis_scan_page_size: mocks.redisScanPageSize }),
     updateRedisDbKeyStats: mocks.updateRedisDbKeyStats,
+    listRedisCompletionCommandDocs: mocks.listRedisCompletionCommandDocs,
+    listRedisCompletionKeys: mocks.listRedisCompletionKeys,
     invalidateCompletionCache: vi.fn(),
     refreshRedisDbKeyCounts: vi.fn(),
+  }),
+}));
+
+vi.mock("@/stores/settingsStore", () => ({
+  useSettingsStore: () => ({
+    editorSettings: {
+      infiniteScroll: mocks.infiniteScroll,
+      queryResultMaxRowsEnabled: mocks.queryResultMaxRowsEnabled,
+      queryResultMaxRows: mocks.queryResultMaxRows,
+    },
   }),
 }));
 
@@ -81,7 +103,7 @@ vi.mock("@/components/ui/button", async () => {
 });
 
 vi.mock("@/components/ui/input", async () => {
-  const { defineComponent, h } = await import("vue");
+  const { defineComponent, h, mergeProps } = await import("vue");
   return {
     Input: defineComponent({
       inheritAttrs: false,
@@ -89,12 +111,14 @@ vi.mock("@/components/ui/input", async () => {
       emits: ["update:modelValue"],
       setup(props, { attrs, emit }) {
         return () =>
-          h("input", {
-            ...attrs,
-            value: props.modelValue ?? "",
-            disabled: props.disabled,
-            onInput: (event: Event) => emit("update:modelValue", (event.target as HTMLInputElement).value),
-          });
+          h(
+            "input",
+            mergeProps(attrs, {
+              value: props.modelValue ?? "",
+              disabled: props.disabled,
+              onInput: (event: Event) => emit("update:modelValue", (event.target as HTMLInputElement).value),
+            }),
+          );
       },
     }),
   };
@@ -330,6 +354,15 @@ function redisKeyInfo(keyType = "json") {
   return { key_display: KEY_NAME, key_raw: KEY_RAW, key_type: keyType, ttl: 90, size: 7, value_preview: "{}" };
 }
 
+const completionCommands = [
+  { name: "GET", group: "string", arity: 2, keySpecs: [{ beginSearch: { type: "index" as const, index: 1 }, findKeys: { type: "range" as const, lastKey: 0, keyStep: 1, limit: 0 } }] },
+  { name: "GETEX", group: "string", arity: -2, keySpecs: [{ beginSearch: { type: "index" as const, index: 1 }, findKeys: { type: "range" as const, lastKey: 0, keyStep: 1, limit: 0 } }] },
+  { name: "GETSET", group: "string", arity: 3, keySpecs: [{ beginSearch: { type: "index" as const, index: 1 }, findKeys: { type: "range" as const, lastKey: 0, keyStep: 1, limit: 0 } }] },
+  { name: "PING", group: "connection", arity: -1, keySpecs: [] },
+  { name: "SET", group: "string", arity: -3, keySpecs: [{ beginSearch: { type: "index" as const, index: 1 }, findKeys: { type: "range" as const, lastKey: 0, keyStep: 1, limit: 0 } }] },
+  { name: "VGET", group: "string", arity: 2, summary: "Reads a vendor key.", keySpecs: [{ beginSearch: { type: "index" as const, index: 1 }, findKeys: { type: "range" as const, lastKey: 0, keyStep: 1, limit: 0 } }] },
+];
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;
@@ -342,6 +375,10 @@ function deferred<T>() {
 
 function resetApiMocks() {
   vi.clearAllMocks();
+  mocks.redisScanPageSize = 100;
+  mocks.infiniteScroll = false;
+  mocks.queryResultMaxRowsEnabled = true;
+  mocks.queryResultMaxRows = 5000;
   mocks.redisScanKeysBatch.mockResolvedValue({ cursor: 0, keys: [], total_keys: 0 });
   mocks.redisGetValue.mockImplementation((_connectionId: string, _db: number, keyRaw: string) => Promise.resolve(redisValue(keyRaw)));
   mocks.redisSetString.mockResolvedValue(undefined);
@@ -356,16 +393,29 @@ function resetApiMocks() {
   mocks.redisCheckJsonModule.mockResolvedValue(true);
   mocks.redisDeleteKey.mockResolvedValue(undefined);
   mocks.redisDeleteKeys.mockResolvedValue(0);
+  mocks.redisExecuteCommand.mockResolvedValue({ value: "OK" });
+  mocks.saveHistory.mockResolvedValue(undefined);
+  mocks.listRedisCompletionCommandDocs.mockResolvedValue(completionCommands);
+  mocks.listRedisCompletionKeys.mockResolvedValue(["user:1"]);
   mocks.canBuildRedisFuzzyTree.mockImplementation((loadedKeyCount: number) => loadedKeyCount <= 200_000);
 }
 
-function mountBrowser() {
+function mountBrowser(withDeleteDetails = false) {
   const host = document.createElement("div");
   document.body.append(host);
   const app = createApp(RedisKeyBrowser, { connectionId: "connection", db: 0, blockDangerousRedisCommands: false });
-  app.use(createI18n({ legacy: false, locale: "en", messages: { en: {} }, missingWarn: false, fallbackWarn: false }));
+  const messages = {
+    en: {
+      redis: {
+        deleteGroupDetails: withDeleteDetails ? "{target}\n{count} keys" : "redis.deleteGroupDetails",
+        keys: "{count} keys",
+      },
+    },
+  };
+  app.use(createI18n({ legacy: false, locale: "en", messages, missingWarn: false, fallbackWarn: false }));
   app.mount(host);
   mountedApps.push({ unmount: () => app.unmount(), host });
+  return host;
 }
 
 function mountScopedBrowser() {
@@ -459,12 +509,42 @@ async function submitKeySearch(value: string) {
   await settle();
 }
 
-function groupCheckbox(label: string): HTMLInputElement {
+function groupRow(label: string): HTMLElement {
   const labelElement = Array.from(document.querySelectorAll<HTMLElement>(".dbx-editor-font-family")).find((element) => element.textContent === label);
   expect(labelElement, label).toBeDefined();
-  const checkbox = labelElement?.closest(".group")?.querySelector<HTMLInputElement>('input[type="checkbox"]');
+  const row = labelElement?.closest<HTMLElement>(".group");
+  expect(row, label).toBeDefined();
+  return row!;
+}
+
+function redisCheckboxes(): HTMLElement[] {
+  return Array.from(document.querySelectorAll<HTMLElement>('input[type="checkbox"]'));
+}
+
+function groupCheckbox(label: string): HTMLElement {
+  const checkbox = groupRow(label).querySelector<HTMLElement>('input[type="checkbox"]');
   expect(checkbox, label).toBeDefined();
   return checkbox!;
+}
+
+function leafCheckbox(label: string): HTMLElement {
+  const checkbox = redisCheckboxes().find((el) => el.closest(".group")?.querySelector(".dbx-editor-font-family")?.textContent === label);
+  expect(checkbox, label).toBeDefined();
+  return checkbox!;
+}
+
+function isCheckboxChecked(el: HTMLElement): boolean {
+  return (el as HTMLInputElement).checked;
+}
+
+function isCheckboxMixed(el: HTMLElement): boolean {
+  return (el as HTMLInputElement).indeterminate;
+}
+
+/** Select a folder via its left-side checkbox (same single-click path as leaf keys). */
+async function selectGroup(label: string) {
+  groupCheckbox(label).dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+  await settle();
 }
 
 async function select(value: string) {
@@ -480,6 +560,21 @@ async function openCreateDialog() {
   requiredElement<HTMLButtonElement>('button[title="redis.createKey"]').click();
   await settle();
   await setInput('input[placeholder="redis.createKeyNamePlaceholder"]', KEY_NAME);
+}
+
+async function openCommandPanel() {
+  const trigger = document.querySelector<HTMLElement>('[value="command"]');
+  expect(trigger, "redis.commandLine trigger").toBeDefined();
+  trigger!.click();
+  await settle();
+}
+
+function commandCompletionLabels(): string[] {
+  return Array.from(document.querySelectorAll<HTMLButtonElement>('[role="option"]')).map((item) => item.textContent?.trim() ?? "");
+}
+
+async function setCommandInput(value: string) {
+  await setInput("[data-redis-command-input]", value);
 }
 
 async function fillCreateValue(type: CreateType) {
@@ -574,6 +669,391 @@ describe("RedisKeyBrowser scope changes", () => {
 
     expect(browser.host.textContent).toContain("db1-key");
     expect(browser.host.textContent).not.toContain("db0-key");
+  });
+});
+
+describe("RedisKeyBrowser TTL list badges and no-expiry filter", () => {
+  it("renders TTL badges per row and filters rows to keys without expiry", async () => {
+    mocks.redisScanKeysBatch.mockResolvedValue({
+      cursor: 0,
+      keys: [
+        {
+          key_display: "session:a",
+          key_raw: "c2Vzc2lvbjph",
+          key_type: "string",
+          ttl: -1,
+        },
+        {
+          key_display: "cache:b",
+          key_raw: "Y2FjaGU6Yg==",
+          key_type: "string",
+          ttl: 3600,
+        },
+      ],
+      total_keys: 2,
+    });
+    mountBrowser();
+    await settle();
+    // 初始 "*" 浏览是树模式且分组默认折叠；切到 key 搜索后走平铺行，leaf 直接可见
+    await submitKeySearch("session");
+
+    expect(document.body.textContent).toContain("session:a");
+    // 永不过期（TTL = -1）显示为本地化的 redis.noExpiry 文案，
+    // 剩余 3600 秒显示为加载时刻快照 redis.ttlHour（测试未配置 i18n 文案时回退为 key）
+    expect(document.body.textContent).toContain("redis.noExpiry");
+    expect(document.body.textContent).toContain("redis.ttlHour");
+
+    requiredElement<HTMLButtonElement>("[data-redis-no-expiry-filter]").click();
+    await settle();
+
+    expect(document.body.textContent).toContain("session:a");
+    expect(document.body.textContent).not.toContain("cache:b");
+  });
+
+  it("shows an empty hint when no loaded key is without expiry", async () => {
+    mocks.redisScanKeysBatch.mockResolvedValue({
+      cursor: 0,
+      keys: [
+        {
+          key_display: "cache:b",
+          key_raw: "Y2FjaGU6Yg==",
+          key_type: "string",
+          ttl: 60,
+        },
+      ],
+      total_keys: 1,
+    });
+    mountBrowser();
+    await settle();
+    await submitKeySearch("cache");
+
+    requiredElement<HTMLButtonElement>("[data-redis-no-expiry-filter]").click();
+    await settle();
+
+    expect(document.body.textContent).toContain("redis.noExpiryKeysEmpty");
+  });
+
+  it("counts down the list TTL locally without extra network requests", async () => {
+    vi.useFakeTimers();
+    try {
+      mocks.redisScanKeysBatch.mockResolvedValue({
+        cursor: 0,
+        keys: [
+          {
+            key_display: "cache:b",
+            key_raw: "Y2FjaGU6Yg==",
+            key_type: "string",
+            ttl: 60,
+          },
+        ],
+        total_keys: 1,
+      });
+      mountBrowser();
+      await settle();
+      await submitKeySearch("cache");
+
+      // 刚加载时流逝为 0，60 秒只展示分钟单位（未配置文案时回退为 key）
+      expect(document.body.textContent).toContain("redis.ttlMinute");
+
+      const scanCalls = mocks.redisScanKeysBatch.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(5000);
+      await settle();
+
+      // 倒计时是纯本地计算，不发额外请求；55 秒只展示秒单位
+      expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(scanCalls);
+      expect(document.body.textContent).toContain("redis.ttlSecond");
+      expect(document.body.textContent).not.toContain("redis.ttlMinute");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("shows an expired badge when the local countdown reaches zero", async () => {
+    vi.useFakeTimers();
+    try {
+      mocks.redisScanKeysBatch.mockResolvedValue({
+        cursor: 0,
+        keys: [
+          {
+            key_display: "cache:b",
+            key_raw: "Y2FjaGU6Yg==",
+            key_type: "string",
+            ttl: 1,
+          },
+        ],
+        total_keys: 1,
+      });
+      mountBrowser();
+      await settle();
+      await submitKeySearch("cache");
+
+      await vi.advanceTimersByTimeAsync(2000);
+      await settle();
+
+      // 倒计时归零后展示已过期文案，而不是停留在旧快照
+      expect(document.body.textContent).toContain("redis.expired");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("RedisKeyBrowser command completion", () => {
+  it("uses the connected server's module command docs and accepts the selection with Tab", async () => {
+    mountBrowser();
+    await settle();
+    await openCommandPanel();
+    await setCommandInput("VGE");
+
+    expect(mocks.listRedisCompletionCommandDocs).toHaveBeenCalledWith("connection", "0");
+    expect(commandCompletionLabels()).toEqual(expect.arrayContaining([expect.stringContaining("VGET")]));
+
+    const input = requiredElement<HTMLInputElement>("[data-redis-command-input]");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", shiftKey: true, bubbles: true }));
+    await settle();
+    expect(input.value).toBe("VGE");
+
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+    await settle();
+    expect(input.value).toBe("VGET arg1");
+  });
+
+  it("completes known keys only at a documented key argument", async () => {
+    mountBrowser();
+    await settle();
+    await openCommandPanel();
+    await setCommandInput("VGET ");
+
+    expect(mocks.listRedisCompletionKeys).toHaveBeenCalledWith("connection", "0");
+    expect(commandCompletionLabels()).toContain("user:1key");
+
+    const input = requiredElement<HTMLInputElement>("[data-redis-command-input]");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+    await settle();
+    expect(input.value).toBe("VGET user:1");
+  });
+
+  it("replaces an incomplete quoted key with the executable completion text", async () => {
+    mocks.listRedisCompletionKeys.mockResolvedValueOnce(["user name"]);
+    mountBrowser();
+    await settle();
+    await openCommandPanel();
+    await setCommandInput('VGET "user');
+
+    const input = requiredElement<HTMLInputElement>("[data-redis-command-input]");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+    await settle();
+
+    expect(input.value).toBe('VGET "user name"');
+  });
+
+  it("does not guess command candidates when server metadata is unavailable", async () => {
+    mocks.listRedisCompletionCommandDocs.mockRejectedValueOnce(new Error("unknown subcommand 'DOCS'"));
+    mountBrowser();
+    await settle();
+    await openCommandPanel();
+    await setCommandInput("GE");
+
+    expect(commandCompletionLabels()).toEqual([]);
+  });
+
+  it("keeps one selected completion while pointer and keyboard move it", async () => {
+    mountBrowser();
+    await settle();
+    await openCommandPanel();
+    await setCommandInput("GE");
+
+    const options = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="option"]'));
+    const input = requiredElement<HTMLInputElement>("[data-redis-command-input]");
+    const listbox = requiredElement<HTMLElement>('[role="listbox"]');
+    expect(options.length).toBeGreaterThan(1);
+    expect(options.filter((option) => option.getAttribute("aria-selected") === "true")).toEqual([options[0]]);
+    expect(options.every((option) => !option.hasAttribute("title"))).toBe(true);
+    expect(input.getAttribute("aria-controls")).toBe(listbox.id);
+    expect(input.getAttribute("aria-activedescendant")).toBe(options[0]!.id);
+
+    options[1]!.dispatchEvent(new Event("pointerenter", { bubbles: true }));
+    await settle();
+    expect(options.filter((option) => option.getAttribute("aria-selected") === "true")).toEqual([options[1]]);
+    expect(input.getAttribute("aria-activedescendant")).toBe(options[1]!.id);
+
+    listbox.scrollTop = 20;
+    vi.spyOn(listbox, "getBoundingClientRect").mockReturnValue({ top: 100, bottom: 200 } as DOMRect);
+    vi.spyOn(options[2]!, "getBoundingClientRect").mockReturnValue({ top: 180, bottom: 224 } as DOMRect);
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    await settle();
+    expect(options.filter((option) => option.getAttribute("aria-selected") === "true")).toEqual([options[2]]);
+    expect(listbox.scrollTop).toBe(44);
+
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    await settle();
+    expect(options.filter((option) => option.getAttribute("aria-selected") === "true")).toEqual([options[2]]);
+
+    vi.spyOn(options[1]!, "getBoundingClientRect").mockReturnValue({ top: 76, bottom: 120 } as DOMRect);
+    vi.spyOn(options[0]!, "getBoundingClientRect").mockReturnValue({ top: 100, bottom: 144 } as DOMRect);
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+    await settle();
+    expect(options.filter((option) => option.getAttribute("aria-selected") === "true")).toEqual([options[0]]);
+    expect(listbox.scrollTop).toBe(20);
+  });
+
+  it("accepts a documented argument keyword and advances to its value", async () => {
+    mocks.listRedisCompletionCommandDocs.mockResolvedValueOnce([
+      ...completionCommands,
+      {
+        name: "XREAD",
+        group: "stream",
+        arity: -4,
+        keySpecs: [],
+        arguments: [
+          { name: "count", token: "COUNT", type: "integer", optional: true },
+          { name: "streams", token: "STREAMS", type: "block", arguments: [{ name: "key", type: "key", multiple: true }] },
+        ],
+      },
+    ]);
+    mountBrowser();
+    await settle();
+    await openCommandPanel();
+    await setCommandInput("XREAD C");
+
+    const input = requiredElement<HTMLInputElement>("[data-redis-command-input]");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+    await settle();
+
+    expect(input.value).toBe("XREAD COUNT ");
+    expect(commandCompletionLabels()).toEqual([]);
+  });
+
+  it("accepts the selected completion before executing on Enter", async () => {
+    mountBrowser();
+    await settle();
+    await openCommandPanel();
+    await setCommandInput("SE");
+
+    const input = requiredElement<HTMLInputElement>("[data-redis-command-input]");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await settle();
+
+    expect(input.value).toBe("SET arg1 arg2");
+    expect(mocks.redisExecuteCommand).not.toHaveBeenCalled();
+  });
+
+  it("inserts documented Redis argument examples before executing on Enter", async () => {
+    mocks.listRedisCompletionCommandDocs.mockResolvedValueOnce([
+      {
+        name: "GETBIT",
+        group: "bitmap",
+        arity: 3,
+        keySpecs: [{ beginSearch: { type: "index" as const, index: 1 }, findKeys: { type: "range" as const, lastKey: 0, keyStep: 1, limit: 0 } }],
+        arguments: [
+          { name: "key", type: "key" },
+          { name: "offset", type: "integer" },
+        ],
+      },
+    ]);
+    mountBrowser();
+    await settle();
+    await openCommandPanel();
+    await setCommandInput("GETB");
+
+    const input = requiredElement<HTMLInputElement>("[data-redis-command-input]");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await settle();
+
+    expect(input.value).toBe("GETBIT key offset");
+    expect(mocks.redisExecuteCommand).not.toHaveBeenCalled();
+    expect(commandCompletionLabels()).toEqual([]);
+  });
+
+  it("waits for command metadata instead of sending a partial command on Enter", async () => {
+    const docs = deferred<typeof completionCommands>();
+    mocks.listRedisCompletionCommandDocs.mockReturnValueOnce(docs.promise);
+    mountBrowser();
+    await settle();
+    await openCommandPanel();
+    await setCommandInput("SE");
+
+    const input = requiredElement<HTMLInputElement>("[data-redis-command-input]");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await settle();
+
+    expect(input.value).toBe("SE");
+    expect(mocks.redisExecuteCommand).not.toHaveBeenCalled();
+
+    docs.resolve(completionCommands);
+    await settle();
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await settle();
+    expect(input.value).toBe("SET arg1 arg2");
+    expect(mocks.redisExecuteCommand).not.toHaveBeenCalled();
+  });
+
+  it("executes an exact command instead of completing it a second time", async () => {
+    mountBrowser();
+    await settle();
+    await openCommandPanel();
+    await setCommandInput("PING");
+
+    const input = requiredElement<HTMLInputElement>("[data-redis-command-input]");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await settle();
+
+    expect(mocks.redisExecuteCommand).toHaveBeenCalledWith("connection", 0, "PING", true);
+    expect(input.value).toBe("");
+  });
+});
+
+describe("RedisKeyBrowser command console echo", () => {
+  it("echoes the submitted command to the terminal before the response arrives, then fills in the result", async () => {
+    const pending = deferred<{ value: unknown }>();
+    mocks.redisExecuteCommand.mockReturnValueOnce(pending.promise);
+    mountBrowser();
+    await settle();
+    await openCommandPanel();
+    await setCommandInput("PING");
+
+    const input = requiredElement<HTMLInputElement>("[data-redis-command-input]");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await settle();
+
+    // The command must show up in the terminal right away — while the
+    // request is still in flight — not only once the response resolves.
+    const terminal = requiredElement<HTMLElement>(".redis-command-terminal");
+    expect(terminal.textContent).toContain("PING");
+    expect(terminal.querySelectorAll(".mb-2")).toHaveLength(1);
+    expect(terminal.textContent).not.toContain("PONG");
+
+    pending.resolve({ value: "PONG" });
+    await settle();
+
+    expect(terminal.textContent).toContain("PONG");
+    // The result fills in the same echoed entry rather than adding a second one.
+    expect(terminal.querySelectorAll(".mb-2")).toHaveLength(1);
+  });
+
+  it("attaches a failed command's error to the same echoed entry", async () => {
+    const pending = deferred<{ value: unknown }>();
+    mocks.redisExecuteCommand.mockReturnValueOnce(pending.promise);
+    mountBrowser();
+    await settle();
+    await openCommandPanel();
+    await setCommandInput("PING");
+
+    const input = requiredElement<HTMLInputElement>("[data-redis-command-input]");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await settle();
+
+    const terminal = requiredElement<HTMLElement>(".redis-command-terminal");
+    expect(terminal.textContent).toContain("PING");
+    expect(terminal.querySelectorAll(".mb-2")).toHaveLength(1);
+
+    pending.reject(new Error("ERR unknown command"));
+    await settle();
+
+    expect(terminal.textContent).toContain("ERR unknown command");
+    expect(terminal.querySelectorAll(".mb-2")).toHaveLength(1);
   });
 });
 
@@ -681,6 +1161,233 @@ describe("RedisKeyBrowser expiry creation", () => {
 });
 
 describe("RedisKeyBrowser fuzzy key hierarchy", () => {
+  it("deletes a leaf directly from the key list after confirmation", async () => {
+    const key = { key_display: "session:current", key_raw: "c2Vzc2lvbjpjdXJyZW50", key_type: "string", ttl: -1 };
+    mocks.redisScanKeysBatch.mockResolvedValue({ cursor: 0, keys: [key], total_keys: 1 });
+    mocks.redisDeleteKeys.mockResolvedValue(1);
+    mountBrowser(true);
+    await settle();
+
+    groupRow("session").dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    await settle();
+
+    const deleteButton = requiredElement<HTMLButtonElement>('button[title="redis.deleteKey"]');
+    deleteButton.click();
+    await settle();
+
+    expect(mocks.redisDeleteKeys).not.toHaveBeenCalled();
+    expect(requiredElement<HTMLElement>("[data-test-danger-details]").textContent).toContain("session:current");
+    requiredElement<HTMLButtonElement>("[data-test-danger-confirm]").click();
+    await settle();
+
+    expect(mocks.redisDeleteKeys).toHaveBeenCalledWith("connection", 0, [key.key_raw]);
+    expect(document.body.textContent).not.toContain("session:current");
+  });
+
+  it("preserves the cursor and finds a sparse fuzzy match after a bounded continuation", async () => {
+    mocks.redisScanPageSize = 1_000;
+    mountBrowser();
+    await settle();
+    clickButtonWithText("redis.fuzzyMatch");
+    await settle();
+
+    const target = { key_display: "issue5012:target", key_raw: "aXNzdWU1MDEyOnRhcmdldA==", key_type: "string", ttl: -1 };
+    let batch = 0;
+    mocks.redisScanKeysBatch.mockReset();
+    mocks.redisScanKeysBatch.mockImplementation(() => {
+      batch += 1;
+      if (batch === 8) return Promise.resolve({ cursor: 801, keys: [target], total_keys: 0 });
+      return Promise.resolve({ cursor: batch * 100, keys: [], total_keys: batch === 1 ? 200_000 : 0 });
+    });
+
+    await submitKeySearch("issue5012:target");
+    await vi.waitFor(() => expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(7));
+    await settle();
+    expect(document.body.textContent).not.toContain("target");
+    expect(document.body.textContent).toContain("redis.noKeysInScanHint");
+
+    clickButtonWithText("redis.loadMoreKeys");
+    await vi.waitFor(() => {
+      const labels = Array.from(document.querySelectorAll<HTMLElement>(".dbx-editor-font-family")).map((element) => element.textContent);
+      expect(labels).toContain("target");
+    });
+
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(8);
+    expect(mocks.redisScanKeysBatch.mock.calls.every((call) => call[3] === "*issue5012:target*")).toBe(true);
+  });
+
+  it("bounds a large no-match keyspace and exposes the saved-cursor continuation", async () => {
+    mocks.redisScanPageSize = 1_000;
+    mountBrowser();
+    await settle();
+    clickButtonWithText("redis.fuzzyMatch");
+    await settle();
+
+    let batch = 0;
+    mocks.redisScanKeysBatch.mockReset();
+    mocks.redisScanKeysBatch.mockImplementation(() => {
+      batch += 1;
+      return Promise.resolve({ cursor: batch, keys: [], total_keys: batch === 1 ? 5_000_000 : 0 });
+    });
+
+    await submitKeySearch("missing-key");
+    await vi.waitFor(() => expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(7));
+    await settle();
+
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(7);
+    expect(mocks.redisScanKeysBatch.mock.calls[mocks.redisScanKeysBatch.mock.calls.length - 1]?.[2]).toBe(6);
+    expect(document.body.textContent).toContain("redis.noKeysInScanHint");
+    expect(Array.from(document.querySelectorAll("button")).some((button) => button.textContent?.includes("redis.loadMoreKeys"))).toBe(true);
+
+    clickButtonWithText("redis.loadMoreKeys");
+    await vi.waitFor(() => expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(14));
+
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(14);
+    expect(mocks.redisScanKeysBatch.mock.calls[7]?.[2]).toBe(7);
+    expect(document.body.textContent).toContain("redis.noKeysInScanHint");
+  });
+
+  it("keeps existing matches while continuing to the next sparse fuzzy result", async () => {
+    mocks.redisScanPageSize = 1_000;
+    mountBrowser();
+    await settle();
+    clickButtonWithText("redis.fuzzyMatch");
+    await settle();
+
+    const first = { key_display: "issue5012:first", key_raw: "aXNzdWU1MDEyOmZpcnN0", key_type: "string", ttl: -1 };
+    const next = { key_display: "issue5012:next", key_raw: "aXNzdWU1MDEyOm5leHQ=", key_type: "string", ttl: -1 };
+    let continuationBatch = 0;
+    mocks.redisScanKeysBatch.mockReset();
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, cursor: number) => {
+      if (cursor === 0) return Promise.resolve({ cursor: 1, keys: [first], total_keys: 200_000 });
+      continuationBatch += 1;
+      if (continuationBatch === 8) return Promise.resolve({ cursor: 0, keys: [next], total_keys: 0 });
+      return Promise.resolve({ cursor: continuationBatch + 1, keys: [], total_keys: 0 });
+    });
+
+    await submitKeySearch("issue5012");
+    await vi.waitFor(() => expect(document.body.textContent).toContain("first"));
+    expect(requiredElement<HTMLElement>(".redis-key-count").textContent).toBe("1+ keys");
+
+    clickButtonWithText("redis.loadMoreKeys");
+    await vi.waitFor(() => expect(continuationBatch).toBe(7));
+    expect(document.body.textContent).toContain("first");
+    expect(document.body.textContent).not.toContain("next");
+
+    clickButtonWithText("redis.loadMoreKeys");
+    await vi.waitFor(() => expect(document.body.textContent).toContain("next"));
+
+    expect(continuationBatch).toBe(8);
+    expect(document.body.textContent).toContain("first");
+    expect(requiredElement<HTMLElement>(".redis-key-count").textContent).toBe("2 keys");
+  });
+
+  it("cancels a sparse scan immediately without searching until Enter", async () => {
+    mocks.redisScanPageSize = 1_000;
+    mountBrowser();
+    await settle();
+    clickButtonWithText("redis.fuzzyMatch");
+    await settle();
+
+    const oldPage = deferred<{ cursor: number; keys: RedisKeyInfo[]; total_keys: number }>();
+    const stale = { key_display: "old:result", key_raw: "b2xkOnJlc3VsdA==", key_type: "string", ttl: -1 };
+    const fresh = { key_display: "new:result", key_raw: "bmV3OnJlc3VsdA==", key_type: "string", ttl: -1 };
+    mocks.redisScanKeysBatch.mockReset();
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, _cursor: number, pattern: string) => {
+      if (pattern === "*old*") return oldPage.promise;
+      return Promise.resolve({ cursor: 0, keys: [fresh], total_keys: 1 });
+    });
+
+    await submitKeySearch("old");
+    await vi.waitFor(() => expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(1));
+
+    await setInput("[data-redis-search-input]", "new");
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(1);
+    mocks.updateRedisDbKeyStats.mockClear();
+
+    oldPage.resolve({ cursor: 0, keys: [stale], total_keys: 1 });
+    await settle();
+
+    expect(mocks.updateRedisDbKeyStats).not.toHaveBeenCalled();
+    expect(document.body.textContent).not.toContain("old:result");
+    expect(document.body.textContent).not.toContain("new:result");
+    expect(mocks.redisScanKeysBatch.mock.calls.filter((call) => call[3] === "*old*")).toHaveLength(1);
+    expect(mocks.redisScanKeysBatch.mock.calls.map((call) => call[3])).toEqual(["*old*"]);
+
+    requiredElement<HTMLInputElement>("[data-redis-search-input]").dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await settle();
+
+    await vi.waitFor(() => expect(document.body.textContent).toContain("result"));
+    expect(mocks.redisScanKeysBatch.mock.calls.map((call) => call[3])).toEqual(["*old*", "*new*"]);
+  });
+
+  it("keeps a current continuation locked when an older load-more request finishes", async () => {
+    mocks.redisScanPageSize = 1_000;
+    mountBrowser();
+    await settle();
+    clickButtonWithText("redis.fuzzyMatch");
+    await settle();
+
+    const oldContinuation = deferred<{ cursor: number; keys: RedisKeyInfo[]; total_keys: number }>();
+    const currentContinuation = deferred<{ cursor: number; keys: RedisKeyInfo[]; total_keys: number }>();
+    const oldInitial = { key_display: "old:initial", key_raw: "b2xkOmluaXRpYWw=", key_type: "string", ttl: -1 };
+    const currentInitial = { key_display: "new:initial", key_raw: "bmV3OmluaXRpYWw=", key_type: "string", ttl: -1 };
+    const currentFirstPage = { key_display: "new:first-page", key_raw: "bmV3OmZpcnN0LXBhZ2U=", key_type: "string", ttl: -1 };
+    const currentLastPage = { key_display: "new:last-page", key_raw: "bmV3Omxhc3QtcGFnZQ==", key_type: "string", ttl: -1 };
+    mocks.redisScanKeysBatch.mockReset();
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, cursor: number, pattern: string) => {
+      if (pattern === "*old*") {
+        if (cursor === 0) return Promise.resolve({ cursor: 11, keys: [oldInitial], total_keys: 100 });
+        return oldContinuation.promise;
+      }
+      if (pattern === "*new*") {
+        if (cursor === 0) return Promise.resolve({ cursor: 21, keys: [currentInitial], total_keys: 100 });
+        if (cursor === 21) return Promise.resolve({ cursor: 22, keys: [currentFirstPage], total_keys: 0 });
+        if (cursor === 22) return currentContinuation.promise;
+      }
+      return Promise.resolve({ cursor: 0, keys: [], total_keys: 0 });
+    });
+
+    await submitKeySearch("old");
+    await vi.waitFor(() => expect(mocks.redisScanKeysBatch.mock.calls.filter((call) => call[2] === 0 && call[3] === "*old*")).toHaveLength(1));
+    clickButtonWithText("redis.loadMoreKeys");
+    await vi.waitFor(() => expect(mocks.redisScanKeysBatch.mock.calls.some((call) => call[2] === 11)).toBe(true));
+
+    await submitKeySearch("new");
+    await vi.waitFor(() => expect(mocks.redisScanKeysBatch.mock.calls.filter((call) => call[2] === 0 && call[3] === "*new*")).toHaveLength(1));
+    const firstCurrentLoadMore = await vi.waitFor(() => {
+      const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).filter((candidate) => candidate.textContent?.includes("redis.loadMoreKeys"));
+      const button = buttons.find((candidate) => !candidate.disabled);
+      expect(button).toBeDefined();
+      return button!;
+    });
+    firstCurrentLoadMore.click();
+    await vi.waitFor(() => expect(mocks.redisScanKeysBatch.mock.calls.filter((call) => call[2] === 21)).toHaveLength(1));
+    const secondCurrentLoadMore = await vi.waitFor(() => {
+      const button = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find((candidate) => candidate.textContent?.includes("redis.loadMoreKeys") && !candidate.disabled);
+      expect(button).toBeDefined();
+      return button!;
+    });
+    secondCurrentLoadMore.click();
+    await vi.waitFor(() => expect(mocks.redisScanKeysBatch.mock.calls.filter((call) => call[2] === 22)).toHaveLength(1));
+
+    oldContinuation.resolve({ cursor: 12, keys: [], total_keys: 0 });
+    await settle();
+
+    const loadMoreButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).filter((button) => button.textContent?.includes("redis.loadMoreKeys"));
+    expect(loadMoreButtons.length).toBeGreaterThan(0);
+    expect(loadMoreButtons.every((button) => button.disabled)).toBe(true);
+    loadMoreButtons[0]!.click();
+    await settle();
+    expect(mocks.redisScanKeysBatch.mock.calls.filter((call) => call[2] === 22)).toHaveLength(1);
+
+    currentContinuation.resolve({ cursor: 0, keys: [currentLastPage], total_keys: 0 });
+    await vi.waitFor(() => expect(Array.from(document.querySelectorAll<HTMLButtonElement>("button")).filter((button) => button.textContent?.includes("redis.loadMoreKeys"))).toHaveLength(0));
+    const labels = Array.from(document.querySelectorAll<HTMLElement>(".dbx-editor-font-family")).map((element) => element.textContent);
+    expect(labels).toContain("new");
+    expect(labels).not.toContain("old");
+  });
+
   it("keeps NUL-containing fuzzy groups isolated when selecting keys to delete", async () => {
     const firstKeyRaw = "cmF3LWZpcnN0";
     const secondKeyRaw = "cmF3LXNlY29uZA==";
@@ -697,10 +1404,7 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
     clickButtonWithText("redis.fuzzyMatch");
     await settle();
 
-    const firstGroupCheckbox = groupCheckbox(`a\0b`);
-    firstGroupCheckbox.checked = true;
-    firstGroupCheckbox.dispatchEvent(new Event("change", { bubbles: true }));
-    await settle();
+    await selectGroup(`a\0b`);
     const deleteButton = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.trim() === "1");
     expect(deleteButton).toBeDefined();
     deleteButton!.click();
@@ -733,12 +1437,9 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
     clickButtonWithText("redis.fuzzyMatch");
     await settle();
 
-    // Fuzzy search restores the namespace hierarchy and exposes group selection.
+    // Hierarchy restores leaf + group checkboxes (groups stay opacity-0 until hover/selection).
     expect(document.querySelectorAll('input[type="checkbox"]')).toHaveLength(keys.length + 2);
-    const userCheckbox = groupCheckbox("user");
-    userCheckbox.checked = true;
-    userCheckbox.dispatchEvent(new Event("change", { bubbles: true }));
-    await settle();
+    await selectGroup("user");
 
     const deleteButton = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.trim() === String(keys.length));
     expect(deleteButton).toBeDefined();
@@ -753,6 +1454,48 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
     expect(db).toBe(0);
     expect(new Set(deletedKeyRaws)).toEqual(new Set(keys.map((key) => key.key_raw)));
     expect(document.querySelectorAll('input[type="checkbox"]')).toHaveLength(0);
+  });
+
+  it("selects hierarchy folders in the normal tree the same way as fuzzy groups", async () => {
+    const keys = [
+      { key_display: "course:incr_class_id-1004", key_raw: "Y291cnNlOjEwMDQ=", key_type: "string", ttl: -1 },
+      { key_display: "course:incr_class_id-172", key_raw: "Y291cnNlOjE3Mg==", key_type: "string", ttl: -1 },
+      { key_display: "other:item", key_raw: "b3RoZXI6aXRlbQ==", key_type: "string", ttl: -1 },
+    ];
+    mocks.redisScanKeysBatch.mockResolvedValue({ cursor: 0, keys, total_keys: keys.length });
+    mocks.redisDeleteKeys.mockResolvedValue(2);
+    mountBrowser();
+    await settle();
+
+    // Single-click the folder checkbox (left side) selects all loaded keys under it.
+    await selectGroup("course");
+    expect(isCheckboxChecked(groupCheckbox("course"))).toBe(true);
+    expect(document.querySelector("[data-redis-batch-delete]")?.textContent).toContain("2");
+
+    // Expand and uncheck children — parent must clear (not stay checked).
+    groupRow("course").dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    await settle();
+    for (const input of redisCheckboxes()) {
+      const label = input.closest(".group")?.querySelector(".dbx-editor-font-family")?.textContent;
+      if (label?.startsWith("incr_class_id-") && isCheckboxChecked(input)) {
+        input.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      }
+    }
+    await settle();
+    expect(isCheckboxChecked(groupCheckbox("course"))).toBe(false);
+    expect(isCheckboxMixed(groupCheckbox("course"))).toBe(false);
+    expect(document.querySelector("[data-redis-batch-delete]")).toBeNull();
+
+    // Re-select the folder and delete only its keys.
+    await selectGroup("course");
+    expect(isCheckboxChecked(groupCheckbox("course"))).toBe(true);
+    requiredElement<HTMLButtonElement>("[data-redis-batch-delete]").click();
+    await settle();
+    requiredElement<HTMLButtonElement>("[data-test-danger-confirm]").click();
+    await settle();
+
+    expect(mocks.redisDeleteKeys).toHaveBeenCalledWith("connection", 0, expect.arrayContaining(["Y291cnNlOjEwMDQ=", "Y291cnNlOjE3Mg=="]));
+    expect(mocks.redisDeleteKeys.mock.calls[0]?.[2]).not.toContain("b3RoZXI6aXRlbQ==");
   });
 
   it("falls back to flat rows at the fuzzy tree limit while retaining loaded-result delete wording", async () => {
@@ -774,7 +1517,7 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
     expect(document.querySelectorAll('input[type="checkbox"]')).toHaveLength(keys.length);
     expect(document.body.textContent).toContain("redis.fuzzyTreeLimit");
 
-    requiredElement<HTMLInputElement>('input[type="checkbox"]').click();
+    requiredElement<HTMLElement>('input[type="checkbox"]').click();
     await settle();
     const deleteButton = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.trim() === "1");
     expect(deleteButton).toBeDefined();
@@ -799,16 +1542,13 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
     clickButtonWithText("redis.fuzzyMatch");
     await settle();
 
-    const userCheckbox = groupCheckbox("user");
-    userCheckbox.checked = true;
-    userCheckbox.dispatchEvent(new Event("change", { bubbles: true }));
-    await settle();
+    await selectGroup("user");
     clickButtonWithText("redis.loadMoreKeys");
     await settle();
 
     const updatedUserCheckbox = groupCheckbox("user");
-    expect(updatedUserCheckbox.checked).toBe(false);
-    expect(updatedUserCheckbox.indeterminate).toBe(true);
+    expect(isCheckboxChecked(updatedUserCheckbox)).toBe(false);
+    expect(isCheckboxMixed(updatedUserCheckbox)).toBe(true);
     const deleteButton = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.trim() === "1");
     expect(deleteButton).toBeDefined();
     deleteButton!.click();
@@ -835,10 +1575,7 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
     clickButtonWithText("redis.fuzzyMatch");
     await settle();
 
-    const batchCheckbox = groupCheckbox("batch");
-    batchCheckbox.checked = true;
-    batchCheckbox.dispatchEvent(new Event("change", { bubbles: true }));
-    await settle();
+    await selectGroup("batch");
     const deleteButton = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.trim() === String(keys.length));
     expect(deleteButton).toBeDefined();
     deleteButton!.click();
@@ -872,10 +1609,7 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
     clickButtonWithText("redis.fuzzyMatch");
     await settle();
 
-    const batchCheckbox = groupCheckbox("batch");
-    batchCheckbox.checked = true;
-    batchCheckbox.dispatchEvent(new Event("change", { bubbles: true }));
-    await settle();
+    await selectGroup("batch");
     const deleteButton = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.trim() === String(keys.length));
     expect(deleteButton).toBeDefined();
     deleteButton!.click();
@@ -909,10 +1643,7 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
     clickButtonWithText("redis.fuzzyMatch");
     await settle();
 
-    const batchCheckbox = groupCheckbox("batch");
-    batchCheckbox.checked = true;
-    batchCheckbox.dispatchEvent(new Event("change", { bubbles: true }));
-    await settle();
+    await selectGroup("batch");
     const deleteButton = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.trim() === String(keys.length));
     expect(deleteButton).toBeDefined();
     deleteButton!.click();
@@ -963,5 +1694,186 @@ describe("RedisKeyBrowser interrupted Fetch All", () => {
     expect(document.body.textContent).toContain("fresh");
     expect(document.body.textContent).not.toContain("buffered");
     expect(freshPageRequests).toBeGreaterThan(0);
+  });
+
+  it("selects all loaded keys from the toolbar and clears the multi-selection", async () => {
+    const keys = [
+      { key_display: "alpha", key_raw: "YWxwaGE=", key_type: "string", ttl: -1 },
+      { key_display: "bravo", key_raw: "YnJhdm8=", key_type: "string", ttl: -1 },
+      { key_display: "charlie", key_raw: "Y2hhcmxpZQ==", key_type: "string", ttl: -1 },
+    ];
+    mocks.redisScanKeysBatch.mockResolvedValue({ cursor: 0, keys, total_keys: keys.length });
+    mountBrowser();
+    await settle();
+
+    const selectAll = requiredElement<HTMLButtonElement>("[data-redis-select-all]");
+    selectAll.click();
+    await settle();
+
+    const checkboxes = Array.from(document.querySelectorAll<HTMLElement>('input[type="checkbox"]'));
+    expect(checkboxes).toHaveLength(keys.length);
+    expect(checkboxes.every((checkbox) => isCheckboxChecked(checkbox as HTMLElement))).toBe(true);
+    expect(document.querySelector("[data-redis-select-all]")).toBeNull();
+    expect(document.querySelector("[data-redis-batch-delete]")?.textContent).toContain(String(keys.length));
+    expect(document.activeElement).toBe(document.querySelector(".redis-key-pane"));
+
+    requiredElement<HTMLButtonElement>("[data-redis-deselect-all]").click();
+    await settle();
+    expect(Array.from(document.querySelectorAll<HTMLElement>('input[type="checkbox"]')).every((checkbox) => !isCheckboxChecked(checkbox))).toBe(true);
+    expect(document.querySelector("[data-redis-batch-delete]")).toBeNull();
+    expect(document.querySelector("[data-redis-select-all]")).not.toBeNull();
+    expect(document.activeElement).toBe(document.querySelector(".redis-key-pane"));
+  });
+
+  it("fetches remaining scan pages before selecting all keys", async () => {
+    const first = { key_display: "first", key_raw: "Zmlyc3Q=", key_type: "string", ttl: -1 };
+    const second = { key_display: "second", key_raw: "c2Vjb25k", key_type: "string", ttl: -1 };
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, cursor: number) => {
+      if (cursor === 0) return Promise.resolve({ cursor: 1, keys: [first], total_keys: 2 });
+      return Promise.resolve({ cursor: 0, keys: [second], total_keys: 0 });
+    });
+    mountBrowser();
+    await settle();
+
+    expect(document.body.textContent).toContain("redis.loadMoreKeys");
+    const keyPane = requiredElement<HTMLElement>(".redis-key-pane");
+    keyPane.focus();
+    keyPane.dispatchEvent(new KeyboardEvent("keydown", { key: "a", ctrlKey: true, bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(document.querySelector("[data-redis-batch-delete]")?.textContent).toContain("2"));
+
+    expect(document.body.textContent).toContain("second");
+    expect(Array.from(document.querySelectorAll<HTMLElement>('input[type="checkbox"]')).every(isCheckboxChecked)).toBe(true);
+    expect(document.querySelector("[data-redis-select-all]")).toBeNull();
+  });
+
+  it("does not select stale keys when a search changes during select-all scanning", async () => {
+    const oldPage = deferred<{ cursor: number; keys: RedisKeyInfo[]; total_keys: number }>();
+    const oldKey = { key_display: "old", key_raw: "b2xk", key_type: "string", ttl: -1 };
+    const lateOldKey = { key_display: "late-old", key_raw: "bGF0ZS1vbGQ=", key_type: "string", ttl: -1 };
+    const freshKey = { key_display: "fresh", key_raw: "ZnJlc2g=", key_type: "string", ttl: -1 };
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, cursor: number, pattern: string) => {
+      if (pattern === "*" && cursor === 0) return Promise.resolve({ cursor: 1, keys: [oldKey], total_keys: 2 });
+      if (pattern === "*") return oldPage.promise;
+      return Promise.resolve({ cursor: 0, keys: [freshKey], total_keys: 1 });
+    });
+    mountBrowser();
+    await settle();
+
+    requiredElement<HTMLButtonElement>("[data-redis-select-all]").click();
+    await vi.waitFor(() => expect(mocks.redisScanKeysBatch.mock.calls.length).toBeGreaterThan(1));
+    await setInput("[data-redis-search-input]", "fresh");
+    oldPage.resolve({ cursor: 0, keys: [lateOldKey], total_keys: 0 });
+    await settle();
+
+    expect(document.body.textContent).not.toContain("late-old");
+    expect(document.body.textContent).not.toContain("redis.stopFetchAll");
+    expect(mocks.redisScanKeysBatch.mock.calls.every((call) => call[3] === "*")).toBe(true);
+    expect(document.querySelector("[data-redis-batch-delete]")).toBeNull();
+
+    requiredElement<HTMLInputElement>("[data-redis-search-input]").dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await settle();
+
+    await vi.waitFor(() => expect(document.body.textContent).toContain("fresh"));
+    expect(document.body.textContent).not.toContain("old");
+    expect(document.querySelector("[data-redis-batch-delete]")).toBeNull();
+  });
+
+  it("does not downgrade Ctrl+A to a partial selection when fetch-all is stopped", async () => {
+    const continuation = deferred<{ cursor: number; keys: RedisKeyInfo[]; total_keys: number }>();
+    const first = { key_display: "first", key_raw: "Zmlyc3Q=", key_type: "string", ttl: -1 };
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, cursor: number) => {
+      if (cursor === 0) return Promise.resolve({ cursor: 1, keys: [first], total_keys: 2 });
+      return continuation.promise;
+    });
+    mountBrowser();
+    await settle();
+
+    requiredElement<HTMLButtonElement>("[data-redis-select-all]").click();
+    await vi.waitFor(() => expect(document.body.textContent).toContain("redis.stopFetchAll"));
+    clickButtonWithText("redis.stopFetchAll");
+    continuation.resolve({ cursor: 1, keys: [], total_keys: 0 });
+    await settle();
+
+    expect(document.querySelector("[data-redis-batch-delete]")).toBeNull();
+    expect(document.querySelector("[data-redis-select-all]")).not.toBeNull();
+  });
+
+  it("shows a native checked mark after selecting a single leaf key", async () => {
+    const keys = [
+      { key_display: "solo-a", key_raw: "c29sby1h", key_type: "string", ttl: -1 },
+      { key_display: "solo-b", key_raw: "c29sby1i", key_type: "string", ttl: -1 },
+    ];
+    mocks.redisScanKeysBatch.mockResolvedValue({ cursor: 0, keys, total_keys: keys.length });
+    mountBrowser();
+    await settle();
+
+    const leafA = leafCheckbox("solo-a");
+    expect(leafA.className).toContain("accent-primary");
+    expect(leafA.className).toContain("h-3.5");
+    leafA.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    await settle();
+    expect(isCheckboxChecked(leafCheckbox("solo-a"))).toBe(true);
+    expect(document.querySelector("[data-redis-batch-delete]")?.textContent).toContain("1");
+  });
+
+  it("keeps parent and child checkbox DOM state in sync", async () => {
+    const keys = [
+      { key_display: "pack:user_select", key_raw: "cGFjazp1c2VyX3NlbGVjdA==", key_type: "string", ttl: -1 },
+      { key_display: "other:item", key_raw: "b3RoZXI6aXRlbQ==", key_type: "string", ttl: -1 },
+    ];
+    mocks.redisScanKeysBatch.mockResolvedValue({ cursor: 0, keys, total_keys: keys.length });
+    mountBrowser();
+    await settle();
+
+    // Select parent folder → child leaf must also appear checked.
+    await selectGroup("pack");
+    groupRow("pack").dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    await settle();
+
+    const child = leafCheckbox("user_select");
+    expect(isCheckboxChecked(groupCheckbox("pack"))).toBe(true);
+    expect(isCheckboxChecked(child)).toBe(true);
+
+    // Uncheck child → parent must clear.
+    child.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    await settle();
+    expect(isCheckboxChecked(leafCheckbox("user_select"))).toBe(false);
+    expect(isCheckboxChecked(groupCheckbox("pack"))).toBe(false);
+    expect(isCheckboxMixed(groupCheckbox("pack"))).toBe(false);
+  });
+
+  it("supports Shift multi-line selection and Ctrl/Cmd+A on the key list", async () => {
+    const keys = [
+      { key_display: "k1", key_raw: "azE=", key_type: "string", ttl: -1 },
+      { key_display: "k2", key_raw: "azI=", key_type: "string", ttl: -1 },
+      { key_display: "k3", key_raw: "azM=", key_type: "string", ttl: -1 },
+      { key_display: "k4", key_raw: "azQ=", key_type: "string", ttl: -1 },
+    ];
+    mocks.redisScanKeysBatch.mockResolvedValue({ cursor: 0, keys, total_keys: keys.length });
+    mountBrowser();
+    await settle();
+
+    const checkboxes = Array.from(document.querySelectorAll<HTMLElement>('input[type="checkbox"]'));
+    expect(checkboxes).toHaveLength(keys.length);
+
+    checkboxes[0]!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    await settle();
+    expect(isCheckboxChecked(checkboxes[0]!)).toBe(true);
+
+    checkboxes[2]!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, shiftKey: true }));
+    await settle();
+    expect(checkboxes.map((checkbox) => isCheckboxChecked(checkbox as HTMLElement))).toEqual([true, true, true, false]);
+    expect(document.querySelector("[data-redis-batch-delete]")?.textContent).toContain("3");
+
+    const keyPane = requiredElement<HTMLElement>(".redis-key-pane");
+    keyPane.focus();
+    keyPane.dispatchEvent(new KeyboardEvent("keydown", { key: "a", ctrlKey: true, bubbles: true, cancelable: true }));
+    await settle();
+    expect(checkboxes.every((checkbox) => isCheckboxChecked(checkbox as HTMLElement))).toBe(true);
+    expect(document.querySelector("[data-redis-batch-delete]")?.textContent).toContain("4");
+
+    keyPane.dispatchEvent(new KeyboardEvent("keydown", { key: "a", metaKey: true, bubbles: true, cancelable: true }));
+    await settle();
+    expect(checkboxes.every((checkbox) => !isCheckboxChecked(checkbox as HTMLElement))).toBe(true);
   });
 });

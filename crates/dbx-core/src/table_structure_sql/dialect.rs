@@ -11,11 +11,18 @@ pub(super) enum StructureDialect {
     SqlServer,
     Oracle,
     Dameng,
+    // 神通 Oscar：Oracle 兼容方言，且支持 ALTER TABLE DROP/ADD PRIMARY KEY（与 Dameng 一致，
+    // 不同于 Oracle）。DDL 生成行为与 Dameng 共享分支；单独成 dialect 以保证 label/反向映射准确。
+    Oscar,
     H2,
     ClickHouse,
     ManticoreSearch,
     Informix,
     Questdb,
+    // GaussDB M 模式：MySQL 兼容方言，使用反引号引用标识符。DDL 行为接近 MySQL，
+    // 但使用 UBTREE 索引类型（而非 BTREE），不支持 INCLUDE/FILTER 等。
+    // DROP INDEX 使用 PostgreSQL 风格（DROP INDEX name），而非 MySQL 的 DROP INDEX name ON table。
+    GaussdbM,
     Unsupported,
 }
 
@@ -35,6 +42,8 @@ pub(super) struct TableStructureCapabilities {
     pub(super) index_include: bool,
     pub(super) index_filter: bool,
     pub(super) index_comment: bool,
+    pub(super) index_concurrent: bool,
+    pub(super) add_primary_key: bool,
     pub(super) alter_primary_key: bool,
     pub(super) foreign_key: bool,
 }
@@ -56,9 +65,31 @@ impl Default for TableStructureCapabilities {
             index_include: false,
             index_filter: false,
             index_comment: false,
+            index_concurrent: false,
+            add_primary_key: false,
             alter_primary_key: false,
             foreign_key: false,
         }
+    }
+}
+
+pub(super) fn gaussdb_m_capabilities() -> TableStructureCapabilities {
+    TableStructureCapabilities {
+        dialect: StructureDialect::GaussdbM,
+        add_column: true,
+        drop_column: true,
+        rename_column: true,
+        alter_existing_column: true,
+        reorder_column: true,
+        comment: true,
+        create_index: true,
+        drop_index: true,
+        rebuild_index: true,
+        index_type: true,
+        index_comment: true,
+        add_primary_key: true,
+        alter_primary_key: true,
+        ..TableStructureCapabilities::default()
     }
 }
 
@@ -84,6 +115,7 @@ pub(super) fn capabilities_for(database_type: Option<DatabaseType>) -> TableStru
             rebuild_index: true,
             index_type: true,
             index_comment: true,
+            add_primary_key: true,
             alter_primary_key: true,
             foreign_key: true,
             ..base
@@ -115,24 +147,36 @@ pub(super) fn capabilities_for(database_type: Option<DatabaseType>) -> TableStru
             | DatabaseType::Vastbase
             | DatabaseType::Kingbase
             | DatabaseType::Firebird,
-        ) => TableStructureCapabilities {
-            dialect: StructureDialect::Postgres,
-            add_column: true,
-            drop_column: true,
-            rename_column: true,
-            alter_existing_column: true,
-            comment: true,
-            create_index: true,
-            drop_index: true,
-            rebuild_index: true,
-            index_type: true,
-            index_include: true,
-            index_filter: true,
-            index_comment: true,
-            alter_primary_key: true,
-            foreign_key: true,
-            ..base
-        },
+        ) => {
+            let mut caps = TableStructureCapabilities {
+                dialect: StructureDialect::Postgres,
+                add_column: true,
+                drop_column: true,
+                rename_column: true,
+                alter_existing_column: true,
+                comment: true,
+                create_index: true,
+                drop_index: true,
+                rebuild_index: true,
+                index_type: true,
+                index_include: true,
+                index_filter: true,
+                index_comment: true,
+                add_primary_key: true,
+                alter_primary_key: true,
+                foreign_key: true,
+                ..base
+            };
+            // CREATE INDEX CONCURRENTLY is PostgreSQL-specific. Other PostgreSQL-family
+            // engines (Kingbase, GaussDB, OpenGauss, HighGo, UXDB, Vastbase, KWDB,
+            // Firebird) share the Postgres dialect but have not been verified against a
+            // real environment, so they keep this capability off until individually
+            // validated.
+            if database_type == Some(DatabaseType::Postgres) {
+                caps.index_concurrent = true;
+            }
+            caps
+        }
         Some(DatabaseType::Questdb) => TableStructureCapabilities {
             dialect: StructureDialect::Questdb,
             add_column: true,
@@ -148,6 +192,8 @@ pub(super) fn capabilities_for(database_type: Option<DatabaseType>) -> TableStru
             index_include: false,
             index_filter: false,
             index_comment: false,
+            index_concurrent: false,
+            add_primary_key: false,
             alter_primary_key: false,
             foreign_key: false,
         },
@@ -209,6 +255,24 @@ pub(super) fn capabilities_for(database_type: Option<DatabaseType>) -> TableStru
             drop_index: true,
             rebuild_index: true,
             index_type: true,
+            add_primary_key: true,
+            alter_primary_key: true,
+            ..base
+        },
+        // 神通 Oscar v7：Oracle 兼容，实测支持 ALTER TABLE ADD/MODIFY/DROP/RENAME COLUMN、
+        // DROP/ADD PRIMARY KEY、COMMENT ON、CREATE/DROP INDEX（见 issue #5505 探测）。
+        Some(DatabaseType::Oscar) => TableStructureCapabilities {
+            dialect: StructureDialect::Oscar,
+            add_column: true,
+            drop_column: true,
+            rename_column: true,
+            alter_existing_column: true,
+            comment: true,
+            create_index: true,
+            drop_index: true,
+            rebuild_index: true,
+            index_type: true,
+            add_primary_key: true,
             alter_primary_key: true,
             ..base
         },
@@ -226,7 +290,22 @@ pub(super) fn capabilities_for(database_type: Option<DatabaseType>) -> TableStru
             index_type: true,
             ..base
         },
-        Some(DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Yashandb | DatabaseType::Xugu) => {
+        Some(DatabaseType::Oracle) => TableStructureCapabilities {
+            dialect: StructureDialect::Oracle,
+            add_column: true,
+            drop_column: true,
+            rename_column: true,
+            alter_existing_column: true,
+            comment: true,
+            create_index: true,
+            drop_index: true,
+            rebuild_index: true,
+            index_type: true,
+            add_primary_key: true,
+            foreign_key: true,
+            ..base
+        },
+        Some(DatabaseType::OceanbaseOracle | DatabaseType::Yashandb | DatabaseType::Xugu) => {
             TableStructureCapabilities {
                 dialect: StructureDialect::Oracle,
                 add_column: true,
@@ -285,7 +364,7 @@ pub(super) fn capabilities_for(database_type: Option<DatabaseType>) -> TableStru
 }
 
 pub(super) fn is_oracle_like(dialect: StructureDialect) -> bool {
-    matches!(dialect, StructureDialect::Oracle | StructureDialect::Dameng)
+    matches!(dialect, StructureDialect::Oracle | StructureDialect::Dameng | StructureDialect::Oscar)
 }
 
 pub(super) fn database_label(database_type: Option<DatabaseType>) -> String {
@@ -310,10 +389,12 @@ pub(super) fn dialect_label(dialect: StructureDialect) -> String {
         StructureDialect::SqlServer => "sqlserver",
         StructureDialect::Oracle => "oracle",
         StructureDialect::Dameng => "dameng",
+        StructureDialect::Oscar => "oscar",
         StructureDialect::H2 => "h2",
         StructureDialect::ClickHouse => "clickhouse",
         StructureDialect::ManticoreSearch => "manticoresearch",
         StructureDialect::Informix => "informix",
+        StructureDialect::GaussdbM => "gaussdb-m",
         StructureDialect::Questdb => "questdb",
         StructureDialect::Unsupported => "this database",
     }
@@ -331,11 +412,13 @@ pub(super) fn database_type_for_dialect(dialect: StructureDialect) -> Option<Dat
         StructureDialect::SqlServer => Some(DatabaseType::SqlServer),
         StructureDialect::Oracle => Some(DatabaseType::Oracle),
         StructureDialect::Dameng => Some(DatabaseType::Dameng),
+        StructureDialect::Oscar => Some(DatabaseType::Oscar),
         StructureDialect::H2 => Some(DatabaseType::H2),
         StructureDialect::ClickHouse => Some(DatabaseType::ClickHouse),
         StructureDialect::ManticoreSearch => Some(DatabaseType::ManticoreSearch),
         StructureDialect::Informix => Some(DatabaseType::Informix),
         StructureDialect::Questdb => Some(DatabaseType::Questdb),
+        StructureDialect::GaussdbM => Some(DatabaseType::Mysql),
         StructureDialect::Unsupported => None,
     }
 }

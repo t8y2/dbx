@@ -1,10 +1,40 @@
+configurations {
+    h2V1
+    h2V2
+    h2V3
+}
+
 dependencies {
-    implementation fileTree(dir: 'libs', include: ['*.jar'])
-    implementation 'com.h2database:h2:2.3.232'
+    h2V1 'com.h2database:h2:1.4.200'
+    h2V2 'com.h2database:h2:2.1.214'
+    h2V3 'com.h2database:h2:2.4.240'
+    testImplementation 'com.google.code.gson:gson:2.12.1'
+}
+
+tasks.named('processResources') {
+    from(configurations.h2V1) {
+        into 'drivers'
+        rename { 'h2-1.4.200.jar' }
+    }
+    from(configurations.h2V2) {
+        into 'drivers'
+        rename { 'h2-2.1.214.jar' }
+    }
+    from(configurations.h2V3) {
+        into 'drivers'
+        rename { 'h2-2.4.240.jar' }
+    }
 }
 
 tasks.named('shadowJar') {
     manifest {
         attributes('Agent-Label': 'H2', 'Main-Class': 'com.dbx.agent.h2.H2Agent')
+    }
+}
+
+tasks.named('test') {
+    dependsOn tasks.named('shadowJar')
+    doFirst {
+        systemProperty 'dbx.h2.agent.jar', tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath
     }
 }

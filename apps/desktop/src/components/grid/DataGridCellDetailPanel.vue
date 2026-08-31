@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { toRef } from "vue";
-import { Code2, Copy, Eye, Pencil, Upload, X } from "@lucide/vue";
+import { computed, toRef } from "vue";
+import { Code2, Copy, Download, Eye, FileDiff, FileUp, Pencil, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -8,11 +8,12 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { TabsContent } from "@/components/ui/tabs";
 import TemporalCellEditor from "@/components/grid/TemporalCellEditor.vue";
 import { useDataGridCellDetail } from "@/composables/useDataGridCellDetail";
-import { BINARY_CELL_DOWNLOAD_MODES, type BinaryCellDownloadMode } from "@/lib/dataGrid/binaryCellDownload";
+import { BINARY_CELL_DOWNLOAD_MODES, binaryCellUtf8Text, isBlobCellColumnType, type BinaryCellDownloadMode } from "@/lib/dataGrid/binaryCellDownload";
 import { isGeometryColumnType } from "@/lib/dataGrid/cellDetailPresentation";
 import { isHexGeometry } from "@/lib/dataGrid/geometryPreview";
 import type { DataGridCellDetail } from "@/lib/dataGrid/dataGridDetail";
 import type { TemporalCellEditorConfig } from "@/lib/dataGrid/dataGridTemporalEditor";
+import type { DatabaseType } from "@/types/database";
 
 const { t } = useI18n();
 
@@ -27,11 +28,17 @@ const props = defineProps<{
   sideJsonView: boolean;
   showCompactJson: boolean;
   canCompactJson: boolean;
+  showCompareJson?: boolean;
+  canCompareJson?: boolean;
   typeColorClass: (type: string) => string;
   canDownloadBinaryValue: (detail: DataGridCellDetail | null) => boolean;
   downloadBinaryValue: (detail: DataGridCellDetail | null, mode: BinaryCellDownloadMode) => void | Promise<void>;
+  canImportBinaryValue: (detail: DataGridCellDetail | null) => boolean;
+  importBinaryValue: (detail: DataGridCellDetail | null) => void | Promise<void>;
   openImagePreview: (src: string, title: string) => void;
   canCopySqlCondition: () => boolean;
+  /** BLOB 文本预览与编辑写回一致，仅在 MySQL 连接开启。 */
+  databaseType?: DatabaseType;
 }>();
 
 const detailEditValue = defineModel<string>("value", { default: "" });
@@ -39,6 +46,7 @@ const detailEditValue = defineModel<string>("value", { default: "" });
 const emit = defineEmits<{
   startEdit: [];
   compactJson: [];
+  compareJson: [];
   toggleFormatted: [];
   copyValue: [];
   commit: [];
@@ -52,6 +60,21 @@ const { geometryPreviewOpen, geometryCanvas, detailsEditorContainer, sideJsonPre
 void geometryCanvas;
 void detailsEditorContainer;
 void sideJsonPreviewContainer;
+
+const binaryTextPreview = computed(() => (isBlobCellColumnType(props.detail.type) ? binaryCellUtf8Text(props.detail.value, props.detail.type, props.databaseType) : null));
+const presentedValuePreview = computed(() => (binaryTextPreview.value === null ? props.detail.rawValuePreview : props.detail.displayValuePreview));
+
+function startJsonEditFromBlankArea(event: MouseEvent) {
+  const target = event.target as { closest?: (selector: string) => Element | null } | null;
+  const line = target?.closest?.(".cm-line");
+  if (line) {
+    const range = line.ownerDocument.createRange();
+    range.selectNodeContents(line);
+    const textHit = Array.from(range.getClientRects()).some((rect) => event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top && event.clientY <= rect.bottom);
+    if (textHit) return;
+  }
+  emit("startEdit");
+}
 
 defineExpose({ openSearch });
 </script>
@@ -118,13 +141,15 @@ defineExpose({ openSearch });
         <div class="flex min-h-5 items-center justify-between gap-2">
           <div class="text-muted-foreground">{{ t("grid.cellValue") }}</div>
           <div class="flex items-center gap-1">
+            <Button v-if="editing && showCompareJson" variant="ghost" size="sm" class="h-5 gap-1 px-1.5 text-xs" :disabled="!canCompareJson" :title="t('grid.compareJson')" @mousedown.prevent @click="emit('compareJson')"><FileDiff class="h-3 w-3" />{{ t("grid.compareJson") }}</Button>
             <Button v-if="showCompactJson" variant="ghost" size="sm" class="h-5 gap-1 px-1.5 text-xs" :disabled="!canCompactJson" :title="t('grid.compactJson')" @click="emit('compactJson')"><Code2 class="h-3 w-3" />{{ t("grid.compactJson") }}</Button>
             <Button v-if="!editing && detail.formattedJson" :variant="sideJsonView ? 'secondary' : 'ghost'" size="sm" class="h-5 gap-1 px-1.5 text-xs" :title="t('grid.formattedJson')" @click="emit('toggleFormatted')"><Code2 class="h-3 w-3" />{{ t("grid.formattedJson") }}</Button>
             <Button v-if="!editing && detail.isEditable" variant="ghost" size="icon" class="h-5 w-5" :title="t('grid.editValue')" @click="emit('startEdit')"><Pencil class="h-3 w-3" /></Button>
             <Button v-if="!editing" variant="ghost" size="icon" class="h-5 w-5" :title="t('grid.copyValue')" @click="emit('copyValue')"><Copy class="h-3 w-3" /></Button>
+            <Button v-if="canImportBinaryValue(detail)" variant="ghost" size="icon" class="h-5 w-5" :title="t('grid.importBinaryValue')" @click="importBinaryValue(detail)"><FileUp class="h-3 w-3" /></Button>
             <DropdownMenu v-if="!editing && canDownloadBinaryValue(detail)"
               ><DropdownMenuTrigger as-child
-                ><Button variant="ghost" size="icon" class="h-5 w-5" :title="t('grid.downloadBinaryValue')"><Upload class="h-3 w-3" /></Button></DropdownMenuTrigger
+                ><Button variant="ghost" size="icon" class="h-5 w-5" :title="t('grid.downloadBinaryValue')"><Download class="h-3 w-3" /></Button></DropdownMenuTrigger
               ><DropdownMenuContent align="end" class="w-44"
                 ><DropdownMenuItem v-for="mode in BINARY_CELL_DOWNLOAD_MODES" :key="mode" @click="downloadBinaryValue(detail, mode)">{{ t(`grid.binaryDownload.${mode}`) }}</DropdownMenuItem></DropdownMenuContent
               ></DropdownMenu
@@ -156,16 +181,17 @@ defineExpose({ openSearch });
           v-else-if="detail.formattedJson"
           ref="sideJsonPreviewContainer"
           data-cell-detail-editor-root
+          data-cell-detail-json-preview
           class="overflow-hidden rounded border bg-muted/20 p-2"
           :class="[{ 'cursor-text': detail.isEditable }, valueFillsHeight ? 'min-h-0 flex-1' : 'h-72 max-h-[42vh]']"
-          @dblclick.capture="emit('startEdit')"
+          @dblclick.capture="startJsonEditFromBlankArea"
         />
         <pre
           v-else
           class="dbx-data-grid-value-font overflow-auto rounded border bg-muted/20 p-2 text-xs whitespace-pre-wrap break-words cursor-pointer hover:border-primary/50"
           :class="[{ 'cursor-text': detail.isEditable }, panelIsBottom && detail.imagePreviewUrl ? 'min-h-24 max-h-32 shrink-0' : '', valueFillsHeight && !detail.imagePreviewUrl ? 'min-h-0 flex-1' : '']"
           @dblclick="emit('startEdit')"
-          >{{ detail.rawValuePreview }}</pre
+          >{{ presentedValuePreview }}</pre
         >
         <div v-if="detail.isValuePreviewTruncated && !sideJsonView" class="text-[11px] text-muted-foreground">{{ t("grid.largeValuePreviewHint", { count: detail.rawValuePreview.length }) }}</div>
       </div>

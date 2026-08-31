@@ -62,6 +62,20 @@ afterEach(() => {
 });
 
 describe("DataGridConditionEditor quote completion", () => {
+  it("does not open suggestions for a programmatic value update while unfocused", async () => {
+    const { value, input } = mountEditor("where", "", { columns: ["status", "started_at"] });
+
+    value.value = "sta";
+    await nextTick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(document.querySelector('[role="listbox"]')).toBeNull();
+
+    input.focus();
+    input.setSelectionRange(3, 3);
+    input.dispatchEvent(new Event("select", { bubbles: true }));
+    await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(2));
+  });
+
   it("inserts paired quotes in WHERE and places the caret between them", async () => {
     const { value, input } = mountEditor("where", "id = ");
     input.focus();
@@ -172,6 +186,23 @@ describe("DataGridConditionEditor quote completion", () => {
     nextFirstOption.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, cancelable: true }));
     await nextTick();
     expect(document.querySelector('[role="option"][aria-selected="true"]')?.textContent).toContain("name");
+  });
+
+  it("keeps suggestions closed after Enter applies a complete condition", async () => {
+    const { input } = mountEditor("where", "", { columns: ["id", "order0", "status"] });
+    input.focus();
+    input.value = "id > 0";
+    input.setSelectionRange(6, 6);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(1));
+
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await nextTick();
+    input.setSelectionRange(0, 0);
+    input.dispatchEvent(new Event("select", { bubbles: true }));
+    await nextTick();
+
+    expect(document.querySelector('[role="listbox"]')).toBeNull();
   });
 
   it("keeps expanded input first-line indent and wraps long tokens", () => {
@@ -336,5 +367,46 @@ describe("DataGridConditionEditor quote completion", () => {
     expect(source).toContain("bottom: expandedRect.value.top + expandedHeight.value");
     expect(expandedPaneCss).toContain("transition: box-shadow 150ms ease");
     expect(expandedPaneCss).not.toContain("height 150ms");
+  });
+});
+
+describe("DataGridConditionEditor Chinese column matching", () => {
+  function mountChineseColumns() {
+    return mountEditor("where", "", { columns: ["总租金", "租赁日期", "amount"] });
+  }
+
+  async function typeToken(input: HTMLTextAreaElement, token: string) {
+    input.focus();
+    input.value = token;
+    input.setSelectionRange(token.length, token.length);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  it("matches a single Han character anywhere in the column name", async () => {
+    const { input } = mountChineseColumns();
+    await typeToken(input, "金");
+
+    await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(1));
+    expect(document.querySelector('[role="option"]')?.textContent).toContain("总租金");
+  });
+
+  it("matches pinyin initials and initials subsequences", async () => {
+    const { input } = mountChineseColumns();
+    await typeToken(input, "zzj");
+
+    await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(1));
+    expect(document.querySelector('[role="option"]')?.textContent).toContain("总租金");
+
+    await typeToken(input, "zj");
+    await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(1));
+    expect(document.querySelector('[role="option"]')?.textContent).toContain("总租金");
+  });
+
+  it("still matches plain English columns", async () => {
+    const { input } = mountChineseColumns();
+    await typeToken(input, "am");
+
+    await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(1));
+    expect(document.querySelector('[role="option"]')?.textContent).toContain("amount");
   });
 });

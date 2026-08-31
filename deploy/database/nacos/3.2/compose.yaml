@@ -1,13 +1,13 @@
 services:
   database:
-    image: docker.cnb.cool/znb/images/nacos-server:v3.2.2
+    image: docker.cnb.cool/znb/images/nacos-server:v3.2.3
     container_name: dbx-nacos-3.2
     restart: always
     ports:
-      - "${DB_BIND_ADDRESS:-127.0.0.1}:${NACOS_CONSOLE_PORT:-8010}:8080"
-      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-8849}:8848"
-      - "${DB_BIND_ADDRESS:-127.0.0.1}:${NACOS_GRPC_PORT:-9849}:9848"
-      - "${DB_BIND_ADDRESS:-127.0.0.1}:${NACOS_RAFT_PORT:-9850}:9849"
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${NACOS_CONSOLE_PORT:-11004}:8080"
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-11003}:8848"
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${NACOS_GRPC_PORT:-11005}:9848"
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${NACOS_RAFT_PORT:-11006}:9849"
     environment:
       MODE: standalone
       PREFER_HOST_MODE: hostname

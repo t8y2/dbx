@@ -1,4 +1,7 @@
+import type { ColumnInfo, ForeignKeyInfo, IndexInfo, ObjectSourceKind, TableInfo, TriggerInfo } from "@/types/database";
+import { isSchemaDiffView } from "@/lib/schema/schemaDiffTableFilter";
 import type { SchemaDiffCompareOptions } from "@/types/schemaDiff";
+import type { TableSchemaDetail } from "@/lib/schema/schemaDiff";
 
 const MYSQL_LARGE_SCHEMA_DIFF_METADATA_CONCURRENCY = 2;
 const MYSQL_SMALL_SCHEMA_DIFF_METADATA_CONCURRENCY = 4;
@@ -114,4 +117,61 @@ export function createConcurrencyLimiter(limit: number) {
       release();
     }
   };
+}
+
+export interface SchemaDiffMetadataApi {
+  getTableDdl(connectionId: string, database: string, schema: string, table: string, objectType?: ObjectSourceKind): Promise<string>;
+  getColumns(connectionId: string, database: string, schema: string, table: string): Promise<ColumnInfo[]>;
+  listIndexes(connectionId: string, database: string, schema: string, table: string): Promise<IndexInfo[]>;
+  listForeignKeys(connectionId: string, database: string, schema: string, table: string): Promise<ForeignKeyInfo[]>;
+  listTriggers(connectionId: string, database: string, schema: string, table: string): Promise<TriggerInfo[]>;
+}
+
+export interface SchemaDiffMetadataProgress {
+  current: number;
+  total: number;
+  objectName: string;
+}
+
+export interface SchemaDetailLoadContext {
+  connectionId: string;
+  database: string;
+  schema: string;
+  dbType: string;
+  options: SchemaDiffCompareOptions;
+  onProgress?: (progress: SchemaDiffMetadataProgress) => void;
+}
+
+function isViewOrMaterializedView(tableType: string): ObjectSourceKind | undefined {
+  switch (tableType.toUpperCase().replace(/\s+/g, "_")) {
+    case "VIEW":
+      return "VIEW";
+    case "MATERIALIZED_VIEW":
+      return "MATERIALIZED_VIEW";
+    default:
+      return undefined;
+  }
+}
+
+export async function loadSchemaDetails(tables: TableInfo[], context: SchemaDetailLoadContext, api: SchemaDiffMetadataApi): Promise<TableSchemaDetail[]> {
+  const concurrency = schemaDiffMetadataConcurrency(context.dbType, tables.length);
+  const runMetadataQuery = createConcurrencyLimiter(concurrency);
+  let completed = 0;
+
+  return mapWithConcurrency(tables, concurrency, async (table) => {
+    const objectType = isViewOrMaterializedView(table.table_type);
+    const loadPlan = schemaDiffMetadataLoadPlan(isSchemaDiffView(table), context.options);
+    const ddlPromise = loadPlan.ddl ? runMetadataQuery(() => api.getTableDdl(context.connectionId, context.database, context.schema, table.name, objectType)) : Promise.resolve("");
+    const [columns, indexes, foreignKeys, triggers, ddl] = await Promise.all([
+      loadPlan.columns ? runMetadataQuery(() => api.getColumns(context.connectionId, context.database, context.schema, table.name)) : Promise.resolve([]),
+      loadPlan.indexes ? runMetadataQuery(() => api.listIndexes(context.connectionId, context.database, context.schema, table.name)) : Promise.resolve([]),
+      loadPlan.foreignKeys ? runMetadataQuery(() => api.listForeignKeys(context.connectionId, context.database, context.schema, table.name)) : Promise.resolve([]),
+      loadPlan.triggers ? runMetadataQuery(() => api.listTriggers(context.connectionId, context.database, context.schema, table.name)) : Promise.resolve([]),
+      ddlPromise,
+    ]);
+
+    const detail = { name: table.name, columns, indexes, foreignKeys, triggers, ddl };
+    context.onProgress?.({ current: ++completed, total: tables.length, objectName: table.name });
+    return detail;
+  });
 }

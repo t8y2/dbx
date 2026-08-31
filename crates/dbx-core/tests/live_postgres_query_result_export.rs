@@ -18,6 +18,7 @@ fn live_postgres_config(
     database: &str,
 ) -> ConnectionConfig {
     ConnectionConfig {
+        docs_notes_path: None,
         id: id.to_string(),
         name: id.to_string(),
         note: String::new(),
@@ -31,7 +32,9 @@ fn live_postgres_config(
         username: user.to_string(),
         password: password.to_string(),
         database: Some(database.to_string()),
+        default_schema: None,
         visible_databases: None,
+        visible_database_patterns: None,
         visible_schemas: None,
         attached_databases: Vec::new(),
         init_script: None,
@@ -58,6 +61,7 @@ fn live_postgres_config(
         redis_key_separator: dbx_core::models::connection::default_redis_key_separator(),
         redis_scan_page_size: None,
         redis_database_aliases: Default::default(),
+        redis_key_templates: Vec::new(),
         etcd_endpoints: String::new(),
         gbase_server: String::new(),
         informix_server: String::new(),
@@ -65,6 +69,7 @@ fn live_postgres_config(
         jdbc_driver_class: None,
         jdbc_driver_paths: Vec::new(),
         one_time: false,
+        save_password: true,
         read_only: false,
         is_production: false,
         production_databases: vec![],
@@ -121,6 +126,7 @@ async fn live_postgres_query_result_export_uses_single_streamed_query() {
         connection_id: connection_id.to_string(),
         database: database.clone(),
         schema: Some(schema.clone()),
+        catalog: None,
         sql: sql.clone(),
         query_base_sql: sql,
         setup_sql: Vec::new(),
@@ -140,6 +146,8 @@ async fn live_postgres_query_result_export_uses_single_streamed_query() {
         export_table_name: None,
         export_column_types: None,
         column_comments: None,
+        auto_filter: None,
+        identifier_quote: None,
         numeric_column_right_align: false,
     };
     let done_seen = AtomicBool::new(false);
@@ -200,6 +208,7 @@ async fn live_postgres_query_result_xlsx_preserves_temporal_cell_types() {
         connection_id: connection_id.to_string(),
         database: database.clone(),
         schema: Some(schema.clone()),
+        catalog: None,
         sql: format!("SELECT day, created_at, label FROM \"{schema}\".events"),
         query_base_sql: format!("SELECT day, created_at, label FROM \"{schema}\".events"),
         setup_sql: Vec::new(),
@@ -219,6 +228,8 @@ async fn live_postgres_query_result_xlsx_preserves_temporal_cell_types() {
         export_table_name: None,
         export_column_types: None,
         column_comments: None,
+        auto_filter: None,
+        identifier_quote: None,
         numeric_column_right_align: false,
     };
 
@@ -235,6 +246,78 @@ async fn live_postgres_query_result_xlsx_preserves_temporal_cell_types() {
     let cleanup_result = postgres::execute_batch(&setup_pool, &cleanup).await;
     let _ = std::fs::remove_dir_all(&dir);
     cleanup_result.expect("cleanup temporal export fixture");
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_POSTGRES_HOST/PORT/USER/PASSWORD/DATABASE pointing at PostgreSQL 16.3"]
+async fn live_postgres_numeric_xlsx_ignores_fractional_trailing_zeros() {
+    let host = std::env::var("DBX_LIVE_POSTGRES_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port = std::env::var("DBX_LIVE_POSTGRES_PORT").ok().and_then(|value| value.parse().ok()).unwrap_or(5432);
+    let user = std::env::var("DBX_LIVE_POSTGRES_USER").unwrap_or_else(|_| "postgres".to_string());
+    let password = std::env::var("DBX_LIVE_POSTGRES_PASSWORD").unwrap_or_default();
+    let database = std::env::var("DBX_LIVE_POSTGRES_DATABASE").unwrap_or_else(|_| "postgres".to_string());
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let dir = std::env::temp_dir().join(format!("dbx-live-postgres-xlsx-numeric-{suffix}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let state = AppState::new(storage);
+    let connection_id = "live-postgres-xlsx-numeric";
+    let config = live_postgres_config(connection_id, &host, port, &user, &password, &database);
+    state.configs.write().await.insert(config.id.clone(), config);
+
+    let file_path = dir.join("result.xlsx");
+    let sql = "SELECT fee FROM (VALUES \
+               (1, (-100000.0000000000)::numeric), \
+               (2, (-999999999999999.0000)::numeric), \
+               (3, (123456789012345.0000000000)::numeric), \
+               (4, (1234567890123456.0000)::numeric), \
+               (5, (100000.0000000001)::numeric)) AS v(ord, fee) ORDER BY ord"
+        .to_string();
+    let request = QueryResultExportRequest {
+        export_id: format!("live-postgres-xlsx-numeric-{suffix}"),
+        connection_id: connection_id.to_string(),
+        database: database.clone(),
+        schema: None,
+        catalog: None,
+        sql: sql.clone(),
+        query_base_sql: sql,
+        setup_sql: Vec::new(),
+        database_type: DatabaseType::Postgres,
+        use_agent_cursor: false,
+        file_path: file_path.to_string_lossy().to_string(),
+        format: "xlsx".to_string(),
+        include_sql_sheet: false,
+        page_size: 100,
+        row_limit: None,
+        total_rows: None,
+        timeout_secs: Some(30),
+        keyset_optimization_enabled: false,
+        client_session_id: Some(format!("live-postgres-xlsx-numeric-{suffix}")),
+        execution_id: Some(format!("live-postgres-xlsx-numeric-{suffix}")),
+        date_time_format: None,
+        export_table_name: None,
+        export_column_types: None,
+        column_comments: None,
+        auto_filter: None,
+        identifier_quote: None,
+        numeric_column_right_align: true,
+    };
+
+    export_query_result_core(&state, &request, None, |_| {}).await.expect("export numeric XLSX");
+
+    let workbook = std::fs::read(&file_path).unwrap();
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(workbook)).expect("open generated XLSX");
+    let mut sheet = String::new();
+    archive.by_name("xl/worksheets/sheet1.xml").unwrap().read_to_string(&mut sheet).unwrap();
+    assert!(sheet.contains("<c r=\"A2\" s=\"4\"><v>-100000.0000000000</v></c>"), "sheet={sheet}");
+    assert!(sheet.contains("<c r=\"A3\" s=\"4\"><v>-999999999999999.0000</v></c>"), "sheet={sheet}");
+    assert!(sheet.contains("<c r=\"A4\" s=\"4\"><v>123456789012345.0000000000</v></c>"), "sheet={sheet}");
+    assert!(sheet.contains("<c r=\"A5\" t=\"inlineStr\" s=\"4\"><is><t>1234567890123456.0000</t></is></c>"));
+    assert!(sheet.contains("<c r=\"A6\" t=\"inlineStr\" s=\"4\"><is><t>100000.0000000001</t></is></c>"));
+
+    drop(archive);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
@@ -272,6 +355,7 @@ async fn live_postgres_truncated_batch_result_export_replays_safe_temp_setup() {
         connection_id: connection_id.clone(),
         database: database.clone(),
         schema: Some("public".to_string()),
+        catalog: None,
         sql: sql.clone(),
         query_base_sql: sql.clone(),
         setup_sql: setup_sql.clone(),
@@ -291,6 +375,8 @@ async fn live_postgres_truncated_batch_result_export_replays_safe_temp_setup() {
         export_table_name: None,
         export_column_types: None,
         column_comments: None,
+        auto_filter: None,
+        identifier_quote: None,
         numeric_column_right_align: false,
     };
     let csv_rows = AtomicU64::new(0);
@@ -347,6 +433,7 @@ async fn live_postgres_xlsx_export_can_outlive_query_timeout_while_rows_keep_arr
         connection_id,
         database,
         schema: Some("public".to_string()),
+        catalog: None,
         sql: sql.to_string(),
         query_base_sql: sql.to_string(),
         setup_sql: Vec::new(),
@@ -366,6 +453,8 @@ async fn live_postgres_xlsx_export_can_outlive_query_timeout_while_rows_keep_arr
         export_table_name: None,
         export_column_types: None,
         column_comments: None,
+        auto_filter: None,
+        identifier_quote: None,
         numeric_column_right_align: false,
     };
     let rows_exported = AtomicU64::new(0);
@@ -413,6 +502,7 @@ async fn live_postgres_stream_still_times_out_without_progress_and_recovers() {
         connection_id: connection_id.clone(),
         database: database.clone(),
         schema: Some("public".to_string()),
+        catalog: None,
         sql: sql.to_string(),
         query_base_sql: sql.to_string(),
         setup_sql: Vec::new(),
@@ -432,6 +522,8 @@ async fn live_postgres_stream_still_times_out_without_progress_and_recovers() {
         export_table_name: None,
         export_column_types: None,
         column_comments: None,
+        auto_filter: None,
+        identifier_quote: None,
         numeric_column_right_align: false,
     };
     let started_at = Instant::now();

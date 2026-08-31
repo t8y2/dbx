@@ -12,30 +12,226 @@ use super::types::{
     DBX_TDENGINE_TBNAME_COLUMN,
 };
 
+pub const DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX: &str = "__DBX_LARGE_VALUE_BYTES_";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LargeValuePreviewKind {
+    Text,
+    Binary,
+    TextCast,
+    Vector,
+}
+
+fn large_value_marker_alias_kind(kind: LargeValuePreviewKind, data_type: &str) -> &'static str {
+    match kind {
+        LargeValuePreviewKind::Binary => "B",
+        LargeValuePreviewKind::Vector => "V",
+        LargeValuePreviewKind::TextCast => match normalized_data_type_base(data_type).as_str() {
+            "json" => "J",
+            "jsonb" => "K",
+            "tsvector" => "S",
+            _ => "T",
+        },
+        LargeValuePreviewKind::Text => "T",
+    }
+}
+
+fn normalized_data_type_base(data_type: &str) -> String {
+    data_type.trim().split(['(', '[']).next().unwrap_or_default().trim().to_ascii_lowercase()
+}
+
+fn declared_data_type_length(data_type: &str) -> Option<usize> {
+    let parameters = data_type.split_once('(')?.1;
+    let digits = parameters.trim_start().chars().take_while(char::is_ascii_digit).collect::<String>();
+    (!digits.is_empty()).then(|| digits.parse::<usize>().ok()).flatten()
+}
+
+fn large_value_preview_kind(
+    database_type: Option<DatabaseType>,
+    data_type: &str,
+    preview_size: usize,
+) -> Option<LargeValuePreviewKind> {
+    let normalized = data_type.trim().to_ascii_lowercase();
+    let base = normalized_data_type_base(data_type);
+    match database_type {
+        Some(DatabaseType::Mysql) => {
+            if matches!(base.as_str(), "blob" | "mediumblob" | "longblob")
+                || (base == "varbinary"
+                    && declared_data_type_length(data_type).is_some_and(|length| length > preview_size))
+            {
+                Some(LargeValuePreviewKind::Binary)
+            } else if base == "json" {
+                Some(LargeValuePreviewKind::TextCast)
+            } else if matches!(base.as_str(), "text" | "mediumtext" | "longtext")
+                || (base == "varchar"
+                    && declared_data_type_length(data_type).is_some_and(|length| length > preview_size))
+            {
+                Some(LargeValuePreviewKind::Text)
+            } else {
+                None
+            }
+        }
+        Some(DatabaseType::Postgres) => {
+            if normalized.contains('[') {
+                None
+            } else if base == "bytea" {
+                Some(LargeValuePreviewKind::Binary)
+            } else if matches!(base.as_str(), "char" | "character" | "varchar" | "text" | "citext" | "name" | "xml")
+                || normalized.starts_with("character varying")
+            {
+                Some(LargeValuePreviewKind::Text)
+            } else if base == "vector" {
+                Some(LargeValuePreviewKind::Vector)
+            } else if matches!(base.as_str(), "json" | "jsonb" | "tsvector") {
+                Some(LargeValuePreviewKind::TextCast)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn build_large_value_preview_columns(options: &TableDataSelectSqlOptions) -> Option<String> {
+    let database_type = options.database_type;
+    let preview_size = options.large_value_preview_size?.max(1);
+    if options.columns.is_empty()
+        || options.columns.len() != options.column_types.len()
+        || options.primary_keys.is_empty()
+        || options
+            .columns
+            .iter()
+            .any(|column| column.to_ascii_uppercase().starts_with(DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX))
+    {
+        return None;
+    }
+
+    let protected: std::collections::HashSet<String> =
+        options.primary_keys.iter().map(|column| column.to_ascii_lowercase()).collect();
+    let mut projections = Vec::with_capacity(options.columns.len() * 2);
+    let mut marker_count = 0;
+    for (column_index, (column, data_type)) in options.columns.iter().zip(&options.column_types).enumerate() {
+        let quoted = if uses_connection_identifier_quote(database_type, options.identifier_quote.as_deref()) {
+            quote_table_data_identifier(database_type, column, options.identifier_quote.as_deref())
+        } else {
+            quote_table_identifier(database_type, column)
+        };
+        let kind = (!protected.contains(&column.to_ascii_lowercase()))
+            .then(|| large_value_preview_kind(database_type, data_type, preview_size))
+            .flatten();
+        let Some(kind) = kind else {
+            projections.push(quoted);
+            continue;
+        };
+
+        let alias_kind = large_value_marker_alias_kind(kind, data_type);
+        let marker_alias = quote_table_identifier(
+            database_type,
+            &format!("{DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX}{alias_kind}_{column_index}"),
+        );
+        let prefix_size = preview_size.saturating_add(1);
+        let (preview, marker_kind) = match database_type {
+            Some(DatabaseType::Mysql) if kind == LargeValuePreviewKind::Binary => {
+                (format!("LEFT({quoted}, {prefix_size}) AS {quoted}"), "B")
+            }
+            Some(DatabaseType::Mysql) => (format!("LEFT({quoted}, {prefix_size}) AS {quoted}"), "T"),
+            Some(DatabaseType::Postgres) if kind == LargeValuePreviewKind::Binary => {
+                (format!("substring({quoted} from 1 for {prefix_size}) AS {quoted}"), "B")
+            }
+            Some(DatabaseType::Postgres) if kind == LargeValuePreviewKind::TextCast => {
+                (format!("left({quoted}::text, {prefix_size}) AS {quoted}"), "T")
+            }
+            Some(DatabaseType::Postgres) if kind == LargeValuePreviewKind::Vector => {
+                (format!("left({quoted}::text, {prefix_size}) AS {quoted}"), "V")
+            }
+            Some(DatabaseType::Postgres) => (format!("left({quoted}, {prefix_size}) AS {quoted}"), "T"),
+            _ => return None,
+        };
+        let marker = if database_type == Some(DatabaseType::Mysql) {
+            format!("CONCAT('{marker_kind}:{preview_size}:', LENGTH({quoted})) AS {marker_alias}")
+        } else {
+            format!("'{marker_kind}:{preview_size}' AS {marker_alias}")
+        };
+        projections.push(preview);
+        projections.push(marker);
+        marker_count += 1;
+    }
+    (marker_count > 0).then(|| projections.join(", "))
+}
+
 pub fn build_count_table_sql(database_type: Option<DatabaseType>, schema: Option<&str>, table_name: &str) -> String {
+    if database_type == Some(DatabaseType::VictoriaMetrics) {
+        return format!("count({})", victoriametrics_metric_selector(table_name));
+    }
     format!("SELECT COUNT(*) AS row_count FROM {}", qualified_table_name(database_type, schema, table_name))
 }
 
+pub(crate) fn table_data_schema<'a>(
+    database_type: Option<DatabaseType>,
+    driver_profile: Option<&str>,
+    schema: Option<&'a str>,
+) -> Option<&'a str> {
+    if database_type == Some(DatabaseType::Informix)
+        && driver_profile.is_some_and(|profile| profile.eq_ignore_ascii_case("gbase8s"))
+    {
+        None
+    } else {
+        schema
+    }
+}
+
+/// Builds the SQL used by the data-table grid. Database qualification is opt-in
+/// so existing callers retain their current SQL shape.
 pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String {
+    build_table_data_select_sql_with_database(options, false)
+}
+
+pub fn build_table_data_select_sql_with_database(
+    options: TableDataSelectSqlOptions,
+    include_database_name: bool,
+) -> String {
     let database_type = options.database_type;
+    let schema = table_data_schema(database_type, options.driver_profile.as_deref(), options.schema.as_deref());
     let limit = options.limit.unwrap_or(100);
     if database_type == Some(DatabaseType::Neo4j) {
         return build_neo4j_table_select_sql(&options, limit);
     }
+    if database_type == Some(DatabaseType::VictoriaMetrics) {
+        return format!("{}[1h]", victoriametrics_metric_selector(&options.table_name));
+    }
 
+    // TDengine's JDBC connection context setters do not affect WebSocket statements,
+    // so table reads must carry the selected database in the SQL itself.
+    let jdbc_tdengine_database = (database_type == Some(DatabaseType::Jdbc)
+        && options.driver_profile.as_deref().is_some_and(|profile| profile.trim().eq_ignore_ascii_case("tdengine")))
+    .then(|| options.database.as_deref().map(str::trim).filter(|database| !database.is_empty()).or(schema))
+    .flatten();
+    let table = if let Some(database) = jdbc_tdengine_database {
+        qualified_table_name(Some(DatabaseType::Tdengine), Some(database), &options.table_name)
     // Doris / StarRocks multi-catalog: prefix the catalog for external-catalog tables.
-    let table = if uses_connection_identifier_quote(database_type, options.identifier_quote.as_deref()) {
-        table_data_qualified_table_name(
+    } else if uses_connection_identifier_quote(database_type, options.identifier_quote.as_deref()) {
+        table_data_qualified_table_name(database_type, schema, &options.table_name, options.identifier_quote.as_deref())
+    } else if include_database_name {
+        database_qualified_table_name(
             database_type,
-            options.schema.as_deref(),
+            options.catalog.as_deref(),
+            options.database.as_deref(),
             &options.table_name,
-            options.identifier_quote.as_deref(),
         )
+        .unwrap_or_else(|| {
+            qualified_table_name_with_catalog(
+                database_type,
+                options.catalog.as_deref(),
+                schema,
+                options.database.as_deref(),
+                &options.table_name,
+            )
+        })
     } else {
         qualified_table_name_with_catalog(
             database_type,
             options.catalog.as_deref(),
-            options.schema.as_deref(),
+            schema,
             options.database.as_deref(),
             &options.table_name,
         )
@@ -45,6 +241,11 @@ pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String
     let default_order_by = if database_type == Some(DatabaseType::InfluxDb) {
         // InfluxQL only allows sorting of timestamp column
         Some("time DESC".to_string())
+    } else if database_type == Some(DatabaseType::Impala) {
+        // Impala requires ORDER BY when OFFSET is present. Keeping the same
+        // fallback on the first page also prevents page boundaries from using
+        // different row orders when the table has no explicit key.
+        Some("1".to_string())
     } else {
         None
     };
@@ -61,6 +262,8 @@ pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String
 
     let select_columns = if include_oracle_row_id {
         format!("ROWIDTOCHAR(t.ROWID) AS \"{DBX_ROWID_COLUMN}\", t.*")
+    } else if let Some(preview_columns) = build_large_value_preview_columns(&options) {
+        preview_columns
     } else {
         build_select_columns(
             database_type,
@@ -73,7 +276,21 @@ pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String
         if options.columns.is_empty() {
             "*".to_string()
         } else {
-            format!("\"{DBX_ROWID_COLUMN}\", {rownum_select_columns}")
+            // Callers that address rows by the synthetic key may list it among
+            // the requested columns; the leading projection already supplies
+            // it from the inline view, so drop the duplicate.
+            let rest = options
+                .columns
+                .iter()
+                .filter(|column| !column.eq_ignore_ascii_case(DBX_ROWID_COLUMN))
+                .map(|column| quote_table_identifier(database_type, column))
+                .collect::<Vec<_>>()
+                .join(", ");
+            if rest.is_empty() {
+                format!("\"{DBX_ROWID_COLUMN}\"")
+            } else {
+                format!("\"{DBX_ROWID_COLUMN}\", {rest}")
+            }
         }
     } else {
         rownum_select_columns.clone()
@@ -82,7 +299,11 @@ pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String
 
     match table_pagination_strategy(database_type) {
         TablePaginationStrategy::IrisTop => {
-            format!("SELECT TOP {limit} {select_columns} FROM {table_alias}{where_clause}{order}")
+            if options.use_driver_row_offset {
+                format!("SELECT {select_columns} FROM {table_alias}{where_clause}{order}")
+            } else {
+                format!("SELECT TOP {limit} {select_columns} FROM {table_alias}{where_clause}{order}")
+            }
         }
         TablePaginationStrategy::InformixFirst => {
             let row_limit = informix_row_limit_clause(limit, options.offset.unwrap_or(0));
@@ -161,6 +382,29 @@ pub fn build_table_data_select_sql(options: TableDataSelectSqlOptions) -> String
     }
 }
 
+/// Returns a `database.table` reference for engines whose active database is
+/// normally omitted from table-data SQL. Doris and StarRocks retain an external
+/// catalog prefix when one is selected.
+fn database_qualified_table_name(
+    database_type: Option<DatabaseType>,
+    catalog: Option<&str>,
+    database: Option<&str>,
+    table_name: &str,
+) -> Option<String> {
+    let database = database.map(str::trim).filter(|database| !database.is_empty())?;
+    match database_type {
+        Some(DatabaseType::ClickHouse) => Some(format!(
+            "{}.{}",
+            quote_table_identifier(database_type, database),
+            quote_table_identifier(database_type, table_name)
+        )),
+        Some(DatabaseType::Mysql | DatabaseType::Goldendb | DatabaseType::Doris | DatabaseType::StarRocks) => {
+            Some(qualified_table_name_with_catalog(database_type, catalog, Some(database), Some(database), table_name))
+        }
+        _ => None,
+    }
+}
+
 pub(crate) fn table_data_qualified_table_name(
     database_type: Option<DatabaseType>,
     schema: Option<&str>,
@@ -203,6 +447,16 @@ pub(crate) fn uses_connection_identifier_quote(
     identifier_quote: Option<&str>,
 ) -> bool {
     database_type == Some(DatabaseType::Kingbase)
+        // JDBC table-data requests carry the schema returned by DatabaseMetaData.
+        // Keep the JDBC identifier unquoted when no driver quote was reported, but
+        // still qualify the table with that schema.
+        || database_type == Some(DatabaseType::Jdbc)
+        // Spanner is dual-dialect: GoogleSQL uses backticks, the PostgreSQL dialect uses
+        // double quotes, and only the connected agent knows which. Unconditional like
+        // Kingbase — when no quote was reported the callers fall back to
+        // `quote_table_identifier`, whose static mapping is GoogleSQL-correct.
+        || database_type == Some(DatabaseType::Spanner)
+        || (database_type == Some(DatabaseType::Informix) && identifier_quote.is_some())
         || (matches!(database_type, Some(DatabaseType::Gaussdb | DatabaseType::OpenGauss | DatabaseType::Postgres))
             && identifier_quote.is_some())
 }
@@ -213,6 +467,9 @@ fn is_view_table_type(table_type: Option<&str>) -> bool {
 
 pub fn build_table_select_sql(options: TableSelectSqlOptions<'_>) -> String {
     let database_type = options.database_type;
+    if database_type == Some(DatabaseType::VictoriaMetrics) {
+        return format!("{}[1h]", victoriametrics_metric_selector(options.table_name));
+    }
     let table = qualified_table_name(database_type, options.schema, options.table_name);
     let select_columns = quoted_table_columns_or_star(database_type, options.columns);
     let order_by = if options.order_columns.is_empty() {
@@ -254,6 +511,11 @@ pub fn build_table_select_sql(options: TableSelectSqlOptions<'_>) -> String {
             format!("SELECT {select_columns} FROM {table}{order_by} LIMIT {limit};")
         }
     }
+}
+
+fn victoriametrics_metric_selector(metric_name: &str) -> String {
+    let escaped = metric_name.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
+    format!(r#"{{__name__="{escaped}"}}"#)
 }
 
 fn informix_row_limit_clause(limit: usize, offset: usize) -> String {
@@ -346,7 +608,7 @@ pub(super) fn build_select_columns(
             .collect::<Vec<_>>()
             .join(", ");
     }
-    if database_type != Some(DatabaseType::Hive) {
+    if !matches!(database_type, Some(DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala)) {
         return "*".to_string();
     }
     columns
@@ -487,6 +749,7 @@ mod tests {
     ) -> TableDataSelectSqlOptions {
         TableDataSelectSqlOptions {
             database_type: Some(database_type),
+            driver_profile: None,
             identifier_quote: None,
             schema: None,
             table_name: table.to_string(),
@@ -495,13 +758,41 @@ mod tests {
             table_type: None,
             primary_keys: Vec::new(),
             columns: Vec::new(),
+            column_types: Vec::new(),
+            large_value_preview_size: None,
             fallback_order_columns: Vec::new(),
             order_by: None,
             limit: Some(10),
             offset: None,
+            use_driver_row_offset: false,
             where_input: None,
             include_row_id: false,
         }
+    }
+
+    #[test]
+    fn databricks_table_select_uses_backtick_identifiers() {
+        assert_eq!(
+            build_table_data_select_sql(TableDataSelectSqlOptions {
+                database_type: Some(DatabaseType::Databricks),
+                schema: Some("sales".to_string()),
+                table_name: "ads_veeva_target_customer_df".to_string(),
+                limit: Some(100),
+                ..Default::default()
+            }),
+            "SELECT * FROM `sales`.`ads_veeva_target_customer_df` LIMIT 100;"
+        );
+        assert_eq!(
+            build_table_data_select_sql(TableDataSelectSqlOptions {
+                database_type: Some(DatabaseType::Databricks),
+                identifier_quote: Some("\"".to_string()),
+                schema: Some("sales`west".to_string()),
+                table_name: "ads`target".to_string(),
+                limit: Some(100),
+                ..Default::default()
+            }),
+            "SELECT * FROM `sales``west`.`ads``target` LIMIT 100;"
+        );
     }
 
     #[test]
@@ -516,6 +807,13 @@ mod tests {
         let sql =
             build_table_data_select_sql(opts(DatabaseType::StarRocks, Some("hive_catalog"), Some("sales"), "orders"));
         assert!(sql.contains("FROM `hive_catalog`.`sales`.`orders`"), "sql was: {sql}");
+    }
+
+    #[test]
+    fn table_data_select_optionally_qualifies_database() {
+        let options = opts(DatabaseType::Mysql, None, Some("aaa"), "apis");
+        assert_eq!(build_table_data_select_sql(options.clone()), "SELECT * FROM `apis` LIMIT 10;");
+        assert_eq!(build_table_data_select_sql_with_database(options, true), "SELECT * FROM `aaa`.`apis` LIMIT 10;");
     }
 
     #[test]
@@ -553,5 +851,17 @@ mod tests {
             build_table_data_select_sql(opts(DatabaseType::Postgres, Some("iceberg_catalog"), Some("sales"), "orders"));
         assert!(!sql.contains("iceberg_catalog"), "sql was: {sql}");
         assert!(sql.contains("orders"), "sql was: {sql}");
+    }
+
+    #[test]
+    fn victoriametrics_builds_metric_queries_without_sql_identifiers() {
+        assert_eq!(
+            build_table_data_select_sql(opts(DatabaseType::VictoriaMetrics, None, None, "rack_temperature")),
+            r#"{__name__="rack_temperature"}[1h]"#
+        );
+        assert_eq!(
+            build_count_table_sql(Some(DatabaseType::VictoriaMetrics), None, "rack\\\"temperature"),
+            r#"count({__name__="rack\\\"temperature"})"#
+        );
     }
 }

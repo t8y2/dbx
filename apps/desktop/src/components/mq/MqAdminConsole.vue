@@ -5,6 +5,7 @@ import { useI18n } from "vue-i18n";
 import type { MqAdminConfig, MqClusterInfo, MqSystemKind, NamespaceRef, TopicInfo } from "@/types/mq";
 import { mqCreateNamespace, mqListNamespaces, mqTestConnection } from "@/lib/backend/api";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useMqMutationGuard } from "@/composables/useMqMutationGuard";
 import { mqClusterOptionsFromExtra } from "@/lib/mq/mqTenantForm";
 import {
   defaultMqCapabilitiesForSystemKind,
@@ -17,6 +18,7 @@ import {
   resolveInitialMqTab,
   resolveMqSystemKindFromConnection,
   resolveRabbitMqDefaultVhost,
+  resolveTopicSelectedTab,
   type MqTab,
 } from "@/lib/mq/mqConsoleDefaults";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -25,6 +27,7 @@ import TenantsPanel from "./TenantsPanel.vue";
 import NamespacesPanel from "./NamespacesPanel.vue";
 import TopicsPanel from "./TopicsPanel.vue";
 import SubscriptionsPanel from "./SubscriptionsPanel.vue";
+import KafkaConsumerGroupsPanel from "./KafkaConsumerGroupsPanel.vue";
 import MonitoringPanel from "./MonitoringPanel.vue";
 import ProducerConsumerPanel from "./ProducerConsumerPanel.vue";
 import PoliciesPanel from "./PoliciesPanel.vue";
@@ -34,6 +37,7 @@ import MessageTracePanel from "./MessageTracePanel.vue";
 import RocketMqMessagesPanel from "./RocketMqMessagesPanel.vue";
 import SendMessagePanel from "./SendMessagePanel.vue";
 import MessageQueryPanel from "./MessageQueryPanel.vue";
+import KafkaMessagesPanel from "./KafkaMessagesPanel.vue";
 import BrokerPanel from "./BrokerPanel.vue";
 import RabbitMqClientsPanel from "./rabbitmq/RabbitMqClientsPanel.vue";
 import RabbitMqPermissionsPanel from "./rabbitmq/RabbitMqPermissionsPanel.vue";
@@ -50,6 +54,8 @@ interface Props {
 const props = defineProps<Props>();
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
+const { confirmMqWrite } = useMqMutationGuard(() => props.connectionId);
+const isProductionConnection = computed(() => !!connectionStore.getConfig(props.connectionId)?.is_production);
 const configuredSystemKind = computed(() => resolveMqSystemKindFromConnection(connectionStore.getConfig(props.connectionId)));
 const FLAT_MQ_CONTEXT = "_flat_mq";
 
@@ -100,6 +106,8 @@ const mqSystemKind = computed<MqSystemKind | undefined>(() => clusterInfo.value?
 const isFlatMqCluster = computed(() => isFlatMqSystemKind(mqSystemKind.value));
 const isRabbitMqCluster = computed(() => mqSystemKind.value === "rabbitmq");
 const isRocketMqCluster = computed(() => mqSystemKind.value === "rocketmq");
+const isKafkaCluster = computed(() => mqSystemKind.value === "kafka");
+const canBrowseKafkaMessages = computed(() => isKafkaCluster.value && canPeekMessages.value);
 const rocketmqClusterLabel = computed(() => {
   if (!isRocketMqCluster.value) return undefined;
   const fromOptions = clusterOptions.value[0];
@@ -167,6 +175,7 @@ function tabLabelKey(tab: MqTab): string {
     namespaces: "mqAdmin.tabNamespaces",
     topics: "mqAdmin.tabTopics",
     subscriptions: "mqAdmin.tabSubscriptions",
+    consumerGroups: "mqAdmin.tabConsumerGroups",
     monitoring: "mqAdmin.tabMonitoring",
     clients: "mqAdmin.tabClients",
     producers: "mqAdmin.tabProducers",
@@ -225,6 +234,7 @@ function handleNamespaceSelect(value: AcceptableValue) {
 
 async function handleCreateNamespace() {
   if (props.readOnly) return;
+  if (!(await confirmMqWrite(t("mqNamespaces.create")))) return;
   const name = createNamespaceName.value.trim();
   if (!name) {
     createNamespaceError.value = t("mqNamespaces.namespaceNameRequired");
@@ -278,11 +288,7 @@ function handleNamespaceRolesSelected(namespace: string) {
 function handleTopicSelected(topic: TopicInfo) {
   selectedTopic.value = topic;
   selectedSubscriptionName.value = undefined;
-  if (isRocketMqCluster.value) {
-    activeTab.value = canManageSubscriptions.value ? "subscriptions" : "topics";
-  } else {
-    activeTab.value = isFlatMqCluster.value ? "monitoring" : canManageSubscriptions.value ? "subscriptions" : "monitoring";
-  }
+  activeTab.value = resolveTopicSelectedTab({ systemKind: mqSystemKind.value, capabilities: effectiveCapabilities.value });
 }
 
 function handleNavigateTab(payload: { tab: MqTab; topic?: TopicInfo; subscription?: string; preferDlqTopic?: boolean }) {
@@ -298,6 +304,17 @@ function handleNavigateTab(payload: { tab: MqTab; topic?: TopicInfo; subscriptio
     preferDlqTopic.value = payload.preferDlqTopic;
   }
   setActiveTab(payload.tab);
+}
+
+function handleKafkaConsumerGroupTopicSelected(topic: string) {
+  selectedTopic.value = {
+    name: topic,
+    shortName: topic,
+    partitioned: false,
+    persistent: true,
+  };
+  selectedSubscriptionName.value = undefined;
+  setActiveTab("subscriptions");
 }
 
 function handleSubscriptionSelected(subscription: string) {
@@ -398,6 +415,7 @@ onMounted(async () => {
         <button v-if="selectedTopic" class="breadcrumb-button" @click="goToTopicLevel" :title="t('mqAdmin.viewTopic')">{{ selectedTopic.shortName }}</button>
       </div>
       <div class="toolbar-status">
+        <span v-if="isProductionConnection" class="prod-badge">PROD</span>
         <span v-if="readOnly" class="readonly-badge">{{ t("mqAdmin.readOnly") }}</span>
         <span v-if="error" class="toolbar-error">{{ error }}</span>
       </div>
@@ -467,8 +485,9 @@ onMounted(async () => {
         :supports-expire-messages="canExpireMessages"
         @subscription-selected="handleSubscriptionSelected"
       />
+      <KafkaConsumerGroupsPanel v-else-if="activeTab === 'consumerGroups' && isKafkaCluster" :connection-id="connectionId" @navigate-subscriptions="handleKafkaConsumerGroupTopicSelected" />
       <RabbitMqMonitoringPanel v-else-if="activeTab === 'monitoring' && isRabbitMqCluster && canClusterMonitor" :connection-id="connectionId" />
-      <MonitoringPanel v-else-if="activeTab === 'monitoring'" :connection-id="connectionId" :topic="selectedTopic" :tenant="effectiveTenant" :namespace="effectiveNamespace" :mq-system-kind="mqSystemKind" />
+      <MonitoringPanel v-else-if="activeTab === 'monitoring'" :connection-id="connectionId" :topic="selectedTopic" :tenant="effectiveTenant" :namespace="effectiveNamespace" :mq-system-kind="mqSystemKind" @navigate-tab="handleNavigateTab" />
       <RabbitMqClientsPanel v-else-if="activeTab === 'clients' && isRabbitMqCluster && canManageClientConnections" :connection-id="connectionId" :namespace="effectiveNamespace" :read-only="readOnly" />
       <ProducerConsumerPanel
         v-else-if="activeTab === 'clients'"
@@ -505,6 +524,16 @@ onMounted(async () => {
         :prefer-dlq-topic="preferDlqTopic"
       />
       <MessageTracePanel v-else-if="activeTab === 'trace' && isRocketMqCluster && canMessageTrace" :connection-id="connectionId" :tenant="effectiveTenant" :namespace="effectiveNamespace" :topic="selectedTopic" :read-only="readOnly" :mq-system-kind="mqSystemKind" />
+      <KafkaMessagesPanel
+        v-else-if="activeTab === 'messages' && canBrowseKafkaMessages"
+        :connection-id="connectionId"
+        :tenant="effectiveTenant"
+        :namespace="effectiveNamespace"
+        :topic="selectedTopic"
+        :read-only="readOnly"
+        :can-send-message="canSendMessage"
+        @topic-selected="handleProducerTopicSelected"
+      />
       <MessageQueryPanel v-else-if="activeTab === 'messages' && canMessageQuery && !isRocketMqCluster" :connection-id="connectionId" :tenant="effectiveTenant" :namespace="effectiveNamespace" :topic="selectedTopic" :read-only="readOnly" :mq-system-kind="mqSystemKind" />
       <SendMessagePanel
         v-else-if="activeTab === 'messages' && canSendMessage && !isRocketMqCluster && !canMessageQuery"
@@ -560,6 +589,8 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+@import "./shared/mqPanel.css";
+
 .mq-admin-console {
   display: flex;
   flex-direction: column;
@@ -633,6 +664,15 @@ onMounted(async () => {
   color: var(--color-warning);
   font-size: 12px;
   font-weight: 500;
+}
+
+.prod-badge {
+  padding: 2px 8px;
+  border: 1px solid rgb(220 38 38 / 0.55);
+  border-radius: var(--dbx-radius-fixed-4);
+  color: rgb(185 28 28);
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .mq-tabs {
@@ -735,16 +775,6 @@ onMounted(async () => {
   font-size: 18px;
 }
 
-.btn-close {
-  border: none;
-  background: none;
-  font-size: 24px;
-  cursor: pointer;
-  color: var(--color-text-secondary);
-  padding: 0;
-  line-height: 1;
-}
-
 .dialog-body {
   padding: 20px;
 }
@@ -782,28 +812,6 @@ onMounted(async () => {
 .form-error {
   color: var(--color-error);
   font-size: 13px;
-}
-
-.btn-primary,
-.btn-secondary {
-  padding: 6px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--dbx-radius-fixed-4);
-  background: var(--color-background);
-  color: var(--color-text);
-  cursor: pointer;
-  font-size: 13px;
-  transition: all 0.2s;
-}
-
-.btn-primary {
-  background: var(--color-primary);
-  color: white;
-  border-color: var(--color-primary);
-}
-
-.btn-primary:hover:not(:disabled) {
-  opacity: 0.9;
 }
 
 button:disabled {

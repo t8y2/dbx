@@ -14,6 +14,7 @@ const props = withDefaults(
     cellLayout?: "grid" | "transpose";
     commitOnClose?: boolean;
     fractionPrecision?: number;
+    normalizeValue?: (value: string) => string;
   }>(),
   {
     variant: "cell",
@@ -99,9 +100,10 @@ function setOpen(value: boolean) {
   if (!value && props.commitOnClose && !closeHandled && !skipCommitOnClose) finishCommit();
 }
 
-function setModelValue(value: string) {
-  localValue.value = value;
-  emit("update:modelValue", value);
+function setModelValue(value: string, normalize = false) {
+  const nextValue = normalize ? (props.normalizeValue?.(value) ?? value) : value;
+  localValue.value = nextValue;
+  emit("update:modelValue", nextValue);
 }
 
 function updateTextInput(event: Event) {
@@ -125,14 +127,14 @@ function updateDateFromInput(part: "day" | "month" | "year", event: Event) {
 }
 
 function stepDate(part: "day" | "month" | "year", delta: number) {
-  setModelValue(stepTemporalInputValue(localValue.value, props.kind, part, delta));
+  setModelValue(stepTemporalInputValue(localValue.value, props.kind, part, delta), true);
 }
 
 function updateTime(part: "hour" | "minute" | "second", rawValue: string | number) {
   const parts = { ...timeParts.value, [part]: normalizeTimePart(rawValue, part === "hour" ? 23 : 59) };
   const nextTime = `${parts.hour}:${parts.minute}:${parts.second}${fractionSuffix.value}`;
   if (props.kind === "time") {
-    setModelValue(nextTime);
+    setModelValue(nextTime, true);
     return;
   }
   setDateTimeValue(dateParts.value.year, dateParts.value.month, dateParts.value.day, nextTime);
@@ -143,7 +145,7 @@ function updateTimeFromInput(part: "hour" | "minute" | "second", event: Event) {
 }
 
 function stepTime(part: "hour" | "minute" | "second", delta: number) {
-  setModelValue(stepTemporalInputValue(localValue.value, props.kind, part, delta));
+  setModelValue(stepTemporalInputValue(localValue.value, props.kind, part, delta), true);
 }
 
 const fractionSuffix = computed(() => {
@@ -160,7 +162,7 @@ function updateFractionValue(rawValue: string) {
   const digits = rawValue.replace(/\D/g, "").slice(0, maxLength);
   const nextTime = `${timeParts.value.hour}:${timeParts.value.minute}:${timeParts.value.second}${digits ? `.${digits}` : ""}`;
   if (props.kind === "time") {
-    setModelValue(nextTime);
+    setModelValue(nextTime, true);
     return;
   }
   setDateTimeValue(dateParts.value.year, dateParts.value.month, dateParts.value.day, nextTime);
@@ -179,20 +181,20 @@ function flushInputValue(target: EventTarget | null) {
 }
 
 function normalizeTextInputValue() {
-  setModelValue(parseTemporalInputValue(localValue.value, props.kind) ?? "");
+  setModelValue(parseTemporalInputValue(localValue.value, props.kind) ?? "", true);
 }
 
 function setNull() {
-  setModelValue("NULL");
+  setModelValue("NULL", true);
 }
 
 function setNow() {
   const now = new Date();
   const dateText = [String(now.getFullYear()).padStart(4, "0"), String(now.getMonth() + 1).padStart(2, "0"), String(now.getDate()).padStart(2, "0")].join("-");
   const nextTime = [String(now.getHours()).padStart(2, "0"), String(now.getMinutes()).padStart(2, "0"), String(now.getSeconds()).padStart(2, "0")].join(":") + nowFractionSuffix(now);
-  if (props.kind === "date") setModelValue(dateText);
-  else if (props.kind === "time") setModelValue(nextTime);
-  else setModelValue(`${dateText} ${nextTime}`);
+  if (props.kind === "date") setModelValue(dateText, true);
+  else if (props.kind === "time") setModelValue(nextTime, true);
+  else setModelValue(`${dateText} ${nextTime}`, true);
 }
 
 function finishCommit() {
@@ -264,8 +266,8 @@ function normalizeTimePart(value: string | number, max: number): string {
 
 function setDateTimeValue(year: number, month: number, day: number, time: string) {
   const dateText = [String(year).padStart(4, "0"), String(month).padStart(2, "0"), String(day).padStart(2, "0")].join("-");
-  if (props.kind === "date") setModelValue(dateText);
-  else setModelValue(`${dateText} ${time}`);
+  if (props.kind === "date") setModelValue(dateText, true);
+  else setModelValue(`${dateText} ${time}`, true);
 }
 
 function parseFractionDigits(value: string): string {

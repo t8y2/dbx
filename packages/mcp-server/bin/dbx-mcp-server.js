@@ -49,7 +49,11 @@ try {
     process.exit(0);
   }
   const binary = resolveBinary();
-  const child = spawn(binary, process.argv.slice(2), { stdio: "inherit", env: process.env });
+  const child = spawn(binary, process.argv.slice(2), {
+    stdio: "inherit",
+    env: process.env,
+    windowsHide: true,
+  });
   for (const signal of ["SIGINT", "SIGTERM"]) {
     process.on(signal, () => child.kill(signal));
   }

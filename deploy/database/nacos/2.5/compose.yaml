@@ -4,9 +4,9 @@ services:
     container_name: dbx-nacos-2.5
     restart: always
     ports:
-      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-8849}:8848"
-      - "${DB_BIND_ADDRESS:-127.0.0.1}:${NACOS_GRPC_PORT:-9849}:9848"
-      - "${DB_BIND_ADDRESS:-127.0.0.1}:${NACOS_RAFT_PORT:-9850}:9849"
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-11000}:8848"
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${NACOS_GRPC_PORT:-11001}:9848"
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${NACOS_RAFT_PORT:-11002}:9849"
     environment:
       MODE: standalone
       PREFER_HOST_MODE: hostname

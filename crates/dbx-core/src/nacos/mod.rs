@@ -6,10 +6,12 @@
 //! still supports an older Rust toolchain. A future SDK adapter can implement
 //! the same port without changing commands, routes, or frontend contracts.
 
+pub mod access_control;
 pub mod archive;
 pub mod batch;
 pub mod config;
 pub mod http;
+pub mod namespace_access;
 pub mod port;
 mod prometheus;
 pub mod search;
@@ -116,6 +118,8 @@ impl NacosAdminRegistry {
     pub async fn drop_connection(&self, connection_id: &str) {
         self.instances.write().await.remove(connection_id);
         self.build_locks.write().await.remove(connection_id);
+        access_control::invalidate_operations(connection_id);
+        namespace_access::invalidate(connection_id);
     }
 
     async fn rnacos_console_session(&self, cfg: &NacosAdminConfig) -> RNacosConsoleSessionHandle {
@@ -172,10 +176,12 @@ mod tests {
         NacosAdminConfig {
             implementation: Some(NacosImplementation::RNacos),
             version_mode: None,
+            api_plane: None,
             server_addr: "http://127.0.0.1:8848".to_string(),
             display_server_addr: "http://127.0.0.1:8848".to_string(),
             namespace: "public".to_string(),
             context_path: "/nacos".to_string(),
+            managed_namespaces: Vec::new(),
             rnacos_console_addr: "http://127.0.0.1:10848".to_string(),
             rnacos_history_enabled: Some(true),
             rnacos_console_auth: NacosRNacosConsoleAuth::UsernamePassword {

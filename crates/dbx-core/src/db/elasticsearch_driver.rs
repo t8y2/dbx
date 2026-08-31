@@ -1,9 +1,11 @@
 use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, CONTROLS};
+use regex::Regex;
 use reqwest::{Client as HttpClient, Method, StatusCode};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use super::{http_client_builder, with_connection_timeout};
@@ -50,6 +52,12 @@ pub struct EsClient {
     transport_mode: ElasticsearchTransportMode,
     /// GET path used for connect / health / test (default "/").
     connectivity_check_path: String,
+    /// 为 true 时完全跳过连通性检查（test_connection 直接返回 Ok）。
+    /// 用于账号连 `/` 或任何检查路径都无权限、且集群间权限不统一的场景。
+    connectivity_check_disabled: bool,
+    /// 正则:把易变的时间/滚动后缀折叠成 `*`，将同一前缀的滚动索引聚合成一个
+    /// pattern 节点。`None` 表示关闭聚合，展示原始索引名。
+    index_grouping: Option<Regex>,
 }
 
 impl EsClient {
@@ -68,6 +76,8 @@ impl EsClient {
             timeout,
             ElasticsearchTransportMode::Direct,
             "/".to_string(),
+            false,
+            None,
         )
     }
 
@@ -79,16 +89,30 @@ impl EsClient {
         timeout: Duration,
         transport_mode: ElasticsearchTransportMode,
         connectivity_check_path: String,
+        connectivity_check_disabled: bool,
+        index_grouping: Option<Regex>,
     ) -> Self {
         let base_url = url.trim_end_matches('/').to_string();
         let auth = match (username, password) {
             (Some(u), Some(p)) if !u.is_empty() => Some((u.to_string(), p.to_string())),
             _ => None,
         };
-        let builder = http_client_builder(timeout).danger_accept_invalid_certs(accept_invalid_certs);
+        let mut builder = http_client_builder(timeout).danger_accept_invalid_certs(accept_invalid_certs);
+        if let Some(addrs) = elasticsearch_localhost_resolve_addrs(&base_url, connectivity_check_disabled) {
+            builder = builder.resolve_to_addrs("localhost", &addrs);
+        }
         let http = builder.build().unwrap_or_else(|_| HttpClient::new());
         let fallback_base_urls = elasticsearch_base_url_fallbacks(&base_url);
-        Self { http, base_url, fallback_base_urls, auth, transport_mode, connectivity_check_path }
+        Self {
+            http,
+            base_url,
+            fallback_base_urls,
+            auth,
+            transport_mode,
+            connectivity_check_path,
+            connectivity_check_disabled,
+            index_grouping,
+        }
     }
 
     pub fn from_config(
@@ -108,6 +132,8 @@ impl EsClient {
         };
         let base_url = format!("{}{}", url.trim_end_matches('/'), kibana_base_path.as_deref().unwrap_or(""));
         let connectivity_check_path = elasticsearch_connectivity_check_path(external_config);
+        let connectivity_check_disabled = elasticsearch_connectivity_check_disabled(external_config);
+        let index_grouping = elasticsearch_index_grouping(external_config);
         Self::new_with_mode(
             &base_url,
             username,
@@ -116,6 +142,8 @@ impl EsClient {
             timeout,
             transport_mode,
             connectivity_check_path,
+            connectivity_check_disabled,
+            index_grouping,
         )
     }
 
@@ -142,7 +170,8 @@ impl EsClient {
                 .http
                 .post(format!("{}/api/console/proxy", self.base_url))
                 .query(&[("path", path), ("method", method.as_str())])
-                .header("kbn-xsrf", "true"),
+                .header("kbn-xsrf", "true")
+                .header("osd-xsrf", "true"),
         };
         self.with_auth(req)
     }
@@ -180,6 +209,8 @@ impl Clone for EsClient {
             auth: self.auth.clone(),
             transport_mode: self.transport_mode,
             connectivity_check_path: self.connectivity_check_path.clone(),
+            connectivity_check_disabled: self.connectivity_check_disabled,
+            index_grouping: self.index_grouping.clone(),
         }
     }
 }
@@ -227,7 +258,68 @@ pub fn elasticsearch_connectivity_check_path(external_config: Option<&Value>) ->
     }
 }
 
+/// 解析连接配置里的索引聚合正则。**默认关闭**（命名格式因环境而异，不做全局假设）。
+/// - 缺省/空/`off`/`none`/`false` → 关闭聚合，展示原始索引名。
+/// - 其它 → 作为自定义正则；编译失败同样视为关闭，避免意外折叠。
+///
+/// 语义：用 `${1}*` 模板替换匹配区间——正则带捕获组 1 时保留其内容做前缀，
+/// 不带捕获组时即把匹配到的“易变尾巴”替换成 `*`。
+/// 是否完全跳过连通性检查。读取配置 `connectivityCheckDisabled`（布尔）。
+/// 也兼容字符串 "true"/"1"/"yes"/"on"。用于账号无任何集群/索引探活权限的场景。
+pub fn elasticsearch_connectivity_check_disabled(external_config: Option<&Value>) -> bool {
+    let Some(value) = external_config.and_then(Value::as_object).and_then(|c| c.get("connectivityCheckDisabled"))
+    else {
+        return false;
+    };
+    match value {
+        Value::Bool(b) => *b,
+        Value::String(s) => {
+            let s = s.trim();
+            s.eq_ignore_ascii_case("true") || s == "1" || s.eq_ignore_ascii_case("yes") || s.eq_ignore_ascii_case("on")
+        }
+        _ => false,
+    }
+}
+
+pub fn elasticsearch_index_grouping(external_config: Option<&Value>) -> Option<Regex> {
+    let raw = external_config
+        .and_then(Value::as_object)
+        .and_then(|config| config.get("indexGroupingPattern"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if raw.is_empty()
+        || raw.eq_ignore_ascii_case("off")
+        || raw.eq_ignore_ascii_case("none")
+        || raw.eq_ignore_ascii_case("false")
+    {
+        return None;
+    }
+    Regex::new(raw).ok()
+}
+
+/// 用分组正则把索引名聚合成 pattern。`None` 表示关闭聚合，原样返回。
+fn group_index_names(names: Vec<String>, pattern: Option<&Regex>) -> Vec<String> {
+    let Some(re) = pattern else {
+        return names;
+    };
+    let mut buckets: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for name in names {
+        // `${1}*`：有捕获组则保留组1做前缀，无组则把匹配尾巴替换成 `*`。
+        let key = re.replace(&name, "${1}*").into_owned();
+        buckets.entry(key).or_default().push(name);
+    }
+    let mut out: Vec<String> = buckets.into_keys().collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 pub async fn test_connection(client: &mut EsClient, timeout: Duration) -> Result<(), String> {
+    // 用户显式关闭连通性检查：不发探活请求，直接视为可连。
+    if client.connectivity_check_disabled {
+        return Ok(());
+    }
     let mut errors = Vec::new();
     let urls = std::iter::once(client.base_url.clone()).chain(client.fallback_base_urls.clone());
     let check_path = client.connectivity_check_path.clone();
@@ -307,6 +399,17 @@ fn elasticsearch_base_url_fallbacks(base_url: &str) -> Vec<String> {
     }
 }
 
+fn elasticsearch_localhost_resolve_addrs(base_url: &str, connectivity_check_disabled: bool) -> Option<[SocketAddr; 2]> {
+    if !connectivity_check_disabled {
+        return None;
+    }
+    let parsed = reqwest::Url::parse(base_url).ok()?;
+    if !parsed.host_str()?.eq_ignore_ascii_case("localhost") {
+        return None;
+    }
+    Some([SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0), SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)])
+}
+
 fn elasticsearch_index_path(index: &str, endpoint: &str) -> String {
     format!("/{}/{}", elasticsearch_path_segment(index), endpoint.trim_start_matches('/'))
 }
@@ -375,20 +478,92 @@ struct CatIndex {
     index: String,
 }
 
+#[derive(Deserialize)]
+struct ResolveIndexResponse {
+    #[serde(default)]
+    indices: Vec<ResolveNamed>,
+    #[serde(default)]
+    data_streams: Vec<ResolveNamed>,
+}
+
+#[derive(Deserialize)]
+struct ResolveNamed {
+    name: String,
+}
+
+/// 去掉 ES 内部索引（以 `.` 开头），排序并去重后返回可见索引名。
+fn normalize_index_names(names: impl Iterator<Item = String>) -> Vec<String> {
+    let mut names: Vec<String> = names.filter(|name| !name.starts_with('.')).collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
 pub async fn list_indices(client: &EsClient) -> Result<Vec<String>, String> {
+    let names = list_raw_index_names(client).await?;
+    Ok(group_index_names(names, client.index_grouping.as_ref()))
+}
+
+async fn list_raw_index_names(client: &EsClient) -> Result<Vec<String>, String> {
+    // 主路径 `_cat/indices` 需要集群级 `monitor` 权限。仅有索引级权限的账号
+    // （例如日志采集用户）会在这里拿到 401/403，此时降级到索引级元数据端点。
     let resp = client
         .get("/_cat/indices?format=json&h=index")
         .send()
         .await
         .map_err(|e| format!("Elasticsearch request failed: {e}"))?;
+    let status = client.response_status(&resp);
+    if status.is_success() {
+        let indices: Vec<CatIndex> = resp.json().await.map_err(|e| format!("Elasticsearch parse error: {e}"))?;
+        return Ok(normalize_index_names(indices.into_iter().map(|i| i.index)));
+    }
+    if status == StatusCode::FORBIDDEN || status == StatusCode::UNAUTHORIZED {
+        return list_indices_via_metadata(client).await;
+    }
+    let body = resp.text().await.unwrap_or_default();
+    Err(format!("Elasticsearch error: {body}"))
+}
+
+/// 集群 `monitor` 不可用时的降级：`_resolve/index` 与 `_alias` 属于
+/// `indices:admin/*` 动作，`view_index_metadata`/`read` 索引权限即可访问，
+/// 且 ES 安全层会把结果过滤为当前账号可见的索引。
+async fn list_indices_via_metadata(client: &EsClient) -> Result<Vec<String>, String> {
+    // 优先 `_resolve/index`：同时覆盖普通索引与数据流（data stream）。
+    if let Some(names) = resolve_index_names(client).await? {
+        return Ok(names);
+    }
+    // 再退回 `_alias`：以对象 key 形式返回具体索引名。
+    alias_index_names(client).await
+}
+
+/// 通过 `GET /_resolve/index/*` 列举索引。该端点缺权限时返回 `Ok(None)`，
+/// 以便继续尝试 `_alias`；其它错误如实上抛。
+async fn resolve_index_names(client: &EsClient) -> Result<Option<Vec<String>>, String> {
+    let resp =
+        client.get("/_resolve/index/*").send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
+    let status = client.response_status(&resp);
+    if status == StatusCode::FORBIDDEN || status == StatusCode::UNAUTHORIZED {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Elasticsearch error: {body}"));
+    }
+    let body: ResolveIndexResponse = resp.json().await.map_err(|e| format!("Elasticsearch parse error: {e}"))?;
+    let names = body.indices.into_iter().chain(body.data_streams).map(|item| item.name);
+    Ok(Some(normalize_index_names(names)))
+}
+
+/// 通过 `GET /_alias` 列举索引（对象 key 即索引名）。
+async fn alias_index_names(client: &EsClient) -> Result<Vec<String>, String> {
+    let resp = client.get("/_alias").send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
     if !client.response_status(&resp).is_success() {
         let body = resp.text().await.unwrap_or_default();
         return Err(format!("Elasticsearch error: {body}"));
     }
-    let indices: Vec<CatIndex> = resp.json().await.map_err(|e| format!("Elasticsearch parse error: {e}"))?;
-    let mut names: Vec<String> = indices.into_iter().filter(|i| !i.index.starts_with('.')).map(|i| i.index).collect();
-    names.sort();
-    Ok(names)
+    let body: serde_json::Map<String, Value> =
+        resp.json().await.map_err(|e| format!("Elasticsearch parse error: {e}"))?;
+    Ok(normalize_index_names(body.into_iter().map(|(name, _)| name)))
 }
 
 pub async fn get_columns(client: &EsClient, index: &str) -> Result<Vec<crate::db::ColumnInfo>, String> {
@@ -479,6 +654,8 @@ fn push_mapping_column(
 
 #[derive(Deserialize)]
 struct SearchResponse {
+    #[serde(default)]
+    pit_id: Option<String>,
     hits: SearchHits,
     #[serde(rename = "_shards")]
     shards: Option<ElasticsearchShards>,
@@ -543,6 +720,68 @@ struct SearchHit {
     routing: Option<String>,
     #[serde(rename = "_source")]
     source: serde_json::Value,
+    #[serde(default)]
+    sort: Option<Vec<serde_json::Value>>,
+}
+
+const ES_PIT_KEEP_ALIVE: &str = "1m";
+const ES_MAX_RESULT_WINDOW: usize = 10_000;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum EsCursorKind {
+    Pit,
+}
+
+/// Opaque cursor used for PIT + search_after deep pagination.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EsDocumentCursor {
+    kind: EsCursorKind,
+    pit_id: String,
+    index: String,
+    search_after: Vec<serde_json::Value>,
+    sort_spec: Vec<serde_json::Value>,
+    size: usize,
+    keep_alive: String,
+    filter_json: Option<String>,
+    sort_json: Option<String>,
+}
+
+/// Opaque cursor used by the SQL/REST search path. It is either a PIT +
+/// search_after cursor for translated `_search` queries, or a raw ES SQL
+/// cursor returned by `_sql`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum EsSearchCursor {
+    Pit {
+        pit_id: String,
+        index: String,
+        search_after: Vec<serde_json::Value>,
+        body: serde_json::Value,
+        size: usize,
+        keep_alive: String,
+    },
+    Sql {
+        cursor: String,
+        columns_key: String,
+        columns: Vec<serde_json::Value>,
+    },
+}
+
+fn encode_es_cursor(cursor: &EsDocumentCursor) -> Result<String, String> {
+    serde_json::to_string(cursor).map_err(|e| format!("Failed to encode Elasticsearch cursor: {e}"))
+}
+
+fn decode_es_cursor(cursor: &str) -> Result<EsDocumentCursor, String> {
+    serde_json::from_str(cursor).map_err(|e| format!("Invalid Elasticsearch cursor: {e}"))
+}
+
+fn encode_es_search_cursor(cursor: &EsSearchCursor) -> Result<String, String> {
+    serde_json::to_string(cursor).map_err(|e| format!("Failed to encode Elasticsearch search cursor: {e}"))
+}
+
+fn decode_es_search_cursor(cursor: &str) -> Result<EsSearchCursor, String> {
+    serde_json::from_str(cursor).map_err(|e| format!("Invalid Elasticsearch search cursor: {e}"))
 }
 
 pub async fn find_documents(
@@ -566,6 +805,256 @@ pub async fn find_documents(
     let result: SearchResponse = resp.json().await.map_err(|e| format!("Elasticsearch parse error: {e}"))?;
 
     search_response_to_document_result(result)
+}
+
+async fn open_es_pit(client: &EsClient, index: &str, keep_alive: &str) -> Result<String, String> {
+    let path =
+        format!("/{}/_pit?keep_alive={}", elasticsearch_path_segment(index), elasticsearch_query_value(keep_alive));
+    let resp = client.post(&path).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
+    if !client.response_status(&resp).is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Elasticsearch error: {body}"));
+    }
+    let body: Value = resp.json().await.map_err(|e| format!("Elasticsearch PIT parse error: {e}"))?;
+    body.get("id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| "Elasticsearch PIT response missing id".to_string())
+}
+
+async fn close_es_pit(client: &EsClient, pit_id: &str) -> Result<(), String> {
+    let resp = client
+        .delete("/_pit")
+        .json(&serde_json::json!({ "id": pit_id }))
+        .send()
+        .await
+        .map_err(|e| format!("Elasticsearch request failed: {e}"))?;
+    if !client.response_status(&resp).is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Elasticsearch error: {body}"));
+    }
+    Ok(())
+}
+
+async fn close_es_sql_cursor(client: &EsClient, cursor: &str) -> Result<(), String> {
+    let resp = client
+        .post("/_sql/close")
+        .json(&serde_json::json!({ "cursor": cursor }))
+        .send()
+        .await
+        .map_err(|e| format!("Elasticsearch request failed: {e}"))?;
+    if !client.response_status(&resp).is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Elasticsearch error: {body}"));
+    }
+    Ok(())
+}
+
+/// Close a previously returned ES cursor. Supports DBX-wrapped PIT cursors,
+/// DBX-wrapped SQL cursors, and raw ES SQL cursors.
+pub async fn close_cursor(client: &EsClient, cursor: &str) -> Result<(), String> {
+    if let Ok(document_cursor) = decode_es_cursor(cursor) {
+        return match document_cursor.kind {
+            EsCursorKind::Pit => close_es_pit(client, &document_cursor.pit_id).await,
+        };
+    }
+    if let Ok(search_cursor) = decode_es_search_cursor(cursor) {
+        return match search_cursor {
+            EsSearchCursor::Pit { pit_id, .. } => close_es_pit(client, &pit_id).await,
+            EsSearchCursor::Sql { cursor, .. } => close_es_sql_cursor(client, &cursor).await,
+        };
+    }
+    close_es_sql_cursor(client, cursor).await
+}
+
+/// Build the sort used for PIT + search_after. Always appends `_shard_doc`
+/// as a stable tiebreaker so search_after never skips or repeats documents.
+fn elasticsearch_cursor_sort(sort: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+    let trimmed = sort.map(str::trim).filter(|value| !value.is_empty());
+    let mut items = match trimmed {
+        None => Vec::new(),
+        Some(sort) => match elasticsearch_sort_from_document_sort(Some(sort))? {
+            serde_json::Value::Array(items) => items,
+            other => return Err(format!("Elasticsearch sort must produce an array, got {other}")),
+        },
+    };
+    // The generic document sort uses "_doc" when no explicit sort is given.
+    // PIT + search_after needs a stable shard-level tiebreaker instead.
+    if items.len() == 1 && items[0].get("_doc").is_some() {
+        items.clear();
+    }
+    if items.iter().all(|item| item.get("_shard_doc").is_none()) {
+        items.push(serde_json::json!({ "_shard_doc": "asc" }));
+    }
+    Ok(items)
+}
+
+/// Decide whether a SELECT * query should use PIT + search_after.
+///
+/// The pagination plan always emits `LIMIT n OFFSET m` (even `OFFSET 0`), so a
+/// zero/absent `from` plus an OFFSET clause is treated as a plan first page.
+/// A user-written `OFFSET > 0` without a cursor keeps the legacy from/size path
+/// so explicit offsets are not silently ignored.
+fn should_use_search_cursor(body: &serde_json::Value, has_offset: bool, cursor: Option<&str>) -> bool {
+    if cursor.is_some() {
+        return true;
+    }
+    if !has_offset {
+        return false;
+    }
+    body.get("from").and_then(serde_json::Value::as_u64).is_none_or(|from| from == 0)
+}
+
+/// Ensure a `_search` body has a stable `_shard_doc` tiebreaker for PIT +
+/// search_after pagination. The body map is modified in place.
+fn ensure_search_sort_with_tiebreaker(body: &mut serde_json::Map<String, serde_json::Value>) {
+    let items = match body.get("sort").cloned().unwrap_or(serde_json::Value::Array(Vec::new())) {
+        serde_json::Value::Array(items) => items,
+        _ => Vec::new(),
+    };
+    let mut items = items;
+    // The generic document sort uses "_doc" when no explicit sort is given.
+    // PIT + search_after needs a stable shard-level tiebreaker instead.
+    if items.len() == 1 && items[0].get("_doc").is_some() {
+        items.clear();
+    }
+    if items.iter().all(|item| item.get("_shard_doc").is_none()) {
+        items.push(serde_json::json!({ "_shard_doc": "asc" }));
+    }
+    body.insert("sort".to_string(), serde_json::Value::Array(items));
+}
+
+fn build_es_cursor_search_body(
+    size: usize,
+    filter: Option<&str>,
+    sort_spec: &[serde_json::Value],
+    pit_id: &str,
+    keep_alive: &str,
+    search_after: Option<&[serde_json::Value]>,
+) -> Result<serde_json::Value, String> {
+    let mut body = serde_json::Map::new();
+    body.insert("size".to_string(), serde_json::json!(size));
+    body.insert("track_total_hits".to_string(), serde_json::json!(true));
+    if let Some(query) = elasticsearch_query_from_document_filter(filter)? {
+        body.insert("query".to_string(), query);
+    }
+    body.insert("sort".to_string(), serde_json::Value::Array(sort_spec.to_vec()));
+    body.insert("pit".to_string(), serde_json::json!({ "id": pit_id, "keep_alive": keep_alive }));
+    if let Some(search_after) = search_after.filter(|values| !values.is_empty()) {
+        body.insert("search_after".to_string(), serde_json::Value::Array(search_after.to_vec()));
+    }
+    Ok(serde_json::Value::Object(body))
+}
+
+/// Deep-paginate an ES index with PIT + search_after. `cursor` is the opaque
+/// string returned by a previous call; `None` opens a new PIT.
+pub async fn find_documents_with_cursor(
+    client: &EsClient,
+    index: &str,
+    limit: i64,
+    filter: Option<&str>,
+    sort: Option<&str>,
+    cursor: Option<&str>,
+) -> Result<DocumentQueryResult, String> {
+    let limit = limit.max(1).min(ES_MAX_RESULT_WINDOW as i64) as usize;
+    let filter_owned = filter.map(str::to_string);
+    let sort_owned = sort.map(str::to_string);
+    let keep_alive = ES_PIT_KEEP_ALIVE.to_string();
+
+    let (pit_id, search_after, sort_spec, filter_json, sort_json, size) = if let Some(cursor) = cursor {
+        let decoded = decode_es_cursor(cursor)?;
+        if decoded.index != index {
+            let _ = close_es_pit(client, &decoded.pit_id).await;
+            return Err("Elasticsearch cursor was created for a different index".to_string());
+        }
+        if decoded.filter_json.as_deref() != filter_owned.as_deref()
+            || decoded.sort_json.as_deref() != sort_owned.as_deref()
+        {
+            let _ = close_es_pit(client, &decoded.pit_id).await;
+            return Err(
+                "Elasticsearch cursor no longer matches the current filter/sort; refresh the document list".to_string()
+            );
+        }
+        (
+            decoded.pit_id,
+            Some(decoded.search_after.clone()),
+            decoded.sort_spec,
+            decoded.filter_json.clone(),
+            decoded.sort_json.clone(),
+            decoded.size,
+        )
+    } else {
+        let sort_spec = elasticsearch_cursor_sort(sort_owned.as_deref())?;
+        let pit_id = match open_es_pit(client, index, &keep_alive).await {
+            Ok(pit_id) => pit_id,
+            // Older ES/Easysearch versions may not support PIT. Fall back to
+            // the legacy first-page query so existing users are not broken.
+            Err(_) => return find_documents(client, index, 0, limit as i64, filter, sort).await,
+        };
+        (pit_id, None, sort_spec, filter_owned.clone(), sort_owned.clone(), limit)
+    };
+
+    let body = match build_es_cursor_search_body(
+        size,
+        filter_json.as_deref(),
+        &sort_spec,
+        &pit_id,
+        &keep_alive,
+        search_after.as_deref(),
+    ) {
+        Ok(body) => body,
+        Err(error) => {
+            let _ = close_es_pit(client, &pit_id).await;
+            return Err(error);
+        }
+    };
+    let resp =
+        client.post("/_search").json(&body).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
+
+    if !client.response_status(&resp).is_success() {
+        if cursor.is_none() {
+            let _ = close_es_pit(client, &pit_id).await;
+        }
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Elasticsearch error: {body}"));
+    }
+
+    let result: SearchResponse = resp.json().await.map_err(|e| format!("Elasticsearch parse error: {e}"))?;
+    let response_pit_id = result.pit_id.clone().unwrap_or(pit_id);
+    let last_sort = result.hits.hits.last().and_then(|hit| hit.sort.clone());
+    let next_cursor = if result.hits.hits.len() == size && last_sort.is_some() {
+        let next = EsDocumentCursor {
+            kind: EsCursorKind::Pit,
+            pit_id: response_pit_id.clone(),
+            index: index.to_string(),
+            search_after: last_sort.unwrap_or_default(),
+            sort_spec,
+            size,
+            keep_alive,
+            filter_json,
+            sort_json,
+        };
+        Some(encode_es_cursor(&next)?)
+    } else {
+        // The first page has no previous page to return to, so close the PIT
+        // when it is already exhausted instead of holding it open.
+        if cursor.is_none() {
+            let _ = close_es_pit(client, &response_pit_id).await;
+        }
+        None
+    };
+
+    let mut document_result = match search_response_to_document_result(result) {
+        Ok(result) => result,
+        Err(error) => {
+            if cursor.is_none() {
+                let _ = close_es_pit(client, &response_pit_id).await;
+            }
+            return Err(error);
+        }
+    };
+    document_result.next_cursor = next_cursor;
+    Ok(document_result)
 }
 
 #[derive(Deserialize)]
@@ -655,6 +1144,7 @@ fn search_response_to_document_result(result: SearchResponse) -> Result<Document
         extended_documents: None,
         total,
         total_is_exact,
+        next_cursor: None,
     })
 }
 
@@ -1161,19 +1651,28 @@ fn validate_elasticsearch_ndjson(body: &str) -> Result<String, String> {
 pub(crate) type SqlResponseParser = fn(&serde_json::Value, std::time::Instant) -> Option<QueryResult>;
 
 pub async fn execute_rest_query(client: &EsClient, input: &str) -> Result<QueryResult, String> {
-    execute_rest_query_with_sql_parser(client, input, parse_sql_response).await
+    execute_rest_query_with_sql_parser(client, input, parse_sql_response, None).await
+}
+
+pub async fn execute_rest_query_with_cursor(
+    client: &EsClient,
+    input: &str,
+    cursor: Option<&str>,
+) -> Result<QueryResult, String> {
+    execute_rest_query_with_sql_parser(client, input, parse_sql_response, cursor).await
 }
 
 pub(crate) async fn execute_rest_query_with_sql_parser(
     client: &EsClient,
     input: &str,
     sql_response_parser: SqlResponseParser,
+    cursor: Option<&str>,
 ) -> Result<QueryResult, String> {
     let start = std::time::Instant::now();
     let input = strip_leading_elasticsearch_comments(input);
 
     if let Some(search_query) = parse_select_star_search_query(input) {
-        return execute_search_query(client, search_query, start, sql_response_parser).await;
+        return execute_search_query(client, search_query, start, sql_response_parser, cursor).await;
     }
 
     if is_elasticsearch_sql_query(input) {
@@ -1189,13 +1688,13 @@ pub(crate) async fn execute_rest_query_with_sql_parser(
         let adapted_for_translator = adapt_elasticsearch_sql_query(input);
         match crate::db::elasticsearch_sql::translate_select_star(&adapted_for_translator) {
             Ok(Some(translated)) => {
-                return execute_translated_select_star(client, translated, start, sql_response_parser).await;
+                return execute_translated_select_star(client, translated, start, sql_response_parser, cursor).await;
             }
             Ok(None) => {}
             Err(message) => return Err(format!("Elasticsearch SQL error: {message}")),
         }
 
-        return execute_sql_query(client, input, start, sql_response_parser).await;
+        return execute_sql_query(client, input, start, sql_response_parser, cursor).await;
     }
 
     // CAT APIs default to text, so request JSON for an unformatted CAT call.
@@ -1227,6 +1726,7 @@ pub(crate) async fn execute_rest_query_with_sql_parser(
 // of documents. The result-grid surfaces the index's true total separately so
 // the user can see how much was actually held back.
 const AUTO_PAGED_SELECT_STAR_SIZE: usize = 100;
+const ES_SQL_FETCH_SIZE: usize = 10_000;
 
 struct ElasticsearchSearchQuery {
     index: String,
@@ -1244,22 +1744,162 @@ async fn execute_search_query(
     query: ElasticsearchSearchQuery,
     start: std::time::Instant,
     sql_response_parser: SqlResponseParser,
+    cursor: Option<&str>,
 ) -> Result<QueryResult, String> {
     let report_index_total = query.from_plan_pagination;
-    let path = elasticsearch_index_path(&query.index, "_search");
-    let resp =
-        client.post(&path).json(&query.body).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
+    // Only pagination-plan first pages (OFFSET 0) and explicit cursor
+    // continuations use PIT + search_after. A bare user `LIMIT n` or a
+    // user-written `OFFSET > 0` stays on the legacy from/size path.
+    let use_cursor = should_use_search_cursor(&query.body, query.from_plan_pagination, cursor);
+    let keep_alive = ES_PIT_KEEP_ALIVE.to_string();
+
+    if !use_cursor {
+        let path = elasticsearch_index_path(&query.index, "_search");
+        let resp = client
+            .post(&path)
+            .json(&query.body)
+            .send()
+            .await
+            .map_err(|e| format!("Elasticsearch request failed: {e}"))?;
+        let status = client.response_status(&resp).as_u16();
+        let body: serde_json::Value = resp.json().await.unwrap_or_else(|_| serde_json::Value::Null);
+        let index_total = body.pointer("/hits/total/value").and_then(|v| v.as_u64());
+        let mut result = parse_elasticsearch_response_with_sql_parser(status, body, start, sql_response_parser)?;
+        if report_index_total {
+            if let Some(total) = index_total {
+                result.affected_rows = total;
+            }
+        }
+        return Ok(result);
+    }
+
+    let (pit_id, search_after, base_body, size, index) = if let Some(cursor) = cursor {
+        match decode_es_search_cursor(cursor)? {
+            EsSearchCursor::Pit { pit_id, index, search_after, body, size, .. } => {
+                (pit_id, Some(search_after), body, size, index)
+            }
+            EsSearchCursor::Sql { cursor, .. } => {
+                let _ = close_es_sql_cursor(client, &cursor).await;
+                return Err("Elasticsearch SQL cursor cannot be used to continue a _search query".to_string());
+            }
+        }
+    } else {
+        let pit_id = match open_es_pit(client, &query.index, &keep_alive).await {
+            Ok(pit_id) => pit_id,
+            // Older ES/Easysearch versions may not support PIT. Fall back to
+            // the legacy from/size path so existing queries keep working.
+            Err(_) => {
+                let path = elasticsearch_index_path(&query.index, "_search");
+                let resp = client
+                    .post(&path)
+                    .json(&query.body)
+                    .send()
+                    .await
+                    .map_err(|e| format!("Elasticsearch request failed: {e}"))?;
+                let status = client.response_status(&resp).as_u16();
+                let body: serde_json::Value = resp.json().await.unwrap_or_else(|_| serde_json::Value::Null);
+                let index_total = body.pointer("/hits/total/value").and_then(|v| v.as_u64());
+                let mut result =
+                    parse_elasticsearch_response_with_sql_parser(status, body, start, sql_response_parser)?;
+                if report_index_total {
+                    if let Some(total) = index_total {
+                        result.affected_rows = total;
+                    }
+                }
+                return Ok(result);
+            }
+        };
+        let mut base_body = query.body;
+        if let Some(body) = base_body.as_object_mut() {
+            body.remove("from");
+            ensure_search_sort_with_tiebreaker(body);
+        }
+        let size =
+            base_body.get("size").and_then(serde_json::Value::as_u64).unwrap_or(AUTO_PAGED_SELECT_STAR_SIZE as u64)
+                as usize;
+        (pit_id, None, base_body, size, query.index.clone())
+    };
+    if cursor.is_some() && index != query.index {
+        let _ = close_es_pit(client, &pit_id).await;
+        return Err("Elasticsearch cursor was created for a different index".to_string());
+    }
+
+    let mut request_body = base_body.clone();
+    if let Some(body) = request_body.as_object_mut() {
+        body.insert("track_total_hits".to_string(), serde_json::json!(true));
+        body.insert("pit".to_string(), serde_json::json!({ "id": pit_id.clone(), "keep_alive": keep_alive.clone() }));
+        if let Some(search_after) = search_after.as_ref().filter(|values| !values.is_empty()) {
+            body.insert("search_after".to_string(), serde_json::Value::Array(search_after.clone()));
+        }
+    }
+
+    let resp = client
+        .post("/_search")
+        .json(&request_body)
+        .send()
+        .await
+        .map_err(|e| format!("Elasticsearch request failed: {e}"))?;
     let status = client.response_status(&resp).as_u16();
+    if status >= 400 {
+        if cursor.is_none() {
+            let _ = close_es_pit(client, &pit_id).await;
+        }
+        let error_body = resp.text().await.unwrap_or_default();
+        return Err(format!("Elasticsearch error: {error_body}"));
+    }
+
     let body: serde_json::Value = resp.json().await.unwrap_or_else(|_| serde_json::Value::Null);
+    let response_pit_id = body.get("pit_id").and_then(serde_json::Value::as_str).map(str::to_string).unwrap_or(pit_id);
     // Capture the index's true match total before the body is consumed by the
     // parser — needed below when we report total instead of rows.len().
     let index_total = body.pointer("/hits/total/value").and_then(|v| v.as_u64());
+    let hits = body.pointer("/hits/hits").and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
+    let last_sort = hits.last().and_then(|hit| hit.get("sort").and_then(serde_json::Value::as_array).cloned());
 
-    let mut result = parse_elasticsearch_response_with_sql_parser(status, body, start, sql_response_parser)?;
+    let has_next_page = use_cursor && hits.len() == size && last_sort.is_some();
+    let active_cursor = if has_next_page || cursor.is_some() {
+        let active = EsSearchCursor::Pit {
+            pit_id: response_pit_id.clone(),
+            index: index.clone(),
+            search_after: last_sort.clone().or_else(|| search_after.clone()).unwrap_or_default(),
+            body: base_body.clone(),
+            size,
+            keep_alive: keep_alive.clone(),
+        };
+        Some(encode_es_search_cursor(&active)?)
+    } else {
+        None
+    };
+    let next_cursor = if has_next_page {
+        active_cursor.clone()
+    } else {
+        // A first page that is already exhausted has no previous page to return
+        // to, so close the PIT instead of holding it open.
+        if use_cursor && cursor.is_none() {
+            let _ = close_es_pit(client, &response_pit_id).await;
+        }
+        None
+    };
+
+    let mut result = match parse_elasticsearch_response_with_sql_parser(status, body, start, sql_response_parser) {
+        Ok(result) => result,
+        Err(error) => {
+            if use_cursor && cursor.is_none() {
+                let _ = close_es_pit(client, &response_pit_id).await;
+            }
+            return Err(error);
+        }
+    };
     if report_index_total {
         if let Some(total) = index_total {
             result.affected_rows = total;
         }
+    }
+    if use_cursor {
+        // Keep the latest PIT id available for cleanup after an exhausted page.
+        let has_more = next_cursor.is_some();
+        result.session_id = next_cursor.or(active_cursor).or_else(|| cursor.map(str::to_string));
+        result.has_more = has_more;
     }
     Ok(result)
 }
@@ -1298,6 +1938,7 @@ fn parse_elasticsearch_response_with_sql_parser(
                 session_id: None,
                 has_more: false,
                 elasticsearch_raw_body: None,
+                messages: Vec::new(),
             })
         } else {
             Ok(json_response_result(status, &body, start))
@@ -1323,6 +1964,7 @@ fn parse_elasticsearch_response_with_sql_parser(
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         })
     } else {
         Ok(json_response_result(status, &body, start))
@@ -1494,6 +2136,7 @@ fn raw_json_response_result(
         session_id: None,
         has_more: false,
         elasticsearch_raw_body: None,
+        messages: Vec::new(),
     }
 }
 
@@ -1560,6 +2203,7 @@ fn parse_elasticsearch_rest_response_with_sql_parser(
         session_id: None,
         has_more: false,
         elasticsearch_raw_body: None,
+        messages: Vec::new(),
     })
 }
 
@@ -1665,26 +2309,181 @@ async fn execute_translated_select_star(
     translated: crate::db::elasticsearch_sql::TranslatedSelectStar,
     start: std::time::Instant,
     sql_response_parser: SqlResponseParser,
+    cursor: Option<&str>,
 ) -> Result<QueryResult, String> {
     let report_index_total = !translated.user_limited;
-    let path = elasticsearch_index_path(&translated.index, "_search");
+    let use_cursor = should_use_search_cursor(&translated.body, translated.from_plan_pagination, cursor);
+    let keep_alive = ES_PIT_KEEP_ALIVE.to_string();
+
+    if !use_cursor {
+        let path = elasticsearch_index_path(&translated.index, "_search");
+        let resp = client
+            .post(&path)
+            .json(&translated.body)
+            .send()
+            .await
+            .map_err(|e| format!("Elasticsearch request failed: {e}"))?;
+        let status = client.response_status(&resp).as_u16();
+        let body: serde_json::Value = resp.json().await.unwrap_or_else(|_| serde_json::Value::Null);
+        let index_total = body.pointer("/hits/total/value").and_then(|v| v.as_u64());
+        let mut result = parse_elasticsearch_response_with_sql_parser(status, body, start, sql_response_parser)?;
+        if report_index_total {
+            if let Some(total) = index_total {
+                result.affected_rows = total;
+            }
+        }
+        return Ok(result);
+    }
+
+    let (pit_id, search_after, base_body, size, index) = if let Some(cursor) = cursor {
+        match decode_es_search_cursor(cursor)? {
+            EsSearchCursor::Pit { pit_id, index, search_after, body, size, .. } => {
+                (pit_id, Some(search_after), body, size, index)
+            }
+            EsSearchCursor::Sql { cursor, .. } => {
+                let _ = close_es_sql_cursor(client, &cursor).await;
+                return Err("Elasticsearch SQL cursor cannot be used to continue a _search query".to_string());
+            }
+        }
+    } else {
+        let pit_id = match open_es_pit(client, &translated.index, &keep_alive).await {
+            Ok(pit_id) => pit_id,
+            // Older ES/Easysearch versions may not support PIT. Fall back to
+            // the legacy from/size path so existing queries keep working.
+            Err(_) => {
+                let path = elasticsearch_index_path(&translated.index, "_search");
+                let resp = client
+                    .post(&path)
+                    .json(&translated.body)
+                    .send()
+                    .await
+                    .map_err(|e| format!("Elasticsearch request failed: {e}"))?;
+                let status = client.response_status(&resp).as_u16();
+                let body: serde_json::Value = resp.json().await.unwrap_or_else(|_| serde_json::Value::Null);
+                let index_total = body.pointer("/hits/total/value").and_then(|v| v.as_u64());
+                let mut result =
+                    parse_elasticsearch_response_with_sql_parser(status, body, start, sql_response_parser)?;
+                if report_index_total {
+                    if let Some(total) = index_total {
+                        result.affected_rows = total;
+                    }
+                }
+                return Ok(result);
+            }
+        };
+        let mut base_body = translated.body;
+        if let Some(body) = base_body.as_object_mut() {
+            body.remove("from");
+            ensure_search_sort_with_tiebreaker(body);
+        }
+        let size =
+            base_body.get("size").and_then(serde_json::Value::as_u64).unwrap_or(AUTO_PAGED_SELECT_STAR_SIZE as u64)
+                as usize;
+        (pit_id, None, base_body, size, translated.index.clone())
+    };
+    if cursor.is_some() && index != translated.index {
+        let _ = close_es_pit(client, &pit_id).await;
+        return Err("Elasticsearch cursor was created for a different index".to_string());
+    }
+
+    let mut request_body = base_body.clone();
+    if let Some(body) = request_body.as_object_mut() {
+        body.insert("track_total_hits".to_string(), serde_json::json!(true));
+        body.insert("pit".to_string(), serde_json::json!({ "id": pit_id.clone(), "keep_alive": keep_alive.clone() }));
+        if let Some(search_after) = search_after.as_ref().filter(|values| !values.is_empty()) {
+            body.insert("search_after".to_string(), serde_json::Value::Array(search_after.clone()));
+        }
+    }
+
     let resp = client
-        .post(&path)
-        .json(&translated.body)
+        .post("/_search")
+        .json(&request_body)
         .send()
         .await
         .map_err(|e| format!("Elasticsearch request failed: {e}"))?;
     let status = client.response_status(&resp).as_u16();
-    let body: serde_json::Value = resp.json().await.unwrap_or_else(|_| serde_json::Value::Null);
-    let index_total = body.pointer("/hits/total/value").and_then(|v| v.as_u64());
+    if status >= 400 {
+        if cursor.is_none() {
+            let _ = close_es_pit(client, &pit_id).await;
+        }
+        let error_body = resp.text().await.unwrap_or_default();
+        return Err(format!("Elasticsearch error: {error_body}"));
+    }
 
-    let mut result = parse_elasticsearch_response_with_sql_parser(status, body, start, sql_response_parser)?;
+    let body: serde_json::Value = resp.json().await.unwrap_or_else(|_| serde_json::Value::Null);
+    let response_pit_id = body.get("pit_id").and_then(serde_json::Value::as_str).map(str::to_string).unwrap_or(pit_id);
+    let index_total = body.pointer("/hits/total/value").and_then(|v| v.as_u64());
+    let hits = body.pointer("/hits/hits").and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
+    let last_sort = hits.last().and_then(|hit| hit.get("sort").and_then(serde_json::Value::as_array).cloned());
+
+    let has_next_page = use_cursor && hits.len() == size && last_sort.is_some();
+    let active_cursor = if has_next_page || cursor.is_some() {
+        let active = EsSearchCursor::Pit {
+            pit_id: response_pit_id.clone(),
+            index: index.clone(),
+            search_after: last_sort.clone().or_else(|| search_after.clone()).unwrap_or_default(),
+            body: base_body.clone(),
+            size,
+            keep_alive: keep_alive.clone(),
+        };
+        Some(encode_es_search_cursor(&active)?)
+    } else {
+        None
+    };
+    let next_cursor = if has_next_page {
+        active_cursor.clone()
+    } else {
+        if use_cursor && cursor.is_none() {
+            let _ = close_es_pit(client, &response_pit_id).await;
+        }
+        None
+    };
+
+    let mut result = match parse_elasticsearch_response_with_sql_parser(status, body, start, sql_response_parser) {
+        Ok(result) => result,
+        Err(error) => {
+            if use_cursor && cursor.is_none() {
+                let _ = close_es_pit(client, &response_pit_id).await;
+            }
+            return Err(error);
+        }
+    };
     if report_index_total {
         if let Some(total) = index_total {
             result.affected_rows = total;
         }
     }
+    if use_cursor {
+        // Keep the latest PIT id available for cleanup after an exhausted page.
+        let has_more = next_cursor.is_some();
+        result.session_id = next_cursor.or(active_cursor).or_else(|| cursor.map(str::to_string));
+        result.has_more = has_more;
+    }
     Ok(result)
+}
+
+/// Split a trailing `LIMIT n OFFSET m` from an ES SQL statement. The OFFSET
+/// form is produced by the DBX pagination plan; it must be removed before
+/// sending the query to `_sql` so ES SQL cursor pagination can drive paging.
+/// A bare user `LIMIT n` (no OFFSET) is preserved as an explicit row cap.
+fn es_sql_pagination(query: &str) -> (String, Option<usize>) {
+    let trimmed = query.trim().trim_end_matches(';').trim();
+    let re =
+        Regex::new(r"(?i)^(.*?)\s+limit\s+(\d+)(?:\s+offset\s+(\d+))?\s*$").expect("valid ES SQL pagination regex");
+    if let Some(caps) = re.captures(trimmed) {
+        let limit = caps.get(2).and_then(|value| value.as_str().parse::<usize>().ok());
+        let offset = caps.get(3).and_then(|value| value.as_str().parse::<usize>().ok());
+        // Only the plan's `OFFSET 0` first page is safe to strip. A
+        // user-written `OFFSET > 0` must keep its explicit offset semantics.
+        if offset == Some(0) {
+            let base = caps.get(1).map(|value| value.as_str().trim().to_string()).unwrap_or_default();
+            (base, limit)
+        } else {
+            (trimmed.to_string(), limit)
+        }
+    } else {
+        (trimmed.to_string(), None)
+    }
 }
 
 async fn execute_sql_query(
@@ -1692,21 +2491,78 @@ async fn execute_sql_query(
     query: &str,
     start: std::time::Instant,
     sql_response_parser: SqlResponseParser,
+    cursor: Option<&str>,
 ) -> Result<QueryResult, String> {
-    let query = adapt_elasticsearch_sql_query(query);
-    let body = serde_json::json!({ "query": query });
+    let (body, mut column_metadata) = if let Some(cursor) = cursor {
+        if let Ok(search_cursor) = decode_es_search_cursor(cursor) {
+            match search_cursor {
+                EsSearchCursor::Sql { cursor, columns_key, columns } => {
+                    (serde_json::json!({ "cursor": cursor }), Some((columns_key, columns)))
+                }
+                EsSearchCursor::Pit { pit_id, .. } => {
+                    let _ = close_es_pit(client, &pit_id).await;
+                    return Err("Elasticsearch PIT cursor cannot be used to continue a _sql query".to_string());
+                }
+            }
+        } else {
+            (serde_json::json!({ "cursor": cursor }), None)
+        }
+    } else {
+        // The pagination plan rewrites ES SQL to `LIMIT n OFFSET m`. Strip the
+        // OFFSET form so ES SQL cursor pagination can return exactly `n` rows
+        // per page and continue beyond index.max_result_window.
+        let (base_query, limit) = es_sql_pagination(query);
+        let query = adapt_elasticsearch_sql_query(&base_query);
+        let fetch_size = limit.unwrap_or(ES_SQL_FETCH_SIZE);
+        (serde_json::json!({ "query": query, "fetch_size": fetch_size }), None)
+    };
+
     let resp =
         client.post("/_sql").json(&body).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
     let status = client.response_status(&resp);
-    let response_body: serde_json::Value = resp.json().await.unwrap_or_else(|_| serde_json::Value::Null);
+    let mut response_body: serde_json::Value = resp.json().await.unwrap_or_else(|_| serde_json::Value::Null);
 
     if !status.is_success() {
         return Err(format_sql_error(status, &response_body));
     }
 
-    sql_response_parser(&response_body, start).ok_or_else(|| {
-        let pretty = serde_json::to_string_pretty(&response_body).unwrap_or_else(|_| response_body.to_string());
-        format!("Unexpected Elasticsearch SQL response: {pretty}")
+    if response_body.get("schema").is_none() && response_body.get("columns").is_none() {
+        if let (Some(body), Some((columns_key, columns))) = (response_body.as_object_mut(), column_metadata.as_ref()) {
+            body.insert(columns_key.clone(), serde_json::Value::Array(columns.clone()));
+        }
+    }
+    if column_metadata.is_none() {
+        column_metadata = sql_cursor_column_metadata(&response_body);
+    }
+
+    let mut result = match sql_response_parser(&response_body, start) {
+        Some(result) => result,
+        None => {
+            if let Some(raw_cursor) = response_body.get("cursor").and_then(serde_json::Value::as_str) {
+                let _ = close_es_sql_cursor(client, raw_cursor).await;
+            }
+            let pretty = serde_json::to_string_pretty(&response_body).unwrap_or_else(|_| response_body.to_string());
+            return Err(format!("Unexpected Elasticsearch SQL response: {pretty}"));
+        }
+    };
+    // Wrap the raw ES SQL cursor so close_cursor can distinguish it from a PIT
+    // cursor and close it with POST /_sql/close.
+    if let Some(raw_cursor) = result.session_id.take() {
+        let (columns_key, columns) =
+            column_metadata.ok_or_else(|| "Elasticsearch SQL response missing column metadata".to_string())?;
+        result.session_id =
+            Some(encode_es_search_cursor(&EsSearchCursor::Sql { cursor: raw_cursor, columns_key, columns })?);
+    } else if let Some(cursor) = cursor {
+        // On an exhausted continuation, keep returning the cursor that was used
+        // so the frontend can still close the SQL cursor during cleanup.
+        result.session_id = Some(cursor.to_string());
+    }
+    Ok(result)
+}
+
+fn sql_cursor_column_metadata(body: &serde_json::Value) -> Option<(String, Vec<serde_json::Value>)> {
+    ["schema", "columns"].into_iter().find_map(|key| {
+        body.get(key).and_then(serde_json::Value::as_array).map(|columns| (key.to_string(), columns.clone()))
     })
 }
 
@@ -1996,6 +2852,7 @@ pub(crate) fn parse_tabular_sql_response(
         session_id: body.get("cursor").and_then(|cursor| cursor.as_str()).map(str::to_string),
         has_more: body.get("cursor").and_then(|cursor| cursor.as_str()).is_some(),
         elasticsearch_raw_body: None,
+        messages: Vec::new(),
     })
 }
 
@@ -2090,7 +2947,8 @@ fn parse_aggregations(aggs: &serde_json::Map<String, serde_json::Value>) -> (Vec
 mod tests {
     use super::{
         build_count_documents_body, build_find_documents_body, elasticsearch_accept_invalid_certs,
-        elasticsearch_base_url_fallbacks, redact_elasticsearch_url, EsClient, SearchResponse,
+        elasticsearch_base_url_fallbacks, elasticsearch_index_grouping, group_index_names, normalize_index_names,
+        redact_elasticsearch_url, EsClient, SearchResponse,
     };
     use serde_json::json;
     use std::time::Duration;
@@ -2135,6 +2993,89 @@ mod tests {
         assert_eq!(request.path, "/_nodes/stats/jvm?pretty");
         assert_eq!(request.body, None);
         assert_eq!(request.body_kind, super::ElasticsearchRestBodyKind::Json);
+    }
+
+    #[test]
+    fn normalize_index_names_filters_sorts_and_dedups() {
+        let names = normalize_index_names(
+            [".kibana", "ngx-log-2", "ngx-log-1", "ngx-log-1", ".security-7"].into_iter().map(String::from),
+        );
+        // 去掉点前缀内部索引、排序、去重。
+        assert_eq!(names, vec!["ngx-log-1".to_string(), "ngx-log-2".to_string()]);
+    }
+
+    #[test]
+    fn connectivity_check_disabled_parses_bool_and_string() {
+        use super::elasticsearch_connectivity_check_disabled as disabled;
+        assert!(!disabled(None));
+        assert!(!disabled(Some(&serde_json::json!({}))));
+        assert!(disabled(Some(&serde_json::json!({ "connectivityCheckDisabled": true }))));
+        assert!(disabled(Some(&serde_json::json!({ "connectivityCheckDisabled": "on" }))));
+        assert!(disabled(Some(&serde_json::json!({ "connectivityCheckDisabled": "TRUE" }))));
+        assert!(!disabled(Some(&serde_json::json!({ "connectivityCheckDisabled": false }))));
+        assert!(!disabled(Some(&serde_json::json!({ "connectivityCheckDisabled": "off" }))));
+    }
+
+    #[test]
+    fn group_index_names_off_by_default() {
+        // 缺省配置 → 关闭聚合，原样返回。
+        assert!(elasticsearch_index_grouping(None).is_none());
+        let raw = vec!["a-2026.08.04".to_string(), "a-2026.08.05".to_string()];
+        assert_eq!(group_index_names(raw.clone(), None), raw);
+    }
+
+    #[test]
+    fn group_index_names_tenant_level_with_capture_group() {
+        // 保留 `@<第一段>`（到第一个下划线），其后全部折叠成 `*`。用中性占位名。
+        let cfg = serde_json::json!({ "indexGroupingPattern": r"^([^@]*@[^_]+)_.*$" });
+        let re = elasticsearch_index_grouping(Some(&cfg));
+        let out = group_index_names(
+            vec![
+                "svc@alpha_r1-2026.08.06@0-000001".to_string(),
+                "svc@alpha_r1-2026.08.07@0-000001".to_string(),
+                "svc@beta_r1-2026.08.06@0-000001".to_string(),
+                "svc_err-2026.08.06@0-000001".to_string(), // 无 @ → 不匹配 → 原样
+            ],
+            re.as_ref(),
+        );
+        assert_eq!(
+            out,
+            vec!["svc@alpha*".to_string(), "svc@beta*".to_string(), "svc_err-2026.08.06@0-000001".to_string(),]
+        );
+    }
+
+    #[test]
+    fn group_index_names_tail_strip_without_capture_group() {
+        // 无捕获组：按 ES 惯例剥掉“日期+滚动号”尾巴，`${1}` 为空即替换成 `*`。
+        let cfg = serde_json::json!({ "indexGroupingPattern": r"[-_.@]\d{4}[-_.]?\d{2}[-_.]?\d{2}.*$" });
+        let re = elasticsearch_index_grouping(Some(&cfg));
+        let out = group_index_names(
+            vec!["logs-2026.08.06".to_string(), "logs-2026.08.07".to_string(), "orders-2026.08.01".to_string()],
+            re.as_ref(),
+        );
+        assert_eq!(out, vec!["logs*".to_string(), "orders*".to_string()]);
+    }
+
+    #[test]
+    fn group_index_names_mixed_tenant_and_plain_scheme() {
+        // 同一条正则同时处理：真租户（@后跟字母）折到 @租户；无租户的按名字剥日期尾巴；
+        // 普通非时间序列索引保持原样。区分点：真租户 @ 后是字母，滚动号 @ 后是数字。用中性名。
+        let cfg = serde_json::json!({ "indexGroupingPattern": r"^([^@]*@[a-zA-Z][a-zA-Z0-9]*|[^-@]*)[-_.@].*$" });
+        let re = elasticsearch_index_grouping(Some(&cfg));
+        let out = group_index_names(
+            vec![
+                "svc_err-2026.08.10@0-000001".to_string(), // 无租户 → svc_err*
+                "svc_err-2026.08.11@0-000001".to_string(),
+                "svc@alpha_r1-2026.08.10@0-000001".to_string(), // 带区域租户 → svc@alpha*
+                "svc@beta-2026.08.10@0-000001".to_string(),     // 无区域租户 → svc@beta*
+                "catalog".to_string(),                          // 普通索引无尾巴 → 原样
+            ],
+            re.as_ref(),
+        );
+        assert_eq!(
+            out,
+            vec!["catalog".to_string(), "svc@alpha*".to_string(), "svc@beta*".to_string(), "svc_err*".to_string(),]
+        );
     }
 
     #[test]
@@ -2206,6 +3147,51 @@ mod tests {
             vec!["https://127.0.0.1:9200".to_string()]
         );
         assert_eq!(elasticsearch_base_url_fallbacks("https://search.example.com:9200"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn disabled_connectivity_check_keeps_localhost_request_fallback() {
+        assert_eq!(
+            super::elasticsearch_localhost_resolve_addrs("https://localhost:9200", true),
+            Some(["[::1]:0".parse().unwrap(), "127.0.0.1:0".parse().unwrap()])
+        );
+        assert_eq!(super::elasticsearch_localhost_resolve_addrs("https://localhost:9200", false), None);
+        assert_eq!(super::elasticsearch_localhost_resolve_addrs("https://search.example.com:9200", true), None);
+    }
+
+    #[tokio::test]
+    async fn disabled_connectivity_check_can_request_ipv4_localhost() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.starts_with("GET /_cluster/health "), "unexpected request: {request}");
+            let body = r#"{"status":"green"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let mut client = EsClient::from_config(
+            &format!("http://localhost:{}", addr.port()),
+            None,
+            None,
+            false,
+            None,
+            Some(&json!({ "connectivityCheckDisabled": "yes" })),
+            Duration::from_secs(2),
+        );
+        super::test_connection(&mut client, Duration::from_secs(2)).await.unwrap();
+        let response = client.get("/_cluster/health").send().await.unwrap();
+
+        assert!(response.status().is_success());
+        server.await.unwrap();
     }
 
     #[test]
@@ -2387,6 +3373,239 @@ mod tests {
             })
         );
         assert!(body.get("track_total_hits").is_none());
+    }
+
+    #[test]
+    fn cursor_sort_appends_shard_doc_tiebreaker() {
+        assert_eq!(super::elasticsearch_cursor_sort(None).unwrap(), vec![serde_json::json!({ "_shard_doc": "asc" })]);
+        assert_eq!(
+            super::elasticsearch_cursor_sort(Some(r#"{"created_at":-1}"#)).unwrap(),
+            vec![serde_json::json!({ "created_at": { "order": "desc" } }), serde_json::json!({ "_shard_doc": "asc" })]
+        );
+    }
+
+    #[test]
+    fn cursor_search_body_includes_pit_and_search_after() {
+        let body = super::build_es_cursor_search_body(
+            25,
+            Some(r#"{"city":"长治"}"#),
+            &[serde_json::json!({ "created_at": { "order": "desc" } })],
+            "pit-1",
+            "1m",
+            Some(&[serde_json::json!("abc"), serde_json::json!(123)]),
+        )
+        .unwrap();
+
+        assert_eq!(
+            body,
+            json!({
+                "size": 25,
+                "track_total_hits": true,
+                "query": { "term": { "city": "长治" } },
+                "sort": [{ "created_at": { "order": "desc" } }],
+                "pit": { "id": "pit-1", "keep_alive": "1m" },
+                "search_after": ["abc", 123]
+            })
+        );
+    }
+
+    #[test]
+    fn es_sql_pagination_strips_plan_offset_but_keeps_user_limit() {
+        let (base, limit) = super::es_sql_pagination("SELECT field FROM idx LIMIT 500 OFFSET 0");
+        assert_eq!(base, "SELECT field FROM idx");
+        assert_eq!(limit, Some(500));
+
+        let (base, limit) = super::es_sql_pagination("SELECT field FROM idx LIMIT 10");
+        assert_eq!(base, "SELECT field FROM idx LIMIT 10");
+        assert_eq!(limit, Some(10));
+
+        let (base, limit) = super::es_sql_pagination("SELECT field FROM idx LIMIT 500 OFFSET 100");
+        assert_eq!(base, "SELECT field FROM idx LIMIT 500 OFFSET 100");
+        assert_eq!(limit, Some(500));
+
+        let (base, limit) = super::es_sql_pagination("SELECT field FROM idx");
+        assert_eq!(base, "SELECT field FROM idx");
+        assert_eq!(limit, None);
+    }
+
+    #[test]
+    fn should_use_search_cursor_distinguishes_plan_from_user_offset() {
+        let plan_first = serde_json::json!({ "size": 100 });
+        let user_offset = serde_json::json!({ "size": 100, "from": 5 });
+        assert!(super::should_use_search_cursor(&plan_first, true, None));
+        assert!(!super::should_use_search_cursor(&user_offset, true, None));
+        assert!(super::should_use_search_cursor(&user_offset, true, Some("cursor")));
+        assert!(!super::should_use_search_cursor(&plan_first, false, None));
+    }
+
+    #[test]
+    fn search_cursor_encode_decode_round_trips() {
+        let cursor = super::EsSearchCursor::Pit {
+            pit_id: "pit-1".to_string(),
+            index: "logs".to_string(),
+            search_after: vec![serde_json::json!("abc")],
+            body: serde_json::json!({ "size": 100, "query": { "match_all": {} } }),
+            size: 100,
+            keep_alive: "1m".to_string(),
+        };
+        let encoded = super::encode_es_search_cursor(&cursor).unwrap();
+        let decoded = super::decode_es_search_cursor(&encoded).unwrap();
+        match decoded {
+            super::EsSearchCursor::Pit { pit_id, search_after, .. } => {
+                assert_eq!(pit_id, "pit-1");
+                assert_eq!(search_after, vec![serde_json::json!("abc")]);
+            }
+            super::EsSearchCursor::Sql { .. } => panic!("expected PIT search cursor"),
+        }
+
+        let sql = super::EsSearchCursor::Sql {
+            cursor: "raw-sql-cursor".to_string(),
+            columns_key: "columns".to_string(),
+            columns: vec![serde_json::json!({ "name": "message", "type": "keyword" })],
+        };
+        let encoded = super::encode_es_search_cursor(&sql).unwrap();
+        match super::decode_es_search_cursor(&encoded).unwrap() {
+            super::EsSearchCursor::Sql { cursor, columns_key, columns } => {
+                assert_eq!(cursor, "raw-sql-cursor");
+                assert_eq!(columns_key, "columns");
+                assert_eq!(columns, vec![serde_json::json!({ "name": "message", "type": "keyword" })]);
+            }
+            super::EsSearchCursor::Pit { .. } => panic!("expected SQL cursor"),
+        }
+    }
+
+    #[tokio::test]
+    async fn pit_search_uses_global_endpoint_and_latest_pit_id() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.starts_with("POST /products/_pit?keep_alive=1m "), "{request}");
+            let response_body = r#"{"id":"pit-1"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.starts_with("POST /_search "), "{request}");
+            assert!(request.contains(r#""pit":{"id":"pit-1","keep_alive":"1m"}"#), "{request}");
+            let response_body = r#"{"pit_id":"pit-2","hits":{"total":{"value":2,"relation":"eq"},"hits":[{"_id":"1","_source":{"name":"one"},"sort":[1]}]}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        let result = super::find_documents_with_cursor(&client, "products", 1, None, None, None).await.unwrap();
+        server.await.unwrap();
+
+        let cursor = super::decode_es_cursor(result.next_cursor.as_deref().unwrap()).unwrap();
+        assert_eq!(cursor.pit_id, "pit-2");
+    }
+
+    #[tokio::test]
+    async fn sql_cursor_continuation_reuses_first_page_columns() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.starts_with("POST /_sql "), "{request}");
+            let response_body = r#"{"columns":[{"name":"name","type":"keyword"}],"rows":[["first"]],"cursor":"raw-1"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.starts_with("POST /_sql "), "{request}");
+            assert!(request.ends_with(r#"{"cursor":"raw-1"}"#), "{request}");
+            let response_body = r#"{"rows":[["second"]]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        let first = super::execute_rest_query(&client, "SELECT name FROM products").await.unwrap();
+        let second =
+            super::execute_rest_query_with_cursor(&client, "SELECT name FROM products", first.session_id.as_deref())
+                .await
+                .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(second.columns, vec!["name"]);
+        assert_eq!(second.rows, vec![vec![json!("second")]]);
+        assert!(!second.has_more);
+    }
+
+    #[tokio::test]
+    async fn closes_pit_and_sql_cursors_with_elasticsearch_protocols() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.starts_with("DELETE /_pit "), "{request}");
+            assert!(request.ends_with(r#"{"id":"pit-1"}"#), "{request}");
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+                .await
+                .unwrap();
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.starts_with("POST /_sql/close "), "{request}");
+            assert!(request.ends_with(r#"{"cursor":"sql-1"}"#), "{request}");
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+                .await
+                .unwrap();
+        });
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        super::close_es_pit(&client, "pit-1").await.unwrap();
+        super::close_es_sql_cursor(&client, "sql-1").await.unwrap();
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn cursor_encode_decode_round_trips() {
+        let cursor = super::EsDocumentCursor {
+            kind: super::EsCursorKind::Pit,
+            pit_id: "pit-1".to_string(),
+            index: "logs".to_string(),
+            search_after: vec![serde_json::json!("abc")],
+            sort_spec: vec![serde_json::json!({ "_shard_doc": "asc" })],
+            size: 100,
+            keep_alive: "1m".to_string(),
+            filter_json: Some(r#"{"city":"长治"}"#.to_string()),
+            sort_json: None,
+        };
+        let encoded = super::encode_es_cursor(&cursor).unwrap();
+        let decoded = super::decode_es_cursor(&encoded).unwrap();
+        assert_eq!(decoded.pit_id, "pit-1");
+        assert_eq!(decoded.search_after, vec![serde_json::json!("abc")]);
     }
 
     #[test]
@@ -3049,6 +4268,7 @@ mod tests {
             assert_eq!(query.get("path").map(String::as_str), Some("/missing/_doc/1?refresh=true"));
             assert_eq!(query.get("method").map(String::as_str), Some("DELETE"));
             assert!(headers.lines().any(|line| line.eq_ignore_ascii_case("kbn-xsrf: true")), "{headers}");
+            assert!(headers.lines().any(|line| line.eq_ignore_ascii_case("osd-xsrf: true")), "{headers}");
             assert!(headers.lines().any(|line| line.eq_ignore_ascii_case("authorization: Basic ZWxhc3RpYzpzZWNyZXQ=")));
             assert_eq!(serde_json::from_str::<serde_json::Value>(body).unwrap(), json!({ "reason": "cleanup" }));
 
@@ -3078,6 +4298,15 @@ mod tests {
 
         assert_eq!(result.rows[0][0], json!(404));
         assert_eq!(result.rows[0][1], json!(response_body));
+    }
+
+    #[test]
+    fn direct_transport_omits_proxy_xsrf_headers() {
+        let client = EsClient::new("http://localhost:9200", None, None, false, Duration::from_secs(1));
+        let request = client.get("/").build().unwrap();
+
+        assert!(!request.headers().contains_key("kbn-xsrf"));
+        assert!(!request.headers().contains_key("osd-xsrf"));
     }
 
     #[tokio::test]

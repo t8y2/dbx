@@ -369,10 +369,17 @@ pub async fn ai_stream(
         })
         .await;
 
-        if let Err(_e) = result {
-            let error_chunk =
-                AiStreamChunk { session_id: sid.clone(), delta: String::new(), reasoning_delta: None, done: true };
-            let _ = tx.send(serde_json::to_string(&error_chunk).unwrap_or_default());
+        if let Err(error) = result {
+            // Preserve the existing POST/SSE lifecycle, but make failure an
+            // explicit terminal payload so Web cannot mistake it for a
+            // successful empty response.
+            let error_chunk = serde_json::json!({
+                "session_id": sid.clone(),
+                "delta": "",
+                "done": true,
+                "error": error,
+            });
+            let _ = tx.send(error_chunk.to_string());
         }
 
         dbx_core::ai::unregister_stream(&sid).await;
@@ -527,12 +534,31 @@ mod tests {
             claude_code_cli_env: Default::default(),
             pi_agent_cli_path: None,
             pi_agent_cli_env: Default::default(),
+            opencode_cli_path: None,
+            opencode_cli_env: Default::default(),
+            cursor_cli_path: None,
+            cursor_cli_env: Default::default(),
+            grok_cli_path: None,
+            grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
+            qoder_cli_path: None,
+            qoder_cli_env: Default::default(),
         }
     }
 
     #[test]
     fn rejects_local_cli_providers_single() {
-        for provider in [AiProvider::CodexCli, AiProvider::ClaudeCodeCli, AiProvider::PiAgentCli] {
+        for provider in [
+            AiProvider::CodexCli,
+            AiProvider::ClaudeCodeCli,
+            AiProvider::PiAgentCli,
+            AiProvider::OpenCodeCli,
+            AiProvider::CursorCli,
+            AiProvider::GrokCli,
+            AiProvider::CodeBuddyCli,
+            AiProvider::QoderCli,
+        ] {
             let config = make_config(provider);
             assert!(reject_web_unsupported_ai_provider(&config).is_err());
         }
@@ -614,6 +640,16 @@ mod tests {
             claude_code_cli_env: Default::default(),
             pi_agent_cli_path: None,
             pi_agent_cli_env: Default::default(),
+            opencode_cli_path: None,
+            opencode_cli_env: Default::default(),
+            cursor_cli_path: None,
+            cursor_cli_env: Default::default(),
+            grok_cli_path: None,
+            grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
+            qoder_cli_path: None,
+            qoder_cli_env: Default::default(),
         };
 
         let body = super::AiTestConnectionRequest { config };

@@ -129,11 +129,19 @@ pub fn quote_table_identifier(database_type: Option<DatabaseType>, name: &str) -
             | DatabaseType::StarRocks
             | DatabaseType::ManticoreSearch
             | DatabaseType::Hive
+            | DatabaseType::Kyuubi
+            | DatabaseType::Impala
             | DatabaseType::Spark
+            | DatabaseType::Databricks
             | DatabaseType::Databend
             | DatabaseType::Tdengine
             | DatabaseType::Access
             | DatabaseType::Bigquery
+            // GoogleSQL (Spanner's default dialect) quotes identifiers with backticks;
+            // double quotes are string literals there, so `SELECT * FROM "users"` is a
+            // syntax error. PostgreSQL-dialect Spanner databases override this through
+            // the identifier quote reported by the agent on connect.
+            | DatabaseType::Spanner
             | DatabaseType::Questdb,
         ) => {
             format!("`{}`", name.replace('`', "``"))
@@ -378,6 +386,8 @@ pub(crate) fn quote_transfer_identifier(name: &str, database_type: &DatabaseType
         | DatabaseType::Doris
         | DatabaseType::StarRocks
         | DatabaseType::Hive
+        | DatabaseType::Kyuubi
+        | DatabaseType::Impala
         | DatabaseType::Spark
         | DatabaseType::Questdb => format!("`{}`", name.replace('`', "``")),
         DatabaseType::SqlServer => format!("[{}]", name.replace(']', "]]")),

@@ -1,0 +1,191 @@
+name: VSign Operator Bootstrap
+
+on:
+  push:
+    tags:
+      - "trustasia-vsign-init-*"
+
+permissions:
+  contents: read
+
+jobs:
+  bootstrap-operator:
+    runs-on: windows-2022
+    environment: release-signing
+    timeout-minutes: 15
+    steps:
+      - name: Download and verify VSign CLI
+        shell: pwsh
+        env:
+          VSIGN_CLI_URL: https://github.com/g5wsg/vsign-github-test1/releases/download/vsign-cli-v1/ssigncode.exe
+          VSIGN_CLI_SHA256: 25A680C653CF0E89BFD53D0A2399F4D748E33DE6644E15B0DAB29974765BFA40
+        run: |
+          $toolPath = Join-Path $env:RUNNER_TEMP "ssigncode.exe"
+          Invoke-WebRequest -Uri $env:VSIGN_CLI_URL -OutFile $toolPath
+
+          $actualHash = (Get-FileHash -LiteralPath $toolPath -Algorithm SHA256).Hash
+          if ($actualHash -ne $env:VSIGN_CLI_SHA256) {
+            throw "VSign CLI SHA256 mismatch. Expected $env:VSIGN_CLI_SHA256, got $actualHash"
+          }
+
+          "VSIGN_CLI=$toolPath" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "VSign CLI SHA256: $actualHash"
+
+      - name: Inspect VSign CLI commands
+        if: startsWith(github.ref_name, 'trustasia-vsign-init-probe-')
+        shell: pwsh
+        run: |
+          & $env:VSIGN_CLI version
+          if ($LASTEXITCODE -ne 0) {
+            throw "VSign CLI version command failed with exit code $LASTEXITCODE"
+          }
+
+          & $env:VSIGN_CLI install --help
+          if ($LASTEXITCODE -ne 0) {
+            throw "VSign CLI install help failed with exit code $LASTEXITCODE"
+          }
+
+          & $env:VSIGN_CLI vsign --help
+          if ($LASTEXITCODE -ne 0) {
+            throw "VSign CLI vsign help failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Install and export VSign operator
+        if: startsWith(github.ref_name, 'trustasia-vsign-init-run-')
+        shell: pwsh
+        env:
+          VSIGN_SERVER: ${{ vars.VSIGN_SERVER }}
+          VSIGN_OPERATOR_TOKEN: ${{ secrets.VSIGN_OPERATOR_TOKEN }}
+          VSIGN_KEY_PIN: ${{ secrets.VSIGN_KEY_PIN }}
+          VSIGN_OPERATOR_PWD: ${{ secrets.VSIGN_OPERATOR_PWD }}
+          VSIGN_ARTIFACT_PWD: ${{ secrets.VSIGN_ARTIFACT_PWD }}
+        run: |
+          $requiredValues = @{
+            VSIGN_SERVER = $env:VSIGN_SERVER
+            VSIGN_OPERATOR_TOKEN = $env:VSIGN_OPERATOR_TOKEN
+            VSIGN_KEY_PIN = $env:VSIGN_KEY_PIN
+            VSIGN_OPERATOR_PWD = $env:VSIGN_OPERATOR_PWD
+            VSIGN_ARTIFACT_PWD = $env:VSIGN_ARTIFACT_PWD
+          }
+          foreach ($entry in $requiredValues.GetEnumerator()) {
+            if ([string]::IsNullOrWhiteSpace($entry.Value)) {
+              throw "$($entry.Key) is not configured"
+            }
+          }
+
+          $operatorDir = Join-Path $env:RUNNER_TEMP "vsign-operator"
+          $operatorFile = Join-Path $operatorDir "dbx-github-ci@ssigncode.pfx"
+          $bundleDir = Join-Path $env:RUNNER_TEMP "vsign-bundle"
+          $bundlePath = Join-Path $env:RUNNER_TEMP "vsign-operator-bundle.7z"
+          New-Item -ItemType Directory -Force -Path $operatorDir, $bundleDir | Out-Null
+
+          $env:SSIGNCODE_OPERATOR_STORE = "file"
+          $env:SSIGNCODE_OPERATOR_DIR = $operatorDir
+          $env:SSIGNCODE_OPERATOR_FILE = $operatorFile
+          $env:SSIGNCODE_OPERATOR_PWD = $env:VSIGN_OPERATOR_PWD
+
+          & $env:VSIGN_CLI install `
+            -s $env:VSIGN_SERVER `
+            --auth $env:VSIGN_OPERATOR_TOKEN `
+            --vsign `
+            --key_pin $env:VSIGN_KEY_PIN
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "VSign operator installation failed with exit code $LASTEXITCODE"
+          }
+
+          $pfxCandidates = @(
+            Get-ChildItem -LiteralPath $operatorDir -Filter "*.pfx" -File -Recurse -ErrorAction SilentlyContinue
+            Get-ChildItem -LiteralPath $env:USERPROFILE -Filter "*@ssigncode.pfx" -File -Recurse -ErrorAction SilentlyContinue
+          ) | Sort-Object LastWriteTimeUtc -Descending -Unique
+
+          if ($pfxCandidates.Count -eq 0) {
+            throw "VSign operator installation completed but no PFX file was found"
+          }
+
+          $sourcePfx = $pfxCandidates[0]
+          $flags = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable `
+            -bor [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet
+          $operatorCert = $null
+          foreach ($candidatePassword in @($env:VSIGN_OPERATOR_PWD, $env:VSIGN_KEY_PIN, "")) {
+            try {
+              $operatorCert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+                $sourcePfx.FullName,
+                $candidatePassword,
+                $flags
+              )
+              if ($operatorCert.HasPrivateKey) {
+                break
+              }
+              $operatorCert.Dispose()
+              $operatorCert = $null
+            }
+            catch {
+              $operatorCert = $null
+            }
+          }
+
+          if ($null -eq $operatorCert) {
+            throw "The generated operator PFX could not be opened with the configured passwords"
+          }
+
+          try {
+            $exportedPfx = Join-Path $bundleDir "dbx-github-ci@ssigncode.pfx"
+            $pfxBytes = $operatorCert.Export(
+              [System.Security.Cryptography.X509Certificates.X509ContentType]::Pfx,
+              $env:VSIGN_OPERATOR_PWD
+            )
+            [IO.File]::WriteAllBytes($exportedPfx, $pfxBytes)
+
+            $thumbprint = $operatorCert.Thumbprint.Replace(" ", "").ToUpperInvariant()
+            $metadata = [ordered]@{
+              operator = "dbx-github-ci"
+              sha1 = $thumbprint
+              expires = $operatorCert.NotAfter.ToUniversalTime().ToString("o")
+              pfx_sha256 = (Get-FileHash -LiteralPath $exportedPfx -Algorithm SHA256).Hash
+              run_id = $env:GITHUB_RUN_ID
+            }
+            $metadata | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $bundleDir "metadata.json") -Encoding utf8
+
+            $sevenZip = "C:\Program Files\7-Zip\7z.exe"
+            if (!(Test-Path -LiteralPath $sevenZip -PathType Leaf)) {
+              throw "7-Zip was not found on the Windows runner"
+            }
+
+            & $sevenZip a -t7z "-p$env:VSIGN_ARTIFACT_PWD" -mhe=on $bundlePath (Join-Path $bundleDir "*")
+            if ($LASTEXITCODE -ne 0) {
+              throw "Encrypted operator bundle creation failed with exit code $LASTEXITCODE"
+            }
+
+            "VSIGN_OPERATOR_SHA1=$thumbprint" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+            "VSIGN_BUNDLE_PATH=$bundlePath" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+            Write-Host "Operator PFX created and encrypted for retrieval."
+            Write-Host "Operator certificate SHA1: $thumbprint"
+          }
+          finally {
+            $operatorCert.Dispose()
+          }
+
+      - name: Upload encrypted operator bundle
+        if: startsWith(github.ref_name, 'trustasia-vsign-init-run-')
+        uses: actions/upload-artifact@v4
+        with:
+          name: vsign-operator-${{ github.run_id }}
+          path: ${{ env.VSIGN_BUNDLE_PATH }}
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Remove temporary VSign files
+        if: always()
+        shell: pwsh
+        run: |
+          foreach ($path in @(
+            (Join-Path $env:RUNNER_TEMP "ssigncode.exe"),
+            (Join-Path $env:RUNNER_TEMP "vsign-operator"),
+            (Join-Path $env:RUNNER_TEMP "vsign-bundle"),
+            (Join-Path $env:RUNNER_TEMP "vsign-operator-bundle.7z")
+          )) {
+            if (Test-Path -LiteralPath $path) {
+              Remove-Item -LiteralPath $path -Recurse -Force
+            }
+          }

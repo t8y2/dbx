@@ -29,7 +29,8 @@ test("tracks database export progress and cancels through database export API", 
   });
 
   assert.equal(task.kind, "database-export");
-  assert.equal(task.tableName, "users");
+  assert.equal(task.tableName, "app");
+  assert.equal(task.currentObject, "users");
   assert.equal(task.objectIndex, 2);
   assert.equal(task.totalObjects, 5);
   assert.equal(tracker.activeCount.value, 1);

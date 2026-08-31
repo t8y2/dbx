@@ -13,6 +13,10 @@ describe("webPath", () => {
     expect(webPath("/", "/dbx")).toBe("/dbx/");
     expect(webPath("/icons/database/mysql.svg", "/dbx")).toBe("/dbx/icons/database/mysql.svg");
     expect(webPath("/icons/ai/openai.svg", "/dbx")).toBe("/dbx/icons/ai/openai.svg");
+    expect(webPath("/logo.png", "/dbx")).toBe("/dbx/logo.png");
+    expect(webPath("/logo-black.png", "/dbx")).toBe("/dbx/logo-black.png");
+    expect(webPath("/icon-preview-default.png", "/dbx")).toBe("/dbx/icon-preview-default.png");
+    expect(webPath("/icon-preview-black.png", "/dbx")).toBe("/dbx/icon-preview-black.png");
     expect(apiUrl("/auth/check", "/dbx")).toBe("/dbx/api/auth/check");
     expect(apiUrl("/api/auth/check", "/dbx")).toBe("/dbx/api/auth/check");
     expect(apiUrl("api/auth/check", "/dbx")).toBe("/dbx/api/auth/check");

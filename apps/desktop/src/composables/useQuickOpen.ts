@@ -1,11 +1,13 @@
 import { computed, ref, watch } from "vue";
 import type { ConnectionConfig } from "@/types/database";
 import type { SqlCompletionTable } from "@/lib/sql/sqlCompletion";
+import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import * as api from "@/lib/backend/api";
 import type { SqlFileEntry } from "@/lib/backend/api";
 import { getSqlFileFolderPaths, sqlFileFoldersVersion } from "@/lib/sqlFile/sqlFileFolders";
+import i18n from "@/i18n";
 
 const REMOTE_SEARCH_DEBOUNCE_MS = 180;
 const REMOTE_SEARCH_MIN_QUERY_LENGTH = 2;
@@ -17,7 +19,7 @@ const QUICK_OPEN_MAX_RESULTS = 200;
 const INITIAL_SQL_LIBRARY_LIMIT = 20;
 const INITIAL_SQL_FILE_LIMIT = 20;
 
-const REMOTE_SEARCH_UNSUPPORTED_TYPES = new Set<ConnectionConfig["db_type"]>(["redis", "mongodb", "elasticsearch", "easysearch", "qdrant", "milvus", "weaviate", "chromadb", "neo4j", "influxdb", "etcd", "zookeeper", "mq", "nacos"]);
+const REMOTE_SEARCH_UNSUPPORTED_TYPES = new Set<ConnectionConfig["db_type"]>(["redis", "mongodb", "elasticsearch", "easysearch", "meilisearch", "qdrant", "milvus", "weaviate", "chromadb", "neo4j", "influxdb", "victoriametrics", "etcd", "zookeeper", "mq", "nacos", "consul"]);
 
 export interface QuickOpenItem {
   id: string;
@@ -35,45 +37,141 @@ export interface QuickOpenItem {
   sqlFileId?: string; // For saved SQL library files
 }
 
-/**
- * Fuzzy match function that checks if query matches text
- * Returns the matched indices for highlighting
- */
-function fuzzyMatch(query: string, text: string): { score: number; indices: number[] } | null {
-  const lowerQuery = query.toLowerCase();
-  const lowerText = text.toLowerCase();
+export type QuickOpenMatchKind = "exact" | "initials" | "prefix" | "word-prefix" | "substring" | "fuzzy";
 
-  if (!lowerQuery) return { score: Infinity, indices: [] };
-  if (lowerText.includes(lowerQuery)) {
-    // Exact substring match gets highest score
-    const startIdx = lowerText.indexOf(lowerQuery);
-    return {
-      score: 1,
-      indices: Array.from({ length: lowerQuery.length }, (_, i) => startIdx + i),
-    };
+export interface QuickOpenMatch {
+  kind: QuickOpenMatchKind;
+  score: number;
+  indices: number[];
+}
+
+interface IdentifierWord {
+  text: string;
+  start: number;
+}
+
+const IDENTIFIER_SEPARATOR_RE = /[_\-. /\\]/;
+
+function identifierWords(text: string): IdentifierWord[] {
+  const words: IdentifierWord[] = [];
+  let start = -1;
+
+  function pushWord(end: number): void {
+    if (start < 0 || end <= start) return;
+    words.push({ text: text.slice(start, end), start });
   }
 
-  // Fuzzy match: find all characters in order
-  let queryIdx = 0;
-  const indices: number[] = [];
-  let score = 0;
-  let lastMatchIdx = -1;
-
-  for (let i = 0; i < lowerText.length && queryIdx < lowerQuery.length; i++) {
-    if (lowerText[i] === lowerQuery[queryIdx]) {
-      indices.push(i);
-      // Score based on proximity (consecutive chars score better)
-      score += lastMatchIdx === i - 1 ? 2 : 1;
-      lastMatchIdx = i;
-      queryIdx++;
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index];
+    if (IDENTIFIER_SEPARATOR_RE.test(char)) {
+      pushWord(index);
+      start = -1;
+      continue;
+    }
+    if (start < 0) {
+      start = index;
+      continue;
+    }
+    const previous = text[index - 1];
+    if (previous >= "a" && previous <= "z" && char >= "A" && char <= "Z") {
+      pushWord(index);
+      start = index;
     }
   }
+  pushWord(text.length);
+  return words;
+}
 
-  if (queryIdx === lowerQuery.length) {
-    return { score: score / lowerQuery.length, indices };
+function rangeIndices(start: number, length: number): number[] {
+  return Array.from({ length }, (_, index) => start + index);
+}
+
+function matchWordPrefixes(words: IdentifierWord[], query: string): number[] | null {
+  interface PrefixState {
+    queryIndex: number;
+    firstWordIndex: number;
+    lastWordIndex: number;
+    usedWords: number;
+    indices: number[];
   }
 
-  return null;
+  function stateScore(state: PrefixState): number {
+    if (state.usedWords === 0) return 0;
+    return (state.lastWordIndex - state.firstWordIndex - state.usedWords + 1) * 10 + state.usedWords;
+  }
+
+  function retainBest(states: Map<string, PrefixState>, candidate: PrefixState): void {
+    const key = `${candidate.queryIndex}:${candidate.usedWords}`;
+    const current = states.get(key);
+    if (!current || stateScore(candidate) < stateScore(current)) states.set(key, candidate);
+  }
+
+  let states = new Map<string, PrefixState>([["0:0", { queryIndex: 0, firstWordIndex: -1, lastWordIndex: -1, usedWords: 0, indices: [] }]]);
+  for (let wordIndex = 0; wordIndex < words.length; wordIndex++) {
+    const nextStates = new Map(states);
+    const word = words[wordIndex];
+    const lowerWord = word.text.toLowerCase();
+    for (const state of states.values()) {
+      const maxLength = Math.min(lowerWord.length, query.length - state.queryIndex);
+      for (let length = 1; length <= maxLength; length++) {
+        if (lowerWord.slice(0, length) !== query.slice(state.queryIndex, state.queryIndex + length)) break;
+        retainBest(nextStates, {
+          queryIndex: state.queryIndex + length,
+          firstWordIndex: state.usedWords === 0 ? wordIndex : state.firstWordIndex,
+          lastWordIndex: wordIndex,
+          usedWords: state.usedWords + 1,
+          indices: [...state.indices, ...rangeIndices(word.start, length)],
+        });
+      }
+    }
+    states = nextStates;
+  }
+
+  return [...states.values()].filter((state) => state.queryIndex === query.length && state.usedWords >= 2).sort((a, b) => stateScore(a) - stateScore(b))[0]?.indices ?? null;
+}
+
+/** Match one quick-open field and return label-relative highlight indices. */
+export function matchQuickOpenText(query: string, text: string): QuickOpenMatch | null {
+  const lowerQuery = query.trim().toLowerCase();
+  const lowerText = text.toLowerCase();
+  if (!lowerQuery) return { kind: "exact", score: Infinity, indices: [] };
+
+  if (lowerText === lowerQuery) {
+    return { kind: "exact", score: 1, indices: rangeIndices(0, text.length) };
+  }
+
+  const words = identifierWords(text);
+  const initials = words.map((word) => word.text[0]?.toLowerCase() ?? "").join("");
+  if (words.length >= 2 && initials === lowerQuery) {
+    return { kind: "initials", score: 100 + Math.min(words.length, 99), indices: words.map((word) => word.start) };
+  }
+
+  if (lowerText.startsWith(lowerQuery)) {
+    return { kind: "prefix", score: 200 + Math.min(text.length - lowerQuery.length, 99), indices: rangeIndices(0, lowerQuery.length) };
+  }
+
+  const wordPrefixIndices = matchWordPrefixes(words, lowerQuery);
+  if (wordPrefixIndices) {
+    return { kind: "word-prefix", score: 300 + Math.min(text.length - lowerQuery.length, 99), indices: wordPrefixIndices };
+  }
+
+  const substringIndex = lowerText.indexOf(lowerQuery);
+  if (substringIndex >= 0) {
+    return { kind: "substring", score: 400 + Math.min(substringIndex, 99), indices: rangeIndices(substringIndex, lowerQuery.length) };
+  }
+
+  if (lowerQuery.length < 2) return null;
+  const indices: number[] = [];
+  let queryIndex = 0;
+  for (let index = 0; index < lowerText.length && queryIndex < lowerQuery.length; index++) {
+    if (lowerText[index] !== lowerQuery[queryIndex]) continue;
+    indices.push(index);
+    queryIndex++;
+  }
+  if (queryIndex !== lowerQuery.length) return null;
+
+  const span = indices[indices.length - 1] - indices[0] + 1;
+  return { kind: "fuzzy", score: 500 + Math.min(span - lowerQuery.length, 99), indices };
 }
 
 interface MatchedItem extends QuickOpenItem {
@@ -111,31 +209,28 @@ export function useQuickOpen() {
   let remoteSearchGeneration = 0;
   let remoteSearchTimer: ReturnType<typeof setTimeout> | undefined;
   let activeRemoteRequests = 0;
-  const remoteRequestWaiters: Array<() => void> = [];
+  const remoteRequestWaiters: Array<{ generation: number; resolve: (acquired: boolean) => void }> = [];
   let sqlFilesLoaded = false;
   let sqlFilesLoadingPromise: Promise<void> | null = null;
   let sqlFilesLoadGeneration = 0;
 
   function getConnectionLabel(connectionId: string): string {
+    if (!connectionId) return i18n.global.t("sqlLibrary.unassociated");
     const conn = connectionStore.connections.find((c) => c.id === connectionId);
-    return conn?.name || connectionId;
+    return conn?.name || i18n.global.t("sqlLibrary.deletedConnection");
   }
 
   const sqlLibraryAllItems = computed<QuickOpenItem[]>(() => {
-    const activeConnectionIds = new Set(connectionStore.connections.map((c) => c.id));
-    const orphanedIds = savedSqlStore.orphanedFileIds(activeConnectionIds);
-    return savedSqlStore.allFiles
-      .filter((file) => !orphanedIds.has(file.id))
-      .map((file) => ({
-        id: `sqllib-${file.id}`,
-        type: "sql_library_file" as const,
-        label: file.name,
-        description: getConnectionLabel(file.connectionId),
-        connectionId: file.connectionId,
-        connectionName: getConnectionLabel(file.connectionId),
-        sqlFileId: file.id,
-        searchText: `${file.name} ${getConnectionLabel(file.connectionId)}`,
-      }));
+    return savedSqlStore.allFiles.map((file) => ({
+      id: `sqllib-${file.id}`,
+      type: "sql_library_file" as const,
+      label: file.name,
+      description: getConnectionLabel(file.connectionId),
+      connectionId: file.connectionId,
+      connectionName: getConnectionLabel(file.connectionId),
+      sqlFileId: file.id,
+      searchText: `${file.name} ${getConnectionLabel(file.connectionId)}`,
+    }));
   });
 
   const sqlLibraryRecentItems = computed<QuickOpenItem[]>(() => {
@@ -440,7 +535,8 @@ export function useQuickOpen() {
   }
 
   function remoteTableItem(table: SqlCompletionTable, conn: ConnectionConfig, database: string): QuickOpenItem {
-    const type = table.type ?? "table";
+    // Completion "tables" may carry routine navigation types; quick-open relation entries only accept relation kinds.
+    const type = table.type === "view" || table.type === "materialized_view" ? table.type : "table";
     const prefix = type === "materialized_view" ? "mview" : type;
     return {
       id: `${prefix}-${conn.id}-${database}-${table.schema || ""}-${table.name}`,
@@ -467,12 +563,20 @@ export function useQuickOpen() {
 
   function remoteSearchContexts(): Array<{ conn: ConnectionConfig; database: string }> {
     if (typeof connectionStore.listCompletionTables !== "function") return [];
-    const connectedIds = connectionStore.connectedIds;
-    if (!(connectedIds instanceof Set)) return [];
 
     const databasesByConnection: Array<{ conn: ConnectionConfig; databases: string[] }> = [];
-    for (const conn of connectionStore.connections) {
-      if (!connectedIds.has(conn.id) || REMOTE_SEARCH_UNSUPPORTED_TYPES.has(conn.db_type)) continue;
+    const orderedConnections = [...connectionStore.connections].sort((left, right) => {
+      const priority = (conn: ConnectionConfig) => {
+        if (conn.id === connectionStore.activeConnectionId) return 0;
+        if (connectionStore.connectedIds.has(conn.id)) return 1;
+        return 2;
+      };
+      return priority(left) - priority(right);
+    });
+    for (const conn of orderedConnections) {
+      // listCompletionTables connects on demand. Keeping disconnected connections
+      // out here makes quick-open blind to unloaded tables after a cold start.
+      if (REMOTE_SEARCH_UNSUPPORTED_TYPES.has(conn.db_type)) continue;
       const databases = new Set<string>();
       collectConnectionDatabases(connectionStore.treeNodes, conn.id, databases);
       if (conn.database?.trim()) databases.add(conn.database.trim());
@@ -482,6 +586,8 @@ export function useQuickOpen() {
       for (const database of conn.attached_databases ?? []) {
         if (database.name.trim()) databases.add(database.name.trim());
       }
+      const defaultDatabase = resolveDefaultDatabase(conn, [...databases]);
+      if (defaultDatabase) databases.add(defaultDatabase);
       if (databases.size > 0) databasesByConnection.push({ conn, databases: [...databases] });
     }
 
@@ -500,39 +606,54 @@ export function useQuickOpen() {
     return contexts;
   }
 
-  async function acquireRemoteRequestSlot(): Promise<void> {
+  async function acquireRemoteRequestSlot(generation: number): Promise<boolean> {
+    if (generation !== remoteSearchGeneration) return false;
     if (activeRemoteRequests < REMOTE_SEARCH_CONCURRENCY) {
       activeRemoteRequests++;
-      return;
+      return true;
     }
-    await new Promise<void>((resolve) => remoteRequestWaiters.push(resolve));
+    return new Promise<boolean>((resolve) => remoteRequestWaiters.push({ generation, resolve }));
+  }
+
+  function cancelStaleRemoteRequestWaiters(generation: number): void {
+    for (let index = remoteRequestWaiters.length - 1; index >= 0; index -= 1) {
+      const waiter = remoteRequestWaiters[index]!;
+      if (waiter.generation === generation) continue;
+      remoteRequestWaiters.splice(index, 1);
+      waiter.resolve(false);
+    }
   }
 
   function releaseRemoteRequestSlot(): void {
-    const next = remoteRequestWaiters.shift();
-    if (next) next();
+    let next = remoteRequestWaiters.shift();
+    while (next && next.generation !== remoteSearchGeneration) {
+      next.resolve(false);
+      next = remoteRequestWaiters.shift();
+    }
+    if (next) next.resolve(true);
     else activeRemoteRequests--;
   }
 
   async function runRemoteSearch(query: string, generation: number, contexts: Array<{ conn: ConnectionConfig; database: string }>): Promise<void> {
-    const groups = await Promise.all(
-      contexts.map(async ({ conn, database }) => {
-        await acquireRemoteRequestSlot();
+    const groups = contexts.map(() => [] as QuickOpenItem[]);
+    await Promise.all(
+      contexts.map(async ({ conn, database }, index) => {
+        const acquired = await acquireRemoteRequestSlot(generation);
+        if (!acquired) return;
         try {
           // A newer query may supersede queued work before it reaches the metadata API.
-          if (generation !== remoteSearchGeneration) return [];
-          const tables = await connectionStore.listCompletionTables(conn.id, database, query, REMOTE_SEARCH_RESULTS_PER_REQUEST, undefined, true);
-          return tables.slice(0, REMOTE_SEARCH_RESULTS_PER_REQUEST).map((table) => remoteTableItem(table, conn, database));
+          if (generation !== remoteSearchGeneration) return;
+          const tables = await connectionStore.listCompletionTables(conn.id, database, query, REMOTE_SEARCH_RESULTS_PER_REQUEST, undefined, true, undefined, undefined, { activateConnection: false });
+          if (generation !== remoteSearchGeneration) return;
+          groups[index] = tables.slice(0, REMOTE_SEARCH_RESULTS_PER_REQUEST).map((table) => remoteTableItem(table, conn, database));
+          remoteItems.value = groups.flat().slice(0, REMOTE_SEARCH_MAX_RESULTS);
         } catch {
-          return [];
+          return;
         } finally {
           releaseRemoteRequestSlot();
         }
       }),
     );
-
-    if (generation !== remoteSearchGeneration) return;
-    remoteItems.value = groups.flat().slice(0, REMOTE_SEARCH_MAX_RESULTS);
   }
 
   /**
@@ -549,7 +670,9 @@ export function useQuickOpen() {
   watch(
     searchQuery,
     (query) => {
+      selectedIndex.value = 0;
       const generation = ++remoteSearchGeneration;
+      cancelStaleRemoteRequestWaiters(generation);
       if (remoteSearchTimer) clearTimeout(remoteSearchTimer);
       remoteItems.value = [];
 
@@ -590,12 +713,14 @@ export function useQuickOpen() {
       const key = quickOpenItemKey(item);
       if (seen.has(key)) continue;
       seen.add(key);
-      const result = fuzzyMatch(searchQuery.value, item.searchText);
+      const labelMatch = matchQuickOpenText(searchQuery.value, item.label);
+      const metadataMatch = labelMatch ? null : matchQuickOpenText(searchQuery.value, item.searchText);
+      const result = labelMatch ?? metadataMatch;
       if (result) {
         matched.push({
           ...item,
-          matchScore: result.score,
-          matchIndices: result.indices,
+          matchScore: result.score + (labelMatch ? 0 : 1000),
+          matchIndices: labelMatch ? result.indices : [],
         });
       }
     }
@@ -621,7 +746,11 @@ export function useQuickOpen() {
         sql_library_file: 11,
         sql_file: 12,
       };
-      return typeOrder[a.type] - typeOrder[b.type];
+      const typeDifference = typeOrder[a.type] - typeOrder[b.type];
+      if (typeDifference !== 0) return typeDifference;
+      const lengthDifference = a.label.length - b.label.length;
+      if (lengthDifference !== 0) return lengthDifference;
+      return a.label.localeCompare(b.label);
     });
 
     return matched.slice(0, QUICK_OPEN_MAX_RESULTS);

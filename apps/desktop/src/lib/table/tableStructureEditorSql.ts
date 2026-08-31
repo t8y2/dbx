@@ -44,6 +44,8 @@ export interface EditableStructureIndex {
   indexType: string;
   includedColumns: string[];
   comment: string;
+  /** Build the index with PostgreSQL `CREATE INDEX CONCURRENTLY` (PostgreSQL only, default off). */
+  concurrently?: boolean;
   original?: IndexInfo;
   markedForDrop: boolean;
 }
@@ -81,11 +83,27 @@ export interface BuildTableStructureChangeSqlOptions {
   triggers?: EditableStructureTrigger[];
   tableComment?: string;
   originalTableComment?: string;
+  mysqlEngine?: string;
+  /** The target table is a PostgreSQL partitioned parent (`relkind = 'p'`);
+   * the backend rejects `CREATE INDEX CONCURRENTLY` on such tables (fail
+   * closed) instead of downgrading to a blocking `CREATE INDEX`. */
+  partitioned?: boolean;
+  /** When true, the connection is GaussDB M-mode which uses MySQL-compatible
+   * SQL dialect with backtick quoting. */
+  isGaussdbMMode?: boolean;
 }
 
 export interface TableStructureChangeSql {
   statements: string[];
   warnings: string[];
+}
+
+export interface BuildTableOwnerChangeSqlOptions {
+  databaseType?: DatabaseType;
+  schema?: string;
+  tableName: string;
+  owner: string;
+  originalOwner: string;
 }
 
 export interface SqliteTableStructureChangePreview extends TableStructureChangeSql {

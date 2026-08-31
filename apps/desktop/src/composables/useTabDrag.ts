@@ -7,19 +7,23 @@ interface TabDragState {
   draggedId: string | null;
   targetId: string | null;
   dropPosition: TabDropPosition | null;
-  wasDragged: boolean;
+  suppressClick: boolean;
   startX: number;
   startY: number;
 }
 
-const DRAG_THRESHOLD = 5;
+// Many touchscreen digitizers report to the OS/webview as a plain HID mouse
+// (no distinguishable pointerType), with tap contact-point drift well beyond
+// what real mouse/trackpad click jitter produces. 24px absorbs that jitter
+// while still requiring a clearly deliberate drag to reorder a tab.
+export const TAB_DRAG_HORIZONTAL_THRESHOLD = 24;
 
 const state = reactive<TabDragState>({
   active: false,
   draggedId: null,
   targetId: null,
   dropPosition: null,
-  wasDragged: false,
+  suppressClick: false,
   startX: 0,
   startY: 0,
 });
@@ -30,7 +34,7 @@ let pending: {
   y: number;
   sourceEl: HTMLElement | null;
 } | null = null;
-let onDropCallback: ((draggedId: string, targetId: string, position: TabDropPosition) => void) | null = null;
+let onDropCallback: ((draggedId: string, targetId: string, position: TabDropPosition) => boolean) | null = null;
 let ghostEl: HTMLElement | null = null;
 
 function createGhost(sourceEl: HTMLElement, x: number, y: number) {
@@ -74,15 +78,13 @@ function removeGhost() {
   }
 }
 
-function onMouseMove(event: MouseEvent) {
+function onPointerMove(event: PointerEvent) {
   if (!pending && !state.active) return;
 
   if (pending && !state.active) {
     const dx = event.clientX - pending.x;
-    const dy = event.clientY - pending.y;
-    if (Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return;
+    if (Math.abs(dx) < TAB_DRAG_HORIZONTAL_THRESHOLD) return;
     state.active = true;
-    state.wasDragged = true;
     state.draggedId = pending.id;
     state.startX = pending.x;
     state.startY = pending.y;
@@ -100,8 +102,9 @@ function onMouseMove(event: MouseEvent) {
 }
 
 function onMouseUp() {
+  state.suppressClick = false;
   if (state.active && state.draggedId && state.targetId && state.dropPosition && onDropCallback) {
-    onDropCallback(state.draggedId, state.targetId, state.dropPosition);
+    state.suppressClick = onDropCallback(state.draggedId, state.targetId, state.dropPosition);
   }
   reset();
 }
@@ -123,20 +126,26 @@ let listenersAttached = false;
 
 function ensureListeners() {
   if (listenersAttached) return;
-  document.addEventListener("mousemove", onMouseMove, true);
-  document.addEventListener("mouseup", onMouseUp, true);
+  document.addEventListener("pointermove", onPointerMove, true);
+  document.addEventListener("pointerup", onMouseUp, true);
   listenersAttached = true;
 }
 
-export function useTabDrag(onDrop: (draggedId: string, targetId: string, position: TabDropPosition) => void) {
+export function useTabDrag(onDrop: (draggedId: string, targetId: string, position: TabDropPosition) => boolean) {
   ensureListeners();
   onDropCallback = onDrop;
 
-  function startDrag(event: MouseEvent, tabId: string) {
+  function startDrag(event: PointerEvent, tabId: string) {
     if (event.button !== 0) return;
+    // Touch input has no reliable equivalent of mouse jitter: a real finger's
+    // contact point commonly drifts well past TAB_DRAG_HORIZONTAL_THRESHOLD
+    // during an ordinary tap, which would misread the tap as a drag. Skip
+    // arming the drag for touch entirely and let the tab strip's native
+    // horizontal scroll handle the gesture instead.
+    if (event.pointerType === "touch") return;
     const target = event.target as HTMLElement;
     if (target.closest("button, input, [data-tab-title-input]")) return;
-    state.wasDragged = false;
+    state.suppressClick = false;
     const el = (event.currentTarget as HTMLElement) || null;
     pending = { id: tabId, x: event.clientX, y: event.clientY, sourceEl: el };
   }

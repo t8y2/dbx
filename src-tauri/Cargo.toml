@@ -1,6 +1,6 @@
 [package]
 name = "dbx"
-version = "0.5.74"
+version = "0.5.98"
 description = "Open-source database management tool"
 authors = ["skyler"]
 license = "Apache-2.0"
@@ -13,10 +13,14 @@ name = "dbx_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
-default = ["duckdb-sidecar", "mq-admin", "sqlite-sqlcipher", "system-fonts"]
+default = ["duckdb-sidecar", "dynamodb", "mq-admin", "sqlite-multiple-ciphers", "system-fonts"]
+custom-protocol = ["tauri/custom-protocol"]
 duckdb-sidecar = ["dbx-core/duckdb-sidecar"]
+dynamodb = ["dbx-core/dynamodb"]
 mq-admin = ["dbx-core/mq-admin"]
 sqlite-sqlcipher = ["dbx-core/sqlite-sqlcipher"]
+sqlite-multiple-ciphers = ["dbx-core/sqlite-multiple-ciphers"]
+sqlite-bundled = ["dbx-core/sqlite-bundled"]
 system-fonts = ["dbx-core/system-fonts"]
 
 [build-dependencies]
@@ -27,8 +31,9 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 base64 = "0.22"
 log = "0.4"
-tauri = { version = "2.10.3", features = ["tray-icon"] }
+tauri = { version = "2.10.3", features = ["tray-icon", "image-png"] }
 tauri-plugin-log = "2"
+tauri-plugin-opener = "2"
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-uuid-1", "with-serde_json-1"] }
 deadpool-postgres = { version = "0.14", features = ["rt_tokio_1"] }
 rust_decimal = { version = "1", features = ["serde", "db-postgres"] }
@@ -51,7 +56,7 @@ tiberius = { version = "0.12.3", default-features = false, features = ["tds73", 
 tokio-util = { version = "0.7", features = ["compat"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }
 futures = "0.3"
-mongodb = "3.2.5"
+mongodb = { version = "3.2.5", features = ["socks5-proxy"] }
 percent-encoding = "2"
 minisign-verify = "0.2.5"
 semver = "1"
@@ -61,6 +66,7 @@ csv = "1.4.0"
 calamine = "0.30.1"
 zip = "4.6.1"
 dbx-core = { path = "../crates/dbx-core", default-features = false }
+wry = { path = "../vendor/wry" }
 axum = { version = "0.8", features = ["ws"] }
 font-kit = "0.14.3"
 tauri-plugin-clipboard-manager = "2.3.2"
@@ -71,7 +77,7 @@ tauri = { version = "2.10.3", features = ["test"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { version = "0.6.4", default-features = false, features = ["std"] }
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSApplication", "NSButton", "NSControl", "NSDockTile", "NSImage", "NSResponder", "NSView", "NSWindow"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSApplication", "NSButton", "NSControl", "NSDockTile", "NSEvent", "NSImage", "NSResponder", "NSView", "NSWindow"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSData", "NSString"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

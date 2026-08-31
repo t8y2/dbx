@@ -25,4 +25,17 @@ describe("ClickHouse signature help", () => {
     expect(help?.overloads).toHaveLength(1);
     expect(help?.overloads[0].parameterGroups).toEqual([["date", "INTERVAL expr unit"]]);
   });
+
+  it("adds Dolt signature help only for the Dolt profile", () => {
+    const sql = "CALL DOLT_MERGE_BASE('main', ";
+    expect(getSqlFunctionSignatureHelp(sql, sql.length, "mysql", "mysql")).toBeNull();
+
+    const help = getSqlFunctionSignatureHelp(sql, sql.length, "mysql", "dolt");
+    expect(help?.name).toBe("DOLT_MERGE_BASE");
+    expect(help?.parameters).toEqual(["revision_a", "revision_b"]);
+    expect(help?.activeParameter).toBe(1);
+
+    const procedureSql = "CALL DOLT_COMMIT_HASH_OUT(";
+    expect(getSqlFunctionSignatureHelp(procedureSql, procedureSql.length, "mysql", "dolt")?.parameters).toEqual(["out_hash", "arguments"]);
+  });
 });

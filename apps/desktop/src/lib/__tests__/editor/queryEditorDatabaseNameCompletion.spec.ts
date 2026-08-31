@@ -53,4 +53,13 @@ describe("QueryEditor database name completion wiring", () => {
     expect(provider).toContain("supports_session_database_switch");
     expect(provider).toContain("useDatabaseDefaultSchema");
   });
+
+  it("scopes SQL Server semantic metadata to the database selected by a preceding USE", () => {
+    const scope = extractFunction("semanticDiagnosticMetadataScope");
+    expect(scope).toContain("sqlServerUseDatabaseBeforeCursor(sql, range.from)");
+    expect(scope).toContain("lookupLocalCompletionDatabases");
+    expect(queryEditorSource).toMatch(/async function refreshSemanticDiagnostics[\s\S]*?semanticDiagnosticTablesForScope\(semanticAnalysis\.tables, metadataScope\)/);
+    expect(queryEditorSource).toContain("enrichSemanticDiagnosticTables(scopedAnalysis.tables, metadataScope)");
+    expect(queryEditorSource).toContain("ensureColumnsForSemanticDiagnostics(tables, metadataScope)");
+  });
 });

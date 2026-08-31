@@ -5,6 +5,8 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/composables/useToast";
 import { copyToClipboard } from "@/lib/common/clipboard";
+import { gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
+import type { DatabaseType } from "@/types/database";
 
 export interface ColumnInfo {
   name: string;
@@ -17,10 +19,12 @@ export interface ColumnInfo {
   extra?: string | null;
 }
 
-defineProps<{
+const props = defineProps<{
   columns: ColumnInfo[];
   loading: boolean;
   error?: string;
+  databaseType?: DatabaseType;
+  isGaussdbM?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -29,6 +33,14 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 const { toast } = useToast();
+
+function displayDataType(dataType: string | undefined): string {
+  if (!dataType) return "—";
+  if (props.databaseType === "gaussdb" && props.isGaussdbM) {
+    return gaussdbMTypeDisplayName(dataType);
+  }
+  return dataType;
+}
 
 async function copyText(text: string) {
   try {
@@ -81,8 +93,8 @@ async function copyText(text: string) {
           <div class="rounded-md border border-border divide-y divide-border text-xs">
             <div class="flex items-center justify-between px-2 py-1">
               <span class="text-muted-foreground">{{ t("grid.columnType") }}</span>
-              <span class="font-medium max-w-[180px] truncate" :title="col.dataType">
-                {{ col.dataType || "—" }}
+              <span class="font-medium max-w-[180px] truncate" :title="displayDataType(col.dataType)">
+                {{ displayDataType(col.dataType) }}
               </span>
             </div>
             <div class="flex items-center justify-between px-2 py-1">

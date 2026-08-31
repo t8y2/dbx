@@ -46,6 +46,7 @@ const dropdownOpen = ref(false);
 const highlightIndex = ref(-1);
 const rootRef = ref<HTMLElement>();
 const inputRef = ref<HTMLInputElement>();
+let loadRequestVersion = 0;
 
 const listboxId = computed(() => `mq-topic-listbox-${props.connectionId}-${props.tenant ?? ""}-${props.namespace ?? ""}`);
 
@@ -180,14 +181,16 @@ function onDocumentPointerDown(event: PointerEvent) {
 }
 
 async function loadTopics() {
+  const requestVersion = ++loadRequestVersion;
   if (!props.tenant || !props.namespace) {
     topics.value = [];
+    loading.value = false;
     emit("loaded", []);
     return;
   }
   loading.value = true;
   try {
-    topics.value = await mqListTopics(
+    const loaded = await mqListTopics(
       props.connectionId,
       {
         tenant: props.tenant,
@@ -195,13 +198,13 @@ async function loadTopics() {
       },
       { includeNonPersistent: false },
     );
-    emit("loaded", topics.value);
+    if (requestVersion !== loadRequestVersion) return;
+    topics.value = loaded;
+    emit("loaded", loaded);
   } catch (e: unknown) {
     console.warn("[DBX] Failed to load RocketMQ topics:", e);
-    topics.value = [];
-    emit("loaded", []);
   } finally {
-    loading.value = false;
+    if (requestVersion === loadRequestVersion) loading.value = false;
   }
 }
 
@@ -227,7 +230,12 @@ watch(dropdownOpen, (open) => {
 
 watch(
   () => [props.tenant, props.namespace, props.connectionId],
-  () => {
+  (_context, previousContext) => {
+    if (previousContext) {
+      loadRequestVersion += 1;
+      topics.value = [];
+      emit("loaded", []);
+    }
     void loadTopics();
   },
   { immediate: true },

@@ -44,19 +44,91 @@ test("collects complete reusable Java, native, and JRE assets", () => {
 
 test("rejects an incomplete reusable native platform set", () => {
   const native = Object.fromEntries(
-    platforms.slice(1).map((platform, index) => [platform, artifact(`dbx-agent-duckdb-0.1.2-${platform}.tar.zst`, String(index + 1))]),
+    platforms.slice(1).map((platform, index) => [platform, artifact(`dbx-agent-vastbase-0.1.38-${platform}.tar.zst`, String(index + 1))]),
   );
-  const registry = { drivers: { duckdb: { version: "0.1.2", native } }, jres: {} };
+  const registry = { drivers: { vastbase: { version: "0.1.38", native } }, jres: {} };
 
   assert.throws(
     () => collectReusableAssetPlan({
       registry,
       release: releaseFor(Object.values(native)),
-      versions: { duckdb: "0.1.2" },
-      modules: ["duckdb"],
+      versions: { vastbase: "0.1.38" },
+      modules: ["vastbase"],
       reuseJre: false,
     }),
     /missing=macos-aarch64/,
+  );
+});
+
+test("requires all TDengine native platforms when reusing a release", () => {
+  const native = Object.fromEntries(
+    platforms.slice(0, -1).map((platform, index) => [platform, artifact(`dbx-agent-tdengine-0.1.40-${platform}.tar.zst`, String(index + 1))]),
+  );
+  const registry = { drivers: { tdengine: { version: "0.1.40", native } }, jres: {} };
+
+  assert.throws(
+    () => collectReusableAssetPlan({
+      registry,
+      release: releaseFor(Object.values(native)),
+      versions: { tdengine: "0.1.40" },
+      modules: ["tdengine"],
+      reuseJre: false,
+    }),
+    /missing=windows-x64/,
+  );
+});
+
+test("requires all Neo4j native platforms when reusing a release", () => {
+  const native = Object.fromEntries(
+    platforms.slice(0, -1).map((platform, index) => [platform, artifact(`dbx-agent-neo4j-0.1.40-${platform}.tar.zst`, String(index + 1))]),
+  );
+  const registry = { drivers: { neo4j: { version: "0.1.40", native } }, jres: {} };
+
+  assert.throws(
+    () => collectReusableAssetPlan({
+      registry,
+      release: releaseFor(Object.values(native)),
+      versions: { neo4j: "0.1.40" },
+      modules: ["neo4j"],
+      reuseJre: false,
+    }),
+    /missing=windows-x64/,
+  );
+});
+
+test("requires all IoTDB native platforms when reusing a release", () => {
+  const native = Object.fromEntries(
+    platforms.slice(0, -1).map((platform, index) => [platform, artifact(`dbx-agent-iotdb-0.1.30-${platform}.tar.zst`, String(index + 1))]),
+  );
+  const registry = { drivers: { iotdb: { version: "0.1.30", native } }, jres: {} };
+
+  assert.throws(
+    () => collectReusableAssetPlan({
+      registry,
+      release: releaseFor(Object.values(native)),
+      versions: { iotdb: "0.1.30" },
+      modules: ["iotdb"],
+      reuseJre: false,
+    }),
+    /missing=windows-x64/,
+  );
+});
+
+test("requires all RocketMQ native platforms when reusing a release", () => {
+  const native = Object.fromEntries(
+    platforms.slice(0, -1).map((platform, index) => [platform, artifact(`dbx-agent-rocketmq-0.1.40-${platform}.tar.zst`, String(index + 1))]),
+  );
+  const registry = { drivers: { rocketmq: { version: "0.1.40", native } }, jres: {} };
+
+  assert.throws(
+    () => collectReusableAssetPlan({
+      registry,
+      release: releaseFor(Object.values(native)),
+      versions: { rocketmq: "0.1.40" },
+      modules: ["rocketmq"],
+      reuseJre: false,
+    }),
+    /missing=windows-x64/,
   );
 });
 

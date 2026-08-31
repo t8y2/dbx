@@ -94,17 +94,23 @@ function loadPage(pageNo: number) {
   <Dialog v-model:open="open">
     <DialogContent :show-close-button="false" class="nacos-config-history-dialog flex h-[min(82vh,760px)] flex-col gap-0 overflow-hidden rounded-lg p-0 shadow-2xl">
       <DialogHeader class="shrink-0 border-b bg-muted/20 px-5 py-4">
-        <div class="flex items-center justify-between gap-4">
+        <div class="flex items-start justify-between gap-4">
           <div class="flex min-w-0 items-start gap-3">
             <div class="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-md border bg-background text-primary">
               <Clock3 class="h-4 w-4" />
             </div>
             <div class="min-w-0">
               <DialogTitle class="truncate text-lg font-semibold">{{ t("nacos.configHistory") }}</DialogTitle>
-              <div class="mt-2 flex min-w-0 flex-wrap items-center gap-1.5 text-xs">
-                <Badge variant="outline" class="max-w-64 truncate font-mono">namespace={{ namespaceLabel }}</Badge>
-                <Badge variant="secondary" class="max-w-72 truncate font-mono">dataId={{ dataIdLabel }}</Badge>
-                <Badge variant="outline" class="max-w-48 truncate font-mono">group={{ groupLabel }}</Badge>
+              <div class="mt-1.5 flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                <span class="min-w-0 font-mono" :title="`namespace=${namespaceLabel}`"
+                  >namespace=<span class="break-all text-foreground">{{ namespaceLabel }}</span></span
+                >
+                <span class="min-w-0 font-mono" :title="`dataId=${dataIdLabel}`"
+                  >dataId=<span class="break-all text-foreground">{{ dataIdLabel }}</span></span
+                >
+                <span class="min-w-0 font-mono" :title="`group=${groupLabel}`"
+                  >group=<span class="break-all text-foreground">{{ groupLabel }}</span></span
+                >
               </div>
               <div class="sr-only">{{ historyTitle }}</div>
             </div>

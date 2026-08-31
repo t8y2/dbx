@@ -37,18 +37,33 @@ function shortcutKeyName(key: string): string | null {
   return key;
 }
 
-export function eventToShortcut(event: ShortcutLikeEvent): string | null {
+function shortcutKeyNameFromEvent(event: ShortcutLikeEvent, platform: string): string | null {
+  if (event.altKey && isMacShortcutPlatform(platform) && /^Key[A-Z]$/.test(event.code ?? "")) {
+    return event.code!.slice(3);
+  }
+  return shortcutKeyName(event.key);
+}
+
+export function eventToShortcut(event: ShortcutLikeEvent, platform = globalThis.navigator?.platform || ""): string | null {
   if (event.isComposing) return null;
 
-  const key = shortcutKeyName(event.key);
+  const key = shortcutKeyNameFromEvent(event, platform);
   if (!key) return null;
 
   const hasModifier = !!event.metaKey || !!event.ctrlKey || !!event.altKey || !!event.shiftKey;
   if (!hasModifier && event.key.length === 1 && event.key !== " ") return null;
 
+  const isMac = isMacShortcutPlatform(platform);
   const parts: string[] = [];
   if (event.shiftKey) parts.push("Shift");
-  if (event.metaKey || event.ctrlKey) parts.push("Mod");
+  if (isMac) {
+    if (event.ctrlKey) parts.push("Ctrl");
+    if (event.metaKey) parts.push("Mod");
+  } else if (event.ctrlKey && event.metaKey) {
+    parts.push("Mod", "Meta");
+  } else if (event.ctrlKey || event.metaKey) {
+    parts.push("Mod");
+  }
   if (event.altKey) parts.push("Alt");
   parts.push(key);
   return parts.join("+");
@@ -87,7 +102,13 @@ export function matchesShortcut(event: ShortcutLikeEvent, shortcut: string, plat
   const usesCtrl = modifiers.has("Ctrl");
 
   if (usesMod) {
-    if (!event.metaKey && !event.ctrlKey) return false;
+    if (isMacShortcutPlatform(platform)) {
+      if (!event.metaKey || !!event.ctrlKey !== usesCtrl) return false;
+    } else {
+      if (!event.metaKey && !event.ctrlKey) return false;
+      if (usesCtrl && (!event.ctrlKey || !event.metaKey)) return false;
+      if (usesMeta && (!event.metaKey || !event.ctrlKey)) return false;
+    }
   } else {
     if (!!event.metaKey !== usesMeta) return false;
     if (!!event.ctrlKey !== usesCtrl) return false;
@@ -98,8 +119,8 @@ export function matchesShortcut(event: ShortcutLikeEvent, shortcut: string, plat
   return matchesShortcutKey(event, key, platform);
 }
 
-function actionShortcut(actionId: ShortcutActionId, shortcuts?: Partial<ShortcutSettings>): string {
-  return normalizeShortcutSettings(shortcuts)[actionId];
+function actionShortcut(actionId: ShortcutActionId, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): string {
+  return normalizeShortcutSettings(shortcuts, platform)[actionId];
 }
 
 const SWITCH_TO_TAB_ACTIONS: ShortcutActionId[] = ["switchToTab1", "switchToTab2", "switchToTab3", "switchToTab4", "switchToTab5", "switchToTab6", "switchToTab7", "switchToTab8", "switchToTab9"];
@@ -138,6 +159,10 @@ export function isFocusSearchShortcut(event: ShortcutLikeEvent, shortcuts?: Part
 
 export function isRefreshDataShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("refreshData", shortcuts));
+}
+
+export function isToggleResultsPaneShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("toggleResultsPane", shortcuts));
 }
 
 export function isModRShortcut(event: ShortcutLikeEvent): boolean {
@@ -185,8 +210,32 @@ export function isCopyCurrentRowShortcut(event: ShortcutLikeEvent, shortcuts?: P
   return matchesShortcut(event, actionShortcut("copyCurrentRow", shortcuts));
 }
 
+export function isEditTableStructureShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
+  return matchesShortcut(event, actionShortcut("editTableStructure", shortcuts, platform), platform);
+}
+
 export function isDeleteCurrentRowShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("deleteCurrentRow", shortcuts));
+}
+
+export function isGoToColumnShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
+  return matchesShortcut(event, actionShortcut("goToColumn", shortcuts, platform), platform);
+}
+
+export function isGoToFirstPageShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("goToFirstPage", shortcuts));
+}
+
+export function isGoToPreviousPageShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("goToPreviousPage", shortcuts));
+}
+
+export function isGoToNextPageShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("goToNextPage", shortcuts));
+}
+
+export function isGoToLastPageShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("goToLastPage", shortcuts));
 }
 
 export function isCancelSearchShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
@@ -195,6 +244,10 @@ export function isCancelSearchShortcut(event: ShortcutLikeEvent, shortcuts?: Par
 
 export function isToggleSidebarShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("toggleSidebar", shortcuts));
+}
+
+export function isToggleZenModeShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("toggleZenMode", shortcuts));
 }
 
 export function isCopySidebarSelectionShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
@@ -209,8 +262,26 @@ export function isEditSidebarConnectionShortcut(event: ShortcutLikeEvent, shortc
   return matchesShortcut(event, actionShortcut("editSidebarConnection", shortcuts));
 }
 
+export function isViewTableDdlShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("viewTableDdl", shortcuts));
+}
+
 export function isQuickOpenShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("quickOpen", shortcuts));
+}
+
+export function isNavigateTabHistoryBackShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
+  return matchesShortcut(event, actionShortcut("navigateTabHistoryBack", shortcuts, platform), platform);
+}
+
+export function isNavigateTabHistoryForwardShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
+  return matchesShortcut(event, actionShortcut("navigateTabHistoryForward", shortcuts, platform), platform);
+}
+
+export function handleTabHistoryNavigationShortcut(event: ShortcutLikeEvent, shortcuts: Partial<ShortcutSettings> | undefined, navigate: (direction: -1 | 1) => boolean, platform = globalThis.navigator?.platform || ""): boolean {
+  if (isNavigateTabHistoryBackShortcut(event, shortcuts, platform)) return navigate(-1);
+  if (isNavigateTabHistoryForwardShortcut(event, shortcuts, platform)) return navigate(1);
+  return false;
 }
 
 export function isSwitchToPreviousTabShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
@@ -219,6 +290,18 @@ export function isSwitchToPreviousTabShortcut(event: ShortcutLikeEvent, shortcut
 
 export function isSwitchToNextTabShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("switchToNextTab", shortcuts));
+}
+
+/**
+ * JetBrains-style tab switcher: exact match advances forward; adding Shift to
+ * the configured combo (Ctrl+Shift+Tab by default) moves backward. Returns
+ * null when the event is not the switcher shortcut.
+ */
+export function tabSwitcherDirectionFromShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): -1 | 1 | null {
+  const shortcut = actionShortcut("tabSwitcher", shortcuts, platform);
+  if (matchesShortcut(event, shortcut, platform)) return 1;
+  if (event.shiftKey && matchesShortcut({ ...event, shiftKey: false }, shortcut, platform)) return -1;
+  return null;
 }
 
 export function switchToTabIndexFromShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): number | null {

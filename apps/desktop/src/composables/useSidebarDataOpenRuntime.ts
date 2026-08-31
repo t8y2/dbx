@@ -7,12 +7,13 @@ import { uuid } from "@/lib/common/utils";
 import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { effectiveDatabaseTypeForConnection, connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema } from "@/lib/database/jdbcDialect";
 import { getCachedTableMetadata, loadTableMetadata, TABLE_METADATA_CACHE_TTL_MS, tableMetadataToDataTabMeta } from "@/lib/metadata/tableMetadataCache";
-import { canApplyDataTabMetadata, dataTabMetadataNeedsRefresh, findExistingDataTabCandidate, type DataTabOpenMode, type DataTabReuseScope } from "@/lib/sidebar/dataTabOpenPolicy";
+import { canApplyDataTabMetadata, dataTabMetadataNeedsRefresh, findExistingDataTabCandidate, isDataTabMetadataLifecycleStale, type DataTabOpenMode, type DataTabReuseMode } from "@/lib/sidebar/dataTabOpenPolicy";
 import type { SidebarDataOpenRequest } from "@/lib/sidebar/sidebarDataOpenCoordinator";
 import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
 import { usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
+import { tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
 import { canActivateExistingDataTableTab } from "@/lib/tabs/dataTabActivation";
 import { beginDataTabNavigation, endDataTabNavigation, isCurrentDataTabNavigation } from "@/lib/tabs/dataTabNavigationGeneration";
 
@@ -27,13 +28,16 @@ export function useSidebarDataOpenRuntime() {
   const queryStore = useQueryStore();
   const settingsStore = useSettingsStore();
 
-  async function openData(node: TreeNode, request?: SidebarDataOpenRequest, openMode: DataTabOpenMode = "default", options: { reuseScope?: DataTabReuseScope } = {}) {
+  async function openData(node: TreeNode, request?: SidebarDataOpenRequest, openMode: DataTabOpenMode = "default", options: { reuseMode?: DataTabReuseMode } = {}) {
     if (!(node.type === "table" || node.type === "view" || node.type === "materialized_view") || !hasNodeDatabaseContext(node)) return;
     const config = connectionStore.getConfig(node.connectionId);
-    const reuseScope = options.reuseScope ?? (settingsStore.editorSettings.reuseDataTab ? "database" : "none");
+    const reuseMode = options.reuseMode ?? settingsStore.editorSettings.dataTabReuseMode;
     if (config?.db_type === "hbase") {
       await connectionStore.ensureConnected(node.connectionId);
-      const tabId = queryStore.createTab(node.connectionId, node.database, node.label, "hbase", undefined, node.label, undefined, { forceNew: openMode === "new-tab" || reuseScope === "none" });
+      const tabId = queryStore.createTab(node.connectionId, node.database, node.label, "hbase", undefined, node.label, undefined, {
+        forceNew: openMode === "new-tab" || reuseMode === "always-new",
+        insertAfterActive: settingsStore.editorSettings.openDataTabsNextToActive,
+      });
       queryStore.updateSql(tabId, node.label);
       return;
     }
@@ -60,6 +64,7 @@ export function useSidebarDataOpenRuntime() {
       type: node.type,
       dbType: config?.db_type,
       openMode,
+      reuseMode,
     });
     const tableSchema = connectionObjectTreeNodeSchema(config, node.database, node.schema);
     const tableType = node.type === "view" ? "VIEW" : node.type === "materialized_view" ? "MATERIALIZED_VIEW" : (node.tableType ?? "TABLE");
@@ -88,6 +93,11 @@ export function useSidebarDataOpenRuntime() {
       });
       try {
         if (ensureConnected) await connectionStore.ensureConnected(node.connectionId);
+        // 记录启动时的连接元数据代次：加载期间若跨过生命周期边界（disconnect /
+        // 关库 / 死池重连），结果已过期，不得写回 tab（PR #6640 review
+        // blocker 1 的 tab-local 半边——shared 缓存写回已有 per-scope 失效代
+        // 数保护，tab 写回此前没有）。
+        const metadataGenerationAtStart = connectionStore.metadataGenerationFor(node.connectionId, node.database);
         const loadedMetadata = await loadTableMetadata({
           connectionId: node.connectionId,
           database: node.database,
@@ -99,6 +109,15 @@ export function useSidebarDataOpenRuntime() {
           catalog: node.catalog,
           traceLogger: isDebugLoggingEnabled() ? (event) => openDataLog("debug", "metadata:trace", { sourceTraceId: traceId, ...event }) : undefined,
         });
+        if (connectionStore.metadataGenerationFor(node.connectionId, node.database) !== metadataGenerationAtStart) {
+          openDataLog("info", "metadata:superseded-by-connection-generation", {
+            traceId,
+            tabId: targetTabId,
+            columnCount: loadedMetadata.metadata.columns.length,
+            elapsed: elapsed(),
+          });
+          return;
+        }
         if (!canApplyTableMetadata(targetTabId)) {
           openDataLog("info", "metadata:stale", {
             traceId,
@@ -126,7 +145,7 @@ export function useSidebarDataOpenRuntime() {
         openDataLog("warn", "metadata:error", { traceId, tabId: targetTabId, elapsed: elapsed(), error });
       }
     };
-    const existingDataTabCandidate = findExistingDataTabCandidate(queryStore.tabs, dataTabTarget, { openMode, reuseScope });
+    const existingDataTabCandidate = findExistingDataTabCandidate(queryStore.tabs, dataTabTarget, { openMode, reuseMode, activeTabId: queryStore.activeTabId });
     const existingSameTableTab = existingDataTabCandidate?.match === "same-table" ? existingDataTabCandidate.tab : undefined;
     const resetReusedDataTabState = (tab: (typeof queryStore.tabs)[number]) => {
       tab.title = node.label;
@@ -139,6 +158,7 @@ export function useSidebarDataOpenRuntime() {
       tab.resultSortDirection = undefined;
       tab.resultSortMode = undefined;
       tab.resultLocalSortOriginalRows = undefined;
+      tab.resultLocalSortOriginalLargeValueCells = undefined;
       tab.resultLocalSortOriginalMongoDocuments = undefined;
       tab.resultLocalSortOriginalMongoCopyDocuments = undefined;
       tab.resultSortedSql = undefined;
@@ -152,10 +172,13 @@ export function useSidebarDataOpenRuntime() {
       tab.queryEditabilityReason = undefined;
     };
 
-    if (existingSameTableTab && canActivateExistingDataTableTab(existingSameTableTab, { activateExecuting: false })) {
+    if (existingSameTableTab && (existingSameTableTab.isExecuting || canActivateExistingDataTableTab(existingSameTableTab, { activateExecuting: false }))) {
       queryStore.switchTab(existingSameTableTab.id);
       logPhase("existing-tab-activated", { table: node.label });
-      if (dataTabMetadataNeedsRefresh(existingSameTableTab, DATA_TAB_METADATA_TTL_MS)) {
+      // 代次失配视同冷缓存（即使位于 30s TTL 窗口内也要重建）：disconnect /
+      // 关库 / 死池重连都可能不改变 timestamp 判定而改变连接生命周期
+      const connectionGeneration = connectionStore.metadataGenerationFor(node.connectionId, node.database);
+      if (isDataTabMetadataLifecycleStale(existingSameTableTab, connectionGeneration) || dataTabMetadataNeedsRefresh(existingSameTableTab, DATA_TAB_METADATA_TTL_MS)) {
         // 真实列缺失时行标识未知：启动刷新的同时必须挂起编辑门控（所有
         // "真实列缺失且启动刷新"的入口统一置 pending）
         if (!existingSameTableTab.tableMeta?.columns.length) existingSameTableTab.tableMetaPending = true;
@@ -171,7 +194,10 @@ export function useSidebarDataOpenRuntime() {
         resetReusedDataTabState(existingDataTabCandidate.tab);
         return existingDataTabCandidate.tab.id;
       }
-      return queryStore.createTab(node.connectionId, node.database, node.label, "data", tableSchema, undefined, node.catalog, { forceNew: reuseScope === "none" || openMode === "new-tab" });
+      return queryStore.createTab(node.connectionId, node.database, node.label, "data", tableSchema, undefined, node.catalog, {
+        forceNew: true,
+        insertAfterActive: settingsStore.editorSettings.openDataTabsNextToActive,
+      });
     })();
     openDataLog("info", "tab-created", { traceId, tabId, elapsed: elapsed() });
     logPhase("tab-created", { tabId });
@@ -291,8 +317,12 @@ export function useSidebarDataOpenRuntime() {
       } else if (deferTableMetaRefresh) {
         logPhase("metadata-deferred", { tabId });
       } else {
-        void refreshTableMetaInBackground(tabId);
         logPhase("metadata-started", { tabId });
+      }
+
+      const metadataRefresh = shouldRefreshTableMeta && !deferTableMetaRefresh ? refreshTableMetaInBackground(tabId) : undefined;
+      if (!cachedTableMeta && (effectiveDbType === "mysql" || effectiveDbType === "postgres")) {
+        await metadataRefresh;
       }
 
       // Check if superseded by a newer openData call
@@ -301,11 +331,13 @@ export function useSidebarDataOpenRuntime() {
         return;
       }
 
-      const columns = cachedTableMeta?.columns ?? [];
-      const primaryKeys = cachedTableMeta?.primaryKeys ?? [];
+      const loadedTableMeta = cachedTableMeta ?? queryStore.tabs.find((item) => item.id === tabId)?.tableMeta;
+      const columns = loadedTableMeta?.columns ?? [];
+      const primaryKeys = loadedTableMeta?.primaryKeys ?? [];
       const includeRowId = usesSyntheticRowIdKey(effectiveDbType, primaryKeys, tableType);
       const sql = await buildTableSelectSql({
         databaseType: effectiveDbType,
+        driverProfile: config?.driver_profile,
         identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
         schema: tableSchema,
         database: node.database,
@@ -314,6 +346,8 @@ export function useSidebarDataOpenRuntime() {
         catalog: node.catalog,
         columns: columns.map((column) => column.name),
         primaryKeys,
+        ...tableDataLargeValuePreviewOptions(effectiveDbType, columns, primaryKeys, limit),
+        includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
         limit,
         includeRowId,
       });

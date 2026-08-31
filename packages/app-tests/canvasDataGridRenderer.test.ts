@@ -47,7 +47,7 @@ test("DataGrid forwards hover action reservation only for right-aligned canvas c
   const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
 
   assert.match(source, /columnAligns\.value\[cell\.visibleColIdx\] !== "right"/);
-  assert.match(source, /reservedWidth: canvasDataGridActionReservedWidth\(cell\.canQuickDownload, !!cell\.foreignKey\)/);
+  assert.match(source, /reservedWidth: canvasDataGridActionReservedWidth\(cell\.canQuickDownload, !!cell\.foreignKey, cellDetailButtonEnabled\.value\)/);
   assert.match(source, /rightAlignedActionCell: canvasRightAlignedActionCell\.value/);
 });
 
@@ -72,4 +72,10 @@ test("data grid paint theme uses the resolved striped row token", () => {
   const getVar = (name: string) => (name === "--data-grid-row-muted-bg" ? "rgb(235, 239, 244)" : "");
 
   assert.equal(resolveDataGridPaintTheme({ getVar, isDark: false }).rowMuted, "rgb(235, 239, 244)");
+});
+
+test("data grid paint theme resolves cellDirty token", () => {
+  const getVar = (name: string) => (name === "--data-grid-cell-dirty-bg" ? "rgb(166, 210, 255)" : "");
+
+  assert.equal(resolveDataGridPaintTheme({ getVar, isDark: false }).cellDirty, "rgb(166, 210, 255)");
 });

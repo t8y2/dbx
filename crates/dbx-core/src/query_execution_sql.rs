@@ -54,7 +54,7 @@ pub fn build_explain_sql(options: ExplainSqlOptions) -> ExplainSqlBuildResult {
     if source.is_empty() {
         return explain_err("empty");
     }
-    if !is_safe_explain_sql(&source) {
+    if !is_safe_explain_sql_for_database(&source, options.database_type) {
         return explain_err("unsafe");
     }
     if options.analyze == Some(true)
@@ -133,15 +133,22 @@ pub fn supports_explain_plan(database_type: Option<DatabaseType>) -> bool {
 }
 
 pub fn is_safe_explain_sql(sql: &str) -> bool {
+    is_safe_explain_sql_for_database(sql, None)
+}
+
+pub fn is_safe_explain_sql_for_database(sql: &str, database_type: Option<DatabaseType>) -> bool {
     let source = strip_trailing_semicolons(sql.trim());
-    !source.is_empty()
-        && !has_extra_statement_after_semicolon(&source)
-        && is_safe_explain_source(&source)
-        && !contains_dangerous_sql_keyword(&source)
+    if source.is_empty() || has_extra_statement_after_semicolon(&source) {
+        return false;
+    }
+    if database_type == Some(DatabaseType::Oracle) && is_safe_oracle_explain_dml_source(&source) {
+        return true;
+    }
+    is_safe_explain_source(&source) && !contains_dangerous_sql_keyword(&source)
 }
 
 /// Returns true for databases that support SQL query execution (execute_query / get_sample_data).
-/// Non-SQL databases (Redis, MongoDB, Elasticsearch, InfluxDB, Neo4j, etcd) are excluded.
+/// Non-SQL databases (Redis, MongoDB, Elasticsearch, InfluxDB, VictoriaMetrics, Neo4j, etcd) are excluded.
 pub fn supports_sql_query(database_type: DatabaseType) -> bool {
     !matches!(
         database_type,
@@ -154,6 +161,7 @@ pub fn supports_sql_query(database_type: DatabaseType) -> bool {
             | DatabaseType::Weaviate
             | DatabaseType::ChromaDb
             | DatabaseType::InfluxDb
+            | DatabaseType::VictoriaMetrics
             | DatabaseType::Neo4j
             | DatabaseType::Etcd
     )
@@ -180,6 +188,12 @@ fn is_safe_explain_source(sql: &str) -> bool {
     ["select", "with", "table", "values"].iter().any(|keyword| {
         source == *keyword || source.starts_with(&format!("{keyword} ")) || source.starts_with(&format!("{keyword}\n"))
     })
+}
+
+fn is_safe_oracle_explain_dml_source(sql: &str) -> bool {
+    let source = strip_sql_comments_and_literals(sql);
+    let source = source.trim_start().to_ascii_uppercase();
+    ["INSERT", "UPDATE", "DELETE", "MERGE"].iter().any(|keyword| starts_with_keyword(&source, keyword))
 }
 
 pub fn contains_dangerous_sql_keyword(sql: &str) -> bool {
@@ -228,10 +242,30 @@ pub fn is_write_sql(sql: &str) -> bool {
 /// executable comments and file exports, plus PostgreSQL-family/SQL Server
 /// `SELECT ... INTO` table creation.
 pub fn is_write_sql_for_database(sql: &str, database_type: DatabaseType) -> bool {
+    // VictoriaMetrics execution is hard-wired to the read-only query API; MetricsQL
+    // does not use SQL verbs and must not be rejected by SQL write classification.
+    if database_type == DatabaseType::VictoriaMetrics {
+        return false;
+    }
+    if database_type == DatabaseType::DynamoDb {
+        if let Some(is_write) = classify_dynamodb_statement_write(sql) {
+            return is_write;
+        }
+    }
     if let Some(risk) = classify_search_engine_query_risk(sql, database_type) {
         return risk != SearchEngineQueryRisk::ReadOnly;
     }
     is_write_sql_with_database_type(sql, Some(database_type))
+}
+
+fn classify_dynamodb_statement_write(source: &str) -> Option<bool> {
+    let header = source.lines().find(|line| !line.trim().is_empty())?.trim().to_ascii_uppercase();
+    match header.as_str() {
+        "DBX DYNAMODB SCAN" | "DBX DYNAMODB QUERY / SCAN" => Some(false),
+        "DBX DYNAMODB INSERT ITEM" | "DBX DYNAMODB PUT ITEM" | "DBX DYNAMODB DELETE ITEM" => Some(true),
+        _ if header.starts_with("DBX DYNAMODB") => Some(true),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -326,9 +360,10 @@ fn is_write_sql_with_database_type(sql: &str, database_type: Option<DatabaseType
         None => crate::sql::split_sql_statements(sql),
     };
 
-    statements
-        .iter()
-        .any(|statement| is_write_sql_statement(statement, detect_mysql_executable_comments, detect_select_into))
+    let allow_mysql_checksum = database_type == Some(DatabaseType::Mysql);
+    statements.iter().any(|statement| {
+        is_write_sql_statement(statement, detect_mysql_executable_comments, detect_select_into, allow_mysql_checksum)
+    })
 }
 
 /// The explain flows toggle plan capture with a standalone SET statement:
@@ -414,7 +449,12 @@ fn contains_unquoted_keyword(sql: &str, dialect: &dyn sqlparser::dialect::Dialec
     })
 }
 
-fn is_write_sql_statement(sql: &str, detect_mysql_executable_comments: bool, detect_select_into: bool) -> bool {
+fn is_write_sql_statement(
+    sql: &str,
+    detect_mysql_executable_comments: bool,
+    detect_select_into: bool,
+    allow_mysql_checksum: bool,
+) -> bool {
     // 1. Strip comments and string literals
     let (cleaned, has_mysql_executable_comment) =
         strip_sql_comments_and_literals_with_metadata(sql, detect_mysql_executable_comments);
@@ -434,7 +474,7 @@ fn is_write_sql_statement(sql: &str, detect_mysql_executable_comments: bool, det
     // 2. Check if first keyword is a read keyword
     let starts_with_read = READ_SQL_KEYWORDS.iter().any(|kw| {
         upper.starts_with(kw) && (upper.len() == kw.len() || !upper.as_bytes()[kw.len()].is_ascii_alphanumeric())
-    });
+    }) || (allow_mysql_checksum && starts_with_keyword(&upper, "CHECKSUM TABLE"));
 
     // 3. Special handling for PRAGMA: only allow safe read-only forms
     if !starts_with_read && starts_with_keyword(&upper, "PRAGMA") {
@@ -548,6 +588,93 @@ pub fn check_read_only(sql: &str, connection_name: &str, database_type: Database
         ));
     }
     Ok(())
+}
+
+/// Oracle-only, fail-closed classifier for manual-transaction UX. Returns true
+/// only for an ordinary top-level read that DBX can prove harmless: a single
+/// top-level `SELECT` (not `WITH`) that after Oracle-aware comment/literal
+/// stripping contains no row-locking, transaction-control, DDL/DCL, `CALL`/
+/// `EXEC`, PL/SQL block, `EXECUTE IMMEDIATE`, database-link, sequence
+/// pseudocolumn (`NEXTVAL`/`CURRVAL`), function-invocation, or subquery
+/// syntax. Any lexical ambiguity is **not** proven read-only; the classifier
+/// deliberately whitelists no functions because user/package function side
+/// effects cannot be proven and would create an unbounded compatibility
+/// surface.
+pub fn is_oracle_proven_read_only_statement(sql: &str) -> bool {
+    let cleaned = strip_sql_comments_and_literals(sql);
+    let trimmed = cleaned.trim_start();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let upper = trimmed.to_uppercase();
+    // Single top-level SELECT only (WITH is excluded because data-modifying
+    // CTEs can hide writes in a row-returning path).
+    if !starts_with_keyword(&upper, "SELECT") {
+        return false;
+    }
+
+    let lower = cleaned.to_lowercase();
+
+    // Function invocation or subquery syntax: any '(' after literal stripping.
+    // This deliberately excludes SELECT upper(name), COUNT(*), package
+    // functions, and subqueries DBX cannot prove harmless.
+    if lower.contains('(') {
+        return false;
+    }
+
+    // Database link: '@' cannot appear in an unquoted Oracle identifier, so any
+    // remaining '@' after literal stripping is a remote-object reference.
+    if lower.contains('@') {
+        return false;
+    }
+
+    // Word-boundary forbidden keywords. These are Oracle keywords/reserved
+    // words, so they cannot be legitimate unquoted identifiers inside a simple
+    // read; a quoted occurrence is already stripped to spaces above.
+    const FORBIDDEN_WORDS: &[&str] = &[
+        // row locking
+        "for",
+        "update",
+        "lock",
+        // transaction control
+        "begin",
+        "commit",
+        "rollback",
+        "savepoint",
+        // DDL/DCL
+        "create",
+        "alter",
+        "drop",
+        "truncate",
+        "rename",
+        "grant",
+        "revoke",
+        "comment",
+        "purge",
+        "audit",
+        "noaudit",
+        "analyze",
+        "flashback",
+        "merge",
+        "insert",
+        "delete",
+        // set operators (a UNION is not a single top-level SELECT)
+        "union",
+        "minus",
+        "intersect",
+        // stored procedures / dynamic SQL / PL/SQL blocks
+        "call",
+        "exec",
+        "execute",
+        "declare",
+        // sequence pseudocolumns
+        "nextval",
+        "currval",
+        // SELECT ... INTO is PL/SQL-only in Oracle
+        "into",
+    ];
+
+    !FORBIDDEN_WORDS.iter().any(|word| contains_word(&lower, word))
 }
 
 fn contains_word(source: &str, word: &str) -> bool {
@@ -786,6 +913,93 @@ mod tests {
     use super::*;
 
     #[test]
+    fn oracle_proven_read_only_accepts_simple_top_level_selects() {
+        assert!(is_oracle_proven_read_only_statement("SELECT * FROM table"));
+        assert!(is_oracle_proven_read_only_statement("select id, name from users"));
+        assert!(is_oracle_proven_read_only_statement("SELECT * FROM users WHERE id = 1"));
+        assert!(is_oracle_proven_read_only_statement("SELECT * FROM users ORDER BY id"));
+        assert!(is_oracle_proven_read_only_statement("SELECT * FROM users FETCH FIRST 10 ROWS ONLY"));
+        assert!(is_oracle_proven_read_only_statement("SELECT 1"));
+        assert!(is_oracle_proven_read_only_statement("SELECT ROWNUM FROM dual"));
+        assert!(is_oracle_proven_read_only_statement("SELECT * FROM users"));
+        // Comment/literal stripping hides keywords that are not part of the SQL.
+        assert!(is_oracle_proven_read_only_statement("-- comment\nSELECT * FROM users"));
+        assert!(is_oracle_proven_read_only_statement("SELECT 'update' FROM dual"));
+        assert!(is_oracle_proven_read_only_statement("SELECT \"select\" FROM t"));
+        assert!(is_oracle_proven_read_only_statement("SELECT * FROM user_update"));
+    }
+
+    #[test]
+    fn oracle_proven_read_only_rejects_writes_and_ddl() {
+        for sql in [
+            "UPDATE users SET name = 'x'",
+            "INSERT INTO users VALUES (1)",
+            "DELETE FROM users",
+            "MERGE INTO target USING source ON (a = b) WHEN MATCHED THEN UPDATE",
+            "CREATE TABLE t (id INT)",
+            "ALTER TABLE t ADD COLUMN c INT",
+            "DROP TABLE t",
+            "TRUNCATE TABLE t",
+            "GRANT SELECT ON t TO x",
+            "REVOKE SELECT ON t FROM x",
+        ] {
+            assert!(!is_oracle_proven_read_only_statement(sql), "expected rejected: {sql}");
+        }
+    }
+
+    #[test]
+    fn oracle_proven_read_only_rejects_cte_procedure_and_plsql() {
+        for sql in [
+            "WITH cte AS (SELECT 1 FROM dual) SELECT * FROM cte",
+            "CALL my_proc()",
+            "EXEC my_proc",
+            "EXECUTE IMMEDIATE 'DROP TABLE t'",
+            "BEGIN UPDATE t SET x = 1; END;",
+            "DECLARE x INT; BEGIN NULL; END;",
+        ] {
+            assert!(!is_oracle_proven_read_only_statement(sql), "expected rejected: {sql}");
+        }
+    }
+
+    #[test]
+    fn oracle_proven_read_only_rejects_locking_and_sequence_pseudocolumns() {
+        for sql in [
+            "SELECT * FROM t FOR UPDATE",
+            "LOCK TABLE t IN EXCLUSIVE MODE",
+            "SELECT seq.NEXTVAL FROM dual",
+            "SELECT seq.CURRVAL FROM dual",
+            "SELECT * FROM t@dblink",
+            "SELECT * FROM t WHERE id = 1 FOR UPDATE",
+        ] {
+            assert!(!is_oracle_proven_read_only_statement(sql), "expected rejected: {sql}");
+        }
+    }
+
+    #[test]
+    fn oracle_proven_read_only_rejects_functions_and_subqueries() {
+        for sql in [
+            "SELECT upper(name) FROM users",
+            "SELECT count(*) FROM users",
+            "SELECT pkg.fn() FROM dual",
+            "SELECT * FROM users WHERE id IN (SELECT id FROM orders)",
+            "SELECT * FROM (SELECT * FROM users)",
+            "SELECT NVL(name, 'x') FROM users",
+        ] {
+            assert!(!is_oracle_proven_read_only_statement(sql), "expected rejected: {sql}");
+        }
+    }
+
+    #[test]
+    fn oracle_proven_read_only_rejects_empty_and_ambiguous_input() {
+        assert!(!is_oracle_proven_read_only_statement(""));
+        assert!(!is_oracle_proven_read_only_statement("   "));
+        assert!(!is_oracle_proven_read_only_statement("-- only a comment"));
+        assert!(!is_oracle_proven_read_only_statement("SELECT * FROM t WHERE a IN (1, 2)"));
+        assert!(!is_oracle_proven_read_only_statement("SELECT * FROM t WHERE b = 'x' AND c IN (3)"));
+        assert!(!is_oracle_proven_read_only_statement("SELECT 1 UNION SELECT 2"));
+    }
+
+    #[test]
     fn builds_postgres_json_explain_sql() {
         let result = build_explain_sql(ExplainSqlOptions {
             database_type: Some(DatabaseType::Postgres),
@@ -976,6 +1190,67 @@ mod tests {
                 reason: None,
             }
         );
+    }
+
+    #[test]
+    fn builds_oracle_explain_plan_for_update() {
+        let result = build_explain_sql(ExplainSqlOptions {
+            database_type: Some(DatabaseType::Oracle),
+            format: None,
+            analyze: None,
+            sql: "UPDATE AA_PAY_VOUCHER_TEMP t SET t.AGENCY_ID = '1';".to_string(),
+        });
+
+        assert_eq!(
+            result,
+            ExplainSqlBuildResult {
+                ok: true,
+                sql: Some("EXPLAIN PLAN FOR UPDATE AA_PAY_VOUCHER_TEMP t SET t.AGENCY_ID = '1'".to_string()),
+                reason: None,
+            }
+        );
+    }
+
+    #[test]
+    fn allows_oracle_explain_plan_for_dml_only() {
+        for (sql, expected) in [
+            ("INSERT INTO audit_log (id) VALUES (1)", "EXPLAIN PLAN FOR INSERT INTO audit_log (id) VALUES (1)"),
+            ("DELETE FROM audit_log WHERE id = 1", "EXPLAIN PLAN FOR DELETE FROM audit_log WHERE id = 1"),
+            (
+                "MERGE INTO target t USING source s ON (t.id = s.id) WHEN MATCHED THEN UPDATE SET t.name = s.name",
+                "EXPLAIN PLAN FOR MERGE INTO target t USING source s ON (t.id = s.id) WHEN MATCHED THEN UPDATE SET t.name = s.name",
+            ),
+        ] {
+            assert_eq!(
+                build_explain_sql(ExplainSqlOptions {
+                    database_type: Some(DatabaseType::Oracle),
+                    format: None,
+                    analyze: None,
+                    sql: sql.to_string(),
+                })
+                .sql,
+                Some(expected.to_string()),
+                "{sql}"
+            );
+        }
+
+        for sql in [
+            "DROP TABLE audit_log",
+            "ALTER TABLE audit_log ADD created_at DATE",
+            "BEGIN DELETE FROM audit_log; END;",
+            "UPDATE audit_log SET id = 2; DROP TABLE audit_log",
+        ] {
+            assert_eq!(
+                build_explain_sql(ExplainSqlOptions {
+                    database_type: Some(DatabaseType::Oracle),
+                    format: None,
+                    analyze: None,
+                    sql: sql.to_string(),
+                }),
+                ExplainSqlBuildResult { ok: false, sql: None, reason: Some("unsafe".to_string()) },
+                "{sql}"
+            );
+        }
     }
 
     #[test]
@@ -1452,6 +1727,14 @@ mod tests {
     }
 
     #[test]
+    fn check_read_only_allows_mysql_checksum_only_for_mysql() {
+        assert_eq!(check_read_only("CHECKSUM TABLE `issue6693_repro`", "mysql", DatabaseType::Mysql), Ok(()));
+        assert!(check_read_only("CHECKSUM TABLE users", "postgres", DatabaseType::Postgres).is_err());
+        assert!(check_read_only("CHECKSUM TABLE users", "sqlite", DatabaseType::Sqlite).is_err());
+        assert!(check_read_only("CHECKSUM TABLE users; DROP TABLE users", "mysql", DatabaseType::Mysql).is_err());
+    }
+
+    #[test]
     fn check_read_only_allows_only_sqlserver_plan_capture_session_switches() {
         for sql in [
             "SET SHOWPLAN_XML ON;",
@@ -1519,6 +1802,24 @@ mod tests {
     }
 
     #[test]
+    fn classifies_dynamodb_generated_statements_for_read_only_protection() {
+        assert!(!is_write_sql_for_database(
+            "DBX DYNAMODB SCAN\ntable: \"orders\"\nlimit: 1000",
+            DatabaseType::DynamoDb
+        ));
+        assert!(!is_write_sql_for_database(
+            "DBX DYNAMODB QUERY / SCAN\ntable: \"orders\"\nfilter:\n{\"status\":\"SHIPPED\"}",
+            DatabaseType::DynamoDb
+        ));
+        for operation in ["INSERT ITEM", "PUT ITEM", "DELETE ITEM", "UNKNOWN"] {
+            assert!(is_write_sql_for_database(
+                &format!("DBX DYNAMODB {operation}\ntable: \"orders\""),
+                DatabaseType::DynamoDb
+            ));
+        }
+    }
+
+    #[test]
     fn classifies_search_engine_rest_writes() {
         assert!(!is_write_sql_for_database("GET /_cluster/health", DatabaseType::Easysearch));
         assert!(!is_write_sql_for_database(
@@ -1529,5 +1830,19 @@ mod tests {
             "PUT /products/_doc/1?refresh=true\n{\"name\":\"Notebook\"}",
             DatabaseType::Easysearch
         ));
+    }
+
+    #[test]
+    fn excludes_victoriametrics_from_sql_query_paths() {
+        assert!(!supports_sql_query(DatabaseType::VictoriaMetrics));
+        assert!(supports_sql_query(DatabaseType::Postgres));
+        assert_eq!(
+            check_read_only(
+                r#"{__name__="dbx_issue_5352_temperature_celsius"}[5m]"#,
+                "VictoriaMetrics",
+                DatabaseType::VictoriaMetrics,
+            ),
+            Ok(())
+        );
     }
 }

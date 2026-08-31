@@ -83,6 +83,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.MCP_RELEASE_TOKEN }}
 
       - name: Download agent version patch
         uses: actions/download-artifact@v4
@@ -146,7 +147,11 @@ jobs:
           for module in "${MODULES[@]}"; do
             TASKS+=(":${module}:shadowJar")
           done
-          ./gradlew "${TASKS[@]}" --parallel
+          # agents/common changes trigger a parallel mass rebuild of every
+          # packaged module; the Gradle daemon default heap is too small for
+          # ~25 shadowJar fat jars at once on a 16 GB runner.
+          ./gradlew "${TASKS[@]}" --parallel \
+            -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g"
         working-directory: agents
       - run: python3 scripts/validate_agent_jars.py
         working-directory: agents
@@ -179,7 +184,6 @@ jobs:
             ["linux-aarch64"]="linux/arm64"
             ["linux-x64"]="linux/amd64"
             ["windows-aarch64"]="windows/arm64"
-            ["windows-x64"]="windows/amd64"
           )
           for platform in "${!TARGETS[@]}"; do
             IFS=/ read -r goos goarch <<< "${TARGETS[$platform]}"
@@ -191,6 +195,20 @@ jobs:
             CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "$output" .
           done
           ls -lh ../../../release-native
+      # Go 1.20 is the last release that supports Windows 7; keep other targets on Go 1.22.
+      - name: Set up Go for Windows 7-compatible Oracle agent
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.20.14"
+          cache-dependency-path: agents/drivers/oracle-go/go.sum
+      - name: Build Windows 7-compatible Oracle agent
+        shell: bash
+        working-directory: agents/drivers/oracle-go
+        run: |
+          output="../../../release-native/dbx-agent-oracle-windows-x64.exe"
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o "$output" .
+          go version -m "$output" | tee /tmp/oracle-windows-x64-build-info.txt
+          grep -q ': go1\.20\.14$' /tmp/oracle-windows-x64-build-info.txt
       - uses: actions/upload-artifact@v4
         with:
           name: oracle-native
@@ -259,7 +277,6 @@ jobs:
             ["linux-aarch64"]="linux/arm64"
             ["linux-x64"]="linux/amd64"
             ["windows-aarch64"]="windows/arm64"
-            ["windows-x64"]="windows/amd64"
           )
           for platform in "${!TARGETS[@]}"; do
             IFS=/ read -r goos goarch <<< "${TARGETS[$platform]}"
@@ -271,10 +288,184 @@ jobs:
             CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "$output" .
           done
           ls -lh ../../../release-native
+      # Go 1.20 is the last release that supports Windows 7; keep other targets on Go 1.22.
+      - name: Set up Go for Windows 7-compatible RabbitMQ agent
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.20.14"
+          cache-dependency-path: agents/drivers/rabbitmq/go.sum
+      - name: Build Windows 7-compatible RabbitMQ agent
+        shell: bash
+        working-directory: agents/drivers/rabbitmq
+        run: |
+          output="../../../release-native/dbx-agent-rabbitmq-windows-x64.exe"
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o "$output" .
+          go version -m "$output" | tee /tmp/rabbitmq-windows-x64-build-info.txt
+          grep -q ': go1\.20\.14$' /tmp/rabbitmq-windows-x64-build-info.txt
       - uses: actions/upload-artifact@v4
         with:
           name: rabbitmq-native
           path: "release-native/dbx-agent-rabbitmq-*"
+
+  build-rocketmq-native:
+    needs: [bump-versions]
+    if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'rocketmq') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+      - name: Test RocketMQ native agent
+        working-directory: agents/drivers/rocketmq
+        run: go test -race ./...
+      - name: Cross-compile RocketMQ native agent
+        shell: bash
+        run: |
+          mkdir -p release-native
+          cd agents/drivers/rocketmq
+          declare -A TARGETS=(
+            ["macos-aarch64"]="darwin/arm64"
+            ["macos-x64"]="darwin/amd64"
+            ["linux-aarch64"]="linux/arm64"
+            ["linux-x64"]="linux/amd64"
+            ["windows-aarch64"]="windows/arm64"
+            ["windows-x64"]="windows/amd64"
+          )
+          for platform in "${!TARGETS[@]}"; do
+            IFS=/ read -r goos goarch <<< "${TARGETS[$platform]}"
+            output="../../../release-native/dbx-agent-rocketmq-${platform}"
+            if [[ "$goos" == "windows" ]]; then
+              output="${output}.exe"
+            fi
+            echo "Building $platform ($goos/$goarch)"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "$output" .
+          done
+          ls -lh ../../../release-native
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rocketmq-native
+          path: "release-native/dbx-agent-rocketmq-*"
+
+  build-zookeeper-native:
+    needs: [bump-versions]
+    if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'zookeeper') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+      - name: Test ZooKeeper native agent
+        working-directory: agents/drivers/zookeeper
+        run: go test -race ./...
+      - name: Cross-compile ZooKeeper native agent
+        shell: bash
+        run: |
+          mkdir -p release-native
+          cd agents/drivers/zookeeper
+          declare -A TARGETS=(
+            ["macos-aarch64"]="darwin/arm64"
+            ["macos-x64"]="darwin/amd64"
+            ["linux-aarch64"]="linux/arm64"
+            ["linux-x64"]="linux/amd64"
+            ["windows-aarch64"]="windows/arm64"
+            ["windows-x64"]="windows/amd64"
+          )
+          for platform in "${!TARGETS[@]}"; do
+            IFS=/ read -r goos goarch <<< "${TARGETS[$platform]}"
+            output="../../../release-native/dbx-agent-zookeeper-${platform}"
+            if [[ "$goos" == "windows" ]]; then
+              output="${output}.exe"
+            fi
+            echo "Building $platform ($goos/$goarch)"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "$output" .
+          done
+          ls -lh ../../../release-native
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zookeeper-native
+          path: "release-native/dbx-agent-zookeeper-*"
+
+  build-cassandra-native:
+    needs: [bump-versions]
+    if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'cassandra') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+      - name: Test Cassandra native agent
+        working-directory: agents/drivers/cassandra-go
+        run: go test ./...
+      - name: Cross-compile Cassandra native agent
+        shell: bash
+        run: |
+          mkdir -p release-native
+          cd agents/drivers/cassandra-go
+          declare -A TARGETS=(
+            ["macos-aarch64"]="darwin/arm64"
+            ["macos-x64"]="darwin/amd64"
+            ["linux-aarch64"]="linux/arm64"
+            ["linux-x64"]="linux/amd64"
+            ["windows-aarch64"]="windows/arm64"
+            ["windows-x64"]="windows/amd64"
+          )
+          for platform in "${!TARGETS[@]}"; do
+            IFS=/ read -r goos goarch <<< "${TARGETS[$platform]}"
+            output="../../../release-native/dbx-agent-cassandra-${platform}"
+            if [[ "$goos" == "windows" ]]; then
+              output="${output}.exe"
+            fi
+            echo "Building $platform ($goos/$goarch)"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "$output" .
+          done
+          ls -lh ../../../release-native
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cassandra-native
+          path: "release-native/dbx-agent-cassandra-*"
+
+  build-hive-native:
+    needs: [bump-versions]
+    if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'hive') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.x"
+      - name: Test Hive native agent
+        working-directory: agents/drivers/hive-go
+        run: go test ./...
+      - name: Cross-compile Hive native agent
+        shell: bash
+        run: |
+          mkdir -p release-native
+          cd agents/drivers/hive-go
+          declare -A TARGETS=(
+            ["macos-aarch64"]="darwin/arm64"
+            ["macos-x64"]="darwin/amd64"
+            ["linux-aarch64"]="linux/arm64"
+            ["linux-x64"]="linux/amd64"
+            ["windows-aarch64"]="windows/arm64"
+            ["windows-x64"]="windows/amd64"
+          )
+          for platform in "${!TARGETS[@]}"; do
+            IFS=/ read -r goos goarch <<< "${TARGETS[$platform]}"
+            output="../../../release-native/dbx-agent-hive-${platform}"
+            if [[ "$goos" == "windows" ]]; then
+              output="${output}.exe"
+            fi
+            echo "Building $platform ($goos/$goarch)"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "$output" .
+          done
+          ls -lh ../../../release-native
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hive-native
+          path: "release-native/dbx-agent-hive-*"
 
   build-kingbase-native:
     needs: [bump-versions]
@@ -315,6 +506,126 @@ jobs:
         with:
           name: kingbase-native
           path: "release-native/dbx-agent-kingbase-*"
+
+  build-vastbase-native:
+    needs: [bump-versions]
+    if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'vastbase') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+      - name: Test Vastbase native agent
+        working-directory: agents/drivers/vastbase-go
+        run: go test ./...
+      - name: Cross-compile Vastbase native agent
+        shell: bash
+        run: |
+          mkdir -p release-native
+          cd agents/drivers/vastbase-go
+          declare -A TARGETS=(
+            ["macos-aarch64"]="darwin/arm64"
+            ["macos-x64"]="darwin/amd64"
+            ["linux-aarch64"]="linux/arm64"
+            ["linux-x64"]="linux/amd64"
+            ["windows-aarch64"]="windows/arm64"
+            ["windows-x64"]="windows/amd64"
+          )
+          for platform in "${!TARGETS[@]}"; do
+            IFS=/ read -r goos goarch <<< "${TARGETS[$platform]}"
+            output="../../../release-native/dbx-agent-vastbase-${platform}"
+            if [[ "$goos" == "windows" ]]; then
+              output="${output}.exe"
+            fi
+            echo "Building $platform ($goos/$goarch)"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "$output" .
+          done
+          ls -lh ../../../release-native
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vastbase-native
+          path: "release-native/dbx-agent-vastbase-*"
+
+  build-neo4j-native:
+    needs: [bump-versions]
+    if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'neo4j') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.x"
+      - name: Test Neo4j native agent
+        working-directory: agents/drivers/neo4j-go
+        run: go test ./...
+      - name: Cross-compile Neo4j native agent
+        shell: bash
+        run: |
+          mkdir -p release-native
+          cd agents/drivers/neo4j-go
+          declare -A TARGETS=(
+            ["macos-aarch64"]="darwin/arm64"
+            ["macos-x64"]="darwin/amd64"
+            ["linux-aarch64"]="linux/arm64"
+            ["linux-x64"]="linux/amd64"
+            ["windows-aarch64"]="windows/arm64"
+            ["windows-x64"]="windows/amd64"
+          )
+          for platform in "${!TARGETS[@]}"; do
+            IFS=/ read -r goos goarch <<< "${TARGETS[$platform]}"
+            output="../../../release-native/dbx-agent-neo4j-${platform}"
+            if [[ "$goos" == "windows" ]]; then
+              output="${output}.exe"
+            fi
+            echo "Building $platform ($goos/$goarch)"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "$output" .
+          done
+          ls -lh ../../../release-native
+      - uses: actions/upload-artifact@v4
+        with:
+          name: neo4j-native
+          path: "release-native/dbx-agent-neo4j-*"
+
+  build-iotdb-native:
+    needs: [bump-versions]
+    if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'iotdb') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+      - name: Test IoTDB native agent
+        working-directory: agents/drivers/iotdb
+        run: go test ./...
+      - name: Cross-compile IoTDB native agent
+        shell: bash
+        run: |
+          mkdir -p release-native
+          cd agents/drivers/iotdb
+          declare -A TARGETS=(
+            ["macos-aarch64"]="darwin/arm64"
+            ["macos-x64"]="darwin/amd64"
+            ["linux-aarch64"]="linux/arm64"
+            ["linux-x64"]="linux/amd64"
+            ["windows-aarch64"]="windows/arm64"
+            ["windows-x64"]="windows/amd64"
+          )
+          for platform in "${!TARGETS[@]}"; do
+            IFS=/ read -r goos goarch <<< "${TARGETS[$platform]}"
+            output="../../../release-native/dbx-agent-iotdb-${platform}"
+            if [[ "$goos" == "windows" ]]; then
+              output="${output}.exe"
+            fi
+            echo "Building $platform ($goos/$goarch)"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "$output" .
+          done
+          ls -lh ../../../release-native
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iotdb-native
+          path: "release-native/dbx-agent-iotdb-*"
 
   build-duckdb-native:
     needs: [bump-versions]
@@ -367,12 +678,19 @@ jobs:
         with:
           toolchain: nightly-2026-07-22
           components: rust-src
+      - uses: actions/setup-python@v5
+        if: runner.os == 'Windows'
+        with:
+          python-version: "3.13"
       - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
         with:
           version: "v0.10.0"
       - name: Build DuckDB native driver
         shell: bash
         run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static"
+          fi
           if [ -n "${{ matrix.manylinux_image }}" ]; then
             docker run --rm \
               --user "$(id -u):$(id -g)" \
@@ -380,14 +698,14 @@ jobs:
               -e CARGO_INCREMENTAL=0 \
               -e CARGO_TARGET_DIR=/workspace/target/duckdb-driver \
               -v "${{ github.workspace }}:/workspace" \
-              -w /workspace \
+              -w /workspace/agents/drivers/duckdb \
               "${{ matrix.manylinux_image }}" \
               bash -lc '
                 mkdir -p "$HOME"
                 curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.97.1
                 source "$HOME/.cargo/env"
                 cargo build \
-                  --manifest-path agents/drivers/duckdb/Cargo.toml \
+                  --manifest-path Cargo.toml \
                   --locked \
                   --release \
                   --bin dbx-duckdb-driver \
@@ -398,18 +716,24 @@ jobs:
             if [ "${{ matrix.win7 }}" = "true" ]; then
               BUILD_STD=(-Z build-std=std,panic_abort)
             fi
+            pushd agents/drivers/duckdb
             cargo build \
-              --manifest-path agents/drivers/duckdb/Cargo.toml \
+              --manifest-path Cargo.toml \
               --locked \
               --release \
               --bin dbx-duckdb-driver \
               --target "${{ matrix.target }}" \
               "${BUILD_STD[@]}"
+            popd
           fi
           mkdir -p release-native
           cp \
             "target/duckdb-driver/${{ matrix.target }}/release/dbx-duckdb-driver${{ matrix.extension }}" \
             "release-native/dbx-agent-duckdb-${{ matrix.platform }}${{ matrix.extension }}"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            python agents/scripts/validate_windows_pe_dependencies.py \
+              "release-native/dbx-agent-duckdb-${{ matrix.platform }}${{ matrix.extension }}"
+          fi
           if [ -n "${{ matrix.manylinux_image }}" ]; then
             docker run --rm \
               --user "$(id -u):$(id -g)" \
@@ -421,6 +745,168 @@ jobs:
         with:
           name: duckdb-native-${{ matrix.platform }}
           path: "release-native/dbx-agent-duckdb-*"
+
+  build-sqlite-worker-native:
+    needs: [bump-versions]
+    if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'sqlite-worker') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+            platform: linux-x64
+            rustflags: "-C target-feature=+crt-static"
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-musl
+            platform: linux-aarch64
+            rustflags: "-C target-feature=+crt-static -C link-arg=-z -C link-arg=max-page-size=65536"
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cargo-zigbuild
+        run: pip3 install cargo-zigbuild
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./ -> target"
+          shared-key: sqlite-worker-${{ matrix.target }}
+          cache-on-failure: true
+
+      - name: Build musl SQLite SSH worker
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: cargo zigbuild --release -p dbx-sqlite-worker --target ${{ matrix.target }}
+
+      - name: Stage SQLite SSH worker
+        run: |
+          mkdir -p release-native
+          cp \
+            "target/${{ matrix.target }}/release/dbx-sqlite-worker" \
+            "release-native/dbx-agent-sqlite-worker-${{ matrix.platform }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sqlite-worker-native-${{ matrix.platform }}
+          path: "release-native/dbx-agent-sqlite-worker-*"
+
+  build-tdengine-native:
+    needs: [bump-versions]
+    if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'tdengine') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            platform: macos-aarch64
+            extension: ""
+            smoke: true
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            platform: macos-x64
+            extension: ""
+            smoke: true
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            platform: linux-aarch64
+            extension: ""
+            manylinux_image: quay.io/pypa/manylinux_2_28_aarch64
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            platform: linux-x64
+            extension: ""
+            manylinux_image: quay.io/pypa/manylinux_2_28_x86_64
+          - runner: windows-2022
+            target: aarch64-pc-windows-msvc
+            platform: windows-aarch64
+            extension: .exe
+          - runner: windows-2022
+            target: x86_64-win7-windows-msvc
+            platform: windows-x64
+            extension: .exe
+            smoke: true
+            win7: true
+    runs-on: ${{ matrix.runner }}
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/tdengine-driver
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.97.1
+        if: runner.os != 'Linux' && matrix.win7 != true
+        with:
+          targets: ${{ matrix.target }}
+      - name: Setup Rust for Windows 7
+        if: matrix.win7 == true
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-07-22
+          components: rust-src
+      - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        with:
+          version: "v0.10.0"
+      - name: Build TDengine native driver
+        shell: bash
+        run: |
+          if [ -n "${{ matrix.manylinux_image }}" ]; then
+            docker run --rm \
+              --user "$(id -u):$(id -g)" \
+              -e HOME=/tmp/dbx-rust-home \
+              -e CARGO_INCREMENTAL=0 \
+              -e CARGO_TARGET_DIR=/workspace/target/tdengine-driver \
+              -v "${{ github.workspace }}:/workspace" \
+              -w /workspace \
+              "${{ matrix.manylinux_image }}" \
+              bash -lc '
+                mkdir -p "$HOME"
+                curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.97.1
+                source "$HOME/.cargo/env"
+                cargo build \
+                  --manifest-path agents/drivers/tdengine/Cargo.toml \
+                  --locked \
+                  --release \
+                  --bin dbx-tdengine-driver \
+                  --target "${{ matrix.target }}"
+              '
+          else
+            BUILD_STD=()
+            if [ "${{ matrix.win7 }}" = "true" ]; then
+              BUILD_STD=(-Z build-std=std,panic_abort)
+            fi
+            cargo build \
+              --manifest-path agents/drivers/tdengine/Cargo.toml \
+              --locked \
+              --release \
+              --bin dbx-tdengine-driver \
+              --target "${{ matrix.target }}" \
+              "${BUILD_STD[@]}"
+          fi
+          mkdir -p release-native
+          cp \
+            "target/tdengine-driver/${{ matrix.target }}/release/dbx-tdengine-driver${{ matrix.extension }}" \
+            "release-native/dbx-agent-tdengine-${{ matrix.platform }}${{ matrix.extension }}"
+          if [ -n "${{ matrix.manylinux_image }}" ]; then
+            docker run --rm \
+              --user "$(id -u):$(id -g)" \
+              -v "${{ github.workspace }}/release-native:/driver:ro" \
+              "${{ matrix.manylinux_image }}" \
+              "/driver/dbx-agent-tdengine-${{ matrix.platform }}" < /dev/null
+          elif [ "${{ matrix.smoke }}" = "true" ]; then
+            "release-native/dbx-agent-tdengine-${{ matrix.platform }}${{ matrix.extension }}" < /dev/null
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tdengine-native-${{ matrix.platform }}
+          path: "release-native/dbx-agent-tdengine-*"
 
   build-jre:
     needs: [bump-versions]
@@ -531,7 +1017,7 @@ jobs:
           retention-days: 1
 
   release:
-    needs: [bump-versions, commit-versions, build-agents, build-oracle-native, build-xugu-native, build-rabbitmq-native, build-kingbase-native, build-duckdb-native, build-jre, reuse-previous-assets]
+    needs: [bump-versions, commit-versions, build-agents, build-oracle-native, build-xugu-native, build-rabbitmq-native, build-rocketmq-native, build-zookeeper-native, build-cassandra-native, build-hive-native, build-kingbase-native, build-vastbase-native, build-neo4j-native, build-iotdb-native, build-duckdb-native, build-sqlite-worker-native, build-tdengine-native, build-jre, reuse-previous-assets]
     if: ${{ always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     runs-on: ubuntu-latest
     steps:
@@ -552,6 +1038,11 @@ jobs:
         with:
           token: ${{ steps.release-token.outputs.token }}
           fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -648,10 +1139,19 @@ jobs:
           native_only_label() {
             local name="$1"
             case "$name" in
-              kingbase) echo "人大金仓 KingbaseES" ;;
+              kingbase) echo "金仓KingbaseES" ;;
+              vastbase) echo "Vastbase" ;;
               duckdb) echo "DuckDB" ;;
+              sqlite-worker) echo "SQLite SSH Worker" ;;
               xugu) echo "虚谷 XuguDB" ;;
               rabbitmq) echo "RabbitMQ" ;;
+              rocketmq) echo "Apache RocketMQ" ;;
+              zookeeper) echo "Apache ZooKeeper" ;;
+              cassandra) echo "Apache Cassandra" ;;
+              hive) echo "Apache Hive" ;;
+              neo4j) echo "Neo4j" ;;
+              iotdb) echo "Apache IoTDB" ;;
+              tdengine) echo "TDengine" ;;
               *) echo "$name" ;;
             esac
           }
@@ -715,7 +1215,7 @@ jobs:
             [ -n "$DRIVERS" ] && DRIVERS="${DRIVERS},"$'\n'
             DRIVERS="${DRIVERS}$(generate_jar_entry "$name" "$label" "$f" "$jre_key" "$version" "$external_driver" "$native_json")"
           done
-          for name in oracle xugu kingbase duckdb rabbitmq; do
+          for name in oracle xugu kingbase vastbase neo4j iotdb duckdb sqlite-worker rabbitmq rocketmq zookeeper cassandra hive tdengine; do
             version=$(get_module_version "$name")
             [ -f "release/dbx-agent-${name}-${version}.jar" ] && continue
             native_json=$(generate_native_platforms "$name" "$version")
@@ -747,8 +1247,21 @@ jobs:
           echo "=== agent-registry.json ==="
           cat release/agent-registry.json
 
+      - name: Build managed JDBC offline payload
+        shell: bash
+        run: |
+          ./plugins/jdbc/package.sh
+          JDBC_VERSION="$(sed -nE "s/^version[[:space:]]*=[[:space:]]*'([^']+)'.*/\1/p" plugins/jdbc/build.gradle | head -n 1)"
+          node agents/scripts/build_offline_jdbc_payload.mjs \
+            release \
+            "plugins/jdbc/dist/dbx-jdbc-plugin-${JDBC_VERSION}.zip" \
+            "plugins/jdbc/dist/dbx-jdbc-plugin-${JDBC_VERSION}/bin/dbx-maven-resolver"
+
       - name: Build offline ZIP bundles
         run: bash agents/scripts/build_offline_zip.sh release
+
+      - name: Verify managed JDBC assets in all offline ZIPs
+        run: node agents/scripts/verify_offline_jdbc_release.mjs release
 
       - name: Build single-driver packages
         run: |
@@ -779,11 +1292,20 @@ jobs:
           native_only_label() {
             local name="$1"
             case "$name" in
-              kingbase) echo "人大金仓 KingbaseES" ;;
+              kingbase) echo "金仓KingbaseES" ;;
+              vastbase) echo "Vastbase" ;;
               duckdb) echo "DuckDB" ;;
+              sqlite-worker) echo "SQLite SSH Worker" ;;
               oracle) echo "Oracle" ;;
               xugu) echo "虚谷 XuguDB" ;;
               rabbitmq) echo "RabbitMQ" ;;
+              rocketmq) echo "Apache RocketMQ" ;;
+              zookeeper) echo "Apache ZooKeeper" ;;
+              cassandra) echo "Apache Cassandra" ;;
+              hive) echo "Apache Hive" ;;
+              neo4j) echo "Neo4j" ;;
+              iotdb) echo "Apache IoTDB" ;;
+              tdengine) echo "TDengine" ;;
               *) echo "$name" ;;
             esac
           }
@@ -806,12 +1328,36 @@ jobs:
               LOG_PATH="agents/drivers/oracle-go/"
             elif [ "$name" = "kingbase" ]; then
               LOG_PATH="agents/drivers/kingbase-go/"
+            elif [ "$name" = "vastbase" ]; then
+              LOG_PATH="agents/drivers/vastbase-go/"
+            elif [ "$name" = "cassandra" ]; then
+              LOG_PATH="agents/drivers/cassandra-go/"
+            elif [ "$name" = "hive" ]; then
+              LOG_PATH="agents/drivers/hive-go/"
+            elif [ "$name" = "neo4j" ]; then
+              LOG_PATH="agents/drivers/neo4j-go/"
+            elif [ "$name" = "iotdb" ]; then
+              LOG_PATH="agents/drivers/iotdb/"
+            elif [ "$name" = "sqlite-worker" ]; then
+              LOG_PATH="crates/dbx-sqlite-worker/"
             elif [ -d "agents/drivers/$name" ]; then
               LOG_PATH="agents/drivers/$name/"
             else
               LOG_PATH="agents/$name/"
             fi
             LOG_PATHS=("$LOG_PATH")
+            if [ "$name" = "hive" ]; then
+              LOG_PATHS+=(
+                "agents/go-common/go-gssapi/"
+                "agents/go-common/gohive/"
+                "agents/go-common/gosasl/"
+              )
+            elif [ "$name" = "zookeeper" ]; then
+              LOG_PATHS+=(
+                "agents/go-common/go-gssapi/"
+                "agents/go-common/gosasl/"
+              )
+            fi
             while IFS= read -r line; do
               [ -n "$line" ] && NOTES="${NOTES}- ${line}"$'\n'
             done < <(git log --oneline "$PREV_TAG"..HEAD -- "${LOG_PATHS[@]}" | sed 's/^[0-9a-f]* //')

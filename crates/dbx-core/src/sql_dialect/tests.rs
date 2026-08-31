@@ -4,11 +4,13 @@ use crate::models::connection::DatabaseType;
 #[test]
 fn transfer_identifier_policy_preserves_legacy_output() {
     assert_eq!(quote_transfer_identifier("user`events", &DatabaseType::Hive), "`user``events`");
+    assert_eq!(quote_transfer_identifier("user`events", &DatabaseType::Impala), "`user``events`");
     assert_eq!(quote_transfer_identifier("user`events", &DatabaseType::ClickHouse), "`user``events`");
     assert_eq!(quote_transfer_identifier("user`events", &DatabaseType::Doris), "`user``events`");
     assert_eq!(quote_transfer_identifier("user]events", &DatabaseType::SqlServer), "[user]]events]");
     assert_eq!(quote_transfer_identifier("user\"events", &DatabaseType::Postgres), "\"user\"\"events\"");
     assert_eq!(qualified_transfer_table("events", "warehouse", &DatabaseType::Hive, None), "`warehouse`.`events`");
+    assert_eq!(qualified_transfer_table("events", "warehouse", &DatabaseType::Impala, None), "`warehouse`.`events`");
     assert_eq!(qualified_transfer_table("events", "warehouse", &DatabaseType::Mysql, None), "`events`");
 }
 
@@ -32,6 +34,37 @@ fn quotes_identifiers_by_database_type() {
     assert_eq!(quote_table_identifier(Some(DatabaseType::Jdbc), "users_1"), "users_1");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Jdbc), "user name"), "user name");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Iotdb), "root.test.device2"), "root.test.device2");
+    assert_eq!(quote_table_identifier(Some(DatabaseType::Spanner), "user`name"), "`user``name`");
+}
+
+/// Spanner databases are created in one of two immutable dialects. The connected
+/// agent reports the correct identifier quote; when it is missing the static mapping
+/// must fall back to GoogleSQL (backticks), because GoogleSQL treats double quotes as
+/// string literals and would reject `SELECT * FROM "users"`.
+#[test]
+fn quotes_spanner_identifiers_by_connection_dialect() {
+    // GoogleSQL dialect: agent reports a backtick.
+    assert_eq!(quote_table_data_identifier(Some(DatabaseType::Spanner), "order", Some("`")), "`order`");
+    assert_eq!(quote_table_data_identifier(Some(DatabaseType::Spanner), "user`name", Some("`")), "`user``name`");
+
+    // PostgreSQL dialect: agent reports a double quote.
+    assert_eq!(quote_table_data_identifier(Some(DatabaseType::Spanner), "order", Some("\"")), "\"order\"");
+    assert_eq!(quote_table_data_identifier(Some(DatabaseType::Spanner), "user\"name", Some("\"")), "\"user\"\"name\"");
+
+    // No quote reported (metadata probe failed / caller outside the desktop store):
+    // fall back to the GoogleSQL default rather than the ANSI double quote.
+    assert_eq!(quote_table_data_identifier(Some(DatabaseType::Spanner), "order", None), "`order`");
+
+    // GoogleSQL's default schema is the empty string and must not produce `` ``.`t` ``,
+    // which Spanner rejects with `Invalid empty identifier`.
+    assert_eq!(
+        table_data_qualified_table_name(Some(DatabaseType::Spanner), Some(""), "singers", Some("`")),
+        "`singers`"
+    );
+    assert_eq!(
+        table_data_qualified_table_name(Some(DatabaseType::Spanner), Some("public"), "singers", Some("\"")),
+        "\"public\".\"singers\""
+    );
 }
 
 #[test]
@@ -80,6 +113,11 @@ fn qualifies_schema_only_for_schema_aware_databases() {
     assert_eq!(qualified_table_name(Some(DatabaseType::Informix), Some("xtdpcky"), "users"), "xtdpcky.users");
     assert_eq!(qualified_table_name(Some(DatabaseType::Sqlite), Some("analytics"), "users"), "\"analytics\".\"users\"");
     assert_eq!(qualified_table_name(Some(DatabaseType::Jdbc), Some("cbsdw_dwd"), "dwd_test_df"), "dwd_test_df");
+    // GoogleSQL's default schema is the empty string: the qualifier (and its dot) must be
+    // dropped entirely, otherwise Spanner reports `Invalid empty identifier`.
+    assert_eq!(qualified_table_name(Some(DatabaseType::Spanner), Some(""), "users"), "`users`");
+    assert_eq!(qualified_table_name(Some(DatabaseType::Spanner), None, "users"), "`users`");
+    assert_eq!(qualified_table_name(Some(DatabaseType::Spanner), Some("public"), "users"), "`public`.`users`");
     assert_eq!(qualified_table_name(Some(DatabaseType::Iotdb), Some("root.test"), "device2"), "root.test.device2");
     assert_eq!(
         qualified_table_name(Some(DatabaseType::Iotdb), Some("root.test"), "root.test.device2"),
@@ -110,7 +148,7 @@ fn maps_table_pagination_strategy_by_database_type() {
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Oscar)), TablePaginationStrategy::Rownum);
     assert_eq!(
         pagination_strategy(Some(DatabaseType::Oracle), PaginationContext::BoundedRead),
-        TablePaginationStrategy::FetchFirst
+        TablePaginationStrategy::Rownum
     );
     assert_eq!(
         pagination_strategy(Some(DatabaseType::Oscar), PaginationContext::BoundedRead),
@@ -125,6 +163,8 @@ fn maps_table_pagination_strategy_by_database_type() {
         TablePaginationStrategy::Unbounded
     );
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Jdbc)), TablePaginationStrategy::AgentMaxRows);
+    // Both Spanner dialects support `LIMIT n OFFSET m`; pin the fallback.
+    assert_eq!(table_pagination_strategy(Some(DatabaseType::Spanner)), TablePaginationStrategy::LimitOffset);
     assert_eq!(table_pagination_strategy(None), TablePaginationStrategy::LimitOffset);
 }
 
@@ -247,6 +287,17 @@ fn builds_select_sql_with_limit_syntax_for_database_type() {
     );
     assert_eq!(
         build_table_select_sql(TableSelectSqlOptions {
+            database_type: Some(DatabaseType::Impala),
+            schema: Some("dbx_demo"),
+            table_name: "connection_test",
+            columns: &[],
+            order_columns: &[],
+            limit: 100,
+        }),
+        "SELECT * FROM `dbx_demo`.`connection_test` LIMIT 100;"
+    );
+    assert_eq!(
+        build_table_select_sql(TableSelectSqlOptions {
             database_type: Some(DatabaseType::StarRocks),
             schema: None,
             table_name: "sales_report",
@@ -277,6 +328,91 @@ fn builds_select_sql_with_limit_syntax_for_database_type() {
             limit: 100,
         }),
         "SELECT * FROM root.test.device2 LIMIT 100;"
+    );
+}
+
+#[test]
+fn jdbc_tdengine_table_preview_qualifies_selected_database() {
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Jdbc),
+            driver_profile: Some(" TDENGINE ".to_string()),
+            schema: None,
+            database: Some("bopu_light".to_string()),
+            table_name: "mppd_pwr_862288087612675".to_string(),
+            limit: Some(100),
+            ..Default::default()
+        }),
+        "SELECT * FROM `bopu_light`.`mppd_pwr_862288087612675`;"
+    );
+
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Jdbc),
+            driver_profile: Some("tdengine".to_string()),
+            schema: Some("fallback_db".to_string()),
+            database: Some("   ".to_string()),
+            table_name: "meter`readings".to_string(),
+            limit: Some(100),
+            ..Default::default()
+        }),
+        "SELECT * FROM `fallback_db`.`meter``readings`;"
+    );
+}
+
+#[test]
+fn jdbc_non_tdengine_and_unscoped_tdengine_previews_remain_unqualified() {
+    for (driver_profile, database) in [(Some("postgres"), Some("analytics")), (Some("tdengine"), None)] {
+        assert_eq!(
+            build_table_data_select_sql(TableDataSelectSqlOptions {
+                database_type: Some(DatabaseType::Jdbc),
+                driver_profile: driver_profile.map(str::to_string),
+                schema: None,
+                database: database.map(str::to_string),
+                table_name: "readings".to_string(),
+                limit: Some(100),
+                ..Default::default()
+            }),
+            "SELECT * FROM readings;"
+        );
+    }
+}
+
+#[test]
+fn jdbc_table_data_qualifies_schema_without_forcing_identifier_quotes() {
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Jdbc),
+            driver_profile: Some("phoenix".to_string()),
+            schema: Some("DEMO".to_string()),
+            table_name: "STUDENT".to_string(),
+            limit: Some(100),
+            ..Default::default()
+        }),
+        "SELECT * FROM DEMO.STUDENT;"
+    );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Jdbc),
+            driver_profile: Some("phoenix".to_string()),
+            identifier_quote: Some("\"".to_string()),
+            schema: Some("MY_SCHEMA".to_string()),
+            table_name: "ORDER".to_string(),
+            limit: Some(100),
+            ..Default::default()
+        }),
+        "SELECT * FROM \"MY_SCHEMA\".\"ORDER\";"
+    );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Jdbc),
+            driver_profile: Some("phoenix".to_string()),
+            schema: None,
+            table_name: "STUDENT".to_string(),
+            limit: Some(100),
+            ..Default::default()
+        }),
+        "SELECT * FROM STUDENT;"
     );
 }
 
@@ -342,6 +478,24 @@ fn builds_table_data_where_and_schema_queries() {
     );
     assert_eq!(
         build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Impala),
+            schema: Some("dbx_demo".to_string()),
+            table_name: "connection_test".to_string(),
+            table_type: Some("TABLE".to_string()),
+            primary_keys: Vec::new(),
+            columns: vec!["id".to_string(), "name".to_string()],
+            fallback_order_columns: Vec::new(),
+            order_by: None,
+            limit: Some(2),
+            offset: Some(1),
+            where_input: None,
+            include_row_id: false,
+            ..Default::default()
+        }),
+        "SELECT `id` AS `id`, `name` AS `name` FROM `dbx_demo`.`connection_test` ORDER BY 1 LIMIT 2 OFFSET 1;"
+    );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
             database_type: Some(DatabaseType::Kingbase),
             identifier_quote: Some("`".to_string()),
             schema: Some("nacos-v3".to_string()),
@@ -369,6 +523,29 @@ fn builds_table_data_where_and_schema_queries() {
             ..Default::default()
         }),
         "SELECT * FROM \"App Schema\".\"ANALYZE\" LIMIT 100;"
+    );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Informix),
+            driver_profile: Some("gbase8s".to_string()),
+            identifier_quote: Some(String::new()),
+            schema: Some("gbasedbt".to_string()),
+            table_name: "connection_smoke".to_string(),
+            limit: Some(100),
+            ..Default::default()
+        }),
+        "SELECT FIRST 100 * FROM connection_smoke"
+    );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Informix),
+            identifier_quote: Some(String::new()),
+            schema: Some("gbasedbt".to_string()),
+            table_name: "connection_smoke".to_string(),
+            limit: Some(100),
+            ..Default::default()
+        }),
+        "SELECT FIRST 100 * FROM gbasedbt.connection_smoke"
     );
     assert_eq!(
         build_table_data_select_sql(TableDataSelectSqlOptions {
@@ -600,6 +777,25 @@ fn builds_table_data_where_and_schema_queries() {
     );
     assert_eq!(
         build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Iris),
+            schema: Some("Ens".to_string()),
+            table_name: "AlarmResponse".to_string(),
+            table_type: None,
+            primary_keys: Vec::new(),
+            columns: Vec::new(),
+            fallback_order_columns: Vec::new(),
+            order_by: Some("\"ID\" ASC".to_string()),
+            limit: Some(100),
+            offset: Some(100),
+            use_driver_row_offset: true,
+            where_input: Some("Status = 'Open'".to_string()),
+            include_row_id: false,
+            ..Default::default()
+        }),
+        "SELECT * FROM \"Ens\".\"AlarmResponse\" WHERE (Status = 'Open') ORDER BY \"ID\" ASC"
+    );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
             database_type: Some(DatabaseType::Iotdb),
             schema: Some("root.test".to_string()),
             table_name: "device2".to_string(),
@@ -615,6 +811,208 @@ fn builds_table_data_where_and_schema_queries() {
             ..Default::default()
         }),
         "SELECT * FROM root.test.device2 LIMIT 100;"
+    );
+}
+
+#[test]
+fn builds_mysql_table_data_large_value_previews_without_truncating_keys() {
+    let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        table_name: "large_rows".to_string(),
+        primary_keys: vec!["id".to_string()],
+        columns: vec!["id".to_string(), "payload".to_string(), "raw_value".to_string(), "metadata".to_string()],
+        column_types: vec!["bigint".to_string(), "longtext".to_string(), "longblob".to_string(), "json".to_string()],
+        large_value_preview_size: Some(4096),
+        limit: Some(100),
+        ..Default::default()
+    });
+
+    assert!(sql.starts_with("SELECT `id`, LEFT(`payload`, 4097) AS `payload`"));
+    assert!(sql.contains("CONCAT('T:4096:', LENGTH(`payload`)) AS `__DBX_LARGE_VALUE_BYTES_T_1`"));
+    assert!(sql.contains("LEFT(`raw_value`, 4097) AS `raw_value`"));
+    assert!(sql.contains("CONCAT('B:4096:', LENGTH(`raw_value`)) AS `__DBX_LARGE_VALUE_BYTES_B_2`"));
+    assert!(sql.contains("LEFT(`metadata`, 4097) AS `metadata`"));
+    assert!(sql.contains("CONCAT('T:4096:', LENGTH(`metadata`)) AS `__DBX_LARGE_VALUE_BYTES_J_3`"));
+    assert!(!sql.contains("OCTET_LENGTH"));
+    assert!(!sql.contains("__DBX_LARGE_VALUE_BYTES_0"));
+}
+
+#[test]
+fn previews_mysql_bounded_string_columns_only_above_the_active_budget() {
+    let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        table_name: "t_0001".to_string(),
+        primary_keys: vec!["id".to_string()],
+        columns: vec![
+            "id".to_string(),
+            "image_mime".to_string(),
+            "image_data".to_string(),
+            "image_url".to_string(),
+            "large_note".to_string(),
+            "large_binary".to_string(),
+        ],
+        column_types: vec![
+            "int".to_string(),
+            "varchar(64)".to_string(),
+            "longblob".to_string(),
+            "varchar(512)".to_string(),
+            "varchar(10000)".to_string(),
+            "varbinary(10000)".to_string(),
+        ],
+        large_value_preview_size: Some(419),
+        limit: Some(10_000),
+        ..Default::default()
+    });
+
+    assert!(sql.starts_with("SELECT `id`, `image_mime`, LEFT(`image_data`, 420) AS `image_data`"));
+    assert!(sql.contains("CONCAT('B:419:', LENGTH(`image_data`)) AS `__DBX_LARGE_VALUE_BYTES_B_2`, LEFT(`image_url`, 420) AS `image_url`"));
+    assert!(sql.contains("CONCAT('T:419:', LENGTH(`image_url`)) AS `__DBX_LARGE_VALUE_BYTES_T_3`"));
+    assert!(sql.contains("LEFT(`large_note`, 420) AS `large_note`"));
+    assert!(sql.contains("CONCAT('T:419:', LENGTH(`large_note`)) AS `__DBX_LARGE_VALUE_BYTES_T_4`"));
+    assert!(sql.contains("LEFT(`large_binary`, 420) AS `large_binary`"));
+    assert!(!sql.contains("LEFT(`image_mime`"));
+}
+
+#[test]
+fn builds_postgres_table_data_large_value_previews() {
+    let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Postgres),
+        schema: Some("public".to_string()),
+        table_name: "large_rows".to_string(),
+        primary_keys: vec!["id".to_string()],
+        columns: vec!["id".to_string(), "payload".to_string(), "metadata".to_string()],
+        column_types: vec!["integer".to_string(), "text".to_string(), "jsonb".to_string()],
+        large_value_preview_size: Some(8192),
+        limit: Some(100),
+        ..Default::default()
+    });
+
+    assert!(sql.starts_with("SELECT \"id\", left(\"payload\", 8193) AS \"payload\""));
+    assert!(sql.contains("'T:8192' AS \"__DBX_LARGE_VALUE_BYTES_T_1\""));
+    assert!(sql.contains("left(\"metadata\"::text, 8193) AS \"metadata\""));
+    assert!(sql.contains("'T:8192' AS \"__DBX_LARGE_VALUE_BYTES_K_2\""));
+}
+
+#[test]
+fn preserves_postgres_array_types_in_large_value_previews() {
+    let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Postgres),
+        schema: Some("public".to_string()),
+        table_name: "array_preview".to_string(),
+        primary_keys: vec!["id".to_string()],
+        columns: [
+            "id",
+            "varchar_array",
+            "text_array",
+            "bytea_array",
+            "jsonb_array",
+            "vector_array",
+            "integer_array",
+            "text_value",
+            "varchar_value",
+            "varying_value",
+            "json_value",
+            "jsonb_value",
+            "tsvector_value",
+            "vector_value",
+            "bytea_value",
+        ]
+        .map(str::to_string)
+        .to_vec(),
+        column_types: [
+            "integer",
+            "character varying[]",
+            "text[][]",
+            "bytea[]",
+            "jsonb[]",
+            "vector(3)[]",
+            "integer[]",
+            "text",
+            "varchar(255)",
+            "character varying(255)",
+            "json",
+            "jsonb",
+            "tsvector",
+            "vector(3)",
+            "bytea",
+        ]
+        .map(str::to_string)
+        .to_vec(),
+        large_value_preview_size: Some(8),
+        limit: Some(25),
+        ..Default::default()
+    });
+
+    assert!(sql.starts_with(
+        "SELECT \"id\", \"varchar_array\", \"text_array\", \"bytea_array\", \"jsonb_array\", \
+         \"vector_array\", \"integer_array\", left(\"text_value\", 9) AS \"text_value\""
+    ));
+    for index in 1..=6 {
+        assert!(!sql.contains(&format!("__DBX_LARGE_VALUE_BYTES_T_{index}\"")));
+        assert!(!sql.contains(&format!("__DBX_LARGE_VALUE_BYTES_B_{index}\"")));
+        assert!(!sql.contains(&format!("__DBX_LARGE_VALUE_BYTES_K_{index}\"")));
+        assert!(!sql.contains(&format!("__DBX_LARGE_VALUE_BYTES_V_{index}\"")));
+    }
+    assert!(sql.contains("left(\"varchar_value\", 9) AS \"varchar_value\""));
+    assert!(sql.contains("left(\"varying_value\", 9) AS \"varying_value\""));
+    assert!(sql.contains("left(\"json_value\"::text, 9) AS \"json_value\""));
+    assert!(sql.contains("left(\"jsonb_value\"::text, 9) AS \"jsonb_value\""));
+    assert!(sql.contains("left(\"tsvector_value\"::text, 9) AS \"tsvector_value\""));
+    assert!(sql.contains("left(\"vector_value\"::text, 9) AS \"vector_value\""));
+    assert!(sql.contains("substring(\"bytea_value\" from 1 for 9) AS \"bytea_value\""));
+    assert!(sql.contains("'T:8' AS \"__DBX_LARGE_VALUE_BYTES_J_10\""));
+    assert!(sql.contains("'T:8' AS \"__DBX_LARGE_VALUE_BYTES_K_11\""));
+    assert!(sql.contains("'T:8' AS \"__DBX_LARGE_VALUE_BYTES_S_12\""));
+    assert!(sql.contains("'V:8' AS \"__DBX_LARGE_VALUE_BYTES_V_13\""));
+    assert!(sql.contains("'B:8' AS \"__DBX_LARGE_VALUE_BYTES_B_14\""));
+}
+
+#[test]
+fn builds_pgvector_table_data_preview_with_compatible_text_cast() {
+    let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Postgres),
+        schema: Some("public".to_string()),
+        table_name: "embeddings".to_string(),
+        primary_keys: vec!["id".to_string()],
+        columns: vec!["id".to_string(), "embedding".to_string()],
+        column_types: vec!["integer".to_string(), "vector(16000)".to_string()],
+        large_value_preview_size: Some(8192),
+        limit: Some(100),
+        ..Default::default()
+    });
+
+    assert!(sql.contains("left(\"embedding\"::text, 8193) AS \"embedding\""));
+    assert!(sql.contains("'V:8192' AS \"__DBX_LARGE_VALUE_BYTES_V_1\""));
+}
+
+#[test]
+fn table_data_preview_requires_stable_keys_and_parallel_types() {
+    let base = TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Postgres),
+        table_name: "large_rows".to_string(),
+        columns: vec!["payload".to_string()],
+        column_types: vec!["text".to_string()],
+        large_value_preview_size: Some(8192),
+        limit: Some(100),
+        ..Default::default()
+    };
+    assert_eq!(build_table_data_select_sql(base.clone()), "SELECT * FROM \"large_rows\" LIMIT 100;");
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            primary_keys: vec!["id".to_string()],
+            column_types: Vec::new(),
+            ..base.clone()
+        }),
+        "SELECT * FROM \"large_rows\" LIMIT 100;"
+    );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            primary_keys: vec!["id".to_string()],
+            columns: vec!["id".to_string(), "__dbx_large_value_bytes_t_0".to_string()],
+            column_types: vec!["integer".to_string(), "text".to_string()],
+            ..base
+        }),
+        "SELECT * FROM \"large_rows\" LIMIT 100;"
     );
 }
 
@@ -933,6 +1331,31 @@ fn builds_oracle_and_neo4j_table_data_queries() {
             }),
             "MATCH (n:`Employee`) RETURN elementId(n) AS `__DBX_ELEMENT_ID`, n.`id` AS `id`, n.`first name` AS `first name`, n.`role` AS `role` LIMIT 100;"
         );
+}
+
+#[test]
+fn builds_oracle_rowid_wrapped_large_value_reload_sql() {
+    // The data-grid large-value reload selects the synthetic rowid key plus the
+    // target column with a rowid equality filter; `__DBX_ROWID` exists only as
+    // the inline-view alias, never as a base-table column (ORA-00904).
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Oracle),
+            schema: Some("APP".to_string()),
+            table_name: "T_TEST".to_string(),
+            table_type: Some("TABLE".to_string()),
+            primary_keys: vec![DBX_ROWID_COLUMN.to_string()],
+            columns: vec![DBX_ROWID_COLUMN.to_string(), "ELM_CONTENT".to_string()],
+            where_input: Some("ROWIDTOCHAR(ROWID) = 'AAAFd1AAFAAAABSAA/'".to_string()),
+            fallback_order_columns: Vec::new(),
+            order_by: None,
+            limit: Some(1),
+            offset: Some(0),
+            include_row_id: true,
+            ..Default::default()
+        }),
+        "SELECT \"__DBX_ROWID\", \"ELM_CONTENT\" FROM (SELECT ROWIDTOCHAR(t.ROWID) AS \"__DBX_ROWID\", t.* FROM \"APP\".\"T_TEST\" t WHERE (ROWIDTOCHAR(ROWID) = 'AAAFd1AAFAAAABSAA/')) WHERE ROWNUM <= 1"
+    );
 }
 
 #[test]

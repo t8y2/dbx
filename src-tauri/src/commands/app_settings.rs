@@ -101,7 +101,8 @@ pub fn mark_frontend_ready(app: AppHandle) -> Result<(), String> {
     let state =
         app.try_state::<CloseBehaviorState>().ok_or_else(|| "close behavior state is unavailable".to_string())?;
     state.set_frontend_ready(true);
-    clear_startup_probe_after_frontend_ready();
+    let main_window_visible = app.get_webview_window("main").is_some_and(|window| window.is_visible().unwrap_or(false));
+    clear_startup_probe_after_frontend_ready(main_window_visible);
     Ok(())
 }
 
@@ -164,6 +165,19 @@ pub async fn save_saved_sql_editor_positions(
     positions: serde_json::Value,
 ) -> Result<(), String> {
     state.storage.save_saved_sql_editor_positions(&positions).await
+}
+
+#[tauri::command]
+pub async fn load_transfer_task_library(state: State<'_, Arc<AppState>>) -> Result<Option<serde_json::Value>, String> {
+    state.storage.load_transfer_task_library().await
+}
+
+#[tauri::command]
+pub async fn save_transfer_task_library(
+    state: State<'_, Arc<AppState>>,
+    library: serde_json::Value,
+) -> Result<(), String> {
+    state.storage.save_transfer_task_library(&library).await
 }
 
 #[tauri::command]

@@ -12,6 +12,8 @@ export interface JsonTreeNode {
   /** Zero-based structural depth; the root value is at depth zero. */
   depth: number;
   parentKind: JsonTreeParentKind;
+  /** True only for the synthetic closing-bracket row of an expanded container. */
+  closing?: boolean;
 }
 
 export type JsonTreeContainer = Record<string, unknown> | unknown[];
@@ -36,9 +38,14 @@ export function jsonTreeContainerKind(value: JsonTreeContainer): JsonTreeContain
   return Array.isArray(value) ? "array" : "object";
 }
 
-export function jsonTreeContainerSummary(value: JsonTreeContainer, includeObjectLength = true): string {
+/** Compact summary shown between the brackets of a collapsed container. */
+export function jsonTreeContainerSummary(value: JsonTreeContainer): string {
   if (Array.isArray(value)) return `Array(${value.length})`;
-  return includeObjectLength ? `Object(${Object.keys(value).length})` : "Object";
+  return `Object(${Object.keys(value).length})`;
+}
+
+export function isJsonTreeClosingNode(node: JsonTreeNode): boolean {
+  return node.closing === true;
 }
 
 /** Escape a reference token according to RFC 6901. */
@@ -81,9 +88,10 @@ export function getJsonTreeChildren(node: JsonTreeNode): JsonTreeNode[] {
 /**
  * Flatten the currently expanded tree with an iterative traversal. This lets
  * virtual renderers keep every node logically expanded without recursive DOM
- * creation or deep-call-stack failures.
+ * creation or deep-call-stack failures. When `includeClosingRows` is set, each
+ * expanded container is followed by a synthetic closing-bracket row.
  */
-export function getVisibleJsonTreeNodes(root: JsonTreeNode, isExpanded: (node: JsonTreeNode) => boolean): JsonTreeNode[] {
+export function getVisibleJsonTreeNodes(root: JsonTreeNode, isExpanded: (node: JsonTreeNode) => boolean, includeClosingRows = false): JsonTreeNode[] {
   const nodes: JsonTreeNode[] = [];
   const pending = [root];
 
@@ -92,7 +100,20 @@ export function getVisibleJsonTreeNodes(root: JsonTreeNode, isExpanded: (node: J
     if (!node) continue;
     nodes.push(node);
 
-    if (!isJsonTreeContainer(node.value) || !isExpanded(node)) continue;
+    if (isJsonTreeClosingNode(node) || !isJsonTreeContainer(node.value) || !isExpanded(node)) continue;
+    if (includeClosingRows) {
+      pending.push({
+        // NUL suffix keeps synthetic closing rows from colliding with a real
+        // `$close` key that a document may legitimately contain.
+        key: `${node.key}$close\0`,
+        label: "",
+        value: node.value,
+        path: `${node.path}/$close\0`,
+        depth: node.depth,
+        parentKind: node.parentKind,
+        closing: true,
+      });
+    }
     const children = getJsonTreeChildren(node);
     for (let index = children.length - 1; index >= 0; index -= 1) pending.push(children[index]);
   }

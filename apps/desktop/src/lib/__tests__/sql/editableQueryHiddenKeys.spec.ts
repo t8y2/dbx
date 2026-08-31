@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildQueryWithHiddenPrimaryKeys, hiddenResultColumnIndexes } from "@/lib/sql/editableQueryHiddenKeys";
-import { analyzeEditableQueryEditability } from "@/lib/sql/sqlAnalysis";
+import { analyzeEditableQueryEditability, sourceColumnsForResult } from "@/lib/sql/sqlAnalysis";
 
 describe("editable query hidden primary keys", () => {
   it("appends quoted MySQL primary keys without changing the visible projection", () => {
@@ -155,6 +155,50 @@ describe("editable query hidden primary keys", () => {
       expect(result.editable, sql).toBe(true);
       if (result.editable) expect(result.analysis.columns.map((column) => column.sourceName)).toEqual(["name", "note"]);
     }
+  });
+
+  it("maps MySQL JSON expressions with implicit aliases without making them writeable", () => {
+    const result = analyzeEditableQueryEditability("select id, status, extra->>'$.mode' mode, extra->>'$.template' tmpl from jobs");
+
+    expect(result.editable).toBe(true);
+    if (!result.editable) return;
+    expect(result.analysis.columns).toEqual([
+      expect.objectContaining({ sourceName: "id", resultName: "id", expression: "id" }),
+      expect.objectContaining({ sourceName: "status", resultName: "status", expression: "status" }),
+      expect.objectContaining({ sourceName: undefined, resultName: "mode", expression: "extra->>'$.mode'" }),
+      expect.objectContaining({ sourceName: undefined, resultName: "tmpl", expression: "extra->>'$.template'" }),
+    ]);
+    expect(sourceColumnsForResult(result.analysis, ["id", "status", "mode", "tmpl"])).toEqual(["id", "status", undefined, undefined]);
+  });
+
+  it("uses MySQL expression text as the result label when no alias is present", () => {
+    const result = analyzeEditableQueryEditability("select id, status, extra->>'$.mode', extra->>'$.template' from jobs");
+
+    expect(result.editable).toBe(true);
+    if (!result.editable) return;
+    expect(sourceColumnsForResult(result.analysis, ["id", "status", "extra->>'$.mode'", "extra->>'$.template'"])).toEqual(["id", "status", undefined, undefined]);
+  });
+
+  it("preserves direct columns and explicit aliases while keeping computed projections read-only", () => {
+    const result = analyzeEditableQueryEditability("select id, status as state, lower(name) normalized, count_value + 1 from jobs");
+
+    expect(result.editable).toBe(true);
+    if (!result.editable) return;
+    expect(sourceColumnsForResult(result.analysis, ["id", "state", "normalized", "count_value + 1"])).toEqual(["id", "status", undefined, undefined]);
+  });
+
+  it("does not mistake the right operand of an unaliased expression for an alias", () => {
+    const result = analyzeEditableQueryEditability("select id, id + status, lower(status) from jobs");
+
+    expect(result.editable).toBe(true);
+    if (!result.editable) return;
+    expect(sourceColumnsForResult(result.analysis, ["id", "id + status", "lower(status)"])).toEqual(["id", undefined, undefined]);
+  });
+
+  it("keeps aggregate, join-star, and set-operation boundaries read-only", () => {
+    expect(analyzeEditableQueryEditability("select id, count(*) total from jobs group by id")).toEqual({ editable: false, reason: "aggregation" });
+    expect(analyzeEditableQueryEditability("select * from jobs j join users u on u.id = j.user_id")).toEqual({ editable: false, reason: "complex-source" });
+    expect(analyzeEditableQueryEditability("select id from jobs union select id from archived_jobs")).toEqual({ editable: false, reason: "set-operation" });
   });
 
   it("resolves appended aliases to result indexes", () => {

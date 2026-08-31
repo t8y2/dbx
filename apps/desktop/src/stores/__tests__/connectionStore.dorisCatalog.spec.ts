@@ -121,6 +121,47 @@ describe("connectionStore Doris catalog tree", () => {
     expect(listTables).toHaveBeenCalledTimes(1);
     expect(listTables.mock.calls[0]?.[7]).toBe("iceberg");
     expect(hiveDatabase.children).toEqual([]);
-    expect(icebergDatabase.children?.map((node) => [node.catalog, node.database, node.label])).toEqual([["iceberg", "sales", "orders"]]);
+    expect(icebergDatabase.children?.map((node) => [node.catalog, node.database, node.label])).toEqual([
+      ["iceberg", "sales", "orders"],
+      ["iceberg", "sales", "tree.queries"],
+    ]);
+  });
+
+  it("uses the bounded fuzzy-search budget for external catalog tables", async () => {
+    const listTables = vi.fn().mockResolvedValue([{ name: "late_orders", table_type: "BASE TABLE", comment: null }]);
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listTables,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    const settingsStore = useSettingsStore();
+    settingsStore.editorSettings.sidebarObjectDisplay = "simple";
+    settingsStore.desktopSettings.sidebar_table_page_size = 500;
+    const connection = starRocksConnection();
+    const database = databaseNode(connection.id, "hive", "sales");
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [{ id: connection.id, label: connection.name, type: "connection", connectionId: connection.id, children: [catalogNode(connection.id, "hive", "Hive", [database])] }];
+    store.setSidebarTableSearchQuery(database.id, "orders");
+
+    await store.loadTreeNodeChildren(database, {
+      force: true,
+      searchFilter: "orders",
+      sidebarTableSearchParentId: database.id,
+      expectedSidebarTableSearchQuery: "orders",
+    });
+
+    expect(listTables.mock.calls[0]?.[4]).toBe(2000);
+    expect(listTables.mock.calls[0]?.[5]).toBeUndefined();
+    expect(listTables.mock.calls[0]?.[7]).toBe("hive");
   });
 });

@@ -20,6 +20,21 @@ export interface TableDataCopyColumnOptions {
   sqlserverIdentityInsert: boolean;
 }
 
+export interface TablePasteFeedback {
+  successCount: number;
+  failedCount: number;
+  firstError: unknown;
+}
+
+/** Keep batch paste feedback bounded while preserving the first actionable error. */
+export function tablePasteFeedback(successCount: number, failedCount: number, firstError: unknown): TablePasteFeedback {
+  return {
+    successCount,
+    failedCount,
+    firstError,
+  };
+}
+
 function normalizeSchema(schema: string | null | undefined): string {
   return schema?.trim() ?? "";
 }
@@ -56,7 +71,7 @@ export function tableClipboardMenuState(entries: TableClipboardTableContext[], t
 }
 
 export function supportsWholeRowTableDataCopy(databaseType: DatabaseType | undefined): boolean {
-  return !!databaseType;
+  return !!databaseType && databaseType !== "victoriametrics";
 }
 
 export function defaultPasteTableMode(databaseType: DatabaseType | undefined): PasteTableMode {
@@ -85,7 +100,8 @@ function isWritableTableDataCopyColumn(databaseType: DatabaseType | undefined, c
     return !extra.includes("generated always as (");
   }
   if (databaseType === "sqlserver") {
-    return !extra.includes("computed");
+    const baseDataType = column.data_type.trim().toLowerCase().split(/[\s(]/, 1)[0] ?? "";
+    return !extra.includes("computed") && baseDataType !== "timestamp" && baseDataType !== "rowversion";
   }
   return !extra.includes("computed") && !(extra.includes("generated") && !extra.includes("identity"));
 }

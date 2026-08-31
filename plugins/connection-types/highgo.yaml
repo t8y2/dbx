@@ -1,0 +1,37 @@
+schemaVersion: 1
+order: 280
+dbType: highgo
+rustVariant: Highgo
+label: 瀚高 HighGo
+dialect: HighGo
+runtimeMode: agent
+mcpMode: bridge
+agentKey: highgo
+driverStoreVisible: true
+driverStoreOrder: 3
+singleConnectionPool: true
+metadataConnectionScoped: false
+skipTcpProbe: true
+defaultPort: 5866
+traits:
+  schemaAware: true
+  treeSchema: true
+  pgVacuum: true
+supportLevel: operate
+capabilities:
+  queryExecution: true
+  metadataBrowse: true
+  objectBrowser: true
+  objectSource: true
+  schemaSearch: true
+  diagram: true
+  tableDataEdit: true
+  tableStructureEdit: true
+  tableImport: true
+  dataTransfer: false
+  sqlFileExecution: true
+  databaseCreate: true
+  fieldLineage: false
+  sqlExplain: false
+  userAdmin: true
+  driverManagement: true

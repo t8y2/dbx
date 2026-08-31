@@ -34,6 +34,34 @@ test("bumps DuckDB after its initial release", () => {
   assert.equal(result.versions.duckdb, "0.1.1");
 });
 
+test("bumps the SQLite SSH worker from its crate path", () => {
+  const result = evaluateAgentVersionBump({
+    versions: { "sqlite-worker": "0.1.0" },
+    changedFiles: ["crates/dbx-sqlite-worker/src/runtime.rs"],
+    moduleExists: (path) => path === "crates/dbx-sqlite-worker",
+    readModuleFile: () => "",
+  });
+
+  assert.equal(result.versions["sqlite-worker"], "0.1.1");
+  assert.deepEqual(result.changedModules, ["sqlite-worker"]);
+  assert.deepEqual(result.javaModules, []);
+  assert.deepEqual(result.nativeModules, ["sqlite-worker"]);
+});
+
+test("classifies TDengine Rust changes as native-only", () => {
+  const result = evaluateAgentVersionBump({
+    versions: { tdengine: "0.1.39" },
+    changedFiles: ["agents/drivers/tdengine/src/driver.rs"],
+    moduleExists: (path) => path === "agents/drivers/tdengine",
+    readModuleFile: () => "",
+  });
+
+  assert.equal(result.versions.tdengine, "0.1.40");
+  assert.deepEqual(result.changedModules, ["tdengine"]);
+  assert.deepEqual(result.javaModules, []);
+  assert.deepEqual(result.nativeModules, ["tdengine"]);
+});
+
 test("bumps the native RabbitMQ agent from its Go directory", () => {
   const result = evaluateAgentVersionBump({
     versions: { rabbitmq: "0.1.0" },
@@ -43,6 +71,128 @@ test("bumps the native RabbitMQ agent from its Go directory", () => {
   });
 
   assert.equal(result.versions.rabbitmq, "0.1.1");
+});
+
+test("bumps the native RocketMQ agent from its Go directory", () => {
+  const result = evaluateAgentVersionBump({
+    versions: { rocketmq: "0.1.0" },
+    changedFiles: ["agents/drivers/rocketmq/main.go"],
+    moduleExists: (path) => path === "agents/drivers/rocketmq",
+    readModuleFile: () => "",
+  });
+
+  assert.equal(result.versions.rocketmq, "0.1.1");
+  assert.deepEqual(result.nativeModules, ["rocketmq"]);
+});
+
+test("bumps ZooKeeper from native and shared SASL source directories", () => {
+  for (const changedFile of [
+    "agents/drivers/zookeeper/main.go",
+    "agents/go-common/gosasl/sasl.go",
+    "agents/go-common/go-gssapi/krb5/krb5.go",
+  ]) {
+    const result = evaluateAgentVersionBump({
+      versions: { zookeeper: "0.1.0" },
+      changedFiles: [changedFile],
+      moduleExists: (path) => path === "agents/drivers/zookeeper",
+      readModuleFile: () => "",
+    });
+
+    assert.equal(result.versions.zookeeper, "0.1.1");
+    assert.deepEqual(result.javaModules, []);
+    assert.deepEqual(result.nativeModules, ["zookeeper"]);
+  }
+});
+
+test("bumps the native Vastbase agent from its independent Go directory", () => {
+  const result = evaluateAgentVersionBump({
+    versions: { vastbase: "0.1.37" },
+    changedFiles: ["agents/drivers/vastbase-go/main.go"],
+    moduleExists: (path) => path === "agents/drivers/vastbase-go",
+    readModuleFile: () => "",
+  });
+
+  assert.equal(result.versions.vastbase, "0.1.38");
+  assert.deepEqual(result.nativeModules, ["vastbase"]);
+});
+
+test("bumps Cassandra from its native Go source directory", () => {
+  const result = evaluateAgentVersionBump({
+    versions: { cassandra: "0.1.37" },
+    changedFiles: ["agents/drivers/cassandra-go/main.go"],
+    moduleExists: (path) => path === "agents/drivers/cassandra-go",
+    readModuleFile: () => "",
+  });
+
+  assert.equal(result.versions.cassandra, "0.1.38");
+  assert.deepEqual(result.nativeModules, ["cassandra"]);
+});
+
+test("bumps Hive from native and shared Kerberos source directories", () => {
+  for (const changedFile of [
+    "agents/drivers/hive-go/main.go",
+    "agents/go-common/gohive/driver.go",
+    "agents/go-common/gosasl/gssapi.go",
+    "agents/go-common/go-gssapi/krb5/krb5.go",
+  ]) {
+    const result = evaluateAgentVersionBump({
+      versions: { hive: "0.1.43" },
+      changedFiles: [changedFile],
+      moduleExists: (path) => path === "agents/drivers/hive-go",
+      readModuleFile: () => "",
+    });
+
+    assert.equal(result.versions.hive, "0.1.44");
+    assert.deepEqual(result.javaModules, []);
+    assert.deepEqual(result.nativeModules, ["hive"]);
+  }
+});
+
+test("bumps Neo4j from its native Go source directory", () => {
+  const result = evaluateAgentVersionBump({
+    versions: { neo4j: "0.1.39" },
+    changedFiles: ["agents/drivers/neo4j-go/main.go"],
+    moduleExists: (path) => path === "agents/drivers/neo4j-go",
+    readModuleFile: () => "",
+  });
+
+  assert.equal(result.versions.neo4j, "0.1.40");
+  assert.deepEqual(result.javaModules, []);
+  assert.deepEqual(result.nativeModules, ["neo4j"]);
+});
+
+test("bumps IoTDB from its native Go source directory", () => {
+  const result = evaluateAgentVersionBump({
+    versions: { iotdb: "0.1.30" },
+    changedFiles: ["agents/drivers/iotdb/main.go"],
+    moduleExists: (path) => path === "agents/drivers/iotdb",
+    readModuleFile: () => "",
+  });
+
+  assert.equal(result.versions.iotdb, "0.1.31");
+  assert.deepEqual(result.javaModules, []);
+  assert.deepEqual(result.nativeModules, ["iotdb"]);
+});
+
+test("rebuilds native modules when shared native packaging changes", () => {
+  const existing = new Set([
+    "agents/drivers/access",
+    "agents/drivers/access/build.gradle",
+    "agents/drivers/duckdb",
+    "agents/drivers/neo4j-go",
+  ]);
+  const result = evaluateAgentVersionBump({
+    versions: { access: "0.1.37", duckdb: "0.1.3", neo4j: "0.1.40" },
+    changedFiles: ["agents/scripts/version_agent_artifacts.py"],
+    moduleExists: (path) => existing.has(path),
+    readModuleFile: () => "implementation project(':common')",
+  });
+
+  assert.equal(result.versions.access, "0.1.37");
+  assert.equal(result.versions.duckdb, "0.1.4");
+  assert.equal(result.versions.neo4j, "0.1.41");
+  assert.deepEqual(result.nativeModules, ["duckdb", "neo4j"]);
+  assert.deepEqual(result.reusedModules, ["access"]);
 });
 
 test("builds a manually versioned module even without runtime file changes", () => {
@@ -58,6 +208,18 @@ test("builds a manually versioned module even without runtime file changes", () 
   assert.deepEqual(result.nativeModules, ["duckdb"]);
   assert.deepEqual(result.reusedModules, []);
   assert.equal(result.versions.duckdb, "0.1.1");
+});
+
+test("bumps DuckDB when its Cargo target configuration changes", () => {
+  const result = evaluateAgentVersionBump({
+    versions: { duckdb: "0.1.2" },
+    changedFiles: ["agents/drivers/duckdb/.cargo/config.toml"],
+    moduleExists: (path) => path === "agents/drivers/duckdb",
+    readModuleFile: () => "",
+  });
+
+  assert.equal(result.versions.duckdb, "0.1.3");
+  assert.deepEqual(result.nativeModules, ["duckdb"]);
 });
 
 test("builds only common-dependent Java modules for a shared runtime change", () => {

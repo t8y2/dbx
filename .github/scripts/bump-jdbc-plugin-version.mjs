@@ -2,11 +2,11 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 
-const POM_PATH = "plugins/jdbc/pom.xml";
+const BUILD_GRADLE_PATH = "plugins/jdbc/build.gradle";
 const MANIFEST_PATH = "plugins/jdbc/manifest.json";
 
-function firstProjectVersion(pomXml) {
-  const match = pomXml.match(/<project[\s\S]*?<version>([^<]+)<\/version>/);
+function gradleVersion(buildGradle) {
+  const match = buildGradle.match(/^version\s*=\s*['"]([^'"]+)['"]/m);
   return match?.[1]?.trim() ?? "";
 }
 
@@ -27,16 +27,16 @@ function isReleaseBumpRelevantJdbcPluginChange(file) {
   if (!file.startsWith("plugins/jdbc/")) return false;
   if (file.startsWith("plugins/jdbc/dist/") || file.startsWith("plugins/jdbc/target/")) return false;
   if (file === "plugins/jdbc/README.md" || file === "plugins/jdbc/package.sh") return false;
-  if (file === POM_PATH || file === MANIFEST_PATH) return false;
+  if (file === BUILD_GRADLE_PATH || file === MANIFEST_PATH) return false;
   return true;
 }
 
 function hasJdbcPluginVersionChange(file) {
-  return file === POM_PATH || file === MANIFEST_PATH;
+  return file === MANIFEST_PATH;
 }
 
-function updatePomVersion(pomXml, version) {
-  return pomXml.replace(/(<project[\s\S]*?<version>)([^<]+)(<\/version>)/, `$1${version}$3`);
+function updateGradleVersion(buildGradle, version) {
+  return buildGradle.replace(/^(version\s*=\s*)(['"])[^'"]+\2/m, (_, prefix, quote) => `${prefix}${quote}${version}${quote}`);
 }
 
 function updateManifestVersion(manifestJson, version) {
@@ -45,20 +45,20 @@ function updateManifestVersion(manifestJson, version) {
   return `${JSON.stringify(manifest, null, 2)}\n`;
 }
 
-export function evaluateJdbcPluginReleaseBump({ changedFiles, pomXml, manifestJson }) {
-  const pomVersion = firstProjectVersion(pomXml);
+export function evaluateJdbcPluginReleaseBump({ changedFiles, buildGradle, manifestJson }) {
+  const currentGradleVersion = gradleVersion(buildGradle);
   const currentManifestVersion = manifestVersion(manifestJson);
-  if (pomVersion !== currentManifestVersion) {
-    throw new Error(`JDBC plugin version mismatch: pom.xml is ${pomVersion} but manifest.json is ${currentManifestVersion}.`);
+  if (currentGradleVersion !== currentManifestVersion) {
+    throw new Error(`JDBC plugin version mismatch: build.gradle is ${currentGradleVersion} but manifest.json is ${currentManifestVersion}.`);
   }
 
   const shouldBump = changedFiles.some(isReleaseBumpRelevantJdbcPluginChange) && !changedFiles.some(hasJdbcPluginVersionChange);
-  const newVersion = shouldBump ? bumpPatchVersion(pomVersion) : pomVersion;
+  const newVersion = shouldBump ? bumpPatchVersion(currentGradleVersion) : currentGradleVersion;
   return {
     changed: shouldBump,
-    oldVersion: pomVersion,
+    oldVersion: currentGradleVersion,
     newVersion,
-    pomXml: shouldBump ? updatePomVersion(pomXml, newVersion) : pomXml,
+    buildGradle: shouldBump ? updateGradleVersion(buildGradle, newVersion) : buildGradle,
     manifestJson: shouldBump ? updateManifestVersion(manifestJson, newVersion) : manifestJson,
   };
 }
@@ -73,12 +73,12 @@ function main() {
   const changedFiles = git(["diff", "--name-only", baseRef, headRef]).split("\n").filter(Boolean);
   const result = evaluateJdbcPluginReleaseBump({
     changedFiles,
-    pomXml: readFileSync(POM_PATH, "utf8"),
+    buildGradle: readFileSync(BUILD_GRADLE_PATH, "utf8"),
     manifestJson: readFileSync(MANIFEST_PATH, "utf8"),
   });
 
   if (write && result.changed) {
-    writeFileSync(POM_PATH, result.pomXml);
+    writeFileSync(BUILD_GRADLE_PATH, result.buildGradle);
     writeFileSync(MANIFEST_PATH, result.manifestJson);
   }
 

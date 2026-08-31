@@ -1,8 +1,63 @@
-import type { ColumnInfo, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo } from "@/types/database.ts";
+import type { ColumnInfo, DatabaseConnectionInfo, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo } from "@/types/database.ts";
 import type { ColumnExtra, EditableStructureColumn, EditableStructureForeignKey, EditableStructureIndex, EditableStructureTrigger } from "@/lib/table/tableStructureEditorSql.ts";
 
 export function hasExistingColumnTypeChange(columns: readonly EditableStructureColumn[]): boolean {
   return columns.some((column) => !!column.original && !column.markedForDrop && column.dataType !== column.original.data_type);
+}
+
+export function resolveColumnSelectionActiveId(columns: readonly Pick<EditableStructureColumn, "id" | "markedForDrop">[], selectedIds: ReadonlySet<string>, preferredId: string): string | null {
+  if (selectedIds.has(preferredId)) return preferredId;
+  for (let index = columns.length - 1; index >= 0; index -= 1) {
+    const column = columns[index];
+    if (column && !column.markedForDrop && selectedIds.has(column.id)) return column.id;
+  }
+  return null;
+}
+
+export function isSyntheticContextMenuClick(contextMenuButton: number | null, contextMenuCtrlKey: boolean, clickButton: number): boolean {
+  return contextMenuButton === 2 && contextMenuCtrlKey && clickButton === 0;
+}
+
+type TableStructureIdentifierCaseInfo = Pick<DatabaseConnectionInfo, "unquotedIdentifierCase" | "quotedIdentifierCase">;
+
+const LOWER_UNQUOTED_MIXED_QUOTED_DATABASES = new Set<DatabaseType>(["postgres", "redshift", "opengauss", "gaussdb", "highgo", "uxdb"]);
+const UPPER_UNQUOTED_MIXED_QUOTED_DATABASES = new Set<DatabaseType>(["oracle", "oceanbase-oracle", "dameng", "kingbase", "vastbase", "goldendb", "yashandb"]);
+
+function defaultTableStructureIdentifierCaseInfo(databaseType?: DatabaseType): Required<TableStructureIdentifierCaseInfo> {
+  if (databaseType && LOWER_UNQUOTED_MIXED_QUOTED_DATABASES.has(databaseType)) {
+    return { unquotedIdentifierCase: "lower", quotedIdentifierCase: "mixed" };
+  }
+  if (databaseType && UPPER_UNQUOTED_MIXED_QUOTED_DATABASES.has(databaseType)) {
+    return { unquotedIdentifierCase: "upper", quotedIdentifierCase: "mixed" };
+  }
+  if (databaseType === "clickhouse") {
+    return { unquotedIdentifierCase: "mixed", quotedIdentifierCase: "mixed" };
+  }
+  return { unquotedIdentifierCase: "lower", quotedIdentifierCase: "lower" };
+}
+
+function applyIdentifierCase(value: string, identifierCase: NonNullable<DatabaseConnectionInfo["unquotedIdentifierCase"]>): string {
+  if (identifierCase === "lower") return value.toLowerCase();
+  if (identifierCase === "upper") return value.toUpperCase();
+  return value;
+}
+
+export function tableStructureIdentifierComparisonKey(name: string, databaseType?: DatabaseType, databaseInfo?: TableStructureIdentifierCaseInfo): string {
+  const value = name.trim();
+  const defaults = defaultTableStructureIdentifierCaseInfo(databaseType);
+  const unquotedIdentifierCase = databaseInfo?.unquotedIdentifierCase ?? defaults.unquotedIdentifierCase;
+  const quotedIdentifierCase = databaseInfo?.quotedIdentifierCase ?? defaults.quotedIdentifierCase;
+  const normalizedUnquoted = applyIdentifierCase(value, unquotedIdentifierCase);
+
+  if (unquotedIdentifierCase === "mixed") return `exact:${value}`;
+  if (quotedIdentifierCase === "mixed" && value !== normalizedUnquoted) return `quoted:${value}`;
+  return `unquoted:${normalizedUnquoted}`;
+}
+
+const POSTGRES_SERIAL_PSEUDO_TYPES = new Set(["smallserial", "serial", "bigserial"]);
+
+function withPostgresArrayTypes(types: readonly string[]): string[] {
+  return [...types, ...types.filter((type) => !POSTGRES_SERIAL_PSEUDO_TYPES.has(type)).map((type) => `${type}[]`)];
 }
 
 export const DATA_TYPE_OPTIONS: Record<string, string[]> = {
@@ -58,7 +113,7 @@ export const DATA_TYPE_OPTIONS: Record<string, string[]> = {
     "multipolygon",
     "geometrycollection",
   ],
-  postgres: [
+  postgres: withPostgresArrayTypes([
     "smallint",
     "int2",
     "integer",
@@ -122,7 +177,7 @@ export const DATA_TYPE_OPTIONS: Record<string, string[]> = {
     "tstzrange",
     "daterange",
     "oid",
-  ],
+  ]),
   sqlite: ["integer", "real", "text", "blob", "numeric"],
   rqlite: ["integer", "real", "text", "blob", "numeric"],
   turso: ["integer", "real", "text", "blob", "numeric"],
@@ -192,6 +247,63 @@ export const DATA_TYPE_OPTIONS: Record<string, string[]> = {
     "urowid",
     "xmltype",
     "sdo_geometry",
+  ],
+  dameng: [
+    "number",
+    "numeric",
+    "decimal",
+    "dec",
+    "integer",
+    "int",
+    "bigint",
+    "smallint",
+    "tinyint",
+    "byte",
+    "float",
+    "double",
+    "real",
+    "double precision",
+    "bit",
+    "binary",
+    "varbinary",
+    "raw",
+    "char",
+    "character",
+    "varchar2",
+    "varchar",
+    "rowid",
+    "bool",
+    "boolean",
+    "date",
+    "time",
+    "timestamp",
+    "datetime",
+    "time with time zone",
+    "timestamp with time zone",
+    "timestamp with local time zone",
+    "interval year",
+    "interval month",
+    "interval year to month",
+    "interval day",
+    "interval hour",
+    "interval minute",
+    "interval second",
+    "interval day to hour",
+    "interval day to minute",
+    "interval day to second",
+    "interval hour to minute",
+    "interval hour to second",
+    "interval minute to second",
+    "text",
+    "long",
+    "longvarchar",
+    "image",
+    "longvarbinary",
+    "blob",
+    "clob",
+    "bfile",
+    "json",
+    "jsonb",
   ],
   clickhouse: [
     "Int8",
@@ -272,7 +384,65 @@ export const DATA_TYPE_OPTIONS: Record<string, string[]> = {
     "interval day to second",
   ],
   questdb: ["boolean", "ipv4", "byte", "short", "char", "int", "float", "symbol", "varchar", "string", "long", "date", "timestamp", "timestamp_ns", "double", "uuid", "binary", "long256", "geohash", "array", "interval", "decimal"],
-  xugu: ["BOOLEAN", "INTEGER", "SMALLINT", "BIGINT", "FLOAT", "NUMERIC", "CHAR", "VARCHAR", "CLOB", "DATE", "TIME", "TIMESTAMP", "BINARY", "VARBINARY", "BLOB", "XML", "BOOL", "INT", "SHORT", "LONGINT", "LONG", "REAL", "DECIMAL", "TEXT", "NCHAR", "NVARCHAR", "NVARCHAR2"],
+  xugu: [
+    "BIGINT",
+    "BINARY",
+    "BIT",
+    "BLOB",
+    "BOOL",
+    "BOOLEAN",
+    "CHAR",
+    "CHAR[]",
+    "CLOB",
+    "CLOB[]",
+    "DATE",
+    "DATETIME",
+    "DATETIME WITH TIME ZONE",
+    "DECIMAL",
+    "DOUBLE",
+    "DOUBLE[]",
+    "FLOAT",
+    "GUID",
+    "INT",
+    "INTEGER",
+    "INTEGER[]",
+    "INTERVAL DAY",
+    "INTERVAL DAY TO HOUR",
+    "INTERVAL DAY TO MINUTE",
+    "INTERVAL DAY TO SECOND",
+    "INTERVAL HOUR",
+    "INTERVAL HOUR TO MINUTE",
+    "INTERVAL HOUR TO SECOND",
+    "INTERVAL MINUTE",
+    "INTERVAL MINUTE TO SECOND",
+    "INTERVAL MONTH",
+    "INTERVAL SECOND",
+    "INTERVAL YEAR",
+    "INTERVAL YEAR TO MONTH",
+    "JSON",
+    "LONG",
+    "LONGINT",
+    "NCHAR",
+    "NUMERIC",
+    "NVARCHAR",
+    "NVARCHAR2",
+    "REAL",
+    "ROWID",
+    "SHORT",
+    "SMALLINT",
+    "TEXT",
+    "TIME",
+    "TIME WITH TIME ZONE",
+    "TIMESTAMP",
+    "TIMESTAMP WITH TIME ZONE",
+    "TINYINT",
+    "VARBINARY",
+    "VARBIT",
+    "VARCHAR",
+    "XML",
+  ],
+  duckdb: ["BOOLEAN", "TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "UTINYINT", "USMALLINT", "UINTEGER", "UBIGINT", "FLOAT", "DOUBLE", "DECIMAL", "VARCHAR", "TEXT", "BLOB", "DATE", "TIME", "TIMESTAMP", "TIMESTAMPTZ", "INTERVAL", "UUID", "JSON"],
+  h2: ["BOOLEAN", "TINYINT", "SMALLINT", "INTEGER", "BIGINT", "IDENTITY", "DECIMAL", "NUMERIC", "REAL", "DOUBLE", "FLOAT", "CHAR", "CHARACTER", "VARCHAR", "VARCHAR_IGNORECASE", "CLOB", "BINARY", "VARBINARY", "BLOB", "DATE", "TIME", "TIMESTAMP", "TIMESTAMP WITH TIME ZONE", "UUID", "ARRAY", "JSON"],
 };
 
 const DATA_TYPE_OPTION_ALIASES: Partial<Record<DatabaseType, string>> = {
@@ -287,13 +457,19 @@ const DATA_TYPE_OPTION_ALIASES: Partial<Record<DatabaseType, string>> = {
   opengauss: "postgres",
   questdb: "questdb",
   redshift: "postgres",
+  vertica: "postgres",
   highgo: "postgres",
   uxdb: "postgres",
   vastbase: "postgres",
   kingbase: "postgres",
-  dameng: "oracle",
+  firebird: "postgres",
   "oceanbase-oracle": "oracle",
   iris: "oracle",
+  yashandb: "oracle",
+  rqlite: "sqlite",
+  turso: "sqlite",
+  "cloudflare-d1": "sqlite",
+  access: "h2",
 };
 
 export function getDataTypeOptions(dbType: DatabaseType | undefined): string[] {
@@ -451,6 +627,8 @@ export const POSTGRES_TYPE_LENGTH_DISABLES: string[] = [
 ];
 
 export const ORACLE_LIKE_TYPE_LENGTH_DISABLES: string[] = ["binary_double", "binary_float", "bigint", "boolean", "bool", "byte", "date", "double", "double precision", "float", "integer", "int", "long", "long raw", "nclob", "real", "smallint", "text", "tinyint"];
+
+const XUGU_TYPE_LENGTH_DISABLES = new Set([...ORACLE_LIKE_TYPE_LENGTH_DISABLES, "blob", "clob", "datetime", "datetime with time zone", "guid", "json", "longint", "rowid", "short", "xml"]);
 
 export const SQLSERVER_TYPE_LENGTH_DISABLES: string[] = ["bigint", "bit", "date", "datetime", "image", "int", "integer", "money", "ntext", "real", "smalldatetime", "smallint", "smallmoney", "sql_variant", "text", "timestamp", "tinyint", "uniqueidentifier", "xml"];
 
@@ -644,17 +822,23 @@ function columnDefaultForEditor(column: ColumnInfo, databaseType?: DatabaseType)
   return defaultValue;
 }
 
-const CHARACTER_LENGTH_METADATA_TYPES = new Set(["binary", "char", "character", "character varying", "nchar", "nvarchar", "nvarchar2", "varbinary", "varchar", "varchar2"]);
+const CHARACTER_LENGTH_METADATA_TYPES = new Set(["binary", "bpchar", "char", "character", "character varying", "nchar", "nvarchar", "nvarchar2", "varbinary", "varchar", "varchar2"]);
 const NUMERIC_PRECISION_METADATA_TYPES = new Set(["decimal", "number", "numeric"]);
+const XUGU_SINGLE_PRECISION_METADATA_TYPES = new Set(["bit", "time", "time with time zone", "timestamp", "timestamp with time zone", "varbit"]);
 
 function columnDataTypeForEditor(column: ColumnInfo, databaseType?: DatabaseType): string {
-  const parsed = splitDataType(column.data_type);
+  const parsed = splitDataTypeForDatabase(databaseType, column.data_type);
   if (parsed.params) return column.data_type;
 
   const baseType = parsed.baseType.trim().replace(/\s+/g, " ");
   const normalized = baseType.toLowerCase();
   if (CHARACTER_LENGTH_METADATA_TYPES.has(normalized) && Number.isInteger(column.character_maximum_length) && Number(column.character_maximum_length) > 0) {
     return combineDataTypeForDatabase(databaseType, baseType, String(column.character_maximum_length));
+  }
+  if (databaseType === "xugu" && XUGU_SINGLE_PRECISION_METADATA_TYPES.has(normalized) && Number.isInteger(column.numeric_precision)) {
+    const precision = Number(column.numeric_precision);
+    const minimum = normalized === "bit" || normalized === "varbit" ? 1 : 0;
+    if (precision >= minimum) return combineDataTypeForDatabase(databaseType, baseType, String(precision));
   }
   if (NUMERIC_PRECISION_METADATA_TYPES.has(normalized) && Number.isInteger(column.numeric_precision) && Number(column.numeric_precision) > 0) {
     const scale = Number.isInteger(column.numeric_scale) && Number(column.numeric_scale) >= 0 ? `,${column.numeric_scale}` : "";
@@ -685,6 +869,45 @@ export function createColumnDrafts(columns: ColumnInfo[], databaseType?: Databas
       markedForDrop: false,
     };
   });
+}
+
+/**
+ * Turns another table's metadata into columns that will be added to the table
+ * currently being edited. Unlike createColumnDrafts(), these must not retain
+ * original metadata: the SQL builder uses that metadata to identify existing
+ * columns that should be altered.
+ */
+export function createCopiedColumnDrafts(columns: ColumnInfo[], databaseType: DatabaseType | undefined, createId: () => string): EditableStructureColumn[] {
+  return createColumnDrafts(columns, databaseType).map(({ original: _original, originalPosition: _originalPosition, isPrimaryKey: _isPrimaryKey, extra, ...column }) => ({
+    ...column,
+    id: `new:${createId()}`,
+    isPrimaryKey: false,
+    extra: copyableColumnExtra(extra),
+  }));
+}
+
+/** Copy only field-local extras; keys and generated-value state are table-level concerns. */
+function copyableColumnExtra(extra: ColumnExtra): ColumnExtra {
+  const { autoIncrement: _autoIncrement, identity: _identity, ...copyableExtra } = extra;
+  return copyableExtra;
+}
+
+/** Clone an editable field as a new column, without linking it to persisted metadata or key state. */
+export function cloneColumnDraftAsNew(column: EditableStructureColumn, createId: () => string): EditableStructureColumn {
+  return {
+    id: `new:${createId()}`,
+    name: column.name,
+    dataType: column.dataType,
+    enumValues: column.enumValues ? [...column.enumValues] : undefined,
+    isNullable: column.isNullable,
+    defaultValue: column.defaultValue,
+    comment: column.comment,
+    isPrimaryKey: false,
+    characterSet: column.characterSet,
+    collation: column.collation,
+    extra: copyableColumnExtra(column.extra),
+    markedForDrop: false,
+  };
 }
 
 function existingColumnIdName(id: string): string | undefined {
@@ -766,6 +989,15 @@ export function normalizeStructureIndexType(indexType: string | null | undefined
 /** Case-insensitive index-type equality (draft is uppercased; API may still return lowercase amname). */
 export function sameStructureIndexType(left: string | null | undefined, right: string | null | undefined): boolean {
   return normalizeStructureIndexType(left) === normalizeStructureIndexType(right);
+}
+
+/** Keep selected fields removable even after they are no longer available on the table. */
+export function filterStructureIndexColumnOptions(availableColumns: readonly string[], selectedColumns: readonly string[], search = ""): string[] {
+  const availableSet = new Set(availableColumns);
+  const unavailableSelected = selectedColumns.filter((column) => column.trim() && !availableSet.has(column));
+  const options = [...new Set([...unavailableSelected, ...availableColumns])];
+  const query = search.trim().toLowerCase();
+  return query ? options.filter((column) => column.toLowerCase().includes(query)) : options;
 }
 
 export function createIndexDrafts(indexes: IndexInfo[]): EditableStructureIndex[] {
@@ -892,22 +1124,39 @@ export function splitDataType(raw: string): { baseType: string; params: string }
   return { baseType, params };
 }
 
+function splitDataTypeForDatabase(dbType: DatabaseType | undefined, raw: string): { baseType: string; params: string } {
+  if (dbType === "xugu") {
+    const match = raw.trim().match(/^(TIME|TIMESTAMP)\s*\(([^()]*)\)\s+WITH\s+TIME\s+ZONE$/i);
+    if (match) {
+      return {
+        baseType: `${match[1]} WITH TIME ZONE`,
+        params: match[2]!.trim(),
+      };
+    }
+  }
+  return splitDataType(raw);
+}
+
+export function dataTypeBaseInputValue(dbType: DatabaseType | undefined, rawDataType: string): string {
+  return splitDataTypeForDatabase(dbType, rawDataType).baseType;
+}
+
 export type DataTypeLengthUnit = "BYTE" | "CHAR";
 
-const DAMENG_LENGTH_UNIT_TYPES = new Set(["char", "varchar", "varchar2"]);
-const DAMENG_LENGTH_UNITS: readonly DataTypeLengthUnit[] = ["BYTE", "CHAR"];
+const CHARACTER_LENGTH_UNIT_TYPES = new Set(["char", "varchar", "varchar2"]);
+const CHARACTER_LENGTH_UNITS: readonly DataTypeLengthUnit[] = ["BYTE", "CHAR"];
 
 function normalizedDataTypeName(rawDataType: string): string {
   return splitDataType(rawDataType).baseType.trim().replace(/\s+/g, " ").toLowerCase();
 }
 
 export function getDataTypeLengthUnitOptions(dbType: DatabaseType | undefined, rawDataType: string): readonly DataTypeLengthUnit[] {
-  if (dbType !== "dameng") return [];
-  return DAMENG_LENGTH_UNIT_TYPES.has(normalizedDataTypeName(rawDataType)) ? DAMENG_LENGTH_UNITS : [];
+  if (dbType !== "dameng" && dbType !== "oracle") return [];
+  return CHARACTER_LENGTH_UNIT_TYPES.has(normalizedDataTypeName(rawDataType)) ? CHARACTER_LENGTH_UNITS : [];
 }
 
 function splitDataTypeLengthParams(dbType: DatabaseType | undefined, rawDataType: string): { length: string; unit: DataTypeLengthUnit | "" } {
-  const { params } = splitDataType(rawDataType);
+  const { params } = splitDataTypeForDatabase(dbType, rawDataType);
   if (!params || getDataTypeLengthUnitOptions(dbType, rawDataType).length === 0) {
     return { length: params, unit: "" };
   }
@@ -935,13 +1184,13 @@ export function combineDataTypeForDatabaseWithLengthUnit(dbType: DatabaseType | 
   return combineDataTypeForDatabase(dbType, baseType, params);
 }
 
-export function restoreDamengLengthUnitsAfterSave(columns: EditableStructureColumn[], savedDataTypesByColumn: ReadonlyMap<string, string>): EditableStructureColumn[] {
+export function restoreCharacterLengthUnitsAfterSave(dbType: DatabaseType | undefined, columns: EditableStructureColumn[], savedDataTypesByColumn: ReadonlyMap<string, string>): EditableStructureColumn[] {
   if (savedDataTypesByColumn.size === 0) return columns;
 
   return columns.map((column) => {
-    if (dataTypeLengthUnitValue("dameng", column.dataType)) return column;
+    if (dataTypeLengthUnitValue(dbType, column.dataType)) return column;
     const savedDataType = savedDataTypesByColumn.get(column.name.trim().toLowerCase());
-    if (!savedDataType || !dataTypeLengthUnitValue("dameng", savedDataType)) return column;
+    if (!savedDataType || !dataTypeLengthUnitValue(dbType, savedDataType)) return column;
     if (normalizedDataTypeName(savedDataType) !== normalizedDataTypeName(column.dataType)) return column;
 
     return {
@@ -1003,19 +1252,28 @@ export function combineDataTypeForDatabase(dbType: DatabaseType | undefined, bas
   const normalizedParams = normalizeDataTypeParams(dbType, baseType, params);
   const mysqlType = combineMysqlNumericAttributeType(dbType, baseType, normalizedParams);
   if (mysqlType) return mysqlType;
+  const xuguTemporalType = combineXuguTemporalType(baseType, normalizedParams, dbType);
+  if (xuguTemporalType) return xuguTemporalType;
   return combineDataType(baseType, normalizedParams);
 }
 
 export function dataTypeLengthInputValue(dbType: DatabaseType | undefined, rawDataType: string): string {
-  const parsed = splitDataType(rawDataType);
+  const parsed = splitDataTypeForDatabase(dbType, rawDataType);
   return isDataTypeLengthDisabled(dbType, parsed.baseType) ? "" : splitDataTypeLengthParams(dbType, rawDataType).length;
+}
+
+function combineXuguTemporalType(baseType: string, params: string, dbType: DatabaseType | undefined): string | null {
+  if (dbType !== "xugu") return null;
+  const match = baseType.trim().match(/^(TIME|TIMESTAMP)\s+WITH\s+TIME\s+ZONE$/i);
+  if (!match) return null;
+  return params ? `${match[1]}(${params}) WITH TIME ZONE` : baseType.trim();
 }
 
 export function normalizeDataTypeParams(dbType: DatabaseType | undefined, baseType: string, params: string): string {
   const p = params.trim();
   if (!p) return "";
   if (!isTemporalPrecisionType(dbType, baseType)) return p;
-  return isValidTemporalPrecision(dbType, p) ? p : "";
+  return isValidTemporalPrecision(dbType, baseType, p) ? p : "";
 }
 
 function isTemporalPrecisionType(dbType: DatabaseType | undefined, baseType: string): boolean {
@@ -1045,6 +1303,8 @@ function isTemporalPrecisionType(dbType: DatabaseType | undefined, baseType: str
       return ["timestamp", "timestamp with time zone", "timestamp with local time zone"].includes(normalized);
     case "questdb":
       return ["timestamp"].includes(normalized);
+    case "xugu":
+      return ["time", "time with time zone", "timestamp", "timestamp with time zone"].includes(normalized);
     default:
       return false;
   }
@@ -1069,10 +1329,11 @@ function isOracleLikeStructureType(dbType: DatabaseType | undefined): boolean {
   return dbType === "oracle" || dbType === "dameng" || dbType === "oceanbase-oracle" || dbType === "iris" || dbType === "yashandb" || dbType === "xugu";
 }
 
-function isValidTemporalPrecision(dbType: DatabaseType | undefined, params: string): boolean {
+function isValidTemporalPrecision(dbType: DatabaseType | undefined, baseType: string, params: string): boolean {
   if (!/^\d+$/.test(params)) return false;
   const value = Number(params);
-  const max = dbType === "oracle" || dbType === "dameng" || dbType === "oceanbase-oracle" ? 9 : 6;
+  const normalizedBaseType = baseType.trim().replace(/\s+/g, " ").toLowerCase();
+  const max = dbType === "xugu" && ["time", "time with time zone"].includes(normalizedBaseType) ? 3 : dbType === "oracle" || dbType === "dameng" || dbType === "oceanbase-oracle" ? 9 : 6;
   return Number.isInteger(value) && value >= 0 && value <= max && String(value) === params;
 }
 
@@ -1104,6 +1365,26 @@ export function defaultNewColumnDataType(dbType: DatabaseType | undefined, dataT
     const baseType = dataTypeOptions[0] ?? "text";
     return combineDataTypeForDatabase(dbType, baseType, getDefaultLengthForType(dbType, baseType));
   }
+
+  const options = dataTypeOptions.length > 0 ? dataTypeOptions : getDataTypeOptions(dbType);
+  const dialectKey = dbType ? (DATA_TYPE_OPTION_ALIASES[dbType] ?? dbType) : "";
+
+  if (dialectKey === "sqlite" || dialectKey === "duckdb") {
+    const textType = options.find((type) => /^text$/i.test(type.trim()));
+    return textType ?? "text";
+  }
+
+  if (options.length > 0) {
+    const preferred =
+      (dbType === "dameng" ? options.find((type) => /^varchar2$/i.test(type.trim())) : undefined) ??
+      options.find((type) => /^(varchar|character varying|nvarchar)$/i.test(type.trim())) ??
+      options.find((type) => /^(string|clob|lvarchar|text)$/i.test(type.trim())) ??
+      options.find((type) => /^varchar/i.test(type.trim()));
+    if (preferred) {
+      return combineDataTypeForDatabase(dbType, preferred, getDefaultLengthForType(dbType, preferred));
+    }
+  }
+
   return dbType === "sqlite" ? "text" : "varchar(255)";
 }
 
@@ -1113,6 +1394,27 @@ export function resolveInsertColumnIndex(columns: readonly { id: string; markedF
   // Dropped rows are not valid insertion anchors.
   const index = columns.findIndex((column) => column.id === selectedColumnId && !column.markedForDrop);
   return index >= 0 ? index + 1 : columns.length;
+}
+
+/**
+ * Compute the contiguous column-id range for a shift-click in the structure
+ * editor, mirroring the object browser's range-select behavior
+ * (objectBrowserSelection.ts): the range spans every row between the anchor
+ * and the clicked row in visible order, but rows marked for drop are not
+ * selectable and are dropped from the result.
+ */
+export function structureColumnSelectionRange(columns: readonly { id: string; markedForDrop?: boolean }[], anchorId: string, currentId: string): string[] {
+  const anchorIndex = columns.findIndex((column) => column.id === anchorId);
+  const currentIndex = columns.findIndex((column) => column.id === currentId);
+  if (anchorIndex < 0 || currentIndex < 0) {
+    return columns.some((column) => column.id === currentId && !column.markedForDrop) ? [currentId] : [];
+  }
+  const start = Math.min(anchorIndex, currentIndex);
+  const end = Math.max(anchorIndex, currentIndex);
+  return columns
+    .slice(start, end + 1)
+    .filter((column) => !column.markedForDrop)
+    .map((column) => column.id);
 }
 
 function isMysqlDeprecatedDefaultParameterType(baseType: string): boolean {
@@ -1127,7 +1429,11 @@ export function isDataTypeLengthDisabled(_dbType: DatabaseType | undefined, base
   } else if (_dbType === "manticoresearch") {
     return key !== "bit" && key !== "float_vector";
   } else if (_dbType === "postgres" || _dbType === "gaussdb" || _dbType === "kwdb" || _dbType === "opengauss" || _dbType === "highgo" || _dbType === "uxdb" || _dbType === "vastbase" || _dbType === "kingbase") {
-    return POSTGRES_TYPE_LENGTH_DISABLES.includes(key);
+    return key.endsWith("[]") || POSTGRES_TYPE_LENGTH_DISABLES.includes(key);
+  } else if (_dbType === "xugu") {
+    // Xugu array suffixes and interval qualifiers require grammar-aware
+    // placement; a generic TYPE(length) editor would emit invalid DDL for them.
+    return key.endsWith("[]") || key.startsWith("interval ") || XUGU_TYPE_LENGTH_DISABLES.has(key);
   } else if (isOracleLikeStructureType(_dbType)) {
     // Dameng/Oracle integer aliases have fixed precision; MySQL-style display widths generate invalid DDL.
     return ORACLE_LIKE_TYPE_LENGTH_DISABLES.includes(key);

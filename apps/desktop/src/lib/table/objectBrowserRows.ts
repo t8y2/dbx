@@ -1,5 +1,6 @@
-import type { ObjectInfo, TreeNode, TreeNodeType } from "@/types/database";
+import type { MongoCollectionKind, ObjectInfo, TreeNode, TreeNodeType } from "@/types/database";
 import { pinnedTreeNodeIdentityMatches, type PinnedTreeNodeIdentity } from "@/lib/app/pinnedItems";
+import { toMongoCollectionKind } from "@/lib/sidebar/mongoCollectionMutation";
 import { buildGroupedObjectTreeNodes, buildSimpleObjectTreeNodes, buildTableTreeNodes, compareDatabaseObjectNames, normalizeDatabaseObjectName } from "@/lib/table/tableTree";
 import { parseSlashDelimitedRegexQuery } from "@/lib/common/searchPattern";
 
@@ -8,7 +9,8 @@ export type ObjectBrowserRow = {
   name: string;
   displayName: string;
   schema?: string;
-  type: "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
+  type: "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
+  collectionKind?: MongoCollectionKind;
   valid?: boolean | null;
   signature?: string | null;
   comment?: string | null;
@@ -24,7 +26,7 @@ export type ObjectBrowserRow = {
 
 export type ObjectBrowserSortKey = "name" | "type" | "estimatedRows" | "totalBytes" | "created_at" | "updated_at" | "comment";
 export type ObjectBrowserSortDirection = "asc" | "desc";
-export type ObjectBrowserFilter = "all" | "tables" | "views" | "materializedViews" | "procedures" | "functions" | "triggers" | "sequences" | "packages" | "types";
+export type ObjectBrowserFilter = "all" | "tables" | "views" | "materializedViews" | "procedures" | "functions" | "triggers" | "events" | "sequences" | "packages" | "types";
 export type ObjectBrowserFilterCounts = Record<ObjectBrowserFilter, number>;
 
 export type ObjectBrowserPinnedTreeNodeContext = {
@@ -42,6 +44,7 @@ export function objectBrowserRowTreeNodeType(type: ObjectBrowserRow["type"]): Tr
   if (type === "PROCEDURE") return "procedure";
   if (type === "FUNCTION") return "function";
   if (type === "TRIGGER") return "trigger";
+  if (type === "EVENT") return "event";
   if (type === "SEQUENCE") return "sequence";
   if (type === "PACKAGE_BODY") return "package-body";
   if (type === "PACKAGE") return "package";
@@ -142,6 +145,7 @@ export function normalizeObjectBrowserType(type: string): ObjectBrowserRow["type
   if (normalized.includes("TYPE_BODY")) return "TYPE_BODY";
   if (normalized.includes("PACKAGE")) return "PACKAGE";
   if (normalized.includes("TRIGGER")) return "TRIGGER";
+  if (normalized.includes("EVENT")) return "EVENT";
   if (normalized.includes("TYPE")) return "TYPE";
   if (normalized.includes("MATERIALIZED_VIEW")) return "MATERIALIZED_VIEW";
   if (value.includes("VIEW")) return "VIEW";
@@ -185,6 +189,28 @@ export function buildObjectBrowserRows(options: { objects: ObjectInfo[]; databas
 
   markPartitionRows(rows, options.fallbackSchema || options.database);
   return rows;
+}
+
+export function buildMongoObjectBrowserRows(options: { collections: Array<{ name: string; kind?: string | null }>; database: string }): ObjectBrowserRow[] {
+  const seen = new Map<string, number>();
+  return options.collections.flatMap((collection) => {
+    const name = collection.name;
+    if (!name) return [];
+    const collectionKind = toMongoCollectionKind(collection.kind);
+    const type: ObjectBrowserRow["type"] = collectionKind === "view" ? "VIEW" : "TABLE";
+    const baseId = `${options.database}:${name}:${type}:${collectionKind}`;
+    const index = seen.get(baseId) ?? 0;
+    seen.set(baseId, index + 1);
+    return [
+      {
+        id: `${baseId}:${index}`,
+        name,
+        displayName: name,
+        type,
+        collectionKind,
+      },
+    ];
+  });
 }
 
 function routineSignatureForDisplay(type: ObjectBrowserRow["type"], signature: string | null | undefined): string | undefined {
@@ -231,9 +257,14 @@ export function filterObjectBrowserRows(rows: ObjectBrowserRow[], query: string)
   if (!q) return rows;
   const regex = parseSlashDelimitedRegexQuery(query.trim());
   if (regex) {
-    return rows.filter((row) => [row.displayName, row.name, row.type, row.comment].filter(Boolean).some((value) => regex.test(String(value))));
+    // Object type labels ("TABLE", "VIEW", "PROCEDURE", ...) are deliberately
+    // not searchable: a query like "TAB" would otherwise match every TABLE row
+    // via its type label (issue #6488). The type filter buttons cover type
+    // scoping, and every other search path (sidebar tree, backend metadata)
+    // matches names and comments only.
+    return rows.filter((row) => [row.displayName, row.name, row.comment].filter(Boolean).some((value) => regex.test(String(value))));
   }
-  return rows.filter((row) => [row.displayName, row.name, row.type, row.comment].filter(Boolean).some((value) => String(value).toLowerCase().includes(q)));
+  return rows.filter((row) => [row.displayName, row.name, row.comment].filter(Boolean).some((value) => String(value).toLowerCase().includes(q)));
 }
 
 export function countObjectBrowserRowsByFilter(rows: ObjectBrowserRow[]): ObjectBrowserFilterCounts {
@@ -245,6 +276,7 @@ export function countObjectBrowserRowsByFilter(rows: ObjectBrowserRow[]): Object
     procedures: 0,
     functions: 0,
     triggers: 0,
+    events: 0,
     sequences: 0,
     packages: 0,
     types: 0,
@@ -257,6 +289,7 @@ export function countObjectBrowserRowsByFilter(rows: ObjectBrowserRow[]): Object
     else if (row.type === "PROCEDURE") counts.procedures++;
     else if (row.type === "FUNCTION") counts.functions++;
     else if (row.type === "TRIGGER") counts.triggers++;
+    else if (row.type === "EVENT") counts.events++;
     else if (row.type === "SEQUENCE") counts.sequences++;
     else if (row.type === "PACKAGE" || row.type === "PACKAGE_BODY") counts.packages++;
     else if (row.type === "TYPE" || row.type === "TYPE_BODY") counts.types++;

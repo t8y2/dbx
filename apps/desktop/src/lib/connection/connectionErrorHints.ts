@@ -12,10 +12,28 @@ function normalizeUrlParamKey(key: string): string {
 
 function urlParamValue(params: URLSearchParams, key: string): string {
   const normalizedKey = normalizeUrlParamKey(key);
+  let result = "";
   for (const [paramKey, value] of params.entries()) {
-    if (normalizeUrlParamKey(paramKey) === normalizedKey) return value;
+    if (normalizeUrlParamKey(paramKey) === normalizedKey) result = value;
   }
-  return "";
+  return result;
+}
+
+function jdbcUrlParamValue(params: URLSearchParams, key: string): string {
+  const normalizedKey = key.trim().toLowerCase();
+  let result = "";
+  for (const [paramKey, value] of params.entries()) {
+    if (paramKey.trim().toLowerCase() === normalizedKey) result = value;
+  }
+  return result;
+}
+
+function hasJdbcUrlParam(params: URLSearchParams, key: string): boolean {
+  const normalizedKey = key.trim().toLowerCase();
+  for (const paramKey of params.keys()) {
+    if (paramKey.trim().toLowerCase() === normalizedKey) return true;
+  }
+  return false;
 }
 
 function mysqlTlsMode(config: ConnectionConfig): string {
@@ -25,7 +43,19 @@ function mysqlTlsMode(config: ConnectionConfig): string {
   if (["disabled", "disable"].includes(mode)) return "disabled";
   if (["preferred", "prefer"].includes(mode)) return "preferred";
   if (["required", "require", "verify_ca", "verify_identity"].includes(mode)) return mode;
-  if (config.ssl || ["true", "1", "yes", "on"].includes(urlParamValue(parsed, "require_ssl").trim().toLowerCase())) return "required";
+  const isTrue = (value: string) => ["true", "1", "yes", "on"].includes(value);
+  const isFalse = (value: string) => ["false", "0", "no", "off"].includes(value);
+  const nativeRequireSsl = jdbcUrlParamValue(parsed, "require_ssl").trim().toLowerCase();
+  if (isFalse(nativeRequireSsl)) return "disabled";
+  if (isTrue(nativeRequireSsl)) return "required";
+  const jdbcUseSsl = jdbcUrlParamValue(parsed, "useSSL").trim().toLowerCase();
+  const jdbcRequireSsl = jdbcUrlParamValue(parsed, "requireSSL").trim().toLowerCase();
+  const jdbcVerifyServerCertificate = jdbcUrlParamValue(parsed, "verifyServerCertificate").trim().toLowerCase();
+  if (isFalse(jdbcUseSsl)) return "disabled";
+  if (isTrue(jdbcVerifyServerCertificate)) return "verify_ca";
+  if (isTrue(jdbcRequireSsl)) return "required";
+  if (hasJdbcUrlParam(parsed, "useSSL") || hasJdbcUrlParam(parsed, "requireSSL") || hasJdbcUrlParam(parsed, "verifyServerCertificate")) return "preferred";
+  if (config.ssl) return "required";
   return "disabled";
 }
 
@@ -35,6 +65,16 @@ function isMysqlTlsLikeFailure(message: string): boolean {
     (text.includes("mysql") || text.includes("mariadb") || text.includes("tidb") || text.includes("tls") || text.includes("ssl")) &&
     (text.includes("tls") || text.includes("ssl") || text.includes("handshake") || text.includes("certificate") || text.includes("cert") || text.includes("unknown ca") || text.includes("self signed"))
   );
+}
+
+export function isMysqlMissingPasswordFailure(config: ConnectionConfig, message: string): boolean {
+  if (config.db_type !== "mysql" || config.password) return false;
+  return /access denied for user[\s\S]*using password:\s*no/i.test(message);
+}
+
+export function isSqliteMissingEncryptionPasswordFailure(config: ConnectionConfig, message: string): boolean {
+  if (config.db_type !== "sqlite" || config.password) return false;
+  return /Selected file is not a valid SQLite database file/i.test(message);
 }
 
 export function isJdbcMissingRuntimeDependencyError(message: string): boolean {
@@ -52,8 +92,18 @@ export function appendConnectionErrorHints(config: ConnectionConfig | undefined,
     result = appendHint(result, t("connection.jdbcMissingRuntimeDependencyHint"));
   }
   if (config.db_type !== "mysql") return result;
+  // MySQL includes the client's source IP in this error, which is easy to
+  // mistake for a host rewritten by sync. When no password was sent, lead
+  // with the actionable fix and reserve the native grant error for attempts
+  // that actually supplied credentials.
+  if (isMysqlMissingPasswordFailure(config, message)) {
+    return t("connection.mysqlMissingPasswordHint");
+  }
   if (mysqlTlsMode(config) === "disabled") return message;
   if (!isMysqlTlsLikeFailure(message)) return message;
+  if (/UnsupportedCertVersion/i.test(message)) {
+    return appendHint(message, t("connection.mysqlUnsupportedCertVersionHint"));
+  }
   const hint = t("connection.mysqlTlsConnectionFailureHint");
   return appendHint(message, hint);
 }

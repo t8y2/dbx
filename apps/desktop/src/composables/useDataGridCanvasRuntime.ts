@@ -1,4 +1,5 @@
 import { getCurrentScope, onScopeDispose } from "vue";
+import type { CanvasDevicePixelSize } from "@/lib/dataGrid/canvasDataGridRenderer";
 
 export interface DataGridAnimationFrameDriver {
   request(callback: FrameRequestCallback): number;
@@ -7,8 +8,9 @@ export interface DataGridAnimationFrameDriver {
 
 export interface DataGridCanvasRuntimeOptions {
   draw(): void;
-  syncViewport(): void;
+  syncViewport(entries?: readonly ResizeObserverEntry[]): void;
   getViewport(): Element | null;
+  getSurface?: () => Element | null;
   refreshPixelRatio?: () => void;
   frameDriver?: DataGridAnimationFrameDriver;
   createResizeObserver?: (callback: ResizeObserverCallback) => ResizeObserver | null;
@@ -25,6 +27,18 @@ export interface DataGridCanvasRuntime {
   pause(): void;
   resume(): void;
   dispose(): void;
+}
+
+export function dataGridCanvasDevicePixelSize(entry: ResizeObserverEntry): CanvasDevicePixelSize | null {
+  const boxes = entry.devicePixelContentBoxSize;
+  const box = Array.isArray(boxes) ? boxes[0] : (boxes as unknown as ResizeObserverSize | undefined);
+  if (!box || !Number.isFinite(box.inlineSize) || !Number.isFinite(box.blockSize) || box.inlineSize <= 0 || box.blockSize <= 0) return null;
+  return {
+    cssWidth: entry.contentRect.width,
+    cssHeight: entry.contentRect.height,
+    pixelWidth: Math.round(box.inlineSize),
+    pixelHeight: Math.round(box.blockSize),
+  };
 }
 
 function defaultFrameDriver(): DataGridAnimationFrameDriver {
@@ -88,10 +102,18 @@ export function useDataGridCanvasRuntime(options: DataGridCanvasRuntimeOptions):
       options.syncViewport();
       const viewport = options.getViewport();
       if (!viewport) return;
-      resizeObserver = createResizeObserver(() => {
-        if (active && !disposed) options.syncViewport();
+      resizeObserver = createResizeObserver((entries) => {
+        if (active && !disposed) options.syncViewport(entries);
       });
       resizeObserver?.observe(viewport);
+      const surface = options.getSurface?.();
+      if (resizeObserver && surface && surface !== viewport) {
+        try {
+          resizeObserver.observe(surface, { box: "device-pixel-content-box" });
+        } catch {
+          resizeObserver.observe(surface);
+        }
+      }
     },
     pause() {
       active = false;

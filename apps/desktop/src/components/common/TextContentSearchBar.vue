@@ -2,7 +2,7 @@
 import { nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { ChevronDown, ChevronUp, GripVertical, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
-import { isTextContentSearchDragSource } from "@/lib/redis/redisValueSearch";
+import { isTextContentSearchDragSource } from "@/lib/common/textContentSearch";
 
 /**
  * Floating find panel (EditorSearchPanel look).

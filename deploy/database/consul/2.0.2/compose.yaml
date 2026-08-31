@@ -1,0 +1,26 @@
+services:
+  database:
+    image: docker.cnb.cool/znb/images/consul:2.0.2
+    container_name: dbx-consul-2.0.2
+    restart: unless-stopped
+    command:
+      - agent
+      - -dev
+      - -client=0.0.0.0
+      - -ui
+      - -data-dir=/consul/data
+    ports:
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-10900}:8500"
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${CONSUL_GRPC_PORT:-10901}:8502"
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${CONSUL_DNS_PORT:-10902}:8600/tcp"
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${CONSUL_DNS_PORT:-10902}:8600/udp"
+    volumes:
+      - data:/consul/data
+    healthcheck:
+      test: ["CMD", "consul", "members", "-http-addr=http://127.0.0.1:8500"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+volumes:
+  data:

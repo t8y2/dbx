@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { ChevronDown, ExternalLink, Loader2, RefreshCw, Tag } from "@lucide/vue";
+import { ChevronDown, CloudDownload, ExternalLink, Loader2, RefreshCw, Tag } from "@lucide/vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -12,6 +12,19 @@ import { changelogLangFromLocale, changelogReleaseUrl, changelogWebsiteUrl, crea
 const PAGE_SIZE = 5;
 
 const { t, locale } = useI18n();
+
+withDefaults(
+  defineProps<{
+    checkingUpdates?: boolean;
+  }>(),
+  {
+    checkingUpdates: false,
+  },
+);
+
+const emit = defineEmits<{
+  "check-updates": [];
+}>();
 
 const loading = ref(false);
 const error = ref("");
@@ -117,12 +130,17 @@ watch(changelogLang, (lang) => {
 
 <template>
   <div class="rounded-lg border p-4">
-    <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+    <div class="settings-about-section-header flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
       <div class="min-w-0 space-y-1">
         <Label>{{ t("settings.changelogTitle") }}</Label>
         <p class="text-sm text-muted-foreground">{{ t("settings.changelogDescription") }}</p>
       </div>
-      <div class="flex shrink-0 flex-wrap items-center gap-2">
+      <div class="settings-about-section-actions flex shrink-0 flex-wrap items-center gap-2">
+        <Button type="button" variant="outline" size="sm" :disabled="checkingUpdates" @click="emit('check-updates')">
+          <Loader2 v-if="checkingUpdates" class="mr-1 h-3.5 w-3.5 animate-spin" />
+          <CloudDownload v-else class="mr-1 h-3.5 w-3.5" />
+          {{ t("updates.check") }}
+        </Button>
         <Button type="button" variant="outline" size="sm" :disabled="loading" @click="openExternalUrl(changelogWebsiteUrl(changelogLang))">
           <ExternalLink class="mr-1 h-3.5 w-3.5" />
           {{ t("settings.changelogOpenWebsite") }}

@@ -1,18 +1,21 @@
 import type { ColumnInfo, DatabaseType } from "@/types/database";
-import { qualifiedTableName, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
+import { metricRangeQuery, qualifiedTableName, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
 
 export interface TableSqlTemplateOptions {
   databaseType?: DatabaseType;
+  driverProfile?: string;
   identifierQuote?: string;
   schema?: string;
   catalog?: string;
   database?: string;
+  includeDatabaseName?: boolean;
   tableName: string;
   columns?: ColumnInfo[];
   tableType?: string;
 }
 
 export function buildTableSelectTemplate(options: TableSqlTemplateOptions): string {
+  if (options.databaseType === "victoriametrics") return metricRangeQuery(options.tableName);
   const tableName = templateTableName(options);
   const columns = options.columns ?? [];
   if (!columns.length) {
@@ -99,9 +102,11 @@ export function buildTableDeleteTemplate(options: TableSqlTemplateOptions): stri
 function templateTableName(options: TableSqlTemplateOptions): string {
   return qualifiedTableName({
     databaseType: options.databaseType,
+    driverProfile: options.driverProfile,
     identifierQuote: options.identifierQuote,
     catalog: options.catalog,
     database: options.database,
+    includeDatabaseName: options.includeDatabaseName,
     schema: options.schema,
     tableName: options.tableName,
   });

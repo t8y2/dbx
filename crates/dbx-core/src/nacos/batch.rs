@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -157,17 +158,22 @@ async fn transfer_configs(
     source_admin: Arc<dyn NacosAdmin>,
     request: &NacosConfigTransferRequest,
 ) -> Result<Vec<NacosConfigUpsert>, String> {
+    let target_group = request.target_group.as_deref().map(str::trim).filter(|group| !group.is_empty());
+    let mut data_id_mappings = validated_data_id_mappings(request)?;
     let source = resolve_selector(source_admin, &request.source).await?;
-    source
+    let configs = source
         .into_iter()
         .map(|config| {
+            let source_key = (config.group.clone(), config.data_id.clone());
             let content = config
                 .content
                 .ok_or_else(|| format!("Nacos configuration {}/{} has no content", config.group, config.data_id))?;
+            let group = target_group.map(str::to_string).unwrap_or(config.group);
+            let data_id = data_id_mappings.remove(&source_key).unwrap_or(config.data_id);
             Ok(NacosConfigUpsert {
                 namespace: Some(request.target_namespace.clone()),
-                data_id: config.data_id,
-                group: config.group,
+                data_id,
+                group,
                 content,
                 config_type: config.config_type,
                 app_name: config.app_name,
@@ -175,7 +181,65 @@ async fn transfer_configs(
                 tags: config.tags,
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>, String>>()?;
+    if let Some(((group, data_id), _)) = data_id_mappings.into_iter().next() {
+        return Err(format!(
+            "Nacos configuration {group}/{data_id} no longer exists in the selected source configurations"
+        ));
+    }
+    let mut target_keys = HashSet::new();
+    for config in &configs {
+        let namespace = config.namespace.as_deref().unwrap_or_default();
+        let key = (namespace, config.group.as_str(), config.data_id.as_str());
+        if !target_keys.insert(key) {
+            return Err(format!(
+                "Multiple selected Nacos configurations map to the same target key {namespace}/{}/{}",
+                config.group, config.data_id
+            ));
+        }
+    }
+    Ok(configs)
+}
+
+fn validated_data_id_mappings(
+    request: &NacosConfigTransferRequest,
+) -> Result<HashMap<(String, String), String>, String> {
+    if request.data_id_mappings.is_empty() {
+        return Ok(HashMap::new());
+    }
+    if !matches!(request.source.scope, NacosConfigSelectionScope::Selected) {
+        return Err("Nacos Data ID mappings are only supported for selected configurations".to_string());
+    }
+
+    let selected_keys: HashSet<_> =
+        request.source.keys.iter().map(|key| (key.group.as_str(), key.data_id.as_str())).collect();
+    let mut mappings = HashMap::with_capacity(request.data_id_mappings.len());
+    for mapping in &request.data_id_mappings {
+        let source_key = (mapping.source_group.as_str(), mapping.source_data_id.as_str());
+        if !selected_keys.contains(&source_key) {
+            return Err(format!(
+                "Nacos configuration {}/{} is not selected for Data ID mapping",
+                mapping.source_group, mapping.source_data_id
+            ));
+        }
+        let target_data_id = mapping.target_data_id.trim();
+        if target_data_id.is_empty() {
+            return Err(format!(
+                "Nacos configuration {}/{} target Data ID cannot be blank",
+                mapping.source_group, mapping.source_data_id
+            ));
+        }
+        if mappings
+            .insert((mapping.source_group.clone(), mapping.source_data_id.clone()), target_data_id.to_string())
+            .is_some()
+        {
+            return Err(format!(
+                "Nacos configuration {}/{} has multiple target Data ID mappings",
+                mapping.source_group, mapping.source_data_id
+            ));
+        }
+    }
+    Ok(mappings)
 }
 
 async fn resolve_selector(
@@ -196,6 +260,7 @@ async fn resolve_selector(
             let mut query = selector.query.clone().unwrap_or(crate::nacos::types::NacosConfigQuery {
                 namespace: None,
                 group: None,
+                group_contains: false,
                 data_id: None,
                 app_name: None,
                 search: None,
@@ -397,6 +462,7 @@ async fn existing_config(
         .list_configs(crate::nacos::types::NacosConfigQuery {
             namespace: Some(namespace.clone()),
             group: Some(config.group.clone()),
+            group_contains: false,
             data_id: Some(config.data_id.clone()),
             app_name: None,
             search: None,
@@ -618,11 +684,31 @@ mod tests {
             Err("unused".to_string())
         }
 
+        async fn get_service(&self, _: NacosServiceQuery) -> Result<NacosServiceDetail, String> {
+            Err("unused".to_string())
+        }
+        async fn create_service(&self, _: NacosServiceUpsert) -> Result<(), String> {
+            Err("unused".to_string())
+        }
+        async fn update_service(&self, _: NacosServiceUpsert) -> Result<(), String> {
+            Err("unused".to_string())
+        }
+        async fn delete_service(&self, _: NacosServiceQuery) -> Result<(), String> {
+            Err("unused".to_string())
+        }
+
         async fn list_instances(&self, _: NacosInstanceQuery) -> Result<Vec<NacosInstanceInfo>, String> {
             Err("unused".to_string())
         }
 
-        async fn update_instance(&self, _: NacosInstanceUpdate) -> Result<(), String> {
+        async fn update_instance(&self, _: NacosInstanceUpdateRequest) -> Result<(), String> {
+            Err("unused".to_string())
+        }
+
+        async fn register_instance(&self, _: NacosInstanceRegistration) -> Result<(), String> {
+            Err("unused".to_string())
+        }
+        async fn deregister_instance(&self, _: NacosInstanceRef) -> Result<(), String> {
             Err("unused".to_string())
         }
 
@@ -787,5 +873,238 @@ mod tests {
         assert_eq!((report.created, report.failed), (1, 1));
         assert!(report.partial);
         assert_eq!(admin.publish_count.load(Ordering::SeqCst), 1);
+    }
+
+    fn transfer_request(target_group: Option<&str>) -> NacosConfigTransferRequest {
+        NacosConfigTransferRequest {
+            operation_id: "op".to_string(),
+            source_connection_id: "source".to_string(),
+            target_connection_id: "target".to_string(),
+            source: NacosConfigSelector {
+                namespace: "source-ns".to_string(),
+                scope: NacosConfigSelectionScope::Selected,
+                keys: vec![NacosConfigKey {
+                    namespace: Some("source-ns".to_string()),
+                    data_id: "app".to_string(),
+                    group: "SOURCE_GROUP".to_string(),
+                }],
+                query: None,
+            },
+            target_namespace: "target-ns".to_string(),
+            target_group: target_group.map(str::to_string),
+            data_id_mappings: Vec::new(),
+            conflict_policy: NacosConflictPolicy::default(),
+        }
+    }
+
+    fn data_id_mapping(source_group: &str, source_data_id: &str, target_data_id: &str) -> NacosConfigDataIdMapping {
+        NacosConfigDataIdMapping {
+            source_group: source_group.to_string(),
+            source_data_id: source_data_id.to_string(),
+            target_data_id: target_data_id.to_string(),
+        }
+    }
+
+    fn insert_source_config(admin: &MockAdmin, data_id: &str, group: &str, content: &str) {
+        admin.insert(NacosConfigItem {
+            data_id: data_id.to_string(),
+            group: group.to_string(),
+            namespace: "source-ns".to_string(),
+            app_name: None,
+            desc: None,
+            tags: None,
+            config_type: Some("text".to_string()),
+            md5: None,
+            encrypted_data_key: None,
+            content: Some(content.to_string()),
+        });
+    }
+
+    fn source_admin_with_config() -> Arc<MockAdmin> {
+        let admin = Arc::new(MockAdmin::default());
+        insert_source_config(&admin, "app", "SOURCE_GROUP", "value");
+        admin
+    }
+
+    #[tokio::test]
+    async fn transfer_without_target_group_keeps_the_source_group() {
+        let source_admin = source_admin_with_config();
+        let configs = transfer_configs(source_admin, &transfer_request(None)).await.unwrap();
+
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].group, "SOURCE_GROUP");
+    }
+
+    #[tokio::test]
+    async fn transfer_with_target_group_overrides_the_source_group() {
+        let source_admin = source_admin_with_config();
+        let configs = transfer_configs(source_admin, &transfer_request(Some("  TARGET_GROUP  "))).await.unwrap();
+
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].group, "TARGET_GROUP");
+    }
+
+    #[tokio::test]
+    async fn transfer_rejects_target_key_collisions_after_group_override() {
+        let source_admin = source_admin_with_config();
+        source_admin.insert(NacosConfigItem {
+            data_id: "app".to_string(),
+            group: "OTHER_GROUP".to_string(),
+            namespace: "source-ns".to_string(),
+            app_name: None,
+            desc: None,
+            tags: None,
+            config_type: Some("text".to_string()),
+            md5: None,
+            encrypted_data_key: None,
+            content: Some("other value".to_string()),
+        });
+        let mut request = transfer_request(Some("TARGET_GROUP"));
+        request.source.keys.push(NacosConfigKey {
+            namespace: Some("source-ns".to_string()),
+            data_id: "app".to_string(),
+            group: "OTHER_GROUP".to_string(),
+        });
+
+        let error = transfer_configs(source_admin, &request).await.unwrap_err();
+
+        assert!(error.contains("target-ns/TARGET_GROUP/app"), "unexpected error: {error}");
+    }
+
+    #[tokio::test]
+    async fn transfer_with_blank_target_group_keeps_the_source_group() {
+        let source_admin = source_admin_with_config();
+        let configs = transfer_configs(source_admin, &transfer_request(Some("   "))).await.unwrap();
+
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].group, "SOURCE_GROUP");
+    }
+
+    #[tokio::test]
+    async fn transfer_with_data_id_mapping_uses_the_trimmed_target_data_id() {
+        let source_admin = source_admin_with_config();
+        let mut request = transfer_request(None);
+        request.data_id_mappings = vec![data_id_mapping("SOURCE_GROUP", "app", "  renamed.yaml  ")];
+
+        let configs = transfer_configs(source_admin, &request).await.unwrap();
+
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].data_id, "renamed.yaml");
+    }
+
+    #[tokio::test]
+    async fn transfer_with_multiple_selected_configs_maps_only_the_edited_data_id() {
+        let source_admin = source_admin_with_config();
+        insert_source_config(&source_admin, "worker", "OTHER_GROUP", "worker value");
+        let mut request = transfer_request(None);
+        request.source.keys.push(NacosConfigKey {
+            namespace: Some("source-ns".to_string()),
+            data_id: "worker".to_string(),
+            group: "OTHER_GROUP".to_string(),
+        });
+        request.data_id_mappings = vec![data_id_mapping("OTHER_GROUP", "worker", "worker-prod")];
+
+        let configs = transfer_configs(source_admin, &request).await.unwrap();
+
+        assert_eq!(configs.len(), 2);
+        assert!(configs.iter().any(|config| config.group == "SOURCE_GROUP" && config.data_id == "app"));
+        assert!(configs.iter().any(|config| config.group == "OTHER_GROUP" && config.data_id == "worker-prod"));
+    }
+
+    #[tokio::test]
+    async fn transfer_rejects_blank_data_id_mapping() {
+        let source_admin = source_admin_with_config();
+        let mut request = transfer_request(None);
+        request.data_id_mappings = vec![data_id_mapping("SOURCE_GROUP", "app", "   ")];
+
+        let error = transfer_configs(source_admin, &request).await.unwrap_err();
+
+        assert!(error.contains("target Data ID cannot be blank"), "unexpected error: {error}");
+    }
+
+    #[tokio::test]
+    async fn transfer_rejects_duplicate_mappings_for_the_same_source_key() {
+        let source_admin = source_admin_with_config();
+        let mut request = transfer_request(None);
+        request.data_id_mappings =
+            vec![data_id_mapping("SOURCE_GROUP", "app", "first"), data_id_mapping("SOURCE_GROUP", "app", "second")];
+
+        let error = transfer_configs(source_admin, &request).await.unwrap_err();
+
+        assert!(error.contains("multiple target Data ID mappings"), "unexpected error: {error}");
+    }
+
+    #[tokio::test]
+    async fn transfer_rejects_data_id_mapping_outside_selected_scope() {
+        let source_admin = source_admin_with_config();
+        let mut request = transfer_request(None);
+        request.source.scope = NacosConfigSelectionScope::Filtered;
+        request.data_id_mappings = vec![data_id_mapping("SOURCE_GROUP", "app", "renamed")];
+
+        let error = transfer_configs(source_admin, &request).await.unwrap_err();
+
+        assert!(error.contains("only supported for selected"), "unexpected error: {error}");
+    }
+
+    #[tokio::test]
+    async fn transfer_rejects_data_id_mapping_for_an_unselected_source_key() {
+        let source_admin = source_admin_with_config();
+        let mut request = transfer_request(None);
+        request.data_id_mappings = vec![data_id_mapping("SOURCE_GROUP", "not-selected", "renamed")];
+
+        let error = transfer_configs(source_admin, &request).await.unwrap_err();
+
+        assert!(error.contains("SOURCE_GROUP/not-selected is not selected"), "unexpected error: {error}");
+    }
+
+    #[tokio::test]
+    async fn transfer_rejects_a_stale_selected_source_mapping() {
+        let source_admin = source_admin_with_config();
+        let mut request = transfer_request(None);
+        request.source.keys[0].data_id = "deleted".to_string();
+        request.data_id_mappings = vec![data_id_mapping("SOURCE_GROUP", "deleted", "renamed")];
+
+        let error = transfer_configs(source_admin, &request).await.unwrap_err();
+
+        assert_eq!(error, "not found");
+    }
+
+    #[tokio::test]
+    async fn transfer_rejects_target_key_collisions_after_data_id_mapping() {
+        let source_admin = source_admin_with_config();
+        insert_source_config(&source_admin, "worker", "SOURCE_GROUP", "worker value");
+        let mut request = transfer_request(Some("TARGET_GROUP"));
+        request.source.keys.push(NacosConfigKey {
+            namespace: Some("source-ns".to_string()),
+            data_id: "worker".to_string(),
+            group: "SOURCE_GROUP".to_string(),
+        });
+        request.data_id_mappings = vec![data_id_mapping("SOURCE_GROUP", "worker", "app")];
+
+        let error = transfer_configs(source_admin, &request).await.unwrap_err();
+
+        assert!(error.contains("target-ns/TARGET_GROUP/app"), "unexpected error: {error}");
+    }
+
+    #[tokio::test]
+    async fn preview_and_apply_share_the_same_mapped_data_id_plan() {
+        let source_admin = source_admin_with_config();
+        let target_admin = Arc::new(MockAdmin::default());
+        let mut request = transfer_request(None);
+        request.data_id_mappings = vec![data_id_mapping("SOURCE_GROUP", "app", "app-prod")];
+
+        let preview = preview_transfer(source_admin.clone(), target_admin.clone(), &request).await.unwrap();
+        let report = apply_transfer(source_admin, target_admin.clone(), &request, &preview.plan_hash).await.unwrap();
+
+        assert_eq!((preview.created, report.created), (1, 1));
+        let published = target_admin
+            .get_config(NacosConfigKey {
+                namespace: Some("target-ns".to_string()),
+                data_id: "app-prod".to_string(),
+                group: "SOURCE_GROUP".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(published.content.as_deref(), Some("value"));
     }
 }

@@ -156,6 +156,135 @@ function alignColumnRows(rows: ColumnFieldParts[]): string[] {
 }
 
 /**
+ * Collapse column-alignment padding outside SQL literals and comments, keeping
+ * each line's leading indentation intact. The hover tooltip renders padding for
+ * readability, but copied SQL must preserve semantic whitespace inside values.
+ */
+export function normalizeAlignedSqlWhitespace(text: string): string {
+  let result = "";
+  let index = 0;
+  let lineStart = true;
+  let blockComment = false;
+  let dollarQuoteEnd = "";
+
+  while (index < text.length) {
+    if (blockComment) {
+      const end = text.indexOf("*/", index);
+      if (end === -1) return result + text.slice(index);
+      result += text.slice(index, end + 2);
+      lineStart = text[end + 1] === "\n";
+      index = end + 2;
+      blockComment = false;
+      continue;
+    }
+
+    if (dollarQuoteEnd) {
+      const end = text.indexOf(dollarQuoteEnd, index);
+      if (end === -1) return result + text.slice(index);
+      result += text.slice(index, end + dollarQuoteEnd.length);
+      lineStart = false;
+      index = end + dollarQuoteEnd.length;
+      dollarQuoteEnd = "";
+      continue;
+    }
+
+    const char = text[index];
+    const next = text[index + 1];
+
+    if (char === "\n" || char === "\r") {
+      result += char;
+      index += 1;
+      lineStart = true;
+      continue;
+    }
+
+    if (lineStart && (char === " " || char === "\t")) {
+      result += char;
+      index += 1;
+      continue;
+    }
+    lineStart = false;
+
+    if (char === "-" && next === "-") {
+      const end = text.indexOf("\n", index);
+      if (end === -1) return result + text.slice(index);
+      result += text.slice(index, end);
+      index = end;
+      continue;
+    }
+
+    if (char === "/" && next === "*") {
+      result += "/*";
+      index += 2;
+      blockComment = true;
+      continue;
+    }
+
+    if (char === "$" && (index === 0 || !/[\w$]/.test(text[index - 1]))) {
+      const match = /^\$[A-Za-z_][A-Za-z0-9_]*\$|^\$\$/.exec(text.slice(index));
+      if (match) {
+        result += match[0];
+        index += match[0].length;
+        dollarQuoteEnd = match[0];
+        continue;
+      }
+    }
+
+    if (char === "'" || char === '"' || char === "`") {
+      const quote = char;
+      const start = index;
+      index += 1;
+      while (index < text.length) {
+        if (text[index] === quote) {
+          if (text[index + 1] === quote) index += 2;
+          else {
+            index += 1;
+            break;
+          }
+        } else if (text[index] === "\\" && index + 1 < text.length) {
+          index += 2;
+        } else {
+          index += 1;
+        }
+      }
+      result += text.slice(start, index);
+      continue;
+    }
+
+    if (char === "[") {
+      const start = index;
+      index += 1;
+      while (index < text.length) {
+        if (text[index] === "]") {
+          if (text[index + 1] === "]") index += 2;
+          else {
+            index += 1;
+            break;
+          }
+        } else {
+          index += 1;
+        }
+      }
+      result += text.slice(start, index);
+      continue;
+    }
+
+    if (char === " ") {
+      let end = index + 1;
+      while (text[end] === " ") end += 1;
+      result += " ";
+      index = end;
+      continue;
+    }
+
+    result += char;
+    index += 1;
+  }
+
+  return result;
+}
+
+/**
  * Quote a SQL identifier by wrapping it in double quotes with proper escaping.
  */
 export function quoteIdentifier(name: string): string {

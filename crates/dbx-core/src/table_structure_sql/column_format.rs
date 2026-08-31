@@ -19,25 +19,61 @@ pub(super) fn column_definition(dialect: StructureDialect, column: &EditableStru
             parts.push(format!("COLLATE {}", quote_ident(dialect, &column.collation)));
         }
     }
+    let mysql_generated_clause =
+        (dialect == StructureDialect::Mysql).then(|| original_mysql_generated_clause(column)).flatten();
+    if let Some(generated_clause) = mysql_generated_clause.as_ref() {
+        parts.push(generated_clause.clone());
+    }
     if !column.is_nullable && !is_oracle_like(dialect) && dialect != StructureDialect::ClickHouse {
         parts.push("NOT NULL".to_string());
+    } else if column.is_nullable
+        && dialect == StructureDialect::Mysql
+        && mysql_generated_clause.is_none()
+        && is_mysql_timestamp_type(&column.data_type)
+    {
+        parts.push("NULL".to_string());
     }
-    if let Some(extra_clause) = column_extra_clause(dialect, column) {
-        parts.push(extra_clause);
-    }
-    let default_value = normalize_default(Some(&column.default_value));
-    if !default_value.is_empty() {
-        parts.push(format!("DEFAULT {}", format_default_for_sql(dialect, &column.data_type, &default_value)));
-    }
-    if let Some(on_update) = column.extra.as_ref().and_then(|e| e.on_update_current_timestamp).filter(|v| *v) {
-        if on_update && dialect == StructureDialect::Mysql {
-            parts.push("ON UPDATE CURRENT_TIMESTAMP".to_string());
+    if mysql_generated_clause.is_none() {
+        if let Some(extra_clause) = column_extra_clause(dialect, column) {
+            parts.push(extra_clause);
         }
     }
-    if matches!(dialect, StructureDialect::Mysql | StructureDialect::Doris) && !clean(&column.comment).is_empty() {
+    let default_value = normalize_default(Some(&column.default_value));
+    if mysql_generated_clause.is_none() && !default_value.is_empty() {
+        parts.push(format!("DEFAULT {}", format_default_for_sql(dialect, &column.data_type, &default_value)));
+    }
+    if mysql_generated_clause.is_none() {
+        if let Some(on_update) = column.extra.as_ref().and_then(|e| e.on_update_current_timestamp).filter(|v| *v) {
+            if on_update && dialect == StructureDialect::Mysql {
+                parts.push("ON UPDATE CURRENT_TIMESTAMP".to_string());
+            }
+        }
+    }
+    if matches!(dialect, StructureDialect::Mysql | StructureDialect::GaussdbM | StructureDialect::Doris)
+        && !clean(&column.comment).is_empty()
+    {
         parts.push(format!("COMMENT {}", quote_string(&clean(&column.comment))));
     }
     parts.join(" ")
+}
+
+pub(super) fn original_mysql_generated_clause(column: &EditableStructureColumn) -> Option<String> {
+    let extra = column.original.as_ref()?.extra.as_deref()?.trim();
+    let normalized = extra.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
+    (normalized.starts_with("generated ") && normalized.contains(" as (")).then(|| extra.to_string())
+}
+
+pub(super) fn original_is_mysql_generated_column(column: &EditableStructureColumn) -> bool {
+    let Some(extra) = column.original.as_ref().and_then(|original| original.extra.as_deref()) else {
+        return false;
+    };
+    let mut tokens = extra.split_whitespace();
+    let first = tokens.next();
+    first.is_some_and(|token| token.eq_ignore_ascii_case("generated"))
+        || matches!(first, Some(token) if token.eq_ignore_ascii_case("virtual")
+            || token.eq_ignore_ascii_case("stored")
+            || token.eq_ignore_ascii_case("persistent"))
+            && tokens.next().is_some_and(|token| token.eq_ignore_ascii_case("generated"))
 }
 
 pub(super) fn column_extra_clause(dialect: StructureDialect, column: &EditableStructureColumn) -> Option<String> {
@@ -132,7 +168,15 @@ pub(super) fn column_data_type(dialect: StructureDialect, column: &EditableStruc
     if dialect == StructureDialect::Questdb {
         return questdb_column_type(column);
     }
-    normalize_column_data_type(dialect, &column.data_type)
+    let normalized = normalize_column_data_type(dialect, &column.data_type);
+    // Dameng only recognizes its built-in type keywords in the canonical
+    // upper-case form: a lower-case `varchar(50)` in DDL is stored as a
+    // USER-DEFINED type instead of VARCHAR (issue #7343). Uppercase after the
+    // dialect-specific normalization so its rewrites still apply.
+    if dialect == StructureDialect::Dameng {
+        return normalized.to_uppercase();
+    }
+    normalized
 }
 
 fn manticore_column_type(column: &EditableStructureColumn) -> String {
@@ -323,7 +367,7 @@ pub(super) fn is_temporal_precision_type(dialect: StructureDialect, base_type: &
                 | "timestamp with time zone"
         ),
         StructureDialect::SqlServer => matches!(normalized.as_str(), "time" | "datetime2" | "datetimeoffset"),
-        StructureDialect::Oracle | StructureDialect::Dameng => {
+        StructureDialect::Oracle | StructureDialect::Dameng | StructureDialect::Oscar => {
             matches!(normalized.as_str(), "timestamp" | "timestamp with time zone" | "timestamp with local time zone")
         }
         _ => false,
@@ -334,7 +378,11 @@ pub(super) fn is_valid_temporal_precision(params: &str, dialect: StructureDialec
     let Ok(value) = params.parse::<u8>() else {
         return false;
     };
-    let max = if matches!(dialect, StructureDialect::Oracle | StructureDialect::Dameng) { 9 } else { 6 };
+    let max = if matches!(dialect, StructureDialect::Oracle | StructureDialect::Dameng | StructureDialect::Oscar) {
+        9
+    } else {
+        6
+    };
     value <= max && params == value.to_string()
 }
 
@@ -395,4 +443,19 @@ pub(super) fn is_mysql_character_data_type(data_type: &str) -> bool {
     };
     let normalized = base_type.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
     matches!(normalized.as_str(), "char" | "varchar" | "tinytext" | "text" | "mediumtext" | "longtext" | "enum" | "set")
+}
+
+/// MySQL silently rewrites a nullable `TIMESTAMP` column to `NOT NULL` when the
+/// generated DDL omits an explicit `NULL` keyword — regardless of whether a
+/// `DEFAULT` is present. With the (still common) `explicit_defaults_for_timestamp`
+/// server default of `OFF`, this can outright fail with `ERROR 1067 (42000):
+/// Invalid default value` for any non-first TIMESTAMP column. `DATETIME` is not
+/// affected and must not be touched.
+pub(super) fn is_mysql_timestamp_type(data_type: &str) -> bool {
+    let trimmed = data_type.trim();
+    let base_type = match trimmed.find('(') {
+        Some(open_index) => trimmed[..open_index].trim(),
+        None => trimmed,
+    };
+    base_type.eq_ignore_ascii_case("timestamp")
 }

@@ -1,4 +1,4 @@
-import type { ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
+import type { ContextMenuItem } from "@/components/ui/customContextMenuRegistry";
 import type { DatabaseType, TreeNode, TreeNodeType } from "@/types/database";
 import { createSidebarActionTarget, type SidebarActionTarget } from "./sidebarActionTarget";
 

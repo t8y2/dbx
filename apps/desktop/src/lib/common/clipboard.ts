@@ -23,10 +23,15 @@ interface ClipboardTextarea {
   setSelectionRange?(start: number, end: number): void;
 }
 
+interface ClipboardContainer {
+  appendChild(node: unknown): unknown;
+  removeChild(node: unknown): unknown;
+}
+
 interface ClipboardDocument {
-  body?: {
-    appendChild(node: unknown): unknown;
-    removeChild(node: unknown): unknown;
+  body?: ClipboardContainer;
+  activeElement?: {
+    closest?(selector: string): ClipboardContainer | null;
   };
   createElement(tagName: "textarea"): ClipboardTextarea;
   execCommand?(command: string): boolean;
@@ -58,6 +63,7 @@ interface NativeClipboardSelectionEnvironment {
 
 const EDITABLE_CLIPBOARD_TARGET_SELECTOR = "input, textarea, [contenteditable='true'], [role='textbox']";
 const NATIVE_CLIPBOARD_REGION_SELECTOR = "[data-native-clipboard]";
+const DATA_GRID_ROOT_SELECTOR = "[data-grid-root]";
 let clipboardWriteRevision = 0;
 
 export function getClipboardWriteRevision(): number {
@@ -66,6 +72,10 @@ export function getClipboardWriteRevision(): number {
 
 function recordClipboardWrite(): void {
   clipboardWriteRevision += 1;
+}
+
+function legacyClipboardContainer(document: ClipboardDocument): ClipboardContainer | undefined {
+  return document.activeElement?.closest?.("[role='dialog']") ?? document.body;
 }
 
 function closestElement(target: unknown, selector: string): unknown {
@@ -84,6 +94,10 @@ function selectionNodeElement(node: Node | null): Element | null {
 
 export function isPlainClipboardShortcut(event: ClipboardShortcutEvent, key: string): boolean {
   return !!(event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === key;
+}
+
+export function shouldBlockAppNativeSelectAll(event: ClipboardShortcutEvent): boolean {
+  return isPlainClipboardShortcut(event, "a") && !eventTargetUsesNativeClipboard(event) && !closestElement(event.target, DATA_GRID_ROOT_SELECTOR);
 }
 
 export function hasNativeClipboardSelection(env: NativeClipboardSelectionEnvironment = globalThis as unknown as NativeClipboardSelectionEnvironment): boolean {
@@ -144,7 +158,8 @@ export async function copyToClipboard(text: string, env: ClipboardEnvironment = 
   }
 
   const document = env.document;
-  if (!document?.body || !document.execCommand) {
+  const container = document ? legacyClipboardContainer(document) : undefined;
+  if (!document || !container || !document.execCommand) {
     throw new Error("Clipboard API is not available");
   }
 
@@ -156,7 +171,7 @@ export async function copyToClipboard(text: string, env: ClipboardEnvironment = 
   textarea.style.left = "-9999px";
   textarea.style.opacity = "0";
 
-  document.body.appendChild(textarea);
+  container.appendChild(textarea);
   try {
     textarea.focus?.();
     textarea.select();
@@ -166,6 +181,6 @@ export async function copyToClipboard(text: string, env: ClipboardEnvironment = 
     }
     recordClipboardWrite();
   } finally {
-    document.body.removeChild(textarea);
+    container.removeChild(textarea);
   }
 }

@@ -4,11 +4,15 @@ use crate::plugins::{PluginManifest, SUPPORTED_PLUGIN_PROTOCOL_VERSION};
 use crate::update::{fetch_latest_release, is_newer_version, JdbcPluginLatest};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 const JDBC_PLUGIN_DOWNLOAD_URL: &str =
     "https://github.com/t8y2/dbx/releases/latest/download/dbx-jdbc-plugin-latest.zip";
 const JDBC_PLUGIN_R2_PATH: &str = "releases/latest/dbx-jdbc-plugin-latest.zip";
+const OFFLINE_JDBC_MANIFEST_ENTRY: &str = "jdbc/offline-manifest.json";
+const OFFLINE_JDBC_FORMAT_VERSION: u32 = 1;
+const OFFLINE_JDBC_PLUGIN_ENTRY: &str = "jdbc/plugin.zip";
 pub const PRESTOSQL_JDBC_DRIVER_VERSION: &str = "350";
 pub const PRESTOSQL_JDBC_DRIVER_COORDINATE: &str = "io.prestosql:presto-jdbc:350";
 pub const PRESTOSQL_JDBC_DRIVER_REPOSITORY: &str = "https://repo.maven.apache.org/maven2/";
@@ -81,6 +85,25 @@ pub struct JdbcPluginStatus {
     pub latest_protocol_version: Option<u32>,
     pub update_available: bool,
     pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OfflineJdbcImportResult {
+    pub plugin_installed: bool,
+    pub bundles_installed: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OfflineJdbcManifest {
+    format_version: u32,
+    plugin_entry: String,
+    bundles: Vec<OfflineJdbcBundle>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OfflineJdbcBundle {
+    id: String,
+    coordinate: String,
 }
 
 // ---- JDBC Drivers ----
@@ -189,10 +212,57 @@ pub async fn install_jdbc_driver_from_maven(
     let local_repo = plugin_dir.join("maven-cache");
     std::fs::create_dir_all(&local_repo).map_err(|err| err.to_string())?;
 
-    let mut command = crate::process::new_tokio_command(&resolver);
+    let mut resolved = resolve_maven_artifacts(&resolver, &coordinate, &local_repo, &repositories, &env).await?;
+    if let Some(orai18n) = oracle_orai18n_companion(&resolved) {
+        match resolve_maven_artifacts(&resolver, &orai18n, &local_repo, &repositories, &env).await {
+            Ok(mut companion) => resolved.artifacts.append(&mut companion.artifacts),
+            Err(_) => {
+                // A missing orai18n companion must not block the driver install;
+                // affected charsets surface a dedicated hint at runtime.
+            }
+        }
+    }
+    let root = plugins_root.to_path_buf();
+    tokio::task::spawn_blocking(move || install_jdbc_maven_bundle(&root, &coordinate, &resolved))
+        .await
+        .map_err(|err| err.to_string())??;
+    list_jdbc_drivers(plugins_root)
+}
+
+const ORACLE_JDBC_GROUP_ID: &str = "com.oracle.database.jdbc";
+const ORACLE_NLS_GROUP_ID: &str = "com.oracle.database.nls";
+const ORAI18N_ARTIFACT_ID: &str = "orai18n";
+
+/// Oracle's thin driver jar ships converters for a small default charset set;
+/// multibyte charsets such as ZHS16GBK need the orai18n companion jar, otherwise
+/// every metadata call that reads dictionary comments fails wholesale. DBeaver
+/// ships the same pairing.
+fn oracle_orai18n_companion(resolved: &MavenResolveOutput) -> Option<String> {
+    let ojdbc = resolved
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.group_id == ORACLE_JDBC_GROUP_ID && artifact.artifact_id.starts_with("ojdbc"))?;
+    if resolved
+        .artifacts
+        .iter()
+        .any(|artifact| artifact.group_id == ORACLE_NLS_GROUP_ID && artifact.artifact_id == ORAI18N_ARTIFACT_ID)
+    {
+        return None;
+    }
+    Some(format!("{ORACLE_NLS_GROUP_ID}:{ORAI18N_ARTIFACT_ID}:{}", ojdbc.version))
+}
+
+async fn resolve_maven_artifacts(
+    resolver: &Path,
+    coordinate: &str,
+    local_repo: &Path,
+    repositories: &[String],
+    env: &PluginRuntimeEnv,
+) -> Result<MavenResolveOutput, String> {
+    let mut command = crate::process::new_tokio_command(resolver);
     env.apply_to(&mut command);
-    command.arg("resolve").arg("--coordinate").arg(&coordinate).arg("--local-repo").arg(&local_repo);
-    for repo in &repositories {
+    command.arg("resolve").arg("--coordinate").arg(coordinate).arg("--local-repo").arg(local_repo);
+    for repo in repositories {
         command.arg("--repo").arg(repo);
     }
     let output = command.output().await.map_err(|err| format!("Failed to run JDBC Maven resolver: {err}"))?;
@@ -201,13 +271,7 @@ pub async fn install_jdbc_driver_from_maven(
         return Err(if stderr.is_empty() { "JDBC Maven resolver failed".to_string() } else { stderr });
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let resolved: MavenResolveOutput =
-        serde_json::from_str(&stdout).map_err(|err| format!("Failed to parse JDBC Maven resolver output: {err}"))?;
-    let root = plugins_root.to_path_buf();
-    tokio::task::spawn_blocking(move || install_jdbc_maven_bundle(&root, &coordinate, &resolved))
-        .await
-        .map_err(|err| err.to_string())??;
-    list_jdbc_drivers(plugins_root)
+    serde_json::from_str(&stdout).map_err(|err| format!("Failed to parse JDBC Maven resolver output: {err}"))
 }
 
 pub async fn install_prestosql_jdbc_driver(plugins_root: &Path) -> Result<Vec<JdbcDriverInfo>, String> {
@@ -255,6 +319,66 @@ pub async fn install_prestosql_jdbc_driver(plugins_root: &Path) -> Result<Vec<Jd
     list_jdbc_drivers(plugins_root)
 }
 
+/// Imports the optional JDBC payload embedded in a full offline Agent ZIP.
+/// Older Agent packages have no JDBC manifest and remain valid.
+pub fn import_offline_jdbc_payload(
+    plugins_root: &Path,
+    zip_path: &Path,
+) -> Result<Option<OfflineJdbcImportResult>, String> {
+    if !zip_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.to_ascii_lowercase().ends_with(".zip"))
+    {
+        return Ok(None);
+    }
+    let file = std::fs::File::open(zip_path).map_err(|err| format!("Failed to open offline package: {err}"))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|err| format!("Invalid offline package ZIP: {err}"))?;
+    let manifest_raw = match read_zip_entry(&mut archive, OFFLINE_JDBC_MANIFEST_ENTRY, 1024 * 1024) {
+        Ok(raw) => raw,
+        Err(error) if error == format!("Offline package entry not found: {OFFLINE_JDBC_MANIFEST_ENTRY}") => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    let manifest: OfflineJdbcManifest =
+        serde_json::from_slice(&manifest_raw).map_err(|err| format!("Failed to parse offline JDBC manifest: {err}"))?;
+    validate_offline_jdbc_manifest(&manifest)?;
+
+    let plugin_bytes = read_zip_entry(&mut archive, &manifest.plugin_entry, 512 * 1024 * 1024)?;
+    let maven_dir = jdbc_maven_drivers_dir(plugins_root);
+    std::fs::create_dir_all(&maven_dir).map_err(|err| err.to_string())?;
+    let staging_root = maven_dir.join(format!(".offline-import-{}", uuid::Uuid::new_v4()));
+
+    let import_result = (|| {
+        std::fs::create_dir_all(&staging_root).map_err(|err| err.to_string())?;
+        let mut staged_bundles = Vec::with_capacity(manifest.bundles.len());
+        for bundle in &manifest.bundles {
+            let staged = stage_offline_jdbc_bundle(&mut archive, bundle, &staging_root, &maven_dir)?;
+            staged_bundles.push((bundle.id.clone(), staged));
+        }
+
+        install_jdbc_plugin_zip(&plugin_bytes, &plugins_root.join("jdbc"))?;
+
+        for (bundle_id, staged_dir) in &staged_bundles {
+            let target = maven_dir.join(bundle_id);
+            if target.exists() {
+                std::fs::remove_dir_all(&target).map_err(|err| err.to_string())?;
+            }
+            std::fs::rename(staged_dir, &target)
+                .map_err(|err| format!("Failed to install offline JDBC bundle {bundle_id}: {err}"))?;
+        }
+
+        Ok(Some(OfflineJdbcImportResult {
+            plugin_installed: true,
+            bundles_installed: manifest.bundles.iter().map(|bundle| bundle.coordinate.clone()).collect(),
+        }))
+    })();
+
+    let _ = std::fs::remove_dir_all(&staging_root);
+    import_result
+}
+
 // ---- JDBC Plugin ----
 
 pub async fn get_jdbc_plugin_status(plugins_root: &Path) -> Result<JdbcPluginStatus, String> {
@@ -291,7 +415,9 @@ pub async fn install_jdbc_plugin_from_file(plugins_root: &Path, file_path: &str)
     })
     .await
     .map_err(|err| err.to_string())??;
-    jdbc_plugin_status_from_dir(&status_dir).await
+    // Local install must stay fully offline: build status from the local
+    // manifest only, do not check for a newer release over the network.
+    jdbc_plugin_status_from_dir_local(&status_dir)
 }
 
 pub fn uninstall_jdbc_plugin(plugins_root: &Path) -> Result<JdbcPluginStatus, String> {
@@ -307,14 +433,20 @@ pub fn uninstall_jdbc_plugin(plugins_root: &Path) -> Result<JdbcPluginStatus, St
             std::fs::remove_file(path).map_err(|err| err.to_string())?;
         }
     }
-    // synchronous version: check local manifest only, no network call
+    jdbc_plugin_status_from_dir_local(&plugin_dir)
+}
+
+/// Builds plugin status from the local manifest only, no network call.
+/// Used by install/uninstall paths that must stay fully offline (uninstall,
+/// and installing a plugin package the user already has on disk).
+fn jdbc_plugin_status_from_dir_local(plugin_dir: &Path) -> Result<JdbcPluginStatus, String> {
     let manifest_path = plugin_dir.join("manifest.json");
     let manifest = match std::fs::read_to_string(&manifest_path) {
         Ok(raw) => Some(serde_json::from_str::<PluginManifest>(&raw).map_err(|err| err.to_string())?),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
         Err(err) => return Err(err.to_string()),
     };
-    Ok(build_plugin_status(&manifest, None, &plugin_dir))
+    Ok(build_plugin_status(&manifest, None, plugin_dir))
 }
 
 // ---- System Fonts ----
@@ -368,13 +500,25 @@ fn jdbc_maven_resolver_executable(plugin_dir: &Path) -> PathBuf {
 }
 
 async fn jdbc_plugin_status_from_dir(plugin_dir: &Path) -> Result<JdbcPluginStatus, String> {
+    jdbc_plugin_status_from_dir_after(plugin_dir, latest_jdbc_plugin()).await
+}
+
+/// Waits on `latest` before reading the manifest, so a slow/offline network
+/// check can never race ahead of a concurrent local install and report a
+/// stale pre-install snapshot back to the caller. `latest` is a parameter
+/// (rather than calling `latest_jdbc_plugin()` directly) so tests can
+/// simulate a delayed network response without a real network call.
+async fn jdbc_plugin_status_from_dir_after(
+    plugin_dir: &Path,
+    latest: impl std::future::Future<Output = Option<JdbcPluginLatest>>,
+) -> Result<JdbcPluginStatus, String> {
+    let latest = latest.await;
     let manifest_path = plugin_dir.join("manifest.json");
     let manifest = match std::fs::read_to_string(&manifest_path) {
         Ok(raw) => Some(serde_json::from_str::<PluginManifest>(&raw).map_err(|err| err.to_string())?),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
         Err(err) => return Err(err.to_string()),
     };
-    let latest = latest_jdbc_plugin().await;
     Ok(build_plugin_status(&manifest, latest.as_ref(), plugin_dir))
 }
 
@@ -428,14 +572,19 @@ async fn download_jdbc_plugin_zip_with_progress(progress: &impl Fn(AgentProgress
     progress(AgentProgressEvent::transfer("jdbc-plugin", 0, total));
     let mut downloaded = 0;
     let mut bytes = Vec::with_capacity(total.try_into().unwrap_or(0));
+    // Emit transfer progress at most once per whole percent (or 500ms on slow
+    // links) instead of once per HTTP chunk; see TransferProgressGate.
+    let mut transfer_gate = crate::agent_service::TransferProgressGate::new(total);
     while let Some(chunk) = resp.chunk().await.map_err(|err| err.to_string())? {
         downloaded += chunk.len() as u64;
         bytes.extend_from_slice(&chunk);
-        progress(AgentProgressEvent::transfer("jdbc-plugin", downloaded, total));
+        if transfer_gate.record(downloaded, std::time::Instant::now()) {
+            progress(AgentProgressEvent::transfer("jdbc-plugin", downloaded, total));
+        }
     }
-    if total == 0 {
-        progress(AgentProgressEvent::transfer("jdbc-plugin", downloaded, downloaded));
-    }
+    // The gate may have suppressed the final chunk; always publish the
+    // completed transfer so the UI reaches 100% before extraction starts.
+    progress(AgentProgressEvent::transfer("jdbc-plugin", downloaded, if total == 0 { downloaded } else { total }));
     Ok(bytes)
 }
 
@@ -470,7 +619,10 @@ fn install_jdbc_plugin_zip(bytes: &[u8], plugin_dir: &Path) -> Result<(), String
 
     if !temp_dir.join("manifest.json").exists() {
         let _ = std::fs::remove_dir_all(&temp_dir);
-        return Err("Downloaded JDBC plugin package is missing manifest.json".to_string());
+        return Err(format!(
+            "This ZIP is not a valid DBX JDBC plugin package (missing manifest.json). \
+             The correct package is available at: {JDBC_PLUGIN_DOWNLOAD_URL}"
+        ));
     }
     let manifest_path = temp_dir.join("manifest.json");
     let manifest = std::fs::read_to_string(&manifest_path)
@@ -538,6 +690,123 @@ fn copy_dir_all(source: &Path, target: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn read_zip_entry(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+    entry_name: &str,
+    max_size: u64,
+) -> Result<Vec<u8>, String> {
+    let mut entry = archive.by_name(entry_name).map_err(|err| match err {
+        zip::result::ZipError::FileNotFound => format!("Offline package entry not found: {entry_name}"),
+        _ => format!("Failed to read offline package entry {entry_name}: {err}"),
+    })?;
+    if entry.size() > max_size {
+        return Err(format!("Offline package entry is too large: {entry_name}"));
+    }
+    let mut bytes = Vec::with_capacity(entry.size().try_into().unwrap_or(0));
+    entry.read_to_end(&mut bytes).map_err(|err| format!("Failed to read offline package entry {entry_name}: {err}"))?;
+    Ok(bytes)
+}
+
+fn validate_offline_jdbc_manifest(manifest: &OfflineJdbcManifest) -> Result<(), String> {
+    if manifest.format_version != OFFLINE_JDBC_FORMAT_VERSION {
+        return Err(format!("Unsupported offline JDBC format version: {}", manifest.format_version));
+    }
+    if manifest.plugin_entry != OFFLINE_JDBC_PLUGIN_ENTRY {
+        return Err(format!("Unexpected offline JDBC plugin entry: {}", manifest.plugin_entry));
+    }
+    if manifest.bundles.is_empty() {
+        return Err("Offline JDBC payload contains no Maven bundles".to_string());
+    }
+    let mut ids = std::collections::HashSet::new();
+    let mut coordinates = std::collections::HashSet::new();
+    for bundle in &manifest.bundles {
+        if !is_safe_bundle_id(&bundle.id) {
+            return Err(format!("Invalid offline JDBC bundle id: {}", bundle.id));
+        }
+        if bundle.id != maven_bundle_id(&bundle.coordinate) {
+            return Err(format!("Offline JDBC bundle id does not match coordinate: {}", bundle.coordinate));
+        }
+        if !ids.insert(bundle.id.as_str()) {
+            return Err(format!("Duplicate offline JDBC bundle id: {}", bundle.id));
+        }
+        if !coordinates.insert(bundle.coordinate.as_str()) {
+            return Err(format!("Duplicate offline JDBC coordinate: {}", bundle.coordinate));
+        }
+    }
+    Ok(())
+}
+
+fn stage_offline_jdbc_bundle(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+    expected: &OfflineJdbcBundle,
+    staging_root: &Path,
+    final_maven_dir: &Path,
+) -> Result<PathBuf, String> {
+    let prefix = format!("jdbc/maven/{}/", expected.id);
+    let manifest_entry = format!("{prefix}manifest.json");
+    let manifest_raw = read_zip_entry(archive, &manifest_entry, 4 * 1024 * 1024)?;
+    let portable: JdbcMavenBundleInfo = serde_json::from_slice(&manifest_raw)
+        .map_err(|err| format!("Failed to parse offline JDBC bundle manifest {manifest_entry}: {err}"))?;
+    if portable.id != expected.id || portable.coordinate != expected.coordinate {
+        return Err(format!("Offline JDBC bundle manifest does not match {}", expected.coordinate));
+    }
+    if portable.artifacts.is_empty() {
+        return Err(format!("Offline JDBC bundle contains no JAR artifacts: {}", expected.coordinate));
+    }
+
+    let staged_dir = staging_root.join(&expected.id);
+    let jars_dir = staged_dir.join("jars");
+    std::fs::create_dir_all(&jars_dir).map_err(|err| err.to_string())?;
+    let final_bundle_dir = final_maven_dir.join(&expected.id);
+    let mut artifacts = Vec::with_capacity(portable.artifacts.len());
+    let mut file_names = std::collections::HashSet::new();
+
+    for mut artifact in portable.artifacts {
+        let file_name_path = Path::new(&artifact.file_name);
+        if artifact.extension != "jar"
+            || file_name_path.file_name().and_then(|name| name.to_str()) != Some(artifact.file_name.as_str())
+            || !file_names.insert(artifact.file_name.clone())
+        {
+            return Err(format!("Invalid offline JDBC artifact name: {}", artifact.file_name));
+        }
+        let entry_name = format!("{prefix}jars/{}", artifact.file_name);
+        let mut entry = archive.by_name(&entry_name).map_err(|err| match err {
+            zip::result::ZipError::FileNotFound => format!("Offline package entry not found: {entry_name}"),
+            _ => format!("Failed to read offline package entry {entry_name}: {err}"),
+        })?;
+        if entry.size() != artifact.size {
+            return Err(format!("Offline JDBC artifact size mismatch: {entry_name}"));
+        }
+        let target = jars_dir.join(&artifact.file_name);
+        let mut output = std::fs::File::create(&target).map_err(|err| err.to_string())?;
+        std::io::copy(&mut entry, &mut output)
+            .map_err(|err| format!("Failed to extract offline JDBC artifact {entry_name}: {err}"))?;
+        drop(output);
+        let sha256 = file_sha256(&target)?;
+        if !sha256.eq_ignore_ascii_case(&artifact.sha256) {
+            return Err(format!("Offline JDBC artifact checksum mismatch: {entry_name}"));
+        }
+        artifact.path = final_bundle_dir.join("jars").join(&artifact.file_name).to_string_lossy().to_string();
+        artifacts.push(artifact);
+    }
+
+    let installed = JdbcMavenBundleInfo {
+        id: portable.id,
+        coordinate: portable.coordinate,
+        scope: portable.scope,
+        repositories: portable.repositories,
+        installed_at: chrono::Utc::now().to_rfc3339(),
+        path: final_bundle_dir.to_string_lossy().to_string(),
+        artifacts,
+    };
+    std::fs::write(
+        staged_dir.join("manifest.json"),
+        serde_json::to_string_pretty(&installed).map_err(|err| err.to_string())?,
+    )
+    .map_err(|err| err.to_string())?;
+    Ok(staged_dir)
 }
 
 fn list_jdbc_drivers_from_dir(drivers_dir: &Path) -> Result<Vec<JdbcDriverInfo>, String> {
@@ -858,8 +1127,17 @@ fn is_safe_bundle_id(bundle_id: &str) -> bool {
 }
 
 fn file_sha256(path: &Path) -> Result<String, String> {
-    let bytes = std::fs::read(path).map_err(|err| err.to_string())?;
-    let hash = Sha256::digest(bytes);
+    let mut file = std::fs::File::open(path).map_err(|err| err.to_string())?;
+    let mut hash = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|err| err.to_string())?;
+        if read == 0 {
+            break;
+        }
+        hash.update(&buffer[..read]);
+    }
+    let hash = hash.finalize();
     Ok(format!("{hash:x}"))
 }
 
@@ -911,6 +1189,71 @@ fn paths_refer_to_same_file(left: &Path, right: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::plugins::PluginRuntimeEnv;
+    use std::io::Write;
+
+    fn test_jdbc_plugin_zip() -> Vec<u8> {
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut zip = zip::ZipWriter::new(cursor);
+        let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("dbx-jdbc-plugin-test/manifest.json", options).unwrap();
+        zip.write_all(
+            br#"{
+              "id": "jdbc",
+              "name": "DBX JDBC Plugin",
+              "version": "0.1.30",
+              "protocol_version": 1,
+              "executable": "bin/dbx-jdbc-plugin",
+              "drivers": [{"id":"jdbc","label":"JDBC","kind":"external","database_type":"jdbc"}]
+            }"#,
+        )
+        .unwrap();
+        zip.start_file("dbx-jdbc-plugin-test/bin/dbx-jdbc-plugin", options).unwrap();
+        zip.write_all(b"#!/bin/sh\n").unwrap();
+        zip.finish().unwrap().into_inner()
+    }
+
+    fn write_offline_jdbc_package(path: &Path, artifact_sha256: &str) {
+        let coordinate = "com.example:demo-driver:1.0.0";
+        let bundle_id = maven_bundle_id(coordinate);
+        let artifact = b"offline-driver";
+        let bundle = JdbcMavenBundleInfo {
+            id: bundle_id.clone(),
+            coordinate: coordinate.to_string(),
+            scope: "runtime".to_string(),
+            repositories: vec!["https://repo.maven.apache.org/maven2/".to_string()],
+            installed_at: String::new(),
+            path: String::new(),
+            artifacts: vec![JdbcMavenArtifactInfo {
+                group_id: "com.example".to_string(),
+                artifact_id: "demo-driver".to_string(),
+                version: "1.0.0".to_string(),
+                classifier: String::new(),
+                extension: "jar".to_string(),
+                file_name: "demo-driver-1.0.0.jar".to_string(),
+                path: String::new(),
+                size: artifact.len() as u64,
+                sha256: artifact_sha256.to_string(),
+            }],
+        };
+        let manifest = serde_json::json!({
+            "format_version": 1,
+            "plugin_entry": "jdbc/plugin.zip",
+            "bundles": [{"id": bundle_id, "coordinate": coordinate}],
+        });
+
+        let file = std::fs::File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip.start_file(OFFLINE_JDBC_MANIFEST_ENTRY, options).unwrap();
+        zip.write_all(serde_json::to_string(&manifest).unwrap().as_bytes()).unwrap();
+        zip.start_file(OFFLINE_JDBC_PLUGIN_ENTRY, options).unwrap();
+        zip.write_all(&test_jdbc_plugin_zip()).unwrap();
+        zip.start_file(format!("jdbc/maven/{}/manifest.json", bundle.id), options).unwrap();
+        zip.write_all(serde_json::to_string(&bundle).unwrap().as_bytes()).unwrap();
+        zip.start_file(format!("jdbc/maven/{}/jars/demo-driver-1.0.0.jar", bundle.id), options).unwrap();
+        zip.write_all(artifact).unwrap();
+        zip.finish().unwrap();
+    }
 
     #[test]
     fn maven_bundle_install_lists_nested_jars() {
@@ -955,6 +1298,96 @@ mod tests {
         );
         assert!(is_safe_bundle_id("org.apache.hive_hive-jdbc_4.0.1_standalone"));
         assert!(!is_safe_bundle_id("../hive"));
+    }
+
+    fn resolved_artifact(group_id: &str, artifact_id: &str, version: &str) -> MavenResolvedArtifact {
+        MavenResolvedArtifact {
+            group_id: group_id.to_string(),
+            artifact_id: artifact_id.to_string(),
+            version: version.to_string(),
+            classifier: String::new(),
+            extension: "jar".to_string(),
+            file: format!("/tmp/{artifact_id}-{version}.jar"),
+        }
+    }
+
+    fn resolved_with(artifacts: Vec<MavenResolvedArtifact>) -> MavenResolveOutput {
+        MavenResolveOutput {
+            coordinate: String::new(),
+            scope: "runtime".to_string(),
+            repositories: vec!["https://repo.maven.apache.org/maven2/".to_string()],
+            artifacts,
+        }
+    }
+
+    #[test]
+    fn oracle_ojdbc_resolves_matching_orai18n_companion() {
+        let resolved = resolved_with(vec![resolved_artifact("com.oracle.database.jdbc", "ojdbc11", "21.9.0.0")]);
+        assert_eq!(oracle_orai18n_companion(&resolved).as_deref(), Some("com.oracle.database.nls:orai18n:21.9.0.0"));
+    }
+
+    #[test]
+    fn oracle_orai18n_companion_skips_existing_nls_artifact() {
+        let resolved = resolved_with(vec![
+            resolved_artifact("com.oracle.database.jdbc", "ojdbc11", "21.9.0.0"),
+            resolved_artifact("com.oracle.database.nls", "orai18n", "21.9.0.0"),
+        ]);
+        assert_eq!(oracle_orai18n_companion(&resolved), None);
+    }
+
+    #[test]
+    fn oracle_orai18n_companion_ignores_non_oracle_drivers() {
+        for coordinate in
+            [("org.postgresql", "postgresql"), ("com.oracle.database.xml", "xdb6"), ("mysql", "mysql-connector-java")]
+        {
+            let resolved = resolved_with(vec![resolved_artifact(coordinate.0, coordinate.1, "8.0.33")]);
+            assert_eq!(oracle_orai18n_companion(&resolved), None, "{}", coordinate.1);
+        }
+    }
+
+    #[test]
+    fn imports_offline_jdbc_plugin_and_rewrites_bundle_paths() {
+        let root = std::env::temp_dir().join(format!("dbx-offline-jdbc-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let package = root.join("offline.zip");
+        let artifact_sha256 = format!("{:x}", Sha256::digest(b"offline-driver"));
+        write_offline_jdbc_package(&package, &artifact_sha256);
+
+        let plugins_root = root.join("plugins");
+        let result = import_offline_jdbc_payload(&plugins_root, &package).unwrap().unwrap();
+
+        assert!(result.plugin_installed);
+        assert_eq!(result.bundles_installed, vec!["com.example:demo-driver:1.0.0"]);
+        assert!(plugins_root.join("jdbc/manifest.json").exists());
+        let bundles = list_jdbc_maven_bundles(&plugins_root).unwrap();
+        assert_eq!(bundles.len(), 1);
+        assert_eq!(
+            bundles[0].path,
+            plugins_root.join("jdbc/drivers/maven/com.example_demo-driver_1.0.0").to_string_lossy()
+        );
+        assert_eq!(
+            bundles[0].artifacts[0].path,
+            plugins_root
+                .join("jdbc/drivers/maven/com.example_demo-driver_1.0.0/jars/demo-driver-1.0.0.jar")
+                .to_string_lossy()
+        );
+        assert_eq!(std::fs::read(&bundles[0].artifacts[0].path).unwrap(), b"offline-driver");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rejects_corrupt_offline_jdbc_artifact_before_installing_plugin() {
+        let root = std::env::temp_dir().join(format!("dbx-offline-jdbc-corrupt-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let package = root.join("offline.zip");
+        write_offline_jdbc_package(&package, &"0".repeat(64));
+
+        let plugins_root = root.join("plugins");
+        let error = import_offline_jdbc_payload(&plugins_root, &package).unwrap_err();
+
+        assert!(error.contains("checksum mismatch"));
+        assert!(!plugins_root.join("jdbc/manifest.json").exists());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1125,6 +1558,41 @@ mod tests {
 
         assert_eq!(drivers.len(), 1);
         assert_eq!(drivers[0].name, "env-driver.jar");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn delayed_network_status_check_does_not_revert_a_concurrent_local_install() {
+        let root = std::env::temp_dir().join(format!("dbx-jdbc-status-race-test-{}", uuid::Uuid::new_v4()));
+        let plugin_dir = root.join("jdbc");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+
+        // Mirrors DriverStoreDialog's mount-time status check: it starts
+        // before the local install and only finishes its (simulated)
+        // network wait after the local install has already written the
+        // new manifest to disk.
+        let status_plugin_dir = plugin_dir.clone();
+        let status_task = tokio::spawn(async move {
+            jdbc_plugin_status_from_dir_after(&status_plugin_dir, async {
+                tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+                None
+            })
+            .await
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        // Local install completes fully offline while the status check
+        // above is still waiting on its simulated network round-trip.
+        std::fs::write(
+            plugin_dir.join("manifest.json"),
+            r#"{"id":"jdbc","name":"DBX JDBC Plugin","version":"0.1.30","protocol_version":1,"executable":"bin/dbx-jdbc-plugin","drivers":[]}"#,
+        )
+        .unwrap();
+
+        let status = status_task.await.unwrap().unwrap();
+        assert!(status.installed, "stale pre-install snapshot must not overwrite the completed local install");
+        assert_eq!(status.version.as_deref(), Some("0.1.30"));
 
         let _ = std::fs::remove_dir_all(root);
     }

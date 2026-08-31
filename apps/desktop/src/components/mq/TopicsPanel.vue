@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { ref, watch, computed } from "vue";
 import { useI18n } from "vue-i18n";
+import { RecycleScroller } from "vue-virtual-scroller";
+import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 import type { NamespaceRef, TopicRef, TopicInfo, ListTopicsOpts, MqSystemKind, RocketMqTopicMessageType } from "@/types/mq";
 import { mqListTopics, mqCreateTopic, mqDeleteTopic, mqUpdatePartitions, mqGetClusterInfo } from "@/lib/backend/api";
 import type { ClusterInfo } from "@/types/mq";
@@ -10,9 +12,18 @@ import ExchangesPanel from "./ExchangesPanel.vue";
 import MqTypeFilterBar from "./shared/MqTypeFilterBar.vue";
 import type { MqTab } from "@/lib/mq/mqConsoleDefaults";
 import { isAllVhostsNamespace, resolveMqRowNamespace } from "@/lib/mq/mqConsoleDefaults";
+import { formatMqRateCompact, rabbitMqArgumentsSummary, rabbitMqFeatureBadges, rabbitMqQueueType, type RabbitMqFeatureBadge } from "@/lib/mq/rabbitmqQueueFeatures";
 import { formatError } from "@/lib/backend/errorUtils";
 import { DEFAULT_ROCKETMQ_TOPIC_TYPE_FILTERS, isProtectedRocketMqTopic, isRocketMqBusinessMessageType, matchesRocketMqTypeFilters, resolveRocketMqMessageType, ROCKETMQ_CREATABLE_TOPIC_MESSAGE_TYPES, ROCKETMQ_TOPIC_MESSAGE_TYPES } from "@/lib/mq/rocketmqTopicTypes";
+import { useMqMutationGuard } from "@/composables/useMqMutationGuard";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
+
+const TOPIC_ROW_HEIGHT = 44;
+
+type VirtualTopicRow = {
+  id: string;
+  topic: TopicInfo;
+};
 
 interface Props {
   connectionId: string;
@@ -86,6 +97,7 @@ const showNamespaceColumn = computed(() => isRabbitMqCluster.value && isAllVhost
 // RabbitMQ splits the topics tab into Queues (topics table) and Exchanges views.
 const showRabbitMqSubTabs = computed(() => isRabbitMqCluster.value && props.supportsExchanges === true);
 const rabbitMqSubTab = ref<"queues" | "exchanges">("queues");
+const rabbitMqMessageSort = ref<"asc" | "desc" | null>(null);
 const rocketMqTopicTypeOptions = ROCKETMQ_TOPIC_MESSAGE_TYPES;
 const rocketMqCreatableTopicTypes = ROCKETMQ_CREATABLE_TOPIC_MESSAGE_TYPES;
 const rocketMqClusterName = computed(() => clusterInfo.value?.clusterId ?? "-");
@@ -110,12 +122,109 @@ const filteredTopics = computed(() => {
   });
 });
 
+const displayedTopics = computed(() => {
+  if (!isRabbitMqCluster.value || !rabbitMqMessageSort.value) return filteredTopics.value;
+  const direction = rabbitMqMessageSort.value === "asc" ? 1 : -1;
+  return [...filteredTopics.value].sort((left, right) => {
+    const countDifference = (rabbitMqReadyMessageCount(left) - rabbitMqReadyMessageCount(right)) * direction;
+    return countDifference || left.shortName.localeCompare(right.shortName);
+  });
+});
+
+/** Stable ids for RecycleScroller; avoids mounting all topic rows at once. */
+const virtualTopicRows = computed<VirtualTopicRow[]>(() =>
+  displayedTopics.value.map((topic) => ({
+    id: showNamespaceColumn.value ? `${topic.namespace ?? ""}:${topic.name}` : topic.name,
+    topic,
+  })),
+);
+
+const topicsGridTemplate = computed(() => {
+  const cols: string[] = ["minmax(180px, 1.6fr)"];
+  if (showNamespaceColumn.value) cols.push("minmax(100px, 0.8fr)");
+  if (isRabbitMqCluster.value) {
+    // RabbitMQ queues: type(+state) | features | messages | consumers | rates | actions
+    cols.push("110px", "170px", "90px", "70px", "190px");
+  } else {
+    cols.push("120px");
+  }
+  if (!isRocketMqCluster.value && !isRabbitMqCluster.value) cols.push("140px");
+  // RocketMQ keeps tiled row actions (status/route/consumers/…) — reserve a wider actions column.
+  cols.push(isRocketMqCluster.value ? "minmax(560px, 2.2fr)" : "minmax(150px, 1fr)");
+  return cols.join(" ");
+});
+
+/** Min content width from grid track mins + gaps + padding; enables shared horizontal scroll. */
+const topicsTableMinWidthPx = computed(() => {
+  let min = 180; // name
+  if (showNamespaceColumn.value) min += 100;
+  let colCount = 0;
+  if (isRabbitMqCluster.value) {
+    // type + features + messages + consumers + rates + actions
+    min += 110 + 170 + 90 + 70 + 190 + 150;
+    colCount = 7; // name, type, features, messages, consumers, rates, actions
+  } else {
+    min += 120; // type
+    if (!isRocketMqCluster.value) min += 140; // partitions
+    min += isRocketMqCluster.value ? 560 : 200; // actions
+    // RocketMQ: name + type + actions. Others: + partitions.
+    colCount = isRocketMqCluster.value ? 3 : 4;
+  }
+  if (showNamespaceColumn.value) colCount += 1;
+  min += (colCount - 1) * 8; // column-gap
+  min += 24; // horizontal padding
+  return min;
+});
+
 const userTopicCount = computed(() => {
   if (isRocketMqCluster.value) {
     return topics.value.filter((topic) => isRocketMqBusinessMessageType(resolveRocketMqMessageType(topic))).length;
   }
   return topics.value.filter((topic) => !topic.internal).length;
 });
+
+function topicRowSelected(topic: TopicInfo): boolean {
+  return selectedTopic.value?.name === topic.name && selectedTopic.value?.namespace === topic.namespace;
+}
+
+function rabbitMqReadyMessageCount(topic: TopicInfo): number {
+  return topic.messagesReady ?? topic.messageCount ?? 0;
+}
+
+/** Queue type label for the type column; unknown types are never guessed. */
+function rabbitMqQueueTypeLabel(topic: TopicInfo): string {
+  return rabbitMqQueueType(topic) ?? t("mqTopics.rabbitmqQueueTypeUnknown");
+}
+
+function rabbitMqQueueTypeBadgeClass(topic: TopicInfo): string {
+  const type = rabbitMqQueueType(topic);
+  if (type === "quorum") return "badge-info";
+  if (type === "stream") return "badge-warning";
+  return "badge-default";
+}
+
+function rabbitMqFeatureBadgesFor(topic: TopicInfo): RabbitMqFeatureBadge[] {
+  return rabbitMqFeatureBadges(topic);
+}
+
+/** Tooltip for the message-count column: Ready / Unacked / Total / Consumers. */
+function rabbitMqMessageCountTitle(topic: TopicInfo): string {
+  const parts = [`${t("mqRabbitMqMonitoring.messagesReady")}: ${topic.messagesReady ?? "-"}`, `${t("mqRabbitMqMonitoring.messagesUnacked")}: ${topic.messagesUnacked ?? "-"}`, `${t("mqTopics.messageCount")}: ${topic.messageCount ?? "-"}`];
+  if (topic.consumerCount !== undefined) parts.push(`${t("mqTopics.consumers")}: ${topic.consumerCount}`);
+  if (topic.state) parts.push(`${t("mqTopics.rabbitmqState")}: ${topic.state}`);
+  const summary = rabbitMqArgumentsSummary(topic);
+  if (summary) parts.push(`${t("mqTopics.rabbitmqArguments")}: ${summary}`);
+  return parts.join(" · ");
+}
+
+/** Tooltip for the rates column; rates are msg/s sampled by the management API. */
+function rabbitMqRatesTitle(): string {
+  return `${t("mqTopics.rabbitmqPublishRate")} / ${t("mqTopics.rabbitmqDeliverRate")} / ${t("mqTopics.rabbitmqAckRate")} (msg/s)`;
+}
+
+function toggleRabbitMqMessageSort() {
+  rabbitMqMessageSort.value = rabbitMqMessageSort.value === "desc" ? "asc" : "desc";
+}
 
 function topicTypeLabel(topic: TopicInfo): string {
   if (isRocketMqCluster.value) {
@@ -148,12 +257,14 @@ const canSubmitPartitionUpdate = computed(() => {
   return !props.readOnly && current > 0 && Number.isFinite(newPartitions.value) && newPartitions.value > current;
 });
 
-function guardWritable() {
+const { confirmMqWrite } = useMqMutationGuard(() => props.connectionId);
+
+async function guardWritable(operation: string): Promise<boolean> {
   if (props.readOnly) {
     error.value = t("mqTopics.readOnly");
     return false;
   }
-  return true;
+  return confirmMqWrite(operation);
 }
 
 async function loadTopics() {
@@ -189,7 +300,10 @@ async function loadClusterInfo() {
 }
 
 function openCreateDialog() {
-  if (!guardWritable()) return;
+  if (props.readOnly) {
+    error.value = t("mqTopics.readOnly");
+    return;
+  }
   dialogError.value = undefined;
   const defaultBroker = rocketMqMasterBrokers.value[0]?.brokerName ?? rocketMqBrokerOptions.value[0]?.brokerName ?? "";
   formData.value = {
@@ -262,7 +376,10 @@ function isDlqTopic(topic: TopicInfo): boolean {
 }
 
 function openPartitionsDialog(topic: TopicInfo) {
-  if (!guardWritable()) return;
+  if (props.readOnly) {
+    error.value = t("mqTopics.readOnly");
+    return;
+  }
   dialogError.value = undefined;
   if (!topic.partitions || topic.partitions < 1) {
     error.value = t("mqTopics.currentPartitionsUnknown");
@@ -274,7 +391,7 @@ function openPartitionsDialog(topic: TopicInfo) {
 }
 
 async function handleCreate() {
-  if (!guardWritable()) return;
+  if (!(await guardWritable(t("mqTopics.create")))) return;
   if (!formData.value.topicName.trim() || !props.tenant || !props.namespace) {
     dialogError.value = t("mqTopics.topicNameRequired");
     return;
@@ -308,12 +425,16 @@ async function handleCreate() {
 }
 
 function handleDelete(topic: TopicInfo) {
-  if (!guardWritable()) return;
+  if (props.readOnly) {
+    error.value = t("mqTopics.readOnly");
+    return;
+  }
   deleteTarget.value = topic;
   showDeleteDialog.value = true;
 }
 
 async function confirmDelete() {
+  if (!(await guardWritable(t("mqTopics.delete")))) return;
   const topic = deleteTarget.value;
   if (!topic || !props.tenant || !props.namespace) return;
   const namespace = resolveMqRowNamespace(topic, props.namespace);
@@ -345,7 +466,7 @@ async function confirmDelete() {
 }
 
 async function handleUpdatePartitions() {
-  if (!guardWritable()) return;
+  if (!(await guardWritable(t("mqTopics.adjustPartitions")))) return;
   if (!editingTopic.value || !props.tenant || !props.namespace) return;
   const currentPartitions = editingTopic.value.partitions;
   if (!currentPartitions || currentPartitions < 1) {
@@ -470,61 +591,103 @@ watch(newPartitions, () => {
       </div>
 
       <div v-else class="topics-table">
-        <table>
-          <thead>
-            <tr>
-              <th>{{ t("mqTopics.name") }}</th>
-              <th v-if="showNamespaceColumn">{{ t("mqAdmin.namespace") }}</th>
-              <th>{{ t("mqTopics.type") }}</th>
-              <th v-if="!isRocketMqCluster">{{ t("mqTopics.partitions") }}</th>
-              <th>{{ t("mqTopics.actions") }}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="topic in filteredTopics" :key="showNamespaceColumn ? `${topic.namespace ?? ''}:${topic.name}` : topic.name" :class="{ selected: selectedTopic?.name === topic.name && selectedTopic?.namespace === topic.namespace }" @click="selectTopic(topic)">
-              <td class="topic-name">
-                <div class="topic-name-cell">
-                  <span>{{ topic.shortName }}</span>
-                  <span v-if="!topic.persistent" class="badge badge-warning">{{ t("mqTopics.nonPersistent") }}</span>
+        <!-- Shared horizontal scroller keeps header/body columns aligned when the grid min-width exceeds the panel. -->
+        <div class="topics-table-hscroll" :style="{ '--topics-table-min-width': `${topicsTableMinWidthPx}px` }">
+          <div class="topics-table-header" :style="{ gridTemplateColumns: topicsGridTemplate }">
+            <div class="topics-col">{{ t("mqTopics.name") }}</div>
+            <div v-if="showNamespaceColumn" class="topics-col">{{ t("mqAdmin.namespace") }}</div>
+            <div v-if="isRabbitMqCluster" class="topics-col">{{ t("mqTopics.rabbitmqQueueType") }}</div>
+            <div v-else class="topics-col">{{ t("mqTopics.type") }}</div>
+            <div v-if="isRabbitMqCluster" class="topics-col">{{ t("mqTopics.rabbitmqFeatures") }}</div>
+            <div v-if="isRabbitMqCluster" class="topics-col">
+              <button type="button" class="topics-sort-button" data-testid="rabbitmq-message-sort" @click="toggleRabbitMqMessageSort">
+                {{ t("mqTopics.messageCount") }}
+                <span v-if="rabbitMqMessageSort" aria-hidden="true">{{ rabbitMqMessageSort === "desc" ? "↓" : "↑" }}</span>
+              </button>
+            </div>
+            <div v-else-if="!isRocketMqCluster" class="topics-col">{{ t("mqTopics.partitions") }}</div>
+            <div v-if="isRabbitMqCluster" class="topics-col">{{ t("mqTopics.consumers") }}</div>
+            <div v-if="isRabbitMqCluster" class="topics-col" :title="rabbitMqRatesTitle()">{{ t("mqTopics.rabbitmqRates") }}</div>
+            <div class="topics-col">{{ t("mqTopics.actions") }}</div>
+          </div>
+          <RecycleScroller class="topics-scroller" :items="virtualTopicRows" :item-size="TOPIC_ROW_HEIGHT" :buffer="200" key-field="id">
+            <template #default="{ item: row }">
+              <div class="topics-row" :class="{ selected: topicRowSelected(row.topic) }" :style="{ gridTemplateColumns: topicsGridTemplate, height: `${TOPIC_ROW_HEIGHT}px` }" @click="selectTopic(row.topic)">
+                <div class="topics-col topic-name">
+                  <div class="topic-name-cell">
+                    <span class="topic-name-text" :title="row.topic.shortName">{{ row.topic.shortName }}</span>
+                    <span v-if="!row.topic.persistent" class="badge badge-warning">{{ t("mqTopics.nonPersistent") }}</span>
+                  </div>
                 </div>
-              </td>
-              <td v-if="showNamespaceColumn">{{ topic.namespace || "-" }}</td>
-              <td>
-                <span class="badge" :class="topicTypeBadgeClass(topic)">
-                  {{ topicTypeLabel(topic) }}
-                </span>
-              </td>
-              <td v-if="!isRocketMqCluster">
-                <span v-if="topic.partitioned">{{ topic.partitions ? t("mqTopics.partitionCount", { count: topic.partitions }) : t("mqTopics.partitionsUnknown") }}</span>
-                <span v-else class="text-muted">-</span>
-              </td>
-              <td class="actions" @click.stop>
-                <template v-if="isRocketMqCluster">
-                  <button class="btn-sm" @click="openRocketMqDialog('status', topic)">{{ t("mqTopics.actionStatus") }}</button>
-                  <button class="btn-sm" @click="openRocketMqDialog('route', topic)">{{ t("mqTopics.actionRoute") }}</button>
-                  <button class="btn-sm" @click="openRocketMqDialog('consumers', topic)">{{ t("mqTopics.actionConsumers") }}</button>
-                  <button v-if="isDlqTopic(topic)" class="btn-sm" @click="navigateToMessageQuery(topic, true)">{{ t("mqRocketmq.viewDlqMessages") }}</button>
-                  <template v-else>
-                    <button class="btn-sm" @click="navigateToMessageQuery(topic)">{{ t("mqRocketmq.actionMessageQuery") }}</button>
-                    <button class="btn-sm" :disabled="readOnly" @click="navigateToMessages(topic)">{{ t("mqRocketmq.actionSendMessage") }}</button>
+                <div v-if="showNamespaceColumn" class="topics-col">{{ row.topic.namespace || "-" }}</div>
+                <div v-if="isRabbitMqCluster" class="topics-col">
+                  <span class="badge" :class="rabbitMqQueueTypeBadgeClass(row.topic)" :title="t('mqTopics.rabbitmqQueueTypeHint')">
+                    {{ rabbitMqQueueTypeLabel(row.topic) }}
+                  </span>
+                  <span v-if="row.topic.state" class="queue-state" :title="t('mqTopics.rabbitmqState')">{{ row.topic.state }}</span>
+                </div>
+                <div v-else class="topics-col">
+                  <span class="badge" :class="topicTypeBadgeClass(row.topic)">
+                    {{ topicTypeLabel(row.topic) }}
+                  </span>
+                </div>
+                <div v-if="isRabbitMqCluster" class="topics-col" data-testid="rabbitmq-features">
+                  <span v-if="rabbitMqFeatureBadgesFor(row.topic).length" class="feature-badges">
+                    <span v-for="badge in rabbitMqFeatureBadgesFor(row.topic)" :key="badge.key" class="feature-badge" :class="badge.kind === 'feature' ? 'feature-flag' : ''" :title="badge.title">
+                      {{ badge.label }}
+                    </span>
+                  </span>
+                  <span v-else class="text-muted">-</span>
+                </div>
+                <div v-if="isRabbitMqCluster" class="topics-col" data-testid="rabbitmq-message-count" :title="rabbitMqMessageCountTitle(row.topic)">
+                  {{ rabbitMqReadyMessageCount(row.topic) }}
+                </div>
+                <div v-else-if="!isRocketMqCluster" class="topics-col">
+                  <span v-if="row.topic.partitioned">{{ row.topic.partitions ? t("mqTopics.partitionCount", { count: row.topic.partitions }) : t("mqTopics.partitionsUnknown") }}</span>
+                  <span v-else class="text-muted">-</span>
+                </div>
+                <div v-if="isRabbitMqCluster" class="topics-col" data-testid="rabbitmq-consumers">{{ row.topic.consumerCount ?? "-" }}</div>
+                <div v-if="isRabbitMqCluster" class="topics-col topics-rates" data-testid="rabbitmq-rates" :title="rabbitMqRatesTitle()">
+                  <span>{{ formatMqRateCompact(row.topic.publishRate) }}</span>
+                  <span class="rate-sep">/</span>
+                  <span>{{ formatMqRateCompact(row.topic.deliverRate) }}</span>
+                  <span class="rate-sep">/</span>
+                  <span>{{ formatMqRateCompact(row.topic.ackRate) }}</span>
+                </div>
+                <div class="topics-col actions" @click.stop>
+                  <template v-if="isRocketMqCluster">
+                    <button type="button" class="btn-sm" @click="openRocketMqDialog('status', row.topic)">{{ t("mqTopics.actionStatus") }}</button>
+                    <button type="button" class="btn-sm" @click="openRocketMqDialog('route', row.topic)">{{ t("mqTopics.actionRoute") }}</button>
+                    <button type="button" class="btn-sm" @click="openRocketMqDialog('consumers', row.topic)">{{ t("mqTopics.actionConsumers") }}</button>
+                    <button v-if="isDlqTopic(row.topic)" type="button" class="btn-sm" @click="navigateToMessageQuery(row.topic, true)">{{ t("mqRocketmq.viewDlqMessages") }}</button>
+                    <template v-else>
+                      <button type="button" class="btn-sm" @click="navigateToMessageQuery(row.topic)">{{ t("mqRocketmq.actionMessageQuery") }}</button>
+                      <button type="button" class="btn-sm" :disabled="readOnly" @click="navigateToMessages(row.topic)">{{ t("mqRocketmq.actionSendMessage") }}</button>
+                    </template>
+                    <button type="button" class="btn-sm" @click="openRocketMqDialog('config', row.topic)">{{ t("mqTopics.actionConfig") }}</button>
+                    <button type="button" class="btn-sm" :disabled="readOnly || isTopicProtected(row.topic)" @click="openRocketMqDialog('reset', row.topic)">{{ t("mqTopics.actionReset") }}</button>
+                    <button type="button" class="btn-sm" :disabled="readOnly || isTopicProtected(row.topic)" @click="openRocketMqDialog('skip', row.topic)">{{ t("mqTopics.actionSkip") }}</button>
+                    <button type="button" class="btn-sm btn-danger" :disabled="readOnly || isTopicProtected(row.topic)" @click="handleDelete(row.topic)">{{ t("mqTopics.delete") }}</button>
                   </template>
-                  <button class="btn-sm" @click="openRocketMqDialog('config', topic)">{{ t("mqTopics.actionConfig") }}</button>
-                  <button class="btn-sm" :disabled="readOnly || isTopicProtected(topic)" @click="openRocketMqDialog('reset', topic)">{{ t("mqTopics.actionReset") }}</button>
-                  <button class="btn-sm" :disabled="readOnly || isTopicProtected(topic)" @click="openRocketMqDialog('skip', topic)">{{ t("mqTopics.actionSkip") }}</button>
-                  <button class="btn-sm btn-danger" :disabled="readOnly || isTopicProtected(topic)" @click="handleDelete(topic)">{{ t("mqTopics.delete") }}</button>
-                </template>
-                <template v-else>
-                  <button v-if="topic.partitioned && supportsPartitionedTopics !== false && !isTopicProtected(topic)" @click="openPartitionsDialog(topic)" :disabled="readOnly || !topic.partitions" class="btn-sm">
-                    {{ t("mqTopics.adjustPartitions") }}
-                  </button>
-                  <button @click="handleDelete(topic)" :disabled="readOnly || isTopicProtected(topic) || (showNamespaceColumn && !topic.namespace)" :title="showNamespaceColumn && !topic.namespace ? t('mqAdmin.selectNamespaceToWrite') : undefined" class="btn-sm btn-danger">
-                    {{ t("mqTopics.delete") }}
-                  </button>
-                </template>
-              </td>
-            </tr>
-          </tbody>
-        </table>
+                  <template v-else>
+                    <button v-if="row.topic.partitioned && supportsPartitionedTopics !== false && !isTopicProtected(row.topic)" type="button" @click="openPartitionsDialog(row.topic)" :disabled="readOnly || !row.topic.partitions" class="btn-sm">
+                      {{ t("mqTopics.adjustPartitions") }}
+                    </button>
+                    <button
+                      type="button"
+                      @click="handleDelete(row.topic)"
+                      :disabled="readOnly || isTopicProtected(row.topic) || (showNamespaceColumn && !row.topic.namespace)"
+                      :title="showNamespaceColumn && !row.topic.namespace ? t('mqAdmin.selectNamespaceToWrite') : undefined"
+                      class="btn-sm btn-danger"
+                    >
+                      {{ t("mqTopics.delete") }}
+                    </button>
+                  </template>
+                </div>
+              </div>
+            </template>
+          </RecycleScroller>
+        </div>
       </div>
 
       <!-- Create Dialog -->
@@ -667,6 +830,8 @@ watch(newPartitions, () => {
 </template>
 
 <style scoped>
+@import "./shared/mqPanel.css";
+
 .topics-panel {
   --topics-surface: var(--card, var(--color-background, #ffffff));
   --topics-header-bg: color-mix(in srgb, var(--secondary, #f5f5f5) 86%, var(--card, #ffffff));
@@ -809,87 +974,106 @@ watch(newPartitions, () => {
 .topics-table {
   position: relative;
   flex: 1;
-  overflow: auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   background: var(--topics-surface);
 }
 
-.topics-table::before {
-  content: "";
-  position: sticky;
-  top: 0;
-  display: block;
+.topics-table-hscroll {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.topics-table-header,
+.topics-row {
+  display: grid;
+  align-items: center;
+  column-gap: 8px;
+  padding: 0 12px;
+  min-width: var(--topics-table-min-width, 100%);
+}
+
+.topics-table-header {
+  flex: 0 0 auto;
   height: 38px;
-  margin-bottom: -38px;
-  background: var(--topics-header-bg);
-  z-index: 9;
-  box-shadow:
-    0 1px 0 var(--topics-border),
-    0 2px 8px rgba(0, 0, 0, 0.05);
-  pointer-events: none;
-}
-
-table {
-  position: relative;
-  width: 100%;
-  border-collapse: separate;
-  border-spacing: 0;
-}
-
-thead {
-  position: sticky;
-  top: 0;
-  background: var(--topics-header-bg);
-  z-index: 10;
-}
-
-th {
-  position: sticky;
-  top: 0;
-  z-index: 11;
-  padding: 10px 12px;
-  text-align: left;
-  font-weight: 600;
-  font-size: 13px;
-  color: var(--color-text-secondary);
+  /* Match RecycleScroller classic-scrollbar gutter so header/body columns stay aligned. */
+  overflow: hidden;
+  scrollbar-gutter: stable;
   background: var(--topics-header-bg);
   border-bottom: 1px solid var(--topics-border);
-  background-clip: padding-box;
   box-shadow:
     0 1px 0 var(--topics-border),
     0 2px 6px rgba(0, 0, 0, 0.04);
+  z-index: 2;
 }
 
-tbody tr {
+.topics-table-header .topics-col {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+.topics-sort-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
   cursor: pointer;
-  transition: background 0.2s;
 }
 
-tbody tr:hover {
-  background: var(--color-hover);
+.topics-scroller {
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  min-width: var(--topics-table-min-width, 100%);
+  /* RecycleScroller owns overflow-y; reserve gutter for classic scrollbars (Windows). */
+  scrollbar-gutter: stable;
 }
 
-tbody tr:hover td {
-  background: var(--color-hover);
-}
-
-tbody tr.selected {
-  background: var(--color-primary-alpha);
-}
-
-tbody tr.selected td {
-  background: var(--color-primary-alpha);
-}
-
-td {
-  padding: 10px 12px;
+.topics-row {
+  width: 100%;
+  cursor: pointer;
   border-bottom: 1px solid var(--topics-border-light);
   background: var(--topics-surface);
+  box-sizing: border-box;
+}
+
+.topics-row:hover {
+  background: var(--color-hover);
+}
+
+.topics-row.selected {
+  background: var(--color-primary-alpha);
+}
+
+.topics-col {
+  min-width: 0;
+  font-size: 13px;
 }
 
 .topic-name-cell {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+}
+
+.topic-name-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
 }
 
 .topic-name {
@@ -924,12 +1108,61 @@ td {
   font-style: italic;
 }
 
+/* RabbitMQ queue feature badges (compact, tooltip-bearing). */
+.queue-state {
+  margin-left: 4px;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+}
+
+.feature-badges {
+  display: inline-flex;
+  gap: 3px;
+  flex-wrap: nowrap;
+  overflow: hidden;
+}
+
+.feature-badge {
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: var(--dbx-radius-fixed-4);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.5;
+  background: var(--color-background-secondary);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  cursor: help;
+}
+
+.feature-badge.feature-flag {
+  background: var(--color-warning-alpha);
+  border-color: transparent;
+  color: var(--color-warning);
+}
+
+.topics-rates {
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: help;
+}
+
+.topics-rates .rate-sep {
+  margin: 0 3px;
+  color: var(--color-text-tertiary);
+}
+
 .actions {
   display: flex;
   gap: 6px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
-  min-width: 420px;
+  justify-content: flex-start;
+  overflow-x: auto;
+  min-width: 0;
 }
 
 .form-row-inline {
@@ -947,45 +1180,6 @@ td {
   box-sizing: border-box;
   background: var(--color-background);
   color: var(--color-text);
-}
-
-.btn-primary,
-.btn-secondary,
-.btn-sm,
-.btn-danger {
-  padding: 6px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--dbx-radius-fixed-4);
-  background: var(--color-background);
-  color: var(--color-text);
-  cursor: pointer;
-  font-size: 13px;
-  transition: all 0.2s;
-}
-
-.btn-primary {
-  background: var(--color-primary);
-  color: white;
-  border-color: var(--color-primary);
-}
-
-.btn-primary:hover:not(:disabled) {
-  opacity: 0.9;
-}
-
-.btn-danger {
-  color: var(--color-error);
-  border-color: var(--color-error);
-}
-
-.btn-danger:hover:not(:disabled) {
-  background: var(--color-error);
-  color: white;
-}
-
-.btn-sm {
-  padding: 4px 8px;
-  font-size: 12px;
 }
 
 button:disabled {
@@ -1026,16 +1220,6 @@ button:disabled {
 .dialog-header h3 {
   margin: 0;
   font-size: 18px;
-}
-
-.btn-close {
-  border: none;
-  background: none;
-  font-size: 24px;
-  cursor: pointer;
-  color: var(--color-text-secondary);
-  padding: 0;
-  line-height: 1;
 }
 
 .dialog-body {

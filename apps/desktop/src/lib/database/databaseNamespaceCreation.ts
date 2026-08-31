@@ -1,5 +1,6 @@
 import type { ConnectionConfig, DatabaseType, TreeNodeType } from "@/types/database";
 import { isMongoLegacyDriverProfile } from "@/lib/mongo/mongoCapabilities";
+import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 
 export type DatabaseNamespaceCreationTarget = "database" | "schema" | "attach" | "special";
 
@@ -12,7 +13,7 @@ export interface DatabaseNamespaceCreationMatrixEntry {
   deferred?: string;
 }
 
-type CreationConnection = (Pick<ConnectionConfig, "db_type" | "driver_profile" | "read_only"> & Partial<Pick<ConnectionConfig, "host" | "password">>) | undefined;
+type CreationConnection = (Pick<ConnectionConfig, "db_type" | "driver_profile" | "read_only"> & Partial<Pick<ConnectionConfig, "host" | "password" | "id">>) | undefined;
 
 // Keep creation target-specific: many products expose schemas, files, or provider-managed namespaces instead of a top-level database.
 export const DATABASE_NAMESPACE_CREATION_MATRIX = {
@@ -27,9 +28,11 @@ export const DATABASE_NAMESPACE_CREATION_MATRIX = {
   clickhouse: { connection: "database" },
   sqlserver: { connection: "database", database: "schema" },
   mongodb: { connection: "special" },
+  dynamodb: { deferred: "table creation requires dedicated DynamoDB key and capacity options" },
   oracle: { deferred: "Oracle schemas are users; database creation is not a normal connected DDL action" },
   elasticsearch: { deferred: "index creation is not modeled as database creation" },
   easysearch: { deferred: "index creation is not modeled as database creation" },
+  meilisearch: { deferred: "index creation is not modeled as database creation" },
   hbase: { deferred: "namespace creation needs dedicated HBase namespace options" },
   qdrant: { deferred: "collection creation is separate from database creation" },
   milvus: { deferred: "collection/database lifecycle needs a dedicated vector workflow" },
@@ -65,13 +68,18 @@ export const DATABASE_NAMESPACE_CREATION_MATRIX = {
   trino: { database: "schema" },
   prestosql: { database: "schema" },
   hive: { deferred: "Hive database creation needs agent metadata validation first" },
+  kyuubi: { deferred: "Kyuubi database creation needs dedicated metadata validation first" },
+  impala: { deferred: "Impala database creation needs dedicated metadata validation first" },
   spark: { deferred: "Spark database creation needs agent metadata validation first" },
   db2: { database: "schema" },
   informix: { database: "schema" },
   neo4j: { deferred: "database creation depends on edition/admin privileges" },
   cassandra: { deferred: "keyspace creation requires replication options" },
   bigquery: { deferred: "dataset creation needs project/location options" },
+  spanner: { deferred: "database creation requires the Cloud Spanner Admin API" },
   kylin: { deferred: "project/model lifecycle is not SQL database creation" },
+  ignite: { deferred: "schema lifecycle is managed through cluster/cache configuration" },
+  ignite3: { deferred: "schema lifecycle is managed through cluster configuration" },
   sundb: { deferred: "creation semantics not verified for first pass" },
   oscar: { database: "schema" },
   tdengine: { connection: "database" },
@@ -81,13 +89,16 @@ export const DATABASE_NAMESPACE_CREATION_MATRIX = {
   zookeeper: { deferred: "key-value namespaces are not databases" },
   iris: { database: "schema" },
   influxdb: { connection: "database" },
+  victoriametrics: { deferred: "metric namespaces are managed by VictoriaMetrics deployment configuration" },
   jdbc: { deferred: "generic JDBC does not expose a reliable dialect-specific create target" },
   mq: { deferred: "message queue namespaces are handled by MQ admin panels" },
   nacos: { deferred: "Nacos namespace creation already uses the Nacos admin flow" },
+  consul: { deferred: "Consul namespaces and partitions are connection scopes, not KV resources" },
+  mqtt: { deferred: "MQTT topics are managed via the MQTT console" },
 } satisfies Record<DatabaseType, DatabaseNamespaceCreationMatrixEntry>;
 
 export function connectionNamespaceCreationTarget(connection: CreationConnection): ConnectionCreationTarget | null {
-  if (!connection || connection.read_only) return null;
+  if (!connection || connectionIsEffectivelyReadOnly(connection)) return null;
   if (connection.db_type === "mongodb" && isMongoLegacyDriverProfile(connection.driver_profile)) return null;
   if (connection.db_type === "sqlite" && (connection.host?.trim().toLowerCase() === ":memory:" || Boolean(connection.password))) {
     return null;
@@ -97,7 +108,7 @@ export function connectionNamespaceCreationTarget(connection: CreationConnection
 }
 
 export function databaseNodeNamespaceCreationTarget(connection: CreationConnection, node: Pick<{ type: TreeNodeType; database?: string | null }, "type" | "database">): DatabaseNodeCreationTarget | null {
-  if (!connection || connection.read_only || node.type !== "database" || !node.database) return null;
+  if (!connection || connectionIsEffectivelyReadOnly(connection) || node.type !== "database" || !node.database) return null;
   const entry: DatabaseNamespaceCreationMatrixEntry = DATABASE_NAMESPACE_CREATION_MATRIX[connection.db_type];
   return entry.database ?? null;
 }

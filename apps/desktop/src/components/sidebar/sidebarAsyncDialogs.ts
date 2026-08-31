@@ -18,7 +18,9 @@ function lazySidebarDialog(loader: () => Promise<Component>) {
 
 export const SidebarDangerConfirmDialog = lazySidebarDialog(() => import("@/components/editor/DangerConfirmDialog.vue"));
 export const SidebarVisibleDatabasesDialog = lazySidebarDialog(() => import("@/components/sidebar/VisibleDatabasesDialog.vue"));
+export const SidebarVisibleNacosNamespacesDialog = lazySidebarDialog(() => import("@/components/sidebar/VisibleNacosNamespacesDialog.vue"));
 export const SidebarVisibleSchemasDialog = lazySidebarDialog(() => import("@/components/sidebar/VisibleSchemasDialog.vue"));
 export const SidebarDdlViewDialog = lazySidebarDialog(() => import("@/components/objects/DdlViewDialog.vue"));
 export const SidebarObjectSourceDialog = lazySidebarDialog(() => import("@/components/objects/ObjectSourceDialog.vue"));
 export const SidebarProcedureExecutionDialog = lazySidebarDialog(() => import("@/components/objects/ProcedureExecutionDialog.vue"));
+export const SidebarMongoIndexManagerDialog = lazySidebarDialog(() => import("@/components/sidebar/MongoIndexManagerDialog.vue"));

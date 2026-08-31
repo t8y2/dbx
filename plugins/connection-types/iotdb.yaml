@@ -1,0 +1,34 @@
+schemaVersion: 1
+order: 730
+dbType: iotdb
+rustVariant: Iotdb
+label: Apache IoTDB
+runtimeMode: agent
+mcpMode: bridge
+agentKey: iotdb
+driverStoreVisible: true
+driverStoreOrder: 38
+singleConnectionPool: false
+metadataConnectionScoped: false
+skipTcpProbe: true
+defaultPort: 6667
+traits:
+  schemaAware: true
+supportLevel: understand
+capabilities:
+  queryExecution: true
+  metadataBrowse: true
+  objectBrowser: true
+  objectSource: false
+  schemaSearch: true
+  diagram: false
+  tableDataEdit: false
+  tableStructureEdit: false
+  tableImport: false
+  dataTransfer: false
+  sqlFileExecution: true
+  databaseCreate: false
+  fieldLineage: false
+  sqlExplain: false
+  userAdmin: false
+  driverManagement: true

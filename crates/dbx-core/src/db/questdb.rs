@@ -14,11 +14,15 @@ pub async fn list_objects(pool: &Pool, schema: &str) -> Result<Vec<ObjectInfo>, 
             schema: None,
             valid: None,
             signature: None,
+            custom_type_kind: None,
+            has_members: None,
             comment: t.comment.clone(),
             created_at: None,
             updated_at: None,
             parent_schema: None,
             parent_name: None,
+            trigger: None,
+            xugu_type_members_expandable: None,
         })
         .collect())
 }
@@ -172,6 +176,7 @@ pub async fn list_indexes(pool: &Pool, _schema: &str, table: &str) -> Result<Vec
                 index_type: None,
                 included_columns: None,
                 comment: None,
+                key_is_expression: Vec::new(),
             }
         })
         .collect())

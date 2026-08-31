@@ -129,18 +129,30 @@ type querySession struct {
 }
 
 type server struct {
-	db                         *sql.DB
-	openDatabase               kingbaseDBOpener
-	params                     connectParams
-	mode                       kingbaseMode
-	usePgDefaultExpression     bool
-	catalogIdentityUnsupported bool
-	currentSchema              string
-	schemaSet                  bool
-	sessions                   map[string]*querySession
-	nextSessionID              uint64
-	activeCancelMu             sync.Mutex
-	activeCancel               context.CancelFunc
+	db                              *sql.DB
+	openDatabase                    kingbaseDBOpener
+	params                          connectParams
+	mode                            kingbaseMode
+	usePgDefaultExpression          bool
+	usePgViewDefinition             bool
+	usePgFunctionDefinition         bool
+	useLegacyRoutineDefinition      bool
+	catalogIdentityUnsupported      bool
+	catalogOIDUnsupported           bool
+	infoColumnTypeUnsupported       bool
+	infoUdtNameUnsupported          bool
+	indexOrdinalityUnsupported      bool
+	triggerPrettyUnsupported        bool
+	triggerInternalUnsupported      bool
+	constraintDefinitionUnsupported bool
+	constraintValidatedUnsupported  bool
+	constraintStatusUnsupported     bool
+	currentSchema                   string
+	schemaSet                       bool
+	sessions                        map[string]*querySession
+	nextSessionID                   uint64
+	activeCancelMu                  sync.Mutex
+	activeCancel                    context.CancelFunc
 }
 
 type agentSession struct {
@@ -398,11 +410,17 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 	case "list_foreign_keys":
 		result, err := s.listForeignKeys(stringParam(params, "schema"), stringParam(params, "table"))
 		return result, false, err
+	case "list_constraints":
+		result, err := s.listConstraints(stringParam(params, "schema"), stringParam(params, "table"))
+		return result, false, err
 	case "list_triggers":
 		result, err := s.listTriggers(stringParam(params, "schema"), stringParam(params, "table"))
 		return result, false, err
 	case "get_object_source":
-		result, err := s.getObjectSource(stringParam(params, "schema"), stringParam(params, "name"), stringParam(params, "object_type"))
+		result, err := s.getObjectSourceForRelation(stringParam(params, "schema"), stringParam(params, "name"), stringParam(params, "object_type"), stringParam(params, "relation_name"))
+		return result, false, err
+	case "get_type_details":
+		result, err := s.getTypeDetails(stringParam(params, "schema"), stringParam(params, "name"))
 		return result, false, err
 	case "get_table_ddl":
 		result, err := s.getTableDDL(stringParam(params, "schema"), stringParam(params, "table"))
@@ -453,8 +471,21 @@ func (s *server) connect(cp connectParams) error {
 	s.db = db
 	s.params = cp
 	s.mode = detectKingbaseMode(db, cp.MySQLCompatMode)
+	s.mode.legacyV7 = detectKingbaseV7(db)
 	s.usePgDefaultExpression = false
+	s.usePgViewDefinition = false
+	s.usePgFunctionDefinition = false
+	s.useLegacyRoutineDefinition = false
 	s.catalogIdentityUnsupported = false
+	s.catalogOIDUnsupported = false
+	s.infoColumnTypeUnsupported = false
+	s.infoUdtNameUnsupported = false
+	s.indexOrdinalityUnsupported = false
+	s.triggerPrettyUnsupported = false
+	s.triggerInternalUnsupported = false
+	s.constraintDefinitionUnsupported = false
+	s.constraintValidatedUnsupported = false
+	s.constraintStatusUnsupported = false
 	return nil
 }
 
@@ -489,12 +520,25 @@ func openAndPingDB(cp connectParams, timeout time.Duration, opener kingbaseDBOpe
 		if db != nil {
 			_ = db.Close()
 		}
-		if index == 0 && len(attempts) == 2 && errors.Is(err, gokb.ErrSSLNotSupported) {
+		if index == 0 && len(attempts) == 2 && shouldRetryKingbaseWithoutSSL(err) {
 			continue
 		}
 		return nil, err
 	}
 	return nil, errors.New("kingbase connection failed")
+}
+
+func shouldRetryKingbaseWithoutSSL(err error) bool {
+	if errors.Is(err, gokb.ErrSSLNotSupported) {
+		return true
+	}
+	if err == nil {
+		return false
+	}
+
+	// KingBase V7 can accept the SSLRequest and then reject the TLS handshake,
+	// so gokb returns the TLS alert instead of ErrSSLNotSupported.
+	return strings.Contains(strings.ToLower(err.Error()), "remote error: tls: handshake failure")
 }
 
 func openDBWithSSLMode(cp connectParams, sslMode string) (*sql.DB, error) {
@@ -516,7 +560,19 @@ func (s *server) disconnect() error {
 	s.cancelActiveQuery()
 	s.closeAllQuerySessions()
 	s.usePgDefaultExpression = false
+	s.usePgViewDefinition = false
+	s.usePgFunctionDefinition = false
+	s.useLegacyRoutineDefinition = false
 	s.catalogIdentityUnsupported = false
+	s.catalogOIDUnsupported = false
+	s.infoColumnTypeUnsupported = false
+	s.infoUdtNameUnsupported = false
+	s.indexOrdinalityUnsupported = false
+	s.triggerPrettyUnsupported = false
+	s.triggerInternalUnsupported = false
+	s.constraintDefinitionUnsupported = false
+	s.constraintValidatedUnsupported = false
+	s.constraintStatusUnsupported = false
 	s.currentSchema = ""
 	s.schemaSet = false
 	if s.db == nil {
@@ -643,6 +699,7 @@ func (s *server) executeQueryPage(opts queryOptions, pageSize int) (queryPageRes
 		s.endOperation(cancel)
 		return queryPageResult{}, err
 	}
+	columns = nonNilStrings(columns)
 	maxRows := opts.MaxRows
 	if maxRows <= 0 {
 		maxRows = defaultMaxRows
@@ -752,6 +809,7 @@ func readRows(rows *sql.Rows, maxRows int) (queryResult, error) {
 	if err != nil {
 		return queryResult{}, err
 	}
+	columns = nonNilStrings(columns)
 	result := queryResult{Columns: columns, ColumnTypes: columnTypeNames(rows), Rows: make([][]any, 0, min(maxRows, 1024))}
 	for rows.Next() {
 		if len(result.Rows) >= maxRows {
@@ -867,11 +925,16 @@ func (s *server) schemaConn(ctx context.Context, schema string) (*sql.Conn, erro
 
 func (s *server) setSchema(ctx context.Context, conn *sql.Conn, schema string) error {
 	schema = strings.TrimSpace(schema)
+	// An omitted schema leaves the session search_path under user control.
+	// Reset it only after DBX applied an explicit schema.
+	if schema == "" && !s.schemaSet {
+		return nil
+	}
 	statement := "RESET search_path"
 	if schema != "" {
 		// Kingbase implicitly prioritizes its system catalog when it is not
 		// listed explicitly, matching the JDBC agent and DBeaver behavior.
-		statement = "SET search_path TO " + quoteIdentifier(schema)
+		statement = "SET search_path TO " + s.quoteIdentifier(schema)
 	}
 	if _, err := conn.ExecContext(ctx, statement); err != nil {
 		return err
@@ -904,7 +967,6 @@ func buildDSNWithSSLMode(cp connectParams, sslMode string) string {
 		"password=" + quoteDSNValue(cp.Password),
 		"dbname=" + quoteDSNValue(cp.Database),
 		"sslmode=" + sslMode,
-		"connect_timeout=15",
 	}
 	if cp.CACertPath != "" {
 		parts = append(parts, "sslrootcert="+quoteDSNValue(cp.CACertPath))
@@ -915,11 +977,15 @@ func buildDSNWithSSLMode(cp connectParams, sslMode string) string {
 	if cp.ClientKeyPath != "" {
 		parts = append(parts, "sslkey="+quoteDSNValue(cp.ClientKeyPath))
 	}
-	for _, pair := range strings.FieldsFunc(cp.URLParams, func(r rune) bool { return r == '&' || r == ';' }) {
-		key, value, ok := strings.Cut(pair, "=")
-		if ok && isSafeParamKey(key) && !strings.EqualFold(strings.TrimSpace(key), "sslmode") {
-			parts = append(parts, strings.TrimSpace(key)+"="+quoteDSNValue(strings.TrimSpace(value)))
-		}
+	// Classify and de-duplicate the app-supplied url_params. The connect_timeout
+	// default is only applied when the user did not provide one (natively or via
+	// the connectTimeout alias), so the parameter is never emitted twice.
+	urlParams := normalizeURLParams(cp.URLParams)
+	if !hasDSNParam(urlParams, "connect_timeout") {
+		parts = append(parts, "connect_timeout=15")
+	}
+	for _, p := range urlParams {
+		parts = append(parts, p.key+"="+quoteDSNValue(p.value))
 	}
 	return strings.Join(parts, " ")
 }
@@ -994,18 +1060,38 @@ func rewriteNativeConnectionStringSSLMode(value, sslMode string) string {
 	if strings.HasPrefix(strings.ToLower(value), "kingbase://") {
 		baseAndQuery, fragment, hasFragment := strings.Cut(value, "#")
 		base, query, hasQuery := strings.Cut(baseAndQuery, "?")
-		pairs := make([]string, 0)
+		params := make([]dsnParam, 0)
 		if hasQuery {
 			for _, pair := range strings.Split(query, "&") {
-				key, _, _ := strings.Cut(pair, "=")
-				decodedKey, err := url.QueryUnescape(key)
-				if err == nil && strings.EqualFold(decodedKey, "sslmode") {
+				if pair == "" {
 					continue
 				}
-				if pair != "" {
-					pairs = append(pairs, pair)
+				rawKey, rawValue, _ := strings.Cut(pair, "=")
+				decodedKey, err := url.QueryUnescape(rawKey)
+				if err != nil {
+					decodedKey = rawKey
 				}
+				if strings.EqualFold(strings.TrimSpace(decodedKey), "sslmode") {
+					continue
+				}
+				decodedValue, err := url.QueryUnescape(rawValue)
+				if err != nil {
+					decodedValue = rawValue
+				}
+				nativeKey, keep := classifyDSNParam(decodedKey, decodedValue)
+				if !keep {
+					continue
+				}
+				params = append(params, dsnParam{
+					key:       nativeKey,
+					value:     rawValue, // preserve the original percent-encoding
+					fromAlias: !strings.EqualFold(strings.TrimSpace(decodedKey), nativeKey),
+				})
 			}
+		}
+		pairs := make([]string, 0, len(params)+1)
+		for _, p := range mergeDSNParams(params) {
+			pairs = append(pairs, url.QueryEscape(p.key)+"="+p.value)
 		}
 		pairs = append(pairs, "sslmode="+url.QueryEscape(sslMode))
 		result := base + "?" + strings.Join(pairs, "&")
@@ -1016,14 +1102,32 @@ func rewriteNativeConnectionStringSSLMode(value, sslMode string) string {
 	}
 
 	fields := splitNativeDSNFields(value)
-	result := make([]string, 0, len(fields)+1)
+	params := make([]dsnParam, 0, len(fields))
+	passthrough := make([]string, 0)
 	for _, field := range fields {
-		key, _, ok := strings.Cut(field, "=")
-		if ok && strings.EqualFold(strings.TrimSpace(key), "sslmode") {
+		key, rawValue, ok := strings.Cut(field, "=")
+		if !ok {
+			passthrough = append(passthrough, field)
 			continue
 		}
-		result = append(result, field)
+		if strings.EqualFold(strings.TrimSpace(key), "sslmode") {
+			continue
+		}
+		nativeKey, keep := classifyDSNParam(key, unquoteNativeDSNValue(rawValue))
+		if !keep {
+			continue
+		}
+		params = append(params, dsnParam{
+			key:       nativeKey,
+			value:     rawValue, // preserve the original quoting
+			fromAlias: !strings.EqualFold(strings.TrimSpace(key), nativeKey),
+		})
 	}
+	result := make([]string, 0, len(params)+len(passthrough)+1)
+	for _, p := range mergeDSNParams(params) {
+		result = append(result, p.key+"="+p.value)
+	}
+	result = append(result, passthrough...)
 	result = append(result, "sslmode="+sslMode)
 	return strings.Join(result, " ")
 }
@@ -1096,6 +1200,87 @@ func quoteDSNValue(value string) string {
 	return "'" + strings.ReplaceAll(strings.ReplaceAll(value, `\`, `\\`), "'", `\'`) + "'"
 }
 
+// supportedDSNParams is the curated set of parameters known to be understood by
+// the gokb driver or the Kingbase server. It is no longer a strict allow-list:
+// classifyDSNParam also forwards unknown lower_snake_case names to the server as
+// run-time parameters, because gokb passes every non-driver-setting to the
+// startup packet (conn.go startup()). This set is what classifyDSNParam treats
+// as definitely native, which short-circuits the camelCase JDBC heuristic so
+// CamelCase GUCs such as DateStyle/TimeZone are still forwarded rather than
+// dropped.
+//
+// The list mirrors the driver's own surface:
+//   - gokb conn.go isDriverSetting(): host, port, password, sslmode, sslcert,
+//     sslkey, sslrootcert, fallback_application_name, connect_timeout,
+//     disable_prepared_binary_result, binary_parameters, krbsrvname, krbspn;
+//   - the standard startup keywords user and dbname;
+//   - connector.go special handling: client_encoding (must be UTF8),
+//     datestyle, extra_float_digits;
+//   - common Kingbase/PostgreSQL run-time parameters that can be set in the
+//     startup packet: application_name, options, search_path,
+//     statement_timeout, work_mem, timezone and friends.
+var supportedDSNParams = map[string]struct{}{
+	// gokb driver settings (conn.go isDriverSetting) and startup keywords
+	"host":                           {},
+	"port":                           {},
+	"user":                           {},
+	"password":                       {},
+	"dbname":                         {},
+	"sslmode":                        {},
+	"sslcert":                        {},
+	"sslkey":                         {},
+	"sslrootcert":                    {},
+	"fallback_application_name":      {},
+	"connect_timeout":                {},
+	"disable_prepared_binary_result": {},
+	"binary_parameters":              {},
+	"krbsrvname":                     {},
+	"krbspn":                         {},
+
+	// connector.go special handling
+	"client_encoding":    {},
+	"datestyle":          {},
+	"extra_float_digits": {},
+
+	// Common run-time parameters the Kingbase server accepts in the startup
+	// packet (PostgreSQL-compatible GUCs).
+	"application_name":                    {},
+	"options":                             {},
+	"search_path":                         {},
+	"statement_timeout":                   {},
+	"lock_timeout":                        {},
+	"idle_in_transaction_session_timeout": {},
+	"idle_session_timeout":                {},
+	"work_mem":                            {},
+	"maintenance_work_mem":                {},
+	"temp_buffers":                        {},
+	"effective_cache_size":                {},
+	"timezone":                            {},
+	"intervalstyle":                       {},
+	"lc_messages":                         {},
+	"lc_monetary":                         {},
+	"lc_numeric":                          {},
+	"lc_time":                             {},
+	"default_transaction_isolation":       {},
+	"default_transaction_read_only":       {},
+	"default_transaction_deferrable":      {},
+	"synchronous_commit":                  {},
+	"client_min_messages":                 {},
+	"standard_conforming_strings":         {},
+	"xmloption":                           {},
+	"role":                                {},
+	"session_replication_role":            {},
+	"default_tablespace":                  {},
+	"temp_tablespaces":                    {},
+	"default_table_access_method":         {},
+	"max_parallel_workers_per_gather":     {},
+}
+
+func isSupportedDSNParam(key string) bool {
+	_, ok := supportedDSNParams[strings.ToLower(strings.TrimSpace(key))]
+	return ok
+}
+
 func isSafeParamKey(value string) bool {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -1107,6 +1292,189 @@ func isSafeParamKey(value string) bool {
 		}
 	}
 	return true
+}
+
+// dsnParam is a single normalized connection parameter ready to be emitted into
+// a DSN. value carries the surface-specific text (single-quoted for keyword
+// DSNs, percent-encoded for kingbase:// URLs, raw for url_params) so callers can
+// preserve the original quoting/encoding when only the key was rewritten.
+type dsnParam struct {
+	key       string
+	value     string
+	fromAlias bool
+}
+
+// jdbcAliasParams maps a lowercased JDBC property to the native gokb/server
+// parameter with equivalent semantics. clientEncoding is handled separately in
+// classifyDSNParam because it also has to validate the value.
+var jdbcAliasParams = map[string]string{
+	"connecttimeout":  "connect_timeout", // both measured in seconds
+	"currentschema":   "search_path",     // both accept a comma-separated list
+	"applicationname": "application_name",
+}
+
+// jdbcOnlyParams lists client-side JDBC/driver properties that have no meaning to
+// the Kingbase server. gokb forwards every non-driver-setting to the startup
+// packet, so a value the server does not recognize fails the whole connection
+// with "unrecognized configuration parameter". camelCase names are also caught by
+// the heuristic in classifyDSNParam; this set additionally covers the lowercase
+// JDBC properties the heuristic cannot detect and documents intent for the common
+// MySQL/JDBC-style names.
+var jdbcOnlyParams = map[string]struct{}{
+	"usessl":                   {},
+	"autoreconnect":            {},
+	"characterencoding":        {},
+	"servertimezone":           {},
+	"rewritebatchedstatements": {},
+	"useserverprepstmts":       {},
+	"sockettimeout":            {},
+	"usecompression":           {},
+	"zerodatetimebehavior":     {},
+	"useaffectedrows":          {},
+	"usecursorfetch":           {},
+	"defaultfetchsize":         {},
+	"allowmultiqueries":        {},
+	"useunicode":               {},
+	// Lowercase PgJDBC/Kingbase-JDBC client properties the camelCase heuristic
+	// would otherwise forward and break the connection.
+	"ssl":             {},
+	"sslfactory":      {},
+	"stringtype":      {},
+	"gsslib":          {},
+	"sspiservicename": {},
+	"protocolversion": {},
+	"loglevel":        {},
+}
+
+// classifyDSNParam decides how one connection parameter should be treated and
+// returns the native parameter name to emit plus whether to keep it. sslmode is
+// handled separately by the callers and must not be passed here. decodedValue is
+// the already-unquoted/decoded value, used only for the client_encoding check.
+func classifyDSNParam(key, decodedValue string) (nativeKey string, keep bool) {
+	trimmed := strings.TrimSpace(key)
+	if !isSafeParamKey(trimmed) {
+		return "", false
+	}
+	lower := strings.ToLower(trimmed)
+
+	// client_encoding (native, or via the clientEncoding alias): gokb only
+	// accepts UTF-8, so map compatible values and drop everything else — a
+	// non-UTF8 value would otherwise fail the whole connection.
+	if lower == "client_encoding" || lower == "clientencoding" {
+		if isUTF8Encoding(decodedValue) {
+			return "client_encoding", true
+		}
+		return "", false
+	}
+
+	// JDBC properties with a direct native equivalent.
+	if native, ok := jdbcAliasParams[lower]; ok {
+		return native, true
+	}
+
+	// Curated native/server parameters are always forwarded. Matching here also
+	// keeps CamelCase GUCs such as DateStyle/TimeZone from being mistaken for JDBC
+	// camelCase properties by the heuristic below.
+	if isSupportedDSNParam(lower) {
+		return lower, true
+	}
+
+	// Known JDBC-only client properties never reach the server.
+	if _, ok := jdbcOnlyParams[lower]; ok {
+		return "", false
+	}
+
+	// Unknown parameter. Server GUCs are conventionally lower_snake_case while
+	// JDBC properties are camelCase, so forward snake_case names as run-time
+	// parameters (gokb passes them to the startup packet) and drop names carrying
+	// an uppercase letter as presumed client-side JDBC settings.
+	if hasUpperASCII(trimmed) {
+		return "", false
+	}
+	return lower, true
+}
+
+// mergeDSNParams applies duplicate-parameter precedence: an explicit native
+// parameter beats a JDBC alias for the same key, and within the same class the
+// first occurrence wins to preserve gokb's existing DSN behavior. Output order
+// follows each key's first appearance.
+func mergeDSNParams(params []dsnParam) []dsnParam {
+	result := make([]dsnParam, 0, len(params))
+	pos := make(map[string]int, len(params))
+	for _, p := range params {
+		if i, ok := pos[p.key]; ok {
+			// A later explicit native parameter may replace an earlier alias, but
+			// same-class duplicates keep the first value just as gokb does.
+			if result[i].fromAlias && !p.fromAlias {
+				result[i] = p
+			}
+			continue
+		}
+		pos[p.key] = len(result)
+		result = append(result, p)
+	}
+	return result
+}
+
+// normalizeURLParams classifies and de-duplicates the app-supplied url_params
+// blob (a &/;-separated key=value list), excluding sslmode which is handled
+// separately. Values are kept raw for later single-quoting.
+func normalizeURLParams(raw string) []dsnParam {
+	params := make([]dsnParam, 0)
+	for _, pair := range strings.FieldsFunc(raw, func(r rune) bool { return r == '&' || r == ';' }) {
+		key, value, ok := strings.Cut(pair, "=")
+		if !ok {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(key), "sslmode") {
+			continue
+		}
+		val := strings.TrimSpace(value)
+		nativeKey, keep := classifyDSNParam(key, val)
+		if !keep {
+			continue
+		}
+		params = append(params, dsnParam{
+			key:       nativeKey,
+			value:     val,
+			fromAlias: !strings.EqualFold(strings.TrimSpace(key), nativeKey),
+		})
+	}
+	return mergeDSNParams(params)
+}
+
+func hasDSNParam(params []dsnParam, key string) bool {
+	for _, p := range params {
+		if p.key == key {
+			return true
+		}
+	}
+	return false
+}
+
+func hasUpperASCII(value string) bool {
+	for i := 0; i < len(value); i++ {
+		if value[i] >= 'A' && value[i] <= 'Z' {
+			return true
+		}
+	}
+	return false
+}
+
+// isUTF8Encoding mirrors gokb's isUTF8: it recognizes fuzzy variants of "UTF-8"
+// (dropping non-alphanumerics, case-insensitively) as well as "unicode".
+func isUTF8Encoding(name string) bool {
+	var b strings.Builder
+	for _, ch := range name {
+		switch {
+		case ch >= 'A' && ch <= 'Z':
+			b.WriteRune(ch + ('a' - 'A'))
+		case ch >= 'a' && ch <= 'z', ch >= '0' && ch <= '9':
+			b.WriteRune(ch)
+		}
+	}
+	s := b.String()
+	return s == "utf8" || s == "unicode"
 }
 
 func normalizeValue(value any) any {
@@ -1196,12 +1564,340 @@ func trimStatementSQL(sqlText string) string {
 }
 
 func isQuerySQL(sqlText string) bool {
-	lower := strings.ToLower(strings.TrimSpace(sqlText))
-	return strings.HasPrefix(lower, "select") || strings.HasPrefix(lower, "with") || strings.HasPrefix(lower, "show") || strings.HasPrefix(lower, "explain")
+	keyword, next := sqlKeywordAt(sqlText, 0)
+	if keyword == "with" {
+		terminal, terminalEnd := withTerminalKeyword(sqlText, next)
+		if terminal == "" || !isStatementKeyword(terminal) {
+			return true
+		}
+		keyword = terminal
+		next = terminalEnd
+	}
+	if keyword == "select" || keyword == "show" || keyword == "explain" || keyword == "values" || keyword == "table" {
+		return true
+	}
+	return isDMLKeyword(keyword) && hasTopLevelSQLKeyword(sqlText, next, "returning")
+}
+
+func withTerminalKeyword(sqlText string, index int) (string, int) {
+	if keyword, next := sqlKeywordAt(sqlText, index); keyword == "recursive" {
+		index = next
+	}
+
+	for {
+		index = skipSQLTrivia(sqlText, index)
+		index = skipSQLIdentifier(sqlText, index)
+		if index < 0 {
+			return "", index
+		}
+
+		index = skipSQLTrivia(sqlText, index)
+		if index < len(sqlText) && sqlText[index] == '(' {
+			index = skipSQLParenthesized(sqlText, index)
+			if index < 0 {
+				return "", index
+			}
+		}
+
+		keyword, next := sqlKeywordAt(sqlText, index)
+		if keyword != "as" {
+			return "", index
+		}
+		index = next
+
+		if keyword, next = sqlKeywordAt(sqlText, index); keyword == "not" {
+			index = next
+			keyword, next = sqlKeywordAt(sqlText, index)
+			if keyword != "materialized" {
+				return "", index
+			}
+			index = next
+		} else if keyword == "materialized" {
+			index = next
+		}
+
+		index = skipSQLTrivia(sqlText, index)
+		if index >= len(sqlText) || sqlText[index] != '(' {
+			return "", index
+		}
+		index = skipSQLParenthesized(sqlText, index)
+		if index < 0 {
+			return "", index
+		}
+
+		index = skipSQLTrivia(sqlText, index)
+		if index < len(sqlText) && sqlText[index] == ',' {
+			index++
+			continue
+		}
+		keyword, next = sqlKeywordAt(sqlText, index)
+		return keyword, next
+	}
+}
+
+func hasTopLevelSQLKeyword(sqlText string, index int, target string) bool {
+	depth := 0
+	for index < len(sqlText) {
+		switch sqlText[index] {
+		case '\'':
+			index = skipSQLQuoted(sqlText, index, '\'')
+			if index < 0 {
+				return false
+			}
+			continue
+		case '"':
+			index = skipSQLQuoted(sqlText, index, '"')
+			if index < 0 {
+				return false
+			}
+			continue
+		case '$':
+			if next := skipSQLDollarQuoted(sqlText, index); next != index {
+				if next < 0 {
+					return false
+				}
+				index = next
+				continue
+			}
+		case '-':
+			if index+1 < len(sqlText) && sqlText[index+1] == '-' {
+				index = skipSQLLineComment(sqlText, index+2)
+				continue
+			}
+		case '/':
+			if index+1 < len(sqlText) && sqlText[index+1] == '*' {
+				index = skipSQLBlockComment(sqlText, index)
+				if index < 0 {
+					return false
+				}
+				continue
+			}
+		case '(':
+			depth++
+		case ')':
+			depth = max(depth-1, 0)
+		default:
+			if depth == 0 && isSQLWordStartByte(sqlText[index]) {
+				keyword, next := sqlKeywordAt(sqlText, index)
+				if keyword == target {
+					return true
+				}
+				index = next
+				continue
+			}
+		}
+		index++
+	}
+	return false
+}
+
+func isDMLKeyword(keyword string) bool {
+	return keyword == "insert" || keyword == "update" || keyword == "delete" || keyword == "merge"
+}
+
+func isStatementKeyword(keyword string) bool {
+	return isDMLKeyword(keyword) || keyword == "select" || keyword == "values" || keyword == "table"
+}
+
+func sqlKeywordAt(sqlText string, index int) (string, int) {
+	index = skipSQLTrivia(sqlText, index)
+	if index >= len(sqlText) || !isSQLWordStartByte(sqlText[index]) {
+		return "", index
+	}
+	start := index
+	for index < len(sqlText) && isSQLIdentifierByte(sqlText[index]) {
+		index++
+	}
+	return strings.ToLower(sqlText[start:index]), index
+}
+
+func skipSQLIdentifier(sqlText string, index int) int {
+	index = skipSQLTrivia(sqlText, index)
+	if index >= len(sqlText) {
+		return -1
+	}
+	if sqlText[index] == '"' {
+		return skipSQLQuoted(sqlText, index, '"')
+	}
+	start := index
+	for index < len(sqlText) && isSQLIdentifierByte(sqlText[index]) {
+		index++
+	}
+	if start == index {
+		return -1
+	}
+	return index
+}
+
+func skipSQLParenthesized(sqlText string, index int) int {
+	if index >= len(sqlText) || sqlText[index] != '(' {
+		return -1
+	}
+	depth := 0
+	for index < len(sqlText) {
+		switch sqlText[index] {
+		case '\'':
+			index = skipSQLQuoted(sqlText, index, '\'')
+			if index < 0 {
+				return -1
+			}
+			continue
+		case '"':
+			index = skipSQLQuoted(sqlText, index, '"')
+			if index < 0 {
+				return -1
+			}
+			continue
+		case '$':
+			if next := skipSQLDollarQuoted(sqlText, index); next != index {
+				if next < 0 {
+					return -1
+				}
+				index = next
+				continue
+			}
+		case '-':
+			if index+1 < len(sqlText) && sqlText[index+1] == '-' {
+				index = skipSQLLineComment(sqlText, index+2)
+				continue
+			}
+		case '/':
+			if index+1 < len(sqlText) && sqlText[index+1] == '*' {
+				index = skipSQLBlockComment(sqlText, index)
+				if index < 0 {
+					return -1
+				}
+				continue
+			}
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return index + 1
+			}
+		}
+		index++
+	}
+	return -1
+}
+
+func skipSQLTrivia(sqlText string, index int) int {
+	for index < len(sqlText) {
+		if isSQLSpace(sqlText[index]) {
+			index++
+			continue
+		}
+		if index+1 < len(sqlText) && sqlText[index] == '-' && sqlText[index+1] == '-' {
+			index = skipSQLLineComment(sqlText, index+2)
+			continue
+		}
+		if index+1 < len(sqlText) && sqlText[index] == '/' && sqlText[index+1] == '*' {
+			index = skipSQLBlockComment(sqlText, index)
+			if index < 0 {
+				return len(sqlText)
+			}
+			continue
+		}
+		break
+	}
+	return index
+}
+
+func skipSQLLineComment(sqlText string, index int) int {
+	for index < len(sqlText) && sqlText[index] != '\n' {
+		index++
+	}
+	return index
+}
+
+func skipSQLBlockComment(sqlText string, index int) int {
+	depth := 0
+	for index+1 < len(sqlText) {
+		if sqlText[index] == '/' && sqlText[index+1] == '*' {
+			depth++
+			index += 2
+			continue
+		}
+		if sqlText[index] == '*' && sqlText[index+1] == '/' {
+			depth--
+			index += 2
+			if depth == 0 {
+				return index
+			}
+			continue
+		}
+		index++
+	}
+	return -1
+}
+
+func skipSQLQuoted(sqlText string, index int, quote byte) int {
+	index++
+	for index < len(sqlText) {
+		if sqlText[index] == '\\' && quote == '\'' && index+1 < len(sqlText) {
+			index += 2
+			continue
+		}
+		if sqlText[index] == quote {
+			if index+1 < len(sqlText) && sqlText[index+1] == quote {
+				index += 2
+				continue
+			}
+			return index + 1
+		}
+		index++
+	}
+	return -1
+}
+
+func skipSQLDollarQuoted(sqlText string, index int) int {
+	endTag := index + 1
+	for endTag < len(sqlText) && isSQLDollarTagByte(sqlText[endTag]) {
+		endTag++
+	}
+	if endTag >= len(sqlText) || sqlText[endTag] != '$' {
+		return index
+	}
+	tag := sqlText[index : endTag+1]
+	if end := strings.Index(sqlText[endTag+1:], tag); end >= 0 {
+		return endTag + 1 + end + len(tag)
+	}
+	return -1
+}
+
+func nonNilStrings(values []string) []string {
+	if values == nil {
+		return []string{}
+	}
+	return values
+}
+
+func isSQLSpace(value byte) bool {
+	return value == ' ' || value == '\t' || value == '\r' || value == '\n' || value == '\f'
+}
+
+func isSQLWordStartByte(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value == '_'
+}
+
+func isSQLIdentifierByte(value byte) bool {
+	return isSQLWordStartByte(value) || value >= '0' && value <= '9' || value == '$' || value >= 0x80
+}
+
+func isSQLDollarTagByte(value byte) bool {
+	return isSQLWordStartByte(value) || value >= '0' && value <= '9'
 }
 
 func quoteIdentifier(value string) string {
 	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
+}
+
+func (s *server) quoteIdentifier(value string) string {
+	if s.mode.mysqlCompat {
+		return "`" + strings.ReplaceAll(value, "`", "``") + "`"
+	}
+	return quoteIdentifier(value)
 }
 
 func quoteLiteral(value string) string {

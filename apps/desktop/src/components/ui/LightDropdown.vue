@@ -5,12 +5,14 @@ import { Check, ChevronDown } from "@lucide/vue";
 export interface LightDropdownItem {
   label: string;
   value: string;
+  groupLabel?: string;
   title?: string;
   icon?: Component;
   iconClass?: string;
   leadingText?: string;
   disabled?: boolean;
   separatorBefore?: boolean;
+  indentLevel?: number;
 }
 
 const props = withDefaults(
@@ -83,13 +85,20 @@ const menuStyle = computed(() => ({
   left: `${x.value}px`,
   top: `${y.value}px`,
   minWidth: props.matchTriggerWidth ? `${minWidth.value}px` : undefined,
+  maxHeight: "min(420px, calc(100vh - 16px))",
 }));
+
+function onScroll(event: Event) {
+  const target = event.target;
+  if (target instanceof Node && menuRef.value?.contains(target)) return;
+  close();
+}
 
 function close() {
   open.value = false;
   document.removeEventListener("pointerdown", onOutsidePointerDown, true);
   document.removeEventListener("keydown", onKeydown);
-  window.removeEventListener("scroll", close, true);
+  window.removeEventListener("scroll", onScroll, true);
   window.removeEventListener("resize", close);
 }
 
@@ -123,7 +132,7 @@ function openMenu() {
   nextTick(fitPositionToViewport);
   document.addEventListener("pointerdown", onOutsidePointerDown, true);
   document.addEventListener("keydown", onKeydown);
-  window.addEventListener("scroll", close, true);
+  window.addEventListener("scroll", onScroll, true);
   window.addEventListener("resize", close);
 }
 
@@ -169,17 +178,19 @@ onBeforeUnmount(close);
     <ChevronDown v-if="showChevron" class="h-3 w-3 opacity-50" />
   </button>
   <Teleport to="body">
-    <div v-if="open" ref="menuRef" class="fixed z-50 min-w-32 rounded-md p-1 cn-menu-translucent text-popover-foreground" :class="contentClass" :style="menuStyle" role="menu">
+    <div v-if="open" ref="menuRef" class="fixed z-50 min-w-32 overflow-x-hidden overflow-y-auto rounded-md p-1 cn-menu-translucent text-popover-foreground" :class="contentClass" :style="menuStyle" role="menu">
       <div v-if="label" :class="labelClass">{{ label }}</div>
       <div v-if="label" class="bg-border -mx-1 my-1 h-px" />
       <template v-for="item in items" :key="item.value">
         <div v-if="item.separatorBefore" class="bg-border -mx-1 my-1 h-px" />
+        <div v-if="item.groupLabel" class="px-1.5 py-1 text-[11px] font-medium text-muted-foreground">{{ item.groupLabel }}</div>
         <button
           type="button"
           class="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-sm outline-hidden hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
           :class="[itemClass, highlightSelected && isItemSelected(item) ? selectedItemClass : '']"
           :disabled="item.disabled"
           :title="item.title"
+          :style="{ paddingInlineStart: `${0.375 + (item.indentLevel ?? 0) * 0.75}rem` }"
           role="menuitem"
           @click="selectItem(item)"
         >

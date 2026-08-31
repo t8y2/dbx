@@ -4,6 +4,7 @@ export interface TableMetadataCapabilities {
   columns: boolean;
   indexes: boolean;
   foreignKeys: boolean;
+  constraints: boolean;
   triggers: boolean;
   ddl: boolean;
 }
@@ -12,11 +13,33 @@ const defaultCapabilities: TableMetadataCapabilities = {
   columns: true,
   indexes: true,
   foreignKeys: true,
+  // Structured constraint metadata (list_constraints) is only enabled for
+  // drivers that implement it (PostgreSQL natively; Oracle/Xugu via agents);
+  // leave it off by default so every other dialect doesn't grow a permanently
+  // empty tab.
+  constraints: false,
   triggers: true,
   ddl: true,
 };
 
 const capabilityByType: Partial<Record<DatabaseType, Partial<TableMetadataCapabilities>>> = {
+  oracle: {
+    constraints: true,
+  },
+  kingbase: {
+    constraints: true,
+  },
+  vastbase: {
+    constraints: true,
+  },
+  opengauss: {
+    constraints: true,
+  },
+  // PostgreSQL reports full pg_constraint metadata (PK/FK/UNIQUE/CHECK/
+  // EXCLUDE/NOT NULL) through list_constraints.
+  postgres: {
+    constraints: true,
+  },
   mongodb: {
     columns: false,
     foreignKeys: false,
@@ -38,6 +61,12 @@ const capabilityByType: Partial<Record<DatabaseType, Partial<TableMetadataCapabi
     ddl: false,
   },
   easysearch: {
+    indexes: false,
+    foreignKeys: false,
+    triggers: false,
+    ddl: false,
+  },
+  meilisearch: {
     indexes: false,
     foreignKeys: false,
     triggers: false,
@@ -79,6 +108,12 @@ const capabilityByType: Partial<Record<DatabaseType, Partial<TableMetadataCapabi
     triggers: false,
     ddl: false,
   },
+  victoriametrics: {
+    indexes: false,
+    foreignKeys: false,
+    triggers: false,
+    ddl: false,
+  },
   questdb: {
     indexes: true,
     foreignKeys: false,
@@ -96,11 +131,19 @@ export function firstStructureMetadataTab(capabilities: TableMetadataCapabilitie
   if (capabilities.columns) return "columns";
   if (capabilities.indexes) return "indexes";
   if (capabilities.foreignKeys) return "foreignKeys";
+  if (capabilities.constraints) return "constraints";
   if (capabilities.triggers) return "triggers";
   if (!isCreateMode && capabilities.ddl) return "ddl";
   return "columns";
 }
 
 export function isStructureMetadataTabSupported(tab: TableInfoTab, capabilities: TableMetadataCapabilities, isCreateMode: boolean): boolean {
-  return (tab === "columns" && capabilities.columns) || (tab === "indexes" && capabilities.indexes) || (tab === "foreignKeys" && capabilities.foreignKeys) || (tab === "triggers" && capabilities.triggers) || (tab === "ddl" && capabilities.ddl && !isCreateMode);
+  return (
+    (tab === "columns" && capabilities.columns) ||
+    (tab === "indexes" && capabilities.indexes) ||
+    (tab === "foreignKeys" && capabilities.foreignKeys) ||
+    (tab === "constraints" && capabilities.constraints) ||
+    (tab === "triggers" && capabilities.triggers) ||
+    (tab === "ddl" && capabilities.ddl && !isCreateMode)
+  );
 }

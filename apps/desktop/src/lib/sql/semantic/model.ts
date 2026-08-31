@@ -1,5 +1,6 @@
 import { sqlSemanticDialectFor, type SqlSemanticDialectAdapter } from "@/lib/sql/semantic/dialect";
 import { findActiveSqlStatementSpan, isSuppressedSqlSemanticContext, tokenIsIdentifier, tokenizeSqlSemantic, unquoteSqlSemanticIdentifier } from "@/lib/sql/semantic/tokens";
+import { resolveSqlStatementWindow } from "@/lib/sql/sqlSyntaxTreeWindow";
 import type {
   SqlSemanticBuildOptions,
   SqlSemanticClauseSpans,
@@ -675,7 +676,8 @@ function sourceForQualifier(sources: readonly SqlSemanticRowSource[], qualifierP
 
 function starQualifierParts(before: readonly SqlSemanticToken[], starIndex: number, dialect: SqlSemanticDialectAdapter): string[] {
   let index = starIndex - 1;
-  if (before[index]?.text === ".") index -= 1;
+  if (before[index]?.text !== ".") return [];
+  index -= 1;
   const qualifierParts: string[] = [];
   while (index >= 0) {
     const identifier = before[index];
@@ -784,8 +786,16 @@ function buildScope(statement: SqlSemanticStatement, rowSources: SqlSemanticRowS
 export function buildSqlSemanticModel(sql: string, cursor: number, options: SqlSemanticBuildOptions = {}): SqlSemanticModel {
   const safeCursor = Math.max(0, Math.min(cursor, sql.length));
   const dialect = sqlSemanticDialectFor(options);
-  const allTokens = tokenizeSqlSemantic(sql, dialect.id);
-  const statementSpan = findActiveSqlStatementSpan(sql, allTokens, safeCursor);
+  const window = resolveSqlStatementWindow(sql, safeCursor, options.editorState, dialect.id);
+  const windowSql = sql.slice(window.from, window.to);
+  const windowCursor = safeCursor - window.from;
+  const localTokens = tokenizeSqlSemantic(windowSql, dialect.id);
+  const localStatementSpan = findActiveSqlStatementSpan(windowSql, localTokens, windowCursor);
+  const allTokens = localTokens.map((token) => ({
+    ...token,
+    span: { start: token.span.start + window.from, end: token.span.end + window.from },
+  }));
+  const statementSpan = { start: localStatementSpan.start + window.from, end: localStatementSpan.end + window.from };
   const tokens = significantTokens(allTokens.filter((item) => item.span.end > statementSpan.start && item.span.start < statementSpan.end));
   const kind = statementKind(tokens);
   const statement: SqlSemanticStatement = {

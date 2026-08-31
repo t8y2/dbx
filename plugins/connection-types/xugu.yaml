@@ -1,0 +1,36 @@
+schemaVersion: 1
+order: 660
+dbType: xugu
+rustVariant: Xugu
+label: 虚谷 XuguDB
+dialect: Xugu
+runtimeMode: agent
+mcpMode: bridge
+agentKey: xugu
+driverStoreVisible: true
+driverStoreOrder: 37
+singleConnectionPool: false
+metadataConnectionScoped: false
+skipTcpProbe: true
+defaultPort: 5138
+traits:
+  schemaAware: true
+  treeSchema: true
+supportLevel: operate
+capabilities:
+  queryExecution: true
+  metadataBrowse: true
+  objectBrowser: true
+  objectSource: false
+  schemaSearch: true
+  diagram: true
+  tableDataEdit: false
+  tableStructureEdit: true
+  tableImport: false
+  dataTransfer: false
+  sqlFileExecution: true
+  databaseCreate: false
+  fieldLineage: false
+  sqlExplain: false
+  userAdmin: false
+  driverManagement: true

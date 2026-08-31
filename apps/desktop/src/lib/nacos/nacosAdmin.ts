@@ -1,4 +1,4 @@
-import type { NacosConfigHistoryItem, NacosConfigItem, NacosConfigKey, NacosContentMatch, NacosImplementation, NacosInstanceInfo, NacosRawRequest, NacosServiceInfo, NacosVersionMode } from "@/types/nacos";
+import type { NacosApiPlane, NacosConfigHistoryItem, NacosConfigItem, NacosConfigKey, NacosContentMatch, NacosImplementation, NacosInstanceInfo, NacosPermissionInfo, NacosRawRequest, NacosServiceInfo, NacosVersionMode } from "@/types/nacos";
 import { diffArrays, diffChars } from "diff";
 
 export type NacosRawTemplateKey = "serverState" | "namespaceList" | "configDetail" | "serviceList" | "instanceList";
@@ -12,26 +12,26 @@ export interface NacosRawTemplate {
 }
 
 export const NACOS_RAW_TEMPLATES: NacosRawTemplate[] = [
-  { key: "serverState", method: "GET", path: "/v3/console/server/state", query: "", body: "" },
-  { key: "namespaceList", method: "GET", path: "/v3/console/core/namespace/list", query: "", body: "" },
+  { key: "serverState", method: "GET", path: "/v3/admin/core/state", query: "", body: "" },
+  { key: "namespaceList", method: "GET", path: "/v3/admin/core/namespace/list", query: "", body: "" },
   {
     key: "configDetail",
     method: "GET",
-    path: "/v3/console/cs/config",
+    path: "/v3/admin/cs/config",
     query: "dataId=application.yaml&groupName=DEFAULT_GROUP&namespaceId=",
     body: "",
   },
   {
     key: "serviceList",
     method: "GET",
-    path: "/v3/console/ns/service/list",
+    path: "/v3/admin/ns/service/list",
     query: "pageNo=1&pageSize=20&namespaceId=",
     body: "",
   },
   {
     key: "instanceList",
     method: "GET",
-    path: "/v3/console/ns/instance/list",
+    path: "/v3/admin/ns/instance/list",
     query: "serviceName=DEFAULT_GROUP@@example&namespaceId=",
     body: "",
   },
@@ -58,6 +58,7 @@ export interface NacosEndpointNormalization {
 export interface NacosEndpointNormalizationOptions {
   implementation?: NacosImplementation;
   versionMode?: NacosVersionMode;
+  apiPlane?: NacosApiPlane;
   contextPath?: string;
 }
 
@@ -78,6 +79,7 @@ export function normalizeNacosEndpoint(input: string, options: NacosEndpointNorm
   const rawPath = url.pathname.replace(/\/+$/, "");
   const implementation = options.implementation;
   const versionMode = options.versionMode || "auto";
+  const apiPlane = options.apiPlane || "admin";
   const warnings: string[] = [];
   const hasRNacosSuffix = /\/rnacos$/i.test(rawPath);
   const hasNacosSuffix = /\/nacos$/i.test(rawPath);
@@ -91,7 +93,7 @@ export function normalizeNacosEndpoint(input: string, options: NacosEndpointNorm
     contextPath = hasNacosSuffix ? rawPath : options.contextPath?.trim() || "/nacos";
   } else if (detectedVersion === "v3" || hasNacos3UiSuffix) {
     contextPath = rawPath.replace(/\/(?:next(?:\/index\.html)?|index\.html)$/i, "");
-    if (!contextPath) contextPath = options.contextPath?.trim() || "/nacos";
+    if (!contextPath) contextPath = options.contextPath?.trim() || (apiPlane === "console" ? "" : "/nacos");
     if (hasNacos3UiSuffix) warnings.push("The Nacos 3 console route was removed from the API context.");
   } else if (!contextPath) {
     contextPath = options.contextPath?.trim() || (versionMode === "v2" ? "/nacos" : "");
@@ -160,6 +162,43 @@ export function parseNacosRawQuery(text: string): Record<string, string> | undef
   const trimmed = text.trim().replace(/^\?/, "");
   if (!trimmed) return undefined;
   return Object.fromEntries(new URLSearchParams(trimmed).entries());
+}
+
+export function parseNacosManagedNamespaces(text: string): string[] {
+  return [
+    ...new Set(
+      text
+        .split(/[\n,，]+/)
+        .map((value) => value.trim())
+        .filter(Boolean),
+    ),
+  ];
+}
+
+export type NacosNamespacePermissionAction = "r" | "w" | "rw";
+
+export interface NacosNamespacePermissionAssignment {
+  namespaceId: string;
+  action: NacosNamespacePermissionAction;
+}
+
+/**
+ * The Nacos permission table may store read and write as separate rows for the
+ * same role and namespace. The editor exposes one assignment per namespace, so
+ * combine those rows before populating the form to avoid dropping either half
+ * when an unchanged role is saved.
+ */
+export function mergeNacosNamespacePermissionAssignments(permissions: Pick<NacosPermissionInfo, "actionRaw" | "parsedScope">[]): NacosNamespacePermissionAssignment[] {
+  const assignments = new Map<string, NacosNamespacePermissionAction>();
+  for (const permission of permissions) {
+    const namespaceId = permission.parsedScope?.namespaceId;
+    if (!namespaceId || !["r", "w", "rw"].includes(permission.actionRaw)) continue;
+    const current = assignments.get(namespaceId);
+    const readable = current?.includes("r") || permission.actionRaw.includes("r");
+    const writable = current?.includes("w") || permission.actionRaw.includes("w");
+    assignments.set(namespaceId, readable && writable ? "rw" : readable ? "r" : "w");
+  }
+  return [...assignments].map(([namespaceId, action]) => ({ namespaceId, action }));
 }
 
 export function parseNacosRawBody(text: string): unknown {
@@ -702,8 +741,12 @@ export function buildNacosInstanceConfirm(service: NacosServiceInfo, instance: N
     `serviceName=${service.serviceName}`,
     `group=${instance.groupName || service.groupName || fallbackGroup || "DEFAULT_GROUP"}`,
     `instance=${instance.ip}:${instance.port}`,
+    `cluster=${instance.clusterName || "DEFAULT"}`,
+    `ephemeral=${instance.ephemeral === true ? "true" : instance.ephemeral === false ? "false" : "unknown"}`,
     patch.enabled == null ? "" : `targetEnabled=${targetEnabled === false ? "false" : "true"}`,
     patch.healthy == null ? "" : `targetHealthy=${targetHealthy === false ? "false" : "true"}`,
+    patch.weight == null ? "" : `targetWeight=${patch.weight}`,
+    patch.metadata == null ? "" : `targetMetadata=${JSON.stringify(patch.metadata)}`,
   ]
     .filter(Boolean)
     .join("\n");

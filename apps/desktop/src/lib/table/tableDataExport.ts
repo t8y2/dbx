@@ -17,6 +17,18 @@ export interface FetchTableDataForExportOptions {
 
 export async function fetchTableDataForExport(options: FetchTableDataForExportOptions): Promise<QueryResult> {
   const pageSize = Math.max(1, options.pageSize ?? TABLE_DATA_EXPORT_PAGE_SIZE);
+  if (options.databaseType === "victoriametrics") {
+    const query = await (options.buildPageSql ?? buildTableSelectSql)({
+      databaseType: options.databaseType,
+      schema: options.schema,
+      tableName: options.tableName,
+      tableType: options.tableType,
+      columns: options.columns,
+      limit: pageSize,
+      offset: 0,
+    });
+    return options.executePage(query);
+  }
   let offset = 0;
   const rows: QueryResult["rows"] = [];
   let columns: string[] = [];

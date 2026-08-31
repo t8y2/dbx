@@ -2,22 +2,26 @@
 import { computed, ref, watch, nextTick, onUnmounted } from "vue";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { X, Pin, ChevronDown, Table2, Code2, TableProperties, PencilRuler, KeyRound, Pencil, Package, Lock, Copy, AlertTriangle, Network, Minimize2, Maximize2, Settings, CalendarClock, Activity, Gauge, ShieldCheck } from "@lucide/vue";
+import { X, Pin, ChevronDown, Search, Table2, Code2, TableProperties, PencilRuler, KeyRound, Pencil, Package, Copy, AlertTriangle, Network, Minimize2, Maximize2, Settings, CalendarClock, Activity, Gauge, ShieldCheck, Database, GitBranch, Crosshair } from "@lucide/vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
+import TabExecutionStatus from "@/components/layout/TabExecutionStatus.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useTabScroll } from "@/composables/useTabScroll";
 import { useTabDrag } from "@/composables/useTabDrag";
-import { connectionColor, isConnectionReadonly, tabDisplayTitle, tabTooltipLines } from "@/lib/tabs/tabPresentation";
+import { connectionColor, tabDisplayTitle, tabTooltipLines } from "@/lib/tabs/tabPresentation";
+import ReadOnlySessionControl from "@/components/connection/ReadOnlySessionControl.vue";
 import { hexToRgba } from "@/lib/common/color";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { useToast } from "@/composables/useToast";
+import { activeTabSidebarTarget } from "@/lib/sidebar/sidebarActiveTabTarget";
 import type { QueryTab } from "@/types/database";
 
 const props = defineProps<{
@@ -30,6 +34,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   "activate-tab": [];
+  "toggle-zen-mode": [];
+  "locate-tab": [tab: QueryTab];
   "activate-driver-store": [];
   "close-driver-store": [];
   "activate-settings-page": [];
@@ -47,7 +53,7 @@ const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 const { toast } = useToast();
 const tabDrag = useTabDrag((draggedId, targetId, position) => {
-  queryStore.reorderTab(draggedId, targetId, position);
+  return queryStore.reorderTab(draggedId, targetId, position);
 });
 const editingTabId = ref<string | null>(null);
 const editingTitle = ref("");
@@ -184,6 +190,36 @@ function closeOtherRegularTabsFromTab(tab: QueryTab) {
   closeSpecialRegularSurfaces();
 }
 
+function tabsToRightInGroup(tab: QueryTab) {
+  const groupedTabs = tab.pinned ? fixedTabs.value : regularTabs.value;
+  const targetIndex = groupedTabs.findIndex((item) => item.id === tab.id);
+  return targetIndex < 0 ? [] : groupedTabs.slice(targetIndex + 1);
+}
+
+function hasTabsToRight(tab: QueryTab) {
+  return tabsToRightInGroup(tab).length > 0 || (!tab.pinned && (!!props.settingsPageOpen || !!props.driverStoreOpen));
+}
+
+function closeTabsToRightFromTab(tab: QueryTab) {
+  const shouldActivateTarget = !tab.pinned && (!!props.settingsPageActive || !!props.driverStoreActive);
+  queryStore.closeRightTabs(tab.id, () => {
+    if (tab.pinned) return;
+    closeSpecialRegularSurfaces();
+    if (shouldActivateTarget) activateTab(tab.id);
+  });
+}
+
+function hasSpecialRegularSurfaceToRight(surface: SpecialRegularSurface) {
+  return surface === "settings" && !!props.driverStoreOpen;
+}
+
+function closeSpecialRegularSurfacesToRight(surface: SpecialRegularSurface) {
+  if (surface !== "settings" || !props.driverStoreOpen) return;
+  const shouldActivateSettings = !!props.driverStoreActive;
+  emit("close-driver-store");
+  if (shouldActivateSettings) emit("activate-settings-page");
+}
+
 function closeAllRegularSurfaces() {
   queryStore.closeRegularTabs();
   closeSpecialRegularSurfaces();
@@ -235,6 +271,12 @@ function getSpecialRegularTabMenuItems(surface: SpecialRegularSurface): ContextM
       shortcut: settingsStore.editorSettings.shortcuts.closeOtherTabs,
     },
     {
+      label: t("contextMenu.closeRightTabs"),
+      action: () => closeSpecialRegularSurfacesToRight(surface),
+      disabled: !hasSpecialRegularSurfaceToRight(surface),
+      icon: X,
+    },
+    {
       label: closeAllLabel,
       action: closeAllRegularSurfaces,
       variant: "destructive" as const,
@@ -281,6 +323,12 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
       },
       icon: Copy,
     },
+    {
+      label: t("sidebar.locateActiveTab"),
+      action: () => emit("locate-tab", tab),
+      icon: Crosshair,
+      visible: !!activeTabSidebarTarget(tab),
+    },
     { label: "", separator: true },
     {
       label: tab.pinned ? t("contextMenu.unfixTab") : t("contextMenu.fixTab"),
@@ -296,6 +344,12 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
       disabled: closeOtherDisabled,
       icon: X,
       shortcut: settingsStore.editorSettings.shortcuts.closeOtherTabs,
+    },
+    {
+      label: t("contextMenu.closeRightTabs"),
+      action: () => closeTabsToRightFromTab(tab),
+      disabled: !hasTabsToRight(tab),
+      icon: X,
     },
     {
       label: closeAllLabel,
@@ -436,20 +490,28 @@ function tabColorStyle(tab: QueryTab) {
 
   if (isClassic) {
     return {
-      backgroundColor: hexToRgba(color, isActive ? 0.16 : 0.07),
+      "--app-tab-background": hexToRgba(color, isActive ? 0.16 : 0.07),
+      "--app-tab-hover-background": hexToRgba(color, 0.14),
       boxShadow: isActive ? `inset 0 -2px 0 ${color}` : undefined,
     };
   }
 
   return {
-    backgroundColor: hexToRgba(color, isActive ? 0.16 : 0.09),
+    "--app-tab-background": hexToRgba(color, isActive ? 0.16 : 0.09),
+    "--app-tab-hover-background": hexToRgba(color, 0.16),
     borderColor: isActive ? hexToRgba(color, 0.72) : hexToRgba(color, 0.18),
   };
 }
 
+function specialTabActiveStyle(active: boolean | undefined): CSSProperties | undefined {
+  if (!active) return undefined;
+  return isClassicLayout.value ? { boxShadow: "inset 0 -2px 0 var(--ring)" } : { borderColor: "var(--ring)" };
+}
+
 function tabIconClass(tab: QueryTab) {
+  if (tab.externalSqlFileMissing) return "text-amber-600 dark:text-amber-400";
   if (tab.mode === "mq") return "";
-  if (tab.mode === "objects") return "text-amber-500 dark:text-amber-400";
+  if (tab.mode === "databases" || tab.mode === "objects") return "text-amber-500 dark:text-amber-400";
   if (tab.mode === "data" || tab.mode === "mongo" || tab.mode === "vector" || tab.mode === "redis" || tab.mode === "hbase" || tab.mode === "structure") return "text-emerald-600 dark:text-emerald-400";
   return "text-blue-600 dark:text-blue-400";
 }
@@ -473,33 +535,67 @@ const showFixedTabScrollbar = computed(() => hasFixedTabOverflow.value && !isWra
 const showRegularTabOverflowControls = computed(() => regularTabs.value.length > 0 && hasTabOverflow.value && !isWrapLayout.value);
 const regularTabOverflowOpen = ref(false);
 const fixedTabOverflowOpen = ref(false);
+const tabSearchQuery = ref("");
+const filteredOpenTabs = computed(() => {
+  const query = tabSearchQuery.value.trim().toLocaleLowerCase();
+  if (!query) return queryStore.tabs;
+  return queryStore.tabs.filter((tab) => tabTitleText(tab).toLocaleLowerCase().includes(query) || tab.title.toLocaleLowerCase().includes(query));
+});
 const tabBarClass = computed(() => [isClassicLayout.value ? "bg-muted" : "border-b bg-background", hasFixedTabs.value ? "flex-col" : "", isClassicLayout.value && hasFixedTabs.value ? "border-b" : ""]);
 const regularTabRowClass = computed(() => [isClassicLayout.value ? "h-9 items-stretch" : "h-10 items-center px-2", isClassicLayout.value && !hasFixedTabs.value ? "border-b" : ""]);
 
+watch(regularTabOverflowOpen, (open) => {
+  tabSearchQuery.value = "";
+  if (open) nextTick(() => document.querySelector<HTMLInputElement>('[data-tab-search-input="regular"]')?.focus());
+});
+
+watch(fixedTabOverflowOpen, (open) => {
+  tabSearchQuery.value = "";
+  if (open) nextTick(() => document.querySelector<HTMLInputElement>('[data-tab-search-input="fixed"]')?.focus());
+});
+
 function tabMenuIcon(tab: QueryTab) {
+  if (tab.externalSqlFileMissing) return AlertTriangle;
   if (tab.mode === "data" || tab.mode === "mongo" || tab.mode === "redis" || tab.mode === "hbase") return Table2;
   if (tab.mode === "vector") return TableProperties;
-  if (tab.mode === "etcd" || tab.mode === "zookeeper") return KeyRound;
+  if (tab.mode === "etcd" || tab.mode === "zookeeper" || tab.mode === "consul") return KeyRound;
+  if (tab.mode === "consul-overview") return Gauge;
   if (tab.mode === "etcd-dashboard") return Gauge;
   if (tab.mode === "etcd-access-control") return ShieldCheck;
   if (tab.mode === "nacos") return Network;
+  if (tab.mode === "databases") return Database;
   if (tab.mode === "objects") return TableProperties;
   if (tab.mode === "structure") return PencilRuler;
   if (tab.mode === "dameng-jobs") return CalendarClock;
-  if (tab.mode === "processlist") return Activity;
+  if (tab.mode === "processlist" || tab.mode === "sqlserver-trace") return Activity;
   if (tab.mode === "mysql-dashboard" || tab.mode === "postgres-dashboard" || tab.mode === "nacos-dashboard") return Gauge;
+  if (tab.mode === "dolt-version-control") return GitBranch;
   return Code2;
 }
 
 function handleTabClick(tab: QueryTab) {
-  if (tabDrag.state.wasDragged) return;
+  if (tabDrag.state.suppressClick) return;
   activateTab(tab.id);
 }
 
-function handleTabMouseDown(event: MouseEvent, tabId: string) {
+function handleTabDoubleClick(tab: QueryTab, event: MouseEvent) {
+  event.stopPropagation();
+  if (tabDrag.state.suppressClick || (event.target instanceof Element && event.target.closest("button, input, [role='button']"))) return;
+  if (tab.mode === "data") {
+    if (tab.id !== queryStore.activeTabId) activateTab(tab.id);
+    emit("toggle-zen-mode");
+    return;
+  }
+  startRenameTab(tab);
+}
+
+function handleTabMouseDown(event: PointerEvent, tabId: string) {
   if (event.button === 0) {
     dispatchBeforeTabSwitch(tabId);
-    event.preventDefault();
+    // Don't preventDefault touch pointerdowns: that would cancel the tab
+    // strip's native horizontal scroll, which is how touch users browse an
+    // overflowing tab bar.
+    if (event.pointerType !== "touch") event.preventDefault();
   }
   tabDrag.startDrag(event, tabId);
 }
@@ -600,7 +696,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
               <Tooltip>
                 <TooltipTrigger as-child>
                   <div
-                    class="app-tab-pill group flex items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap select-none"
+                    class="app-tab-pill group flex cursor-default items-center gap-1 px-2 text-xs transition-colors whitespace-nowrap select-none"
                     :class="
                       isClassicLayout
                         ? [
@@ -613,28 +709,34 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                     :style="[tabColorStyle(tab), tabDropStyle(tab.id)]"
                     :data-active-tab="tab.id === queryStore.activeTabId && !driverStoreActive && !settingsPageActive"
                     @click="handleTabClick(tab)"
-                    @dblclick.stop="startRenameTab(tab)"
+                    @dblclick="handleTabDoubleClick(tab, $event)"
                     @mousedown.middle.prevent="queryStore.closeTab(tab.id)"
-                    @mousedown="handleTabMouseDown($event, tab.id)"
+                    @pointerdown="handleTabMouseDown($event, tab.id)"
                     @mouseenter="handleTabDragTarget($event, tab)"
                     @mousemove="handleTabDragTarget($event, tab)"
                     @mouseleave="tabDrag.clearTarget(tab.id)"
                   >
-                    <span class="shrink-0" :class="tabIconClass(tab)">
-                      <Table2 v-if="tab.mode === 'data' || tab.mode === 'mongo' || tab.mode === 'redis' || tab.mode === 'hbase'" class="h-3.5 w-3.5" />
-                      <DatabaseIcon v-else-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5" />
-                      <TableProperties v-else-if="tab.mode === 'vector'" class="h-3.5 w-3.5" />
-                      <KeyRound v-else-if="tab.mode === 'etcd' || tab.mode === 'zookeeper'" class="h-3.5 w-3.5" />
-                      <Gauge v-else-if="tab.mode === 'etcd-dashboard'" class="h-3.5 w-3.5" />
-                      <ShieldCheck v-else-if="tab.mode === 'etcd-access-control'" class="h-3.5 w-3.5" />
-                      <Network v-else-if="tab.mode === 'nacos'" class="h-3.5 w-3.5" />
-                      <TableProperties v-else-if="tab.mode === 'objects'" class="h-3.5 w-3.5" />
-                      <PencilRuler v-else-if="tab.mode === 'structure'" class="h-3.5 w-3.5" />
-                      <CalendarClock v-else-if="tab.mode === 'dameng-jobs'" class="h-3.5 w-3.5" />
-                      <Activity v-else-if="tab.mode === 'processlist'" class="h-3.5 w-3.5" />
-                      <Gauge v-else-if="tab.mode === 'mysql-dashboard' || tab.mode === 'postgres-dashboard' || tab.mode === 'nacos-dashboard'" class="h-3.5 w-3.5" />
-                      <Code2 v-else class="h-3.5 w-3.5" />
-                    </span>
+                    <TabExecutionStatus :tab="tab">
+                      <span class="shrink-0" :class="tabIconClass(tab)">
+                        <AlertTriangle v-if="tab.externalSqlFileMissing" class="h-3.5 w-3.5" />
+                        <Table2 v-else-if="tab.mode === 'data' || tab.mode === 'mongo' || tab.mode === 'redis' || tab.mode === 'hbase'" class="h-3.5 w-3.5" />
+                        <DatabaseIcon v-else-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5" />
+                        <TableProperties v-else-if="tab.mode === 'vector'" class="h-3.5 w-3.5" />
+                        <KeyRound v-else-if="tab.mode === 'etcd' || tab.mode === 'zookeeper' || tab.mode === 'consul'" class="h-3.5 w-3.5" />
+                        <Gauge v-else-if="tab.mode === 'consul-overview'" class="h-3.5 w-3.5" />
+                        <Gauge v-else-if="tab.mode === 'etcd-dashboard'" class="h-3.5 w-3.5" />
+                        <ShieldCheck v-else-if="tab.mode === 'etcd-access-control'" class="h-3.5 w-3.5" />
+                        <Network v-else-if="tab.mode === 'nacos'" class="h-3.5 w-3.5" />
+                        <Database v-else-if="tab.mode === 'databases'" class="h-3.5 w-3.5" />
+                        <TableProperties v-else-if="tab.mode === 'objects'" class="h-3.5 w-3.5" />
+                        <PencilRuler v-else-if="tab.mode === 'structure'" class="h-3.5 w-3.5" />
+                        <CalendarClock v-else-if="tab.mode === 'dameng-jobs'" class="h-3.5 w-3.5" />
+                        <Activity v-else-if="tab.mode === 'processlist' || tab.mode === 'sqlserver-trace'" class="h-3.5 w-3.5" />
+                        <Gauge v-else-if="tab.mode === 'mysql-dashboard' || tab.mode === 'postgres-dashboard' || tab.mode === 'nacos-dashboard'" class="h-3.5 w-3.5" />
+                        <GitBranch v-else-if="tab.mode === 'dolt-version-control'" class="h-3.5 w-3.5" />
+                        <Code2 v-else class="h-3.5 w-3.5" />
+                      </span>
+                    </TabExecutionStatus>
                     <input
                       v-if="editingTabId === tab.id"
                       v-model="editingTitle"
@@ -651,12 +753,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                       <span v-if="isDirtyTab(tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
                       <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(tab)">{{ tabTitleText(tab) }}</span>
                     </span>
-                    <Tooltip v-if="isConnectionReadonly(tab.connectionId)">
-                      <TooltipTrigger as-child>
-                        <Lock class="h-3 w-3 text-muted-foreground shrink-0" />
-                      </TooltipTrigger>
-                      <TooltipContent>{{ t("connection.readOnlyBadge") }}</TooltipContent>
-                    </Tooltip>
+                    <ReadOnlySessionControl :connection-id="tab.connectionId" compact />
                     <button class="rounded hover:bg-muted-foreground/20 p-0.5 shrink-0" @click.stop="queryStore.closeTab(tab.id)">
                       <X class="h-3 w-3" />
                     </button>
@@ -677,13 +774,13 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
             <div :class="isClassicLayout ? 'h-full' : ''" @contextmenu="onContextMenu">
               <div
                 data-settings-page-tab
-                class="app-tab-pill group flex min-w-36 items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap"
+                class="app-tab-pill group flex min-w-36 cursor-default items-center gap-1 px-2 text-xs transition-colors whitespace-nowrap"
                 :class="
                   isClassicLayout
                     ? ['h-full border-r border-border/80 dark:border-border/45 font-medium', settingsPageActive ? 'bg-background text-foreground' : 'text-foreground/70 hover:text-foreground/90']
                     : ['h-7 rounded-md border font-medium', settingsPageActive ? 'border-ring text-foreground' : 'border-border/60 text-foreground/70 hover:border-border hover:text-foreground/90']
                 "
-                :style="isClassicLayout && settingsPageActive ? { boxShadow: '0 1px 0 0 var(--color-background)' } : {}"
+                :style="specialTabActiveStyle(settingsPageActive)"
                 :data-active-tab="settingsPageActive"
                 @click="emit('activate-settings-page')"
                 @mousedown.middle.prevent="emit('close-settings-page')"
@@ -704,13 +801,13 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
             <div :class="isClassicLayout ? 'h-full' : ''" @contextmenu="onContextMenu">
               <div
                 data-driver-store-tab
-                class="app-tab-pill group flex min-w-38 items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap"
+                class="app-tab-pill group flex min-w-38 cursor-default items-center gap-1 px-2 text-xs transition-colors whitespace-nowrap"
                 :class="
                   isClassicLayout
                     ? ['h-full border-r border-border/80 dark:border-border/45 font-medium', driverStoreActive ? 'bg-background text-foreground' : 'text-foreground/70 hover:text-foreground/90']
                     : ['h-7 rounded-md border font-medium', driverStoreActive ? 'border-ring text-foreground' : 'border-border/60 text-foreground/70 hover:border-border hover:text-foreground/90']
                 "
-                :style="isClassicLayout && driverStoreActive ? { boxShadow: '0 1px 0 0 var(--color-background)' } : {}"
+                :style="specialTabActiveStyle(driverStoreActive)"
                 :data-active-tab="driverStoreActive"
                 @click="emit('activate-driver-store')"
                 @mousedown.middle.prevent="emit('close-driver-store')"
@@ -738,40 +835,49 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
               <ChevronDown class="h-4 w-4" />
             </button>
           </PopoverTrigger>
-          <PopoverContent align="end" class="w-auto min-w-56 max-w-80 max-h-[min(70vh,28rem)] gap-0 overflow-y-auto rounded-[6px] p-1" @click.stop @keydown.stop>
-            <CustomContextMenu v-for="tab in queryStore.tabs" :key="tab.id" :items="getTabMenuItems(tab)" v-slot="{ onContextMenu }">
-              <div
-                class="group flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-sm outline-hidden hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground"
-                :class="tab.id === queryStore.activeTabId && !driverStoreActive && !settingsPageActive ? 'bg-accent/70 text-accent-foreground' : ''"
-                :title="tabTitleLabel(tab)"
-                role="menuitem"
-                tabindex="0"
-                @click="activateTabFromOverflow(tab.id, 'regular')"
-                @contextmenu="onContextMenu"
-                @keydown="onOverflowItemKeydown($event, tab.id, 'regular')"
-              >
-                <DatabaseIcon v-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5 shrink-0" />
-                <component :is="tabMenuIcon(tab)" v-else :class="['h-3.5 w-3.5 shrink-0', tabIconClass(tab)]" />
-                <span class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
-                  <span v-if="isDirtyTab(tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
-                  <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(tab)">{{ tabTitleText(tab) }}</span>
-                </span>
-                <Lock v-if="isConnectionReadonly(tab.connectionId)" class="h-3 w-3 shrink-0 text-muted-foreground" />
-                <Pin v-if="tab.pinned" class="h-3 w-3 shrink-0 fill-current text-primary" />
-                <span class="w-5 shrink-0">
-                  <button
-                    type="button"
-                    class="inline-flex rounded p-1 text-muted-foreground opacity-70 hover:bg-muted-foreground/20 hover:text-foreground group-hover:opacity-100"
-                    :aria-label="t('contextMenu.closeTab')"
-                    :title="t('contextMenu.closeTab')"
-                    @click="closeTabFromOverflow(tab.id, $event)"
-                    @mousedown.stop
-                  >
-                    <X class="h-3 w-3" />
-                  </button>
-                </span>
-              </div>
-            </CustomContextMenu>
+          <PopoverContent align="end" class="w-auto min-w-56 max-w-80 gap-0 rounded-[6px] p-1" @click.stop @keydown.stop>
+            <div class="relative border-b px-1 pb-1">
+              <Search class="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Input data-tab-search-input="regular" v-model="tabSearchQuery" type="search" :placeholder="t('tabs.searchOpenTabs')" class="h-8 pl-7 text-sm" />
+            </div>
+            <div class="max-h-[min(70vh,28rem)] overflow-y-auto pt-1">
+              <CustomContextMenu v-for="tab in filteredOpenTabs" :key="tab.id" :items="getTabMenuItems(tab)" v-slot="{ onContextMenu }">
+                <div
+                  class="group flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-sm outline-hidden hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground"
+                  :class="tab.id === queryStore.activeTabId && !driverStoreActive && !settingsPageActive ? 'bg-accent/70 text-accent-foreground' : ''"
+                  :title="tabTitleLabel(tab)"
+                  role="menuitem"
+                  tabindex="0"
+                  @click="activateTabFromOverflow(tab.id, 'regular')"
+                  @contextmenu="onContextMenu"
+                  @keydown="onOverflowItemKeydown($event, tab.id, 'regular')"
+                >
+                  <TabExecutionStatus :tab="tab">
+                    <DatabaseIcon v-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5 shrink-0" />
+                    <component :is="tabMenuIcon(tab)" v-else :class="['h-3.5 w-3.5 shrink-0', tabIconClass(tab)]" />
+                  </TabExecutionStatus>
+                  <span class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
+                    <span v-if="isDirtyTab(tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
+                    <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(tab)">{{ tabTitleText(tab) }}</span>
+                  </span>
+                  <ReadOnlySessionControl :connection-id="tab.connectionId" compact />
+                  <Pin v-if="tab.pinned" class="h-3 w-3 shrink-0 fill-current text-primary" />
+                  <span class="w-5 shrink-0">
+                    <button
+                      type="button"
+                      class="inline-flex rounded p-1 text-muted-foreground opacity-70 hover:bg-muted-foreground/20 hover:text-foreground group-hover:opacity-100"
+                      :aria-label="t('contextMenu.closeTab')"
+                      :title="t('contextMenu.closeTab')"
+                      @click="closeTabFromOverflow(tab.id, $event)"
+                      @mousedown.stop
+                    >
+                      <X class="h-3 w-3" />
+                    </button>
+                  </span>
+                </div>
+              </CustomContextMenu>
+              <p v-if="filteredOpenTabs.length === 0" class="px-2 py-4 text-center text-sm text-muted-foreground">{{ t("tabs.noMatchingTabs") }}</p>
+            </div>
           </PopoverContent>
         </Popover>
       </div>
@@ -795,7 +901,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
               <Tooltip>
                 <TooltipTrigger as-child>
                   <div
-                    class="app-tab-pill group flex items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap select-none"
+                    class="app-tab-pill group flex cursor-default items-center gap-1 px-2 text-xs transition-colors whitespace-nowrap select-none"
                     :class="
                       isClassicLayout
                         ? [
@@ -808,28 +914,34 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                     :style="[tabColorStyle(tab), tabDropStyle(tab.id)]"
                     :data-active-tab="tab.id === queryStore.activeTabId && !driverStoreActive && !settingsPageActive"
                     @click="handleTabClick(tab)"
-                    @dblclick.stop="startRenameTab(tab)"
+                    @dblclick="handleTabDoubleClick(tab, $event)"
                     @mousedown.middle.prevent="queryStore.closeTab(tab.id)"
-                    @mousedown="handleTabMouseDown($event, tab.id)"
+                    @pointerdown="handleTabMouseDown($event, tab.id)"
                     @mouseenter="handleTabDragTarget($event, tab)"
                     @mousemove="handleTabDragTarget($event, tab)"
                     @mouseleave="tabDrag.clearTarget(tab.id)"
                   >
-                    <span class="shrink-0" :class="tabIconClass(tab)">
-                      <Table2 v-if="tab.mode === 'data' || tab.mode === 'mongo' || tab.mode === 'redis' || tab.mode === 'hbase'" class="h-3.5 w-3.5" />
-                      <DatabaseIcon v-else-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5" />
-                      <TableProperties v-else-if="tab.mode === 'vector'" class="h-3.5 w-3.5" />
-                      <KeyRound v-else-if="tab.mode === 'etcd' || tab.mode === 'zookeeper'" class="h-3.5 w-3.5" />
-                      <Gauge v-else-if="tab.mode === 'etcd-dashboard'" class="h-3.5 w-3.5" />
-                      <ShieldCheck v-else-if="tab.mode === 'etcd-access-control'" class="h-3.5 w-3.5" />
-                      <Network v-else-if="tab.mode === 'nacos'" class="h-3.5 w-3.5" />
-                      <TableProperties v-else-if="tab.mode === 'objects'" class="h-3.5 w-3.5" />
-                      <PencilRuler v-else-if="tab.mode === 'structure'" class="h-3.5 w-3.5" />
-                      <CalendarClock v-else-if="tab.mode === 'dameng-jobs'" class="h-3.5 w-3.5" />
-                      <Activity v-else-if="tab.mode === 'processlist'" class="h-3.5 w-3.5" />
-                      <Gauge v-else-if="tab.mode === 'mysql-dashboard' || tab.mode === 'postgres-dashboard' || tab.mode === 'nacos-dashboard'" class="h-3.5 w-3.5" />
-                      <Code2 v-else class="h-3.5 w-3.5" />
-                    </span>
+                    <TabExecutionStatus :tab="tab">
+                      <span class="shrink-0" :class="tabIconClass(tab)">
+                        <AlertTriangle v-if="tab.externalSqlFileMissing" class="h-3.5 w-3.5" />
+                        <Table2 v-else-if="tab.mode === 'data' || tab.mode === 'mongo' || tab.mode === 'redis' || tab.mode === 'hbase'" class="h-3.5 w-3.5" />
+                        <DatabaseIcon v-else-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5" />
+                        <TableProperties v-else-if="tab.mode === 'vector'" class="h-3.5 w-3.5" />
+                        <KeyRound v-else-if="tab.mode === 'etcd' || tab.mode === 'zookeeper' || tab.mode === 'consul'" class="h-3.5 w-3.5" />
+                        <Gauge v-else-if="tab.mode === 'consul-overview'" class="h-3.5 w-3.5" />
+                        <Gauge v-else-if="tab.mode === 'etcd-dashboard'" class="h-3.5 w-3.5" />
+                        <ShieldCheck v-else-if="tab.mode === 'etcd-access-control'" class="h-3.5 w-3.5" />
+                        <Network v-else-if="tab.mode === 'nacos'" class="h-3.5 w-3.5" />
+                        <Database v-else-if="tab.mode === 'databases'" class="h-3.5 w-3.5" />
+                        <TableProperties v-else-if="tab.mode === 'objects'" class="h-3.5 w-3.5" />
+                        <PencilRuler v-else-if="tab.mode === 'structure'" class="h-3.5 w-3.5" />
+                        <CalendarClock v-else-if="tab.mode === 'dameng-jobs'" class="h-3.5 w-3.5" />
+                        <Activity v-else-if="tab.mode === 'processlist' || tab.mode === 'sqlserver-trace'" class="h-3.5 w-3.5" />
+                        <Gauge v-else-if="tab.mode === 'mysql-dashboard' || tab.mode === 'postgres-dashboard' || tab.mode === 'nacos-dashboard'" class="h-3.5 w-3.5" />
+                        <GitBranch v-else-if="tab.mode === 'dolt-version-control'" class="h-3.5 w-3.5" />
+                        <Code2 v-else class="h-3.5 w-3.5" />
+                      </span>
+                    </TabExecutionStatus>
                     <input
                       v-if="editingTabId === tab.id"
                       v-model="editingTitle"
@@ -846,12 +958,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                       <span v-if="isDirtyTab(tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
                       <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(tab)">{{ tabTitleText(tab) }}</span>
                     </span>
-                    <Tooltip v-if="isConnectionReadonly(tab.connectionId)">
-                      <TooltipTrigger as-child>
-                        <Lock class="h-3 w-3 text-muted-foreground shrink-0" />
-                      </TooltipTrigger>
-                      <TooltipContent>{{ t("connection.readOnlyBadge") }}</TooltipContent>
-                    </Tooltip>
+                    <ReadOnlySessionControl :connection-id="tab.connectionId" compact />
                     <button class="rounded p-0.5 text-primary hover:bg-muted-foreground/20 shrink-0" :aria-label="t('contextMenu.unfixTab')" :title="t('contextMenu.unfixTab')" @click.stop="queryStore.togglePinnedTab(tab.id)">
                       <Pin class="h-3 w-3 fill-current" aria-hidden="true" />
                     </button>
@@ -875,44 +982,53 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
       <div v-if="showFixedTabScrollbar" class="relative z-30 flex shrink-0 items-center">
         <Popover v-model:open="fixedTabOverflowOpen">
           <PopoverTrigger as-child>
-            <button type="button" :class="['inline-flex shrink-0 items-center justify-center', tabOverflowControlClass].join(' ')" :aria-label="t('tabs.fixedTabs')" :title="t('tabs.fixedTabs')">
+            <button type="button" :class="['inline-flex shrink-0 items-center justify-center', tabOverflowControlClass].join(' ')" :aria-label="t('tabs.openTabs')" :title="t('tabs.openTabs')">
               <ChevronDown class="h-4 w-4" />
             </button>
           </PopoverTrigger>
-          <PopoverContent align="end" class="w-auto min-w-56 max-w-80 max-h-[min(70vh,28rem)] gap-0 overflow-y-auto rounded-[6px] p-1" @click.stop @keydown.stop>
-            <CustomContextMenu v-for="tab in fixedTabs" :key="tab.id" :items="getTabMenuItems(tab)" v-slot="{ onContextMenu }">
-              <div
-                class="group flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-sm outline-hidden hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground"
-                :class="tab.id === queryStore.activeTabId && !driverStoreActive && !settingsPageActive ? 'bg-accent/70 text-accent-foreground' : ''"
-                :title="tabTitleLabel(tab)"
-                role="menuitem"
-                tabindex="0"
-                @click="activateTabFromOverflow(tab.id, 'fixed')"
-                @contextmenu="onContextMenu"
-                @keydown="onOverflowItemKeydown($event, tab.id, 'fixed')"
-              >
-                <DatabaseIcon v-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5 shrink-0" />
-                <component :is="tabMenuIcon(tab)" v-else :class="['h-3.5 w-3.5 shrink-0', tabIconClass(tab)]" />
-                <span class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
-                  <span v-if="isDirtyTab(tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
-                  <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(tab)">{{ tabTitleText(tab) }}</span>
-                </span>
-                <Lock v-if="isConnectionReadonly(tab.connectionId)" class="h-3 w-3 shrink-0 text-muted-foreground" />
-                <Pin class="h-3 w-3 shrink-0 fill-current text-primary" />
-                <span class="w-5 shrink-0">
-                  <button
-                    type="button"
-                    class="inline-flex rounded p-1 text-muted-foreground opacity-70 hover:bg-muted-foreground/20 hover:text-foreground group-hover:opacity-100"
-                    :aria-label="t('contextMenu.closeTab')"
-                    :title="t('contextMenu.closeTab')"
-                    @click="closeTabFromOverflow(tab.id, $event)"
-                    @mousedown.stop
-                  >
-                    <X class="h-3 w-3" />
-                  </button>
-                </span>
-              </div>
-            </CustomContextMenu>
+          <PopoverContent align="end" class="w-auto min-w-56 max-w-80 gap-0 rounded-[6px] p-1" @click.stop @keydown.stop>
+            <div class="relative border-b px-1 pb-1">
+              <Search class="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Input data-tab-search-input="fixed" v-model="tabSearchQuery" type="search" :placeholder="t('tabs.searchOpenTabs')" class="h-8 pl-7 text-sm" />
+            </div>
+            <div class="max-h-[min(70vh,28rem)] overflow-y-auto pt-1">
+              <CustomContextMenu v-for="tab in filteredOpenTabs" :key="tab.id" :items="getTabMenuItems(tab)" v-slot="{ onContextMenu }">
+                <div
+                  class="group flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-sm outline-hidden hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground"
+                  :class="tab.id === queryStore.activeTabId && !driverStoreActive && !settingsPageActive ? 'bg-accent/70 text-accent-foreground' : ''"
+                  :title="tabTitleLabel(tab)"
+                  role="menuitem"
+                  tabindex="0"
+                  @click="activateTabFromOverflow(tab.id, 'fixed')"
+                  @contextmenu="onContextMenu"
+                  @keydown="onOverflowItemKeydown($event, tab.id, 'fixed')"
+                >
+                  <TabExecutionStatus :tab="tab">
+                    <DatabaseIcon v-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5 shrink-0" />
+                    <component :is="tabMenuIcon(tab)" v-else :class="['h-3.5 w-3.5 shrink-0', tabIconClass(tab)]" />
+                  </TabExecutionStatus>
+                  <span class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
+                    <span v-if="isDirtyTab(tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
+                    <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(tab)">{{ tabTitleText(tab) }}</span>
+                  </span>
+                  <ReadOnlySessionControl :connection-id="tab.connectionId" compact />
+                  <Pin v-if="tab.pinned" class="h-3 w-3 shrink-0 fill-current text-primary" />
+                  <span class="w-5 shrink-0">
+                    <button
+                      type="button"
+                      class="inline-flex rounded p-1 text-muted-foreground opacity-70 hover:bg-muted-foreground/20 hover:text-foreground group-hover:opacity-100"
+                      :aria-label="t('contextMenu.closeTab')"
+                      :title="t('contextMenu.closeTab')"
+                      @click="closeTabFromOverflow(tab.id, $event)"
+                      @mousedown.stop
+                    >
+                      <X class="h-3 w-3" />
+                    </button>
+                  </span>
+                </div>
+              </CustomContextMenu>
+              <p v-if="filteredOpenTabs.length === 0" class="px-2 py-4 text-center text-sm text-muted-foreground">{{ t("tabs.noMatchingTabs") }}</p>
+            </div>
           </PopoverContent>
         </Popover>
       </div>
@@ -935,7 +1051,8 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
         </DialogTitle>
       </DialogHeader>
       <!-- Grid items use min-content sizing by default; shrink and wrap long file paths before they can displace the footer actions. -->
-      <div class="min-w-0 space-y-2">
+      <!-- 限制最大高度并允许滚动，确保内容超长时底部操作按钮始终可见可点-->
+      <div class="max-h-120 min-h-0 min-w-0 overflow-y-auto space-y-2">
         <p class="wrap-anywhere text-sm text-muted-foreground">{{ closeConfirmMessage }}</p>
         <Popover v-if="showCloseConfirmBulkActions" :open="closeConfirmListOpen" @update:open="closeConfirmListOpen = $event">
           <PopoverTrigger as-child>
@@ -963,9 +1080,9 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
       </div>
       <DialogFooter class="min-w-0 sm:flex-wrap">
         <Button variant="outline" @click="handleCancelClose">{{ t("common.cancel") }}</Button>
-        <Button v-if="showCloseConfirmBulkActions" variant="secondary" @click="handleDiscardAllAndClose">{{ t("editor.discardAllChanges") }}</Button>
+        <Button v-if="showCloseConfirmBulkActions" variant="secondary" class="border-border" @click="handleDiscardAllAndClose">{{ t("editor.discardAllChanges") }}</Button>
         <Button v-if="showCloseConfirmBulkActions" @click="handleSaveAllAndClose">{{ t("editor.saveAllChanges") }}</Button>
-        <Button variant="secondary" @click="handleDiscardAndClose">{{ t("editor.discardChanges") }}</Button>
+        <Button variant="secondary" class="border-border" @click="handleDiscardAndClose">{{ t("editor.discardChanges") }}</Button>
         <Button @click="handleSaveAndClose">{{ t("savedSql.save") }}</Button>
       </DialogFooter>
     </DialogContent>
@@ -1010,6 +1127,14 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
 /* 经典布局下 h-full 在 height:auto 容器中失效，改为固定高度 */
 .app-tab-scroll.classic-wrap > div {
   height: 2rem;
+}
+
+.app-tab-pill {
+  background-color: var(--app-tab-background);
+}
+
+.app-tab-pill[data-active-tab="false"]:hover {
+  background-color: var(--app-tab-hover-background, color-mix(in oklch, var(--foreground) 8%, transparent));
 }
 
 .dirty-tab-marker {

@@ -5,6 +5,8 @@ import {
   formatRedisMemberDetail,
   formatRedisStringValue,
   getRedisMemberSelectionKey,
+  jsonToXmlText,
+  jsonToYamlText,
   normalizeRedisJsonDraft,
   preferredRedisValueFormat,
   redisClipboardSafeText,
@@ -227,7 +229,7 @@ describe("redisValuePresentation", () => {
         },
         { allowJsonText: true },
       ).availableFormats,
-    ).toEqual(["utf8", "ascii", "binary", "json", "hex", "base64"]);
+    ).toEqual(["utf8", "ascii", "binary", "json", "unicodejson", "yaml", "xml", "hex", "base64"]);
   });
 
   it("falls back to utf8 when a binary inspection view was stored for editable text", () => {
@@ -242,17 +244,29 @@ describe("redisValuePresentation", () => {
     expect(preferredRedisValueFormat(blob, "json", { allowJsonText: true })).toBe("utf8");
   });
 
-  it("adds a Java serialized format when the blob uses Java object serialization", () => {
+  it("keeps Java serialized payloads on the codec axis, not the view tabs", () => {
     const detail = formatRedisMemberDetail({
       raw_base64: "rO0ABXQACHNvbWV0ZXh0",
       encoding: "binary",
     });
 
-    expect(detail.availableFormats).toEqual(["javaserialize", "binary", "hex", "base64"]);
-    expect(detail.defaultFormat).toBe("javaserialize");
+    expect(detail.availableFormats).toEqual(["hex", "binary", "base64"]);
+    expect(detail.defaultFormat).toBe("hex");
+    expect(detail.defaultCodec).toBe("none");
+    expect(detail.availableCodecs).toContain("javaserialize");
     expect(detail.javaSerialized?.formattedText).toBe('"sometext"');
-    expect(canRenderRedisValueFormat(detail, "javaserialize")).toBe(true);
-    expect(canRenderRedisValueFormat(formatRedisMemberDetail("plain-text"), "javaserialize")).toBe(false);
+    expect(canRenderRedisValueFormat(detail, "json")).toBe(false);
+    expect(canRenderRedisValueFormat(formatRedisMemberDetail("plain-text"), "utf8")).toBe(true);
+  });
+
+  it("keeps legacy Pickle payloads out of conservative auto-detection", () => {
+    const detail = formatRedisMemberDetail({
+      raw_base64: "KGRwMApWc3RhdHVzCnAxClZTVUNDRVNTCnAyCnNWcmVzdWx0CnAzCihscDQKSTEKYVZoZWxsbwpwNQphTmFJMDEKYUkwMAphcy4=",
+      encoding: "binary",
+    });
+
+    expect(detail.pickle).toBeUndefined();
+    expect(detail.defaultCodec).toBe("none");
   });
 
   it("keeps self-referential Java maps representable via refs", () => {
@@ -284,5 +298,34 @@ describe("redisValuePresentation", () => {
         encoding: "binary",
       }),
     ).toBe("\\xac\\xed\\x00\\x05");
+  });
+
+  it("renders JSON values as YAML", () => {
+    expect(
+      jsonToYamlText({
+        id: 1,
+        name: "Ada",
+        tags: ["redis", "db"],
+        meta: { host: "localhost", port: 6379 },
+        empty: {},
+        items: [],
+      }),
+    ).toBe("id: 1\nname: Ada\ntags:\n  - redis\n  - db\nmeta:\n  host: localhost\n  port: 6379\nempty: {}\nitems: []\n");
+  });
+
+  it("quotes YAML scalars that would otherwise change type", () => {
+    expect(jsonToYamlText({ port: "6379", flag: "true", label: "hello world", none: "null" })).toBe('port: "6379"\nflag: "true"\nlabel: "hello world"\nnone: "null"\n');
+  });
+
+  it("renders JSON values as XML", () => {
+    expect(jsonToXmlText({ id: 1, name: "Ada", tags: ["redis", "db"] })).toBe('<?xml version="1.0" encoding="UTF-8"?>\n<root>\n  <id>1</id>\n  <name>Ada</name>\n  <tags>redis</tags>\n  <tags>db</tags>\n</root>');
+  });
+
+  it("escapes XML text and sanitizes unsafe tag names", () => {
+    expect(jsonToXmlText({ query: 'a < "b" & c', "1st": "entry" })).toBe('<?xml version="1.0" encoding="UTF-8"?>\n<root>\n  <query>a &lt; &quot;b&quot; &amp; c</query>\n  <_1st>entry</_1st>\n</root>');
+  });
+
+  it("uses a valid fallback tag for empty JSON keys", () => {
+    expect(jsonToXmlText({ "": 1 })).toBe('<?xml version="1.0" encoding="UTF-8"?>\n<root>\n  <item>1</item>\n</root>');
   });
 });

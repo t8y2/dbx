@@ -1,0 +1,32 @@
+schemaVersion: 1
+order: 570
+dbType: cassandra
+rustVariant: Cassandra
+label: Apache Cassandra
+runtimeMode: agent
+mcpMode: bridge
+agentKey: cassandra
+driverStoreVisible: true
+driverStoreOrder: 27
+singleConnectionPool: false
+metadataConnectionScoped: false
+skipTcpProbe: true
+defaultPort: 9042
+supportLevel: understand
+capabilities:
+  queryExecution: true
+  metadataBrowse: true
+  objectBrowser: true
+  objectSource: false
+  schemaSearch: true
+  diagram: false
+  tableDataEdit: false
+  tableStructureEdit: false
+  tableImport: false
+  dataTransfer: false
+  sqlFileExecution: true
+  databaseCreate: false
+  fieldLineage: false
+  sqlExplain: false
+  userAdmin: false
+  driverManagement: true

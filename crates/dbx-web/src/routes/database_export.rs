@@ -9,12 +9,15 @@ use axum::http::{header, StatusCode};
 use axum::response::sse::{Event, Sse};
 use axum::response::Response;
 use axum::Json;
-use dbx_core::database_export::{self, DatabaseExportRequest, ExportProgress, ExportStatus};
+use dbx_core::database_export::{
+    self, DatabaseExportOutputCompression, DatabaseExportRequest, ExportProgress, ExportStatus,
+};
 use futures::stream::Stream;
 use serde::Deserialize;
 
 use crate::error::AppError;
-use crate::state::WebState;
+use crate::routes::export_download::attachment_content_disposition;
+use crate::state::{WebExportFile, WebState};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -41,14 +44,19 @@ pub async fn start_database_export(
     // endpoint after the export completes.
     let tmp_dir = state.data_dir.join("tmp");
     std::fs::create_dir_all(&tmp_dir).map_err(|e| AppError::from(e.to_string()))?;
-    let tmp_file = tmp_dir.join(format!("database_export_{export_id}.sql"));
+    let extension = if req.output_compression == DatabaseExportOutputCompression::Gzip { "sql.gz" } else { "sql" };
+    let tmp_file = tmp_dir.join(format!("database_export_{export_id}.{extension}"));
     let tmp_file_path = tmp_file.to_string_lossy().to_string();
     req.file_path = tmp_file_path.clone();
 
-    let download_filename = format!("{}.sql", sanitize_export_filename(&req.database));
+    let download_filename = format!("{}.{}", sanitize_export_filename(&req.database), extension);
+    let content_format = extension.to_string();
 
     // Store export file mapping for download
-    state.export_files.write().await.insert(export_id.clone(), (tmp_file_path.clone(), download_filename));
+    state.export_files.write().await.insert(
+        export_id.clone(),
+        WebExportFile { file_path: tmp_file_path.clone(), download_filename, format: content_format },
+    );
 
     let (tx, _) = tokio::sync::broadcast::channel::<String>(256);
     state.sse_channels.write().await.insert(export_id.clone(), tx.clone());
@@ -147,21 +155,23 @@ pub async fn database_export_download(
     State(state): State<Arc<WebState>>,
     Path(export_id): Path<String>,
 ) -> Result<Response, AppError> {
-    let (file_path, download_filename) = state
+    let export_file = state
         .export_files
         .write()
         .await
         .remove(&export_id)
         .ok_or_else(|| AppError::from("Export file not found".to_string()))?;
 
-    let data = tokio::fs::read(&file_path).await.map_err(|e| AppError::from(e.to_string()))?;
+    let data = tokio::fs::read(&export_file.file_path).await.map_err(|e| AppError::from(e.to_string()))?;
     // Clean up temp file
-    let _ = tokio::fs::remove_file(&file_path).await;
+    let _ = tokio::fs::remove_file(&export_file.file_path).await;
 
+    let content_type =
+        if export_file.format == "sql.gz" { "application/gzip" } else { "application/sql; charset=utf-8" };
     Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/sql; charset=utf-8")
-        .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"{download_filename}\""))
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_DISPOSITION, attachment_content_disposition(&export_file.download_filename))
         .body(Body::from(data))
         .map_err(|e| AppError::from(e.to_string()))
 }

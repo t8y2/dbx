@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, State};
 
 use crate::commands::connection::AppState;
@@ -23,6 +23,13 @@ struct ExecuteMultiProgress {
     error: Option<BackendError>,
 }
 
+#[derive(Debug, serde::Serialize)]
+#[serde(untagged)]
+pub enum ManualTransactionCommandError {
+    Structured(Box<BackendError>),
+    Legacy(String),
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_query(
@@ -36,6 +43,7 @@ pub async fn execute_query(
     max_rows: Option<usize>,
     fetch_size: Option<usize>,
     page_size: Option<usize>,
+    row_offset: Option<usize>,
     result_session_id: Option<String>,
     client_session_id: Option<String>,
     timeout_secs: Option<u64>,
@@ -50,7 +58,7 @@ pub async fn execute_query(
     });
     let cancel_token = registered_query.as_ref().map(|query| query.token());
 
-    dbx_core::query::execute_sql_statement_with_options_typed(
+    let result = dbx_core::query::execute_sql_statement_with_options_typed(
         &state,
         &connection_id,
         &database,
@@ -61,6 +69,7 @@ pub async fn execute_query(
             max_rows,
             fetch_size,
             page_size,
+            row_offset,
             catalog,
             result_session_id,
             client_session_id,
@@ -70,8 +79,94 @@ pub async fn execute_query(
             ..Default::default()
         },
     )
-    .await
-    .map_err(dbx_core::query::QueryExecutionError::into_backend_error)
+    .await;
+
+    if let Some(registered_query) = registered_query {
+        registered_query.finish(&result);
+    }
+
+    result.map_err(dbx_core::query::QueryExecutionError::into_backend_error)
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_conditional_update(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    sql: String,
+    schema: Option<String>,
+    catalog: Option<String>,
+    execution_id: Option<String>,
+    max_rows: Option<usize>,
+    fetch_size: Option<usize>,
+    page_size: Option<usize>,
+    row_offset: Option<usize>,
+    result_session_id: Option<String>,
+    client_session_id: Option<String>,
+    timeout_secs: Option<u64>,
+    execution_mode: Option<dbx_core::query::QueryExecutionMode>,
+) -> Result<db::QueryResult, BackendError> {
+    let execution_id =
+        execution_id.filter(|id| !id.trim().is_empty()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let registered = state.running_queries.register_task_for_terminal_confirmation(
+        execution_id.clone(),
+        RunningTaskMetadata::query(connection_id.clone(), database.clone(), client_session_id.clone()),
+    );
+    let cancel_token = registered.token();
+    let response_timeout = dbx_core::query::query_timeout_duration(timeout_secs);
+    let app_state = state.inner().clone();
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+
+    tokio::spawn(async move {
+        let result = dbx_core::query::execute_sql_statement_with_options_typed(
+            &app_state,
+            &connection_id,
+            &database,
+            &sql,
+            schema.as_deref(),
+            Some(cancel_token),
+            dbx_core::query::QueryExecutionOptions {
+                max_rows,
+                fetch_size,
+                page_size,
+                row_offset,
+                catalog,
+                result_session_id,
+                client_session_id,
+                timeout_secs: Some(0),
+                await_cancel_completion: true,
+                execution_id: Some(execution_id),
+                execution_mode: execution_mode.unwrap_or_default(),
+                ..Default::default()
+            },
+        )
+        .await;
+        let _ = result_tx.send(result);
+        drop(registered);
+    });
+
+    let result = match response_timeout {
+        Some(timeout) => match tokio::time::timeout(timeout, result_rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => {
+                return Err(BackendError::from_sql_detail("Conditional update execution task stopped unexpectedly"));
+            }
+            Err(_) => {
+                return Err(BackendError::from_timeout_detail(&format!(
+                    "Query timed out after {} seconds",
+                    timeout.as_secs().max(1)
+                )));
+            }
+        },
+        None => match result_rx.await {
+            Ok(result) => result,
+            Err(_) => {
+                return Err(BackendError::from_sql_detail("Conditional update execution task stopped unexpectedly"));
+            }
+        },
+    };
+    result.map_err(dbx_core::query::QueryExecutionError::into_backend_error)
 }
 
 #[tauri::command]
@@ -88,6 +183,10 @@ pub async fn execute_multi(
     max_rows: Option<usize>,
     fetch_size: Option<usize>,
     page_size: Option<usize>,
+    row_offset: Option<usize>,
+    max_result_bytes: Option<usize>,
+    result_key_columns: Option<Vec<String>>,
+    table_data_preview: Option<bool>,
     result_session_id: Option<String>,
     client_session_id: Option<String>,
     timeout_secs: Option<u64>,
@@ -144,10 +243,15 @@ pub async fn execute_multi(
             max_rows,
             fetch_size,
             page_size,
+            row_offset,
+            max_result_bytes,
+            result_key_columns: result_key_columns.unwrap_or_default(),
+            table_data_preview: table_data_preview.unwrap_or(false),
             catalog,
             result_session_id,
             client_session_id,
             timeout_secs,
+            await_cancel_completion: false,
             execution_id,
             use_transaction,
             continue_on_error: continue_on_error.unwrap_or(false),
@@ -172,12 +276,25 @@ pub async fn execute_multi(
             error
         ),
     }
+
+    if let Some(registered_query) = registered_query {
+        registered_query.finish(&result);
+    }
+
     result.map_err(dbx_core::query::QueryExecutionError::into_backend_error)
 }
 
 #[tauri::command]
 pub async fn cancel_query(state: State<'_, Arc<AppState>>, execution_id: String) -> Result<bool, String> {
     Ok(state.running_queries.cancel(&execution_id))
+}
+
+#[tauri::command]
+pub async fn cancel_conditional_update(
+    state: State<'_, Arc<AppState>>,
+    execution_id: String,
+) -> Result<dbx_core::query_cancel::CancellationWaitResult, String> {
+    Ok(state.running_queries.cancel_and_wait(&execution_id, Duration::from_secs(10)).await)
 }
 
 #[tauri::command]
@@ -291,8 +408,17 @@ pub async fn execute_script_with_2pc_core(
     database: String,
     statements: Vec<String>,
     schema: Option<String>,
+    destructive_confirmed: bool,
 ) -> dbx_core::query::SchemaDiffDeployResult {
-    dbx_core::query::execute_schema_diff_deploy(&app, &connection_id, &database, &statements, schema.as_deref()).await
+    dbx_core::query::execute_schema_diff_deploy(
+        &app,
+        &connection_id,
+        &database,
+        &statements,
+        schema.as_deref(),
+        destructive_confirmed,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -302,9 +428,18 @@ pub async fn execute_script_with_2pc(
     database: String,
     statements: Vec<String>,
     schema: Option<String>,
+    destructive_confirmed: Option<bool>,
 ) -> Result<dbx_core::query::SchemaDiffDeployResult, String> {
     let app: Arc<AppState> = (*state).clone();
-    Ok(execute_script_with_2pc_core(app, connection_id, database, statements, schema).await)
+    Ok(execute_script_with_2pc_core(
+        app,
+        connection_id,
+        database,
+        statements,
+        schema,
+        destructive_confirmed.unwrap_or(false),
+    )
+    .await)
 }
 
 #[tauri::command]
@@ -327,16 +462,35 @@ pub async fn execute_in_manual_transaction(
     database: String,
     schema: Option<String>,
     max_rows: Option<usize>,
-) -> Result<Vec<db::QueryResult>, String> {
-    dbx_core::query::execute_in_manual_transaction(
+    table_data_preview: Option<bool>,
+    page_size: Option<usize>,
+    result_session_id: Option<String>,
+    classification_sql: Option<String>,
+) -> Result<Vec<dbx_core::query::ExecuteMultiResult>, ManualTransactionCommandError> {
+    dbx_core::query::execute_in_manual_transaction_with_options(
         &state,
         &txn_session_id,
         &sql,
         &database,
         schema.as_deref(),
-        max_rows,
+        dbx_core::query::ManualTransactionExecutionOptions {
+            max_rows,
+            table_data_preview: table_data_preview.unwrap_or(false),
+            page_size,
+            result_session_id,
+            classification_sql,
+        },
     )
     .await
+    .map_err(|error| {
+        if dbx_core::query::is_manual_transaction_session_expired_error(&error) {
+            ManualTransactionCommandError::Structured(Box::new(BackendError::from_manual_transaction_session_expired(
+                dbx_core::query::MANUAL_TRANSACTION_IDLE_TIMEOUT_SECS,
+            )))
+        } else {
+            ManualTransactionCommandError::Legacy(error)
+        }
+    })
 }
 
 #[tauri::command]
@@ -403,8 +557,14 @@ pub fn build_dropped_file_preview_sql(
 }
 
 #[tauri::command]
-pub fn build_table_select_sql(options: dbx_core::sql_dialect::TableDataSelectSqlOptions) -> Result<String, String> {
-    Ok(dbx_core::sql_dialect::build_table_data_select_sql(options))
+pub fn build_table_select_sql(
+    options: dbx_core::sql_dialect::TableDataSelectSqlOptions,
+    include_database_name: Option<bool>,
+) -> Result<String, String> {
+    Ok(dbx_core::sql_dialect::build_table_data_select_sql_with_database(
+        options,
+        include_database_name.unwrap_or(false),
+    ))
 }
 
 #[tauri::command]
@@ -424,6 +584,24 @@ pub fn build_search_result_where(
 #[tauri::command]
 pub fn build_rename_object_sql(options: dbx_core::db_admin_sql::RenameObjectSqlOptions) -> Result<String, String> {
     dbx_core::db_admin_sql::build_rename_object_sql(options)
+}
+
+#[tauri::command]
+pub fn build_rename_database_sql(
+    database_type: Option<dbx_core::models::connection::DatabaseType>,
+    old_name: String,
+    new_name: String,
+    terminate_connections: bool,
+) -> Result<String, String> {
+    dbx_core::db_admin_sql::build_rename_database_sql(database_type, &old_name, &new_name, terminate_connections)
+}
+
+#[tauri::command]
+pub fn build_rename_database_preflight_sql(
+    database_type: Option<dbx_core::models::connection::DatabaseType>,
+    database_name: String,
+) -> Result<String, String> {
+    dbx_core::db_admin_sql::build_rename_database_preflight_sql(database_type, &database_name)
 }
 
 #[tauri::command]
@@ -471,6 +649,18 @@ pub fn build_empty_table_sql(options: dbx_core::db_admin_sql::TableAdminSqlOptio
 #[tauri::command]
 pub fn build_truncate_table_sql(options: dbx_core::db_admin_sql::TableAdminSqlOptions) -> Result<String, String> {
     Ok(dbx_core::db_admin_sql::build_truncate_table_sql(options))
+}
+
+#[tauri::command]
+pub fn build_vacuum_table_sql(options: dbx_core::db_admin_sql::VacuumTableSqlOptions) -> Result<String, String> {
+    dbx_core::db_admin_sql::build_vacuum_table_sql(options)
+}
+
+#[tauri::command]
+pub fn build_mysql_auto_increment_sql(
+    options: dbx_core::db_admin_sql::MysqlAutoIncrementSqlOptions,
+) -> Result<String, String> {
+    dbx_core::db_admin_sql::build_mysql_auto_increment_sql(options)
 }
 
 #[tauri::command]
@@ -548,6 +738,13 @@ pub fn build_table_structure_change_sql(
 }
 
 #[tauri::command]
+pub fn build_table_owner_change_sql(
+    options: dbx_core::table_structure_sql::TableOwnerChangeSqlOptions,
+) -> Result<dbx_core::table_structure_sql::TableStructureSqlResult, String> {
+    Ok(dbx_core::table_structure_sql::build_table_owner_change_sql(options))
+}
+
+#[tauri::command]
 pub async fn preview_sqlite_table_structure_change(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
@@ -598,8 +795,9 @@ pub fn analyze_editable_query_editability(sql: String) -> Result<dbx_core::sql_e
 #[tauri::command]
 pub fn prepare_data_grid_save(
     options: dbx_core::data_grid_sql::DataGridSaveStatementOptions,
+    driver_profile: Option<String>,
 ) -> Result<dbx_core::data_grid_sql::DataGridSavePreparation, String> {
-    Ok(dbx_core::data_grid_sql::prepare_data_grid_save(options))
+    Ok(dbx_core::data_grid_sql::prepare_data_grid_save_for_driver_profile(options, driver_profile.as_deref()))
 }
 
 #[tauri::command]
@@ -662,6 +860,13 @@ pub fn build_data_grid_column_distinct_values_sql(
 #[tauri::command]
 pub fn build_data_grid_count_sql(options: dbx_core::data_grid_sql::DataGridCountSqlOptions) -> Result<String, String> {
     Ok(dbx_core::data_grid_sql::build_data_grid_count_sql(options))
+}
+
+#[tauri::command]
+pub fn build_data_grid_conditional_update_sql(
+    options: dbx_core::data_grid_sql::DataGridConditionalUpdateSqlOptions,
+) -> Result<Option<String>, String> {
+    Ok(dbx_core::data_grid_sql::build_data_grid_conditional_update_sql(options))
 }
 
 #[tauri::command]
@@ -767,6 +972,7 @@ mod tests {
             "testdb".to_string(),
             vec!["SELECT 1".to_string()],
             None,
+            false,
         )
         .await;
 
@@ -783,7 +989,8 @@ mod tests {
     async fn execute_script_with_2pc_empty_statements_succeeds() {
         let state = test_app_state().await;
         let result =
-            execute_script_with_2pc_core(state, "conn-empty".to_string(), "testdb".to_string(), vec![], None).await;
+            execute_script_with_2pc_core(state, "conn-empty".to_string(), "testdb".to_string(), vec![], None, false)
+                .await;
 
         assert_eq!(result.status, "committed");
         assert_eq!(result.statement_count, 0);
@@ -801,6 +1008,7 @@ mod tests {
             "testdb".to_string(),
             vec!["-- WARNING: incomplete\n-- manual only".to_string()],
             None,
+            false,
         )
         .await;
 
@@ -818,6 +1026,7 @@ mod tests {
             "testdb".to_string(),
             vec!["CREATE TABLE t1 (id INT)".to_string(), "CREATE TABLE t2 (id INT)".to_string()],
             None,
+            false,
         )
         .await;
 
@@ -825,5 +1034,64 @@ mod tests {
         assert_eq!(result.statement_count, 2);
         assert!(result.error.as_ref().is_some_and(|e| !e.is_empty()));
         assert_eq!(result.executed_count, 0);
+    }
+
+    #[tokio::test]
+    async fn execute_script_with_2pc_blocks_unconfirmed_destructive_sql() {
+        let state = test_app_state().await;
+        let result = execute_script_with_2pc_core(
+            state,
+            "missing-conn".to_string(),
+            "testdb".to_string(),
+            vec!["DROP INDEX idx_old ON users".to_string()],
+            None,
+            false,
+        )
+        .await;
+
+        assert_eq!(result.status, "rolled_back");
+        assert_eq!(result.executed_count, 0);
+        assert_eq!(result.metadata["blocked"], "destructive_confirmation_required");
+        assert_eq!(result.metadata["destructive_statement_count"], 1);
+    }
+
+    #[tokio::test]
+    async fn execute_script_with_2pc_allows_confirmed_destructive_sql_to_reach_execution() {
+        let state = test_app_state().await;
+        let result = execute_script_with_2pc_core(
+            state,
+            "missing-conn".to_string(),
+            "testdb".to_string(),
+            vec!["DROP INDEX idx_old ON users".to_string()],
+            None,
+            true,
+        )
+        .await;
+
+        assert_ne!(
+            result.metadata.get("blocked").and_then(|value| value.as_str()),
+            Some("destructive_confirmation_required")
+        );
+        assert!(result.error.as_ref().is_some_and(|error| !error.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn execute_script_with_2pc_does_not_block_drop_text_in_comments() {
+        let state = test_app_state().await;
+        let result = execute_script_with_2pc_core(
+            state,
+            "missing-conn".to_string(),
+            "testdb".to_string(),
+            vec!["-- DROP INDEX idx_fake\nSELECT 1".to_string()],
+            None,
+            false,
+        )
+        .await;
+
+        assert_ne!(
+            result.metadata.get("blocked").and_then(|value| value.as_str()),
+            Some("destructive_confirmation_required")
+        );
+        assert!(result.error.as_ref().is_some_and(|error| !error.is_empty()));
     }
 }

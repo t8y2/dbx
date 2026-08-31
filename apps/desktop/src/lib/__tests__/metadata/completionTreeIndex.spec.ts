@@ -41,6 +41,7 @@ describe("completionTreeIndex", () => {
                         connectionId: "conn",
                         database: "hive",
                         schema: "sales_analytics",
+                        comment: "Daily revenue summary",
                       },
                       {
                         id: "conn:hive:sales_analytics:__tables:daily_revenue_view",
@@ -70,7 +71,7 @@ describe("completionTreeIndex", () => {
 
     expect(completionSchemasFromTree(tree, "conn", "hive")).toEqual(["sales_analytics"]);
     const expected = [
-      { name: "daily_revenue", schema: "sales_analytics", type: "table" },
+      { name: "daily_revenue", schema: "sales_analytics", type: "table", detail: "→ Daily revenue summary" },
       { name: "daily_revenue_view", schema: "sales_analytics", type: "view" },
       { name: "daily_revenue_mv", schema: "sales_analytics", type: "materialized_view" },
     ];
@@ -99,5 +100,20 @@ describe("completionTreeIndex", () => {
 
     expect(completionTablesFromTree(tree, "doris", "sales")).toEqual([{ name: "orders", schema: undefined, type: "table" }]);
     expect(completionTablesFromTree(tree, "doris", "sales", undefined, "hive_catalog")).toEqual([{ name: "orders", catalog: "hive_catalog", schema: undefined, type: "table" }]);
+  });
+
+  it("preserves TDengine stable metadata from the sidebar tree", () => {
+    const tree: TreeNode[] = [
+      {
+        id: "tdengine-stable",
+        label: "test_tb",
+        type: "table",
+        tableType: "STABLE",
+        connectionId: "tdengine",
+        database: "issue_5685",
+      },
+    ];
+
+    expect(completionTablesFromTree(tree, "tdengine", "issue_5685")).toEqual([{ name: "test_tb", schema: undefined, type: "table", tableType: "STABLE" }]);
   });
 });

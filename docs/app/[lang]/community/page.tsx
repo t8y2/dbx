@@ -80,7 +80,7 @@ export default async function CommunityPage({ params }: { params: Promise<{ lang
   const t = i18n[l];
 
   return (
-    <main className="min-h-screen bg-[#0b1120] text-landing-ink">
+    <main className="min-h-screen bg-[#08080a] text-landing-ink">
       <LandingNav lang={l} active="community" />
 
       <div className="max-w-[860px] mx-auto px-6 pt-32 pb-4 max-[760px]:px-[18px] max-[760px]:pt-28">
@@ -93,7 +93,7 @@ export default async function CommunityPage({ params }: { params: Promise<{ lang
           {channels.map((ch) => {
             const meta = t[ch.id as keyof typeof t] as { name: string; desc: string };
             return (
-              <a key={ch.id} href={ch.href} target="_blank" rel="noopener noreferrer" className="group flex items-center gap-5 rounded-xl border border-landing-line bg-landing-panel px-6 py-5 transition-colors hover:border-[rgba(155,176,205,0.32)]">
+              <a key={ch.id} href={ch.href} target="_blank" rel="noopener noreferrer" className="group flex items-center gap-5 rounded-xl border border-landing-line bg-landing-panel px-6 py-5 transition-colors hover:border-[rgba(173,176,182,0.32)]">
                 <span className="grid place-items-center w-11 h-11 rounded-lg shrink-0" style={{ backgroundColor: `${ch.color}18`, color: ch.color }}>
                   {ch.icon}
                 </span>

@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { SidebarMongoIndexManagerDialog } from "./sidebarAsyncDialogs";
 
 const props = defineProps<{ controller: Record<string, any> }>();
 const emit = defineEmits<{ closed: [] }>();
@@ -22,9 +23,14 @@ const {
   moveToNewGroupName,
   confirmMoveToNewGroup,
   showDeleteGroupConfirm,
+  deleteConnectionsWithGroup,
+  connectionGroupDeleteConfirmMessage,
+  connectionGroupDeleteMenuLabel,
+  deletingConnectionGroups,
   confirmDeleteGroup,
   showRenameObjectDialog,
   renameObjectName,
+  renameObjectDialogTitle,
   renameObjectPreviewSql,
   renameObjectError,
   confirmRenameObject,
@@ -90,12 +96,20 @@ const {
   editNacosNamespaceDesc,
   editNacosNamespaceLoading,
   confirmEditNacosNamespace,
+  showDeleteNacosNamespaceConfirm,
+  deleteNacosNamespaceLoading,
+  confirmDeleteNacosNamespace,
   showRenameMongoCollectionDialog,
   renameMongoCollectionName,
   renameMongoCollectionError,
   renameMongoCollectionPreview,
   renameMongoCollectionLoading,
   confirmRenameMongoCollection,
+  showCloneMongoCollectionDialog,
+  cloneMongoCollectionName,
+  cloneMongoCollectionError,
+  cloneMongoCollectionLoading,
+  confirmCloneMongoCollection,
   showCreateMongoIndexDialog,
   mongoCreateIndexForm,
   mongoCreateIndexFieldOptions,
@@ -107,6 +121,7 @@ const {
   addMongoCreateIndexField,
   removeMongoCreateIndexField,
   confirmCreateMongoIndex,
+  showMongoIndexManagerDialog,
   showRedisDatabaseAliasDialog,
   redisDatabaseAliasInput,
   redisDatabaseAliasSaving,
@@ -152,6 +167,15 @@ function closeCreateDatabaseResult() {
   showCreateDatabasePreviewDialog.value = false;
 }
 
+function updateDeleteGroupDialogOpen(open: boolean) {
+  if (!open && deletingConnectionGroups.value) return;
+  showDeleteGroupConfirm.value = open;
+}
+
+function preventDeleteGroupDialogDismiss(event: Event) {
+  if (deletingConnectionGroups.value) event.preventDefault();
+}
+
 const mongoIndexCollectionName = computed(() => node.value.tableName || node.value.label);
 
 function mongoIndexTypeLabel(type: string): string {
@@ -175,8 +199,11 @@ watch(
     showEditDatabasePropertiesDialog,
     showCreateNacosNamespaceDialog,
     showEditNacosNamespaceDialog,
+    showDeleteNacosNamespaceConfirm,
     showRenameMongoCollectionDialog,
+    showCloneMongoCollectionDialog,
     showCreateMongoIndexDialog,
+    showMongoIndexManagerDialog,
     showRedisDatabaseAliasDialog,
     showCreateSchemaDialog,
     showEditSchemaCommentDialog,
@@ -223,17 +250,24 @@ watch(
     </DialogContent>
   </Dialog>
 
-  <Dialog v-model:open="showDeleteGroupConfirm">
-    <DialogContent class="sm:max-w-[400px]">
+  <Dialog :open="showDeleteGroupConfirm" @update:open="updateDeleteGroupDialogOpen">
+    <DialogContent class="sm:max-w-[400px]" :show-close-button="!deletingConnectionGroups" @escape-key-down="preventDeleteGroupDialogDismiss" @interact-outside="preventDeleteGroupDialogDismiss">
       <DialogHeader>
         <DialogTitle>{{ t("connectionGroup.deleteGroupConfirmTitle") }}</DialogTitle>
       </DialogHeader>
       <p class="text-sm text-muted-foreground">
-        {{ t("connectionGroup.deleteGroupConfirmMessage", { name: node.label }) }}
+        {{ connectionGroupDeleteConfirmMessage() }}
       </p>
+      <label class="flex items-start gap-2 rounded-md border border-border/70 px-3 py-2 text-sm" :class="deletingConnectionGroups ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'">
+        <input v-model="deleteConnectionsWithGroup" type="checkbox" class="mt-0.5 h-4 w-4 shrink-0 accent-primary" :disabled="deletingConnectionGroups" />
+        <span>{{ t("connectionGroup.deleteConnectionsWithGroup") }}</span>
+      </label>
       <DialogFooter>
-        <Button variant="outline" @click="showDeleteGroupConfirm = false">{{ t("dangerDialog.cancel") }}</Button>
-        <Button variant="destructive" @click="confirmDeleteGroup">{{ t("connectionGroup.deleteGroup") }}</Button>
+        <Button variant="outline" :disabled="deletingConnectionGroups" @click="showDeleteGroupConfirm = false">{{ t("dangerDialog.cancel") }}</Button>
+        <Button variant="destructive" :disabled="deletingConnectionGroups" @click="confirmDeleteGroup">
+          <Loader2 v-if="deletingConnectionGroups" class="mr-2 h-4 w-4 animate-spin" />
+          {{ connectionGroupDeleteMenuLabel() }}
+        </Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>
@@ -241,7 +275,7 @@ watch(
   <Dialog v-model:open="showRenameObjectDialog">
     <DialogContent class="sm:max-w-[420px]">
       <DialogHeader>
-        <DialogTitle>{{ t("contextMenu.renameObjectTitle") }}</DialogTitle>
+        <DialogTitle>{{ renameObjectDialogTitle }}</DialogTitle>
       </DialogHeader>
       <div class="grid gap-3">
         <Input v-model="renameObjectName" :placeholder="t('contextMenu.renameObjectNamePlaceholder')" @keydown.enter.prevent="confirmRenameObject" />
@@ -272,6 +306,23 @@ watch(
         <Button :disabled="renameMongoCollectionLoading || !renameMongoCollectionName || renameMongoCollectionName === node.label" @click="confirmRenameMongoCollection">
           <Loader2 v-if="renameMongoCollectionLoading" class="mr-2 h-4 w-4 animate-spin" />
           {{ t("contextMenu.renameObject") }}
+        </Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
+
+  <Dialog v-model:open="showCloneMongoCollectionDialog">
+    <DialogContent class="sm:max-w-[400px]">
+      <DialogHeader>
+        <DialogTitle>{{ t("contextMenu.cloneCollectionTitle") }}</DialogTitle>
+      </DialogHeader>
+      <Input v-model="cloneMongoCollectionName" :placeholder="t('contextMenu.cloneCollectionNamePlaceholder')" :disabled="cloneMongoCollectionLoading" @keydown.enter.prevent="confirmCloneMongoCollection" />
+      <p v-if="cloneMongoCollectionError" class="text-sm text-destructive">{{ cloneMongoCollectionError }}</p>
+      <DialogFooter>
+        <Button variant="outline" :disabled="cloneMongoCollectionLoading" @click="showCloneMongoCollectionDialog = false">{{ t("dangerDialog.cancel") }}</Button>
+        <Button :disabled="cloneMongoCollectionLoading || !cloneMongoCollectionName || cloneMongoCollectionName === node.label" @click="confirmCloneMongoCollection">
+          <Loader2 v-if="cloneMongoCollectionLoading" class="mr-2 h-4 w-4 animate-spin" />
+          {{ t("dangerDialog.confirm") }}
         </Button>
       </DialogFooter>
     </DialogContent>
@@ -695,6 +746,26 @@ watch(
     </DialogContent>
   </Dialog>
 
+  <Dialog v-model:open="showDeleteNacosNamespaceConfirm">
+    <DialogContent class="sm:max-w-[420px]">
+      <DialogHeader>
+        <DialogTitle>{{ t("nacos.deleteNamespace") }}</DialogTitle>
+      </DialogHeader>
+      <div class="flex items-start gap-3 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm">
+        <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
+        <p class="min-w-0 break-words text-muted-foreground [overflow-wrap:anywhere]">
+          {{ t("nacos.deleteNamespaceDescription", { name: node.nacosNamespaceName || node.label, id: node.nacosNamespace || "public" }) }}
+        </p>
+      </div>
+      <DialogFooter>
+        <Button variant="outline" :disabled="deleteNacosNamespaceLoading" @click="showDeleteNacosNamespaceConfirm = false">{{ t("dangerDialog.cancel") }}</Button>
+        <Button variant="destructive" :disabled="deleteNacosNamespaceLoading" @click="confirmDeleteNacosNamespace">
+          {{ deleteNacosNamespaceLoading ? t("nacos.deletingNamespace") : t("dangerDialog.confirm") }}
+        </Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
+
   <Dialog v-model:open="showCreateSchemaDialog">
     <DialogContent class="sm:max-w-[400px]">
       <DialogHeader>
@@ -732,4 +803,6 @@ watch(
       </DialogFooter>
     </DialogContent>
   </Dialog>
+
+  <SidebarMongoIndexManagerDialog v-if="showMongoIndexManagerDialog" :controller="controller" />
 </template>

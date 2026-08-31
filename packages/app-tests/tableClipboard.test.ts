@@ -78,3 +78,31 @@ test("table data copy uses only writable columns for first-class databases", () 
     sqlserverIdentityInsert: false,
   });
 });
+
+test("table data copy skips only SQL Server rowversion types", () => {
+  const column = (name: string, dataType: string): ColumnInfo => ({
+    name,
+    data_type: dataType,
+    is_nullable: true,
+    column_default: null,
+    is_primary_key: false,
+    extra: null,
+  });
+  const sqlServerColumns = [{ ...column("id", "int"), extra: "identity(1,1)" }, column("name", "nvarchar(64)"), column("legacy_version", "timestamp"), column("row_version", "  ROWVERSION  "), column("fixed_binary", "binary(8)"), column("variable_binary", "varbinary(8)")];
+
+  assert.deepEqual(tableDataCopyColumnOptions("sqlserver", sqlServerColumns), {
+    columns: ["id", "name", "fixed_binary", "variable_binary"],
+    postgresOverridingSystemValue: false,
+    sqlserverIdentityInsert: true,
+  });
+  assert.deepEqual(tableDataCopyColumnOptions("postgres", [column("updated_at", "timestamp")]), {
+    columns: ["updated_at"],
+    postgresOverridingSystemValue: false,
+    sqlserverIdentityInsert: false,
+  });
+  assert.deepEqual(tableDataCopyColumnOptions("mysql", [column("updated_at", "timestamp")]), {
+    columns: ["updated_at"],
+    postgresOverridingSystemValue: false,
+    sqlserverIdentityInsert: false,
+  });
+});

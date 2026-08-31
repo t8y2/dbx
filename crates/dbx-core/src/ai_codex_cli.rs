@@ -8,6 +8,7 @@ use crate::ai_cli_agent::{
     model_infos, parse_cli_jsonl_event, run_cli_jsonl_agent, toml_string, toml_string_array, CliAgentCommandSpec,
     CliAgentJsonlDialect, CliAgentProcessSpec, CliAgentRunOptions,
 };
+use base64::Engine;
 use serde_json::{json, Value};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet};
@@ -25,8 +26,11 @@ const DEFAULT_CODEX_MODELS: &[&str] = &["default", "gpt-5.5", "gpt-5.4-mini"];
 const CODEX_MODEL_SUCCESS_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const CODEX_MODEL_COMPATIBILITY_CACHE_TTL: Duration = Duration::from_secs(30);
 const CODEX_MODEL_NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(10);
-const CODEX_MODEL_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(3);
-const CODEX_MODEL_COMPATIBILITY_TIMEOUT: Duration = Duration::from_secs(2);
+// Codex app-server and npm-installed CLI can take several seconds to cold-start,
+// especially on Windows. Keep discovery bounded while allowing capability metadata
+// to be returned before falling back to the static catalog.
+const CODEX_MODEL_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
+const CODEX_MODEL_COMPATIBILITY_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(not(windows))]
 const CODEX_PATH_MARKER: &str = "__DBX_CODEX_PATH__";
 
@@ -118,19 +122,37 @@ fn windows_npm_codex_shim_command(program: &str) -> Option<CodexCommandSpec> {
     Some(CodexCommandSpec { program: node, args: vec![codex_js.to_string_lossy().to_string()] })
 }
 
-fn codex_process_env(config: &AiConfig, command: &CodexCommandSpec) -> Result<Vec<(String, String)>, String> {
+async fn codex_process_env(config: &AiConfig, command: &CodexCommandSpec) -> Result<Vec<(String, String)>, String> {
     let inherited_env_keys = env::vars_os().map(|(key, _)| key.to_string_lossy().into_owned()).collect::<Vec<_>>();
-    codex_process_env_with_system_proxy(
+    #[cfg(not(windows))]
+    let node_runtime_dir = shell_program_path("node").await.and_then(|path| {
+        Path::new(&path).parent().filter(|parent| !parent.as_os_str().is_empty()).map(|parent| parent.to_path_buf())
+    });
+    #[cfg(windows)]
+    let node_runtime_dir: Option<PathBuf> = None;
+    codex_process_env_with_runtime_and_system_proxy(
         config,
         command,
+        node_runtime_dir.as_deref(),
         crate::update::system_proxy_url().as_deref(),
         &inherited_env_keys,
     )
 }
 
+#[cfg(test)]
 fn codex_process_env_with_system_proxy(
     config: &AiConfig,
     command: &CodexCommandSpec,
+    system_proxy: Option<&str>,
+    inherited_env_keys: &[String],
+) -> Result<Vec<(String, String)>, String> {
+    codex_process_env_with_runtime_and_system_proxy(config, command, None, system_proxy, inherited_env_keys)
+}
+
+fn codex_process_env_with_runtime_and_system_proxy(
+    config: &AiConfig,
+    command: &CodexCommandSpec,
+    node_runtime_dir: Option<&Path>,
     system_proxy: Option<&str>,
     inherited_env_keys: &[String],
 ) -> Result<Vec<(String, String)>, String> {
@@ -139,9 +161,13 @@ fn codex_process_env_with_system_proxy(
         insert_env_if_absent(&mut env, inherited_env_keys, "HTTP_PROXY", proxy);
         insert_env_if_absent(&mut env, inherited_env_keys, "HTTPS_PROXY", proxy);
     }
-    if let Some(dir) = command.parent_dir() {
+    let command_dir = command.parent_dir();
+    if command_dir.is_some() || node_runtime_dir.is_some() {
         let user_path = env.get("PATH").map(String::as_str);
-        env.insert("PATH".to_string(), merged_path_with_dir(&dir, user_path));
+        env.insert(
+            "PATH".to_string(),
+            merged_codex_path(command_dir.as_deref().map(Path::new), node_runtime_dir, user_path),
+        );
     }
     Ok(env.into_iter().collect())
 }
@@ -338,9 +364,20 @@ fn common_executable_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+#[cfg(test)]
 fn merged_path_with_dir(dir: &str, user_path: Option<&str>) -> String {
+    merged_codex_path(Some(Path::new(dir)), None, user_path)
+}
+
+fn merged_codex_path(codex_dir: Option<&Path>, node_runtime_dir: Option<&Path>, user_path: Option<&str>) -> String {
     let mut seen = BTreeSet::new();
-    let mut dirs = vec![PathBuf::from(dir)];
+    let mut dirs = Vec::new();
+    if let Some(dir) = codex_dir {
+        dirs.push(dir.to_path_buf());
+    }
+    if let Some(dir) = node_runtime_dir {
+        dirs.push(dir.to_path_buf());
+    }
     if let Some(path) = user_path {
         dirs.extend(env::split_paths(path));
     }
@@ -520,10 +557,55 @@ pub fn build_codex_prompt(system_prompt: &str, messages: &[crate::ai::AiMessage]
     build_cli_agent_prompt("Codex", system_prompt, messages, allow_write_sql)
 }
 
+fn materialize_codex_images(
+    images: &[crate::ai::AiInlineImage],
+) -> Result<(Option<tempfile::TempDir>, Vec<PathBuf>), String> {
+    const MAX_CODEX_IMAGE_BASE64_CHARS: usize = 7 * 1024 * 1024;
+    if images.is_empty() {
+        return Ok((None, Vec::new()));
+    }
+
+    let directory = tempfile::Builder::new().prefix("dbx-ai-images-").tempdir().map_err(|error| {
+        format!("[codexImageAttachmentFailed] Could not create image attachment directory: {error}")
+    })?;
+    let mut paths = Vec::with_capacity(images.len());
+    for (index, image) in images.iter().enumerate() {
+        if image.data.is_empty() || image.data.len() > MAX_CODEX_IMAGE_BASE64_CHARS {
+            return Err("[codexImageAttachmentFailed] Image attachment exceeds the supported size limit".to_string());
+        }
+        let extension = match image.media_type.as_str() {
+            "image/png" => "png",
+            "image/jpeg" => "jpg",
+            "image/gif" => "gif",
+            "image/webp" => "webp",
+            _ => {
+                return Err(format!("[codexImageAttachmentFailed] Unsupported image media type: {}", image.media_type))
+            }
+        };
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&image.data)
+            .map_err(|error| format!("[codexImageAttachmentFailed] Could not decode image attachment: {error}"))?;
+        let path = directory.path().join(format!("attachment-{}.{}", index + 1, extension));
+        std::fs::write(&path, bytes)
+            .map_err(|error| format!("[codexImageAttachmentFailed] Could not write image attachment: {error}"))?;
+        paths.push(path);
+    }
+    Ok((Some(directory), paths))
+}
+
+fn attach_codex_images(command: &mut CodexCommandSpec, image_paths: &[PathBuf]) {
+    let prompt_index = command.args.iter().rposition(|arg| arg == "-").unwrap_or(command.args.len());
+    let args = image_paths
+        .iter()
+        .flat_map(|path| ["--image".to_string(), path.to_string_lossy().into_owned()])
+        .collect::<Vec<_>>();
+    command.args.splice(prompt_index..prompt_index, args);
+}
+
 pub async fn list_codex_models(config: &AiConfig) -> Result<Vec<AiModelInfo>, String> {
     validate_codex_program(config)?;
     let command = resolve_codex_command(config).await;
-    let process_env = codex_process_env(config, &command)?;
+    let process_env = codex_process_env(config, &command).await?;
     let cache_key = codex_model_cache_key(&command, &process_env);
     Ok(list_codex_models_cached(&CODEX_MODEL_CACHE, cache_key, || async {
         list_codex_models_uncached(&command, &process_env).await
@@ -897,7 +979,8 @@ pub async fn test_codex_connection(config: &AiConfig) -> Result<AiTestConnection
     let mut command = cli_command(&codex_command.program);
     command.args(codex_command.args.iter().map(String::as_str));
     command.args(["login", "status"]);
-    command.envs(codex_process_env(config, &codex_command)?.iter().map(|(key, value)| (key.as_str(), value.as_str())));
+    let process_env = codex_process_env(config, &codex_command).await?;
+    command.envs(process_env.iter().map(|(key, value)| (key.as_str(), value.as_str())));
 
     let output = command.output().await.map_err(|e| classify_codex_spawn_error(&e.to_string()))?;
 
@@ -955,21 +1038,25 @@ pub fn parse_codex_jsonl_event(line: &str) -> Option<Vec<AgentEvent>> {
 pub async fn run_codex_agent(
     config: &AiConfig,
     prompt: &str,
+    images: &[crate::ai::AiInlineImage],
     options: CodexRunOptions,
     cancelled: &Notify,
     on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
 ) -> Result<String, String> {
     validate_codex_program(config)?;
+    let (_image_directory, image_paths) = materialize_codex_images(images)?;
     let effective_config = capability_aware_codex_config(config).await;
     let mut command = build_codex_exec_command(&effective_config, prompt, &options);
     let resolved_command = resolve_codex_command(config).await;
     command.program = resolved_command.program;
     command.args.splice(0..0, resolved_command.args);
-    let env = codex_process_env(config, &command)?;
+    attach_codex_images(&mut command, &image_paths);
+    let env = codex_process_env(config, &command).await?;
     run_cli_jsonl_agent(
         CliAgentProcessSpec {
             command,
             env,
+            env_remove: Vec::new(),
             current_dir: None,
             stdin: Some(prompt.to_string()),
             dialect: CliAgentJsonlDialect::CodexExec,
@@ -988,16 +1075,19 @@ mod tests {
     #[cfg(not(windows))]
     use super::shell_quote;
     use super::{
-        build_codex_exec_command, classify_codex_spawn_error, codex_cli_env, codex_enabled_tools,
+        attach_codex_images, build_codex_exec_command, classify_codex_spawn_error, codex_cli_env, codex_enabled_tools,
         codex_model_cache_key, is_path_like_program, legacy_minimal_effort, list_codex_models_cached,
-        parse_codex_app_server_models, parse_codex_jsonl_event, parse_codex_models, validate_codex_program,
-        with_codex_model_discovery_timeout, CachedCodexModels, CodexModelCacheClass, CodexModelDiscovery,
-        CodexRunOptions, CODEX_MODEL_COMPATIBILITY_CACHE_TTL, CODEX_MODEL_COMPATIBILITY_TIMEOUT,
+        materialize_codex_images, parse_codex_app_server_models, parse_codex_jsonl_event, parse_codex_models,
+        validate_codex_program, with_codex_model_discovery_timeout, CachedCodexModels, CodexModelCacheClass,
+        CodexModelDiscovery, CodexRunOptions, CODEX_MODEL_COMPATIBILITY_CACHE_TTL, CODEX_MODEL_COMPATIBILITY_TIMEOUT,
         CODEX_MODEL_DISCOVERY_TIMEOUT, CODEX_MODEL_NEGATIVE_CACHE_TTL, CODEX_MODEL_SUCCESS_CACHE_TTL,
         DEFAULT_CODEX_MODELS,
     };
     #[cfg(not(windows))]
-    use super::{codex_process_env, common_executable_dirs, merged_path_with_dir};
+    use super::{
+        codex_command_for_program, codex_process_env_with_runtime_and_system_proxy, common_executable_dirs,
+        merged_path_with_dir,
+    };
     #[cfg(windows)]
     use super::{
         direct_program_path, first_windows_program_path, program_path_candidates, resolve_codex_command,
@@ -1005,8 +1095,8 @@ mod tests {
     };
     use crate::agent_events::AgentEvent;
     use crate::ai::{
-        AiApiStyle, AiAuthMethod, AiCapabilitySource, AiConfig, AiEffortCapability, AiEffortSelection, AiProvider,
-        AiReasoningLevel,
+        AiApiStyle, AiAuthMethod, AiCapabilitySource, AiConfig, AiEffortCapability, AiEffortSelection, AiInlineImage,
+        AiProvider, AiReasoningLevel,
     };
     use crate::ai_cli_agent::{model_infos, CliAgentCommandSpec};
     use serde_json::json;
@@ -1037,6 +1127,16 @@ mod tests {
             claude_code_cli_env: Default::default(),
             pi_agent_cli_path: None,
             pi_agent_cli_env: Default::default(),
+            opencode_cli_path: None,
+            opencode_cli_env: Default::default(),
+            cursor_cli_path: None,
+            cursor_cli_env: Default::default(),
+            grok_cli_path: None,
+            grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
+            qoder_cli_path: None,
+            qoder_cli_env: Default::default(),
         }
     }
 
@@ -1074,6 +1174,23 @@ mod tests {
         assert!(spec.args.contains(&"mcp_servers.dbx.env.DBX_MCP_ALLOW_DANGEROUS_SQL=\"0\"".to_string()));
         assert!(spec.args.contains(&"mcp_servers.dbx.env.DBX_MCP_SCOPE_CONNECTION_ID=\"conn-1\"".to_string()));
         assert!(spec.args.iter().any(|arg| arg.contains("dbx_execute_query")));
+    }
+
+    #[test]
+    fn codex_image_attachment_uses_image_argument_and_clean_prompt() {
+        let prompt = "inspect this";
+        let images = vec![AiInlineImage { media_type: "image/png".to_string(), data: "aGVsbG8=".to_string() }];
+        let (directory, paths) = materialize_codex_images(&images).unwrap();
+        let mut command = build_codex_exec_command(&codex_config("default"), prompt, &run_options());
+        attach_codex_images(&mut command, &paths);
+
+        assert_eq!(prompt, "inspect this");
+        assert!(directory.is_some());
+        assert_eq!(std::fs::read(&paths[0]).unwrap(), b"hello");
+        let image_arg = command.args.iter().position(|arg| arg == "--image").unwrap();
+        let prompt_arg = command.args.iter().position(|arg| arg == "-").unwrap();
+        assert_eq!(command.args[image_arg + 1], paths[0].to_string_lossy());
+        assert!(image_arg < prompt_arg);
     }
 
     #[test]
@@ -1286,14 +1403,27 @@ mod tests {
 
     #[test]
     #[cfg(not(windows))]
-    fn codex_command_env_prepends_resolved_program_dir_and_keeps_node_dirs() {
-        let config = codex_config("default");
-        let command = CliAgentCommandSpec { program: "/opt/homebrew/bin/codex".to_string(), args: Vec::new() };
-        let env = codex_process_env(&config, &command).unwrap();
+    fn codex_command_env_orders_program_node_and_explicit_path_with_deduplication() {
+        let mut config = codex_config("default");
+        config
+            .codex_cli_env
+            .insert("PATH".to_string(), "/custom/bin:/Users/test/.nvm/versions/node/v22.13.0/bin:/usr/bin".to_string());
+        let command = CliAgentCommandSpec { program: "/Users/test/Library/pnpm/codex".to_string(), args: Vec::new() };
+        let node_runtime_dir = std::path::Path::new("/Users/test/.nvm/versions/node/v22.13.0/bin");
+        let env = codex_process_env_with_runtime_and_system_proxy(&config, &command, Some(node_runtime_dir), None, &[])
+            .unwrap();
         let path = env.iter().find(|(key, _)| key == "PATH").map(|(_, value)| value).unwrap();
         let dirs = std::env::split_paths(path).collect::<Vec<_>>();
 
-        assert_eq!(dirs.first().unwrap(), std::path::Path::new("/opt/homebrew/bin"));
+        assert_eq!(
+            &dirs[..3],
+            [
+                std::path::PathBuf::from("/Users/test/Library/pnpm"),
+                node_runtime_dir.to_path_buf(),
+                std::path::PathBuf::from("/custom/bin"),
+            ]
+        );
+        assert_eq!(dirs.iter().filter(|dir| dir.as_path() == node_runtime_dir).count(), 1);
         assert!(dirs.iter().any(|dir| dir == std::path::Path::new("/usr/bin")));
     }
 
@@ -1309,17 +1439,27 @@ mod tests {
 
     #[test]
     #[cfg(not(windows))]
-    fn codex_process_env_keeps_resolved_program_dir_before_user_path() {
+    fn codex_process_env_keeps_old_path_behavior_when_node_is_missing() {
         let mut config = codex_config("default");
         config.codex_cli_env.insert("PATH".to_string(), "/custom/bin:/usr/bin".to_string());
         let command = CliAgentCommandSpec { program: "/opt/homebrew/bin/codex".to_string(), args: Vec::new() };
 
-        let env = codex_process_env(&config, &command).unwrap();
+        let env = codex_process_env_with_runtime_and_system_proxy(&config, &command, None, None, &[]).unwrap();
         let path = env.iter().find(|(key, _)| key == "PATH").map(|(_, value)| value).unwrap();
         let dirs = std::env::split_paths(path).collect::<Vec<_>>();
 
         assert_eq!(dirs.first().unwrap(), std::path::Path::new("/opt/homebrew/bin"));
         assert!(dirs.iter().any(|dir| dir == std::path::Path::new("/custom/bin")));
+        assert_eq!(path, &merged_path_with_dir("/opt/homebrew/bin", Some("/custom/bin:/usr/bin")));
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn native_codex_binary_command_remains_direct() {
+        let command = codex_command_for_program("/Applications/DBX.app/Contents/MacOS/codex".to_string());
+
+        assert_eq!(command.program, "/Applications/DBX.app/Contents/MacOS/codex");
+        assert!(command.args.is_empty());
     }
 
     #[test]
@@ -1505,8 +1645,8 @@ mod tests {
 
     #[test]
     fn model_cache_uses_bounded_success_fallback_and_negative_ttls() {
-        assert_eq!(CODEX_MODEL_DISCOVERY_TIMEOUT, Duration::from_secs(3));
-        assert_eq!(CODEX_MODEL_COMPATIBILITY_TIMEOUT, Duration::from_secs(2));
+        assert_eq!(CODEX_MODEL_DISCOVERY_TIMEOUT, Duration::from_secs(15));
+        assert_eq!(CODEX_MODEL_COMPATIBILITY_TIMEOUT, Duration::from_secs(10));
         assert_eq!(CODEX_MODEL_SUCCESS_CACHE_TTL, Duration::from_secs(5 * 60));
         assert_eq!(CODEX_MODEL_COMPATIBILITY_CACHE_TTL, Duration::from_secs(30));
         assert_eq!(CODEX_MODEL_NEGATIVE_CACHE_TTL, Duration::from_secs(10));

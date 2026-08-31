@@ -1,6 +1,7 @@
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::Read;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -13,8 +14,82 @@ use crate::db::agent_driver::{
 use crate::models::connection::DatabaseType;
 
 pub const DEFAULT_JRE_KEY: &str = "21";
+pub const SQLITE_WORKER_DRIVER_KEY: &str = "sqlite-worker";
+pub const SQLITE_WORKER_NATIVE_PLATFORMS: &[&str] = &["linux-x64", "linux-aarch64"];
 pub const DOWNLOAD_CACHE_DIR_NAME: &str = "download-cache";
 pub const DOWNLOAD_CACHE_MAX_AGE_DAYS: u64 = 7;
+
+pub(crate) type OperationLockTable = StdMutex<std::collections::HashMap<String, Arc<Mutex<()>>>>;
+
+pub(crate) struct OperationLockHandle<'a> {
+    table: &'a OperationLockTable,
+    key: String,
+    lock: Arc<Mutex<()>>,
+}
+
+impl<'a> OperationLockHandle<'a> {
+    pub(crate) fn new(table: &'a OperationLockTable, key: &str, lock: Arc<Mutex<()>>) -> Self {
+        Self { table, key: key.to_string(), lock }
+    }
+}
+
+impl Deref for OperationLockHandle<'_> {
+    type Target = Mutex<()>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.lock
+    }
+}
+
+impl Drop for OperationLockHandle<'_> {
+    fn drop(&mut self) {
+        let Ok(mut locks) = self.table.lock() else {
+            return;
+        };
+        let should_remove =
+            locks.get(&self.key).is_some_and(|lock| Arc::ptr_eq(lock, &self.lock) && Arc::strong_count(lock) == 2);
+        if should_remove {
+            locks.remove(&self.key);
+        }
+    }
+}
+
+/// Cooperative cancellation token for an agent driver install/upgrade.
+///
+/// Mirrors the updater's `DownloadCancellation` (src-tauri/src/commands/update.rs)
+/// so the same `watch<bool>` pattern can abort an in-flight JRE/driver download.
+#[derive(Debug)]
+pub struct AgentInstallCancellation {
+    canceled: tokio::sync::watch::Sender<bool>,
+}
+
+impl AgentInstallCancellation {
+    fn new() -> Self {
+        let (canceled, _) = tokio::sync::watch::channel(false);
+        Self { canceled }
+    }
+
+    pub fn cancel(&self) {
+        let _ = self.canceled.send_replace(true);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        *self.canceled.borrow()
+    }
+
+    /// Completes once cancellation is requested (immediately if already cancelled).
+    pub async fn cancelled(&self) {
+        let mut receiver = self.canceled.subscribe();
+        if *receiver.borrow_and_update() {
+            return;
+        }
+        while receiver.changed().await.is_ok() {
+            if *receiver.borrow_and_update() {
+                return;
+            }
+        }
+    }
+}
 
 fn default_jre_key() -> String {
     DEFAULT_JRE_KEY.to_string()
@@ -77,7 +152,7 @@ mod tests {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).unwrap();
         }
-        fs::write(path, b"").unwrap();
+        fs::write(path, b"test executable").unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -273,6 +348,22 @@ mod tests {
         assert_eq!(launch.program, native);
         assert_eq!(launch.args, Vec::<String>::new());
         assert_eq!(launch.working_dir.as_deref(), Some(manager.driver_dir("dameng").as_path()));
+    }
+
+    #[test]
+    fn hive_native_launch_ignores_stale_legacy_jar_without_jre() {
+        let manager = test_manager("hive-native-over-legacy-jar");
+        let native = manager.driver_native_path("hive");
+        touch(&native);
+        touch(&manager.driver_jar_path("hive"));
+
+        let launch = manager
+            .resolve_agent_launch_spec(&AgentState::default(), "hive", DEFAULT_JRE_KEY)
+            .expect("Hive native launch should not require a JRE");
+
+        assert_eq!(launch.program, native);
+        assert_eq!(launch.args, Vec::<String>::new());
+        assert_eq!(launch.working_dir.as_deref(), Some(manager.driver_dir("hive").as_path()));
     }
 
     #[test]
@@ -488,13 +579,18 @@ pub struct AgentManager {
     pub(crate) state_lock: StdMutex<()>,
     /// Per-JRE-key install locks so that concurrent driver installs sharing the
     /// same JRE download it only once (DCL pattern: lock → re-check installed → download).
-    pub(crate) jre_install_locks: Mutex<std::collections::HashMap<String, Arc<Mutex<()>>>>,
+    pub(crate) jre_install_locks: OperationLockTable,
     /// Per-driver locks serialize install, import, and uninstall operations
     /// targeting the same on-disk agent files.
-    pub(crate) driver_operation_locks: Mutex<std::collections::HashMap<String, Arc<Mutex<()>>>>,
+    pub(crate) driver_operation_locks: OperationLockTable,
     /// Driver operations may run concurrently, but JRE replacement/removal
     /// must exclude them until their dependent driver state is persisted.
     pub(crate) installation_operation_lock: tokio::sync::RwLock<()>,
+    /// Per-operation cancellation tokens keyed by operation id (single installs
+    /// use `install:<op>`, batches `batch:<op>` and `batch:<op>:<db>`). Downloads
+    /// observe the exact token threaded to them to abort promptly.
+    pub(crate) install_cancellations:
+        tokio::sync::Mutex<std::collections::HashMap<String, Arc<AgentInstallCancellation>>>,
 }
 
 impl Default for AgentManager {
@@ -521,9 +617,10 @@ impl AgentManager {
             daemons: Mutex::new(std::collections::HashMap::new()),
             connection_runtimes: Mutex::new(std::collections::HashMap::new()),
             state_lock: StdMutex::new(()),
-            jre_install_locks: Mutex::new(std::collections::HashMap::new()),
-            driver_operation_locks: Mutex::new(std::collections::HashMap::new()),
+            jre_install_locks: StdMutex::new(std::collections::HashMap::new()),
+            driver_operation_locks: StdMutex::new(std::collections::HashMap::new()),
             installation_operation_lock: tokio::sync::RwLock::new(()),
+            install_cancellations: Mutex::new(std::collections::HashMap::new()),
         };
         mgr.migrate_legacy_jre();
         mgr.cleanup_pending_jre_dirs();
@@ -542,6 +639,39 @@ impl AgentManager {
         let result = mutate(&mut state);
         self.save_state(&state)?;
         Ok(result)
+    }
+
+    /// Register a fresh cancellation token for an operation keyed by `key` (an
+    /// operation-scoped key; see the `agent_service` key helpers). Any existing
+    /// token for the same key is replaced; each install registers under a unique
+    /// operation id, so a stale cancelled token cannot leak into another
+    /// operation, and concurrent same-driver installs stay isolated.
+    pub async fn begin_install_cancellation(&self, key: &str) -> Arc<AgentInstallCancellation> {
+        let token = Arc::new(AgentInstallCancellation::new());
+        self.install_cancellations.lock().await.insert(key.to_string(), Arc::clone(&token));
+        token
+    }
+
+    /// Remove the token for `key` only if it is still `token` (guarded by
+    /// `Arc::ptr_eq`) so a concurrently registered fresh token is not removed.
+    pub async fn finish_install_cancellation(&self, key: &str, token: &Arc<AgentInstallCancellation>) {
+        let mut cancellations = self.install_cancellations.lock().await;
+        if cancellations.get(key).is_some_and(|current| Arc::ptr_eq(current, token)) {
+            cancellations.remove(key);
+        }
+    }
+
+    /// Request cancellation for the operation registered under `key`.
+    pub async fn cancel_install(&self, key: &str) {
+        if let Some(token) = self.install_cancellations.lock().await.get(key).cloned() {
+            token.cancel();
+        }
+    }
+
+    /// Whether the operation registered under `key` (an operation-scoped key,
+    /// see `agent_service` key helpers) has been cancelled.
+    pub async fn is_install_cancelled(&self, key: &str) -> bool {
+        self.install_cancellations.lock().await.get(key).is_some_and(|token| token.is_cancelled())
     }
 
     fn migrate_legacy_jre(&self) {
@@ -649,6 +779,24 @@ impl AgentManager {
         self.driver_dir(db_type).join(executable_name)
     }
 
+    pub fn driver_native_platform_path(&self, db_type: &str, platform: &str) -> PathBuf {
+        self.driver_dir(db_type).join(platform)
+    }
+
+    pub fn is_sqlite_worker_driver(db_type: &str) -> bool {
+        db_type == SQLITE_WORKER_DRIVER_KEY
+    }
+
+    pub fn driver_native_installed(&self, db_type: &str) -> bool {
+        if Self::is_sqlite_worker_driver(db_type) {
+            SQLITE_WORKER_NATIVE_PLATFORMS
+                .iter()
+                .all(|platform| self.driver_native_platform_path(db_type, platform).is_file())
+        } else {
+            self.driver_native_path(db_type).exists()
+        }
+    }
+
     pub fn driver_launch_config_path(&self, db_type: &str) -> PathBuf {
         self.driver_dir(db_type).join("agent-launch.json")
     }
@@ -680,12 +828,12 @@ impl AgentManager {
     }
 
     pub fn is_jre_installed(&self, jre_key: &str) -> bool {
-        self.jre_java_path(jre_key).exists()
+        std::fs::metadata(self.jre_java_path(jre_key)).is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
     }
 
     pub fn is_driver_installed(&self, db_type: &str) -> bool {
         self.is_driver_jar_valid(db_type)
-            || self.driver_native_path(db_type).exists()
+            || self.driver_native_installed(db_type)
             || self.driver_launch_config_path(db_type).exists()
     }
 
@@ -695,8 +843,25 @@ impl AgentManager {
 
     pub fn driver_requires_java_runtime(&self, db_type: &str) -> bool {
         self.is_driver_jar_valid(db_type)
-            && !self.driver_native_path(db_type).exists()
+            && !self.driver_native_installed(db_type)
             && !self.driver_launch_config_path(db_type).exists()
+    }
+
+    /// The JRE key an installed driver actually depends on, or `None` when the
+    /// installed artifact runs without a managed JRE (native binary or custom
+    /// launch config).
+    ///
+    /// The on-disk artifact is the source of truth. The persisted `jre` string
+    /// is only consulted for genuine Java (jar) drivers, because it is written
+    /// unconditionally at install time and goes stale when a driver is
+    /// refactored from Java to a native language. Every "is this JRE still in
+    /// use?" question must route through here rather than reading `driver.jre`
+    /// directly, so stale metadata can never manufacture a false dependency.
+    pub fn installed_driver_jre_dependency<'a>(&self, state: &'a AgentState, db_type: &str) -> Option<&'a str> {
+        if !self.driver_requires_java_runtime(db_type) {
+            return None;
+        }
+        state.installed_drivers.get(db_type).map(|driver| driver.jre.as_str())
     }
 
     pub fn resolve_agent_launch_spec(

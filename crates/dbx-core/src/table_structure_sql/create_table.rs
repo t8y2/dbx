@@ -1,20 +1,35 @@
 use super::column_format::{
     column_data_type, column_extra_clause, has_dameng_identity, is_dameng_identity_compatible_type,
-    is_mysql_character_data_type,
+    is_mysql_character_data_type, is_mysql_timestamp_type,
 };
 use super::comments::{build_sqlserver_column_comment_sql, build_sqlserver_table_comment_sql};
 use super::dialect::{capabilities_for, database_label, StructureDialect};
 use super::foreign_keys::build_foreign_key_sql;
 use super::indexes::build_create_index_statements;
+use super::mysql_engine::{append_mysql_table_option, validate_mysql_engine};
 use super::triggers::build_trigger_sql;
 use super::types::{TableStructureSqlOptions, TableStructureSqlResult};
 use super::util::{clean, format_default_for_sql, normalize_default, qualified_table, quote_ident, quote_string};
-use super::validation::{validate_columns, validate_dameng_identity};
+use super::validation::{validate_columns, validate_concurrent_index_scope, validate_dameng_identity};
 use crate::models::connection::DatabaseType;
 
 pub fn build_create_table_sql(mut options: TableStructureSqlOptions) -> TableStructureSqlResult {
+    let capabilities;
+    let dialect;
+    if options.is_gaussdb_m_mode {
+        capabilities = super::dialect::gaussdb_m_capabilities();
+        dialect = StructureDialect::GaussdbM;
+    } else {
+        capabilities = capabilities_for(options.database_type);
+        dialect = capabilities.dialect;
+    }
     options.table_name = clean(&options.table_name);
     let mut warnings = Vec::new();
+    warnings.extend(validate_mysql_engine(&options));
+    // Fail closed: a concurrent-index request on a partitioned parent (or on an
+    // existing index in a hand-built draft) is refused up front instead of
+    // degrading into blocking index DDL.
+    warnings.extend(validate_concurrent_index_scope(&options));
     if options.table_name.is_empty() {
         warnings.push("Table name is required.".to_string());
     }
@@ -27,9 +42,6 @@ pub fn build_create_table_sql(mut options: TableStructureSqlOptions) -> TableStr
     if !warnings.is_empty() {
         return TableStructureSqlResult { statements: Vec::new(), warnings };
     }
-
-    let capabilities = capabilities_for(options.database_type);
-    let dialect = capabilities.dialect;
     let table = qualified_table(dialect, options.schema.as_deref(), &options.table_name);
     if dialect == StructureDialect::Dameng {
         for column in &active_columns {
@@ -63,6 +75,12 @@ pub fn build_create_table_sql(mut options: TableStructureSqlOptions) -> TableStr
             && !matches!(dialect, StructureDialect::ClickHouse | StructureDialect::ManticoreSearch)
         {
             parts.push("NOT NULL".to_string());
+        } else if column.is_nullable
+            && !column.is_primary_key
+            && dialect == StructureDialect::Mysql
+            && is_mysql_timestamp_type(&column.data_type)
+        {
+            parts.push("NULL".to_string());
         }
         if let Some(extra_clause) = column_extra_clause(dialect, column) {
             parts.push(extra_clause);
@@ -93,16 +111,26 @@ pub fn build_create_table_sql(mut options: TableStructureSqlOptions) -> TableStr
 
     statements.push(format!("CREATE TABLE {table} (\n  {}\n);", column_definitions.join(",\n  ")));
 
+    if let Some(engine) = options.mysql_engine.as_deref().map(str::trim).filter(|engine| !engine.is_empty()) {
+        if let Some(statement) = statements.last_mut() {
+            append_mysql_table_option(statement, &format!("ENGINE = {engine}"));
+        }
+    }
+
     if capabilities.comment {
         let table_comment = clean(options.table_comment.as_deref().unwrap_or(""));
         if !table_comment.is_empty() {
-            if dialect == StructureDialect::Mysql {
+            if matches!(dialect, StructureDialect::Mysql | StructureDialect::GaussdbM) {
                 if let Some(last) = statements.last_mut() {
-                    *last = last.replace(");", &format!(") COMMENT = {};", quote_string(&table_comment)));
+                    append_mysql_table_option(last, &format!("COMMENT = {}", quote_string(&table_comment)));
                 }
             } else if matches!(
                 dialect,
-                StructureDialect::Postgres | StructureDialect::Oracle | StructureDialect::Dameng | StructureDialect::H2
+                StructureDialect::Postgres
+                    | StructureDialect::Oracle
+                    | StructureDialect::Dameng
+                    | StructureDialect::Oscar
+                    | StructureDialect::H2
             ) {
                 statements.push(format!("COMMENT ON TABLE {table} IS {};", quote_string(&table_comment)));
             } else if dialect == StructureDialect::ClickHouse {
@@ -121,7 +149,11 @@ pub fn build_create_table_sql(mut options: TableStructureSqlOptions) -> TableStr
     if capabilities.comment
         && matches!(
             dialect,
-            StructureDialect::Postgres | StructureDialect::Oracle | StructureDialect::Dameng | StructureDialect::H2
+            StructureDialect::Postgres
+                | StructureDialect::Oracle
+                | StructureDialect::Dameng
+                | StructureDialect::Oscar
+                | StructureDialect::H2
         )
     {
         for column in &active_columns {
@@ -174,6 +206,8 @@ pub fn build_create_table_sql(mut options: TableStructureSqlOptions) -> TableStr
             &mut warnings,
             options.schema.as_deref(),
             &options.table_name,
+            false,
+            capabilities.index_concurrent,
         ));
     }
 

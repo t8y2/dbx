@@ -1,12 +1,73 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { activeTabSidebarTarget, findNodePathForTarget, findSidebarNodeForActiveTab, scrollTopForSidebarNode, shouldScrollActiveSidebarSelection } from "../../apps/desktop/src/lib/sidebar/sidebarActiveTabTarget.ts";
+import { activeTabSidebarTarget, findNodePathForTarget, findSidebarConnectionNode, findSidebarNodeForActiveTab, findSidebarNodeForTarget, scrollTopForSidebarNode, shouldScrollActiveSidebarSelection } from "../../apps/desktop/src/lib/sidebar/sidebarActiveTabTarget.ts";
+import { buildTreeNodesFromLayout, expandGroups } from "../../apps/desktop/src/lib/sidebar/sidebarLayout.ts";
+import { flattenTree } from "../../apps/desktop/src/composables/useFlatTree.ts";
 import type { FlatTreeNode } from "../../apps/desktop/src/composables/useFlatTree.ts";
-import type { QueryTab, TreeNode } from "../../apps/desktop/src/types/database.ts";
+import type { ConnectionConfig, QueryTab, SidebarLayout, TreeNode } from "../../apps/desktop/src/types/database.ts";
 
 function flat(node: TreeNode, depth = 0): FlatTreeNode {
   return { id: node.id, node, depth, type: node.type };
 }
+
+test("findSidebarConnectionNode resolves grouped roots without scanning descendants", () => {
+  const groupedConnection: TreeNode = {
+    id: "conn-grouped",
+    label: "Grouped",
+    type: "connection",
+    connectionId: "conn-grouped",
+    children: [
+      {
+        id: "conn-grouped:app",
+        label: "app",
+        type: "database",
+        connectionId: "conn-grouped",
+        database: "app",
+      },
+    ],
+  };
+  const nestedGroups: TreeNode[] = [
+    {
+      id: "group-outer",
+      label: "Outer",
+      type: "connection-group",
+      children: [
+        {
+          id: "group-inner",
+          label: "Inner",
+          type: "connection-group",
+          children: [groupedConnection],
+        },
+      ],
+    },
+  ];
+
+  assert.equal(findSidebarConnectionNode(nestedGroups, "conn-grouped"), groupedConnection);
+  assert.equal(findSidebarConnectionNode(nestedGroups, "missing"), null);
+  assert.equal(
+    findSidebarConnectionNode(
+      [
+        {
+          id: "conn-root",
+          label: "Root",
+          type: "connection",
+          connectionId: "conn-root",
+          children: [
+            {
+              id: "conn-nested-decoy",
+              label: "Decoy",
+              type: "connection",
+              connectionId: "conn-grouped",
+            },
+          ],
+        },
+        ...nestedGroups,
+      ],
+      "conn-grouped",
+    ),
+    groupedConnection,
+  );
+});
 
 test("findNodePathForTarget handles loaded, unloaded, and MySQL schema fallback trees", () => {
   const cases = [
@@ -381,10 +442,37 @@ test("saved SQL tabs target the matching visible saved SQL file node", () => {
     isExecuting: false,
     mode: "query",
   };
-  const file: TreeNode = { id: "file-node", label: "report.sql", type: "saved-sql-file", savedSqlId: "sql-1" };
+  const file: TreeNode = { id: "file-node", label: "report.sql", type: "saved-sql-file", connectionId: "conn-1", database: "app", savedSqlId: "sql-1" };
+  const queries: TreeNode = {
+    id: "queries-node",
+    label: "tree.queries",
+    type: "saved-sql-root",
+    connectionId: "conn-1",
+    database: "app",
+    children: [file],
+  };
+  const database: TreeNode = {
+    id: "database-node",
+    label: "app",
+    type: "database",
+    connectionId: "conn-1",
+    database: "app",
+    children: [queries],
+  };
+  const connection: TreeNode = {
+    id: "conn-1",
+    label: "Local",
+    type: "connection",
+    connectionId: "conn-1",
+    children: [database],
+  };
 
   assert.deepEqual(activeTabSidebarTarget(tab), { type: "saved-sql-file", savedSqlId: "sql-1" });
   assert.equal(findSidebarNodeForActiveTab(tab, [flat(file)])?.id, "file-node");
+  assert.deepEqual(
+    findNodePathForTarget(activeTabSidebarTarget(tab)!, [connection])?.map((node) => node.id),
+    ["conn-1", "database-node", "queries-node", "file-node"],
+  );
 });
 
 test("query tabs target their database node in the sidebar", () => {
@@ -401,6 +489,7 @@ test("query tabs target their database node in the sidebar", () => {
   assert.deepEqual(activeTabSidebarTarget(tab), {
     type: "query-context",
     connectionId: "conn-1",
+    catalog: undefined,
     database: "app",
     schema: undefined,
   });
@@ -455,6 +544,13 @@ test("sidebar node scrolling supports top and smart locate alignment", () => {
   assert.equal(scrollTopForSidebarNode({ index: 0, currentScrollTop: 300, viewportHeight: 140, topOcclusionHeight: 28, align: "smart" }), 0);
 });
 
+test("sidebar node scrolling centers explicit tab locate with sticky and boundary clamping", () => {
+  assert.equal(scrollTopForSidebarNode({ index: 20, currentScrollTop: 0, viewportHeight: 140, align: "center" }), 504);
+  assert.equal(scrollTopForSidebarNode({ index: 11, currentScrollTop: 0, viewportHeight: 140, topOcclusionHeight: 28, align: "center" }), 238);
+  assert.equal(scrollTopForSidebarNode({ index: 0, currentScrollTop: 300, viewportHeight: 140, topOcclusionHeight: 28, align: "center" }), 0);
+  assert.equal(scrollTopForSidebarNode({ index: 20, currentScrollTop: 0, viewportHeight: 140, scrollHeight: 588, align: "center" }), 448);
+});
+
 test("active sidebar selection only scrolls on tab or setting changes", () => {
   assert.equal(
     shouldScrollActiveSidebarSelection({
@@ -483,4 +579,60 @@ test("active sidebar selection only scrolls on tab or setting changes", () => {
     }),
     true,
   );
+});
+
+test("locate under collapsed connection groups resolves the path, expands the groups, then finds the flat node", () => {
+  // Mirrors locateTabInSidebar for a target inside collapsed (nested)
+  // connection groups: the node path ignores expansion, the visible flat tree
+  // does not, so locate must reopen the collapsed groups through the layout op
+  // and rebuild before matching, otherwise the locate silently fails (#7387).
+  const conn = (id: string): ConnectionConfig => ({
+    id,
+    name: id,
+    db_type: "postgres",
+    host: "localhost",
+    port: 5432,
+    username: "user",
+    password: "",
+  });
+  const layout: SidebarLayout = {
+    groups: [
+      { id: "group-outer", name: "Outer", collapsed: true },
+      { id: "group-inner", name: "Inner", collapsed: true },
+      { id: "group-open", name: "Open", collapsed: false },
+    ],
+    order: [
+      {
+        type: "group",
+        id: "group-outer",
+        children: [{ type: "group", id: "group-inner", children: [{ type: "connection", id: "conn-grouped" }] }],
+      },
+      { type: "group", id: "group-open", children: [{ type: "connection", id: "conn-open" }] },
+    ],
+  };
+  const connections = [conn("conn-grouped"), conn("conn-open")];
+  const target = { type: "connection", connectionId: "conn-grouped" } as const;
+
+  const collapsedTree = buildTreeNodesFromLayout(layout, connections, new Set());
+  const nodePath = findNodePathForTarget(target, collapsedTree);
+  assert.deepEqual(nodePath?.map((node) => node.id), ["group-outer", "group-inner", "conn-grouped"]);
+  assert.equal(findSidebarNodeForTarget(target, flattenTree(collapsedTree)), null);
+
+  const collapsedGroupIds = nodePath!
+    .filter((node) => node.type === "connection-group" && !node.isExpanded)
+    .map((node) => node.id);
+  assert.deepEqual(collapsedGroupIds, ["group-outer", "group-inner"]);
+
+  const expandedLayout = expandGroups(layout, collapsedGroupIds);
+  assert.deepEqual(
+    expandedLayout.groups.map((group) => [group.id, group.collapsed]),
+    [
+      ["group-outer", false],
+      ["group-inner", false],
+      ["group-open", false],
+    ],
+  );
+
+  const rebuiltTree = buildTreeNodesFromLayout(expandedLayout, connections, new Set());
+  assert.equal(findSidebarNodeForTarget(target, flattenTree(rebuiltTree))?.id, "conn-grouped");
 });

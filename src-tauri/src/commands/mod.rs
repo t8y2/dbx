@@ -7,11 +7,13 @@ pub mod config_cmd;
 pub mod connection;
 #[allow(dead_code, unused_imports)]
 mod connection_secrets;
+pub mod consul_cmd;
 pub mod csv_export;
 pub mod data_compare;
 pub mod database_export;
 pub mod deep_link;
 pub mod dialect_cmd;
+pub mod docs;
 pub mod document_cmd;
 pub mod etcd_cmd;
 pub mod external_db;
@@ -26,6 +28,8 @@ pub mod mcp_bridge;
 pub mod mongo_cmd;
 #[cfg(feature = "mq-admin")]
 pub mod mq_cmd;
+#[cfg(feature = "mq-admin")]
+pub mod mqtt_cmd;
 pub mod nacos_cmd;
 pub mod plugins;
 pub mod prompt_template;
@@ -52,6 +56,7 @@ pub mod transfer;
 pub mod tunnel_profiles;
 pub mod update;
 mod update_portable;
+pub mod vector_cmd;
 pub mod window_controls;
 pub mod xlsx_export;
 pub mod zookeeper_cmd;

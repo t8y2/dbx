@@ -17,6 +17,7 @@ import type { CellValue } from "@/lib/dataGrid/cellValue";
 import { encodeHBaseTextInput, hbaseCellInput } from "@/lib/hbase/hbaseValues";
 import { loadHBaseRowLimit, saveHBaseRowLimit } from "@/lib/hbase/hbaseBrowserPreferences";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { useQueryStore } from "@/stores/queryStore";
 import type { QueryResult } from "@/types/database";
 import type { HBaseCellInput, HBasePutRowInput, HBaseRow, HBaseTableSchema, HBaseValueEncoding } from "@/types/hbase";
@@ -61,7 +62,7 @@ const deleteTableLoading = ref(false);
 const deleteTableError = ref("");
 
 const hasTable = computed(() => props.table.trim().length > 0);
-const readOnly = computed(() => connectionStore.getConfig(props.connectionId)?.read_only === true);
+const readOnly = computed(() => connectionIsEffectivelyReadOnly(connectionStore.getConfig(props.connectionId)));
 const qualifiedTableLabel = computed(() => {
   if (!hasTable.value) return props.namespace;
   return props.namespace && props.namespace !== "default" ? `${props.namespace}:${props.table}` : props.table;

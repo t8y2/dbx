@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  DBX_NEO4J_ELEMENT_ID_COLUMN,
   DBX_ROWID_COLUMN,
   DBX_TDENGINE_TBNAME_COLUMN,
   canDeleteExistingTdengineRows,
@@ -49,6 +50,12 @@ describe("tableEditing", () => {
     expect(isTableDataEditable("oracle", [DBX_ROWID_COLUMN], "VIEW")).toBe(false);
   });
 
+  it("keeps Impala table data readonly", () => {
+    expect(isTableDataEditable("impala", ["id"], "TABLE")).toBe(false);
+    expect(canEditExistingTableRows("impala", undefined, ["id"])).toBe(false);
+    expect(supportsDataGridTransaction("impala")).toBe(false);
+  });
+
   it("does not include Oracle ROWID for view data tabs", () => {
     expect(usesSyntheticRowIdKey("oracle", [DBX_ROWID_COLUMN], "VIEW")).toBe(false);
     expect(usesSyntheticRowIdKey("oracle", [DBX_ROWID_COLUMN], "MATERIALIZED_VIEW")).toBe(false);
@@ -67,6 +74,25 @@ describe("tableEditing", () => {
     expect(editableRowIdentifierColumns("postgres", [column("email"), column("name")], [index(["email", "name"]), index(["email"])])).toEqual(["email"]);
     expect(editableRowIdentifierColumns("postgres", [column("email"), column("name")], [index(["email"], true, "email IS NOT NULL")])).toEqual([]);
     expect(editableRowIdentifierColumns("postgres", [column("id", true), column("email")], [index(["email"])])).toEqual(["id"]);
+  });
+
+  it.each(["oracle", "oceanbase-oracle"] as const)("prefers physical %s indexes over the ROWID fallback", (databaseType) => {
+    const columns = [column("OFFER_RELA_ID"), column("ORI_OFFER_ID")];
+    const primaryIndex = { ...index(["OFFER_RELA_ID"], false), is_primary: true };
+
+    expect(editableRowIdentifierColumns(databaseType, columns, [index(["ORI_OFFER_ID"]), primaryIndex], "TABLE")).toEqual(["OFFER_RELA_ID"]);
+    expect(editableRowIdentifierColumns(databaseType, columns, [index(["ORI_OFFER_ID"])], "TABLE")).toEqual(["ORI_OFFER_ID"]);
+    expect(editableRowIdentifierColumns(databaseType, columns, [index(["ORI_OFFER_ID"], false)], "TABLE")).toEqual([DBX_ROWID_COLUMN]);
+    expect(editableRowIdentifierColumns(databaseType, columns, [index(["ORI_OFFER_ID"], true, "ORI_OFFER_ID IS NOT NULL")], "TABLE")).toEqual([DBX_ROWID_COLUMN]);
+    expect(editableRowIdentifierColumns(databaseType, columns, [], "TABLE")).toEqual([DBX_ROWID_COLUMN]);
+  });
+
+  it("keeps synthetic row identifiers scoped to their existing fallbacks", () => {
+    const columns = [column("ID"), column("NAME")];
+
+    expect(editableRowIdentifierColumns("oracle", columns, [], "VIEW")).toEqual([]);
+    expect(editableRowIdentifierColumns("oracle", columns, [], "MATERIALIZED_VIEW")).toEqual([]);
+    expect(editableRowIdentifierColumns("neo4j", columns, [index(["ID"])], "TABLE")).toEqual([DBX_NEO4J_ELEMENT_ID_COLUMN]);
   });
 
   it("allows ClickHouse table editing when row identifiers are available", () => {

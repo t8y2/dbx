@@ -32,8 +32,14 @@ test("mutation families retain accepted targets, failures, and refresh work", ()
     const body = functionBody(name);
     assert.match(body, /sidebarDangerTarget\.value \?\? activeNode\.value/);
     assert.match(body, /refreshMutatedTableDataTabsForNode\(node\)/);
-    assert.match(body, /tableOperationFailed/);
+    // Failure reporting (including the tableOperationFailed toast) lives in
+    // the shared runDangerOperation helper, not inlined in each confirm*
+    // function.
+    assert.match(body, /runDangerOperation\(/);
   }
+
+  const runDangerOperation = functionBody("runDangerOperation");
+  assert.match(runDangerOperation, /toastDangerOperationError\(/);
 
   for (const name of ["confirmCreateNacosNamespace", "confirmEditNacosNamespace", "confirmDropDatabase"]) {
     const body = functionBody(name);
@@ -91,4 +97,25 @@ test("all locales define the object drop refresh warning with its message placeh
     assert.equal(keys.length, 1, `${locale} must define objectDropRefreshFailed exactly once`);
     assert.match(source, /objectDropRefreshFailed\s*:\s*["'][^\n]*\{message\}/, `${locale} must preserve the message placeholder`);
   }
+});
+
+test("database rename uses a maintenance connection and mutates state only after guarded script execution", () => {
+  const rename = functionBody("confirmRenameObject");
+  assert.ok(rename.includes("databaseRenameMaintenanceDatabase(connectionStore.getConfig(node.connectionId)?.database, node.label)"));
+  assert.ok(rename.includes("api.executeQuery(node.connectionId, maintenanceDatabase, preflightSql)"));
+  assert.ok(rename.includes("database: maintenanceDatabase"));
+  assert.ok(rename.includes("executeAsScript: true"));
+  assert.ok(rename.includes("beforeExecute: () => connectionStore.closeDatabaseConnection(node.connectionId!, node.label)"));
+  assert.ok(rename.includes("if (executed === undefined) return"));
+
+  const executionIndex = rename.indexOf("const executed = await executeTreeNodeSqlWithProductionGuard");
+  const cancellationIndex = rename.indexOf("if (executed === undefined) return");
+  const mutationIndex = rename.indexOf("renameApplied = true");
+  assert.ok(executionIndex >= 0 && cancellationIndex > executionIndex && mutationIndex > cancellationIndex);
+
+  assert.ok(runtimeHost.includes("beforeExecute?: () => Promise<void>"));
+  const guardedExecuteIndex = runtimeHost.indexOf("execute: async () => {");
+  const beforeExecuteIndex = runtimeHost.indexOf("await options.beforeExecute?.()", guardedExecuteIndex);
+  const markDispatchedIndex = runtimeHost.indexOf("options.markDispatched?.()", guardedExecuteIndex);
+  assert.ok(guardedExecuteIndex >= 0 && beforeExecuteIndex > guardedExecuteIndex && markDispatchedIndex > beforeExecuteIndex);
 });

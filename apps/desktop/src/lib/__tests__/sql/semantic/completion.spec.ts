@@ -281,6 +281,57 @@ describe("semantic SQL completion candidates", () => {
     expect(columns.find((item) => item.label === "v.id")?.apply).toBe("v.id");
   });
 
+  it("prioritizes matching table aliases over matching columns", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["test_tb", ["title", "type"].map((name) => ({ name, table: "test_tb" }))]]);
+
+    const { items } = semanticCompletion("SELECT * FROM test_tb AS tt WHERE t|", { columnsByTable });
+
+    expect(items[0]).toMatchObject({ label: "tt", type: "text", apply: "tt" });
+    expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual(expect.arrayContaining(["title", "type"]));
+  });
+
+  it("qualifies both unique and duplicate columns in multi-table queries", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([
+      ["tVillage", ["villageId", "villageName"].map((name) => ({ name, table: "tVillage" }))],
+      ["tland", ["villageId", "landName"].map((name) => ({ name, table: "tland" }))],
+    ]);
+
+    const { items } = semanticCompletion("SELECT vill| FROM tVillage tV INNER JOIN tland tl ON tV.villageId = tl.villageId", { columnsByTable });
+    const columns = items.filter((item) => item.type === "column");
+
+    expect(columns.map((item) => item.label)).toEqual(expect.arrayContaining(["tV.villageId", "tV.villageName", "tl.villageId"]));
+    expect(columns.find((item) => item.label === "tV.villageName")).toMatchObject({ filterText: "villageName", apply: "tV.villageName" });
+    expect(columns.find((item) => item.label === "tl.villageId")).toMatchObject({ filterText: "villageId", apply: "tl.villageId" });
+  });
+
+  it("marks SELECT projection columns as batch-selectable", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["users", ["id", "name"].map((name) => ({ name, table: "users" }))]]);
+
+    const { items } = semanticCompletion("SELECT | FROM users", { columnsByTable });
+
+    expect(items.filter((item) => item.type === "column")).toEqual(expect.arrayContaining([expect.objectContaining({ label: "id", apply: "id", batchSelectionMode: "select" }), expect.objectContaining({ label: "name", apply: "name", batchSelectionMode: "select" })]));
+  });
+
+  it("retains a typed table alias for batch-selected projection columns", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["users", ["id", "name"].map((name) => ({ name, table: "users" }))]]);
+
+    const { items } = semanticCompletion("SELECT u.| FROM users u", { columnsByTable });
+
+    expect(items.filter((item) => item.type === "column")).toEqual(
+      expect.arrayContaining([expect.objectContaining({ label: "id", apply: "id", batchSelectionMode: "select", batchSelectionQualifier: "u" }), expect.objectContaining({ label: "name", apply: "name", batchSelectionMode: "select", batchSelectionQualifier: "u" })]),
+    );
+  });
+
+  it("retains a typed table name when the referenced table also has an alias", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["users", ["id", "name"].map((name) => ({ name, table: "users" }))]]);
+
+    const { items } = semanticCompletion("SELECT users.| FROM users u", { columnsByTable });
+
+    expect(items.filter((item) => item.type === "column")).toEqual(
+      expect.arrayContaining([expect.objectContaining({ label: "id", apply: "id", batchSelectionMode: "select", batchSelectionQualifier: "users" }), expect.objectContaining({ label: "name", apply: "name", batchSelectionMode: "select", batchSelectionQualifier: "users" })]),
+    );
+  });
+
   it("completes columns for aliases in comma-separated table lists", () => {
     const columnsByTable = new Map<string, SqlCompletionColumn[]>([
       ["table_a", ["id", "name"].map((name) => ({ name, table: "table_a" }))],
@@ -394,6 +445,33 @@ WHERE a.id = b.fk_kpi_set_score_id`,
     expect(star?.apply).toBe("id, u.name");
   });
 
+  it.each([
+    ["Oracle", "oracle", "mysql", '"ID", o."created at", o."SELECT", o.safe_name'],
+    ["MySQL", "mysql", "mysql", "`ID`, o.`created at`, o.`SELECT`, o.safe_name"],
+    ["PostgreSQL", "postgres", "postgres", '"ID", o."created at", o."SELECT", o.safe_name'],
+    ["SQL Server", "sqlserver", "sqlserver", "[ID], o.[created at], o.[SELECT], o.safe_name"],
+    ["dialect fallback", undefined, "mysql", "`ID`, o.`created at`, o.`SELECT`, o.safe_name"],
+  ] as const)("uses %s identifier quoting in qualified star completion items", (_label, databaseType, dialect, expected) => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["orders", ["ID", "created at", "SELECT", "safe_name"].map((name) => ({ name, table: "orders" }))]]);
+
+    const starItems = semanticCompletion("SELECT o.*| FROM orders o", { columnsByTable }, { databaseType, dialect }).items;
+    const selectAllItems = semanticCompletion("SELECT o.| FROM orders o", { columnsByTable }, { databaseType, dialect }).items;
+
+    expect(starItems.find((item) => item.label === "* \u2192 columns")?.apply).toBe(expected);
+    expect(selectAllItems.find((item) => item.label === "o.*")?.apply).toBe(expected);
+  });
+
+  it("uses Oracle quoting for an unqualified multi-table star completion item", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([
+      ["ORDERS", ["ID", "created at"].map((name) => ({ name, table: "ORDERS" }))],
+      ["AUDIT", ["ID", "SELECT"].map((name) => ({ name, table: "AUDIT" }))],
+    ]);
+
+    const { items } = semanticCompletion("SELECT *| FROM ORDERS o JOIN AUDIT a ON a.ID = o.ID", { columnsByTable }, { databaseType: "oracle", dialect: "mysql" });
+
+    expect(items.find((item) => item.label === "* \u2192 columns")?.apply).toBe('o."ID", o."created at", a."ID", a."SELECT"');
+  });
+
   it("generates collision-free table aliases from semantic row sources", () => {
     const { items } = semanticCompletion("SELECT * FROM order_items oi JOIN ord|", {
       tables: [{ name: "order_items", type: "table" }],
@@ -417,7 +495,25 @@ WHERE a.id = b.fk_kpi_set_score_id`,
     const { context, items } = semanticCompletion("INSERT INTO users (|", { columnsByTable });
 
     expect(context.insertTable).toBe("users");
-    expect(items.find((item) => item.type === "snippet" && item.label === "users.*")?.apply).toBe("id, name, email");
+    const allColumns = items.find((item) => item.type === "snippet" && item.label === "users.*");
+    expect(allColumns?.apply).toBe("id, name, email) VALUES (${1:value}, ${2:value}, ${3:value})");
+    expect(allColumns?.detail).toBe("3 columns: id, name, email) VALUES (value, value, value)");
+  });
+
+  it("marks INSERT target columns as batch-selectable", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["users", ["id", "name"].map((name) => ({ name, table: "users" }))]]);
+
+    const { items } = semanticCompletion("INSERT INTO users (|", { columnsByTable });
+
+    expect(items.filter((item) => item.type === "column")).toEqual(expect.arrayContaining([expect.objectContaining({ label: "id", apply: "id", batchSelectionMode: "insert" }), expect.objectContaining({ label: "name", apply: "name", batchSelectionMode: "insert" })]));
+  });
+
+  it("uses the configured keyword case for INSERT all-column snippets", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["users", ["id", "name"].map((name) => ({ name, table: "users" }))]]);
+
+    const { items } = semanticCompletion("insert into users (|", { columnsByTable, keywordCase: "lower" });
+
+    expect(items.find((item) => item.type === "snippet" && item.label === "users.*")?.apply).toBe("id, name) values (${1:value}, ${2:value})");
   });
 
   it("keeps partial INSERT INTO targets in table completion context", () => {

@@ -66,7 +66,27 @@ pub struct DocumentFindRequest {
     pub filter: Option<String>,
     pub projection: Option<String>,
     pub sort: Option<String>,
+    pub collation: Option<String>,
+    pub cursor: Option<String>,
+    #[serde(default)]
+    pub cursor_pagination: bool,
     pub execution_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentCountRequest {
+    pub connection_id: String,
+    pub collection: String,
+    pub filter: Option<String>,
+    pub execution_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DynamoDbDescribeTableRequest {
+    pub connection_id: String,
+    pub table: String,
 }
 
 #[derive(Deserialize)]
@@ -86,6 +106,7 @@ pub struct DocumentInsertRequest {
     pub collection: String,
     pub doc_json: String,
     pub routing: Option<String>,
+    pub preserve_bson_types: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -108,6 +129,124 @@ pub struct DocumentDeleteRequest {
     pub id: String,
     pub routing: Option<String>,
     pub document_type: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchBatchSaveRequest {
+    pub connection_id: String,
+    pub collection: String,
+    pub updates: Vec<dbx_core::db::meilisearch_driver::MeilisearchDocumentUpdate>,
+    pub delete_ids: Vec<String>,
+    pub inserts: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchSearchRequest {
+    pub connection_id: String,
+    pub index: String,
+    pub q: Option<String>,
+    pub filter: Option<String>,
+    pub sort: Option<String>,
+    pub limit: u64,
+    pub offset: u64,
+    pub hybrid_embedder: Option<String>,
+    pub hybrid_semantic_ratio: Option<f64>,
+    pub show_ranking_score: Option<bool>,
+    pub ranking_score_threshold: Option<f64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchDocumentPageRequest {
+    pub connection_id: String,
+    pub index: String,
+    pub filter: Option<String>,
+    pub sort: Option<String>,
+    pub limit: u64,
+    pub offset: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchIndexRequest {
+    pub connection_id: String,
+    pub index: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchDocumentGetRequest {
+    pub connection_id: String,
+    pub index: String,
+    pub id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchSettingsUpdateRequest {
+    pub connection_id: String,
+    pub index: String,
+    pub settings: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchConnectionRequest {
+    pub connection_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchKeyListRequest {
+    pub connection_id: String,
+    pub offset: Option<u64>,
+    pub limit: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchKeyRequest {
+    pub connection_id: String,
+    pub uid: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchKeyCreateRequest {
+    pub connection_id: String,
+    pub input: dbx_core::db::meilisearch_driver::MeilisearchKeyCreateInput,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchKeyUpdateRequest {
+    pub connection_id: String,
+    pub uid: String,
+    pub input: dbx_core::db::meilisearch_driver::MeilisearchKeyUpdateInput,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchTaskListRequest {
+    pub connection_id: String,
+    pub input: dbx_core::db::meilisearch_driver::MeilisearchTaskListInput,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchTaskRequest {
+    pub connection_id: String,
+    pub uid: u64,
+    pub expected_index_uid: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchTaskMutationRequest {
+    pub connection_id: String,
+    pub selector: dbx_core::db::meilisearch_driver::MeilisearchTaskSelector,
 }
 
 #[derive(Deserialize)]
@@ -191,9 +330,40 @@ pub async fn find_documents(
             req.filter.as_deref(),
             req.projection.as_deref(),
             req.sort.as_deref(),
+            req.collation.as_deref(),
+            req.cursor.as_deref(),
+            req.cursor_pagination,
         ),
     )
     .await?;
+    Ok(Json(result))
+}
+
+pub async fn count_documents(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<DocumentCountRequest>,
+) -> Result<Json<u64>, AppError> {
+    let result = run_cancellable(
+        &state,
+        req.execution_id,
+        dbx_core::document_ops::count_document_store_documents_core(
+            &state.app,
+            &req.connection_id,
+            &req.collection,
+            req.filter.as_deref(),
+        ),
+    )
+    .await?;
+    Ok(Json(result))
+}
+
+pub async fn describe_dynamodb_table(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<DynamoDbDescribeTableRequest>,
+) -> Result<Json<dbx_core::db::dynamodb_driver::DynamoDbTableDescription>, AppError> {
+    let result = dbx_core::document_ops::describe_dynamodb_table_core(&state.app, &req.connection_id, &req.table)
+        .await
+        .map_err(AppError::from)?;
     Ok(Json(result))
 }
 
@@ -220,15 +390,27 @@ pub async fn insert_document(
     Json(req): Json<DocumentInsertRequest>,
 ) -> Result<Json<String>, AppError> {
     ensure_writable(&state.app, &req.connection_id, "Insert").await?;
-    let result = dbx_core::document_ops::insert_document_core(
-        &state.app,
-        &req.connection_id,
-        &req.database,
-        &req.collection,
-        &req.doc_json,
-        req.routing.as_deref(),
-    )
-    .await
+    let result = if req.preserve_bson_types.unwrap_or(false) {
+        dbx_core::document_ops::insert_document_preserving_bson_types_core(
+            &state.app,
+            &req.connection_id,
+            &req.database,
+            &req.collection,
+            &req.doc_json,
+            req.routing.as_deref(),
+        )
+        .await
+    } else {
+        dbx_core::document_ops::insert_document_core(
+            &state.app,
+            &req.connection_id,
+            &req.database,
+            &req.collection,
+            &req.doc_json,
+            req.routing.as_deref(),
+        )
+        .await
+    }
     .map_err(AppError::from)?;
     Ok(Json(result))
 }
@@ -268,6 +450,268 @@ pub async fn delete_document(
     )
     .await
     .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn save_meilisearch_batch(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MeilisearchBatchSaveRequest>,
+) -> Result<Json<u64>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "Save").await?;
+    let result = dbx_core::document_ops::save_meilisearch_document_batch_core(
+        &state.app,
+        &req.connection_id,
+        &req.collection,
+        &req.updates,
+        &req.delete_ids,
+        &req.inserts,
+    )
+    .await
+    .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn meilisearch_search(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MeilisearchSearchRequest>,
+) -> Result<Json<dbx_core::db::meilisearch_driver::MeilisearchSearchResult>, AppError> {
+    let result = dbx_core::document_ops::meilisearch_search_documents_core(
+        &state.app,
+        &req.connection_id,
+        &req.index,
+        req.q.as_deref(),
+        req.filter.as_deref(),
+        req.sort.as_deref(),
+        req.limit,
+        req.offset,
+        req.hybrid_embedder.as_deref(),
+        req.hybrid_semantic_ratio,
+        req.show_ranking_score.unwrap_or(false),
+        req.ranking_score_threshold,
+    )
+    .await
+    .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn meilisearch_fetch_documents(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MeilisearchDocumentPageRequest>,
+) -> Result<Json<dbx_core::db::meilisearch_driver::MeilisearchDocumentPage>, AppError> {
+    let result = dbx_core::document_ops::meilisearch_fetch_document_page_core(
+        &state.app,
+        &req.connection_id,
+        &req.index,
+        req.filter.as_deref(),
+        req.sort.as_deref(),
+        req.limit,
+        req.offset,
+    )
+    .await
+    .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn meilisearch_get_document(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MeilisearchDocumentGetRequest>,
+) -> Result<Json<String>, AppError> {
+    let result =
+        dbx_core::document_ops::meilisearch_get_document_core(&state.app, &req.connection_id, &req.index, &req.id)
+            .await
+            .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn meilisearch_get_settings(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MeilisearchIndexRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let result =
+        dbx_core::document_ops::meilisearch_get_index_settings_core(&state.app, &req.connection_id, &req.index)
+            .await
+            .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn meilisearch_update_settings(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MeilisearchSettingsUpdateRequest>,
+) -> Result<Json<()>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "Update settings").await?;
+    dbx_core::document_ops::meilisearch_update_index_settings_core(
+        &state.app,
+        &req.connection_id,
+        &req.index,
+        &req.settings,
+    )
+    .await
+    .map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn meilisearch_get_stats(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MeilisearchIndexRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let result = dbx_core::document_ops::meilisearch_get_index_stats_core(&state.app, &req.connection_id, &req.index)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn meilisearch_get_overview(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MeilisearchIndexRequest>,
+) -> Result<Json<dbx_core::db::meilisearch_driver::MeilisearchIndexOverview>, AppError> {
+    let result =
+        dbx_core::document_ops::meilisearch_get_index_overview_core(&state.app, &req.connection_id, &req.index)
+            .await
+            .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn meilisearch_delete_index(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MeilisearchIndexRequest>,
+) -> Result<Json<()>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "Delete index").await?;
+    dbx_core::document_ops::meilisearch_delete_index_core(&state.app, &req.connection_id, &req.index)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn meilisearch_delete_all_documents(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MeilisearchIndexRequest>,
+) -> Result<Json<()>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "Delete all documents").await?;
+    dbx_core::document_ops::meilisearch_delete_all_documents_core(&state.app, &req.connection_id, &req.index)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn meilisearch_get_system_overview(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MeilisearchConnectionRequest>,
+) -> Result<Json<dbx_core::db::meilisearch_driver::MeilisearchSystemOverview>, AppError> {
+    let result = dbx_core::document_ops::meilisearch_get_system_overview_core(&state.app, &req.connection_id)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn meilisearch_list_keys(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MeilisearchKeyListRequest>,
+) -> Result<Json<dbx_core::db::meilisearch_driver::MeilisearchKeyPage>, AppError> {
+    let result = dbx_core::document_ops::meilisearch_list_keys_core(
+        &state.app,
+        &req.connection_id,
+        req.offset.unwrap_or(0),
+        req.limit.unwrap_or(20),
+    )
+    .await
+    .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn meilisearch_get_key(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MeilisearchKeyRequest>,
+) -> Result<Json<dbx_core::db::meilisearch_driver::MeilisearchKeyListItem>, AppError> {
+    let result = dbx_core::document_ops::meilisearch_get_key_core(&state.app, &req.connection_id, &req.uid)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn meilisearch_create_key(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MeilisearchKeyCreateRequest>,
+) -> Result<Json<dbx_core::db::meilisearch_driver::MeilisearchCreatedKey>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "Create API key").await?;
+    let result = dbx_core::document_ops::meilisearch_create_key_core(&state.app, &req.connection_id, &req.input)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn meilisearch_update_key(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MeilisearchKeyUpdateRequest>,
+) -> Result<Json<dbx_core::db::meilisearch_driver::MeilisearchKeyListItem>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "Update API key").await?;
+    let result =
+        dbx_core::document_ops::meilisearch_update_key_core(&state.app, &req.connection_id, &req.uid, &req.input)
+            .await
+            .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn meilisearch_delete_key(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MeilisearchKeyRequest>,
+) -> Result<Json<()>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "Delete API key").await?;
+    dbx_core::document_ops::meilisearch_delete_key_core(&state.app, &req.connection_id, &req.uid)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn meilisearch_get_tasks(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MeilisearchTaskListRequest>,
+) -> Result<Json<dbx_core::db::meilisearch_driver::MeilisearchTaskPage>, AppError> {
+    let result = dbx_core::document_ops::meilisearch_get_tasks_core(
+        &state.app,
+        &req.connection_id,
+        &req.input.selector,
+        req.input.from,
+        req.input.limit.unwrap_or(20),
+    )
+    .await
+    .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn meilisearch_get_task(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MeilisearchTaskRequest>,
+) -> Result<Json<dbx_core::db::meilisearch_driver::MeilisearchTask>, AppError> {
+    let result = dbx_core::document_ops::meilisearch_get_task_core(
+        &state.app,
+        &req.connection_id,
+        req.uid,
+        req.expected_index_uid.as_deref(),
+    )
+    .await
+    .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn meilisearch_cancel_tasks(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MeilisearchTaskMutationRequest>,
+) -> Result<Json<dbx_core::db::meilisearch_driver::MeilisearchEnqueuedTaskSummary>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "Cancel tasks").await?;
+    let result = dbx_core::document_ops::meilisearch_cancel_tasks_core(&state.app, &req.connection_id, &req.selector)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn meilisearch_delete_tasks(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MeilisearchTaskMutationRequest>,
+) -> Result<Json<dbx_core::db::meilisearch_driver::MeilisearchEnqueuedTaskSummary>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "Delete tasks").await?;
+    let result = dbx_core::document_ops::meilisearch_delete_tasks_core(&state.app, &req.connection_id, &req.selector)
+        .await
+        .map_err(AppError::from)?;
     Ok(Json(result))
 }
 

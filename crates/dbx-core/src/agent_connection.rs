@@ -25,7 +25,7 @@ impl AgentSessionRole {
 
 fn agent_jdbc_driver_class(config: &ConnectionConfig) -> &str {
     let driver_class = config.jdbc_driver_class.as_deref().unwrap_or("");
-    if config.db_type == DatabaseType::H2
+    if (config.db_type == DatabaseType::H2 && !h2_uses_custom_driver(config))
         || (config.db_type == DatabaseType::SapHana && matches!(driver_class, "sap_hana" | "saphana"))
     {
         ""
@@ -34,7 +34,25 @@ fn agent_jdbc_driver_class(config: &ConnectionConfig) -> &str {
     }
 }
 
-pub fn agent_connect_params(config: &ConnectionConfig, host: &str, port: u16, database: &str) -> serde_json::Value {
+fn agent_jdbc_driver_paths(config: &ConnectionConfig) -> &[String] {
+    if config.db_type == DatabaseType::H2 && !h2_uses_custom_driver(config) {
+        &[]
+    } else {
+        &config.jdbc_driver_paths
+    }
+}
+
+fn h2_uses_custom_driver(config: &ConnectionConfig) -> bool {
+    config.db_type == DatabaseType::H2
+        && config.driver_profile.as_deref().is_some_and(|profile| profile.eq_ignore_ascii_case("h2-custom"))
+}
+
+pub fn agent_connect_params(
+    config: &ConnectionConfig,
+    host: &str,
+    port: u16,
+    database: &str,
+) -> Result<serde_json::Value, String> {
     agent_connect_params_with_role(config, host, port, database, AgentSessionRole::Workload)
 }
 
@@ -44,7 +62,7 @@ pub fn agent_connect_params_with_role(
     port: u16,
     database: &str,
     session_role: AgentSessionRole,
-) -> serde_json::Value {
+) -> Result<serde_json::Value, String> {
     let agent_database = if config.db_type == DatabaseType::MongoDb {
         mongo_agent_database(config, database)
     } else if matches!(config.db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle) {
@@ -62,9 +80,9 @@ pub fn agent_connect_params_with_role(
     let connection_string = if config.db_type == DatabaseType::MongoDb {
         config.connection_url_with_host(host, port)
     } else if config.db_type == DatabaseType::Oracle {
-        oracle_jdbc_connection_string(config, host, port, database)
+        oracle_jdbc_connection_string(config, host, port, database)?
     } else if config.db_type == DatabaseType::OceanbaseOracle {
-        oceanbase_oracle_jdbc_connection_string(config, host, port, database)
+        oceanbase_oracle_jdbc_connection_string(config, host, port, database)?
     } else if matches!(
         config.db_type,
         DatabaseType::Kingbase | DatabaseType::Highgo | DatabaseType::Uxdb | DatabaseType::Vastbase
@@ -73,7 +91,7 @@ pub fn agent_connect_params_with_role(
     } else if config.db_type == DatabaseType::SapHana {
         sap_hana_jdbc_connection_string(config, host, port, database)
     } else if matches!(config.db_type, DatabaseType::Trino | DatabaseType::PrestoSql) {
-        trino_like_jdbc_connection_string(config, host, port, database)
+        trino_like_jdbc_connection_string(config, host, port, database)?
     } else if config.db_type == DatabaseType::H2 {
         h2_agent_jdbc_connection_string(config)
     } else {
@@ -108,15 +126,17 @@ pub fn agent_connect_params_with_role(
         "gbase_server": config.gbase_server,
         "informix_server": config.informix_server,
         "jdbc_driver_class": agent_jdbc_driver_class(config),
-        "jdbc_driver_paths": &config.jdbc_driver_paths,
+        "jdbc_driver_paths": agent_jdbc_driver_paths(config),
+        "driver_profile": config.driver_profile.as_deref().unwrap_or(""),
         "sessionRole": session_role.as_str(),
+        "database_type": config.db_type,
     });
     if config.db_type == DatabaseType::ZooKeeper {
         params["connection_timeout_ms"] = serde_json::json!(
             (config.effective_connect_timeout_secs() * 1000).max(ZOOKEEPER_MIN_CONNECTION_TIMEOUT_MS)
         );
     }
-    params
+    Ok(params)
 }
 
 fn oracle_uses_sysdba(config: &ConnectionConfig) -> bool {
@@ -260,9 +280,13 @@ pub fn mongo_legacy_error_with_auth_hint(err: &str) -> String {
         return err.to_string();
     };
     let source = &source[..source_end];
-    format!(
-        "{err}\n\nCurrent authentication database: {source}. If this user was created in admin, set Authentication database to admin or add authSource=admin to URL params."
-    )
+    let verification_hint = format!(
+        "Current authentication database: {source}. The server rejected these credentials. Verify the username and password, and confirm that the user was created in {source}."
+    );
+    if source.eq_ignore_ascii_case("admin") {
+        return format!("{err}\n\n{verification_hint}");
+    }
+    format!("{err}\n\n{verification_hint} If the user was created in admin, set Authentication database to admin or add authSource=admin to URL params.")
 }
 
 pub fn mongo_uses_legacy_driver(config: &ConnectionConfig) -> bool {
@@ -325,7 +349,7 @@ pub fn oracle_alternate_connect_configs(config: &ConnectionConfig, err: &str) ->
 
     let host = config.host.trim();
     let port = config.port;
-    let current_url = oracle_jdbc_connection_string(config, host, port, database);
+    let current_url = oracle_jdbc_connection_string(config, host, port, database).unwrap_or_default();
     let service_url = oracle_service_jdbc_url(host, port, database);
     let sid_url = oracle_sid_jdbc_url(host, port, database);
     let legacy_service_url = oracle_legacy_service_jdbc_url(host, port, database);
@@ -362,25 +386,30 @@ pub fn oracle_alternate_connect_configs(config: &ConnectionConfig, err: &str) ->
         .collect()
 }
 
-fn oracle_jdbc_connection_string(config: &ConnectionConfig, host: &str, port: u16, database: &str) -> String {
+fn oracle_jdbc_connection_string(
+    config: &ConnectionConfig,
+    host: &str,
+    port: u16,
+    database: &str,
+) -> Result<String, String> {
     if let Some(connection_string) = config.connection_string.as_deref().filter(|value| !value.trim().is_empty()) {
         let connection_string = connection_string.trim();
         if host == config.host && port == config.port {
-            return connection_string.to_string();
+            return Ok(connection_string.to_string());
         }
         return crate::models::connection::rewrite_jdbc_url_host(connection_string, host, port);
     }
 
     let database = database.trim();
     if database.is_empty() {
-        return String::new();
+        return Ok(String::new());
     }
 
-    if config.oracle_connection_type.as_deref() == Some("sid") {
+    Ok(if config.oracle_connection_type.as_deref() == Some("sid") {
         oracle_sid_jdbc_url(host, port, database)
     } else {
         oracle_service_jdbc_url(host, port, database)
-    }
+    })
 }
 
 fn oracle_listener_error_can_retry(err: &str) -> bool {
@@ -408,27 +437,32 @@ fn oracle_descriptor_jdbc_url(host: &str, port: u16, database: &str, key: &str) 
     format!("jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST={host})(PORT={port}))(CONNECT_DATA=({key}={database})))")
 }
 
-fn oceanbase_oracle_jdbc_connection_string(config: &ConnectionConfig, host: &str, port: u16, database: &str) -> String {
+fn oceanbase_oracle_jdbc_connection_string(
+    config: &ConnectionConfig,
+    host: &str,
+    port: u16,
+    database: &str,
+) -> Result<String, String> {
     if let Some(connection_string) = config.connection_string.as_deref().filter(|value| !value.trim().is_empty()) {
         let connection_string = connection_string.trim();
         let url = if host == config.host && port == config.port {
             connection_string.to_string()
         } else {
-            crate::models::connection::rewrite_jdbc_url_host(connection_string, host, port)
+            crate::models::connection::rewrite_jdbc_url_host(connection_string, host, port)?
         };
         if url_has_query_key(&url, OCEANBASE_ORACLE_COMPATIBLE_OJDBC_VERSION_KEY) {
-            return url;
+            return Ok(url);
         }
-        return append_agent_url_params(url, Some(OCEANBASE_ORACLE_COMPATIBLE_OJDBC_VERSION_PARAM));
+        return Ok(append_agent_url_params(url, Some(OCEANBASE_ORACLE_COMPATIBLE_OJDBC_VERSION_PARAM)));
     }
 
     let database = database.trim();
     if database.is_empty() {
-        return String::new();
+        return Ok(String::new());
     }
 
     let base = format!("jdbc:oceanbase://{host}:{port}/{database}");
-    append_agent_url_params(base, Some(&oceanbase_oracle_jdbc_params(config)))
+    Ok(append_agent_url_params(base, Some(&oceanbase_oracle_jdbc_params(config))))
 }
 
 fn oceanbase_oracle_jdbc_params(config: &ConnectionConfig) -> String {
@@ -524,7 +558,12 @@ fn sap_hana_jdbc_connection_string(config: &ConnectionConfig, host: &str, port: 
     }
 }
 
-pub fn trino_like_jdbc_connection_string(config: &ConnectionConfig, host: &str, port: u16, database: &str) -> String {
+pub fn trino_like_jdbc_connection_string(
+    config: &ConnectionConfig,
+    host: &str,
+    port: u16,
+    database: &str,
+) -> Result<String, String> {
     let jdbc_scheme = match config.db_type {
         DatabaseType::PrestoSql => "presto",
         _ => "trino",
@@ -537,11 +576,12 @@ pub fn trino_like_jdbc_connection_string(config: &ConnectionConfig, host: &str, 
         .filter(|value| value.get(..jdbc_prefix.len()).is_some_and(|prefix| prefix.eq_ignore_ascii_case(&jdbc_prefix)))
         .map(|connection_string| {
             if host == config.host && port == config.port {
-                connection_string.to_string()
+                Ok(connection_string.to_string())
             } else {
                 crate::models::connection::rewrite_jdbc_url_host(connection_string, host, port)
             }
         })
+        .transpose()?
         .unwrap_or_else(|| {
             let database = database.trim();
             if database.is_empty() {
@@ -552,11 +592,7 @@ pub fn trino_like_jdbc_connection_string(config: &ConnectionConfig, host: &str, 
         });
 
     let params = trino_agent_jdbc_params(config, &base);
-    if params.is_empty() {
-        base
-    } else {
-        append_agent_url_params(base, Some(&params))
-    }
+    Ok(if params.is_empty() { base } else { append_agent_url_params(base, Some(&params)) })
 }
 
 fn trino_agent_jdbc_params(config: &ConnectionConfig, base: &str) -> String {
@@ -624,6 +660,31 @@ fn append_agent_url_params(base: String, params: Option<&str>) -> String {
     format!("{base}{separator}{params}")
 }
 
+pub fn hive_uses_zookeeper_discovery(config: &ConnectionConfig) -> bool {
+    if !matches!(config.db_type, DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala) {
+        return false;
+    }
+
+    if config.url_params.as_deref().is_some_and(hive_parameters_use_zookeeper_discovery) {
+        return true;
+    }
+
+    config.host.trim().is_empty()
+        && config.connection_string.as_deref().is_some_and(hive_parameters_use_zookeeper_discovery)
+}
+
+fn hive_parameters_use_zookeeper_discovery(source: &str) -> bool {
+    source.split([';', '?', '#', '&']).any(|part| {
+        let Some((key, value)) = part.split_once('=') else {
+            return false;
+        };
+        let key = percent_decode_str(key.trim()).decode_utf8_lossy();
+        let value = percent_decode_str(value.trim()).decode_utf8_lossy();
+        key.eq_ignore_ascii_case("serviceDiscoveryMode")
+            && (value.eq_ignore_ascii_case("zookeeper") || value.eq_ignore_ascii_case("zookeeperha"))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -634,6 +695,7 @@ mod tests {
 
     fn config(db_type: DatabaseType, database: Option<&str>) -> ConnectionConfig {
         ConnectionConfig {
+            docs_notes_path: None,
             id: "conn".to_string(),
             name: "Connection".to_string(),
             note: String::new(),
@@ -647,7 +709,9 @@ mod tests {
             username: "user".to_string(),
             password: "secret".to_string(),
             database: database.map(str::to_string),
+            default_schema: None,
             visible_databases: None,
+            visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
             attached_databases: Vec::new(),
@@ -675,6 +739,7 @@ mod tests {
             redis_key_separator: default_redis_key_separator(),
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
+            redis_key_templates: Vec::new(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),
@@ -682,6 +747,7 @@ mod tests {
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            save_password: true,
             read_only: false,
             is_production: false,
             production_databases: vec![],
@@ -691,8 +757,9 @@ mod tests {
 
     #[test]
     fn agent_connect_params_default_to_workload_session_role() {
-        let params = agent_connect_params(&config(DatabaseType::H2, Some("test")), "127.0.0.1", 9092, "test");
+        let params = agent_connect_params(&config(DatabaseType::H2, Some("test")), "127.0.0.1", 9092, "test").unwrap();
         assert_eq!(params["sessionRole"], "workload");
+        assert_eq!(params["database_type"], "h2");
     }
 
     #[test]
@@ -703,8 +770,45 @@ mod tests {
             9092,
             "test",
             AgentSessionRole::Metadata,
-        );
+        )
+        .unwrap();
         assert_eq!(params["sessionRole"], "metadata");
+    }
+
+    #[test]
+    fn oracle_form_connections_use_orcl_when_database_is_omitted() {
+        for (mode, expected_url) in [
+            ("service_name", "jdbc:oracle:thin:@//oracle.example.com:1521/ORCL"),
+            ("sid", "jdbc:oracle:thin:@oracle.example.com:1521:ORCL"),
+        ] {
+            let mut cfg = config(DatabaseType::Oracle, None);
+            cfg.oracle_connection_type = Some(mode.to_string());
+            let database = cfg.effective_database().unwrap_or("");
+
+            let params = agent_connect_params(&cfg, "oracle.example.com", 1521, database).unwrap();
+
+            assert_eq!(params["database"], "ORCL");
+            assert_eq!(params["connection_string"], expected_url);
+        }
+    }
+
+    #[test]
+    fn structured_hive_uses_current_url_params_for_zookeeper_detection() {
+        let mut cfg = config(DatabaseType::Hive, Some("default"));
+        cfg.connection_string = Some(
+            "jdbc:hive2://zk1.example.com:2181,zk2.example.com:2181/default;serviceDiscoveryMode=zooKeeper".to_string(),
+        );
+        assert!(!hive_uses_zookeeper_discovery(&cfg));
+
+        cfg.url_params = Some("serviceDiscoveryMode=zooKeeperHA;zooKeeperNamespace=hs2".to_string());
+        assert!(hive_uses_zookeeper_discovery(&cfg));
+
+        cfg.url_params = Some("note=serviceDiscoveryMode=zooKeeper".to_string());
+        assert!(!hive_uses_zookeeper_discovery(&cfg));
+
+        cfg.host.clear();
+        cfg.url_params = None;
+        assert!(hive_uses_zookeeper_discovery(&cfg));
     }
 
     #[test]
@@ -712,7 +816,7 @@ mod tests {
         let mut cfg = config(DatabaseType::MongoDb, None);
         cfg.connection_string = Some("mongodb://user:secret@127.0.0.1:27017/app_db?authSource=admin".to_string());
 
-        let params = agent_connect_params(&cfg, "127.0.0.1", 27017, "");
+        let params = agent_connect_params(&cfg, "127.0.0.1", 27017, "").unwrap();
 
         assert_eq!(params["database"], "app_db");
     }
@@ -731,7 +835,7 @@ mod tests {
         cfg.host = "/tmp/app.mv.db".to_string();
         cfg.port = 0;
 
-        let params = agent_connect_params(&cfg, "/tmp/app.mv.db", 0, "");
+        let params = agent_connect_params(&cfg, "/tmp/app.mv.db", 0, "").unwrap();
 
         assert_eq!(params["host"], "");
         assert_eq!(params["port"], 0);
@@ -744,7 +848,7 @@ mod tests {
         let mut cfg = config(DatabaseType::H2, None);
         cfg.connection_string = Some("jdbc:h2:file:/tmp/app.mv.db;AUTO_SERVER=TRUE".to_string());
 
-        let params = agent_connect_params(&cfg, "127.0.0.1", 9092, "test");
+        let params = agent_connect_params(&cfg, "127.0.0.1", 9092, "test").unwrap();
 
         assert_eq!(params["host"], "");
         assert_eq!(params["port"], 0);
@@ -757,7 +861,7 @@ mod tests {
         let mut cfg = config(DatabaseType::H2, None);
         cfg.connection_string = Some("jdbc:h2:split:28:C:/dbx-test/h2/sample-db;AUTO_SERVER=TRUE".to_string());
 
-        let params = agent_connect_params(&cfg, "127.0.0.1", 9092, "test");
+        let params = agent_connect_params(&cfg, "127.0.0.1", 9092, "test").unwrap();
 
         assert_eq!(
             h2_file_path_from_jdbc_url(cfg.connection_string.as_deref().unwrap()).as_deref(),
@@ -775,7 +879,7 @@ mod tests {
         cfg.host = "127.0.0.1".to_string();
         cfg.port = 9092;
 
-        let params = agent_connect_params(&cfg, "127.0.0.1", 9092, "test");
+        let params = agent_connect_params(&cfg, "127.0.0.1", 9092, "test").unwrap();
 
         assert_eq!(params["host"], "127.0.0.1");
         assert_eq!(params["port"], 9092);
@@ -784,23 +888,41 @@ mod tests {
     }
 
     #[test]
-    fn h2_agent_connect_params_ignore_stale_driver_class() {
-        for driver_profile in [None, Some("h2-legacy")] {
+    fn h2_bundled_agent_connect_params_ignore_stale_custom_driver_config() {
+        for driver_profile in
+            [None, Some("h2"), Some("h2-auto"), Some("h2-legacy"), Some("h2-v1"), Some("h2-v2"), Some("h2-v3")]
+        {
             let mut cfg = config(DatabaseType::H2, Some("test"));
             cfg.driver_profile = driver_profile.map(str::to_string);
             cfg.jdbc_driver_class = Some("h2_embedded".to_string());
+            cfg.jdbc_driver_paths = vec!["/tmp/stale-h2.jar".to_string()];
 
-            let params = agent_connect_params(&cfg, "127.0.0.1", 9092, "test");
+            let params = agent_connect_params(&cfg, "127.0.0.1", 9092, "test").unwrap();
 
             assert_eq!(params["jdbc_driver_class"], "");
+            assert_eq!(params["jdbc_driver_paths"], serde_json::json!([]));
         }
+    }
+
+    #[test]
+    fn h2_custom_agent_connect_params_preserve_external_driver_config() {
+        let mut cfg = config(DatabaseType::H2, Some("test"));
+        cfg.driver_profile = Some("h2-custom".to_string());
+        cfg.jdbc_driver_class = Some("org.h2.Driver".to_string());
+        cfg.jdbc_driver_paths = vec!["/tmp/h2-custom.jar".to_string(), "/tmp/h2-helper.jar".to_string()];
+
+        let params = agent_connect_params(&cfg, "127.0.0.1", 9092, "test").unwrap();
+
+        assert_eq!(params["driver_profile"], "h2-custom");
+        assert_eq!(params["jdbc_driver_class"], "org.h2.Driver");
+        assert_eq!(params["jdbc_driver_paths"], serde_json::json!(["/tmp/h2-custom.jar", "/tmp/h2-helper.jar"]));
     }
 
     #[test]
     fn vastbase_agent_url_defaults_to_postgres_database_when_empty() {
         let cfg = config(DatabaseType::Vastbase, Some(""));
 
-        let params = agent_connect_params(&cfg, "vastbase.example.com", 5432, "");
+        let params = agent_connect_params(&cfg, "vastbase.example.com", 5432, "").unwrap();
 
         assert_eq!(params["database"], "postgres");
         assert_eq!(params["connection_string"], "jdbc:vastbase://vastbase.example.com:5432/postgres");
@@ -810,7 +932,7 @@ mod tests {
     fn uxdb_agent_params_use_vendor_jdbc_url() {
         let cfg = config(DatabaseType::Uxdb, Some("uxdb"));
 
-        let params = agent_connect_params(&cfg, "uxdb.example.com", 52025, "uxdb");
+        let params = agent_connect_params(&cfg, "uxdb.example.com", 52025, "uxdb").unwrap();
 
         assert_eq!(params["database"], "uxdb");
         assert_eq!(params["connection_string"], "jdbc:uxdb://uxdb.example.com:52025/uxdb");
@@ -822,7 +944,7 @@ mod tests {
         cfg.connection_string = Some("zk-1:2181,zk-2:2181/app".to_string());
         cfg.connect_timeout_secs = 20;
 
-        let params = agent_connect_params(&cfg, "127.0.0.1", 2181, "");
+        let params = agent_connect_params(&cfg, "127.0.0.1", 2181, "").unwrap();
 
         assert_eq!(params["connection_string"], "zk-1:2181,zk-2:2181/app");
         assert_eq!(params["zookeeper_connect_string"], "zk-1:2181,zk-2:2181/app");
@@ -834,7 +956,7 @@ mod tests {
         let mut cfg = config(DatabaseType::Mysql, Some("app"));
         cfg.connect_timeout_secs = 45;
 
-        let params = agent_connect_params(&cfg, "mysql.example.com", 3306, "app");
+        let params = agent_connect_params(&cfg, "mysql.example.com", 3306, "app").unwrap();
 
         assert_eq!(params["connect_timeout_secs"], 45);
     }
@@ -843,7 +965,7 @@ mod tests {
     fn zookeeper_agent_params_fall_back_to_host_port_connect_string() {
         let cfg = config(DatabaseType::ZooKeeper, None);
 
-        let params = agent_connect_params(&cfg, "zk.local", 2281, "");
+        let params = agent_connect_params(&cfg, "zk.local", 2281, "").unwrap();
 
         assert_eq!(params["connection_string"], "");
         assert_eq!(params["zookeeper_connect_string"], "zk.local:2281");
@@ -858,6 +980,8 @@ mod tests {
 
         assert!(hinted.starts_with(err));
         assert!(hinted.contains("Current authentication database: admin"));
+        assert!(hinted.contains("The server rejected these credentials"));
+        assert!(!hinted.contains("add authSource=admin"));
     }
 
     #[test]
@@ -890,11 +1014,11 @@ mod tests {
         let mut cfg = config(DatabaseType::Oracle, Some("ORCL"));
         cfg.oracle_connection_type = Some("sid".to_string());
 
-        let sid = agent_connect_params(&cfg, "oracle.example.com", 1521, "ORCL");
+        let sid = agent_connect_params(&cfg, "oracle.example.com", 1521, "ORCL").unwrap();
         assert_eq!(sid["connection_string"], "jdbc:oracle:thin:@oracle.example.com:1521:ORCL");
 
         cfg.oracle_connection_type = Some("service_name".to_string());
-        let service = agent_connect_params(&cfg, "oracle.example.com", 1521, "ORCL");
+        let service = agent_connect_params(&cfg, "oracle.example.com", 1521, "ORCL").unwrap();
         assert_eq!(service["connection_string"], "jdbc:oracle:thin:@//oracle.example.com:1521/ORCL");
     }
 
@@ -918,7 +1042,7 @@ mod tests {
         cfg.username = "SYS".to_string();
         cfg.oracle_connection_type = Some("service_name".to_string());
 
-        let params = agent_connect_params(&cfg, "oracle.example.com", 1521, "ORCLPDB1");
+        let params = agent_connect_params(&cfg, "oracle.example.com", 1521, "ORCLPDB1").unwrap();
 
         assert_eq!(params["database"], "SYSDBA:ORCLPDB1");
         assert_eq!(params["sysdba"], true);
@@ -931,7 +1055,7 @@ mod tests {
         cfg.username = "system".to_string();
         cfg.sysdba = true;
 
-        let params = agent_connect_params(&cfg, "oracle.example.com", 1521, "ORCLPDB1");
+        let params = agent_connect_params(&cfg, "oracle.example.com", 1521, "ORCLPDB1").unwrap();
 
         assert_eq!(params["database"], "SYSDBA:ORCLPDB1");
         assert_eq!(params["sysdba"], true);
@@ -943,7 +1067,7 @@ mod tests {
         cfg.host = "oceanbase.example.com".to_string();
         cfg.port = 2881;
 
-        let params = agent_connect_params(&cfg, "oceanbase.example.com", 2881, "sys");
+        let params = agent_connect_params(&cfg, "oceanbase.example.com", 2881, "sys").unwrap();
 
         assert_eq!(params["database"], "sys");
         assert_eq!(params["sysdba"], false);
@@ -960,7 +1084,7 @@ mod tests {
         cfg.port = 2881;
         cfg.url_params = Some("useSSL=false".to_string());
 
-        let params = agent_connect_params(&cfg, "127.0.0.1", 12881, "sys");
+        let params = agent_connect_params(&cfg, "127.0.0.1", 12881, "sys").unwrap();
 
         assert_eq!(
             params["connection_string"],
@@ -975,7 +1099,7 @@ mod tests {
         cfg.port = 2881;
         cfg.url_params = Some("compatibleOjdbcVersion=6&useSSL=false".to_string());
 
-        let params = agent_connect_params(&cfg, "127.0.0.1", 12881, "sys");
+        let params = agent_connect_params(&cfg, "127.0.0.1", 12881, "sys").unwrap();
 
         assert_eq!(
             params["connection_string"],
@@ -990,7 +1114,7 @@ mod tests {
         cfg.port = 2881;
         cfg.connection_string = Some("jdbc:oceanbase://oceanbase.example.com:2881/sys?useSSL=false".to_string());
 
-        let params = agent_connect_params(&cfg, "127.0.0.1", 12881, "sys");
+        let params = agent_connect_params(&cfg, "127.0.0.1", 12881, "sys").unwrap();
 
         assert_eq!(
             params["connection_string"],
@@ -1008,7 +1132,7 @@ mod tests {
                 .to_string(),
         );
 
-        let params = agent_connect_params(&cfg, "127.0.0.1", 11521, "ORCL");
+        let params = agent_connect_params(&cfg, "127.0.0.1", 11521, "ORCL").unwrap();
 
         assert_eq!(
             params["connection_string"],
@@ -1026,12 +1150,27 @@ mod tests {
                 .to_string(),
         );
 
-        let params = agent_connect_params(&cfg, "form-host.example.com", 1521, "ORCL");
+        let params = agent_connect_params(&cfg, "form-host.example.com", 1521, "ORCL").unwrap();
 
         assert_eq!(
             params["connection_string"],
             "jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=descriptor-host.example.com)(PORT=1522))(CONNECT_DATA=(SERVICE_NAME=ORCL)))"
         );
+    }
+
+    #[test]
+    fn oracle_multi_address_descriptor_fails_closed_for_transport_endpoint() {
+        let mut cfg = config(DatabaseType::Oracle, Some("ORCL"));
+        cfg.host = "oracle.example.com".to_string();
+        cfg.port = 1521;
+        cfg.connection_string = Some(
+            "jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS_LIST=(ADDRESS=(PROTOCOL=TCP)(HOST=db1.example.com)(PORT=1521))(ADDRESS=(PROTOCOL=TCP)(HOST=db2.example.com)(PORT=1521)))(CONNECT_DATA=(SERVICE_NAME=ORCL)))"
+                .to_string(),
+        );
+
+        let err = agent_connect_params(&cfg, "127.0.0.1", 11521, "ORCL").unwrap_err();
+
+        assert!(err.contains("single ADDRESS entry"), "{err}");
     }
 
     #[test]
@@ -1084,7 +1223,7 @@ mod tests {
         let mut cfg = config(DatabaseType::SapHana, Some("TENANT1"));
         cfg.url_params = Some("encrypt=true".to_string());
 
-        let params = agent_connect_params(&cfg, "hana.example.com", 30013, "TENANT1");
+        let params = agent_connect_params(&cfg, "hana.example.com", 30013, "TENANT1").unwrap();
 
         assert_eq!(params["connection_string"], "jdbc:sap://hana.example.com:30013/?databaseName=TENANT1&encrypt=true");
     }
@@ -1096,7 +1235,7 @@ mod tests {
             cfg.jdbc_driver_class = Some(alias.to_string());
             cfg.jdbc_driver_paths = vec!["/tmp/ngdbc.jar".to_string()];
 
-            let params = agent_connect_params(&cfg, "hana.example.com", 30013, "TENANT1");
+            let params = agent_connect_params(&cfg, "hana.example.com", 30013, "TENANT1").unwrap();
 
             assert_eq!(params["jdbc_driver_class"], "");
             assert_eq!(params["jdbc_driver_paths"], serde_json::json!(["/tmp/ngdbc.jar"]));
@@ -1108,7 +1247,7 @@ mod tests {
         let mut cfg = config(DatabaseType::SapHana, Some("TENANT1"));
         cfg.jdbc_driver_class = Some("com.example.CustomSapHanaDriver".to_string());
 
-        let params = agent_connect_params(&cfg, "hana.example.com", 30013, "TENANT1");
+        let params = agent_connect_params(&cfg, "hana.example.com", 30013, "TENANT1").unwrap();
 
         assert_eq!(params["jdbc_driver_class"], "com.example.CustomSapHanaDriver");
     }
@@ -1119,7 +1258,7 @@ mod tests {
         cfg.jdbc_driver_class = Some("sap_hana".to_string());
         cfg.jdbc_driver_paths = vec!["/tmp/custom-driver.jar".to_string()];
 
-        let params = agent_connect_params(&cfg, "mysql.example.com", 3306, "test");
+        let params = agent_connect_params(&cfg, "mysql.example.com", 3306, "test").unwrap();
 
         assert_eq!(params["jdbc_driver_class"], "sap_hana");
         assert_eq!(params["jdbc_driver_paths"], serde_json::json!(["/tmp/custom-driver.jar"]));
@@ -1130,7 +1269,7 @@ mod tests {
         let mut cfg = config(DatabaseType::Jdbc, Some("test"));
         cfg.jdbc_driver_class = Some("com.example.CustomDriver".to_string());
 
-        let params = agent_connect_params(&cfg, "jdbc.example.com", 1234, "test");
+        let params = agent_connect_params(&cfg, "jdbc.example.com", 1234, "test").unwrap();
 
         assert_eq!(params["jdbc_driver_class"], "com.example.CustomDriver");
     }
@@ -1141,7 +1280,7 @@ mod tests {
         cfg.host = "trino.example.com".to_string();
         cfg.port = 8080;
 
-        let params = agent_connect_params(&cfg, "trino.example.com", 8080, "hive");
+        let params = agent_connect_params(&cfg, "trino.example.com", 8080, "hive").unwrap();
 
         assert_eq!(params["connection_string"], "jdbc:trino://trino.example.com:8080/hive");
         assert_eq!(params["ssl"], false);
@@ -1153,7 +1292,7 @@ mod tests {
         cfg.host = "presto.example.com".to_string();
         cfg.port = 9090;
 
-        let params = agent_connect_params(&cfg, "presto.example.com", 9090, "hive/default");
+        let params = agent_connect_params(&cfg, "presto.example.com", 9090, "hive/default").unwrap();
 
         assert_eq!(params["connection_string"], "jdbc:presto://presto.example.com:9090/hive/default");
         assert_eq!(params["ssl"], false);
@@ -1166,7 +1305,7 @@ mod tests {
         cfg.port = 9090;
         cfg.connection_string = Some("jdbc:presto://presto.internal:9090/hive/default?source=dbx".to_string());
 
-        let params = agent_connect_params(&cfg, "127.0.0.1", 19090, "hive/default");
+        let params = agent_connect_params(&cfg, "127.0.0.1", 19090, "hive/default").unwrap();
 
         assert_eq!(params["connection_string"], "jdbc:presto://127.0.0.1:19090/hive/default?source=dbx");
     }
@@ -1176,7 +1315,7 @@ mod tests {
         let mut cfg = config(DatabaseType::Trino, Some("hive"));
         cfg.ssl = true;
 
-        let params = agent_connect_params(&cfg, "trino.example.com", 8443, "hive");
+        let params = agent_connect_params(&cfg, "trino.example.com", 8443, "hive").unwrap();
 
         assert_eq!(params["connection_string"], "jdbc:trino://trino.example.com:8443/hive?SSL=true");
     }
@@ -1187,7 +1326,7 @@ mod tests {
         cfg.ssl = true;
         cfg.url_params = Some("ssl=true&SSLVerification=NONE".to_string());
 
-        let params = agent_connect_params(&cfg, "trino.example.com", 8443, "hive");
+        let params = agent_connect_params(&cfg, "trino.example.com", 8443, "hive").unwrap();
 
         assert_eq!(
             params["connection_string"],
@@ -1204,7 +1343,7 @@ mod tests {
                 .to_string(),
         );
 
-        let params = agent_connect_params(&cfg, "trino.example.com", 8443, "hive");
+        let params = agent_connect_params(&cfg, "trino.example.com", 8443, "hive").unwrap();
 
         assert_eq!(
             params["connection_string"],
@@ -1220,7 +1359,7 @@ mod tests {
         cfg.ssl = true;
         cfg.url_params = Some("SSLVerification=NONE".to_string());
 
-        let params = agent_connect_params(&cfg, "127.0.0.1", 15443, "hive");
+        let params = agent_connect_params(&cfg, "127.0.0.1", 15443, "hive").unwrap();
 
         assert_eq!(params["connection_string"], "jdbc:trino://127.0.0.1:15443/hive?SSLVerification=NONE&SSL=true");
     }
@@ -1234,7 +1373,7 @@ mod tests {
         cfg.connection_string = Some("jdbc:trino://trino.internal:8443/hive?SSL=true&source=dbx".to_string());
         cfg.url_params = Some("SSLVerification=NONE".to_string());
 
-        let params = agent_connect_params(&cfg, "127.0.0.1", 15443, "hive");
+        let params = agent_connect_params(&cfg, "127.0.0.1", 15443, "hive").unwrap();
 
         assert_eq!(
             params["connection_string"],

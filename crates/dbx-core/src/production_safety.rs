@@ -426,6 +426,9 @@ fn schema_first_qualifier_type(db_type: &DatabaseType) -> bool {
             | DatabaseType::PrestoSql
             | DatabaseType::Databricks
             | DatabaseType::Bigquery
+            // A Spanner JDBC connection is bound to a single database, so there is no
+            // cross-database `db.table` syntax — the first part of `a.b` is always a schema.
+            | DatabaseType::Spanner
     )
 }
 
@@ -638,6 +641,7 @@ mod tests {
 
     fn config() -> ConnectionConfig {
         ConnectionConfig {
+            docs_notes_path: None,
             id: "conn".to_string(),
             name: "test".to_string(),
             note: String::new(),
@@ -651,7 +655,9 @@ mod tests {
             username: "root".to_string(),
             password: String::new(),
             database: None,
+            default_schema: None,
             visible_databases: None,
+            visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
             attached_databases: vec![],
@@ -681,11 +687,13 @@ mod tests {
             redis_key_separator: ":".to_string(),
             redis_scan_page_size: Some(1000),
             redis_database_aliases: Default::default(),
+            redis_key_templates: Vec::new(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),
             external_config: None,
             one_time: false,
+            save_password: true,
             read_only: false,
             is_production: false,
             production_databases: vec!["prod_app".to_string()],
@@ -763,6 +771,18 @@ mod tests {
 
         assert!(targets_production_database(&sqlserver, "staging", "DELETE FROM prod_app.dbo.users WHERE id = 1"));
         assert!(!targets_production_database(&sqlserver, "staging", "DELETE FROM prod_app.users WHERE id = 1"));
+    }
+
+    /// A Spanner JDBC connection is bound to exactly one database, so `a.b` can only be
+    /// `schema.table`. Treating `a` as a database name would match a database that cannot
+    /// be addressed from this connection at all.
+    #[test]
+    fn resolves_spanner_qualifiers_as_schema_not_database() {
+        let mut spanner = config();
+        spanner.db_type = DatabaseType::Spanner;
+
+        assert!(!targets_production_database(&spanner, "staging", "DELETE FROM prod_app.users WHERE TRUE"));
+        assert!(targets_production_database(&spanner, "prod_app", "DELETE FROM public.users WHERE TRUE"));
     }
 
     #[test]

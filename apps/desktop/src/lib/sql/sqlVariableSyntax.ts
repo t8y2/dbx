@@ -53,11 +53,22 @@ export type SqlVariableSyntaxOverrides = Partial<Record<DatabaseType, Partial<Sq
 export const SQL_VARIABLE_SYNTAX_DATABASE_TYPES: DatabaseType[] = manifestDatabaseTypes();
 
 /**
- * Resolve the effective toggles for a database type. Any syntax not explicitly
- * disabled in `overrides` is enabled. A pure function safe to call on every
- * execution.
+ * Resolve the effective toggles for a database type. The global gate disables
+ * every syntax without modifying the saved overrides. Otherwise, any syntax not
+ * explicitly disabled in `overrides` is enabled. A pure function safe to call
+ * on every execution.
  */
-export function resolveSqlVariableSyntaxToggles(overrides: SqlVariableSyntaxOverrides | undefined, dbType: DatabaseType | undefined): SqlVariableSyntaxToggles {
+export function resolveSqlVariableSyntaxToggles(overrides: SqlVariableSyntaxOverrides | undefined, dbType: DatabaseType | undefined, enabled = true): SqlVariableSyntaxToggles {
+  if (!enabled) {
+    return {
+      positional: false,
+      named: false,
+      shell: false,
+      mybatis: false,
+      sqlserver: false,
+      atSet: false,
+    };
+  }
   const partial = dbType ? overrides?.[dbType] : undefined;
   return {
     positional: partial?.positional ?? true,

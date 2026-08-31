@@ -40,7 +40,7 @@ console.log(`Static export verified: ${files.length} files contain no GitHub API
 const requiredContent = [
   { file: "en.html", includes: ['<html lang="en"', '"@type":"SoftwareApplication"'] },
   { file: "cn.html", includes: ['<html lang="zh-CN"', '"@type":"SoftwareApplication"'] },
-  { file: "llms.txt", includes: ["70+ database", "20 MB", "Apache-2.0"] },
+  { file: "llms.txt", includes: ["90+ database", "20 MB", "Apache-2.0"] },
 ];
 
 for (const requirement of requiredContent) {
@@ -83,6 +83,19 @@ const sitemap = await readFile(join(outputDirectory, "sitemap.xml"), "utf8");
 for (const localizedHome of ["https://dbxio.com/en", "https://dbxio.com/cn"]) {
   if (!sitemap.includes(`<loc>${localizedHome}</loc>`)) {
     throw new Error(`sitemap.xml is missing localized URL: ${localizedHome}`);
+  }
+}
+
+for (const privateRoute of ["https://dbxio.com/en/issue", "https://dbxio.com/cn/issue"]) {
+  if (sitemap.includes(`<loc>${privateRoute}</loc>`)) {
+    throw new Error(`sitemap.xml must not advertise direct-only route: ${privateRoute}`);
+  }
+}
+
+for (const issuePage of ["en/issue.html", "cn/issue.html"]) {
+  const content = await readFile(join(outputDirectory, issuePage), "utf8");
+  if (!content.includes('<meta name="robots" content="noindex, nofollow, nocache"')) {
+    throw new Error(`${issuePage} must remain excluded from search indexing.`);
   }
 }
 

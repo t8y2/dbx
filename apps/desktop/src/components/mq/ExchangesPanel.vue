@@ -6,6 +6,7 @@ import { mqBind, mqCreateExchange, mqDeleteExchange, mqListBindings, mqListExcha
 import { formatError } from "@/lib/backend/errorUtils";
 import { isBuiltinRabbitMqExchange, rabbitMqExchangeDisplayName, RABBITMQ_EXCHANGE_TYPES } from "@/lib/mq/rabbitmqExchanges";
 import { isAllVhostsNamespace, resolveMqRowNamespace } from "@/lib/mq/mqConsoleDefaults";
+import { useMqMutationGuard } from "@/composables/useMqMutationGuard";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 
 interface Props {
@@ -17,6 +18,7 @@ interface Props {
 
 const props = defineProps<Props>();
 const { t } = useI18n();
+const { confirmMqWrite } = useMqMutationGuard(() => props.connectionId);
 
 const exchanges = ref<MqExchangeInfo[]>([]);
 const loading = ref(false);
@@ -79,12 +81,12 @@ function nsRefFor(row: { namespace?: string } | undefined): NamespaceRef | null 
   return { tenant: props.tenant, namespace };
 }
 
-function guardWritable() {
+async function guardWritable(operation: string): Promise<boolean> {
   if (props.readOnly) {
     error.value = t("mqExchanges.readOnly");
     return false;
   }
-  return true;
+  return confirmMqWrite(operation);
 }
 
 async function loadExchanges() {
@@ -143,14 +145,17 @@ function selectExchange(exchange: MqExchangeInfo) {
 }
 
 function openCreateDialog() {
-  if (!guardWritable()) return;
+  if (props.readOnly) {
+    error.value = t("mqExchanges.readOnly");
+    return;
+  }
   dialogError.value = undefined;
   createForm.value = { name: "", type: "direct", durable: true, autoDelete: false };
   showCreateDialog.value = true;
 }
 
 async function handleCreate() {
-  if (!guardWritable()) return;
+  if (!(await guardWritable(t("mqExchanges.create")))) return;
   const ns = nsRef();
   if (!createForm.value.name.trim() || !ns) {
     dialogError.value = t("mqExchanges.nameRequired");
@@ -176,13 +181,17 @@ async function handleCreate() {
 }
 
 function openDeleteDialog(exchange: MqExchangeInfo) {
-  if (!guardWritable()) return;
+  if (props.readOnly) {
+    error.value = t("mqExchanges.readOnly");
+    return;
+  }
   if (isBuiltinRabbitMqExchange(exchange)) return;
   deleteTarget.value = exchange;
   showDeleteDialog.value = true;
 }
 
 async function confirmDelete() {
+  if (!(await guardWritable(t("mqExchanges.delete")))) return;
   const target = deleteTarget.value;
   if (!target) return;
   const ns = nsRefFor(target);
@@ -208,7 +217,10 @@ async function confirmDelete() {
 }
 
 function openBindDialog() {
-  if (!guardWritable()) return;
+  if (props.readOnly) {
+    error.value = t("mqExchanges.readOnly");
+    return;
+  }
   if (!selectedExchange.value) return;
   dialogError.value = undefined;
   bindForm.value = { destinationType: "queue", destination: "", routingKey: "", argumentsText: "" };
@@ -227,7 +239,7 @@ function parseBindingArguments(): Record<string, unknown> | undefined {
 }
 
 async function handleBind() {
-  if (!guardWritable()) return;
+  if (!(await guardWritable(t("mqExchanges.bind")))) return;
   const exchange = selectedExchange.value;
   if (!exchange) return;
   const ns = nsRefFor(exchange);
@@ -260,12 +272,16 @@ async function handleBind() {
 }
 
 function openUnbindDialog(bindingRow: MqBindingInfo) {
-  if (!guardWritable()) return;
+  if (props.readOnly) {
+    error.value = t("mqExchanges.readOnly");
+    return;
+  }
   unbindTarget.value = bindingRow;
   showUnbindDialog.value = true;
 }
 
 async function confirmUnbind() {
+  if (!(await guardWritable(t("mqExchanges.unbind")))) return;
   const target = unbindTarget.value;
   if (!target) return;
   const ns = nsRefFor(target ?? selectedExchange.value);
@@ -522,6 +538,8 @@ watch(
 </template>
 
 <style scoped>
+@import "./shared/mqPanel.css";
+
 .exchanges-panel {
   display: flex;
   flex-direction: column;
@@ -700,45 +718,6 @@ td {
   font-weight: 600;
 }
 
-.btn-primary,
-.btn-secondary,
-.btn-sm,
-.btn-danger {
-  padding: 6px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--dbx-radius-fixed-4);
-  background: var(--color-background);
-  color: var(--color-text);
-  cursor: pointer;
-  font-size: 13px;
-  transition: all 0.2s;
-}
-
-.btn-primary {
-  background: var(--color-primary);
-  color: white;
-  border-color: var(--color-primary);
-}
-
-.btn-primary:hover:not(:disabled) {
-  opacity: 0.9;
-}
-
-.btn-danger {
-  color: var(--color-error);
-  border-color: var(--color-error);
-}
-
-.btn-danger:hover:not(:disabled) {
-  background: var(--color-error);
-  color: white;
-}
-
-.btn-sm {
-  padding: 4px 8px;
-  font-size: 12px;
-}
-
 button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
@@ -776,16 +755,6 @@ button:disabled {
 .dialog-header h3 {
   margin: 0;
   font-size: 18px;
-}
-
-.btn-close {
-  border: none;
-  background: none;
-  font-size: 24px;
-  cursor: pointer;
-  color: var(--color-text-secondary);
-  padding: 0;
-  line-height: 1;
 }
 
 .dialog-body {

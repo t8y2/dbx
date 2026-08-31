@@ -94,6 +94,102 @@ describe("useAiModelCatalog", () => {
     expect(apiMock.aiResolveModelEffort).toHaveBeenCalledTimes(2);
   });
 
+  it("tracks OpenCode executable and environment changes without depending on environment key order", async () => {
+    const initial: AiConfigItem = {
+      ...config(),
+      provider: "opencode-cli",
+      endpoint: "",
+      apiKey: "",
+      model: "default",
+      opencodeCliPath: "/opt/homebrew/bin/opencode",
+      opencodeCliEnv: { HTTPS_PROXY: "http://127.0.0.1:7890", NO_PROXY: "localhost" },
+    };
+    apiMock.aiListModels.mockResolvedValueOnce([{ id: "first" }]).mockResolvedValueOnce([{ id: "second" }]);
+
+    await expect(catalog.loadModels(initial)).resolves.toEqual([{ id: "first" }]);
+    await expect(
+      catalog.loadModels({
+        ...initial,
+        opencodeCliEnv: { NO_PROXY: "localhost", HTTPS_PROXY: "http://127.0.0.1:7890" },
+      }),
+    ).resolves.toEqual([{ id: "first" }]);
+    await expect(catalog.loadModels({ ...initial, opencodeCliPath: "/usr/local/bin/opencode" })).resolves.toEqual([{ id: "second" }]);
+
+    expect(apiMock.aiListModels).toHaveBeenCalledTimes(2);
+  });
+
+  it("tracks Cursor executable and environment changes without depending on environment key order", async () => {
+    const initial: AiConfigItem = {
+      ...config(),
+      provider: "cursor-cli",
+      endpoint: "",
+      apiKey: "",
+      model: "default",
+      cursorCliPath: "~/.local/bin/agent",
+      cursorCliEnv: { HTTPS_PROXY: "http://127.0.0.1:7890", NO_PROXY: "localhost" },
+    };
+    apiMock.aiListModels.mockResolvedValueOnce([{ id: "first" }]).mockResolvedValueOnce([{ id: "second" }]);
+
+    await expect(catalog.loadModels(initial)).resolves.toEqual([{ id: "first" }]);
+    await expect(
+      catalog.loadModels({
+        ...initial,
+        cursorCliEnv: { NO_PROXY: "localhost", HTTPS_PROXY: "http://127.0.0.1:7890" },
+      }),
+    ).resolves.toEqual([{ id: "first" }]);
+    await expect(catalog.loadModels({ ...initial, cursorCliPath: "/usr/local/bin/agent" })).resolves.toEqual([{ id: "second" }]);
+
+    expect(apiMock.aiListModels).toHaveBeenCalledTimes(2);
+  });
+
+  it("tracks CodeBuddy executable and environment changes without depending on environment key order", async () => {
+    const initial: AiConfigItem = {
+      ...config(),
+      provider: "codebuddy-cli",
+      endpoint: "",
+      apiKey: "",
+      model: "default",
+      codebuddyCliPath: "/opt/homebrew/bin/codebuddy",
+      codebuddyCliEnv: { HTTPS_PROXY: "http://127.0.0.1:7890", NO_PROXY: "localhost" },
+    };
+    apiMock.aiListModels.mockResolvedValueOnce([{ id: "first" }]).mockResolvedValueOnce([{ id: "second" }]);
+
+    await expect(catalog.loadModels(initial)).resolves.toEqual([{ id: "first" }]);
+    await expect(
+      catalog.loadModels({
+        ...initial,
+        codebuddyCliEnv: { NO_PROXY: "localhost", HTTPS_PROXY: "http://127.0.0.1:7890" },
+      }),
+    ).resolves.toEqual([{ id: "first" }]);
+    await expect(catalog.loadModels({ ...initial, codebuddyCliPath: "/usr/local/bin/codebuddy" })).resolves.toEqual([{ id: "second" }]);
+
+    expect(apiMock.aiListModels).toHaveBeenCalledTimes(2);
+  });
+
+  it("tracks Qoder executable and environment changes without depending on environment key order", async () => {
+    const initial: AiConfigItem = {
+      ...config(),
+      provider: "qoder-cli",
+      endpoint: "",
+      apiKey: "",
+      model: "default",
+      qoderCliPath: "/opt/homebrew/bin/qodercli",
+      qoderCliEnv: { HTTPS_PROXY: "http://127.0.0.1:7890", NO_PROXY: "localhost" },
+    };
+    apiMock.aiListModels.mockResolvedValueOnce([{ id: "first" }]).mockResolvedValueOnce([{ id: "second" }]);
+
+    await expect(catalog.loadModels(initial)).resolves.toEqual([{ id: "first" }]);
+    await expect(
+      catalog.loadModels({
+        ...initial,
+        qoderCliEnv: { NO_PROXY: "localhost", HTTPS_PROXY: "http://127.0.0.1:7890" },
+      }),
+    ).resolves.toEqual([{ id: "first" }]);
+    await expect(catalog.loadModels({ ...initial, qoderCliPath: "/usr/local/bin/qodercli" })).resolves.toEqual([{ id: "second" }]);
+
+    expect(apiMock.aiListModels).toHaveBeenCalledTimes(2);
+  });
+
   it("does not let a stale request overwrite a newer provider catalog", async () => {
     let resolveInitial: ((models: { id: string }[]) => void) | undefined;
     apiMock.aiListModels

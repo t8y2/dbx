@@ -79,7 +79,9 @@ fn has_foreign_key_change(foreign_key: &EditableStructureForeignKey, original: &
 fn drop_foreign_key_sql(dialect: StructureDialect, table: &str, name: &str) -> String {
     match dialect {
         StructureDialect::Mysql => format!("ALTER TABLE {table} DROP FOREIGN KEY {};", quote_ident(dialect, name)),
-        StructureDialect::Postgres => format!("ALTER TABLE {table} DROP CONSTRAINT {};", quote_ident(dialect, name)),
+        StructureDialect::Postgres | StructureDialect::Oracle => {
+            format!("ALTER TABLE {table} DROP CONSTRAINT {};", quote_ident(dialect, name))
+        }
         _ => unreachable!("foreign key SQL requested for unsupported dialect"),
     }
 }
@@ -117,11 +119,11 @@ fn create_foreign_key_sql(
     );
     sql.push(')');
 
-    if let Some(action) = action_clause("ON DELETE", &foreign_key.on_delete, warnings) {
+    if let Some(action) = action_clause(dialect, "ON DELETE", &foreign_key.on_delete, warnings) {
         sql.push(' ');
         sql.push_str(&action);
     }
-    if let Some(action) = action_clause("ON UPDATE", &foreign_key.on_update, warnings) {
+    if let Some(action) = action_clause(dialect, "ON UPDATE", &foreign_key.on_update, warnings) {
         sql.push(' ');
         sql.push_str(&action);
     }
@@ -129,10 +131,26 @@ fn create_foreign_key_sql(
     Some(sql)
 }
 
-fn action_clause(prefix: &str, value: &str, warnings: &mut Vec<String>) -> Option<String> {
+fn action_clause(dialect: StructureDialect, prefix: &str, value: &str, warnings: &mut Vec<String>) -> Option<String> {
     let action = normalize_action(value);
     if action.is_empty() {
         return None;
+    }
+    if dialect == StructureDialect::Oracle {
+        if prefix == "ON UPDATE" {
+            if action != "NO ACTION" {
+                warnings.push(format!("Oracle does not support {prefix} {action}."));
+            }
+            return None;
+        }
+        return match action.as_str() {
+            "CASCADE" | "SET NULL" => Some(format!("{prefix} {action}")),
+            "NO ACTION" => None,
+            _ => {
+                warnings.push(format!("Unsupported Oracle foreign key action \"{}\".", clean(value)));
+                None
+            }
+        };
     }
     match action.as_str() {
         "CASCADE" | "SET NULL" | "RESTRICT" | "NO ACTION" => Some(format!("{prefix} {action}")),

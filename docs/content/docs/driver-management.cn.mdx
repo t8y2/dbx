@@ -10,7 +10,7 @@ DBX 使用混合驱动架构：内置 Rust 驱动、独立原生 Agent，以及 
 | 驱动类型     | 工作方式                    | 适用场景                                                                                                                                    |
 | ------------ | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | 原生（内置） | Rust 驱动编译进 DBX         | MySQL、PostgreSQL、SQLite、SQL Server、Redis、MongoDB、ClickHouse 等                                                                       |
-| 原生 Agent / 外部驱动 | DBX 管理的 Go/Rust 独立进程或 sidecar | Oracle、KingBase、虚谷 XuguDB、DuckDB，以及 RabbitMQ 等需要独立运行时的连接 |
+| 原生 Agent / 外部驱动 | DBX 管理的 Go/Rust 独立进程或 sidecar | Oracle、KingbaseES、虚谷 XuguDB、DuckDB，以及 RabbitMQ 等需要独立运行时的连接 |
 | JDBC Agent   | DBX 管理的 Java 子进程      | 需要 JDBC 的数据库：GaussDB、openGauss、DM、HighGo、Vastbase、UXDB、Trino、Hive、DB2、Informix、Neo4j、TDengine、YashanDB、GoldenDB、Kylin、SunDB 等 |
 
 <Callout type="info">内置驱动可直接使用；原生 Agent/sidecar 需要对应平台文件，JDBC Agent 还需要 JRE。连接对话框会提示缺少的组件，但安装是否自动完成取决于网络、平台、驱动许可和当前设置。</Callout>
@@ -83,11 +83,11 @@ RabbitMQ 等消息队列 Agent 还可能同时使用业务协议和管理 API。
 
 这适用于气隙网络、严格防火墙环境或企业中预先批准的驱动版本。
 
-所有 Agent 都提供单驱动 ZIP，可直接使用**导入离线包**安装。Java Agent 的单驱动包跨平台，但不重复携带 JRE；Kingbase、Oracle、Xugu 等原生 Agent 的单驱动包按操作系统和 CPU 架构区分。
+所有 Agent 都提供单驱动 ZIP，可直接使用**导入离线包**安装。Java Agent 的单驱动包跨平台，但不重复携带 JRE；KingbaseES、Oracle、Xugu 等原生 Agent 的单驱动包按操作系统和 CPU 架构区分。
 
 如果目标机器尚未安装 Java Agent 所需的托管 JRE，请另外导入一次对应平台的 JRE，或者直接使用包含全部驱动和 JRE 的完整离线包。
 
-### Windows 导入 Kingbase
+### Windows 导入 KingbaseES
 
 Windows x64 下载 `dbx-agent-kingbase-<version>-windows-x64.zip`，Windows ARM64 下载 `dbx-agent-kingbase-<version>-windows-aarch64.zip`，然后在驱动管理中选择**导入离线包**。请勿导入 Linux 或 macOS 包。
 

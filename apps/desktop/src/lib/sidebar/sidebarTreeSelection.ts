@@ -1,9 +1,47 @@
 import type { TreeNode } from "@/types/database";
 
+export type VisibleTreeSelection = {
+  nodeIds: readonly string[];
+  activeNodeId: string | null;
+  anchorNodeId: string | null;
+};
+
+export type VisibleTreeNodeIdLookup = {
+  has(nodeId: string): boolean;
+};
+
+export function supportsSidebarModifierSelection(node: Pick<TreeNode, "type">): boolean {
+  return node.type !== "database" && node.type !== "schema" && !node.type.startsWith("group-");
+}
+
+export function filterSidebarModifierSelectionIds(nodes: readonly TreeNode[], nodeIds: readonly string[]): string[] {
+  const selectableIds = new Set(nodes.filter(supportsSidebarModifierSelection).map((node) => node.id));
+  return nodeIds.filter((id) => selectableIds.has(id));
+}
+
 export function selectedTreeNodesInVisibleOrder(visibleNodes: TreeNode[], selectedIds: Iterable<string>): TreeNode[] {
   const ids = new Set(selectedIds);
   if (!ids.size) return [];
   return visibleNodes.filter((node) => ids.has(node.id));
+}
+
+export function pruneTreeSelectionToVisibleNodeIds(visibleNodeIds: VisibleTreeNodeIdLookup, selection: VisibleTreeSelection): VisibleTreeSelection {
+  const nodeIds = selection.nodeIds.filter((id) => visibleNodeIds.has(id));
+  const activeNodeId = selection.activeNodeId && visibleNodeIds.has(selection.activeNodeId) ? selection.activeNodeId : (nodeIds[0] ?? null);
+  const anchorNodeId = selection.anchorNodeId && visibleNodeIds.has(selection.anchorNodeId) ? selection.anchorNodeId : activeNodeId;
+  return { nodeIds, activeNodeId, anchorNodeId };
+}
+
+export function pruneTreeSelectionToVisibleNodes(visibleNodes: readonly TreeNode[], selection: VisibleTreeSelection): VisibleTreeSelection {
+  return pruneTreeSelectionToVisibleNodeIds(new Set(visibleNodes.map((node) => node.id)), selection);
+}
+
+export function selectedSidebarBatchTargets(activeNode: TreeNode, selectedNodes: readonly TreeNode[], canUseTarget: (node: TreeNode) => boolean): TreeNode[] {
+  if (selectedNodes.length <= 1 || !selectedNodes.some((node) => node.id === activeNode.id)) return [];
+  const first = selectedNodes[0];
+  if (!first?.connectionId || !first.database || !selectedNodes.every((node) => node.type === first.type)) return [];
+  if (!selectedNodes.every((node) => node.connectionId === first.connectionId && node.database === first.database && canUseTarget(node))) return [];
+  return [...selectedNodes];
 }
 
 export function treeSelectionRangeIdsByIndex(visibleNodes: TreeNode[], currentIndex: number, anchorIndex: number, currentId?: string): string[] {

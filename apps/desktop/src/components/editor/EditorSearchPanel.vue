@@ -1,18 +1,26 @@
 <script setup lang="ts">
 import { ref, nextTick, onBeforeUnmount, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import type { EditorView } from "@codemirror/view";
+import { EditorView } from "@codemirror/view";
 import { EditorSelection } from "@codemirror/state";
 import { setSearchQuery, openSearchPanel as cmOpenSearchPanel, findNext as cmFindNext, findPrevious as cmFindPrevious, replaceNext as cmReplaceNext, replaceAll as cmReplaceAll } from "@codemirror/search";
-import { ChevronUp, ChevronDown, ChevronRight, X } from "@lucide/vue";
-import { collectEditorSearchMatches, createEditorSearchQuery, replaceEditorSearchMatches } from "@/lib/editor/editorSearchQuery";
+import { ChevronUp, ChevronDown, ChevronRight, TextSelect, X } from "@lucide/vue";
+import { collectEditorSearchMatches, countEditorSearchMatches, createEditorSearchQuery, replaceEditorSearchMatches, type EditorSearchMatch } from "@/lib/editor/editorSearchQuery";
+import { appendSearchMatchSelection, findSearchMatch, isSearchAddSelectionModifier, selectionRangesForSearchMatches, type EditorSearchSelectionDirection } from "@/lib/editor/editorSearchSelection";
+import { useSettingsStore } from "@/stores/settingsStore";
 
 const props = defineProps<{
   view: EditorView | null;
   tone?: "app" | "editor";
 }>();
 
+const emit = defineEmits<{
+  open: [];
+  close: [];
+}>();
+
 const { t } = useI18n();
+const settingsStore = useSettingsStore();
 
 const searchVisible = ref(false);
 const searchText = ref("");
@@ -24,7 +32,7 @@ const matchCount = ref(0);
 const currentMatchIndex = ref(0);
 const searchInputRef = ref<HTMLInputElement>();
 const replaceInputRef = ref<HTMLInputElement>();
-const matchCountLimited = ref(false);
+const selectionLimitReached = ref(false);
 
 // Scoped search: restrict find/replace to the original selection range
 let searchScopeFrom: number | null = null;
@@ -32,11 +40,29 @@ let searchScopeTo: number | null = null;
 const inSelectionScope = ref(false);
 
 const SEARCH_UPDATE_DELAY_MS = 120;
+// When the panel is opening, push the first match-count pass past the enter
+// transition (150ms) so the O(document) count does not contend with the
+// animation's first frames and cause dropped frames on large documents.
+const SEARCH_OPEN_DELAY_MS = 200;
 const DOCUMENT_SEARCH_UPDATE_DELAY_MS = 500;
-const MATCH_COUNT_LIMIT = 1000;
-
 let searchUpdateTimer: ReturnType<typeof setTimeout> | null = null;
 let documentSearchUpdateTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingIdleHandle: number | null = null;
+
+// requestIdleCallback lets the match-count pass yield to the animation frame
+// budget; fall back to setTimeout where the API is unavailable (older webviews).
+const requestIdle = typeof window !== "undefined" && typeof window.requestIdleCallback === "function" ? (cb: () => void) => window.requestIdleCallback(cb, { timeout: 500 }) : (cb: () => void) => window.setTimeout(cb, 0) as unknown as number;
+const cancelIdle = typeof window !== "undefined" && typeof window.cancelIdleCallback === "function" ? (handle: number) => window.cancelIdleCallback(handle) : (handle: number) => window.clearTimeout(handle);
+
+function clearPendingIdle() {
+  if (pendingIdleHandle == null) return;
+  cancelIdle(pendingIdleHandle);
+  pendingIdleHandle = null;
+}
+
+function searchMatchLimit(): number {
+  return settingsStore.editorSettings.regexMaxMatchCount;
+}
 
 function clearDocumentSearchUpdate() {
   if (!documentSearchUpdateTimer) return;
@@ -72,7 +98,7 @@ function clearSearchQuery() {
   });
   matchCount.value = 0;
   currentMatchIndex.value = 0;
-  matchCountLimited.value = false;
+  selectionLimitReached.value = false;
 }
 
 /**
@@ -98,7 +124,7 @@ function computeReplacementForMatch(v: EditorView, matchFrom: number, matchTo: n
 /**
  * Collect all search matches within the scoped range.
  */
-function collectScopedMatches(v: EditorView, limit = MATCH_COUNT_LIMIT) {
+function collectScopedMatches(v: EditorView, limit = Number.POSITIVE_INFINITY) {
   if (searchScopeFrom == null || searchScopeTo == null) return null;
   const q = createEditorSearchQuery({
     search: searchText.value,
@@ -109,6 +135,33 @@ function collectScopedMatches(v: EditorView, limit = MATCH_COUNT_LIMIT) {
   return collectEditorSearchMatches(q, v.state, searchScopeFrom, searchScopeTo, limit);
 }
 
+function collectAllMatches(v: EditorView, limit = Number.POSITIVE_INFINITY) {
+  if (!searchText.value) return [];
+  const query = createEditorSearchQuery({
+    search: searchText.value,
+    caseSensitive: caseSensitive.value,
+    useRegex: useRegex.value,
+  });
+  if (!query.valid) return [];
+  return collectEditorSearchMatches(query, v.state, searchScopeFrom ?? 0, searchScopeTo ?? v.state.doc.length, limit);
+}
+
+function* iterateAllMatches(v: EditorView): Generator<EditorSearchMatch> {
+  if (!searchText.value) return;
+  const query = createEditorSearchQuery({
+    search: searchText.value,
+    caseSensitive: caseSensitive.value,
+    useRegex: useRegex.value,
+  });
+  if (!query.valid) return;
+  const from = searchScopeFrom ?? 0;
+  const to = searchScopeTo ?? v.state.doc.length;
+  const cursor = query.getCursor(v.state);
+  for (let result = cursor.next(); !result.done; result = cursor.next()) {
+    if (result.value.from >= from && result.value.to <= to) yield { from: result.value.from, to: result.value.to };
+  }
+}
+
 /**
  * Find next/previous match within the scoped range.
  * Returns true if a match was found.
@@ -116,23 +169,17 @@ function collectScopedMatches(v: EditorView, limit = MATCH_COUNT_LIMIT) {
 function findInScope(direction: "next" | "prev"): boolean {
   const v = props.view;
   if (!v || !searchText.value || searchScopeFrom == null || searchScopeTo == null) return false;
-  const matches = collectScopedMatches(v);
-  if (!matches || matches.length === 0) return false;
-
-  const cursor = v.state.selection.main.head;
-  let target: { from: number; to: number } | null = null;
-
-  if (direction === "next") {
-    target = matches.find((m) => m.from >= cursor) ?? matches.find((m) => m.from >= searchScopeFrom!) ?? null;
-  } else {
-    const before = matches.filter((m) => m.to <= cursor);
-    target = before.length > 0 ? before[before.length - 1] : matches[matches.length - 1];
-  }
+  const selection = v.state.selection.main;
+  const cursor = direction === "next" ? selection.head : selection.from;
+  const target = findSearchMatch(iterateAllMatches(v), cursor, direction);
 
   if (target) {
     v.dispatch({
       selection: EditorSelection.range(target.from, target.to),
-      scrollIntoView: true,
+      // Center the match instead of the default "nearest" alignment, which
+      // often lands the match flush against the viewport edge and makes an
+      // immediate drag-select there trigger CodeMirror's edge autoscroll.
+      effects: EditorView.scrollIntoView(target.from, { y: "center" }),
     });
     return true;
   }
@@ -144,27 +191,24 @@ function updateMatchInfo(autoSelect = false) {
   if (!v || !searchText.value) {
     matchCount.value = 0;
     currentMatchIndex.value = 0;
-    matchCountLimited.value = false;
     return;
   }
+  if (selectionLimitReached.value && v.state.selection.ranges.length !== searchMatchLimit()) selectionLimitReached.value = false;
   try {
     // Scoped: use custom find logic
     if (searchScopeFrom != null && searchScopeTo != null) {
       if (autoSelect) findInScope("next");
-      const matches = collectScopedMatches(v);
-      if (!matches) {
-        matchCount.value = 0;
-        currentMatchIndex.value = 0;
-        matchCountLimited.value = false;
-        return;
-      }
-      const count = matches.length;
-      matchCount.value = count;
-      matchCountLimited.value = count >= MATCH_COUNT_LIMIT;
+      const q = createEditorSearchQuery({
+        search: searchText.value,
+        caseSensitive: caseSensitive.value,
+        useRegex: useRegex.value,
+      });
+      if (!q.valid) return;
       const selFrom = v.state.selection.main.from;
       const selTo = v.state.selection.main.to;
-      const idx = matches.findIndex((m) => m.from === selFrom && m.to === selTo);
-      currentMatchIndex.value = idx >= 0 ? idx + 1 : count > 0 ? 1 : 0;
+      const { count, currentIndex } = countEditorSearchMatches(q, v.state, searchScopeFrom, searchScopeTo, { from: selFrom, to: selTo });
+      matchCount.value = count;
+      currentMatchIndex.value = currentIndex || (count > 0 ? 1 : 0);
       return;
     }
 
@@ -177,36 +221,25 @@ function updateMatchInfo(autoSelect = false) {
     if (!q.valid) {
       matchCount.value = 0;
       currentMatchIndex.value = 0;
-      matchCountLimited.value = false;
       return;
     }
     if (autoSelect) {
       cmFindNext(v);
     }
-    const iter = q.getCursor(v.state);
-    let count = 0;
-    let curIdx = 0;
     const selFrom = v.state.selection.main.from;
     const selTo = v.state.selection.main.to;
-    let r = iter.next();
-    while (!r.done) {
-      count++;
-      if (r.value.from === selFrom && r.value.to === selTo) curIdx = count;
-      if (count >= MATCH_COUNT_LIMIT) break;
-      r = iter.next();
-    }
+    const { count, currentIndex } = countEditorSearchMatches(q, v.state, 0, v.state.doc.length, { from: selFrom, to: selTo });
     matchCount.value = count;
-    matchCountLimited.value = count >= MATCH_COUNT_LIMIT && !r.done;
-    currentMatchIndex.value = curIdx || (count > 0 ? 1 : 0);
+    currentMatchIndex.value = currentIndex || (count > 0 ? 1 : 0);
   } catch {
     matchCount.value = 0;
     currentMatchIndex.value = 0;
-    matchCountLimited.value = false;
   }
 }
 
-function scheduleSearchUpdate(autoSelect = false) {
+function scheduleSearchUpdate(autoSelect = false, delay = SEARCH_UPDATE_DELAY_MS) {
   clearDocumentSearchUpdate();
+  clearPendingIdle();
   if (searchUpdateTimer) {
     clearTimeout(searchUpdateTimer);
     searchUpdateTimer = null;
@@ -215,30 +248,41 @@ function scheduleSearchUpdate(autoSelect = false) {
     clearSearchQuery();
     return;
   }
+  selectionLimitReached.value = false;
   dispatchSearchQuery();
   searchUpdateTimer = setTimeout(() => {
     searchUpdateTimer = null;
-    updateMatchInfo(autoSelect);
-  }, SEARCH_UPDATE_DELAY_MS);
+    // Run the O(document) match count on an idle tick so it does not block
+    // the enter transition's animation frames or typing responsiveness.
+    pendingIdleHandle = requestIdle(() => {
+      pendingIdleHandle = null;
+      updateMatchInfo(autoSelect);
+    });
+  }, delay);
 }
 
 function scheduleDocumentSearchUpdate() {
   if (!searchVisible.value || !searchText.value) return;
   clearDocumentSearchUpdate();
+  clearPendingIdle();
   documentSearchUpdateTimer = setTimeout(() => {
     documentSearchUpdateTimer = null;
-    updateMatchInfo();
+    pendingIdleHandle = requestIdle(() => {
+      pendingIdleHandle = null;
+      updateMatchInfo();
+    });
   }, DOCUMENT_SEARCH_UPDATE_DELAY_MS);
 }
 
 function openSearch(): boolean {
   searchVisible.value = true;
+  emit("open");
   const v = props.view;
   if (v) {
     cmOpenSearchPanel(v);
     const sel = v.state.selection.main;
     const selText = v.state.sliceDoc(sel.from, sel.to);
-    if (selText && !selText.includes("\n")) {
+    if (selText) {
       searchText.value = selText;
     }
     // Set scope when there's a multi-line selection
@@ -256,7 +300,7 @@ function openSearch(): boolean {
     searchInputRef.value?.focus();
     searchInputRef.value?.select();
   });
-  if (searchText.value) scheduleSearchUpdate(true);
+  if (searchText.value) scheduleSearchUpdate(true, SEARCH_OPEN_DELAY_MS);
   return true;
 }
 
@@ -275,6 +319,7 @@ function closeSearch() {
   searchVisible.value = false;
   showReplace.value = false;
   clearDocumentSearchUpdate();
+  clearPendingIdle();
   searchScopeFrom = null;
   searchScopeTo = null;
   inSelectionScope.value = false;
@@ -283,10 +328,41 @@ function closeSearch() {
     clearSearchQuery();
     v.focus();
   }
+  if (wasVisible) emit("close");
   return wasVisible;
 }
 
-function nextMatch() {
+function selectAllMatches() {
+  const v = props.view;
+  if (!v) return false;
+  const limit = searchMatchLimit();
+  const matches = collectAllMatches(v, limit + 1);
+  selectionLimitReached.value = matches.length > limit;
+  const ranges = selectionRangesForSearchMatches(matches.slice(0, limit));
+  if (ranges.length === 0) return false;
+  v.dispatch({ selection: EditorSelection.create(ranges), scrollIntoView: true });
+  updateMatchInfo();
+  v.focus();
+  return true;
+}
+
+function appendMatch(direction: EditorSearchSelectionDirection) {
+  const v = props.view;
+  if (!v) return false;
+  const selection = appendSearchMatchSelection(v.state.selection, iterateAllMatches(v), direction);
+  if (!selection) return false;
+  v.dispatch({ selection, scrollIntoView: true });
+  updateMatchInfo();
+  v.focus();
+  return true;
+}
+
+function nextMatch(event?: MouseEvent) {
+  if (event && isSearchAddSelectionModifier(event)) {
+    event.preventDefault();
+    appendMatch("next");
+    return;
+  }
   const v = props.view;
   if (!v || !searchText.value) return;
   if (searchScopeFrom != null) {
@@ -297,7 +373,12 @@ function nextMatch() {
   updateMatchInfo();
 }
 
-function prevMatch() {
+function prevMatch(event?: MouseEvent) {
+  if (event && isSearchAddSelectionModifier(event)) {
+    event.preventDefault();
+    appendMatch("prev");
+    return;
+  }
   const v = props.view;
   if (!v || !searchText.value) return;
   if (searchScopeFrom != null) {
@@ -394,6 +475,7 @@ watch(replaceText, () => {
 
 onBeforeUnmount(() => {
   clearDocumentSearchUpdate();
+  clearPendingIdle();
   if (searchUpdateTimer) {
     clearTimeout(searchUpdateTimer);
     searchUpdateTimer = null;
@@ -409,7 +491,7 @@ defineExpose({
 </script>
 
 <template>
-  <Transition enter-active-class="transition-[transform,opacity] duration-150" leave-active-class="transition-[transform,opacity] duration-100" enter-from-class="opacity-0 -translate-y-1" leave-to-class="opacity-0 -translate-y-1">
+  <Transition enter-active-class="transition-[transform,opacity] duration-150 will-change-[transform,opacity]" leave-active-class="transition-[transform,opacity] duration-100 will-change-[transform,opacity]" enter-from-class="opacity-0 -translate-y-1" leave-to-class="opacity-0 -translate-y-1">
     <div v-if="searchVisible" class="editor-search-panel absolute right-4 top-3 z-[9999] isolate flex flex-col gap-1 rounded-lg border border-border bg-popover p-1.5 text-popover-foreground shadow-xl ring-1 ring-border/60" :class="{ 'editor-search-panel--editor': tone === 'editor' }">
       <div class="flex items-center gap-1">
         <button class="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground" :title="showReplace ? t('editor.search.collapseReplace') : t('editor.search.expandReplace')" @click="showReplace = !showReplace">
@@ -443,9 +525,18 @@ defineExpose({
             .*
           </button>
         </div>
-        <span class="min-w-[3.4rem] shrink-0 text-center text-xs" :class="searchText && matchCount === 0 ? 'text-destructive' : 'text-muted-foreground'">
-          {{ searchText && matchCount > 0 ? `${currentMatchIndex}/${matchCount}${matchCountLimited ? "+" : ""}` : t("editor.search.noResults") }}
+        <span class="min-w-[3.4rem] shrink-0 text-center text-xs" :class="searchText && matchCount === 0 ? 'text-destructive' : 'text-muted-foreground'" aria-live="polite">
+          {{ selectionLimitReached ? t("editor.search.selectionLimitSummary", { limit: searchMatchLimit(), total: matchCount }) : searchText && matchCount > 0 ? `${currentMatchIndex}/${matchCount}` : t("editor.search.noResults") }}
         </span>
+        <button
+          class="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+          :disabled="!searchText || matchCount === 0"
+          :title="selectionLimitReached ? t('editor.search.selectionTruncated', { limit: searchMatchLimit(), total: matchCount }) : t('editor.search.selectAllLimit', { limit: searchMatchLimit() })"
+          :aria-label="selectionLimitReached ? t('editor.search.selectionTruncated', { limit: searchMatchLimit(), total: matchCount }) : t('editor.search.selectAllLimit', { limit: searchMatchLimit() })"
+          @click="selectAllMatches"
+        >
+          <TextSelect class="h-4 w-4" />
+        </button>
         <span v-if="inSelectionScope" class="shrink-0 rounded bg-accent px-1 py-0.5 text-[10px] font-medium text-muted-foreground" :title="t('editor.search.inSelection')">
           {{ t("editor.search.inSelection") }}
         </span>

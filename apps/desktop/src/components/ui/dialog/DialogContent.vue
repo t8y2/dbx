@@ -36,13 +36,13 @@ const forwarded = useForwardPropsEmits(delegatedProps, emits);
 <template>
   <DialogPortal>
     <DialogOverlay :class="props.overlayClass" />
-    <div :class="cn('fixed inset-0 z-50 grid place-items-center p-4 pointer-events-none', props.portalClass)">
+    <div data-slot="dialog-positioner" :class="cn('fixed inset-0 z-50 grid place-items-center p-4 pointer-events-none', props.portalClass)">
       <DialogContent
         data-slot="dialog-content"
         v-bind="{ ...$attrs, ...forwarded }"
         :class="
           cn(
-            'bg-popover text-popover-foreground data-open:animate-in data-closed:animate-out data-closed:fade-out-0 data-open:fade-in-0 data-closed:zoom-out-95 data-open:zoom-in-95 relative grid max-h-[calc(var(--dbx-viewport-height)-2rem)] w-full max-w-sm gap-4 overflow-hidden rounded-lg border border-border p-4 text-sm shadow-lg duration-100 outline-none pointer-events-auto',
+            'bg-popover text-popover-foreground data-open:animate-in data-closed:animate-out data-closed:fade-out-0 data-open:fade-in-0 data-closed:zoom-out-95 data-open:zoom-in-95 relative grid grid-cols-[minmax(0,1fr)] max-h-[calc(var(--dbx-viewport-height)-2rem)] w-full max-w-sm gap-4 overflow-hidden rounded-lg border border-border p-4 text-sm shadow-lg duration-100 outline-none pointer-events-auto',
             props.class,
           )
         "

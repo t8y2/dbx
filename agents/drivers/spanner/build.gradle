@@ -1,0 +1,31 @@
+dependencies {
+    // Google publishes an officially shaded fat jar for the Spanner JDBC driver. It already bundles
+    // gRPC/protobuf/netty with relocated packages, which keeps shadowJar free of the relocation and
+    // META-INF/services conflicts a plain dependency tree would introduce. The transitive tree is
+    // dropped because the bundle already contains it, and resolving it would both duplicate every
+    // shaded class and upgrade the Gson version the shared agent runtime is built against.
+    implementation('com.google.cloud:google-cloud-spanner-jdbc:2.42.0:single-jar-with-dependencies') {
+        transitive = false
+    }
+}
+
+tasks.named('shadowJar') {
+    dependencies {
+        exclude(dependency('com.google.code.gson:gson'))
+        exclude(dependency('com.google.errorprone:error_prone_annotations'))
+    }
+    // The published fat jar still carries stale BouncyCastle signature files (META-INF/BC2048KE.SF
+    // and its .DSA). Their digests no longer match the rewritten manifest, so keeping them makes the
+    // JVM fail with "SecurityException: Invalid signature file digest for Manifest main attributes".
+    exclude 'META-INF/*.SF'
+    exclude 'META-INF/*.DSA'
+    exclude 'META-INF/*.RSA'
+    exclude 'META-INF/*.EC'
+    mergeServiceFiles()
+    manifest {
+        attributes(
+            'Agent-Label': 'Google Cloud Spanner',
+            'Main-Class': 'com.dbx.agent.spanner.SpannerAgent'
+        )
+    }
+}

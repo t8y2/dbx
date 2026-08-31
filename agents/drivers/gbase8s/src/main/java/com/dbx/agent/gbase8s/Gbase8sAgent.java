@@ -46,9 +46,15 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
     private String tableCacheSchema = "";
     private long tableCacheTimeMillis;
     private List<TableInfo> tableCache = Collections.emptyList();
+    private ConnectParams databaseListParams;
 
     public Gbase8sAgent() {
         super(GBASE8S_PROFILE);
+    }
+
+    @Override
+    public boolean supportsConnectionPooling() {
+        return false;
     }
 
     public static String buildUrl(ConnectParams params) {
@@ -78,6 +84,38 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
         return defaultGbaseServer(params.getHost());
     }
 
+    static String buildUrlForDatabase(ConnectParams params, String database) {
+        return buildUrl(paramsForDatabase(params, database));
+    }
+
+    private static ConnectParams paramsForDatabase(ConnectParams params, String database) {
+        String connectionString = trim(params.getConnection_string());
+        if (!connectionString.isEmpty()) {
+            int schemeEnd = connectionString.indexOf("://");
+            int databaseStart = schemeEnd < 0 ? -1 : connectionString.indexOf('/', schemeEnd + 3);
+            if (databaseStart >= 0) {
+                int paramsStart = connectionString.indexOf(':', databaseStart + 1);
+                String suffix = paramsStart >= 0 ? connectionString.substring(paramsStart) : "";
+                connectionString = connectionString.substring(0, databaseStart + 1) + database + suffix;
+            }
+        }
+
+        ConnectParams databaseParams = new ConnectParams(
+            params.getHost(),
+            params.getPort(),
+            database,
+            params.getUsername(),
+            params.getPassword(),
+            params.getUrl_params(),
+            connectionString,
+            params.isMysql_compat_mode(),
+            params.getJdbc_driver_class(),
+            params.getJdbc_driver_paths()
+        );
+        databaseParams.setGbase_server(getGbaseServer(params));
+        return databaseParams;
+    }
+
     @Override
     protected String buildJdbcUrl(ConnectParams params) {
         return buildUrl(params);
@@ -86,11 +124,13 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
     @Override
     protected void afterConnect(ConnectParams params, Connection connection) {
         super.afterConnect(params, connection);
+        databaseListParams = paramsForDatabase(params, "sysmaster");
         clearMetadataCache();
     }
 
     @Override
     protected void afterDisconnect() {
+        databaseListParams = null;
         clearMetadataCache();
     }
 
@@ -109,13 +149,7 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
         if (cached != null) {
             return cached;
         }
-        List<String> names = queryDatabaseNamesInCatalog("sysmaster", "SELECT name FROM sysdatabases ORDER BY name");
-        if (names.isEmpty()) {
-            names = queryDatabaseNames("SELECT name FROM sysmaster:sysdatabases ORDER BY name");
-        }
-        if (names.isEmpty()) {
-            names = queryDatabaseNames("SELECT name FROM sysdatabases ORDER BY name");
-        }
+        List<String> names = queryDatabaseNamesFromSysmaster();
         if (names.isEmpty()) {
             return super.listDatabases();
         }
@@ -135,8 +169,14 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
             if (cached != null) {
                 return cached;
             }
+            Connection connection = requireConnection();
+            if (!connection.getMetaData().supportsSchemasInDataManipulation()) {
+                List<String> schemas = Collections.emptyList();
+                cacheSchemas(catalog, schemas);
+                return schemas;
+            }
             Set<String> schemas = new LinkedHashSet<>();
-            try (PreparedStatement stmt = requireConnection().prepareStatement(
+            try (PreparedStatement stmt = connection.prepareStatement(
                 "SELECT DISTINCT owner FROM systables WHERE tabid >= 100 AND tabtype IN ('T', 'V') ORDER BY owner"
             ); ResultSet rs = stmt.executeQuery()) {
                 while (rs.next()) {
@@ -419,33 +459,13 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
         return value.toLowerCase(Locale.ROOT).contains(needle.toLowerCase(Locale.ROOT));
     }
 
-    private List<String> queryDatabaseNames(String sql) {
-        try {
-            return queryDatabaseNames(requireConnection(), sql);
-        } catch (Exception ignored) {
+    private List<String> queryDatabaseNamesFromSysmaster() {
+        ConnectParams params = databaseListParams;
+        if (params == null) {
             return Collections.emptyList();
         }
-    }
-
-    private List<String> queryDatabaseNamesInCatalog(String catalog, String sql) {
-        try {
-            Connection connection = requireConnection();
-            String previousCatalog = "";
-            try {
-                previousCatalog = trim(connection.getCatalog());
-            } catch (Exception ignored) {
-            }
-            connection.setCatalog(catalog);
-            try {
-                return queryDatabaseNames(connection, sql);
-            } finally {
-                if (!previousCatalog.isEmpty()) {
-                    try {
-                        connection.setCatalog(previousCatalog);
-                    } catch (Exception ignored) {
-                    }
-                }
-            }
+        try (Connection connection = openInitializedConnection(params)) {
+            return queryDatabaseNames(connection, "SELECT name FROM sysdatabases ORDER BY name");
         } catch (Exception ignored) {
             return Collections.emptyList();
         }

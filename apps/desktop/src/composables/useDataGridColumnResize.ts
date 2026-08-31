@@ -36,11 +36,13 @@ export interface UseDataGridColumnResizeOptions {
   columnIndexes: ComputedRef<number[]>;
   density: Ref<ColumnWidthDensity>;
   compactColumnHeaderActions: ComputedRef<boolean>;
+  columnIndexIndicators?: ComputedRef<readonly boolean[]>;
   cacheKey?: ComputedRef<string | undefined>;
   columnStructureSignature: ComputedRef<string>;
   measureHeaderText?: (text: string) => number | undefined;
   headerMeasurementKey?: Ref<unknown>;
   rowNumberWidth?: Ref<number> | ComputedRef<number>;
+  displayValue?: (value: CellValue, columnIndex: number) => CellValue;
 }
 
 export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions) {
@@ -67,7 +69,8 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
     const actualColIdx = columnIndexes.value[visibleColIdx];
     if (actualColIdx === undefined) return [];
     const preset = COLUMN_WIDTH_DENSITY_PRESETS[density.value];
-    return sampleDataGridColumnValues(sourceRows.value, actualColIdx, preset.sampleRows);
+    const values = sampleDataGridColumnValues(sourceRows.value, actualColIdx, preset.sampleRows);
+    return options.displayValue ? values.map((value) => options.displayValue!(value, actualColIdx)) : values;
   }
 
   function neededColumnWidth(colIdx: number): number {
@@ -79,6 +82,7 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
       density: density.value,
       compactColumnHeaderActions: compactColumnHeaderActions.value,
       headerTextWidth: measureHeaderText?.(colName),
+      hasIndexIndicator: options.columnIndexIndicators?.value[colIdx] ?? false,
     });
   }
 
@@ -191,6 +195,7 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
       compactColumnHeaderActions: compactColumnHeaderActions.value,
       includeValues: true,
       headerTextWidth: measureHeaderText?.(colName),
+      hasIndexIndicator: options.columnIndexIndicators?.value[colIdx] ?? false,
     });
     markColumnUserSized(colIdx);
     persistColumnWidths();

@@ -4,17 +4,22 @@ import type { PasteTableMode } from "@/lib/table/tableClipboard";
 import { fallbackCreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
 import type { DatabaseUserIdentity } from "@/lib/database/databaseUserAdmin";
 import type { AuthorizationPlan, AuthorizationStepResult } from "@/lib/database/databaseAuthorizationPlan";
-import type { MongoCreateIndexForm } from "@/lib/sidebar/mongoCollectionMutation";
+import type { MongoCreateIndexForm, MongoIndexRow } from "@/lib/sidebar/mongoCollectionMutation";
 
 export type DuplicateStructureSource = TreeNode & { connectionId: string; database: string };
 type ConnectionDeleteTarget = TreeNode & { connectionId: string };
+type ConnectionGroupDeleteTarget = TreeNode & { type: "connection-group" };
 
 export const fallbackCreateDatabaseCharset = fallbackCreateDatabaseCharsetMetadata();
 
 export const sidebarTreeDialogOwner = shallowRef<symbol | null>(null);
 export const sidebarDangerTarget = shallowRef<TreeNode | null>(null);
+export const sidebarDangerRunningExecutionId = ref<string>("");
+export const sidebarDangerRunningCancel = ref<(() => void | Promise<void>) | null>(null);
 export const sidebarFormTarget = shallowRef<TreeNode | null>(null);
 export const connectionDeleteTargetSnapshot = ref<ConnectionDeleteTarget[]>([]);
+export const connectionGroupDeleteTargetSnapshot = ref<ConnectionGroupDeleteTarget[]>([]);
+export const deleteConnectionsWithGroup = ref(false);
 export const showDeleteConfirm = ref(false);
 export const showDropTableConfirm = ref(false);
 export const showDropTableChildObjectConfirm = ref(false);
@@ -32,6 +37,8 @@ export const structureDocCopyTitle = ref("");
 export const isLoadingStructurePreview = ref(false);
 export const showEmptyTableConfirm = ref(false);
 export const showTruncateTableConfirm = ref(false);
+export const showVacuumTableConfirm = ref(false);
+export const showMysqlAutoIncrementConfirm = ref(false);
 export const showRenameObjectDialog = ref(false);
 export const renameObjectName = ref("");
 export const renameObjectError = ref("");
@@ -42,6 +49,14 @@ export const batchDropCascade = ref(false);
 export const emptyTablePreviewSql = ref("");
 export const truncateTablePreviewSql = ref("");
 export const truncateTableCascade = ref(false);
+export const vacuumTableFull = ref(false);
+export const vacuumTableAnalyze = ref(false);
+export const vacuumTablePreviewSql = ref("");
+export const vacuumTablePreviewKey = ref("");
+export const vacuumTableExecuting = ref(false);
+export const mysqlAutoIncrementValue = ref("1");
+export const mysqlAutoIncrementPreviewSql = ref("");
+export const mysqlAutoIncrementPreviewKey = ref("");
 export const dropObjectPreviewSql = ref("");
 export const showDropObjectConfirm = ref(false);
 export const dropTableChildObjectPreviewSql = ref("");
@@ -81,6 +96,8 @@ export const showEditNacosNamespaceDialog = ref(false);
 export const editNacosNamespaceName = ref("");
 export const editNacosNamespaceDesc = ref("");
 export const editNacosNamespaceLoading = ref(false);
+export const showDeleteNacosNamespaceConfirm = ref(false);
+export const deleteNacosNamespaceLoading = ref(false);
 export const createDatabaseCharsetOptions = ref<string[]>(fallbackCreateDatabaseCharset.charsets);
 export const createDatabaseCollationsByCharset = ref<Record<string, string[]>>(fallbackCreateDatabaseCharset.collationsByCharset);
 export const createDatabaseCharsetLoading = ref(false);
@@ -93,21 +110,58 @@ export const renameMongoCollectionName = ref("");
 export const renameMongoCollectionError = ref("");
 export const renameMongoCollectionPreview = ref("");
 export const renameMongoCollectionLoading = ref(false);
+export const showCloneMongoCollectionDialog = ref(false);
+export const cloneMongoCollectionName = ref("");
+export const cloneMongoCollectionError = ref("");
+export const cloneMongoCollectionLoading = ref(false);
 export const showDropMongoIndexConfirm = ref(false);
 export const dropMongoIndexLoading = ref(false);
 export const showDropAllMongoIndexesConfirm = ref(false);
 export const dropAllMongoIndexesLoading = ref(false);
 export const showCreateMongoIndexDialog = ref(false);
-export const mongoCreateIndexForm = ref<MongoCreateIndexForm>({ name: "", fields: [{ id: 1, path: "", type: "1" }], unique: false, sparse: false });
+
+function emptyMongoCreateIndexForm(): MongoCreateIndexForm {
+  return {
+    name: "",
+    fields: [{ id: 1, path: "", type: "1" }],
+    unique: false,
+    sparse: false,
+    expireAfterSeconds: "",
+    partialFilterExpression: "",
+    background: false,
+    bucketSize: "",
+    hidden: false,
+  };
+}
+
+export const mongoCreateIndexForm = ref<MongoCreateIndexForm>(emptyMongoCreateIndexForm());
 export const mongoCreateIndexFieldOptions = ref<string[]>([]);
 export const mongoCreateIndexError = ref("");
 export const mongoCreateIndexLoading = ref(false);
 
 export function resetMongoCreateIndexForm() {
-  mongoCreateIndexForm.value = { name: "", fields: [{ id: 1, path: "", type: "1" }], unique: false, sparse: false };
+  mongoCreateIndexForm.value = emptyMongoCreateIndexForm();
   mongoCreateIndexFieldOptions.value = [];
   mongoCreateIndexError.value = "";
   mongoCreateIndexLoading.value = false;
+}
+
+export const showMongoIndexManagerDialog = ref(false);
+export const mongoIndexManagerRows = ref<MongoIndexRow[]>([]);
+export const mongoIndexManagerLoading = ref(false);
+export const mongoIndexManagerError = ref("");
+export const mongoIndexManagerSelectedName = ref("");
+export const mongoIndexManagerMode = ref<"view" | "create" | "edit">("view");
+/** Name of the index being edited, so the confirm step knows which one to drop. */
+export const mongoEditIndexOriginalName = ref("");
+
+export function resetMongoIndexManager() {
+  mongoIndexManagerRows.value = [];
+  mongoIndexManagerLoading.value = false;
+  mongoIndexManagerError.value = "";
+  mongoIndexManagerSelectedName.value = "";
+  mongoIndexManagerMode.value = "view";
+  mongoEditIndexOriginalName.value = "";
 }
 export const showFlushRedisDbConfirm = ref(false);
 export const showRedisDatabaseAliasDialog = ref(false);
@@ -141,6 +195,8 @@ const openFlags = [
   showStructureDocCopyDialog,
   showEmptyTableConfirm,
   showTruncateTableConfirm,
+  showVacuumTableConfirm,
+  showMysqlAutoIncrementConfirm,
   showDropObjectConfirm,
   showRenameObjectDialog,
   showDuplicateDialog,
@@ -152,9 +208,11 @@ const openFlags = [
   showDropDatabaseConfirm,
   showDropMongoCollectionConfirm,
   showRenameMongoCollectionDialog,
+  showCloneMongoCollectionDialog,
   showDropMongoIndexConfirm,
   showDropAllMongoIndexesConfirm,
   showCreateMongoIndexDialog,
+  showMongoIndexManagerDialog,
   showFlushRedisDbConfirm,
   showRedisDatabaseAliasDialog,
   showCreateSchemaDialog,
@@ -176,9 +234,18 @@ export function resetSidebarTreeDialogState() {
   createDatabaseAuthorizationApplying.value = false;
   redisDatabaseAliasInput.value = "";
   redisDatabaseAliasSaving.value = false;
+  cloneMongoCollectionName.value = "";
+  cloneMongoCollectionError.value = "";
+  cloneMongoCollectionLoading.value = false;
   resetMongoCreateIndexForm();
+  resetMongoIndexManager();
+  vacuumTableExecuting.value = false;
   sidebarTreeDialogOwner.value = null;
   sidebarDangerTarget.value = null;
   sidebarFormTarget.value = null;
+  sidebarDangerRunningExecutionId.value = "";
+  sidebarDangerRunningCancel.value = null;
   connectionDeleteTargetSnapshot.value = [];
+  connectionGroupDeleteTargetSnapshot.value = [];
+  deleteConnectionsWithGroup.value = false;
 }

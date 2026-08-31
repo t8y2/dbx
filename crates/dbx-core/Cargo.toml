@@ -5,10 +5,15 @@ edition = "2021"
 license = "Apache-2.0"
 
 [features]
-default = ["duckdb-sidecar", "mq-admin", "sqlite-sqlcipher", "system-fonts"]
+default = ["duckdb-sidecar", "dynamodb", "mq-admin", "sqlite-sqlcipher", "system-fonts"]
 duckdb-sidecar = []
-mq-admin = []
+dynamodb = ["dep:aws-sdk-dynamodb"]
+mq-admin = ["dep:rumqttc"]
 sqlite-sqlcipher = ["rusqlite/bundled-sqlcipher-vendored-openssl"]
+sqlite-multiple-ciphers = ["dep:libsqlite3-hotbundle"]
+# Keeps bundled SQLite for consumers that enable no other sqlite source
+# (dbx-cli, dbx-mcp); do not combine with the cipher features.
+sqlite-bundled = ["rusqlite/bundled"]
 openapi = ["dep:utoipa"]
 system-fonts = ["font-kit"]
 
@@ -38,19 +43,24 @@ uuid = { version = "1", features = ["v4", "serde"] }
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-uuid-1", "with-serde_json-1"] }
 deadpool-postgres = { version = "0.14", features = ["rt_tokio_1"] }
 tokio-postgres-rustls = "0.13"
+postgres-openssl = "0.5"
+openssl = { version = "0.10", features = ["vendored"] }
 webpki-roots = "0.26"
-rusqlite = { version = "0.32", features = ["bundled", "load_extension", "backup", "functions", "column_decltype"] }
+rusqlite = { version = "0.32", default-features = false, features = ["load_extension", "backup", "functions", "column_decltype"] }
+libsqlite3-hotbundle = { git = "https://github.com/zipg/libsqlite3-hotbundle.git", rev = "7f12f203b4f4694a273410bd9b02d77f82b6114e", features = ["cipher-sqlcipher"], optional = true }
+dbx-sqlite-worker = { path = "../dbx-sqlite-worker", default-features = false }
 mysql_async = { version = "0.37", default-features = false, features = ["default-rustls", "client_ed25519", "chrono", "rust_decimal"] }
 sqlparser = { version = "0.62.0", features = ["visitor"] }
 redis = { version = "0.32.2", features = ["tokio-comp", "tls-rustls", "tls-rustls-insecure", "tokio-rustls-comp", "sentinel", "cluster-async"] }
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 rustls-pemfile = "2.2"
 tiberius = { version = "0.12.3", default-features = false, features = ["tds73", "chrono", "rust_decimal", "rustls", "sql-browser-tokio"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "socks"] }
+reqwest = { version = "0.12", default-features = false, features = ["cookies", "json", "stream", "rustls-tls", "socks"] }
 prometheus-parse = "=0.2.5"
 futures = "0.3"
-iana-time-zone = "0.1"
-mongodb = "3.2.5"
+mongodb = { version = "3.2.5", features = ["socks5-proxy"] }
+aws-sdk-dynamodb = { version = "=1.104.0", optional = true }
+rumqttc = { version = "0.24", features = ["websocket"], optional = true }
 russh = "0.60"
 pageant = "0.2"
 portpicker = "0.1.1"
@@ -79,3 +89,22 @@ notify = { version = "7", default-features = false, features = ["macos_kqueue"] 
 arc-swap = "1"
 insta = { version = "1", features = ["json", "glob"] }
 tempfile = "3"
+
+[target.'cfg(not(all(windows, target_vendor = "win7")))'.dependencies]
+iana-time-zone = "0.1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security"] }
+
+[target.'cfg(all(unix, not(target_os = "redox")))'.dependencies]
+nix = { version = "0.31.3", features = ["user"] }
+
+[dev-dependencies]
+mysql_common = { git = "https://github.com/t8y2/rust_mysql_common.git", rev = "47740d85a8277167a5717afac785d37b46a36296", default-features = false }
+tokio = { version = "1", features = ["test-util"] }
+tokio-openssl = "0.6"
+
+[build-dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml_ng = "0.10"

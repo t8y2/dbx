@@ -46,16 +46,6 @@ pub async fn mongo_list_collections(
 }
 
 #[tauri::command]
-pub async fn vector_collection_detail(
-    state: State<'_, Arc<AppState>>,
-    connection_id: String,
-    database: String,
-    collection: String,
-) -> Result<dbx_core::db::vector_driver::CollectionInfo, String> {
-    dbx_core::schema::get_vector_collection_detail_core(&state, &connection_id, &database, &collection).await
-}
-
-#[tauri::command]
 pub async fn mongo_create_database(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
@@ -99,6 +89,25 @@ pub async fn mongo_rename_collection(
 }
 
 #[tauri::command]
+pub async fn mongo_clone_collection(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    source_collection: String,
+    target_collection: String,
+) -> Result<dbx_core::db::mongo_driver::MongoCloneCollectionResult, String> {
+    ensure_connection_writable(&state, &connection_id, "Clone collection").await?;
+    dbx_core::mongo_ops::mongo_clone_collection_core(
+        &state,
+        &connection_id,
+        &database,
+        &source_collection,
+        &target_collection,
+    )
+    .await
+}
+
+#[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn mongo_find_documents(
     state: State<'_, Arc<AppState>>,
@@ -110,6 +119,7 @@ pub async fn mongo_find_documents(
     filter: Option<String>,
     projection: Option<String>,
     sort: Option<String>,
+    collation: Option<String>,
     execution_id: Option<String>,
     mcp_request: Option<bool>,
 ) -> Result<MongoDocumentResult, String> {
@@ -126,6 +136,9 @@ pub async fn mongo_find_documents(
         filter,
         projection,
         sort,
+        collation,
+        None,
+        None,
         execution_id,
     )
     .await
@@ -300,6 +313,17 @@ pub async fn mongo_distinct(
     .await
 }
 
+/// Read-only listing of a collection's indexes with their full MongoDB options.
+#[tauri::command]
+pub async fn mongo_list_index_specs(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    collection: String,
+) -> Result<Vec<dbx_core::db::mongo_driver::MongoIndexSpec>, String> {
+    dbx_core::mongo_ops::mongo_list_index_specs_core(&state, &connection_id, &database, &collection).await
+}
+
 #[tauri::command]
 pub async fn mongo_create_index(
     state: State<'_, Arc<AppState>>,
@@ -330,6 +354,64 @@ pub async fn mongo_create_index(
     )
     .await?;
     Ok(serde_json::json!({ "name": name }))
+}
+
+#[tauri::command]
+pub async fn mongo_create_user(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    user_json: String,
+    write_concern_json: Option<String>,
+    mcp_request: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    if mcp_request == Some(true) {
+        crate::commands::mcp_bridge::ensure_mcp_dangerous_write_allowed_by_id(
+            state.inner(),
+            &connection_id,
+            &database,
+            "Create user",
+        )
+        .await?;
+    }
+    ensure_connection_writable(&state, &connection_id, "Create user").await?;
+    let affected_rows = dbx_core::mongo_ops::mongo_create_user_core(
+        &state,
+        &connection_id,
+        &database,
+        &user_json,
+        write_concern_json.as_deref(),
+    )
+    .await?;
+    Ok(serde_json::json!({ "affected_rows": affected_rows }))
+}
+
+#[tauri::command]
+pub async fn mongo_run_command(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    command_json: String,
+    execution_id: Option<String>,
+    mcp_request: Option<bool>,
+) -> Result<MongoDocumentResult, String> {
+    if mcp_request == Some(true) {
+        crate::commands::mcp_bridge::ensure_mcp_dangerous_write_allowed_by_id(
+            state.inner(),
+            &connection_id,
+            &database,
+            "Run MongoDB command",
+        )
+        .await?;
+    }
+    ensure_connection_writable(&state, &connection_id, "Run MongoDB command").await?;
+    let app = state.inner().clone();
+    run_cancellable(
+        &app,
+        execution_id,
+        dbx_core::mongo_ops::mongo_run_command_core(&app, &connection_id, &database, &command_json),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -379,6 +461,7 @@ pub async fn mongo_insert_document(
         collection,
         doc_json,
         routing,
+        None,
     )
     .await
 }

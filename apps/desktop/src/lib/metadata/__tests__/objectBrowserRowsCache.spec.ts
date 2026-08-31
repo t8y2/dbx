@@ -94,6 +94,17 @@ describe("objectBrowserRowsCache", () => {
     expect(getCachedObjectBrowserRows(isolatedScope)).toEqual([row]);
   });
 
+  it("rejects old write tokens after their bounded generation state is evicted", () => {
+    const staleScope = { connectionId: "stale", database: "db", schema: "public" };
+    const staleToken = createObjectBrowserRowsCacheWriteToken(staleScope);
+    for (let index = 0; index < 128; index += 1) {
+      createObjectBrowserRowsCacheWriteToken({ connectionId: `c${index}`, database: "db", schema: "public" });
+    }
+
+    expect(cacheObjectBrowserRows(staleToken, [row])).toBeUndefined();
+    expect(getCachedObjectBrowserRows(staleScope)).toBeUndefined();
+  });
+
   it("preserves the original object list freshness when statistics update cached rows", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-28T00:00:00Z"));

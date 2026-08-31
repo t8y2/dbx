@@ -2,8 +2,31 @@ sourceSets {
     main.java.srcDirs = ['src/main/java', '../h2/src/main/java']
 }
 
+configurations {
+    h2V1
+    h2V2
+    h2V3
+}
+
 dependencies {
-    implementation 'com.h2database:h2:2.1.214'
+    h2V1 'com.h2database:h2:1.4.200'
+    h2V2 'com.h2database:h2:2.1.214'
+    h2V3 'com.h2database:h2:2.4.240'
+}
+
+tasks.named('processResources') {
+    from(configurations.h2V1) {
+        into 'drivers'
+        rename { 'h2-1.4.200.jar' }
+    }
+    from(configurations.h2V2) {
+        into 'drivers'
+        rename { 'h2-2.1.214.jar' }
+    }
+    from(configurations.h2V3) {
+        into 'drivers'
+        rename { 'h2-2.4.240.jar' }
+    }
 }
 
 tasks.named('shadowJar') {

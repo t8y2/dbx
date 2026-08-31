@@ -53,7 +53,7 @@ pub async fn list_databases(pool: &mysql_async::Pool) -> Result<Vec<DatabaseInfo
     let result = conn.query_iter(list_user_schemas_sql()).await.map_err(|e| e.to_string())?;
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
 
-    Ok(rows.iter().map(|row| DatabaseInfo { name: get_str(row, 0) }).collect())
+    Ok(rows.iter().map(|row| DatabaseInfo { name: get_str(row, 0), ..Default::default() }).collect())
 }
 
 pub async fn list_schemas(pool: &mysql_async::Pool) -> Result<Vec<String>, String> {
@@ -126,11 +126,15 @@ pub async fn list_objects(pool: &mysql_async::Pool, schema: &str) -> Result<Vec<
                 .or_else(|| (!schema.trim().is_empty()).then(|| schema.to_string())),
             valid: None,
             signature: None,
+            custom_type_kind: None,
+            has_members: None,
             comment: None,
             created_at: None,
             updated_at: None,
             parent_schema: None,
             parent_name: None,
+            trigger: None,
+            xugu_type_members_expandable: None,
         })
         .collect())
 }
@@ -237,6 +241,7 @@ pub async fn list_indexes(pool: &mysql_async::Pool, schema: &str, table: &str) -
                 index_type: None,
                 included_columns: None,
                 comment: None,
+                key_is_expression: Vec::new(),
             }
         })
         .collect())
@@ -310,7 +315,19 @@ pub async fn list_triggers(pool: &mysql_async::Pool, schema: &str, table: &str) 
             } else {
                 "INSTEAD OF"
             };
-            TriggerInfo { name: get_str(row, 0), event: get_str(row, 1), timing: timing.to_string(), statement: None }
+            TriggerInfo {
+                name: get_str(row, 0),
+                event: get_str(row, 1),
+                timing: timing.to_string(),
+                level: None,
+                condition: None,
+                language: None,
+                enabled: None,
+                valid: None,
+                comment: None,
+                created_at: None,
+                statement: None,
+            }
         })
         .collect())
 }

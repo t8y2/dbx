@@ -6,6 +6,7 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.sql.Connection;
+import java.sql.SQLFeatureNotSupportedException;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -37,6 +38,31 @@ class BatchExecutorTest {
         assertEquals(2L, result.getAffected_rows());
     }
 
+    @Test
+    void executeBatchStatementsFallsBackWhenStatementBatchIsUnsupported() {
+        List<String> executedSql = new ArrayList<>();
+        AtomicInteger addBatchCalls = new AtomicInteger();
+        AtomicInteger executeLargeBatchCalls = new AtomicInteger();
+
+        Statement statement = unsupportedBatchStatementProxy(executedSql, addBatchCalls, executeLargeBatchCalls);
+        Connection connection = connectionProxy(statement);
+
+        QueryResult result = BatchExecutor.executeBatchStatements(
+            connection,
+            Arrays.asList(" UPDATE items SET name = 'Ada' WHERE id = 1; ", " DELETE FROM items WHERE id = 2; "),
+            null,
+            schema -> null
+        );
+
+        assertEquals(1, addBatchCalls.get());
+        assertEquals(0, executeLargeBatchCalls.get());
+        assertEquals(
+            Arrays.asList("UPDATE items SET name = 'Ada' WHERE id = 1", "DELETE FROM items WHERE id = 2"),
+            executedSql
+        );
+        assertEquals(0L, result.getAffected_rows());
+    }
+
     private static Statement statementProxy(
         List<String> batchedSql,
         AtomicInteger executeLargeBatchCalls,
@@ -53,6 +79,31 @@ class BatchExecutorTest {
                 case "executeUpdate":
                     executeUpdateCalls.incrementAndGet();
                     throw new AssertionError("executeBatchStatements must not execute statements one by one");
+                default:
+                    return defaultValue(method.getReturnType());
+            }
+        };
+        return (Statement) Proxy.newProxyInstance(Statement.class.getClassLoader(), new Class<?>[]{Statement.class}, handler);
+    }
+
+    private static Statement unsupportedBatchStatementProxy(
+        List<String> executedSql,
+        AtomicInteger addBatchCalls,
+        AtomicInteger executeLargeBatchCalls
+    ) {
+        InvocationHandler handler = (Object unused, Method method, Object[] args) -> {
+            switch (method.getName()) {
+                case "addBatch":
+                    addBatchCalls.incrementAndGet();
+                    throw new SQLFeatureNotSupportedException("Batches not supported");
+                case "executeLargeBatch":
+                    executeLargeBatchCalls.incrementAndGet();
+                    throw new AssertionError("Unsupported JDBC batches must not be executed");
+                case "execute":
+                    executedSql.add((String) args[0]);
+                    return false;
+                case "getLargeUpdateCount":
+                    return -1L;
                 default:
                     return defaultValue(method.getReturnType());
             }

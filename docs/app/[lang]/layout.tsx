@@ -1,22 +1,20 @@
 import "../global.css";
 import type { ReactNode } from "react";
 import type { Metadata, Viewport } from "next";
-import { RootProvider } from "fumadocs-ui/provider/next";
-import { StaticSearchDialog } from "@/components/StaticSearchDialog";
-import { i18nUI } from "@/lib/i18n";
+import { RouteProgress } from "@/components/RouteProgress";
 import { buildMetadata, DEFAULT_DESCRIPTION, getHtmlLang, SITE_NAME, SITE_URL } from "@/lib/metadata";
 import { buildSiteStructuredData } from "@/lib/structuredData";
 
 const LOCALE_MAP: Record<string, { locale: string; title: string; description: string }> = {
   en: {
     locale: "en_US",
-    title: "DBX - 20 MB to manage 70+ databases",
+    title: "DBX - 20 MB to manage 90+ databases",
     description: DEFAULT_DESCRIPTION,
   },
   cn: {
     locale: "zh_CN",
-    title: "DBX - 20MB，管理70+种数据库",
-    description: "70+ 种数据库，仅 20 MB。支持桌面与 Docker 自托管，内置 AI 助手。",
+    title: "DBX - 20MB，管理90+种数据库",
+    description: "90+ 种数据库，仅 20 MB。支持桌面与 Docker 自托管，内置 AI 助手。",
   },
 };
 
@@ -40,8 +38,8 @@ export async function generateMetadata({ params }: { params: Promise<{ lang: str
     },
     metadataBase: new URL(SITE_URL),
     icons: {
-      icon: "/favicon.png",
-      shortcut: "/favicon.png",
+      icon: "/favicon-64.png",
+      shortcut: "/favicon-64.png",
       apple: "/logo.png",
     },
     robots: { index: true, follow: true },
@@ -53,7 +51,7 @@ export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   viewportFit: "cover",
-  themeColor: "#0b1120",
+  themeColor: "#08080a",
   colorScheme: "dark light",
 };
 
@@ -76,15 +74,8 @@ export default async function LangLayout({ params, children }: { params: Promise
         ))}
       </head>
       <body className="flex min-h-screen flex-col">
-        <RootProvider
-          i18n={i18nUI.provider(locale)}
-          search={{
-            SearchDialog: StaticSearchDialog,
-          }}
-          theme={{ defaultTheme: "system", enableSystem: true }}
-        >
-          {children}
-        </RootProvider>
+        <RouteProgress />
+        {children}
       </body>
     </html>
   );

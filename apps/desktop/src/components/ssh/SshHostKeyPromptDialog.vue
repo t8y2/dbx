@@ -11,12 +11,13 @@ import { apiUrl } from "@/lib/common/webPath";
 
 interface SshPromptRequest {
   id: string;
-  kind: "HostKeyVerify" | "SecretInput";
+  kind: "HostKeyVerify" | "SecretInput" | "WorkerUploadConsent";
   host: string;
   port: number;
   key_type?: string | null;
   fingerprint?: string | null;
   prompt?: string | null;
+  echo?: boolean;
 }
 
 interface SshHostKeyNotice {
@@ -35,6 +36,8 @@ const { toast } = useToast();
 // Using a queue keyed by request id means every prompt is shown and answered.
 const queue = ref<SshPromptRequest[]>([]);
 const current = computed<SshPromptRequest | null>(() => queue.value[0] ?? null);
+const isSecretPrompt = computed(() => current.value?.kind === "SecretInput");
+const isWorkerUploadPrompt = computed(() => current.value?.kind === "WorkerUploadConsent");
 const visible = ref(false);
 
 const remember = ref(true);
@@ -42,6 +45,7 @@ const secretCode = ref("");
 const resolving = ref(false);
 const unlisteners: Array<() => void> = [];
 let webEventSource: EventSource | null = null;
+let pendingTimer: ReturnType<typeof setInterval> | null = null;
 let mounted = true;
 
 function enqueuePrompt(request: SshPromptRequest) {
@@ -125,12 +129,43 @@ async function setupTauriPromptBridge() {
   }
 }
 
+// Fallback delivery alongside the SSE stream. On first connect the dialog's
+// EventSource may not be open yet when the backend fires a host-key prompt, so
+// the SSE `Prompt` event is lost and (without this) the connection hangs until
+// its timeout. Polling the pending endpoint recovers any lost prompt so the
+// dialog still appears. `enqueuePrompt` dedupes by id, so repeated polls are
+// harmless.
+async function fetchPendingPrompts() {
+  try {
+    const res = await fetch(apiUrl("/api/ssh/prompts/pending"), { credentials: "include" });
+    if (!res.ok) return;
+    const pending = (await res.json()) as SshPromptRequest[];
+    pending.forEach((req) => enqueuePrompt(req));
+  } catch {
+    // Transient failure — the next poll retries.
+  }
+}
+
 function setupWebPromptBridge() {
   webEventSource = new EventSource(apiUrl("/api/ssh/prompts"));
   webEventSource.onmessage = (event) => handleWebEvent(event.data);
-  webEventSource.onerror = () => {
-    // EventSource automatically retries. Do not close it while the app is mounted.
+  webEventSource.onopen = () => {
+    // The SSE stream is live; its replay already carries any prompt that fired
+    // before the stream opened, so stop polling to avoid needless requests.
+    if (pendingTimer) {
+      clearInterval(pendingTimer);
+      pendingTimer = null;
+    }
   };
+  webEventSource.onerror = () => {
+    // EventSource reconnects automatically. While disconnected, fall back to
+    // polling so a prompt fired during the outage is not lost.
+    if (!pendingTimer) pendingTimer = setInterval(fetchPendingPrompts, 2000);
+  };
+  // First-connect fallback: the stream may not be open yet when the backend
+  // fires a host-key prompt, so poll until it is.
+  void fetchPendingPrompts();
+  if (!pendingTimer) pendingTimer = setInterval(fetchPendingPrompts, 2000);
 }
 
 onMounted(() => {
@@ -143,6 +178,10 @@ onBeforeUnmount(() => {
   unlisteners.forEach((u) => u());
   webEventSource?.close();
   webEventSource = null;
+  if (pendingTimer) {
+    clearInterval(pendingTimer);
+    pendingTimer = null;
+  }
   if (isTauriRuntime()) void import("@tauri-apps/api/core").then(({ invoke }) => invoke("ssh_prompt_not_ready")).catch(() => undefined);
 });
 
@@ -199,45 +238,67 @@ function submitSecret() {
 </script>
 
 <template>
-  <Dialog v-model:open="visible" :dismissible="false">
-    <DialogContent class="sm:max-w-[460px]">
-      <DialogHeader>
-        <DialogTitle>{{ t("connection.sshHostKeyVerifyTitle") }}</DialogTitle>
+  <Dialog v-model:open="visible">
+    <!-- Every dialog portal teleports into <body> when its component mounts, so
+    body order (and therefore paint order at the shared z-50) is fixed by mount
+    order, not by which dialog opened last. This prompt mounts once at app start,
+    so a dialog mounted on demand later (e.g. the connection editor) paints over
+    it while still being demoted to pointer-events:none as the lower modal layer
+    — the prompt is invisible, the dialog is dead, and the window is stuck. This
+    is a blocking prompt, so keep it above every other layer in the app (the
+    tallest today are the image preview at 80/81 and the sidebar overlays at
+    100). -->
+    <DialogContent class="flex max-h-[min(36rem,calc(var(--dbx-viewport-height)-2rem))] w-full max-w-[32rem] flex-col gap-4 overflow-hidden" overlay-class="z-[200]" portal-class="z-[200]" :show-close-button="false" @interact-outside.prevent @escape-key-down.prevent>
+      <DialogHeader class="shrink-0">
+        <DialogTitle>
+          {{ t(isSecretPrompt ? "connection.sshInteractiveTitle" : isWorkerUploadPrompt ? "connection.sshWorkerUploadConsentTitle" : "connection.sshHostKeyVerifyTitle") }}
+        </DialogTitle>
         <DialogDescription class="text-muted-foreground">
-          {{ t("connection.sshHostKeyVerifyMessage", { host: current?.host ?? "", port: current?.port ?? "" }) }}
+          {{ t(isSecretPrompt ? "connection.sshInteractiveMessage" : isWorkerUploadPrompt ? "connection.sshWorkerUploadConsentMessage" : "connection.sshHostKeyVerifyMessage", { host: current?.host ?? "", port: current?.port ?? "" }) }}
         </DialogDescription>
       </DialogHeader>
 
-      <div v-if="current" class="space-y-3 py-1">
-        <div class="rounded-md border border-border bg-muted/40 p-3 text-sm">
-          <div class="flex items-center justify-between gap-3">
-            <span class="text-muted-foreground">{{ t("connection.sshHostKeyVerifyKeyType") }}</span>
-            <span class="font-medium">{{ current.key_type || "—" }}</span>
+      <div v-if="current" class="min-h-0 flex-1 space-y-3 overflow-y-auto py-1">
+        <div v-if="current.kind === 'HostKeyVerify' || current.kind === 'WorkerUploadConsent'" class="space-y-3 rounded-md border border-border bg-muted/40 p-3 text-sm">
+          <div class="space-y-1">
+            <div class="text-muted-foreground">{{ current.kind === "WorkerUploadConsent" ? t("connection.sshWorkerUploadConsentDigest") : t("connection.sshHostKeyVerifyKeyType") }}</div>
+            <div class="break-all font-mono text-xs font-medium leading-5">{{ current.kind === "WorkerUploadConsent" ? current.fingerprint || "—" : current.key_type || "—" }}</div>
           </div>
-          <div class="mt-2 flex items-start justify-between gap-3">
-            <span class="shrink-0 text-muted-foreground">{{ t("connection.sshHostKeyVerifyFingerprint") }}</span>
-            <span class="break-all text-right font-mono text-xs font-medium">{{ current.fingerprint || "—" }}</span>
+          <div class="space-y-1">
+            <div class="text-muted-foreground">{{ current.kind === "WorkerUploadConsent" ? t("connection.sshWorkerUploadConsentPath") : t("connection.sshHostKeyVerifyFingerprint") }}</div>
+            <div class="break-all font-mono text-xs font-medium leading-5">{{ current.kind === "WorkerUploadConsent" ? current.prompt || "—" : current.fingerprint || "—" }}</div>
           </div>
         </div>
 
-        <label v-if="current.kind === 'HostKeyVerify'" class="flex items-center gap-2 text-sm">
+        <label v-if="current.kind === 'HostKeyVerify' || current.kind === 'WorkerUploadConsent'" class="flex items-center gap-2 text-sm">
           <input type="checkbox" v-model="remember" class="h-4 w-4 rounded border-border accent-primary" />
-          <span>{{ t("connection.sshHostKeyVerifyRemember") }}</span>
+          <span>{{ current.kind === "WorkerUploadConsent" ? t("connection.sshWorkerUploadConsentRemember") : t("connection.sshHostKeyVerifyRemember") }}</span>
         </label>
 
         <div v-else-if="current.kind === 'SecretInput'" class="space-y-2">
-          <p class="text-sm text-muted-foreground">{{ current.prompt || "Enter verification code" }}</p>
-          <input v-model="secretCode" type="text" autocomplete="off" class="w-full rounded-md border border-border bg-background px-3 py-2 font-mono text-sm outline-none focus:ring-2 focus:ring-ring" :placeholder="'••••••'" />
+          <p class="whitespace-pre-wrap text-sm text-muted-foreground">
+            {{ current.prompt || t("connection.sshInteractiveDefaultPrompt") }}
+          </p>
+          <input
+            v-model="secretCode"
+            :type="current.echo ? 'text' : 'password'"
+            autocomplete="one-time-code"
+            class="w-full rounded-md border border-border bg-background px-3 py-2 font-mono text-sm outline-none focus:ring-2 focus:ring-ring"
+            :placeholder="t('connection.sshInteractivePlaceholder')"
+            @keydown.enter="submitSecret"
+          />
         </div>
       </div>
 
-      <DialogFooter>
-        <Button variant="outline" :disabled="resolving" @click="reject">{{ t("connection.sshHostKeyVerifyReject") }}</Button>
+      <DialogFooter class="shrink-0">
+        <Button variant="outline" :disabled="resolving" @click="reject">
+          {{ t(isSecretPrompt ? "connection.sshInteractiveCancel" : isWorkerUploadPrompt ? "connection.sshWorkerUploadConsentReject" : "connection.sshHostKeyVerifyReject") }}
+        </Button>
         <Button v-if="current?.kind !== 'SecretInput'" :disabled="resolving" @click="accept">
-          {{ t("connection.sshHostKeyVerifyAccept") }}
+          {{ t(isWorkerUploadPrompt ? "connection.sshWorkerUploadConsentAccept" : "connection.sshHostKeyVerifyAccept") }}
         </Button>
         <Button v-else :disabled="resolving || !secretCode" @click="submitSecret">
-          {{ t("connection.sshHostKeyVerifyAccept") }}
+          {{ t("connection.sshInteractiveSubmit") }}
         </Button>
       </DialogFooter>
     </DialogContent>

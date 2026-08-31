@@ -151,6 +151,7 @@ fn env_required(name: &str) -> Result<String, String> {
 fn connection_config(id: &str, database: BenchDatabase) -> Result<ConnectionConfig, String> {
     let database_name = env_required("DBX_BENCH_DATABASE")?;
     Ok(ConnectionConfig {
+        docs_notes_path: None,
         id: id.to_string(),
         name: id.to_string(),
         note: String::new(),
@@ -167,7 +168,9 @@ fn connection_config(id: &str, database: BenchDatabase) -> Result<ConnectionConf
         username: env_required("DBX_BENCH_USER")?,
         password: env_required("DBX_BENCH_PASSWORD")?,
         database: Some(database_name),
+        default_schema: None,
         visible_databases: None,
+        visible_database_patterns: None,
         visible_schemas: None,
         show_system_schemas: false,
         attached_databases: Vec::new(),
@@ -195,6 +198,7 @@ fn connection_config(id: &str, database: BenchDatabase) -> Result<ConnectionConf
         redis_key_separator: dbx_core::models::connection::default_redis_key_separator(),
         redis_scan_page_size: None,
         redis_database_aliases: Default::default(),
+        redis_key_templates: Vec::new(),
         etcd_endpoints: String::new(),
         gbase_server: String::new(),
         informix_server: String::new(),
@@ -202,6 +206,7 @@ fn connection_config(id: &str, database: BenchDatabase) -> Result<ConnectionConf
         jdbc_driver_class: None,
         jdbc_driver_paths: Vec::new(),
         one_time: false,
+        save_password: true,
         read_only: false,
         is_production: false,
         production_databases: Vec::new(),

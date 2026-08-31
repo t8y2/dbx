@@ -6,10 +6,14 @@ import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import SearchableSelect from "@/components/ui/searchable-select/SearchableSelect.vue";
 import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
+import TableMultiSelect from "@/components/diff/TableMultiSelect.vue";
+import { buildSameNameTableMatches } from "@/lib/diff/sameNameTableMatch";
+import { createSchemaDiffTableListCoordinator, reconcileSchemaDiffSelectedTables, shouldLoadSchemaDiffTableList, type SchemaDiffTableIdentity, type SchemaDiffTableListLoader, type SchemaDiffTableSide } from "@/lib/schema/schemaDiffTableList";
 import { useConnectionStore } from "@/stores/connectionStore";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import * as api from "@/lib/backend/api";
 import { isSchemaAware } from "@/lib/database/databaseCapabilities";
+import { fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOptions";
 import { ArrowLeftRight, GitCompareArrows, Save, FolderOpen, Settings, X } from "@lucide/vue";
 import type { SchemaDiffConfig, SchemaDiffCompareOptions, FieldMappingEntry } from "@/types/schemaDiff";
 
@@ -27,6 +31,8 @@ const props = defineProps<{
   targetSchema: string;
   ignoreComments: boolean;
   options: SchemaDiffCompareOptions;
+  selectedTables?: string[];
+  tableListLoader: SchemaDiffTableListLoader;
   loading: boolean;
   recentConfigs: SchemaDiffConfig[];
 }>();
@@ -48,6 +54,7 @@ const emit = defineEmits<{
   (e: "swap"): void;
   (e: "loadHistoryConfig", config: SchemaDiffConfig): void;
   (e: "deleteHistoryConfig", configId: string): void;
+  (e: "update:selectedTables", value?: string[]): void;
 }>();
 
 const sourceDatabases = ref<string[]>([]);
@@ -57,7 +64,7 @@ const targetSchemas = ref<string[]>([]);
 const sourceDbVersion = ref<string | null>(null);
 const targetDbVersion = ref<string | null>(null);
 
-const sqlConnections = computed(() => store.connections.filter((c: any) => !["mongodb", "redis", "elasticsearch", "easysearch", "etcd", "mq", "nacos"].includes(c.db_type)));
+const sqlConnections = computed(() => store.connections.filter((c: any) => !["mongodb", "redis", "elasticsearch", "easysearch", "meilisearch", "etcd", "zookeeper", "consul", "mq", "nacos"].includes(c.db_type)));
 
 const sourceConfig = computed(() => store.getConfig(props.sourceConnectionId));
 const targetConfig = computed(() => store.getConfig(props.targetConnectionId));
@@ -67,16 +74,118 @@ const targetDbType = computed(() => targetConfig.value?.db_type || "");
 const showFieldMapping = computed(() => sourceDbType.value && targetDbType.value && sourceDbType.value !== targetDbType.value);
 const activeFieldMappings = computed(() => props.options?.fieldMappings ?? []);
 
+// ---- Visual (explicit) table selection ----
+const sourceTableList = ref<string[]>([]);
+const targetTableList = ref<string[]>([]);
+const restrictTables = ref(false);
+const localSelectedTables = ref<string[]>([]);
+
+const matchResult = computed(() => buildSameNameTableMatches(localSelectedTables.value, targetTableList.value));
+const missingTargetTables = computed(() => matchResult.value.missing);
+
+// Keep the visual restriction in sync with the (persisted) config options.
+// `undefined` = not restricted (compare all tables, then regex filter);
+// an array = explicitly restricted to exactly those tables.
+watch(
+  () => props.selectedTables,
+  (value) => {
+    restrictTables.value = Array.isArray(value);
+    localSelectedTables.value = value && Array.isArray(value) ? [...value] : [];
+  },
+  { immediate: true },
+);
+
+function handleToggleRestrict(enabled: boolean) {
+  restrictTables.value = enabled;
+  emit("update:selectedTables", enabled ? [...localSelectedTables.value] : undefined);
+}
+
+function handleUpdateSelectedTables(value: string[]) {
+  localSelectedTables.value = value;
+  if (restrictTables.value) emit("update:selectedTables", [...value]);
+}
+
+function clearUnavailableTableSelection() {
+  sourceTableList.value = [];
+  targetTableList.value = [];
+  if (props.selectedTables === undefined && !restrictTables.value && localSelectedTables.value.length === 0) return;
+  restrictTables.value = false;
+  localSelectedTables.value = [];
+  emit("update:selectedTables", undefined);
+}
+
+function getTableIdentity(side: SchemaDiffTableSide): SchemaDiffTableIdentity {
+  return side === "source" ? { connectionId: props.sourceConnectionId, database: props.sourceDatabase, schema: props.sourceSchema } : { connectionId: props.targetConnectionId, database: props.targetDatabase, schema: props.targetSchema };
+}
+
+function isTableIdentityReady(side: SchemaDiffTableSide): boolean {
+  const identity = getTableIdentity(side);
+  const config = side === "source" ? sourceConfig.value : targetConfig.value;
+  return !!identity.connectionId && !!identity.database && (!isSchemaAware(config?.db_type) || !!identity.schema);
+}
+
+function setTableList(side: SchemaDiffTableSide, tables: Array<{ name?: string }>) {
+  const names = tables.map((entry) => entry.name ?? "").filter(Boolean);
+  if (side === "source") sourceTableList.value = names;
+  else targetTableList.value = names;
+}
+
+function reconcileSelectedTablesAfterSuccessfulLoad(tables: Array<{ name?: string }>) {
+  if (!restrictTables.value || !Array.isArray(props.selectedTables)) return;
+
+  const availableTables = tables.map((entry) => entry.name ?? "").filter(Boolean);
+  const nextSelectedTables = reconcileSchemaDiffSelectedTables(props.selectedTables, availableTables);
+  if (nextSelectedTables.length === props.selectedTables.length && nextSelectedTables.every((table, index) => table === props.selectedTables?.[index])) return;
+
+  localSelectedTables.value = nextSelectedTables;
+  emit("update:selectedTables", nextSelectedTables);
+}
+
+const tableListCoordinator = createSchemaDiffTableListCoordinator({
+  loader: props.tableListLoader,
+  getIdentity: getTableIdentity,
+  setTables: setTableList,
+  onSourceTablesLoaded: reconcileSelectedTablesAfterSuccessfulLoad,
+});
+
+watch(
+  () => [restrictTables.value, props.sourceConnectionId, props.sourceDatabase, props.sourceSchema, sourceDbType.value],
+  () => {
+    const shouldLoad = shouldLoadSchemaDiffTableList("source", restrictTables.value, localSelectedTables.value.length, isTableIdentityReady("source"));
+    tableListCoordinator.refresh("source", shouldLoad).catch(() => {});
+  },
+  { immediate: true },
+);
+
+watch(
+  () => [restrictTables.value, localSelectedTables.value.length, props.targetConnectionId, props.targetDatabase, props.targetSchema, targetDbType.value],
+  () => {
+    const shouldLoad = shouldLoadSchemaDiffTableList("target", restrictTables.value, localSelectedTables.value.length, isTableIdentityReady("target"));
+    tableListCoordinator.refresh("target", shouldLoad).catch(() => {});
+  },
+  { immediate: true },
+);
+
+const canConfigureTableSelection = computed(() => isTableIdentityReady("source"));
+
 const canCompare = computed(() => {
-  return props.sourceConnectionId && props.targetConnectionId && props.sourceDatabase && props.targetDatabase && (!isSchemaAware(sourceConfig.value?.db_type) || props.sourceSchema) && (!isSchemaAware(targetConfig.value?.db_type) || props.targetSchema);
+  const hasSelectedTables = props.selectedTables === undefined || props.selectedTables.length > 0;
+  return props.sourceConnectionId && props.targetConnectionId && props.sourceDatabase && props.targetDatabase && hasSelectedTables && (!isSchemaAware(sourceConfig.value?.db_type) || props.sourceSchema) && (!isSchemaAware(targetConfig.value?.db_type) || props.targetSchema);
 });
 
 async function loadDatabases(connectionId: string, side: "source" | "target") {
   if (!connectionId) return;
   try {
     await store.ensureConnected(connectionId);
-    const dbs = await api.listDatabases(connectionId);
-    const dbNames = Array.isArray(dbs) ? dbs.map((db: any) => (typeof db === "string" ? db : db.name || db.database)) : [];
+    const config = store.getConfig(connectionId);
+    let dbNames: string[];
+    if (config?.db_type === "dameng") {
+      // 达梦的"数据库"概念对应 schema，使用 fetchNamespaceOptionsForConnection
+      dbNames = await fetchNamespaceOptionsForConnection(connectionId, config);
+    } else {
+      const dbs = await api.listDatabases(connectionId);
+      dbNames = Array.isArray(dbs) ? dbs.map((db: any) => (typeof db === "string" ? db : db.name || db.database)) : [];
+    }
     if (side === "source") {
       sourceDatabases.value = dbNames;
       if (props.sourceDatabase) {
@@ -163,6 +272,29 @@ watch(
     } else {
       targetDatabases.value = [];
     }
+  },
+  { immediate: true },
+);
+
+// A visual selection belongs to the current source connection/database/schema. Clear it
+// when that identity changes so a saved table name cannot silently restrict a different
+// source. If the source and selected tables change together, it is a saved-config load;
+// let the selectedTables watcher restore that config instead of clearing it again.
+watch(
+  () => ({
+    source: [props.sourceConnectionId, props.sourceDatabase, props.sourceSchema] as const,
+    selectedTables: props.selectedTables,
+  }),
+  (current, previous) => {
+    if (!isTableIdentityReady("source")) {
+      clearUnavailableTableSelection();
+      return;
+    }
+    if (!previous) return;
+    if (current.source.every((value, index) => value === previous.source[index])) return;
+    if (current.selectedTables !== previous.selectedTables) return;
+    if (current.selectedTables === undefined && !restrictTables.value) return;
+    clearUnavailableTableSelection();
   },
   { immediate: true },
 );
@@ -416,6 +548,41 @@ async function fetchDbVersion(connectionId: string, database: string, schema: st
             <span class="text-muted-foreground">{{ t("diff.serverVersion") }}</span>
             <span>{{ targetDbVersion || "--" }}</span>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Comparison Scope -->
+    <div class="space-y-3 rounded-lg border bg-muted/20 p-3">
+      <div class="space-y-1.5">
+        <div class="flex items-center justify-between gap-2">
+          <Label class="text-xs font-medium">{{ t("diff.tableSelection") }}</Label>
+          <Button v-if="restrictTables || canConfigureTableSelection" variant="ghost" size="sm" class="h-6 px-2 text-xs" @click="handleToggleRestrict(!restrictTables)">
+            {{ restrictTables ? t("diff.compareAllTables") : t("diff.chooseTables") }}
+          </Button>
+        </div>
+        <div v-if="!restrictTables" class="text-[11px] text-muted-foreground">
+          {{ t("diff.tableSelectionUnrestricted") }}
+        </div>
+        <TableMultiSelect
+          v-if="restrictTables && canConfigureTableSelection"
+          :key="`${sourceConnectionId}.${sourceDatabase}.${sourceSchema}`"
+          :model-value="localSelectedTables"
+          @update:model-value="handleUpdateSelectedTables"
+          :tables="sourceTableList"
+          :title="t('diff.sourceTables')"
+          :empty-text="t('dataCompare.noTables')"
+        />
+      </div>
+
+      <!-- Target Same-Name Match -->
+      <div v-if="restrictTables && localSelectedTables.length && canConfigureTableSelection && isTableIdentityReady('target')" class="space-y-1.5 rounded-lg border p-3 text-xs">
+        <div class="font-medium">{{ t("diff.autoMatchHint") }}</div>
+        <div class="text-muted-foreground">
+          {{ t("diff.matchedTables", { matched: matchResult.matched.length, total: localSelectedTables.length }) }}
+        </div>
+        <div v-if="missingTargetTables.length" class="text-destructive">
+          {{ t("diff.missingTargetTables", { tables: missingTargetTables.join(", ") }) }}
         </div>
       </div>
     </div>

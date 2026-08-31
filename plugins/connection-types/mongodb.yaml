@@ -1,0 +1,37 @@
+schemaVersion: 1
+order: 110
+dbType: mongodb
+rustVariant: MongoDb
+label: MongoDB (Legacy)
+runtimeMode: agent
+mcpMode: bridge
+agentKey: mongodb
+driverStoreVisible: true
+driverStoreOrder: 41
+driverProfiles:
+  - profile: mongodb-legacy
+    agentKey: mongodb
+    label: MongoDB (Legacy)
+    storeVisible: false
+singleConnectionPool: true
+metadataConnectionScoped: false
+skipTcpProbe: true
+defaultPort: 27017
+supportLevel: connect
+capabilities:
+  queryExecution: true
+  metadataBrowse: false
+  objectBrowser: true
+  objectSource: false
+  schemaSearch: false
+  diagram: false
+  tableDataEdit: false
+  tableStructureEdit: false
+  tableImport: false
+  dataTransfer: true
+  sqlFileExecution: false
+  databaseCreate: false
+  fieldLineage: false
+  sqlExplain: false
+  userAdmin: false
+  driverManagement: false

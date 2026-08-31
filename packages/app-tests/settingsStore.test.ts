@@ -7,6 +7,7 @@ import { DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS } from "../../apps/desktop/src/lib
 import { DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY, SYSTEM_UI_FONT_FAMILY } from "../../apps/desktop/src/lib/app/appFonts.ts";
 import { tableOpenPageLimit } from "../../apps/desktop/src/lib/table/tableOpenPageLimit.ts";
 import { AI_PROVIDER_PRESETS, DEFAULT_EDITOR_SETTINGS, EXECUTE_MODE_CURRENT_DEFAULT_VERSION, normalizeAiConfig, normalizeEditorSettings, useSettingsStore } from "../../apps/desktop/src/stores/settingsStore.ts";
+import { DEFAULT_SHORTCUT_SETTINGS, tabNavigationHistoryDefaultShortcut, type ShortcutSettings } from "../../apps/desktop/src/lib/editor/shortcutRegistry.ts";
 
 const saveEditorSettingsMock = vi.hoisted(() => vi.fn());
 vi.mock("../../apps/desktop/src/lib/backend/api", async (importOriginal) => {
@@ -27,6 +28,16 @@ const OLD_FONT_SIZE_KEY = "dbx-query-editor-font-size";
 beforeEach(() => {
   saveEditorSettingsMock.mockClear();
 });
+
+function createDeferred() {
+  let resolve!: () => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
 
 async function withMockLocalStorage(initial: Record<string, string>, run: () => void | Promise<void>) {
   const previousDescriptor = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
@@ -63,18 +74,30 @@ async function withMockLocalStorage(initial: Record<string, string>, run: () => 
 test("normalizes saved query result page size", () => {
   assert.equal(DEFAULT_EDITOR_SETTINGS.pageSize, 100);
   assert.equal(normalizeEditorSettings({ pageSize: 5000 }).pageSize, 5000);
-  assert.equal(normalizeEditorSettings({ pageSize: 200000 }).pageSize, 100000);
+  assert.equal(normalizeEditorSettings({ pageSize: 200000 }).pageSize, 200000);
+  assert.equal(normalizeEditorSettings({ pageSize: 2000000 }).pageSize, 1000000);
   assert.equal(normalizeEditorSettings({ pageSize: 0 }).pageSize, 100);
 });
 
 test("normalizes the dedicated default row limit for table opens", () => {
   assert.equal(DEFAULT_EDITOR_SETTINGS.tableOpenPageSize, 100);
   assert.equal(normalizeEditorSettings({ tableOpenPageSize: 1000 }).tableOpenPageSize, 1000);
-  assert.equal(normalizeEditorSettings({ tableOpenPageSize: 200000 }).tableOpenPageSize, 100000);
+  assert.equal(normalizeEditorSettings({ tableOpenPageSize: 200000 }).tableOpenPageSize, 200000);
+  assert.equal(normalizeEditorSettings({ tableOpenPageSize: 2000000 }).tableOpenPageSize, 1000000);
   assert.equal(normalizeEditorSettings({ tableOpenPageSize: 0 }).tableOpenPageSize, 100);
   assert.equal(tableOpenPageLimit(), 100);
   assert.equal(tableOpenPageLimit(1000), 1000);
   assert.equal(tableOpenPageLimit(0), 100);
+});
+
+test("normalizes the global query result row limit", () => {
+  assert.equal(DEFAULT_EDITOR_SETTINGS.queryResultMaxRowsEnabled, true);
+  assert.equal(DEFAULT_EDITOR_SETTINGS.queryResultMaxRows, 100000);
+  assert.equal(normalizeEditorSettings({}).queryResultMaxRowsEnabled, true);
+  assert.equal(normalizeEditorSettings({}).queryResultMaxRows, 100000);
+  assert.equal(normalizeEditorSettings({ queryResultMaxRowsEnabled: false, queryResultMaxRows: 250000 }).queryResultMaxRowsEnabled, false);
+  assert.equal(normalizeEditorSettings({ queryResultMaxRows: 250000 }).queryResultMaxRows, 250000);
+  assert.equal(normalizeEditorSettings({ queryResultMaxRows: 2147483648 }).queryResultMaxRows, 2147483647);
 });
 
 test("numericColumnRightAlign defaults to true and round-trips through normalizeEditorSettings", () => {
@@ -85,6 +108,57 @@ test("numericColumnRightAlign defaults to true and round-trips through normalize
   // Non-boolean values fall back to the default.
   assert.equal(normalizeEditorSettings({ numericColumnRightAlign: undefined }).numericColumnRightAlign, true);
   assert.equal(normalizeEditorSettings({ numericColumnRightAlign: "false" as unknown as boolean }).numericColumnRightAlign, true);
+});
+
+test("completion column sorting defaults to alphabetical and normalizes saved booleans", () => {
+  assert.equal(DEFAULT_EDITOR_SETTINGS.sortCompletionColumnsAlphabetically, true);
+  assert.equal(normalizeEditorSettings({}).sortCompletionColumnsAlphabetically, true);
+  assert.equal(normalizeEditorSettings({ sortCompletionColumnsAlphabetically: false }).sortCompletionColumnsAlphabetically, false);
+  assert.equal(normalizeEditorSettings({ sortCompletionColumnsAlphabetically: true }).sortCompletionColumnsAlphabetically, true);
+  assert.equal(normalizeEditorSettings({ sortCompletionColumnsAlphabetically: "false" as unknown as boolean }).sortCompletionColumnsAlphabetically, true);
+});
+
+test("table DDL wrapping defaults on and normalizes saved booleans independently", () => {
+  assert.equal(DEFAULT_EDITOR_SETTINGS.tableDdlWordWrap, true);
+  assert.equal(DEFAULT_EDITOR_SETTINGS.wordWrap, false);
+  assert.equal(normalizeEditorSettings({}).tableDdlWordWrap, true);
+  assert.equal(normalizeEditorSettings({ tableDdlWordWrap: false }).tableDdlWordWrap, false);
+  assert.equal(normalizeEditorSettings({ tableDdlWordWrap: true }).tableDdlWordWrap, true);
+  assert.equal(normalizeEditorSettings({ tableDdlWordWrap: "false" as unknown as boolean }).tableDdlWordWrap, true);
+
+  const settings = normalizeEditorSettings({ tableDdlWordWrap: false, wordWrap: true });
+  assert.equal(settings.tableDdlWordWrap, false);
+  assert.equal(settings.wordWrap, true);
+});
+
+test("updateEditorSettings persists completion column sort toggles", async () => {
+  await withMockLocalStorage({}, async () => {
+    setActivePinia(createPinia());
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+
+    store.updateEditorSettings({ sortCompletionColumnsAlphabetically: false });
+    assert.equal(store.editorSettings.sortCompletionColumnsAlphabetically, false);
+    await vi.waitFor(() => {
+      const saved = saveEditorSettingsMock.mock.calls.at(-1)?.[0] as { sortCompletionColumnsAlphabetically?: boolean } | undefined;
+      assert.equal(saved?.sortCompletionColumnsAlphabetically, false);
+    });
+  });
+});
+
+test("updateEditorSettings persists table DDL wrapping toggles", async () => {
+  await withMockLocalStorage({}, async () => {
+    setActivePinia(createPinia());
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+
+    store.updateEditorSettings({ tableDdlWordWrap: false });
+    assert.equal(store.editorSettings.tableDdlWordWrap, false);
+    await vi.waitFor(() => {
+      const saved = saveEditorSettingsMock.mock.calls.at(-1)?.[0] as { tableDdlWordWrap?: boolean } | undefined;
+      assert.equal(saved?.tableDdlWordWrap, false);
+    });
+  });
 });
 
 test("updateEditorSettings persists numericColumnRightAlign toggles", async () => {
@@ -315,11 +389,19 @@ test("defaults shortcut settings", () => {
 
   assert.equal(settings.shortcuts.executeSql, "Mod+Enter");
   assert.equal(settings.shortcuts.saveSql, "Mod+S");
-  assert.equal(settings.shortcuts.copyCurrentRow, "Mod+D");
+  assert.equal(settings.shortcuts.extendSelection, "Alt+W");
+  assert.equal(settings.shortcuts.editTableStructure, "Mod+D");
+  assert.equal(settings.shortcuts.copyCurrentRow, "");
   assert.equal(settings.shortcuts.deleteCurrentRow, "Delete");
+  assert.equal(settings.shortcuts.goToFirstPage, "");
+  assert.equal(settings.shortcuts.goToPreviousPage, "");
+  assert.equal(settings.shortcuts.goToNextPage, "");
+  assert.equal(settings.shortcuts.goToLastPage, "");
   assert.equal(settings.shortcuts.newQuery, "Mod+T");
   assert.equal(settings.shortcuts.openSettings, "Mod+,");
   assert.equal(settings.shortcuts.focusSearch, "Mod+F");
+  assert.equal(settings.shortcuts.navigateTabHistoryBack, tabNavigationHistoryDefaultShortcut("back"));
+  assert.equal(settings.shortcuts.navigateTabHistoryForward, tabNavigationHistoryDefaultShortcut("forward"));
   assert.equal(settings.shortcuts.zoomInUi, "Mod+=");
   assert.equal(settings.shortcuts.zoomOutUi, "Mod+-");
   assert.equal(settings.shortcuts.resetUiZoom, "Mod+0");
@@ -336,6 +418,7 @@ test("keeps saved shortcut overrides", () => {
       executeSql: "Shift+Mod+Enter",
       copyCurrentRow: "Alt+Shift+D",
       deleteCurrentRow: "Backspace",
+      goToNextPage: "Alt+F3",
       newQuery: "Shift+Mod+N",
       openSettings: "Shift+Mod+P",
       zoomInUi: "Alt+Mod+=",
@@ -346,11 +429,54 @@ test("keeps saved shortcut overrides", () => {
   assert.equal(settings.shortcuts.executeSql, "Shift+Mod+Enter");
   assert.equal(settings.shortcuts.copyCurrentRow, "Alt+Shift+D");
   assert.equal(settings.shortcuts.deleteCurrentRow, "Backspace");
+  assert.equal(settings.shortcuts.goToNextPage, "Alt+F3");
+  assert.equal(settings.shortcuts.goToFirstPage, "");
   assert.equal(settings.shortcuts.newQuery, "Shift+Mod+N");
   assert.equal(settings.shortcuts.openSettings, "Shift+Mod+P");
   assert.equal(settings.shortcuts.zoomInUi, "Alt+Mod+=");
   assert.equal(settings.shortcuts.editSidebarConnection, "Alt+E");
   assert.equal(settings.shortcuts.saveSql, "Mod+S");
+});
+
+test("preserves adjacent tab shortcuts and persists unbound history actions when upgrading legacy settings", async () => {
+  const legacyShortcuts: Partial<ShortcutSettings> = { ...DEFAULT_SHORTCUT_SETTINGS };
+  delete legacyShortcuts.navigateTabHistoryBack;
+  delete legacyShortcuts.navigateTabHistoryForward;
+  legacyShortcuts.switchToPreviousTab = tabNavigationHistoryDefaultShortcut("back");
+  legacyShortcuts.switchToNextTab = tabNavigationHistoryDefaultShortcut("forward");
+
+  await withMockLocalStorage(
+    {
+      "dbx-app-state:editor_settings": JSON.stringify({
+        executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
+        shortcuts: legacyShortcuts,
+      }),
+    },
+    async () => {
+      setActivePinia(createPinia());
+      const migratedStore = useSettingsStore();
+      await migratedStore.initEditorSettings();
+
+      assert.equal(migratedStore.editorSettings.shortcuts.switchToPreviousTab, tabNavigationHistoryDefaultShortcut("back"));
+      assert.equal(migratedStore.editorSettings.shortcuts.switchToNextTab, tabNavigationHistoryDefaultShortcut("forward"));
+      assert.equal(migratedStore.editorSettings.shortcuts.navigateTabHistoryBack, "");
+      assert.equal(migratedStore.editorSettings.shortcuts.navigateTabHistoryForward, "");
+
+      await vi.waitFor(() => {
+        const saved = saveEditorSettingsMock.mock.calls.at(-1)?.[0] as { shortcuts?: ShortcutSettings } | undefined;
+        assert.equal(saved?.shortcuts?.navigateTabHistoryBack, "");
+        assert.equal(saved?.shortcuts?.navigateTabHistoryForward, "");
+      });
+
+      setActivePinia(createPinia());
+      const reloadedStore = useSettingsStore();
+      await reloadedStore.initEditorSettings();
+      assert.equal(reloadedStore.editorSettings.shortcuts.switchToPreviousTab, tabNavigationHistoryDefaultShortcut("back"));
+      assert.equal(reloadedStore.editorSettings.shortcuts.switchToNextTab, tabNavigationHistoryDefaultShortcut("forward"));
+      assert.equal(reloadedStore.editorSettings.shortcuts.navigateTabHistoryBack, "");
+      assert.equal(reloadedStore.editorSettings.shortcuts.navigateTabHistoryForward, "");
+    },
+  );
 });
 
 test("defaults sidebar activation to single click", () => {
@@ -370,18 +496,22 @@ test("defaults sidebar horizontal scroll to off", () => {
 
 test("defaults data grid header display settings", () => {
   assert.equal(DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader, true);
+  assert.equal(DEFAULT_EDITOR_SETTINGS.dataGridShowTransposeFieldMetadata, false);
   assert.equal(DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions, true);
   assert.equal(normalizeEditorSettings({}).showColumnCommentsInHeader, true);
+  assert.equal(normalizeEditorSettings({}).dataGridShowTransposeFieldMetadata, false);
   assert.equal(normalizeEditorSettings({}).compactColumnHeaderActions, true);
 });
 
 test("keeps saved data grid header display settings", () => {
   const settings = normalizeEditorSettings({
     showColumnCommentsInHeader: true,
+    dataGridShowTransposeFieldMetadata: true,
     compactColumnHeaderActions: false,
   } as any);
 
   assert.equal(settings.showColumnCommentsInHeader, true);
+  assert.equal(settings.dataGridShowTransposeFieldMetadata, true);
   assert.equal(settings.compactColumnHeaderActions, false);
 });
 
@@ -494,6 +624,7 @@ test("keeps only valid saved column formatter configs", () => {
       "conn::db::public::users::payload": { kind: "json-path", path: "$.user.name" },
       "conn::db::public::users::invalid_json": { kind: "json-path", path: "user.name" },
       "conn::db::public::users::status": { kind: "custom-ref", formatterId: "fmt_1" },
+      "conn::db::public::orders::user_id": { kind: "foreign-key-display", refSchema: "public", refTable: "users", refColumn: "id", displayColumn: "name" },
     },
     customColumnFormatters: {
       fmt_1: { id: "fmt_1", name: "Status label", template: "status:${value}" },
@@ -507,9 +638,172 @@ test("keeps only valid saved column formatter configs", () => {
     "conn::db::public::users::name": { kind: "mask", prefix: 2, suffix: 2 },
     "conn::db::public::users::payload": { kind: "json-path", path: "$.user.name" },
     "conn::db::public::users::status": { kind: "custom-ref", formatterId: "fmt_1" },
+    "conn::db::public::orders::user_id": { kind: "foreign-key-display", refSchema: "public", refTable: "users", refColumn: "id", displayColumn: "name" },
   });
   assert.deepEqual(settings.customColumnFormatters, {
     fmt_1: { id: "fmt_1", name: "Status label", template: "status:${value}" },
+  });
+});
+
+test("deleting a saved custom formatter clears every reference to it", async () => {
+  await withMockLocalStorage({}, async () => {
+    setActivePinia(createPinia());
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+    store.updateEditorSettings({
+      customColumnFormatters: {
+        fmt_remove: { id: "fmt_remove", name: "Remove me", template: "remove:${value}" },
+        fmt_keep: { id: "fmt_keep", name: "Keep me", template: "keep:${value}" },
+      },
+      columnFormatters: {
+        first: { kind: "custom-ref", formatterId: "fmt_remove" },
+        second: { kind: "custom-ref", formatterId: "fmt_remove" },
+        keep: { kind: "custom-ref", formatterId: "fmt_keep" },
+        mask: { kind: "mask", prefix: 1, suffix: 1 },
+      },
+    });
+
+    await store.deleteCustomColumnFormatter("fmt_remove");
+
+    assert.deepEqual(store.editorSettings.customColumnFormatters, {
+      fmt_keep: { id: "fmt_keep", name: "Keep me", template: "keep:${value}" },
+    });
+    assert.deepEqual(store.editorSettings.columnFormatters, {
+      keep: { kind: "custom-ref", formatterId: "fmt_keep" },
+      mask: { kind: "mask", prefix: 1, suffix: 1 },
+    });
+  });
+});
+
+test("serializes concurrent custom formatter deletes", async () => {
+  await withMockLocalStorage({}, async () => {
+    setActivePinia(createPinia());
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+    store.updateEditorSettings({
+      customColumnFormatters: {
+        fmt_a: { id: "fmt_a", name: "A", template: "a:${value}" },
+        fmt_b: { id: "fmt_b", name: "B", template: "b:${value}" },
+        fmt_keep: { id: "fmt_keep", name: "Keep", template: "keep:${value}" },
+      },
+      columnFormatters: {
+        first: { kind: "custom-ref", formatterId: "fmt_a" },
+        second: { kind: "custom-ref", formatterId: "fmt_b" },
+        keep: { kind: "custom-ref", formatterId: "fmt_keep" },
+      },
+    });
+    await store.persistEditorSettings();
+
+    await Promise.all([store.deleteCustomColumnFormatter("fmt_a"), store.deleteCustomColumnFormatter("fmt_b")]);
+
+    assert.deepEqual(store.editorSettings.customColumnFormatters, {
+      fmt_keep: { id: "fmt_keep", name: "Keep", template: "keep:${value}" },
+    });
+    assert.deepEqual(store.editorSettings.columnFormatters, {
+      keep: { kind: "custom-ref", formatterId: "fmt_keep" },
+    });
+    const saved = saveEditorSettingsMock.mock.calls.at(-1)?.[0] as { customColumnFormatters?: Record<string, unknown> } | undefined;
+    assert.deepEqual(saved?.customColumnFormatters, {
+      fmt_keep: { id: "fmt_keep", name: "Keep", template: "keep:${value}" },
+    });
+  });
+});
+
+test("queues formatter upserts behind a deferred delete save", async () => {
+  await withMockLocalStorage({}, async () => {
+    setActivePinia(createPinia());
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+    store.updateEditorSettings({
+      customColumnFormatters: {
+        fmt_a: { id: "fmt_a", name: "A", template: "a:${value}" },
+        fmt_b: { id: "fmt_b", name: "B", template: "b:${value}" },
+      },
+      columnFormatters: {
+        first: { kind: "custom-ref", formatterId: "fmt_a" },
+      },
+    });
+    await store.persistEditorSettings();
+    const deleteSave = createDeferred();
+    saveEditorSettingsMock.mockImplementationOnce(() => deleteSave.promise);
+
+    const deletePromise = store.deleteCustomColumnFormatter("fmt_a");
+    await vi.waitFor(() => assert.equal(store.editorSettings.customColumnFormatters.fmt_a, undefined));
+    const upsertPromise = store.upsertCustomColumnFormatter({ id: "fmt_b", name: "B updated", template: "updated:${value}" });
+    await Promise.resolve();
+    assert.equal(store.editorSettings.customColumnFormatters.fmt_b.name, "B");
+
+    deleteSave.resolve();
+    await deletePromise;
+    await upsertPromise;
+
+    assert.deepEqual(store.editorSettings.customColumnFormatters, {
+      fmt_b: { id: "fmt_b", name: "B updated", template: "updated:${value}" },
+    });
+    assert.deepEqual(store.editorSettings.columnFormatters, {});
+  });
+});
+
+test("rolls back a failed delete before running a queued formatter upsert", async () => {
+  await withMockLocalStorage({}, async () => {
+    setActivePinia(createPinia());
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+    store.updateEditorSettings({
+      customColumnFormatters: {
+        fmt_a: { id: "fmt_a", name: "A", template: "a:${value}" },
+      },
+      columnFormatters: {
+        first: { kind: "custom-ref", formatterId: "fmt_a" },
+      },
+    });
+    await store.persistEditorSettings();
+    const deleteSave = createDeferred();
+    saveEditorSettingsMock.mockImplementationOnce(() => deleteSave.promise);
+
+    const deletePromise = store.deleteCustomColumnFormatter("fmt_a");
+    const deleteRejected = assert.rejects(deletePromise, /disk full/);
+    await vi.waitFor(() => assert.equal(store.editorSettings.customColumnFormatters.fmt_a, undefined));
+    const upsertPromise = store.upsertCustomColumnFormatter({ id: "fmt_b", name: "B", template: "b:${value}" });
+    await Promise.resolve();
+    assert.equal(store.editorSettings.customColumnFormatters.fmt_b, undefined);
+
+    deleteSave.reject(new Error("disk full"));
+    await deleteRejected;
+    await upsertPromise;
+
+    assert.deepEqual(store.editorSettings.customColumnFormatters, {
+      fmt_a: { id: "fmt_a", name: "A", template: "a:${value}" },
+      fmt_b: { id: "fmt_b", name: "B", template: "b:${value}" },
+    });
+    assert.deepEqual(store.editorSettings.columnFormatters, {
+      first: { kind: "custom-ref", formatterId: "fmt_a" },
+    });
+  });
+});
+
+test("rejects stale formatter drafts but allows deliberate same-id recreation", async () => {
+  await withMockLocalStorage({}, async () => {
+    setActivePinia(createPinia());
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+    store.updateEditorSettings({
+      customColumnFormatters: {
+        fmt_rebuild: { id: "fmt_rebuild", name: "Original", template: "original:${value}" },
+      },
+    });
+    await store.persistEditorSettings();
+    const capturedDeleteVersion = store.customColumnFormatterDeleteVersion("fmt_rebuild");
+    const staleFormatter = store.editorSettings.customColumnFormatters.fmt_rebuild;
+
+    await store.deleteCustomColumnFormatter("fmt_rebuild");
+
+    assert.equal(await store.upsertCustomColumnFormatter(staleFormatter, capturedDeleteVersion), undefined);
+    assert.equal(store.editorSettings.customColumnFormatters.fmt_rebuild, undefined);
+    const rebuilt = { id: "fmt_rebuild", name: "Rebuilt", template: "rebuilt:${value}" };
+    assert.deepEqual(await store.upsertCustomColumnFormatter(rebuilt), rebuilt);
+    assert.deepEqual(store.editorSettings.customColumnFormatters.fmt_rebuild, rebuilt);
+    assert.notEqual(store.customColumnFormatterDeleteVersion("fmt_rebuild"), capturedDeleteVersion);
   });
 });
 
@@ -537,6 +831,20 @@ test("AI provider presets include common hosted and local providers", () => {
   assert.equal(AI_PROVIDER_PRESETS["claude-code-cli"].model, "default");
   assert.equal(AI_PROVIDER_PRESETS["claude-code-cli"].iconSlug, "claudecode");
   assert.equal(AI_PROVIDER_PRESETS["claude-code-cli"].requiresApiKey, false);
+  assert.equal(AI_PROVIDER_PRESETS["opencode-cli"].model, "default");
+  assert.equal(AI_PROVIDER_PRESETS["opencode-cli"].iconSlug, "opencode");
+  assert.equal(AI_PROVIDER_PRESETS["opencode-cli"].requiresApiKey, false);
+  assert.equal(AI_PROVIDER_PRESETS["cursor-cli"].model, "default");
+  assert.equal(AI_PROVIDER_PRESETS["cursor-cli"].iconSlug, "cursor");
+  assert.equal(AI_PROVIDER_PRESETS["cursor-cli"].requiresApiKey, false);
+  assert.equal(AI_PROVIDER_PRESETS["codebuddy-cli"].model, "default");
+  assert.equal(AI_PROVIDER_PRESETS["codebuddy-cli"].iconSlug, "codebuddy");
+  assert.equal(AI_PROVIDER_PRESETS["codebuddy-cli"].requiresApiKey, false);
+  assert.equal(AI_PROVIDER_PRESETS["qoder-cli"].model, "default");
+  assert.equal(AI_PROVIDER_PRESETS["qoder-cli"].requiresApiKey, false);
+  assert.equal(AI_PROVIDER_PRESETS["grok-cli"].model, "default");
+  assert.equal(AI_PROVIDER_PRESETS["grok-cli"].iconSlug, "grok");
+  assert.equal(AI_PROVIDER_PRESETS["grok-cli"].requiresApiKey, false);
   assert.equal(AI_PROVIDER_PRESETS["pi-agent-cli"].model, "default");
   assert.equal(AI_PROVIDER_PRESETS["pi-agent-cli"].iconSlug, "pi");
   assert.equal(AI_PROVIDER_PRESETS["pi-agent-cli"].requiresApiKey, false);
@@ -545,6 +853,15 @@ test("AI provider presets include common hosted and local providers", () => {
   assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("minimax") < Object.keys(AI_PROVIDER_PRESETS).indexOf("ollama"));
   assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("claude-code-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("codex-cli"));
   assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("claude-code-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("pi-agent-cli"));
+  assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("codex-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("opencode-cli"));
+  assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("opencode-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("pi-agent-cli"));
+  assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("opencode-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("cursor-cli"));
+  assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("cursor-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("pi-agent-cli"));
+  assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("cursor-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("codebuddy-cli"));
+  assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("codebuddy-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("grok-cli"));
+  assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("codebuddy-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("qoder-cli"));
+  assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("qoder-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("grok-cli"));
+  assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("codex-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("grok-cli"));
   assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("codex-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("pi-agent-cli"));
 });
 
@@ -555,6 +872,18 @@ test("API AI provider settings expose and persist a default model ID", () => {
   assert.ok(modelControl >= 0);
   assert.match(source.slice(modelControl - 300, modelControl + 300), /v-if="!aiIsCliProvider"[\s\S]*t\("ai\.defaultModel"\)[\s\S]*t\('ai\.manualModelPlaceholder'\)/);
   assert.match(source, /model:\s*aiEditModel\.value/);
+});
+
+test("AI connection test uses the model currently entered in the config form", () => {
+  const source = readFileSync("apps/desktop/src/components/editor/EditorSettingsDialog.vue", "utf8");
+  const testConnectionStart = source.indexOf("async function aiTestConn()");
+  const testConnectionEnd = source.indexOf("async function copyAiTestError()", testConnectionStart);
+  const testConnection = source.slice(testConnectionStart, testConnectionEnd);
+
+  assert.notEqual(testConnectionStart, -1);
+  assert.notEqual(testConnectionEnd, -1);
+  assert.match(testConnection, /const config = currentAiEditConfig\(\);[\s\S]*aiTestConnection\(config\)/);
+  assert.doesNotMatch(testConnection, /activeModel|config\.model\s*=/);
 });
 
 test("normalizes legacy AI config and fills provider defaults", () => {
@@ -613,6 +942,39 @@ test("normalizes legacy AI config and fills provider defaults", () => {
   assert.equal(piAgent.piAgentCliPath, "/opt/homebrew/bin/pi");
   assert.deepEqual(piAgent.piAgentCliEnv, { HTTPS_PROXY: "http://proxy:9800" });
   assert.equal(piAgent.model, "default");
+
+  const openCode = normalizeAiConfig({
+    provider: "opencode-cli",
+    opencodeCliPath: " /opt/homebrew/bin/opencode ",
+    opencodeCliEnv: { HTTPS_PROXY: "http://proxy:9800" },
+  } as any);
+  assert.equal(openCode.opencodeCliPath, "/opt/homebrew/bin/opencode");
+  assert.deepEqual(openCode.opencodeCliEnv, { HTTPS_PROXY: "http://proxy:9800" });
+  assert.equal(openCode.model, "default");
+  const grokCli = normalizeAiConfig({
+    provider: "grok-cli",
+    grokCliPath: " /Users/me/.grok/bin/grok ",
+    grokCliEnv: { HTTPS_PROXY: "http://proxy:9800" },
+  });
+  assert.equal(grokCli.grokCliPath, "/Users/me/.grok/bin/grok");
+  assert.deepEqual(grokCli.grokCliEnv, { HTTPS_PROXY: "http://proxy:9800" });
+  assert.equal(grokCli.model, "default");
+  const codeBuddy = normalizeAiConfig({
+    provider: "codebuddy-cli",
+    codebuddyCliPath: " /opt/homebrew/bin/codebuddy ",
+    codebuddyCliEnv: { HTTPS_PROXY: "http://proxy:9800" },
+  });
+  assert.equal(codeBuddy.codebuddyCliPath, "/opt/homebrew/bin/codebuddy");
+  assert.deepEqual(codeBuddy.codebuddyCliEnv, { HTTPS_PROXY: "http://proxy:9800" });
+  assert.equal(codeBuddy.model, "default");
+  const qoder = normalizeAiConfig({
+    provider: "qoder-cli",
+    qoderCliPath: " /opt/homebrew/bin/qodercli ",
+    qoderCliEnv: { QODER_PERSONAL_ACCESS_TOKEN: "token" },
+  });
+  assert.equal(qoder.qoderCliPath, "/opt/homebrew/bin/qodercli");
+  assert.deepEqual(qoder.qoderCliEnv, { QODER_PERSONAL_ACCESS_TOKEN: "token" });
+  assert.equal(qoder.model, "default");
 });
 
 test("infers legacy AI provider from saved endpoint and model", () => {

@@ -27,12 +27,15 @@ export interface TabResultSnapshot {
    * still return to the original result order.
    */
   resultLocalSortOriginalRows?: QueryResult["rows"];
+  resultLocalSortOriginalLargeValueCells?: QueryResult["large_value_cells"];
   resultLocalSortOriginalMongoDocuments?: QueryResult["mongo_documents"];
   resultLocalSortOriginalMongoCopyDocuments?: QueryResult["mongo_copy_documents"];
   resultRuns?: QueryTab["resultRuns"];
   activeResultRunId?: string;
   queryAnalysis?: QueryTab["queryAnalysis"];
   querySourceColumns?: QueryTab["querySourceColumns"];
+  resultColumnComments?: QueryTab["resultColumnComments"];
+  queryDisplaySourceColumns?: QueryTab["queryDisplaySourceColumns"];
   queryEditabilityReason?: QueryTab["queryEditabilityReason"];
   mongoEditTarget?: QueryTab["mongoEditTarget"];
   tableMeta?: QueryTab["tableMeta"];
@@ -48,6 +51,7 @@ interface ColumnarQueryResult {
   columns: string[];
   spatial_columns?: QueryResult["spatial_columns"];
   spatial_values?: QueryResult["spatial_values"];
+  large_value_cells?: QueryResult["large_value_cells"];
   execution_error?: true;
   statement_index?: number;
   column_types?: string[];
@@ -316,7 +320,11 @@ async function deleteIndexedDbCacheOwner(ownerId: string): Promise<void> {
 function clonePlain<T>(value: T): T {
   const raw = toRaw(value);
   if (typeof structuredClone === "function") return structuredClone(raw);
-  return JSON.parse(JSON.stringify(raw)) as T;
+  try {
+    return JSON.parse(JSON.stringify(raw)) as T;
+  } catch {
+    return raw;
+  }
 }
 
 function stripSessionIds(result: QueryResult | undefined): QueryResult | undefined {
@@ -328,6 +336,7 @@ function stripSessionIds(result: QueryResult | undefined): QueryResult | undefin
     column_types: result.column_types ? [...result.column_types] : undefined,
     spatial_columns: result.spatial_columns?.map((entry) => ({ column_index: entry.column_index, srid: entry.srid })),
     spatial_values: result.spatial_values?.map((row) => [...row]),
+    large_value_cells: result.large_value_cells?.map((cell) => ({ ...cell })),
     rows: result.rows.map((row) => [...row]),
     mongo_documents: result.mongo_documents ? clonePlain(result.mongo_documents) : undefined,
     mongo_copy_documents: result.mongo_copy_documents ? clonePlain(result.mongo_copy_documents) : undefined,
@@ -353,6 +362,7 @@ function stripResultRunSessionIds(resultRuns: QueryTab["resultRuns"]): QueryTab[
     result: stripSessionIds(run.result),
     results: stripResultSessionIds(run.results),
     resultLocalSortOriginalRows: run.resultLocalSortOriginalRows?.map((row) => [...row]),
+    resultLocalSortOriginalLargeValueCells: run.resultLocalSortOriginalLargeValueCells?.map((cell) => ({ ...cell })),
     resultLocalSortOriginalMongoDocuments: run.resultLocalSortOriginalMongoDocuments ? clonePlain(run.resultLocalSortOriginalMongoDocuments) : undefined,
     resultLocalSortOriginalMongoCopyDocuments: run.resultLocalSortOriginalMongoCopyDocuments ? clonePlain(run.resultLocalSortOriginalMongoCopyDocuments) : undefined,
     resultSessionId: undefined,
@@ -369,6 +379,7 @@ function toColumnarResult(result: QueryResult | undefined): ColumnarQueryResult 
     column_types: result.column_types ? [...result.column_types] : undefined,
     spatial_columns: result.spatial_columns?.map((entry) => ({ column_index: entry.column_index, srid: entry.srid })),
     spatial_values: result.spatial_values?.map((row) => [...row]),
+    large_value_cells: result.large_value_cells?.map((cell) => ({ ...cell })),
     columnValues,
     rowCount: result.rows.length,
     mongo_documents: result.mongo_documents ? clonePlain(result.mongo_documents) : undefined,
@@ -394,6 +405,7 @@ function fromColumnarResult(result: ColumnarQueryResult | undefined): QueryResul
     column_types: result.column_types ? [...result.column_types] : undefined,
     spatial_columns: result.spatial_columns?.map((entry) => ({ column_index: entry.column_index, srid: entry.srid })),
     spatial_values: result.spatial_values?.map((row) => [...row]),
+    large_value_cells: result.large_value_cells?.map((cell) => ({ ...cell })),
     rows,
     mongo_documents: result.mongo_documents ? clonePlain(result.mongo_documents) : undefined,
     mongo_copy_documents: result.mongo_copy_documents ? clonePlain(result.mongo_copy_documents) : undefined,
@@ -721,6 +733,8 @@ export function buildTabResultSnapshot(tab: QueryTab): TabResultSnapshot | undef
     activeResultRunId: tab.activeResultRunId,
     queryAnalysis: tab.queryAnalysis ? clonePlain(tab.queryAnalysis) : undefined,
     querySourceColumns: tab.querySourceColumns ? [...tab.querySourceColumns] : undefined,
+    resultColumnComments: tab.resultColumnComments ? clonePlain(tab.resultColumnComments) : undefined,
+    queryDisplaySourceColumns: tab.queryDisplaySourceColumns ? [...tab.queryDisplaySourceColumns] : undefined,
     queryEditabilityReason: tab.queryEditabilityReason,
     mongoEditTarget: tab.mongoEditTarget ? clonePlain(tab.mongoEditTarget) : undefined,
     tableMeta: tab.tableMeta ? clonePlain(tab.tableMeta) : undefined,

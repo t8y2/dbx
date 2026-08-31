@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { copySelectedConnectionsToClipboards, selectedConnectionDeleteTargets, selectedConnectionDuplicateTargets } from "@/lib/sidebar/sidebarConnectionSelection";
+import { copySelectedConnectionsToClipboards, selectedConnectionDeleteTargets, selectedConnectionDisconnectTargets, selectedConnectionDuplicateTargets, selectedConnectionGroupDeleteTargets } from "@/lib/sidebar/sidebarConnectionSelection";
 import type { TreeNode } from "@/types/database";
 
 function node(id: string, type: TreeNode["type"] = "connection"): TreeNode {
@@ -31,6 +31,14 @@ describe("sidebar connection selection", () => {
     const selected = [current, node("conn-2")];
 
     expect(selectedConnectionDuplicateTargets(current, selected)).toEqual(selectedConnectionDeleteTargets(current, selected));
+    expect(selectedConnectionDisconnectTargets(current, selected)).toEqual(selectedConnectionDeleteTargets(current, selected));
+  });
+
+  it("disconnects only the right-clicked connection when it is outside the selection", () => {
+    const current = node("conn-3");
+    const selected = [node("conn-1"), node("conn-2")];
+
+    expect(selectedConnectionDisconnectTargets(current, selected).map((item) => item.connectionId)).toEqual(["conn-3"]);
   });
 
   it("copies selected connection names to the system clipboard for the sidebar copy shortcut", () => {
@@ -49,5 +57,23 @@ describe("sidebar connection selection", () => {
     expect(copySelectedConnectionsToClipboards([node("conn-1")], copyConnectionsToTreeClipboard, copyToSystemClipboard)).toBe(1);
     await Promise.resolve();
     expect(copyConnectionsToTreeClipboard).toHaveBeenCalledWith(["conn-1"]);
+  });
+});
+
+describe("sidebar connection group selection", () => {
+  it("uses all selected groups when the current group is selected", () => {
+    const current = node("group-2", "connection-group");
+    const selected = [node("group-1", "connection-group"), current];
+
+    expect(selectedConnectionGroupDeleteTargets(current, selected)).toEqual(selected);
+  });
+
+  it("falls back to the current group for mixed, stale, and single selections", () => {
+    const current = node("group-current", "connection-group");
+    const other = node("group-other", "connection-group");
+
+    expect(selectedConnectionGroupDeleteTargets(current, [other])).toEqual([current]);
+    expect(selectedConnectionGroupDeleteTargets(current, [current, node("conn-1")])).toEqual([current]);
+    expect(selectedConnectionGroupDeleteTargets(current, [current])).toEqual([current]);
   });
 });

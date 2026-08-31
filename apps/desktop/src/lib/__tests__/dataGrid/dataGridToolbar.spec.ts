@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH,
+  dataGridDeleteRowToolbarState,
   dataGridToolbarCompactBreakpoint,
   dataGridToolbarIntervalOptions,
   isDataGridToolbarCompact,
@@ -32,6 +33,17 @@ function autoRefreshCapability(overrides: Partial<DataGridToolbarAutoRefreshCapa
 }
 
 describe("data grid toolbar capabilities", () => {
+  it("shows delete only for editable grids with a supported deletion path", () => {
+    expect(dataGridDeleteRowToolbarState({ editable: false, canDeleteRows: true, canDeleteExistingRows: true, deletableTargetCount: 1, isSaving: false })).toEqual({ visible: false, disabled: false });
+    expect(dataGridDeleteRowToolbarState({ editable: true, canDeleteRows: true, canDeleteExistingRows: true, deletableTargetCount: 0, isSaving: false })).toEqual({ visible: true, disabled: true });
+    expect(dataGridDeleteRowToolbarState({ editable: true, canDeleteRows: true, canDeleteExistingRows: false, deletableTargetCount: 0, isSaving: false })).toEqual({ visible: false, disabled: true });
+  });
+
+  it("keeps unsaved deletable rows available when existing-row deletion is unsupported", () => {
+    expect(dataGridDeleteRowToolbarState({ editable: true, canDeleteRows: true, canDeleteExistingRows: false, deletableTargetCount: 1, isSaving: false })).toEqual({ visible: true, disabled: false });
+    expect(dataGridDeleteRowToolbarState({ editable: true, canDeleteRows: true, canDeleteExistingRows: true, deletableTargetCount: 2, isSaving: true })).toEqual({ visible: true, disabled: true });
+  });
+
   it("uses a viewport-relative compact breakpoint within stable bounds", () => {
     expect(dataGridToolbarCompactBreakpoint(1920)).toBe(1050);
     expect(dataGridToolbarCompactBreakpoint(1280)).toBe(960);

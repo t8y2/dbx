@@ -25,6 +25,14 @@ export interface DataGridToolbarActionCapability {
   onTrigger: () => void | Promise<void>;
 }
 
+export function dataGridDeleteRowToolbarState(options: { editable: boolean; canDeleteRows: boolean; canDeleteExistingRows: boolean; deletableTargetCount: number; isSaving: boolean }): { visible: boolean; disabled: boolean } {
+  const deletionAvailable = options.editable && options.canDeleteRows;
+  return {
+    visible: deletionAvailable && (options.canDeleteExistingRows || options.deletableTargetCount > 0),
+    disabled: options.isSaving || options.deletableTargetCount === 0,
+  };
+}
+
 export interface DataGridToolbarSaveCapability extends DataGridToolbarActionCapability {
   pendingCount: number;
   shortcutLabel?: string;

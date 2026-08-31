@@ -4,10 +4,30 @@ export const SIDEBAR_TREE_ROW_HEIGHT = 28;
 export const SIDEBAR_TREE_SCROLL_BUFFER = 600;
 export const SIDEBAR_TREE_PRERENDER_COUNT = 48;
 
+/**
+ * Sidebar trees at or above this many rows use the virtualized renderer.
+ * Smaller trees render plainly (all rows in the DOM). Virtualized rendering
+ * has a failure mode where the view pool stops matching the viewport when the
+ * tree mutates while scrolled (observed with the Dameng connection, whose
+ * subtree keeps streaming in new nodes) — a blank band appears below the last
+ * materialized row. Plain rendering cannot exhibit that failure, so keep
+ * small/medium trees off the virtual path.
+ */
+export const SIDEBAR_TREE_VIRTUALIZE_THRESHOLD = 500;
+
+/**
+ * Once a tree is virtualized it stays virtualized until the row count drops
+ * below THRESHOLD - HYSTERESIS. Switching renderers remounts the whole tree,
+ * so the hysteresis prevents search/filter oscillation around the threshold
+ * from thrashing between the two branches.
+ */
+export const SIDEBAR_TREE_VIRTUALIZE_HYSTERESIS = 50;
+
 export interface FlatTreeNode {
   node: TreeNode;
   depth: number;
   id: string;
+  renderKey: string;
   type: TreeNodeType;
   poolType: string;
 }
@@ -31,26 +51,35 @@ interface FlatTreeIndexOptions {
   isSchemaContainer: (type: TreeNodeType) => boolean;
 }
 
-function walk(children: TreeNode[], depth: number, result: FlatTreeNode[]) {
+export function appendFlatTreeRenderKey(parentRenderKey: string, node: Pick<TreeNode, "id" | "type">): string {
+  return `${parentRenderKey}${node.type.length}:${node.type}${node.id.length}:${node.id}`;
+}
+
+function walk(children: TreeNode[], depth: number, result: FlatTreeNode[], parentRenderKey: string) {
   for (const node of children) {
+    // Business ids are delimiter-composed and can collide across different
+    // database/schema paths, while the recycler requires a unique row key.
+    const renderKey = appendFlatTreeRenderKey(parentRenderKey, node);
     result.push({
       node,
       depth,
       id: node.id,
+      renderKey,
       type: node.type,
       poolType: node.type === "connection-group" ? `${node.type}:${node.id}` : node.type,
     });
     if (node.isExpanded && node.children) {
-      walk(node.children, depth + 1, result);
+      walk(node.children, depth + 1, result, renderKey);
     }
   }
 }
 
-function flatTreeNode(node: TreeNode, depth: number): FlatTreeNode {
+function flatTreeNode(node: TreeNode, depth: number, renderKey: string): FlatTreeNode {
   return {
     node,
     depth,
     id: node.id,
+    renderKey,
     type: node.type,
     poolType: node.type === "connection-group" ? `${node.type}:${node.id}` : node.type,
   };
@@ -66,20 +95,21 @@ function visibleDescendantEnd(nodes: readonly FlatTreeNode[], parentIndex: numbe
 
 export function flattenTree(nodes: TreeNode[]): FlatTreeNode[] {
   const result: FlatTreeNode[] = [];
-  walk(nodes, 0, result);
+  walk(nodes, 0, result, "");
   return result;
 }
 
 export function replaceFlatTreeChildren(nodes: readonly FlatTreeNode[], parentIndex: number, parent: TreeNode): FlatTreeNode[] {
   if (parentIndex < 0 || parentIndex >= nodes.length || nodes[parentIndex].id !== parent.id) return [...nodes];
 
+  const parentItem = nodes[parentIndex];
   const end = visibleDescendantEnd(nodes, parentIndex);
   const replacement: FlatTreeNode[] = [];
-  if (parent.isExpanded && parent.children) walk(parent.children, nodes[parentIndex].depth + 1, replacement);
+  if (parent.isExpanded && parent.children) walk(parent.children, parentItem.depth + 1, replacement, parentItem.renderKey);
 
   // One splice-shaped replacement keeps recycled-list consumers from observing
   // an intermediate state where old and new child ranges coexist.
-  return [...nodes.slice(0, parentIndex), flatTreeNode(parent, nodes[parentIndex].depth), ...replacement, ...nodes.slice(end)];
+  return [...nodes.slice(0, parentIndex), flatTreeNode(parent, parentItem.depth, parentItem.renderKey), ...replacement, ...nodes.slice(end)];
 }
 
 export function mutateFlatTreeExpansion(nodes: readonly FlatTreeNode[], parentIndex: number, parent: TreeNode, expanded: boolean): FlatTreeNode[] {
@@ -87,8 +117,17 @@ export function mutateFlatTreeExpansion(nodes: readonly FlatTreeNode[], parentIn
   return replaceFlatTreeChildren(nodes, parentIndex, parent);
 }
 
+/** Whether the visible row identities changed enough to refresh recycled views. */
+export function flatTreeRowsChanged(nodes: readonly FlatTreeNode[], previousNodes: readonly FlatTreeNode[] | undefined): boolean {
+  if (!previousNodes || nodes.length !== previousNodes.length) return true;
+  return nodes.some((item, index) => {
+    const previous = previousNodes[index];
+    return !previous || item.renderKey !== previous.renderKey || item.poolType !== previous.poolType || item.depth !== previous.depth;
+  });
+}
+
 export function shouldVirtualizeFlatTree(count: number): boolean {
-  return count > 0;
+  return count >= SIDEBAR_TREE_VIRTUALIZE_THRESHOLD;
 }
 
 export function createFlatTreeIndex(nodes: readonly FlatTreeNode[], options: FlatTreeIndexOptions): FlatTreeIndex {

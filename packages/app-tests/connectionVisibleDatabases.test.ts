@@ -90,9 +90,35 @@ test("Turso does not offer a visible database filter for its fixed main namespac
   assert.equal(connectionCanChooseVisibleDatabases(config({ db_type: "turso" })), false);
 });
 
+test("non-database connection types do not offer visible database selection", () => {
+  assert.equal(connectionCanChooseVisibleDatabases(config({ db_type: "mq" })), false);
+  assert.equal(connectionCanChooseVisibleDatabases(config({ db_type: "nacos" })), false);
+});
+
 test("OceanBase Oracle uses schema filtering for visible object selection", () => {
   assert.equal(connectionUsesVisibleSchemaFilter(config({ db_type: "oceanbase-oracle" })), true);
   assert.equal(connectionUsesVisibleSchemaFilter(config({ db_type: "mysql", driver_profile: "oceanbase" })), false);
+});
+
+test("OceanBase Oracle applies Oracle system schema visibility rules", () => {
+  const schemas = ["APP", "SYS", "SYSTEM", "APEX_240100", "FLOWS_240100", "APP$USER"];
+
+  assert.deepEqual(filterSchemaNamesForVisiblePicker(schemas, config({ db_type: "oceanbase-oracle", username: "APP" })), ["APP"]);
+  assert.deepEqual(filterSchemaNamesForVisiblePicker(schemas, config({ db_type: "oceanbase-oracle", username: "SYS" })), ["APP", "SYS"]);
+  assert.deepEqual(filterSchemaNamesForConnection(schemas, config({ db_type: "oceanbase-oracle", show_system_schemas: true }), ""), schemas);
+  assert.deepEqual(filterSchemaNamesForConnection(schemas, config({ db_type: "oceanbase-oracle", visible_schemas: { "": ["SYS", "APEX_240100", "FLOWS_240100", "APP$USER"] } }), ""), ["SYS", "APEX_240100", "FLOWS_240100", "APP$USER"]);
+});
+
+test("Oracle JDBC uses schema filtering for visible object selection", () => {
+  const connection = config({
+    db_type: "jdbc",
+    driver_profile: "jdbc",
+    connection_string: "jdbc:oracle:thin:@//127.0.0.1:1521/XE",
+    username: "DBX_TEST",
+  });
+
+  assert.equal(connectionUsesVisibleSchemaFilter(connection), true);
+  assert.deepEqual(filterSchemaNamesForConnection(["ANONYMOUS", "DBX_TEST", "SYS", "SYSTEM"], connection, ""), ["DBX_TEST"]);
 });
 
 test("Vastbase schema filters preserve ordinary schemas and explicit empty selections", () => {

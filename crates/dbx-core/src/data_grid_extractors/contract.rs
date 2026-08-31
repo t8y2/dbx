@@ -18,6 +18,7 @@ const DEFAULT_JSON_PRETTY: bool = true;
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum DataGridExtractorId {
+    Raw,
     Tsv,
     TsvWithHeaders,
     Csv,
@@ -30,6 +31,7 @@ pub enum DataGridExtractorId {
     SqlInList,
     SqlInserts,
     SqlUpdates,
+    SqlSelect,
     WhereClause,
     Markdown,
     Html,
@@ -110,11 +112,12 @@ impl Default for DataGridSqlExtractorOptions {
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct DataGridJsonExtractorOptions {
     pub pretty: bool,
+    pub camel_case_field_names: bool,
 }
 
 impl Default for DataGridJsonExtractorOptions {
     fn default() -> Self {
-        Self { pretty: DEFAULT_JSON_PRETTY }
+        Self { pretty: DEFAULT_JSON_PRETTY, camel_case_field_names: false }
     }
 }
 
@@ -145,6 +148,8 @@ pub struct DataGridExtractRequest {
     pub extractor: DataGridExtractorId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_type: Option<DatabaseType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identifier_quote: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub table_meta: Option<DataGridTableMeta>,
     #[serde(default)]
@@ -196,6 +201,8 @@ pub struct DataGridExtractResult {
 pub enum DataGridExtractErrorCode {
     UnsupportedVersion,
     EmptySelection,
+    InvalidRawSelection,
+    InvalidSelectSelection,
     InvalidColumnIndex,
     InvalidColumnMapping,
     MissingTableMetadata,

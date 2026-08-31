@@ -1,8 +1,12 @@
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
+import { connectionUsesConnectionRootSchemaMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+
+type VisibleDatabaseConnection = Partial<ConnectionConfig>;
 
 type SystemNameRules = {
   exact?: ReadonlySet<string>;
   prefixes?: readonly string[];
+  contains?: readonly string[];
 };
 
 type SchemaFilterOptions = {
@@ -77,39 +81,48 @@ const POSTGRES_LIKE_SYSTEM_SCHEMA_RULES: SystemNameRules = {
   prefixes: ["pg_temp_", "pg_toast_temp_"],
 };
 
+const ORACLE_SYSTEM_SCHEMA_NAMES = new Set([
+  "anonymous",
+  "appqossys",
+  "audsys",
+  "ctxsys",
+  "dbsnmp",
+  "dvf",
+  "dvsys",
+  "exfsys",
+  "flows_files",
+  "gsmadmin_internal",
+  "mddata",
+  "mdsys",
+  "mgmt_view",
+  "olapsys",
+  "orddata",
+  "ordplugins",
+  "ordsys",
+  "outln",
+  "owbsys",
+  "remote_scheduler_agent",
+  "si_informtn_schema",
+  "sys",
+  "sysback",
+  "sysdg",
+  "syskm",
+  "system",
+  "wmsys",
+  "xdb",
+  "xs$null",
+]);
+
+const OCEANBASE_ORACLE_SYSTEM_SCHEMA_NAMES = new Set([...ORACLE_SYSTEM_SCHEMA_NAMES, "apex_public_user", "dbsfwuser", "dgpdb_int", "dip", "ggsys", "gsmcatuser", "gsmrootuser", "gsmuser", "lbacsys", "ojvmsys", "ops$oracle", "oracle_ocm", "pdbadmin", "sysbackup", "sysman", "sysrac"]);
+
 const SYSTEM_SCHEMA_RULES: Partial<Record<DatabaseType, SystemNameRules>> = {
   oracle: {
-    exact: new Set([
-      "anonymous",
-      "appqossys",
-      "audsys",
-      "ctxsys",
-      "dbsnmp",
-      "dvf",
-      "dvsys",
-      "exfsys",
-      "flows_files",
-      "gsmadmin_internal",
-      "mddata",
-      "mdsys",
-      "mgmt_view",
-      "olapsys",
-      "orddata",
-      "ordplugins",
-      "ordsys",
-      "outln",
-      "owbsys",
-      "remote_scheduler_agent",
-      "si_informtn_schema",
-      "sys",
-      "sysback",
-      "sysdg",
-      "syskm",
-      "system",
-      "wmsys",
-      "xdb",
-      "xs$null",
-    ]),
+    exact: ORACLE_SYSTEM_SCHEMA_NAMES,
+  },
+  "oceanbase-oracle": {
+    exact: OCEANBASE_ORACLE_SYSTEM_SCHEMA_NAMES,
+    prefixes: ["apex_", "flows_"],
+    contains: ["$"],
   },
   dameng: {
     exact: new Set(["_sys_statistics", "ctisys", "dba", "sys", "sys_dba", "sys_phm", "sysauditor", "sysdba", "sysdbo", "syssso", "system"]),
@@ -137,14 +150,57 @@ export function visibleDatabaseFilterIsEnabled(visibleDatabases: string[] | unde
   return Array.isArray(visibleDatabases);
 }
 
+const visibleDatabasePatternRegExpCache = new Map<string, RegExp>();
+
+/** SQL LIKE 语义：`%` 匹配任意字符序列、`_` 匹配单个字符，其余按字面匹配（区分大小写）。 */
+export function visibleDatabasePatternRegExp(pattern: string): RegExp {
+  const trimmed = pattern.trim();
+  const cached = visibleDatabasePatternRegExpCache.get(trimmed);
+  if (cached) return cached;
+  let source = "";
+  for (const ch of trimmed) {
+    if (ch === "%") source += "[\\s\\S]*";
+    else if (ch === "_") source += "[\\s\\S]";
+    else source += ch.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+  }
+  const regExp = new RegExp(`^${source}$`);
+  if (visibleDatabasePatternRegExpCache.size > 256) visibleDatabasePatternRegExpCache.clear();
+  visibleDatabasePatternRegExpCache.set(trimmed, regExp);
+  return regExp;
+}
+
+export function visibleDatabasePatternsAreEnabled(patterns: string[] | undefined): boolean {
+  return Array.isArray(patterns) && patterns.some((pattern) => pattern.trim() !== "");
+}
+
+/** 解析用户输入的模式列表：逗号/分号/换行分隔，去空白、去重。 */
+export function parseVisibleDatabasePatternsInput(value: string): string[] {
+  const seen = new Set<string>();
+  const patterns: string[] = [];
+  for (const part of value.split(/[\n,，;；]+/)) {
+    const pattern = part.trim();
+    if (!pattern || seen.has(pattern)) continue;
+    seen.add(pattern);
+    patterns.push(pattern);
+  }
+  return patterns;
+}
+
+export function databaseNameMatchesVisiblePatterns(name: string, patterns: string[] | undefined): boolean {
+  if (!visibleDatabasePatternsAreEnabled(patterns)) return false;
+  return patterns!.some((pattern) => visibleDatabasePatternRegExp(pattern).test(name));
+}
+
 export function canSaveVisibleDatabaseSelection(selectedNames: string[]): boolean {
   return selectedNames.length > 0;
 }
 
-export function filterVisibleDatabaseNames(databaseNames: string[], visibleDatabases: string[] | undefined): string[] {
-  if (!visibleDatabaseFilterIsEnabled(visibleDatabases)) return databaseNames;
-  const visible = new Set(visibleDatabases);
-  return databaseNames.filter((name) => visible.has(name));
+export function filterVisibleDatabaseNames(databaseNames: string[], visibleDatabases: string[] | undefined, visibleDatabasePatterns?: string[]): string[] {
+  const exactEnabled = visibleDatabaseFilterIsEnabled(visibleDatabases);
+  if (!exactEnabled && !visibleDatabasePatternsAreEnabled(visibleDatabasePatterns)) return databaseNames;
+  // 显式勾选与模式取并集：模式对新建的数据库持续生效（#7164）
+  const visible = exactEnabled ? new Set(visibleDatabases) : undefined;
+  return databaseNames.filter((name) => visible?.has(name) || databaseNameMatchesVisiblePatterns(name, visibleDatabasePatterns));
 }
 
 export function normalizeVisibleDatabaseSelection(selectedNames: string[], databaseNames: string[]): string[] {
@@ -168,48 +224,48 @@ export function isSystemSchemaName(databaseType: DatabaseType | undefined, schem
   const rules = SYSTEM_SCHEMA_RULES[databaseType];
   if (!rules) return false;
   if (rules.exact?.has(normalized)) return true;
-  return rules.prefixes?.some((prefix) => normalized.startsWith(prefix)) ?? false;
+  if (rules.prefixes?.some((prefix) => normalized.startsWith(prefix))) return true;
+  return rules.contains?.some((part) => normalized.includes(part)) ?? false;
 }
 
-export function filterDatabaseNamesForConnection(databaseNames: string[], connection: Pick<ConnectionConfig, "db_type" | "driver_profile" | "visible_databases"> | undefined): string[] {
+export function filterDatabaseNamesForConnection(databaseNames: string[], connection: VisibleDatabaseConnection | undefined): string[] {
   const visibleDatabases = connection?.visible_databases;
-  if (visibleDatabaseFilterIsEnabled(visibleDatabases)) {
-    return filterVisibleDatabaseNames(databaseNames, visibleDatabases);
+  const visibleDatabasePatterns = connection?.visible_database_patterns;
+  if (visibleDatabaseFilterIsEnabled(visibleDatabases) || visibleDatabasePatternsAreEnabled(visibleDatabasePatterns)) {
+    return filterVisibleDatabaseNames(databaseNames, visibleDatabases, visibleDatabasePatterns);
   }
   return filterDatabaseNamesForVisiblePicker(databaseNames, connection);
 }
 
-export function filterDatabaseNamesForVisiblePicker(databaseNames: string[], connection: Pick<ConnectionConfig, "db_type" | "driver_profile"> | undefined): string[] {
+export function filterDatabaseNamesForVisiblePicker(databaseNames: string[], connection: VisibleDatabaseConnection | undefined): string[] {
   if (connection?.db_type === "gbase" && connection.driver_profile === "gbase8s") {
     return databaseNames;
   }
-  return databaseNames.filter((name) => !isSystemDatabaseName(connection?.db_type, name));
+  return databaseNames.filter((name) => !isSystemDatabaseName(effectiveDatabaseTypeForConnection(connection), name));
 }
 
-export function filterSchemaNamesForVisiblePicker(schemaNames: string[], connection: Partial<Pick<ConnectionConfig, "db_type" | "username" | "show_system_schemas">> | undefined, options?: SchemaFilterOptions): string[] {
+export function filterSchemaNamesForVisiblePicker(schemaNames: string[], connection: VisibleDatabaseConnection | undefined, options?: SchemaFilterOptions): string[] {
   if (schemaFilterShowSystemSchemas(connection, options)) return schemaNames;
   const currentSchema = connection?.username?.trim().toLowerCase();
-  return schemaNames.filter((name) => name.toLowerCase() === currentSchema || !isSystemSchemaName(connection?.db_type, name));
+  const databaseType = effectiveDatabaseTypeForConnection(connection);
+  return schemaNames.filter((name) => name.toLowerCase() === currentSchema || !isSystemSchemaName(databaseType, name));
 }
 
-export function connectionUsesVisibleSchemaFilter(connection: Pick<ConnectionConfig, "db_type"> | undefined): boolean {
-  return connection?.db_type === "oracle" || connection?.db_type === "dameng" || connection?.db_type === "oceanbase-oracle";
+export function connectionUsesVisibleSchemaFilter(connection: VisibleDatabaseConnection | undefined): boolean {
+  return connectionUsesConnectionRootSchemaMode(connection);
 }
 
 export function visibleSchemaFilterIsEnabled(visibleSchemas: Record<string, string[]> | undefined, database: string): boolean {
   return Array.isArray(visibleSchemas?.[database]);
 }
 
-export function filterSchemaNamesForConnection(
-  schemaNames: string[],
-  connection: (Pick<ConnectionConfig, "db_type" | "visible_schemas" | "visible_databases" | "show_system_schemas"> & Partial<Pick<ConnectionConfig, "username">>) | undefined,
-  database: string,
-  options?: SchemaFilterOptions,
-): string[] {
+export function filterSchemaNamesForConnection(schemaNames: string[], connection: VisibleDatabaseConnection | undefined, database: string, options?: SchemaFilterOptions): string[] {
   const visibleSchemas = connection?.visible_schemas;
   if (!visibleSchemaFilterIsEnabled(visibleSchemas, database)) {
-    if (connectionUsesVisibleSchemaFilter(connection) && visibleDatabaseFilterIsEnabled(connection?.visible_databases)) {
-      return filterVisibleDatabaseNames(schemaNames, connection?.visible_databases);
+    const visibleDatabases = connection?.visible_databases;
+    const visibleDatabasePatterns = connection?.visible_database_patterns;
+    if (connectionUsesVisibleSchemaFilter(connection) && (visibleDatabaseFilterIsEnabled(visibleDatabases) || visibleDatabasePatternsAreEnabled(visibleDatabasePatterns))) {
+      return filterVisibleDatabaseNames(schemaNames, visibleDatabases, visibleDatabasePatterns);
     }
     return filterSchemaNamesForVisiblePicker(schemaNames, connection, options);
   }

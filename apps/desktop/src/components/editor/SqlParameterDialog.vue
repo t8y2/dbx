@@ -47,6 +47,10 @@ const syntaxLabels: Record<SqlParameterSyntax, string> = {
   sqlserver: "@name",
 };
 
+function syntaxLabel(parameter: SqlParameterDescriptor): string {
+  return parameter.collection ? "<foreach>" : syntaxLabels[parameter.syntax];
+}
+
 const resolvedSql = computed(() => substituteSqlParameters(props.sql, values.value, { databaseType: props.databaseType, enabledSyntaxes: props.enabledSyntaxes }));
 const highlightedSql = computed(() => highlight(resolvedSql.value));
 
@@ -71,6 +75,25 @@ function updateKind(name: string, kind: SqlParameterValueKind) {
   const current = values.value[name] ?? { value: "" };
   const value = kind === "null" ? "NULL" : current.kind === "null" ? "" : current.value;
   values.value[name] = { ...current, kind, value };
+}
+
+function setAllParametersToRaw() {
+  const next = { ...values.value };
+  for (const parameter of props.parameters) {
+    const current = next[parameter.key] ?? { kind: "string", value: "" };
+    next[parameter.key] = { ...current, kind: "raw" };
+  }
+  values.value = next;
+}
+
+function clearParameterValues() {
+  const next = { ...values.value };
+  for (const parameter of props.parameters) {
+    const current = next[parameter.key] ?? { kind: "string", value: "" };
+    next[parameter.key] = { ...current, value: "" };
+  }
+  activeHistoryName.value = "";
+  values.value = next;
 }
 
 function updateValue(name: string, value: string) {
@@ -131,7 +154,15 @@ async function copyResolvedSql() {
       </DialogHeader>
 
       <div class="grid max-h-[calc(86vh-8rem)] gap-4 overflow-y-auto pr-1">
-        <p class="text-sm text-muted-foreground">{{ t("sqlParameters.description") }}</p>
+        <div class="flex flex-wrap items-center gap-2">
+          <p class="min-w-0 flex-1 text-sm text-muted-foreground">{{ t("sqlParameters.description") }}</p>
+          <Button type="button" size="sm" variant="outline" class="shrink-0" data-testid="sql-parameters-clear-values" @click="clearParameterValues">
+            {{ t("sqlParameters.clearValues") }}
+          </Button>
+          <Button type="button" size="sm" variant="outline" class="ml-auto shrink-0" data-testid="sql-parameters-use-raw-all" @click="setAllParametersToRaw">
+            {{ t("sqlParameters.useRawForAll") }}
+          </Button>
+        </div>
 
         <div class="relative z-20 max-h-[302px] overflow-auto rounded-md border bg-background">
           <div class="min-w-[680px]">
@@ -143,7 +174,7 @@ async function copyResolvedSql() {
             </div>
             <div v-for="parameter in parameters" :key="parameter.key" class="grid grid-cols-[minmax(140px,1fr)_104px_132px_minmax(180px,1.5fr)] items-center gap-2 border-b px-3 py-2 text-sm last:border-b-0">
               <div class="min-w-0 truncate font-mono text-xs">{{ parameter.name }}</div>
-              <div class="min-w-0 truncate font-mono text-[11px] text-muted-foreground">{{ syntaxLabels[parameter.syntax] }}</div>
+              <div class="min-w-0 truncate font-mono text-[11px] text-muted-foreground">{{ syntaxLabel(parameter) }}</div>
               <Select :model-value="values[parameter.key]?.kind || 'string'" @update:model-value="(value) => updateKind(parameter.key, value as SqlParameterValueKind)">
                 <SelectTrigger class="h-8 bg-background text-xs">
                   <SelectValue />
@@ -164,7 +195,7 @@ async function copyResolvedSql() {
                       autocomplete="off"
                       data-lpignore="true"
                       data-form-type="other"
-                      :placeholder="t('sqlParameters.valuePlaceholder')"
+                      :placeholder="parameter.collection ? t('sqlParameters.collectionValuePlaceholder') : t('sqlParameters.valuePlaceholder')"
                       @focus="focusParameterInput(parameter.key, $event)"
                       @blur="closeParameterHistory(parameter.key)"
                       @update:model-value="(value) => updateValue(parameter.key, String(value))"

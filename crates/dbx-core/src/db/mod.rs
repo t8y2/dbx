@@ -3,13 +3,21 @@ pub mod clickhouse_driver;
 pub mod cloudberry;
 pub mod cloudflare_d1;
 pub use cloudflare_d1 as cloudflare_d1_driver;
+pub(crate) mod ddl_scan;
 pub mod document_result;
+pub mod dolt;
 pub mod doris;
 pub mod duckdb_sql;
 #[cfg(feature = "duckdb-sidecar")]
 pub mod duckdb_worker_process;
 #[cfg(feature = "duckdb-sidecar")]
 pub mod duckdb_worker_protocol;
+#[cfg(feature = "dynamodb")]
+#[path = "dynamodb_driver.rs"]
+pub mod dynamodb_driver;
+#[cfg(not(feature = "dynamodb"))]
+#[path = "dynamodb_driver_disabled.rs"]
+pub mod dynamodb_driver;
 pub mod easysearch_driver;
 pub mod elasticsearch_driver;
 pub mod elasticsearch_sql;
@@ -18,36 +26,101 @@ pub mod hbase_driver;
 pub mod http_tunnel;
 pub mod influxdb_driver;
 pub mod manticoresearch;
+pub mod meilisearch_driver;
 pub mod mongo_driver;
 pub mod mysql;
 pub mod mysql_compatible;
 pub mod ob_oracle;
+pub mod oceanbase_mysql;
+pub mod opentenbase;
 pub mod postgres;
 pub mod proxy_tunnel;
 pub mod questdb;
 pub mod redis_driver;
 pub mod rqlite_driver;
 pub mod sqlite;
+pub mod sqlite_worker;
 pub mod sqlserver;
 pub mod ssh_host_key;
 pub mod ssh_prompt;
 pub mod ssh_tunnel;
 pub mod starrocks;
+pub mod tdsql_mysql;
+pub mod tidb;
 pub mod transport_layer_tunnel;
 pub mod turso_driver;
 pub mod vector_driver;
+pub mod victoriametrics_driver;
 pub mod wkb;
 
 use reqwest::ClientBuilder;
+use std::fmt;
 use std::future::Future;
 use std::time::Duration;
 
 // Re-export types so that `db::QueryResult` etc. work within dbx-core
+pub use crate::mysql_event_sql::MysqlEventInfo;
 pub use crate::types::*;
 pub use file_validator::validate_file_path;
 
 pub const CONNECTION_TIMEOUT_SECS: u64 = 5;
 pub const TCP_PROBE_TIMEOUT_SECS: u64 = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PoolCheckoutStage {
+    Wait,
+    Create,
+    Recycle,
+    Unknown,
+}
+
+impl PoolCheckoutStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Wait => "wait",
+            Self::Create => "create",
+            Self::Recycle => "recycle",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PoolCheckoutError {
+    Timeout { database: &'static str, stage: PoolCheckoutStage, timeout: Duration },
+    Failed { database: &'static str, stage: PoolCheckoutStage, detail: String },
+    Canceled,
+}
+
+impl PoolCheckoutError {
+    pub fn stage(&self) -> Option<PoolCheckoutStage> {
+        match self {
+            Self::Timeout { stage, .. } | Self::Failed { stage, .. } => Some(*stage),
+            Self::Canceled => None,
+        }
+    }
+
+    pub fn is_pool_saturation(&self) -> bool {
+        matches!(self, Self::Timeout { stage: PoolCheckoutStage::Wait, .. })
+    }
+}
+
+impl fmt::Display for PoolCheckoutError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Timeout { database, stage, timeout } => write!(
+                formatter,
+                "{database} connection pool checkout timed out [stage={}, timeout_ms={}]",
+                stage.as_str(),
+                timeout.as_millis()
+            ),
+            Self::Failed { database, stage, detail } => {
+                write!(formatter, "{database} connection pool checkout failed [stage={}]: {detail}", stage.as_str())
+            }
+            Self::Canceled => formatter.write_str(crate::query::QUERY_CANCELED),
+        }
+    }
+}
 
 pub fn connection_timeout() -> Duration {
     Duration::from_secs(CONNECTION_TIMEOUT_SECS)

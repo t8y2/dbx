@@ -1,16 +1,19 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 
 use serde_json::json;
+use serde_json::Value;
 
 use crate::agent_events::{ToolCall, ToolDefinition, ToolResult};
 use crate::connection::AppState;
 use crate::db::vector_driver;
 use crate::models::connection::DatabaseType;
+use crate::models::connection::{ConnectionConfig, SPANNER_MIN_QUERY_TIMEOUT_SECS};
 use crate::query::QueryExecutionOptions;
 use crate::query_execution_sql::{build_explain_sql, supports_explain_plan, supports_sql_query, ExplainSqlOptions};
 use crate::sql_dialect::{build_table_data_select_sql, TableDataSelectSqlOptions};
 use crate::sql_risk::SqlRisk;
-use crate::types::QueryResult;
+use crate::types::{QueryMessage, QueryResult};
 
 /// Maximum number of tables returned by list_tables tool.
 const LIST_TABLES_LIMIT: usize = 200;
@@ -26,6 +29,106 @@ const BROWSE_COLLECTION_LIMIT: usize = 20;
 
 /// Absolute maximum rows any query tool may request.
 const MAX_ALLOWED_ROWS: usize = 100;
+
+/// Default string-cell character budget for AI and local MCP query results.
+const DEFAULT_QUERY_CELL_CHAR_LIMIT: usize = 200;
+
+/// Explicit string-cell windows stay bounded so one tool call cannot flood the model context.
+const MAX_QUERY_CELL_CHAR_LIMIT: usize = 4_000;
+
+/// Bounds explicit sliding-window scans without changing the underlying database request.
+const MAX_QUERY_CELL_CHAR_OFFSET: usize = 1_000_000;
+
+fn connection_tool_lock(connection_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: OnceLock<StdMutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    let locks = LOCKS.get_or_init(|| StdMutex::new(HashMap::new()));
+    let mut registry = locks.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    registry.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = registry.get(connection_id).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    registry.insert(connection_id.to_string(), Arc::downgrade(&lock));
+    lock
+}
+
+fn tool_uses_database(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "list_tables"
+            | "get_columns"
+            | "execute_query"
+            | "get_sample_data"
+            | "list_collections"
+            | "browse_collection"
+            | "explain_query"
+    )
+}
+
+/// Resolve the query timeout (seconds) for an agent/MCP query.
+///
+/// Precedence: an explicit per-call `requested` value wins; otherwise inherit
+/// the connection's `effective_query_timeout_secs()`; the legacy 30s survives
+/// only when no connection config is available to resolve against. `Some(0)`
+/// from either source means "no limit" (unlimited, and it bypasses the Spanner
+/// floor — see `ConnectionConfig::effective_query_timeout_secs`). A finite
+/// value on a Spanner connection gets the 120s floor.
+pub fn agent_query_timeout_secs(requested: Option<u64>, connection: Option<&ConnectionConfig>) -> u64 {
+    match requested {
+        Some(0) => 0,
+        Some(n) => {
+            if connection.is_some_and(|config| config.db_type == DatabaseType::Spanner) {
+                n.max(SPANNER_MIN_QUERY_TIMEOUT_SECS)
+            } else {
+                n
+            }
+        }
+        None => connection.map_or(QUERY_TIMEOUT_SECS, ConnectionConfig::effective_query_timeout_secs),
+    }
+}
+
+/// Legacy fallback query timeout for agent queries. Matches the current fixed
+/// `Some(30)` behavior and remains the last resort when no connection config
+/// can be resolved (that path fails the query at pool lookup anyway).
+const QUERY_TIMEOUT_SECS: u64 = 30;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueryCellWindow {
+    offset: usize,
+    limit: usize,
+}
+
+impl Default for QueryCellWindow {
+    fn default() -> Self {
+        Self { offset: 0, limit: DEFAULT_QUERY_CELL_CHAR_LIMIT }
+    }
+}
+
+impl QueryCellWindow {
+    pub fn from_options(offset: Option<u64>, limit: Option<u64>) -> Self {
+        Self {
+            offset: bounded_query_cell_option(offset, 0, MAX_QUERY_CELL_CHAR_OFFSET),
+            limit: bounded_query_cell_option(limit, DEFAULT_QUERY_CELL_CHAR_LIMIT, MAX_QUERY_CELL_CHAR_LIMIT).max(1),
+        }
+    }
+
+    pub fn from_arguments(arguments: &serde_json::Value) -> Self {
+        Self::from_options(
+            arguments.get("cell_char_offset").and_then(serde_json::Value::as_u64),
+            arguments.get("cell_char_limit").and_then(serde_json::Value::as_u64),
+        )
+    }
+
+    pub fn explicit_from_arguments(arguments: &serde_json::Value) -> Option<Self> {
+        let offset = arguments.get("cell_char_offset").and_then(serde_json::Value::as_u64);
+        let limit = arguments.get("cell_char_limit").and_then(serde_json::Value::as_u64);
+        (offset.is_some() || limit.is_some()).then(|| Self::from_options(offset, limit))
+    }
+}
+
+fn bounded_query_cell_option(value: Option<u64>, default: usize, maximum: usize) -> usize {
+    value.map(|value| value.min(maximum as u64) as usize).unwrap_or(default)
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AgentSqlPermissions {
@@ -105,19 +208,119 @@ fn sql_risk_allowed(risk: SqlRisk, permissions: AgentSqlPermissions) -> bool {
     }
 }
 
+/// Returns true when an Agent attempted a write or DDL call before DBX has a
+/// user-confirmed SQL binding for the current run. The caller must turn that
+/// attempt into a confirmation proposal instead of sending it to the database.
+pub fn write_requires_confirmation(
+    sql: &str,
+    db_type: DatabaseType,
+    permissions: &AgentSqlPermissions,
+) -> Result<bool, String> {
+    if permissions.allow_writes || permissions.allow_dangerous || permissions.confirmed_write_sql.is_some() {
+        return Ok(false);
+    }
+    let risk = crate::sql_risk::classify_sql_risk_for_database(sql, db_type)?;
+    Ok(matches!(risk, SqlRisk::Write | SqlRisk::Ddl))
+}
+
+/// Snapshot the permissions for one execute_query call and consume an exact
+/// confirmed write/DDL grant before dispatch. Later calls in the same agent run
+/// receive the cleared permissions and must request a new confirmation.
+pub(crate) fn take_sql_permissions_for_execution(
+    sql: &str,
+    db_type: DatabaseType,
+    permissions: &mut AgentSqlPermissions,
+) -> AgentSqlPermissions {
+    let execution_permissions = permissions.clone();
+    let consumes_confirmation = match crate::sql_risk::classify_sql_risk_for_database(sql, db_type) {
+        Ok(risk @ (SqlRisk::Write | SqlRisk::Ddl)) => {
+            sql_risk_allowed(risk, execution_permissions.clone())
+                && sql_matches_confirmed_write(sql, &execution_permissions.confirmed_write_sql)
+                && execution_permissions.confirmed_write_sql.is_some()
+        }
+        _ => false,
+    };
+    if consumes_confirmation {
+        *permissions = AgentSqlPermissions::default();
+    }
+    execution_permissions
+}
+
 /// Returns true for vector database types (Qdrant, Milvus, Weaviate, ChromaDb).
 /// If modifying this, also update VECTOR_DB_TYPES in apps/desktop/src/lib/ai.ts.
 pub fn is_vector_db(db_type: DatabaseType) -> bool {
     matches!(db_type, DatabaseType::Qdrant | DatabaseType::Milvus | DatabaseType::Weaviate | DatabaseType::ChromaDb)
 }
 
+/// `get_current_time` tool definition — DB-independent utility that returns
+/// the current UTC time plus a caller-provided local offset.
+fn get_current_time_tool() -> ToolDefinition {
+    ToolDefinition {
+        name: "get_current_time",
+        description: "Get the current date and time with timezone information. \
+                      Pass the client UTC offset from the system prompt; when \
+                      omitted, local time safely falls back to UTC. Use this to resolve \
+                      relative time expressions like \"last 7 days\", \
+                      \"yesterday\", \"this month\" into concrete dates \
+                      for constructing SQL queries.",
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "utc_offset_minutes": {
+                    "type": "integer",
+                    "minimum": -1439,
+                    "maximum": 1439,
+                    "description": "Client UTC offset in minutes from the system prompt"
+                },
+                "timezone": {
+                    "type": "string",
+                    "description": "Client IANA timezone name from the system prompt"
+                }
+            },
+            "required": []
+        }),
+        read_only: true,
+        parallel_ok: true,
+    }
+}
+
+/// Execute `get_current_time` — returns a JSON payload with utc, local,
+/// utc_offset_minutes, timezone, and readable fields.
+fn execute_get_current_time(tool_call: &ToolCall) -> Result<String, String> {
+    let utc = chrono::Utc::now();
+    let offset_minutes = tool_call.arguments.get("utc_offset_minutes").and_then(serde_json::Value::as_i64).unwrap_or(0);
+    let offset_minutes = i32::try_from(offset_minutes).map_err(|_| "utc_offset_minutes is out of range".to_string())?;
+    let offset_seconds =
+        offset_minutes.checked_mul(60).ok_or_else(|| "utc_offset_minutes is out of range".to_string())?;
+    let offset = chrono::FixedOffset::east_opt(offset_seconds)
+        .ok_or_else(|| "utc_offset_minutes must be between -1439 and 1439".to_string())?;
+    let local = utc.with_timezone(&offset);
+    let timezone = tool_call
+        .arguments
+        .get("timezone")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| if offset_minutes == 0 { "UTC".to_string() } else { format!("UTC{}", local.format("%:z")) });
+    let readable = format!("{} ({timezone}, UTC{})", local.format("%Y-%m-%d %H:%M:%S"), local.format("%:z"));
+    Ok(serde_json::json!({
+        "utc": utc.to_rfc3339(),
+        "local": local.to_rfc3339(),
+        "utc_offset_minutes": offset_minutes,
+        "timezone": timezone,
+        "readable": readable,
+    })
+    .to_string())
+}
+
 /// Get read-only tool definitions for the given database type.
 /// Returns vector tools for vector DBs, SQL tools otherwise.
 pub fn read_only_tools(db_type: DatabaseType) -> Vec<ToolDefinition> {
     if is_vector_db(db_type) {
-        vec![list_collections_tool()]
+        vec![list_collections_tool(), get_current_time_tool()]
     } else {
-        vec![list_tables_tool(), get_columns_tool()]
+        vec![list_tables_tool(), get_columns_tool(), get_current_time_tool()]
     }
 }
 
@@ -126,10 +329,12 @@ pub fn read_only_tools(db_type: DatabaseType) -> Vec<ToolDefinition> {
 /// explain_query for database types that support them.
 pub fn all_tools(db_type: DatabaseType, sql_permissions: AgentSqlPermissions) -> Vec<ToolDefinition> {
     if is_vector_db(db_type) {
-        return vec![list_collections_tool(), browse_collection_tool()];
+        return vec![list_collections_tool(), browse_collection_tool(), get_current_time_tool()];
     }
-    let mut tools = vec![list_tables_tool(), get_columns_tool()];
-    if supports_sql_query(db_type) {
+    let mut tools = vec![list_tables_tool(), get_columns_tool(), get_current_time_tool()];
+    if db_type == DatabaseType::MongoDb {
+        tools.push(mongo_execute_query_tool(sql_permissions));
+    } else if supports_sql_query(db_type) {
         tools.push(execute_query_tool(sql_permissions));
         tools.push(get_sample_data_tool());
     }
@@ -137,6 +342,29 @@ pub fn all_tools(db_type: DatabaseType, sql_permissions: AgentSqlPermissions) ->
         tools.push(explain_query_tool());
     }
     tools
+}
+
+fn mongo_execute_query_tool(_sql_permissions: AgentSqlPermissions) -> ToolDefinition {
+    ToolDefinition {
+        name: "execute_query",
+        description: "Execute a read-only MongoDB shell command and return results (max 50 rows). Use commands such as db.collection.find({}), db.collection.findOne({}), db.collection.aggregate([]), or db.collection.countDocuments({}). Write commands are not available to the MongoDB Agent.",
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "sql": {
+                    "type": "string",
+                    "description": "The MongoDB shell-style command to execute"
+                },
+                "limit": {
+                    "type": "number",
+                    "description": "Max rows to return (default 50, max 100)"
+                }
+            },
+            "required": ["sql"]
+        }),
+        read_only: true,
+        parallel_ok: false,
+    }
 }
 
 /// list_tables tool definition.
@@ -194,7 +422,7 @@ fn execute_query_tool(sql_permissions: AgentSqlPermissions) -> ToolDefinition {
     } else if sql_permissions.allow_writes {
         "Execute SQL after the user explicitly confirmed this operation. Read queries and non-DDL writes are allowed for this run."
     } else {
-        "Execute a read-only SQL query and return results (max 50 rows). Only SELECT, WITH, SHOW, DESCRIBE, EXPLAIN statements are allowed. Write operations (INSERT/UPDATE/DELETE/DDL) are blocked."
+        "Execute a read-only SQL query and return results (max 50 rows). This run cannot execute writes or DDL because no specific SQL has been confirmed yet; this does not mean the database itself is read-only. When the user requests a write, first propose the exact SQL in one ```sql code block and ask for confirmation. After confirmation, DBX starts a new run that can execute only that exact SQL. Only SELECT, WITH, SHOW, DESCRIBE, EXPLAIN statements may be executed in this run."
     };
     ToolDefinition {
         name: "execute_query",
@@ -209,6 +437,18 @@ fn execute_query_tool(sql_permissions: AgentSqlPermissions) -> ToolDefinition {
                 "limit": {
                     "type": "number",
                     "description": "Max rows to return (default 50, max 100)"
+                },
+                "cell_char_offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1000000,
+                    "description": "Start character offset for every string cell (default 0). Use the next offset reported by a truncated result to slide through long values. Narrow the query to the target row and column before expanding."
+                },
+                "cell_char_limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 4000,
+                    "description": "Maximum characters returned per string cell (default 200, max 4000). Increase only for an explicit long-value expansion."
                 },
                 "client_session_id": {
                     "type": "string",
@@ -322,6 +562,15 @@ pub async fn execute_tool(
     db_type: &DatabaseType,
     sql_permissions: AgentSqlPermissions,
 ) -> ToolResult {
+    // Agent loops for different conversations may share a physical connection.
+    // Lock only the database tool future; model generation and non-DB tools stay
+    // concurrent. Dropping a cancelled future releases either the waiter or the
+    // acquired guard automatically.
+    let _connection_guard = if tool_uses_database(&tool_call.name) {
+        Some(connection_tool_lock(connection_id).lock_owned().await)
+    } else {
+        None
+    };
     let result = match tool_call.name.as_str() {
         "list_tables" => execute_list_tables(tool_call, state, connection_id, database, default_schema, db_type).await,
         "get_columns" => execute_get_columns(tool_call, state, connection_id, database, default_schema, db_type).await,
@@ -358,6 +607,7 @@ pub async fn execute_tool(
                 }
             }
         }
+        "get_current_time" => execute_get_current_time(tool_call),
         _ => Err(format!("Unknown tool: {}", tool_call.name)),
     };
 
@@ -556,16 +806,35 @@ async fn execute_execute_query(
         .and_then(|v| v.as_u64())
         .map(|l| (l as usize).min(MAX_ALLOWED_ROWS))
         .unwrap_or(EXECUTE_QUERY_LIMIT);
+    let cell_window = QueryCellWindow::from_arguments(&tool_call.arguments);
+
+    if *db_type == DatabaseType::MongoDb {
+        return execute_mongo_query(state, connection_id, database, sql, limit.max(1), cell_window).await;
+    }
 
     // Classify SQL risk using the concrete database dialect.
     let risk = crate::sql_risk::classify_sql_risk_for_database(sql, *db_type)?;
     let connection_config = state.configs.read().await.get(connection_id).cloned();
-    if let Some(config) = connection_config {
-        if risk != SqlRisk::ReadOnly && crate::production_safety::targets_production_database(&config, database, sql) {
-            return Err("Blocked: AI agents cannot execute writes or DDL on a production database. Return the SQL for the user to review and execute manually in DBX.".to_string());
-        }
+    let targets_production = connection_config.as_ref().is_some_and(|config| {
+        risk != SqlRisk::ReadOnly && crate::production_safety::targets_production_database(config, database, sql)
+    });
+    let risk_allowed = sql_risk_allowed(risk, sql_permissions.clone());
+    let confirmed_sql_matches =
+        risk == SqlRisk::ReadOnly || sql_matches_confirmed_write(sql, &sql_permissions.confirmed_write_sql);
+
+    // Keep permission diagnostics useful without logging SQL, connection details, or result data.
+    log::debug!(
+        "[agent:execute_query:permission] risk={risk:?} targets_production={targets_production} allow_writes={} allow_dangerous={} has_confirmed_sql={} confirmed_sql_matches={confirmed_sql_matches} will_execute={}",
+        sql_permissions.allow_writes,
+        sql_permissions.allow_dangerous,
+        sql_permissions.confirmed_write_sql.is_some(),
+        !targets_production && risk_allowed && confirmed_sql_matches,
+    );
+
+    if targets_production {
+        return Err("Blocked: AI agents cannot execute writes or DDL on a production database. Return the SQL for the user to review and execute manually in DBX.".to_string());
     }
-    if !sql_risk_allowed(risk, sql_permissions.clone()) {
+    if !risk_allowed {
         if risk == SqlRisk::Transaction {
             return Err("Blocked: transaction control statements are not available to the AI agent.".to_string());
         }
@@ -577,7 +846,7 @@ async fn execute_execute_query(
 
     // When the user confirmed a specific write SQL, the agent must
     // execute only that SQL — not an arbitrary different statement.
-    if risk != SqlRisk::ReadOnly && !sql_matches_confirmed_write(sql, &sql_permissions.confirmed_write_sql) {
+    if !confirmed_sql_matches {
         let confirmed = sql_permissions.confirmed_write_sql.as_deref().unwrap_or("");
         return Err(format!(
             "Blocked: the executed SQL does not match the user-confirmed SQL.\n\
@@ -593,10 +862,16 @@ async fn execute_execute_query(
     let client_session_id =
         tool_call.arguments.get("client_session_id").and_then(|v| v.as_str()).map(str::trim).filter(|v| !v.is_empty());
 
-    // Execute query using existing infrastructure
+    // Execute query using existing infrastructure. Timeout resolves as
+    // per-call `timeout_secs` > connection effective timeout (see
+    // `agent_query_timeout_secs`); MCP injects the policy value as
+    // `timeout_secs` in the arguments.
     let options = QueryExecutionOptions {
         max_rows: Some(limit),
-        timeout_secs: Some(30),
+        timeout_secs: Some(agent_query_timeout_secs(
+            tool_call.arguments.get("timeout_secs").and_then(Value::as_u64),
+            connection_config.as_ref(),
+        )),
         client_session_id: client_session_id.map(str::to_string),
         ..Default::default()
     };
@@ -611,15 +886,46 @@ async fn execute_execute_query(
     )
     .await?;
 
-    format_query_result_as_text(&result, limit)
+    format_query_result_as_text(&result, limit, cell_window)
+}
+
+async fn execute_mongo_query(
+    state: &Arc<AppState>,
+    connection_id: &str,
+    database: &str,
+    source: &str,
+    limit: usize,
+    cell_window: QueryCellWindow,
+) -> Result<String, String> {
+    let command = crate::mongo_shell::parse(source).map_err(|error| {
+        format!(
+            "{error} Use MongoDB shell-style commands such as db.collection.find({{}}), db.collection.findOne({{}}), or db.collection.aggregate([])."
+        )
+    })?;
+    if command.is_mutating() {
+        return Err(
+            "Blocked: MongoDB Agent queries are read-only. Return the command for the user to review and execute manually in DBX."
+                .to_string(),
+        );
+    }
+
+    let result = crate::mongo_ops::execute_mongo_command_core(state, connection_id, database, &command, limit).await?;
+    format_query_result_as_text(&result, limit, cell_window)
 }
 
 /// Format a QueryResult as a Markdown table for LLM consumption.
-fn format_query_result_as_text(result: &QueryResult, limit: usize) -> Result<String, String> {
+pub fn format_query_result_as_text(
+    result: &QueryResult,
+    limit: usize,
+    cell_window: QueryCellWindow,
+) -> Result<String, String> {
     // A result without columns is a command result, not an empty result set.
     // This is how drivers represent DML that does not use RETURNING.
     if result.columns.is_empty() {
-        return Ok(format!("Query executed. {} row(s) affected.", result.affected_rows));
+        return Ok(append_server_messages(
+            format!("Query executed. {} row(s) affected.", result.affected_rows),
+            &result.messages,
+        ));
     }
 
     let mut lines = Vec::new();
@@ -635,16 +941,7 @@ fn format_query_result_as_text(result: &QueryResult, limit: usize) -> Result<Str
             .iter()
             .map(|v| match v {
                 serde_json::Value::Null => "NULL".to_string(),
-                serde_json::Value::String(s) => {
-                    // Truncate long strings to keep result compact
-                    if s.len() > 200 {
-                        let truncated: String =
-                            s.char_indices().take_while(|(i, _)| *i < 200).map(|(_, c)| c).collect();
-                        format!("{}...", truncated)
-                    } else {
-                        s.clone()
-                    }
-                }
+                serde_json::Value::String(value) => format_query_string_cell(value, cell_window),
                 other => other.to_string(),
             })
             .collect();
@@ -659,7 +956,38 @@ fn format_query_result_as_text(result: &QueryResult, limit: usize) -> Result<Str
     // Stats line
     lines.push(format!("({} rows, {}ms)", result.rows.len(), result.execution_time_ms));
 
-    Ok(lines.join("\n"))
+    Ok(append_server_messages(lines.join("\n"), &result.messages))
+}
+
+fn format_query_string_cell(value: &str, window: QueryCellWindow) -> String {
+    let mut characters = value.chars().skip(window.offset);
+    let mut returned = 0usize;
+    let content = characters.by_ref().take(window.limit).inspect(|_| returned += 1).collect::<String>();
+    let has_more = characters.next().is_some();
+    if window.offset == 0 && !has_more {
+        return content;
+    }
+
+    let end = window.offset.saturating_add(returned);
+    let prefix = if window.offset > 0 { "..." } else { "" };
+    if has_more {
+        format!("{prefix}{content}... [chars {}..{end}; next cell_char_offset={end}]", window.offset)
+    } else {
+        format!("{prefix}{content} [chars {}..{end}; end of value]", window.offset)
+    }
+}
+
+/// Append server messages in the same style as the MCP `format_query_result`
+/// renderer: a `Server messages:` section with `- SEVERITY: message` lines.
+fn append_server_messages(mut output: String, messages: &[QueryMessage]) -> String {
+    if messages.is_empty() {
+        return output;
+    }
+    output.push_str("\n\nServer messages:");
+    for message in messages {
+        output.push_str(&format!("\n- {}", message.format_line()));
+    }
+    output
 }
 
 /// Get sample data from a table via the get_sample_data tool.
@@ -792,8 +1120,18 @@ async fn execute_explain_query(
         }
     };
 
-    // Execute the EXPLAIN query
-    let options = QueryExecutionOptions { max_rows: Some(100), timeout_secs: Some(30), ..Default::default() };
+    // Execute the EXPLAIN query. Timeout resolves like the execute path
+    // (per-call `timeout_secs` > connection effective timeout) so the global
+    // MCP timeout override covers EXPLAIN too.
+    let connection_config = state.configs.read().await.get(connection_id).cloned();
+    let options = QueryExecutionOptions {
+        max_rows: Some(100),
+        timeout_secs: Some(agent_query_timeout_secs(
+            tool_call.arguments.get("timeout_secs").and_then(Value::as_u64),
+            connection_config.as_ref(),
+        )),
+        ..Default::default()
+    };
     let result = match crate::query::execute_sql_statement_with_options(
         state,
         connection_id,
@@ -811,7 +1149,7 @@ async fn execute_explain_query(
 
     // Serialize the raw QueryResult for the frontend ExplainPlanViewer
     let explain_data = serde_json::to_value(&result).ok();
-    let text = match format_query_result_as_text(&result, 100) {
+    let text = match format_query_result_as_text(&result, 100, QueryCellWindow::default()) {
         Ok(t) => t,
         Err(e) => return (Err(e), None),
     };
@@ -904,14 +1242,19 @@ async fn execute_browse_collection(
         collection.to_string()
     };
 
-    let query = build_browse_query(db_type, &collection_id, database, limit)?;
+    let tenant = if *db_type == DatabaseType::ChromaDb {
+        state.configs.read().await.get(connection_id).map(|config| config.username.clone()).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let query = build_browse_query(db_type, &collection_id, database, &tenant, limit)?;
 
     let options = QueryExecutionOptions { max_rows: Some(limit), timeout_secs: Some(30), ..Default::default() };
     let result =
         crate::query::execute_sql_statement_with_options(state, connection_id, database, &query, None, None, options)
             .await?;
 
-    format_query_result_as_text(&result, limit)
+    format_query_result_as_text(&result, limit, QueryCellWindow::default())
 }
 
 /// Build a browse query for the given vector database type.
@@ -920,6 +1263,7 @@ fn build_browse_query(
     db_type: &DatabaseType,
     collection: &str,
     database: &str,
+    tenant: &str,
     limit: usize,
 ) -> Result<String, String> {
     let collection = collection.trim();
@@ -946,11 +1290,9 @@ fn build_browse_query(
         DatabaseType::Weaviate => {
             Ok(format!("GET /v1/objects?class={}&limit={}", vector_driver::query_value(collection), limit))
         }
-        // TODO: ChromaDB Cloud 支持自定义租户和数据库，当前只实现了本地部署
-        // （固定 default_tenant / default_database），后续支持云服务时需改为可配置。
         DatabaseType::ChromaDb => Ok(format!(
-            "POST /api/v2/tenants/default_tenant/databases/default_database/collections/{}/get\n{}",
-            collection,
+            "POST {}/get\n{}",
+            vector_driver::chroma_collection_path(tenant, database, collection, None),
             serde_json::json!({ "limit": limit, "include": ["documents", "metadatas"] })
         )),
         _ => Err(format!("Unsupported database type: {:?}", db_type)),
@@ -982,6 +1324,68 @@ async fn resolve_chroma_collection_uuid(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_query_timeout_resolves_by_precedence() {
+        // Explicit per-call value wins.
+        assert_eq!(agent_query_timeout_secs(Some(45), Some(&postgres_connection(60))), 45);
+        // 0 = unlimited bypasses the Spanner floor.
+        assert_eq!(agent_query_timeout_secs(Some(0), Some(&spanner_connection(60))), 0);
+        // Finite value on Spanner gets the 120s floor.
+        assert_eq!(agent_query_timeout_secs(Some(60), Some(&spanner_connection(60))), 120);
+        // No request + connection => inherit the connection's effective timeout.
+        assert_eq!(agent_query_timeout_secs(None, Some(&postgres_connection(60))), 60);
+        assert_eq!(agent_query_timeout_secs(None, Some(&postgres_connection(120))), 120);
+        assert_eq!(agent_query_timeout_secs(None, Some(&postgres_connection(0))), 0);
+        // No request, no connection => legacy 30s fallback.
+        assert_eq!(agent_query_timeout_secs(None, None), 30);
+    }
+
+    fn postgres_connection(query_timeout_secs: u64) -> ConnectionConfig {
+        let mut config = test_connection();
+        config.db_type = DatabaseType::Postgres;
+        config.query_timeout_secs = query_timeout_secs;
+        config
+    }
+
+    fn spanner_connection(query_timeout_secs: u64) -> ConnectionConfig {
+        let mut config = test_connection();
+        config.db_type = DatabaseType::Spanner;
+        config.query_timeout_secs = query_timeout_secs;
+        config
+    }
+
+    fn test_connection() -> ConnectionConfig {
+        serde_json::from_value(json!({
+            "id": "agent-timeout-test",
+            "name": "timeout-test",
+            "db_type": "postgres",
+            "host": "127.0.0.1",
+            "port": 5432,
+            "username": "",
+            "password": "",
+            "ssl": false,
+        }))
+        .expect("test connection config")
+    }
+
+    #[tokio::test]
+    async fn database_tool_locks_are_connection_scoped_and_cancel_safe() {
+        let first = connection_tool_lock("agent-tool-lock-a").lock_owned().await;
+        let same_connection = connection_tool_lock("agent-tool-lock-a");
+        let other_connection = connection_tool_lock("agent-tool-lock-b");
+
+        assert!(same_connection.try_lock().is_err(), "same connection must serialize tool calls");
+        assert!(other_connection.try_lock().is_ok(), "different connections must remain concurrent");
+
+        let waiter = tokio::spawn(async move { same_connection.lock_owned().await });
+        tokio::task::yield_now().await;
+        waiter.abort();
+        let _ = waiter.await;
+        drop(first);
+
+        assert!(connection_tool_lock("agent-tool-lock-a").try_lock().is_ok());
+    }
     #[cfg(unix)]
     use crate::connection::PoolKind;
     #[cfg(unix)]
@@ -1034,12 +1438,13 @@ for line in sys.stdin:
     }
 
     #[cfg(unix)]
-    fn dameng_test_connection() -> ConnectionConfig {
+    fn agent_test_connection(id: &str, name: &str, db_type: DatabaseType, database: &str) -> ConnectionConfig {
         ConnectionConfig {
-            id: "dameng-1".to_string(),
-            name: "Dameng".to_string(),
+            docs_notes_path: None,
+            id: id.to_string(),
+            name: name.to_string(),
             note: String::new(),
-            db_type: DatabaseType::Dameng,
+            db_type,
             driver_profile: None,
             driver_label: None,
             url_params: None,
@@ -1048,8 +1453,10 @@ for line in sys.stdin:
             port: 5236,
             username: "APP_USER".to_string(),
             password: String::new(),
-            database: Some("APPDB".to_string()),
+            database: Some(database.to_string()),
+            default_schema: None,
             visible_databases: None,
+            visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
             attached_databases: Vec::new(),
@@ -1077,6 +1484,7 @@ for line in sys.stdin:
             redis_key_separator: default_redis_key_separator(),
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
+            redis_key_templates: Vec::new(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),
@@ -1084,6 +1492,7 @@ for line in sys.stdin:
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            save_password: true,
             read_only: false,
             is_production: false,
             production_databases: vec![],
@@ -1096,7 +1505,9 @@ for line in sys.stdin:
         let tools = read_only_tools(DatabaseType::Qdrant);
         let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
 
-        assert_eq!(names, vec!["list_collections"]);
+        assert!(names.contains(&"list_collections"));
+        assert!(!names.contains(&"browse_collection"));
+        assert!(names.contains(&"get_current_time"));
     }
 
     #[test]
@@ -1104,7 +1515,98 @@ for line in sys.stdin:
         let tools = all_tools(DatabaseType::Qdrant, AgentSqlPermissions::default());
         let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
 
-        assert_eq!(names, vec!["list_collections", "browse_collection"]);
+        assert!(names.contains(&"list_collections"));
+        assert!(names.contains(&"browse_collection"));
+        assert!(names.contains(&"get_current_time"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mongodb_agent_registers_shell_query_tool_and_routes_find_one_as_read_only() {
+        let tools = all_tools(DatabaseType::MongoDb, AgentSqlPermissions::default());
+        let names = tools.iter().map(|tool| tool.name).collect::<Vec<_>>();
+        assert!(names.contains(&"execute_query"));
+        assert!(!names.contains(&"get_sample_data"));
+        assert!(!names.contains(&"explain_query"));
+        let execute_query = tools.iter().find(|tool| tool.name == "execute_query").unwrap();
+        assert!(execute_query.description.contains("MongoDB shell command"));
+        assert!(!execute_query.description.contains("SQL query"));
+        assert!(execute_query.description.contains("read-only"));
+
+        let confirmed_tools = all_tools(
+            DatabaseType::MongoDb,
+            AgentSqlPermissions {
+                allow_writes: true,
+                allow_dangerous: true,
+                confirmed_write_sql: Some("db.items.insertOne({name: 'test'})".to_string()),
+            },
+        );
+        let confirmed_execute_query = confirmed_tools.iter().find(|tool| tool.name == "execute_query").unwrap();
+        assert!(confirmed_execute_query.description.contains("read-only"));
+        assert!(!confirmed_execute_query.description.contains("confirmed write"));
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
+        let state = Arc::new(AppState::new(storage));
+        let call = ToolCall {
+            id: "mongo-find-one".to_string(),
+            name: "execute_query".to_string(),
+            arguments: json!({ "sql": "db.BenchmarkIndex_approved.findOne({})" }),
+            provider_payload: None,
+        };
+
+        let result = execute_tool(
+            &call,
+            &state,
+            "mongo-1",
+            "benchmark",
+            None,
+            &DatabaseType::MongoDb,
+            AgentSqlPermissions::default(),
+        )
+        .await;
+
+        assert!(result.is_error);
+        assert!(!result.content.contains("Blocked:"), "{}", result.content);
+        assert!(result.content.contains("Connection") || result.content.contains("connection"), "{}", result.content);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mongodb_agent_keeps_all_writes_blocked_after_sql_confirmation() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
+        let state = Arc::new(AppState::new(storage));
+        let permissions = AgentSqlPermissions {
+            allow_writes: true,
+            allow_dangerous: true,
+            confirmed_write_sql: Some("SQL confirmation does not grant MongoDB writes".to_string()),
+        };
+
+        for (index, source) in [
+            "db.items.insertOne({name: 'test'})",
+            "db.items.updateMany({tenant: 7}, {$set: {active: false}})",
+            "db.items.deleteMany({tenant: 7})",
+            "db.items.createIndex({tenant: 1})",
+            "db.runCommand({compact: 'items'})",
+            r#"db.items.aggregate([{"$out":"items_backup"}])"#,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let call = ToolCall {
+                id: format!("mongo-write-{index}"),
+                name: "execute_query".to_string(),
+                arguments: json!({ "sql": source }),
+                provider_payload: None,
+            };
+            let result =
+                execute_tool(&call, &state, "mongo-1", "benchmark", None, &DatabaseType::MongoDb, permissions.clone())
+                    .await;
+
+            assert!(result.is_error, "{source}: {}", result.content);
+            assert!(result.content.contains("read-only"), "{source}: {}", result.content);
+        }
     }
 
     #[test]
@@ -1134,6 +1636,52 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn unconfirmed_sql_tool_describes_the_confirmation_flow() {
+        let execute_query = all_tools(DatabaseType::Postgres, AgentSqlPermissions::default())
+            .into_iter()
+            .find(|tool| tool.name == "execute_query")
+            .expect("PostgreSQL Agent mode should expose execute_query");
+
+        assert!(execute_query.description.contains("no specific SQL has been confirmed yet"));
+        assert!(execute_query.description.contains("does not mean the database itself is read-only"));
+        assert!(execute_query.description.contains("propose the exact SQL in one ```sql code block"));
+        assert!(!sql_risk_allowed(SqlRisk::Write, AgentSqlPermissions::default()));
+        assert!(!sql_risk_allowed(SqlRisk::Ddl, AgentSqlPermissions::default()));
+    }
+
+    #[test]
+    fn write_confirmation_is_required_only_for_unconfirmed_write_or_ddl() {
+        let permissions = AgentSqlPermissions::default();
+        assert!(write_requires_confirmation("INSERT INTO users (id) VALUES (1)", DatabaseType::Postgres, &permissions)
+            .unwrap());
+        assert!(write_requires_confirmation("CREATE TABLE users (id INT)", DatabaseType::Mysql, &permissions).unwrap());
+        assert!(!write_requires_confirmation("SELECT * FROM users", DatabaseType::Postgres, &permissions).unwrap());
+
+        let confirmed = confirmed_write_sql_permissions(false, true, Some("CREATE TABLE users (id INT)".to_string()));
+        assert!(
+            !write_requires_confirmation("CREATE TABLE users (id INT)", DatabaseType::Postgres, &confirmed).unwrap()
+        );
+    }
+
+    #[test]
+    fn confirmed_postgres_article_tags_insert_is_write_enabled_for_nonproduction_agent() {
+        let sql = "INSERT INTO \"public\".\"article_tags\" (article_id, tag_id)\nVALUES (1, 4), (2, 4), (3, 8), (4, 5), (4, 6);";
+        let permissions = confirmed_write_sql_permissions(false, true, Some(sql.to_string()));
+
+        assert!(permissions.allow_writes);
+        assert!(permissions.allow_dangerous);
+        assert!(sql_risk_allowed(SqlRisk::Write, permissions.clone()));
+        assert!(sql_matches_confirmed_write(sql, &permissions.confirmed_write_sql));
+
+        let execute_query = all_tools(DatabaseType::Postgres, permissions)
+            .into_iter()
+            .find(|tool| tool.name == "execute_query")
+            .expect("PostgreSQL Agent mode should expose execute_query");
+        assert!(execute_query.description.contains("writes"));
+        assert!(!execute_query.description.contains("Write operations (INSERT/UPDATE/DELETE/DDL) are blocked"));
+    }
+
+    #[test]
     fn oracle_agent_tools_include_explain_query() {
         let tools = all_tools(DatabaseType::Oracle, AgentSqlPermissions::default());
         let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
@@ -1155,6 +1703,7 @@ for line in sys.stdin:
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         }
     }
 
@@ -1162,7 +1711,10 @@ for line in sys.stdin:
     fn query_result_formatter_reports_dml_affected_rows() {
         let result = query_result(vec![], vec![], 2);
 
-        assert_eq!(format_query_result_as_text(&result, 50).unwrap(), "Query executed. 2 row(s) affected.");
+        assert_eq!(
+            format_query_result_as_text(&result, 50, QueryCellWindow::default()).unwrap(),
+            "Query executed. 2 row(s) affected."
+        );
     }
 
     #[test]
@@ -1170,8 +1722,14 @@ for line in sys.stdin:
         let dml = query_result(vec![], vec![], 0);
         let returning = query_result(vec!["id", "name"], vec![], 0);
 
-        assert_eq!(format_query_result_as_text(&dml, 50).unwrap(), "Query executed. 0 row(s) affected.");
-        assert_eq!(format_query_result_as_text(&returning, 50).unwrap(), "| id | name |\n|---|---|\n(0 rows, 1ms)");
+        assert_eq!(
+            format_query_result_as_text(&dml, 50, QueryCellWindow::default()).unwrap(),
+            "Query executed. 0 row(s) affected."
+        );
+        assert_eq!(
+            format_query_result_as_text(&returning, 50, QueryCellWindow::default()).unwrap(),
+            "| id | name |\n|---|---|\n(0 rows, 1ms)"
+        );
     }
 
     #[test]
@@ -1180,8 +1738,94 @@ for line in sys.stdin:
             query_result(vec!["id", "name"], vec![vec![serde_json::json!(5), serde_json::json!("returning")]], 0);
 
         assert_eq!(
-            format_query_result_as_text(&result, 50).unwrap(),
+            format_query_result_as_text(&result, 50, QueryCellWindow::default()).unwrap(),
             "| id | name |\n|---|---|\n| 5 | returning |\n(1 rows, 1ms)"
+        );
+    }
+
+    #[test]
+    fn query_result_formatter_marks_the_default_character_window() {
+        let value = format!("{}DBX_ISSUE_5620_SENTINEL", "A".repeat(200));
+        let result = query_result(vec!["message"], vec![vec![serde_json::json!(value)]], 0);
+
+        let output = format_query_result_as_text(&result, 50, QueryCellWindow::from_options(None, None)).unwrap();
+
+        assert!(output.contains(&format!("{}... [chars 0..200; next cell_char_offset=200]", "A".repeat(200))));
+        assert!(!output.contains("DBX_ISSUE_5620_SENTINEL"));
+    }
+
+    #[test]
+    fn query_result_formatter_supports_expanded_and_sliding_character_windows() {
+        let value = format!("{}DBX_ISSUE_5620_SENTINEL{}", "A".repeat(200), "Z".repeat(20));
+        let result = query_result(vec!["message"], vec![vec![serde_json::json!(value)]], 0);
+
+        let expanded =
+            format_query_result_as_text(&result, 50, QueryCellWindow::from_options(None, Some(400))).unwrap();
+        assert!(expanded.contains("DBX_ISSUE_5620_SENTINEL"));
+        assert!(!expanded.contains("next cell_char_offset"));
+
+        let sliding =
+            format_query_result_as_text(&result, 50, QueryCellWindow::from_options(Some(200), Some(23))).unwrap();
+        assert!(sliding.contains("...DBX_ISSUE_5620_SENTINEL... [chars 200..223; next cell_char_offset=223]"));
+    }
+
+    #[test]
+    fn query_result_formatter_counts_unicode_characters_in_windows() {
+        let result = query_result(vec!["message"], vec![vec![serde_json::json!("甲乙丙丁戊己庚辛")]], 0);
+
+        let output = format_query_result_as_text(&result, 50, QueryCellWindow::from_options(Some(2), Some(3))).unwrap();
+
+        assert!(output.contains("...丙丁戊... [chars 2..5; next cell_char_offset=5]"));
+    }
+
+    #[test]
+    fn query_cell_window_clamps_explicit_bounds() {
+        assert_eq!(QueryCellWindow::from_options(None, None), QueryCellWindow::default());
+        assert_eq!(
+            QueryCellWindow::from_options(Some(u64::MAX), Some(0)),
+            QueryCellWindow { offset: 1_000_000, limit: 1 }
+        );
+        assert_eq!(
+            QueryCellWindow::from_options(Some(1_000_001), Some(u64::MAX)),
+            QueryCellWindow { offset: 1_000_000, limit: 4_000 }
+        );
+    }
+
+    #[test]
+    fn query_result_formatter_appends_server_messages() {
+        let mut dml = query_result(vec![], vec![], 2);
+        dml.messages = vec![
+            QueryMessage {
+                severity: "notice".to_string(),
+                message: "hello world".to_string(),
+                code: Some("00000".to_string()),
+                detail: None,
+                hint: Some("use a table".to_string()),
+            },
+            QueryMessage {
+                severity: "WARNING".to_string(),
+                message: "careful".to_string(),
+                code: None,
+                detail: None,
+                hint: None,
+            },
+        ];
+        assert_eq!(
+            format_query_result_as_text(&dml, 50, QueryCellWindow::default()).unwrap(),
+            "Query executed. 2 row(s) affected.\n\nServer messages:\n- NOTICE: hello world (code: 00000, hint: use a table)\n- WARNING: careful"
+        );
+
+        let mut result = query_result(vec!["id"], vec![vec![serde_json::json!(1)]], 0);
+        result.messages = vec![QueryMessage {
+            severity: "INFO".to_string(),
+            message: "print output".to_string(),
+            code: None,
+            detail: None,
+            hint: None,
+        }];
+        assert_eq!(
+            format_query_result_as_text(&result, 50, QueryCellWindow::default()).unwrap(),
+            "| id |\n|---|\n| 1 |\n(1 rows, 1ms)\n\nServer messages:\n- INFO: print output"
         );
     }
 
@@ -1226,7 +1870,7 @@ for line in sys.stdin:
         let (client, _script) = spawn_recording_agent(&record_path).await;
         let storage = Storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
         let state = Arc::new(AppState::new(storage));
-        let connection = dameng_test_connection();
+        let connection = agent_test_connection("dameng-1", "Dameng", DatabaseType::Dameng, "APPDB");
         state.configs.write().await.insert(connection.id.clone(), connection);
         state.connections.write().await.insert("dameng-1:APPDB".to_string(), PoolKind::agent(client));
 
@@ -1282,9 +1926,49 @@ for line in sys.stdin:
         }
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mysql_agent_allows_show_triggers_without_write_confirmation() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let record_path = temp_dir.path().join("agent-requests.jsonl");
+        let (client, _script) = spawn_recording_agent(&record_path).await;
+        let storage = Storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
+        let state = Arc::new(AppState::new(storage));
+        let connection = agent_test_connection("mysql-1", "MySQL", DatabaseType::Mysql, "rs_main");
+        state.configs.write().await.insert(connection.id.clone(), connection);
+        state.connections.write().await.insert("mysql-1:rs_main".to_string(), PoolKind::agent(client));
+
+        let sql = "SHOW TRIGGERS FROM `rs_main` LIKE 'trg_order_items_after_%';";
+        let call = ToolCall {
+            id: "show-triggers".to_string(),
+            name: "execute_query".to_string(),
+            arguments: json!({ "sql": sql }),
+            provider_payload: None,
+        };
+        let result = execute_tool(
+            &call,
+            &state,
+            "mysql-1",
+            "rs_main",
+            None,
+            &DatabaseType::Mysql,
+            AgentSqlPermissions::default(),
+        )
+        .await;
+
+        assert!(!result.is_error, "{}", result.content);
+        let request = std::fs::read_to_string(&record_path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|request| request["method"] == "execute_query")
+            .unwrap();
+        assert_eq!(request["params"]["sql"], sql);
+    }
+
     #[test]
     fn build_browse_query_qdrant() {
-        let q = build_browse_query(&DatabaseType::Qdrant, "articles", "", 10).unwrap();
+        let q = build_browse_query(&DatabaseType::Qdrant, "articles", "", "", 10).unwrap();
         assert!(q.starts_with("POST /collections/articles/points/scroll"));
         assert!(q.contains("\"limit\":10"));
         assert!(q.contains("\"with_payload\":true"));
@@ -1292,13 +1976,13 @@ for line in sys.stdin:
 
     #[test]
     fn build_browse_query_qdrant_encodes_url_chars() {
-        let q = build_browse_query(&DatabaseType::Qdrant, "my collection", "", 10).unwrap();
+        let q = build_browse_query(&DatabaseType::Qdrant, "my collection", "", "", 10).unwrap();
         assert!(q.starts_with("POST /collections/my%20collection/points/scroll"));
     }
 
     #[test]
     fn build_browse_query_milvus() {
-        let q = build_browse_query(&DatabaseType::Milvus, "articles", "custom_db", 20).unwrap();
+        let q = build_browse_query(&DatabaseType::Milvus, "articles", "custom_db", "", 20).unwrap();
         assert!(q.starts_with("POST /v2/vectordb/entities/query"));
         assert!(q.contains("\"dbName\":\"custom_db\""));
         assert!(q.contains("\"collectionName\":\"articles\""));
@@ -1308,40 +1992,46 @@ for line in sys.stdin:
 
     #[test]
     fn build_browse_query_milvus_default_db() {
-        let q = build_browse_query(&DatabaseType::Milvus, "articles", "", 10).unwrap();
+        let q = build_browse_query(&DatabaseType::Milvus, "articles", "", "", 10).unwrap();
         assert!(q.contains("\"dbName\":\"default\""));
     }
 
     #[test]
     fn build_browse_query_weaviate() {
-        let q = build_browse_query(&DatabaseType::Weaviate, "Articles", "", 5).unwrap();
+        let q = build_browse_query(&DatabaseType::Weaviate, "Articles", "", "", 5).unwrap();
         assert_eq!(q, "GET /v1/objects?class=Articles&limit=5");
     }
 
     #[test]
     fn build_browse_query_weaviate_encodes_query_param() {
-        let q = build_browse_query(&DatabaseType::Weaviate, "A&B", "", 5).unwrap();
+        let q = build_browse_query(&DatabaseType::Weaviate, "A&B", "", "", 5).unwrap();
         assert!(q.contains("class=A%26B"));
     }
 
     #[test]
     fn build_browse_query_chromadb() {
-        let q = build_browse_query(&DatabaseType::ChromaDb, "uuid-123", "", 15).unwrap();
-        assert!(
-            q.starts_with("POST /api/v2/tenants/default_tenant/databases/default_database/collections/uuid-123/get")
-        );
+        let q = build_browse_query(&DatabaseType::ChromaDb, "uuid-123", "cloud/db", "tenant /eu", 15).unwrap();
+        assert!(q.starts_with("POST /api/v2/tenants/tenant%20%2Feu/databases/cloud%2Fdb/collections/uuid-123/get"));
         assert!(q.contains("\"limit\":15"));
     }
 
     #[test]
+    fn build_browse_query_chromadb_keeps_local_defaults() {
+        let q = build_browse_query(&DatabaseType::ChromaDb, "uuid-123", "", "", 15).unwrap();
+        assert!(
+            q.starts_with("POST /api/v2/tenants/default_tenant/databases/default_database/collections/uuid-123/get")
+        );
+    }
+
+    #[test]
     fn build_browse_query_rejects_empty_collection() {
-        let result = build_browse_query(&DatabaseType::Qdrant, "  ", "", 10);
+        let result = build_browse_query(&DatabaseType::Qdrant, "  ", "", "", 10);
         assert!(result.is_err());
     }
 
     #[test]
     fn build_browse_query_rejects_unsupported_type() {
-        let result = build_browse_query(&DatabaseType::Postgres, "articles", "", 10);
+        let result = build_browse_query(&DatabaseType::Postgres, "articles", "", "", 10);
         assert!(result.is_err());
     }
 
@@ -1450,6 +2140,40 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn confirmed_write_target_binding_rejects_replay_to_another_scope() {
+        let confirmed_sql = Some("DELETE FROM sessions WHERE id = 7".to_string());
+        let matching = verify_confirmed_target(
+            Some(true),
+            confirmed_sql.clone(),
+            Some("connection-1".to_string()),
+            Some("app".to_string()),
+            Some("public".to_string()),
+            "connection-1",
+            "app",
+            Some("public"),
+        );
+        assert_eq!(matching, (Some(true), confirmed_sql.clone()));
+
+        for (connection_id, database, schema) in [
+            ("connection-2", "app", Some("public")),
+            ("connection-1", "audit", Some("public")),
+            ("connection-1", "app", Some("private")),
+        ] {
+            let rejected = verify_confirmed_target(
+                Some(true),
+                confirmed_sql.clone(),
+                Some("connection-1".to_string()),
+                Some("app".to_string()),
+                Some("public".to_string()),
+                connection_id,
+                database,
+                schema,
+            );
+            assert_eq!(rejected, (Some(false), None));
+        }
+    }
+
+    #[test]
     fn confirmed_sql_preserved_through_permission_construction() {
         let perms = AgentSqlPermissions {
             allow_writes: true,
@@ -1467,5 +2191,164 @@ for line in sys.stdin:
         // contract — the frontend is responsible for only sending
         // allow_write_sql=true when a specific SQL was confirmed.
         assert!(sql_matches_confirmed_write("INSERT INTO t VALUES (1)", &None));
+    }
+
+    // ── get_current_time tests ────────────────────────────────────────────
+
+    #[test]
+    fn get_current_time_is_in_all_tools_postgres() {
+        let tools = all_tools(DatabaseType::Postgres, AgentSqlPermissions::default());
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
+        assert!(names.contains(&"get_current_time"), "get_current_time missing from all_tools(Postgres)");
+    }
+
+    #[test]
+    fn get_current_time_is_in_read_only_tools_postgres() {
+        let tools = read_only_tools(DatabaseType::Postgres);
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
+        assert!(names.contains(&"get_current_time"), "get_current_time missing from read_only_tools(Postgres)");
+    }
+
+    #[test]
+    fn get_current_time_is_in_all_tools_qdrant() {
+        let tools = all_tools(DatabaseType::Qdrant, AgentSqlPermissions::default());
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
+        assert!(names.contains(&"get_current_time"), "get_current_time missing from all_tools(Qdrant)");
+    }
+
+    #[test]
+    fn get_current_time_is_in_read_only_tools_qdrant() {
+        let tools = read_only_tools(DatabaseType::Qdrant);
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
+        assert!(names.contains(&"get_current_time"), "get_current_time missing from read_only_tools(Qdrant)");
+    }
+
+    #[test]
+    fn get_current_time_tool_is_read_only_and_parallel_ok() {
+        let tool = get_current_time_tool();
+        assert!(tool.read_only, "get_current_time must be read_only");
+        assert!(tool.parallel_ok, "get_current_time must be parallel_ok");
+    }
+
+    #[test]
+    fn execute_get_current_time_returns_valid_timestamps() {
+        let before_secs = chrono::Utc::now().timestamp();
+        let tool_call = ToolCall {
+            id: "call-gct".to_string(),
+            name: "get_current_time".to_string(),
+            arguments: serde_json::json!({ "utc_offset_minutes": 480, "timezone": "Asia/Shanghai" }),
+            provider_payload: None,
+        };
+        let result = execute_get_current_time(&tool_call).expect("get_current_time should succeed");
+        let after_secs = chrono::Utc::now().timestamp();
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("get_current_time result should be valid JSON");
+
+        let utc_str = parsed["utc"].as_str().expect("utc field should be a string");
+        let local_str = parsed["local"].as_str().expect("local field should be a string");
+
+        // Parse as RFC3339 timestamps.
+        let _utc_dt = chrono::DateTime::parse_from_rfc3339(utc_str).expect("utc should be valid RFC3339");
+        let local_dt = chrono::DateTime::parse_from_rfc3339(local_str).expect("local should be valid RFC3339");
+
+        // Verify UTC is within tolerance.
+        let utc_dt_utc = chrono::DateTime::parse_from_rfc3339(utc_str)
+            .expect("utc should parse as rfc3339")
+            .with_timezone(&chrono::Utc);
+        let utc_ts = utc_dt_utc.timestamp();
+        assert!(
+            utc_ts >= before_secs && utc_ts <= after_secs + 1,
+            "UTC timestamp {utc_ts} should be within [{before_secs}, {after_secs}+1]"
+        );
+
+        // Verify local is within tolerance (converted to UTC).
+        let local_ts = local_dt.with_timezone(&chrono::Utc).timestamp();
+        assert!(
+            local_ts >= before_secs && local_ts <= after_secs + 1,
+            "Local timestamp {local_ts} (UTC) should be within [{before_secs}, {after_secs}+1]"
+        );
+
+        // utc_offset_minutes should match the offset in local.
+        let offset_minutes =
+            parsed["utc_offset_minutes"].as_i64().expect("utc_offset_minutes should be an integer") as i32;
+        let local_offset_secs = local_dt.offset().local_minus_utc();
+        // The offset from the RFC3339 timestamp should match utc_offset_minutes * 60.
+        assert_eq!(
+            local_offset_secs / 60,
+            offset_minutes,
+            "utc_offset_minutes {offset_minutes} does not match local offset {}",
+            local_offset_secs / 60
+        );
+        assert_eq!(offset_minutes, 480);
+        assert_eq!(parsed["timezone"], "Asia/Shanghai");
+
+        // readable should be a non-empty string.
+        let readable = parsed["readable"].as_str().expect("readable field should be a string");
+        assert!(!readable.is_empty(), "readable should not be empty");
+    }
+
+    #[test]
+    fn execute_get_current_time_defaults_to_utc_without_client_context() {
+        let tool_call = ToolCall {
+            id: "call-gct".to_string(),
+            name: "get_current_time".to_string(),
+            arguments: serde_json::json!({}),
+            provider_payload: None,
+        };
+        let result = execute_get_current_time(&tool_call).expect("get_current_time should succeed");
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+
+        assert_eq!(parsed["utc_offset_minutes"], 0);
+        assert_eq!(parsed["timezone"], "UTC");
+        assert!(parsed["local"].as_str().unwrap().ends_with("+00:00"));
+    }
+
+    #[test]
+    fn execute_get_current_time_labels_offset_when_timezone_name_is_missing() {
+        let tool_call = ToolCall {
+            id: "call-gct".to_string(),
+            name: "get_current_time".to_string(),
+            arguments: serde_json::json!({ "utc_offset_minutes": -300 }),
+            provider_payload: None,
+        };
+        let result = execute_get_current_time(&tool_call).expect("get_current_time should succeed");
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+
+        assert_eq!(parsed["timezone"], "UTC-05:00");
+        assert!(parsed["local"].as_str().unwrap().ends_with("-05:00"));
+    }
+
+    #[test]
+    fn execute_tool_get_current_time_is_not_error() {
+        // Test via execute_tool dispatch. All args can be dummy since the tool
+        // does not use any of them.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let storage = crate::storage::Storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
+            let state = std::sync::Arc::new(crate::connection::AppState::new(storage));
+            let tool_call = ToolCall {
+                id: "call-gct".to_string(),
+                name: "get_current_time".to_string(),
+                arguments: serde_json::json!({}),
+                provider_payload: None,
+            };
+            let result = execute_tool(
+                &tool_call,
+                &state,
+                "dummy",
+                "dummy",
+                None,
+                &DatabaseType::Postgres,
+                AgentSqlPermissions::default(),
+            )
+            .await;
+            assert!(!result.is_error, "execute_tool get_current_time should not error: {}", result.content);
+            let parsed: serde_json::Value = serde_json::from_str(&result.content).expect("result should be valid JSON");
+            assert!(parsed["utc"].is_string());
+            assert!(parsed["local"].is_string());
+            assert!(parsed["readable"].is_string());
+        });
     }
 }

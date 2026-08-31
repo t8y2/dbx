@@ -1,0 +1,10 @@
+dependencies {
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
+    implementation 'org.apache.ignite:ignite-core:2.18.0'
+}
+
+tasks.named('shadowJar') {
+    manifest {
+        attributes('Agent-Label': 'Apache Ignite', 'Main-Class': 'com.dbx.agent.ignite.IgniteAgent')
+    }
+}

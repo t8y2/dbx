@@ -96,6 +96,8 @@ pub struct EditableStructureIndex {
     pub included_columns: Vec<String>,
     #[serde(default)]
     pub comment: String,
+    #[serde(default)]
+    pub concurrently: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original: Option<IndexInfo>,
     #[serde(default)]
@@ -119,6 +121,10 @@ pub struct IndexInfo {
     pub included_columns: Option<Vec<String>>,
     #[serde(default)]
     pub comment: Option<String>,
+    /// Parallel to `columns`: `true` at index `i` means `columns[i]` is a raw expression
+    /// (e.g. sourced from `pg_get_indexdef`), not a plain column name.
+    #[serde(default)]
+    pub key_is_expression: Vec<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -204,6 +210,20 @@ pub struct TableStructureSqlOptions {
     pub table_comment: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_table_comment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mysql_engine: Option<String>,
+    /// Whether the target table is a partitioned parent table (PostgreSQL
+    /// `relkind = 'p'`). PostgreSQL rejects `CREATE INDEX CONCURRENTLY` on
+    /// partitioned parents, so the builder refuses such a request up front
+    /// (`validate_concurrent_index_scope`) instead of emitting SQL the server
+    /// will reject or downgrading to a blocking `CREATE INDEX`.
+    #[serde(default)]
+    pub partitioned: bool,
+    /// When true, the connection is GaussDB M-mode which uses MySQL-compatible
+    /// SQL dialect with backtick quoting. The structure editor maps this to
+    /// `StructureDialect::Mysql` so that DDL is generated with MySQL syntax.
+    #[serde(default)]
+    pub is_gaussdb_m_mode: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -211,6 +231,20 @@ pub struct TableStructureSqlOptions {
 pub struct TableStructureSqlResult {
     pub statements: Vec<String>,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableOwnerChangeSqlOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_type: Option<DatabaseType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    pub table_name: String,
+    #[serde(default)]
+    pub owner: String,
+    #[serde(default)]
+    pub original_owner: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

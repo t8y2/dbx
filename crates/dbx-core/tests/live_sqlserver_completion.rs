@@ -19,6 +19,7 @@ use tokio_util::sync::CancellationToken;
 
 fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connection::ConnectionConfig {
     dbx_core::models::connection::ConnectionConfig {
+        docs_notes_path: None,
         id: id.to_string(),
         name: id.to_string(),
         note: String::new(),
@@ -32,7 +33,9 @@ fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connecti
         username: std::env::var("DBX_LIVE_SQLSERVER_USER").unwrap_or_else(|_| "sa".to_string()),
         password: std::env::var("DBX_LIVE_SQLSERVER_PASSWORD").expect("DBX_LIVE_SQLSERVER_PASSWORD"),
         database: Some(database.to_string()),
+        default_schema: None,
         visible_databases: None,
+        visible_database_patterns: None,
         visible_schemas: None,
         attached_databases: Vec::new(),
         init_script: None,
@@ -59,6 +62,7 @@ fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connecti
         redis_key_separator: dbx_core::models::connection::default_redis_key_separator(),
         redis_scan_page_size: None,
         redis_database_aliases: Default::default(),
+        redis_key_templates: Vec::new(),
         etcd_endpoints: String::new(),
         gbase_server: String::new(),
         informix_server: String::new(),
@@ -66,6 +70,7 @@ fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connecti
         jdbc_driver_class: None,
         jdbc_driver_paths: Vec::new(),
         one_time: false,
+        save_password: true,
         read_only: false,
         is_production: false,
         production_databases: vec![],
@@ -1002,6 +1007,9 @@ async fn live_sqlserver_table_structure_default_changes_drop_existing_constraint
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
     });
     assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(result.statements.len(), 4);
@@ -1177,6 +1185,7 @@ async fn live_sqlserver_query_result_export_streams_cte_query_to_csv() {
         connection_id: connection_id.to_string(),
         database: database.clone(),
         schema: Some("dbo".to_string()),
+        catalog: None,
         sql: sql.clone(),
         query_base_sql: sql,
         setup_sql: Vec::new(),
@@ -1196,6 +1205,8 @@ async fn live_sqlserver_query_result_export_streams_cte_query_to_csv() {
         export_table_name: None,
         export_column_types: None,
         column_comments: None,
+        auto_filter: None,
+        identifier_quote: None,
         numeric_column_right_align: false,
     };
     let done_seen = AtomicBool::new(false);
@@ -1377,6 +1388,8 @@ async fn live_sqlserver_transfer_table_skips_rowversion_insert_column() {
         &DatabaseType::SqlServer,
         &source_pool_key,
         &target_pool_key,
+        &std::collections::HashMap::new(),
+        &mut Vec::new(),
         |_| {},
     )
     .await;

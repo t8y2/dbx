@@ -1,0 +1,33 @@
+---
+title: FAQ
+description: Frequently asked questions about DBX, including where connection data is stored and how to customize the data directory.
+---
+
+<Callout type="info">Common questions about DBX Desktop. This page starts with data storage and the data directory, and more entries will be added over time.</Callout>
+
+## Data and Backup
+
+<Accordions>
+  <Accordion title="Where is my connection configuration stored?">
+    DBX Desktop stores connections, saved credentials, SSH tunnel profiles, query history, and app settings in a single SQLite database file `dbx.db` inside the DBX data directory:
+
+    - **Windows (installer):** `C:\Users\<user>\AppData\Roaming\com.dbx.app\dbx.db`
+    - **Windows (portable ZIP):** `<DBX.exe folder>\data\dbx.db`
+    - **macOS:** `~/Library/Application Support/com.dbx.app/dbx.db`
+    - **Linux:** `~/.local/share/com.dbx.app/dbx.db`
+
+    SSH host keys are kept in `known_hosts` in the same directory, so DBX never touches `~/.ssh`. Depending on write activity, `dbx.db-wal` and `dbx.db-shm` checkpoint files may sit next to the database.
+
+    Older DBX releases kept connections in `connections.json` and `secrets.json`. These files are migrated into `dbx.db` automatically on startup and the originals are renamed to `*.bak`.
+
+    To move connections to another machine, use encrypted [Config Export/Import](/en/docs/config-export) instead of copying files. For a manual backup, quit DBX first, then copy the whole data directory, or at least `dbx.db` together with the `-wal` and `-shm` files.
+  </Accordion>
+  <Accordion title="Can I keep the data next to the executable, or use a custom data directory?">
+    Yes. There are two supported ways:
+
+    - **Windows portable ZIP:** the `DBX_<version>_<arch>-portable.zip` from the release page ships with a `portable.dbx` marker file. Extract it anywhere and run it; all data is stored in the `data` folder beside `DBX.exe`. On first launch, if the portable folder is still empty and older data exists in `AppData`, it is imported automatically once.
+    - **`DBX_DATA_DIR` environment variable:** works on every platform and for both installer and portable builds, and takes the highest priority. Point it at any folder. The new directory starts empty, so migrate with Config Export/Import, or copy `dbx.db` while DBX is not running.
+
+    The `portable.dbx` marker only works on Windows, and it is ignored when `uninstall.exe` sits next to the executable (installed builds). There is no in-app setting for the data directory.
+  </Accordion>
+</Accordions>

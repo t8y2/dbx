@@ -9,6 +9,8 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/composables/useToast";
 import { copyToClipboard } from "@/lib/common/clipboard";
+import { saveTextFile } from "@/lib/export/saveTextFile";
+import { searchKeymapWithoutModD } from "@/lib/editor/codemirrorSearchKeymap";
 import {
   DEFAULT_SQL_FORMATTER_SETTINGS,
   SQL_FORMATTER_CONFIG_FORMATTER,
@@ -19,6 +21,7 @@ import {
   syncSqlFormatterConfigDraft,
   type SqlFormatterCase,
   type SqlFormatterExpressionWidth,
+  type SqlFormatterFromClauseLayout,
   type SqlFormatterIndentStyle,
   type SqlFormatterLinesBetweenQueries,
   type SqlFormatterLogicalOperatorNewline,
@@ -77,6 +80,12 @@ const caseOptions: { value: SqlFormatterCase; labelKey: string }[] = [
 const logicalOperatorOptions: { value: SqlFormatterLogicalOperatorNewline; labelKey: string }[] = [
   { value: "before", labelKey: "settings.sqlFormatterLogicalBefore" },
   { value: "after", labelKey: "settings.sqlFormatterLogicalAfter" },
+  { value: "none", labelKey: "settings.sqlFormatterLogicalSameLine" },
+];
+
+const fromClauseLayoutOptions: { value: SqlFormatterFromClauseLayout; labelKey: string }[] = [
+  { value: "newLine", labelKey: "settings.sqlFormatterFromNewLine" },
+  { value: "sameLine", labelKey: "settings.sqlFormatterFromSameLine" },
 ];
 
 const indentStyleOptions: { value: SqlFormatterIndentStyle; labelKey: string }[] = [
@@ -97,8 +106,10 @@ const sqlFormatterOptionLabelKeys: Record<keyof SqlFormatterOptionSettings, stri
   useTabs: "settings.sqlFormatterIndent",
   tabWidth: "settings.sqlFormatterTabWidth",
   logicalOperatorNewline: "settings.sqlFormatterLogicalOperatorNewline",
+  fromClauseLayout: "settings.sqlFormatterFromClauseLayout",
   expressionWidth: "settings.sqlFormatterExpressionWidth",
   linesBetweenQueries: "settings.sqlFormatterLinesBetweenQueries",
+  preserveEmptyLines: "settings.sqlFormatterPreserveEmptyLines",
   denseOperators: "settings.sqlFormatterDenseOperators",
   newlineBeforeSemicolon: "settings.sqlFormatterNewlineBeforeSemicolon",
   paramTypes: "settings.sqlFormatterParamTypes",
@@ -184,7 +195,11 @@ function onIndentStyle(value: any) {
 }
 
 function onLogicalOperatorNewline(value: any) {
-  if (value === "before" || value === "after") updateOption("logicalOperatorNewline", value);
+  if (value === "before" || value === "after" || value === "none") updateOption("logicalOperatorNewline", value);
+}
+
+function onFromClauseLayout(value: any) {
+  if (value === "newLine" || value === "sameLine") updateOption("fromClauseLayout", value);
 }
 
 function onTabWidth(value: any) {
@@ -287,16 +302,8 @@ async function onImportFile(event: Event) {
   }
 }
 
-function exportConfig() {
-  const blob = new Blob([serializeSqlFormatterConfig(settings.value)], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = "dbx-sql-formatter.json";
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
+async function exportConfig() {
+  await saveTextFile(serializeSqlFormatterConfig(settings.value), "dbx-sql-formatter.json", "JSON", "json");
 }
 
 async function copyJsonDraft() {
@@ -356,7 +363,7 @@ function jsonEditorKeymapExtension(modules: CodeMirrorModules) {
   const { keymap } = modules.view;
   const commands = modules.commands;
   const search = modules.search;
-  return keymap.of([...search.searchKeymap, ...commands.historyKeymap, ...commands.defaultKeymap]);
+  return keymap.of([...searchKeymapWithoutModD(search.searchKeymap), ...commands.historyKeymap, ...commands.defaultKeymap]);
 }
 
 async function initJsonEditor() {
@@ -618,6 +625,20 @@ onBeforeUnmount(() => {
           </div>
 
           <div class="space-y-2">
+            <Label>{{ t("settings.sqlFormatterFromClauseLayout") }}</Label>
+            <Select :model-value="settings.fromClauseLayout" @update:model-value="onFromClauseLayout">
+              <SelectTrigger class="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem v-for="option in fromClauseLayoutOptions" :key="option.value" :value="option.value">
+                  {{ t(option.labelKey) }}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div class="space-y-2">
             <Label>{{ t("settings.sqlFormatterExpressionWidth") }}</Label>
             <Select :model-value="String(settings.expressionWidth)" @update:model-value="onExpressionWidth">
               <SelectTrigger class="w-full">
@@ -647,6 +668,11 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="grid gap-3 md:grid-cols-2">
+          <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+            <Label for="sql-formatter-preserve-empty-lines">{{ t("settings.sqlFormatterPreserveEmptyLines") }}</Label>
+            <Switch id="sql-formatter-preserve-empty-lines" :model-value="settings.preserveEmptyLines" @update:model-value="(value: boolean) => updateOption('preserveEmptyLines', value)" />
+          </div>
+
           <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
             <Label for="sql-formatter-dense-operators">{{ t("settings.sqlFormatterDenseOperators") }}</Label>
             <Switch id="sql-formatter-dense-operators" :model-value="settings.denseOperators" @update:model-value="(value: boolean) => updateOption('denseOperators', value)" />

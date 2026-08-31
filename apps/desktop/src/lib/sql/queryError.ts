@@ -1,11 +1,38 @@
-export function isQueryTimeoutErrorMessage(message: string): boolean {
+import type { BackendError } from "@/lib/backend/errorUtils";
+
+const QUERY_TIMEOUT_STAGES = new Set(["execute", "fetch"]);
+const CONNECTION_TIMEOUT_STAGES = new Set(["connect", "connection"]);
+
+export function isConnectionTimeoutErrorMessage(message: string, backendError?: BackendError): boolean {
+  if (backendError?.messageKey === "backendErrors.jdbc.operationTimedOut") {
+    const stage = String(backendError.messageParams.stage ?? "").toLowerCase();
+    return CONNECTION_TIMEOUT_STAGES.has(stage);
+  }
+
+  const lower = message.toLowerCase();
+  if (/\btimeout occurred while creating a new object\b/.test(lower)) return true;
+  if (/\b(?:pool\s+checkout|checkout|metadata|loading|health check|cancel request)\b/.test(lower)) return false;
+  if (/\b(?:connection|connect|handshake)\b[\s\S]{0,80}\b(?:timed out|timeout expired|timeout exceeded|time-out)\b/.test(lower)) return true;
+  return /\b(?:timed out|timeout expired|timeout exceeded|time-out)\b[\s\S]{0,80}\b(?:connection attempt|connect|handshake)\b/.test(lower);
+}
+
+export function isQueryTimeoutErrorMessage(message: string, backendError?: BackendError): boolean {
+  if (backendError?.messageKey === "backendErrors.jdbc.operationTimedOut") {
+    const stage = String(backendError.messageParams.stage ?? "").toLowerCase();
+    return QUERY_TIMEOUT_STAGES.has(stage);
+  }
   const lower = message.toLowerCase();
   if (lower.includes("query timed out") || lower.includes("查询超时") || lower.includes("查詢逾時")) return true;
   // Agent RPC client-side timeout (tokio::time::timeout in agent_driver.rs). This is the
   // fallback when JDBC setQueryTimeout never fires (unsupported/unresponsive driver), so the
   // backend already treats it as a query timeout (is_agent_rpc_timeout_error in query.rs) —
-  // surface the same action here to stay consistent with the backend.
-  if (/\bagent rpc call timed out\b/.test(lower)) return true;
+  // surface the same action here to stay consistent with the backend. Connection and other
+  // infrastructure stages must be excluded first because their messages can share this prefix.
+  const agentTimeout = /\bagent rpc call timed out(?: at ([a-z_]+))?\b/.exec(lower);
+  if (agentTimeout) {
+    const stage = agentTimeout[1];
+    return stage === undefined || QUERY_TIMEOUT_STAGES.has(stage);
+  }
   if (/\b(?:canceling|cancelling|canceled|cancelled)\b[\s\S]{0,80}\bstatement\b[\s\S]{0,80}\btimeout\b/.test(lower)) return true;
   if (/\b(?:connection|connect|pool|checkout|metadata|loading|health check|cancel request|ssh|tunnel)\b/.test(lower)) return false;
   return (

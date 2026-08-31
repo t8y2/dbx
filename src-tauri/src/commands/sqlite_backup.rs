@@ -5,7 +5,10 @@ use tauri::State;
 use dbx_core::connection::{AppState, PoolKind};
 use dbx_core::db::sqlite::{is_memory_database_path, SqliteHandle};
 use dbx_core::models::connection::DatabaseType;
-use dbx_core::sqlite_backup::{backup_sqlite_database as backup_sqlite_database_core, SqliteBackupOptions};
+use dbx_core::sqlite_backup::{
+    backup_sqlite_database as backup_sqlite_database_core, restore_sqlite_database as restore_sqlite_database_core,
+    SqliteBackupOptions,
+};
 
 #[tauri::command]
 pub async fn backup_sqlite_database(
@@ -24,6 +27,17 @@ pub async fn backup_sqlite_database(
     };
 
     backup_sqlite_database_core(pool, SqliteBackupOptions { source_path, destination_path }).await
+}
+
+#[tauri::command]
+pub async fn restore_sqlite_database(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    source_path: String,
+) -> Result<(), String> {
+    let pool_key = state.get_or_create_pool(&connection_id, None).await?;
+    let pool = existing_sqlite_pool(&state, &pool_key).await?.ok_or_else(|| "Connection is not open".to_string())?;
+    restore_sqlite_database_core(pool, &source_path).await
 }
 
 async fn sqlite_source_path(state: &Arc<AppState>, connection_id: &str) -> Result<String, String> {

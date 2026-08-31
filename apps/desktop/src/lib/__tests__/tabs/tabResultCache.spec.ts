@@ -163,6 +163,25 @@ describe("tab result cache statement execution metadata", () => {
     expect(result?.spatial_values).toEqual([[4326], [3857], [null]]);
   });
 
+  it("preserves large-value preview metadata", () => {
+    const encoded = encodeTabResultSnapshot({
+      result: {
+        columns: ["id", "payload"],
+        rows: [[1, "preview..."]],
+        large_value_cells: [{ row_index: 0, column_index: 1, original_bytes: 1_000_000 }],
+        affected_rows: 0,
+        execution_time_ms: 1,
+      },
+      resultLocalSortOriginalRows: [[1, "preview..."]],
+      resultLocalSortOriginalLargeValueCells: [{ row_index: 0, column_index: 1, original_bytes: 1_000_000 }],
+      cachedAt: 1,
+    });
+
+    const restored = decodeTabResultSnapshot(encoded);
+    expect(restored?.result?.large_value_cells).toEqual([{ row_index: 0, column_index: 1, original_bytes: 1_000_000 }]);
+    expect(restored?.resultLocalSortOriginalLargeValueCells).toEqual([{ row_index: 0, column_index: 1, original_bytes: 1_000_000 }]);
+  });
+
   it("restores multi-result, pagination, local-sort, and editable metadata fixtures", () => {
     const restored = decodeTabResultSnapshot(encodeTabResultSnapshot(queryResultLifecycleSnapshot()));
 
@@ -172,6 +191,60 @@ describe("tab result cache statement execution metadata", () => {
     expect(restored?.resultTotalRowCount).toBe(301);
     expect(restored?.tableMeta?.primaryKeys).toEqual(["id"]);
     expect(restored?.querySourceColumns).toEqual(["id", "name"]);
+  });
+
+  it("restores multi-source column comments and their source identity from the snapshot", () => {
+    const snapshot = {
+      result: {
+        columns: ["id", "user_id", "id_1", "name"],
+        rows: [[1, 100, 7, "Alice"]],
+        affected_rows: 0,
+        execution_time_ms: 1,
+      },
+      resultRuns: [
+        {
+          id: "run-join",
+          title: "Run 1",
+          sequence: 1,
+          sql: "SELECT a.id, a.user_id, b.id, b.name FROM orders a JOIN users b ON a.user_id = b.id",
+          createdAt: 1,
+          result: {
+            columns: ["id", "user_id", "id_1", "name"],
+            rows: [[1, 100, 7, "Alice"]],
+            affected_rows: 0,
+            execution_time_ms: 1,
+          },
+          resultColumnComments: ["订单ID", "下单用户", "用户ID", "用户名"],
+          queryDisplaySourceColumns: [
+            { sourceKey: "a", sourceColumn: "id" },
+            { sourceKey: "a", sourceColumn: "user_id" },
+            { sourceKey: "b", sourceColumn: "id" },
+            { sourceKey: "b", sourceColumn: "name" },
+          ],
+        },
+      ],
+      activeResultRunId: "run-join",
+      resultColumnComments: ["订单ID", "下单用户", "用户ID", "用户名"],
+      queryDisplaySourceColumns: [
+        { sourceKey: "a", sourceColumn: "id" },
+        { sourceKey: "a", sourceColumn: "user_id" },
+        { sourceKey: "b", sourceColumn: "id" },
+        { sourceKey: "b", sourceColumn: "name" },
+      ],
+      cachedAt: 1,
+    };
+
+    const restored = decodeTabResultSnapshot(encodeTabResultSnapshot(snapshot));
+
+    expect(restored?.resultColumnComments).toEqual(["订单ID", "下单用户", "用户ID", "用户名"]);
+    expect(restored?.queryDisplaySourceColumns).toEqual([
+      { sourceKey: "a", sourceColumn: "id" },
+      { sourceKey: "a", sourceColumn: "user_id" },
+      { sourceKey: "b", sourceColumn: "id" },
+      { sourceKey: "b", sourceColumn: "name" },
+    ]);
+    expect(restored?.resultRuns?.[0]?.resultColumnComments).toEqual(["订单ID", "下单用户", "用户ID", "用户名"]);
+    expect(restored?.resultRuns?.[0]?.queryDisplaySourceColumns?.[2]).toEqual({ sourceKey: "b", sourceColumn: "id" });
   });
 
   it("treats corrupt and unsupported snapshots as missing", () => {

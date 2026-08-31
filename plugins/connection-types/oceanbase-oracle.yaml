@@ -1,0 +1,39 @@
+schemaVersion: 1
+order: 440
+dbType: oceanbase-oracle
+rustVariant: OceanbaseOracle
+label: OceanBase Oracle Mode
+dialect: OceanBase
+runtimeMode: agent
+mcpMode: bridge
+agentKey: oceanbase-oracle
+driverStoreVisible: true
+driverStoreOrder: 14
+singleConnectionPool: true
+metadataConnectionScoped: false
+skipTcpProbe: true
+defaultPort: 2883
+traits:
+  schemaAware: true
+  singleDatabase: true
+  clearableQuerySchema: true
+  treeSchema: true
+  diagramSql: true
+supportLevel: operate
+capabilities:
+  queryExecution: true
+  metadataBrowse: true
+  objectBrowser: true
+  objectSource: true
+  schemaSearch: true
+  diagram: true
+  tableDataEdit: true
+  tableStructureEdit: true
+  tableImport: true
+  dataTransfer: true
+  sqlFileExecution: true
+  databaseCreate: false
+  fieldLineage: true
+  sqlExplain: false
+  userAdmin: false
+  driverManagement: true

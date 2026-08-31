@@ -1,12 +1,14 @@
 use super::column_alter::{
-    build_clickhouse_existing_column_sql, build_doris_existing_column_sql, build_h2_existing_column_sql,
-    build_informix_existing_column_sql, build_iris_existing_column_sql, build_mysql_existing_column_sql,
-    build_oracle_like_existing_column_sql, build_postgres_existing_column_sql, build_questdb_existing_column_sql,
-    build_sqlite_existing_column_sql, build_sqlserver_existing_column_sql, build_xugu_existing_column_sql,
-    has_column_extra_change, has_existing_column_attribute_change,
+    build_clickhouse_existing_column_sql, build_dameng_existing_column_sql, build_doris_existing_column_sql,
+    build_h2_existing_column_sql, build_informix_existing_column_sql, build_iris_existing_column_sql,
+    build_mysql_existing_column_clause, build_oracle_like_existing_column_sql, build_oscar_existing_column_sql,
+    build_postgres_existing_column_sql, build_questdb_existing_column_sql, build_sqlite_existing_column_sql,
+    build_sqlserver_existing_column_sql, build_xugu_existing_column_sql, dameng_drops_identity,
+    has_column_extra_change, has_existing_column_attribute_change, validate_dameng_existing_identity_change,
 };
 use super::column_format::{
     column_definition, has_dameng_identity, is_dameng_identity_compatible_type, is_mysql_character_data_type,
+    original_is_mysql_generated_column, original_mysql_generated_clause,
 };
 use super::comments::build_sqlserver_column_comment_sql;
 use super::dialect::{capabilities_for, database_label, is_oracle_like, StructureDialect};
@@ -15,6 +17,7 @@ use super::util::{
     clean, is_protected_manticore_id_column, normalize_default, original_comment, original_default, qualified_table,
     quote_ident, quote_string,
 };
+use crate::models::connection::DatabaseType;
 use std::collections::HashSet;
 
 pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mut Vec<String>) -> Vec<String> {
@@ -23,6 +26,32 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
     let table = qualified_table(dialect, options.schema.as_deref(), &options.table_name);
     let database_label = database_label(options.database_type);
     let active_columns: Vec<_> = options.columns.iter().filter(|column| !column.marked_for_drop).collect();
+    if dialect == StructureDialect::Dameng {
+        let identity_columns: Vec<_> = active_columns.iter().filter(|column| has_dameng_identity(column)).collect();
+        if identity_columns.len() > 1
+            || identity_columns.iter().any(|column| {
+                column.extra.as_ref().and_then(|extra| extra.identity.as_ref()).and_then(|identity| identity.increment)
+                    == Some(0)
+            })
+        {
+            return Vec::new();
+        }
+        let mut valid_identity_changes = true;
+        for column in &active_columns {
+            if has_dameng_identity(column) && !is_dameng_identity_compatible_type(&column.data_type) {
+                warnings.push(format!(
+                    "Dameng identity column \"{}\" must use tinyint, smallint, int, integer, bigint, number, numeric, or decimal/dec with scale 0.",
+                    column.name
+                ));
+                valid_identity_changes = false;
+            } else if column.original.is_some() && !validate_dameng_existing_identity_change(column, warnings) {
+                valid_identity_changes = false;
+            }
+        }
+        if !valid_identity_changes {
+            return Vec::new();
+        }
+    }
     if is_oracle_like(dialect)
         && active_columns.is_empty()
         && options.columns.iter().any(|column| column.marked_for_drop)
@@ -42,7 +71,25 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
         } else {
             HashSet::new()
         };
+    let mysql_primary_key_change = if options.database_type == Some(DatabaseType::Mysql) && !options.is_gaussdb_m_mode {
+        primary_key_change(options)
+    } else {
+        None
+    };
+    // MySQL validates AUTO_INCREMENT against the statement's final index layout. Keep the
+    // dependent column and key clauses together so no implicit commit exposes an invalid middle state.
+    let mysql_coalesced_primary_key_change = mysql_primary_key_change
+        .as_ref()
+        .filter(|change| options.columns.iter().any(|column| mysql_auto_increment_touches_primary_key(column, change)));
+    let mut mysql_primary_key_column_clauses = Vec::new();
     let mut statements = Vec::new();
+    // DM8 owns identity at table level, so remove the old identity before any per-column ADD,
+    // even when the target column appears earlier in the submitted draft.
+    if dialect == StructureDialect::Dameng
+        && options.columns.iter().any(|column| !column.marked_for_drop && dameng_drops_identity(column))
+    {
+        statements.push(format!("ALTER TABLE {table} DROP IDENTITY;"));
+    }
 
     for column in &options.columns {
         if column.marked_for_drop {
@@ -96,32 +143,31 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
                 ));
                 continue;
             }
-            if dialect == StructureDialect::Dameng
-                && has_dameng_identity(column)
-                && !is_dameng_identity_compatible_type(&column.data_type)
-            {
-                warnings.push(format!(
-                    "Dameng identity column \"{}\" must use tinyint, smallint, int, integer, bigint, number, numeric, or decimal/dec with scale 0.",
-                    column.name
-                ));
-                continue;
-            }
             if !capabilities.comment && !clean(&column.comment).is_empty() {
                 warnings.push(format!(
                     "Column comments are not supported for {database_label} from this editor; the comment for \"{}\" was ignored.",
                     column.name
                 ));
             }
-            statements.extend(build_add_column_sql(
-                dialect,
-                options.database_type,
-                capabilities.comment,
-                &table,
-                column,
-                &position_clause,
-                options.schema.as_deref(),
-                &options.table_name,
-            ));
+            if mysql_coalesced_primary_key_change
+                .is_some_and(|change| mysql_auto_increment_touches_primary_key(column, change))
+            {
+                mysql_primary_key_column_clauses.push(format!(
+                    "ADD COLUMN {}{position_clause}",
+                    column_definition(StructureDialect::Mysql, column)
+                ));
+            } else {
+                statements.extend(build_add_column_sql(
+                    dialect,
+                    options.database_type,
+                    capabilities.comment,
+                    &table,
+                    column,
+                    &position_clause,
+                    options.schema.as_deref(),
+                    &options.table_name,
+                ));
+            }
             if has_original_column_positions
                 && matches!(dialect, StructureDialect::Mysql | StructureDialect::ClickHouse)
             {
@@ -165,19 +211,35 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
         {
             continue;
         }
+        if dialect == StructureDialect::Mysql
+            && original_is_mysql_generated_column(column)
+            && original_mysql_generated_clause(column).is_none()
+        {
+            warnings.push(format!(
+                "Column \"{}\" is generated, but its generation expression could not be loaded; no ALTER statement was generated to avoid removing the generated-column definition.",
+                original.name
+            ));
+            continue;
+        }
         if !has_rename && !has_attribute_change && !has_position_change {
             continue;
         }
 
         match dialect {
-            StructureDialect::Mysql => statements.extend(build_mysql_existing_column_sql(
-                &table,
-                column,
-                if has_position_change { &position_clause } else { "" },
-            )),
+            StructureDialect::Mysql => {
+                let clause =
+                    build_mysql_existing_column_clause(column, if has_position_change { &position_clause } else { "" });
+                if mysql_coalesced_primary_key_change
+                    .is_some_and(|change| mysql_auto_increment_touches_primary_key(column, change))
+                {
+                    mysql_primary_key_column_clauses.push(clause);
+                } else {
+                    statements.push(format!("ALTER TABLE {table} {clause};"));
+                }
+            }
             StructureDialect::Doris => statements.extend(build_doris_existing_column_sql(&table, column, "")),
             StructureDialect::Postgres => statements.extend(build_postgres_existing_column_sql(&table, column)),
-            StructureDialect::Oracle | StructureDialect::Dameng => {
+            StructureDialect::Oracle => {
                 if options.database_type == Some(crate::models::connection::DatabaseType::Iris) {
                     statements.extend(build_iris_existing_column_sql(&table, column));
                 } else if options.database_type == Some(crate::models::connection::DatabaseType::Xugu) {
@@ -186,6 +248,11 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
                     statements.extend(build_oracle_like_existing_column_sql(dialect, &table, column))
                 }
             }
+            StructureDialect::Dameng => {
+                statements.extend(build_dameng_existing_column_sql(&table, column, false, warnings))
+            }
+            // 神通 MODIFY 语法与 Oracle 有差异（NULL/NOT NULL 须单独一条），用专属实现。
+            StructureDialect::Oscar => statements.extend(build_oscar_existing_column_sql(dialect, &table, column)),
             StructureDialect::H2 => statements.extend(build_h2_existing_column_sql(&table, column)),
             StructureDialect::ClickHouse => statements.extend(build_clickhouse_existing_column_sql(
                 &table,
@@ -209,9 +276,27 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
         }
     }
 
-    // Keep the existing key while column DDL validates. This avoids leaving a table
-    // without a key when an incoming key column cannot be made valid.
-    statements.extend(build_primary_key_sql(options, dialect, &table, warnings));
+    if let Some(change) = mysql_coalesced_primary_key_change {
+        let mut clauses = Vec::new();
+        if !change.old_ids.is_empty() {
+            clauses.push("DROP PRIMARY KEY".to_string());
+        }
+        clauses.append(&mut mysql_primary_key_column_clauses);
+        if !change.new_names.is_empty() {
+            let pk_list = change
+                .new_names
+                .iter()
+                .map(|name| quote_ident(StructureDialect::Mysql, name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            clauses.push(format!("ADD PRIMARY KEY ({pk_list})"));
+        }
+        statements.push(format!("ALTER TABLE {table} {};", clauses.join(", ")));
+    } else {
+        // Keep the existing key while column DDL validates. This avoids leaving a table
+        // without a key when an incoming key column cannot be made valid.
+        statements.extend(build_primary_key_sql(options, dialect, &table, warnings));
+    }
 
     statements
 }
@@ -225,6 +310,73 @@ fn appears_in_add_primary_key(column: &EditableStructureColumn) -> bool {
     column.is_primary_key && !column.marked_for_drop
 }
 
+struct PrimaryKeyChange<'a> {
+    old_ids: HashSet<&'a str>,
+    new_ids: HashSet<&'a str>,
+    new_names: Vec<&'a str>,
+}
+
+fn primary_key_change(options: &TableStructureSqlOptions) -> Option<PrimaryKeyChange<'_>> {
+    if options.columns.iter().any(|column| column.marked_for_drop && was_primary_key_column(column)) {
+        return None;
+    }
+
+    let old_ids: HashSet<&str> = options
+        .columns
+        .iter()
+        .filter(|column| was_primary_key_column(column))
+        .map(|column| column.id.as_str())
+        .collect();
+    let new_ids: HashSet<&str> = options
+        .columns
+        .iter()
+        .filter(|column| appears_in_add_primary_key(column))
+        .map(|column| column.id.as_str())
+        .collect();
+    if old_ids == new_ids {
+        return None;
+    }
+
+    let new_names = options
+        .columns
+        .iter()
+        .filter(|column| appears_in_add_primary_key(column))
+        .map(|column| column.name.as_str())
+        .collect();
+    Some(PrimaryKeyChange { old_ids, new_ids, new_names })
+}
+
+fn unsupported_primary_key_change_warning(options: &TableStructureSqlOptions, change: &PrimaryKeyChange<'_>) -> String {
+    let action = if change.old_ids.is_empty() { "Adding" } else { "Changing" };
+    format!("{action} primary keys is not supported for {} from this editor.", database_label(options.database_type))
+}
+
+pub(super) fn validate_primary_key_change_scope(options: &TableStructureSqlOptions) -> Vec<String> {
+    if let Some(original) = options
+        .columns
+        .iter()
+        .find(|column| column.marked_for_drop && was_primary_key_column(column))
+        .and_then(|column| column.original.as_ref())
+    {
+        return vec![format!("Primary key column \"{}\" cannot be dropped from this editor.", original.name)];
+    }
+
+    let Some(change) = primary_key_change(options) else { return Vec::new() };
+    let capabilities = capabilities_for(options.database_type);
+    let supported =
+        if change.old_ids.is_empty() { capabilities.add_primary_key } else { capabilities.alter_primary_key };
+    if supported {
+        Vec::new()
+    } else {
+        vec![unsupported_primary_key_change_warning(options, &change)]
+    }
+}
+
+fn mysql_auto_increment_touches_primary_key(column: &EditableStructureColumn, change: &PrimaryKeyChange<'_>) -> bool {
+    column.extra.as_ref().is_some_and(|extra| extra.auto_increment.unwrap_or(false))
+        && (change.old_ids.contains(column.id.as_str()) || change.new_ids.contains(column.id.as_str()))
+}
+
 pub(super) fn build_primary_key_sql(
     options: &TableStructureSqlOptions,
     dialect: StructureDialect,
@@ -233,35 +385,40 @@ pub(super) fn build_primary_key_sql(
 ) -> Vec<String> {
     let capabilities = capabilities_for(options.database_type);
 
-    // A draft cannot drop a primary-key column. The column pass emits the user-facing
-    // warning; keep the entire PK change empty so another checked column cannot
-    // turn that invalid draft into a partial DROP/ADD constraint change.
-    if options.columns.iter().any(|column| column.marked_for_drop && was_primary_key_column(column)) {
-        return Vec::new();
-    }
-
     // Membership by draft id (set equality): pure rename / local reorder of the same key
-    // columns is not a PK change. ADD still lists columns in table order.
-    let old_pk_ids: HashSet<&str> =
-        options.columns.iter().filter(|c| was_primary_key_column(c)).map(|c| c.id.as_str()).collect();
-    let new_pk_ids: HashSet<&str> =
-        options.columns.iter().filter(|c| appears_in_add_primary_key(c)).map(|c| c.id.as_str()).collect();
+    // columns is not a PK change. A draft that drops a PK column is also rejected here.
+    let Some(change) = primary_key_change(options) else { return Vec::new() };
 
-    if old_pk_ids == new_pk_ids {
+    let supported =
+        if change.old_ids.is_empty() { capabilities.add_primary_key } else { capabilities.alter_primary_key };
+    if !supported {
+        warnings.push(unsupported_primary_key_change_warning(options, &change));
         return Vec::new();
     }
 
-    if !capabilities.alter_primary_key {
-        warnings.push(format!(
-            "Changing primary keys is not supported for {} from this editor.",
-            database_label(options.database_type)
-        ));
-        return Vec::new();
-    }
+    let persisted_postgres_primary_key_name = if options.database_type == Some(DatabaseType::Postgres)
+        && !change.old_ids.is_empty()
+    {
+        let mut primary_indexes =
+            options.indexes.iter().filter_map(|index| index.original.as_ref().filter(|original| original.is_primary));
+        match (primary_indexes.next(), primary_indexes.next()) {
+            (Some(primary_index), None) if !primary_index.name.is_empty() => Some(primary_index.name.as_str()),
+            _ => {
+                warnings.push(
+                        "Could not determine the existing PostgreSQL primary key constraint name. Refresh the table structure and try again."
+                            .to_string(),
+                    );
+                return Vec::new();
+            }
+        }
+    } else {
+        None
+    };
 
     let mut statements = Vec::new();
-    if !old_pk_ids.is_empty() {
-        let Some(drop_sql) = drop_primary_key_statement(dialect, table, options) else {
+    if !change.old_ids.is_empty() {
+        let Some(drop_sql) = drop_primary_key_statement(dialect, table, options, persisted_postgres_primary_key_name)
+        else {
             warnings.push(format!(
                 "Changing primary keys is not supported for {} from this editor.",
                 database_label(options.database_type)
@@ -271,12 +428,13 @@ pub(super) fn build_primary_key_sql(
         statements.push(drop_sql);
     }
 
-    let new_pk_names: Vec<&str> =
-        options.columns.iter().filter(|c| appears_in_add_primary_key(c)).map(|c| c.name.as_str()).collect();
-    if !new_pk_names.is_empty() {
-        let pk_list = new_pk_names.iter().map(|n| quote_ident(dialect, n)).collect::<Vec<_>>().join(", ");
+    if !change.new_names.is_empty() {
+        let pk_list = change.new_names.iter().map(|name| quote_ident(dialect, name)).collect::<Vec<_>>().join(", ");
         // DM8: ADD [CONSTRAINT name] PRIMARY KEY; anonymous form matches Navicat/DBeaver/MySQL editors.
-        statements.push(format!("ALTER TABLE {table} ADD PRIMARY KEY ({pk_list});"));
+        let constraint = persisted_postgres_primary_key_name
+            .map(|name| format!("CONSTRAINT {} ", quote_ident(dialect, name)))
+            .unwrap_or_default();
+        statements.push(format!("ALTER TABLE {table} ADD {constraint}PRIMARY KEY ({pk_list});"));
     }
 
     statements
@@ -289,19 +447,30 @@ pub(super) fn build_primary_key_sql(
 ///   (no CASCADE — dependent FKs should not be silently removed).
 ///   System names (`CONS…`) are not stable; name-based DROP is avoided.
 ///   Cluster primary keys cannot use this path (DM8 restriction) — left to the server.
-/// - Postgres: `DROP CONSTRAINT {table}_pkey` (default naming convention)
+/// - Postgres: `DROP CONSTRAINT <persisted primary index name>` for PostgreSQL;
+///   other Postgres-compatible engines retain the existing default-name behavior.
 fn drop_primary_key_statement(
     dialect: StructureDialect,
     table: &str,
     options: &TableStructureSqlOptions,
+    persisted_postgres_primary_key_name: Option<&str>,
 ) -> Option<String> {
     match dialect {
         StructureDialect::Postgres => {
-            let raw_table = options.table_name.split('.').next_back().unwrap_or(&options.table_name);
-            let pk_name = format!("{}_pkey", clean(raw_table));
-            Some(format!("ALTER TABLE {table} DROP CONSTRAINT {};", quote_ident(dialect, &pk_name)))
+            let fallback_name;
+            let pk_name = if let Some(name) = persisted_postgres_primary_key_name {
+                name
+            } else {
+                let raw_table = options.table_name.split('.').next_back().unwrap_or(&options.table_name);
+                fallback_name = format!("{}_pkey", clean(raw_table));
+                &fallback_name
+            };
+            Some(format!("ALTER TABLE {table} DROP CONSTRAINT {};", quote_ident(dialect, pk_name)))
         }
-        StructureDialect::Mysql | StructureDialect::Dameng => Some(format!("ALTER TABLE {table} DROP PRIMARY KEY;")),
+        // 神通 Oscar 实测支持 `ALTER TABLE ... DROP PRIMARY KEY`（与 Dameng/MySQL 一致）。
+        StructureDialect::Mysql | StructureDialect::Dameng | StructureDialect::Oscar => {
+            Some(format!("ALTER TABLE {table} DROP PRIMARY KEY;"))
+        }
         _ => None,
     }
 }
@@ -362,7 +531,10 @@ pub(super) fn build_add_column_sql(
         vec![format!("ALTER TABLE {table} {add_keyword} {definition}{position_clause};")]
     };
     if supports_comments
-        && matches!(dialect, StructureDialect::Postgres | StructureDialect::Oracle | StructureDialect::Dameng)
+        && matches!(
+            dialect,
+            StructureDialect::Postgres | StructureDialect::Oracle | StructureDialect::Dameng | StructureDialect::Oscar
+        )
         && !clean(&column.comment).is_empty()
     {
         statements.push(format!(

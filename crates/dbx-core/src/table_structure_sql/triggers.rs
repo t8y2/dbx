@@ -50,12 +50,13 @@ pub(super) fn build_trigger_sql(options: &TableStructureSqlOptions, warnings: &m
             statements.push(sql);
             // SQL Server rebuilds via DROP + CREATE, which resets is_disabled to
             // enabled; restore the catalog-reported disabled state explicitly.
+            // `table` is already qualified the same way the CREATE's ON clause is.
             if dialect == StructureDialect::SqlServer
                 && trigger.original.as_ref().is_some_and(|original| original.enabled == Some(false))
             {
                 let schema = options.schema.as_deref();
-                let qualify = |name: &str| qualified_trigger_object_name(dialect, schema, name);
-                statements.push(format!("DISABLE TRIGGER {} ON {};", qualify(&trigger.name), qualify(&table)));
+                let trigger_name = qualified_trigger_object_name(dialect, schema, &trigger.name);
+                statements.push(format!("DISABLE TRIGGER {trigger_name} ON {table};"));
             }
         }
     }

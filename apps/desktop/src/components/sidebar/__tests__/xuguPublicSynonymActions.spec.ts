@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const runtimeSource = readFileSync(fileURLToPath(new URL("../SidebarTreeRuntimeHost.vue", import.meta.url)), "utf8");
+const treeItemSource = readFileSync(fileURLToPath(new URL("../TreeItem.vue", import.meta.url)), "utf8");
 
 function functionSource(name: string): string {
   const start = runtimeSource.indexOf(`function ${name}(`);
@@ -24,5 +25,10 @@ describe("Xugu public synonym actions", () => {
   it("guards both the drop request and confirmed execution", () => {
     expect(functionSource("dropSchema")).toContain("isXuguSyntheticTreeNode");
     expect(functionSource("confirmDropSchema")).toContain("isXuguSyntheticTreeNode");
+  });
+
+  it("uses a distinct link icon for the database-global synonym scope", () => {
+    expect(treeItemSource).toContain("isXuguPublicSynonymTreeNode(databaseType, node.type, node.schema)");
+    expect(treeItemSource).toContain('return { icon: Link2, colorClass: "text-sky-500" }');
   });
 });

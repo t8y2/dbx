@@ -14,8 +14,15 @@ pub async fn begin_database_backup_snapshot(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
     database: String,
+    export_id: Option<String>,
 ) -> Result<DatabaseBackupSnapshot, String> {
-    dbx_core::database_export::begin_database_backup_snapshot_core(&state, &connection_id, &database).await
+    dbx_core::database_export::begin_database_backup_snapshot_core_for_export(
+        &state,
+        &connection_id,
+        &database,
+        export_id.as_deref(),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -63,6 +70,12 @@ pub async fn export_database_sql(
 #[tauri::command]
 pub async fn cancel_database_export(export_id: String) -> Result<(), String> {
     dbx_core::database_export::set_export_cancelled(&export_id).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn clear_database_export_cancellation(export_id: String) -> Result<(), String> {
+    dbx_core::database_export::clear_export_cancelled(&export_id).await;
     Ok(())
 }
 

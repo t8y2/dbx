@@ -4449,6 +4449,8 @@ test("disconnecting a connection closes every tab for that connection", async ()
     connectionStore.addEphemeralConnection(conn("conn-2"));
     const queryId = queryStore.createTab("conn-1", "db", "draft query", "query");
     const dataId = queryStore.createTab("conn-1", "db", "users", "data", "public");
+    const objectId = queryStore.openObjectBrowser("conn-1", "db", "public");
+    const structureId = queryStore.openTableStructure("conn-1", "db", "public", "users");
     const otherConnectionId = queryStore.createTab("conn-2", "db", "users", "data", "public");
 
     queryStore.activeTabId = dataId;
@@ -4461,10 +4463,127 @@ test("disconnecting a connection closes every tab for that connection", async ()
     );
     assert.equal(queryStore.activeTabId, otherConnectionId);
     assert.equal(
-      queryStore.tabs.some((tab) => [queryId, dataId].includes(tab.id)),
+      queryStore.tabs.some((tab) => [queryId, dataId, objectId, structureId].includes(tab.id)),
       false,
     );
   } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("disconnecting a connection flushes released tabs before an immediate restore", async () => {
+  const restoreStorage = installMemoryStorage();
+  const originalFetch = globalThis.fetch;
+  vi.useFakeTimers();
+  globalThis.fetch = withConnectionHealthMock(async () => {
+    return new Response(JSON.stringify(true), { status: 200, headers: { "Content-Type": "application/json" } });
+  });
+
+  try {
+    setActivePinia(createPinia());
+    const connectionStore = useConnectionStore();
+    const queryStore = useQueryStore();
+    useSettingsStore().updateEditorSettings({ disconnectTabHandlingMode: "keep-tabs-clear-results" });
+    connectionStore.addEphemeralConnection(conn("conn-a"));
+    connectionStore.addEphemeralConnection(conn("conn-b"));
+
+    const queryId = queryStore.createTab("conn-a", "app", "query", "query");
+    const dataId = queryStore.createTab("conn-a", "app", "users", "data", "public");
+    const objectId = queryStore.openObjectBrowser("conn-a", "app", "public");
+    const structureId = queryStore.openTableStructure("conn-a", "app", "public", "users");
+    const outsideId = queryStore.createTab("conn-b", "app", "orders", "data", "public");
+    queryStore.activeTabId = dataId;
+    await queryStore.flushPendingPersist();
+
+    await connectionStore.disconnect("conn-a");
+    await nextTick();
+
+    assert.deepEqual(
+      queryStore.tabs.map((tab) => tab.id),
+      [queryId, outsideId],
+    );
+    assert.equal(queryStore.activeTabId, outsideId);
+    const persisted = JSON.parse(localStorage.getItem("dbx-app-state:open_tabs") ?? "null");
+    assert.deepEqual(
+      persisted.tabs.map((tab: { id: string }) => tab.id),
+      [queryId, outsideId],
+    );
+    assert.equal(persisted.activeTabId, outsideId);
+
+    disposePinia(getActivePinia()!);
+    setActivePinia(createPinia());
+    const restored = useQueryStore();
+    await restored.initOpenTabs({ validConnectionIds: ["conn-a", "conn-b"] });
+
+    assert.deepEqual(
+      restored.tabs.map((tab) => tab.id),
+      [queryId, outsideId],
+    );
+    assert.equal(restored.activeTabId, outsideId);
+  } finally {
+    vi.useRealTimers();
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("closing a database flushes only that database's released tabs before restore", async () => {
+  const restoreStorage = installMemoryStorage();
+  const originalFetch = globalThis.fetch;
+  vi.useFakeTimers();
+  globalThis.fetch = withConnectionHealthMock(async () => {
+    return new Response(JSON.stringify(true), { status: 200, headers: { "Content-Type": "application/json" } });
+  });
+
+  try {
+    setActivePinia(createPinia());
+    const connectionStore = useConnectionStore();
+    const queryStore = useQueryStore();
+    useSettingsStore().updateEditorSettings({ disconnectTabHandlingMode: "keep-tabs-clear-results" });
+    connectionStore.addEphemeralConnection(conn("conn-a"));
+    connectionStore.addEphemeralConnection(conn("conn-b"));
+
+    const queryId = queryStore.createTab("conn-a", "app", "query", "query");
+    const dataId = queryStore.createTab("conn-a", "app", "users", "data", "public");
+    const objectId = queryStore.openObjectBrowser("conn-a", "app", "public");
+    const structureId = queryStore.openTableStructure("conn-a", "app", "public", "users");
+    const otherDatabaseId = queryStore.createTab("conn-a", "analytics", "orders", "data", "public");
+    const outsideId = queryStore.createTab("conn-b", "app", "orders", "data", "public");
+    queryStore.activeTabId = dataId;
+    await queryStore.flushPendingPersist();
+
+    await connectionStore.closeDatabaseConnection("conn-a", "app");
+    await nextTick();
+
+    assert.deepEqual(
+      queryStore.tabs.map((tab) => tab.id),
+      [queryId, otherDatabaseId, outsideId],
+    );
+    assert.equal(queryStore.activeTabId, otherDatabaseId);
+    const persisted = JSON.parse(localStorage.getItem("dbx-app-state:open_tabs") ?? "null");
+    assert.deepEqual(
+      persisted.tabs.map((tab: { id: string }) => tab.id),
+      [queryId, otherDatabaseId, outsideId],
+    );
+    assert.equal(persisted.activeTabId, otherDatabaseId);
+
+    disposePinia(getActivePinia()!);
+    setActivePinia(createPinia());
+    const restored = useQueryStore();
+    await restored.initOpenTabs({ validConnectionIds: ["conn-a", "conn-b"] });
+
+    assert.deepEqual(
+      restored.tabs.map((tab) => tab.id),
+      [queryId, otherDatabaseId, outsideId],
+    );
+    assert.equal(restored.activeTabId, otherDatabaseId);
+    assert.equal(
+      restored.tabs.some((tab) => [dataId, objectId, structureId].includes(tab.id)),
+      false,
+    );
+  } finally {
+    vi.useRealTimers();
     globalThis.fetch = originalFetch;
     restoreStorage();
   }

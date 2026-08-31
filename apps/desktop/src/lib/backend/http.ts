@@ -2376,7 +2376,7 @@ export async function releaseTableImportSource(sourceRef: string): Promise<boole
 // Database Export
 // ---------------------------------------------------------------------------
 
-export async function beginDatabaseBackupSnapshot(_connectionId: string, _database: string): Promise<DatabaseBackupSnapshot> {
+export async function beginDatabaseBackupSnapshot(_connectionId: string, _database: string, _exportId?: string): Promise<DatabaseBackupSnapshot> {
   throw new Error("Consistent database backup snapshots are only available in the desktop app.");
 }
 
@@ -2420,6 +2420,10 @@ function downloadDatabaseExportFile(exportId: string): void {
 
 export async function cancelDatabaseExport(exportId: string): Promise<void> {
   await post("/api/export/database/cancel", { exportId });
+}
+
+export async function clearDatabaseExportCancellation(_exportId: string): Promise<void> {
+  // The web exporter owns and clears its cancellation marker on completion.
 }
 
 export async function recordDatabaseExportDestination(_directory: string): Promise<void> {

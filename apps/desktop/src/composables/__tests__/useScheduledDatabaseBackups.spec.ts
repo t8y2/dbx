@@ -8,12 +8,15 @@ const mocks = vi.hoisted(() => ({
   rollbackSnapshot: vi.fn(async () => {}),
   deleteFiles: vi.fn(async () => 0),
   cancelExport: vi.fn(async () => {}),
+  clearExportCancellation: vi.fn(async () => {}),
   exportDatabase: vi.fn(),
   runDatabaseExport: vi.fn(),
   addTask: vi.fn(),
   registerCancel: vi.fn(),
   unregisterCancel: vi.fn(),
   updateTask: vi.fn(),
+  markTaskCancelling: vi.fn(),
+  restoreTaskRunning: vi.fn(),
   nextId: 0,
 }));
 
@@ -23,6 +26,7 @@ vi.mock("@/lib/backend/api", () => ({
   rollbackManualTransaction: mocks.rollbackSnapshot,
   deleteDatabaseBackupFiles: mocks.deleteFiles,
   cancelDatabaseExport: mocks.cancelExport,
+  clearDatabaseExportCancellation: mocks.clearExportCancellation,
 }));
 
 vi.mock("@/lib/export/databaseExport", () => ({
@@ -45,6 +49,8 @@ vi.mock("@/composables/useExportTracker", () => ({
     registerTaskCancelHandler: mocks.registerCancel,
     unregisterTaskCancelHandler: mocks.unregisterCancel,
     updateDatabaseExportTask: mocks.updateTask,
+    markDatabaseExportTaskCancelling: mocks.markTaskCancelling,
+    restoreDatabaseExportTaskRunning: mocks.restoreTaskRunning,
   }),
 }));
 
@@ -60,6 +66,7 @@ const config: DatabaseBackupExecutionConfig = {
   includeData: true,
   includeObjects: true,
   dropTableIfExists: false,
+  outputCompression: "none",
 };
 
 describe("useScheduledDatabaseBackups one-shot execution", () => {
@@ -126,12 +133,72 @@ describe("useScheduledDatabaseBackups one-shot execution", () => {
     expect(activeRunId).toBeTruthy();
 
     await backup.cancelRun(activeRunId!);
+    expect(mocks.cancelExport).toHaveBeenCalledWith(activeRunId);
     expect(mocks.cancelExport).toHaveBeenCalledWith(`${activeRunId}-1`);
+    expect(mocks.markTaskCancelling).toHaveBeenCalledWith(activeRunId);
+    expect(backup.cancellingRunIds.has(activeRunId!)).toBe(true);
+    await backup.cancelRun(activeRunId!);
+    expect(mocks.cancelExport).toHaveBeenCalledTimes(2);
     resolveExport({ status: "Cancelled", objectIndex: 0, totalObjects: 1, currentObject: "app" });
 
     const finishedRun = await pendingRun;
     expect(finishedRun).toEqual(expect.objectContaining({ status: "cancelled", source: "one-shot", files: [] }));
     expect(mocks.deleteFiles).toHaveBeenCalledWith([expect.stringContaining(activeRunId!)]);
     expect(backup.runs.value.find((run) => run.id === activeRunId)).toEqual(expect.objectContaining({ status: "cancelled", files: [] }));
+    expect(backup.cancellingRunIds.has(activeRunId!)).toBe(false);
+  });
+
+  it("stops after cancelling during database discovery without creating a snapshot", async () => {
+    mocks.beginSnapshot.mockClear();
+    mocks.cancelExport.mockClear();
+    let resolveDatabases!: (databases: Array<{ name: string }>) => void;
+    mocks.listDatabases.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveDatabases = resolve;
+        }),
+    );
+
+    const backup = useScheduledDatabaseBackups();
+    const pendingRun = backup.runOneShot(config, "One-time backup");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const activeRunId = [...backup.activeRunIds][0];
+    expect(activeRunId).toBeTruthy();
+
+    await backup.cancelRun(activeRunId!);
+    expect(mocks.cancelExport).toHaveBeenCalledWith(activeRunId);
+    resolveDatabases([{ name: "app" }]);
+
+    const finishedRun = await pendingRun;
+    expect(finishedRun).toEqual(expect.objectContaining({ status: "cancelled", files: [] }));
+    expect(mocks.beginSnapshot).not.toHaveBeenCalled();
+  });
+
+  it("signals the backup run while snapshot creation is pending", async () => {
+    mocks.beginSnapshot.mockClear();
+    mocks.cancelExport.mockClear();
+    let resolveSnapshot!: (snapshot: { sessionId: string }) => void;
+    mocks.beginSnapshot.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveSnapshot = resolve;
+        }),
+    );
+
+    const backup = useScheduledDatabaseBackups();
+    const pendingRun = backup.runOneShot(config, "One-time backup");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const activeRunId = [...backup.activeRunIds][0];
+    expect(activeRunId).toBeTruthy();
+    expect(mocks.beginSnapshot).toHaveBeenCalledWith("mysql-1", "app", activeRunId);
+
+    await backup.cancelRun(activeRunId!);
+    expect(mocks.cancelExport).toHaveBeenCalledWith(activeRunId);
+    resolveSnapshot({ sessionId: "snapshot-pending" });
+
+    const finishedRun = await pendingRun;
+    expect(finishedRun).toEqual(expect.objectContaining({ status: "cancelled", files: [] }));
+    expect(mocks.rollbackSnapshot).toHaveBeenCalledWith("snapshot-pending");
+    expect(mocks.clearExportCancellation).toHaveBeenCalledWith(activeRunId);
   });
 });

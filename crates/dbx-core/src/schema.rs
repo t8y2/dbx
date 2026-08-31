@@ -7443,23 +7443,12 @@ pub async fn get_table_ddl_core(
         table,
         object_type,
         TableDdlOptions::SINGLE_RELATION,
+        None,
     )
     .await
 }
 
 pub async fn get_table_export_ddl_core(
-    state: &AppState,
-    connection_id: &str,
-    database: &str,
-    schema: &str,
-    table: &str,
-    object_type: Option<db::ObjectSourceKind>,
-) -> Result<String, String> {
-    get_table_ddl_core_with_options(state, connection_id, database, schema, table, object_type, TableDdlOptions::EXPORT)
-        .await
-}
-
-pub(crate) async fn get_table_relation_export_ddl_core(
     state: &AppState,
     connection_id: &str,
     database: &str,
@@ -7474,7 +7463,30 @@ pub(crate) async fn get_table_relation_export_ddl_core(
         schema,
         table,
         object_type,
+        TableDdlOptions::EXPORT,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn get_table_relation_export_ddl_core_for_session(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+    object_type: Option<db::ObjectSourceKind>,
+    client_session_id: Option<&str>,
+) -> Result<String, String> {
+    get_table_ddl_core_with_options(
+        state,
+        connection_id,
+        database,
+        schema,
+        table,
+        object_type,
         TableDdlOptions::RELATION_EXPORT,
+        client_session_id,
     )
     .await
 }
@@ -7495,6 +7507,7 @@ pub async fn get_table_display_ddl_core(
         table,
         object_type,
         TableDdlOptions::DISPLAY,
+        None,
     )
     .await
 }
@@ -7507,6 +7520,7 @@ async fn get_table_ddl_core_with_options(
     table: &str,
     object_type: Option<db::ObjectSourceKind>,
     options: TableDdlOptions,
+    client_session_id: Option<&str>,
 ) -> Result<String, String> {
     if crate::sql_dialect::parse_sqlserver_linked_schema_ref(schema).is_some() {
         return Err("DDL is not supported for SQL Server linked server tables".to_string());
@@ -7551,8 +7565,8 @@ async fn get_table_ddl_core_with_options(
         return Ok(source.source);
     }
 
-    retry_metadata_connection(state, connection_id, Some(database), || {
-        get_table_ddl_once(state, connection_id, database, schema, table, options)
+    retry_metadata_connection_for_session(state, connection_id, Some(database), client_session_id, || {
+        get_table_ddl_once(state, connection_id, database, schema, table, options, client_session_id)
     })
     .await
 }
@@ -7579,8 +7593,10 @@ async fn get_table_ddl_once(
     schema: &str,
     table: &str,
     options: TableDdlOptions,
+    client_session_id: Option<&str>,
 ) -> Result<String, String> {
-    let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
+    let pool_key =
+        state.get_or_create_metadata_pool_for_session(connection_id, Some(database), client_session_id).await?;
     let db_config = connection_config(state, connection_id).await;
 
     {

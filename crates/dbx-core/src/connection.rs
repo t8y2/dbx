@@ -193,7 +193,9 @@ enum ConnectionDatabaseInfoSource {
 /// Held connection for a manual transaction session
 pub enum TxnConnection {
     Postgres(Box<deadpool_postgres::Object>),
-    Mysql(mysql_async::Conn),
+    /// A dedicated MySQL connection. Cancellation may consume and discard this
+    /// connection instead of trying to reuse it after an interrupted result set.
+    Mysql(Option<mysql_async::Conn>),
     /// Dedicated agent multi_session workload client with an open sticky TX.
     Agent {
         client: Arc<db::agent_driver::PooledAgentClient>,

@@ -1,14 +1,15 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from "vue";
+import { computed, reactive, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { ChevronDown, ChevronRight, DatabaseBackup, FolderOpen, Loader2, Pencil, Play, Plus, RotateCcw, Square, Trash2 } from "@lucide/vue";
+import { Check, ChevronDown, ChevronRight, DatabaseBackup, FolderOpen, Loader2, Pencil, Play, Plus, RotateCcw, Search, Square, Trash2 } from "@lucide/vue";
 import * as api from "@/lib/backend/api";
 import { useScheduledDatabaseBackups } from "@/composables/useScheduledDatabaseBackups";
 import DatabaseBackupConfigFields from "@/components/backup/DatabaseBackupConfigFields.vue";
@@ -22,7 +23,7 @@ import { fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOpt
 const { t, locale } = useI18n();
 const { toast } = useToast();
 const connectionStore = useConnectionStore();
-const { schedules, runs, activeScheduleIds, activeRunIds, activeRuns, saveSchedule, setScheduleEnabled, deleteSchedule, deleteRun, renameRun, runSchedule, runOneShot, cancelRun } = useScheduledDatabaseBackups();
+const { schedules, runs, activeScheduleIds, activeRunIds, cancellingRunIds, activeRuns, saveSchedule, setScheduleEnabled, deleteSchedule, deleteRun, renameRun, runSchedule, runOneShot, cancelRun } = useScheduledDatabaseBackups();
 
 const scheduleDialogOpen = ref(false);
 const oneShotDialogOpen = ref(false);
@@ -42,10 +43,35 @@ const allDatabases = ref(true);
 const selectedDatabases = ref<string[]>([]);
 const tablePatternsInput = ref("");
 const expandedRunIds = reactive(new Set<string>());
+const historyConnectionId = ref("");
+const historyConnectionPickerOpen = ref(false);
+const historyConnectionSearch = ref("");
+const historyBackupMethod = ref<"all" | "manual" | "scheduled" | "one-shot">("all");
+const historyStatus = ref<"all" | DatabaseBackupRun["status"]>("all");
 
 const sqlConnections = computed(() => connectionStore.connections.filter((connection) => supportsScheduledDatabaseBackup(connection.db_type)));
 const canCreateSchedule = computed(() => sqlConnections.value.length > 0);
 const sortedRuns = computed(() => [...runs.value].sort((left, right) => Date.parse(right.startedAt) - Date.parse(left.startedAt)));
+const historyConnections = computed(() => {
+  const connectionById = new Map<string, string>();
+  for (const run of sortedRuns.value) {
+    if (!connectionById.has(run.connectionId)) connectionById.set(run.connectionId, run.connectionName || connectionName(run.connectionId));
+  }
+  return [...connectionById].map(([id, name]) => ({ id, name })).sort((left, right) => left.name.localeCompare(right.name, locale.value));
+});
+const filteredHistoryConnections = computed(() => {
+  const query = historyConnectionSearch.value.trim().toLocaleLowerCase();
+  if (!query) return historyConnections.value;
+  return historyConnections.value.filter((connection) => connection.name.toLocaleLowerCase().includes(query));
+});
+const filteredRuns = computed(() =>
+  sortedRuns.value.filter((run) => {
+    if (historyConnectionId.value && run.connectionId !== historyConnectionId.value) return false;
+    if (historyBackupMethod.value !== "all" && historyBackupMethod.value !== runBackupMethod(run)) return false;
+    return historyStatus.value === "all" || historyStatus.value === run.status;
+  }),
+);
+const selectedHistoryConnectionName = computed(() => historyConnections.value.find((connection) => connection.id === historyConnectionId.value)?.name || t("databaseBackup.allConnections"));
 const weekdays = computed(() => [
   { value: 0, label: t("databaseBackup.weekdays.sunday") },
   { value: 1, label: t("databaseBackup.weekdays.monday") },
@@ -55,6 +81,10 @@ const weekdays = computed(() => [
   { value: 5, label: t("databaseBackup.weekdays.friday") },
   { value: 6, label: t("databaseBackup.weekdays.saturday") },
 ]);
+
+watch(historyConnectionPickerOpen, (open) => {
+  if (!open) historyConnectionSearch.value = "";
+});
 
 function newBackupConfig(connectionId = sqlConnections.value[0]?.id ?? ""): DatabaseBackupExecutionConfig {
   return {
@@ -67,6 +97,7 @@ function newBackupConfig(connectionId = sqlConnections.value[0]?.id ?? ""): Data
     includeData: true,
     includeObjects: true,
     dropTableIfExists: false,
+    outputCompression: "none",
   };
 }
 
@@ -121,6 +152,17 @@ function connectionName(connectionId: string): string {
   return connectionStore.getConfig(connectionId)?.name || t("databaseBackup.missingConnection");
 }
 
+function selectHistoryConnection(connectionId: string) {
+  historyConnectionId.value = connectionId;
+  historyConnectionPickerOpen.value = false;
+  historyConnectionSearch.value = "";
+}
+
+function runBackupMethod(run: DatabaseBackupRun): "manual" | "scheduled" | "one-shot" {
+  if (run.source === "one-shot") return "one-shot";
+  return run.trigger;
+}
+
 function formatDate(value?: string): string {
   if (!value || !Number.isFinite(Date.parse(value))) return t("databaseBackup.never");
   return new Intl.DateTimeFormat(locale.value, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
@@ -151,6 +193,10 @@ function runStatusLabel(status: DatabaseBackupRun["status"]): string {
   return t(`databaseBackup.status.${status}`);
 }
 
+function displayedRunStatusLabel(run: DatabaseBackupRun): string {
+  return cancellingRunIds.has(run.id) ? t("databaseBackup.cancelling") : runStatusLabel(run.status);
+}
+
 function runStatusVariant(status: DatabaseBackupRun["status"]): "default" | "secondary" | "destructive" | "outline" {
   if (status === "success") return "default";
   if (status === "failed") return "destructive";
@@ -160,6 +206,15 @@ function runStatusVariant(status: DatabaseBackupRun["status"]): "default" | "sec
 
 function activeRunForSchedule(scheduleId: string): DatabaseBackupRun | undefined {
   return activeRuns.value.find((run) => run.scheduleId === scheduleId);
+}
+
+function scheduleCancellationRequested(scheduleId: string): boolean {
+  const run = activeRunForSchedule(scheduleId);
+  return !!run && cancellingRunIds.has(run.id);
+}
+
+function oneShotCancellationRequested(): boolean {
+  return !!activeOneShotRun.value && cancellingRunIds.has(activeOneShotRun.value.id);
 }
 
 async function loadDatabases(dialog: BackupDialogKind, targetDraft: DatabaseBackupExecutionConfig, preserveSelection: boolean) {
@@ -295,7 +350,11 @@ async function startOneShotBackup() {
 
 async function cancelActiveOneShotBackup() {
   const run = activeOneShotRun.value;
-  if (run) await cancelRun(run.id);
+  if (run && (await cancelRun(run.id))) toast(t("databaseBackup.cancelRequested"), 2500);
+}
+
+async function requestCancelRun(runId: string) {
+  if (await cancelRun(runId)) toast(t("databaseBackup.cancelRequested"), 2500);
 }
 
 async function runNow(schedule: DatabaseBackupSchedule) {
@@ -418,7 +477,7 @@ function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
           <div class="flex min-w-0 flex-wrap items-center gap-2">
             <span class="truncate text-sm font-medium">{{ schedule.name }}</span>
             <Badge variant="outline" class="font-normal">{{ connectionName(schedule.connectionId) }}</Badge>
-            <Badge v-if="activeScheduleIds.has(schedule.id)" variant="secondary" class="font-normal">{{ t("databaseBackup.status.running") }}</Badge>
+            <Badge v-if="activeScheduleIds.has(schedule.id)" variant="secondary" class="font-normal">{{ scheduleCancellationRequested(schedule.id) ? t("databaseBackup.cancelling") : t("databaseBackup.status.running") }}</Badge>
           </div>
           <div class="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
             <span>{{ frequencyLabel(schedule) }}</span>
@@ -430,8 +489,17 @@ function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
         </div>
         <div class="flex items-center justify-end gap-1">
           <Switch :model-value="schedule.enabled" :disabled="activeScheduleIds.has(schedule.id)" :title="schedule.enabled ? t('databaseBackup.disable') : t('databaseBackup.enable')" @update:model-value="(value: boolean) => setScheduleEnabled(schedule.id, value)" />
-          <Button v-if="activeRunForSchedule(schedule.id)" variant="ghost" size="icon" class="h-8 w-8" :title="t('databaseBackup.cancel')" @click="cancelRun(activeRunForSchedule(schedule.id)!.id)">
-            <Square class="h-4 w-4" />
+          <Button
+            v-if="activeRunForSchedule(schedule.id)"
+            variant="ghost"
+            size="icon"
+            class="h-8 w-8"
+            :disabled="scheduleCancellationRequested(schedule.id)"
+            :title="scheduleCancellationRequested(schedule.id) ? t('databaseBackup.cancelling') : t('databaseBackup.cancel')"
+            @click="requestCancelRun(activeRunForSchedule(schedule.id)!.id)"
+          >
+            <Loader2 v-if="scheduleCancellationRequested(schedule.id)" class="h-4 w-4 animate-spin" />
+            <Square v-else class="h-4 w-4" />
           </Button>
           <Button v-else variant="ghost" size="icon" class="h-8 w-8" :title="t('databaseBackup.runNow')" @click="runNow(schedule)">
             <Play class="h-4 w-4" />
@@ -447,10 +515,64 @@ function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
     </div>
 
     <div class="flex flex-col gap-3">
-      <h3 class="text-base font-semibold">{{ t("databaseBackup.history") }}</h3>
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <h3 class="text-base font-semibold">{{ t("databaseBackup.history") }}</h3>
+        <div class="flex flex-wrap items-center justify-end gap-2">
+          <Popover v-model:open="historyConnectionPickerOpen">
+            <PopoverTrigger as-child>
+              <Button data-backup-history-connection-picker type="button" variant="outline" role="combobox" :aria-expanded="historyConnectionPickerOpen" class="min-w-52 justify-between font-normal">
+                <span class="truncate">{{ selectedHistoryConnectionName }}</span>
+                <ChevronDown class="ml-2 h-4 w-4 shrink-0 opacity-50" />
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent align="end" class="w-[var(--reka-popover-trigger-width)] p-1">
+              <div class="relative">
+                <Search class="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <Input v-model="historyConnectionSearch" data-backup-history-connection-search class="h-9 pl-8" :aria-label="t('databaseBackup.searchHistoryConnections')" :placeholder="t('databaseBackup.searchHistoryConnections')" />
+              </div>
+              <div class="max-h-60 overflow-y-auto py-1">
+                <button type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none" @click="selectHistoryConnection('')">
+                  <Check class="h-4 w-4 shrink-0" :class="historyConnectionId ? 'opacity-0' : 'opacity-100'" />
+                  <span class="min-w-0 flex-1 truncate">{{ t("databaseBackup.allConnections") }}</span>
+                </button>
+                <button
+                  v-for="connection in filteredHistoryConnections"
+                  :key="connection.id"
+                  type="button"
+                  class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none"
+                  @click="selectHistoryConnection(connection.id)"
+                >
+                  <Check class="h-4 w-4 shrink-0" :class="connection.id === historyConnectionId ? 'opacity-100' : 'opacity-0'" />
+                  <span class="min-w-0 flex-1 truncate">{{ connection.name }}</span>
+                </button>
+                <div v-if="filteredHistoryConnections.length === 0" class="px-2 py-2 text-sm text-muted-foreground">{{ t("databaseBackup.noMatchingConnections") }}</div>
+              </div>
+            </PopoverContent>
+          </Popover>
+          <Select v-model="historyBackupMethod">
+            <SelectTrigger class="w-36" :aria-label="t('databaseBackup.backupMethod')"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">{{ t("databaseBackup.allBackupMethods") }}</SelectItem>
+              <SelectItem value="manual">{{ t("databaseBackup.manualTrigger") }}</SelectItem>
+              <SelectItem value="scheduled">{{ t("databaseBackup.scheduledTrigger") }}</SelectItem>
+              <SelectItem value="one-shot">{{ t("databaseBackup.oneShotTrigger") }}</SelectItem>
+            </SelectContent>
+          </Select>
+          <Select v-model="historyStatus">
+            <SelectTrigger class="w-32" :aria-label="t('databaseBackup.backupStatus')"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">{{ t("databaseBackup.allStatuses") }}</SelectItem>
+              <SelectItem value="running">{{ t("databaseBackup.status.running") }}</SelectItem>
+              <SelectItem value="success">{{ t("databaseBackup.status.success") }}</SelectItem>
+              <SelectItem value="failed">{{ t("databaseBackup.status.failed") }}</SelectItem>
+              <SelectItem value="cancelled">{{ t("databaseBackup.status.cancelled") }}</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
       <div class="overflow-hidden rounded-md border border-border/70">
-        <div v-if="sortedRuns.length === 0" class="px-4 py-8 text-center text-sm text-muted-foreground">{{ t("databaseBackup.noHistory") }}</div>
-        <template v-for="run in sortedRuns" :key="run.id">
+        <div v-if="filteredRuns.length === 0" class="px-4 py-8 text-center text-sm text-muted-foreground">{{ historyConnectionId || historyBackupMethod !== "all" || historyStatus !== "all" ? t("databaseBackup.noFilteredHistory") : t("databaseBackup.noHistory") }}</div>
+        <template v-for="run in filteredRuns" :key="run.id">
           <div class="grid gap-2 border-b border-border/70 px-3 py-3 last:border-b-0 md:grid-cols-[auto_minmax(0,1fr)_auto] md:items-center">
             <Button variant="ghost" size="icon" class="h-7 w-7" :disabled="run.files.length === 0" :title="t('databaseBackup.showFiles')" @click="toggleRunExpanded(run.id)">
               <ChevronDown v-if="expandedRunIds.has(run.id)" class="h-4 w-4" />
@@ -459,7 +581,7 @@ function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
             <div class="min-w-0">
               <div class="flex min-w-0 flex-wrap items-center gap-2">
                 <span class="truncate text-sm font-medium">{{ run.displayName || run.scheduleName }}</span>
-                <Badge :variant="runStatusVariant(run.status)" class="font-normal">{{ runStatusLabel(run.status) }}</Badge>
+                <Badge :variant="runStatusVariant(run.status)" class="font-normal">{{ displayedRunStatusLabel(run) }}</Badge>
                 <Badge variant="outline" class="font-normal">{{ run.source === "one-shot" ? t("databaseBackup.oneShotTrigger") : run.trigger === "scheduled" ? t("databaseBackup.scheduledTrigger") : t("databaseBackup.manualTrigger") }}</Badge>
               </div>
               <div class="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
@@ -476,8 +598,17 @@ function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
               </div>
             </div>
             <div class="flex items-center justify-end gap-1">
-              <Button v-if="activeRunIds.has(run.id) && run.source === 'one-shot'" variant="ghost" size="icon" class="h-8 w-8" :title="t('databaseBackup.cancel')" @click="cancelRun(run.id)">
-                <Square class="h-4 w-4" />
+              <Button
+                v-if="activeRunIds.has(run.id) && run.source === 'one-shot'"
+                variant="ghost"
+                size="icon"
+                class="h-8 w-8"
+                :disabled="cancellingRunIds.has(run.id)"
+                :title="cancellingRunIds.has(run.id) ? t('databaseBackup.cancelling') : t('databaseBackup.cancel')"
+                @click="requestCancelRun(run.id)"
+              >
+                <Loader2 v-if="cancellingRunIds.has(run.id)" class="h-4 w-4 animate-spin" />
+                <Square v-else class="h-4 w-4" />
               </Button>
               <Loader2 v-else-if="activeRunIds.has(run.id)" class="mr-2 h-4 w-4 animate-spin text-primary" />
               <Button variant="ghost" size="icon" class="h-8 w-8" :disabled="activeRunIds.has(run.id)" :title="t('databaseBackup.renameBackup')" @click="requestRenameRun(run)">
@@ -619,9 +750,10 @@ function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
 
       <DialogFooter>
         <Button variant="outline" @click="oneShotDialogOpen = false">{{ oneShotStarting ? t("common.close") : t("common.cancel") }}</Button>
-        <Button v-if="oneShotStarting" variant="destructive" :disabled="!activeOneShotRun" :title="t('databaseBackup.cancel')" @click="cancelActiveOneShotBackup">
-          <Square class="mr-2 h-4 w-4" />
-          {{ t("databaseBackup.cancel") }}
+        <Button v-if="oneShotStarting" variant="destructive" :disabled="!activeOneShotRun || oneShotCancellationRequested()" :title="oneShotCancellationRequested() ? t('databaseBackup.cancelling') : t('databaseBackup.cancel')" @click="cancelActiveOneShotBackup">
+          <Loader2 v-if="oneShotCancellationRequested()" class="mr-2 h-4 w-4 animate-spin" />
+          <Square v-else class="mr-2 h-4 w-4" />
+          {{ oneShotCancellationRequested() ? t("databaseBackup.cancelling") : t("databaseBackup.cancel") }}
         </Button>
         <Button v-else :disabled="!canStartOneShot" @click="startOneShotBackup">
           {{ t("databaseBackup.startBackup") }}

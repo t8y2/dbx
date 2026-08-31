@@ -1,4 +1,6 @@
+use std::io::Read as StdRead;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, BufReader};
@@ -535,10 +537,66 @@ pub async fn read_sql_file_preview(file_path: &Path, max_chars: usize) -> Result
 }
 
 struct SqlFileStreamDecoder {
-    reader: BufReader<tokio::fs::File>,
+    reader: SqlFileByteReader,
     decoder: encoding_rs::Decoder,
     pending_bytes: Vec<u8>,
     reached_eof: bool,
+}
+
+enum SqlFileByteReader {
+    Plain(BufReader<tokio::fs::File>),
+    Gzip(Arc<Mutex<flate2::read::GzDecoder<std::io::BufReader<std::fs::File>>>>),
+}
+
+impl SqlFileByteReader {
+    async fn open(file_path: &Path) -> Result<Self, String> {
+        if is_gzip_sql_file_path(file_path) {
+            let path = file_path.to_path_buf();
+            let reader = tokio::task::spawn_blocking(move || {
+                let file = std::fs::File::open(&path).map_err(|error| error.to_string())?;
+                Ok::<_, String>(flate2::read::GzDecoder::new(std::io::BufReader::new(file)))
+            })
+            .await
+            .map_err(|error| format!("Failed to open compressed SQL file: {error}"))??;
+            return Ok(Self::Gzip(Arc::new(Mutex::new(reader))));
+        }
+
+        let file = tokio::fs::File::open(file_path).await.map_err(|error| error.to_string())?;
+        Ok(Self::Plain(BufReader::with_capacity(SQL_FILE_READ_CHUNK_BYTES, file)))
+    }
+
+    async fn read(&mut self, buffer: &mut [u8]) -> Result<usize, String> {
+        match self {
+            Self::Plain(reader) => reader.read(buffer).await.map_err(|error| error.to_string()),
+            Self::Gzip(reader) => {
+                let reader = reader.clone();
+                let capacity = buffer.len();
+                let (chunk, read) = tokio::task::spawn_blocking(move || {
+                    let mut chunk = vec![0; capacity];
+                    let mut reader =
+                        reader.lock().map_err(|_| "Compressed SQL reader lock was poisoned".to_string())?;
+                    let read =
+                        reader.read(&mut chunk).map_err(|error| format!("Failed to decompress SQL file: {error}"))?;
+                    Ok::<_, String>((chunk, read))
+                })
+                .await
+                .map_err(|error| format!("Failed to read compressed SQL file: {error}"))??;
+                buffer[..read].copy_from_slice(&chunk[..read]);
+                Ok(read)
+            }
+        }
+    }
+}
+
+fn is_gzip_sql_file_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("gz"))
+        && path
+            .file_stem()
+            .and_then(|stem| Path::new(stem).extension())
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("sql"))
 }
 
 impl SqlFileStreamDecoder {
@@ -548,18 +606,13 @@ impl SqlFileStreamDecoder {
 
     async fn open_with_detection_limit(file_path: &Path, detection_limit: Option<usize>) -> Result<Self, String> {
         let (encoding, bom_len) = detect_sql_file_encoding(file_path, detection_limit).await?;
-        let mut file = tokio::fs::File::open(file_path).await.map_err(|error| error.to_string())?;
+        let mut reader = SqlFileByteReader::open(file_path).await?;
         let mut prefix = [0u8; 3];
-        let prefix_len = file.read(&mut prefix).await.map_err(|error| error.to_string())?;
+        let prefix_len = reader.read(&mut prefix).await?;
         let prefix = &prefix[..prefix_len];
         let mut pending_bytes = prefix[bom_len..].to_vec();
         pending_bytes.reserve(SQL_FILE_READ_CHUNK_BYTES);
-        Ok(Self {
-            reader: BufReader::with_capacity(SQL_FILE_READ_CHUNK_BYTES, file),
-            decoder: encoding.new_decoder_without_bom_handling(),
-            pending_bytes,
-            reached_eof: false,
-        })
+        Ok(Self { reader, decoder: encoding.new_decoder_without_bom_handling(), pending_bytes, reached_eof: false })
     }
 
     async fn next_chunk(&mut self) -> Result<Option<String>, String> {
@@ -568,7 +621,7 @@ impl SqlFileStreamDecoder {
         }
         while !self.reached_eof && self.pending_bytes.len() < SQL_FILE_READ_CHUNK_BYTES {
             let mut buffer = vec![0u8; SQL_FILE_READ_CHUNK_BYTES - self.pending_bytes.len()];
-            let read = self.reader.read(&mut buffer).await.map_err(|error| error.to_string())?;
+            let read = self.reader.read(&mut buffer).await?;
             if read == 0 {
                 self.reached_eof = true;
                 break;
@@ -596,7 +649,7 @@ async fn detect_sql_file_encoding(
     file_path: &Path,
     detection_limit: Option<usize>,
 ) -> Result<(&'static encoding_rs::Encoding, usize), String> {
-    let mut file = tokio::fs::File::open(file_path).await.map_err(|error| error.to_string())?;
+    let mut file = SqlFileByteReader::open(file_path).await?;
     let mut prefix = [0u8; 3];
     let prefix_len = file.read(&mut prefix).await.map_err(|error| error.to_string())?;
     let prefix = &prefix[..prefix_len];
@@ -623,7 +676,7 @@ async fn detect_sql_file_encoding(
             let remaining =
                 detection_limit.map(|limit| limit.saturating_sub(inspected_bytes)).unwrap_or(SQL_FILE_READ_CHUNK_BYTES);
             let mut buffer = vec![0u8; SQL_FILE_READ_CHUNK_BYTES.min(remaining.max(1))];
-            let read = file.read(&mut buffer).await.map_err(|error| error.to_string())?;
+            let read = file.read(&mut buffer).await?;
             if read == 0 {
                 reached_eof = true;
             } else {
@@ -1512,6 +1565,27 @@ mod tests {
         path
     }
 
+    async fn temporary_gzip_sql_file(bytes: &[u8]) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "dbx-sql-file-{}-{}.sql.gz",
+            std::process::id(),
+            TEMP_SQL_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let bytes = bytes.to_vec();
+        let output = path.clone();
+        tokio::task::spawn_blocking(move || {
+            use std::io::Write;
+
+            let file = std::fs::File::create(&output).unwrap();
+            let mut writer = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+            writer.write_all(&bytes).unwrap();
+            writer.finish().unwrap();
+        })
+        .await
+        .unwrap();
+        path
+    }
+
     fn test_progress(status: SqlFileStatus, statement_index: usize) -> SqlFileProgress {
         SqlFileProgress {
             execution_id: "test-execution".to_string(),
@@ -1705,6 +1779,19 @@ mod tests {
         tokio::fs::remove_file(path).await.unwrap();
 
         assert_eq!(decoded, "SELECT '中文';");
+    }
+
+    #[tokio::test]
+    async fn streaming_decoder_reads_gzip_sql_files() {
+        let path = temporary_gzip_sql_file(b"SELECT 'compressed';\n").await;
+        let mut decoder = SqlFileStreamDecoder::open(&path).await.unwrap();
+        let mut decoded = String::new();
+        while let Some(chunk) = decoder.next_chunk().await.unwrap() {
+            decoded.push_str(&chunk);
+        }
+        tokio::fs::remove_file(path).await.unwrap();
+
+        assert_eq!(decoded, "SELECT 'compressed';\n");
     }
 
     #[test]

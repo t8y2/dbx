@@ -4750,7 +4750,7 @@ async fn begin_transaction_session(
             if !syntax_errors.is_empty() {
                 return Err(format!("START TRANSACTION failed for all compatible forms: {}", syntax_errors.join("; ")));
             }
-            (TxnConnection::Mysql(conn), probe_pool_key.clone())
+            (TxnConnection::Mysql(Some(conn)), probe_pool_key.clone())
         }
         TxnPoolHandle::Agent => {
             let client_session_id = format!("manual-txn-{}", uuid::Uuid::new_v4());
@@ -5072,7 +5072,14 @@ pub async fn execute_in_manual_transaction_with_options(
             TxnConnection::Postgres(conn) => {
                 execute_manual_txn_postgres_statement(conn.as_ref(), statement, row_limit).await
             }
-            TxnConnection::Mysql(conn) => execute_manual_txn_mysql_statement(conn, statement, row_limit).await,
+            TxnConnection::Mysql(conn) => {
+                execute_manual_txn_mysql_statement(
+                    conn.as_mut().ok_or_else(|| MANUAL_TRANSACTION_SESSION_NOT_FOUND_ERROR.to_string())?,
+                    statement,
+                    row_limit,
+                )
+                .await
+            }
             TxnConnection::Agent { client, .. } => {
                 execute_manual_txn_agent_statement(
                     client,
@@ -5235,45 +5242,85 @@ where
                 Err(error) => Err(error),
             }
         }
-        TxnConnection::Mysql(conn) => match conn.query_iter(sql).await {
-            Ok(mut result) => match result.stream::<mysql_async::Row>().await {
-                Ok(Some(mut stream)) => {
-                    let mut batch = Vec::with_capacity(batch_size);
-                    let mut total_rows = 0_u64;
-                    let mut error = None;
-                    while let Some(row_result) = stream.next().await {
-                        match row_result {
-                            Ok(row) => {
-                                batch.push(
-                                    (0..row.len()).map(|index| db::mysql::mysql_value_to_json(&row, index)).collect(),
-                                );
-                                total_rows += 1;
-                                if batch.len() >= batch_size {
-                                    if let Err(err) = on_batch(std::mem::take(&mut batch)) {
-                                        error = Some(err);
+        TxnConnection::Mysql(Some(conn)) => {
+            let query_result = match cancel_token.as_ref() {
+                Some(cancel_token) => {
+                    tokio::select! {
+                        _ = cancel_token.cancelled() => Err(QUERY_CANCELED.to_string()),
+                        result = conn.query_iter(sql) => result.map_err(|error| format!("Query failed: {error}")),
+                    }
+                }
+                None => conn.query_iter(sql).await.map_err(|error| format!("Query failed: {error}")),
+            };
+            match query_result {
+                Ok(mut result) => {
+                    let stream_result = match cancel_token.as_ref() {
+                        Some(cancel_token) => {
+                            tokio::select! {
+                                _ = cancel_token.cancelled() => Err(QUERY_CANCELED.to_string()),
+                                stream = result.stream::<mysql_async::Row>() => stream.map_err(|error| format!("Query failed: {error}")),
+                            }
+                        }
+                        None => {
+                            result.stream::<mysql_async::Row>().await.map_err(|error| format!("Query failed: {error}"))
+                        }
+                    };
+                    match stream_result {
+                        Ok(Some(mut stream)) => {
+                            let mut batch = Vec::with_capacity(batch_size);
+                            let mut total_rows = 0_u64;
+                            let mut error = None;
+                            loop {
+                                let next_row = match cancel_token.as_ref() {
+                                    Some(cancel_token) => {
+                                        tokio::select! {
+                                            _ = cancel_token.cancelled() => {
+                                                error = Some(QUERY_CANCELED.to_string());
+                                                break;
+                                            }
+                                            row = stream.next() => row,
+                                        }
+                                    }
+                                    None => stream.next().await,
+                                };
+                                let Some(row_result) = next_row else { break };
+                                match row_result {
+                                    Ok(row) => {
+                                        batch.push(
+                                            (0..row.len())
+                                                .map(|index| db::mysql::mysql_value_to_json(&row, index))
+                                                .collect(),
+                                        );
+                                        total_rows += 1;
+                                        if batch.len() >= batch_size {
+                                            if let Err(err) = on_batch(std::mem::take(&mut batch)) {
+                                                error = Some(err);
+                                                break;
+                                            }
+                                            batch = Vec::with_capacity(batch_size);
+                                        }
+                                    }
+                                    Err(err) => {
+                                        error = Some(format!("Query failed: {err}"));
                                         break;
                                     }
-                                    batch = Vec::with_capacity(batch_size);
                                 }
                             }
-                            Err(err) => {
-                                error = Some(format!("Query failed: {err}"));
-                                break;
+                            if error.is_none() && !batch.is_empty() {
+                                if let Err(err) = on_batch(batch) {
+                                    error = Some(err);
+                                }
                             }
+                            error.map_or(Ok(total_rows), Err)
                         }
+                        Ok(None) => Err("Empty result set stream".to_string()),
+                        Err(error) => Err(error),
                     }
-                    if error.is_none() && !batch.is_empty() {
-                        if let Err(err) = on_batch(batch) {
-                            error = Some(err);
-                        }
-                    }
-                    error.map_or(Ok(total_rows), Err)
                 }
-                Ok(None) => Err("Empty result set stream".to_string()),
-                Err(err) => Err(format!("Query failed: {err}")),
-            },
-            Err(err) => Err(format!("Query failed: {err}")),
-        },
+                Err(error) => Err(error),
+            }
+        }
+        TxnConnection::Mysql(None) => Err(MANUAL_TRANSACTION_SESSION_NOT_FOUND_ERROR.to_string()),
         TxnConnection::Agent { .. } => {
             Err("Streaming rows inside an agent manual transaction is not supported".to_string())
         }
@@ -5288,9 +5335,12 @@ where
             sessions.remove(txn_session_id)
         };
         if let Some(session) = removed {
-            let rollback_result =
+            let rollback_result = if err == QUERY_CANCELED {
+                discard_mysql_manual_txn_connection(&mut conn, operation_budget.cleanup_timeout).await
+            } else {
                 rollback_manual_txn_connection_with_postgres_timeout(&mut conn, Some(operation_budget.cleanup_timeout))
-                    .await;
+                    .await
+            };
             release_manual_txn_session_pool(state, &session.connection_id, &mut conn).await;
             if let Err(rollback_error) = rollback_result {
                 return Err(format!("{err}. Transaction cleanup failed: {rollback_error}"));
@@ -5334,9 +5384,10 @@ async fn rollback_manual_txn_connection_with_postgres_timeout(
                 conn.execute_typed("ROLLBACK", &[]).await.map_err(|e| format!("ROLLBACK failed: {e}"))?;
             }
         }
-        TxnConnection::Mysql(conn) => {
+        TxnConnection::Mysql(Some(conn)) => {
             conn.query_drop("ROLLBACK").await.map_err(|e| format!("ROLLBACK failed: {e}"))?;
         }
+        TxnConnection::Mysql(None) => return Ok(()),
         TxnConnection::Agent { client, .. } => {
             let mut locked = client.lock().await;
             match locked.rollback_manual_transaction::<serde_json::Value>().await {
@@ -5364,6 +5415,24 @@ async fn rollback_manual_txn_connection_with_postgres_timeout(
         }
     }
     Ok(())
+}
+
+/// A cancelled MySQL row stream may still have unread result packets.  Do not
+/// send ROLLBACK on that connection: mysql_async only consumes a dropped stream
+/// when the next result set is requested.  Discarding the dedicated connection
+/// makes MySQL roll the transaction back and prevents protocol desynchronization.
+async fn discard_mysql_manual_txn_connection(conn: &mut TxnConnection, timeout: Duration) -> Result<(), String> {
+    let TxnConnection::Mysql(conn) = conn else {
+        return rollback_manual_txn_connection_with_postgres_timeout(conn, Some(timeout)).await;
+    };
+    let Some(conn) = conn.take() else {
+        return Ok(());
+    };
+    match tokio::time::timeout(timeout, conn.disconnect()).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(format!("Failed to discard cancelled MySQL connection: {error}")),
+        Err(_) => Err(format!("Discarding cancelled MySQL connection timed out after {} seconds", timeout.as_secs())),
+    }
 }
 
 async fn release_manual_txn_session_pool(state: &AppState, connection_id: &str, conn: &mut TxnConnection) {
@@ -5628,9 +5697,10 @@ pub async fn commit_manual_transaction(state: &AppState, txn_session_id: &str) -
         TxnConnection::Postgres(conn) => {
             conn.execute_typed("COMMIT", &[]).await.map_err(|e| format!("COMMIT failed: {e}"))?;
         }
-        TxnConnection::Mysql(conn) => {
+        TxnConnection::Mysql(Some(conn)) => {
             conn.query_drop("COMMIT").await.map_err(|e| format!("COMMIT failed: {e}"))?;
         }
+        TxnConnection::Mysql(None) => return Err(MANUAL_TRANSACTION_SESSION_NOT_FOUND_ERROR.to_string()),
         TxnConnection::Agent { client, .. } => {
             let mut locked = client.lock().await;
             locked

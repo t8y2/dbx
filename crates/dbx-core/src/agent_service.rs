@@ -208,6 +208,84 @@ impl AgentProgressEvent {
     }
 }
 
+/// Rate limit for gated download transfer progress: on slow connections a
+/// whole percent of a large artifact can take seconds, so the clock fallback
+/// keeps the byte counter visibly moving.
+const TRANSFER_PROGRESS_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+/// Byte fallback when the total size is unknown (no manifest size and no
+/// Content-Length), so unbounded streams still report roughly once per MiB.
+const TRANSFER_PROGRESS_UNKNOWN_TOTAL_STEP: u64 = 1024 * 1024;
+
+/// Decides when a download transfer progress event should be emitted. Drivers
+/// and JRE archives are tens to hundreds of MB and arrive in 8-64KB HTTP
+/// chunks; emitting per chunk floods the frontend event channel with thousands
+/// of events whose progress the UI rounds to whole percent anyway. The gate
+/// emits on the first observation, then at most once per whole percent of the
+/// total, or once per [`TRANSFER_PROGRESS_MIN_INTERVAL`] on slow connections.
+#[derive(Debug, Clone)]
+pub struct TransferProgressGate {
+    total: u64,
+    last_bytes: u64,
+    last_emit: Option<std::time::Instant>,
+}
+
+impl TransferProgressGate {
+    pub fn new(total: u64) -> Self {
+        Self { total, last_bytes: 0, last_emit: None }
+    }
+
+    /// Records `downloaded` bytes observed at `now`; returns `true` when a
+    /// progress event should be emitted for this observation.
+    pub fn record(&mut self, downloaded: u64, now: std::time::Instant) -> bool {
+        if let Some(last_emit) = self.last_emit {
+            let delta = downloaded.saturating_sub(self.last_bytes);
+            let whole_percent = self.total > 0 && delta * 100 >= self.total;
+            let slow_link = now.duration_since(last_emit) >= TRANSFER_PROGRESS_MIN_INTERVAL;
+            let unknown_total_step = self.total == 0 && delta >= TRANSFER_PROGRESS_UNKNOWN_TOTAL_STEP;
+            if !whole_percent && !slow_link && !unknown_total_step {
+                return false;
+            }
+        }
+        self.last_bytes = downloaded;
+        self.last_emit = Some(now);
+        true
+    }
+}
+
+#[cfg(test)]
+mod transfer_progress_gate_tests {
+    use super::TransferProgressGate;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn emits_leading_then_whole_percent_steps() {
+        let t0 = Instant::now();
+        let mut gate = TransferProgressGate::new(1000);
+        assert!(gate.record(10, t0), "first observation always emits");
+        assert!(!gate.record(15, t0 + Duration::from_millis(10)), "0.5% within 500ms is suppressed");
+        assert!(gate.record(25, t0 + Duration::from_millis(20)), ">= 1% emits immediately");
+        assert!(!gate.record(26, t0 + Duration::from_millis(30)), "0.1% right after an emit is suppressed");
+    }
+
+    #[test]
+    fn emits_on_slow_connections_without_percent_progress() {
+        let t0 = Instant::now();
+        let mut gate = TransferProgressGate::new(1000);
+        assert!(gate.record(10, t0));
+        assert!(!gate.record(11, t0 + Duration::from_millis(100)), "0.1% at 100ms is suppressed");
+        assert!(gate.record(12, t0 + Duration::from_millis(600)), "500ms without a whole percent emits");
+    }
+
+    #[test]
+    fn unknown_total_falls_back_to_mib_steps() {
+        let t0 = Instant::now();
+        let mut gate = TransferProgressGate::new(0);
+        assert!(gate.record(1000, t0));
+        assert!(!gate.record(600_000, t0 + Duration::from_millis(10)), "sub-MiB within 500ms is suppressed");
+        assert!(gate.record(1_200_000, t0 + Duration::from_millis(20)), "1 MiB step emits without a total");
+    }
+}
+
 pub fn build_agent_list(am: &AgentManager, registry: Option<&AgentRegistry>) -> Vec<AgentDriverInfo> {
     let local_state = am.load_state();
     let use_managed_jre = local_state.java_runtime.mode == JavaRuntimeMode::Managed;
@@ -1893,17 +1971,20 @@ async fn download_with_progress(
         };
         std::fs::write(&tmp_source, &source_url).map_err(|err| format!("Failed to write download source: {err}"))?;
         let mut downloaded = starting_size;
+        let mut transfer_gate = TransferProgressGate::new(content_length);
         let transfer_result = async {
             if cancellations.is_empty() {
                 while let Some(chunk) = resp.chunk().await.map_err(|err| format!("Download stream error: {err}"))? {
                     std::io::Write::write_all(&mut file, &chunk)
                         .map_err(|err| format!("Failed to write chunk: {err}"))?;
                     downloaded += chunk.len() as u64;
-                    progress(AgentProgressEvent::transfer(step, downloaded, content_length).with_batch(
-                        db_type,
-                        current,
-                        total_drivers,
-                    ));
+                    if transfer_gate.record(downloaded, std::time::Instant::now()) {
+                        progress(AgentProgressEvent::transfer(step, downloaded, content_length).with_batch(
+                            db_type,
+                            current,
+                            total_drivers,
+                        ));
+                    }
                 }
                 return std::io::Write::flush(&mut file).map_err(|err| format!("Failed to flush temp file: {err}"));
             }
@@ -1919,8 +2000,10 @@ async fn download_with_progress(
                                 std::io::Write::write_all(&mut file, &chunk)
                                     .map_err(|err| format!("Failed to write chunk: {err}"))?;
                                 downloaded += chunk.len() as u64;
-                                progress(AgentProgressEvent::transfer(step, downloaded, content_length)
-                                    .with_batch(db_type, current, total_drivers));
+                                if transfer_gate.record(downloaded, std::time::Instant::now()) {
+                                    progress(AgentProgressEvent::transfer(step, downloaded, content_length)
+                                        .with_batch(db_type, current, total_drivers));
+                                }
                             }
                             None => break,
                         }
@@ -1944,6 +2027,14 @@ async fn download_with_progress(
             last_err = Some(format!("{err} (attempt {attempt}/{DOWNLOAD_ATTEMPTS}, source {source_url})"));
             continue;
         }
+
+        // The gate may have suppressed the final chunk; always publish the
+        // completed transfer so the UI reaches 100% before integrity validation.
+        progress(AgentProgressEvent::transfer(step, downloaded, content_length).with_batch(
+            db_type,
+            current,
+            total_drivers,
+        ));
 
         let actual_size = std::fs::metadata(&tmp).map(|meta| meta.len()).unwrap_or(0);
         if total_size == 0 || actual_size == total_size {

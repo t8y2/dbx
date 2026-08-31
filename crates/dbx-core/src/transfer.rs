@@ -1499,7 +1499,12 @@ fn writable_transfer_columns(
         .collect()
 }
 
-fn transfer_column_names_match(target_db_type: &DatabaseType, left: &str, right: &str) -> bool {
+fn transfer_column_names_match(
+    target_db_type: &DatabaseType,
+    quote_target_column_names: bool,
+    left: &str,
+    right: &str,
+) -> bool {
     if matches!(
         target_db_type,
         DatabaseType::Mysql
@@ -1516,7 +1521,11 @@ fn transfer_column_names_match(target_db_type: &DatabaseType, left: &str, right:
             | DatabaseType::Impala
             | DatabaseType::Spark
             | DatabaseType::Access
-    ) {
+    ) || (matches!(target_db_type, DatabaseType::Gaussdb | DatabaseType::OpenGauss) && !quote_target_column_names)
+    {
+        // Unquoted GaussDB/openGauss identifiers fold to lowercase server-side,
+        // so with quoting disabled a table created from mixed-case source
+        // columns reports folded names back from the catalog.
         left.eq_ignore_ascii_case(right)
     } else {
         left == right
@@ -1527,11 +1536,14 @@ fn missing_transfer_target_columns(
     target_columns: &[db::ColumnInfo],
     col_names: &[String],
     target_db_type: &DatabaseType,
+    quote_target_column_names: bool,
 ) -> Vec<String> {
     col_names
         .iter()
         .filter(|name| {
-            !target_columns.iter().any(|column| transfer_column_names_match(target_db_type, name, &column.name))
+            !target_columns.iter().any(|column| {
+                transfer_column_names_match(target_db_type, quote_target_column_names, name, &column.name)
+            })
         })
         .cloned()
         .collect()
@@ -1553,12 +1565,15 @@ fn required_unmapped_transfer_target_columns(
     target_columns: &[db::ColumnInfo],
     col_names: &[String],
     target_db_type: &DatabaseType,
+    quote_target_column_names: bool,
 ) -> Vec<String> {
     target_columns
         .iter()
         .filter(|column| {
             !target_column_can_be_omitted(column, target_db_type)
-                && !col_names.iter().any(|name| transfer_column_names_match(target_db_type, name, &column.name))
+                && !col_names.iter().any(|name| {
+                    transfer_column_names_match(target_db_type, quote_target_column_names, name, &column.name)
+                })
         })
         .map(|column| column.name.clone())
         .collect()
@@ -7493,7 +7508,12 @@ where
     // can't accept the planned insert, fail fast here instead of truncating
     // the target's existing data and then hitting an opaque driver error.
     if request.create_table && target_table_preexisting {
-        let missing = missing_transfer_target_columns(&target_columns, &col_names, target_db_type);
+        let missing = missing_transfer_target_columns(
+            &target_columns,
+            &col_names,
+            target_db_type,
+            request.quote_target_column_names,
+        );
         if !missing.is_empty() {
             return Err(format!(
                 "Target table '{target_table}' already exists with a different structure and is missing column(s) \
@@ -7503,7 +7523,12 @@ where
             ));
         }
 
-        let required = required_unmapped_transfer_target_columns(&target_columns, &col_names, target_db_type);
+        let required = required_unmapped_transfer_target_columns(
+            &target_columns,
+            &col_names,
+            target_db_type,
+            request.quote_target_column_names,
+        );
         if !required.is_empty() {
             return Err(format!(
                 "Target table '{target_table}' already exists with a different structure and has required column(s) \
@@ -9653,7 +9678,7 @@ mod tests {
         let col_names = vec!["id".to_string(), "name".to_string(), "extra_col".to_string()];
 
         assert_eq!(
-            missing_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Mysql),
+            missing_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Mysql, true),
             vec!["extra_col".to_string()]
         );
     }
@@ -9663,11 +9688,26 @@ mod tests {
         let target_columns = vec![test_column("ID", "int"), test_column("Name", "varchar(32)")];
         let col_names = vec!["id".to_string(), "name".to_string()];
 
-        assert!(missing_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Mysql).is_empty());
-        assert!(missing_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Kyuubi).is_empty());
+        assert!(missing_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Mysql, true).is_empty());
+        assert!(missing_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Kyuubi, true).is_empty());
         assert_eq!(
-            missing_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Postgres),
+            missing_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Postgres, true),
             vec!["id".to_string(), "name".to_string()]
+        );
+    }
+
+    #[test]
+    fn gauss_target_column_validation_ignores_case_when_quoting_disabled() {
+        let target_columns = vec![test_column("id", "int"), test_column("user_id", "bigint")];
+        let col_names = vec!["id".to_string(), "USER_ID".to_string()];
+
+        assert!(missing_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Gaussdb, false).is_empty());
+        assert!(
+            missing_transfer_target_columns(&target_columns, &col_names, &DatabaseType::OpenGauss, false).is_empty()
+        );
+        assert_eq!(
+            missing_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Gaussdb, true),
+            vec!["USER_ID".to_string()]
         );
     }
 
@@ -9700,11 +9740,15 @@ mod tests {
         ];
         let col_names = vec!["id".to_string()];
 
-        assert!(required_unmapped_transfer_target_columns(&target_columns[..6], &col_names, &DatabaseType::Mysql)
+        assert!(required_unmapped_transfer_target_columns(
+            &target_columns[..6],
+            &col_names,
+            &DatabaseType::Mysql,
+            true
+        )
+        .is_empty());
+        assert!(required_unmapped_transfer_target_columns(&target_columns, &col_names, &DatabaseType::SqlServer, true)
             .is_empty());
-        assert!(
-            required_unmapped_transfer_target_columns(&target_columns, &col_names, &DatabaseType::SqlServer).is_empty()
-        );
     }
 
     #[test]
@@ -9716,7 +9760,7 @@ mod tests {
         let col_names = vec!["id".to_string()];
 
         assert_eq!(
-            required_unmapped_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Mysql),
+            required_unmapped_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Mysql, true),
             vec!["required_code".to_string()]
         );
     }

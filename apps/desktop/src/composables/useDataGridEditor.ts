@@ -1219,7 +1219,8 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     pushUndoSnapshot();
     rowStatusFilter.value = rowStatusFilterAfterAddingRow(rowStatusFilter.value);
     newRows.value.push(clonedData);
-    newRowMeta.value.push(clonedRowMeta(item, clonedData));
+    const clonedMeta = clonedRowMeta(item, clonedData);
+    newRowMeta.value.push(clonedMeta);
     newRows.value = [...newRows.value];
     newRowMeta.value = [...newRowMeta.value];
     touchPendingChanges();
@@ -1229,7 +1230,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     const newRowId = -newRows.value.length;
     nextTick(() => {
       const el = getScrollerElement();
-      if (el) el.scrollTop = el.scrollHeight;
+      if (clonedMeta.placement === null && el) el.scrollTop = el.scrollHeight;
       startEdit(newRowId, initialEditColumn?.value ?? 0);
     });
   }

@@ -1,0 +1,118 @@
+name: Build Windows Desktop (ArgoDB branch)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch or ref to build"
+        required: false
+        default: "feat/hive-routines-object-source"
+
+permissions:
+  contents: read
+
+env:
+  APP_NAME: dbx
+  PRODUCT_NAME: DBX
+
+jobs:
+  build-windows:
+    name: Build DBX.app for Windows x64
+    runs-on: windows-latest
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Install frontend dependencies
+        run: pnpm install
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        with:
+          version: "v0.10.0"
+
+      - name: Compute Rust dependency hash
+        id: deps-hash
+        shell: bash
+        run: |
+          {
+            find . -name Cargo.toml -not -path './target/*' -print0 \
+              | sort -z \
+              | xargs -0 sed -E '/^version = /d'
+            grep -v '^version = ' Cargo.lock
+          } | sha256sum | cut -d ' ' -f1 | {
+            read -r hash
+            echo "hash=${hash:0:20}" >> "$GITHUB_OUTPUT"
+          }
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./ -> target"
+          shared-key: windows-x64-${{ steps.deps-hash.outputs.hash }}
+          add-rust-environment-hash-key: false
+          cache-targets: false
+          cache-on-failure: true
+
+      - name: Generate connection types
+        run: pnpm generate:connection-types
+
+      - name: Build Tauri app (Windows)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Build only the frontend + Rust binary + NSIS installer; no signing,
+          # no updater — this is a local-test build of the ArgoDB branch.
+          TAURI_SIGNING_PRIVATE_KEY: ""
+        with:
+          tagName: argo-windows-local
+          releaseDraft: true
+          args: --target x86_64-pc-windows-msvc
+
+      - name: Collect artifacts
+        shell: pwsh
+        run: |
+          $artifacts = New-Item -ItemType Directory -Force -Path "artifacts"
+          $nsis = Get-ChildItem -Path "target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe" -ErrorAction SilentlyContinue
+          if ($nsis) {
+            Copy-Item -Path $nsis.FullName -Destination "artifacts/"
+            Write-Host "NSIS installer: $($nsis.Name)"
+          }
+          $msi = Get-ChildItem -Path "target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi" -ErrorAction SilentlyContinue
+          if ($msi) {
+            Copy-Item -Path $msi.FullName -Destination "artifacts/"
+            Write-Host "MSI installer: $($msi.Name)"
+          }
+          $exe = Get-ChildItem -Path "target/x86_64-pc-windows-msvc/release/*.exe" -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq "dbx.exe" }
+          if ($exe) {
+            Copy-Item -Path $exe.FullName -Destination "artifacts/DBX-argo-windows-x64.exe"
+            Write-Host "Raw exe: $($exe.Name)"
+          }
+          Get-ChildItem -Path "artifacts/" | ForEach-Object { Write-Host "Artifact: $($_.Name) ($($_.Length) bytes)" }
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: DBX-windows-x64-argodb
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 30
